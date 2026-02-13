@@ -1,18 +1,10 @@
 import { App } from "@slack/bolt";
 import { config } from "../config.js";
 import { markdownToSlackMrkdwn, splitMessage } from "./formatter.js";
-import {
-  runRouter,
-  runAgent,
-  generateHeartbeatMessage,
-  buildActivitySummary,
-} from "../agent/agent.js";
+import { swapReaction, postErrorAttachment } from "./helpers.js";
+import { HeartbeatManager } from "./heartbeat-manager.js";
+import { runRouter, runAgent } from "../agent/agent.js";
 import { createEvent, updateEvent } from "../dashboard/events.js";
-import type {
-  AgentLogEntry,
-  HeartbeatSnapshot,
-  HeartbeatUpdate,
-} from "../types.js";
 import {
   getOrCreateThread,
   addMessageToThread,
@@ -136,169 +128,24 @@ export async function startSlackListener(): Promise<void> {
         });
         const placeholderTs = placeholder.ts!;
 
-        // Heartbeat state: conversational orchestrator with full memory
-        const agentLog: AgentLogEntry[] = [];
+        // Set up heartbeat manager for status updates during agent run
         const heartbeatStart = Date.now();
-        let lastSnapshotEntryCount = 0;
-        let heartbeatCycle = 0;
-        let orchestratorPending = false;
-        const previousSnapshots: HeartbeatSnapshot[] = [];
-        let latestHeartbeat: HeartbeatUpdate = {
-          emoji: ":hourglass_flowing_sand:",
-          color: "#6c5ce7",
-          text: "Dispatching the agent now, hang tight...",
-          stop: false,
-        };
-
-        const onLogEntry = (entry: AgentLogEntry) => {
-          agentLog.push(entry);
-        };
-
-        // Throttled streaming state: update Slack at most every 500ms
-        let lastFlushTime = 0;
-        let pendingTimer: ReturnType<typeof setTimeout> | null = null;
-        let latestStreamText = "";
-
-        const flushToSlack = () => {
-          if (!latestStreamText) return;
-          const preview = markdownToSlackMrkdwn(latestStreamText);
-          const truncated =
-            preview.length > 3900
-              ? preview.slice(0, 3900) + "\n\n_...still generating..._"
-              : preview;
-
-          client.chat
-            .update({
-              channel: message.channel,
-              ts: placeholderTs,
-              text: truncated,
-              attachments: [
-                {
-                  color: latestHeartbeat.color,
-                  blocks: [
-                    {
-                      type: "context",
-                      elements: [
-                        {
-                          type: "mrkdwn",
-                          text: `${latestHeartbeat.emoji} *${latestHeartbeat.text}* (${Math.round((Date.now() - heartbeatStart) / 1000)}s)`,
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            })
-            .catch((err: unknown) =>
-              console.error("Stream update failed:", err),
-            );
-
-          lastFlushTime = Date.now();
-        };
-
-        const onStream = (accumulatedText: string) => {
-          latestStreamText = accumulatedText;
-          const now = Date.now();
-          const elapsed = now - lastFlushTime;
-
-          if (elapsed >= 500) {
-            if (pendingTimer) {
-              clearTimeout(pendingTimer);
-              pendingTimer = null;
-            }
-            flushToSlack();
-          } else if (!pendingTimer) {
-            pendingTimer = setTimeout(() => {
-              pendingTimer = null;
-              flushToSlack();
-            }, 500 - elapsed);
-          }
-        };
-
-        const updateHeartbeatSlack = (hb: HeartbeatUpdate) => {
-          const elapsed = Math.round(
-            (Date.now() - heartbeatStart) / 1000,
-          );
-          client.chat
-            .update({
-              channel: message.channel,
-              ts: placeholderTs,
-              text: latestStreamText
-                ? markdownToSlackMrkdwn(latestStreamText)
-                : " ",
-              attachments: [
-                {
-                  color: hb.color,
-                  blocks: [
-                    {
-                      type: "context",
-                      elements: [
-                        {
-                          type: "mrkdwn",
-                          text: `${hb.emoji} *${hb.text}* (${elapsed}s)`,
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            })
-            .catch((err: unknown) =>
-              console.error("Heartbeat update failed:", err),
-            );
-        };
-
-        const heartbeatInterval = setInterval(() => {
-          heartbeatCycle++;
-
-          // Update Slack every tick (5s) with cached heartbeat
-          updateHeartbeatSlack(latestHeartbeat);
-
-          // Call orchestrator every other tick (10s)
-          if (heartbeatCycle % 2 === 0 && !orchestratorPending) {
-            orchestratorPending = true;
-            const elapsed = Math.round(
-              (Date.now() - heartbeatStart) / 1000,
-            );
-
-            // Build and store the activity summary for this cycle
-            const activitySummary = buildActivitySummary(
-              agentLog,
-              lastSnapshotEntryCount,
-              elapsed,
-            );
-
-            generateHeartbeatMessage(activitySummary, previousSnapshots)
-              .then((update) => {
-                latestHeartbeat = update;
-                previousSnapshots.push({ activitySummary, update });
-                lastSnapshotEntryCount = agentLog.length;
-                orchestratorPending = false;
-
-                if (update.stop) {
-                  // Orchestrator detected the agent is dead
-                  clearInterval(heartbeatInterval);
-                  console.error(
-                    `Orchestrator signaled stop in thread ${threadTs}: ${update.text}`,
-                  );
-                  updateHeartbeatSlack(update);
-                } else {
-                  updateHeartbeatSlack(update);
-                }
-              })
-              .catch(() => {
-                orchestratorPending = false;
-              });
-          }
-        }, 5000);
+        const hbManager = new HeartbeatManager(
+          client,
+          message.channel,
+          placeholderTs,
+          threadTs,
+          heartbeatStart,
+        );
+        hbManager.start();
 
         // Race the agent against a wall-clock timeout
         const timeoutMs = config.agent.timeoutMs;
         const agentPromise = runAgent(
           message.text,
           thread.sessionId,
-          onStream,
-          onLogEntry,
+          (text) => hbManager.onStream(text),
+          (entry) => hbManager.onLogEntry(entry),
           thread.messages,
         );
         const timeoutPromise = new Promise<null>((resolve) =>
@@ -320,43 +167,19 @@ export async function startSlackListener(): Promise<void> {
               error: `Agent timed out after ${elapsed}s`,
             });
 
-            await client.chat.update({
-              channel: message.channel,
-              ts: placeholderTs,
-              text: " ",
-              attachments: [
-                {
-                  color: "#e74c3c",
-                  blocks: [
-                    {
-                      type: "context",
-                      elements: [
-                        {
-                          type: "mrkdwn",
-                          text: `:x: *Timed out after ${elapsed}s.* I wasn't able to find an answer in time. Want me to try again?`,
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            });
-
-            // Swap reactions: remove thinking, add warning
-            await client.reactions
-              .remove({
-                channel: message.channel,
-                timestamp: message.ts,
-                name: "brain",
-              })
-              .catch(() => {});
-            await client.reactions
-              .add({
-                channel: message.channel,
-                timestamp: message.ts,
-                name: "warning",
-              })
-              .catch(() => {});
+            await postErrorAttachment(
+              client,
+              message.channel,
+              placeholderTs,
+              `:x: *Timed out after ${elapsed}s.* I wasn't able to find an answer in time. Want me to try again?`,
+            );
+            await swapReaction(
+              client,
+              message.channel,
+              message.ts,
+              "brain",
+              "warning",
+            );
           } else {
             updateEvent(dashEvent.id, {
               status: "complete",
@@ -401,21 +224,13 @@ export async function startSlackListener(): Promise<void> {
               isBot: true,
             });
 
-            // Swap reactions: remove thinking, add done
-            await client.reactions
-              .remove({
-                channel: message.channel,
-                timestamp: message.ts,
-                name: "brain",
-              })
-              .catch(() => {});
-            await client.reactions
-              .add({
-                channel: message.channel,
-                timestamp: message.ts,
-                name: "white_check_mark",
-              })
-              .catch(() => {});
+            await swapReaction(
+              client,
+              message.channel,
+              message.ts,
+              "brain",
+              "white_check_mark",
+            );
 
             console.log(
               `Agent responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
@@ -440,49 +255,21 @@ export async function startSlackListener(): Promise<void> {
             error: errorMsg,
           });
 
-          await client.chat.update({
-            channel: message.channel,
-            ts: placeholderTs,
-            text: " ",
-            attachments: [
-              {
-                color: "#e74c3c",
-                blocks: [
-                  {
-                    type: "context",
-                    elements: [
-                      {
-                        type: "mrkdwn",
-                        text: `:x: *The agent crashed after ${elapsed}s.* I wasn't able to look that up. Want me to try again?`,
-                      },
-                    ],
-                  },
-                ],
-              },
-            ],
-          });
-
-          await client.reactions
-            .remove({
-              channel: message.channel,
-              timestamp: message.ts,
-              name: "brain",
-            })
-            .catch(() => {});
-          await client.reactions
-            .add({
-              channel: message.channel,
-              timestamp: message.ts,
-              name: "x",
-            })
-            .catch(() => {});
+          await postErrorAttachment(
+            client,
+            message.channel,
+            placeholderTs,
+            `:x: *The agent crashed after ${elapsed}s.* I wasn't able to look that up. Want me to try again?`,
+          );
+          await swapReaction(
+            client,
+            message.channel,
+            message.ts,
+            "brain",
+            "x",
+          );
         } finally {
-          // Always clean up heartbeat and pending throttle timer
-          clearInterval(heartbeatInterval);
-          if (pendingTimer) {
-            clearTimeout(pendingTimer);
-            pendingTimer = null;
-          }
+          hbManager.stop();
         }
       } else {
         // Router-only response, mark complete

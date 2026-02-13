@@ -284,6 +284,23 @@ describe("runRouter", () => {
     expect(result.needsAgent).toBe(false);
     expect(result.reason).toBe("router error");
   });
+
+  it("returns error fallback when API returns garbled non-JSON text", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [
+        {
+          type: "text",
+          text: "Sure! I'd be happy to help. Here is some garbled output that is not JSON at all.",
+        },
+      ],
+    });
+
+    const result = await runRouter("hello");
+
+    expect(result.quickResponse).toBe("");
+    expect(result.needsAgent).toBe(false);
+    expect(result.reason).toBe("router error");
+  });
 });
 
 // ============================================================
@@ -787,6 +804,19 @@ describe("generateHeartbeatMessage", () => {
     });
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
+    expect(result.stop).toBe(false);
+  });
+
+  it("returns fallback when API returns empty content array", async () => {
+    mockCreate.mockResolvedValueOnce({
+      content: [],
+    });
+
+    const result = await generateHeartbeatMessage("Elapsed: 10s", []);
+
+    expect(result.emoji).toBe(":hourglass_flowing_sand:");
+    expect(result.color).toBe("#6c5ce7");
+    expect(result.text).toBe("Working on it...");
     expect(result.stop).toBe(false);
   });
 });
