@@ -1,0 +1,35 @@
+services:
+  flytebot:
+    build: .
+    container_name: flytebot
+    restart: always
+    env_file: .env
+    ports:
+      - "5555:5555"
+    volumes:
+      # Hot-reload during development
+      - ./src:/flytebot/app/src
+      - ./package.json:/flytebot/app/package.json
+      # Persistent thread cache
+      - flytebot-threads:/flytebot/threads
+      # Mount local platform repo (faster than cloning)
+      - /home/newms/web/platform:/flytebot/platform
+      # Claude Code auth source (copied to writable location at startup)
+      - /home/newms/.claude.json:/flytebot/claude-auth/claude.json:ro
+      - /home/newms/.claude/.credentials.json:/flytebot/claude-auth/credentials.json:ro
+    networks:
+      - default
+      - sail
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  flytebot-threads:
+
+networks:
+  sail:
+    external: true
+    name: ssap_sail
