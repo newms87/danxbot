@@ -17,7 +17,7 @@ export const config = {
     channelId: required("SLACK_CHANNEL_ID"),
   },
   anthropic: {
-    apiKey: process.env.ANTHROPIC_API_KEY || "",
+    apiKey: required("ANTHROPIC_API_KEY"),
   },
   platform: {
     repoUrl: required("PLATFORM_REPO_URL"),
@@ -31,12 +31,15 @@ export const config = {
   },
   agent: {
     model: optional("CLAUDE_MODEL", "claude-sonnet-4-5"),
-    maxTurns: parseInt(optional("MAX_TURNS", "30"), 10),
+    maxTurns: parseInt(optional("MAX_TURNS", "10"), 10),
     maxBudgetUsd: parseFloat(optional("MAX_BUDGET_USD", "1.00")),
+    maxThinkingTokens: parseInt(optional("MAX_THINKING_TOKENS", "8000"), 10),
+    timeoutMs: parseInt(optional("AGENT_TIMEOUT_MS", "300000"), 10),
   },
   github: {
     webhookSecret: process.env.GITHUB_WEBHOOK_SECRET || "",
   },
   logLevel: optional("LOG_LEVEL", "info"),
   threadsDir: "/flytebot/threads",
+  logsDir: "/flytebot/logs",
 } as const;
