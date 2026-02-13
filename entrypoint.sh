@@ -23,11 +23,11 @@ else
     echo "Platform repo already present (volume-mounted or previously cloned)."
 fi
 
-# Set up Claude Code auth (copy from read-only mount to writable location)
-if [ -f "/flytebot/claude-auth/claude.json" ]; then
-    cp /flytebot/claude-auth/claude.json /root/.claude.json
+# Set up Claude Code auth (copy from read-only directory mounts to writable location)
+if [ -f "/flytebot/claude-auth/home/.claude.json" ]; then
+    cp /flytebot/claude-auth/home/.claude.json /root/.claude.json
     mkdir -p /root/.claude
-    cp /flytebot/claude-auth/credentials.json /root/.claude/.credentials.json
+    cp /flytebot/claude-auth/dot-claude/.credentials.json /root/.claude/.credentials.json
     echo "Claude Code auth configured."
 fi
 

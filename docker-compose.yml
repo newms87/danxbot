@@ -14,9 +14,9 @@ services:
       - flytebot-threads:/flytebot/threads
       # Mount local platform repo (faster than cloning)
       - /home/newms/web/platform:/flytebot/platform
-      # Claude Code auth source (copied to writable location at startup)
-      - /home/newms/.claude.json:/flytebot/claude-auth/claude.json:ro
-      - /home/newms/.claude/.credentials.json:/flytebot/claude-auth/credentials.json:ro
+      # Claude Code auth (directory mounts survive inode changes from file rewrites)
+      - /home/newms/.claude:/flytebot/claude-auth/dot-claude:ro
+      - /home/newms:/flytebot/claude-auth/home:ro
     networks:
       - default
       - sail
