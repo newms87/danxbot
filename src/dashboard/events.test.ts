@@ -1,0 +1,197 @@
+import { describe, it, expect, beforeEach } from "vitest";
+import {
+  createEvent,
+  updateEvent,
+  getEvents,
+  getAnalytics,
+  addSSEClient,
+  removeSSEClient,
+  resetEvents,
+} from "./events.js";
+
+beforeEach(() => {
+  resetEvents();
+});
+
+function makeEvent(overrides: Partial<Parameters<typeof createEvent>[0]> = {}) {
+  return createEvent({
+    threadTs: overrides.threadTs ?? `t-${Date.now()}-${Math.random()}`,
+    messageTs: overrides.messageTs ?? `m-${Date.now()}-${Math.random()}`,
+    channelId: overrides.channelId ?? "C123",
+    user: overrides.user ?? "U456",
+    text: overrides.text ?? "test message",
+  });
+}
+
+describe("createEvent", () => {
+  it("creates event with correct defaults", () => {
+    const event = makeEvent();
+
+    expect(event.status).toBe("received");
+    expect(event.receivedAt).toBeTypeOf("number");
+    expect(event.routerResponse).toBeNull();
+    expect(event.routerNeedsAgent).toBeNull();
+    expect(event.agentResponse).toBeNull();
+    expect(event.agentCostUsd).toBeNull();
+    expect(event.error).toBeNull();
+  });
+
+  it("generates ID from threadTs-messageTs", () => {
+    const event = createEvent({
+      threadTs: "1234.5678",
+      messageTs: "9999.0000",
+      channelId: "C1",
+      user: "U1",
+      text: "test",
+    });
+
+    expect(event.id).toBe("1234.5678-9999.0000");
+  });
+
+  it("adds event to the events array", () => {
+    makeEvent();
+    expect(getEvents().length).toBe(1);
+  });
+
+  it("prepends new events (most recent first)", () => {
+    const event = makeEvent();
+    expect(getEvents()[0].id).toBe(event.id);
+  });
+});
+
+describe("updateEvent", () => {
+  it("applies partial updates to an existing event", () => {
+    const event = makeEvent();
+    updateEvent(event.id, { status: "routing" });
+
+    const found = getEvents().find((e) => e.id === event.id);
+    expect(found?.status).toBe("routing");
+  });
+
+  it("does nothing for non-existent event ID", () => {
+    const before = getEvents().length;
+    updateEvent("nonexistent-id", { status: "error" });
+    expect(getEvents().length).toBe(before);
+  });
+
+  it("applies multiple fields at once", () => {
+    const event = makeEvent();
+    updateEvent(event.id, {
+      status: "complete",
+      routerResponse: "hi",
+      agentCostUsd: 0.05,
+    });
+
+    const found = getEvents().find((e) => e.id === event.id);
+    expect(found?.status).toBe("complete");
+    expect(found?.routerResponse).toBe("hi");
+    expect(found?.agentCostUsd).toBe(0.05);
+  });
+});
+
+describe("getAnalytics", () => {
+  it("returns analytics object with expected shape", () => {
+    const analytics = getAnalytics();
+
+    expect(analytics).toHaveProperty("totalMessages");
+    expect(analytics).toHaveProperty("completedMessages");
+    expect(analytics).toHaveProperty("routerOnlyMessages");
+    expect(analytics).toHaveProperty("agentMessages");
+    expect(analytics).toHaveProperty("avgRouterTimeMs");
+    expect(analytics).toHaveProperty("avgAgentTimeMs");
+    expect(analytics).toHaveProperty("avgTotalTimeMs");
+    expect(analytics).toHaveProperty("totalCostUsd");
+    expect(analytics).toHaveProperty("errorCount");
+  });
+
+  it("counts completed events correctly", () => {
+    const event = makeEvent();
+    const beforeCompleted = getAnalytics().completedMessages;
+
+    updateEvent(event.id, {
+      status: "complete",
+      routerResponseAt: Date.now(),
+    });
+
+    expect(getAnalytics().completedMessages).toBe(beforeCompleted + 1);
+  });
+
+  it("sums agent costs", () => {
+    const e1 = makeEvent();
+    const e2 = makeEvent();
+    const before = getAnalytics().totalCostUsd;
+
+    updateEvent(e1.id, {
+      status: "complete",
+      routerResponseAt: Date.now(),
+      agentResponseAt: Date.now(),
+      agentCostUsd: 0.10,
+    });
+    updateEvent(e2.id, {
+      status: "complete",
+      routerResponseAt: Date.now(),
+      agentResponseAt: Date.now(),
+      agentCostUsd: 0.25,
+    });
+
+    expect(getAnalytics().totalCostUsd).toBeCloseTo(before + 0.35, 2);
+  });
+
+  it("counts errors", () => {
+    const event = makeEvent();
+    updateEvent(event.id, { status: "error", error: "something broke" });
+    expect(getAnalytics().errorCount).toBe(1);
+  });
+});
+
+describe("MAX_EVENTS cap", () => {
+  it("evicts oldest event when exceeding 500", () => {
+    const events: ReturnType<typeof makeEvent>[] = [];
+    for (let i = 0; i < 501; i++) {
+      events.push(makeEvent({ threadTs: `t-${i}`, messageTs: `m-${i}` }));
+    }
+
+    expect(getEvents().length).toBe(500);
+    // Most recent should be first
+    expect(getEvents()[0].id).toBe("t-500-m-500");
+    // Oldest (first created) should have been evicted
+    expect(getEvents().find((e) => e.id === "t-0-m-0")).toBeUndefined();
+  });
+});
+
+describe("SSE broadcast", () => {
+  it("broadcasts to SSE clients on createEvent", () => {
+    const received: string[] = [];
+    const client = (data: string) => received.push(data);
+
+    addSSEClient(client);
+    const event = makeEvent();
+
+    expect(received).toHaveLength(1);
+    expect(JSON.parse(received[0]).id).toBe(event.id);
+  });
+
+  it("broadcasts to SSE clients on updateEvent", () => {
+    const received: string[] = [];
+    const client = (data: string) => received.push(data);
+
+    const event = makeEvent();
+    addSSEClient(client);
+    updateEvent(event.id, { status: "routing" });
+
+    expect(received).toHaveLength(1);
+    expect(JSON.parse(received[0]).status).toBe("routing");
+  });
+
+  it("stops broadcasting after removeSSEClient", () => {
+    const received: string[] = [];
+    const client = (data: string) => received.push(data);
+
+    addSSEClient(client);
+    makeEvent(); // 1 broadcast
+    removeSSEClient(client);
+    makeEvent(); // should not reach client
+
+    expect(received).toHaveLength(1);
+  });
+});

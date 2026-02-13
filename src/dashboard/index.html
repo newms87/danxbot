@@ -185,13 +185,133 @@
             </template>
           </div>
         </div>
+
+        <!-- Router API Detail -->
+        <div v-if="selectedEvent.routerRequest" class="mt-4">
+          <button @click="toggleSection('routerRequest')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+            <span>{{ expandedSections.routerRequest ? '▼' : '▶' }}</span> Router API Request
+          </button>
+          <div v-if="expandedSections.routerRequest" class="mt-2">
+            <pre class="bg-gray-800 rounded p-3 text-xs text-gray-300 overflow-x-auto max-h-80 overflow-y-auto font-mono">{{ JSON.stringify(selectedEvent.routerRequest, null, 2) }}</pre>
+          </div>
+        </div>
+
+        <div v-if="selectedEvent.routerRawResponse" class="mt-3">
+          <button @click="toggleSection('routerResponse')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+            <span>{{ expandedSections.routerResponse ? '▼' : '▶' }}</span> Router API Response
+          </button>
+          <div v-if="expandedSections.routerResponse" class="mt-2">
+            <pre class="bg-gray-800 rounded p-3 text-xs text-gray-300 overflow-x-auto max-h-80 overflow-y-auto font-mono">{{ JSON.stringify(selectedEvent.routerRawResponse, null, 2) }}</pre>
+          </div>
+        </div>
+
+        <!-- Agent Config -->
+        <div v-if="selectedEvent.agentConfig" class="mt-4">
+          <button @click="toggleSection('agentConfig')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+            <span>{{ expandedSections.agentConfig ? '▼' : '▶' }}</span> Agent Config
+          </button>
+          <div v-if="expandedSections.agentConfig" class="mt-2">
+            <div class="bg-gray-800 rounded p-3 text-xs text-gray-400 space-y-1 font-mono">
+              <div>Model: <span class="text-gray-200">{{ selectedEvent.agentConfig.model }}</span></div>
+              <div>Tools: <span class="text-gray-200">{{ (selectedEvent.agentConfig.allowedTools || []).join(', ') }}</span></div>
+              <div>Max Turns: <span class="text-gray-200">{{ selectedEvent.agentConfig.maxTurns }}</span></div>
+              <div>Max Budget: <span class="text-gray-200">${{ selectedEvent.agentConfig.maxBudgetUsd }}</span></div>
+              <div>CWD: <span class="text-gray-200">{{ selectedEvent.agentConfig.cwd }}</span></div>
+              <div v-if="selectedEvent.agentConfig.resume">Resumed Session: <span class="text-green-300">{{ selectedEvent.agentConfig.resume }}</span></div>
+            </div>
+            <div v-if="selectedEvent.agentConfig.systemPrompt" class="mt-2">
+              <button @click="toggleSection('systemPrompt')" class="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300">
+                <span>{{ expandedSections.systemPrompt ? '▼' : '▶' }}</span> System Prompt
+              </button>
+              <pre v-if="expandedSections.systemPrompt" class="mt-1 bg-gray-800 rounded p-3 text-xs text-gray-400 overflow-x-auto max-h-64 overflow-y-auto font-mono whitespace-pre-wrap">{{ selectedEvent.agentConfig.systemPrompt }}</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Performance Breakdown -->
+        <div v-if="selectedEvent.agentLog && selectedEvent.agentLog.length > 0" class="mt-4">
+          <button @click="toggleSection('perfBreakdown')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+            <span>{{ expandedSections.perfBreakdown ? '▼' : '▶' }}</span> Performance Breakdown
+          </button>
+          <div v-if="expandedSections.perfBreakdown" class="mt-2 bg-gray-800 rounded p-3">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div>
+                <div class="text-gray-500 uppercase">Tool Calls</div>
+                <div class="text-lg font-bold text-white mt-0.5">{{ perfStats.totalToolCalls }}</div>
+              </div>
+              <div>
+                <div class="text-gray-500 uppercase">API Time</div>
+                <div class="text-lg font-bold text-blue-400 mt-0.5">{{ formatMs(perfStats.apiTimeMs) }}</div>
+              </div>
+              <div>
+                <div class="text-gray-500 uppercase">Wall Time</div>
+                <div class="text-lg font-bold text-purple-400 mt-0.5">{{ formatMs(perfStats.wallTimeMs) }}</div>
+              </div>
+              <div>
+                <div class="text-gray-500 uppercase">Tool Time</div>
+                <div class="text-lg font-bold text-yellow-400 mt-0.5">{{ formatMs(perfStats.wallTimeMs - perfStats.apiTimeMs) }}</div>
+              </div>
+            </div>
+            <div v-if="Object.keys(perfStats.toolBreakdown).length" class="mt-3 flex flex-wrap gap-2">
+              <span v-for="(count, name) in perfStats.toolBreakdown" :key="name"
+                    class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-300">
+                {{ name }}: {{ count }}
+              </span>
+            </div>
+            <div v-if="perfStats.longestTool" class="mt-2 text-xs text-gray-400">
+              Longest tool: <span class="text-yellow-300">{{ perfStats.longestTool.name }}</span>
+              ({{ perfStats.longestTool.seconds }}s)
+            </div>
+          </div>
+        </div>
+
+        <!-- Agent Conversation Log -->
+        <div v-if="selectedEvent.agentLog && selectedEvent.agentLog.length > 0" class="mt-4">
+          <button @click="toggleSection('agentLog')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+            <span>{{ expandedSections.agentLog ? '▼' : '▶' }}</span> Agent Conversation Log ({{ selectedEvent.agentLog.length }} entries)
+          </button>
+          <div v-if="expandedSections.agentLog" class="mt-2 overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-left text-gray-500 uppercase border-b border-gray-700">
+                  <th class="px-2 py-1.5 w-20">Time</th>
+                  <th class="px-2 py-1.5 w-24">Type</th>
+                  <th class="px-2 py-1.5">Summary</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template v-for="(entry, idx) in selectedEvent.agentLog" :key="idx">
+                  <tr class="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer"
+                      @click="toggleLogRow(idx)">
+                    <td class="px-2 py-1.5 text-gray-500 font-mono whitespace-nowrap">
+                      +{{ relativeTime(entry.timestamp, selectedEvent.agentLog[0].timestamp) }}s
+                    </td>
+                    <td class="px-2 py-1.5">
+                      <span :class="logTypeBadge(entry.type)" class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium">
+                        {{ entry.type }}{{ entry.subtype ? '.' + entry.subtype : '' }}
+                      </span>
+                    </td>
+                    <td class="px-2 py-1.5 text-gray-300 truncate max-w-lg">
+                      {{ entry.summary }}
+                    </td>
+                  </tr>
+                  <tr v-if="expandedLogRows[idx]">
+                    <td colspan="3" class="px-2 py-2">
+                      <pre class="bg-gray-800 rounded p-2 text-xs text-gray-400 overflow-x-auto max-h-64 overflow-y-auto font-mono">{{ JSON.stringify(entry.data, null, 2) }}</pre>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
     </div>
   </div>
 
   <script>
-    const { createApp, ref, onMounted, onUnmounted } = Vue;
+    const { createApp, ref, reactive, computed, onMounted, onUnmounted } = Vue;
 
     createApp({
       setup() {
@@ -203,6 +323,15 @@
         });
         const selectedEvent = ref(null);
         const connected = ref(false);
+        const expandedSections = reactive({
+          routerRequest: false,
+          routerResponse: false,
+          agentConfig: false,
+          systemPrompt: false,
+          perfBreakdown: false,
+          agentLog: false,
+        });
+        const expandedLogRows = reactive({});
         let eventSource = null;
 
         function fetchAll() {
@@ -268,6 +397,65 @@
           return map[status] || status;
         }
 
+        function toggleSection(name) {
+          expandedSections[name] = !expandedSections[name];
+        }
+
+        function toggleLogRow(idx) {
+          expandedLogRows[idx] = !expandedLogRows[idx];
+        }
+
+        function relativeTime(ts, baseTs) {
+          return ((ts - baseTs) / 1000).toFixed(1);
+        }
+
+        function logTypeBadge(type) {
+          const map = {
+            system: 'bg-gray-700 text-gray-300',
+            assistant: 'bg-blue-900/50 text-blue-300',
+            user: 'bg-green-900/50 text-green-300',
+            tool_progress: 'bg-yellow-900/50 text-yellow-300',
+            result: 'bg-purple-900/50 text-purple-300',
+          };
+          return map[type] || 'bg-gray-700 text-gray-300';
+        }
+
+        const perfStats = computed(() => {
+          const ev = selectedEvent.value;
+          if (!ev || !ev.agentLog || !ev.agentLog.length) {
+            return { totalToolCalls: 0, toolBreakdown: {}, longestTool: null, apiTimeMs: 0, wallTimeMs: 0 };
+          }
+
+          const log = ev.agentLog;
+          let totalToolCalls = 0;
+          const toolBreakdown = {};
+          let longestTool = null;
+
+          for (const entry of log) {
+            if (entry.type === 'assistant' && entry.data && entry.data.content) {
+              for (const block of entry.data.content) {
+                if (block.type === 'tool_use') {
+                  totalToolCalls++;
+                  const name = block.name || 'unknown';
+                  toolBreakdown[name] = (toolBreakdown[name] || 0) + 1;
+                }
+              }
+            }
+            if (entry.type === 'tool_progress' && entry.data) {
+              const secs = entry.data.elapsed_time_seconds || 0;
+              if (!longestTool || secs > longestTool.seconds) {
+                longestTool = { name: entry.data.tool_name || 'unknown', seconds: secs };
+              }
+            }
+          }
+
+          const resultEntry = log.find(e => e.type === 'result');
+          const apiTimeMs = resultEntry ? (resultEntry.data.duration_api_ms || 0) : 0;
+          const wallTimeMs = resultEntry ? (resultEntry.data.duration_ms || 0) : 0;
+
+          return { totalToolCalls, toolBreakdown, longestTool, apiTimeMs, wallTimeMs };
+        });
+
         onMounted(() => {
           fetchAll();
           connectSSE();
@@ -279,7 +467,9 @@
 
         return {
           events, analytics, selectedEvent, connected,
+          expandedSections, expandedLogRows, perfStats,
           fetchAll, formatTime, formatMs, statusClass, statusLabel,
+          toggleSection, toggleLogRow, relativeTime, logTypeBadge,
         };
       },
     }).mount('#app');

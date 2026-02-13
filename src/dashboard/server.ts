@@ -19,6 +19,25 @@ export async function startDashboard(): Promise<void> {
       return;
     }
 
+    // Detailed log for a single event: /api/events/:id/log
+    const logMatch = url.pathname.match(/^\/api\/events\/(.+)\/log$/);
+    if (logMatch) {
+      const event = getEvents().find((e) => e.id === logMatch[1]);
+      if (!event) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Event not found" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        id: event.id,
+        text: event.text,
+        status: event.status,
+        agentLog: event.agentLog,
+      }, null, 2));
+      return;
+    }
+
     if (url.pathname === "/api/analytics") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(getAnalytics()));
@@ -44,7 +63,7 @@ export async function startDashboard(): Promise<void> {
     // Serve the dashboard HTML
     if (url.pathname === "/" || url.pathname === "/index.html") {
       const html = await readFile(htmlPath, "utf-8");
-      res.writeHead(200, { "Content-Type": "text/html" });
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store, must-revalidate" });
       res.end(html);
       return;
     }

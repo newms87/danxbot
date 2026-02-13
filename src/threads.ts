@@ -129,7 +129,7 @@ export async function isBotParticipant(threadTs: string): Promise<boolean> {
 /**
  * Deletes thread files older than 7 days.
  */
-async function cleanupOldThreads(): Promise<void> {
+export async function cleanupOldThreads(): Promise<void> {
   try {
     await ensureThreadsDir();
     const files = await readdir(config.threadsDir);

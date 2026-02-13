@@ -15,6 +15,10 @@ export interface MessageEvent {
   agentTurns: number | null;
   status: "received" | "routing" | "routed" | "agent_running" | "complete" | "error";
   error: string | null;
+  routerRequest: Record<string, unknown> | null;
+  routerRawResponse: Record<string, unknown> | null;
+  agentConfig: Record<string, unknown> | null;
+  agentLog: import("../types.js").AgentLogEntry[] | null;
 }
 
 const events: MessageEvent[] = [];
@@ -43,6 +47,10 @@ export function createEvent(partial: {
     agentTurns: null,
     status: "received",
     error: null,
+    routerRequest: null,
+    routerRawResponse: null,
+    agentConfig: null,
+    agentLog: null,
   };
 
   events.unshift(event);
@@ -110,4 +118,12 @@ export function addSSEClient(client: SSEClient): void {
 
 export function removeSSEClient(client: SSEClient): void {
   sseClients.delete(client);
+}
+
+/**
+ * Resets all in-memory state. Exported for test isolation.
+ */
+export function resetEvents(): void {
+  events.length = 0;
+  sseClients.clear();
 }

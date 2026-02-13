@@ -8,7 +8,7 @@ export function markdownToSlackMrkdwn(markdown: string): string {
   let text = markdown;
 
   // Convert italics first to avoid overlapping syntax (single * → _)
-  text = text.replace(/([^*])\*(.*?)\*/g, "$1_$2_");
+  text = text.replace(/(^|[^*])\*(.*?)\*/gm, "$1_$2_");
 
   // Convert headers (all levels → bold)
   text = text.replace(/^#{1,6}\s+(.*)/gm, "*$1*");
@@ -48,13 +48,15 @@ export function splitMessage(text: string): string[] {
 
     // Find the last newline within the limit
     let splitAt = remaining.lastIndexOf("\n", SLACK_MAX_LENGTH);
-    if (splitAt === -1 || splitAt < SLACK_MAX_LENGTH / 2) {
+    const isNewlineSplit = splitAt !== -1 && splitAt >= SLACK_MAX_LENGTH / 2;
+    if (!isNewlineSplit) {
       // No good newline break — split at the limit
       splitAt = SLACK_MAX_LENGTH;
     }
 
     chunks.push(remaining.slice(0, splitAt));
-    remaining = remaining.slice(splitAt + 1);
+    // Skip the newline delimiter for newline splits; no skip for hard splits
+    remaining = remaining.slice(splitAt + (isNewlineSplit ? 1 : 0));
   }
 
   return chunks;
