@@ -49,6 +49,13 @@ export function makeConfig(overrides?: Record<string, unknown>) {
       },
     },
     github: { webhookSecret: "" },
+    trello: {
+      apiKey: "",
+      apiToken: "",
+      boardId: "698fc5b8847b787a3818ad82",
+      todoListId: "698fc5be16a280cc321a13ec",
+      bugLabelId: "698fc5b8847b787a3818adac",
+    },
     rateLimitSeconds: 30,
     logLevel: "info",
     threadsDir: "/test/threads",

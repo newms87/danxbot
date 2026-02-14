@@ -1,0 +1,104 @@
+import { config } from "../config.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("trello-notifier");
+
+const MAX_CARD_NAME_LENGTH = 100;
+
+function buildCardName(errorType: string, errorMessage: string): string {
+  const prefix = `[Error] ${errorType}: `;
+  const maxMessageLength = MAX_CARD_NAME_LENGTH - prefix.length;
+
+  if (errorMessage.length > maxMessageLength) {
+    return prefix + errorMessage.slice(0, maxMessageLength - 3) + "...";
+  }
+
+  return prefix + errorMessage;
+}
+
+function buildCardDescription(
+  errorType: string,
+  errorMessage: string,
+  context: Record<string, string>,
+): string {
+  const lines: string[] = [
+    `## ${errorType}`,
+    "",
+    `**Error:** ${errorMessage}`,
+    "",
+  ];
+
+  const contextEntries = Object.entries(context);
+  if (contextEntries.length > 0) {
+    lines.push("**Context:**");
+    for (const [key, value] of contextEntries) {
+      lines.push(`- ${key}: ${value}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(`**Timestamp:** ${new Date().toISOString()}`);
+
+  return lines.join("\n");
+}
+
+export async function notifyError(
+  errorType: string,
+  errorMessage: string,
+  context: Record<string, string>,
+): Promise<void> {
+  try {
+    const { apiKey, apiToken, todoListId, bugLabelId } = config.trello;
+
+    if (!apiKey || !apiToken) {
+      log.debug("Trello creds not configured, skipping error notification");
+      return;
+    }
+
+    const cardName = buildCardName(errorType, errorMessage);
+
+    // Fetch existing cards in ToDo list to check for duplicates
+    const listUrl = `https://api.trello.com/1/lists/${todoListId}/cards?key=${apiKey}&token=${apiToken}&fields=id,name`;
+    const listResponse = await fetch(listUrl);
+
+    if (!listResponse.ok) {
+      log.error(`Failed to fetch ToDo cards: ${listResponse.status} ${listResponse.statusText}`);
+      return;
+    }
+
+    const existingCards = (await listResponse.json()) as Array<{ id: string; name: string }>;
+    const isDuplicate = existingCards.some((card) => card.name === cardName);
+
+    if (isDuplicate) {
+      log.info(`Duplicate error card already exists: ${cardName}`);
+      return;
+    }
+
+    // Create the card
+    const desc = buildCardDescription(errorType, errorMessage, context);
+    const params = new URLSearchParams({
+      key: apiKey,
+      token: apiToken,
+      idList: todoListId,
+      name: cardName,
+      desc,
+      pos: "top",
+      idLabels: bugLabelId,
+    });
+
+    const createUrl = `https://api.trello.com/1/cards?${params.toString()}`;
+    const createResponse = await fetch(createUrl, { method: "POST" });
+
+    if (!createResponse.ok) {
+      log.error(`Failed to create Trello card: ${createResponse.status} ${createResponse.statusText}`);
+      return;
+    }
+
+    log.info(`Created error card: ${cardName}`);
+  } catch (error) {
+    log.error(
+      "Failed to send error notification to Trello",
+      error,
+    );
+  }
+}

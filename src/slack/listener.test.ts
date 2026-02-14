@@ -96,6 +96,12 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
+const mockNotifyError = vi.fn().mockResolvedValue(undefined);
+
+vi.mock("../errors/trello-notifier.js", () => ({
+  notifyError: (...args: unknown[]) => mockNotifyError(...args),
+}));
+
 // Mock @slack/bolt — App must be a real class so `new App()` works
 let capturedMessageHandler: Function;
 const capturedEventHandlers: Record<string, Function> = {};
@@ -361,6 +367,17 @@ describe("error paths", () => {
       expect.objectContaining({ status: "error" }),
     );
 
+    // Trello notifier called with Agent Timeout
+    expect(mockNotifyError).toHaveBeenCalledWith(
+      "Agent Timeout",
+      expect.stringContaining("timed out"),
+      expect.objectContaining({
+        threadTs: expect.any(String),
+        user: "U-HUMAN",
+        channelId: "C-TEST",
+      }),
+    );
+
     // Restore timeout
     (mockConfig.agent as Record<string, unknown>).timeoutMs = 300000;
   });
@@ -397,6 +414,34 @@ describe("error paths", () => {
     expect(mockUpdateEvent).toHaveBeenCalledWith(
       "test-id",
       expect.objectContaining({ status: "error" }),
+    );
+
+    // Trello notifier called with Agent Crash
+    expect(mockNotifyError).toHaveBeenCalledWith(
+      "Agent Crash",
+      "SDK process died",
+      expect.objectContaining({
+        threadTs: expect.any(String),
+        user: "U-HUMAN",
+        channelId: "C-TEST",
+      }),
+    );
+  });
+
+  it("calls notifyError on top-level handler error", async () => {
+    // Make getOrCreateThread throw to trigger the top-level catch
+    mockGetOrCreateThread.mockRejectedValue(new Error("Thread DB failure"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockNotifyError).toHaveBeenCalledWith(
+      "Handler Error",
+      "Thread DB failure",
+      expect.objectContaining({
+        threadTs: expect.any(String),
+        user: "U-HUMAN",
+        channelId: "C-TEST",
+      }),
     );
   });
 });

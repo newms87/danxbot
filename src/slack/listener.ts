@@ -7,6 +7,7 @@ import { HeartbeatManager } from "./heartbeat-manager.js";
 import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
 import { resolveUserName } from "./user-cache.js";
 import { runRouter, runAgent } from "../agent/agent.js";
+import { notifyError } from "../errors/trello-notifier.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
   getOrCreateThread,
@@ -81,18 +82,20 @@ export async function startSlackListener(): Promise<void> {
 
     const threadTs = message.thread_ts || message.ts;
     const isThreadReply = !!message.thread_ts;
+    const userId = message.user || "unknown";
+    const errorContext = { threadTs, user: userId, channelId: message.channel };
 
     // Track in dashboard
     const dashEvent = createEvent({
       threadTs,
       messageTs: message.ts,
       channelId: message.channel,
-      user: message.user || "unknown",
+      user: userId,
       text: message.text,
     });
 
     // Resolve user display name asynchronously (fire-and-forget)
-    resolveUserName(client, message.user || "unknown").then((name) => {
+    resolveUserName(client, userId).then((name) => {
       updateEvent(dashEvent.id, { userName: name });
     }).catch(() => {});
 
@@ -108,7 +111,7 @@ export async function startSlackListener(): Promise<void> {
 
       // Track the incoming message
       addMessageToThread(thread, {
-        user: message.user || "unknown",
+        user: userId,
         text: message.text,
         ts: message.ts,
         isBot: false,
@@ -148,7 +151,7 @@ export async function startSlackListener(): Promise<void> {
       // Step 2: If the router says we need the agent, run it
       if (routerResult.needsAgent) {
         // Check rate limit before starting agent
-        if (isRateLimited(message.user || "unknown")) {
+        if (isRateLimited(userId)) {
           await client.chat.postMessage({
             channel: message.channel,
             thread_ts: threadTs,
@@ -157,7 +160,7 @@ export async function startSlackListener(): Promise<void> {
           updateEvent(dashEvent.id, { status: "complete" });
           return;
         }
-        recordAgentRun(message.user || "unknown");
+        recordAgentRun(userId);
 
         updateEvent(dashEvent.id, { status: "agent_running" });
 
@@ -261,6 +264,7 @@ export async function startSlackListener(): Promise<void> {
                   "brain",
                   "warning",
                 );
+                notifyError("Agent Timeout", `Agent timed out after ${elapsed}s`, errorContext).catch(() => {});
                 handled = true;
               } else {
                 // Agent succeeded
@@ -364,6 +368,7 @@ export async function startSlackListener(): Promise<void> {
                   "brain",
                   "x",
                 );
+                notifyError("Agent Crash", errorMsg, errorContext).catch(() => {});
                 handled = true;
               } else {
                 // Retry — update placeholder with retrying status
@@ -421,6 +426,8 @@ export async function startSlackListener(): Promise<void> {
           name: "x",
         })
         .catch(() => {});
+
+      notifyError("Handler Error", error instanceof Error ? error.message : String(error), errorContext).catch(() => {});
     }
   });
 

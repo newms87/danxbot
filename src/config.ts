@@ -41,6 +41,13 @@ export const config = {
   github: {
     webhookSecret: process.env.GITHUB_WEBHOOK_SECRET || "",
   },
+  trello: {
+    apiKey: process.env.TRELLO_API_KEY || "",
+    apiToken: process.env.TRELLO_API_TOKEN || "",
+    boardId: "698fc5b8847b787a3818ad82",
+    todoListId: "698fc5be16a280cc321a13ec",
+    bugLabelId: "698fc5b8847b787a3818adac",
+  },
   rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),
   threadsDir: "/flytebot/threads",
