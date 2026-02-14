@@ -280,8 +280,8 @@ describe("runRouter", () => {
 
     const result = await runRouter("hello");
 
-    expect(result.quickResponse).toBe("");
-    expect(result.needsAgent).toBe(false);
+    expect(result.quickResponse).toBe("I'm having a moment — give me a sec and try again.");
+    expect(result.needsAgent).toBe(true);
     expect(result.reason).toBe("router error");
   });
 
@@ -297,8 +297,8 @@ describe("runRouter", () => {
 
     const result = await runRouter("hello");
 
-    expect(result.quickResponse).toBe("");
-    expect(result.needsAgent).toBe(false);
+    expect(result.quickResponse).toBe("I'm having a moment — give me a sec and try again.");
+    expect(result.needsAgent).toBe(true);
     expect(result.reason).toBe("router error");
   });
 });
