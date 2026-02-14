@@ -46,14 +46,7 @@ When creating Trello cards, aim for a **mix of Valuable + Maintenance**. The que
 
 ### ICE Scoring
 
-Score every feature that is NOT "Complete" using ICE:
-
-- **Impact** (1-10): How much value does this add for users?
-- **Confidence** (1-10): How sure are we this will work as expected?
-- **Ease** (1-10): How easy is it to implement?
-- **ICE Score** = Impact x Confidence x Ease
-
-Use ICE scores within each Type to rank features. Type determines whether to card it; ICE determines the order.
+Score every feature that is NOT "Complete" using the rubric in the "Score Features" workflow step below. Type determines whether to card it; ICE determines the order.
 
 ## Workflow
 
@@ -74,10 +67,43 @@ Use ICE scores within each Type to rank features. Type determines whether to car
 
 1. Brainstorm feature ideas in the Desired Features scratchpad
 2. Consider: response quality, knowledge gaps, caching, new capabilities, UX improvements
-3. ICE score each non-Complete feature
-4. Sort by ICE score descending
 
-### 4. Deduplicate
+### 4. Score Features
+
+Before carding, score every non-Complete feature using ICE. Each component MUST have a one-sentence justification — no bare numbers.
+
+**Impact (1-10)** — How many users benefit and how much?
+
+| Range | Anchor |
+|-------|--------|
+| 1-3 | Nice-to-have, few users affected, minor convenience |
+| 4-6 | Meaningful improvement for some users or workflows |
+| 7-9 | Significant value for most users, prevents real problems |
+| 10 | Critical, blocks core workflows or causes data loss |
+
+**Confidence (1-10)** — How certain is the approach and outcome?
+
+| Range | Anchor |
+|-------|--------|
+| 1-3 | Exploratory, unknown unknowns, unclear requirements |
+| 4-6 | Understood problem but untested approach |
+| 7-9 | Proven pattern, clear path, done similar things before |
+| 10 | Trivial, already done elsewhere in the codebase |
+
+**Ease (1-10)** — How much implementation effort?
+
+| Range | Anchor |
+|-------|--------|
+| 1-3 | Multi-day, cross-cutting changes, many files |
+| 4-6 | Half-day, touches several files or modules |
+| 7-9 | A few hours, isolated to one module |
+| 10 | Single file, under 30 lines changed |
+
+**ICE Score** = Impact x Confidence x Ease
+
+Write scores with justifications into `docs/features.md` first, then copy onto cards.
+
+### 5. Deduplicate
 
 Before creating any Trello card, check ALL of these lists for existing cards covering the same feature:
 - Review list (ID: `698fc5bdfa44ac685050fa35`)
@@ -86,7 +112,7 @@ Before creating any Trello card, check ALL of these lists for existing cards cov
 
 Also verify the feature is not already implemented in the codebase.
 
-### 5. Create Cards
+### 6. Create Cards
 
 Generate 3-5 cards in the Review list from the highest-ICE-scored features.
 
@@ -100,15 +126,28 @@ Every card MUST have a label. Pass the `labels` array when calling `add_card_to_
 | Label | ID | Use |
 |-------|----|-----|
 | Bug | `698fc5b8847b787a3818adac` | Defects, crashes, incorrect behavior |
-| Feature | `698fc5b8847b787a3818ada6` | New functionality, enhancements |
+| Feature | `698fc5b8847b787a3818adae` | New functionality, enhancements |
+| Needs Help | `698fc5b8847b787a3818adaa` | Requires human intervention |
 
 Each card must have:
 - Clear, actionable title
 - A label (Bug or Feature)
-- Description with context, rationale, and ICE score
-- Acceptance criteria checklist
+- Description (Problem, Solution, ICE Score — see template below)
+- Acceptance criteria as a Trello checklist (NOT in the description)
 
-### 6. Save State and Commit
+#### Card Description Template
+
+Write factual, direct descriptions. No selling ("this would be great..."), no filler. Write for a developer who will implement this.
+
+**Problem:** What's wrong or missing today? Reference specific files, modules, or user-visible behavior. Length scales with complexity — one sentence for a simple bug, a paragraph for a complex feature.
+
+**Solution:** What should be built or changed? High-level approach, not implementation details (those go in acceptance criteria). Enough that a developer understands the direction.
+
+**ICE Score:** N (I: X — justification. C: X — justification. E: X — justification.)
+
+That's it. No other sections. Acceptance criteria go ONLY in the "Acceptance Criteria" checklist created via `create_checklist` + `add_checklist_item`.
+
+### 7. Save State and Commit
 
 Update `docs/features.md` with everything you learned this session. This file is your memory for next time.
 
