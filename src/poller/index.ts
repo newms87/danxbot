@@ -50,13 +50,13 @@ export async function poll(): Promise<void> {
     }
   }
 
-  // Lock file signals that the team is running. The shell command removes it when done.
+  // Lock file signals that the team is running. The script removes it via EXIT trap.
   writeFileSync(lockFile, String(process.pid));
 
-  const shellCmd = `cd ${projectRoot} && claude -p '/start-team' --dangerously-skip-permissions; rm -f ${lockFile}`;
+  const script = resolve(dirname(fileURLToPath(import.meta.url)), "run-team.sh");
 
   // wt.exe returns immediately — the Claude process runs in the new tab.
-  spawn("wt.exe", ["-w", "0", "new-tab", "--title", "Flytebot Team", "wsl.exe", "-e", "bash", "-lc", shellCmd], {
+  spawn("wt.exe", ["-w", "0", "new-tab", "--title", "Flytebot Team", "wsl.exe", "-e", "bash", script], {
     cwd: projectRoot,
     stdio: "ignore",
     env,

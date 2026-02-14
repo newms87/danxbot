@@ -73,7 +73,7 @@ describe("poll", () => {
 
     expect(mockSpawn).toHaveBeenCalledWith(
       "wt.exe",
-      expect.arrayContaining(["new-tab", "--title", "Flytebot Team"]),
+      expect.arrayContaining(["new-tab", "--title", "Flytebot Team", "bash", expect.stringContaining("run-team.sh")]),
       expect.objectContaining({
         detached: true,
       }),
