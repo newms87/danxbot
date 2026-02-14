@@ -82,3 +82,13 @@ Stage and commit changes. Check off "Committed".
 1. Move card to Done (position: `"top"`)
 2. **For Bug cards:** Add a "Bug Diagnosis" comment with: Problem (what the user saw), Root Cause (why it happened), Solution (what was changed and why)
 3. Add retro comment (what went well, what went wrong, optimizations)
+
+### Step 9: Self-Terminate
+
+After ALL cards are processed (or when the workflow is fully complete), terminate the Claude process so the terminal tab closes:
+
+```bash
+kill $PPID
+```
+
+This kills the Claude CLI process. The parent bash shell then exits, closing the terminal tab. The poller detects the lock file removal and resumes polling. This step is MANDATORY — never leave the session open after work is done.
