@@ -114,7 +114,7 @@ Also verify the feature is not already implemented in the codebase.
 
 ### 6. Create Cards
 
-Generate 3-5 cards in the Review list from the highest-ICE-scored features.
+Generate 3-5 cards in the Review list from the highest-ICE-scored features. Always add cards to the **bottom** of the list (pass `position: "bottom"` to `add_card_to_list`) so the human reviews them in the order they were created.
 
 Board ID: `698fc5b8847b787a3818ad82`
 Review list ID: `698fc5bdfa44ac685050fa35`
