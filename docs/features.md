@@ -2,7 +2,7 @@
 
 This file is the Ideator agent's persistent memory. It tracks all features, their status, and prioritized ideas for improvement.
 
-Last updated: 2026-02-14 (session 4)
+Last updated: 2026-02-14 (session 5)
 
 ---
 
@@ -35,15 +35,22 @@ Last updated: 2026-02-14 (session 4)
 | Dashboard event persistence | Complete | — | Debounced disk writes with atomic rename |
 | System prompt | Complete | — | Domain routing instructions for agent |
 | Test fixtures/helpers | Complete | — | Shared mocks and factories |
-| Domain docs: school data + buyers | Incomplete | 336 | Last 2 of 8 domains referenced in system prompt |
-| Router + parse-json-response tests | Incomplete | 432 | Critical path modules with zero test coverage |
-| Dashboard server + helpers tests | Incomplete | 360 | HTTP server and Slack helpers with zero test coverage |
-| Slack user display names | Upgradeable | 336 | Dashboard shows raw user IDs instead of names |
-| Dashboard search/filter | Incomplete | 336 | No way to filter events table |
-| Graceful shutdown | Incomplete | 504 | No signal handlers; stuck placeholders on restart |
-| Thread context window limit | Incomplete | 336 | Unbounded thread history sent to router/agent |
-| Health check endpoint | Incomplete | 240 | No /health route for monitoring |
-| Per-user rate limiting | Incomplete | 280 | No flood protection; each message spawns agent run |
+| Router + parse-json-response tests | Complete | — | Full test coverage |
+| Dashboard server + helpers tests | Complete | — | Full test coverage |
+| Per-user rate limiting | Complete | — | In-memory cooldown per user, integrated in listener |
+| Poller (Trello automation) | Complete | — | Polls ToDo list, spawns /start-team, signal handlers |
+| Poller trello-client tests | Complete | — | API call and error handling tested |
+| Poller config tests | Complete | — | Config parsing tested |
+| Domain docs: school data + buyers | Incomplete | 336 | Last 2 of 8 domains; card in ToDo |
+| Slack user display names | Upgradeable | 336 | Dashboard shows raw user IDs; card in ToDo |
+| Dashboard search/filter | Incomplete | 336 | No way to filter events table; card in ToDo |
+| Graceful shutdown | Incomplete | 504 | No signal handlers in index.ts; card in ToDo |
+| Thread context window limit | Incomplete | 336 | Unbounded thread history; card in ToDo |
+| Health check endpoint | Incomplete | 240 | No /health route; card in ToDo |
+| Error notifications to ops channel | Incomplete | 336 | Errors only visible to requesting user; card in Review |
+| Poller index.ts tests | Incomplete | 315 | Poll loop/spawn/shutdown untested; card in Review |
+| Daily cost tracking + alerts | Incomplete | 245 | No persistent cost tracking; card in Review |
+| Agent retry on transient failure | Incomplete | 210 | No auto-retry on crash; card in Review |
 
 ---
 
@@ -55,19 +62,20 @@ Last updated: 2026-02-14 (session 4)
 | Feature Idea | Type | ICE | Description |
 |--------------|------|-----|-------------|
 | Graceful shutdown handler | Carded | 504 | Signal handlers, clean up in-flight agents on restart |
-| Router + parse-json-response tests | Carded | 432 | Critical path, zero coverage, high risk |
-| Dashboard server + helpers tests | Carded | 360 | HTTP server and helpers, zero coverage |
 | Domain docs: School Data + Buyers | Carded | 336 | Last 2 domain knowledge gaps |
 | Dashboard search/filter | Carded | 336 | Filter events by text, status |
 | Slack user display names | Carded | 336 | Resolve user IDs to display names in dashboard |
 | Thread context window limit | Carded | 336 | Cap thread messages sent to router/agent |
-| Per-user rate limiting | Carded | 280 | Prevent cost runaway from rapid messages |
-| Cost tracking alerts | Valuable | 252 | Notify when agent cost exceeds threshold |
+| Error notifications to ops channel | Carded | 336 | Post agent errors to a configurable ops channel |
+| Poller index.ts tests | Carded | 315 | Poll loop, spawn, shutdown logic untested |
+| Per-user rate limiting | Carded | 280 | Implemented; In Progress on board |
+| Daily cost tracking + alerts | Carded | 245 | Track daily spend, alert on threshold |
 | Health check endpoint | Carded | 240 | GET /health for uptime monitoring |
-| Agent retry on error | Valuable | 210 | Auto-retry once on transient agent failures (7*5*6) |
+| Agent retry on error | Carded | 210 | Auto-retry once on transient agent failures |
 | Dashboard data export | Valuable | 192 | Export events as CSV/JSON for offline analysis (6*8*4) |
 | Response caching | Dependent | 280 | Cache common platform queries; needs domain docs first |
 | Multi-channel support | Exploratory | 168 | Support beyond Slack (Teams, web chat) |
+| Agent response quality scoring | Exploratory | 72 | Auto-evaluate response quality via LLM judge |
 
 ---
 
@@ -75,20 +83,22 @@ Last updated: 2026-02-14 (session 4)
 
 <!-- Overwritten each session — only the most recent notes live here -->
 
-2026-02-14 (session 4): No cards were moved to ToDo or completed since session 3. The Review list had 6 existing cards (5 from session 3 + 1 manually-added "Trello Webhooks" card). ToDo and In Progress are empty.
+2026-02-14 (session 5): Significant progress since session 4. The autonomous agent team has been active -- 12 cards in Done, 6 in ToDo, 1 In Progress (rate limiting, partially implemented).
 
-Codebase assessment: 27 TypeScript files in src/ (same as session 3 + the b30f7a5 commit fixing non-root container user). 8 test files. Domain docs: still 6 of 8 (missing school-data, buyers). No new feature implementations since session 3.
+Codebase changes since session 4:
+- Rate limiter module added (`src/slack/rate-limiter.ts`) and integrated into listener
+- Poller module added (`src/poller/`) -- polls Trello ToDo, spawns `/start-team`
+- Router + parse-json-response tests completed (Done)
+- Dashboard server + helpers tests completed (Done)
+- Test count: 14 files, 224 tests (up from ~151 in session 4)
+- `github.webhookSecret` config exists but unused -- potential future feature
 
-Key discoveries this session:
-- `src/index.ts` has no signal handlers (SIGTERM/SIGINT) -- stuck Slack placeholders on restart
-- `thread.messages` grows unbounded -- risk of token overflow on long conversations
-- No rate limiting in listener.ts -- each message spawns a full agent run
-- Dashboard time format uses locale-dependent `toLocaleTimeString()` with no date
+Board state: Review was empty (0 cards). ToDo has 6 cards. In Progress has 1 (rate limiting). Done has 12.
 
 Created 4 new Trello cards in Review:
-1. Graceful shutdown with in-flight agent cleanup (ICE 504, Maintenance)
-2. Limit thread context window (ICE 336, Valuable)
-3. Health check endpoint (ICE 240, Maintenance)
-4. Per-user rate limiting (ICE 280, Valuable)
+1. Send agent error notifications to ops channel (ICE 336, Valuable)
+2. Add unit tests for poller module (ICE 315, Maintenance)
+3. Add daily cost tracking with threshold alerts (ICE 245, Valuable)
+4. Add automatic agent retry on transient failures (ICE 210, Valuable)
 
-Mix: 2 Valuable + 2 Maintenance. Review list now has 10 cards total. Next priorities after current queue: cost tracking alerts (ICE 252), agent retry on error (ICE 210), dashboard data export (ICE 192).
+Mix: 3 Valuable + 1 Maintenance. Review list now has 4 cards. Next priorities after current queue: dashboard data export (ICE 192), response caching (Dependent, ICE 280 -- needs domain docs done first).
