@@ -35,6 +35,8 @@ export function makeConfig(overrides?: Record<string, unknown>) {
       maxBudgetUsd: 1.0,
       maxThinkingTokens: 8000,
       timeoutMs: 300000,
+      maxThreadMessages: 20,
+      maxRetries: 1,
     },
     platform: {
       repoUrl: "https://test.example.com",
@@ -51,6 +53,7 @@ export function makeConfig(overrides?: Record<string, unknown>) {
     logLevel: "info",
     threadsDir: "/test/threads",
     logsDir: "/test/logs",
+    eventsFile: "/test/data/events.json",
     ...overrides,
   };
 }

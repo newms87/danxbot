@@ -111,7 +111,7 @@ vi.mock("@slack/bolt", () => {
 });
 
 // Dynamic import after mocks
-const { startSlackListener } = await import("./listener.js");
+const { startSlackListener, stopSlackListener, getInFlightPlaceholders, resetListenerState } = await import("./listener.js");
 
 // --- Test setup ---
 
@@ -121,6 +121,9 @@ let client: ReturnType<typeof createMockWebClient>;
 beforeEach(async () => {
   vi.clearAllMocks();
   mockIsRateLimited.mockReturnValue(false);
+
+  // Reset listener state (shutdown flag and in-flight tracking)
+  resetListenerState();
 
   // Re-register handler each test (startSlackListener calls app.message(handler))
   await startSlackListener();
@@ -353,13 +356,16 @@ describe("error paths", () => {
     (mockConfig.agent as Record<string, unknown>).timeoutMs = 300000;
   });
 
-  it("handles agent crash", async () => {
+  it("handles agent crash (retries exhausted)", async () => {
     mockRunRouter.mockResolvedValue(
       makeRouterResult({ needsAgent: true, quickResponse: "Let me check..." }),
     );
     mockRunAgent.mockRejectedValue(new Error("SDK process died"));
 
     await handler({ message: makeSlackMessage(), client });
+
+    // Agent called twice (initial + 1 retry, default maxRetries=1)
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
 
     // Error attachment posted
     expect(mockPostErrorAttachment).toHaveBeenCalledWith(
@@ -597,5 +603,245 @@ describe("feedback reactions", () => {
 
     expect(mockFindEventByResponseTs).not.toHaveBeenCalled();
     expect(mockUpdateEvent).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================
+// Agent retry on crash
+// ============================================================
+
+describe("agent retry on crash", () => {
+  beforeEach(() => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+  });
+
+  it("retries on agent crash and succeeds on second attempt", async () => {
+    const agentResponse = makeAgentResponse({ text: "Got it on retry." });
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("SDK process died"))
+      .mockResolvedValueOnce(agentResponse);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called twice (initial + 1 retry)
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+
+    // Placeholder updated with response (not error)
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "Got it on retry.",
+        attachments: [],
+      }),
+    );
+
+    // Reaction swapped to checkmark (not x)
+    expect(mockSwapReaction).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      expect.any(String),
+      "brain",
+      "white_check_mark",
+    );
+
+    // Dashboard event tracks the retry
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({
+        status: "complete",
+        agentRetried: true,
+      }),
+    );
+  });
+
+  it("shows error when retry also fails", async () => {
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("First crash"))
+      .mockRejectedValueOnce(new Error("Second crash"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called twice
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+
+    // Error attachment posted
+    expect(mockPostErrorAttachment).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      "mock-ts",
+      expect.stringContaining("crashed"),
+    );
+
+    // Reaction swapped to x
+    expect(mockSwapReaction).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      expect.any(String),
+      "brain",
+      "x",
+    );
+  });
+
+  it("does NOT retry on timeout", async () => {
+    (mockConfig.agent as Record<string, unknown>).timeoutMs = 50;
+
+    mockRunAgent.mockReturnValue(new Promise(() => {}));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called only once
+    expect(mockRunAgent).toHaveBeenCalledTimes(1);
+
+    // Timeout error shown
+    expect(mockPostErrorAttachment).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      "mock-ts",
+      expect.stringContaining("Timed out"),
+    );
+
+    // Restore timeout
+    (mockConfig.agent as Record<string, unknown>).timeoutMs = 300000;
+  });
+
+  it("does not retry when maxRetries is 0", async () => {
+    (mockConfig.agent as Record<string, unknown>).maxRetries = 0;
+
+    mockRunAgent.mockRejectedValueOnce(new Error("SDK process died"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called only once
+    expect(mockRunAgent).toHaveBeenCalledTimes(1);
+
+    // Error shown
+    expect(mockPostErrorAttachment).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      "mock-ts",
+      expect.stringContaining("crashed"),
+    );
+
+    // Restore maxRetries
+    (mockConfig.agent as Record<string, unknown>).maxRetries = 1;
+  });
+
+  it("updates placeholder with retrying text before retry", async () => {
+    const agentResponse = makeAgentResponse({ text: "Success on retry." });
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("Crash"))
+      .mockResolvedValueOnce(agentResponse);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Placeholder updated with retrying message before the retry
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ts: "mock-ts",
+        text: " ",
+        attachments: expect.arrayContaining([
+          expect.objectContaining({
+            color: "#e17055",
+            blocks: expect.arrayContaining([
+              expect.objectContaining({
+                elements: expect.arrayContaining([
+                  expect.objectContaining({
+                    text: expect.stringContaining("Retrying"),
+                  }),
+                ]),
+              }),
+            ]),
+          }),
+        ]),
+      }),
+    );
+  });
+});
+
+// ============================================================
+// Shutdown handling
+// ============================================================
+
+describe("shutdown handling", () => {
+  it("rejects new messages after stopSlackListener is called", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ quickResponse: "Hi!", needsAgent: false }),
+    );
+
+    // First message should be processed normally
+    await handler({ message: makeSlackMessage(), client });
+    expect(mockRunRouter).toHaveBeenCalledOnce();
+
+    // Stop the listener
+    stopSlackListener();
+
+    // Second message should be ignored
+    vi.clearAllMocks();
+    await handler({ message: makeSlackMessage({ ts: "1234567890.000002" }), client });
+    expect(mockRunRouter).not.toHaveBeenCalled();
+  });
+
+  it("tracks in-flight agent placeholders", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+
+    // Create a promise we can control
+    let resolveAgent: () => void;
+    const agentPromise = new Promise<void>((resolve) => {
+      resolveAgent = resolve;
+    });
+    mockRunAgent.mockReturnValue(agentPromise);
+
+    // Start an agent run (don't await it)
+    handler({ message: makeSlackMessage(), client });
+
+    // Wait a tick for async operations to settle
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Check in-flight placeholders
+    const placeholders = getInFlightPlaceholders();
+    expect(placeholders).toHaveLength(1);
+    expect(placeholders[0]).toMatchObject({
+      channel: "C-TEST",
+      ts: "mock-ts",
+      threadTs: expect.any(String),
+    });
+
+    // Clean up - resolve the agent to let handler complete
+    resolveAgent!();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  it("removes placeholder from in-flight after agent completes", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+    mockRunAgent.mockResolvedValue(makeAgentResponse());
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // After completion, in-flight should be empty
+    const placeholders = getInFlightPlaceholders();
+    expect(placeholders).toHaveLength(0);
+  });
+
+  it("removes placeholder from in-flight after agent errors", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+    mockRunAgent.mockRejectedValue(new Error("Agent crashed"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // After error, in-flight should be empty
+    const placeholders = getInFlightPlaceholders();
+    expect(placeholders).toHaveLength(0);
+  });
+
+  it("returns empty array when no agents are in-flight", () => {
+    const placeholders = getInFlightPlaceholders();
+    expect(placeholders).toEqual([]);
   });
 });

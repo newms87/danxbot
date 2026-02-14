@@ -24,6 +24,7 @@ export interface MessageEvent {
   routerRawResponse: Record<string, unknown> | null;
   agentConfig: Record<string, unknown> | null;
   agentLog: import("../types.js").AgentLogEntry[] | null;
+  agentRetried: boolean;
   feedback: "positive" | "negative" | null;
   responseTs: string | null;
 }
@@ -45,7 +46,7 @@ function schedulePersist(): void {
   }, PERSIST_DEBOUNCE_MS);
 }
 
-async function persistToDisk(): Promise<void> {
+export async function persistToDisk(): Promise<void> {
   try {
     const filePath = config.eventsFile;
     const tmpPath = `${filePath}.tmp`;
@@ -95,6 +96,7 @@ export function createEvent(partial: {
     routerRawResponse: null,
     agentConfig: null,
     agentLog: null,
+    agentRetried: false,
     feedback: null,
     responseTs: null,
   };

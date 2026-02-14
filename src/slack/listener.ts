@@ -17,9 +17,40 @@ import {
 let app: App;
 let botUserId: string | null = null;
 let slackConnected = false;
+let isShuttingDown = false;
+
+// Track in-flight agent placeholders for graceful shutdown
+interface InFlightPlaceholder {
+  channel: string;
+  ts: string;
+  threadTs: string;
+}
+const inFlightPlaceholders = new Set<string>();
+const placeholderData = new Map<string, InFlightPlaceholder>();
 
 export function isSlackConnected(): boolean {
   return slackConnected;
+}
+
+export function stopSlackListener(): void {
+  isShuttingDown = true;
+}
+
+export function getInFlightPlaceholders(): InFlightPlaceholder[] {
+  return Array.from(placeholderData.values());
+}
+
+export function getSlackClient() {
+  return app?.client;
+}
+
+/**
+ * Resets shutdown state for testing. Exported for test isolation only.
+ */
+export function resetListenerState(): void {
+  isShuttingDown = false;
+  inFlightPlaceholders.clear();
+  placeholderData.clear();
 }
 
 export async function startSlackListener(): Promise<void> {
@@ -41,6 +72,9 @@ export async function startSlackListener(): Promise<void> {
 
     // Only process messages from the configured channel
     if (message.channel !== config.slack.channelId) return;
+
+    // Reject new messages during shutdown
+    if (isShuttingDown) return;
 
     const threadTs = message.thread_ts || message.ts;
     const isThreadReply = !!message.thread_ts;
@@ -157,6 +191,15 @@ export async function startSlackListener(): Promise<void> {
         });
         const placeholderTs = placeholder.ts!;
 
+        // Track in-flight placeholder for shutdown cleanup
+        const placeholderId = `${message.channel}-${placeholderTs}`;
+        inFlightPlaceholders.add(placeholderId);
+        placeholderData.set(placeholderId, {
+          channel: message.channel,
+          ts: placeholderTs,
+          threadTs,
+        });
+
         // Set up heartbeat manager for status updates during agent run
         const heartbeatStart = Date.now();
         const hbManager = new HeartbeatManager(
@@ -170,144 +213,192 @@ export async function startSlackListener(): Promise<void> {
 
         // Race the agent against a wall-clock timeout
         const timeoutMs = config.agent.timeoutMs;
-        const agentPromise = runAgent(
-          message.text,
-          thread.sessionId,
-          (text) => hbManager.onStream(text),
-          (entry) => hbManager.onLogEntry(entry),
-          thread.messages,
-        );
+        const maxAttempts = config.agent.maxRetries + 1;
         const timeoutPromise = new Promise<null>((resolve) =>
           setTimeout(() => resolve(null), timeoutMs),
         );
 
         try {
-          const response = await Promise.race([agentPromise, timeoutPromise]);
+          let handled = false;
+          let agentRetried = false;
 
-          if (response === null) {
-            // Agent timed out
-            const elapsed = Math.round(timeoutMs / 1000);
-            console.error(
-              `Agent timed out after ${elapsed}s in thread ${threadTs}`,
-            );
+          for (let attempt = 0; attempt < maxAttempts && !handled; attempt++) {
+            try {
+              const agentPromise = runAgent(
+                message.text,
+                thread.sessionId,
+                (text) => hbManager.onStream(text),
+                (entry) => hbManager.onLogEntry(entry),
+                thread.messages,
+              );
+              const response = await Promise.race([agentPromise, timeoutPromise]);
 
-            updateEvent(dashEvent.id, {
-              status: "error",
-              error: `Agent timed out after ${elapsed}s`,
-            });
+              if (response === null) {
+                // Agent timed out — do NOT retry
+                const elapsed = Math.round(timeoutMs / 1000);
+                console.error(
+                  `Agent timed out after ${elapsed}s in thread ${threadTs}`,
+                );
 
-            await postErrorAttachment(
-              client,
-              message.channel,
-              placeholderTs,
-              `:x: *Timed out after ${elapsed}s.* I wasn't able to find an answer in time. Want me to try again?`,
-            );
-            await swapReaction(
-              client,
-              message.channel,
-              message.ts,
-              "brain",
-              "warning",
-            );
-          } else {
-            updateEvent(dashEvent.id, {
-              status: "complete",
-              agentResponseAt: Date.now(),
-              agentResponse: response.text,
-              agentCostUsd: response.costUsd,
-              agentTurns: response.turns,
-              agentConfig: response.config,
-              agentLog: response.log,
-            });
+                updateEvent(dashEvent.id, {
+                  status: "error",
+                  error: `Agent timed out after ${elapsed}s`,
+                });
 
-            // Update session ID for conversation continuity
-            if (response.sessionId) {
-              updateSessionId(thread, response.sessionId);
+                await postErrorAttachment(
+                  client,
+                  message.channel,
+                  placeholderTs,
+                  `:x: *Timed out after ${elapsed}s.* I wasn't able to find an answer in time. Want me to try again?`,
+                );
+                await swapReaction(
+                  client,
+                  message.channel,
+                  message.ts,
+                  "brain",
+                  "warning",
+                );
+                handled = true;
+              } else {
+                // Agent succeeded
+                updateEvent(dashEvent.id, {
+                  status: "complete",
+                  agentResponseAt: Date.now(),
+                  agentResponse: response.text,
+                  agentCostUsd: response.costUsd,
+                  agentTurns: response.turns,
+                  agentConfig: response.config,
+                  agentLog: response.log,
+                  ...(agentRetried ? { agentRetried: true } : {}),
+                });
+
+                // Update session ID for conversation continuity
+                if (response.sessionId) {
+                  updateSessionId(thread, response.sessionId);
+                }
+
+                // Final update: replace placeholder with formatted response
+                const slackText = markdownToSlackMrkdwn(response.text);
+                const chunks = splitMessage(slackText);
+
+                // Update the placeholder with the first chunk (remove thinking attachment)
+                await client.chat.update({
+                  channel: message.channel,
+                  ts: placeholderTs,
+                  text: chunks[0],
+                  attachments: [],
+                });
+
+                // Post any additional chunks as new messages
+                for (let i = 1; i < chunks.length; i++) {
+                  await client.chat.postMessage({
+                    channel: message.channel,
+                    thread_ts: threadTs,
+                    text: chunks[i],
+                  });
+                }
+
+                addMessageToThread(thread, {
+                  user: "flytebot",
+                  text: response.text,
+                  ts: Date.now().toString(),
+                  isBot: true,
+                });
+
+                await swapReaction(
+                  client,
+                  message.channel,
+                  message.ts,
+                  "brain",
+                  "white_check_mark",
+                );
+
+                // Store responseTs and add feedback reactions
+                updateEvent(dashEvent.id, { responseTs: placeholderTs });
+                await client.reactions
+                  .add({ channel: message.channel, timestamp: placeholderTs, name: "thumbsup" })
+                  .catch(() => {});
+                await client.reactions
+                  .add({ channel: message.channel, timestamp: placeholderTs, name: "thumbsdown" })
+                  .catch(() => {});
+
+                console.log(
+                  `Agent responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
+                );
+                handled = true;
+              }
+            } catch (agentError) {
+              const errorMsg =
+                agentError instanceof Error
+                  ? agentError.message
+                  : String(agentError);
+              const isLastAttempt = attempt >= maxAttempts - 1;
+
+              if (isLastAttempt) {
+                // All retries exhausted — show error
+                const elapsed = Math.round(
+                  (Date.now() - heartbeatStart) / 1000,
+                );
+                console.error(
+                  `Agent crashed after ${elapsed}s in thread ${threadTs}:`,
+                  errorMsg,
+                );
+
+                updateEvent(dashEvent.id, {
+                  status: "error",
+                  error: errorMsg,
+                });
+
+                await postErrorAttachment(
+                  client,
+                  message.channel,
+                  placeholderTs,
+                  `:x: *The agent crashed after ${elapsed}s.* I wasn't able to look that up. Want me to try again?`,
+                );
+                await swapReaction(
+                  client,
+                  message.channel,
+                  message.ts,
+                  "brain",
+                  "x",
+                );
+                handled = true;
+              } else {
+                // Retry — update placeholder with retrying status
+                agentRetried = true;
+                console.warn(
+                  `Agent crashed in thread ${threadTs} (attempt ${attempt + 1}/${maxAttempts}), retrying: ${errorMsg}`,
+                );
+
+                await client.chat.update({
+                  channel: message.channel,
+                  ts: placeholderTs,
+                  text: " ",
+                  attachments: [
+                    {
+                      color: "#e17055",
+                      blocks: [
+                        {
+                          type: "context",
+                          elements: [
+                            {
+                              type: "mrkdwn",
+                              text: `:warning: *Retrying...* The agent hit an error, trying again (attempt ${attempt + 2}/${maxAttempts}).`,
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                });
+              }
             }
-
-            // Final update: replace placeholder with formatted response
-            const slackText = markdownToSlackMrkdwn(response.text);
-            const chunks = splitMessage(slackText);
-
-            // Update the placeholder with the first chunk (remove thinking attachment)
-            await client.chat.update({
-              channel: message.channel,
-              ts: placeholderTs,
-              text: chunks[0],
-              attachments: [],
-            });
-
-            // Post any additional chunks as new messages
-            for (let i = 1; i < chunks.length; i++) {
-              await client.chat.postMessage({
-                channel: message.channel,
-                thread_ts: threadTs,
-                text: chunks[i],
-              });
-            }
-
-            addMessageToThread(thread, {
-              user: "flytebot",
-              text: response.text,
-              ts: Date.now().toString(),
-              isBot: true,
-            });
-
-            await swapReaction(
-              client,
-              message.channel,
-              message.ts,
-              "brain",
-              "white_check_mark",
-            );
-
-            // Store responseTs and add feedback reactions
-            updateEvent(dashEvent.id, { responseTs: placeholderTs });
-            await client.reactions
-              .add({ channel: message.channel, timestamp: placeholderTs, name: "thumbsup" })
-              .catch(() => {});
-            await client.reactions
-              .add({ channel: message.channel, timestamp: placeholderTs, name: "thumbsdown" })
-              .catch(() => {});
-
-            console.log(
-              `Agent responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
-            );
           }
-        } catch (agentError) {
-          // Agent crashed — update Slack with error message
-          const elapsed = Math.round(
-            (Date.now() - heartbeatStart) / 1000,
-          );
-          const errorMsg =
-            agentError instanceof Error
-              ? agentError.message
-              : String(agentError);
-          console.error(
-            `Agent crashed after ${elapsed}s in thread ${threadTs}:`,
-            errorMsg,
-          );
-
-          updateEvent(dashEvent.id, {
-            status: "error",
-            error: errorMsg,
-          });
-
-          await postErrorAttachment(
-            client,
-            message.channel,
-            placeholderTs,
-            `:x: *The agent crashed after ${elapsed}s.* I wasn't able to look that up. Want me to try again?`,
-          );
-          await swapReaction(
-            client,
-            message.channel,
-            message.ts,
-            "brain",
-            "x",
-          );
         } finally {
           hbManager.stop();
+          // Remove from in-flight tracking
+          inFlightPlaceholders.delete(placeholderId);
+          placeholderData.delete(placeholderId);
         }
       } else {
         // Router-only response, mark complete
