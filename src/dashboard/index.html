@@ -71,8 +71,25 @@
 
       <!-- Messages Table -->
       <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
-        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800">
-          <h2 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Messages</h2>
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-3 flex-wrap">
+          <h2 class="text-sm font-semibold text-gray-700 dark:text-gray-300">
+            Messages
+            <span v-if="filteredEvents.length !== events.length" class="font-normal text-gray-400 dark:text-gray-500 ml-1">
+              ({{ filteredEvents.length }} of {{ events.length }})
+            </span>
+          </h2>
+          <div class="flex items-center gap-2">
+            <input v-model="searchQuery" type="text" placeholder="Search messages..."
+              class="px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500 w-48 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+            <select v-model="statusFilter"
+              class="px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-500">
+              <option value="all">All Statuses</option>
+              <option value="complete">Complete</option>
+              <option value="error">Error</option>
+              <option value="agent_running">Agent Running</option>
+              <option value="router_only">Router Only</option>
+            </select>
+          </div>
         </div>
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
@@ -89,7 +106,7 @@
               </tr>
             </thead>
             <tbody>
-              <tr v-for="event in events" :key="event.id"
+              <tr v-for="event in filteredEvents" :key="event.id"
                   class="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
                   @click="selectedEvent = event">
 
@@ -138,9 +155,10 @@
                 </td>
               </tr>
 
-              <tr v-if="events.length === 0">
+              <tr v-if="filteredEvents.length === 0">
                 <td colspan="8" class="px-4 py-8 text-center text-gray-400 dark:text-gray-600">
-                  No messages yet. Send a message in the Slack channel to see it here.
+                  <template v-if="events.length === 0">No messages yet. Send a message in the Slack channel to see it here.</template>
+                  <template v-else>No messages match your filters.</template>
                 </td>
               </tr>
             </tbody>
@@ -350,8 +368,26 @@
           agentLog: false,
         });
         const expandedLogRows = reactive({});
+        const searchQuery = ref('');
+        const statusFilter = ref('all');
         const isDark = ref(localStorage.getItem('flytebot-theme') !== 'light');
         let eventSource = null;
+
+        const filteredEvents = computed(() => {
+          let filtered = events.value;
+          if (searchQuery.value) {
+            const q = searchQuery.value.toLowerCase();
+            filtered = filtered.filter(e => e.text.toLowerCase().includes(q));
+          }
+          if (statusFilter.value !== 'all') {
+            if (statusFilter.value === 'router_only') {
+              filtered = filtered.filter(e => e.status === 'complete' && e.agentResponseAt === null);
+            } else {
+              filtered = filtered.filter(e => e.status === statusFilter.value);
+            }
+          }
+          return filtered;
+        });
 
         function applyTheme() {
           document.documentElement.classList.toggle('dark', isDark.value);
@@ -498,6 +534,7 @@
 
         return {
           events, analytics, selectedEvent, connected, isDark,
+          searchQuery, statusFilter, filteredEvents,
           expandedSections, expandedLogRows, perfStats,
           fetchAll, formatTime, formatMs, statusClass, statusLabel,
           toggleSection, toggleLogRow, relativeTime, logTypeBadge, toggleTheme,
