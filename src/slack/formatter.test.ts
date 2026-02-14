@@ -113,6 +113,137 @@ describe("splitMessage", () => {
   });
 });
 
+describe("markdownToSlackMrkdwn tables", () => {
+  it("converts a simple 2-column table to monospace block", () => {
+    const input = [
+      "| Name  | Age |",
+      "| ----- | --- |",
+      "| Alice | 30  |",
+      "| Bob   | 25  |",
+    ].join("\n");
+
+    const result = markdownToSlackMrkdwn(input);
+    expect(result).toContain("```");
+    expect(result).toContain("Name");
+    expect(result).toContain("Alice");
+    expect(result).toContain("Bob");
+    // Should not contain the separator row
+    expect(result).not.toMatch(/\| -/);
+  });
+
+  it("converts a multi-column table with varying widths", () => {
+    const input = [
+      "| Command | Use | Notes |",
+      "| --- | --- | --- |",
+      "| git status | Show status | Fast |",
+      "| docker compose up | Start services | Slow |",
+    ].join("\n");
+
+    const result = markdownToSlackMrkdwn(input);
+    expect(result).toContain("```");
+    expect(result).toContain("Command");
+    expect(result).toContain("docker compose up");
+    expect(result).toContain("Start services");
+  });
+
+  it("preserves text before and after the table", () => {
+    const input = [
+      "Here is a table:",
+      "",
+      "| A | B |",
+      "| - | - |",
+      "| 1 | 2 |",
+      "",
+      "And some text after.",
+    ].join("\n");
+
+    const result = markdownToSlackMrkdwn(input);
+    expect(result).toMatch(/^Here is a table:/);
+    expect(result).toMatch(/And some text after\.$/);
+    expect(result).toContain("```");
+  });
+
+  it("renders bold markers in monospace cells without mangling content", () => {
+    const input = [
+      "| Header |",
+      "| --- |",
+      "| **bold** |",
+    ].join("\n");
+
+    const result = markdownToSlackMrkdwn(input);
+    expect(result).toContain("```");
+    // Cell content is inside a code block, so Slack renders it as monospace.
+    // The bold converter transforms **bold** to *bold* but Slack ignores
+    // formatting inside code blocks, so the content displays correctly.
+    expect(result).toContain("bold");
+  });
+
+  it("handles a single-row table (header only, no data rows)", () => {
+    const input = [
+      "| Header1 | Header2 |",
+      "| ------- | ------- |",
+    ].join("\n");
+
+    const result = markdownToSlackMrkdwn(input);
+    expect(result).toContain("```");
+    expect(result).toContain("Header1");
+    expect(result).toContain("Header2");
+  });
+
+  it("converts multiple tables in the same text", () => {
+    const input = [
+      "Table one:",
+      "",
+      "| A | B |",
+      "| - | - |",
+      "| 1 | 2 |",
+      "",
+      "Table two:",
+      "",
+      "| X | Y |",
+      "| - | - |",
+      "| 3 | 4 |",
+    ].join("\n");
+
+    const result = markdownToSlackMrkdwn(input);
+    // Should have two separate code blocks
+    const codeBlockCount = (result.match(/```/g) || []).length;
+    expect(codeBlockCount).toBe(4); // 2 opening + 2 closing
+  });
+
+  it("does not treat pipe characters inside code blocks as tables", () => {
+    const input = [
+      "```",
+      "| not | a | table |",
+      "| --- | - | ----- |",
+      "| just | code | block |",
+      "```",
+    ].join("\n");
+
+    const result = markdownToSlackMrkdwn(input);
+    // The pipes should remain as-is inside the existing code block
+    // Should NOT get double-wrapped in backticks
+    const codeBlockCount = (result.match(/```/g) || []).length;
+    expect(codeBlockCount).toBe(2); // Just the original opening + closing
+  });
+
+  it("aligns columns with padding", () => {
+    const input = [
+      "| Name | Value |",
+      "| ---- | ----- |",
+      "| x | longvalue |",
+    ].join("\n");
+
+    const result = markdownToSlackMrkdwn(input);
+    // Extract the content inside the code block
+    const codeBlockMatch = result.match(/```\n([\s\S]*?)\n```/);
+    expect(codeBlockMatch).not.toBeNull();
+    const lines = codeBlockMatch![1].split("\n");
+    // All lines should have the same length (padded)
+    expect(lines[0].length).toBe(lines[1].length);
+  });
+});
+
 describe("markdownToSlackMrkdwn edge cases", () => {
   it("converts standalone bold at string start", () => {
     expect(markdownToSlackMrkdwn("**bold**")).toBe("*bold*");
