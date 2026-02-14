@@ -22,6 +22,7 @@ vi.mock("../config.js", () => ({
       user: "test-user",
       password: "test-pass",
       database: "flytebot_chat",
+      connectTimeoutMs: 5000,
     },
   },
 }));
@@ -92,6 +93,18 @@ describe("getPool", () => {
       }),
     );
   });
+
+  it("passes connectTimeout from config", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.getPool();
+
+    expect(mockCreatePool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectTimeout: 5000,
+      }),
+    );
+  });
 });
 
 describe("getAdminPool", () => {
@@ -115,6 +128,18 @@ describe("getAdminPool", () => {
     const pool2 = mod.getAdminPool();
 
     expect(pool1).toBe(pool2);
+  });
+
+  it("passes connectTimeout from config", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.getAdminPool();
+
+    expect(mockCreatePool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectTimeout: 5000,
+      }),
+    );
   });
 });
 

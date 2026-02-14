@@ -17,6 +17,7 @@ function basePoolOptions(): PoolOptions {
     password: config.db.password,
     connectionLimit: CONNECTION_LIMIT,
     waitForConnections: true,
+    connectTimeout: config.db.connectTimeoutMs,
   };
 }
 
