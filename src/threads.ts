@@ -134,6 +134,18 @@ export function updateSessionId(
 }
 
 /**
+ * Clears the session ID for a thread (sets to null) and persists it.
+ * Used when a session has expired or been deleted, so the next agent
+ * run starts a fresh conversation instead of trying to resume.
+ */
+export function clearSessionId(thread: ThreadState): void {
+  thread.sessionId = null;
+  saveThread(thread).catch((err) =>
+    log.error("Failed to save thread", err),
+  );
+}
+
+/**
  * Checks if the bot has previously responded in a thread.
  */
 export async function isBotParticipant(threadTs: string): Promise<boolean> {

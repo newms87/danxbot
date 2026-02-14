@@ -66,6 +66,9 @@ vi.mock("../dashboard/events.js", () => ({
 const mockGetOrCreateThread = vi.fn();
 const mockAddMessageToThread = vi.fn();
 const mockUpdateSessionId = vi.fn();
+const mockClearSessionId = vi.fn().mockImplementation((t: { sessionId: string | null }) => {
+  t.sessionId = null;
+});
 const mockIsBotParticipant = vi.fn();
 
 const mockIsRateLimited = vi.fn().mockReturnValue(false);
@@ -84,6 +87,7 @@ vi.mock("../threads.js", () => ({
   getOrCreateThread: mockGetOrCreateThread,
   addMessageToThread: mockAddMessageToThread,
   updateSessionId: mockUpdateSessionId,
+  clearSessionId: mockClearSessionId,
   isBotParticipant: mockIsBotParticipant,
 }));
 
@@ -843,6 +847,103 @@ describe("agent retry on crash", () => {
           }),
         ]),
       }),
+    );
+  });
+});
+
+// ============================================================
+// Stale session recovery
+// ============================================================
+
+describe("stale session recovery", () => {
+  beforeEach(() => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+  });
+
+  it("clears session ID and retries fresh when 'No conversation found' error occurs", async () => {
+    // Thread has a stale session ID
+    const thread = makeThreadState({ sessionId: "stale-session-id" });
+    mockGetOrCreateThread.mockResolvedValue(thread);
+
+    const agentResponse = makeAgentResponse({ text: "Fresh response." });
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("No conversation found with session ID: stale-session-id"))
+      .mockResolvedValueOnce(agentResponse);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called twice (first with stale session, second with null)
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+
+    // First call had the stale session ID
+    expect(mockRunAgent.mock.calls[0][1]).toBe("stale-session-id");
+
+    // Second call had null session ID (fresh conversation)
+    expect(mockRunAgent.mock.calls[1][1]).toBeNull();
+
+    // clearSessionId was called to persist the null session
+    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
+
+    // Successful response was sent
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "Fresh response.",
+        attachments: [],
+      }),
+    );
+
+    // Reaction swapped to checkmark (success, not error)
+    expect(mockSwapReaction).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      expect.any(String),
+      "brain",
+      "white_check_mark",
+    );
+  });
+
+  it("persists null session ID to disk after session-not-found error", async () => {
+    const thread = makeThreadState({ sessionId: "expired-session" });
+    mockGetOrCreateThread.mockResolvedValue(thread);
+
+    const agentResponse = makeAgentResponse({ text: "Recovered." });
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("No conversation found with session ID: expired-session"))
+      .mockResolvedValueOnce(agentResponse);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // clearSessionId persists the null to disk
+    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
+
+    // clearSessionId mock sets thread.sessionId = null (line 69-71)
+    expect(mockClearSessionId).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows error when session recovery also fails", async () => {
+    const thread = makeThreadState({ sessionId: "stale-session-id" });
+    mockGetOrCreateThread.mockResolvedValue(thread);
+
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("No conversation found with session ID: stale-session-id"))
+      .mockRejectedValueOnce(new Error("Some other agent error"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called twice
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+
+    // Session was cleared before retry
+    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
+
+    // Error attachment posted after retries exhausted
+    expect(mockPostErrorAttachment).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      "mock-ts",
+      expect.stringContaining("crashed"),
     );
   });
 });

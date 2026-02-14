@@ -13,6 +13,7 @@ import {
   getOrCreateThread,
   addMessageToThread,
   updateSessionId,
+  clearSessionId,
   isBotParticipant,
 } from "../threads.js";
 
@@ -339,6 +340,13 @@ export async function startSlackListener(): Promise<void> {
                 agentError instanceof Error
                   ? agentError.message
                   : String(agentError);
+
+              // Clear stale session ID so retry starts a fresh conversation
+              if (errorMsg.includes("No conversation found")) {
+                clearSessionId(thread);
+                log.warn("Cleared stale session ID, retrying with fresh session");
+              }
+
               const isLastAttempt = attempt >= maxAttempts - 1;
 
               if (isLastAttempt) {
