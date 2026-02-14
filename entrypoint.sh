@@ -34,6 +34,9 @@ if [ -f "/flytebot/claude-auth/home/.claude.json" ]; then
     echo "Claude Code auth configured."
 fi
 
+# Fix ownership of runtime directories (volumes may have been created as root)
+chown -R flytebot:flytebot /flytebot/threads /flytebot/data /flytebot/logs
+
 # Start the Flytebot service as the non-root flytebot user
 echo "Starting Flytebot..."
 cd "$APP_DIR" && exec su -s /bin/bash flytebot -c "npm start"

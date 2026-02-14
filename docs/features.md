@@ -2,7 +2,7 @@
 
 This file is the Ideator agent's persistent memory. It tracks all features, their status, and prioritized ideas for improvement.
 
-Last updated: 2026-02-14
+Last updated: 2026-02-14 (session 3)
 
 ---
 
@@ -14,20 +14,32 @@ Last updated: 2026-02-14
 | Feature | Status | ICE | Notes |
 |---------|--------|-----|-------|
 | Slack Socket Mode listener | Complete | — | Receives messages, handles threads |
-| Haiku router (triage) | Upgradeable | 336 | Silent failure — returns empty string on error, user gets no feedback |
+| Haiku router (triage) | Complete | — | Error fallback with user-friendly message |
 | Claude Code SDK agent | Complete | — | Deep exploration via `query()` |
 | Real-time streaming | Complete | — | Heartbeat updates during agent runs |
-| Heartbeat manager | Complete | — | Throttled Slack updates, but zero test coverage |
+| Heartbeat manager | Complete | — | Throttled Slack updates, comprehensive unit tests |
 | Dashboard + SSE | Complete | — | Events table, analytics, light/dark theme |
-| Markdown-to-Slack formatter | Upgradeable | 252 | No markdown table support — tables render as raw text |
-| Thread state persistence | Complete | — | JSON files on disk |
+| Markdown-to-Slack formatter | Complete | — | Full markdown support including tables |
+| Thread state persistence | Complete | — | JSON files on disk, 7-day cleanup |
 | Session resumption | Complete | — | Resumes agent sessions for thread follow-ups |
 | Message splitting | Complete | — | Splits long responses into multiple Slack messages |
 | Agent log writing | Complete | — | Persists agent conversation logs to disk |
 | Validation tests | Complete | — | Real Claude API tests with $2 budget |
-| Domain reference docs | Incomplete | 504 | System prompt references 8 domains but `docs/domains/` is empty |
+| Domain docs: campaigns | Complete | — | First domain doc |
+| Domain docs: billing | Complete | — | Invoice, payment, billing profile |
+| Domain docs: suppliers | Complete | — | Suppliers, publications, ad zones |
+| Domain docs: ads/creatives | Complete | — | Ad assets, approval workflows |
+| Domain docs: users/auth | Complete | — | User management, roles, permissions |
+| Domain docs: SSP | Complete | — | Programmatic ad serving |
+| User feedback via Slack reactions | Complete | — | Tracks thumbs up/down on bot responses |
+| Dashboard event persistence | Complete | — | Debounced disk writes with atomic rename |
 | System prompt | Complete | — | Domain routing instructions for agent |
 | Test fixtures/helpers | Complete | — | Shared mocks and factories |
+| Domain docs: school data + buyers | Incomplete | 336 | Last 2 of 8 domains referenced in system prompt |
+| Router + parse-json-response tests | Incomplete | 432 | Critical path modules with zero test coverage |
+| Dashboard server + helpers tests | Incomplete | 360 | HTTP server and Slack helpers with zero test coverage |
+| Slack user display names | Upgradeable | 336 | Dashboard shows raw user IDs instead of names |
+| Dashboard search/filter | Incomplete | 336 | No way to filter events table |
 
 ---
 
@@ -35,22 +47,20 @@ Last updated: 2026-02-14
 
 <!-- ICE = Impact x Confidence x Ease (each 1-10) -->
 <!-- Type: Carded | Valuable | Maintenance | Dependent | Exploratory -->
-<!-- Carded = already a Trello card, Valuable = direct end-user value -->
-<!-- Maintenance = cleanup/refactor/QoL/QoS, Dependent = needs other features first -->
-<!-- Exploratory = unsure value, needs requirement gathering with end users -->
-<!-- Priority: keep a mix of Maintenance + Valuable in the queue -->
-<!-- When queue is empty, check Exploratory + Dependent for promotion -->
 
 | Feature Idea | Type | ICE | Description |
 |--------------|------|-----|-------------|
-| Domain reference docs (campaigns + billing) | Carded | 504 | Biggest gap, agent re-explores from scratch every time |
-| Router error fallback | Carded | 336 | Show user-friendly message instead of silent failure |
-| User feedback via Slack reactions | Carded | 280 | Track thumbs up/down on bot responses for quality metrics |
-| Formatter table support | Carded | 252 | Markdown tables render as raw text in Slack |
-| HeartbeatManager unit tests | Carded | 180 | 198-line class with zero test coverage |
-| Dashboard search/filter | Valuable | — | Filter events table by user, status, date range |
-| Response caching | Dependent | — | Cache common platform queries; needs domain docs first |
-| Cost alerts | Valuable | — | Notify when agent cost exceeds threshold |
+| Router + parse-json-response tests | Carded | 432 | Critical path, zero coverage, high risk |
+| Dashboard server + helpers tests | Carded | 360 | HTTP server and helpers, zero coverage |
+| Domain docs: School Data + Buyers | Carded | 336 | Last 2 domain knowledge gaps |
+| Dashboard search/filter | Carded | 336 | Filter events by text, status |
+| Slack user display names | Carded | 336 | Resolve user IDs to display names in dashboard |
+| Cost tracking alerts | Valuable | 252 | Notify when agent cost exceeds threshold |
+| Response caching | Dependent | 280 | Cache common platform queries; needs domain docs first |
+| Multi-channel support | Exploratory | 168 | Support beyond Slack (Teams, web chat) |
+| Agent retry on error | Valuable | 210 | Auto-retry once on transient agent failures (7*5*6) |
+| Dashboard data export | Valuable | 192 | Export events as CSV/JSON for offline analysis (6*8*4) |
+| Health check endpoint | Maintenance | 240 | GET /health for uptime monitoring (6*8*5) |
 
 ---
 
@@ -58,4 +68,15 @@ Last updated: 2026-02-14
 
 <!-- Overwritten each session — only the most recent notes live here -->
 
-2026-02-14: First full exploration. Read all 20 files (15 src + 5 test). Discovered 15 features total — 11 Complete, 2 Upgradeable, 1 Incomplete. Biggest gap: domain docs are completely empty despite system prompt referencing them. Created 5 Trello cards in Review. Ideator was blocked from writing this file (permission issue with subagent Write/Edit tools).
+2026-02-14 (session 3): All 4 cards from session 2 have been implemented and merged (domain docs for Suppliers, Ads/Creatives, Users/Auth+SSP, and event persistence to disk). All 151 tests pass across 8 test files. Trello Review/ToDo/In Progress lists were all empty.
+
+Codebase assessment: 26 TypeScript files in src/. 8 test files covering agent.ts, listener.ts, formatter.ts, heartbeat-manager.ts, threads.ts, events.ts, events-persistence.ts. Untested modules: router.ts, parse-json-response.ts, server.ts, helpers.ts. Domain docs: 6 of 8 complete (missing school-data and buyers). Dashboard has no search/filter. User column shows raw Slack IDs.
+
+Created 5 new Trello cards in Review:
+1. Domain docs: School Data + Buyers (ICE 336, Valuable)
+2. Router + parse-json-response tests (ICE 432, Maintenance)
+3. Dashboard server + helpers tests (ICE 360, Maintenance)
+4. Slack user display names (ICE 336, Valuable)
+5. Dashboard search/filter (ICE 336, Valuable)
+
+Mix: 3 Valuable + 2 Maintenance. Next priorities after these: cost tracking alerts (ICE 252), health check endpoint (ICE 240), agent retry on error (ICE 210).
