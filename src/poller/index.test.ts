@@ -1,7 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, writeFileSync, unlinkSync } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 
 // Mock dependencies before importing module under test
 vi.mock("./config.js", () => ({
@@ -27,10 +24,16 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
-import { poll, shutdown, start, _resetForTesting } from "./index.js";
+const mockExistsSync = vi.fn();
+const mockWriteFileSync = vi.fn();
+const mockUnlinkSync = vi.fn();
+vi.mock("node:fs", () => ({
+  existsSync: (...args: unknown[]) => mockExistsSync(...args),
+  writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
+  unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
+}));
 
-const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const lockFile = resolve(projectRoot, ".poller-running");
+import { poll, shutdown, start, _resetForTesting } from "./index.js";
 
 function createFakeSpawnResult() {
   return { unref: vi.fn() };
@@ -41,13 +44,7 @@ describe("poll", () => {
     vi.clearAllMocks();
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
-  });
-
-  afterEach(() => {
-    // Clean up lock file if tests created one
-    try {
-      if (existsSync(lockFile)) unlinkSync(lockFile);
-    } catch { /* ignore */ }
+    mockExistsSync.mockReturnValue(false);
   });
 
   it("skips when teamRunning is true", async () => {
@@ -91,7 +88,10 @@ describe("poll", () => {
 
     await poll();
 
-    expect(existsSync(lockFile)).toBe(true);
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining(".poller-running"),
+      expect.any(String),
+    );
   });
 
   it("handles fetchTodoCards failure gracefully", async () => {
@@ -116,8 +116,7 @@ describe("poll", () => {
   });
 
   it("refuses to spawn if lock file already exists (pre-spawn safety check)", async () => {
-    // Create lock file before poll — simulates another team already running
-    writeFileSync(lockFile, "99999");
+    mockExistsSync.mockReturnValue(true);
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll();
@@ -136,6 +135,7 @@ describe("start", () => {
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
     mockFetchTodoCards.mockResolvedValue([]);
+    mockExistsSync.mockReturnValue(false);
     mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
   });
 
@@ -143,17 +143,13 @@ describe("start", () => {
     mockExit.mockRestore();
     vi.useRealTimers();
     _resetForTesting();
-    try {
-      if (existsSync(lockFile)) unlinkSync(lockFile);
-    } catch { /* ignore */ }
   });
 
   it("enters watching mode if lock file exists on startup", async () => {
-    // Create lock file before start — simulates a previous team still running
-    writeFileSync(lockFile, "99999");
+    // Lock file exists on startup
+    mockExistsSync.mockReturnValue(true);
 
     start();
-    // Let the initial poll() resolve
     await vi.advanceTimersByTimeAsync(0);
 
     // Even with cards available, should not spawn because lock file was detected
@@ -164,13 +160,14 @@ describe("start", () => {
   });
 
   it("resumes polling after lock file is removed during watching mode", async () => {
-    writeFileSync(lockFile, "99999");
+    // Lock file exists initially
+    mockExistsSync.mockReturnValue(true);
 
     start();
     await vi.advanceTimersByTimeAsync(0);
 
-    // Remove the lock file — simulating team completion
-    unlinkSync(lockFile);
+    // Lock file disappears — simulating team completion
+    mockExistsSync.mockReturnValue(false);
 
     // Advance past lock check interval (5s)
     await vi.advanceTimersByTimeAsync(5000);
@@ -190,22 +187,22 @@ describe("shutdown", () => {
     vi.clearAllMocks();
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
+    mockExistsSync.mockReturnValue(false);
     mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
   });
 
   afterEach(() => {
     mockExit.mockRestore();
-    try {
-      if (existsSync(lockFile)) unlinkSync(lockFile);
-    } catch { /* ignore */ }
   });
 
   it("removes lock file when no team is running", () => {
-    writeFileSync(lockFile, "99999");
+    mockExistsSync.mockReturnValue(true);
 
     shutdown();
 
-    expect(existsSync(lockFile)).toBe(false);
+    expect(mockUnlinkSync).toHaveBeenCalledWith(
+      expect.stringContaining(".poller-running"),
+    );
     expect(mockExit).toHaveBeenCalledWith(0);
   });
 
@@ -214,12 +211,11 @@ describe("shutdown", () => {
 
     // Spawn a team so teamRunning becomes true
     await poll();
-    expect(existsSync(lockFile)).toBe(true);
 
-    // Now shut down — lock file should be preserved
+    // Now shut down — lock file should NOT be removed
     shutdown();
 
-    expect(existsSync(lockFile)).toBe(true);
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
     expect(mockExit).toHaveBeenCalledWith(0);
   });
 });
