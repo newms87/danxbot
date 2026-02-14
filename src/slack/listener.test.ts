@@ -76,6 +76,10 @@ vi.mock("./rate-limiter.js", () => ({
   recordAgentRun: (...args: unknown[]) => mockRecordAgentRun(...args),
 }));
 
+vi.mock("./user-cache.js", () => ({
+  resolveUserName: vi.fn().mockResolvedValue("Test User"),
+}));
+
 vi.mock("../threads.js", () => ({
   getOrCreateThread: mockGetOrCreateThread,
   addMessageToThread: mockAddMessageToThread,

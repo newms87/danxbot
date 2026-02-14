@@ -4,6 +4,7 @@ import { markdownToSlackMrkdwn, splitMessage } from "./formatter.js";
 import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
 import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
+import { resolveUserName } from "./user-cache.js";
 import { runRouter, runAgent } from "../agent/agent.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
@@ -52,6 +53,11 @@ export async function startSlackListener(): Promise<void> {
       user: message.user || "unknown",
       text: message.text,
     });
+
+    // Resolve user display name asynchronously (fire-and-forget)
+    resolveUserName(client, message.user || "unknown").then((name) => {
+      updateEvent(dashEvent.id, { userName: name });
+    }).catch(() => {});
 
     try {
       // For thread replies, only respond if Flytebot is already participating

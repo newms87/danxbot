@@ -8,6 +8,7 @@ export interface MessageEvent {
   messageTs: string;
   channelId: string;
   user: string;
+  userName: string | null;
   text: string;
   receivedAt: number;
   routerResponseAt: number | null;
@@ -79,6 +80,7 @@ export function createEvent(partial: {
   const event: MessageEvent = {
     id: `${partial.threadTs}-${partial.messageTs}`,
     ...partial,
+    userName: null,
     receivedAt: Date.now(),
     routerResponseAt: null,
     routerResponse: null,
