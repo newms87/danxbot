@@ -55,10 +55,12 @@ vi.mock("../agent/agent.js", () => ({
 
 const mockCreateEvent = vi.fn().mockReturnValue({ id: "test-id" });
 const mockUpdateEvent = vi.fn();
+const mockFindEventByResponseTs = vi.fn();
 
 vi.mock("../dashboard/events.js", () => ({
   createEvent: mockCreateEvent,
   updateEvent: mockUpdateEvent,
+  findEventByResponseTs: mockFindEventByResponseTs,
 }));
 
 const mockGetOrCreateThread = vi.fn();
@@ -75,13 +77,21 @@ vi.mock("../threads.js", () => ({
 
 // Mock @slack/bolt — App must be a real class so `new App()` works
 let capturedMessageHandler: Function;
-let mockAppStart: ReturnType<typeof vi.fn>;
+const capturedEventHandlers: Record<string, Function> = {};
 
 vi.mock("@slack/bolt", () => {
   return {
     App: class MockApp {
+      client = {
+        auth: {
+          test: vi.fn().mockResolvedValue({ user_id: "BOT_USER_ID" }),
+        },
+      };
       message(handler: Function) {
         capturedMessageHandler = handler;
+      }
+      event(eventName: string, handler: Function) {
+        capturedEventHandlers[eventName] = handler;
       }
       async start() {}
     },
@@ -360,5 +370,138 @@ describe("error paths", () => {
       "test-id",
       expect.objectContaining({ status: "error" }),
     );
+  });
+});
+
+// ============================================================
+// Feedback reactions
+// ============================================================
+
+describe("feedback reactions", () => {
+  it("stores responseTs after successful agent response", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "On it..." }),
+    );
+    mockRunAgent.mockResolvedValue(makeAgentResponse());
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({ responseTs: "mock-ts" }),
+    );
+  });
+
+  it("adds thumbsup and thumbsdown reactions to agent response", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "On it..." }),
+    );
+    mockRunAgent.mockResolvedValue(makeAgentResponse());
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(client.reactions.add).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "thumbsup", timestamp: "mock-ts" }),
+    );
+    expect(client.reactions.add).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "thumbsdown", timestamp: "mock-ts" }),
+    );
+  });
+
+  it("registers a reaction_added event handler", async () => {
+    expect(capturedEventHandlers["reaction_added"]).toBeDefined();
+  });
+
+  it("records positive feedback on thumbsup reaction", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+    const mockDashEvent = { id: "dash-1" };
+    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
+
+    await reactionHandler({
+      event: {
+        reaction: "thumbsup",
+        user: "U-HUMAN",
+        item: { channel: "C-TEST", ts: "1234.5678" },
+      },
+    });
+
+    expect(mockFindEventByResponseTs).toHaveBeenCalledWith("1234.5678");
+    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-1", { feedback: "positive" });
+  });
+
+  it("records negative feedback on thumbsdown reaction", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+    const mockDashEvent = { id: "dash-2" };
+    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
+
+    await reactionHandler({
+      event: {
+        reaction: "thumbsdown",
+        user: "U-HUMAN",
+        item: { channel: "C-TEST", ts: "5678.1234" },
+      },
+    });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-2", { feedback: "negative" });
+  });
+
+  it("ignores reactions other than thumbsup/thumbsdown", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+
+    await reactionHandler({
+      event: {
+        reaction: "heart",
+        user: "U-HUMAN",
+        item: { channel: "C-TEST", ts: "1234.5678" },
+      },
+    });
+
+    expect(mockFindEventByResponseTs).not.toHaveBeenCalled();
+  });
+
+  it("ignores reactions from wrong channel", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+
+    await reactionHandler({
+      event: {
+        reaction: "thumbsup",
+        user: "U-HUMAN",
+        item: { channel: "C-OTHER", ts: "1234.5678" },
+      },
+    });
+
+    expect(mockFindEventByResponseTs).not.toHaveBeenCalled();
+  });
+
+  it("ignores reactions on unknown messages", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+    mockFindEventByResponseTs.mockReturnValue(undefined);
+
+    await reactionHandler({
+      event: {
+        reaction: "thumbsup",
+        user: "U-HUMAN",
+        item: { channel: "C-TEST", ts: "unknown.ts" },
+      },
+    });
+
+    expect(mockFindEventByResponseTs).toHaveBeenCalledWith("unknown.ts");
+    expect(mockUpdateEvent).not.toHaveBeenCalled();
+  });
+
+  it("ignores bot's own seed reactions", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+    mockFindEventByResponseTs.mockReturnValue({ id: "test-id" });
+
+    await reactionHandler({
+      event: {
+        reaction: "thumbsup",
+        user: "BOT_USER_ID",
+        item: { channel: "C-TEST", ts: "response.ts" },
+      },
+    });
+
+    expect(mockFindEventByResponseTs).not.toHaveBeenCalled();
+    expect(mockUpdateEvent).not.toHaveBeenCalled();
   });
 });

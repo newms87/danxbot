@@ -4,7 +4,7 @@ import { markdownToSlackMrkdwn, splitMessage } from "./formatter.js";
 import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
 import { runRouter, runAgent } from "../agent/agent.js";
-import { createEvent, updateEvent } from "../dashboard/events.js";
+import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
   getOrCreateThread,
   addMessageToThread,
@@ -13,6 +13,7 @@ import {
 } from "../threads.js";
 
 let app: App;
+let botUserId: string | null = null;
 
 export async function startSlackListener(): Promise<void> {
   app = new App({
@@ -20,6 +21,10 @@ export async function startSlackListener(): Promise<void> {
     appToken: config.slack.appToken,
     socketMode: true,
   });
+
+  // Resolve the bot's own user ID so we can ignore its self-reactions
+  const authResult = await app.client.auth.test();
+  botUserId = authResult.user_id ?? null;
 
   app.message(async ({ message, client }) => {
     // Type guard: only handle regular messages
@@ -232,6 +237,15 @@ export async function startSlackListener(): Promise<void> {
               "white_check_mark",
             );
 
+            // Store responseTs and add feedback reactions
+            updateEvent(dashEvent.id, { responseTs: placeholderTs });
+            await client.reactions
+              .add({ channel: message.channel, timestamp: placeholderTs, name: "thumbsup" })
+              .catch(() => {});
+            await client.reactions
+              .add({ channel: message.channel, timestamp: placeholderTs, name: "thumbsdown" })
+              .catch(() => {});
+
             console.log(
               `Agent responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
             );
@@ -291,6 +305,18 @@ export async function startSlackListener(): Promise<void> {
         })
         .catch(() => {});
     }
+  });
+
+  app.event("reaction_added", async ({ event }) => {
+    if (event.reaction !== "thumbsup" && event.reaction !== "thumbsdown") return;
+    if (!("channel" in event.item) || event.item.channel !== config.slack.channelId) return;
+    if (botUserId && event.user === botUserId) return;
+
+    const dashEvent = findEventByResponseTs(event.item.ts);
+    if (!dashEvent) return;
+
+    const feedback = event.reaction === "thumbsup" ? "positive" : "negative";
+    updateEvent(dashEvent.id, { feedback });
   });
 
   await app.start();

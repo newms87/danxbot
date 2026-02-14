@@ -7,6 +7,7 @@ import {
   addSSEClient,
   removeSSEClient,
   resetEvents,
+  findEventByResponseTs,
 } from "./events.js";
 
 beforeEach(() => {
@@ -34,6 +35,8 @@ describe("createEvent", () => {
     expect(event.agentResponse).toBeNull();
     expect(event.agentCostUsd).toBeNull();
     expect(event.error).toBeNull();
+    expect(event.feedback).toBeNull();
+    expect(event.responseTs).toBeNull();
   });
 
   it("generates ID from threadTs-messageTs", () => {
@@ -193,5 +196,60 @@ describe("SSE broadcast", () => {
     makeEvent(); // should not reach client
 
     expect(received).toHaveLength(1);
+  });
+});
+
+describe("findEventByResponseTs", () => {
+  it("returns matching event by responseTs", () => {
+    const event = makeEvent();
+    updateEvent(event.id, { responseTs: "1234.5678" });
+
+    const found = findEventByResponseTs("1234.5678");
+    expect(found?.id).toBe(event.id);
+  });
+
+  it("returns undefined for unknown responseTs", () => {
+    makeEvent();
+    expect(findEventByResponseTs("nonexistent")).toBeUndefined();
+  });
+});
+
+describe("feedback", () => {
+  it("can set feedback to positive via updateEvent", () => {
+    const event = makeEvent();
+    updateEvent(event.id, { feedback: "positive" });
+
+    const found = getEvents().find((e) => e.id === event.id);
+    expect(found?.feedback).toBe("positive");
+  });
+
+  it("can set feedback to negative via updateEvent", () => {
+    const event = makeEvent();
+    updateEvent(event.id, { feedback: "negative" });
+
+    const found = getEvents().find((e) => e.id === event.id);
+    expect(found?.feedback).toBe("negative");
+  });
+
+  it("includes feedback stats in analytics", () => {
+    const e1 = makeEvent();
+    const e2 = makeEvent();
+    const e3 = makeEvent();
+
+    updateEvent(e1.id, { status: "complete", feedback: "positive" });
+    updateEvent(e2.id, { status: "complete", feedback: "negative" });
+    updateEvent(e3.id, { status: "complete" });
+
+    const analytics = getAnalytics();
+    expect(analytics.feedbackPositive).toBe(1);
+    expect(analytics.feedbackNegative).toBe(1);
+    expect(analytics.feedbackRate).toBeCloseTo(2 / 3, 2);
+  });
+
+  it("returns zero feedback stats when no events", () => {
+    const analytics = getAnalytics();
+    expect(analytics.feedbackPositive).toBe(0);
+    expect(analytics.feedbackNegative).toBe(0);
+    expect(analytics.feedbackRate).toBe(0);
   });
 });

@@ -36,7 +36,7 @@
       </div>
 
       <!-- Analytics Cards -->
-      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
+      <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-8">
         <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">
           <div class="text-xs text-gray-500 uppercase tracking-wide">Total</div>
           <div class="text-2xl font-bold text-gray-900 dark:text-white mt-1">{{ analytics.totalMessages }}</div>
@@ -59,6 +59,13 @@
           <div class="text-xs text-gray-500 uppercase tracking-wide">Total Cost</div>
           <div class="text-2xl font-bold text-yellow-600 dark:text-yellow-400 mt-1">${{ analytics.totalCostUsd?.toFixed(4) || '0.0000' }}</div>
           <div class="text-xs text-gray-500 mt-1">{{ analytics.errorCount }} errors</div>
+        </div>
+        <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">
+          <div class="text-xs text-gray-500 uppercase tracking-wide">Feedback</div>
+          <div class="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">
+            👍 {{ analytics.feedbackPositive || 0 }} · 👎 {{ analytics.feedbackNegative || 0 }}
+          </div>
+          <div class="text-xs text-gray-500 mt-1">{{ ((analytics.feedbackRate || 0) * 100).toFixed(0) }}% rate</div>
         </div>
       </div>
 
@@ -160,6 +167,7 @@
               <div>Message: {{ selectedEvent.messageTs }}</div>
               <div>Channel: {{ selectedEvent.channelId }}</div>
               <div>Status: {{ selectedEvent.status }}</div>
+              <div v-if="selectedEvent.feedback" :class="selectedEvent.feedback === 'positive' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">Feedback: {{ selectedEvent.feedback === 'positive' ? '👍 Positive' : '👎 Negative' }}</div>
               <div v-if="selectedEvent.error" class="text-red-600 dark:text-red-400">Error: {{ selectedEvent.error }}</div>
             </div>
           </div>
@@ -329,6 +337,7 @@
           totalMessages: 0, completedMessages: 0, routerOnlyMessages: 0,
           agentMessages: 0, avgRouterTimeMs: 0, avgAgentTimeMs: 0,
           avgTotalTimeMs: 0, totalCostUsd: 0, errorCount: 0,
+          feedbackPositive: 0, feedbackNegative: 0, feedbackRate: 0,
         });
         const selectedEvent = ref(null);
         const connected = ref(false);
