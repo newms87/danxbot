@@ -1,7 +1,7 @@
 import { startSlackListener, getSlackClient } from "./slack/listener.js";
 import { startThreadCleanup } from "./threads.js";
 import { startDashboard } from "./dashboard/server.js";
-import { loadEvents } from "./dashboard/events.js";
+import { loadEvents, startEventCleanup } from "./dashboard/events.js";
 import { initShutdownHandlers } from "./shutdown.js";
 import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
@@ -20,6 +20,9 @@ async function main(): Promise<void> {
   // Load persisted events from disk before starting the dashboard
   await loadEvents();
 
+  // Start periodic event cleanup
+  const eventCleanupInterval = startEventCleanup();
+
   // Start the monitoring dashboard
   await startDashboard();
 
@@ -28,7 +31,7 @@ async function main(): Promise<void> {
 
   // Initialize shutdown handlers
   const slackClient = getSlackClient();
-  initShutdownHandlers({ threadCleanupInterval, slackClient });
+  initShutdownHandlers({ threadCleanupInterval, eventCleanupInterval, slackClient });
 }
 
 main().catch((error) => {

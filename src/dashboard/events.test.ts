@@ -2,8 +2,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // Mock config to avoid requiring real environment variables
 vi.mock("../config.js", () => ({
-  config: {},
+  config: {
+    db: {
+      eventsMaxAgeDays: 30,
+    },
+  },
 }));
+
+const mockDeleteOldEventsFromDb = vi.fn().mockResolvedValue(0);
 
 // Mock the db connection module so persistence calls don't hit a real DB
 vi.mock("../db/connection.js", () => ({
@@ -12,6 +18,14 @@ vi.mock("../db/connection.js", () => ({
     execute: vi.fn().mockResolvedValue([[], []]),
   })),
 }));
+
+vi.mock("./events-db.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./events-db.js")>();
+  return {
+    ...actual,
+    deleteOldEventsFromDb: (...args: unknown[]) => mockDeleteOldEventsFromDb(...args),
+  };
+});
 
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
@@ -32,6 +46,9 @@ import {
   resetEvents,
   findEventByResponseTs,
   getResponseTimeMs,
+  cleanupOldEvents,
+  startEventCleanup,
+  stopEventCleanup,
 } from "./events.js";
 
 beforeEach(() => {
@@ -275,6 +292,60 @@ describe("feedback", () => {
     expect(analytics.feedbackPositive).toBe(0);
     expect(analytics.feedbackNegative).toBe(0);
     expect(analytics.feedbackRate).toBe(0);
+  });
+});
+
+describe("cleanupOldEvents", () => {
+  it("calls deleteOldEventsFromDb with maxAgeMs derived from config", async () => {
+    mockDeleteOldEventsFromDb.mockResolvedValueOnce(5);
+
+    await cleanupOldEvents();
+
+    expect(mockDeleteOldEventsFromDb).toHaveBeenCalledWith(
+      30 * 24 * 60 * 60 * 1000,
+    );
+  });
+
+  it("does not throw when deleteOldEventsFromDb fails", async () => {
+    mockDeleteOldEventsFromDb.mockRejectedValueOnce(new Error("db error"));
+
+    await expect(cleanupOldEvents()).resolves.toBeUndefined();
+  });
+});
+
+describe("startEventCleanup", () => {
+  it("returns an interval reference", () => {
+    const interval = startEventCleanup();
+    expect(interval).toBeDefined();
+    clearInterval(interval);
+  });
+
+  it("runs cleanup immediately on startup", async () => {
+    vi.useFakeTimers();
+
+    const interval = startEventCleanup();
+
+    await vi.waitFor(() => {
+      expect(mockDeleteOldEventsFromDb).toHaveBeenCalled();
+    });
+
+    clearInterval(interval);
+    vi.useRealTimers();
+  });
+});
+
+describe("stopEventCleanup", () => {
+  it("clears the interval", () => {
+    vi.useFakeTimers();
+    const interval = startEventCleanup();
+
+    stopEventCleanup(interval);
+
+    vi.clearAllMocks();
+    vi.advanceTimersByTime(7 * 60 * 60 * 1000); // beyond 6hr interval
+    expect(mockDeleteOldEventsFromDb).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
   });
 });
 

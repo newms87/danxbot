@@ -1,3 +1,4 @@
+import type { ResultSetHeader } from "mysql2/promise";
 import { getPool } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 import type { MessageEvent } from "./events.js";
@@ -160,6 +161,16 @@ export async function updateEventInDb(id: string, updates: Partial<MessageEvent>
     `UPDATE events SET ${setClauses.join(", ")} WHERE id = ?`,
     params,
   );
+}
+
+export async function deleteOldEventsFromDb(maxAgeMs: number): Promise<number> {
+  const pool = getPool();
+  const cutoff = Date.now() - maxAgeMs;
+  const [result] = await pool.execute(
+    "DELETE FROM events WHERE received_at < ?",
+    [cutoff],
+  );
+  return (result as ResultSetHeader).affectedRows;
 }
 
 export async function loadEventsFromDb(maxEvents: number): Promise<MessageEvent[]> {

@@ -53,6 +53,7 @@ export const config = {
     password: requiredWithFallback("FLYTEBOT_DB_PASSWORD", "PLATFORM_DB_PASSWORD"),
     database: optional("FLYTEBOT_DB_NAME", "flytebot_chat"),
     connectTimeoutMs: parseInt(optional("DB_CONNECT_TIMEOUT_MS", "5000"), 10),
+    eventsMaxAgeDays: parseInt(optional("EVENTS_MAX_AGE_DAYS", "30"), 10),
   },
   agent: {
     model: optional("CLAUDE_MODEL", "claude-sonnet-4-5"),
@@ -99,6 +100,7 @@ export function validateConfig(): void {
     { path: "agent.maxRetries", value: config.agent.maxRetries, min: 0, exclusive: false },
     { path: "rateLimitSeconds", value: config.rateLimitSeconds, min: 1, exclusive: false },
     { path: "db.connectTimeoutMs", value: config.db.connectTimeoutMs, min: 1, exclusive: false },
+    { path: "db.eventsMaxAgeDays", value: config.db.eventsMaxAgeDays, min: 1, exclusive: false },
   ];
 
   const errors: string[] = [];

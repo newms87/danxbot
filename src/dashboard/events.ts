@@ -1,5 +1,6 @@
+import { config } from "../config.js";
 import { createLogger } from "../logger.js";
-import { persistEventToDb, updateEventInDb, loadEventsFromDb } from "./events-db.js";
+import { persistEventToDb, updateEventInDb, loadEventsFromDb, deleteOldEventsFromDb } from "./events-db.js";
 import type { AgentLogEntry, ComplexityLevel } from "../types.js";
 
 const log = createLogger("events");
@@ -181,4 +182,38 @@ export function removeSSEClient(client: SSEClient): void {
 export function resetEvents(): void {
   events.length = 0;
   sseClients.clear();
+}
+
+const EVENTS_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+/**
+ * Deletes events older than the configured max age from the database.
+ */
+export async function cleanupOldEvents(): Promise<void> {
+  try {
+    const maxAgeMs = config.db.eventsMaxAgeDays * 24 * 60 * 60 * 1000;
+    const deleted = await deleteOldEventsFromDb(maxAgeMs);
+    if (deleted > 0) {
+      log.info(`Cleaned up ${deleted} old event(s) from DB`);
+    }
+  } catch (error) {
+    log.error("Event cleanup error", error);
+  }
+}
+
+/**
+ * Starts the periodic event cleanup.
+ * Returns the interval reference for shutdown cleanup.
+ */
+export function startEventCleanup(): NodeJS.Timeout {
+  const interval = setInterval(cleanupOldEvents, EVENTS_CLEANUP_INTERVAL_MS);
+  cleanupOldEvents();
+  return interval;
+}
+
+/**
+ * Stops the periodic event cleanup.
+ */
+export function stopEventCleanup(interval: NodeJS.Timeout): void {
+  clearInterval(interval);
 }

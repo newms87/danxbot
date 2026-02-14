@@ -27,6 +27,7 @@ import {
   persistEventToDb,
   updateEventInDb,
   loadEventsFromDb,
+  deleteOldEventsFromDb,
   eventToRow,
   rowToEvent,
   COLUMN_MAP,
@@ -361,6 +362,46 @@ describe("events-db", () => {
       mockExecute.mockRejectedValue(new Error("connection refused"));
 
       await expect(updateEventInDb("test-id", { status: "error" })).rejects.toThrow("connection refused");
+    });
+  });
+
+  describe("deleteOldEventsFromDb", () => {
+    it("returns affected row count", async () => {
+      mockExecute.mockResolvedValueOnce([{ affectedRows: 12 }, []]);
+
+      const result = await deleteOldEventsFromDb(30 * 24 * 60 * 60 * 1000);
+
+      expect(result).toBe(12);
+      expect(mockExecute).toHaveBeenCalledWith(
+        expect.stringContaining("DELETE"),
+        expect.any(Array),
+      );
+    });
+
+    it("passes correct millisecond threshold as parameter", async () => {
+      mockExecute.mockResolvedValueOnce([{ affectedRows: 0 }, []]);
+      const maxAgeMs = 30 * 24 * 60 * 60 * 1000;
+
+      await deleteOldEventsFromDb(maxAgeMs);
+
+      const [, params] = mockExecute.mock.calls[0];
+      // The parameter should represent a timestamp threshold
+      expect(params).toHaveLength(1);
+      expect(typeof params[0]).toBe("number");
+    });
+
+    it("returns 0 when no rows are deleted", async () => {
+      mockExecute.mockResolvedValueOnce([{ affectedRows: 0 }, []]);
+
+      const result = await deleteOldEventsFromDb(30 * 24 * 60 * 60 * 1000);
+
+      expect(result).toBe(0);
+    });
+
+    it("throws when DB fails", async () => {
+      mockExecute.mockRejectedValueOnce(new Error("connection refused"));
+
+      await expect(deleteOldEventsFromDb(30 * 24 * 60 * 60 * 1000)).rejects.toThrow("connection refused");
     });
   });
 
