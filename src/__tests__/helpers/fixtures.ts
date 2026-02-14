@@ -38,6 +38,12 @@ export function makeConfig(overrides?: Record<string, unknown>) {
       maxThreadMessages: 20,
       maxRetries: 1,
     },
+    fastAgent: {
+      model: "fast-test-model",
+      maxTurns: 3,
+      maxBudgetUsd: 0.10,
+      maxThinkingTokens: 1024,
+    },
     platform: {
       repoUrl: "https://test.example.com",
       repoPath: "/test",
@@ -90,6 +96,7 @@ export function makeRouterResult(
   return {
     quickResponse: "Hello!",
     needsAgent: false,
+    complexity: "complex" as const,
     reason: "greeting",
     request: {},
     rawResponse: {},

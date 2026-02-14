@@ -266,7 +266,54 @@ describe("runRouter", () => {
 
     expect(result.quickResponse).toBe("");
     expect(result.needsAgent).toBe(false);
+    expect(result.complexity).toBe("simple");
     expect(result.reason).toBe("");
+  });
+
+  it("returns complexity from router response", async () => {
+    mockRouterResponse({
+      quickResponse: "Looking into it...",
+      needsAgent: true,
+      complexity: "simple",
+      reason: "data lookup",
+    });
+
+    const result = await runRouter("show me recent campaigns");
+
+    expect(result.complexity).toBe("simple");
+  });
+
+  it("returns complex complexity from router response", async () => {
+    mockRouterResponse({
+      quickResponse: "Let me investigate...",
+      needsAgent: true,
+      complexity: "complex",
+      reason: "multi-step reasoning",
+    });
+
+    const result = await runRouter("how does campaign status lifecycle work?");
+
+    expect(result.complexity).toBe("complex");
+  });
+
+  it("defaults complexity to simple when not provided", async () => {
+    mockRouterResponse({
+      quickResponse: "hi",
+      needsAgent: false,
+      reason: "greeting",
+    });
+
+    const result = await runRouter("hi");
+
+    expect(result.complexity).toBe("simple");
+  });
+
+  it("defaults complexity to complex on router error", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("API error"));
+
+    const result = await runRouter("hello");
+
+    expect(result.complexity).toBe("complex");
   });
 
   it("only sets needsAgent true when value is strictly true", async () => {

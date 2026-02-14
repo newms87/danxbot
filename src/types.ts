@@ -25,6 +25,7 @@ export interface AgentLogEntry {
 export interface RouterResult {
   quickResponse: string;
   needsAgent: boolean;
+  complexity: "simple" | "complex";
   reason: string;
   request: Record<string, unknown>;
   rawResponse: Record<string, unknown>;

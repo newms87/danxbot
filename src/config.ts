@@ -44,6 +44,12 @@ export const config = {
     maxThreadMessages: parseInt(optional("MAX_THREAD_MESSAGES", "20"), 10),
     maxRetries: Math.max(0, parseInt(optional("AGENT_MAX_RETRIES", "1"), 10)),
   },
+  fastAgent: {
+    model: optional("FAST_AGENT_MODEL", "claude-haiku-4-5"),
+    maxTurns: parseInt(optional("FAST_AGENT_MAX_TURNS", "3"), 10),
+    maxBudgetUsd: parseFloat(optional("FAST_AGENT_MAX_BUDGET_USD", "0.10")),
+    maxThinkingTokens: parseInt(optional("FAST_AGENT_MAX_THINKING_TOKENS", "1024"), 10),
+  },
   github: {
     webhookSecret: process.env.GITHUB_WEBHOOK_SECRET || "",
   },
@@ -79,6 +85,9 @@ export function validateConfig(): void {
     { path: "agent.timeoutMs", value: config.agent.timeoutMs, min: 1, exclusive: false },
     { path: "agent.maxThreadMessages", value: config.agent.maxThreadMessages, min: 1, exclusive: false },
     { path: "agent.maxRetries", value: config.agent.maxRetries, min: 0, exclusive: false },
+    { path: "fastAgent.maxTurns", value: config.fastAgent.maxTurns, min: 1, exclusive: false },
+    { path: "fastAgent.maxBudgetUsd", value: config.fastAgent.maxBudgetUsd, min: 0, exclusive: true },
+    { path: "fastAgent.maxThinkingTokens", value: config.fastAgent.maxThinkingTokens, min: 1, exclusive: false },
     { path: "rateLimitSeconds", value: config.rateLimitSeconds, min: 1, exclusive: false },
   ];
 

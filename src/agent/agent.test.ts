@@ -29,6 +29,7 @@ vi.mock("../config.js", () => ({
   config: {
     anthropic: { apiKey: "test-key" },
     agent: { model: "test-model", maxTurns: 5, maxBudgetUsd: 1.0, maxThinkingTokens: 8000, maxThreadMessages: 20 },
+    fastAgent: { model: "fast-model", maxTurns: 3, maxBudgetUsd: 0.10, maxThinkingTokens: 1024 },
     platform: { repoPath: "/test" },
     logsDir: "/test/logs",
   },
@@ -50,6 +51,7 @@ const {
   truncStr,
   runRouter,
   runAgent,
+  runFastAgent,
   generateHeartbeatMessage,
 } = await import("./agent.js");
 
@@ -575,6 +577,122 @@ describe("runAgent", () => {
     expect(result.log).toHaveLength(2);
     expect(result.log[0].type).toBe("system");
     expect(result.log[1].type).toBe("result");
+  });
+});
+
+// ============================================================
+// runFastAgent tests
+// ============================================================
+
+describe("runFastAgent", () => {
+  it("uses fast agent config (model, turns, budget)", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "fast-1" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Quick answer.",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          duration_ms: 200,
+          duration_api_ms: 150,
+        },
+      ]),
+    );
+
+    await runFastAgent("show me recent campaigns");
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.model).toBe("fast-model");
+    expect(callArgs.options.maxTurns).toBe(3);
+    expect(callArgs.options.maxBudgetUsd).toBe(0.10);
+    expect(callArgs.options.maxThinkingTokens).toBe(1024);
+  });
+
+  it("does not persist session (one-shot)", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "fast-2" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Answer.",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          duration_ms: 100,
+          duration_api_ms: 80,
+        },
+      ]),
+    );
+
+    const result = await runFastAgent("quick question");
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.persistSession).toBe(false);
+    expect(result.sessionId).toBeNull();
+  });
+
+  it("returns result text, cost, and turns", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "fast-3" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Here are 5 recent campaigns.",
+          total_cost_usd: 0.02,
+          num_turns: 1,
+          duration_ms: 300,
+          duration_api_ms: 250,
+        },
+      ]),
+    );
+
+    const result = await runFastAgent("show me recent campaigns");
+
+    expect(result.text).toBe("Here are 5 recent campaigns.");
+    expect(result.costUsd).toBe(0.02);
+    expect(result.turns).toBe(1);
+  });
+
+  it("prepends thread context when thread has multiple messages", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "fast-4" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Answer with context.",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          duration_ms: 100,
+          duration_api_ms: 80,
+        },
+      ]),
+    );
+
+    const thread = [
+      msg("What is X?", false),
+      msg("X is a feature.", true),
+      msg("Show me more", false),
+    ];
+
+    await runFastAgent("Show me more", thread);
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.prompt).toContain("[Thread context]");
+    expect(callArgs.prompt).toContain("[Current message]");
+  });
+
+  it("throws on SDK error", async () => {
+    mockQuery.mockReturnValueOnce(
+      (async function* () {
+        throw new Error("Fast agent crashed");
+      })(),
+    );
+
+    await expect(runFastAgent("broken query")).rejects.toThrow("Fast agent crashed");
   });
 });
 

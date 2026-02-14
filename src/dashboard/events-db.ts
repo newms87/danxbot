@@ -18,6 +18,7 @@ export const COLUMN_MAP: Record<string, string> = {
   routerResponseAt: "router_response_at",
   routerResponse: "router_response",
   routerNeedsAgent: "router_needs_agent",
+  routerComplexity: "router_complexity",
   agentResponseAt: "agent_response_at",
   agentResponse: "agent_response",
   agentCostUsd: "agent_cost_usd",
@@ -75,6 +76,7 @@ export interface EventRow {
   router_response_at: number | null;
   router_response: string | null;
   router_needs_agent: number | null;
+  router_complexity: string | null;
   agent_response_at: number | null;
   agent_response: string | null;
   agent_cost_usd: string | number | null;
@@ -113,6 +115,7 @@ export function rowToEvent(row: EventRow): MessageEvent {
     routerResponseAt: row.router_response_at,
     routerResponse: row.router_response,
     routerNeedsAgent: row.router_needs_agent === null ? null : row.router_needs_agent === 1,
+    routerComplexity: row.router_complexity as MessageEvent["routerComplexity"],
     agentResponseAt: row.agent_response_at,
     agentResponse: row.agent_response,
     agentCostUsd: row.agent_cost_usd === null ? null : Number(row.agent_cost_usd),

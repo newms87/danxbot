@@ -16,6 +16,7 @@ export interface MessageEvent {
   routerResponseAt: number | null;
   routerResponse: string | null;
   routerNeedsAgent: boolean | null;
+  routerComplexity: "simple" | "complex" | null;
   agentResponseAt: number | null;
   agentResponse: string | null;
   agentCostUsd: number | null;
@@ -75,6 +76,7 @@ export function createEvent(partial: {
     routerResponseAt: null,
     routerResponse: null,
     routerNeedsAgent: null,
+    routerComplexity: null,
     agentResponseAt: null,
     agentResponse: null,
     agentCostUsd: null,

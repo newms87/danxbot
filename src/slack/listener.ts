@@ -6,7 +6,7 @@ import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
 import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
 import { resolveUserName } from "./user-cache.js";
-import { runRouter, runAgent } from "../agent/agent.js";
+import { runRouter, runAgent, runFastAgent } from "../agent/agent.js";
 import { notifyError } from "../errors/trello-notifier.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
@@ -126,6 +126,7 @@ export async function startSlackListener(): Promise<void> {
         routerResponseAt: Date.now(),
         routerResponse: routerResult.quickResponse,
         routerNeedsAgent: routerResult.needsAgent,
+        routerComplexity: routerResult.complexity,
         routerRequest: routerResult.request,
         routerRawResponse: routerResult.rawResponse,
       });
@@ -173,6 +174,101 @@ export async function startSlackListener(): Promise<void> {
             name: "brain",
           })
           .catch(() => {});
+
+        // Simple questions: try fast agent first, fall back to full agent
+        if (routerResult.complexity === "simple") {
+          try {
+            const response = await runFastAgent(message.text, thread.messages);
+
+            // Post placeholder, update with response
+            const placeholder = await client.chat.postMessage({
+              channel: message.channel,
+              thread_ts: threadTs,
+              text: " ",
+              attachments: [
+                {
+                  color: "#00b894",
+                  blocks: [
+                    {
+                      type: "context",
+                      elements: [
+                        {
+                          type: "mrkdwn",
+                          text: ":zap: *Quick lookup in progress...*",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            });
+            const fastPlaceholderTs = placeholder.ts!;
+
+            updateEvent(dashEvent.id, {
+              status: "complete",
+              agentResponseAt: Date.now(),
+              agentResponse: response.text,
+              agentCostUsd: response.costUsd,
+              agentTurns: response.turns,
+              agentConfig: response.config,
+              agentLog: response.log,
+            });
+
+            const slackText = markdownToSlackMrkdwn(response.text);
+            const chunks = splitMessage(slackText);
+
+            await client.chat.update({
+              channel: message.channel,
+              ts: fastPlaceholderTs,
+              text: chunks[0],
+              attachments: [],
+            });
+
+            for (let i = 1; i < chunks.length; i++) {
+              await client.chat.postMessage({
+                channel: message.channel,
+                thread_ts: threadTs,
+                text: chunks[i],
+              });
+            }
+
+            addMessageToThread(thread, {
+              user: "flytebot",
+              text: response.text,
+              ts: Date.now().toString(),
+              isBot: true,
+            });
+
+            await swapReaction(client, message.channel, message.ts, "brain", "white_check_mark");
+
+            updateEvent(dashEvent.id, { responseTs: fastPlaceholderTs });
+            await client.reactions
+              .add({ channel: message.channel, timestamp: fastPlaceholderTs, name: "thumbsup" })
+              .catch(() => {});
+            await client.reactions
+              .add({ channel: message.channel, timestamp: fastPlaceholderTs, name: "thumbsdown" })
+              .catch(() => {});
+
+            log.info(
+              `Fast agent responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
+            );
+            return;
+          } catch (fastError) {
+            log.warn(
+              `Fast agent failed in thread ${threadTs}, falling back to full agent: ${
+                fastError instanceof Error ? fastError.message : String(fastError)
+              }`,
+            );
+            // Remove brain reaction — will be re-added by full agent path below
+            await client.reactions
+              .remove({ channel: message.channel, timestamp: message.ts, name: "brain" })
+              .catch(() => {});
+            // Re-add brain for full agent path
+            await client.reactions
+              .add({ channel: message.channel, timestamp: message.ts, name: "brain" })
+              .catch(() => {});
+          }
+        }
 
         // Post placeholder message with thinking indicator
         const placeholder = await client.chat.postMessage({

@@ -16,6 +16,7 @@ export {
 } from "./heartbeat.js";
 
 let systemPrompt: string | null = null;
+let fastSystemPrompt: string | null = null;
 
 async function getSystemPrompt(): Promise<string> {
   if (!systemPrompt) {
@@ -25,6 +26,16 @@ async function getSystemPrompt(): Promise<string> {
     );
   }
   return systemPrompt;
+}
+
+async function getFastSystemPrompt(): Promise<string> {
+  if (!fastSystemPrompt) {
+    fastSystemPrompt = await readFile(
+      new URL("./fast-system-prompt.md", import.meta.url),
+      "utf-8",
+    );
+  }
+  return fastSystemPrompt;
 }
 
 /**
@@ -261,6 +272,162 @@ export async function runAgent(
   return {
     text: resultText,
     sessionId: resultSessionId,
+    costUsd,
+    turns,
+    config: queryOptions as unknown as Record<string, unknown>,
+    log: agentLog,
+  };
+}
+
+/**
+ * Runs a fast Claude Code agent for simple questions.
+ * Uses Haiku with fewer turns, lower budget, and pre-loaded schema context.
+ * No session persistence — fast queries are one-shot.
+ */
+export async function runFastAgent(
+  messageText: string,
+  threadMessages: ThreadMessage[] = [],
+): Promise<AgentResponse> {
+  const prompt = await getFastSystemPrompt();
+
+  const trimmed = trimThreadMessages(threadMessages, config.agent.maxThreadMessages);
+
+  let agentPrompt = messageText;
+  if (trimmed.length > 1) {
+    const history = trimmed
+      .slice(0, -1)
+      .map((msg) => `${msg.isBot ? "Bot" : "User"}: ${msg.text}`)
+      .join("\n");
+    agentPrompt = `[Thread context]\n${history}\n\n[Current message]\n${messageText}`;
+  }
+
+  const stderrMessages: string[] = [];
+
+  const queryOptions = {
+    model: config.fastAgent.model,
+    systemPrompt: prompt,
+    cwd: config.platform.repoPath,
+    tools: ["Read", "Glob", "Grep", "Bash"],
+    allowedTools: ["Read", "Glob", "Grep", "Bash"],
+    permissionMode: "bypassPermissions" as const,
+    allowDangerouslySkipPermissions: true,
+    maxTurns: config.fastAgent.maxTurns,
+    maxBudgetUsd: config.fastAgent.maxBudgetUsd,
+    maxThinkingTokens: config.fastAgent.maxThinkingTokens,
+    persistSession: false,
+    includePartialMessages: false,
+    stderr: (message: string) => {
+      log.debug(message.trimEnd());
+      stderrMessages.push(message.trimEnd());
+    },
+  };
+
+  const conversation = query({
+    prompt: agentPrompt,
+    options: queryOptions,
+  });
+
+  let resultText = "";
+  let resultSessionId: string | null = null;
+  let costUsd = 0;
+  let turns = 0;
+  const agentLog: AgentLogEntry[] = [];
+  let lastTimestamp = Date.now();
+  const pushLog = (entry: AgentLogEntry) => {
+    entry.data.delta_ms = entry.timestamp - lastTimestamp;
+    lastTimestamp = entry.timestamp;
+    agentLog.push(entry);
+  };
+
+  let caughtError: Error | null = null;
+
+  try {
+    for await (const message of conversation) {
+      if (message.type === "system" && message.subtype === "init") {
+        resultSessionId = message.session_id;
+        const msg = message as any;
+        pushLog({
+          timestamp: Date.now(),
+          type: "system",
+          subtype: "init",
+          summary: `Session initialized: ${msg.model || config.fastAgent.model}`,
+          data: { session_id: message.session_id, model: msg.model, raw: msg },
+        });
+      } else if (message.type === "assistant") {
+        const msg = message as any;
+        const content = msg.message?.content || [];
+        const toolUses = content.filter((b: any) => b.type === "tool_use");
+        const textBlocks = content.filter((b: any) => b.type === "text");
+        const toolNames = toolUses
+          .map((t: any) => {
+            const name = t.name || "unknown";
+            const input = t.input || {};
+            const detail = summarizeToolInput(name, input);
+            return detail ? `${name}(${detail})` : name;
+          })
+          .join(", ");
+        const textPreview = textBlocks.map((b: any) => b.text).join(" ").slice(0, 200);
+        const summary = toolNames ? `Tools: ${toolNames}` : `Text: ${textPreview || "(empty)"}`;
+        pushLog({ timestamp: Date.now(), type: "assistant", summary, data: { content, raw: msg } });
+      } else if (message.type === "user") {
+        const msg = message as any;
+        const results = msg.message?.content || [];
+        pushLog({
+          timestamp: Date.now(),
+          type: "user",
+          summary: `Tool results: ${results.map((r: any) => r.tool_use_id || "result").join(", ")}`,
+          data: { content: results, raw: msg },
+        });
+      } else if (message.type === "result") {
+        const msg = message as any;
+        costUsd = msg.total_cost_usd;
+        turns = msg.num_turns;
+        if (msg.subtype === "success") {
+          resultText = msg.result;
+        } else {
+          resultText = `I ran into an issue: ${msg.subtype}. ${msg.errors?.join(", ") || ""}`.trim();
+        }
+        pushLog({
+          timestamp: Date.now(),
+          type: "result",
+          subtype: msg.subtype,
+          summary: `${msg.subtype}: ${turns} turns, $${costUsd.toFixed(4)}, ${msg.duration_ms || 0}ms`,
+          data: { subtype: msg.subtype, result_text: resultText, total_cost_usd: costUsd, num_turns: turns, raw: msg },
+        });
+      }
+    }
+  } catch (err) {
+    const stderrOutput = stderrMessages.join("\n");
+    pushLog({
+      timestamp: Date.now(),
+      type: "error",
+      summary: `Process error: ${err instanceof Error ? err.message : String(err)}`,
+      data: { error: err instanceof Error ? err.message : String(err), stderr: stderrOutput || null, raw: null },
+    });
+    const detail = stderrOutput ? `\nstderr:\n${stderrOutput}` : "";
+    caughtError = new Error(`${err instanceof Error ? err.message : String(err)}${detail}`);
+  } finally {
+    writeAgentLog({
+      prompt: agentPrompt,
+      sessionId: resultSessionId,
+      model: config.fastAgent.model,
+      costUsd,
+      turns,
+      log: agentLog,
+    }).catch((err) => log.error("Failed to write agent log", err));
+  }
+
+  if (caughtError) {
+    throw caughtError;
+  }
+
+  if (!resultText) {
+    resultText = "I wasn't able to generate a response. Please try again.";
+  }
+
+  return {
+    text: resultText,
+    sessionId: null,
     costUsd,
     turns,
     config: queryOptions as unknown as Record<string, unknown>,

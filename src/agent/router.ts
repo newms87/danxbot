@@ -15,7 +15,7 @@ const ROUTER_SYSTEM_PROMPT = [
   "You receive the full conversation thread, so you can reference earlier messages.",
   "",
   "Respond with JSON only (no markdown, no code fences):",
-  '{"quickResponse": "...", "needsAgent": true/false, "reason": "..."}',
+  '{"quickResponse": "...", "needsAgent": true/false, "complexity": "simple"|"complex", "reason": "..."}',
   "",
   "quickResponse: A short, friendly reply to the user. For greetings, greet them back.",
   "For questions, acknowledge the question and say you're looking into it.",
@@ -26,6 +26,13 @@ const ROUTER_SYSTEM_PROMPT = [
   "needsAgent: true if the user is asking something that requires exploring the",
   "codebase, querying the database, or deep platform knowledge. false if your",
   "quickResponse fully handles it (greetings, small talk, simple acknowledgments).",
+  "",
+  'complexity: "simple" or "complex". This determines which agent handles the question.',
+  '- simple: Can be answered in 1-2 tool calls. Direct data lookups, counts, listing',
+  '  records, "what table stores X", "show me the model for Y", simple schema questions.',
+  '- complex: Requires multi-step reasoning, cross-referencing multiple files/tables,',
+  "  debugging, understanding workflows, anything requiring exploration or judgment.",
+  'When needsAgent is false, set complexity to "simple".',
   "",
   "reason: Brief explanation of your routing decision.",
 ].join("\n");
@@ -91,6 +98,7 @@ export async function runRouter(
     return {
       quickResponse: String(parsed.quickResponse || ""),
       needsAgent: parsed.needsAgent === true,
+      complexity: parsed.complexity === "complex" ? "complex" : "simple",
       reason: String(parsed.reason || ""),
       request: request as unknown as Record<string, unknown>,
       rawResponse: response as unknown as Record<string, unknown>,
@@ -102,6 +110,7 @@ export async function runRouter(
   return {
     quickResponse: "I'm having a moment — give me a sec and try again.",
     needsAgent: true,
+    complexity: "complex",
     reason: "router error",
     request: request as unknown as Record<string, unknown>,
     rawResponse: {},
