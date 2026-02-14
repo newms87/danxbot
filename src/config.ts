@@ -62,7 +62,6 @@ export const config = {
   },
   rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),
-  threadsDir: "/flytebot/threads",
   logsDir: "/flytebot/logs",
 } as const;
 

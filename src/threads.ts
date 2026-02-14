@@ -1,43 +1,17 @@
-import { readFile, writeFile, readdir, unlink, mkdir } from "fs/promises";
-import { join } from "path";
 import type { WebClient } from "@slack/web-api";
-import { config } from "./config.js";
 import { createLogger } from "./logger.js";
+import {
+  loadThreadFromDb,
+  saveThreadToDb,
+  deleteOldThreadsFromDb,
+  isBotInThread,
+} from "./db/threads-db.js";
 import type { ThreadState, ThreadMessage } from "./types.js";
 
 const log = createLogger("threads");
 
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_THREAD_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-function threadPath(threadTs: string): string {
-  return join(config.threadsDir, `${threadTs}.json`);
-}
-
-async function ensureThreadsDir(): Promise<void> {
-  await mkdir(config.threadsDir, { recursive: true });
-}
-
-/**
- * Loads a thread from disk, or returns null if it doesn't exist.
- */
-async function loadThread(threadTs: string): Promise<ThreadState | null> {
-  try {
-    const data = await readFile(threadPath(threadTs), "utf-8");
-    return JSON.parse(data);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Saves a thread to disk.
- */
-async function saveThread(thread: ThreadState): Promise<void> {
-  await ensureThreadsDir();
-  thread.updatedAt = new Date().toISOString();
-  await writeFile(threadPath(thread.threadTs), JSON.stringify(thread, null, 2));
-}
 
 /**
  * Hydrates a thread from Slack's conversation history.
@@ -91,18 +65,18 @@ export function trimThreadMessages(
 }
 
 /**
- * Gets or creates a thread state. Hydrates from Slack if the local file is missing.
+ * Gets or creates a thread state. Hydrates from Slack if not in DB.
  */
 export async function getOrCreateThread(
   threadTs: string,
   channelId: string,
   client: WebClient,
 ): Promise<ThreadState> {
-  const existing = await loadThread(threadTs);
+  const existing = await loadThreadFromDb(threadTs);
   if (existing) return existing;
 
   const thread = await hydrateFromSlack(threadTs, channelId, client);
-  await saveThread(thread);
+  await saveThreadToDb(thread);
   return thread;
 }
 
@@ -114,10 +88,7 @@ export function addMessageToThread(
   message: ThreadMessage,
 ): void {
   thread.messages.push(message);
-  // Fire-and-forget save
-  saveThread(thread).catch((err) =>
-    log.error("Failed to save thread", err),
-  );
+  saveThreadToDb(thread);
 }
 
 /**
@@ -128,9 +99,7 @@ export function updateSessionId(
   sessionId: string,
 ): void {
   thread.sessionId = sessionId;
-  saveThread(thread).catch((err) =>
-    log.error("Failed to save thread", err),
-  );
+  saveThreadToDb(thread);
 }
 
 /**
@@ -140,45 +109,26 @@ export function updateSessionId(
  */
 export function clearSessionId(thread: ThreadState): void {
   thread.sessionId = null;
-  saveThread(thread).catch((err) =>
-    log.error("Failed to save thread", err),
-  );
+  saveThreadToDb(thread);
 }
 
 /**
  * Checks if the bot has previously responded in a thread.
  */
 export async function isBotParticipant(threadTs: string): Promise<boolean> {
-  const thread = await loadThread(threadTs);
-  if (!thread) return false;
-  return thread.messages.some((msg) => msg.isBot);
+  const result = await isBotInThread(threadTs);
+  // null means thread not found — treat as false
+  return result === true;
 }
 
 /**
- * Deletes thread files older than 7 days.
+ * Deletes threads older than 7 days from the database.
  */
 export async function cleanupOldThreads(): Promise<void> {
   try {
-    await ensureThreadsDir();
-    const files = await readdir(config.threadsDir);
-    const now = Date.now();
-
-    for (const file of files) {
-      if (!file.endsWith(".json")) continue;
-
-      try {
-        const filePath = join(config.threadsDir, file);
-        const data = await readFile(filePath, "utf-8");
-        const thread: ThreadState = JSON.parse(data);
-        const updatedAt = new Date(thread.updatedAt).getTime();
-
-        if (now - updatedAt > MAX_THREAD_AGE_MS) {
-          await unlink(filePath);
-          log.info(`Cleaned up old thread: ${file}`);
-        }
-      } catch {
-        // Skip files that can't be parsed
-      }
+    const deleted = await deleteOldThreadsFromDb(MAX_THREAD_AGE_MS);
+    if (deleted > 0) {
+      log.info(`Cleaned up ${deleted} old thread(s) from DB`);
     }
   } catch (error) {
     log.error("Thread cleanup error", error);

@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+const mockUpsertUser = vi.fn().mockResolvedValue(undefined);
+
+vi.mock("../db/users-db.js", () => ({
+  upsertUser: (...args: unknown[]) => mockUpsertUser(...args),
+}));
+
 // Dynamic import after each reset to get fresh module state
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let resolveUserName: (client: any, userId: string) => Promise<string>;
@@ -7,6 +13,22 @@ let resetUserCache: () => void;
 
 beforeEach(async () => {
   vi.resetModules();
+  vi.clearAllMocks();
+  mockUpsertUser.mockResolvedValue(undefined);
+
+  // Re-mock after resetModules
+  vi.doMock("../db/users-db.js", () => ({
+    upsertUser: (...args: unknown[]) => mockUpsertUser(...args),
+  }));
+  vi.doMock("../logger.js", () => ({
+    createLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    }),
+  }));
+
   const mod = await import("./user-cache.js");
   resolveUserName = mod.resolveUserName;
   resetUserCache = mod.resetUserCache;
@@ -138,5 +160,37 @@ describe("resolveUserName", () => {
 
     const name = await resolveUserName(client, "U-NOPROFILE");
     expect(name).toBe("U-NOPROFILE");
+  });
+
+  it("persists resolved user to DB via upsertUser", async () => {
+    const client = {
+      users: {
+        info: vi.fn().mockResolvedValue({
+          ok: true,
+          user: {
+            profile: { display_name: "Jane D", real_name: "Jane Doe" },
+            real_name: "Jane Doe",
+          },
+        }),
+      },
+    };
+
+    await resolveUserName(client, "U-JANE");
+
+    await vi.waitFor(() => {
+      expect(mockUpsertUser).toHaveBeenCalledWith("U-JANE", "Jane D");
+    });
+  });
+
+  it("does not call upsertUser when name resolution fails", async () => {
+    const client = {
+      users: {
+        info: vi.fn().mockRejectedValue(new Error("user_not_found")),
+      },
+    };
+
+    await resolveUserName(client, "U-GONE");
+
+    expect(mockUpsertUser).not.toHaveBeenCalled();
   });
 });

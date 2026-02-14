@@ -1,17 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ThreadState, ThreadMessage } from "./types.js";
 
-// Mock fs/promises before importing the module under test
-vi.mock("fs/promises", () => ({
-  readFile: vi.fn(),
-  writeFile: vi.fn().mockResolvedValue(undefined),
-  readdir: vi.fn(),
-  unlink: vi.fn().mockResolvedValue(undefined),
-  mkdir: vi.fn().mockResolvedValue(undefined),
-}));
+const mockLoadThreadFromDb = vi.fn();
+const mockSaveThreadToDb = vi.fn();
+const mockDeleteOldThreadsFromDb = vi.fn();
+const mockIsBotInThread = vi.fn();
 
-vi.mock("./config.js", () => ({
-  config: { threadsDir: "/test/threads" },
+vi.mock("./db/threads-db.js", () => ({
+  loadThreadFromDb: (...args: unknown[]) => mockLoadThreadFromDb(...args),
+  saveThreadToDb: (...args: unknown[]) => mockSaveThreadToDb(...args),
+  deleteOldThreadsFromDb: (...args: unknown[]) => mockDeleteOldThreadsFromDb(...args),
+  isBotInThread: (...args: unknown[]) => mockIsBotInThread(...args),
 }));
 
 vi.mock("./logger.js", () => ({
@@ -23,22 +22,17 @@ vi.mock("./logger.js", () => ({
   }),
 }));
 
-const fs = await import("fs/promises");
 const {
   getOrCreateThread,
   addMessageToThread,
   updateSessionId,
+  clearSessionId,
   cleanupOldThreads,
   isBotParticipant,
   startThreadCleanup,
   stopThreadCleanup,
   trimThreadMessages,
 } = await import("./threads.js");
-
-const mockReadFile = vi.mocked(fs.readFile);
-const mockWriteFile = vi.mocked(fs.writeFile);
-const mockReaddir = vi.mocked(fs.readdir);
-const mockUnlink = vi.mocked(fs.unlink);
 
 function makeThread(overrides: Partial<ThreadState> = {}): ThreadState {
   return {
@@ -54,12 +48,16 @@ function makeThread(overrides: Partial<ThreadState> = {}): ThreadState {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockSaveThreadToDb.mockResolvedValue(undefined);
+  mockDeleteOldThreadsFromDb.mockResolvedValue(0);
 });
 
 describe("getOrCreateThread", () => {
-  it("returns existing thread from disk when file exists", async () => {
-    const existing = makeThread({ messages: [{ user: "U1", text: "hi", ts: "1", isBot: false }] });
-    mockReadFile.mockResolvedValueOnce(JSON.stringify(existing));
+  it("returns existing thread from DB when found", async () => {
+    const existing = makeThread({
+      messages: [{ user: "U1", text: "hi", ts: "1", isBot: false }],
+    });
+    mockLoadThreadFromDb.mockResolvedValueOnce(existing);
 
     const mockClient = {} as any;
     const result = await getOrCreateThread("1234.5678", "C123", mockClient);
@@ -67,11 +65,11 @@ describe("getOrCreateThread", () => {
     expect(result.threadTs).toBe("1234.5678");
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0].text).toBe("hi");
+    expect(mockLoadThreadFromDb).toHaveBeenCalledWith("1234.5678");
   });
 
-  it("hydrates from Slack when file is missing, saves to disk", async () => {
-    // File doesn't exist
-    mockReadFile.mockRejectedValueOnce(new Error("ENOENT"));
+  it("hydrates from Slack and saves to DB when not in DB", async () => {
+    mockLoadThreadFromDb.mockResolvedValueOnce(null);
 
     const mockClient = {
       conversations: {
@@ -93,12 +91,11 @@ describe("getOrCreateThread", () => {
     expect(result.messages).toHaveLength(2);
     expect(result.messages[0].isBot).toBe(false);
     expect(result.messages[1].isBot).toBe(true);
-    // Verify it was saved to disk
-    expect(mockWriteFile).toHaveBeenCalled();
+    expect(mockSaveThreadToDb).toHaveBeenCalled();
   });
 
   it("returns empty thread when Slack API errors", async () => {
-    mockReadFile.mockRejectedValueOnce(new Error("ENOENT"));
+    mockLoadThreadFromDb.mockResolvedValueOnce(null);
 
     const mockClient = {
       conversations: {
@@ -127,7 +124,7 @@ describe("addMessageToThread", () => {
     expect(thread.messages[0].text).toBe("new message");
   });
 
-  it("triggers a save to disk (fire-and-forget)", async () => {
+  it("triggers a save to DB (fire-and-forget)", async () => {
     const thread = makeThread();
     addMessageToThread(thread, {
       user: "U1",
@@ -136,44 +133,41 @@ describe("addMessageToThread", () => {
       isBot: false,
     });
 
-    // saveThread is fire-and-forget — flush the microtask queue
     await vi.waitFor(() => {
-      expect(mockWriteFile).toHaveBeenCalled();
+      expect(mockSaveThreadToDb).toHaveBeenCalled();
     });
   });
 });
 
 describe("isBotParticipant", () => {
-  it("returns true when thread has bot messages", async () => {
-    const thread = makeThread({
-      messages: [
-        { user: "U1", text: "hi", ts: "1", isBot: false },
-        { user: "flytebot", text: "hello", ts: "2", isBot: true },
-      ],
-    });
-    mockReadFile.mockResolvedValueOnce(JSON.stringify(thread));
+  it("delegates to isBotInThread from DB module", async () => {
+    mockIsBotInThread.mockResolvedValueOnce(true);
 
-    expect(await isBotParticipant("1234.5678")).toBe(true);
+    const result = await isBotParticipant("1234.5678");
+
+    expect(result).toBe(true);
+    expect(mockIsBotInThread).toHaveBeenCalledWith("1234.5678");
+  });
+
+  it("returns false when thread not found (null from DB)", async () => {
+    mockIsBotInThread.mockResolvedValueOnce(null);
+
+    const result = await isBotParticipant("nonexistent");
+
+    expect(result).toBe(false);
   });
 
   it("returns false when thread has no bot messages", async () => {
-    const thread = makeThread({
-      messages: [{ user: "U1", text: "hi", ts: "1", isBot: false }],
-    });
-    mockReadFile.mockResolvedValueOnce(JSON.stringify(thread));
+    mockIsBotInThread.mockResolvedValueOnce(false);
 
-    expect(await isBotParticipant("1234.5678")).toBe(false);
-  });
+    const result = await isBotParticipant("1234.5678");
 
-  it("returns false when thread file does not exist", async () => {
-    mockReadFile.mockRejectedValueOnce(new Error("ENOENT"));
-
-    expect(await isBotParticipant("nonexistent")).toBe(false);
+    expect(result).toBe(false);
   });
 });
 
 describe("updateSessionId", () => {
-  it("sets sessionId on thread and triggers disk save", async () => {
+  it("sets sessionId on thread and triggers DB save", async () => {
     const thread = makeThread();
     expect(thread.sessionId).toBeNull();
 
@@ -181,43 +175,33 @@ describe("updateSessionId", () => {
 
     expect(thread.sessionId).toBe("sess-abc");
     await vi.waitFor(() => {
-      expect(mockWriteFile).toHaveBeenCalled();
+      expect(mockSaveThreadToDb).toHaveBeenCalled();
+    });
+  });
+});
+
+describe("clearSessionId", () => {
+  it("sets sessionId to null and triggers DB save", async () => {
+    const thread = makeThread({ sessionId: "sess-abc" });
+
+    clearSessionId(thread);
+
+    expect(thread.sessionId).toBeNull();
+    await vi.waitFor(() => {
+      expect(mockSaveThreadToDb).toHaveBeenCalled();
     });
   });
 });
 
 describe("cleanupOldThreads", () => {
-  it("deletes threads older than 7 days", async () => {
-    const oldDate = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
-    const oldThread = makeThread({ updatedAt: oldDate });
-
-    mockReaddir.mockResolvedValueOnce(["old.json"] as any);
-    mockReadFile.mockResolvedValueOnce(JSON.stringify(oldThread));
+  it("delegates to deleteOldThreadsFromDb", async () => {
+    mockDeleteOldThreadsFromDb.mockResolvedValueOnce(3);
 
     await cleanupOldThreads();
 
-    expect(mockUnlink).toHaveBeenCalledOnce();
-  });
-
-  it("keeps threads newer than 7 days", async () => {
-    const recentThread = makeThread({ updatedAt: new Date().toISOString() });
-
-    mockReaddir.mockResolvedValueOnce(["recent.json"] as any);
-    mockReadFile.mockResolvedValueOnce(JSON.stringify(recentThread));
-
-    await cleanupOldThreads();
-
-    expect(mockUnlink).not.toHaveBeenCalled();
-  });
-
-  it("skips non-JSON files", async () => {
-    mockReaddir.mockResolvedValueOnce(["readme.txt", "notes.md"] as any);
-
-    await cleanupOldThreads();
-
-    // Should not attempt to read non-JSON files
-    expect(mockReadFile).not.toHaveBeenCalled();
-    expect(mockUnlink).not.toHaveBeenCalled();
+    expect(mockDeleteOldThreadsFromDb).toHaveBeenCalledWith(
+      7 * 24 * 60 * 60 * 1000,
+    );
   });
 });
 
@@ -225,19 +209,16 @@ describe("startThreadCleanup", () => {
   it("returns an interval reference", () => {
     const interval = startThreadCleanup();
     expect(interval).toBeDefined();
-    // Clean up
     clearInterval(interval);
   });
 
   it("runs cleanup immediately on startup", async () => {
     vi.useFakeTimers();
-    mockReaddir.mockResolvedValue([]);
 
     const interval = startThreadCleanup();
 
-    // Should trigger cleanup immediately
     await vi.waitFor(() => {
-      expect(mockReaddir).toHaveBeenCalled();
+      expect(mockDeleteOldThreadsFromDb).toHaveBeenCalled();
     });
 
     clearInterval(interval);
@@ -252,10 +233,9 @@ describe("stopThreadCleanup", () => {
 
     stopThreadCleanup(interval);
 
-    // Fast-forward time - cleanup should not run again
     vi.clearAllMocks();
     vi.advanceTimersByTime(60 * 60 * 1000);
-    expect(mockReaddir).not.toHaveBeenCalled();
+    expect(mockDeleteOldThreadsFromDb).not.toHaveBeenCalled();
 
     vi.useRealTimers();
   });
@@ -290,9 +270,7 @@ describe("trimThreadMessages", () => {
     const result = trimThreadMessages(messages, 20);
 
     expect(result).toHaveLength(20);
-    // First message is the original first message
     expect(result[0]).toEqual(messages[0]);
-    // Last 19 messages are from the end of the original array
     expect(result.slice(1)).toEqual(messages.slice(-19));
   });
 

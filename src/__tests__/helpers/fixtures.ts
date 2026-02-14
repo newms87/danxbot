@@ -64,7 +64,6 @@ export function makeConfig(overrides?: Record<string, unknown>) {
     },
     rateLimitSeconds: 30,
     logLevel: "info",
-    threadsDir: "/test/threads",
     logsDir: "/test/logs",
     ...overrides,
   };
