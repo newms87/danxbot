@@ -26,7 +26,23 @@ The file has two main sections:
 | Removeable | No longer needed or superseded (explain why) |
 | Changeable | Works but should be reworked/redesigned (explain why) |
 
-**Section 2: Desired Features** — A scratchpad of feature ideas big and small. Each entry includes a brief description and why it would add value.
+**Section 2: Desired Features** — A scratchpad of feature ideas big and small. Each entry has a Type, ICE score, and brief description.
+
+### Feature Types
+
+Every desired feature gets a Type:
+
+| Type | Meaning | When to card |
+|------|---------|--------------|
+| Carded | Already a Trello card | Already done |
+| Valuable | Direct end-user value for Flytebot Chat users | High priority — always keep some in queue |
+| Maintenance | Cleanup, refactor, tests, QoL, QoS | Always keep some in queue alongside Valuable |
+| Dependent | Needs other features completed first | Check when dependencies are done |
+| Exploratory | Unsure value, needs requirement gathering with end users | Check when no obvious Valuable/Maintenance left |
+
+### Prioritization Strategy
+
+When creating Trello cards, aim for a **mix of Valuable + Maintenance**. The queue should always have both types represented. Only promote Dependent features when their dependencies are done. Only promote Exploratory features when there are no obvious Valuable or Maintenance features left in the scratchpad.
 
 ### ICE Scoring
 
@@ -37,7 +53,7 @@ Score every feature that is NOT "Complete" using ICE:
 - **Ease** (1-10): How easy is it to implement?
 - **ICE Score** = Impact x Confidence x Ease
 
-Use ICE scores to prioritize which features become Trello cards.
+Use ICE scores within each Type to rank features. Type determines whether to card it; ICE determines the order.
 
 ## Workflow
 
