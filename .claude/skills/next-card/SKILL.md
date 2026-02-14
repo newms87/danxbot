@@ -41,10 +41,12 @@ Add a "Progress" checklist to the card with items:
 
 ### 3. Plan
 
-Read the card description and acceptance criteria. Design the implementation approach. Consider:
-- Which files need to change
-- What tests are needed
-- What the TDD sequence looks like
+1. Read the card description
+2. Fetch the "Acceptance Criteria" checklist using `get_acceptance_criteria` (cardId). These criteria were written by the ideator and define what "done" means for this card
+3. Design the implementation approach, ensuring every acceptance criterion is addressed. Consider:
+   - Which files need to change
+   - What tests are needed
+   - What the TDD sequence looks like
 
 Check off "Planning" on the Progress checklist.
 
@@ -59,7 +61,7 @@ If the plan has 3+ distinct phases, different domains, or >500 estimated lines â
 ### 5. Delegate to Implementor
 
 Launch the `implementor` subagent via the Task tool with `mode: "bypassPermissions"`:
-- Pass the card ID, card title, and your implementation plan
+- Pass the card ID, card title, implementation plan, AND the acceptance criteria items
 - The implementor does strict TDD: failing test first, implement, pass, refactor
 - Wait for the implementor to complete and report back
 
@@ -78,11 +80,15 @@ If any gate reports critical issues, relaunch the implementor with specific fix 
 
 Check off "Code Review" on the Progress checklist.
 
-### 7. Commit
+### 7. Check Off Acceptance Criteria
+
+After implementation and quality gates pass, verify each acceptance criterion is satisfied and check them off using `update_checklist_item` (cardId, checkItemId, state: "complete"). All acceptance criteria MUST be checked off before committing.
+
+### 8. Commit
 
 Stage and commit all changes with a descriptive commit message. Check off "Committed" on the Progress checklist.
 
-### 8. Complete
+### 9. Complete
 
 1. Move card to Done (ID: `698fc5c3396c0c24e921e3f5`)
 2. Add a retro comment covering:
@@ -91,7 +97,7 @@ Stage and commit all changes with a descriptive commit message. Check off "Commi
    - Mistakes made and corrected
    - Workflow optimization ideas
 
-### 9. Stop
+### 10. Stop
 
 Stop after this single card is complete. Do NOT loop to the next card. Report the result:
 - Card title and outcome (completed/failed)

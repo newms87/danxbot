@@ -42,4 +42,5 @@ export const config = {
   logLevel: optional("LOG_LEVEL", "info"),
   threadsDir: "/flytebot/threads",
   logsDir: "/flytebot/logs",
+  eventsFile: optional("EVENTS_FILE", "/flytebot/data/events.json"),
 } as const;

@@ -36,7 +36,10 @@ For each card in the ToDo list (top to bottom), run the full workflow:
 2. Add a "Progress" checklist with items: Planning, Tests Written, Implementation, Tests Pass, Code Review, Committed
 
 #### b. Plan
-Read the card description and acceptance criteria. Design the implementation approach. Check off "Planning".
+1. Read the card description
+2. Fetch the "Acceptance Criteria" checklist using `get_acceptance_criteria` (cardId). These criteria were written by the ideator and define what "done" means for this card
+3. Design the implementation approach, ensuring every acceptance criterion is addressed
+4. Check off "Planning"
 
 #### c. Evaluate Scope
 If 3+ phases, different domains, or >500 lines — split into epic:
@@ -46,7 +49,7 @@ If 3+ phases, different domains, or >500 lines — split into epic:
 
 #### d. Delegate to Implementor
 Launch the `implementor` subagent via Task tool with `mode: "bypassPermissions"`:
-- Pass card ID, title, and implementation plan
+- Pass card ID, title, implementation plan, AND the acceptance criteria items
 - Strict TDD: failing test, implement, pass, refactor
 - Check off "Tests Written", "Implementation", "Tests Pass"
 
@@ -59,10 +62,13 @@ Launch in parallel via Task tool with `mode: "bypassPermissions"`:
 If critical issues found, relaunch implementor with fixes, re-run failed gate.
 Check off "Code Review".
 
-#### f. Commit
+#### f. Check Off Acceptance Criteria
+After implementation and quality gates pass, verify each acceptance criterion is satisfied and check them off using `update_checklist_item` (cardId, checkItemId, state: "complete"). All acceptance criteria MUST be checked off before committing.
+
+#### g. Commit
 Stage and commit changes. Check off "Committed".
 
-#### g. Complete
+#### h. Complete
 1. Move card to Done (ID: `698fc5c3396c0c24e921e3f5`)
 2. Add retro comment (what went well, what went wrong, optimizations)
 

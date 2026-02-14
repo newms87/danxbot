@@ -1,3 +1,7 @@
+import { readFile, writeFile, mkdir, rename } from "fs/promises";
+import { dirname } from "path";
+import { config } from "../config.js";
+
 export interface MessageEvent {
   id: string;
   threadTs: string;
@@ -25,9 +29,45 @@ export interface MessageEvent {
 
 const events: MessageEvent[] = [];
 const MAX_EVENTS = 500;
+const PERSIST_DEBOUNCE_MS = 2000;
 
 type SSEClient = (data: string) => void;
 const sseClients: Set<SSEClient> = new Set();
+
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePersist(): void {
+  if (persistTimer !== null) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistToDisk();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+async function persistToDisk(): Promise<void> {
+  try {
+    const filePath = config.eventsFile;
+    const tmpPath = `${filePath}.tmp`;
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(tmpPath, JSON.stringify(events));
+    await rename(tmpPath, filePath);
+  } catch (error) {
+    console.error("Failed to persist events to disk:", error);
+  }
+}
+
+export async function loadEvents(): Promise<void> {
+  try {
+    const data = await readFile(config.eventsFile, "utf-8");
+    const parsed = JSON.parse(data);
+    if (!Array.isArray(parsed)) return;
+    const capped = parsed.slice(0, MAX_EVENTS);
+    events.splice(0, events.length, ...capped);
+    console.log(`Loaded ${events.length} events from disk`);
+  } catch {
+    // File doesn't exist or is invalid — start with empty array
+  }
+}
 
 export function createEvent(partial: {
   threadTs: string;
@@ -60,6 +100,7 @@ export function createEvent(partial: {
   events.unshift(event);
   if (events.length > MAX_EVENTS) events.pop();
   broadcast(event);
+  schedulePersist();
   return event;
 }
 
@@ -71,6 +112,7 @@ export function updateEvent(
   if (!event) return;
   Object.assign(event, updates);
   broadcast(event);
+  schedulePersist();
 }
 
 export function getEvents(): MessageEvent[] {
@@ -141,4 +183,8 @@ export function removeSSEClient(client: SSEClient): void {
 export function resetEvents(): void {
   events.length = 0;
   sseClients.clear();
+  if (persistTimer !== null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
 }
