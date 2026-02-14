@@ -418,10 +418,12 @@
         }
 
         function connectSSE() {
+          if (eventSource) eventSource.close();
           eventSource = new EventSource('/api/stream');
           eventSource.onopen = () => connected.value = true;
           eventSource.onerror = () => {
             connected.value = false;
+            eventSource.close();
             setTimeout(connectSSE, 3000);
           };
           eventSource.onmessage = (e) => {

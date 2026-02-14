@@ -193,6 +193,21 @@ describe("dashboard server", () => {
     expect(mockRemoveSSEClient).toHaveBeenCalledWith(expect.any(Function));
   });
 
+  it("GET /api/stream registered client writes SSE-formatted data to response", async () => {
+    const { req, res } = createMockReqRes("GET", "/api/stream");
+    await requestHandler(req, res);
+
+    // Capture the client function that was registered
+    const clientFn = mockAddSSEClient.mock.calls[mockAddSSEClient.mock.calls.length - 1][0];
+    expect(clientFn).toBeTypeOf("function");
+
+    // Invoke it like broadcast() would
+    clientFn('{"id":"test-1","status":"complete"}');
+
+    // Should write SSE-formatted data to the response
+    expect(res.write).toHaveBeenCalledWith('data: {"id":"test-1","status":"complete"}\n\n');
+  });
+
   it("GET / returns 200 with HTML content", async () => {
     mockReadFile.mockResolvedValue("<html>Dashboard</html>");
 
