@@ -68,6 +68,14 @@ const mockAddMessageToThread = vi.fn();
 const mockUpdateSessionId = vi.fn();
 const mockIsBotParticipant = vi.fn();
 
+const mockIsRateLimited = vi.fn().mockReturnValue(false);
+const mockRecordAgentRun = vi.fn();
+
+vi.mock("./rate-limiter.js", () => ({
+  isRateLimited: (...args: unknown[]) => mockIsRateLimited(...args),
+  recordAgentRun: (...args: unknown[]) => mockRecordAgentRun(...args),
+}));
+
 vi.mock("../threads.js", () => ({
   getOrCreateThread: mockGetOrCreateThread,
   addMessageToThread: mockAddMessageToThread,
@@ -108,6 +116,7 @@ let client: ReturnType<typeof createMockWebClient>;
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  mockIsRateLimited.mockReturnValue(false);
 
   // Re-register handler each test (startSlackListener calls app.message(handler))
   await startSlackListener();
@@ -370,6 +379,87 @@ describe("error paths", () => {
       "test-id",
       expect.objectContaining({ status: "error" }),
     );
+  });
+});
+
+// ============================================================
+// Rate limiting
+// ============================================================
+
+describe("rate limiting", () => {
+  it("blocks agent run when user is rate limited", async () => {
+    mockIsRateLimited.mockReturnValue(true);
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Router quick response still sent
+    expect(client.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "Looking..." }),
+    );
+
+    // Rate limit message sent
+    expect(client.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "I'm still working on your previous question. I'll get to this one next.",
+      }),
+    );
+
+    // Agent never called
+    expect(mockRunAgent).not.toHaveBeenCalled();
+
+    // Event marked complete (not error)
+    expect(mockUpdateEvent).toHaveBeenCalledWith("test-id", { status: "complete" });
+  });
+
+  it("does not rate limit router-only responses", async () => {
+    mockIsRateLimited.mockReturnValue(true);
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: false, quickResponse: "Hi!" }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Quick response posted normally
+    expect(client.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "Hi!" }),
+    );
+
+    // isRateLimited should not have been checked since needsAgent is false
+    // (the rate limit message should not appear)
+    const postCalls = client.chat.postMessage.mock.calls;
+    const rateLimitMsgs = postCalls.filter(
+      (call) =>
+        typeof call[0].text === "string" &&
+        call[0].text.includes("still working"),
+    );
+    expect(rateLimitMsgs).toHaveLength(0);
+  });
+
+  it("records agent run when not rate limited", async () => {
+    mockIsRateLimited.mockReturnValue(false);
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "On it..." }),
+    );
+    mockRunAgent.mockResolvedValue(makeAgentResponse());
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockRecordAgentRun).toHaveBeenCalledWith("U-HUMAN");
+    expect(mockRunAgent).toHaveBeenCalled();
+  });
+
+  it("does not record agent run when rate limited", async () => {
+    mockIsRateLimited.mockReturnValue(true);
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "On it..." }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockRecordAgentRun).not.toHaveBeenCalled();
   });
 });
 

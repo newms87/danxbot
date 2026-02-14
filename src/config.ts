@@ -39,6 +39,7 @@ export const config = {
   github: {
     webhookSecret: process.env.GITHUB_WEBHOOK_SECRET || "",
   },
+  rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),
   threadsDir: "/flytebot/threads",
   logsDir: "/flytebot/logs",

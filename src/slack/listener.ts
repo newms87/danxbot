@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { markdownToSlackMrkdwn, splitMessage } from "./formatter.js";
 import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
+import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
 import { runRouter, runAgent } from "../agent/agent.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
@@ -98,6 +99,18 @@ export async function startSlackListener(): Promise<void> {
 
       // Step 2: If the router says we need the agent, run it
       if (routerResult.needsAgent) {
+        // Check rate limit before starting agent
+        if (isRateLimited(message.user || "unknown")) {
+          await client.chat.postMessage({
+            channel: message.channel,
+            thread_ts: threadTs,
+            text: "I'm still working on your previous question. I'll get to this one next.",
+          });
+          updateEvent(dashEvent.id, { status: "complete" });
+          return;
+        }
+        recordAgentRun(message.user || "unknown");
+
         updateEvent(dashEvent.id, { status: "agent_running" });
 
         // Add thinking reaction while agent works

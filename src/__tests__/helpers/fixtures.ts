@@ -47,6 +47,7 @@ export function makeConfig(overrides?: Record<string, unknown>) {
       },
     },
     github: { webhookSecret: "" },
+    rateLimitSeconds: 30,
     logLevel: "info",
     threadsDir: "/test/threads",
     logsDir: "/test/logs",
