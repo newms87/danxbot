@@ -38,6 +38,12 @@ export async function poll(): Promise<void> {
   log.info(`Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`);
   cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.name}`));
 
+  // Safety net: refuse to spawn if lock file already exists (race condition guard)
+  if (existsSync(lockFile)) {
+    log.error("Lock file exists but teamRunning was false — refusing to spawn");
+    return;
+  }
+
   teamRunning = true;
   log.info("Spawning Claude in new terminal tab...");
 
@@ -62,14 +68,7 @@ export async function poll(): Promise<void> {
   }).unref();
 
   // Watch for lock file removal to detect completion.
-  lockCheckId = setInterval(() => {
-    if (!existsSync(lockFile)) {
-      clearInterval(lockCheckId!);
-      lockCheckId = null;
-      log.info("Team finished — resuming polling");
-      teamRunning = false;
-    }
-  }, 5000);
+  startLockWatch();
 }
 
 export function shutdown(): void {
@@ -85,12 +84,27 @@ export function shutdown(): void {
     lockCheckId = null;
   }
 
-  // Clean up lock file if it still exists
-  try {
-    if (existsSync(lockFile)) unlinkSync(lockFile);
-  } catch { /* ignore */ }
+  // Only remove lock file if no team is running — run-team.sh handles cleanup otherwise
+  if (teamRunning) {
+    log.info("Team is running — leaving lock file for run-team.sh to clean up");
+  } else {
+    try {
+      if (existsSync(lockFile)) unlinkSync(lockFile);
+    } catch (e) { log.warn("Failed to remove lock file", e); }
+  }
 
   process.exit(0);
+}
+
+function startLockWatch(): void {
+  lockCheckId = setInterval(() => {
+    if (!existsSync(lockFile)) {
+      clearInterval(lockCheckId!);
+      lockCheckId = null;
+      log.info("Team finished — resuming polling");
+      teamRunning = false;
+    }
+  }, 5000);
 }
 
 export function start(): void {
@@ -99,6 +113,13 @@ export function start(): void {
 
   const intervalSeconds = config.pollerIntervalMs / 1000;
   log.info(`Started — polling every ${intervalSeconds}s`);
+
+  // Check for existing lock file from a previous team that may still be running
+  if (existsSync(lockFile)) {
+    log.warn("Lock file found — previous team may still be running, watching for completion");
+    teamRunning = true;
+    startLockWatch();
+  }
 
   poll();
   intervalId = setInterval(poll, config.pollerIntervalMs);
