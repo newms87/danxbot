@@ -55,9 +55,10 @@ Validation tests require `ANTHROPIC_API_KEY` env var and are excluded from the d
 
 ### Team Roles
 
+The main Claude Code session acts as the orchestrator. Subagents are launched via the Task tool with `mode: "bypassPermissions"`.
+
 | Agent | File | Role |
 |-------|------|------|
-| Orchestrator | `.claude/agents/orchestrator.md` | Central coordinator, manages Trello workflow |
 | Ideator | `.claude/agents/ideator.md` | Platform knowledge + feature generation |
 | Implementor | `.claude/agents/implementor.md` | TDD builder, writes code |
 | Validator | `.claude/agents/validator.md` | Runs real Claude API validation tests |
@@ -66,7 +67,7 @@ Validation tests require `ANTHROPIC_API_KEY` env var and are excluded from the d
 
 ### Trello Board
 
-Board ID: `698fc5b8847b787a3818ad82`
+Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP tools)
 
 | List | Purpose |
 |------|---------|
@@ -79,12 +80,12 @@ Board ID: `698fc5b8847b787a3818ad82`
 ### Workflow
 
 1. Human moves approved cards from Review to ToDo
-2. `/start-team` or `/next-card` triggers the Orchestrator
-3. Orchestrator picks up card, moves to In Progress, creates progress checklist
-4. Orchestrator evaluates scope — splits into epic phases if too large (3+ phases)
-5. Implementor builds via TDD (failing test, implement, pass, refactor)
-6. Test Reviewer audits coverage, Code Reviewer checks quality
-7. Validator runs real API tests (only for agent/SDK changes)
-8. Orchestrator commits, moves to Done, adds retro comment
+2. `/start-team` or `/next-card` triggers the workflow
+3. Main session picks up card, moves to In Progress, creates progress checklist
+4. Evaluates scope — splits into epic phases if too large (3+ phases)
+5. Launches Implementor subagent for TDD (failing test, implement, pass, refactor)
+6. Launches Test Reviewer + Code Reviewer subagents for quality gates
+7. Launches Validator subagent only for agent/SDK changes
+8. Commits, moves card to Done, adds retro comment
 9. Epic splitting: cards named `Epic > Phase N > Description`
 10. Every Done card gets a retro comment (what went well/wrong, optimizations)

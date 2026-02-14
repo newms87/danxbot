@@ -4,64 +4,73 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Flytebot Dashboard</title>
+  <script>if (localStorage.getItem('flytebot-theme') !== 'light') document.documentElement.classList.add('dark');</script>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <style type="text/tailwindcss">
+    @custom-variant dark (&:where(.dark, .dark *));
+  </style>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+<body class="bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 min-h-screen">
   <div id="app">
     <div class="max-w-7xl mx-auto px-4 py-6">
 
       <!-- Header -->
       <div class="flex items-center justify-between mb-8">
         <div>
-          <h1 class="text-2xl font-bold text-white">Flytebot Dashboard</h1>
-          <p class="text-gray-400 text-sm mt-1">
-            <span :class="connected ? 'text-green-400' : 'text-red-400'">●</span>
+          <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Flytebot Dashboard</h1>
+          <p class="text-gray-500 dark:text-gray-400 text-sm mt-1">
+            <span :class="connected ? 'text-green-500 dark:text-green-400' : 'text-red-500 dark:text-red-400'">●</span>
             {{ connected ? 'Connected' : 'Disconnected' }}
             · {{ events.length }} messages tracked
           </p>
         </div>
-        <button @click="fetchAll" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm text-gray-300">
-          Refresh
-        </button>
+        <div class="flex items-center gap-2">
+          <button @click="toggleTheme" :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300">
+            {{ isDark ? '☀️' : '🌙' }}
+          </button>
+          <button @click="fetchAll" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300">
+            Refresh
+          </button>
+        </div>
       </div>
 
       <!-- Analytics Cards -->
       <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
-        <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">
           <div class="text-xs text-gray-500 uppercase tracking-wide">Total</div>
-          <div class="text-2xl font-bold text-white mt-1">{{ analytics.totalMessages }}</div>
+          <div class="text-2xl font-bold text-gray-900 dark:text-white mt-1">{{ analytics.totalMessages }}</div>
         </div>
-        <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">
           <div class="text-xs text-gray-500 uppercase tracking-wide">Router Only</div>
-          <div class="text-2xl font-bold text-blue-400 mt-1">{{ analytics.routerOnlyMessages }}</div>
+          <div class="text-2xl font-bold text-blue-600 dark:text-blue-400 mt-1">{{ analytics.routerOnlyMessages }}</div>
           <div class="text-xs text-gray-500 mt-1">avg {{ formatMs(analytics.avgRouterTimeMs) }}</div>
         </div>
-        <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">
           <div class="text-xs text-gray-500 uppercase tracking-wide">Agent</div>
-          <div class="text-2xl font-bold text-purple-400 mt-1">{{ analytics.agentMessages }}</div>
+          <div class="text-2xl font-bold text-purple-600 dark:text-purple-400 mt-1">{{ analytics.agentMessages }}</div>
           <div class="text-xs text-gray-500 mt-1">avg {{ formatMs(analytics.avgAgentTimeMs) }}</div>
         </div>
-        <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">
           <div class="text-xs text-gray-500 uppercase tracking-wide">Avg Total</div>
-          <div class="text-2xl font-bold text-green-400 mt-1">{{ formatMs(analytics.avgTotalTimeMs) }}</div>
+          <div class="text-2xl font-bold text-green-600 dark:text-green-400 mt-1">{{ formatMs(analytics.avgTotalTimeMs) }}</div>
         </div>
-        <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">
           <div class="text-xs text-gray-500 uppercase tracking-wide">Total Cost</div>
-          <div class="text-2xl font-bold text-yellow-400 mt-1">${{ analytics.totalCostUsd?.toFixed(4) || '0.0000' }}</div>
+          <div class="text-2xl font-bold text-yellow-600 dark:text-yellow-400 mt-1">${{ analytics.totalCostUsd?.toFixed(4) || '0.0000' }}</div>
           <div class="text-xs text-gray-500 mt-1">{{ analytics.errorCount }} errors</div>
         </div>
       </div>
 
       <!-- Messages Table -->
-      <div class="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
-        <div class="px-4 py-3 border-b border-gray-800">
-          <h2 class="text-sm font-semibold text-gray-300">Messages</h2>
+      <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+          <h2 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Messages</h2>
         </div>
         <div class="overflow-x-auto">
           <table class="w-full text-sm">
             <thead>
-              <tr class="text-left text-xs text-gray-500 uppercase tracking-wide border-b border-gray-800">
+              <tr class="text-left text-xs text-gray-500 uppercase tracking-wide border-b border-gray-200 dark:border-gray-800">
                 <th class="px-4 py-2">Status</th>
                 <th class="px-4 py-2">Time</th>
                 <th class="px-4 py-2">User</th>
@@ -74,7 +83,7 @@
             </thead>
             <tbody>
               <tr v-for="event in events" :key="event.id"
-                  class="border-b border-gray-800/50 hover:bg-gray-800/50 cursor-pointer"
+                  class="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/50 cursor-pointer"
                   @click="selectedEvent = event">
 
                 <td class="px-4 py-2.5">
@@ -83,39 +92,39 @@
                   </span>
                 </td>
 
-                <td class="px-4 py-2.5 text-gray-400 whitespace-nowrap">
+                <td class="px-4 py-2.5 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                   {{ formatTime(event.receivedAt) }}
                 </td>
 
-                <td class="px-4 py-2.5 text-gray-300 whitespace-nowrap">
+                <td class="px-4 py-2.5 text-gray-700 dark:text-gray-300 whitespace-nowrap">
                   {{ event.user }}
                 </td>
 
-                <td class="px-4 py-2.5 text-gray-200 max-w-xs truncate">
+                <td class="px-4 py-2.5 text-gray-800 dark:text-gray-200 max-w-xs truncate">
                   {{ event.text }}
                 </td>
 
-                <td class="px-4 py-2.5 text-gray-500 font-mono text-xs whitespace-nowrap">
+                <td class="px-4 py-2.5 text-gray-400 dark:text-gray-500 font-mono text-xs whitespace-nowrap">
                   {{ event.threadTs }}
                 </td>
 
-                <td class="px-4 py-2.5 text-gray-400 whitespace-nowrap">
+                <td class="px-4 py-2.5 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                   <template v-if="event.routerResponseAt">
                     {{ formatMs(event.routerResponseAt - event.receivedAt) }}
-                    <span v-if="event.routerNeedsAgent" class="text-purple-400 ml-1">→ agent</span>
+                    <span v-if="event.routerNeedsAgent" class="text-purple-600 dark:text-purple-400 ml-1">→ agent</span>
                   </template>
-                  <span v-else-if="event.status === 'routing'" class="text-yellow-400">...</span>
+                  <span v-else-if="event.status === 'routing'" class="text-yellow-600 dark:text-yellow-400">...</span>
                 </td>
 
-                <td class="px-4 py-2.5 text-gray-400 whitespace-nowrap">
+                <td class="px-4 py-2.5 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                   <template v-if="event.agentResponseAt">
                     {{ formatMs(event.agentResponseAt - event.routerResponseAt) }}
-                    <span class="text-gray-600 ml-1">({{ event.agentTurns }}t)</span>
+                    <span class="text-gray-400 dark:text-gray-600 ml-1">({{ event.agentTurns }}t)</span>
                   </template>
-                  <span v-else-if="event.status === 'agent_running'" class="text-purple-400">...</span>
+                  <span v-else-if="event.status === 'agent_running'" class="text-purple-600 dark:text-purple-400">...</span>
                 </td>
 
-                <td class="px-4 py-2.5 text-gray-400 whitespace-nowrap">
+                <td class="px-4 py-2.5 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                   <template v-if="event.agentCostUsd != null">
                     ${{ event.agentCostUsd.toFixed(4) }}
                   </template>
@@ -123,7 +132,7 @@
               </tr>
 
               <tr v-if="events.length === 0">
-                <td colspan="8" class="px-4 py-8 text-center text-gray-600">
+                <td colspan="8" class="px-4 py-8 text-center text-gray-400 dark:text-gray-600">
                   No messages yet. Send a message in the Slack channel to see it here.
                 </td>
               </tr>
@@ -133,34 +142,34 @@
       </div>
 
       <!-- Detail Panel -->
-      <div v-if="selectedEvent" class="mt-4 bg-gray-900 rounded-lg border border-gray-800 p-4">
+      <div v-if="selectedEvent" class="mt-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4">
         <div class="flex items-center justify-between mb-3">
-          <h3 class="text-sm font-semibold text-gray-300">Message Detail</h3>
-          <button @click="selectedEvent = null" class="text-gray-500 hover:text-gray-300 text-sm">Close</button>
+          <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Message Detail</h3>
+          <button @click="selectedEvent = null" class="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 text-sm">Close</button>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <div class="text-xs text-gray-500 uppercase mb-1">User Message</div>
-            <div class="bg-gray-800 rounded p-3 text-sm text-gray-200 whitespace-pre-wrap">{{ selectedEvent.text }}</div>
+            <div class="bg-gray-100 dark:bg-gray-800 rounded p-3 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">{{ selectedEvent.text }}</div>
           </div>
           <div>
             <div class="text-xs text-gray-500 uppercase mb-1">Metadata</div>
-            <div class="bg-gray-800 rounded p-3 text-xs text-gray-400 space-y-1 font-mono">
+            <div class="bg-gray-100 dark:bg-gray-800 rounded p-3 text-xs text-gray-600 dark:text-gray-400 space-y-1 font-mono">
               <div>Thread: {{ selectedEvent.threadTs }}</div>
               <div>Message: {{ selectedEvent.messageTs }}</div>
               <div>Channel: {{ selectedEvent.channelId }}</div>
               <div>Status: {{ selectedEvent.status }}</div>
-              <div v-if="selectedEvent.error" class="text-red-400">Error: {{ selectedEvent.error }}</div>
+              <div v-if="selectedEvent.error" class="text-red-600 dark:text-red-400">Error: {{ selectedEvent.error }}</div>
             </div>
           </div>
           <div v-if="selectedEvent.routerResponse">
             <div class="text-xs text-gray-500 uppercase mb-1">Router Response</div>
-            <div class="bg-gray-800 rounded p-3 text-sm text-blue-300 whitespace-pre-wrap">{{ selectedEvent.routerResponse }}</div>
+            <div class="bg-gray-100 dark:bg-gray-800 rounded p-3 text-sm text-blue-700 dark:text-blue-300 whitespace-pre-wrap">{{ selectedEvent.routerResponse }}</div>
           </div>
           <div v-if="selectedEvent.agentResponse">
             <div class="text-xs text-gray-500 uppercase mb-1">Agent Response</div>
-            <div class="bg-gray-800 rounded p-3 text-sm text-purple-300 whitespace-pre-wrap max-h-64 overflow-y-auto">{{ selectedEvent.agentResponse }}</div>
+            <div class="bg-gray-100 dark:bg-gray-800 rounded p-3 text-sm text-purple-700 dark:text-purple-300 whitespace-pre-wrap max-h-64 overflow-y-auto">{{ selectedEvent.agentResponse }}</div>
           </div>
         </div>
 
@@ -168,18 +177,18 @@
         <div class="mt-4">
           <div class="text-xs text-gray-500 uppercase mb-2">Timeline</div>
           <div class="flex items-center gap-2 text-xs">
-            <div class="bg-gray-800 rounded px-2 py-1 text-gray-400">Received</div>
+            <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1 text-gray-600 dark:text-gray-400">Received</div>
             <template v-if="selectedEvent.routerResponseAt">
-              <div class="text-gray-600">→ {{ formatMs(selectedEvent.routerResponseAt - selectedEvent.receivedAt) }} →</div>
-              <div class="bg-blue-900/50 rounded px-2 py-1 text-blue-300">Router</div>
+              <div class="text-gray-400 dark:text-gray-600">→ {{ formatMs(selectedEvent.routerResponseAt - selectedEvent.receivedAt) }} →</div>
+              <div class="bg-blue-100 dark:bg-blue-900/50 rounded px-2 py-1 text-blue-700 dark:text-blue-300">Router</div>
             </template>
             <template v-if="selectedEvent.agentResponseAt">
-              <div class="text-gray-600">→ {{ formatMs(selectedEvent.agentResponseAt - selectedEvent.routerResponseAt) }} →</div>
-              <div class="bg-purple-900/50 rounded px-2 py-1 text-purple-300">Agent</div>
+              <div class="text-gray-400 dark:text-gray-600">→ {{ formatMs(selectedEvent.agentResponseAt - selectedEvent.routerResponseAt) }} →</div>
+              <div class="bg-purple-100 dark:bg-purple-900/50 rounded px-2 py-1 text-purple-700 dark:text-purple-300">Agent</div>
             </template>
             <template v-if="selectedEvent.status === 'complete'">
-              <div class="text-gray-600">→</div>
-              <div class="bg-green-900/50 rounded px-2 py-1 text-green-300">
+              <div class="text-gray-400 dark:text-gray-600">→</div>
+              <div class="bg-green-100 dark:bg-green-900/50 rounded px-2 py-1 text-green-700 dark:text-green-300">
                 Total: {{ formatMs((selectedEvent.agentResponseAt || selectedEvent.routerResponseAt) - selectedEvent.receivedAt) }}
               </div>
             </template>
@@ -188,78 +197,78 @@
 
         <!-- Router API Detail -->
         <div v-if="selectedEvent.routerRequest" class="mt-4">
-          <button @click="toggleSection('routerRequest')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+          <button @click="toggleSection('routerRequest')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-700 dark:hover:text-gray-300">
             <span>{{ expandedSections.routerRequest ? '▼' : '▶' }}</span> Router API Request
           </button>
           <div v-if="expandedSections.routerRequest" class="mt-2">
-            <pre class="bg-gray-800 rounded p-3 text-xs text-gray-300 overflow-x-auto max-h-80 overflow-y-auto font-mono">{{ JSON.stringify(selectedEvent.routerRequest, null, 2) }}</pre>
+            <pre class="bg-gray-100 dark:bg-gray-800 rounded p-3 text-xs text-gray-700 dark:text-gray-300 overflow-x-auto max-h-80 overflow-y-auto font-mono">{{ JSON.stringify(selectedEvent.routerRequest, null, 2) }}</pre>
           </div>
         </div>
 
         <div v-if="selectedEvent.routerRawResponse" class="mt-3">
-          <button @click="toggleSection('routerResponse')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+          <button @click="toggleSection('routerResponse')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-700 dark:hover:text-gray-300">
             <span>{{ expandedSections.routerResponse ? '▼' : '▶' }}</span> Router API Response
           </button>
           <div v-if="expandedSections.routerResponse" class="mt-2">
-            <pre class="bg-gray-800 rounded p-3 text-xs text-gray-300 overflow-x-auto max-h-80 overflow-y-auto font-mono">{{ JSON.stringify(selectedEvent.routerRawResponse, null, 2) }}</pre>
+            <pre class="bg-gray-100 dark:bg-gray-800 rounded p-3 text-xs text-gray-700 dark:text-gray-300 overflow-x-auto max-h-80 overflow-y-auto font-mono">{{ JSON.stringify(selectedEvent.routerRawResponse, null, 2) }}</pre>
           </div>
         </div>
 
         <!-- Agent Config -->
         <div v-if="selectedEvent.agentConfig" class="mt-4">
-          <button @click="toggleSection('agentConfig')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+          <button @click="toggleSection('agentConfig')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-700 dark:hover:text-gray-300">
             <span>{{ expandedSections.agentConfig ? '▼' : '▶' }}</span> Agent Config
           </button>
           <div v-if="expandedSections.agentConfig" class="mt-2">
-            <div class="bg-gray-800 rounded p-3 text-xs text-gray-400 space-y-1 font-mono">
-              <div>Model: <span class="text-gray-200">{{ selectedEvent.agentConfig.model }}</span></div>
-              <div>Tools: <span class="text-gray-200">{{ (selectedEvent.agentConfig.allowedTools || []).join(', ') }}</span></div>
-              <div>Max Turns: <span class="text-gray-200">{{ selectedEvent.agentConfig.maxTurns }}</span></div>
-              <div>Max Budget: <span class="text-gray-200">${{ selectedEvent.agentConfig.maxBudgetUsd }}</span></div>
-              <div>CWD: <span class="text-gray-200">{{ selectedEvent.agentConfig.cwd }}</span></div>
-              <div v-if="selectedEvent.agentConfig.resume">Resumed Session: <span class="text-green-300">{{ selectedEvent.agentConfig.resume }}</span></div>
+            <div class="bg-gray-100 dark:bg-gray-800 rounded p-3 text-xs text-gray-600 dark:text-gray-400 space-y-1 font-mono">
+              <div>Model: <span class="text-gray-800 dark:text-gray-200">{{ selectedEvent.agentConfig.model }}</span></div>
+              <div>Tools: <span class="text-gray-800 dark:text-gray-200">{{ (selectedEvent.agentConfig.allowedTools || []).join(', ') }}</span></div>
+              <div>Max Turns: <span class="text-gray-800 dark:text-gray-200">{{ selectedEvent.agentConfig.maxTurns }}</span></div>
+              <div>Max Budget: <span class="text-gray-800 dark:text-gray-200">${{ selectedEvent.agentConfig.maxBudgetUsd }}</span></div>
+              <div>CWD: <span class="text-gray-800 dark:text-gray-200">{{ selectedEvent.agentConfig.cwd }}</span></div>
+              <div v-if="selectedEvent.agentConfig.resume">Resumed Session: <span class="text-green-700 dark:text-green-300">{{ selectedEvent.agentConfig.resume }}</span></div>
             </div>
             <div v-if="selectedEvent.agentConfig.systemPrompt" class="mt-2">
-              <button @click="toggleSection('systemPrompt')" class="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300">
+              <button @click="toggleSection('systemPrompt')" class="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
                 <span>{{ expandedSections.systemPrompt ? '▼' : '▶' }}</span> System Prompt
               </button>
-              <pre v-if="expandedSections.systemPrompt" class="mt-1 bg-gray-800 rounded p-3 text-xs text-gray-400 overflow-x-auto max-h-64 overflow-y-auto font-mono whitespace-pre-wrap">{{ selectedEvent.agentConfig.systemPrompt }}</pre>
+              <pre v-if="expandedSections.systemPrompt" class="mt-1 bg-gray-100 dark:bg-gray-800 rounded p-3 text-xs text-gray-600 dark:text-gray-400 overflow-x-auto max-h-64 overflow-y-auto font-mono whitespace-pre-wrap">{{ selectedEvent.agentConfig.systemPrompt }}</pre>
             </div>
           </div>
         </div>
 
         <!-- Performance Breakdown -->
         <div v-if="selectedEvent.agentLog && selectedEvent.agentLog.length > 0" class="mt-4">
-          <button @click="toggleSection('perfBreakdown')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+          <button @click="toggleSection('perfBreakdown')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-700 dark:hover:text-gray-300">
             <span>{{ expandedSections.perfBreakdown ? '▼' : '▶' }}</span> Performance Breakdown
           </button>
-          <div v-if="expandedSections.perfBreakdown" class="mt-2 bg-gray-800 rounded p-3">
+          <div v-if="expandedSections.perfBreakdown" class="mt-2 bg-gray-100 dark:bg-gray-800 rounded p-3">
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
               <div>
                 <div class="text-gray-500 uppercase">Tool Calls</div>
-                <div class="text-lg font-bold text-white mt-0.5">{{ perfStats.totalToolCalls }}</div>
+                <div class="text-lg font-bold text-gray-900 dark:text-white mt-0.5">{{ perfStats.totalToolCalls }}</div>
               </div>
               <div>
                 <div class="text-gray-500 uppercase">API Time</div>
-                <div class="text-lg font-bold text-blue-400 mt-0.5">{{ formatMs(perfStats.apiTimeMs) }}</div>
+                <div class="text-lg font-bold text-blue-600 dark:text-blue-400 mt-0.5">{{ formatMs(perfStats.apiTimeMs) }}</div>
               </div>
               <div>
                 <div class="text-gray-500 uppercase">Wall Time</div>
-                <div class="text-lg font-bold text-purple-400 mt-0.5">{{ formatMs(perfStats.wallTimeMs) }}</div>
+                <div class="text-lg font-bold text-purple-600 dark:text-purple-400 mt-0.5">{{ formatMs(perfStats.wallTimeMs) }}</div>
               </div>
               <div>
                 <div class="text-gray-500 uppercase">Tool Time</div>
-                <div class="text-lg font-bold text-yellow-400 mt-0.5">{{ formatMs(perfStats.wallTimeMs - perfStats.apiTimeMs) }}</div>
+                <div class="text-lg font-bold text-yellow-600 dark:text-yellow-400 mt-0.5">{{ formatMs(perfStats.wallTimeMs - perfStats.apiTimeMs) }}</div>
               </div>
             </div>
             <div v-if="Object.keys(perfStats.toolBreakdown).length" class="mt-3 flex flex-wrap gap-2">
               <span v-for="(count, name) in perfStats.toolBreakdown" :key="name"
-                    class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-700 text-gray-300">
+                    class="inline-flex items-center px-2 py-0.5 rounded text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300">
                 {{ name }}: {{ count }}
               </span>
             </div>
-            <div v-if="perfStats.longestTool" class="mt-2 text-xs text-gray-400">
-              Longest tool: <span class="text-yellow-300">{{ perfStats.longestTool.name }}</span>
+            <div v-if="perfStats.longestTool" class="mt-2 text-xs text-gray-600 dark:text-gray-400">
+              Longest tool: <span class="text-yellow-700 dark:text-yellow-300">{{ perfStats.longestTool.name }}</span>
               ({{ perfStats.longestTool.seconds }}s)
             </div>
           </div>
@@ -267,13 +276,13 @@
 
         <!-- Agent Conversation Log -->
         <div v-if="selectedEvent.agentLog && selectedEvent.agentLog.length > 0" class="mt-4">
-          <button @click="toggleSection('agentLog')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-300">
+          <button @click="toggleSection('agentLog')" class="flex items-center gap-1 text-xs text-gray-500 uppercase tracking-wide hover:text-gray-700 dark:hover:text-gray-300">
             <span>{{ expandedSections.agentLog ? '▼' : '▶' }}</span> Agent Conversation Log ({{ selectedEvent.agentLog.length }} entries)
           </button>
           <div v-if="expandedSections.agentLog" class="mt-2 overflow-x-auto">
             <table class="w-full text-xs">
               <thead>
-                <tr class="text-left text-gray-500 uppercase border-b border-gray-700">
+                <tr class="text-left text-gray-500 uppercase border-b border-gray-300 dark:border-gray-700">
                   <th class="px-2 py-1.5 w-20">Time</th>
                   <th class="px-2 py-1.5 w-24">Type</th>
                   <th class="px-2 py-1.5">Summary</th>
@@ -281,7 +290,7 @@
               </thead>
               <tbody>
                 <template v-for="(entry, idx) in selectedEvent.agentLog" :key="idx">
-                  <tr class="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer"
+                  <tr class="border-b border-gray-100 dark:border-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800/30 cursor-pointer"
                       @click="toggleLogRow(idx)">
                     <td class="px-2 py-1.5 text-gray-500 font-mono whitespace-nowrap">
                       +{{ relativeTime(entry.timestamp, selectedEvent.agentLog[0].timestamp) }}s
@@ -291,13 +300,13 @@
                         {{ entry.type }}{{ entry.subtype ? '.' + entry.subtype : '' }}
                       </span>
                     </td>
-                    <td class="px-2 py-1.5 text-gray-300 truncate max-w-lg">
+                    <td class="px-2 py-1.5 text-gray-700 dark:text-gray-300 truncate max-w-lg">
                       {{ entry.summary }}
                     </td>
                   </tr>
                   <tr v-if="expandedLogRows[idx]">
                     <td colspan="3" class="px-2 py-2">
-                      <pre class="bg-gray-800 rounded p-2 text-xs text-gray-400 overflow-x-auto max-h-64 overflow-y-auto font-mono">{{ JSON.stringify(entry.data, null, 2) }}</pre>
+                      <pre class="bg-gray-100 dark:bg-gray-800 rounded p-2 text-xs text-gray-600 dark:text-gray-400 overflow-x-auto max-h-64 overflow-y-auto font-mono">{{ JSON.stringify(entry.data, null, 2) }}</pre>
                     </td>
                   </tr>
                 </template>
@@ -332,7 +341,20 @@
           agentLog: false,
         });
         const expandedLogRows = reactive({});
+        const isDark = ref(localStorage.getItem('flytebot-theme') !== 'light');
         let eventSource = null;
+
+        function applyTheme() {
+          document.documentElement.classList.toggle('dark', isDark.value);
+        }
+
+        function toggleTheme() {
+          isDark.value = !isDark.value;
+          localStorage.setItem('flytebot-theme', isDark.value ? 'dark' : 'light');
+          applyTheme();
+        }
+
+        applyTheme();
 
         function fetchAll() {
           fetch('/api/events').then(r => r.json()).then(data => events.value = data);
@@ -375,14 +397,14 @@
 
         function statusClass(status) {
           const map = {
-            received: 'bg-gray-700 text-gray-300',
-            routing: 'bg-yellow-900/50 text-yellow-300',
-            routed: 'bg-blue-900/50 text-blue-300',
-            agent_running: 'bg-purple-900/50 text-purple-300',
-            complete: 'bg-green-900/50 text-green-300',
-            error: 'bg-red-900/50 text-red-300',
+            received: 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300',
+            routing: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/50 dark:text-yellow-300',
+            routed: 'bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300',
+            agent_running: 'bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300',
+            complete: 'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-300',
+            error: 'bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-300',
           };
-          return map[status] || 'bg-gray-700 text-gray-300';
+          return map[status] || 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
         }
 
         function statusLabel(status) {
@@ -411,13 +433,13 @@
 
         function logTypeBadge(type) {
           const map = {
-            system: 'bg-gray-700 text-gray-300',
-            assistant: 'bg-blue-900/50 text-blue-300',
-            user: 'bg-green-900/50 text-green-300',
-            tool_progress: 'bg-yellow-900/50 text-yellow-300',
-            result: 'bg-purple-900/50 text-purple-300',
+            system: 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300',
+            assistant: 'bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300',
+            user: 'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-300',
+            tool_progress: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/50 dark:text-yellow-300',
+            result: 'bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300',
           };
-          return map[type] || 'bg-gray-700 text-gray-300';
+          return map[type] || 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
         }
 
         const perfStats = computed(() => {
@@ -466,10 +488,10 @@
         });
 
         return {
-          events, analytics, selectedEvent, connected,
+          events, analytics, selectedEvent, connected, isDark,
           expandedSections, expandedLogRows, perfStats,
           fetchAll, formatTime, formatMs, statusClass, statusLabel,
-          toggleSection, toggleLogRow, relativeTime, logTypeBadge,
+          toggleSection, toggleLogRow, relativeTime, logTypeBadge, toggleTheme,
         };
       },
     }).mount('#app');
