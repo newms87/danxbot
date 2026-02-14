@@ -12,12 +12,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:validate": "vitest run --config vitest.validation.config.ts",
-    "poller": "npx tsx --env-file=.env src/poller/index.ts"
+    "poller": "tsx --env-file=.env src/poller/index.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
     "@anthropic-ai/sdk": "^0.74.0",
-    "@slack/bolt": "^4.1.0"
+    "@slack/bolt": "^4.1.0",
+    "mysql2": "^3.17.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

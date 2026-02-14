@@ -4,11 +4,15 @@ import { startDashboard } from "./dashboard/server.js";
 import { loadEvents } from "./dashboard/events.js";
 import { initShutdownHandlers } from "./shutdown.js";
 import { createLogger } from "./logger.js";
+import { runMigrations } from "./db/migrate.js";
 
 const log = createLogger("startup");
 
 async function main(): Promise<void> {
   log.info("Starting Flytebot...");
+
+  // Run database migrations
+  await runMigrations();
 
   // Start periodic thread file cleanup
   const threadCleanupInterval = startThreadCleanup();

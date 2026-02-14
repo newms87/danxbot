@@ -8,6 +8,7 @@ const mockStartDashboard = vi.fn().mockResolvedValue(undefined);
 const mockStartSlackListener = vi.fn().mockResolvedValue(undefined);
 const mockGetSlackClient = vi.fn().mockReturnValue({ chat: {} });
 const mockInitShutdownHandlers = vi.fn();
+const mockRunMigrations = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("./slack/listener.js", () => ({
   startSlackListener: mockStartSlackListener,
@@ -43,6 +44,10 @@ vi.mock("./shutdown.js", () => ({
   initShutdownHandlers: mockInitShutdownHandlers,
 }));
 
+vi.mock("./db/migrate.js", () => ({
+  runMigrations: mockRunMigrations,
+}));
+
 vi.mock("./logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
@@ -59,6 +64,7 @@ beforeEach(() => {
   vi.resetModules();
 
   // Re-wire mocks after resetModules clears them
+  mockRunMigrations.mockResolvedValue(undefined);
   mockStartThreadCleanup.mockReturnValue("mock-interval");
   mockLoadEvents.mockResolvedValue(undefined);
   mockStartDashboard.mockResolvedValue(undefined);
@@ -90,6 +96,9 @@ describe("main startup flow", () => {
   it("calls startup functions in correct order", async () => {
     const callOrder: string[] = [];
 
+    mockRunMigrations.mockImplementation(async () => {
+      callOrder.push("runMigrations");
+    });
     mockStartThreadCleanup.mockImplementation(() => {
       callOrder.push("startThreadCleanup");
       return "mock-interval";
@@ -114,6 +123,7 @@ describe("main startup flow", () => {
     await importIndex();
 
     expect(callOrder).toEqual([
+      "runMigrations",
       "startThreadCleanup",
       "loadEvents",
       "startDashboard",

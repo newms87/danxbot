@@ -29,6 +29,12 @@ export const config = {
       database: required("PLATFORM_DB_NAME"),
     },
   },
+  db: {
+    host: process.env.FLYTEBOT_DB_HOST || process.env.PLATFORM_DB_HOST || "",
+    user: process.env.FLYTEBOT_DB_USER || process.env.PLATFORM_DB_USER || "",
+    password: process.env.FLYTEBOT_DB_PASSWORD || process.env.PLATFORM_DB_PASSWORD || "",
+    database: optional("FLYTEBOT_DB_NAME", "flytebot_chat"),
+  },
   agent: {
     model: optional("CLAUDE_MODEL", "claude-sonnet-4-5"),
     maxTurns: parseInt(optional("MAX_TURNS", "10"), 10),
@@ -63,6 +69,10 @@ interface NumericRule {
 }
 
 export function validateConfig(): void {
+  if (config.db.database && !/^[a-zA-Z0-9_]+$/.test(config.db.database)) {
+    throw new Error(`Invalid database name: ${config.db.database} (must be alphanumeric/underscores only)`);
+  }
+
   const rules: NumericRule[] = [
     { path: "agent.maxTurns", value: config.agent.maxTurns, min: 1, exclusive: false },
     { path: "agent.maxBudgetUsd", value: config.agent.maxBudgetUsd, min: 0, exclusive: true },
