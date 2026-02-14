@@ -306,16 +306,11 @@ describe("events-db", () => {
       expect(params[needsAgentIdx]).toBe(1);
     });
 
-    it("logs error but does not throw when DB fails", async () => {
+    it("throws when DB fails", async () => {
       mockExecute.mockRejectedValue(new Error("connection refused"));
       const event = makeFullEvent();
 
-      await persistEventToDb(event);
-
-      expect(mockLogError).toHaveBeenCalledWith(
-        "Failed to persist event to DB",
-        expect.any(Error),
-      );
+      await expect(persistEventToDb(event)).rejects.toThrow("connection refused");
     });
   });
 
@@ -362,15 +357,10 @@ describe("events-db", () => {
       expect(mockExecute).not.toHaveBeenCalled();
     });
 
-    it("logs error but does not throw when DB fails", async () => {
+    it("throws when DB fails", async () => {
       mockExecute.mockRejectedValue(new Error("connection refused"));
 
-      await updateEventInDb("test-id", { status: "error" });
-
-      expect(mockLogError).toHaveBeenCalledWith(
-        "Failed to update event in DB",
-        expect.any(Error),
-      );
+      await expect(updateEventInDb("test-id", { status: "error" })).rejects.toThrow("connection refused");
     });
   });
 
@@ -425,28 +415,18 @@ describe("events-db", () => {
       expect(params).toEqual([500]);
     });
 
-    it("falls back gracefully when DB is unavailable", async () => {
+    it("throws when DB is unavailable", async () => {
       mockQuery.mockRejectedValue(new Error("connection refused"));
 
-      const events = await loadEventsFromDb(500);
-      expect(events).toEqual([]);
-      expect(mockLogError).toHaveBeenCalledWith(
-        "Failed to load events from DB",
-        expect.any(Error),
-      );
+      await expect(loadEventsFromDb(500)).rejects.toThrow("connection refused");
     });
 
-    it("falls back gracefully when getPool() throws synchronously", async () => {
+    it("throws when getPool() throws synchronously", async () => {
       mockGetPool.mockImplementationOnce(() => {
         throw new Error("pool init failed");
       });
 
-      const events = await loadEventsFromDb(500);
-      expect(events).toEqual([]);
-      expect(mockLogError).toHaveBeenCalledWith(
-        "Failed to load events from DB",
-        expect.any(Error),
-      );
+      await expect(loadEventsFromDb(500)).rejects.toThrow("pool init failed");
     });
   });
 });

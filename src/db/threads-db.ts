@@ -1,9 +1,6 @@
 import type { ResultSetHeader } from "mysql2/promise";
 import { getPool } from "./connection.js";
-import { createLogger } from "../logger.js";
 import type { ThreadState, ThreadMessage } from "../types.js";
-
-const log = createLogger("threads-db");
 
 interface ThreadRow {
   thread_ts: string;
@@ -28,56 +25,42 @@ function rowToThread(row: ThreadRow): ThreadState {
 }
 
 export async function loadThreadFromDb(threadTs: string): Promise<ThreadState | null> {
-  try {
-    const pool = getPool();
-    const [rows] = await pool.execute(
-      "SELECT * FROM threads WHERE thread_ts = ?",
-      [threadTs],
-    );
-    const dbRows = rows as ThreadRow[];
-    if (dbRows.length === 0) return null;
-    return rowToThread(dbRows[0]);
-  } catch (error) {
-    log.error("Failed to load thread from DB", error);
-    return null;
-  }
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    "SELECT * FROM threads WHERE thread_ts = ?",
+    [threadTs],
+  );
+  const dbRows = rows as ThreadRow[];
+  if (dbRows.length === 0) return null;
+  return rowToThread(dbRows[0]);
 }
 
 export async function saveThreadToDb(thread: ThreadState): Promise<void> {
-  try {
-    const pool = getPool();
-    await pool.execute(
-      `INSERT INTO threads (thread_ts, channel_id, session_id, messages)
-       VALUES (?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         channel_id = VALUES(channel_id),
-         session_id = VALUES(session_id),
-         messages = VALUES(messages)`,
-      [
-        thread.threadTs,
-        thread.channelId,
-        thread.sessionId,
-        JSON.stringify(thread.messages),
-      ],
-    );
-  } catch (error) {
-    log.error("Failed to save thread to DB", error);
-  }
+  const pool = getPool();
+  await pool.execute(
+    `INSERT INTO threads (thread_ts, channel_id, session_id, messages)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       channel_id = VALUES(channel_id),
+       session_id = VALUES(session_id),
+       messages = VALUES(messages)`,
+    [
+      thread.threadTs,
+      thread.channelId,
+      thread.sessionId,
+      JSON.stringify(thread.messages),
+    ],
+  );
 }
 
 export async function deleteOldThreadsFromDb(maxAgeMs: number): Promise<number> {
-  try {
-    const pool = getPool();
-    const maxAgeSeconds = Math.floor(maxAgeMs / 1000);
-    const [result] = await pool.execute(
-      "DELETE FROM threads WHERE updated_at < NOW() - INTERVAL ? SECOND",
-      [maxAgeSeconds],
-    );
-    return (result as ResultSetHeader).affectedRows;
-  } catch (error) {
-    log.error("Failed to delete old threads from DB", error);
-    return 0;
-  }
+  const pool = getPool();
+  const maxAgeSeconds = Math.floor(maxAgeMs / 1000);
+  const [result] = await pool.execute(
+    "DELETE FROM threads WHERE updated_at < NOW() - INTERVAL ? SECOND",
+    [maxAgeSeconds],
+  );
+  return (result as ResultSetHeader).affectedRows;
 }
 
 export async function isBotInThread(threadTs: string): Promise<boolean | null> {

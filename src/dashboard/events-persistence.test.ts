@@ -325,16 +325,10 @@ describe("DB persistence", () => {
       expect(event.agentLog).toEqual([{ type: "tool_use" }]);
     });
 
-    it("falls back gracefully when DB is unavailable", async () => {
+    it("throws when DB is unavailable", async () => {
       mockQuery.mockRejectedValue(new Error("connection refused"));
 
-      await loadEvents();
-
-      expect(getEvents()).toHaveLength(0);
-      expect(mockLogError).toHaveBeenCalledWith(
-        "Failed to load events from DB",
-        expect.any(Error),
-      );
+      await expect(loadEvents()).rejects.toThrow("connection refused");
     });
 
     it("uses parameterized LIMIT in DB query", async () => {

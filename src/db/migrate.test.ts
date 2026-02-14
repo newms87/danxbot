@@ -170,11 +170,11 @@ describe("runMigrations", () => {
     expect(insertCalls).toHaveLength(0);
   });
 
-  it("does not crash when migrations fail", async () => {
+  it("throws when migrations fail", async () => {
     mockQuery.mockRejectedValueOnce(new Error("Connection refused"));
 
     const { runMigrations } = await importMigrate();
-    await expect(runMigrations()).resolves.toBeUndefined();
+    await expect(runMigrations()).rejects.toThrow("Connection refused");
   });
 
   it("closes the admin pool after running", async () => {
@@ -188,7 +188,7 @@ describe("runMigrations", () => {
     mockQuery.mockRejectedValueOnce(new Error("Connection refused"));
 
     const { runMigrations } = await importMigrate();
-    await runMigrations();
+    await expect(runMigrations()).rejects.toThrow("Connection refused");
 
     expect(mockCloseAdminPool).toHaveBeenCalled();
   });
@@ -209,25 +209,3 @@ describe("runMigrations", () => {
   });
 });
 
-describe("runMigrations with missing config", () => {
-  it("skips migrations when db host is not configured", async () => {
-    vi.doMock("../config.js", () => ({
-      config: {
-        db: {
-          host: "",
-          user: "test-user",
-          password: "test-pass",
-          database: "flytebot_chat",
-        },
-      },
-    }));
-
-    vi.resetModules();
-    const { runMigrations } = await import("./migrate.js");
-    await runMigrations();
-
-    expect(mockQuery).not.toHaveBeenCalled();
-    // closeAdminPool should NOT be called since we early-returned
-    expect(mockCloseAdminPool).not.toHaveBeenCalled();
-  });
-});

@@ -39,15 +39,10 @@ describe("users-db", () => {
       expect(params).toContain("Alice");
     });
 
-    it("logs error but does not throw when DB fails", async () => {
+    it("throws when DB fails", async () => {
       mockExecute.mockRejectedValueOnce(new Error("connection refused"));
 
-      await upsertUser("U123", "Alice");
-
-      expect(mockLogError).toHaveBeenCalledWith(
-        expect.stringContaining("upsert user"),
-        expect.any(Error),
-      );
+      await expect(upsertUser("U123", "Alice")).rejects.toThrow("connection refused");
     });
   });
 
@@ -116,16 +111,10 @@ describe("users-db", () => {
       expect(result).toBeNull();
     });
 
-    it("returns null and logs error when DB fails", async () => {
+    it("throws when DB fails", async () => {
       mockExecute.mockRejectedValueOnce(new Error("connection refused"));
 
-      const result = await getUser("U123");
-
-      expect(result).toBeNull();
-      expect(mockLogError).toHaveBeenCalledWith(
-        expect.stringContaining("get user"),
-        expect.any(Error),
-      );
+      await expect(getUser("U123")).rejects.toThrow("connection refused");
     });
   });
 });

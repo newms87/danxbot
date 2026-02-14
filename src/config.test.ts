@@ -22,8 +22,9 @@ function validEnv(): Record<string, string> {
   };
 }
 
-async function importConfig(envOverrides: Record<string, string> = {}) {
+async function importConfig(envOverrides: Record<string, string> = {}, omitKeys: string[] = []) {
   const env = { ...validEnv(), ...envOverrides };
+  for (const key of omitKeys) delete env[key];
   // Replace process.env entirely for isolation
   const originalEnv = process.env;
   process.env = { ...env };
@@ -36,6 +37,22 @@ async function importConfig(envOverrides: Record<string, string> = {}) {
 
 beforeEach(() => {
   vi.resetModules();
+});
+
+describe("required DB config", () => {
+  it("throws when PLATFORM_DB_HOST is missing and no FLYTEBOT_DB_HOST fallback", async () => {
+    await expect(importConfig({}, ["PLATFORM_DB_HOST"])).rejects.toThrow("PLATFORM_DB_HOST");
+  });
+
+  it("uses FLYTEBOT_DB_HOST when set, ignoring PLATFORM_DB_HOST", async () => {
+    const mod = await importConfig({ FLYTEBOT_DB_HOST: "flytebot-host" });
+    expect(mod.config.db.host).toBe("flytebot-host");
+  });
+
+  it("falls back to PLATFORM_DB_HOST when FLYTEBOT_DB_HOST is not set", async () => {
+    const mod = await importConfig();
+    expect(mod.config.db.host).toBe("localhost");
+  });
 });
 
 describe("validateConfig", () => {

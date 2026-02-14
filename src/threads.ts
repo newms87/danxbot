@@ -76,7 +76,7 @@ export async function getOrCreateThread(
   if (existing) return existing;
 
   const thread = await hydrateFromSlack(threadTs, channelId, client);
-  await saveThreadToDb(thread);
+  saveThreadToDb(thread).catch((err) => log.error("Failed to save hydrated thread to DB", err));
   return thread;
 }
 
@@ -88,7 +88,7 @@ export function addMessageToThread(
   message: ThreadMessage,
 ): void {
   thread.messages.push(message);
-  saveThreadToDb(thread);
+  saveThreadToDb(thread).catch((err) => log.error("Failed to save thread to DB", err));
 }
 
 /**
@@ -99,7 +99,7 @@ export function updateSessionId(
   sessionId: string,
 ): void {
   thread.sessionId = sessionId;
-  saveThreadToDb(thread);
+  saveThreadToDb(thread).catch((err) => log.error("Failed to save thread to DB", err));
 }
 
 /**
@@ -109,7 +109,7 @@ export function updateSessionId(
  */
 export function clearSessionId(thread: ThreadState): void {
   thread.sessionId = null;
-  saveThreadToDb(thread);
+  saveThreadToDb(thread).catch((err) => log.error("Failed to save thread to DB", err));
 }
 
 /**

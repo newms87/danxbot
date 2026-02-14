@@ -1,7 +1,4 @@
 import { getPool } from "./connection.js";
-import { createLogger } from "../logger.js";
-
-const log = createLogger("users-db");
 
 interface UserRow {
   slack_user_id: string;
@@ -26,36 +23,27 @@ function parsePreferences(value: string | Record<string, unknown> | null): Recor
 }
 
 export async function upsertUser(slackUserId: string, displayName: string): Promise<void> {
-  try {
-    const pool = getPool();
-    await pool.execute(
-      `INSERT INTO users (slack_user_id, display_name)
-       VALUES (?, ?)
-       ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`,
-      [slackUserId, displayName],
-    );
-  } catch (error) {
-    log.error("Failed to upsert user in DB", error);
-  }
+  const pool = getPool();
+  await pool.execute(
+    `INSERT INTO users (slack_user_id, display_name)
+     VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)`,
+    [slackUserId, displayName],
+  );
 }
 
 export async function getUser(slackUserId: string): Promise<User | null> {
-  try {
-    const pool = getPool();
-    const [rows] = await pool.execute(
-      "SELECT slack_user_id, display_name, preferences FROM users WHERE slack_user_id = ?",
-      [slackUserId],
-    );
-    const dbRows = rows as UserRow[];
-    if (dbRows.length === 0) return null;
-    const row = dbRows[0];
-    return {
-      slackUserId: row.slack_user_id,
-      displayName: row.display_name,
-      preferences: parsePreferences(row.preferences),
-    };
-  } catch (error) {
-    log.error("Failed to get user from DB", error);
-    return null;
-  }
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    "SELECT slack_user_id, display_name, preferences FROM users WHERE slack_user_id = ?",
+    [slackUserId],
+  );
+  const dbRows = rows as UserRow[];
+  if (dbRows.length === 0) return null;
+  const row = dbRows[0];
+  return {
+    slackUserId: row.slack_user_id,
+    displayName: row.display_name,
+    preferences: parsePreferences(row.preferences),
+  };
 }

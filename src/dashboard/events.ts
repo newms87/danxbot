@@ -95,7 +95,7 @@ export function createEvent(partial: {
   events.unshift(event);
   if (events.length > MAX_EVENTS) events.pop();
   broadcast(event);
-  persistEventToDb(event);
+  persistEventToDb(event).catch((err) => log.error("Failed to persist event to DB", err));
   return event;
 }
 
@@ -107,7 +107,7 @@ export function updateEvent(
   if (!event) return;
   Object.assign(event, updates);
   broadcast(event);
-  updateEventInDb(id, updates);
+  updateEventInDb(id, updates).catch((err) => log.error("Failed to update event in DB", err));
 }
 
 export function getEvents(): MessageEvent[] {

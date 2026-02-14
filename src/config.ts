@@ -16,6 +16,14 @@ function required(name: string): string {
   return value;
 }
 
+function requiredWithFallback(primary: string, fallback: string): string {
+  const value = process.env[primary] || process.env[fallback];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${primary} (or ${fallback})`);
+  }
+  return value;
+}
+
 function optional(name: string, defaultValue: string): string {
   return process.env[name] || defaultValue;
 }
@@ -40,9 +48,9 @@ export const config = {
     },
   },
   db: {
-    host: process.env.FLYTEBOT_DB_HOST || process.env.PLATFORM_DB_HOST || "",
-    user: process.env.FLYTEBOT_DB_USER || process.env.PLATFORM_DB_USER || "",
-    password: process.env.FLYTEBOT_DB_PASSWORD || process.env.PLATFORM_DB_PASSWORD || "",
+    host: requiredWithFallback("FLYTEBOT_DB_HOST", "PLATFORM_DB_HOST"),
+    user: requiredWithFallback("FLYTEBOT_DB_USER", "PLATFORM_DB_USER"),
+    password: requiredWithFallback("FLYTEBOT_DB_PASSWORD", "PLATFORM_DB_PASSWORD"),
     database: optional("FLYTEBOT_DB_NAME", "flytebot_chat"),
   },
   agent: {
@@ -77,7 +85,7 @@ interface NumericRule {
 }
 
 export function validateConfig(): void {
-  if (config.db.database && !/^[a-zA-Z0-9_]+$/.test(config.db.database)) {
+  if (!/^[a-zA-Z0-9_]+$/.test(config.db.database)) {
     throw new Error(`Invalid database name: ${config.db.database} (must be alphanumeric/underscores only)`);
   }
 

@@ -133,54 +133,41 @@ export function rowToEvent(row: EventRow): MessageEvent {
 }
 
 export async function persistEventToDb(event: MessageEvent): Promise<void> {
-  try {
-    const pool = getPool();
-    const params = eventToRow(event);
-    await pool.execute(
-      `INSERT INTO events (${INSERT_COLUMNS}) VALUES (${INSERT_PLACEHOLDERS})`,
-      params,
-    );
-  } catch (error) {
-    log.error("Failed to persist event to DB", error);
-  }
+  const pool = getPool();
+  const params = eventToRow(event);
+  await pool.execute(
+    `INSERT INTO events (${INSERT_COLUMNS}) VALUES (${INSERT_PLACEHOLDERS})`,
+    params,
+  );
 }
 
 export async function updateEventInDb(id: string, updates: Partial<MessageEvent>): Promise<void> {
-  try {
-    const setClauses: string[] = [];
-    const params: unknown[] = [];
+  const setClauses: string[] = [];
+  const params: unknown[] = [];
 
-    for (const [key, value] of Object.entries(updates)) {
-      const column = COLUMN_MAP[key];
-      if (!column) continue;
-      setClauses.push(`${escapeColumn(column)} = ?`);
-      params.push(toDbValue(key, value));
-    }
-
-    if (setClauses.length === 0) return;
-
-    params.push(id);
-    const pool = getPool();
-    await pool.execute(
-      `UPDATE events SET ${setClauses.join(", ")} WHERE id = ?`,
-      params,
-    );
-  } catch (error) {
-    log.error("Failed to update event in DB", error);
+  for (const [key, value] of Object.entries(updates)) {
+    const column = COLUMN_MAP[key];
+    if (!column) continue;
+    setClauses.push(`${escapeColumn(column)} = ?`);
+    params.push(toDbValue(key, value));
   }
+
+  if (setClauses.length === 0) return;
+
+  params.push(id);
+  const pool = getPool();
+  await pool.execute(
+    `UPDATE events SET ${setClauses.join(", ")} WHERE id = ?`,
+    params,
+  );
 }
 
 export async function loadEventsFromDb(maxEvents: number): Promise<MessageEvent[]> {
-  try {
-    const pool = getPool();
-    const [rows] = await pool.query(
-      "SELECT * FROM events ORDER BY received_at DESC LIMIT ?",
-      [maxEvents],
-    );
-    const dbRows = rows as EventRow[];
-    return dbRows.map(rowToEvent);
-  } catch (error) {
-    log.error("Failed to load events from DB", error);
-    return [];
-  }
+  const pool = getPool();
+  const [rows] = await pool.query(
+    "SELECT * FROM events ORDER BY received_at DESC LIMIT ?",
+    [maxEvents],
+  );
+  const dbRows = rows as EventRow[];
+  return dbRows.map(rowToEvent);
 }

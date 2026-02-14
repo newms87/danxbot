@@ -16,14 +16,9 @@ export interface Migration {
 /**
  * Run all pending database migrations.
  * Creates the database and migrations table if they don't exist.
- * Errors are logged but do not crash the bot (graceful degradation).
+ * Errors crash the bot — the database is required.
  */
 export async function runMigrations(): Promise<void> {
-  if (!config.db.host) {
-    log.warn("Database host not configured, skipping migrations");
-    return;
-  }
-
   try {
     const pool = getAdminPool();
     const dbName = config.db.database;
@@ -89,8 +84,6 @@ export async function runMigrations(): Promise<void> {
     } else {
       log.info(`Applied ${appliedCount} migration(s)`);
     }
-  } catch (error) {
-    log.error("Migration failed (bot will continue without database)", error);
   } finally {
     await closeAdminPool();
   }

@@ -87,16 +87,10 @@ describe("threads-db", () => {
       expect(result).toBeNull();
     });
 
-    it("returns null and logs error when DB fails", async () => {
+    it("throws when DB fails", async () => {
       mockExecute.mockRejectedValueOnce(new Error("connection refused"));
 
-      const result = await loadThreadFromDb("1234.5678");
-
-      expect(result).toBeNull();
-      expect(mockLogError).toHaveBeenCalledWith(
-        expect.stringContaining("load thread"),
-        expect.any(Error),
-      );
+      await expect(loadThreadFromDb("1234.5678")).rejects.toThrow("connection refused");
     });
 
     it("handles messages stored as already-parsed object", async () => {
@@ -150,15 +144,10 @@ describe("threads-db", () => {
       expect(params).toContain(JSON.stringify(messages));
     });
 
-    it("logs error but does not throw when DB fails", async () => {
+    it("throws when DB fails", async () => {
       mockExecute.mockRejectedValueOnce(new Error("connection refused"));
 
-      await saveThreadToDb(makeThread());
-
-      expect(mockLogError).toHaveBeenCalledWith(
-        expect.stringContaining("save thread"),
-        expect.any(Error),
-      );
+      await expect(saveThreadToDb(makeThread())).rejects.toThrow("connection refused");
     });
   });
 
@@ -183,16 +172,10 @@ describe("threads-db", () => {
       expect(result).toBe(0);
     });
 
-    it("returns 0 and logs error when DB fails", async () => {
+    it("throws when DB fails", async () => {
       mockExecute.mockRejectedValueOnce(new Error("connection refused"));
 
-      const result = await deleteOldThreadsFromDb(7 * 24 * 60 * 60 * 1000);
-
-      expect(result).toBe(0);
-      expect(mockLogError).toHaveBeenCalledWith(
-        expect.stringContaining("delete old threads"),
-        expect.any(Error),
-      );
+      await expect(deleteOldThreadsFromDb(7 * 24 * 60 * 60 * 1000)).rejects.toThrow("connection refused");
     });
   });
 
