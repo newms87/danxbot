@@ -24,10 +24,7 @@ vi.mock("./threads.js", () => ({
   cleanupOldThreads: vi.fn(),
 }));
 
-const mockPersistToDisk = vi.fn();
-
 vi.mock("./dashboard/events.js", () => ({
-  persistToDisk: mockPersistToDisk,
   createEvent: vi.fn(),
   updateEvent: vi.fn(),
   getEvents: vi.fn().mockReturnValue([]),
@@ -173,14 +170,6 @@ describe("shutdown", () => {
     await shutdownPromise;
 
     expect(mockStopThreadCleanup).toHaveBeenCalledWith("test-interval");
-  });
-
-  it("persists events to disk before exit", async () => {
-    const shutdownPromise = shutdown({ exitProcess: false });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
-
-    expect(mockPersistToDisk).toHaveBeenCalledOnce();
   });
 
   it("closes database connection pool", async () => {

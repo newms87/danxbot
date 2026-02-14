@@ -15,7 +15,7 @@ function getConfiguredLevel(): number {
 export interface Logger {
   debug(message: string): void;
   info(message: string): void;
-  warn(message: string): void;
+  warn(message: string, error?: unknown): void;
   error(message: string, error?: unknown): void;
 }
 
@@ -44,7 +44,7 @@ export function createLogger(component: string): Logger {
   return {
     debug: (message: string) => emit("debug", message),
     info: (message: string) => emit("info", message),
-    warn: (message: string) => emit("warn", message),
+    warn: (message: string, error?: unknown) => emit("warn", message, error),
     error: (message: string, error?: unknown) => emit("error", message, error),
   };
 }

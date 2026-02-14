@@ -2,17 +2,15 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // Mock config to avoid requiring real environment variables
 vi.mock("../config.js", () => ({
-  config: {
-    eventsFile: "/tmp/test-events.json",
-  },
+  config: {},
 }));
 
-// Mock fs/promises so persistence calls don't hit real disk
-vi.mock("fs/promises", () => ({
-  readFile: vi.fn(),
-  writeFile: vi.fn().mockResolvedValue(undefined),
-  mkdir: vi.fn().mockResolvedValue(undefined),
-  rename: vi.fn().mockResolvedValue(undefined),
+// Mock the db connection module so persistence calls don't hit a real DB
+vi.mock("../db/connection.js", () => ({
+  getPool: vi.fn(() => ({
+    query: vi.fn().mockResolvedValue([[], []]),
+    execute: vi.fn().mockResolvedValue([[], []]),
+  })),
 }));
 
 vi.mock("../logger.js", () => ({

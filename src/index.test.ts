@@ -37,7 +37,6 @@ vi.mock("./dashboard/events.js", () => ({
   createEvent: vi.fn(),
   updateEvent: vi.fn(),
   getEvents: vi.fn().mockReturnValue([]),
-  persistToDisk: vi.fn(),
 }));
 
 vi.mock("./shutdown.js", () => ({

@@ -60,7 +60,6 @@ export function makeConfig(overrides?: Record<string, unknown>) {
     logLevel: "info",
     threadsDir: "/test/threads",
     logsDir: "/test/logs",
-    eventsFile: "/test/data/events.json",
     ...overrides,
   };
 }

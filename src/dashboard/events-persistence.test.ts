@@ -1,32 +1,32 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
-// Mock fs/promises before importing the module under test
-vi.mock("fs/promises", () => ({
-  readFile: vi.fn(),
-  writeFile: vi.fn(),
-  mkdir: vi.fn(),
-  rename: vi.fn(),
+const mockQuery = vi.fn();
+const mockExecute = vi.fn();
+
+vi.mock("../db/connection.js", () => ({
+  getPool: vi.fn(() => ({
+    query: mockQuery,
+    execute: mockExecute,
+  })),
 }));
 
-// Mock config to provide a test eventsFile path
 vi.mock("../config.js", () => ({
-  config: {
-    eventsFile: "/tmp/test-events.json",
-  },
+  config: {},
 }));
 
-// Mock logger so we can assert on error calls
-let mockLogError = vi.fn();
+// Mock logger so we can assert on error/info calls
+const mockLogError = vi.fn();
+const mockLogInfo = vi.fn();
+const mockLogWarn = vi.fn();
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
+    info: (...args: unknown[]) => mockLogInfo(...args),
+    warn: (...args: unknown[]) => mockLogWarn(...args),
     error: (...args: unknown[]) => mockLogError(...args),
   }),
 }));
 
-import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import {
   createEvent,
   updateEvent,
@@ -35,10 +35,7 @@ import {
   loadEvents,
 } from "./events.js";
 
-const mockReadFile = vi.mocked(readFile);
-const mockWriteFile = vi.mocked(writeFile);
-const mockMkdir = vi.mocked(mkdir);
-const mockRename = vi.mocked(rename);
+import { COLUMN_MAP } from "./events-db.js";
 
 function makeEvent(overrides: Partial<Parameters<typeof createEvent>[0]> = {}) {
   return createEvent({
@@ -50,272 +47,429 @@ function makeEvent(overrides: Partial<Parameters<typeof createEvent>[0]> = {}) {
   });
 }
 
-describe("persistence", () => {
+describe("DB persistence", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
     resetEvents();
     vi.clearAllMocks();
-    mockWriteFile.mockResolvedValue(undefined);
-    mockMkdir.mockResolvedValue(undefined);
-    mockRename.mockResolvedValue(undefined);
+    mockExecute.mockResolvedValue([[], []]);
+    mockQuery.mockResolvedValue([[], []]);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  describe("schedulePersist", () => {
-    it("writes events to disk after debounce delay on createEvent", async () => {
+  describe("createEvent", () => {
+    it("inserts into the events table", async () => {
       makeEvent({ threadTs: "t-1", messageTs: "m-1" });
 
-      // Should not have written yet (debounce)
-      expect(mockWriteFile).not.toHaveBeenCalled();
+      // Fire-and-forget is async, give it a tick
+      await vi.waitFor(() => {
+        expect(mockExecute).toHaveBeenCalledTimes(1);
+      });
 
-      // Advance past the debounce delay
-      await vi.advanceTimersByTimeAsync(2000);
-
-      expect(mockMkdir).toHaveBeenCalledWith("/tmp", { recursive: true });
-      expect(mockWriteFile).toHaveBeenCalledTimes(1);
-      expect(mockWriteFile).toHaveBeenCalledWith(
-        "/tmp/test-events.json.tmp",
-        expect.any(String),
-      );
-      expect(mockRename).toHaveBeenCalledWith(
-        "/tmp/test-events.json.tmp",
-        "/tmp/test-events.json",
-      );
-
-      // Verify the written data is valid JSON containing our event
-      const writtenData = JSON.parse(
-        mockWriteFile.mock.calls[0][1] as string,
-      );
-      expect(writtenData).toBeInstanceOf(Array);
-      expect(writtenData[0].id).toBe("t-1-m-1");
+      const [sql, params] = mockExecute.mock.calls[0];
+      expect(sql).toContain("INSERT INTO events");
+      expect(params[0]).toBe("t-1-m-1"); // id
+      expect(params[1]).toBe("t-1"); // thread_ts
+      expect(params[2]).toBe("m-1"); // message_ts
     });
 
-    it("writes events to disk after debounce delay on updateEvent", async () => {
-      const event = makeEvent({ threadTs: "t-2", messageTs: "m-2" });
+    it("does not break in-memory flow when DB insert fails", async () => {
+      mockExecute.mockRejectedValue(new Error("connection refused"));
 
-      // Advance past first debounce (from createEvent)
-      await vi.advanceTimersByTimeAsync(2000);
+      const event = makeEvent({ threadTs: "t-fail", messageTs: "m-fail" });
+
+      // Event should still be in memory
+      expect(getEvents()).toHaveLength(1);
+      expect(getEvents()[0].id).toBe(event.id);
+
+      // Wait for the async DB call to complete and log
+      await vi.waitFor(() => {
+        expect(mockLogError).toHaveBeenCalledWith(
+          "Failed to persist event to DB",
+          expect.any(Error),
+        );
+      });
+    });
+
+    it("JSON-stringifies JSON columns in INSERT params", async () => {
+      // createEvent doesn't set JSON fields, so we test through updateEvent
+      // But we can verify that null JSON columns produce null params
+      makeEvent({ threadTs: "t-json", messageTs: "m-json" });
+
+      await vi.waitFor(() => {
+        expect(mockExecute).toHaveBeenCalledTimes(1);
+      });
+
+      const [, params] = mockExecute.mock.calls[0];
+      const keys = Object.keys(COLUMN_MAP);
+      const routerReqIdx = keys.indexOf("routerRequest");
+      // Default event has null for JSON columns
+      expect(params[routerReqIdx]).toBeNull();
+    });
+
+    it("converts boolean false to 0 in INSERT params", async () => {
+      makeEvent({ threadTs: "t-bool", messageTs: "m-bool" });
+
+      await vi.waitFor(() => {
+        expect(mockExecute).toHaveBeenCalledTimes(1);
+      });
+
+      const [, params] = mockExecute.mock.calls[0];
+      const keys = Object.keys(COLUMN_MAP);
+      const retriedIdx = keys.indexOf("agentRetried");
+      expect(params[retriedIdx]).toBe(0);
+    });
+  });
+
+  describe("updateEvent", () => {
+    it("updates the events table with changed fields", async () => {
+      const event = makeEvent({ threadTs: "t-u", messageTs: "m-u" });
       vi.clearAllMocks();
-      mockWriteFile.mockResolvedValue(undefined);
-      mockMkdir.mockResolvedValue(undefined);
-      mockRename.mockResolvedValue(undefined);
+      mockExecute.mockResolvedValue([[], []]);
 
-      updateEvent(event.id, { status: "routing" });
+      updateEvent(event.id, { status: "routing", routerResponse: "hi" });
 
-      expect(mockWriteFile).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.waitFor(() => {
+        expect(mockExecute).toHaveBeenCalledTimes(1);
+      });
 
-      expect(mockWriteFile).toHaveBeenCalledTimes(1);
-      const writtenData = JSON.parse(
-        mockWriteFile.mock.calls[0][1] as string,
-      );
-      expect(writtenData[0].status).toBe("routing");
+      const [sql, params] = mockExecute.mock.calls[0];
+      expect(sql).toContain("UPDATE events SET");
+      expect(sql).toContain("`status` = ?");
+      expect(sql).toContain("router_response = ?");
+      expect(sql).toContain("WHERE id = ?");
+      // Last param is the event id
+      expect(params[params.length - 1]).toBe("t-u-m-u");
     });
 
-    it("coalesces multiple rapid calls into a single write", async () => {
-      makeEvent({ threadTs: "t-a", messageTs: "m-a" });
-      makeEvent({ threadTs: "t-b", messageTs: "m-b" });
-      makeEvent({ threadTs: "t-c", messageTs: "m-c" });
+    it("does not call DB when event is not found", async () => {
+      vi.clearAllMocks();
 
-      await vi.advanceTimersByTimeAsync(2000);
+      updateEvent("nonexistent-id", { status: "error" });
 
-      expect(mockWriteFile).toHaveBeenCalledTimes(1);
-      const writtenData = JSON.parse(
-        mockWriteFile.mock.calls[0][1] as string,
-      );
-      expect(writtenData).toHaveLength(3);
+      // Give a tick for any potential async call
+      await new Promise((r) => setTimeout(r, 10));
+      expect(mockExecute).not.toHaveBeenCalled();
+    });
+
+    it("does not break in-memory flow when DB update fails", async () => {
+      const event = makeEvent({ threadTs: "t-uf", messageTs: "m-uf" });
+      vi.clearAllMocks();
+      mockExecute.mockRejectedValue(new Error("connection refused"));
+
+      updateEvent(event.id, { status: "complete" });
+
+      // In-memory should still be updated
+      const found = getEvents().find((e) => e.id === event.id);
+      expect(found?.status).toBe("complete");
+
+      await vi.waitFor(() => {
+        expect(mockLogError).toHaveBeenCalledWith(
+          "Failed to update event in DB",
+          expect.any(Error),
+        );
+      });
+    });
+
+    it("JSON-stringifies agentLog in UPDATE params", async () => {
+      const event = makeEvent({ threadTs: "t-jup", messageTs: "m-jup" });
+      vi.clearAllMocks();
+      mockExecute.mockResolvedValue([[], []]);
+
+      const agentLog = [{ timestamp: 1, type: "tool_use", summary: "test", data: {} }];
+      updateEvent(event.id, { agentLog } as any);
+
+      await vi.waitFor(() => {
+        expect(mockExecute).toHaveBeenCalledTimes(1);
+      });
+
+      const [, params] = mockExecute.mock.calls[0];
+      // First param is the agentLog value, last is the id
+      expect(params[0]).toBe(JSON.stringify(agentLog));
+    });
+
+    it("converts agentRetried=true to 1 in UPDATE params", async () => {
+      const event = makeEvent({ threadTs: "t-bup", messageTs: "m-bup" });
+      vi.clearAllMocks();
+      mockExecute.mockResolvedValue([[], []]);
+
+      updateEvent(event.id, { agentRetried: true });
+
+      await vi.waitFor(() => {
+        expect(mockExecute).toHaveBeenCalledTimes(1);
+      });
+
+      const [, params] = mockExecute.mock.calls[0];
+      expect(params[0]).toBe(1);
+    });
+
+    it("does NOT call execute when updates is empty", async () => {
+      const event = makeEvent({ threadTs: "t-empty", messageTs: "m-empty" });
+      vi.clearAllMocks();
+      mockExecute.mockResolvedValue([[], []]);
+
+      updateEvent(event.id, {});
+
+      await new Promise((r) => setTimeout(r, 10));
+      expect(mockExecute).not.toHaveBeenCalled();
+    });
+
+    it("does NOT call execute when all keys are unknown", async () => {
+      const event = makeEvent({ threadTs: "t-unk", messageTs: "m-unk" });
+      vi.clearAllMocks();
+      mockExecute.mockResolvedValue([[], []]);
+
+      updateEvent(event.id, { unknownKey: "value" } as any);
+
+      await new Promise((r) => setTimeout(r, 10));
+      expect(mockExecute).not.toHaveBeenCalled();
     });
   });
 
   describe("loadEvents", () => {
-    it("reads from disk and populates events array", async () => {
-      const storedEvents = [
-        {
-          id: "t-1-m-1",
-          threadTs: "t-1",
-          messageTs: "m-1",
-          channelId: "C1",
-          user: "U1",
-          text: "hello",
-          receivedAt: 1000,
-          routerResponseAt: null,
-          routerResponse: null,
-          routerNeedsAgent: null,
-          agentResponseAt: null,
-          agentResponse: null,
-          agentCostUsd: null,
-          agentTurns: null,
-          status: "complete",
-          error: null,
-          routerRequest: null,
-          routerRawResponse: null,
-          agentConfig: null,
-          agentLog: null,
-          feedback: null,
-          responseTs: null,
-        },
-      ];
-      mockReadFile.mockResolvedValue(JSON.stringify(storedEvents));
+    it("loads events from DB when available", async () => {
+      mockQuery.mockResolvedValue([
+        [
+          {
+            id: "t-db-m-db",
+            thread_ts: "t-db",
+            message_ts: "m-db",
+            channel_id: "C1",
+            user: "U1",
+            user_name: "Test User",
+            text: "from database",
+            received_at: 5000,
+            router_response_at: null,
+            router_response: null,
+            router_needs_agent: null,
+            agent_response_at: null,
+            agent_response: null,
+            agent_cost_usd: null,
+            agent_turns: null,
+            status: "complete",
+            error: null,
+            router_request: null,
+            router_raw_response: null,
+            agent_config: null,
+            agent_log: null,
+            agent_retried: 0,
+            feedback: null,
+            response_ts: null,
+          },
+        ],
+        [],
+      ]);
 
       await loadEvents();
 
       const events = getEvents();
       expect(events).toHaveLength(1);
-      expect(events[0].id).toBe("t-1-m-1");
-      expect(events[0].text).toBe("hello");
+      expect(events[0].id).toBe("t-db-m-db");
+      expect(events[0].text).toBe("from database");
+      expect(events[0].threadTs).toBe("t-db");
+      expect(events[0].channelId).toBe("C1");
+      expect(events[0].userName).toBe("Test User");
+      expect(mockLogInfo).toHaveBeenCalledWith("Loaded 1 events from database");
     });
 
-    it("handles missing file gracefully (ENOENT)", async () => {
-      const error = new Error("ENOENT") as NodeJS.ErrnoException;
-      error.code = "ENOENT";
-      mockReadFile.mockRejectedValue(error);
+    it("converts snake_case DB rows to camelCase MessageEvent objects", async () => {
+      mockQuery.mockResolvedValue([
+        [
+          {
+            id: "t-c-m-c",
+            thread_ts: "t-c",
+            message_ts: "m-c",
+            channel_id: "C99",
+            user: "U99",
+            user_name: null,
+            text: "conversion test",
+            received_at: 1000,
+            router_response_at: 2000,
+            router_response: "quick reply",
+            router_needs_agent: 1,
+            agent_response_at: 3000,
+            agent_response: "agent reply",
+            agent_cost_usd: "0.0500",
+            agent_turns: 3,
+            status: "complete",
+            error: null,
+            router_request: JSON.stringify({ model: "haiku" }),
+            router_raw_response: JSON.stringify({ text: "hi" }),
+            agent_config: JSON.stringify({ maxTurns: 10 }),
+            agent_log: JSON.stringify([{ type: "tool_use" }]),
+            agent_retried: 1,
+            feedback: "positive",
+            response_ts: "1234.5678",
+          },
+        ],
+        [],
+      ]);
+
+      await loadEvents();
+
+      const event = getEvents()[0];
+      expect(event.threadTs).toBe("t-c");
+      expect(event.messageTs).toBe("m-c");
+      expect(event.channelId).toBe("C99");
+      expect(event.routerResponseAt).toBe(2000);
+      expect(event.routerResponse).toBe("quick reply");
+      expect(event.routerNeedsAgent).toBe(true);
+      expect(event.agentResponseAt).toBe(3000);
+      expect(event.agentResponse).toBe("agent reply");
+      expect(event.agentCostUsd).toBeCloseTo(0.05);
+      expect(event.agentTurns).toBe(3);
+      expect(event.agentRetried).toBe(true);
+      expect(event.feedback).toBe("positive");
+      expect(event.responseTs).toBe("1234.5678");
+      expect(event.routerRequest).toEqual({ model: "haiku" });
+      expect(event.routerRawResponse).toEqual({ text: "hi" });
+      expect(event.agentConfig).toEqual({ maxTurns: 10 });
+      expect(event.agentLog).toEqual([{ type: "tool_use" }]);
+    });
+
+    it("falls back gracefully when DB is unavailable", async () => {
+      mockQuery.mockRejectedValue(new Error("connection refused"));
 
       await loadEvents();
 
       expect(getEvents()).toHaveLength(0);
-    });
-
-    it("handles invalid JSON gracefully", async () => {
-      mockReadFile.mockResolvedValue("not valid json{{{");
-
-      await loadEvents();
-
-      expect(getEvents()).toHaveLength(0);
-    });
-
-    it("handles non-array JSON gracefully", async () => {
-      mockReadFile.mockResolvedValue(JSON.stringify({ not: "an array" }));
-
-      await loadEvents();
-
-      expect(getEvents()).toHaveLength(0);
-    });
-
-    it("respects MAX_EVENTS cap of 500", async () => {
-      const bigArray = Array.from({ length: 600 }, (_, i) => ({
-        id: `id-${i}`,
-        threadTs: `t-${i}`,
-        messageTs: `m-${i}`,
-        channelId: "C1",
-        user: "U1",
-        text: `msg ${i}`,
-        receivedAt: 1000 + i,
-        routerResponseAt: null,
-        routerResponse: null,
-        routerNeedsAgent: null,
-        agentResponseAt: null,
-        agentResponse: null,
-        agentCostUsd: null,
-        agentTurns: null,
-        status: "complete",
-        error: null,
-        routerRequest: null,
-        routerRawResponse: null,
-        agentConfig: null,
-        agentLog: null,
-        feedback: null,
-        responseTs: null,
-      }));
-      mockReadFile.mockResolvedValue(JSON.stringify(bigArray));
-
-      await loadEvents();
-
-      expect(getEvents()).toHaveLength(500);
-    });
-  });
-
-  describe("persistToDisk error handling", () => {
-    it("logs error when writeFile rejects", async () => {
-      mockWriteFile.mockRejectedValue(new Error("disk full"));
-
-      makeEvent({ threadTs: "t-err", messageTs: "m-err" });
-      await vi.advanceTimersByTimeAsync(2000);
-
       expect(mockLogError).toHaveBeenCalledWith(
-        "Failed to persist events to disk",
+        "Failed to load events from DB",
         expect.any(Error),
       );
     });
-  });
 
-  describe("debounce timer reset", () => {
-    it("resets the debounce timer when a new event is created", async () => {
-      makeEvent({ threadTs: "t-d1", messageTs: "m-d1" });
+    it("uses parameterized LIMIT in DB query", async () => {
+      await loadEvents();
 
-      // Advance 1900ms (just under debounce threshold)
-      await vi.advanceTimersByTimeAsync(1900);
-      expect(mockWriteFile).not.toHaveBeenCalled();
-
-      // Create another event, which should reset the timer
-      makeEvent({ threadTs: "t-d2", messageTs: "m-d2" });
-
-      // Advance 1900ms more (3800ms total, but only 1900ms from last event)
-      await vi.advanceTimersByTimeAsync(1900);
-      expect(mockWriteFile).not.toHaveBeenCalled();
-
-      // Advance 200ms more (2100ms from last event)
-      await vi.advanceTimersByTimeAsync(200);
-      expect(mockWriteFile).toHaveBeenCalledTimes(1);
+      const [sql, params] = mockQuery.mock.calls[0];
+      expect(sql).toContain("LIMIT ?");
+      expect(params).toEqual([500]);
     });
-  });
 
-  describe("loadEvents replaces in-memory events", () => {
-    it("replaces existing in-memory events with disk data", async () => {
+    it("replaces existing in-memory events with DB data", async () => {
       // Add an event to memory
       makeEvent({ threadTs: "t-mem", messageTs: "m-mem", text: "in memory" });
+      vi.clearAllMocks();
 
-      // Load different events from disk
-      const diskEvents = [
-        {
-          id: "t-disk-m-disk",
-          threadTs: "t-disk",
-          messageTs: "m-disk",
-          channelId: "C9",
-          user: "U9",
-          text: "from disk",
-          receivedAt: 5000,
-          routerResponseAt: null,
-          routerResponse: null,
-          routerNeedsAgent: null,
-          agentResponseAt: null,
-          agentResponse: null,
-          agentCostUsd: null,
-          agentTurns: null,
-          status: "complete",
-          error: null,
-          routerRequest: null,
-          routerRawResponse: null,
-          agentConfig: null,
-          agentLog: null,
-          feedback: null,
-          responseTs: null,
-        },
-      ];
-      mockReadFile.mockResolvedValue(JSON.stringify(diskEvents));
+      mockQuery.mockResolvedValue([
+        [
+          {
+            id: "t-db2-m-db2",
+            thread_ts: "t-db2",
+            message_ts: "m-db2",
+            channel_id: "C9",
+            user: "U9",
+            user_name: null,
+            text: "from db",
+            received_at: 5000,
+            router_response_at: null,
+            router_response: null,
+            router_needs_agent: null,
+            agent_response_at: null,
+            agent_response: null,
+            agent_cost_usd: null,
+            agent_turns: null,
+            status: "complete",
+            error: null,
+            router_request: null,
+            router_raw_response: null,
+            agent_config: null,
+            agent_log: null,
+            agent_retried: 0,
+            feedback: null,
+            response_ts: null,
+          },
+        ],
+        [],
+      ]);
 
       await loadEvents();
 
       const events = getEvents();
       expect(events).toHaveLength(1);
-      expect(events[0].id).toBe("t-disk-m-disk");
-      expect(events[0].text).toBe("from disk");
+      expect(events[0].id).toBe("t-db2-m-db2");
     });
-  });
 
-  describe("resetEvents clears persist timer", () => {
-    it("prevents pending persist from firing after reset", async () => {
-      makeEvent({ threadTs: "t-reset", messageTs: "m-reset" });
+    it("returns null for malformed JSON in DB rows instead of crashing", async () => {
+      mockQuery.mockResolvedValue([
+        [
+          {
+            id: "t-bad-m-bad",
+            thread_ts: "t-bad",
+            message_ts: "m-bad",
+            channel_id: "C1",
+            user: "U1",
+            user_name: null,
+            text: "bad json test",
+            received_at: 1000,
+            router_response_at: null,
+            router_response: null,
+            router_needs_agent: null,
+            agent_response_at: null,
+            agent_response: null,
+            agent_cost_usd: null,
+            agent_turns: null,
+            status: "received",
+            error: null,
+            router_request: "{not valid json",
+            router_raw_response: null,
+            agent_config: null,
+            agent_log: null,
+            agent_retried: 0,
+            feedback: null,
+            response_ts: null,
+          },
+        ],
+        [],
+      ]);
 
-      // Immediately reset before debounce fires
-      resetEvents();
+      await loadEvents();
 
-      await vi.advanceTimersByTimeAsync(2000);
+      const event = getEvents()[0];
+      expect(event.routerRequest).toBeNull();
+      expect(mockLogWarn).toHaveBeenCalledWith(
+        expect.stringContaining("router_request"),
+        expect.any(Error),
+      );
+    });
 
-      // writeFile should NOT have been called because resetEvents cleared the timer
-      expect(mockWriteFile).not.toHaveBeenCalled();
+    it("converts DECIMAL string agent_cost_usd to number", async () => {
+      mockQuery.mockResolvedValue([
+        [
+          {
+            id: "t-dec-m-dec",
+            thread_ts: "t-dec",
+            message_ts: "m-dec",
+            channel_id: "C1",
+            user: "U1",
+            user_name: null,
+            text: "decimal test",
+            received_at: 1000,
+            router_response_at: null,
+            router_response: null,
+            router_needs_agent: null,
+            agent_response_at: null,
+            agent_response: null,
+            agent_cost_usd: "0.0500",
+            agent_turns: null,
+            status: "complete",
+            error: null,
+            router_request: null,
+            router_raw_response: null,
+            agent_config: null,
+            agent_log: null,
+            agent_retried: 0,
+            feedback: null,
+            response_ts: null,
+          },
+        ],
+        [],
+      ]);
+
+      await loadEvents();
+
+      const event = getEvents()[0];
+      expect(event.agentCostUsd).toBe(0.05);
+      expect(typeof event.agentCostUsd).toBe("number");
     });
   });
 });

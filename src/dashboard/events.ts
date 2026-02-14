@@ -1,7 +1,6 @@
-import { readFile, writeFile, mkdir, rename } from "fs/promises";
-import { dirname } from "path";
-import { config } from "../config.js";
 import { createLogger } from "../logger.js";
+import { persistEventToDb, updateEventInDb, loadEventsFromDb } from "./events-db.js";
+import type { AgentLogEntry } from "../types.js";
 
 const log = createLogger("events");
 
@@ -26,51 +25,38 @@ export interface MessageEvent {
   routerRequest: Record<string, unknown> | null;
   routerRawResponse: Record<string, unknown> | null;
   agentConfig: Record<string, unknown> | null;
-  agentLog: import("../types.js").AgentLogEntry[] | null;
+  agentLog: AgentLogEntry[] | null;
   agentRetried: boolean;
   feedback: "positive" | "negative" | null;
   responseTs: string | null;
 }
 
+export interface AnalyticsSummary {
+  totalMessages: number;
+  completedMessages: number;
+  routerOnlyMessages: number;
+  agentMessages: number;
+  avgRouterTimeMs: number;
+  avgAgentTimeMs: number;
+  avgTotalTimeMs: number;
+  totalCostUsd: number;
+  errorCount: number;
+  feedbackPositive: number;
+  feedbackNegative: number;
+  feedbackRate: number;
+}
+
 const events: MessageEvent[] = [];
 const MAX_EVENTS = 500;
-const PERSIST_DEBOUNCE_MS = 2000;
 
 type SSEClient = (data: string) => void;
 const sseClients: Set<SSEClient> = new Set();
 
-let persistTimer: ReturnType<typeof setTimeout> | null = null;
-
-function schedulePersist(): void {
-  if (persistTimer !== null) clearTimeout(persistTimer);
-  persistTimer = setTimeout(() => {
-    persistTimer = null;
-    persistToDisk();
-  }, PERSIST_DEBOUNCE_MS);
-}
-
-export async function persistToDisk(): Promise<void> {
-  try {
-    const filePath = config.eventsFile;
-    const tmpPath = `${filePath}.tmp`;
-    await mkdir(dirname(filePath), { recursive: true });
-    await writeFile(tmpPath, JSON.stringify(events));
-    await rename(tmpPath, filePath);
-  } catch (error) {
-    log.error("Failed to persist events to disk", error);
-  }
-}
-
 export async function loadEvents(): Promise<void> {
-  try {
-    const data = await readFile(config.eventsFile, "utf-8");
-    const parsed = JSON.parse(data);
-    if (!Array.isArray(parsed)) return;
-    const capped = parsed.slice(0, MAX_EVENTS);
-    events.splice(0, events.length, ...capped);
-    log.info(`Loaded ${events.length} events from disk`);
-  } catch {
-    // File doesn't exist or is invalid — start with empty array
+  const loaded = await loadEventsFromDb(MAX_EVENTS);
+  events.splice(0, events.length, ...loaded);
+  if (loaded.length > 0) {
+    log.info(`Loaded ${events.length} events from database`);
   }
 }
 
@@ -107,7 +93,7 @@ export function createEvent(partial: {
   events.unshift(event);
   if (events.length > MAX_EVENTS) events.pop();
   broadcast(event);
-  schedulePersist();
+  persistEventToDb(event);
   return event;
 }
 
@@ -119,7 +105,7 @@ export function updateEvent(
   if (!event) return;
   Object.assign(event, updates);
   broadcast(event);
-  schedulePersist();
+  updateEventInDb(id, updates);
 }
 
 export function getEvents(): MessageEvent[] {
@@ -134,7 +120,7 @@ export function getResponseTimeMs(event: MessageEvent): number {
   return (event.agentResponseAt || event.routerResponseAt || event.receivedAt) - event.receivedAt;
 }
 
-export function getAnalytics() {
+export function getAnalytics(): AnalyticsSummary {
   const completed = events.filter((e) => e.status === "complete");
   const withAgent = completed.filter((e) => e.agentResponseAt !== null);
   const routerOnly = completed.filter((e) => e.agentResponseAt === null);
@@ -193,8 +179,4 @@ export function removeSSEClient(client: SSEClient): void {
 export function resetEvents(): void {
   events.length = 0;
   sseClients.clear();
-  if (persistTimer !== null) {
-    clearTimeout(persistTimer);
-    persistTimer = null;
-  }
 }

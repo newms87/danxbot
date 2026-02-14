@@ -1,6 +1,5 @@
 import { stopSlackListener, getInFlightPlaceholders } from "./slack/listener.js";
 import { stopThreadCleanup } from "./threads.js";
-import { persistToDisk } from "./dashboard/events.js";
 import { closePool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
 import type { WebClient } from "@slack/web-api";
@@ -63,10 +62,6 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
   if (threadCleanupInterval) {
     stopThreadCleanup(threadCleanupInterval);
   }
-
-  // Persist events to disk
-  log.info("Persisting events to disk...");
-  await persistToDisk();
 
   // Close database connection pool
   await closePool();
