@@ -599,6 +599,40 @@ describe("feedback reactions", () => {
     expect(mockUpdateEvent).toHaveBeenCalledWith("dash-2", { feedback: "negative" });
   });
 
+  it("records positive feedback on +1 reaction alias", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+    const mockDashEvent = { id: "dash-alias-pos" };
+    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
+
+    await reactionHandler({
+      event: {
+        reaction: "+1",
+        user: "U-HUMAN",
+        item: { channel: "C-TEST", ts: "1234.5678" },
+      },
+    });
+
+    expect(mockFindEventByResponseTs).toHaveBeenCalledWith("1234.5678");
+    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-alias-pos", { feedback: "positive" });
+  });
+
+  it("records negative feedback on -1 reaction alias", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+    const mockDashEvent = { id: "dash-alias-neg" };
+    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
+
+    await reactionHandler({
+      event: {
+        reaction: "-1",
+        user: "U-HUMAN",
+        item: { channel: "C-TEST", ts: "5678.1234" },
+      },
+    });
+
+    expect(mockFindEventByResponseTs).toHaveBeenCalledWith("5678.1234");
+    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-alias-neg", { feedback: "negative" });
+  });
+
   it("ignores reactions other than thumbsup/thumbsdown", async () => {
     const reactionHandler = capturedEventHandlers["reaction_added"];
 

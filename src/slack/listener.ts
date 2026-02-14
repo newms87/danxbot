@@ -431,16 +431,22 @@ export async function startSlackListener(): Promise<void> {
     }
   });
 
+  const positiveReactions = new Set(["thumbsup", "+1"]);
+  const negativeReactions = new Set(["thumbsdown", "-1"]);
+
   app.event("reaction_added", async ({ event }) => {
-    if (event.reaction !== "thumbsup" && event.reaction !== "thumbsdown") return;
+    const isPositive = positiveReactions.has(event.reaction);
+    const isNegative = negativeReactions.has(event.reaction);
+    if (!isPositive && !isNegative) return;
     if (!("channel" in event.item) || event.item.channel !== config.slack.channelId) return;
     if (botUserId && event.user === botUserId) return;
 
     const dashEvent = findEventByResponseTs(event.item.ts);
     if (!dashEvent) return;
 
-    const feedback = event.reaction === "thumbsup" ? "positive" : "negative";
+    const feedback = isPositive ? "positive" : "negative";
     updateEvent(dashEvent.id, { feedback });
+    log.info(`Feedback recorded: ${feedback} for event ${dashEvent.id} (reaction: ${event.reaction})`);
   });
 
   await app.start();
