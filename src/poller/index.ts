@@ -15,7 +15,7 @@ function log(message: string): void {
   console.log(`[POLLER ${time}] ${message}`);
 }
 
-async function poll(): Promise<void> {
+export async function poll(): Promise<void> {
   if (teamRunning) {
     return;
   }
@@ -67,7 +67,7 @@ async function poll(): Promise<void> {
   });
 }
 
-function shutdown(): void {
+export function shutdown(): void {
   log("Shutting down...");
 
   if (intervalId) {
@@ -82,11 +82,34 @@ function shutdown(): void {
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+export function start(): void {
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
-const intervalSeconds = config.pollerIntervalMs / 1000;
-log(`Started — polling every ${intervalSeconds}s`);
+  const intervalSeconds = config.pollerIntervalMs / 1000;
+  log(`Started — polling every ${intervalSeconds}s`);
 
-poll();
-intervalId = setInterval(poll, config.pollerIntervalMs);
+  poll();
+  intervalId = setInterval(poll, config.pollerIntervalMs);
+}
+
+/** Reset module state for testing. Do not use in production. */
+export function _resetForTesting(): void {
+  teamRunning = false;
+  childProcess = null;
+  if (intervalId) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+}
+
+// Auto-start when run as the direct entrypoint.
+// First condition: standard Node.js ESM check.
+// Second condition: tsx rewrites import.meta.url, so fall back to argv path match.
+const isDirectEntrypoint =
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.endsWith("src/poller/index.ts");
+
+if (isDirectEntrypoint) {
+  start();
+}
