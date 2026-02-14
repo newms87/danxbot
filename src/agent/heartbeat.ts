@@ -12,15 +12,70 @@ const log = createLogger("heartbeat");
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
-const HEARTBEAT_SYSTEM_PROMPT = [
+/**
+ * Curated list of standard Slack emoji shortcodes (bare names, no colons).
+ * The heartbeat prompt constrains Haiku to ONLY choose from this list
+ * so we never get broken/invisible emojis in Slack messages.
+ */
+export const VALID_SLACK_EMOJIS = [
+  // Searching/working
+  "mag",
+  "mag_right",
+  "hourglass_flowing_sand",
+  "hourglass",
+  "gear",
+  "wrench",
+  "hammer_and_wrench",
+  "microscope",
+  // Thinking
+  "thinking_face",
+  "brain",
+  "bulb",
+  "monocle_face",
+  // Progress/positive
+  "rocket",
+  "zap",
+  "fire",
+  "sparkles",
+  "star",
+  "tada",
+  "white_check_mark",
+  "muscle",
+  // Humor/waiting
+  "sweat_smile",
+  "eyes",
+  "coffee",
+  "sleuth_or_spy",
+  "stopwatch",
+  "turtle",
+  "snail",
+  // Alert/error
+  "warning",
+  "rotating_light",
+  "boom",
+  "skull",
+  "x",
+  // Misc fun
+  "robot_face",
+  "crystal_ball",
+  "scroll",
+  "books",
+  "flashlight",
+  "compass",
+];
+
+const VALID_SLACK_EMOJI_SET = new Set(VALID_SLACK_EMOJIS);
+const emojiList = VALID_SLACK_EMOJIS.map((e) => `:${e}:`).join(", ");
+
+export const HEARTBEAT_SYSTEM_PROMPT = [
   "You are Flytebot's orchestrator. You dispatched an AI agent to research a question",
   "and you're giving the user status updates in Slack while they wait.",
   "",
   "Return JSON only — no markdown, no code fences, no explanation:",
-  '{"emoji": ":detective:", "color": "#e67e22", "text": "...", "stop": false}',
+  '{"emoji": ":mag:", "color": "#e67e22", "text": "...", "stop": false}',
   "",
   "Fields:",
-  '- emoji: A Slack emoji shortcode that fits the mood (e.g. :mag:, :hourglass:, :sweat_smile:, :tada:)',
+  `- emoji: Pick ONLY from this list (do NOT invent others): ${emojiList}`,
   "- color: A hex color for the Slack attachment sidebar that matches the mood",
   "- text: A 1-sentence status update, max ~20 words. Plain text, no markdown.",
   '- stop: Set to true ONLY when the agent appears to have crashed or fatally errored.',
@@ -128,8 +183,14 @@ export async function generateHeartbeatMessage(
 
     const parsed = parseJsonResponse(response);
 
+    const rawEmoji = String(parsed.emoji || HEARTBEAT_FALLBACK.emoji);
+    const bareName = rawEmoji.replace(/^:|:$/g, "");
+    const validatedEmoji = VALID_SLACK_EMOJI_SET.has(bareName)
+      ? `:${bareName}:`
+      : HEARTBEAT_FALLBACK.emoji;
+
     return {
-      emoji: String(parsed.emoji || HEARTBEAT_FALLBACK.emoji),
+      emoji: validatedEmoji,
       color: String(parsed.color || HEARTBEAT_FALLBACK.color),
       text: String(parsed.text || HEARTBEAT_FALLBACK.text),
       stop: parsed.stop === true,
