@@ -47,12 +47,10 @@ vi.mock("./heartbeat-manager.js", () => {
 
 const mockRunRouter = vi.fn();
 const mockRunAgent = vi.fn();
-const mockRunFastAgent = vi.fn();
 
 vi.mock("../agent/agent.js", () => ({
   runRouter: mockRunRouter,
   runAgent: mockRunAgent,
-  runFastAgent: mockRunFastAgent,
 }));
 
 const mockCreateEvent = vi.fn().mockReturnValue({ id: "test-id" });
@@ -304,23 +302,24 @@ describe("happy paths", () => {
 });
 
 // ============================================================
-// Fast agent (simple complexity)
+// Complexity routing
 // ============================================================
 
-describe("fast agent path", () => {
-  it("uses fast agent for simple complexity", async () => {
+describe("complexity routing", () => {
+  it("uses very_low fast path for very_low complexity", async () => {
     const routerResult = makeRouterResult({
       quickResponse: "Looking into it...",
       needsAgent: true,
-      complexity: "simple" as const,
+      complexity: "very_low",
     });
     mockRunRouter.mockResolvedValue(routerResult);
-    mockRunFastAgent.mockResolvedValue(makeAgentResponse({ text: "Quick answer." }));
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "Quick answer." }));
 
     await handler({ message: makeSlackMessage(), client });
 
-    expect(mockRunFastAgent).toHaveBeenCalledOnce();
-    expect(mockRunAgent).not.toHaveBeenCalled();
+    // Agent called with very_low complexity
+    expect(mockRunAgent).toHaveBeenCalledOnce();
+    expect(mockRunAgent.mock.calls[0][5]).toBe("very_low");
 
     // Placeholder updated with response
     expect(client.chat.update).toHaveBeenCalledWith(
@@ -340,25 +339,25 @@ describe("fast agent path", () => {
     );
   });
 
-  it("falls back to full agent when fast agent fails", async () => {
+  it("escalates to medium when very_low fails", async () => {
     const routerResult = makeRouterResult({
       quickResponse: "Looking...",
       needsAgent: true,
-      complexity: "simple" as const,
+      complexity: "very_low",
     });
     mockRunRouter.mockResolvedValue(routerResult);
-    mockRunFastAgent.mockRejectedValue(new Error("Fast agent crashed"));
-    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "Full agent answer." }));
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("Agent crashed"))
+      .mockResolvedValueOnce(makeAgentResponse({ text: "Full agent answer." }));
 
     await handler({ message: makeSlackMessage(), client });
 
-    // Fast agent was attempted
-    expect(mockRunFastAgent).toHaveBeenCalledOnce();
+    // First call: very_low, second call: medium (escalated)
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+    expect(mockRunAgent.mock.calls[0][5]).toBe("very_low");
+    expect(mockRunAgent.mock.calls[1][5]).toBe("medium");
 
-    // Fell back to full agent
-    expect(mockRunAgent).toHaveBeenCalledOnce();
-
-    // Final response from full agent
+    // Final response from medium agent
     expect(client.chat.update).toHaveBeenCalledWith(
       expect.objectContaining({
         text: "Full agent answer.",
@@ -367,35 +366,66 @@ describe("fast agent path", () => {
     );
   });
 
-  it("uses full agent for complex complexity", async () => {
+  it("uses full path with heartbeat for low complexity", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Let me check...",
+      needsAgent: true,
+      complexity: "low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "Low answer." }));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called with low complexity via the full path
+    expect(mockRunAgent).toHaveBeenCalledOnce();
+    expect(mockRunAgent.mock.calls[0][5]).toBe("low");
+  });
+
+  it("uses full path with heartbeat for high complexity", async () => {
     const routerResult = makeRouterResult({
       quickResponse: "Let me investigate...",
       needsAgent: true,
-      complexity: "complex" as const,
+      complexity: "high",
     });
     mockRunRouter.mockResolvedValue(routerResult);
     mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "Detailed answer." }));
 
     await handler({ message: makeSlackMessage(), client });
 
-    expect(mockRunFastAgent).not.toHaveBeenCalled();
     expect(mockRunAgent).toHaveBeenCalledOnce();
+    expect(mockRunAgent.mock.calls[0][5]).toBe("high");
+  });
+
+  it("passes complexity to runAgent on the full path", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "This will take a moment...",
+      needsAgent: true,
+      complexity: "very_high",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "Deep answer." }));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockRunAgent).toHaveBeenCalledOnce();
+    expect(mockRunAgent.mock.calls[0][5]).toBe("very_high");
   });
 
   it("tracks routerComplexity in dashboard events", async () => {
     const routerResult = makeRouterResult({
       quickResponse: "Looking...",
       needsAgent: true,
-      complexity: "simple" as const,
+      complexity: "very_low",
     });
     mockRunRouter.mockResolvedValue(routerResult);
-    mockRunFastAgent.mockResolvedValue(makeAgentResponse());
+    mockRunAgent.mockResolvedValue(makeAgentResponse());
 
     await handler({ message: makeSlackMessage(), client });
 
     expect(mockUpdateEvent).toHaveBeenCalledWith(
       "test-id",
-      expect.objectContaining({ routerComplexity: "simple" }),
+      expect.objectContaining({ routerComplexity: "very_low" }),
     );
   });
 });

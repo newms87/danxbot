@@ -6,7 +6,7 @@ import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
 import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
 import { resolveUserName } from "./user-cache.js";
-import { runRouter, runAgent, runFastAgent } from "../agent/agent.js";
+import { runRouter, runAgent } from "../agent/agent.js";
 import { notifyError } from "../errors/trello-notifier.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
@@ -175,10 +175,17 @@ export async function startSlackListener(): Promise<void> {
           })
           .catch(() => {});
 
-        // Simple questions: try fast agent first, fall back to full agent
-        if (routerResult.complexity === "simple") {
+        // very_low: No heartbeat, no timeout race, no retries. Escalate to medium on failure.
+        if (routerResult.complexity === "very_low") {
           try {
-            const response = await runFastAgent(message.text, thread.messages);
+            const response = await runAgent(
+              message.text,
+              thread.sessionId,
+              undefined,
+              undefined,
+              thread.messages,
+              "very_low",
+            );
 
             // Post placeholder, update with response
             const placeholder = await client.chat.postMessage({
@@ -213,6 +220,11 @@ export async function startSlackListener(): Promise<void> {
               agentConfig: response.config,
               agentLog: response.log,
             });
+
+            // Update session ID for conversation continuity
+            if (response.sessionId) {
+              updateSessionId(thread, response.sessionId);
+            }
 
             const slackText = markdownToSlackMrkdwn(response.text);
             const chunks = splitMessage(slackText);
@@ -250,15 +262,17 @@ export async function startSlackListener(): Promise<void> {
               .catch(() => {});
 
             log.info(
-              `Fast agent responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
+              `Agent (very_low) responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
             );
             return;
           } catch (fastError) {
             log.warn(
-              `Fast agent failed in thread ${threadTs}, falling back to full agent: ${
+              `Agent (very_low) failed in thread ${threadTs}, escalating to medium: ${
                 fastError instanceof Error ? fastError.message : String(fastError)
               }`,
             );
+            // Escalate: override complexity to medium for the full path below
+            routerResult.complexity = "medium";
             // Remove brain reaction — will be re-added by full agent path below
             await client.reactions
               .remove({ channel: message.channel, timestamp: message.ts, name: "brain" })
@@ -333,6 +347,7 @@ export async function startSlackListener(): Promise<void> {
                 (text) => hbManager.onStream(text),
                 (entry) => hbManager.onLogEntry(entry),
                 thread.messages,
+                routerResult.complexity,
               );
               const response = await Promise.race([agentPromise, timeoutPromise]);
 

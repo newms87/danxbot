@@ -141,7 +141,11 @@
                 <td class="px-4 py-2.5 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                   <template v-if="event.routerResponseAt">
                     {{ formatMs(event.routerResponseAt - event.receivedAt) }}
-                    <span v-if="event.routerNeedsAgent && event.routerComplexity === 'simple'" class="text-green-600 dark:text-green-400 ml-1">→ ⚡fast</span>
+                    <span v-if="event.routerNeedsAgent && event.routerComplexity === 'very_low'" class="text-green-600 dark:text-green-400 ml-1">⚡VL</span>
+                    <span v-else-if="event.routerNeedsAgent && event.routerComplexity === 'low'" class="text-green-600 dark:text-green-400 ml-1">⚡L</span>
+                    <span v-else-if="event.routerNeedsAgent && event.routerComplexity === 'medium'" class="text-yellow-600 dark:text-yellow-400 ml-1">→ M</span>
+                    <span v-else-if="event.routerNeedsAgent && event.routerComplexity === 'high'" class="text-purple-600 dark:text-purple-400 ml-1">→ H</span>
+                    <span v-else-if="event.routerNeedsAgent && event.routerComplexity === 'very_high'" class="text-red-600 dark:text-red-400 ml-1">→ VH</span>
                     <span v-else-if="event.routerNeedsAgent" class="text-purple-600 dark:text-purple-400 ml-1">→ agent</span>
                   </template>
                   <span v-else-if="event.status === 'routing'" class="text-yellow-600 dark:text-yellow-400">...</span>

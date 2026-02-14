@@ -4,7 +4,7 @@ import { createLogger } from "../logger.js";
 import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST, FEATURE_EXAMPLES } from "./features.js";
-import type { RouterResult, ThreadMessage } from "../types.js";
+import type { ComplexityLevel, RouterResult, ThreadMessage } from "../types.js";
 
 const log = createLogger("router");
 
@@ -16,7 +16,7 @@ const ROUTER_SYSTEM_PROMPT = [
   "You receive the full conversation thread, so you can reference earlier messages.",
   "",
   "Respond with JSON only (no markdown, no code fences):",
-  '{"quickResponse": "...", "needsAgent": true/false, "complexity": "simple"|"complex", "reason": "..."}',
+  '{"quickResponse": "...", "needsAgent": true/false, "complexity": "very_low"|"low"|"medium"|"high"|"very_high", "reason": "..."}',
   "",
   "quickResponse: A short, friendly reply to the user. For greetings, greet them back.",
   "For questions, acknowledge the question and say you're looking into it.",
@@ -28,12 +28,13 @@ const ROUTER_SYSTEM_PROMPT = [
   "codebase, querying the database, or deep platform knowledge. false if your",
   "quickResponse fully handles it (greetings, small talk, simple acknowledgments).",
   "",
-  'complexity: "simple" or "complex". This determines which agent handles the question.',
-  '- simple: Can be answered in 1-2 tool calls. Direct data lookups, counts, listing',
-  '  records, "what table stores X", "show me the model for Y", simple schema questions.',
-  '- complex: Requires multi-step reasoning, cross-referencing multiple files/tables,',
-  "  debugging, understanding workflows, anything requiring exploration or judgment.",
-  'When needsAgent is false, set complexity to "simple".',
+  "complexity: Determines the agent tier. Pick the LOWEST level that can handle the question.",
+  '- very_low: Single direct lookup, 1 tool call. "How many campaigns?", "Show me supplier X", "What\'s the schema for orders?"',
+  '- low: 1-3 tool calls, straightforward. "Show recent campaigns with buyer names", "What columns does the users table have?"',
+  '- medium: Moderate exploration, 3-6 tool calls. "How does campaign filtering work?", "What triggers a campaign status change?"',
+  '- high: Multi-step investigation, cross-referencing. "Why might a campaign show wrong status?", "Walk me through the order approval flow"',
+  '- very_high: Deep exploration across multiple domains. "Explain the entire billing lifecycle end-to-end", "Compare SSP vs direct campaign handling"',
+  'When needsAgent is false, set complexity to "very_low".',
   "",
   "reason: Brief explanation of your routing decision.",
   "",
@@ -42,7 +43,7 @@ const ROUTER_SYSTEM_PROMPT = [
   "- Set quickResponse to a friendly message that picks 2-3 relevant features from the list below",
   "- Include 1-2 example questions they could try",
   "- Set needsAgent to false",
-  '- Set complexity to "simple"',
+  '- Set complexity to "very_low"',
   "- Keep it concise — 2-3 bullet points max, not the full feature list",
   "",
   "## Available Features",
@@ -110,10 +111,16 @@ export async function runRouter(
     const response = await anthropic.messages.create(request);
     const parsed = parseJsonResponse(response);
 
+    const VALID_LEVELS = new Set<ComplexityLevel>(["very_low", "low", "medium", "high", "very_high"]);
+    const rawComplexity = String(parsed.complexity || "");
+    const complexity: ComplexityLevel = VALID_LEVELS.has(rawComplexity as ComplexityLevel)
+      ? (rawComplexity as ComplexityLevel)
+      : "high";
+
     return {
       quickResponse: String(parsed.quickResponse || ""),
       needsAgent: parsed.needsAgent === true,
-      complexity: parsed.complexity === "complex" ? "complex" : "simple",
+      complexity,
       reason: String(parsed.reason || ""),
       request: request as unknown as Record<string, unknown>,
       rawResponse: response as unknown as Record<string, unknown>,
@@ -125,7 +132,7 @@ export async function runRouter(
   return {
     quickResponse: "I'm having a moment — give me a sec and try again.",
     needsAgent: true,
-    complexity: "complex",
+    complexity: "very_high",
     reason: "router error",
     request: request as unknown as Record<string, unknown>,
     rawResponse: {},

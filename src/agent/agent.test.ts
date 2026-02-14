@@ -29,9 +29,15 @@ vi.mock("../config.js", () => ({
   config: {
     anthropic: { apiKey: "test-key" },
     agent: { model: "test-model", maxTurns: 5, maxBudgetUsd: 1.0, maxThinkingTokens: 8000, maxThreadMessages: 20 },
-    fastAgent: { model: "fast-model", maxTurns: 3, maxBudgetUsd: 0.10, maxThinkingTokens: 1024 },
     platform: { repoPath: "/test" },
     logsDir: "/test/logs",
+  },
+  COMPLEXITY_PROFILES: {
+    very_low:  { model: "claude-haiku-4-5",  maxTurns: 1,  maxBudgetUsd: 0.05, maxThinkingTokens: 2048,  systemPrompt: "fast" },
+    low:       { model: "claude-haiku-4-5",  maxTurns: 3,  maxBudgetUsd: 0.15, maxThinkingTokens: 4096,  systemPrompt: "fast" },
+    medium:    { model: "claude-sonnet-4-5", maxTurns: 6,  maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
+    high:      { model: "claude-sonnet-4-5", maxTurns: 10, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
+    very_high: { model: "claude-sonnet-4-5", maxTurns: 15, maxBudgetUsd: 2.00, maxThinkingTokens: 16384, systemPrompt: "full" },
   },
 }));
 
@@ -51,7 +57,6 @@ const {
   truncStr,
   runRouter,
   runAgent,
-  runFastAgent,
   generateHeartbeatMessage,
 } = await import("./agent.js");
 
@@ -581,14 +586,14 @@ describe("runAgent", () => {
 });
 
 // ============================================================
-// runFastAgent tests
+// runAgent with complexity parameter
 // ============================================================
 
-describe("runFastAgent", () => {
-  it("uses fast agent config (model, turns, budget)", async () => {
+describe("runAgent with complexity", () => {
+  it("uses very_low profile (Haiku, 1 turn, $0.05)", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
-        { type: "system", subtype: "init", session_id: "fast-1" },
+        { type: "system", subtype: "init", session_id: "vl-1" },
         {
           type: "result",
           subtype: "success",
@@ -601,23 +606,123 @@ describe("runFastAgent", () => {
       ]),
     );
 
-    await runFastAgent("show me recent campaigns");
+    await runAgent("how many campaigns?", null, undefined, undefined, [], "very_low");
 
     const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options.model).toBe("fast-model");
-    expect(callArgs.options.maxTurns).toBe(3);
-    expect(callArgs.options.maxBudgetUsd).toBe(0.10);
-    expect(callArgs.options.maxThinkingTokens).toBe(1024);
+    expect(callArgs.options.model).toBe("claude-haiku-4-5");
+    expect(callArgs.options.maxTurns).toBe(1);
+    expect(callArgs.options.maxBudgetUsd).toBe(0.05);
+    expect(callArgs.options.maxThinkingTokens).toBe(2048);
   });
 
-  it("does not persist session (one-shot)", async () => {
+  it("uses low profile (Haiku, 3 turns, $0.15)", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
-        { type: "system", subtype: "init", session_id: "fast-2" },
+        { type: "system", subtype: "init", session_id: "low-1" },
         {
           type: "result",
           subtype: "success",
           result: "Answer.",
+          total_cost_usd: 0.05,
+          num_turns: 2,
+          duration_ms: 500,
+          duration_api_ms: 400,
+        },
+      ]),
+    );
+
+    await runAgent("show recent campaigns", null, undefined, undefined, [], "low");
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.model).toBe("claude-haiku-4-5");
+    expect(callArgs.options.maxTurns).toBe(3);
+    expect(callArgs.options.maxBudgetUsd).toBe(0.15);
+    expect(callArgs.options.maxThinkingTokens).toBe(4096);
+  });
+
+  it("uses medium profile (Sonnet, 6 turns, $0.50)", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "med-1" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Answer.",
+          total_cost_usd: 0.20,
+          num_turns: 4,
+          duration_ms: 2000,
+          duration_api_ms: 1500,
+        },
+      ]),
+    );
+
+    await runAgent("how does filtering work?", null, undefined, undefined, [], "medium");
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.model).toBe("claude-sonnet-4-5");
+    expect(callArgs.options.maxTurns).toBe(6);
+    expect(callArgs.options.maxBudgetUsd).toBe(0.50);
+    expect(callArgs.options.maxThinkingTokens).toBe(8192);
+  });
+
+  it("uses very_high profile (Sonnet, 15 turns, $2.00)", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "vh-1" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Deep answer.",
+          total_cost_usd: 1.50,
+          num_turns: 12,
+          duration_ms: 30000,
+          duration_api_ms: 25000,
+        },
+      ]),
+    );
+
+    await runAgent("explain billing lifecycle", null, undefined, undefined, [], "very_high");
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.model).toBe("claude-sonnet-4-5");
+    expect(callArgs.options.maxTurns).toBe(15);
+    expect(callArgs.options.maxBudgetUsd).toBe(2.00);
+    expect(callArgs.options.maxThinkingTokens).toBe(16384);
+  });
+
+  it("uses config defaults when no complexity is provided", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "def-1" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Answer.",
+          total_cost_usd: 0.50,
+          num_turns: 5,
+          duration_ms: 5000,
+          duration_api_ms: 4000,
+        },
+      ]),
+    );
+
+    await runAgent("test", null);
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.model).toBe("test-model");
+    expect(callArgs.options.maxTurns).toBe(5);
+    expect(callArgs.options.maxBudgetUsd).toBe(1.0);
+    expect(callArgs.options.maxThinkingTokens).toBe(8000);
+  });
+
+  it("always persists sessions regardless of complexity", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "persist-1" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Quick answer.",
           total_cost_usd: 0.01,
           num_turns: 1,
           duration_ms: 100,
@@ -626,40 +731,17 @@ describe("runFastAgent", () => {
       ]),
     );
 
-    const result = await runFastAgent("quick question");
+    const result = await runAgent("quick question", null, undefined, undefined, [], "very_low");
 
     const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options.persistSession).toBe(false);
-    expect(result.sessionId).toBeNull();
+    expect(callArgs.options.persistSession).toBe(true);
+    expect(result.sessionId).toBe("persist-1");
   });
 
-  it("returns result text, cost, and turns", async () => {
+  it("prepends thread context for very_low complexity", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
-        { type: "system", subtype: "init", session_id: "fast-3" },
-        {
-          type: "result",
-          subtype: "success",
-          result: "Here are 5 recent campaigns.",
-          total_cost_usd: 0.02,
-          num_turns: 1,
-          duration_ms: 300,
-          duration_api_ms: 250,
-        },
-      ]),
-    );
-
-    const result = await runFastAgent("show me recent campaigns");
-
-    expect(result.text).toBe("Here are 5 recent campaigns.");
-    expect(result.costUsd).toBe(0.02);
-    expect(result.turns).toBe(1);
-  });
-
-  it("prepends thread context when thread has multiple messages", async () => {
-    mockQuery.mockReturnValueOnce(
-      asyncIter([
-        { type: "system", subtype: "init", session_id: "fast-4" },
+        { type: "system", subtype: "init", session_id: "vl-ctx" },
         {
           type: "result",
           subtype: "success",
@@ -678,21 +760,23 @@ describe("runFastAgent", () => {
       msg("Show me more", false),
     ];
 
-    await runFastAgent("Show me more", thread);
+    await runAgent("Show me more", null, undefined, undefined, thread, "very_low");
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.prompt).toContain("[Thread context]");
     expect(callArgs.prompt).toContain("[Current message]");
   });
 
-  it("throws on SDK error", async () => {
+  it("throws on SDK error with complexity", async () => {
     mockQuery.mockReturnValueOnce(
       (async function* () {
-        throw new Error("Fast agent crashed");
+        throw new Error("Agent crashed");
       })(),
     );
 
-    await expect(runFastAgent("broken query")).rejects.toThrow("Fast agent crashed");
+    await expect(
+      runAgent("broken query", null, undefined, undefined, [], "very_low"),
+    ).rejects.toThrow("Agent crashed");
   });
 });
 

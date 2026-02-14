@@ -4,6 +4,7 @@ import type {
   RouterResult,
   AgentResponse,
   AgentLogEntry,
+  ComplexityLevel,
 } from "../../types.js";
 
 /**
@@ -37,12 +38,6 @@ export function makeConfig(overrides?: Record<string, unknown>) {
       timeoutMs: 300000,
       maxThreadMessages: 20,
       maxRetries: 1,
-    },
-    fastAgent: {
-      model: "fast-test-model",
-      maxTurns: 3,
-      maxBudgetUsd: 0.10,
-      maxThinkingTokens: 1024,
     },
     platform: {
       repoUrl: "https://test.example.com",
@@ -95,7 +90,7 @@ export function makeRouterResult(
   return {
     quickResponse: "Hello!",
     needsAgent: false,
-    complexity: "complex" as const,
+    complexity: "high" as ComplexityLevel,
     reason: "greeting",
     request: {},
     rawResponse: {},

@@ -1,6 +1,6 @@
 import { createLogger } from "../logger.js";
 import { persistEventToDb, updateEventInDb, loadEventsFromDb } from "./events-db.js";
-import type { AgentLogEntry } from "../types.js";
+import type { AgentLogEntry, ComplexityLevel } from "../types.js";
 
 const log = createLogger("events");
 
@@ -16,7 +16,7 @@ export interface MessageEvent {
   routerResponseAt: number | null;
   routerResponse: string | null;
   routerNeedsAgent: boolean | null;
-  routerComplexity: "simple" | "complex" | null;
+  routerComplexity: ComplexityLevel | null;
   agentResponseAt: number | null;
   agentResponse: string | null;
   agentCostUsd: number | null;

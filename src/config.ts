@@ -1,3 +1,13 @@
+import type { ComplexityLevel, ComplexityProfile } from "./types.js";
+
+export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
+  very_low:  { model: "claude-haiku-4-5",   maxTurns: 1,  maxBudgetUsd: 0.05, maxThinkingTokens: 2048,  systemPrompt: "fast" },
+  low:       { model: "claude-haiku-4-5",   maxTurns: 3,  maxBudgetUsd: 0.15, maxThinkingTokens: 4096,  systemPrompt: "fast" },
+  medium:    { model: "claude-sonnet-4-5",  maxTurns: 6,  maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
+  high:      { model: "claude-sonnet-4-5",  maxTurns: 10, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
+  very_high: { model: "claude-sonnet-4-5",  maxTurns: 15, maxBudgetUsd: 2.00, maxThinkingTokens: 16384, systemPrompt: "full" },
+};
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -44,12 +54,6 @@ export const config = {
     maxThreadMessages: parseInt(optional("MAX_THREAD_MESSAGES", "20"), 10),
     maxRetries: Math.max(0, parseInt(optional("AGENT_MAX_RETRIES", "1"), 10)),
   },
-  fastAgent: {
-    model: optional("FAST_AGENT_MODEL", "claude-haiku-4-5"),
-    maxTurns: parseInt(optional("FAST_AGENT_MAX_TURNS", "3"), 10),
-    maxBudgetUsd: parseFloat(optional("FAST_AGENT_MAX_BUDGET_USD", "0.10")),
-    maxThinkingTokens: parseInt(optional("FAST_AGENT_MAX_THINKING_TOKENS", "1024"), 10),
-  },
   github: {
     webhookSecret: process.env.GITHUB_WEBHOOK_SECRET || "",
   },
@@ -84,9 +88,6 @@ export function validateConfig(): void {
     { path: "agent.timeoutMs", value: config.agent.timeoutMs, min: 1, exclusive: false },
     { path: "agent.maxThreadMessages", value: config.agent.maxThreadMessages, min: 1, exclusive: false },
     { path: "agent.maxRetries", value: config.agent.maxRetries, min: 0, exclusive: false },
-    { path: "fastAgent.maxTurns", value: config.fastAgent.maxTurns, min: 1, exclusive: false },
-    { path: "fastAgent.maxBudgetUsd", value: config.fastAgent.maxBudgetUsd, min: 0, exclusive: true },
-    { path: "fastAgent.maxThinkingTokens", value: config.fastAgent.maxThinkingTokens, min: 1, exclusive: false },
     { path: "rateLimitSeconds", value: config.rateLimitSeconds, min: 1, exclusive: false },
   ];
 

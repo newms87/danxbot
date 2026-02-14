@@ -22,10 +22,20 @@ export interface AgentLogEntry {
   data: Record<string, unknown>;
 }
 
+export type ComplexityLevel = "very_low" | "low" | "medium" | "high" | "very_high";
+
+export interface ComplexityProfile {
+  model: string;
+  maxTurns: number;
+  maxBudgetUsd: number;
+  maxThinkingTokens: number;
+  systemPrompt: "fast" | "full";
+}
+
 export interface RouterResult {
   quickResponse: string;
   needsAgent: boolean;
-  complexity: "simple" | "complex";
+  complexity: ComplexityLevel;
   reason: string;
   request: Record<string, unknown>;
   rawResponse: Record<string, unknown>;
