@@ -1,6 +1,7 @@
 import { createServer } from "http";
 import { readFile } from "fs/promises";
 import { getEvents, getAnalytics, addSSEClient, removeSSEClient } from "./events.js";
+import { getHealthStatus } from "./health.js";
 
 const PORT = 5555;
 
@@ -12,6 +13,14 @@ export async function startDashboard(): Promise<void> {
 
     // CORS headers for local dev
     res.setHeader("Access-Control-Allow-Origin", "*");
+
+    if (url.pathname === "/health") {
+      const health = getHealthStatus();
+      const statusCode = health.status === "ok" ? 200 : 503;
+      res.writeHead(statusCode, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(health));
+      return;
+    }
 
     if (url.pathname === "/api/events") {
       res.writeHead(200, { "Content-Type": "application/json" });

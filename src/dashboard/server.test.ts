@@ -14,6 +14,12 @@ vi.mock("./events.js", () => ({
   removeSSEClient: (...args: unknown[]) => mockRemoveSSEClient(...args),
 }));
 
+// Mock health module
+const mockGetHealthStatus = vi.fn();
+vi.mock("./health.js", () => ({
+  getHealthStatus: (...args: unknown[]) => mockGetHealthStatus(...args),
+}));
+
 // Mock fs/promises for the HTML file read
 const mockReadFile = vi.fn();
 vi.mock("fs/promises", () => ({
@@ -208,5 +214,62 @@ describe("dashboard server", () => {
     await requestHandler(req, res);
 
     expect(res.setHeader).toHaveBeenCalledWith("Access-Control-Allow-Origin", "*");
+  });
+
+  it("GET /health returns 200 with JSON when healthy", async () => {
+    const healthData = {
+      status: "ok",
+      uptime_seconds: 120,
+      slack_connected: true,
+      events_count: 5,
+      memory_usage_mb: 64.3,
+    };
+    mockGetHealthStatus.mockReturnValue(healthData);
+
+    const { req, res } = createMockReqRes("GET", "/health");
+    await requestHandler(req, res);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(res._getHeaders()["content-type"]).toBe("application/json");
+    expect(JSON.parse(res._getBody())).toEqual(healthData);
+  });
+
+  it("GET /health returns 503 when degraded", async () => {
+    const healthData = {
+      status: "degraded",
+      uptime_seconds: 120,
+      slack_connected: false,
+      events_count: 0,
+      memory_usage_mb: 64.3,
+    };
+    mockGetHealthStatus.mockReturnValue(healthData);
+
+    const { req, res } = createMockReqRes("GET", "/health");
+    await requestHandler(req, res);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(res._getHeaders()["content-type"]).toBe("application/json");
+    expect(JSON.parse(res._getBody())).toEqual(healthData);
+  });
+
+  it("GET /health response includes all required fields", async () => {
+    const healthData = {
+      status: "ok",
+      uptime_seconds: 60,
+      slack_connected: true,
+      events_count: 10,
+      memory_usage_mb: 50.1,
+    };
+    mockGetHealthStatus.mockReturnValue(healthData);
+
+    const { req, res } = createMockReqRes("GET", "/health");
+    await requestHandler(req, res);
+
+    const body = JSON.parse(res._getBody());
+    expect(body).toHaveProperty("status");
+    expect(body).toHaveProperty("uptime_seconds");
+    expect(body).toHaveProperty("slack_connected");
+    expect(body).toHaveProperty("events_count");
+    expect(body).toHaveProperty("memory_usage_mb");
   });
 });

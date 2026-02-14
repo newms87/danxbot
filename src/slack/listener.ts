@@ -15,6 +15,11 @@ import {
 
 let app: App;
 let botUserId: string | null = null;
+let slackConnected = false;
+
+export function isSlackConnected(): boolean {
+  return slackConnected;
+}
 
 export async function startSlackListener(): Promise<void> {
   app = new App({
@@ -333,5 +338,6 @@ export async function startSlackListener(): Promise<void> {
   });
 
   await app.start();
+  slackConnected = true;
   console.log("Flytebot is running (Socket Mode)");
 }

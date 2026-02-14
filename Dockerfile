@@ -65,4 +65,7 @@ COPY --chown=flytebot:flytebot . .
 COPY entrypoint.sh /flytebot/entrypoint.sh
 RUN chmod +x /flytebot/entrypoint.sh
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:5555/health || exit 1
+
 ENTRYPOINT ["/flytebot/entrypoint.sh"]

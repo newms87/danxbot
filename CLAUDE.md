@@ -23,6 +23,7 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 | `docker compose down` | Stop the bot |
 | `docker restart flytebot` | Restart (picks up code changes) |
 | `docker logs flytebot -f` | Tail logs |
+| `curl localhost:5555/health` | Check bot health status |
 | `npx tsc --noEmit` | Type-check only (host) |
 
 ## Tech Stack
