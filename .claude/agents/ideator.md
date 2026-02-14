@@ -26,7 +26,7 @@ The file has two main sections:
 | Removeable | No longer needed or superseded (explain why) |
 | Changeable | Works but should be reworked/redesigned (explain why) |
 
-**Section 2: Desired Features** — A scratchpad of feature ideas big and small. Each entry has a Type, ICE score, and brief description.
+**Section 2: Desired Features** — A scratchpad of feature ideas big and small. Each entry has a Type, ICE score as `Total (I×C×E)` (e.g. `336 (8×7×6)`), and brief description.
 
 ### Feature Types
 
@@ -99,7 +99,9 @@ Before carding, score every non-Complete feature using ICE. Each component MUST 
 | 7-9 | A few hours, isolated to one module |
 | 10 | Single file, under 30 lines changed |
 
-**ICE Score** = Impact x Confidence x Ease
+**ICE Score** = Impact × Confidence × Ease (max 1000)
+
+VERIFY YOUR ARITHMETIC. Multiply the three integers and confirm the product is correct. Example: I:8 × C:7 × E:6 = 336, NOT 876. LLMs frequently get multiplication wrong — double-check every score.
 
 Write scores with justifications into `docs/features.md` first, then copy onto cards.
 
@@ -143,7 +145,7 @@ Write factual, direct descriptions. No selling ("this would be great..."), no fi
 
 **Solution:** What should be built or changed? High-level approach, not implementation details (those go in acceptance criteria). Enough that a developer understands the direction.
 
-**ICE Score:** N (I: X — justification. C: X — justification. E: X — justification.)
+**ICE Score:** N = I × C × E (I: X — justification. C: X — justification. E: X — justification.)
 
 That's it. No other sections. Acceptance criteria go ONLY in the "Acceptance Criteria" checklist created via `create_checklist` + `add_checklist_item`.
 

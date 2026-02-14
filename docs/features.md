@@ -9,7 +9,7 @@ Last updated: 2026-02-14 (session 6)
 ## Feature Inventory
 
 <!-- Status: Complete | Upgradeable | Incomplete | Removeable | Changeable -->
-<!-- For non-Complete items, include ICE score: Impact (1-10) x Confidence (1-10) x Ease (1-10) -->
+<!-- ICE format: Total (IxCxE) — e.g. 336 (8×7×6) -->
 
 | Feature | Status | ICE | Notes |
 |---------|--------|-----|-------|
@@ -39,38 +39,38 @@ Last updated: 2026-02-14 (session 6)
 | Dashboard search/filter | Complete | — | Text + status filter controls |
 | Health check endpoint | Complete | — | GET /health returns status, uptime, memory, event count |
 | Listener tests | Complete | — | Filters, happy paths, threads, errors, rate limiting, feedback |
-| Graceful shutdown | Incomplete | 504 | No signal handlers in index.ts; card in Review |
-| Thread context window limit | Incomplete | 336 | Unbounded thread history; card in Review |
-| Error notifications to ops channel | Incomplete | 336 | Errors only visible to requesting user; card in Review |
-| Config validation on startup | Incomplete | 360 | Numeric config not validated for NaN/negative; card in Review |
-| Structured JSON logging | Incomplete | 270 | All logging is bare console.log; card in Review |
-| Index.ts unit tests | Incomplete | 224 | Entrypoint has zero test coverage; card in Review |
-| Daily cost tracking + alerts | Incomplete | 245 | No persistent cost tracking; card in Review |
-| Agent retry on transient failure | Incomplete | 210 | No auto-retry on crash; card in Review |
-| Dashboard data export | Incomplete | 192 | No CSV/JSON export; card in Review |
+| Graceful shutdown | Incomplete | 504 (7×9×8) | No signal handlers in index.ts; card in Review |
+| Thread context window limit | Incomplete | 336 (6×8×7) | Unbounded thread history; card in Review |
+| Error notifications to ops channel | Incomplete | 336 (7×8×6) | Errors only visible to requesting user; card in Review |
+| Config validation on startup | Incomplete | 360 (5×9×8) | Numeric config not validated for NaN/negative; card in Review |
+| Structured JSON logging | Incomplete | 270 (5×9×6) | All logging is bare console.log; card in Review |
+| Index.ts unit tests | Incomplete | 224 (4×8×7) | Entrypoint has zero test coverage; card in Review |
+| Daily cost tracking + alerts | Incomplete | 245 (7×7×5) | No persistent cost tracking; card in Review |
+| Agent retry on transient failure | Incomplete | 210 (7×5×6) | No auto-retry on crash; card in Review |
+| Dashboard data export | Incomplete | 192 (6×8×4) | No CSV/JSON export; card in Review |
 
 ---
 
 ## Desired Features
 
-<!-- ICE = Impact x Confidence x Ease (each 1-10) -->
+<!-- ICE format: Total (IxCxE) — e.g. 336 (8×7×6) -->
 <!-- Type: Carded | Valuable | Maintenance | Dependent | Exploratory -->
 
 | Feature Idea | Type | ICE | Description |
 |--------------|------|-----|-------------|
-| Graceful shutdown handler | Carded | 504 | Signal handlers, clean up in-flight agents on restart |
-| Config validation on startup | Carded | 360 | Validate parsed numeric config values on boot |
-| Error notifications to ops channel | Carded | 336 | Post agent errors to Trello ToDo as bug cards |
-| Thread context window limit | Carded | 336 | Cap thread messages sent to router/agent |
-| Structured JSON logging | Carded | 270 | Replace console.log with structured JSON logger |
-| Daily cost tracking + alerts | Carded | 245 | Track daily spend, alert on threshold |
-| Index.ts startup tests | Carded | 224 | Test entrypoint startup order and error handling |
-| Agent retry on error | Carded | 210 | Auto-retry once on transient agent failures |
-| Dashboard data export | Carded | 192 | Export events as CSV/JSON for offline analysis |
-| Response caching | Valuable | 140 | Cache common platform queries (deps met: all domain docs done) |
-| Event archiving beyond 500 | Valuable | 175 | Persist older events to archive file when cap is reached |
-| Multi-channel support | Exploratory | 168 | Support beyond single Slack channel |
-| Agent response quality scoring | Exploratory | 72 | Auto-evaluate response quality via LLM judge |
+| Graceful shutdown handler | Carded | 504 (7×9×8) | Signal handlers, clean up in-flight agents on restart |
+| Config validation on startup | Carded | 360 (5×9×8) | Validate parsed numeric config values on boot |
+| Error notifications to ops channel | Carded | 336 (7×8×6) | Post agent errors to Trello ToDo as bug cards |
+| Thread context window limit | Carded | 336 (6×8×7) | Cap thread messages sent to router/agent |
+| Structured JSON logging | Carded | 270 (5×9×6) | Replace console.log with structured JSON logger |
+| Daily cost tracking + alerts | Carded | 245 (7×7×5) | Track daily spend, alert on threshold |
+| Index.ts startup tests | Carded | 224 (4×8×7) | Test entrypoint startup order and error handling |
+| Agent retry on error | Carded | 210 (7×5×6) | Auto-retry once on transient agent failures |
+| Dashboard data export | Carded | 192 (6×8×4) | Export events as CSV/JSON for offline analysis |
+| Response caching | Valuable | 140 (7×5×4) | Cache common platform queries (deps met: all domain docs done) |
+| Event archiving beyond 500 | Valuable | 175 (7×5×5) | Persist older events to archive file when cap is reached |
+| Multi-channel support | Exploratory | 168 (7×6×4) | Support beyond single Slack channel |
+| Agent response quality scoring | Exploratory | 72 (9×4×2) | Auto-evaluate response quality via LLM judge |
 
 ---
 
