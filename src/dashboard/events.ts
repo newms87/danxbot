@@ -1,6 +1,9 @@
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { dirname } from "path";
 import { config } from "../config.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("events");
 
 export interface MessageEvent {
   id: string;
@@ -54,7 +57,7 @@ export async function persistToDisk(): Promise<void> {
     await writeFile(tmpPath, JSON.stringify(events));
     await rename(tmpPath, filePath);
   } catch (error) {
-    console.error("Failed to persist events to disk:", error);
+    log.error("Failed to persist events to disk", error);
   }
 }
 
@@ -65,7 +68,7 @@ export async function loadEvents(): Promise<void> {
     if (!Array.isArray(parsed)) return;
     const capped = parsed.slice(0, MAX_EVENTS);
     events.splice(0, events.length, ...capped);
-    console.log(`Loaded ${events.length} events from disk`);
+    log.info(`Loaded ${events.length} events from disk`);
   } catch {
     // File doesn't exist or is invalid — start with empty array
   }

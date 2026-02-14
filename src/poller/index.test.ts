@@ -18,10 +18,16 @@ vi.mock("node:child_process", () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
-import { poll, _resetForTesting } from "./index.js";
+vi.mock("../logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
 
-// Silence log output during tests
-vi.spyOn(console, "log").mockImplementation(() => {});
+import { poll, _resetForTesting } from "./index.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const lockFile = resolve(projectRoot, ".poller-running");

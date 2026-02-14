@@ -23,6 +23,15 @@ vi.mock("./helpers.js", () => ({
   ),
 }));
 
+vi.mock("../logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 const { HeartbeatManager } = await import("./heartbeat-manager.js");
 
 // --- Constants ---
@@ -342,9 +351,6 @@ describe("HeartbeatManager", () => {
         stop: true,
       });
 
-      // Suppress console.error for the stop signal log
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
       manager.start();
 
       // Trigger orchestrator (2 ticks)
@@ -358,7 +364,6 @@ describe("HeartbeatManager", () => {
       vi.advanceTimersByTime(50000);
       expect(client.chat.update.mock.calls.length).toBe(callCountAfterStop);
 
-      consoleSpy.mockRestore();
       manager.stop();
     });
 
@@ -370,9 +375,6 @@ describe("HeartbeatManager", () => {
       mockGenerateHeartbeatMessage.mockRejectedValueOnce(new Error("API failure"));
       // Second call succeeds
       mockGenerateHeartbeatMessage.mockResolvedValueOnce(DEFAULT_HEARTBEAT_UPDATE);
-
-      // Suppress console.error for the rejection
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       manager.start();
 
@@ -390,7 +392,6 @@ describe("HeartbeatManager", () => {
       // Verify the second call succeeded and updated the heartbeat
       expect(manager.latestHeartbeat).toEqual(DEFAULT_HEARTBEAT_UPDATE);
 
-      consoleSpy.mockRestore();
       manager.stop();
     });
   });

@@ -37,6 +37,15 @@ vi.mock("../config.js", () => ({
   config: {},
 }));
 
+vi.mock("../logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 // We need to test the server, but startDashboard hardcodes port 5555.
 // We'll import the module and use it, but we need to handle the port.
 // Since we're in a test environment, we'll use the actual server on a random port

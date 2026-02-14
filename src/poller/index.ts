@@ -3,45 +3,43 @@ import { existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { config } from "./config.js";
+import { createLogger } from "../logger.js";
 import { fetchTodoCards } from "./trello-client.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const lockFile = resolve(projectRoot, ".poller-running");
 
+const log = createLogger("poller");
+
 let teamRunning = false;
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let lockCheckId: ReturnType<typeof setInterval> | null = null;
-
-function log(message: string): void {
-  const time = new Date().toLocaleTimeString("en-US", { hour12: false });
-  console.log(`[POLLER ${time}] ${message}`);
-}
 
 export async function poll(): Promise<void> {
   if (teamRunning) {
     return;
   }
 
-  log("Checking ToDo list...");
+  log.info("Checking ToDo list...");
 
   let cards;
   try {
     cards = await fetchTodoCards();
   } catch (error) {
-    log(`Error fetching cards: ${error instanceof Error ? error.message : error}`);
+    log.error("Error fetching cards", error);
     return;
   }
 
   if (cards.length === 0) {
-    log("No cards in ToDo — waiting");
+    log.info("No cards in ToDo — waiting");
     return;
   }
 
-  log(`Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`);
-  cards.forEach((card, i) => log(`  ${i + 1}. ${card.name}`));
+  log.info(`Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`);
+  cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.name}`));
 
   teamRunning = true;
-  log("Spawning Claude in new terminal tab...");
+  log.info("Spawning Claude in new terminal tab...");
 
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -68,14 +66,14 @@ export async function poll(): Promise<void> {
     if (!existsSync(lockFile)) {
       clearInterval(lockCheckId!);
       lockCheckId = null;
-      log("Team finished — resuming polling");
+      log.info("Team finished — resuming polling");
       teamRunning = false;
     }
   }, 5000);
 }
 
 export function shutdown(): void {
-  log("Shutting down...");
+  log.info("Shutting down...");
 
   if (intervalId) {
     clearInterval(intervalId);
@@ -100,7 +98,7 @@ export function start(): void {
   process.on("SIGTERM", shutdown);
 
   const intervalSeconds = config.pollerIntervalMs / 1000;
-  log(`Started — polling every ${intervalSeconds}s`);
+  log.info(`Started — polling every ${intervalSeconds}s`);
 
   poll();
   intervalId = setInterval(poll, config.pollerIntervalMs);

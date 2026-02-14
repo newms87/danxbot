@@ -34,6 +34,15 @@ vi.mock("../config.js", () => ({
   },
 }));
 
+vi.mock("../logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 const {
   buildConversationMessages,
   buildActivitySummary,

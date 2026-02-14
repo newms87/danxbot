@@ -3,6 +3,9 @@ import { readFile } from "fs/promises";
 import { getEvents, getAnalytics, addSSEClient, removeSSEClient } from "./events.js";
 import { eventsToCSV } from "./export.js";
 import { getHealthStatus } from "./health.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("dashboard");
 
 const PORT = 5555;
 
@@ -108,6 +111,6 @@ export async function startDashboard(): Promise<void> {
   });
 
   server.listen(PORT, () => {
-    console.log(`Dashboard running at http://localhost:${PORT}`);
+    log.info(`Dashboard running at http://localhost:${PORT}`);
   });
 }

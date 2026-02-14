@@ -1,8 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config.js";
+import { createLogger } from "../logger.js";
 import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
 import { trimThreadMessages } from "../threads.js";
 import type { RouterResult, ThreadMessage } from "../types.js";
+
+const log = createLogger("router");
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -93,7 +96,7 @@ export async function runRouter(
       rawResponse: response as unknown as Record<string, unknown>,
     };
   } catch (error) {
-    console.error("Router error:", error);
+    log.error("Router error", error);
   }
 
   return {

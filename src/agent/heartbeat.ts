@@ -1,11 +1,14 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config.js";
+import { createLogger } from "../logger.js";
 import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
 import type {
   AgentLogEntry,
   HeartbeatSnapshot,
   HeartbeatUpdate,
 } from "../types.js";
+
+const log = createLogger("heartbeat");
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -132,7 +135,7 @@ export async function generateHeartbeatMessage(
       stop: parsed.stop === true,
     };
   } catch (error) {
-    console.error("Heartbeat message generation failed:", error);
+    log.error("Heartbeat message generation failed", error);
     return { ...HEARTBEAT_FALLBACK };
   }
 }

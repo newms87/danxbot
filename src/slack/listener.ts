@@ -1,5 +1,6 @@
 import { App } from "@slack/bolt";
 import { config } from "../config.js";
+import { createLogger } from "../logger.js";
 import { markdownToSlackMrkdwn, splitMessage } from "./formatter.js";
 import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
@@ -13,6 +14,8 @@ import {
   updateSessionId,
   isBotParticipant,
 } from "../threads.js";
+
+const log = createLogger("slack");
 
 let app: App;
 let botUserId: string | null = null;
@@ -122,7 +125,7 @@ export async function startSlackListener(): Promise<void> {
         routerRequest: routerResult.request,
         routerRawResponse: routerResult.rawResponse,
       });
-      console.log(
+      log.info(
         `Router: needsAgent=${routerResult.needsAgent}, reason="${routerResult.reason}"`,
       );
 
@@ -236,7 +239,7 @@ export async function startSlackListener(): Promise<void> {
               if (response === null) {
                 // Agent timed out — do NOT retry
                 const elapsed = Math.round(timeoutMs / 1000);
-                console.error(
+                log.error(
                   `Agent timed out after ${elapsed}s in thread ${threadTs}`,
                 );
 
@@ -322,7 +325,7 @@ export async function startSlackListener(): Promise<void> {
                   .add({ channel: message.channel, timestamp: placeholderTs, name: "thumbsdown" })
                   .catch(() => {});
 
-                console.log(
+                log.info(
                   `Agent responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
                 );
                 handled = true;
@@ -339,9 +342,8 @@ export async function startSlackListener(): Promise<void> {
                 const elapsed = Math.round(
                   (Date.now() - heartbeatStart) / 1000,
                 );
-                console.error(
-                  `Agent crashed after ${elapsed}s in thread ${threadTs}:`,
-                  errorMsg,
+                log.error(
+                  `Agent crashed after ${elapsed}s in thread ${threadTs}: ${errorMsg}`,
                 );
 
                 updateEvent(dashEvent.id, {
@@ -366,7 +368,7 @@ export async function startSlackListener(): Promise<void> {
               } else {
                 // Retry — update placeholder with retrying status
                 agentRetried = true;
-                console.warn(
+                log.warn(
                   `Agent crashed in thread ${threadTs} (attempt ${attempt + 1}/${maxAttempts}), retrying: ${errorMsg}`,
                 );
 
@@ -405,7 +407,7 @@ export async function startSlackListener(): Promise<void> {
         updateEvent(dashEvent.id, { status: "complete" });
       }
     } catch (error) {
-      console.error(`Error handling message in thread ${threadTs}:`, error);
+      log.error(`Error handling message in thread ${threadTs}`, error);
       updateEvent(dashEvent.id, {
         status: "error",
         error: error instanceof Error ? error.message : String(error),
@@ -436,5 +438,5 @@ export async function startSlackListener(): Promise<void> {
 
   await app.start();
   slackConnected = true;
-  console.log("Flytebot is running (Socket Mode)");
+  log.info("Flytebot is running (Socket Mode)");
 }

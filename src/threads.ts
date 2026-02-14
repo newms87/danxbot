@@ -2,7 +2,10 @@ import { readFile, writeFile, readdir, unlink, mkdir } from "fs/promises";
 import { join } from "path";
 import type { WebClient } from "@slack/web-api";
 import { config } from "./config.js";
+import { createLogger } from "./logger.js";
 import type { ThreadState, ThreadMessage } from "./types.js";
+
+const log = createLogger("threads");
 
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_THREAD_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -68,7 +71,7 @@ async function hydrateFromSlack(
       }));
     }
   } catch (error) {
-    console.error(`Failed to hydrate thread ${threadTs} from Slack:`, error);
+    log.error(`Failed to hydrate thread ${threadTs} from Slack`, error);
   }
 
   return thread;
@@ -113,7 +116,7 @@ export function addMessageToThread(
   thread.messages.push(message);
   // Fire-and-forget save
   saveThread(thread).catch((err) =>
-    console.error("Failed to save thread:", err),
+    log.error("Failed to save thread", err),
   );
 }
 
@@ -126,7 +129,7 @@ export function updateSessionId(
 ): void {
   thread.sessionId = sessionId;
   saveThread(thread).catch((err) =>
-    console.error("Failed to save thread:", err),
+    log.error("Failed to save thread", err),
   );
 }
 
@@ -159,14 +162,14 @@ export async function cleanupOldThreads(): Promise<void> {
 
         if (now - updatedAt > MAX_THREAD_AGE_MS) {
           await unlink(filePath);
-          console.log(`Cleaned up old thread: ${file}`);
+          log.info(`Cleaned up old thread: ${file}`);
         }
       } catch {
         // Skip files that can't be parsed
       }
     }
   } catch (error) {
-    console.error("Thread cleanup error:", error);
+    log.error("Thread cleanup error", error);
   }
 }
 

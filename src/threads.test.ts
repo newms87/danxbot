@@ -14,6 +14,15 @@ vi.mock("./config.js", () => ({
   config: { threadsDir: "/test/threads" },
 }));
 
+vi.mock("./logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 const fs = await import("fs/promises");
 const {
   getOrCreateThread,

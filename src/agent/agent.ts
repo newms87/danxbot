@@ -2,8 +2,11 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { config } from "../config.js";
+import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
 import type { AgentLogEntry, AgentResponse, ThreadMessage } from "../types.js";
+
+const log = createLogger("agent");
 
 // Re-export router and heartbeat modules so existing imports continue to work
 export { buildConversationMessages, runRouter } from "./router.js";
@@ -71,7 +74,7 @@ export async function runAgent(
     persistSession: !!sessionId,
     includePartialMessages: !!onStream,
     stderr: (message: string) => {
-      console.error("[agent stderr]", message.trimEnd());
+      log.debug(message.trimEnd());
       stderrMessages.push(message.trimEnd());
     },
     ...(sessionId ? { resume: sessionId } : {}),
@@ -87,12 +90,12 @@ export async function runAgent(
   let costUsd = 0;
   let turns = 0;
   let streamText = "";
-  const log: AgentLogEntry[] = [];
+  const agentLog: AgentLogEntry[] = [];
   let lastTimestamp = Date.now();
   const pushLog = (entry: AgentLogEntry) => {
     entry.data.delta_ms = entry.timestamp - lastTimestamp;
     lastTimestamp = entry.timestamp;
-    log.push(entry);
+    agentLog.push(entry);
     onLogEntry?.(entry);
   };
 
@@ -243,8 +246,8 @@ export async function runAgent(
       model: config.agent.model,
       costUsd,
       turns,
-      log,
-    }).catch((err) => console.error("Failed to write agent log:", err));
+      log: agentLog,
+    }).catch((err) => log.error("Failed to write agent log", err));
   }
 
   if (caughtError) {
@@ -261,7 +264,7 @@ export async function runAgent(
     costUsd,
     turns,
     config: queryOptions as unknown as Record<string, unknown>,
-    log,
+    log: agentLog,
   };
 }
 
@@ -278,7 +281,7 @@ async function writeAgentLog(data: {
   const filename = `${ts}_${data.sessionId || "no-session"}.json`;
   const filePath = join(config.logsDir, filename);
   await writeFile(filePath, JSON.stringify(data, null, 2));
-  console.log(`Agent log written to ${filePath}`);
+  log.info(`Agent log written to ${filePath}`);
 }
 
 export function summarizeToolInput(

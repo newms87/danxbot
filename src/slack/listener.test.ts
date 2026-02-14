@@ -87,6 +87,15 @@ vi.mock("../threads.js", () => ({
   isBotParticipant: mockIsBotParticipant,
 }));
 
+vi.mock("../logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 // Mock @slack/bolt — App must be a real class so `new App()` works
 let capturedMessageHandler: Function;
 const capturedEventHandlers: Record<string, Function> = {};

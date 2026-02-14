@@ -1,4 +1,5 @@
 import type { WebClient } from "@slack/web-api";
+import { createLogger } from "../logger.js";
 import { markdownToSlackMrkdwn } from "./formatter.js";
 import { buildHeartbeatAttachment } from "./helpers.js";
 import {
@@ -10,6 +11,8 @@ import type {
   HeartbeatSnapshot,
   HeartbeatUpdate,
 } from "../types.js";
+
+const log = createLogger("heartbeat-manager");
 
 const STREAM_TRUNCATE_LIMIT = 3900;
 const STREAM_THROTTLE_MS = 500;
@@ -121,7 +124,7 @@ export class HeartbeatManager {
 
             if (update.stop) {
               this.clearInterval();
-              console.error(
+              log.error(
                 `Orchestrator signaled stop in thread ${this.threadTs}: ${update.text}`,
               );
             }
@@ -172,7 +175,7 @@ export class HeartbeatManager {
         attachments: buildHeartbeatAttachment(this.latestHeartbeat, elapsed),
       })
       .catch((err: unknown) =>
-        console.error("Stream update failed:", err),
+        log.error("Stream update failed", err),
       );
 
     this.lastFlushTime = Date.now();
@@ -192,7 +195,7 @@ export class HeartbeatManager {
         attachments: buildHeartbeatAttachment(hb, elapsed),
       })
       .catch((err: unknown) =>
-        console.error("Heartbeat update failed:", err),
+        log.error("Heartbeat update failed", err),
       );
   }
 }

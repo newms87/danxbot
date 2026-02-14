@@ -15,6 +15,17 @@ vi.mock("../config.js", () => ({
   },
 }));
 
+// Mock logger so we can assert on error calls
+let mockLogError = vi.fn();
+vi.mock("../logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: (...args: unknown[]) => mockLogError(...args),
+  }),
+}));
+
 import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import {
   createEvent,
@@ -218,17 +229,15 @@ describe("persistence", () => {
 
   describe("persistToDisk error handling", () => {
     it("logs error when writeFile rejects", async () => {
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       mockWriteFile.mockRejectedValue(new Error("disk full"));
 
       makeEvent({ threadTs: "t-err", messageTs: "m-err" });
       await vi.advanceTimersByTimeAsync(2000);
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to persist events to disk:",
+      expect(mockLogError).toHaveBeenCalledWith(
+        "Failed to persist events to disk",
         expect.any(Error),
       );
-      consoleSpy.mockRestore();
     });
   });
 

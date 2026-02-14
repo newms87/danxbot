@@ -43,6 +43,15 @@ vi.mock("./shutdown.js", () => ({
   initShutdownHandlers: mockInitShutdownHandlers,
 }));
 
+vi.mock("./logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 // --- Test setup ---
 
 beforeEach(() => {
@@ -69,14 +78,13 @@ async function importIndex(): Promise<void> {
 // ============================================================
 
 describe("main startup flow", () => {
-  it("logs 'Starting Flytebot...' on startup", async () => {
-    const mockLog = vi.spyOn(console, "log").mockImplementation(() => {});
-
+  it("calls startup functions without throwing", async () => {
     await importIndex();
 
-    expect(mockLog).toHaveBeenCalledWith("Starting Flytebot...");
-
-    mockLog.mockRestore();
+    expect(mockStartThreadCleanup).toHaveBeenCalledOnce();
+    expect(mockLoadEvents).toHaveBeenCalledOnce();
+    expect(mockStartDashboard).toHaveBeenCalledOnce();
+    expect(mockStartSlackListener).toHaveBeenCalledOnce();
   });
 
   it("calls startup functions in correct order", async () => {
@@ -157,17 +165,14 @@ describe("main startup flow", () => {
 
   it("calls process.exit(1) on fatal startup error", async () => {
     const mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
-    const mockError = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const startupError = new Error("Database connection failed");
     mockLoadEvents.mockRejectedValue(startupError);
 
     await importIndex();
 
-    expect(mockError).toHaveBeenCalledWith("Fatal error:", startupError);
     expect(mockExit).toHaveBeenCalledWith(1);
 
     mockExit.mockRestore();
-    mockError.mockRestore();
   });
 });
