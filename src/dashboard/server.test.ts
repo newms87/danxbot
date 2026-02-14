@@ -251,10 +251,11 @@ describe("dashboard server", () => {
       status: "ok",
       uptime_seconds: 120,
       slack_connected: true,
+      db_connected: true,
       events_count: 5,
       memory_usage_mb: 64.3,
     };
-    mockGetHealthStatus.mockReturnValue(healthData);
+    mockGetHealthStatus.mockResolvedValue(healthData);
 
     const { req, res } = createMockReqRes("GET", "/health");
     await requestHandler(req, res);
@@ -269,10 +270,11 @@ describe("dashboard server", () => {
       status: "degraded",
       uptime_seconds: 120,
       slack_connected: false,
+      db_connected: true,
       events_count: 0,
       memory_usage_mb: 64.3,
     };
-    mockGetHealthStatus.mockReturnValue(healthData);
+    mockGetHealthStatus.mockResolvedValue(healthData);
 
     const { req, res } = createMockReqRes("GET", "/health");
     await requestHandler(req, res);
@@ -287,10 +289,11 @@ describe("dashboard server", () => {
       status: "ok",
       uptime_seconds: 60,
       slack_connected: true,
+      db_connected: true,
       events_count: 10,
       memory_usage_mb: 50.1,
     };
-    mockGetHealthStatus.mockReturnValue(healthData);
+    mockGetHealthStatus.mockResolvedValue(healthData);
 
     const { req, res } = createMockReqRes("GET", "/health");
     await requestHandler(req, res);
@@ -299,6 +302,7 @@ describe("dashboard server", () => {
     expect(body).toHaveProperty("status");
     expect(body).toHaveProperty("uptime_seconds");
     expect(body).toHaveProperty("slack_connected");
+    expect(body).toHaveProperty("db_connected");
     expect(body).toHaveProperty("events_count");
     expect(body).toHaveProperty("memory_usage_mb");
   });

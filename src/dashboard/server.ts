@@ -19,7 +19,7 @@ export async function startDashboard(): Promise<void> {
     res.setHeader("Access-Control-Allow-Origin", "*");
 
     if (url.pathname === "/health") {
-      const health = getHealthStatus();
+      const health = await getHealthStatus();
       const statusCode = health.status === "ok" ? 200 : 503;
       res.writeHead(statusCode, { "Content-Type": "application/json" });
       res.end(JSON.stringify(health));
