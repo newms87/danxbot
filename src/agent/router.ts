@@ -131,8 +131,8 @@ export async function runRouter(
 
   return {
     quickResponse: "I'm having a moment — give me a sec and try again.",
-    needsAgent: true,
-    complexity: "very_high",
+    needsAgent: false,
+    complexity: "very_low",
     reason: "router error",
     request: request as unknown as Record<string, unknown>,
     rawResponse: {},

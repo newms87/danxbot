@@ -236,7 +236,7 @@ describe("runRouter", () => {
     expect(result.quickResponse).toBe(
       "I'm having a moment — give me a sec and try again.",
     );
-    expect(result.needsAgent).toBe(true);
+    expect(result.needsAgent).toBe(false);
     expect(result.reason).toBe("router error");
   });
 
@@ -255,7 +255,7 @@ describe("runRouter", () => {
     expect(result.quickResponse).toBe(
       "I'm having a moment — give me a sec and try again.",
     );
-    expect(result.needsAgent).toBe(true);
+    expect(result.needsAgent).toBe(false);
     expect(result.reason).toBe("router error");
   });
 
@@ -360,12 +360,12 @@ describe("runRouter", () => {
     expect(result.complexity).toBe("high");
   });
 
-  it("defaults complexity to very_high on router error", async () => {
+  it("defaults complexity to very_low on router error", async () => {
     mockCreate.mockRejectedValueOnce(new Error("API error"));
 
     const result = await runRouter("hello");
 
-    expect(result.complexity).toBe("very_high");
+    expect(result.complexity).toBe("very_low");
   });
 
   it("only sets needsAgent true when value is strictly true", async () => {
