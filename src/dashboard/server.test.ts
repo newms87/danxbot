@@ -14,6 +14,12 @@ vi.mock("./events.js", () => ({
   removeSSEClient: (...args: unknown[]) => mockRemoveSSEClient(...args),
 }));
 
+// Mock export module
+const mockEventsToCSV = vi.fn();
+vi.mock("./export.js", () => ({
+  eventsToCSV: (...args: unknown[]) => mockEventsToCSV(...args),
+}));
+
 // Mock health module
 const mockGetHealthStatus = vi.fn();
 vi.mock("./health.js", () => ({
@@ -271,5 +277,50 @@ describe("dashboard server", () => {
     expect(body).toHaveProperty("slack_connected");
     expect(body).toHaveProperty("events_count");
     expect(body).toHaveProperty("memory_usage_mb");
+  });
+
+  describe("GET /api/events/export", () => {
+    it("returns JSON download with Content-Disposition header", async () => {
+      const events = [{ id: "test-1", status: "complete" }];
+      mockGetEvents.mockReturnValue(events);
+
+      const { req, res } = createMockReqRes("GET", "/api/events/export?format=json");
+      await requestHandler(req, res);
+
+      expect(res._getStatusCode()).toBe(200);
+      expect(res._getHeaders()["content-type"]).toBe("application/json");
+      expect(res._getHeaders()["content-disposition"]).toBe('attachment; filename="flytebot-events.json"');
+      expect(JSON.parse(res._getBody())).toEqual(events);
+    });
+
+    it("returns CSV download with Content-Disposition header", async () => {
+      const events = [{ id: "test-1", status: "complete" }];
+      mockGetEvents.mockReturnValue(events);
+      mockEventsToCSV.mockReturnValue("timestamp,user,text,status,cost,feedback,response_time_ms\n");
+
+      const { req, res } = createMockReqRes("GET", "/api/events/export?format=csv");
+      await requestHandler(req, res);
+
+      expect(res._getStatusCode()).toBe(200);
+      expect(res._getHeaders()["content-type"]).toBe("text/csv");
+      expect(res._getHeaders()["content-disposition"]).toBe('attachment; filename="flytebot-events.csv"');
+      expect(mockEventsToCSV).toHaveBeenCalledWith(events);
+    });
+
+    it("returns 400 when format query param is missing", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/events/export");
+      await requestHandler(req, res);
+
+      expect(res._getStatusCode()).toBe(400);
+      expect(JSON.parse(res._getBody())).toEqual({ error: 'Missing or invalid format parameter. Use "json" or "csv".' });
+    });
+
+    it("returns 400 when format is invalid", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/events/export?format=xml");
+      await requestHandler(req, res);
+
+      expect(res._getStatusCode()).toBe(400);
+      expect(JSON.parse(res._getBody())).toEqual({ error: 'Missing or invalid format parameter. Use "json" or "csv".' });
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { createServer } from "http";
 import { readFile } from "fs/promises";
 import { getEvents, getAnalytics, addSSEClient, removeSSEClient } from "./events.js";
+import { eventsToCSV } from "./export.js";
 import { getHealthStatus } from "./health.js";
 
 const PORT = 5555;
@@ -50,6 +51,31 @@ export async function startDashboard(): Promise<void> {
     if (url.pathname === "/api/analytics") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(getAnalytics()));
+      return;
+    }
+
+    if (url.pathname === "/api/events/export") {
+      const format = url.searchParams.get("format");
+      if (format === "json") {
+        const body = JSON.stringify(getEvents(), null, 2);
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Content-Disposition": 'attachment; filename="flytebot-events.json"',
+        });
+        res.end(body);
+        return;
+      }
+      if (format === "csv") {
+        const body = eventsToCSV(getEvents());
+        res.writeHead(200, {
+          "Content-Type": "text/csv",
+          "Content-Disposition": 'attachment; filename="flytebot-events.csv"',
+        });
+        res.end(body);
+        return;
+      }
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: 'Missing or invalid format parameter. Use "json" or "csv".' }));
       return;
     }
 

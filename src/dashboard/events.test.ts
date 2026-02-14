@@ -23,6 +23,7 @@ import {
   removeSSEClient,
   resetEvents,
   findEventByResponseTs,
+  getResponseTimeMs,
 } from "./events.js";
 
 beforeEach(() => {
@@ -266,5 +267,31 @@ describe("feedback", () => {
     expect(analytics.feedbackPositive).toBe(0);
     expect(analytics.feedbackNegative).toBe(0);
     expect(analytics.feedbackRate).toBe(0);
+  });
+});
+
+describe("getResponseTimeMs", () => {
+  it("returns agentResponseAt - receivedAt when agent responded", () => {
+    const event = makeEvent();
+    updateEvent(event.id, {
+      routerResponseAt: event.receivedAt + 200,
+      agentResponseAt: event.receivedAt + 1500,
+    });
+    const updated = getEvents().find((e) => e.id === event.id)!;
+    expect(getResponseTimeMs(updated)).toBe(1500);
+  });
+
+  it("returns routerResponseAt - receivedAt when no agent response", () => {
+    const event = makeEvent();
+    updateEvent(event.id, {
+      routerResponseAt: event.receivedAt + 400,
+    });
+    const updated = getEvents().find((e) => e.id === event.id)!;
+    expect(getResponseTimeMs(updated)).toBe(400);
+  });
+
+  it("returns 0 when no response times available", () => {
+    const event = makeEvent();
+    expect(getResponseTimeMs(event)).toBe(0);
   });
 });

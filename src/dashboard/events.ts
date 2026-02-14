@@ -127,6 +127,10 @@ export function findEventByResponseTs(ts: string): MessageEvent | undefined {
   return events.find((e) => e.responseTs === ts);
 }
 
+export function getResponseTimeMs(event: MessageEvent): number {
+  return (event.agentResponseAt || event.routerResponseAt || event.receivedAt) - event.receivedAt;
+}
+
 export function getAnalytics() {
   const completed = events.filter((e) => e.status === "complete");
   const withAgent = completed.filter((e) => e.agentResponseAt !== null);
@@ -140,8 +144,7 @@ export function getAnalytics() {
     .filter((e) => e.agentResponseAt && e.routerResponseAt)
     .map((e) => e.agentResponseAt! - e.routerResponseAt!);
 
-  const totalTimes = completed
-    .map((e) => (e.agentResponseAt || e.routerResponseAt || e.receivedAt) - e.receivedAt);
+  const totalTimes = completed.map((e) => getResponseTimeMs(e));
 
   const avg = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
   const totalCost = withAgent.reduce((sum, e) => sum + (e.agentCostUsd || 0), 0);
