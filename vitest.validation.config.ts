@@ -4,6 +4,6 @@ export default defineConfig({
   test: {
     root: "src",
     restoreMocks: true,
-    exclude: ["**/__tests__/validation/**"],
+    include: ["__tests__/validation/**/*.test.ts"],
   },
 });

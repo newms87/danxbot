@@ -45,14 +45,24 @@ NEVER attempt INSERT, UPDATE, DELETE, or any write operation.
 
 ## Key Domains
 
-- **Campaigns** — Ad campaigns created by buyers, with flights, line items, and targeting
-- **Ads / Creatives** — Ad creative assets uploaded by buyers, reviewed and approved
-- **Buyers** — Advertisers who create campaigns and purchase ad inventory
-- **Suppliers** — Publishers (colleges, universities) who provide ad inventory
-- **SSP (Supply-Side Platform)** — Programmatic ad serving and inventory management
-- **School Data** — College/university data imports and processing
-- **Billing** — Campaign invoicing and payment processing
-- **Users / Auth** — User management, roles, permissions
+When asked about a specific domain, read the corresponding reference doc first for detailed context. These docs are at `docs/domains/` relative to the Flytebot repo root (mounted at `/flytebot/app/docs/domains/` in the container).
+
+- **Campaigns** — Ad campaigns created by buyers, with flights, line items, and targeting. Core models: Campaign, Flight, LineItem, CampaignTarget. Campaigns go through draft → submitted → approved → running → completed lifecycle.
+- **Ads / Creatives** — Ad creative assets uploaded by buyers, reviewed and approved. Models: Ad, Creative, AdSize. Creatives have approval workflows with status transitions.
+- **Buyers** — Advertisers who create campaigns and purchase ad inventory. Models: Buyer, BuyerUser, Agency. Buyers belong to agencies and can have multiple users.
+- **Suppliers** — Publishers (colleges, universities) who provide ad inventory. Models: Supplier, SupplierUser, Publication. Each supplier manages publications with ad zones.
+- **SSP (Supply-Side Platform)** — Programmatic ad serving and inventory management. Handles real-time bidding, ad delivery, and impression tracking.
+- **School Data** — College/university data imports and processing. Uses SchoolDataTask/SchoolDataRequest pattern with activity logging.
+- **Billing** — Campaign invoicing and payment processing. Models: Invoice, Payment, BillingProfile. Invoices are generated from completed campaign flights.
+- **Users / Auth** — User management, roles, permissions. Uses Laravel's built-in auth with Spatie permission package. Users can be BuyerUsers or SupplierUsers.
+
+## Common Data Patterns
+
+- **FilterBuilder macro**: All models support `.filter()` via a FilterBuilder macro. This is the standard way to build filtered queries from API request parameters.
+- **Soft deletes**: Most models use Laravel soft deletes (`deleted_at` column).
+- **Activity logging**: SchoolDataActivityLogger pattern with `start()`, `update()`, `complete()`, `incomplete()`, `fail()` methods.
+- **Broadcasting**: Events use `ShouldBroadcastNow` for real-time websocket updates to the Vue frontend.
+- **Inertia.js**: Frontend pages are rendered via Inertia, which bridges Laravel controllers to Vue page components.
 
 ## Backend Patterns
 
