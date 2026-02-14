@@ -47,3 +47,40 @@ export const config = {
   logsDir: "/flytebot/logs",
   eventsFile: optional("EVENTS_FILE", "/flytebot/data/events.json"),
 } as const;
+
+interface NumericRule {
+  path: string;
+  value: number;
+  min: number;
+  exclusive: boolean;
+}
+
+export function validateConfig(): void {
+  const rules: NumericRule[] = [
+    { path: "agent.maxTurns", value: config.agent.maxTurns, min: 1, exclusive: false },
+    { path: "agent.maxBudgetUsd", value: config.agent.maxBudgetUsd, min: 0, exclusive: true },
+    { path: "agent.maxThinkingTokens", value: config.agent.maxThinkingTokens, min: 1, exclusive: false },
+    { path: "agent.timeoutMs", value: config.agent.timeoutMs, min: 1, exclusive: false },
+    { path: "agent.maxThreadMessages", value: config.agent.maxThreadMessages, min: 1, exclusive: false },
+    { path: "agent.maxRetries", value: config.agent.maxRetries, min: 0, exclusive: false },
+    { path: "rateLimitSeconds", value: config.rateLimitSeconds, min: 1, exclusive: false },
+  ];
+
+  const errors: string[] = [];
+
+  for (const rule of rules) {
+    if (!Number.isFinite(rule.value)) {
+      errors.push(`${rule.path} must be a finite number (got ${rule.value})`);
+    } else if (rule.exclusive && rule.value <= rule.min) {
+      errors.push(`${rule.path} must be > ${rule.min} (got ${rule.value})`);
+    } else if (!rule.exclusive && rule.value < rule.min) {
+      errors.push(`${rule.path} must be >= ${rule.min} (got ${rule.value})`);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Invalid config:\n  - ${errors.join("\n  - ")}`);
+  }
+}
+
+validateConfig();
