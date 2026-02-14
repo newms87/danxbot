@@ -45,19 +45,23 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
 # Claude Code CLI (needed by the SDK)
 RUN npm install -g @anthropic-ai/claude-code
 
-# Working directories
-RUN mkdir -p /flytebot/app /flytebot/platform /flytebot/threads
+# Create non-root user (Claude Code SDK blocks --dangerously-skip-permissions for root)
+RUN useradd -m -s /bin/bash flytebot
+
+# Working directories (owned by flytebot user)
+RUN mkdir -p /flytebot/app /flytebot/platform /flytebot/threads /flytebot/data /flytebot/logs \
+    && chown -R flytebot:flytebot /flytebot
 
 WORKDIR /flytebot/app
 
 # Install dependencies (layer cached unless package.json changes)
-COPY package.json package-lock.json* ./
+COPY --chown=flytebot:flytebot package.json package-lock.json* ./
 RUN npm install
 
 # Copy application code
-COPY . .
+COPY --chown=flytebot:flytebot . .
 
-# Entrypoint
+# Entrypoint (must run as root initially to copy auth, then drops to flytebot user)
 COPY entrypoint.sh /flytebot/entrypoint.sh
 RUN chmod +x /flytebot/entrypoint.sh
 
