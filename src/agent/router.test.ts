@@ -16,6 +16,7 @@ vi.mock("@anthropic-ai/sdk", () => {
 vi.mock("../config.js", () => ({
   config: {
     anthropic: { apiKey: "test-key" },
+    agent: { maxThreadMessages: 20 },
   },
 }));
 

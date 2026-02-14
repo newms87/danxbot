@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config.js";
 import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
+import { trimThreadMessages } from "../threads.js";
 import type { RouterResult, ThreadMessage } from "../types.js";
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
@@ -66,11 +67,11 @@ export async function runRouter(
   messageText: string,
   threadMessages: ThreadMessage[] = [],
 ): Promise<RouterResult> {
-  // Use multi-turn conversation when thread history exists,
-  // otherwise fall back to single message
+  // Trim thread messages to prevent token overflow, then build conversation
+  const trimmed = trimThreadMessages(threadMessages, config.agent.maxThreadMessages);
   const messages =
-    threadMessages.length > 1
-      ? buildConversationMessages(threadMessages)
+    trimmed.length > 1
+      ? buildConversationMessages(trimmed)
       : [{ role: "user" as const, content: messageText }];
 
   const request = {

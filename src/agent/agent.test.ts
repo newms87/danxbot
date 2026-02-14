@@ -28,7 +28,7 @@ vi.mock("fs/promises", () => ({
 vi.mock("../config.js", () => ({
   config: {
     anthropic: { apiKey: "test-key" },
-    agent: { model: "test-model", maxTurns: 5, maxBudgetUsd: 1.0, maxThinkingTokens: 8000 },
+    agent: { model: "test-model", maxTurns: 5, maxBudgetUsd: 1.0, maxThinkingTokens: 8000, maxThreadMessages: 20 },
     platform: { repoPath: "/test" },
     logsDir: "/test/logs",
   },

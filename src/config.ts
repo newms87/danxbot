@@ -35,6 +35,7 @@ export const config = {
     maxBudgetUsd: parseFloat(optional("MAX_BUDGET_USD", "1.00")),
     maxThinkingTokens: parseInt(optional("MAX_THINKING_TOKENS", "8000"), 10),
     timeoutMs: parseInt(optional("AGENT_TIMEOUT_MS", "300000"), 10),
+    maxThreadMessages: parseInt(optional("MAX_THREAD_MESSAGES", "20"), 10),
   },
   github: {
     webhookSecret: process.env.GITHUB_WEBHOOK_SECRET || "",

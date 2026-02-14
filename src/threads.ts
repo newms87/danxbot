@@ -75,6 +75,19 @@ async function hydrateFromSlack(
 }
 
 /**
+ * Trims thread messages to prevent token overflow.
+ * Preserves the first message (original question) and the most recent messages.
+ */
+export function trimThreadMessages(
+  messages: ThreadMessage[],
+  limit: number,
+): ThreadMessage[] {
+  if (messages.length <= limit) return messages;
+  if (limit <= 1) return messages.length > 0 ? [messages[0]] : [];
+  return [messages[0], ...messages.slice(-(limit - 1))];
+}
+
+/**
  * Gets or creates a thread state. Hydrates from Slack if the local file is missing.
  */
 export async function getOrCreateThread(
@@ -159,9 +172,18 @@ export async function cleanupOldThreads(): Promise<void> {
 
 /**
  * Starts the periodic thread cleanup.
+ * Returns the interval reference for shutdown cleanup.
  */
-export function startThreadCleanup(): void {
-  setInterval(cleanupOldThreads, CLEANUP_INTERVAL_MS);
+export function startThreadCleanup(): NodeJS.Timeout {
+  const interval = setInterval(cleanupOldThreads, CLEANUP_INTERVAL_MS);
   // Run once on startup
   cleanupOldThreads();
+  return interval;
+}
+
+/**
+ * Stops the periodic thread cleanup.
+ */
+export function stopThreadCleanup(interval: NodeJS.Timeout): void {
+  clearInterval(interval);
 }

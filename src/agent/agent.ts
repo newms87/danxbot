@@ -2,6 +2,7 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { config } from "../config.js";
+import { trimThreadMessages } from "../threads.js";
 import type { AgentLogEntry, AgentResponse, ThreadMessage } from "../types.js";
 
 // Re-export router and heartbeat modules so existing imports continue to work
@@ -40,11 +41,14 @@ export async function runAgent(
 ): Promise<AgentResponse> {
   const prompt = await getSystemPrompt();
 
+  // Trim thread messages to prevent token overflow
+  const trimmed = trimThreadMessages(threadMessages, config.agent.maxThreadMessages);
+
   // When resuming a session, the SDK already has conversation history.
   // Otherwise, prepend thread context so the agent understands the conversation.
   let agentPrompt = messageText;
-  if (!sessionId && threadMessages.length > 1) {
-    const history = threadMessages
+  if (!sessionId && trimmed.length > 1) {
+    const history = trimmed
       .slice(0, -1) // Exclude the current message (passed as messageText)
       .map((msg) => `${msg.isBot ? "Bot" : "User"}: ${msg.text}`)
       .join("\n");
