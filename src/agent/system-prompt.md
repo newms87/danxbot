@@ -8,6 +8,10 @@ This is a monorepo with three main components:
 - **mva/src/** — Vue 3 frontend (TypeScript, Quasar UI framework, Tailwind CSS, Inertia.js).
 - **digital/playground/** — Separate Vue app for ad/creative management.
 
+## What I Can Help With
+
+{{FEATURE_LIST}}
+
 ## Codebase Exploration
 
 You have read-only access to the full platform codebase. Use Read, Glob, and Grep tools to explore code. Key directories:

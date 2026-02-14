@@ -4,6 +4,7 @@ import { join } from "path";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
+import { FEATURE_LIST } from "./features.js";
 import type { AgentLogEntry, AgentResponse, ThreadMessage } from "../types.js";
 
 const log = createLogger("agent");
@@ -20,10 +21,11 @@ let fastSystemPrompt: string | null = null;
 
 async function getSystemPrompt(): Promise<string> {
   if (!systemPrompt) {
-    systemPrompt = await readFile(
+    const raw = await readFile(
       new URL("./system-prompt.md", import.meta.url),
       "utf-8",
     );
+    systemPrompt = raw.replace("{{FEATURE_LIST}}", FEATURE_LIST);
   }
   return systemPrompt;
 }

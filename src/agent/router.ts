@@ -3,6 +3,7 @@ import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
 import { trimThreadMessages } from "../threads.js";
+import { FEATURE_LIST, FEATURE_EXAMPLES } from "./features.js";
 import type { RouterResult, ThreadMessage } from "../types.js";
 
 const log = createLogger("router");
@@ -35,6 +36,20 @@ const ROUTER_SYSTEM_PROMPT = [
   'When needsAgent is false, set complexity to "simple".',
   "",
   "reason: Brief explanation of your routing decision.",
+  "",
+  'When the user seems unsure, asks "what can you do?", sends a vague or exploratory',
+  'message, or says "help":',
+  "- Set quickResponse to a friendly message that picks 2-3 relevant features from the list below",
+  "- Include 1-2 example questions they could try",
+  "- Set needsAgent to false",
+  '- Set complexity to "simple"',
+  "- Keep it concise — 2-3 bullet points max, not the full feature list",
+  "",
+  "## Available Features",
+  "",
+  FEATURE_LIST,
+  "",
+  FEATURE_EXAMPLES,
 ].join("\n");
 
 /**

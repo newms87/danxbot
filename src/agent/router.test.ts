@@ -369,4 +369,33 @@ describe("runRouter", () => {
     expect(typeof callArgs.system).toBe("string");
     expect(callArgs.system.length).toBeGreaterThan(0);
   });
+
+  it("includes feature list in system prompt", async () => {
+    mockRouterResponse({
+      quickResponse: "hi",
+      needsAgent: false,
+      reason: "test",
+    });
+
+    await runRouter("hi");
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.system).toContain("Data Lookups");
+    expect(callArgs.system).toContain("Platform Knowledge");
+    expect(callArgs.system).toContain("Database Queries");
+  });
+
+  it("includes example questions in system prompt", async () => {
+    mockRouterResponse({
+      quickResponse: "hi",
+      needsAgent: false,
+      reason: "test",
+    });
+
+    await runRouter("hi");
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.system).toContain("How many active campaigns");
+    expect(callArgs.system).toContain("Example questions");
+  });
 });
