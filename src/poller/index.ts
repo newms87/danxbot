@@ -1,14 +1,16 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
+import { existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { config } from "./config.js";
 import { fetchTodoCards } from "./trello-client.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const lockFile = resolve(projectRoot, ".poller-running");
 
 let teamRunning = false;
-let childProcess: ChildProcess | null = null;
 let intervalId: ReturnType<typeof setInterval> | null = null;
+let lockCheckId: ReturnType<typeof setInterval> | null = null;
 
 function log(message: string): void {
   const time = new Date().toLocaleTimeString("en-US", { hour12: false });
@@ -39,7 +41,7 @@ export async function poll(): Promise<void> {
   cards.forEach((card, i) => log(`  ${i + 1}. ${card.name}`));
 
   teamRunning = true;
-  log('Spawning: claude -p "/start-team"');
+  log("Spawning Claude in new terminal tab...");
 
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -48,23 +50,28 @@ export async function poll(): Promise<void> {
     }
   }
 
-  childProcess = spawn("claude", ["-p", "/start-team", "--dangerously-skip-permissions"], {
+  // Lock file signals that the team is running. The shell command removes it when done.
+  writeFileSync(lockFile, String(process.pid));
+
+  const shellCmd = `cd ${projectRoot} && claude -p '/start-team' --dangerously-skip-permissions; rm -f ${lockFile}`;
+
+  // wt.exe returns immediately — the Claude process runs in the new tab.
+  spawn("wt.exe", ["-w", "0", "new-tab", "--title", "Flytebot Team", "wsl.exe", "-e", "bash", "-lc", shellCmd], {
     cwd: projectRoot,
-    stdio: "inherit",
+    stdio: "ignore",
     env,
-  });
+    detached: true,
+  }).unref();
 
-  childProcess.on("exit", (code) => {
-    log(`Team exited (code ${code ?? "unknown"}) — resuming polling`);
-    teamRunning = false;
-    childProcess = null;
-  });
-
-  childProcess.on("error", (error) => {
-    log(`Failed to spawn claude: ${error.message}`);
-    teamRunning = false;
-    childProcess = null;
-  });
+  // Watch for lock file removal to detect completion.
+  lockCheckId = setInterval(() => {
+    if (!existsSync(lockFile)) {
+      clearInterval(lockCheckId!);
+      lockCheckId = null;
+      log("Team finished — resuming polling");
+      teamRunning = false;
+    }
+  }, 5000);
 }
 
 export function shutdown(): void {
@@ -75,9 +82,15 @@ export function shutdown(): void {
     intervalId = null;
   }
 
-  if (childProcess) {
-    childProcess.kill("SIGTERM");
+  if (lockCheckId) {
+    clearInterval(lockCheckId);
+    lockCheckId = null;
   }
+
+  // Clean up lock file if it still exists
+  try {
+    if (existsSync(lockFile)) unlinkSync(lockFile);
+  } catch { /* ignore */ }
 
   process.exit(0);
 }
@@ -96,10 +109,13 @@ export function start(): void {
 /** Reset module state for testing. Do not use in production. */
 export function _resetForTesting(): void {
   teamRunning = false;
-  childProcess = null;
   if (intervalId) {
     clearInterval(intervalId);
     intervalId = null;
+  }
+  if (lockCheckId) {
+    clearInterval(lockCheckId);
+    lockCheckId = null;
   }
 }
 
