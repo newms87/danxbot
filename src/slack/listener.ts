@@ -24,6 +24,12 @@ let botUserId: string | null = null;
 let slackConnected = false;
 let isShuttingDown = false;
 
+/** Error patterns that should not be retried (billing, auth, etc.) */
+const NON_RETRYABLE_PATTERNS = [
+  /credit balance is too low/i,
+  /billing/i,
+];
+
 // Track in-flight agent placeholders for graceful shutdown
 interface InFlightPlaceholder {
   channel: string;
@@ -458,7 +464,10 @@ export async function startSlackListener(): Promise<void> {
                 log.warn("Cleared stale session ID, retrying with fresh session");
               }
 
-              const isLastAttempt = attempt >= maxAttempts - 1;
+              // Skip retries for non-retryable errors (billing, credit, etc.)
+              const isNonRetryable = NON_RETRYABLE_PATTERNS.some((p) => p.test(errorMsg));
+
+              const isLastAttempt = isNonRetryable || attempt >= maxAttempts - 1;
 
               if (isLastAttempt) {
                 // All retries exhausted — show error

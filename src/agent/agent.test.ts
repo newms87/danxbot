@@ -781,6 +781,73 @@ describe("runAgent with complexity", () => {
 });
 
 // ============================================================
+// is_error result handling
+// ============================================================
+
+describe("runAgent handles is_error on result messages", () => {
+  it("throws descriptive error when result has is_error: true followed by process crash", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "sess-err-1" },
+        {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          result: "Credit balance is too low",
+          total_cost_usd: 0,
+          num_turns: 0,
+          duration_ms: 100,
+          duration_api_ms: 50,
+        },
+      ]),
+    );
+
+    // When is_error is true, the result should be treated as an error
+    // even though subtype is "success"
+    const result = await runAgent("test query", null);
+    // The result text should contain the billing error, not a generic fallback
+    expect(result.text).toContain("Credit balance is too low");
+  });
+
+  it("prefers descriptive result error over generic process crash message", async () => {
+    // Simulate: result with is_error: true, then process crashes
+    mockQuery.mockReturnValueOnce(
+      (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-err-2" };
+        yield {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          result: "Credit balance is too low",
+          total_cost_usd: 0,
+          num_turns: 0,
+          duration_ms: 100,
+          duration_api_ms: 50,
+        };
+        throw new Error("Claude Code process exited with code 1");
+      })(),
+    );
+
+    await expect(
+      runAgent("test query", null),
+    ).rejects.toThrow("Credit balance is too low");
+  });
+
+  it("still throws generic error when no descriptive result error exists", async () => {
+    mockQuery.mockReturnValueOnce(
+      (async function* () {
+        yield { type: "system", subtype: "init", session_id: "sess-err-3" };
+        throw new Error("Claude Code process exited with code 1");
+      })(),
+    );
+
+    await expect(
+      runAgent("test query", null),
+    ).rejects.toThrow("Claude Code process exited with code 1");
+  });
+});
+
+// ============================================================
 // buildActivitySummary tests
 // ============================================================
 

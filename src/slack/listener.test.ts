@@ -926,6 +926,41 @@ describe("agent retry on crash", () => {
     (mockConfig.agent as Record<string, unknown>).timeoutMs = 300000;
   });
 
+  it("does not retry billing/credit errors (non-retryable)", async () => {
+    mockRunAgent.mockRejectedValueOnce(new Error("Credit balance is too low"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called only once — billing errors should not be retried
+    expect(mockRunAgent).toHaveBeenCalledTimes(1);
+
+    // Error attachment posted immediately
+    expect(mockPostErrorAttachment).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      "mock-ts",
+      expect.stringContaining("crashed"),
+    );
+
+    // Reaction swapped to x
+    expect(mockSwapReaction).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      expect.any(String),
+      "brain",
+      "x",
+    );
+  });
+
+  it("does not retry billing_error pattern", async () => {
+    mockRunAgent.mockRejectedValueOnce(new Error("billing_error: insufficient funds"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called only once
+    expect(mockRunAgent).toHaveBeenCalledTimes(1);
+  });
+
   it("does not retry when maxRetries is 0", async () => {
     (mockConfig.agent as Record<string, unknown>).maxRetries = 0;
 

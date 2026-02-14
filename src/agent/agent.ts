@@ -74,6 +74,7 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
   });
 
   let resultText = "";
+  let resultError: string | null = null;
   let resultSessionId: string | null = null;
   let costUsd = 0;
   let turns = 0;
@@ -184,8 +185,11 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
         costUsd = msg.total_cost_usd;
         turns = msg.num_turns;
 
-        if (msg.subtype === "success") {
+        if (msg.subtype === "success" && !msg.is_error) {
           resultText = msg.result;
+        } else if (msg.subtype === "success" && msg.is_error) {
+          resultText = msg.result;
+          resultError = msg.result;
         } else {
           resultText =
             `I ran into an issue while researching your question: ${msg.subtype}. ${msg.errors?.join(", ") || ""}`.trim();
@@ -222,10 +226,11 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
         raw: null,
       },
     });
+    // Prefer the descriptive error from a result message with is_error: true
+    // over a generic process exit message
+    const errorMessage = resultError ?? (err instanceof Error ? err.message : String(err));
     const detail = stderrOutput ? `\nstderr:\n${stderrOutput}` : "";
-    caughtError = new Error(
-      `${err instanceof Error ? err.message : String(err)}${detail}`,
-    );
+    caughtError = new Error(`${errorMessage}${detail}`);
   } finally {
     // Always write agent log to disk, even on crash
     writeAgentLog({
