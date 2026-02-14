@@ -93,14 +93,35 @@ Generate 3-5 cards in the Review list from the highest-ICE-scored features.
 Board ID: `698fc5b8847b787a3818ad82`
 Review list ID: `698fc5bdfa44ac685050fa35`
 
+#### Labels
+
+Every card MUST have a label. Pass the `labels` array when calling `add_card_to_list`.
+
+| Label | ID | Use |
+|-------|----|-----|
+| Bug | `698fc5b8847b787a3818adac` | Defects, crashes, incorrect behavior |
+| Feature | `698fc5b8847b787a3818ada6` | New functionality, enhancements |
+
 Each card must have:
 - Clear, actionable title
+- A label (Bug or Feature)
 - Description with context, rationale, and ICE score
 - Acceptance criteria checklist
 
-### 6. Save State
+### 6. Save State and Commit
 
 Update `docs/features.md` with everything you learned this session. This file is your memory for next time.
+
+**After finalizing `docs/features.md`, commit it immediately:**
+
+```bash
+cd /home/newms/web/flytebot && git add docs/features.md && git commit -m "$(cat <<'EOF'
+Update feature notes from ideator session
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+EOF
+)"
+```
 
 **Compaction rules** (apply every session):
 

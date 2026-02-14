@@ -2,7 +2,7 @@
 
 This file is the Ideator agent's persistent memory. It tracks all features, their status, and prioritized ideas for improvement.
 
-Last updated: 2026-02-14 (session 3)
+Last updated: 2026-02-14 (session 4)
 
 ---
 
@@ -40,6 +40,10 @@ Last updated: 2026-02-14 (session 3)
 | Dashboard server + helpers tests | Incomplete | 360 | HTTP server and Slack helpers with zero test coverage |
 | Slack user display names | Upgradeable | 336 | Dashboard shows raw user IDs instead of names |
 | Dashboard search/filter | Incomplete | 336 | No way to filter events table |
+| Graceful shutdown | Incomplete | 504 | No signal handlers; stuck placeholders on restart |
+| Thread context window limit | Incomplete | 336 | Unbounded thread history sent to router/agent |
+| Health check endpoint | Incomplete | 240 | No /health route for monitoring |
+| Per-user rate limiting | Incomplete | 280 | No flood protection; each message spawns agent run |
 
 ---
 
@@ -50,17 +54,20 @@ Last updated: 2026-02-14 (session 3)
 
 | Feature Idea | Type | ICE | Description |
 |--------------|------|-----|-------------|
+| Graceful shutdown handler | Carded | 504 | Signal handlers, clean up in-flight agents on restart |
 | Router + parse-json-response tests | Carded | 432 | Critical path, zero coverage, high risk |
 | Dashboard server + helpers tests | Carded | 360 | HTTP server and helpers, zero coverage |
 | Domain docs: School Data + Buyers | Carded | 336 | Last 2 domain knowledge gaps |
 | Dashboard search/filter | Carded | 336 | Filter events by text, status |
 | Slack user display names | Carded | 336 | Resolve user IDs to display names in dashboard |
+| Thread context window limit | Carded | 336 | Cap thread messages sent to router/agent |
+| Per-user rate limiting | Carded | 280 | Prevent cost runaway from rapid messages |
 | Cost tracking alerts | Valuable | 252 | Notify when agent cost exceeds threshold |
-| Response caching | Dependent | 280 | Cache common platform queries; needs domain docs first |
-| Multi-channel support | Exploratory | 168 | Support beyond Slack (Teams, web chat) |
+| Health check endpoint | Carded | 240 | GET /health for uptime monitoring |
 | Agent retry on error | Valuable | 210 | Auto-retry once on transient agent failures (7*5*6) |
 | Dashboard data export | Valuable | 192 | Export events as CSV/JSON for offline analysis (6*8*4) |
-| Health check endpoint | Maintenance | 240 | GET /health for uptime monitoring (6*8*5) |
+| Response caching | Dependent | 280 | Cache common platform queries; needs domain docs first |
+| Multi-channel support | Exploratory | 168 | Support beyond Slack (Teams, web chat) |
 
 ---
 
@@ -68,15 +75,20 @@ Last updated: 2026-02-14 (session 3)
 
 <!-- Overwritten each session — only the most recent notes live here -->
 
-2026-02-14 (session 3): All 4 cards from session 2 have been implemented and merged (domain docs for Suppliers, Ads/Creatives, Users/Auth+SSP, and event persistence to disk). All 151 tests pass across 8 test files. Trello Review/ToDo/In Progress lists were all empty.
+2026-02-14 (session 4): No cards were moved to ToDo or completed since session 3. The Review list had 6 existing cards (5 from session 3 + 1 manually-added "Trello Webhooks" card). ToDo and In Progress are empty.
 
-Codebase assessment: 26 TypeScript files in src/. 8 test files covering agent.ts, listener.ts, formatter.ts, heartbeat-manager.ts, threads.ts, events.ts, events-persistence.ts. Untested modules: router.ts, parse-json-response.ts, server.ts, helpers.ts. Domain docs: 6 of 8 complete (missing school-data and buyers). Dashboard has no search/filter. User column shows raw Slack IDs.
+Codebase assessment: 27 TypeScript files in src/ (same as session 3 + the b30f7a5 commit fixing non-root container user). 8 test files. Domain docs: still 6 of 8 (missing school-data, buyers). No new feature implementations since session 3.
 
-Created 5 new Trello cards in Review:
-1. Domain docs: School Data + Buyers (ICE 336, Valuable)
-2. Router + parse-json-response tests (ICE 432, Maintenance)
-3. Dashboard server + helpers tests (ICE 360, Maintenance)
-4. Slack user display names (ICE 336, Valuable)
-5. Dashboard search/filter (ICE 336, Valuable)
+Key discoveries this session:
+- `src/index.ts` has no signal handlers (SIGTERM/SIGINT) -- stuck Slack placeholders on restart
+- `thread.messages` grows unbounded -- risk of token overflow on long conversations
+- No rate limiting in listener.ts -- each message spawns a full agent run
+- Dashboard time format uses locale-dependent `toLocaleTimeString()` with no date
 
-Mix: 3 Valuable + 2 Maintenance. Next priorities after these: cost tracking alerts (ICE 252), health check endpoint (ICE 240), agent retry on error (ICE 210).
+Created 4 new Trello cards in Review:
+1. Graceful shutdown with in-flight agent cleanup (ICE 504, Maintenance)
+2. Limit thread context window (ICE 336, Valuable)
+3. Health check endpoint (ICE 240, Maintenance)
+4. Per-user rate limiting (ICE 280, Valuable)
+
+Mix: 2 Valuable + 2 Maintenance. Review list now has 10 cards total. Next priorities after current queue: cost tracking alerts (ICE 252), agent retry on error (ICE 210), dashboard data export (ICE 192).
