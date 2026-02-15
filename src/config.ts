@@ -16,14 +16,6 @@ function required(name: string): string {
   return value;
 }
 
-function requiredWithFallback(primary: string, fallback: string): string {
-  const value = process.env[primary] || process.env[fallback];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${primary} (or ${fallback})`);
-  }
-  return value;
-}
-
 function optional(name: string, defaultValue: string): string {
   return process.env[name] || defaultValue;
 }
@@ -48,9 +40,9 @@ export const config = {
     },
   },
   db: {
-    host: requiredWithFallback("FLYTEBOT_DB_HOST", "PLATFORM_DB_HOST"),
-    user: requiredWithFallback("FLYTEBOT_DB_USER", "PLATFORM_DB_USER"),
-    password: requiredWithFallback("FLYTEBOT_DB_PASSWORD", "PLATFORM_DB_PASSWORD"),
+    host: required("FLYTEBOT_DB_HOST"),
+    user: required("FLYTEBOT_DB_USER"),
+    password: required("FLYTEBOT_DB_PASSWORD"),
     database: optional("FLYTEBOT_DB_NAME", "flytebot_chat"),
     connectTimeoutMs: parseInt(optional("DB_CONNECT_TIMEOUT_MS", "5000"), 10),
     eventsMaxAgeDays: parseInt(optional("EVENTS_MAX_AGE_DAYS", "30"), 10),

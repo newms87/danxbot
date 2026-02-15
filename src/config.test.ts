@@ -12,6 +12,9 @@ function validEnv(): Record<string, string> {
     PLATFORM_DB_USER: "test",
     PLATFORM_DB_PASSWORD: "test",
     PLATFORM_DB_NAME: "test",
+    FLYTEBOT_DB_HOST: "flytebot-mysql",
+    FLYTEBOT_DB_USER: "flytebot",
+    FLYTEBOT_DB_PASSWORD: "flytebot",
     MAX_TURNS: "10",
     MAX_BUDGET_USD: "1.00",
     MAX_THINKING_TOKENS: "8000",
@@ -40,18 +43,21 @@ beforeEach(() => {
 });
 
 describe("required DB config", () => {
-  it("throws when PLATFORM_DB_HOST is missing and no FLYTEBOT_DB_HOST fallback", async () => {
-    await expect(importConfig({}, ["PLATFORM_DB_HOST"])).rejects.toThrow("PLATFORM_DB_HOST");
+  it("throws when FLYTEBOT_DB_HOST is missing", async () => {
+    await expect(importConfig({}, ["FLYTEBOT_DB_HOST"])).rejects.toThrow("FLYTEBOT_DB_HOST");
   });
 
-  it("uses FLYTEBOT_DB_HOST when set, ignoring PLATFORM_DB_HOST", async () => {
-    const mod = await importConfig({ FLYTEBOT_DB_HOST: "flytebot-host" });
-    expect(mod.config.db.host).toBe("flytebot-host");
+  it("uses FLYTEBOT_DB_HOST for db.host", async () => {
+    const mod = await importConfig({ FLYTEBOT_DB_HOST: "custom-host" });
+    expect(mod.config.db.host).toBe("custom-host");
   });
 
-  it("falls back to PLATFORM_DB_HOST when FLYTEBOT_DB_HOST is not set", async () => {
-    const mod = await importConfig();
-    expect(mod.config.db.host).toBe("localhost");
+  it("throws when FLYTEBOT_DB_USER is missing", async () => {
+    await expect(importConfig({}, ["FLYTEBOT_DB_USER"])).rejects.toThrow("FLYTEBOT_DB_USER");
+  });
+
+  it("throws when FLYTEBOT_DB_PASSWORD is missing", async () => {
+    await expect(importConfig({}, ["FLYTEBOT_DB_PASSWORD"])).rejects.toThrow("FLYTEBOT_DB_PASSWORD");
   });
 });
 

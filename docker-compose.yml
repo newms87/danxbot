@@ -21,14 +21,39 @@ services:
     networks:
       - default
       - sail
+    depends_on:
+      flytebot-mysql:
+        condition: service_healthy
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
+  flytebot-mysql:
+    image: mysql/mysql-server:8.0
+    volumes:
+      - flytebot-mysql:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: flytebot
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: flytebot_chat
+      MYSQL_USER: flytebot
+      MYSQL_PASSWORD: flytebot
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-pflytebot"]
+      interval: 5s
+      retries: 5
+      timeout: 3s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
+
 volumes:
   flytebot-threads:
+  flytebot-mysql:
 
 networks:
   sail:
