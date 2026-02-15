@@ -8,6 +8,7 @@ import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
 import { resolveUserName } from "./user-cache.js";
 import { runRouter } from "../agent/router.js";
 import { runAgent } from "../agent/agent.js";
+import { processResponse, extractSqlBlocks } from "../agent/sql-executor.js";
 import type { ApiCallUsage } from "../types.js";
 import { notifyError } from "../errors/trello-notifier.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
@@ -60,6 +61,19 @@ export function resetListenerState(): void {
   isShuttingDown = false;
   inFlightPlaceholders.clear();
   placeholderData.clear();
+}
+
+/**
+ * Process sql:execute blocks in agent response text.
+ * Falls back to raw text if processing fails.
+ */
+async function processSqlInResponse(text: string): Promise<string> {
+  try {
+    return await processResponse(text);
+  } catch (err) {
+    log.warn("SQL processing failed, using raw response", err);
+    return text;
+  }
 }
 
 export async function startSlackListener(): Promise<void> {
@@ -220,6 +234,10 @@ export async function startSlackListener(): Promise<void> {
             if (routerResult.usage) apiCalls.push(routerResult.usage);
             const apiCostUsd = apiCalls.reduce((sum, c) => sum + c.costUsd, 0);
 
+            // Count SQL blocks and process them before formatting
+            const sqlBlockCount = extractSqlBlocks(response.text).length;
+            const processedText = await processSqlInResponse(response.text);
+
             updateEvent(dashEvent.id, {
               status: "complete",
               agentResponseAt: Date.now(),
@@ -231,6 +249,7 @@ export async function startSlackListener(): Promise<void> {
               apiCalls: apiCalls.length > 0 ? apiCalls : null,
               apiCostUsd: apiCostUsd > 0 ? apiCostUsd : null,
               agentUsage: response.usage,
+              ...(sqlBlockCount > 0 ? { sqlQueriesProcessed: sqlBlockCount } : {}),
             });
 
             // Update session ID for conversation continuity
@@ -238,7 +257,7 @@ export async function startSlackListener(): Promise<void> {
               updateSessionId(thread, response.sessionId);
             }
 
-            const slackText = markdownToSlackMrkdwn(response.text);
+            const slackText = markdownToSlackMrkdwn(processedText);
             const chunks = splitMessage(slackText);
 
             await client.chat.update({
@@ -397,6 +416,10 @@ export async function startSlackListener(): Promise<void> {
                 apiCalls.push(...hbManager.getApiCalls());
                 const apiCostUsd = apiCalls.reduce((sum, c) => sum + c.costUsd, 0);
 
+                // Count SQL blocks and process them before formatting
+                const sqlBlockCount = extractSqlBlocks(response.text).length;
+                const processedText = await processSqlInResponse(response.text);
+
                 updateEvent(dashEvent.id, {
                   status: "complete",
                   agentResponseAt: Date.now(),
@@ -409,6 +432,7 @@ export async function startSlackListener(): Promise<void> {
                   apiCostUsd: apiCostUsd > 0 ? apiCostUsd : null,
                   agentUsage: response.usage,
                   ...(agentRetried ? { agentRetried: true } : {}),
+                  ...(sqlBlockCount > 0 ? { sqlQueriesProcessed: sqlBlockCount } : {}),
                 });
 
                 // Update session ID for conversation continuity
@@ -417,7 +441,7 @@ export async function startSlackListener(): Promise<void> {
                 }
 
                 // Final update: replace placeholder with formatted response
-                const slackText = markdownToSlackMrkdwn(response.text);
+                const slackText = markdownToSlackMrkdwn(processedText);
                 const chunks = splitMessage(slackText);
 
                 // Update the placeholder with the first chunk (remove thinking attachment)

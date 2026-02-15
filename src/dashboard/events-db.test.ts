@@ -62,6 +62,7 @@ function makeFullEvent(overrides: Partial<MessageEvent> = {}): MessageEvent {
     agentConfig: null,
     agentLog: null,
     agentRetried: false,
+    sqlQueriesProcessed: null,
     feedback: null,
     responseTs: null,
     ...overrides,
@@ -192,6 +193,7 @@ describe("events-db", () => {
         agent_config: null,
         agent_log: null,
         agent_retried: 0,
+        sql_queries_processed: null,
         feedback: null,
         response_ts: null,
       });
@@ -228,6 +230,7 @@ describe("events-db", () => {
         agent_config: null,
         agent_log: null,
         agent_retried: 0,
+        sql_queries_processed: null,
         feedback: null,
         response_ts: null,
       });
@@ -247,7 +250,7 @@ describe("events-db", () => {
         subscription_cost_usd: null, agent_turns: null,
         api_calls: JSON.stringify(apiCalls), api_cost_usd: "0.000100", agent_usage: null,
         status: "complete", error: null, router_request: null, router_raw_response: null,
-        agent_config: null, agent_log: null, agent_retried: 0, feedback: null, response_ts: null,
+        agent_config: null, agent_log: null, agent_retried: 0, sql_queries_processed: null, feedback: null, response_ts: null,
       });
       expect(event.apiCalls).toEqual(apiCalls);
       expect(event.apiCostUsd).toBe(0.0001);
@@ -273,7 +276,7 @@ describe("events-db", () => {
         subscription_cost_usd: null, agent_turns: null,
         api_calls: null, api_cost_usd: null, agent_usage: JSON.stringify(agentUsage),
         status: "complete", error: null, router_request: null, router_raw_response: null,
-        agent_config: null, agent_log: null, agent_retried: 0, feedback: null, response_ts: null,
+        agent_config: null, agent_log: null, agent_retried: 0, sql_queries_processed: null, feedback: null, response_ts: null,
       });
       expect(event.agentUsage).toEqual(agentUsage);
     });
@@ -287,7 +290,7 @@ describe("events-db", () => {
         subscription_cost_usd: null, agent_turns: null,
         api_calls: null, api_cost_usd: "0.001234", agent_usage: null,
         status: "complete", error: null, router_request: null, router_raw_response: null,
-        agent_config: null, agent_log: null, agent_retried: 0, feedback: null, response_ts: null,
+        agent_config: null, agent_log: null, agent_retried: 0, sql_queries_processed: null, feedback: null, response_ts: null,
       });
       expect(event.apiCostUsd).toBe(0.001234);
       expect(typeof event.apiCostUsd).toBe("number");
@@ -321,6 +324,7 @@ describe("events-db", () => {
         agent_config: null,
         agent_log: null,
         agent_retried: 0,
+        sql_queries_processed: null,
         feedback: null,
         response_ts: null,
       });
@@ -355,6 +359,7 @@ describe("events-db", () => {
         agent_config: null,
         agent_log: null,
         agent_retried: 0,
+        sql_queries_processed: null,
         feedback: null,
         response_ts: null,
       });
@@ -544,6 +549,7 @@ describe("events-db", () => {
             agent_config: null,
             agent_log: null,
             agent_retried: 0,
+            sql_queries_processed: null,
             feedback: null,
             response_ts: null,
           },

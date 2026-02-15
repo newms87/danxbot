@@ -57,6 +57,14 @@ vi.mock("../agent/agent.js", () => ({
   runAgent: mockRunAgent,
 }));
 
+const mockProcessResponse = vi.fn().mockImplementation((text: string) => Promise.resolve(text));
+const mockExtractSqlBlocks = vi.fn().mockReturnValue([]);
+
+vi.mock("../agent/sql-executor.js", () => ({
+  processResponse: (...args: unknown[]) => mockProcessResponse(...args),
+  extractSqlBlocks: (...args: unknown[]) => mockExtractSqlBlocks(...args),
+}));
+
 const mockCreateEvent = vi.fn().mockReturnValue({ id: "test-id" });
 const mockUpdateEvent = vi.fn();
 const mockFindEventByResponseTs = vi.fn();
@@ -144,6 +152,8 @@ let client: ReturnType<typeof createMockWebClient>;
 beforeEach(async () => {
   vi.clearAllMocks();
   mockIsRateLimited.mockReturnValue(false);
+  mockProcessResponse.mockImplementation((text: string) => Promise.resolve(text));
+  mockExtractSqlBlocks.mockReturnValue([]);
 
   // Reset listener state (shutdown flag and in-flight tracking)
   resetListenerState();
@@ -1419,6 +1429,184 @@ describe("usage collection", () => {
         apiCalls: [mockRouterUsage],
         apiCostUsd: mockRouterUsage.costUsd,
         agentUsage: mockAgentUsage,
+      }),
+    );
+  });
+});
+
+// ============================================================
+// SQL processing in agent responses
+// ============================================================
+
+describe("SQL processing in agent responses", () => {
+  it("processes SQL blocks in very_low agent response before sending to Slack", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Quick...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    const responseWithSql = "Here are the results:\n```sql:execute\nSELECT * FROM users\n```";
+    const processedText = "Here are the results:\n| id | name |\n|---|---|\n| 1 | Alice |";
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
+    mockProcessResponse.mockResolvedValue(processedText);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // processResponse was called with the raw agent response
+    expect(mockProcessResponse).toHaveBeenCalledWith(responseWithSql);
+
+    // Slack received the processed text (not raw SQL blocks)
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: processedText,
+        attachments: [],
+      }),
+    );
+  });
+
+  it("processes SQL blocks in full agent path response before sending to Slack", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Looking...",
+      needsAgent: true,
+      complexity: "high",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    const responseWithSql = "Results:\n```sql:execute\nSELECT count(*) FROM orders\n```";
+    const processedText = "Results:\n| count(*) |\n|---|\n| 42 |";
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
+    mockProcessResponse.mockResolvedValue(processedText);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockProcessResponse).toHaveBeenCalledWith(responseWithSql);
+
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: processedText,
+        attachments: [],
+      }),
+    );
+  });
+
+  it("falls back to raw response text when SQL processing fails (very_low path)", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Quick...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    const rawText = "Here is some text with ```sql:execute\nSELECT 1\n```";
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: rawText }));
+    mockProcessResponse.mockRejectedValue(new Error("DB connection failed"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Should fall back to raw text, not crash
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: rawText,
+        attachments: [],
+      }),
+    );
+  });
+
+  it("falls back to raw response text when SQL processing fails (full agent path)", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Looking...",
+      needsAgent: true,
+      complexity: "high",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    const rawText = "Text with ```sql:execute\nSELECT 1\n```";
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: rawText }));
+    mockProcessResponse.mockRejectedValue(new Error("DB connection failed"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Should fall back to raw text, not crash
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: rawText,
+        attachments: [],
+      }),
+    );
+  });
+
+  it("tracks sqlQueriesProcessed in event when SQL blocks are present", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Looking...",
+      needsAgent: true,
+      complexity: "high",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    const responseWithSql = "Results:\n```sql:execute\nSELECT 1\n```\n```sql:execute\nSELECT 2\n```";
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
+    mockProcessResponse.mockResolvedValue("processed text");
+    mockExtractSqlBlocks.mockReturnValue([
+      { fullMatch: "```sql:execute\nSELECT 1\n```", query: "SELECT 1" },
+      { fullMatch: "```sql:execute\nSELECT 2\n```", query: "SELECT 2" },
+    ]);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({
+        status: "complete",
+        sqlQueriesProcessed: 2,
+      }),
+    );
+  });
+
+  it("does not set sqlQueriesProcessed when no SQL blocks in response", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Looking...",
+      needsAgent: true,
+      complexity: "high",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "Plain response" }));
+    mockExtractSqlBlocks.mockReturnValue([]);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // The complete event update should NOT include sqlQueriesProcessed
+    const completeCall = mockUpdateEvent.mock.calls.find(
+      (call: unknown[]) => (call[1] as Record<string, unknown>).status === "complete",
+    );
+    expect(completeCall).toBeDefined();
+    expect((completeCall![1] as Record<string, unknown>).sqlQueriesProcessed).toBeUndefined();
+  });
+
+  it("tracks sqlQueriesProcessed in very_low path", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Quick...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    const responseWithSql = "```sql:execute\nSELECT 1\n```";
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
+    mockProcessResponse.mockResolvedValue("| col |\n|---|\n| 1 |");
+    mockExtractSqlBlocks.mockReturnValue([
+      { fullMatch: "```sql:execute\nSELECT 1\n```", query: "SELECT 1" },
+    ]);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({
+        status: "complete",
+        sqlQueriesProcessed: 1,
       }),
     );
   });

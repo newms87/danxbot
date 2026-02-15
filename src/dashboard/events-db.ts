@@ -34,6 +34,7 @@ export const COLUMN_MAP: Record<string, string> = {
   apiCostUsd: "api_cost_usd",
   agentUsage: "agent_usage",
   agentRetried: "agent_retried",
+  sqlQueriesProcessed: "sql_queries_processed",
   feedback: "feedback",
   responseTs: "response_ts",
 };
@@ -95,6 +96,7 @@ export interface EventRow {
   agent_config: string | null;
   agent_log: string | null;
   agent_retried: number;
+  sql_queries_processed: number | null;
   feedback: string | null;
   response_ts: string | null;
 }
@@ -137,6 +139,7 @@ export function rowToEvent(row: EventRow): MessageEvent {
     agentConfig: parseJson(row.agent_config, "agent_config"),
     agentLog: parseJson(row.agent_log, "agent_log") as AgentLogEntry[] | null,
     agentRetried: row.agent_retried === 1,
+    sqlQueriesProcessed: row.sql_queries_processed,
     feedback: row.feedback as MessageEvent["feedback"],
     responseTs: row.response_ts,
   };

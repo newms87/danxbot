@@ -32,6 +32,7 @@ export interface MessageEvent {
   agentConfig: Record<string, unknown> | null;
   agentLog: AgentLogEntry[] | null;
   agentRetried: boolean;
+  sqlQueriesProcessed: number | null;
   feedback: "positive" | "negative" | null;
   responseTs: string | null;
 }
@@ -97,6 +98,7 @@ export function createEvent(partial: {
     agentConfig: null,
     agentLog: null,
     agentRetried: false,
+    sqlQueriesProcessed: null,
     feedback: null,
     responseTs: null,
   };
