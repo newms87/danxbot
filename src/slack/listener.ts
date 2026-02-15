@@ -6,7 +6,9 @@ import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
 import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
 import { resolveUserName } from "./user-cache.js";
-import { runRouter, runAgent } from "../agent/agent.js";
+import { runRouter } from "../agent/router.js";
+import { runAgent } from "../agent/agent.js";
+import type { ApiCallUsage } from "../types.js";
 import { notifyError } from "../errors/trello-notifier.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
@@ -217,14 +219,22 @@ export async function startSlackListener(): Promise<void> {
             });
             const fastPlaceholderTs = placeholder.ts!;
 
+            // Collect usage: router + agent (no heartbeat for very_low)
+            const apiCalls: ApiCallUsage[] = [];
+            if (routerResult.usage) apiCalls.push(routerResult.usage);
+            const apiCostUsd = apiCalls.reduce((sum, c) => sum + c.costUsd, 0);
+
             updateEvent(dashEvent.id, {
               status: "complete",
               agentResponseAt: Date.now(),
               agentResponse: response.text,
-              agentCostUsd: response.costUsd,
+              subscriptionCostUsd: response.subscriptionCostUsd,
               agentTurns: response.turns,
               agentConfig: response.config,
               agentLog: response.log,
+              apiCalls: apiCalls.length > 0 ? apiCalls : null,
+              apiCostUsd: apiCostUsd > 0 ? apiCostUsd : null,
+              agentUsage: response.usage,
             });
 
             // Update session ID for conversation continuity
@@ -268,7 +278,7 @@ export async function startSlackListener(): Promise<void> {
               .catch(() => {});
 
             log.info(
-              `Agent (very_low) responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
+              `Agent (very_low) responded in thread ${threadTs} (cost: $${response.subscriptionCostUsd.toFixed(4)}, turns: ${response.turns})`,
             );
             return;
           } catch (fastError) {
@@ -385,15 +395,23 @@ export async function startSlackListener(): Promise<void> {
                 notifyError("Agent Timeout", `Agent timed out after ${elapsed}s`, errorContext).catch(() => {});
                 handled = true;
               } else {
-                // Agent succeeded
+                // Agent succeeded — collect usage: router + heartbeats
+                const apiCalls: ApiCallUsage[] = [];
+                if (routerResult.usage) apiCalls.push(routerResult.usage);
+                apiCalls.push(...hbManager.getApiCalls());
+                const apiCostUsd = apiCalls.reduce((sum, c) => sum + c.costUsd, 0);
+
                 updateEvent(dashEvent.id, {
                   status: "complete",
                   agentResponseAt: Date.now(),
                   agentResponse: response.text,
-                  agentCostUsd: response.costUsd,
+                  subscriptionCostUsd: response.subscriptionCostUsd,
                   agentTurns: response.turns,
                   agentConfig: response.config,
                   agentLog: response.log,
+                  apiCalls: apiCalls.length > 0 ? apiCalls : null,
+                  apiCostUsd: apiCostUsd > 0 ? apiCostUsd : null,
+                  agentUsage: response.usage,
                   ...(agentRetried ? { agentRetried: true } : {}),
                 });
 
@@ -448,7 +466,7 @@ export async function startSlackListener(): Promise<void> {
                   .catch(() => {});
 
                 log.info(
-                  `Agent responded in thread ${threadTs} (cost: $${response.costUsd.toFixed(4)}, turns: ${response.turns})`,
+                  `Agent responded in thread ${threadTs} (cost: $${response.subscriptionCostUsd.toFixed(4)}, turns: ${response.turns})`,
                 );
                 handled = true;
               }
@@ -552,8 +570,15 @@ export async function startSlackListener(): Promise<void> {
 
         notifyError("Router Error", routerResult.error, errorContext).catch(() => {});
       } else {
-        // Router-only response, mark complete
-        updateEvent(dashEvent.id, { status: "complete" });
+        // Router-only response, mark complete — capture router API usage
+        const routerApiCalls: ApiCallUsage[] = [];
+        if (routerResult.usage) routerApiCalls.push(routerResult.usage);
+        const routerApiCost = routerApiCalls.reduce((sum, c) => sum + c.costUsd, 0);
+        updateEvent(dashEvent.id, {
+          status: "complete",
+          apiCalls: routerApiCalls.length > 0 ? routerApiCalls : null,
+          apiCostUsd: routerApiCost > 0 ? routerApiCost : null,
+        });
       }
     } catch (error) {
       log.error(`Error handling message in thread ${threadTs}`, error);

@@ -1,7 +1,7 @@
 import type { MessageEvent } from "./events.js";
 import { getResponseTimeMs } from "./events.js";
 
-const CSV_HEADER = "timestamp,user,text,status,cost,feedback,response_time_ms";
+const CSV_HEADER = "timestamp,user,text,status,subscription_cost,api_cost,feedback,response_time_ms";
 
 const CSV_INJECTION_PREFIXES = /^[=+\-@\t\r]/;
 
@@ -23,7 +23,8 @@ export function eventsToCSV(events: MessageEvent[]): string {
     const user = event.userName || event.user;
     const text = event.text;
     const status = event.status;
-    const cost = event.agentCostUsd !== null ? String(event.agentCostUsd) : "";
+    const subscriptionCost = event.subscriptionCostUsd !== null ? String(event.subscriptionCostUsd) : "";
+    const apiCost = event.apiCostUsd !== null ? String(event.apiCostUsd) : "";
     const feedback = event.feedback || "";
     const responseTime = getResponseTimeMs(event);
 
@@ -32,7 +33,8 @@ export function eventsToCSV(events: MessageEvent[]): string {
       escapeCSVField(user),
       escapeCSVField(text),
       escapeCSVField(status),
-      escapeCSVField(cost),
+      escapeCSVField(subscriptionCost),
+      escapeCSVField(apiCost),
       escapeCSVField(feedback),
       escapeCSVField(String(responseTime)),
     ].join(",");

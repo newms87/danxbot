@@ -8,7 +8,7 @@ import { createMockWebClient } from "../__tests__/helpers/slack-mock.js";
 const mockGenerateHeartbeatMessage = vi.fn();
 const mockBuildActivitySummary = vi.fn();
 
-vi.mock("../agent/agent.js", () => ({
+vi.mock("../agent/heartbeat.js", () => ({
   generateHeartbeatMessage: mockGenerateHeartbeatMessage,
   buildActivitySummary: mockBuildActivitySummary,
 }));
@@ -64,7 +64,7 @@ function logEntry(type: string, summary: string): AgentLogEntry {
 
 function setupOrchestratorMocks(update: HeartbeatUpdate = DEFAULT_HEARTBEAT_UPDATE) {
   mockBuildActivitySummary.mockReturnValue("activity summary");
-  mockGenerateHeartbeatMessage.mockResolvedValue(update);
+  mockGenerateHeartbeatMessage.mockResolvedValue({ update, usage: null });
 }
 
 // --- Tests ---
@@ -317,10 +317,13 @@ describe("HeartbeatManager", () => {
       mockGenerateHeartbeatMessage.mockImplementation(async () => {
         callCount++;
         return {
-          emoji: `:num${callCount}:`,
-          color: "#000",
-          text: `Update ${callCount}`,
-          stop: false,
+          update: {
+            emoji: `:num${callCount}:`,
+            color: "#000",
+            text: `Update ${callCount}`,
+            stop: false,
+          },
+          usage: null,
         };
       });
 
@@ -374,7 +377,7 @@ describe("HeartbeatManager", () => {
       // First call rejects
       mockGenerateHeartbeatMessage.mockRejectedValueOnce(new Error("API failure"));
       // Second call succeeds
-      mockGenerateHeartbeatMessage.mockResolvedValueOnce(DEFAULT_HEARTBEAT_UPDATE);
+      mockGenerateHeartbeatMessage.mockResolvedValueOnce({ update: DEFAULT_HEARTBEAT_UPDATE, usage: null });
 
       manager.start();
 
@@ -391,6 +394,72 @@ describe("HeartbeatManager", () => {
       expect(mockGenerateHeartbeatMessage).toHaveBeenCalledTimes(2);
       // Verify the second call succeeded and updated the heartbeat
       expect(manager.latestHeartbeat).toEqual(DEFAULT_HEARTBEAT_UPDATE);
+
+      manager.stop();
+    });
+  });
+
+  describe("getApiCalls", () => {
+    it("returns empty array initially", () => {
+      const { manager } = createManager();
+      expect(manager.getApiCalls()).toEqual([]);
+      manager.stop();
+    });
+
+    it("accumulates usage from orchestrator calls", async () => {
+      const { manager } = createManager();
+      mockBuildActivitySummary.mockReturnValue("summary");
+
+      const mockUsage = {
+        source: "heartbeat" as const,
+        model: "claude-haiku-4-5",
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        costUsd: 0.0001,
+        timestamp: Date.now(),
+      };
+
+      mockGenerateHeartbeatMessage.mockResolvedValue({
+        update: DEFAULT_HEARTBEAT_UPDATE,
+        usage: mockUsage,
+      });
+
+      manager.start();
+
+      // Trigger orchestrator (2 ticks)
+      vi.advanceTimersByTime(10000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(manager.getApiCalls()).toHaveLength(1);
+      expect(manager.getApiCalls()[0]).toBe(mockUsage);
+
+      // Trigger again (2 more ticks)
+      vi.advanceTimersByTime(10000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(manager.getApiCalls()).toHaveLength(2);
+
+      manager.stop();
+    });
+
+    it("skips null usage from orchestrator", async () => {
+      const { manager } = createManager();
+      mockBuildActivitySummary.mockReturnValue("summary");
+
+      mockGenerateHeartbeatMessage.mockResolvedValue({
+        update: DEFAULT_HEARTBEAT_UPDATE,
+        usage: null,
+      });
+
+      manager.start();
+
+      // Trigger orchestrator (2 ticks)
+      vi.advanceTimersByTime(10000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(manager.getApiCalls()).toHaveLength(0);
 
       manager.stop();
     });

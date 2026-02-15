@@ -40,6 +40,7 @@ vi.mock("./heartbeat-manager.js", () => {
       stop() {}
       onStream() {}
       onLogEntry() {}
+      getApiCalls() { return []; }
       latestHeartbeat = { emoji: ":hourglass:", color: "#6c5ce7", text: "Working...", stop: false };
     },
   };
@@ -48,8 +49,11 @@ vi.mock("./heartbeat-manager.js", () => {
 const mockRunRouter = vi.fn();
 const mockRunAgent = vi.fn();
 
-vi.mock("../agent/agent.js", () => ({
+vi.mock("../agent/router.js", () => ({
   runRouter: mockRunRouter,
+}));
+
+vi.mock("../agent/agent.js", () => ({
   runAgent: mockRunAgent,
 }));
 
@@ -208,7 +212,10 @@ describe("happy paths", () => {
     );
 
     // Event marked complete
-    expect(mockUpdateEvent).toHaveBeenCalledWith("test-id", { status: "complete" });
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({ status: "complete" }),
+    );
 
     // Agent never called
     expect(mockRunAgent).not.toHaveBeenCalled();
@@ -654,7 +661,10 @@ describe("rate limiting", () => {
     expect(mockRunAgent).not.toHaveBeenCalled();
 
     // Event marked complete (not error)
-    expect(mockUpdateEvent).toHaveBeenCalledWith("test-id", { status: "complete" });
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({ status: "complete" }),
+    );
   });
 
   it("does not rate limit router-only responses", async () => {
@@ -1242,5 +1252,125 @@ describe("shutdown handling", () => {
   it("returns empty array when no agents are in-flight", () => {
     const placeholders = getInFlightPlaceholders();
     expect(placeholders).toEqual([]);
+  });
+});
+
+// ============================================================
+// Usage collection across all flows
+// ============================================================
+
+describe("usage collection", () => {
+  const mockRouterUsage = {
+    source: "router" as const,
+    model: "claude-haiku-4-5",
+    inputTokens: 100,
+    outputTokens: 50,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    costUsd: 0.0001,
+    timestamp: Date.now(),
+  };
+
+  const mockAgentUsage = {
+    totalCostUsd: 0.05,
+    durationMs: 1000,
+    durationApiMs: 800,
+    numTurns: 2,
+    inputTokens: 5000,
+    outputTokens: 1200,
+    cacheCreationInputTokens: 100,
+    cacheReadInputTokens: 300,
+    modelUsage: {},
+  };
+
+  it("passes router usage to updateEvent for router-only response", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Hi!",
+      needsAgent: false,
+      usage: mockRouterUsage,
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({
+        status: "complete",
+        apiCalls: [mockRouterUsage],
+        apiCostUsd: mockRouterUsage.costUsd,
+      }),
+    );
+  });
+
+  it("passes null apiCalls when router has no usage (router-only)", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Hi!",
+      needsAgent: false,
+      usage: null,
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({
+        status: "complete",
+        apiCalls: null,
+        apiCostUsd: null,
+      }),
+    );
+  });
+
+  it("passes router usage + agentUsage for very_low flow", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Quick...",
+      needsAgent: true,
+      complexity: "very_low",
+      usage: mockRouterUsage,
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+    mockRunAgent.mockResolvedValue(
+      makeAgentResponse({ usage: mockAgentUsage }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({
+        status: "complete",
+        apiCalls: [mockRouterUsage],
+        apiCostUsd: mockRouterUsage.costUsd,
+        agentUsage: mockAgentUsage,
+      }),
+    );
+  });
+
+  it("passes router usage + agentUsage for standard agent flow", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Looking...",
+      needsAgent: true,
+      complexity: "high",
+      usage: mockRouterUsage,
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+    mockRunAgent.mockResolvedValue(
+      makeAgentResponse({ usage: mockAgentUsage }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Standard path includes router usage (heartbeat mock returns empty array)
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({
+        status: "complete",
+        apiCalls: [mockRouterUsage],
+        apiCostUsd: mockRouterUsage.costUsd,
+        agentUsage: mockAgentUsage,
+      }),
+    );
   });
 });

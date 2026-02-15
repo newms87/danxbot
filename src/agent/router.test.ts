@@ -41,8 +41,11 @@ function msg(
   return { user, text, ts: Date.now().toString(), isBot };
 }
 
+const MOCK_USAGE = { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+
 function mockRouterResponse(json: Record<string, unknown>) {
   mockCreate.mockResolvedValueOnce({
+    usage: MOCK_USAGE,
     content: [{ type: "text", text: JSON.stringify(json) }],
   });
 }
@@ -214,6 +217,7 @@ describe("runRouter", () => {
 
   it("handles code-fenced JSON response", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -243,6 +247,7 @@ describe("runRouter", () => {
 
   it("returns error fallback on malformed (non-JSON) response", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -463,5 +468,32 @@ describe("runRouter", () => {
     const callArgs = mockCreate.mock.calls[0][0];
     expect(callArgs.system).toContain("How many active campaigns");
     expect(callArgs.system).toContain("Example questions");
+  });
+
+  it("populates usage on successful response", async () => {
+    mockCreate.mockResolvedValueOnce({
+      usage: { input_tokens: 200, output_tokens: 80, cache_creation_input_tokens: 50, cache_read_input_tokens: 30 },
+      content: [{ type: "text", text: '{"quickResponse":"Hi!","needsAgent":false,"reason":"greeting"}' }],
+    });
+
+    const result = await runRouter("hello");
+
+    expect(result.usage).not.toBeNull();
+    expect(result.usage!.source).toBe("router");
+    expect(result.usage!.model).toBe("claude-haiku-4-5-20251001");
+    expect(result.usage!.inputTokens).toBe(200);
+    expect(result.usage!.outputTokens).toBe(80);
+    expect(result.usage!.cacheCreationInputTokens).toBe(50);
+    expect(result.usage!.cacheReadInputTokens).toBe(30);
+    expect(result.usage!.costUsd).toBeGreaterThan(0);
+    expect(result.usage!.timestamp).toBeTypeOf("number");
+  });
+
+  it("returns null usage on API failure", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("API error"));
+
+    const result = await runRouter("hello");
+
+    expect(result.usage).toBeNull();
   });
 });

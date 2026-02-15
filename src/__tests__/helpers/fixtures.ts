@@ -95,6 +95,7 @@ export function makeRouterResult(
     error: null,
     request: {},
     rawResponse: {},
+    usage: null,
     ...overrides,
   };
 }
@@ -108,9 +109,10 @@ export function makeAgentResponse(
   return {
     text: "Here is the answer.",
     sessionId: "sess-test-1",
-    costUsd: 0.05,
+    subscriptionCostUsd: 0.05,
     turns: 2,
     config: {},
+    usage: null,
     log: [
       {
         timestamp: Date.now(),

@@ -1,7 +1,7 @@
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { persistEventToDb, updateEventInDb, loadEventsFromDb, deleteOldEventsFromDb } from "./events-db.js";
-import type { AgentLogEntry, ComplexityLevel } from "../types.js";
+import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary, ComplexityLevel } from "../types.js";
 
 const log = createLogger("events");
 
@@ -20,8 +20,11 @@ export interface MessageEvent {
   routerComplexity: ComplexityLevel | null;
   agentResponseAt: number | null;
   agentResponse: string | null;
-  agentCostUsd: number | null;
+  subscriptionCostUsd: number | null;
   agentTurns: number | null;
+  apiCalls: ApiCallUsage[] | null;
+  apiCostUsd: number | null;
+  agentUsage: AgentUsageSummary | null;
   status: "received" | "routing" | "routed" | "agent_running" | "complete" | "error";
   error: string | null;
   routerRequest: Record<string, unknown> | null;
@@ -41,7 +44,9 @@ export interface AnalyticsSummary {
   avgRouterTimeMs: number;
   avgAgentTimeMs: number;
   avgTotalTimeMs: number;
-  totalCostUsd: number;
+  totalSubscriptionCostUsd: number;
+  totalApiCostUsd: number;
+  totalCombinedCostUsd: number;
   errorCount: number;
   feedbackPositive: number;
   feedbackNegative: number;
@@ -80,8 +85,11 @@ export function createEvent(partial: {
     routerComplexity: null,
     agentResponseAt: null,
     agentResponse: null,
-    agentCostUsd: null,
+    subscriptionCostUsd: null,
     agentTurns: null,
+    apiCalls: null,
+    apiCostUsd: null,
+    agentUsage: null,
     status: "received",
     error: null,
     routerRequest: null,
@@ -139,7 +147,8 @@ export function getAnalytics(): AnalyticsSummary {
   const totalTimes = completed.map((e) => getResponseTimeMs(e));
 
   const avg = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-  const totalCost = withAgent.reduce((sum, e) => sum + (e.agentCostUsd || 0), 0);
+  const totalSubscriptionCost = withAgent.reduce((sum, e) => sum + (e.subscriptionCostUsd || 0), 0);
+  const totalApiCost = completed.reduce((sum, e) => sum + (e.apiCostUsd || 0), 0);
 
   const feedbackPositive = events.filter((e) => e.feedback === "positive").length;
   const feedbackNegative = events.filter((e) => e.feedback === "negative").length;
@@ -153,7 +162,9 @@ export function getAnalytics(): AnalyticsSummary {
     avgRouterTimeMs: Math.round(avg(routerTimes)),
     avgAgentTimeMs: Math.round(avg(agentTimes)),
     avgTotalTimeMs: Math.round(avg(totalTimes)),
-    totalCostUsd: totalCost,
+    totalSubscriptionCostUsd: totalSubscriptionCost,
+    totalApiCostUsd: totalApiCost,
+    totalCombinedCostUsd: totalSubscriptionCost + totalApiCost,
     errorCount: events.filter((e) => e.status === "error").length,
     feedbackPositive,
     feedbackNegative,

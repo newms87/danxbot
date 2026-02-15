@@ -50,8 +50,11 @@ function makeFullEvent(overrides: Partial<MessageEvent> = {}): MessageEvent {
     routerComplexity: null,
     agentResponseAt: null,
     agentResponse: null,
-    agentCostUsd: null,
+    subscriptionCostUsd: null,
     agentTurns: null,
+    apiCalls: null,
+    apiCostUsd: null,
+    agentUsage: null,
     status: "received",
     error: null,
     routerRequest: null,
@@ -84,7 +87,13 @@ describe("events-db", () => {
       expect(COLUMN_MAP.threadTs).toBe("thread_ts");
       expect(COLUMN_MAP.channelId).toBe("channel_id");
       expect(COLUMN_MAP.routerNeedsAgent).toBe("router_needs_agent");
-      expect(COLUMN_MAP.agentCostUsd).toBe("agent_cost_usd");
+      expect(COLUMN_MAP.subscriptionCostUsd).toBe("subscription_cost_usd");
+    });
+
+    it("includes usage tracking columns", () => {
+      expect(COLUMN_MAP.apiCalls).toBe("api_calls");
+      expect(COLUMN_MAP.apiCostUsd).toBe("api_cost_usd");
+      expect(COLUMN_MAP.agentUsage).toBe("agent_usage");
     });
   });
 
@@ -122,6 +131,36 @@ describe("events-db", () => {
       expect(row[needsAgentIdx]).toBe(1);
       expect(row[retriedIdx]).toBe(1);
     });
+
+    it("JSON-stringifies apiCalls array", () => {
+      const apiCalls = [
+        { source: "router", model: "claude-haiku-4-5", inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, costUsd: 0.0001, timestamp: 1000 },
+      ];
+      const event = makeFullEvent({ apiCalls: apiCalls as any });
+      const row = eventToRow(event);
+      const keys = Object.keys(COLUMN_MAP);
+      const idx = keys.indexOf("apiCalls");
+      expect(row[idx]).toBe(JSON.stringify(apiCalls));
+    });
+
+    it("JSON-stringifies agentUsage object", () => {
+      const agentUsage = {
+        totalCostUsd: 0.25,
+        durationMs: 3000,
+        durationApiMs: 2500,
+        numTurns: 4,
+        inputTokens: 5000,
+        outputTokens: 1200,
+        cacheCreationInputTokens: 100,
+        cacheReadInputTokens: 300,
+        modelUsage: { "claude-sonnet-4-5": { inputTokens: 5000, outputTokens: 1200, cacheReadInputTokens: 300, cacheCreationInputTokens: 100, costUsd: 0.25 } },
+      };
+      const event = makeFullEvent({ agentUsage: agentUsage as any });
+      const row = eventToRow(event);
+      const keys = Object.keys(COLUMN_MAP);
+      const idx = keys.indexOf("agentUsage");
+      expect(row[idx]).toBe(JSON.stringify(agentUsage));
+    });
   });
 
   describe("rowToEvent", () => {
@@ -141,8 +180,11 @@ describe("events-db", () => {
         router_complexity: null,
         agent_response_at: null,
         agent_response: null,
-        agent_cost_usd: null,
+        subscription_cost_usd: null,
         agent_turns: null,
+        api_calls: null,
+        api_cost_usd: null,
+        agent_usage: null,
         status: "received",
         error: null,
         router_request: null,
@@ -158,7 +200,7 @@ describe("events-db", () => {
       expect(event.agentRetried).toBe(false);
     });
 
-    it("converts DECIMAL string to number for agent_cost_usd", () => {
+    it("converts DECIMAL string to number for subscription_cost_usd", () => {
       const event = rowToEvent({
         id: "t-1-m-1",
         thread_ts: "t-1",
@@ -174,8 +216,11 @@ describe("events-db", () => {
         router_complexity: null,
         agent_response_at: null,
         agent_response: null,
-        agent_cost_usd: "0.0500",
+        subscription_cost_usd: "0.0500",
         agent_turns: null,
+        api_calls: null,
+        api_cost_usd: null,
+        agent_usage: null,
         status: "complete",
         error: null,
         router_request: null,
@@ -186,8 +231,66 @@ describe("events-db", () => {
         feedback: null,
         response_ts: null,
       });
-      expect(event.agentCostUsd).toBe(0.05);
-      expect(typeof event.agentCostUsd).toBe("number");
+      expect(event.subscriptionCostUsd).toBe(0.05);
+      expect(typeof event.subscriptionCostUsd).toBe("number");
+    });
+
+    it("parses api_calls JSON column to ApiCallUsage array", () => {
+      const apiCalls = [
+        { source: "router", model: "claude-haiku-4-5", inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, costUsd: 0.0001, timestamp: 1000 },
+      ];
+      const event = rowToEvent({
+        id: "t-1-m-1", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
+        user: "U456", user_name: null, text: "test", received_at: 1000,
+        router_response_at: null, router_response: null, router_needs_agent: null,
+        router_complexity: null, agent_response_at: null, agent_response: null,
+        subscription_cost_usd: null, agent_turns: null,
+        api_calls: JSON.stringify(apiCalls), api_cost_usd: "0.000100", agent_usage: null,
+        status: "complete", error: null, router_request: null, router_raw_response: null,
+        agent_config: null, agent_log: null, agent_retried: 0, feedback: null, response_ts: null,
+      });
+      expect(event.apiCalls).toEqual(apiCalls);
+      expect(event.apiCostUsd).toBe(0.0001);
+    });
+
+    it("parses agent_usage JSON column to AgentUsageSummary", () => {
+      const agentUsage = {
+        totalCostUsd: 0.25,
+        durationMs: 3000,
+        durationApiMs: 2500,
+        numTurns: 4,
+        inputTokens: 5000,
+        outputTokens: 1200,
+        cacheCreationInputTokens: 100,
+        cacheReadInputTokens: 300,
+        modelUsage: {},
+      };
+      const event = rowToEvent({
+        id: "t-1-m-1", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
+        user: "U456", user_name: null, text: "test", received_at: 1000,
+        router_response_at: null, router_response: null, router_needs_agent: null,
+        router_complexity: null, agent_response_at: null, agent_response: null,
+        subscription_cost_usd: null, agent_turns: null,
+        api_calls: null, api_cost_usd: null, agent_usage: JSON.stringify(agentUsage),
+        status: "complete", error: null, router_request: null, router_raw_response: null,
+        agent_config: null, agent_log: null, agent_retried: 0, feedback: null, response_ts: null,
+      });
+      expect(event.agentUsage).toEqual(agentUsage);
+    });
+
+    it("converts DECIMAL string to number for api_cost_usd", () => {
+      const event = rowToEvent({
+        id: "t-1-m-1", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
+        user: "U456", user_name: null, text: "test", received_at: 1000,
+        router_response_at: null, router_response: null, router_needs_agent: null,
+        router_complexity: null, agent_response_at: null, agent_response: null,
+        subscription_cost_usd: null, agent_turns: null,
+        api_calls: null, api_cost_usd: "0.001234", agent_usage: null,
+        status: "complete", error: null, router_request: null, router_raw_response: null,
+        agent_config: null, agent_log: null, agent_retried: 0, feedback: null, response_ts: null,
+      });
+      expect(event.apiCostUsd).toBe(0.001234);
+      expect(typeof event.apiCostUsd).toBe("number");
     });
 
     it("returns null for malformed JSON instead of crashing", () => {
@@ -206,8 +309,11 @@ describe("events-db", () => {
         router_complexity: null,
         agent_response_at: null,
         agent_response: null,
-        agent_cost_usd: null,
+        subscription_cost_usd: null,
         agent_turns: null,
+        api_calls: null,
+        api_cost_usd: null,
+        agent_usage: null,
         status: "received",
         error: null,
         router_request: "{invalid json",
@@ -237,8 +343,11 @@ describe("events-db", () => {
         router_complexity: null,
         agent_response_at: null,
         agent_response: null,
-        agent_cost_usd: null,
+        subscription_cost_usd: null,
         agent_turns: null,
+        api_calls: null,
+        api_cost_usd: null,
+        agent_usage: null,
         status: "received",
         error: null,
         router_request: "{invalid json",
@@ -423,8 +532,11 @@ describe("events-db", () => {
             router_needs_agent: null,
             agent_response_at: null,
             agent_response: null,
-            agent_cost_usd: null,
+            subscription_cost_usd: null,
             agent_turns: null,
+            api_calls: null,
+            api_cost_usd: null,
+            agent_usage: null,
             status: "complete",
             error: null,
             router_request: null,

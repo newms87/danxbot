@@ -101,10 +101,15 @@ const emit = defineEmits<{
               </template>
               <span v-else-if="event.status === 'agent_running'" class="text-purple-600 dark:text-purple-400">...</span>
             </td>
-            <td class="px-4 py-2.5 text-gray-500 dark:text-gray-400 whitespace-nowrap">
-              <template v-if="event.agentCostUsd != null">
-                ${{ event.agentCostUsd.toFixed(4) }}
-              </template>
+            <td class="px-4 py-2.5 whitespace-nowrap">
+              <div class="flex flex-col gap-0.5">
+                <span v-if="event.apiCostUsd != null" class="text-orange-600 dark:text-orange-400 text-xs">
+                  ${{ event.apiCostUsd.toFixed(4) }} <span class="text-[10px] opacity-60">API</span>
+                </span>
+                <span v-if="event.subscriptionCostUsd != null" class="text-blue-600 dark:text-blue-400 text-xs">
+                  ${{ event.subscriptionCostUsd.toFixed(4) }} <span class="text-[10px] opacity-60">Sub</span>
+                </span>
+              </div>
             </td>
           </tr>
           <tr v-if="filteredEvents.length === 0">

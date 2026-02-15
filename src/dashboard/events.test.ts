@@ -74,10 +74,13 @@ describe("createEvent", () => {
     expect(event.routerResponse).toBeNull();
     expect(event.routerNeedsAgent).toBeNull();
     expect(event.agentResponse).toBeNull();
-    expect(event.agentCostUsd).toBeNull();
+    expect(event.subscriptionCostUsd).toBeNull();
     expect(event.error).toBeNull();
     expect(event.feedback).toBeNull();
     expect(event.responseTs).toBeNull();
+    expect(event.apiCalls).toBeNull();
+    expect(event.apiCostUsd).toBeNull();
+    expect(event.agentUsage).toBeNull();
   });
 
   it("generates ID from threadTs-messageTs", () => {
@@ -123,13 +126,13 @@ describe("updateEvent", () => {
     updateEvent(event.id, {
       status: "complete",
       routerResponse: "hi",
-      agentCostUsd: 0.05,
+      subscriptionCostUsd: 0.05,
     });
 
     const found = getEvents().find((e) => e.id === event.id);
     expect(found?.status).toBe("complete");
     expect(found?.routerResponse).toBe("hi");
-    expect(found?.agentCostUsd).toBe(0.05);
+    expect(found?.subscriptionCostUsd).toBe(0.05);
   });
 });
 
@@ -144,7 +147,9 @@ describe("getAnalytics", () => {
     expect(analytics).toHaveProperty("avgRouterTimeMs");
     expect(analytics).toHaveProperty("avgAgentTimeMs");
     expect(analytics).toHaveProperty("avgTotalTimeMs");
-    expect(analytics).toHaveProperty("totalCostUsd");
+    expect(analytics).toHaveProperty("totalSubscriptionCostUsd");
+    expect(analytics).toHaveProperty("totalApiCostUsd");
+    expect(analytics).toHaveProperty("totalCombinedCostUsd");
     expect(analytics).toHaveProperty("errorCount");
   });
 
@@ -163,22 +168,62 @@ describe("getAnalytics", () => {
   it("sums agent costs", () => {
     const e1 = makeEvent();
     const e2 = makeEvent();
-    const before = getAnalytics().totalCostUsd;
+    const before = getAnalytics().totalSubscriptionCostUsd;
 
     updateEvent(e1.id, {
       status: "complete",
       routerResponseAt: Date.now(),
       agentResponseAt: Date.now(),
-      agentCostUsd: 0.10,
+      subscriptionCostUsd: 0.10,
     });
     updateEvent(e2.id, {
       status: "complete",
       routerResponseAt: Date.now(),
       agentResponseAt: Date.now(),
-      agentCostUsd: 0.25,
+      subscriptionCostUsd: 0.25,
     });
 
-    expect(getAnalytics().totalCostUsd).toBeCloseTo(before + 0.35, 2);
+    expect(getAnalytics().totalSubscriptionCostUsd).toBeCloseTo(before + 0.35, 2);
+  });
+
+  it("sums API costs across all completed events", () => {
+    const e1 = makeEvent();
+    const e2 = makeEvent();
+
+    updateEvent(e1.id, {
+      status: "complete",
+      routerResponseAt: Date.now(),
+      apiCostUsd: 0.001,
+    });
+    updateEvent(e2.id, {
+      status: "complete",
+      routerResponseAt: Date.now(),
+      apiCostUsd: 0.002,
+    });
+
+    expect(getAnalytics().totalApiCostUsd).toBeCloseTo(0.003, 6);
+  });
+
+  it("computes combined cost as sum of subscription and API costs", () => {
+    const e1 = makeEvent();
+
+    updateEvent(e1.id, {
+      status: "complete",
+      routerResponseAt: Date.now(),
+      agentResponseAt: Date.now(),
+      subscriptionCostUsd: 0.10,
+      apiCostUsd: 0.005,
+    });
+
+    const analytics = getAnalytics();
+    expect(analytics.totalCombinedCostUsd).toBeCloseTo(0.105, 6);
+  });
+
+  it("returns zero API cost when no events have apiCostUsd", () => {
+    const e1 = makeEvent();
+    updateEvent(e1.id, { status: "complete", routerResponseAt: Date.now() });
+
+    expect(getAnalytics().totalApiCostUsd).toBe(0);
   });
 
   it("counts errors", () => {

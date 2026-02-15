@@ -46,6 +46,17 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 
 Validation tests require `ANTHROPIC_API_KEY` env var and are excluded from the default `npx vitest run`.
 
+## Build Workflow
+
+Every phase or unit of work follows this exact order:
+
+1. **Implement** — write the code, run `npx vitest run` and `npx tsc --noEmit`
+2. **Test coverage** — launch `test-reviewer` agent to audit coverage, then write tests to fill all gaps
+3. **Code review** — launch `code-reviewer` agent, fix all findings
+4. **Report** — present results to user, wait for approval and commit
+
+This applies per-phase in phased plans and to any standalone work (>10 lines or multiple files). Steps 2-3 are mandatory quality gates — never skip or defer them.
+
 ## Autonomous Agent Team
 
 ### Triggers

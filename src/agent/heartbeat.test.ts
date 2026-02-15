@@ -30,6 +30,8 @@ vi.mock("../logger.js", () => ({
 const { VALID_SLACK_EMOJIS, HEARTBEAT_SYSTEM_PROMPT, generateHeartbeatMessage } =
   await import("./heartbeat.js");
 
+const MOCK_USAGE = { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+
 // --- Tests ---
 
 beforeEach(() => {
@@ -67,6 +69,7 @@ describe("HEARTBEAT_SYSTEM_PROMPT", () => {
 describe("generateHeartbeatMessage emoji validation", () => {
   it("returns a valid emoji from the list when the LLM picks one", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -77,11 +80,13 @@ describe("generateHeartbeatMessage emoji validation", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
 
-    expect(result.emoji).toBe(":mag:");
+    expect(result.update.emoji).toBe(":mag:");
+    expect(result.usage).not.toBeNull();
   });
 
   it("replaces invalid emoji with fallback", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -92,14 +97,15 @@ describe("generateHeartbeatMessage emoji validation", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
 
-    expect(result.emoji).toBe(":hourglass_flowing_sand:");
+    expect(result.update.emoji).toBe(":hourglass_flowing_sand:");
     // Other fields should be preserved
-    expect(result.color).toBe("#e67e22");
-    expect(result.text).toBe("Investigating the issue");
+    expect(result.update.color).toBe("#e67e22");
+    expect(result.update.text).toBe("Investigating the issue");
   });
 
   it("replaces another invalid emoji with fallback", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -110,11 +116,12 @@ describe("generateHeartbeatMessage emoji validation", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
 
-    expect(result.emoji).toBe(":hourglass_flowing_sand:");
+    expect(result.update.emoji).toBe(":hourglass_flowing_sand:");
   });
 
   it("normalizes bare emoji name (no colons) to :name: format", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -125,11 +132,12 @@ describe("generateHeartbeatMessage emoji validation", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
 
-    expect(result.emoji).toBe(":rocket:");
+    expect(result.update.emoji).toBe(":rocket:");
   });
 
   it("normalizes emoji with single leading colon to :name: format", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -140,12 +148,13 @@ describe("generateHeartbeatMessage emoji validation", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
 
-    expect(result.emoji).toBe(":rocket:");
+    expect(result.update.emoji).toBe(":rocket:");
   });
 
   it("accepts a sample of emojis from the valid list", async () => {
     for (const emoji of VALID_SLACK_EMOJIS.slice(0, 3)) {
       mockCreate.mockResolvedValueOnce({
+        usage: MOCK_USAGE,
         content: [
           {
             type: "text",
@@ -159,7 +168,7 @@ describe("generateHeartbeatMessage emoji validation", () => {
       });
 
       const result = await generateHeartbeatMessage("Elapsed: 10s", []);
-      expect(result.emoji).toBe(`:${emoji}:`);
+      expect(result.update.emoji).toBe(`:${emoji}:`);
     }
   });
 });

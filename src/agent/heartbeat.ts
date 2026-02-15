@@ -4,9 +4,11 @@ import { createLogger } from "../logger.js";
 import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
 import type {
   AgentLogEntry,
+  ApiCallUsage,
   HeartbeatSnapshot,
   HeartbeatUpdate,
 } from "../types.js";
+import { buildApiCallUsage } from "./pricing.js";
 
 const log = createLogger("heartbeat");
 
@@ -156,10 +158,15 @@ export function buildActivitySummary(
  * The caller provides the current activity summary (built via buildActivitySummary)
  * so this function doesn't need to know about log entry counts.
  */
+export interface HeartbeatResult {
+  update: HeartbeatUpdate;
+  usage: ApiCallUsage | null;
+}
+
 export async function generateHeartbeatMessage(
   currentSummary: string,
   previousSnapshots: HeartbeatSnapshot[],
-): Promise<HeartbeatUpdate> {
+): Promise<HeartbeatResult> {
   // Build multi-turn conversation: replay previous cycles
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
   for (const snapshot of previousSnapshots) {
@@ -181,6 +188,7 @@ export async function generateHeartbeatMessage(
       messages,
     });
 
+    const usage = buildApiCallUsage(response.usage, HAIKU_MODEL, "heartbeat");
     const parsed = parseJsonResponse(response);
 
     const rawEmoji = String(parsed.emoji || HEARTBEAT_FALLBACK.emoji);
@@ -190,13 +198,16 @@ export async function generateHeartbeatMessage(
       : HEARTBEAT_FALLBACK.emoji;
 
     return {
-      emoji: validatedEmoji,
-      color: String(parsed.color || HEARTBEAT_FALLBACK.color),
-      text: String(parsed.text || HEARTBEAT_FALLBACK.text),
-      stop: parsed.stop === true,
+      update: {
+        emoji: validatedEmoji,
+        color: String(parsed.color || HEARTBEAT_FALLBACK.color),
+        text: String(parsed.text || HEARTBEAT_FALLBACK.text),
+        stop: parsed.stop === true,
+      },
+      usage,
     };
   } catch (error) {
     log.error("Heartbeat message generation failed", error);
-    return { ...HEARTBEAT_FALLBACK };
+    return { update: { ...HEARTBEAT_FALLBACK }, usage: null };
   }
 }

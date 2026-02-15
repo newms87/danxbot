@@ -5,13 +5,14 @@ const budget = new BudgetTracker(2.0);
 let savedSessionId: string | null = null;
 
 describe.skipIf(!hasApiKey())("validation: real Claude API", () => {
-  let runRouter: typeof import("../../agent/agent.js").runRouter;
+  let runRouter: typeof import("../../agent/router.js").runRouter;
   let runAgent: typeof import("../../agent/agent.js").runAgent;
 
   beforeAll(async () => {
     // Import real modules (no mocks for Anthropic SDK)
+    const router = await import("../../agent/router.js");
     const agent = await import("../../agent/agent.js");
-    runRouter = agent.runRouter;
+    runRouter = router.runRouter;
     runAgent = agent.runAgent;
   });
 
@@ -40,7 +41,7 @@ describe.skipIf(!hasApiKey())("validation: real Claude API", () => {
     expect(agentResult.text).toBeTruthy();
     expect(agentResult.text.length).toBeGreaterThan(50);
     expect(agentResult.sessionId).toBeTruthy();
-    budget.add(agentResult.costUsd);
+    budget.add(agentResult.subscriptionCostUsd);
 
     // Save for session resumption test
     savedSessionId = agentResult.sessionId;
@@ -56,7 +57,7 @@ describe.skipIf(!hasApiKey())("validation: real Claude API", () => {
     );
 
     expect(result.text).toBeTruthy();
-    budget.add(result.costUsd);
+    budget.add(result.subscriptionCostUsd);
 
     // Cumulative cost should be under $2
     expect(budget.total).toBeLessThan(2.0);

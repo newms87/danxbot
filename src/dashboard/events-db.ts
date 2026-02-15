@@ -2,7 +2,7 @@ import type { ResultSetHeader } from "mysql2/promise";
 import { getPool } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 import type { MessageEvent } from "./events.js";
-import type { AgentLogEntry } from "../types.js";
+import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary } from "../types.js";
 
 const log = createLogger("events-db");
 
@@ -22,7 +22,7 @@ export const COLUMN_MAP: Record<string, string> = {
   routerComplexity: "router_complexity",
   agentResponseAt: "agent_response_at",
   agentResponse: "agent_response",
-  agentCostUsd: "agent_cost_usd",
+  subscriptionCostUsd: "subscription_cost_usd",
   agentTurns: "agent_turns",
   status: "status",
   error: "error",
@@ -30,13 +30,16 @@ export const COLUMN_MAP: Record<string, string> = {
   routerRawResponse: "router_raw_response",
   agentConfig: "agent_config",
   agentLog: "agent_log",
+  apiCalls: "api_calls",
+  apiCostUsd: "api_cost_usd",
+  agentUsage: "agent_usage",
   agentRetried: "agent_retried",
   feedback: "feedback",
   responseTs: "response_ts",
 };
 
 /** JSON-typed columns that need JSON.stringify for DB and JSON.parse on read */
-const JSON_COLUMNS = new Set(["routerRequest", "routerRawResponse", "agentConfig", "agentLog"]);
+const JSON_COLUMNS = new Set(["routerRequest", "routerRawResponse", "agentConfig", "agentLog", "apiCalls", "agentUsage"]);
 
 /** Boolean columns stored as TINYINT(1) */
 const BOOL_COLUMNS = new Set(["routerNeedsAgent", "agentRetried"]);
@@ -80,8 +83,11 @@ export interface EventRow {
   router_complexity: string | null;
   agent_response_at: number | null;
   agent_response: string | null;
-  agent_cost_usd: string | number | null;
+  subscription_cost_usd: string | number | null;
   agent_turns: number | null;
+  api_calls: string | null;
+  api_cost_usd: string | number | null;
+  agent_usage: string | null;
   status: string;
   error: string | null;
   router_request: string | null;
@@ -119,8 +125,11 @@ export function rowToEvent(row: EventRow): MessageEvent {
     routerComplexity: row.router_complexity as MessageEvent["routerComplexity"],
     agentResponseAt: row.agent_response_at,
     agentResponse: row.agent_response,
-    agentCostUsd: row.agent_cost_usd === null ? null : Number(row.agent_cost_usd),
+    subscriptionCostUsd: row.subscription_cost_usd === null ? null : Number(row.subscription_cost_usd),
     agentTurns: row.agent_turns,
+    apiCalls: parseJson(row.api_calls, "api_calls") as ApiCallUsage[] | null,
+    apiCostUsd: row.api_cost_usd === null ? null : Number(row.api_cost_usd),
+    agentUsage: parseJson(row.agent_usage, "agent_usage") as AgentUsageSummary | null,
     status: row.status as MessageEvent["status"],
     error: row.error,
     routerRequest: parseJson(row.router_request, "router_request"),

@@ -4,7 +4,8 @@ import { createLogger } from "../logger.js";
 import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST, FEATURE_EXAMPLES } from "./features.js";
-import type { ComplexityLevel, RouterResult, ThreadMessage } from "../types.js";
+import type { ApiCallUsage, ComplexityLevel, RouterResult, ThreadMessage } from "../types.js";
+import { buildApiCallUsage } from "./pricing.js";
 
 const log = createLogger("router");
 
@@ -109,6 +110,7 @@ export async function runRouter(
 
   try {
     const response = await anthropic.messages.create(request);
+    const usage = buildApiCallUsage(response.usage, HAIKU_MODEL, "router");
     const parsed = parseJsonResponse(response);
 
     const VALID_LEVELS = new Set<ComplexityLevel>(["very_low", "low", "medium", "high", "very_high"]);
@@ -125,6 +127,7 @@ export async function runRouter(
       error: null,
       request: request as unknown as Record<string, unknown>,
       rawResponse: response as unknown as Record<string, unknown>,
+      usage,
     };
   } catch (error) {
     log.error("Router error", error);
@@ -137,6 +140,7 @@ export async function runRouter(
       error: error instanceof Error ? error.message : String(error),
       request: request as unknown as Record<string, unknown>,
       rawResponse: {},
+      usage: null,
     };
   }
 }

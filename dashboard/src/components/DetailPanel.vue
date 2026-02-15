@@ -5,6 +5,7 @@ import DetailResponses from "./DetailResponses.vue";
 import DetailTimeline from "./DetailTimeline.vue";
 import DetailExpandable from "./DetailExpandable.vue";
 import PerfBreakdown from "./PerfBreakdown.vue";
+import CostBreakdown from "./CostBreakdown.vue";
 import AgentLogTable from "./AgentLogTable.vue";
 
 defineProps<{
@@ -56,6 +57,11 @@ const emit = defineEmits<{
     <!-- Performance Breakdown -->
     <DetailExpandable v-if="event.agentLog?.length" label="Performance Breakdown" class="mt-4">
       <PerfBreakdown :event="event" />
+    </DetailExpandable>
+
+    <!-- Cost Breakdown -->
+    <DetailExpandable v-if="event.apiCalls?.length || event.agentUsage" label="Cost Breakdown" class="mt-4">
+      <CostBreakdown :event="event" />
     </DetailExpandable>
 
     <!-- Agent Conversation Log -->

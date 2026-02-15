@@ -5,19 +5,9 @@ import { config, COMPLEXITY_PROFILES } from "../config.js";
 import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST } from "./features.js";
-import type { AgentLogEntry, AgentResponse, ComplexityLevel, ThreadMessage } from "../types.js";
+import type { AgentLogEntry, AgentResponse, AgentUsageSummary, ComplexityLevel, ModelUsage, ThreadMessage } from "../types.js";
 
 const log = createLogger("agent");
-
-// Re-export router and heartbeat modules so existing imports continue to work
-export { buildConversationMessages, runRouter } from "./router.js";
-export {
-  buildActivitySummary,
-  generateHeartbeatMessage,
-} from "./heartbeat.js";
-
-// Re-export for external consumers
-export { COMPLEXITY_PROFILES } from "../config.js";
 
 let systemPrompt: string | null = null;
 let fastSystemPrompt: string | null = null;
@@ -76,8 +66,9 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
   let resultText = "";
   let resultError: string | null = null;
   let resultSessionId: string | null = null;
-  let costUsd = 0;
+  let subscriptionCostUsd = 0;
   let turns = 0;
+  let resultUsage: AgentUsageSummary | null = null;
   let streamText = "";
   const agentLog: AgentLogEntry[] = [];
   let lastTimestamp = Date.now();
@@ -182,8 +173,37 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
         // Skip logging stream_event — no diagnostic value
       } else if (message.type === "result") {
         const msg = message as any;
-        costUsd = msg.total_cost_usd;
+        subscriptionCostUsd = msg.total_cost_usd;
         turns = msg.num_turns;
+
+        // Extract granular usage from SDK result
+        const sdkUsage = msg.usage as { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | undefined;
+        const sdkModelUsage = msg.model_usage as Record<string, { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cost?: number }> | undefined;
+        if (sdkUsage) {
+          const modelUsage: Record<string, ModelUsage> = {};
+          if (sdkModelUsage) {
+            for (const [model, mu] of Object.entries(sdkModelUsage)) {
+              modelUsage[model] = {
+                inputTokens: mu.input_tokens ?? 0,
+                outputTokens: mu.output_tokens ?? 0,
+                cacheReadInputTokens: mu.cache_read_input_tokens ?? 0,
+                cacheCreationInputTokens: mu.cache_creation_input_tokens ?? 0,
+                costUsd: mu.cost ?? 0,
+              };
+            }
+          }
+          resultUsage = {
+            totalCostUsd: subscriptionCostUsd,
+            durationMs: msg.duration_ms ?? 0,
+            durationApiMs: msg.duration_api_ms ?? 0,
+            numTurns: turns,
+            inputTokens: sdkUsage.input_tokens ?? 0,
+            outputTokens: sdkUsage.output_tokens ?? 0,
+            cacheCreationInputTokens: sdkUsage.cache_creation_input_tokens ?? 0,
+            cacheReadInputTokens: sdkUsage.cache_read_input_tokens ?? 0,
+            modelUsage,
+          };
+        }
 
         if (msg.subtype === "success" && !msg.is_error) {
           resultText = msg.result;
@@ -199,11 +219,11 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
           timestamp: Date.now(),
           type: "result",
           subtype: msg.subtype,
-          summary: `${msg.subtype}: ${turns} turns, $${costUsd.toFixed(4)}, ${msg.duration_ms || 0}ms (api: ${msg.duration_api_ms || 0}ms)`,
+          summary: `${msg.subtype}: ${turns} turns, $${subscriptionCostUsd.toFixed(4)}, ${msg.duration_ms || 0}ms (api: ${msg.duration_api_ms || 0}ms)`,
           data: {
             subtype: msg.subtype,
             result_text: resultText,
-            total_cost_usd: costUsd,
+            total_cost_usd: subscriptionCostUsd,
             num_turns: turns,
             duration_ms: msg.duration_ms,
             duration_api_ms: msg.duration_api_ms,
@@ -237,7 +257,7 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
       prompt: agentPrompt,
       sessionId: resultSessionId,
       model: modelLabel,
-      costUsd,
+      costUsd: subscriptionCostUsd,
       turns,
       log: agentLog,
     }).catch((err) => log.error("Failed to write agent log", err));
@@ -254,10 +274,11 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
   return {
     text: resultText,
     sessionId: resultSessionId,
-    costUsd,
+    subscriptionCostUsd,
     turns,
     config: fullOptions as unknown as Record<string, unknown>,
     log: agentLog,
+    usage: resultUsage,
   };
 }
 

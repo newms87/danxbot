@@ -40,6 +40,7 @@ export interface RouterResult {
   error: string | null;
   request: Record<string, unknown>;
   rawResponse: Record<string, unknown>;
+  usage: ApiCallUsage | null;
 }
 
 export interface HeartbeatUpdate {
@@ -54,11 +55,43 @@ export interface HeartbeatSnapshot {
   update: HeartbeatUpdate;
 }
 
+export interface ApiCallUsage {
+  source: "router" | "heartbeat";
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  costUsd: number;
+  timestamp: number;
+}
+
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  costUsd: number;
+}
+
+export interface AgentUsageSummary {
+  totalCostUsd: number;
+  durationMs: number;
+  durationApiMs: number;
+  numTurns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  modelUsage: Record<string, ModelUsage>;
+}
+
 export interface AgentResponse {
   text: string;
   sessionId: string | null;
-  costUsd: number;
+  subscriptionCostUsd: number;
   turns: number;
   config: Record<string, unknown>;
   log: AgentLogEntry[];
+  usage: AgentUsageSummary | null;
 }

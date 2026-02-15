@@ -1,11 +1,11 @@
 import type { ComplexityLevel, ComplexityProfile } from "./types.js";
 
 export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
-  very_low:  { model: "claude-haiku-4-5",   maxTurns: 1,  maxBudgetUsd: 0.05, maxThinkingTokens: 2048,  systemPrompt: "fast" },
-  low:       { model: "claude-haiku-4-5",   maxTurns: 3,  maxBudgetUsd: 0.15, maxThinkingTokens: 4096,  systemPrompt: "fast" },
-  medium:    { model: "claude-sonnet-4-5",  maxTurns: 6,  maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
-  high:      { model: "claude-sonnet-4-5",  maxTurns: 10, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
-  very_high: { model: "claude-sonnet-4-5",  maxTurns: 15, maxBudgetUsd: 2.00, maxThinkingTokens: 16384, systemPrompt: "full" },
+  very_low:  { model: "claude-haiku-4-5",   maxTurns: 5,  maxBudgetUsd: 0.10, maxThinkingTokens: 2048,  systemPrompt: "fast" },
+  low:       { model: "claude-haiku-4-5",   maxTurns: 6,  maxBudgetUsd: 0.20, maxThinkingTokens: 4096,  systemPrompt: "fast" },
+  medium:    { model: "claude-sonnet-4-5",  maxTurns: 8,  maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
+  high:      { model: "claude-sonnet-4-5",  maxTurns: 12, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
+  very_high: { model: "claude-sonnet-4-5",  maxTurns: 18, maxBudgetUsd: 2.00, maxThinkingTokens: 16384, systemPrompt: "full" },
 };
 
 function required(name: string): string {

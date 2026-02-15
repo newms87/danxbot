@@ -3,6 +3,7 @@ import type { ThreadMessage, HeartbeatSnapshot, AgentLogEntry } from "../types.j
 
 // --- Mocks ---
 
+const MOCK_USAGE = { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
 const mockCreate = vi.fn();
 
 vi.mock("@anthropic-ai/sdk", () => {
@@ -33,11 +34,11 @@ vi.mock("../config.js", () => ({
     logsDir: "/test/logs",
   },
   COMPLEXITY_PROFILES: {
-    very_low:  { model: "claude-haiku-4-5",  maxTurns: 1,  maxBudgetUsd: 0.05, maxThinkingTokens: 2048,  systemPrompt: "fast" },
-    low:       { model: "claude-haiku-4-5",  maxTurns: 3,  maxBudgetUsd: 0.15, maxThinkingTokens: 4096,  systemPrompt: "fast" },
-    medium:    { model: "claude-sonnet-4-5", maxTurns: 6,  maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
-    high:      { model: "claude-sonnet-4-5", maxTurns: 10, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
-    very_high: { model: "claude-sonnet-4-5", maxTurns: 15, maxBudgetUsd: 2.00, maxThinkingTokens: 16384, systemPrompt: "full" },
+    very_low:  { model: "claude-haiku-4-5",  maxTurns: 5,  maxBudgetUsd: 0.10, maxThinkingTokens: 2048,  systemPrompt: "fast" },
+    low:       { model: "claude-haiku-4-5",  maxTurns: 6,  maxBudgetUsd: 0.20, maxThinkingTokens: 4096,  systemPrompt: "fast" },
+    medium:    { model: "claude-sonnet-4-5", maxTurns: 8,  maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
+    high:      { model: "claude-sonnet-4-5", maxTurns: 12, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
+    very_high: { model: "claude-sonnet-4-5", maxTurns: 18, maxBudgetUsd: 2.00, maxThinkingTokens: 16384, systemPrompt: "full" },
   },
 }));
 
@@ -50,15 +51,9 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
-const {
-  buildConversationMessages,
-  buildActivitySummary,
-  summarizeToolInput,
-  truncStr,
-  runRouter,
-  runAgent,
-  generateHeartbeatMessage,
-} = await import("./agent.js");
+const { buildConversationMessages, runRouter } = await import("./router.js");
+const { buildActivitySummary, generateHeartbeatMessage } = await import("./heartbeat.js");
+const { summarizeToolInput, truncStr, runAgent } = await import("./agent.js");
 
 // --- Helpers ---
 
@@ -217,6 +212,7 @@ describe("truncStr", () => {
 describe("runRouter", () => {
   it("passes single message when no thread history", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -234,6 +230,7 @@ describe("runRouter", () => {
 
   it("passes multi-turn messages when thread history exists", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -260,6 +257,7 @@ describe("runRouter", () => {
 
   it("parses JSON response correctly", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -277,6 +275,7 @@ describe("runRouter", () => {
 
   it("handles code-fenced JSON response", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -301,8 +300,39 @@ describe("runRouter", () => {
     expect(result.reason).toBe("router error");
   });
 
+  it("populates usage on successful response", async () => {
+    mockCreate.mockResolvedValueOnce({
+      usage: { input_tokens: 200, output_tokens: 80, cache_creation_input_tokens: 50, cache_read_input_tokens: 30 },
+      content: [
+        {
+          type: "text",
+          text: '{"quickResponse":"Hi!","needsAgent":false,"reason":"greeting"}',
+        },
+      ],
+    });
+
+    const result = await runRouter("hello");
+
+    expect(result.usage).not.toBeNull();
+    expect(result.usage!.source).toBe("router");
+    expect(result.usage!.inputTokens).toBe(200);
+    expect(result.usage!.outputTokens).toBe(80);
+    expect(result.usage!.cacheCreationInputTokens).toBe(50);
+    expect(result.usage!.cacheReadInputTokens).toBe(30);
+    expect(result.usage!.costUsd).toBeGreaterThan(0);
+  });
+
+  it("returns null usage on API failure", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("API error"));
+
+    const result = await runRouter("hello");
+
+    expect(result.usage).toBeNull();
+  });
+
   it("returns error fallback when API returns garbled non-JSON text", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -483,7 +513,7 @@ describe("runAgent", () => {
     const result = await runAgent("what is the answer?", null);
 
     expect(result.text).toBe("The answer is 42.");
-    expect(result.costUsd).toBe(0.123);
+    expect(result.subscriptionCostUsd).toBe(0.123);
     expect(result.turns).toBe(3);
     expect(result.sessionId).toBe("sess-4");
   });
@@ -610,12 +640,12 @@ describe("runAgent with complexity", () => {
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("claude-haiku-4-5");
-    expect(callArgs.options.maxTurns).toBe(1);
-    expect(callArgs.options.maxBudgetUsd).toBe(0.05);
+    expect(callArgs.options.maxTurns).toBe(5);
+    expect(callArgs.options.maxBudgetUsd).toBe(0.10);
     expect(callArgs.options.maxThinkingTokens).toBe(2048);
   });
 
-  it("uses low profile (Haiku, 3 turns, $0.15)", async () => {
+  it("uses low profile (Haiku, 6 turns, $0.20)", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
         { type: "system", subtype: "init", session_id: "low-1" },
@@ -635,12 +665,12 @@ describe("runAgent with complexity", () => {
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("claude-haiku-4-5");
-    expect(callArgs.options.maxTurns).toBe(3);
-    expect(callArgs.options.maxBudgetUsd).toBe(0.15);
+    expect(callArgs.options.maxTurns).toBe(6);
+    expect(callArgs.options.maxBudgetUsd).toBe(0.20);
     expect(callArgs.options.maxThinkingTokens).toBe(4096);
   });
 
-  it("uses medium profile (Sonnet, 6 turns, $0.50)", async () => {
+  it("uses medium profile (Sonnet, 8 turns, $0.50)", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
         { type: "system", subtype: "init", session_id: "med-1" },
@@ -660,12 +690,12 @@ describe("runAgent with complexity", () => {
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("claude-sonnet-4-5");
-    expect(callArgs.options.maxTurns).toBe(6);
+    expect(callArgs.options.maxTurns).toBe(8);
     expect(callArgs.options.maxBudgetUsd).toBe(0.50);
     expect(callArgs.options.maxThinkingTokens).toBe(8192);
   });
 
-  it("uses very_high profile (Sonnet, 15 turns, $2.00)", async () => {
+  it("uses very_high profile (Sonnet, 18 turns, $2.00)", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
         { type: "system", subtype: "init", session_id: "vh-1" },
@@ -685,7 +715,7 @@ describe("runAgent with complexity", () => {
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("claude-sonnet-4-5");
-    expect(callArgs.options.maxTurns).toBe(15);
+    expect(callArgs.options.maxTurns).toBe(18);
     expect(callArgs.options.maxBudgetUsd).toBe(2.00);
     expect(callArgs.options.maxThinkingTokens).toBe(16384);
   });
@@ -777,6 +807,192 @@ describe("runAgent with complexity", () => {
     await expect(
       runAgent("broken query", null, undefined, undefined, [], "very_low"),
     ).rejects.toThrow("Agent crashed");
+  });
+});
+
+// ============================================================
+// AgentUsageSummary extraction
+// ============================================================
+
+describe("runAgent extracts AgentUsageSummary from SDK result", () => {
+  it("populates usage from result with usage and model_usage", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "usage-1" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Done.",
+          total_cost_usd: 0.25,
+          num_turns: 4,
+          duration_ms: 3000,
+          duration_api_ms: 2500,
+          usage: {
+            input_tokens: 5000,
+            output_tokens: 1200,
+            cache_read_input_tokens: 300,
+            cache_creation_input_tokens: 100,
+          },
+          model_usage: {
+            "claude-sonnet-4-5": {
+              input_tokens: 5000,
+              output_tokens: 1200,
+              cache_read_input_tokens: 300,
+              cache_creation_input_tokens: 100,
+              cost: 0.25,
+            },
+          },
+        },
+      ]),
+    );
+
+    const result = await runAgent("test", null);
+
+    expect(result.usage).not.toBeNull();
+    expect(result.usage!.totalCostUsd).toBe(0.25);
+    expect(result.usage!.durationMs).toBe(3000);
+    expect(result.usage!.durationApiMs).toBe(2500);
+    expect(result.usage!.numTurns).toBe(4);
+    expect(result.usage!.inputTokens).toBe(5000);
+    expect(result.usage!.outputTokens).toBe(1200);
+    expect(result.usage!.cacheReadInputTokens).toBe(300);
+    expect(result.usage!.cacheCreationInputTokens).toBe(100);
+    expect(result.usage!.modelUsage["claude-sonnet-4-5"]).toEqual({
+      inputTokens: 5000,
+      outputTokens: 1200,
+      cacheReadInputTokens: 300,
+      cacheCreationInputTokens: 100,
+      costUsd: 0.25,
+    });
+  });
+
+  it("returns null usage when SDK result has no usage field", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "usage-2" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Done.",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          duration_ms: 100,
+          duration_api_ms: 80,
+        },
+      ]),
+    );
+
+    const result = await runAgent("test", null);
+
+    expect(result.usage).toBeNull();
+  });
+
+  it("handles multi-model usage breakdown", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "usage-3" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Done.",
+          total_cost_usd: 0.50,
+          num_turns: 6,
+          duration_ms: 8000,
+          duration_api_ms: 7000,
+          usage: {
+            input_tokens: 10000,
+            output_tokens: 3000,
+            cache_read_input_tokens: 500,
+            cache_creation_input_tokens: 200,
+          },
+          model_usage: {
+            "claude-sonnet-4-5": {
+              input_tokens: 8000,
+              output_tokens: 2000,
+              cache_read_input_tokens: 400,
+              cache_creation_input_tokens: 150,
+              cost: 0.40,
+            },
+            "claude-haiku-4-5": {
+              input_tokens: 2000,
+              output_tokens: 1000,
+              cache_read_input_tokens: 100,
+              cache_creation_input_tokens: 50,
+              cost: 0.10,
+            },
+          },
+        },
+      ]),
+    );
+
+    const result = await runAgent("test", null);
+
+    expect(Object.keys(result.usage!.modelUsage)).toHaveLength(2);
+    expect(result.usage!.modelUsage["claude-sonnet-4-5"].costUsd).toBe(0.40);
+    expect(result.usage!.modelUsage["claude-haiku-4-5"].costUsd).toBe(0.10);
+  });
+
+  it("defaults missing model_usage fields to zero", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "usage-4" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Done.",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          duration_ms: 100,
+          duration_api_ms: 80,
+          usage: {
+            input_tokens: 100,
+            output_tokens: 50,
+          },
+          model_usage: {
+            "claude-haiku-4-5": {
+              input_tokens: 100,
+              output_tokens: 50,
+            },
+          },
+        },
+      ]),
+    );
+
+    const result = await runAgent("test", null);
+
+    const mu = result.usage!.modelUsage["claude-haiku-4-5"];
+    expect(mu.cacheReadInputTokens).toBe(0);
+    expect(mu.cacheCreationInputTokens).toBe(0);
+    expect(mu.costUsd).toBe(0);
+  });
+
+  it("handles usage with no model_usage (aggregate only)", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "usage-5" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Done.",
+          total_cost_usd: 0.05,
+          num_turns: 2,
+          duration_ms: 500,
+          duration_api_ms: 400,
+          usage: {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_input_tokens: 50,
+            cache_creation_input_tokens: 20,
+          },
+        },
+      ]),
+    );
+
+    const result = await runAgent("test", null);
+
+    expect(result.usage).not.toBeNull();
+    expect(result.usage!.inputTokens).toBe(1000);
+    expect(Object.keys(result.usage!.modelUsage)).toHaveLength(0);
   });
 });
 
@@ -923,6 +1139,7 @@ describe("buildActivitySummary", () => {
 describe("generateHeartbeatMessage", () => {
   it("returns structured HeartbeatUpdate with emoji, color, text", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -933,12 +1150,13 @@ describe("generateHeartbeatMessage", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s\nNo new activity.", []);
 
-    expect(result).toEqual({
+    expect(result.update).toEqual({
       emoji: ":mag:",
       color: "#3498db",
       text: "Digging through the codebase for answers",
       stop: false,
     });
+    expect(result.usage).not.toBeNull();
   });
 
   it("builds multi-turn conversation from previous snapshots", async () => {
@@ -964,6 +1182,7 @@ describe("generateHeartbeatMessage", () => {
     ];
 
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -988,6 +1207,7 @@ describe("generateHeartbeatMessage", () => {
 
   it("sends single user message when no previous snapshots", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -1008,14 +1228,16 @@ describe("generateHeartbeatMessage", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
 
-    expect(result.emoji).toBe(":hourglass_flowing_sand:");
-    expect(result.color).toBe("#6c5ce7");
-    expect(result.text).toBe("Working on it...");
-    expect(result.stop).toBe(false);
+    expect(result.update.emoji).toBe(":hourglass_flowing_sand:");
+    expect(result.update.color).toBe("#6c5ce7");
+    expect(result.update.text).toBe("Working on it...");
+    expect(result.update.stop).toBe(false);
+    expect(result.usage).toBeNull();
   });
 
   it("returns fallback fields when JSON is missing keys", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -1026,13 +1248,14 @@ describe("generateHeartbeatMessage", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
 
-    expect(result.emoji).toBe(":hourglass_flowing_sand:");
-    expect(result.color).toBe("#6c5ce7");
-    expect(result.text).toBe("Partial response only");
+    expect(result.update.emoji).toBe(":hourglass_flowing_sand:");
+    expect(result.update.color).toBe("#6c5ce7");
+    expect(result.update.text).toBe("Partial response only");
   });
 
   it("handles code-fenced JSON response", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -1043,7 +1266,7 @@ describe("generateHeartbeatMessage", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 15s", []);
 
-    expect(result).toEqual({
+    expect(result.update).toEqual({
       emoji: ":rocket:",
       color: "#e74c3c",
       text: "Blasting off!",
@@ -1053,6 +1276,7 @@ describe("generateHeartbeatMessage", () => {
 
   it("parses stop: true when orchestrator signals agent is dead", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -1066,13 +1290,14 @@ describe("generateHeartbeatMessage", () => {
       [],
     );
 
-    expect(result.stop).toBe(true);
-    expect(result.emoji).toBe(":skull:");
-    expect(result.text).toContain("crashed");
+    expect(result.update.stop).toBe(true);
+    expect(result.update.emoji).toBe(":skull:");
+    expect(result.update.text).toContain("crashed");
   });
 
   it("defaults stop to false when not in response", async () => {
     mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
       content: [
         {
           type: "text",
@@ -1082,7 +1307,7 @@ describe("generateHeartbeatMessage", () => {
     });
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
-    expect(result.stop).toBe(false);
+    expect(result.update.stop).toBe(false);
   });
 
   it("returns fallback when API returns empty content array", async () => {
@@ -1092,9 +1317,10 @@ describe("generateHeartbeatMessage", () => {
 
     const result = await generateHeartbeatMessage("Elapsed: 10s", []);
 
-    expect(result.emoji).toBe(":hourglass_flowing_sand:");
-    expect(result.color).toBe("#6c5ce7");
-    expect(result.text).toBe("Working on it...");
-    expect(result.stop).toBe(false);
+    expect(result.update.emoji).toBe(":hourglass_flowing_sand:");
+    expect(result.update.color).toBe("#6c5ce7");
+    expect(result.update.text).toBe("Working on it...");
+    expect(result.update.stop).toBe(false);
+    expect(result.usage).toBeNull();
   });
 });

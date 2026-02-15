@@ -242,8 +242,11 @@ describe("DB persistence", () => {
             router_needs_agent: null,
             agent_response_at: null,
             agent_response: null,
-            agent_cost_usd: null,
+            subscription_cost_usd: null,
             agent_turns: null,
+            api_calls: null,
+            api_cost_usd: null,
+            agent_usage: null,
             status: "complete",
             error: null,
             router_request: null,
@@ -287,8 +290,11 @@ describe("DB persistence", () => {
             router_needs_agent: 1,
             agent_response_at: 3000,
             agent_response: "agent reply",
-            agent_cost_usd: "0.0500",
+            subscription_cost_usd: "0.0500",
             agent_turns: 3,
+            api_calls: null,
+            api_cost_usd: null,
+            agent_usage: null,
             status: "complete",
             error: null,
             router_request: JSON.stringify({ model: "haiku" }),
@@ -314,7 +320,7 @@ describe("DB persistence", () => {
       expect(event.routerNeedsAgent).toBe(true);
       expect(event.agentResponseAt).toBe(3000);
       expect(event.agentResponse).toBe("agent reply");
-      expect(event.agentCostUsd).toBeCloseTo(0.05);
+      expect(event.subscriptionCostUsd).toBeCloseTo(0.05);
       expect(event.agentTurns).toBe(3);
       expect(event.agentRetried).toBe(true);
       expect(event.feedback).toBe("positive");
@@ -360,8 +366,11 @@ describe("DB persistence", () => {
             router_needs_agent: null,
             agent_response_at: null,
             agent_response: null,
-            agent_cost_usd: null,
+            subscription_cost_usd: null,
             agent_turns: null,
+            api_calls: null,
+            api_cost_usd: null,
+            agent_usage: null,
             status: "complete",
             error: null,
             router_request: null,
@@ -400,8 +409,11 @@ describe("DB persistence", () => {
             router_needs_agent: null,
             agent_response_at: null,
             agent_response: null,
-            agent_cost_usd: null,
+            subscription_cost_usd: null,
             agent_turns: null,
+            api_calls: null,
+            api_cost_usd: null,
+            agent_usage: null,
             status: "received",
             error: null,
             router_request: "{not valid json",
@@ -426,7 +438,7 @@ describe("DB persistence", () => {
       );
     });
 
-    it("converts DECIMAL string agent_cost_usd to number", async () => {
+    it("converts DECIMAL string subscription_cost_usd to number", async () => {
       mockQuery.mockResolvedValue([
         [
           {
@@ -443,8 +455,11 @@ describe("DB persistence", () => {
             router_needs_agent: null,
             agent_response_at: null,
             agent_response: null,
-            agent_cost_usd: "0.0500",
+            subscription_cost_usd: "0.0500",
             agent_turns: null,
+            api_calls: null,
+            api_cost_usd: null,
+            agent_usage: null,
             status: "complete",
             error: null,
             router_request: null,
@@ -462,8 +477,8 @@ describe("DB persistence", () => {
       await loadEvents();
 
       const event = getEvents()[0];
-      expect(event.agentCostUsd).toBe(0.05);
-      expect(typeof event.agentCostUsd).toBe("number");
+      expect(event.subscriptionCostUsd).toBe(0.05);
+      expect(typeof event.subscriptionCostUsd).toBe("number");
     });
   });
 });

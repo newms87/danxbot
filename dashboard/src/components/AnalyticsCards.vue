@@ -28,8 +28,17 @@ defineProps<{
       <div class="text-2xl font-bold text-green-600 dark:text-green-400 mt-1">{{ formatMs(analytics.avgTotalTimeMs) }}</div>
     </div>
     <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">
-      <div class="text-xs text-gray-500 uppercase tracking-wide">Total Cost</div>
-      <div class="text-2xl font-bold text-yellow-600 dark:text-yellow-400 mt-1">${{ analytics.totalCostUsd?.toFixed(4) || '0.0000' }}</div>
+      <div class="text-xs text-gray-500 uppercase tracking-wide">Cost</div>
+      <div class="mt-1 space-y-0.5">
+        <div class="flex items-baseline gap-1.5">
+          <span class="text-lg font-bold text-orange-600 dark:text-orange-400">${{ analytics.totalApiCostUsd?.toFixed(4) || '0.0000' }}</span>
+          <span class="text-[10px] text-orange-500/70 uppercase">API</span>
+        </div>
+        <div class="flex items-baseline gap-1.5">
+          <span class="text-lg font-bold text-blue-600 dark:text-blue-400">${{ analytics.totalSubscriptionCostUsd?.toFixed(4) || '0.0000' }}</span>
+          <span class="text-[10px] text-blue-500/70 uppercase">Sub</span>
+        </div>
+      </div>
       <div class="text-xs text-gray-500 mt-1">{{ analytics.errorCount }} errors</div>
     </div>
     <div class="bg-white dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-800">

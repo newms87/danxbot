@@ -6,3 +6,4 @@ data/
 .poller-running
 dashboard/dist/
 dashboard/node_modules/
+*.tsbuildinfo

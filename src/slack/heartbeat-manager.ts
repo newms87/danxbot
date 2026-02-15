@@ -5,9 +5,10 @@ import { buildHeartbeatAttachment } from "./helpers.js";
 import {
   generateHeartbeatMessage,
   buildActivitySummary,
-} from "../agent/agent.js";
+} from "../agent/heartbeat.js";
 import type {
   AgentLogEntry,
+  ApiCallUsage,
   HeartbeatSnapshot,
   HeartbeatUpdate,
 } from "../types.js";
@@ -33,6 +34,7 @@ export class HeartbeatManager {
   private heartbeatStart: number;
 
   private agentLog: AgentLogEntry[] = [];
+  private heartbeatApiCalls: ApiCallUsage[] = [];
   private lastSnapshotEntryCount = 0;
   private heartbeatCycle = 0;
   private orchestratorPending = false;
@@ -61,6 +63,11 @@ export class HeartbeatManager {
     this.placeholderTs = placeholderTs;
     this.threadTs = threadTs;
     this.heartbeatStart = heartbeatStart;
+  }
+
+  /** Returns all API call usage records from heartbeat calls. */
+  getApiCalls(): ApiCallUsage[] {
+    return this.heartbeatApiCalls;
   }
 
   /** Appends a log entry from the agent for orchestrator consumption. */
@@ -113,8 +120,9 @@ export class HeartbeatManager {
         );
 
         generateHeartbeatMessage(activitySummary, this.previousSnapshots)
-          .then((update) => {
+          .then(({ update, usage }) => {
             this.latestHeartbeat = update;
+            if (usage) this.heartbeatApiCalls.push(usage);
             this.previousSnapshots.push({ activitySummary, update });
             if (this.previousSnapshots.length > 5) {
               this.previousSnapshots.shift();

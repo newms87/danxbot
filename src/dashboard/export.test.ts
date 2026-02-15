@@ -48,7 +48,7 @@ describe("eventsToCSV", () => {
   it("produces header-only CSV for empty events array", () => {
     const csv = eventsToCSV([]);
     const lines = csv.split("\n");
-    expect(lines[0]).toBe("timestamp,user,text,status,cost,feedback,response_time_ms");
+    expect(lines[0]).toBe("timestamp,user,text,status,subscription_cost,api_cost,feedback,response_time_ms");
     expect(lines.length).toBe(2); // header + trailing newline
     expect(lines[1]).toBe("");
   });
@@ -58,7 +58,7 @@ describe("eventsToCSV", () => {
     updateEvent(event.id, {
       userName: "Alice",
       status: "complete",
-      agentCostUsd: 0.05,
+      subscriptionCostUsd: 0.05,
       feedback: "positive",
       routerResponseAt: event.receivedAt + 300,
       agentResponseAt: event.receivedAt + 1500,
@@ -77,12 +77,14 @@ describe("eventsToCSV", () => {
     expect(row[2]).toBe("test message");
     // status
     expect(row[3]).toBe("complete");
-    // cost
+    // subscription_cost
     expect(row[4]).toBe("0.05");
+    // api_cost
+    expect(row[5]).toBe("");
     // feedback
-    expect(row[5]).toBe("positive");
+    expect(row[6]).toBe("positive");
     // response_time_ms
-    expect(row[6]).toBe("1500");
+    expect(row[7]).toBe("1500");
   });
 
   it("escapes fields containing commas", () => {
@@ -112,14 +114,16 @@ describe("eventsToCSV", () => {
 
   it("produces empty values for missing optional fields", () => {
     const event = makeEvent();
-    // Leave agentCostUsd and feedback as null (defaults)
+    // Leave subscriptionCostUsd and feedback as null (defaults)
     const csv = eventsToCSV(getEvents());
     const lines = csv.split("\n");
     const row = lines[1].split(",");
-    // cost (index 4) should be empty
+    // subscription_cost (index 4) should be empty
     expect(row[4]).toBe("");
-    // feedback (index 5) should be empty
+    // api_cost (index 5) should be empty
     expect(row[5]).toBe("");
+    // feedback (index 6) should be empty
+    expect(row[6]).toBe("");
   });
 
   it("falls back to user ID when userName is null", () => {
@@ -142,7 +146,7 @@ describe("eventsToCSV", () => {
     const csv = eventsToCSV(getEvents());
     const lines = csv.split("\n");
     const row = lines[1].split(",");
-    expect(row[6]).toBe("2000");
+    expect(row[7]).toBe("2000");
   });
 
   it("calculates response_time_ms from routerResponseAt when no agent", () => {
@@ -155,7 +159,7 @@ describe("eventsToCSV", () => {
     const csv = eventsToCSV(getEvents());
     const lines = csv.split("\n");
     const row = lines[1].split(",");
-    expect(row[6]).toBe("500");
+    expect(row[7]).toBe("500");
   });
 
   it("calculates response_time_ms as 0 when no response times available", () => {
@@ -163,7 +167,20 @@ describe("eventsToCSV", () => {
     const csv = eventsToCSV(getEvents());
     const lines = csv.split("\n");
     const row = lines[1].split(",");
-    expect(row[6]).toBe("0");
+    expect(row[7]).toBe("0");
+  });
+
+  it("exports apiCostUsd when present", () => {
+    const event = makeEvent();
+    updateEvent(event.id, {
+      status: "complete",
+      apiCostUsd: 0.001,
+    });
+
+    const csv = eventsToCSV(getEvents());
+    const lines = csv.split("\n");
+    const row = lines[1].split(",");
+    expect(row[5]).toBe("0.001");
   });
 
   it("neutralizes CSV injection with = prefix", () => {
@@ -202,16 +219,19 @@ describe("eventsToCSV", () => {
     expect(csv).toContain("\"'\r=SUM(A1)\"");
   });
 
-  it("produces '0' for agentCostUsd of 0 (falsy but valid)", () => {
+  it("produces '0' for subscriptionCostUsd of 0 (falsy but valid)", () => {
     const event = makeEvent();
     updateEvent(event.id, {
       status: "complete",
-      agentCostUsd: 0,
+      subscriptionCostUsd: 0,
     });
 
     const csv = eventsToCSV(getEvents());
     const lines = csv.split("\n");
     const row = lines[1].split(",");
+    // subscription_cost is at index 4
     expect(row[4]).toBe("0");
+    // api_cost at index 5 should be empty
+    expect(row[5]).toBe("");
   });
 });
