@@ -122,19 +122,21 @@ export async function runRouter(
       needsAgent: parsed.needsAgent === true,
       complexity,
       reason: String(parsed.reason || ""),
+      error: null,
       request: request as unknown as Record<string, unknown>,
       rawResponse: response as unknown as Record<string, unknown>,
     };
   } catch (error) {
     log.error("Router error", error);
-  }
 
-  return {
-    quickResponse: "I'm having a moment — give me a sec and try again.",
-    needsAgent: false,
-    complexity: "very_low",
-    reason: "router error",
-    request: request as unknown as Record<string, unknown>,
-    rawResponse: {},
-  };
+    return {
+      quickResponse: "I'm having a moment — give me a sec and try again.",
+      needsAgent: false,
+      complexity: "very_low",
+      reason: "router error",
+      error: error instanceof Error ? error.message : String(error),
+      request: request as unknown as Record<string, unknown>,
+      rawResponse: {},
+    };
+  }
 }

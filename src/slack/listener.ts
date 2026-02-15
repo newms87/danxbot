@@ -535,6 +535,22 @@ export async function startSlackListener(): Promise<void> {
           inFlightPlaceholders.delete(placeholderId);
           placeholderData.delete(placeholderId);
         }
+      } else if (routerResult.error) {
+        // Router errored — still send the friendly message but mark as error
+        updateEvent(dashEvent.id, {
+          status: "error",
+          error: routerResult.error,
+        });
+
+        await client.reactions
+          .add({
+            channel: message.channel,
+            timestamp: message.ts,
+            name: "x",
+          })
+          .catch(() => {});
+
+        notifyError("Router Error", routerResult.error, errorContext).catch(() => {});
       } else {
         // Router-only response, mark complete
         updateEvent(dashEvent.id, { status: "complete" });

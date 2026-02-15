@@ -37,6 +37,7 @@ export interface RouterResult {
   needsAgent: boolean;
   complexity: ComplexityLevel;
   reason: string;
+  error: string | null;
   request: Record<string, unknown>;
   rawResponse: Record<string, unknown>;
 }

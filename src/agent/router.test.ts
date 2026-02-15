@@ -238,6 +238,7 @@ describe("runRouter", () => {
     );
     expect(result.needsAgent).toBe(false);
     expect(result.reason).toBe("router error");
+    expect(result.error).toBe("API rate limit");
   });
 
   it("returns error fallback on malformed (non-JSON) response", async () => {
@@ -257,6 +258,19 @@ describe("runRouter", () => {
     );
     expect(result.needsAgent).toBe(false);
     expect(result.reason).toBe("router error");
+    expect(result.error).toBeDefined();
+  });
+
+  it("returns error: null on successful response", async () => {
+    mockRouterResponse({
+      quickResponse: "Hello!",
+      needsAgent: false,
+      reason: "greeting",
+    });
+
+    const result = await runRouter("hi");
+
+    expect(result.error).toBeNull();
   });
 
   it("coerces missing fields to safe defaults", async () => {

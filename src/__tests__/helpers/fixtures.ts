@@ -92,6 +92,7 @@ export function makeRouterResult(
     needsAgent: false,
     complexity: "high" as ComplexityLevel,
     reason: "greeting",
+    error: null,
     request: {},
     rawResponse: {},
     ...overrides,

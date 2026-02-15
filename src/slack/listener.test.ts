@@ -561,6 +561,52 @@ describe("error paths", () => {
     );
   });
 
+  it("handles router error (error field set)", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "I'm having a moment — give me a sec and try again.",
+      needsAgent: false,
+      error: "credit balance is too low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Quick response still sent to user
+    expect(client.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "I'm having a moment — give me a sec and try again.",
+      }),
+    );
+
+    // Event marked as error with the error message
+    expect(mockUpdateEvent).toHaveBeenCalledWith(
+      "test-id",
+      expect.objectContaining({
+        status: "error",
+        error: "credit balance is too low",
+      }),
+    );
+
+    // :x: reaction added
+    expect(client.reactions.add).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "x" }),
+    );
+
+    // Trello notifier called
+    expect(mockNotifyError).toHaveBeenCalledWith(
+      "Router Error",
+      "credit balance is too low",
+      expect.objectContaining({
+        threadTs: expect.any(String),
+        user: "U-HUMAN",
+        channelId: "C-TEST",
+      }),
+    );
+
+    // Agent never called
+    expect(mockRunAgent).not.toHaveBeenCalled();
+  });
+
   it("calls notifyError on top-level handler error", async () => {
     // Make getOrCreateThread throw to trigger the top-level catch
     mockGetOrCreateThread.mockRejectedValue(new Error("Thread DB failure"));
