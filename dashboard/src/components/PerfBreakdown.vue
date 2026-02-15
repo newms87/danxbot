@@ -28,7 +28,7 @@ const { perfStats } = usePerfStats(toRef(props, "event") as import("vue").Ref<Me
       </div>
       <div>
         <div class="text-gray-500 uppercase">Tool Time</div>
-        <div class="text-lg font-bold text-yellow-600 dark:text-yellow-400 mt-0.5">{{ formatMs(perfStats.wallTimeMs - perfStats.apiTimeMs) }}</div>
+        <div class="text-lg font-bold text-yellow-600 dark:text-yellow-400 mt-0.5">{{ formatMs(perfStats.toolTimeMs) }}</div>
       </div>
     </div>
     <div v-if="Object.keys(perfStats.toolBreakdown).length" class="mt-3 flex flex-wrap gap-2">
