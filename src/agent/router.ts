@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
+import { isOperationalError } from "../errors/patterns.js";
 import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST, FEATURE_EXAMPLES } from "./features.js";
@@ -132,12 +133,19 @@ export async function runRouter(
   } catch (error) {
     log.error("Router error", error);
 
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    const isOperational = isOperationalError(errorMessage);
+
     return {
-      quickResponse: "I'm having a moment — give me a sec and try again.",
+      quickResponse: isOperational
+        ? "I'm temporarily unavailable due to a service configuration issue. The team has been notified."
+        : "I'm having a moment — give me a sec and try again.",
       needsAgent: false,
       complexity: "very_low",
       reason: "router error",
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage,
+      isOperational,
       request: request as unknown as Record<string, unknown>,
       rawResponse: {},
       usage: null,

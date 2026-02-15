@@ -496,4 +496,60 @@ describe("runRouter", () => {
 
     expect(result.usage).toBeNull();
   });
+
+  it("returns service unavailable message for billing/credit errors", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("Your credit balance is too low to make API calls"));
+
+    const result = await runRouter("hello");
+
+    expect(result.quickResponse).toBe(
+      "I'm temporarily unavailable due to a service configuration issue. The team has been notified.",
+    );
+    expect(result.isOperational).toBe(true);
+    expect(result.error).toContain("credit balance is too low");
+  });
+
+  it("returns service unavailable message for billing errors", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("billing_error: insufficient funds"));
+
+    const result = await runRouter("hello");
+
+    expect(result.quickResponse).toBe(
+      "I'm temporarily unavailable due to a service configuration issue. The team has been notified.",
+    );
+    expect(result.isOperational).toBe(true);
+  });
+
+  it("returns service unavailable message for authentication errors", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("authentication_error: invalid API key"));
+
+    const result = await runRouter("hello");
+
+    expect(result.quickResponse).toBe(
+      "I'm temporarily unavailable due to a service configuration issue. The team has been notified.",
+    );
+    expect(result.isOperational).toBe(true);
+  });
+
+  it("returns service unavailable message for unauthorized errors", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("unauthorized: access denied"));
+
+    const result = await runRouter("hello");
+
+    expect(result.quickResponse).toBe(
+      "I'm temporarily unavailable due to a service configuration issue. The team has been notified.",
+    );
+    expect(result.isOperational).toBe(true);
+  });
+
+  it("returns try-again message for generic errors (not operational)", async () => {
+    mockCreate.mockRejectedValueOnce(new Error("API rate limit"));
+
+    const result = await runRouter("hello");
+
+    expect(result.quickResponse).toBe(
+      "I'm having a moment — give me a sec and try again.",
+    );
+    expect(result.isOperational).toBe(false);
+  });
 });

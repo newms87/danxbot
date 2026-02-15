@@ -614,6 +614,55 @@ describe("error paths", () => {
     expect(mockRunAgent).not.toHaveBeenCalled();
   });
 
+  it("routes operational router errors to Needs Help list", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "I'm temporarily unavailable due to a service configuration issue. The team has been notified.",
+      needsAgent: false,
+      error: "credit balance is too low",
+      isOperational: true,
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // notifyError called with Needs Help overrides
+    expect(mockNotifyError).toHaveBeenCalledWith(
+      "Router Error",
+      "credit balance is too low",
+      expect.objectContaining({
+        threadTs: expect.any(String),
+        user: "U-HUMAN",
+        channelId: "C-TEST",
+      }),
+      {
+        listId: "6990129be21ee37b649281a5",
+        labelId: "698fc5b8847b787a3818adaa",
+      },
+    );
+  });
+
+  it("routes non-operational router errors to default list (no overrides)", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "I'm having a moment — give me a sec and try again.",
+      needsAgent: false,
+      error: "API rate limit exceeded",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // notifyError called WITHOUT overrides (3 args, no 4th)
+    expect(mockNotifyError).toHaveBeenCalledWith(
+      "Router Error",
+      "API rate limit exceeded",
+      expect.objectContaining({
+        threadTs: expect.any(String),
+        user: "U-HUMAN",
+        channelId: "C-TEST",
+      }),
+    );
+  });
+
   it("calls notifyError on top-level handler error", async () => {
     // Make getOrCreateThread throw to trigger the top-level catch
     mockGetOrCreateThread.mockRejectedValue(new Error("Thread DB failure"));

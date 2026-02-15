@@ -42,10 +42,16 @@ function buildCardDescription(
   return lines.join("\n");
 }
 
+export interface NotifyErrorOptions {
+  listId?: string;
+  labelId?: string;
+}
+
 export async function notifyError(
   errorType: string,
   errorMessage: string,
   context: Record<string, string>,
+  options?: NotifyErrorOptions,
 ): Promise<void> {
   try {
     const { apiKey, apiToken, todoListId, bugLabelId } = config.trello;
@@ -55,14 +61,16 @@ export async function notifyError(
       return;
     }
 
+    const targetListId = options?.listId || todoListId;
+    const targetLabelId = options?.labelId || bugLabelId;
     const cardName = buildCardName(errorType, errorMessage);
 
-    // Fetch existing cards in ToDo list to check for duplicates
-    const listUrl = `https://api.trello.com/1/lists/${todoListId}/cards?key=${apiKey}&token=${apiToken}&fields=id,name`;
+    // Fetch existing cards in target list to check for duplicates
+    const listUrl = `https://api.trello.com/1/lists/${targetListId}/cards?key=${apiKey}&token=${apiToken}&fields=id,name`;
     const listResponse = await fetch(listUrl);
 
     if (!listResponse.ok) {
-      log.error(`Failed to fetch ToDo cards: ${listResponse.status} ${listResponse.statusText}`);
+      log.error(`Failed to fetch list cards: ${listResponse.status} ${listResponse.statusText}`);
       return;
     }
 
@@ -79,11 +87,11 @@ export async function notifyError(
     const params = new URLSearchParams({
       key: apiKey,
       token: apiToken,
-      idList: todoListId,
+      idList: targetListId,
       name: cardName,
       desc,
       pos: "top",
-      idLabels: bugLabelId,
+      idLabels: targetLabelId,
     });
 
     const createUrl = `https://api.trello.com/1/cards?${params.toString()}`;

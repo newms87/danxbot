@@ -38,6 +38,7 @@ export interface RouterResult {
   complexity: ComplexityLevel;
   reason: string;
   error: string | null;
+  isOperational?: boolean;
   request: Record<string, unknown>;
   rawResponse: Record<string, unknown>;
   usage: ApiCallUsage | null;

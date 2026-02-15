@@ -10,6 +10,8 @@ const mockConfig = makeConfig({
     boardId: "698fc5b8847b787a3818ad82",
     todoListId: "698fc5be16a280cc321a13ec",
     bugLabelId: "698fc5b8847b787a3818adac",
+    needsHelpListId: "6990129be21ee37b649281a5",
+    needsHelpLabelId: "698fc5b8847b787a3818adaa",
   },
 });
 
@@ -42,6 +44,8 @@ beforeEach(() => {
     boardId: "698fc5b8847b787a3818ad82",
     todoListId: "698fc5be16a280cc321a13ec",
     bugLabelId: "698fc5b8847b787a3818adac",
+    needsHelpListId: "6990129be21ee37b649281a5",
+    needsHelpLabelId: "698fc5b8847b787a3818adaa",
   };
 });
 
@@ -171,6 +175,88 @@ describe("card creation", () => {
 
     expect(name.length).toBeLessThanOrEqual(100);
     expect(name).toMatch(/\.\.\.$/);
+  });
+});
+
+// ============================================================
+// List/label overrides
+// ============================================================
+
+describe("list and label overrides", () => {
+  beforeEach(() => {
+    // First fetch: list cards — returns empty (no duplicates)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [],
+    });
+    // Second fetch: create card — returns success
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "new-card-id" }),
+    });
+  });
+
+  it("creates card in custom list when options.listId is provided", async () => {
+    await notifyError("Router Error", "credit balance is too low", {}, {
+      listId: "6990129be21ee37b649281a5",
+    });
+
+    const createCall = mockFetch.mock.calls[1];
+    const url = createCall[0] as string;
+    const params = new URLSearchParams(url.split("?")[1]);
+
+    expect(params.get("idList")).toBe("6990129be21ee37b649281a5");
+    // Label should still be default bugLabelId
+    expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adac");
+  });
+
+  it("creates card with custom label when options.labelId is provided", async () => {
+    await notifyError("Router Error", "credit balance is too low", {}, {
+      labelId: "698fc5b8847b787a3818adaa",
+    });
+
+    const createCall = mockFetch.mock.calls[1];
+    const url = createCall[0] as string;
+    const params = new URLSearchParams(url.split("?")[1]);
+
+    expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adaa");
+    // List should still be default todoListId
+    expect(params.get("idList")).toBe("698fc5be16a280cc321a13ec");
+  });
+
+  it("creates card with both custom list and label when both provided", async () => {
+    await notifyError("Router Error", "credit balance is too low", {}, {
+      listId: "6990129be21ee37b649281a5",
+      labelId: "698fc5b8847b787a3818adaa",
+    });
+
+    const createCall = mockFetch.mock.calls[1];
+    const url = createCall[0] as string;
+    const params = new URLSearchParams(url.split("?")[1]);
+
+    expect(params.get("idList")).toBe("6990129be21ee37b649281a5");
+    expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adaa");
+  });
+
+  it("checks for duplicates in the target list (not always todoListId)", async () => {
+    // Reset mocks to control the list cards fetch
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => [],
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "new-card-id" }),
+    });
+
+    await notifyError("Router Error", "credit error", {}, {
+      listId: "6990129be21ee37b649281a5",
+    });
+
+    // First fetch should query the custom list for duplicates
+    const listCall = mockFetch.mock.calls[0][0] as string;
+    expect(listCall).toContain("/lists/6990129be21ee37b649281a5/cards");
   });
 });
 

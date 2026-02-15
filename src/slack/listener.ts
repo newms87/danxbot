@@ -26,11 +26,7 @@ let botUserId: string | null = null;
 let slackConnected = false;
 let isShuttingDown = false;
 
-/** Error patterns that should not be retried (billing, auth, etc.) */
-const NON_RETRYABLE_PATTERNS = [
-  /credit balance is too low/i,
-  /billing/i,
-];
+import { isOperationalError } from "../errors/patterns.js";
 
 // Track in-flight agent placeholders for graceful shutdown
 interface InFlightPlaceholder {
@@ -483,7 +479,7 @@ export async function startSlackListener(): Promise<void> {
               }
 
               // Skip retries for non-retryable errors (billing, credit, etc.)
-              const isNonRetryable = NON_RETRYABLE_PATTERNS.some((p) => p.test(errorMsg));
+              const isNonRetryable = isOperationalError(errorMsg);
 
               const isLastAttempt = isNonRetryable || attempt >= maxAttempts - 1;
 
@@ -568,7 +564,14 @@ export async function startSlackListener(): Promise<void> {
           })
           .catch(() => {});
 
-        notifyError("Router Error", routerResult.error, errorContext).catch(() => {});
+        if (routerResult.isOperational) {
+          notifyError("Router Error", routerResult.error, errorContext, {
+            listId: config.trello.needsHelpListId,
+            labelId: config.trello.needsHelpLabelId,
+          }).catch(() => {});
+        } else {
+          notifyError("Router Error", routerResult.error, errorContext).catch(() => {});
+        }
       } else {
         // Router-only response, mark complete — capture router API usage
         const routerApiCalls: ApiCallUsage[] = [];
