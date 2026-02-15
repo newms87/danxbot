@@ -39,12 +39,15 @@ vi.mock("./dashboard/server.js", () => ({
 }));
 
 const mockClosePool = vi.fn();
+const mockClosePlatformPool = vi.fn();
 
 vi.mock("./db/connection.js", () => ({
   closePool: (...args: unknown[]) => mockClosePool(...args),
+  closePlatformPool: (...args: unknown[]) => mockClosePlatformPool(...args),
   getPool: vi.fn(),
   getAdminPool: vi.fn(),
   closeAdminPool: vi.fn(),
+  getPlatformPool: vi.fn(),
 }));
 
 vi.mock("./logger.js", () => ({
@@ -192,6 +195,14 @@ describe("shutdown", () => {
     await shutdownPromise;
 
     expect(mockClosePool).toHaveBeenCalledOnce();
+  });
+
+  it("closes platform database connection pool", async () => {
+    const shutdownPromise = shutdown({ exitProcess: false });
+    await vi.runAllTimersAsync();
+    await shutdownPromise;
+
+    expect(mockClosePlatformPool).toHaveBeenCalledOnce();
   });
 
   it("exits with code 0 when exitProcess is true", async () => {

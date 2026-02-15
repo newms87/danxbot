@@ -9,16 +9,30 @@ const CONNECTION_LIMIT = 5;
 
 let pool: Pool | null = null;
 let adminPool: Pool | null = null;
+let platformPool: Pool | null = null;
 
-function basePoolOptions(): PoolOptions {
+interface DbConfig {
+  host: string;
+  user: string;
+  password: string;
+  database?: string;
+}
+
+function createPoolOptions(dbConfig: DbConfig): PoolOptions {
   return {
-    host: config.db.host,
-    user: config.db.user,
-    password: config.db.password,
+    host: dbConfig.host,
+    user: dbConfig.user,
+    password: dbConfig.password,
+    ...(dbConfig.database ? { database: dbConfig.database } : {}),
     connectionLimit: CONNECTION_LIMIT,
     waitForConnections: true,
     connectTimeout: config.db.connectTimeoutMs,
   };
+}
+
+function basePoolOptions(): PoolOptions {
+  const { database: _, ...dbWithoutDatabase } = config.db;
+  return createPoolOptions(dbWithoutDatabase);
 }
 
 /**
@@ -65,5 +79,27 @@ export async function closeAdminPool(): Promise<void> {
   if (adminPool) {
     await adminPool.end();
     adminPool = null;
+  }
+}
+
+/**
+ * Get a connection pool connected to the platform database.
+ * Used for executing SQL queries against the Flytedesk platform DB.
+ */
+export function getPlatformPool(): Pool {
+  if (!platformPool) {
+    log.info("Creating platform database pool");
+    platformPool = mysql.createPool(createPoolOptions(config.platform.db));
+  }
+  return platformPool;
+}
+
+/**
+ * Close the platform pool.
+ */
+export async function closePlatformPool(): Promise<void> {
+  if (platformPool) {
+    await platformPool.end();
+    platformPool = null;
   }
 }

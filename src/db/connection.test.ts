@@ -24,6 +24,14 @@ vi.mock("../config.js", () => ({
       database: "flytebot_chat",
       connectTimeoutMs: 5000,
     },
+    platform: {
+      db: {
+        host: "platform-host",
+        user: "platform-user",
+        password: "platform-pass",
+        database: "platform-db",
+      },
+    },
   },
 }));
 
@@ -36,7 +44,7 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
-import { getPool, getAdminPool, closePool, closeAdminPool } from "./connection.js";
+import { getPool, getAdminPool, closePool, closeAdminPool, getPlatformPool, closePlatformPool } from "./connection.js";
 
 beforeEach(() => {
   vi.resetModules();
@@ -169,5 +177,65 @@ describe("closeAdminPool", () => {
     await mod.closeAdminPool();
 
     expect(mockPool.end).toHaveBeenCalled();
+  });
+});
+
+describe("getPlatformPool", () => {
+  it("creates a pool with the platform database config", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    const pool = mod.getPlatformPool();
+
+    expect(mockCreatePool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        host: "platform-host",
+        user: "platform-user",
+        password: "platform-pass",
+        database: "platform-db",
+      }),
+    );
+    expect(pool).toBe(mockPool);
+  });
+
+  it("returns the same pool on subsequent calls", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    const pool1 = mod.getPlatformPool();
+    const pool2 = mod.getPlatformPool();
+
+    expect(pool1).toBe(pool2);
+    expect(mockCreatePool).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses shared pool settings (connectionLimit, waitForConnections, connectTimeout)", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.getPlatformPool();
+
+    expect(mockCreatePool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionLimit: 5,
+        waitForConnections: true,
+        connectTimeout: 5000,
+      }),
+    );
+  });
+});
+
+describe("closePlatformPool", () => {
+  it("calls end on the platform pool", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.getPlatformPool();
+    await mod.closePlatformPool();
+
+    expect(mockPool.end).toHaveBeenCalled();
+  });
+
+  it("does nothing if platform pool was never created", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    await mod.closePlatformPool();
+    // Should not throw
   });
 });
