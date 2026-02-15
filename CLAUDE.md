@@ -74,7 +74,6 @@ The main Claude Code session acts as the orchestrator. Subagents are launched vi
 | Agent | File | Role |
 |-------|------|------|
 | Ideator | `.claude/agents/ideator.md` | Platform knowledge + feature generation |
-| Implementor | `.claude/agents/implementor.md` | TDD builder, writes code |
 | Validator | `.claude/agents/validator.md` | Runs real Claude API validation tests |
 | Test Reviewer | `.claude/agents/test-reviewer.md` | Audits test coverage (read-only) |
 | Code Reviewer | `.claude/agents/code-reviewer.md` | Reviews code quality (read-only) |
@@ -99,7 +98,7 @@ Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP too
 3. Main session picks up card, moves to In Progress, creates progress checklist
 4. If the card requires human intervention (external service settings, account config, etc.), adds `Needs Help` label and moves to Needs Help list
 5. Evaluates scope — splits into epic phases if too large (3+ phases)
-6. Launches Implementor subagent for TDD (failing test, implement, pass, refactor)
+6. Orchestrator implements directly using TDD (failing test, implement, pass, refactor)
 7. Launches Test Reviewer + Code Reviewer subagents for quality gates
 8. Launches Validator subagent only for agent/SDK changes
 9. Commits, moves card to Done, adds retro comment

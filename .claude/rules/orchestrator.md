@@ -52,12 +52,20 @@ If 3+ phases, different domains, or >500 lines — split into epic:
 3. Move original to Done with split comment
 4. Pick up first phase card instead
 
-### Step 4: Delegate to Implementor
+### Step 4: Implement (TDD)
 
-Launch the `implementor` subagent via Task tool with `mode: "bypassPermissions"`:
-- Pass card ID, title, implementation plan, AND the acceptance criteria items
-- Strict TDD: failing test, implement, pass, refactor
-- Check off "Tests Written", "Implementation", "Tests Pass"
+The orchestrator implements the code directly using strict TDD:
+
+1. **Write failing test** — Create or update test file with tests that verify the expected behavior
+2. **Run tests** — `npx vitest run` — Confirm the new test fails
+3. **Implement** — Write the minimum code to make the test pass
+4. **Run tests** — Confirm all tests pass (new AND existing)
+5. **Refactor** — Clean up if needed, run tests again
+6. **Type check** — `npx tsc --noEmit`
+
+For large-scale repetitive edits (renaming across many files, pattern upgrades, etc.), launch a `batch-editor` subagent via the Task tool.
+
+Check off "Tests Written", "Implementation", "Tests Pass".
 
 ### Step 5: Quality Gates
 
@@ -66,7 +74,7 @@ Launch in parallel via Task tool with `mode: "bypassPermissions"`:
 - **code-reviewer**: Check code quality
 - **validator**: Only if changes touch `src/agent/`, Claude SDK, or router
 
-If critical issues found, relaunch implementor with fixes, re-run failed gate.
+If critical issues found, fix them directly and re-run the failed gate.
 Check off "Code Review".
 
 ### Step 6: Check Off Acceptance Criteria
