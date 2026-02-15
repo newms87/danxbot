@@ -16,8 +16,8 @@ This project uses `tsx` to run TypeScript directly. There is no build step for d
 
 ## Testing Changes
 
-- **HTML/CSS changes**: Hard-refresh the browser (Ctrl+Shift+R)
-- **TypeScript changes**: `docker restart flytebot`, then test
+- **Dashboard changes**: `npm run dashboard:dev` for HMR on port 5173
+- **Backend TypeScript changes**: `docker compose up -d --force-recreate`, then test
 - **New dependencies**: `docker compose up -d --build`
 
 ## Key Files
@@ -28,8 +28,8 @@ This project uses `tsx` to run TypeScript directly. There is no build step for d
 | `src/agent/agent.ts` | Router (Haiku) and Agent (Claude Code SDK) |
 | `src/slack/listener.ts` | Slack message handler, orchestrates router → agent flow |
 | `src/dashboard/events.ts` | Event tracking, SSE broadcasting, analytics |
-| `src/dashboard/server.ts` | HTTP server for dashboard on port 5555 |
-| `src/dashboard/index.html` | Dashboard SPA (Vue 3 + Tailwind) |
+| `src/dashboard/server.ts` | HTTP server: API routes + static file serving |
+| `dashboard/` | Vite + Vue 3 SPA (see `.claude/rules/dashboard.md`) |
 | `src/types.ts` | Shared TypeScript interfaces |
 | `src/config.ts` | Environment variable configuration |
 | `src/threads.ts` | Thread state persistence (JSON files) |

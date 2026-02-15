@@ -54,12 +54,19 @@ RUN mkdir -p /flytebot/app /flytebot/platform /flytebot/threads /flytebot/data /
 
 WORKDIR /flytebot/app
 
-# Install dependencies (layer cached unless package.json changes)
+# Install backend dependencies (layer cached unless package.json changes)
 COPY --chown=flytebot:flytebot package.json package-lock.json* ./
 RUN npm install
 
+# Install dashboard dependencies and build (cached layer)
+COPY --chown=flytebot:flytebot dashboard/package.json dashboard/package-lock.json* dashboard/
+RUN cd dashboard && npm install
+
 # Copy application code
 COPY --chown=flytebot:flytebot . .
+
+# Build dashboard for production
+RUN cd dashboard && npm run build
 
 # Entrypoint (must run as root initially to copy auth, then drops to flytebot user)
 COPY entrypoint.sh /flytebot/entrypoint.sh

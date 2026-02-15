@@ -1,5 +1,5 @@
 import { createServer } from "http";
-import { readFile } from "fs/promises";
+import { readFile, access } from "fs/promises";
 import { getEvents, getAnalytics, addSSEClient, removeSSEClient } from "./events.js";
 import { eventsToCSV } from "./export.js";
 import { getHealthStatus } from "./health.js";
@@ -9,9 +9,25 @@ const log = createLogger("dashboard");
 
 const PORT = 5555;
 
-export async function startDashboard(): Promise<void> {
-  const htmlPath = new URL("./index.html", import.meta.url);
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html",
+  ".js": "application/javascript",
+  ".css": "text/css",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".json": "application/json",
+  ".woff2": "font/woff2",
+};
 
+function getMimeType(path: string): string {
+  const ext = path.slice(path.lastIndexOf("."));
+  return MIME_TYPES[ext] || "application/octet-stream";
+}
+
+// Resolve dashboard dist directory (relative to project root, works with tsx)
+const distDir = new URL("../../dashboard/dist", import.meta.url);
+
+export async function startDashboard(): Promise<void> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);
 
@@ -98,16 +114,35 @@ export async function startDashboard(): Promise<void> {
       return;
     }
 
-    // Serve the dashboard HTML
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      const html = await readFile(htmlPath, "utf-8");
-      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store, must-revalidate" });
-      res.end(html);
-      return;
+    // Serve static assets from dashboard/dist/
+    if (url.pathname.startsWith("/assets/")) {
+      const filePath = new URL("." + url.pathname, distDir + "/");
+      try {
+        await access(filePath);
+        const content = await readFile(filePath);
+        res.writeHead(200, {
+          "Content-Type": getMimeType(url.pathname),
+          "Cache-Control": "public, max-age=31536000, immutable",
+        });
+        res.end(content);
+        return;
+      } catch {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
     }
 
-    res.writeHead(404);
-    res.end("Not found");
+    // SPA fallback: serve index.html for all non-API routes
+    const indexPath = new URL("./index.html", distDir + "/");
+    try {
+      const html = await readFile(indexPath, "utf-8");
+      res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-cache, no-store, must-revalidate" });
+      res.end(html);
+    } catch {
+      res.writeHead(404);
+      res.end("Dashboard not built. Run: cd dashboard && npm run build");
+    }
   });
 
   server.listen(PORT, () => {

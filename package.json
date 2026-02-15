@@ -12,7 +12,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:validate": "vitest run --config vitest.validation.config.ts",
-    "poller": "tsx --env-file=.env src/poller/index.ts"
+    "poller": "tsx --env-file=.env src/poller/index.ts",
+    "dashboard:dev": "cd dashboard && npm run dev",
+    "dashboard:build": "cd dashboard && npm run build"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",

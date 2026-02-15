@@ -11,6 +11,8 @@ services:
       # Hot-reload during development
       - ./src:/flytebot/app/src
       - ./package.json:/flytebot/app/package.json
+      # Dashboard built assets (mount for dev rebuilds)
+      - ./dashboard:/flytebot/app/dashboard
       # Persistent thread cache
       - flytebot-threads:/flytebot/threads
       # Mount local platform repo (faster than cloning)
