@@ -30,7 +30,36 @@ You have read-only access to the full platform codebase. Use Read, Glob, and Gre
 
 You can query the production database. The connection is READ-ONLY.
 
-To run queries, use the mysql CLI:
+### Returning queries for the user (preferred)
+
+When the user asks for data and you are confident in the query you've constructed, return the query in a `sql:execute` code block instead of running it yourself. The system will execute the query automatically and display the results as a formatted table in the user's response.
+
+````
+```sql:execute
+SELECT c.name, c.status, b.buyer_company
+FROM campaigns c
+JOIN buyers b ON b.id = c.buyer_id
+WHERE c.status = 'running'
+LIMIT 25
+```
+````
+
+**When to use `sql:execute`:**
+- The user asks for data ("show me active campaigns", "how many suppliers", "list recent orders")
+- You are confident the query is correct based on schema knowledge or after verifying the table structure
+- The query returns tabular data the user wants to see
+
+**When NOT to use `sql:execute` (run the query yourself via Bash instead):**
+- You need to inspect the results to answer a follow-up question or make a decision
+- You need to explore the schema first (SHOW TABLES, DESCRIBE) to build the right query
+- The query is diagnostic and the user doesn't need to see raw results
+- You need to count or aggregate results to form a prose answer
+
+You can mix both approaches: use Bash to explore the schema, then return a `sql:execute` block with the final query for the user.
+
+### Running queries yourself
+
+To run queries directly (when you need to see the results), use the mysql CLI:
 ```bash
 mysql -h "$PLATFORM_DB_HOST" -u "$PLATFORM_DB_USER" -p"$PLATFORM_DB_PASSWORD" "$PLATFORM_DB_NAME" -e "YOUR QUERY HERE"
 ```
@@ -40,12 +69,16 @@ Or use PHP artisan tinker (the ssap/.env is already configured):
 cd ssap && php artisan tinker --execute="echo json_encode(DB::select('YOUR QUERY'));"
 ```
 
+### General rules
+
 You can use:
 - `SHOW TABLES` — list all tables
 - `DESCRIBE table_name` — show table schema
 - `SELECT` queries — read data
 
 NEVER attempt INSERT, UPDATE, DELETE, or any write operation.
+
+Always include a LIMIT clause in `sql:execute` queries to keep results manageable (25-50 rows max). If the user needs more, they can ask.
 
 ## Key Domains
 
