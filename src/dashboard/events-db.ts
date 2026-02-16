@@ -3,6 +3,7 @@ import { getPool } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 import type { MessageEvent } from "./events.js";
 import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary } from "../types.js";
+import { parseAgentLog } from "../agent/log-parser.js";
 
 const log = createLogger("events-db");
 
@@ -112,6 +113,7 @@ function parseJson(value: string | null, columnName: string): Record<string, unk
 }
 
 export function rowToEvent(row: EventRow): MessageEvent {
+  const agentLog = parseJson(row.agent_log, "agent_log") as AgentLogEntry[] | null;
   return {
     id: row.id,
     threadTs: row.thread_ts,
@@ -137,7 +139,8 @@ export function rowToEvent(row: EventRow): MessageEvent {
     routerRequest: parseJson(row.router_request, "router_request"),
     routerRawResponse: parseJson(row.router_raw_response, "router_raw_response"),
     agentConfig: parseJson(row.agent_config, "agent_config"),
-    agentLog: parseJson(row.agent_log, "agent_log") as AgentLogEntry[] | null,
+    agentLog,
+    parsedAgentLog: agentLog ? parseAgentLog(agentLog) : null,
     agentRetried: row.agent_retried === 1,
     sqlQueriesProcessed: row.sql_queries_processed,
     feedback: row.feedback as MessageEvent["feedback"],

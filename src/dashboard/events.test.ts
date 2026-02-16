@@ -340,6 +340,56 @@ describe("feedback", () => {
   });
 });
 
+describe("parsedAgentLog auto-parsing", () => {
+  it("auto-parses agentLog when updateEvent receives it", () => {
+    const event = makeEvent();
+    updateEvent(event.id, {
+      agentLog: [
+        {
+          timestamp: 1000,
+          type: "system",
+          subtype: "init",
+          summary: "Session initialized: sonnet",
+          data: { session_id: "s1", model: "sonnet", tools: ["Read"], delta_ms: 0, raw: {} },
+        },
+        {
+          timestamp: 2000,
+          type: "assistant",
+          summary: "Text: Hello",
+          data: {
+            content: [{ type: "text", text: "Hello world" }],
+            usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+            delta_ms: 1000,
+            raw: { message: { model: "sonnet" } },
+          },
+        },
+      ],
+    });
+
+    const found = getEvents().find((e) => e.id === event.id);
+    expect(found?.parsedAgentLog).toHaveLength(2);
+    expect(found?.parsedAgentLog?.[0].type).toBe("system_init");
+    expect(found?.parsedAgentLog?.[1].type).toBe("assistant");
+  });
+
+  it("does not re-parse when parsedAgentLog is already provided", () => {
+    const event = makeEvent();
+    const customParsed = [{ type: "system_init" as const, timestamp: 1, deltaMs: 0, sessionId: "x", model: "m", tools: [] }];
+    updateEvent(event.id, {
+      agentLog: [{ timestamp: 1, type: "system", subtype: "init", summary: "s", data: { session_id: "x", model: "m", tools: [], delta_ms: 0, raw: {} } }],
+      parsedAgentLog: customParsed,
+    });
+
+    const found = getEvents().find((e) => e.id === event.id);
+    expect(found?.parsedAgentLog).toBe(customParsed);
+  });
+
+  it("defaults parsedAgentLog to null on createEvent", () => {
+    const event = makeEvent();
+    expect(event.parsedAgentLog).toBeNull();
+  });
+});
+
 describe("cleanupOldEvents", () => {
   it("calls deleteOldEventsFromDb with maxAgeMs derived from config", async () => {
     mockDeleteOldEventsFromDb.mockResolvedValueOnce(5);

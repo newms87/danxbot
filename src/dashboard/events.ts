@@ -2,6 +2,7 @@ import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { persistEventToDb, updateEventInDb, loadEventsFromDb, deleteOldEventsFromDb } from "./events-db.js";
 import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary, ComplexityLevel } from "../types.js";
+import { parseAgentLog, type ParsedLogEntry } from "../agent/log-parser.js";
 
 const log = createLogger("events");
 
@@ -31,6 +32,7 @@ export interface MessageEvent {
   routerRawResponse: Record<string, unknown> | null;
   agentConfig: Record<string, unknown> | null;
   agentLog: AgentLogEntry[] | null;
+  parsedAgentLog: ParsedLogEntry[] | null;
   agentRetried: boolean;
   sqlQueriesProcessed: number | null;
   feedback: "positive" | "negative" | null;
@@ -97,6 +99,7 @@ export function createEvent(partial: {
     routerRawResponse: null,
     agentConfig: null,
     agentLog: null,
+    parsedAgentLog: null,
     agentRetried: false,
     sqlQueriesProcessed: null,
     feedback: null,
@@ -116,6 +119,10 @@ export function updateEvent(
 ): void {
   const event = events.find((e) => e.id === id);
   if (!event) return;
+  // Auto-parse agent log when it's provided
+  if (updates.agentLog && !updates.parsedAgentLog) {
+    updates.parsedAgentLog = parseAgentLog(updates.agentLog);
+  }
   Object.assign(event, updates);
   broadcast(event);
   updateEventInDb(id, updates).catch((err) => log.error("Failed to update event in DB", err));

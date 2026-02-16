@@ -61,6 +61,7 @@ function makeFullEvent(overrides: Partial<MessageEvent> = {}): MessageEvent {
     routerRawResponse: null,
     agentConfig: null,
     agentLog: null,
+    parsedAgentLog: null,
     agentRetried: false,
     sqlQueriesProcessed: null,
     feedback: null,
