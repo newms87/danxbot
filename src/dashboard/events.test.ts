@@ -388,6 +388,42 @@ describe("parsedAgentLog auto-parsing", () => {
     const event = makeEvent();
     expect(event.parsedAgentLog).toBeNull();
   });
+
+  it("prepends router entry to parsedAgentLog when event has router data", () => {
+    const event = makeEvent();
+    // First set router data (simulating "routed" status update)
+    updateEvent(event.id, {
+      routerResponse: "Looking into it!",
+      routerResponseAt: 500,
+      routerNeedsAgent: true,
+      routerComplexity: "medium",
+      routerRawResponse: {},
+    });
+    // Then set agentLog (simulating "complete" status update)
+    updateEvent(event.id, {
+      agentLog: [
+        { timestamp: 1000, type: "system", subtype: "init", summary: "init", data: { session_id: "s1", model: "m", tools: [], delta_ms: 0, raw: {} } },
+      ],
+    });
+
+    const found = getEvents().find((e) => e.id === event.id);
+    expect(found?.parsedAgentLog).toHaveLength(2);
+    expect(found?.parsedAgentLog?.[0].type).toBe("router");
+    expect(found?.parsedAgentLog?.[1].type).toBe("system_init");
+  });
+
+  it("does not prepend router entry when event has no router data", () => {
+    const event = makeEvent();
+    updateEvent(event.id, {
+      agentLog: [
+        { timestamp: 1000, type: "system", subtype: "init", summary: "init", data: { session_id: "s1", model: "m", tools: [], delta_ms: 0, raw: {} } },
+      ],
+    });
+
+    const found = getEvents().find((e) => e.id === event.id);
+    expect(found?.parsedAgentLog).toHaveLength(1);
+    expect(found?.parsedAgentLog?.[0].type).toBe("system_init");
+  });
 });
 
 describe("cleanupOldEvents", () => {

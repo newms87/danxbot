@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseAgentLog } from "./log-parser.js";
+import { parseAgentLog, buildRouterEntry, buildParsedAgentLog } from "./log-parser.js";
 import type { AgentLogEntry } from "../types.js";
 
 // --- Test fixtures ---
@@ -414,5 +414,242 @@ describe("parseAgentLog", () => {
     };
     const result = parseAgentLog([entry]);
     expect(result).toHaveLength(0);
+  });
+
+  it("includes costUsd on assistant entries with known model and usage", () => {
+    const result = parseAgentLog([assistantEntry()]);
+    const entry = result[0];
+    if (entry.type !== "assistant") throw new Error("wrong type");
+    // Model is claude-sonnet-4-5-20250929 with 500 in, 100 out, 200 cache write, 3000 cache read
+    expect(entry.costUsd).toBeGreaterThan(0);
+    expect(typeof entry.costUsd).toBe("number");
+  });
+
+  it("sets costUsd to 0 when model is unknown", () => {
+    const entry = assistantEntry({
+      raw: { message: { model: "unknown-model" } },
+    });
+    const result = parseAgentLog([entry]);
+    const parsed = result[0];
+    if (parsed.type !== "assistant") throw new Error("wrong type");
+    expect(parsed.costUsd).toBe(0);
+  });
+
+  it("sets costUsd to 0 when usage or model is missing", () => {
+    const entry = assistantEntry({
+      content: [{ type: "text", text: "Hello" }],
+      usage: undefined,
+      raw: {},
+    });
+    const result = parseAgentLog([entry]);
+    const parsed = result[0];
+    if (parsed.type !== "assistant") throw new Error("wrong type");
+    expect(parsed.costUsd).toBe(0);
+  });
+});
+
+describe("buildRouterEntry", () => {
+  it("builds a ParsedRouter from router fields", () => {
+    const result = buildRouterEntry({
+      routerResponse: "Looking into it!",
+      routerNeedsAgent: true,
+      routerComplexity: "medium",
+      routerRawResponse: {
+        usage: { input_tokens: 500, output_tokens: 80, cache_creation_input_tokens: 0, cache_read_input_tokens: 300 },
+        content: [{ type: "text", text: '{"quickResponse":"Looking into it!","needsAgent":true,"complexity":"medium","reason":"Needs codebase exploration"}' }],
+      },
+      routerResponseAt: 1000,
+      apiCalls: [{
+        source: "router" as const,
+        model: "claude-haiku-4-5-20251001",
+        inputTokens: 500,
+        outputTokens: 80,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 300,
+        costUsd: 0.00074,
+        timestamp: 1000,
+      }],
+    });
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected non-null");
+    expect(result.type).toBe("router");
+    expect(result.quickResponse).toBe("Looking into it!");
+    expect(result.needsAgent).toBe(true);
+    expect(result.complexity).toBe("medium");
+    expect(result.costUsd).toBeCloseTo(0.00074, 5);
+  });
+
+  it("extracts reason from router raw response content", () => {
+    const result = buildRouterEntry({
+      routerResponse: "Hi!",
+      routerNeedsAgent: false,
+      routerComplexity: "very_low",
+      routerRawResponse: {
+        content: [{ type: "text", text: '{"quickResponse":"Hi!","needsAgent":false,"complexity":"very_low","reason":"Simple greeting"}' }],
+      },
+      routerResponseAt: 1000,
+      apiCalls: null,
+    });
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected non-null");
+    expect(result.reason).toBe("Simple greeting");
+  });
+
+  it("returns null when routerResponse is missing", () => {
+    const result = buildRouterEntry({
+      routerResponse: null,
+      routerNeedsAgent: null,
+      routerComplexity: null,
+      routerRawResponse: null,
+      routerResponseAt: null,
+      apiCalls: null,
+    });
+    expect(result).toBeNull();
+  });
+
+  it("returns null when routerResponseAt is missing", () => {
+    const result = buildRouterEntry({
+      routerResponse: "Hello",
+      routerNeedsAgent: false,
+      routerComplexity: "very_low",
+      routerRawResponse: null,
+      routerResponseAt: null,
+      apiCalls: null,
+    });
+    expect(result).toBeNull();
+  });
+
+  it("handles missing apiCalls gracefully", () => {
+    const result = buildRouterEntry({
+      routerResponse: "Looking into it!",
+      routerNeedsAgent: true,
+      routerComplexity: "high",
+      routerRawResponse: {},
+      routerResponseAt: 2000,
+      apiCalls: null,
+    });
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected non-null");
+    expect(result.costUsd).toBe(0);
+    expect(result.usage).toBeNull();
+  });
+
+  it("handles malformed JSON in raw response content", () => {
+    const result = buildRouterEntry({
+      routerResponse: "Hello!",
+      routerNeedsAgent: false,
+      routerComplexity: "very_low",
+      routerRawResponse: {
+        content: [{ type: "text", text: "not valid json {{{" }],
+      },
+      routerResponseAt: 1000,
+      apiCalls: null,
+    });
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected non-null");
+    expect(result.reason).toBe("");
+  });
+
+  it("handles raw response with no text blocks", () => {
+    const result = buildRouterEntry({
+      routerResponse: "Hello!",
+      routerNeedsAgent: false,
+      routerComplexity: "very_low",
+      routerRawResponse: {
+        content: [{ type: "image", source: {} }],
+      },
+      routerResponseAt: 1000,
+      apiCalls: null,
+    });
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected non-null");
+    expect(result.reason).toBe("");
+  });
+
+  it("defaults needsAgent to false and complexity to very_low when null", () => {
+    const result = buildRouterEntry({
+      routerResponse: "Hi!",
+      routerNeedsAgent: null,
+      routerComplexity: null,
+      routerRawResponse: null,
+      routerResponseAt: 1000,
+      apiCalls: null,
+    });
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected non-null");
+    expect(result.needsAgent).toBe(false);
+    expect(result.complexity).toBe("very_low");
+  });
+
+  it("maps usage tokens correctly from ApiCallUsage", () => {
+    const result = buildRouterEntry({
+      routerResponse: "Looking into it!",
+      routerNeedsAgent: true,
+      routerComplexity: "medium",
+      routerRawResponse: {},
+      routerResponseAt: 1000,
+      apiCalls: [{
+        source: "router" as const,
+        model: "claude-haiku-4-5-20251001",
+        inputTokens: 500,
+        outputTokens: 80,
+        cacheCreationInputTokens: 100,
+        cacheReadInputTokens: 300,
+        costUsd: 0.001,
+        timestamp: 1000,
+      }],
+    });
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("expected non-null");
+    expect(result.usage).toEqual({
+      inputTokens: 500,
+      outputTokens: 80,
+      cacheWriteTokens: 100,
+      cacheReadTokens: 300,
+    });
+  });
+});
+
+describe("buildParsedAgentLog", () => {
+  it("returns null for null/undefined agentLog", () => {
+    expect(buildParsedAgentLog(null, {
+      routerResponse: "Hi",
+      routerNeedsAgent: false,
+      routerComplexity: "very_low",
+      routerRawResponse: null,
+      routerResponseAt: 1000,
+      apiCalls: null,
+    })).toBeNull();
+  });
+
+  it("prepends router entry when router data is available", () => {
+    const agentLog: AgentLogEntry[] = [systemInitEntry()];
+    const result = buildParsedAgentLog(agentLog, {
+      routerResponse: "Looking into it!",
+      routerNeedsAgent: true,
+      routerComplexity: "medium",
+      routerRawResponse: {},
+      routerResponseAt: 1000,
+      apiCalls: null,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.length).toBe(2);
+    expect(result![0].type).toBe("router");
+    expect(result![1].type).toBe("system_init");
+  });
+
+  it("does not prepend router entry when router data is missing", () => {
+    const agentLog: AgentLogEntry[] = [systemInitEntry()];
+    const result = buildParsedAgentLog(agentLog, {
+      routerResponse: null,
+      routerNeedsAgent: null,
+      routerComplexity: null,
+      routerRawResponse: null,
+      routerResponseAt: null,
+      apiCalls: null,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.length).toBe(1);
+    expect(result![0].type).toBe("system_init");
   });
 });

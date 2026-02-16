@@ -28,6 +28,33 @@ describe("calculateApiCost", () => {
     expect(calculateApiCost("unknown-model", 1000, 500, 200, 800)).toBe(0);
   });
 
+  it("calculates correct cost for Sonnet 4", () => {
+    const SONNET = "claude-sonnet-4-20250514";
+    // 1000 input at $3.00/MTok = $0.003
+    // 500 output at $15.00/MTok = $0.0075
+    // 200 cache write at $3.75/MTok = $0.00075
+    // 800 cache read at $0.30/MTok = $0.00024
+    const cost = calculateApiCost(SONNET, 1000, 500, 200, 800);
+    expect(cost).toBeCloseTo(0.01149, 5);
+  });
+
+  it("calculates correct cost for Sonnet 4.5", () => {
+    const SONNET45 = "claude-sonnet-4-5-20250929";
+    // Same pricing as Sonnet 4
+    const cost = calculateApiCost(SONNET45, 1000, 500, 200, 800);
+    expect(cost).toBeCloseTo(0.01149, 5);
+  });
+
+  it("calculates correct cost for Opus 4", () => {
+    const OPUS = "claude-opus-4-20250514";
+    // 1000 input at $15.00/MTok = $0.015
+    // 500 output at $75.00/MTok = $0.0375
+    // 200 cache write at $18.75/MTok = $0.00375
+    // 800 cache read at $1.50/MTok = $0.0012
+    const cost = calculateApiCost(OPUS, 1000, 500, 200, 800);
+    expect(cost).toBeCloseTo(0.05745, 5);
+  });
+
   it("handles large token counts", () => {
     // 1M input at $0.80/MTok = $0.80
     // 1M output at $4.00/MTok = $4.00

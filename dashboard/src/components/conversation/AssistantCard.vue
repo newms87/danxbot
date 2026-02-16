@@ -17,6 +17,10 @@ const showThinking = ref(false);
       </span>
       <span v-if="entry.model" class="text-gray-500 dark:text-gray-500 font-mono text-[10px]">{{ entry.model }}</span>
       <span class="ml-auto text-gray-400 dark:text-gray-600 font-mono text-[10px]">{{ formatMs(entry.deltaMs) }}</span>
+      <template v-if="entry.costUsd > 0">
+        <span class="text-gray-400 dark:text-gray-600">|</span>
+        <span class="text-blue-600 dark:text-blue-400 font-mono text-[10px] font-semibold">${{ entry.costUsd.toFixed(4) }}</span>
+      </template>
       <template v-if="entry.usage">
         <span class="text-gray-400 dark:text-gray-600">|</span>
         <span class="text-gray-500 dark:text-gray-500 font-mono text-[10px]">

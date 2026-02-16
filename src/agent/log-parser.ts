@@ -1,5 +1,6 @@
-import type { AgentLogEntry } from "../types.js";
+import type { AgentLogEntry, ApiCallUsage, ComplexityLevel } from "../types.js";
 import { summarizeToolInput } from "./tool-summary.js";
+import { calculateApiCost } from "./pricing.js";
 
 // --- Parsed log entry types ---
 
@@ -34,6 +35,19 @@ export interface ParsedAssistant {
   text: string | null;
   toolCalls: ParsedToolCall[];
   model: string | null;
+  usage: ParsedAssistantUsage | null;
+  costUsd: number;
+}
+
+export interface ParsedRouter {
+  type: "router";
+  timestamp: number;
+  deltaMs: number;
+  quickResponse: string;
+  needsAgent: boolean;
+  complexity: string;
+  reason: string;
+  costUsd: number;
   usage: ParsedAssistantUsage | null;
 }
 
@@ -85,7 +99,8 @@ export type ParsedLogEntry =
   | ParsedToolResult
   | ParsedToolProgress
   | ParsedResult
-  | ParsedError;
+  | ParsedError
+  | ParsedRouter;
 
 const TOOL_RESULT_MAX_LENGTH = 1000;
 
@@ -179,6 +194,17 @@ function parseAssistant(entry: AgentLogEntry, deltaMs: number): ParsedAssistant 
       }
     : null;
 
+  // Calculate per-turn cost from model + usage
+  const costUsd = model && parsedUsage
+    ? calculateApiCost(
+        model,
+        parsedUsage.inputTokens,
+        parsedUsage.outputTokens,
+        parsedUsage.cacheWriteTokens,
+        parsedUsage.cacheReadTokens,
+      )
+    : 0;
+
   return {
     type: "assistant",
     timestamp: entry.timestamp,
@@ -188,6 +214,7 @@ function parseAssistant(entry: AgentLogEntry, deltaMs: number): ParsedAssistant 
     toolCalls,
     model: model ?? null,
     usage: parsedUsage,
+    costUsd,
   };
 }
 
@@ -260,5 +287,81 @@ function parseError(entry: AgentLogEntry, deltaMs: number): ParsedError {
     deltaMs,
     message: String(entry.data.error ?? "Unknown error"),
     stderr: entry.data.stderr ? String(entry.data.stderr) : null,
+  };
+}
+
+/**
+ * Parses agent log entries and optionally prepends a router entry.
+ * Shared helper used by both events.ts (live updates) and events-db.ts (DB loads).
+ */
+export function buildParsedAgentLog(
+  agentLog: AgentLogEntry[] | null | undefined,
+  routerInput: RouterEntryInput,
+): ParsedLogEntry[] | null {
+  if (!agentLog) return null;
+  const parsed = parseAgentLog(agentLog);
+  const routerEntry = buildRouterEntry(routerInput);
+  if (routerEntry) parsed.unshift(routerEntry);
+  return parsed;
+}
+
+/**
+ * Input fields for buildRouterEntry — a subset of MessageEvent's router-related fields.
+ */
+export interface RouterEntryInput {
+  routerResponse: string | null;
+  routerNeedsAgent: boolean | null;
+  routerComplexity: ComplexityLevel | null;
+  routerRawResponse: Record<string, unknown> | null;
+  routerResponseAt: number | null;
+  apiCalls: ApiCallUsage[] | null;
+}
+
+/**
+ * Builds a ParsedRouter entry from MessageEvent router fields.
+ * Returns null if router data is not available.
+ */
+export function buildRouterEntry(input: RouterEntryInput): ParsedRouter | null {
+  if (!input.routerResponse || !input.routerResponseAt) return null;
+
+  // Extract reason from raw response content (the JSON the router returned)
+  let reason = "";
+  if (input.routerRawResponse) {
+    const content = input.routerRawResponse.content as Array<{ type: string; text?: string }> | undefined;
+    if (Array.isArray(content)) {
+      const textBlock = content.find((b) => b.type === "text");
+      if (textBlock?.text) {
+        try {
+          const parsed = JSON.parse(textBlock.text);
+          reason = String(parsed.reason ?? "");
+        } catch {
+          // Ignore parse errors
+        }
+      }
+    }
+  }
+
+  // Find router API call for cost and usage
+  const routerCall = input.apiCalls?.find((c) => c.source === "router") ?? null;
+
+  const usage: ParsedAssistantUsage | null = routerCall
+    ? {
+        inputTokens: routerCall.inputTokens,
+        outputTokens: routerCall.outputTokens,
+        cacheReadTokens: routerCall.cacheReadInputTokens,
+        cacheWriteTokens: routerCall.cacheCreationInputTokens,
+      }
+    : null;
+
+  return {
+    type: "router",
+    timestamp: input.routerResponseAt,
+    deltaMs: 0,
+    quickResponse: input.routerResponse,
+    needsAgent: input.routerNeedsAgent ?? false,
+    complexity: input.routerComplexity ?? "very_low",
+    reason,
+    costUsd: routerCall?.costUsd ?? 0,
+    usage,
   };
 }

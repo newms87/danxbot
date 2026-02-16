@@ -3,7 +3,7 @@ import { getPool } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 import type { MessageEvent } from "./events.js";
 import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary } from "../types.js";
-import { parseAgentLog } from "../agent/log-parser.js";
+import { buildParsedAgentLog } from "../agent/log-parser.js";
 
 const log = createLogger("events-db");
 
@@ -114,6 +114,11 @@ function parseJson(value: string | null, columnName: string): Record<string, unk
 
 export function rowToEvent(row: EventRow): MessageEvent {
   const agentLog = parseJson(row.agent_log, "agent_log") as AgentLogEntry[] | null;
+  const apiCalls = parseJson(row.api_calls, "api_calls") as ApiCallUsage[] | null;
+  const routerRawResponse = parseJson(row.router_raw_response, "router_raw_response");
+  const routerNeedsAgent = row.router_needs_agent === null ? null : row.router_needs_agent === 1;
+  const routerComplexity = row.router_complexity as MessageEvent["routerComplexity"];
+
   return {
     id: row.id,
     threadTs: row.thread_ts,
@@ -125,22 +130,29 @@ export function rowToEvent(row: EventRow): MessageEvent {
     receivedAt: row.received_at,
     routerResponseAt: row.router_response_at,
     routerResponse: row.router_response,
-    routerNeedsAgent: row.router_needs_agent === null ? null : row.router_needs_agent === 1,
-    routerComplexity: row.router_complexity as MessageEvent["routerComplexity"],
+    routerNeedsAgent,
+    routerComplexity,
     agentResponseAt: row.agent_response_at,
     agentResponse: row.agent_response,
     subscriptionCostUsd: row.subscription_cost_usd === null ? null : Number(row.subscription_cost_usd),
     agentTurns: row.agent_turns,
-    apiCalls: parseJson(row.api_calls, "api_calls") as ApiCallUsage[] | null,
+    apiCalls,
     apiCostUsd: row.api_cost_usd === null ? null : Number(row.api_cost_usd),
     agentUsage: parseJson(row.agent_usage, "agent_usage") as AgentUsageSummary | null,
     status: row.status as MessageEvent["status"],
     error: row.error,
     routerRequest: parseJson(row.router_request, "router_request"),
-    routerRawResponse: parseJson(row.router_raw_response, "router_raw_response"),
+    routerRawResponse,
     agentConfig: parseJson(row.agent_config, "agent_config"),
     agentLog,
-    parsedAgentLog: agentLog ? parseAgentLog(agentLog) : null,
+    parsedAgentLog: buildParsedAgentLog(agentLog, {
+      routerResponse: row.router_response,
+      routerNeedsAgent,
+      routerComplexity,
+      routerRawResponse,
+      routerResponseAt: row.router_response_at,
+      apiCalls,
+    }),
     agentRetried: row.agent_retried === 1,
     sqlQueriesProcessed: row.sql_queries_processed,
     feedback: row.feedback as MessageEvent["feedback"],

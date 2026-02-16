@@ -2,7 +2,7 @@ import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { persistEventToDb, updateEventInDb, loadEventsFromDb, deleteOldEventsFromDb } from "./events-db.js";
 import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary, ComplexityLevel } from "../types.js";
-import { parseAgentLog, type ParsedLogEntry } from "../agent/log-parser.js";
+import { buildParsedAgentLog, type ParsedLogEntry } from "../agent/log-parser.js";
 
 const log = createLogger("events");
 
@@ -121,7 +121,7 @@ export function updateEvent(
   if (!event) return;
   // Auto-parse agent log when it's provided
   if (updates.agentLog && !updates.parsedAgentLog) {
-    updates.parsedAgentLog = parseAgentLog(updates.agentLog);
+    updates.parsedAgentLog = buildParsedAgentLog(updates.agentLog, event);
   }
   Object.assign(event, updates);
   broadcast(event);

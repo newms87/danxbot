@@ -3,6 +3,9 @@ import type { ApiCallUsage } from "../types.js";
 /** Pricing per million tokens (USD) indexed by model */
 const PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
   "claude-haiku-4-5-20251001": { input: 0.80, output: 4.00, cacheWrite: 1.00, cacheRead: 0.08 },
+  "claude-sonnet-4-20250514": { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 },
+  "claude-sonnet-4-5-20250929": { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 },
+  "claude-opus-4-20250514": { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
 };
 
 /**
