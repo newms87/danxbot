@@ -97,10 +97,10 @@ Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP too
 2. `/start-team` or `/next-card` triggers the workflow
 3. Main session picks up card, moves to In Progress, creates progress checklist
 4. If the card requires human intervention (external service settings, account config, etc.), adds `Needs Help` label and moves to Needs Help list
-5. Evaluates scope — splits into epic phases if too large (3+ phases)
+5. Evaluates scope — splits into epic phases if too large (3+ phases), labels parent as Epic, creates phase cards in In Progress
 6. Orchestrator implements directly using TDD (failing test, implement, pass, refactor)
 7. Launches Test Reviewer + Code Reviewer subagents for quality gates
 8. Launches Validator subagent only for agent/SDK changes
 9. Commits, moves card to Done, adds retro comment
-10. Epic splitting: cards named `Epic > Phase N > Description`
+10. Epic splitting: parent gets Epic label, phase cards named `Epic > Phase N > Description` created in In Progress
 11. Every Done card gets a retro comment (what went well/wrong, optimizations)

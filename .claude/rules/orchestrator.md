@@ -23,6 +23,7 @@ Every card MUST have a label. Apply labels when creating cards or picking them u
 |-------|----|-----|
 | Bug | `698fc5b8847b787a3818adac` | Defects, crashes, incorrect behavior |
 | Feature | `698fc5b8847b787a3818adae` | New functionality, enhancements |
+| Epic | `698fc5b8847b787a3818adad` | Parent card split into phases |
 | Needs Help | `698fc5b8847b787a3818adaa` | Requires human intervention |
 
 ## Card Processing Workflow
@@ -47,10 +48,15 @@ YOU are the orchestrator. Do NOT launch a separate orchestrator agent.
 ### Step 3: Evaluate Scope
 
 If 3+ phases, different domains, or >500 lines — split into epic:
-1. Create N new cards in ToDo (position: `"top"`): `Epic Name > Phase N > Description`
-2. Each card gets its own description and acceptance criteria
-3. Move original to Done with split comment
-4. Pick up first phase card instead
+1. Change the parent card's label to `Epic` using `update_card_details` (labels: `["698fc5b8847b787a3818adad"]`)
+2. Add a "Phases" checklist to the epic card with one item per phase
+3. Create N new phase cards in **In Progress** (position: `"top"`): `Epic Name > Phase N > Description`
+4. Each phase card gets its own description, acceptance criteria, and the appropriate label (Bug or Feature)
+5. Add a split comment to the epic card listing all phases
+6. Move the epic card to Done
+7. Pick up the first phase card from In Progress
+
+**Phase processing:** After completing a phase card, search In Progress for the next phase card (not ToDo). This keeps epic phases prioritized and prevents them from mixing with unrelated ToDo cards.
 
 ### Step 4: Implement (TDD)
 
