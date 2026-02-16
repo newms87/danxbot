@@ -11,3 +11,8 @@ export function formatMs(ms: number | null | undefined): string {
 export function relativeTime(ts: number, baseTs: number): string {
   return ((ts - baseTs) / 1000).toFixed(1);
 }
+
+export function formatTokens(n: number): string {
+  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+  return String(n);
+}

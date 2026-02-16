@@ -7,6 +7,7 @@ import DetailExpandable from "./DetailExpandable.vue";
 import PerfBreakdown from "./PerfBreakdown.vue";
 import CostBreakdown from "./CostBreakdown.vue";
 import AgentLogTable from "./AgentLogTable.vue";
+import LlmConversation from "./LlmConversation.vue";
 
 defineProps<{
   event: MessageEvent;
@@ -65,7 +66,10 @@ const emit = defineEmits<{
     </DetailExpandable>
 
     <!-- Agent Conversation Log -->
-    <DetailExpandable v-if="event.agentLog?.length" :label="`Agent Conversation Log (${event.agentLog.length} entries)`" class="mt-4">
+    <DetailExpandable v-if="event.parsedAgentLog?.length" :label="`Agent Conversation (${event.parsedAgentLog.length} interactions)`" class="mt-4">
+      <LlmConversation :entries="event.parsedAgentLog" />
+    </DetailExpandable>
+    <DetailExpandable v-else-if="event.agentLog?.length" :label="`Agent Conversation Log (${event.agentLog.length} entries)`" class="mt-4">
       <AgentLogTable :log="event.agentLog" />
     </DetailExpandable>
   </div>
