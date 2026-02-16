@@ -15,8 +15,7 @@ export function parseJsonResponse(
     .join("");
 
   const jsonStr = text
-    .replace(/```json\s*\n?/g, "")
-    .replace(/```\s*$/g, "")
+    .replace(/```[^\n]*\n?/g, "")
     .trim();
 
   return JSON.parse(jsonStr);

@@ -140,6 +140,27 @@ describe("parseJsonResponse", () => {
     expect(result).toEqual({ key: "value" });
   });
 
+  it("strips bare code fences (no language tag)", () => {
+    const response = makeResponse('```\n{"key": "value"}\n```');
+    const result = parseJsonResponse(response);
+
+    expect(result).toEqual({ key: "value" });
+  });
+
+  it("strips code fences with arbitrary language tags", () => {
+    const response = makeResponse('```text\n{"key": "value"}\n```');
+    const result = parseJsonResponse(response);
+
+    expect(result).toEqual({ key: "value" });
+  });
+
+  it("strips closing code fence mid-text (not just end of string)", () => {
+    const response = makeResponse('```json\n{"key": "value"}\n```\n');
+    const result = parseJsonResponse(response);
+
+    expect(result).toEqual({ key: "value" });
+  });
+
   it("exports HAIKU_MODEL constant", () => {
     expect(HAIKU_MODEL).toBe("claude-haiku-4-5-20251001");
   });
