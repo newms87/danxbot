@@ -399,6 +399,89 @@ describe("HeartbeatManager", () => {
     });
   });
 
+  describe("getSnapshots", () => {
+    it("returns empty array initially", () => {
+      const { manager } = createManager();
+      expect(manager.getSnapshots()).toEqual([]);
+      manager.stop();
+    });
+
+    it("accumulates snapshots from orchestrator calls", async () => {
+      const { manager } = createManager();
+      setupOrchestratorMocks();
+
+      manager.start();
+
+      // Trigger orchestrator (2 ticks)
+      vi.advanceTimersByTime(10000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const snapshots = manager.getSnapshots();
+      expect(snapshots).toHaveLength(1);
+      expect(snapshots[0]).toEqual(expect.objectContaining({
+        activitySummary: "activity summary",
+        update: DEFAULT_HEARTBEAT_UPDATE,
+      }));
+      expect(snapshots[0]).toHaveProperty("timestamp");
+
+      manager.stop();
+    });
+
+    it("returns all snapshots (not capped at 5 like orchestrator context)", async () => {
+      const { manager } = createManager();
+      mockBuildActivitySummary.mockReturnValue("summary");
+
+      let callCount = 0;
+      mockGenerateHeartbeatMessage.mockImplementation(async () => {
+        callCount++;
+        return {
+          update: {
+            emoji: `:num${callCount}:`,
+            color: "#000",
+            text: `Update ${callCount}`,
+            stop: false,
+          },
+          usage: null,
+        };
+      });
+
+      manager.start();
+
+      // Trigger orchestrator 7 times (14 ticks)
+      for (let i = 0; i < 7; i++) {
+        vi.advanceTimersByTime(10000);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      // getSnapshots should return ALL 7, not capped at 5
+      expect(manager.getSnapshots()).toHaveLength(7);
+
+      // But orchestrator context should only get last 5
+      const lastCall = mockGenerateHeartbeatMessage.mock.calls[
+        mockGenerateHeartbeatMessage.mock.calls.length - 1
+      ];
+      expect(lastCall[1]).toHaveLength(5);
+
+      manager.stop();
+    });
+
+    it("includes timestamp on each snapshot", async () => {
+      const { manager } = createManager();
+      setupOrchestratorMocks();
+
+      manager.start();
+
+      vi.advanceTimersByTime(10000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const snapshots = manager.getSnapshots();
+      expect(snapshots[0]).toHaveProperty("timestamp");
+      expect(typeof snapshots[0].timestamp).toBe("number");
+
+      manager.stop();
+    });
+  });
+
   describe("getApiCalls", () => {
     it("returns empty array initially", () => {
       const { manager } = createManager();

@@ -30,6 +30,7 @@ function makeEvent(overrides: Partial<MessageEvent> = {}): MessageEvent {
     routerRawResponse: null,
     agentConfig: null,
     agentLog: null,
+    heartbeatSnapshots: null,
     parsedAgentLog: null,
     agentRetried: false,
     sqlQueriesProcessed: null,

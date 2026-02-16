@@ -1,8 +1,8 @@
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { persistEventToDb, updateEventInDb, loadEventsFromDb, deleteOldEventsFromDb } from "./events-db.js";
-import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary, ComplexityLevel } from "../types.js";
-import { buildParsedAgentLog, type ParsedLogEntry } from "../agent/log-parser.js";
+import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary, ComplexityLevel, TimestampedHeartbeatSnapshot } from "../types.js";
+import { buildFullParsedLog, type ParsedLogEntry } from "../agent/log-parser.js";
 
 const log = createLogger("events");
 
@@ -32,6 +32,7 @@ export interface MessageEvent {
   routerRawResponse: Record<string, unknown> | null;
   agentConfig: Record<string, unknown> | null;
   agentLog: AgentLogEntry[] | null;
+  heartbeatSnapshots: TimestampedHeartbeatSnapshot[] | null;
   parsedAgentLog: ParsedLogEntry[] | null;
   agentRetried: boolean;
   sqlQueriesProcessed: number | null;
@@ -99,6 +100,7 @@ export function createEvent(partial: {
     routerRawResponse: null,
     agentConfig: null,
     agentLog: null,
+    heartbeatSnapshots: null,
     parsedAgentLog: null,
     agentRetried: false,
     sqlQueriesProcessed: null,
@@ -121,7 +123,8 @@ export function updateEvent(
   if (!event) return;
   // Auto-parse agent log when it's provided
   if (updates.agentLog && !updates.parsedAgentLog) {
-    updates.parsedAgentLog = buildParsedAgentLog(updates.agentLog, event);
+    const snapshots = updates.heartbeatSnapshots ?? event.heartbeatSnapshots;
+    updates.parsedAgentLog = buildFullParsedLog(updates.agentLog, event, snapshots);
   }
   Object.assign(event, updates);
   broadcast(event);

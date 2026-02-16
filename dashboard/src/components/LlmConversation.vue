@@ -7,6 +7,7 @@ import ToolResultCard from "./conversation/ToolResultCard.vue";
 import ToolProgressCard from "./conversation/ToolProgressCard.vue";
 import ResultCard from "./conversation/ResultCard.vue";
 import ErrorCard from "./conversation/ErrorCard.vue";
+import HeartbeatCard from "./conversation/HeartbeatCard.vue";
 
 defineProps<{
   entries: ParsedLogEntry[];
@@ -23,6 +24,7 @@ defineProps<{
       <ToolProgressCard v-else-if="entry.type === 'tool_progress'" :entry="entry" />
       <ResultCard v-else-if="entry.type === 'result'" :entry="entry" />
       <ErrorCard v-else-if="entry.type === 'error'" :entry="entry" />
+      <HeartbeatCard v-else-if="entry.type === 'heartbeat'" :entry="entry" />
     </template>
   </div>
 </template>

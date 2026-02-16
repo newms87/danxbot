@@ -2,8 +2,8 @@ import type { ResultSetHeader } from "mysql2/promise";
 import { getPool } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 import type { MessageEvent } from "./events.js";
-import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary } from "../types.js";
-import { buildParsedAgentLog } from "../agent/log-parser.js";
+import type { AgentLogEntry, ApiCallUsage, AgentUsageSummary, TimestampedHeartbeatSnapshot } from "../types.js";
+import { buildFullParsedLog } from "../agent/log-parser.js";
 
 const log = createLogger("events-db");
 
@@ -31,6 +31,7 @@ export const COLUMN_MAP: Record<string, string> = {
   routerRawResponse: "router_raw_response",
   agentConfig: "agent_config",
   agentLog: "agent_log",
+  heartbeatSnapshots: "heartbeat_snapshots",
   apiCalls: "api_calls",
   apiCostUsd: "api_cost_usd",
   agentUsage: "agent_usage",
@@ -41,7 +42,7 @@ export const COLUMN_MAP: Record<string, string> = {
 };
 
 /** JSON-typed columns that need JSON.stringify for DB and JSON.parse on read */
-const JSON_COLUMNS = new Set(["routerRequest", "routerRawResponse", "agentConfig", "agentLog", "apiCalls", "agentUsage"]);
+const JSON_COLUMNS = new Set(["routerRequest", "routerRawResponse", "agentConfig", "agentLog", "heartbeatSnapshots", "apiCalls", "agentUsage"]);
 
 /** Boolean columns stored as TINYINT(1) */
 const BOOL_COLUMNS = new Set(["routerNeedsAgent", "agentRetried"]);
@@ -96,6 +97,7 @@ export interface EventRow {
   router_raw_response: string | null;
   agent_config: string | null;
   agent_log: string | null;
+  heartbeat_snapshots: string | null;
   agent_retried: number;
   sql_queries_processed: number | null;
   feedback: string | null;
@@ -114,6 +116,7 @@ function parseJson(value: string | null, columnName: string): Record<string, unk
 
 export function rowToEvent(row: EventRow): MessageEvent {
   const agentLog = parseJson(row.agent_log, "agent_log") as AgentLogEntry[] | null;
+  const heartbeatSnapshots = parseJson(row.heartbeat_snapshots, "heartbeat_snapshots") as TimestampedHeartbeatSnapshot[] | null;
   const apiCalls = parseJson(row.api_calls, "api_calls") as ApiCallUsage[] | null;
   const routerRawResponse = parseJson(row.router_raw_response, "router_raw_response");
   const routerNeedsAgent = row.router_needs_agent === null ? null : row.router_needs_agent === 1;
@@ -145,14 +148,15 @@ export function rowToEvent(row: EventRow): MessageEvent {
     routerRawResponse,
     agentConfig: parseJson(row.agent_config, "agent_config"),
     agentLog,
-    parsedAgentLog: buildParsedAgentLog(agentLog, {
+    heartbeatSnapshots,
+    parsedAgentLog: buildFullParsedLog(agentLog, {
       routerResponse: row.router_response,
       routerNeedsAgent,
       routerComplexity,
       routerRawResponse,
       routerResponseAt: row.router_response_at,
       apiCalls,
-    }),
+    }, heartbeatSnapshots),
     agentRetried: row.agent_retried === 1,
     sqlQueriesProcessed: row.sql_queries_processed,
     feedback: row.feedback as MessageEvent["feedback"],

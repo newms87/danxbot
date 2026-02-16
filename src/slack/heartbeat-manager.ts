@@ -9,8 +9,8 @@ import {
 import type {
   AgentLogEntry,
   ApiCallUsage,
-  HeartbeatSnapshot,
   HeartbeatUpdate,
+  TimestampedHeartbeatSnapshot,
 } from "../types.js";
 
 const log = createLogger("heartbeat-manager");
@@ -38,7 +38,7 @@ export class HeartbeatManager {
   private lastSnapshotEntryCount = 0;
   private heartbeatCycle = 0;
   private orchestratorPending = false;
-  private previousSnapshots: HeartbeatSnapshot[] = [];
+  private timestampedSnapshots: TimestampedHeartbeatSnapshot[] = [];
   latestHeartbeat: HeartbeatUpdate = {
     emoji: ":hourglass_flowing_sand:",
     color: "#6c5ce7",
@@ -68,6 +68,11 @@ export class HeartbeatManager {
   /** Returns all API call usage records from heartbeat calls. */
   getApiCalls(): ApiCallUsage[] {
     return this.heartbeatApiCalls;
+  }
+
+  /** Returns timestamped heartbeat snapshots for the dashboard timeline. */
+  getSnapshots(): TimestampedHeartbeatSnapshot[] {
+    return this.timestampedSnapshots;
   }
 
   /** Appends a log entry from the agent for orchestrator consumption. */
@@ -119,14 +124,12 @@ export class HeartbeatManager {
           elapsed,
         );
 
-        generateHeartbeatMessage(activitySummary, this.previousSnapshots)
+        const recentSnapshots = this.timestampedSnapshots.slice(-5);
+        generateHeartbeatMessage(activitySummary, recentSnapshots)
           .then(({ update, usage }) => {
             this.latestHeartbeat = update;
             if (usage) this.heartbeatApiCalls.push(usage);
-            this.previousSnapshots.push({ activitySummary, update });
-            if (this.previousSnapshots.length > 5) {
-              this.previousSnapshots.shift();
-            }
+            this.timestampedSnapshots.push({ activitySummary, update, timestamp: Date.now() });
             this.lastSnapshotEntryCount = this.agentLog.length;
             this.orchestratorPending = false;
 

@@ -56,6 +56,10 @@ export interface HeartbeatSnapshot {
   update: HeartbeatUpdate;
 }
 
+export interface TimestampedHeartbeatSnapshot extends HeartbeatSnapshot {
+  timestamp: number;
+}
+
 export interface ApiCallUsage {
   source: "router" | "heartbeat";
   model: string;

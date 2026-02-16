@@ -41,6 +41,7 @@ vi.mock("./heartbeat-manager.js", () => {
       onStream() {}
       onLogEntry() {}
       getApiCalls() { return []; }
+      getSnapshots() { return []; }
       latestHeartbeat = { emoji: ":hourglass:", color: "#6c5ce7", text: "Working...", stop: false };
     },
   };

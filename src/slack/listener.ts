@@ -420,6 +420,9 @@ export async function startSlackListener(): Promise<void> {
                 const sqlBlockCount = extractSqlBlocks(response.text).length;
                 const processedText = await processSqlInResponse(response.text);
 
+                // Collect heartbeat snapshots for dashboard timeline
+                const heartbeatSnapshots = hbManager.getSnapshots();
+
                 updateEvent(dashEvent.id, {
                   status: "complete",
                   agentResponseAt: Date.now(),
@@ -428,6 +431,7 @@ export async function startSlackListener(): Promise<void> {
                   agentTurns: response.turns,
                   agentConfig: response.config,
                   agentLog: response.log,
+                  heartbeatSnapshots: heartbeatSnapshots.length > 0 ? heartbeatSnapshots : null,
                   apiCalls: apiCalls.length > 0 ? apiCalls : null,
                   apiCostUsd: apiCostUsd > 0 ? apiCostUsd : null,
                   agentUsage: response.usage,

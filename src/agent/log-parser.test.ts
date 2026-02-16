@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { parseAgentLog, buildRouterEntry, buildParsedAgentLog } from "./log-parser.js";
-import type { AgentLogEntry } from "../types.js";
+import { parseAgentLog, buildRouterEntry, buildParsedAgentLog, mergeHeartbeatSnapshots, buildFullParsedLog } from "./log-parser.js";
+import type { AgentLogEntry, TimestampedHeartbeatSnapshot, ComplexityLevel } from "../types.js";
 
 // --- Test fixtures ---
 
@@ -650,6 +650,112 @@ describe("buildParsedAgentLog", () => {
     });
     expect(result).not.toBeNull();
     expect(result!.length).toBe(1);
+    expect(result![0].type).toBe("system_init");
+  });
+});
+
+describe("mergeHeartbeatSnapshots", () => {
+  const snapshot = (ts: number, text: string): TimestampedHeartbeatSnapshot => ({
+    timestamp: ts,
+    activitySummary: `summary at ${ts}`,
+    update: { emoji: ":mag:", color: "#3498db", text, stop: false },
+  });
+
+  it("returns original entries when snapshots is empty", () => {
+    const entries = parseAgentLog([systemInitEntry(), assistantEntry()]);
+    const result = mergeHeartbeatSnapshots(entries, []);
+    expect(result).toEqual(entries);
+  });
+
+  it("returns original entries when snapshots is null", () => {
+    const entries = parseAgentLog([systemInitEntry()]);
+    const result = mergeHeartbeatSnapshots(entries, null);
+    expect(result).toEqual(entries);
+  });
+
+  it("inserts heartbeat entries chronologically between agent entries", () => {
+    const entries = parseAgentLog([
+      { ...systemInitEntry(), timestamp: 1000 },
+      { ...assistantEntry(), timestamp: 3000 },
+      { ...resultEntry(), timestamp: 5000 },
+    ]);
+    const snapshots = [snapshot(2000, "Searching..."), snapshot(4000, "Still working...")];
+    const result = mergeHeartbeatSnapshots(entries, snapshots);
+
+    expect(result).toHaveLength(5);
+    expect(result.map(e => e.type)).toEqual([
+      "system_init",
+      "heartbeat",
+      "assistant",
+      "heartbeat",
+      "result",
+    ]);
+  });
+
+  it("produces ParsedHeartbeat entries with correct fields", () => {
+    const entries = parseAgentLog([systemInitEntry()]);
+    const snapshots = [snapshot(2000, "Looking around...")];
+    const result = mergeHeartbeatSnapshots(entries, snapshots);
+
+    const hb = result.find(e => e.type === "heartbeat");
+    expect(hb).toBeDefined();
+    if (hb?.type !== "heartbeat") throw new Error("wrong type");
+    expect(hb.timestamp).toBe(2000);
+    expect(hb.emoji).toBe(":mag:");
+    expect(hb.color).toBe("#3498db");
+    expect(hb.text).toBe("Looking around...");
+    expect(hb.activitySummary).toBe("summary at 2000");
+  });
+
+  it("appends heartbeats after all entries when timestamps are later", () => {
+    const entries = parseAgentLog([{ ...systemInitEntry(), timestamp: 1000 }]);
+    const snapshots = [snapshot(5000, "Late heartbeat")];
+    const result = mergeHeartbeatSnapshots(entries, snapshots);
+
+    expect(result).toHaveLength(2);
+    expect(result[0].type).toBe("system_init");
+    expect(result[1].type).toBe("heartbeat");
+  });
+});
+
+describe("buildFullParsedLog", () => {
+  const snapshot = (ts: number, text: string): TimestampedHeartbeatSnapshot => ({
+    timestamp: ts,
+    activitySummary: `summary at ${ts}`,
+    update: { emoji: ":mag:", color: "#3498db", text, stop: false },
+  });
+
+  const routerInput = {
+    routerResponse: null,
+    routerNeedsAgent: null,
+    routerComplexity: null as ComplexityLevel | null,
+    routerRawResponse: null,
+    routerResponseAt: null,
+    apiCalls: null,
+  };
+
+  it("returns null when agentLog is null", () => {
+    expect(buildFullParsedLog(null, routerInput, null)).toBeNull();
+  });
+
+  it("merges heartbeat snapshots into parsed log", () => {
+    const agentLog: AgentLogEntry[] = [
+      { ...systemInitEntry(), timestamp: 1000 },
+      { ...assistantEntry(), timestamp: 3000 },
+    ];
+    const snapshots = [snapshot(2000, "Working...")];
+    const result = buildFullParsedLog(agentLog, routerInput, snapshots);
+
+    expect(result).not.toBeNull();
+    expect(result!.map(e => e.type)).toEqual(["system_init", "heartbeat", "assistant"]);
+  });
+
+  it("works with null heartbeat snapshots", () => {
+    const agentLog: AgentLogEntry[] = [systemInitEntry()];
+    const result = buildFullParsedLog(agentLog, routerInput, null);
+
+    expect(result).not.toBeNull();
+    expect(result!).toHaveLength(1);
     expect(result![0].type).toBe("system_init");
   });
 });

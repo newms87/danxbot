@@ -1,4 +1,4 @@
-import type { AgentLogEntry, ApiCallUsage, ComplexityLevel } from "../types.js";
+import type { AgentLogEntry, ApiCallUsage, ComplexityLevel, TimestampedHeartbeatSnapshot } from "../types.js";
 import { summarizeToolInput } from "./tool-summary.js";
 import { calculateApiCost } from "./pricing.js";
 
@@ -93,6 +93,16 @@ export interface ParsedError {
   stderr: string | null;
 }
 
+export interface ParsedHeartbeat {
+  type: "heartbeat";
+  timestamp: number;
+  deltaMs: number;
+  emoji: string;
+  color: string;
+  text: string;
+  activitySummary: string;
+}
+
 export type ParsedLogEntry =
   | ParsedSystemInit
   | ParsedAssistant
@@ -100,7 +110,8 @@ export type ParsedLogEntry =
   | ParsedToolProgress
   | ParsedResult
   | ParsedError
-  | ParsedRouter;
+  | ParsedRouter
+  | ParsedHeartbeat;
 
 const TOOL_RESULT_MAX_LENGTH = 1000;
 
@@ -306,6 +317,20 @@ export function buildParsedAgentLog(
 }
 
 /**
+ * Builds the full parsed agent log with heartbeat snapshots merged chronologically.
+ * Combines buildParsedAgentLog + mergeHeartbeatSnapshots in one call.
+ */
+export function buildFullParsedLog(
+  agentLog: AgentLogEntry[] | null | undefined,
+  routerInput: RouterEntryInput,
+  heartbeatSnapshots: TimestampedHeartbeatSnapshot[] | null | undefined,
+): ParsedLogEntry[] | null {
+  const parsed = buildParsedAgentLog(agentLog, routerInput);
+  if (!parsed) return null;
+  return mergeHeartbeatSnapshots(parsed, heartbeatSnapshots);
+}
+
+/**
  * Input fields for buildRouterEntry — a subset of MessageEvent's router-related fields.
  */
 export interface RouterEntryInput {
@@ -315,6 +340,31 @@ export interface RouterEntryInput {
   routerRawResponse: Record<string, unknown> | null;
   routerResponseAt: number | null;
   apiCalls: ApiCallUsage[] | null;
+}
+
+/**
+ * Merges heartbeat snapshots into a parsed log entry timeline chronologically.
+ * Returns a new array with heartbeat entries interleaved at the correct timestamps.
+ */
+export function mergeHeartbeatSnapshots(
+  entries: ParsedLogEntry[],
+  snapshots: TimestampedHeartbeatSnapshot[] | null | undefined,
+): ParsedLogEntry[] {
+  if (!snapshots || snapshots.length === 0) return entries;
+
+  const heartbeats: ParsedHeartbeat[] = snapshots.map((s) => ({
+    type: "heartbeat" as const,
+    timestamp: s.timestamp,
+    deltaMs: 0,
+    emoji: s.update.emoji,
+    color: s.update.color,
+    text: s.update.text,
+    activitySummary: s.activitySummary,
+  }));
+
+  const merged = [...entries, ...heartbeats];
+  merged.sort((a, b) => a.timestamp - b.timestamp);
+  return merged;
 }
 
 /**
