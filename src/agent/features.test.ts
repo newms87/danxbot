@@ -7,6 +7,7 @@ describe("features", () => {
     expect(FEATURE_LIST).toContain("Schema");
     expect(FEATURE_LIST).toContain("Platform Knowledge");
     expect(FEATURE_LIST).toContain("Database Queries");
+    expect(FEATURE_LIST).toContain("Feature Requests");
   });
 
   it("FEATURE_EXAMPLES contains specific example questions", () => {

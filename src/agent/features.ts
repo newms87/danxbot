@@ -25,6 +25,9 @@ export const FEATURE_LIST = [
   "- Run read-only SQL queries against the production database",
   "- Join across tables for complex data questions",
   "- Aggregate data (counts, sums, averages)",
+  "",
+  "**Feature Requests**",
+  "- If I can't do something, I can create a feature request for the dev team",
 ].join("\n");
 
 export const FEATURE_EXAMPLES = [

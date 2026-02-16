@@ -49,10 +49,21 @@ You also have access to the full platform codebase for simple code questions:
 - `mva/src/` — Vue 3 frontend (pages, components, composables)
 - Use Read, Glob, Grep tools to find code
 
+## Feature Requests
+
+If you can't do something, offer to create a feature request. If the user agrees, create a Trello card:
+```bash
+curl -s -X POST "https://api.trello.com/1/cards" \
+  -d "key=$TRELLO_API_KEY" -d "token=$TRELLO_API_TOKEN" \
+  -d "idList={{REVIEW_LIST_ID}}" \
+  --data-urlencode "name=TITLE" --data-urlencode "desc=DESCRIPTION"
+```
+
 ## Response Rules
 
 - Answer directly. You have pre-loaded context — use it instead of exploring.
 - For data lookups, run the SQL query immediately. Do not read model files first.
+- If you can't do something, offer to create a feature request for the team.
 - Format responses for Slack (mrkdwn format, converted automatically).
 - Be concise — lead with the answer, then supporting details.
 - Cite file paths when explaining code.

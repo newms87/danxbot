@@ -31,6 +31,7 @@ vi.mock("../config.js", () => ({
     anthropic: { apiKey: "test-key" },
     agent: { model: "test-model", maxTurns: 5, maxBudgetUsd: 1.0, maxThinkingTokens: 8000, maxThreadMessages: 20 },
     platform: { repoPath: "/test" },
+    trello: { reviewListId: "test-review-list-id" },
     logsDir: "/test/logs",
   },
   COMPLEXITY_PROFILES: {

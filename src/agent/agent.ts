@@ -21,17 +21,20 @@ async function getSystemPrompt(): Promise<string> {
       new URL("./system-prompt.md", import.meta.url),
       "utf-8",
     );
-    systemPrompt = raw.replace("{{FEATURE_LIST}}", FEATURE_LIST);
+    systemPrompt = raw
+      .replace("{{FEATURE_LIST}}", FEATURE_LIST)
+      .replace(/\{\{REVIEW_LIST_ID\}\}/g, config.trello.reviewListId);
   }
   return systemPrompt;
 }
 
 async function getFastSystemPrompt(): Promise<string> {
   if (!fastSystemPrompt) {
-    fastSystemPrompt = await readFile(
+    const raw = await readFile(
       new URL("./fast-system-prompt.md", import.meta.url),
       "utf-8",
     );
+    fastSystemPrompt = raw.replace(/\{\{REVIEW_LIST_ID\}\}/g, config.trello.reviewListId);
   }
   return fastSystemPrompt;
 }

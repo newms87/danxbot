@@ -63,6 +63,7 @@ export const config = {
     apiKey: process.env.TRELLO_API_KEY || "",
     apiToken: process.env.TRELLO_API_TOKEN || "",
     boardId: "698fc5b8847b787a3818ad82",
+    reviewListId: "698fc5bdfa44ac685050fa35",
     todoListId: "698fc5be16a280cc321a13ec",
     bugLabelId: "698fc5b8847b787a3818adac",
     needsHelpListId: "6990129be21ee37b649281a5",
