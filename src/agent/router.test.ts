@@ -470,6 +470,20 @@ describe("runRouter", () => {
     expect(callArgs.system).toContain("Example questions");
   });
 
+  it("includes feature request routing instructions in system prompt", async () => {
+    mockRouterResponse({
+      quickResponse: "hi",
+      needsAgent: false,
+      reason: "test",
+    });
+
+    await runRouter("hi");
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.system).toContain("Feature Requests");
+    expect(callArgs.system).toContain("needsAgent to true");
+  });
+
   it("populates usage on successful response", async () => {
     mockCreate.mockResolvedValueOnce({
       usage: { input_tokens: 200, output_tokens: 80, cache_creation_input_tokens: 50, cache_read_input_tokens: 30 },

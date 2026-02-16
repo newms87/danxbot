@@ -53,6 +53,14 @@ const ROUTER_SYSTEM_PROMPT = [
   FEATURE_LIST,
   "",
   FEATURE_EXAMPLES,
+  "",
+  "## Feature Requests",
+  "",
+  "When the user asks you to do something you can't, asks for a new feature or capability,",
+  'or says something like "can you add that?", "can you do X?", "feature request":',
+  '- Set needsAgent to true (the agent can create Trello cards for feature requests)',
+  '- Set complexity to "very_low"',
+  '- Set quickResponse to acknowledge the request and say you\'re looking into it',
 ].join("\n");
 
 /**
