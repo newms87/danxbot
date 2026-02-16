@@ -55,6 +55,21 @@ describe("calculateApiCost", () => {
     expect(cost).toBeCloseTo(0.05745, 5);
   });
 
+  it("calculates correct cost for Opus 4.6", () => {
+    const OPUS46 = "claude-opus-4-6-20250916";
+    // 1000 input at $5.00/MTok = $0.005
+    // 500 output at $25.00/MTok = $0.0125
+    // 200 cache write at $6.25/MTok = $0.00125
+    // 800 cache read at $0.50/MTok = $0.0004
+    const cost = calculateApiCost(OPUS46, 1000, 500, 200, 800);
+    expect(cost).toBeCloseTo(0.01915, 5);
+  });
+
+  it("calculates correct cost for Opus 4.6 short alias", () => {
+    const cost = calculateApiCost("claude-opus-4-6", 1000, 500, 200, 800);
+    expect(cost).toBeCloseTo(0.01915, 5);
+  });
+
   it("handles large token counts", () => {
     // 1M input at $0.80/MTok = $0.80
     // 1M output at $4.00/MTok = $4.00

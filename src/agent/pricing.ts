@@ -6,6 +6,8 @@ const PRICING: Record<string, { input: number; output: number; cacheWrite: numbe
   "claude-sonnet-4-20250514": { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 },
   "claude-sonnet-4-5-20250929": { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 },
   "claude-opus-4-20250514": { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
+  "claude-opus-4-6": { input: 5.00, output: 25.00, cacheWrite: 6.25, cacheRead: 0.50 },
+  "claude-opus-4-6-20250916": { input: 5.00, output: 25.00, cacheWrite: 6.25, cacheRead: 0.50 },
 };
 
 /**

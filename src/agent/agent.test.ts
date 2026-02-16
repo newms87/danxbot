@@ -39,7 +39,7 @@ vi.mock("../config.js", () => ({
     low:       { model: "claude-haiku-4-5",  maxTurns: 6,  maxBudgetUsd: 0.20, maxThinkingTokens: 4096,  systemPrompt: "fast" },
     medium:    { model: "claude-sonnet-4-5", maxTurns: 8,  maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
     high:      { model: "claude-sonnet-4-5", maxTurns: 12, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
-    very_high: { model: "claude-sonnet-4-5", maxTurns: 18, maxBudgetUsd: 2.00, maxThinkingTokens: 16384, systemPrompt: "full" },
+    very_high: { model: "claude-opus-4-6", maxTurns: 18, maxBudgetUsd: 5.00, maxThinkingTokens: 32768, systemPrompt: "full" },
   },
 }));
 
@@ -696,7 +696,7 @@ describe("runAgent with complexity", () => {
     expect(callArgs.options.maxThinkingTokens).toBe(8192);
   });
 
-  it("uses very_high profile (Sonnet, 18 turns, $2.00)", async () => {
+  it("uses very_high profile (Opus, 18 turns, $5.00)", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
         { type: "system", subtype: "init", session_id: "vh-1" },
@@ -715,10 +715,10 @@ describe("runAgent with complexity", () => {
     await runAgent("explain billing lifecycle", null, undefined, undefined, [], "very_high");
 
     const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options.model).toBe("claude-sonnet-4-5");
+    expect(callArgs.options.model).toBe("claude-opus-4-6");
     expect(callArgs.options.maxTurns).toBe(18);
-    expect(callArgs.options.maxBudgetUsd).toBe(2.00);
-    expect(callArgs.options.maxThinkingTokens).toBe(16384);
+    expect(callArgs.options.maxBudgetUsd).toBe(5.00);
+    expect(callArgs.options.maxThinkingTokens).toBe(32768);
   });
 
   it("uses config defaults when no complexity is provided", async () => {
