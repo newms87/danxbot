@@ -426,6 +426,19 @@ describe("runRouter", () => {
     expect(callArgs.max_tokens).toBe(256);
   });
 
+  it("sets effort to low for efficient routing", async () => {
+    mockRouterResponse({
+      quickResponse: "hi",
+      needsAgent: false,
+      reason: "test",
+    });
+
+    await runRouter("hi");
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.output_config).toEqual({ effort: "low" });
+  });
+
   it("includes system prompt in request", async () => {
     mockRouterResponse({
       quickResponse: "hi",

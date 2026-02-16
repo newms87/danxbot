@@ -186,6 +186,7 @@ export async function generateHeartbeatMessage(
       max_tokens: 150,
       system: HEARTBEAT_SYSTEM_PROMPT,
       messages,
+      output_config: { effort: "low" as const },
     });
 
     const usage = buildApiCallUsage(response.usage, HAIKU_MODEL, "heartbeat");
