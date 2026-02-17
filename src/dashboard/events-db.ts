@@ -119,6 +119,7 @@ export function rowToEvent(row: EventRow): MessageEvent {
   const heartbeatSnapshots = parseJson(row.heartbeat_snapshots, "heartbeat_snapshots") as TimestampedHeartbeatSnapshot[] | null;
   const apiCalls = parseJson(row.api_calls, "api_calls") as ApiCallUsage[] | null;
   const routerRawResponse = parseJson(row.router_raw_response, "router_raw_response");
+  const routerRequest = parseJson(row.router_request, "router_request");
   const routerNeedsAgent = row.router_needs_agent === null ? null : row.router_needs_agent === 1;
   const routerComplexity = row.router_complexity as MessageEvent["routerComplexity"];
 
@@ -144,7 +145,7 @@ export function rowToEvent(row: EventRow): MessageEvent {
     agentUsage: parseJson(row.agent_usage, "agent_usage") as AgentUsageSummary | null,
     status: row.status as MessageEvent["status"],
     error: row.error,
-    routerRequest: parseJson(row.router_request, "router_request"),
+    routerRequest,
     routerRawResponse,
     agentConfig: parseJson(row.agent_config, "agent_config"),
     agentLog,
@@ -153,6 +154,7 @@ export function rowToEvent(row: EventRow): MessageEvent {
       routerResponse: row.router_response,
       routerNeedsAgent,
       routerComplexity,
+      routerRequest,
       routerRawResponse,
       routerResponseAt: row.router_response_at,
       apiCalls,

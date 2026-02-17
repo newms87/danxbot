@@ -48,7 +48,10 @@ export interface ParsedRouter {
   complexity: string;
   reason: string;
   costUsd: number;
+  model: string | null;
   usage: ParsedAssistantUsage | null;
+  rawRequest: Record<string, unknown> | null;
+  rawResponse: Record<string, unknown> | null;
 }
 
 export interface ParsedToolResultItem {
@@ -337,6 +340,7 @@ export interface RouterEntryInput {
   routerResponse: string | null;
   routerNeedsAgent: boolean | null;
   routerComplexity: ComplexityLevel | null;
+  routerRequest: Record<string, unknown> | null;
   routerRawResponse: Record<string, unknown> | null;
   routerResponseAt: number | null;
   apiCalls: ApiCallUsage[] | null;
@@ -412,6 +416,9 @@ export function buildRouterEntry(input: RouterEntryInput): ParsedRouter | null {
     complexity: input.routerComplexity ?? "very_low",
     reason,
     costUsd: routerCall?.costUsd ?? 0,
+    model: routerCall?.model ?? null,
     usage,
+    rawRequest: input.routerRequest,
+    rawResponse: input.routerRawResponse,
   };
 }
