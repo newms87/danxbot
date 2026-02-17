@@ -100,7 +100,8 @@ Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP too
 5. Evaluates scope — splits into epic phases if too large (3+ phases), labels parent as Epic, creates phase cards in In Progress
 6. Orchestrator implements directly using TDD (failing test, implement, pass, refactor)
 7. Launches Test Reviewer + Code Reviewer subagents for quality gates
-8. Launches Validator subagent only for agent/SDK changes
-9. Commits, moves card to Done, adds retro comment
-10. Epic splitting: parent gets Epic label, phase cards named `Epic > Phase N > Description` created in In Progress
-11. Every Done card gets a retro comment (what went well/wrong, optimizations)
+8. Posts review results as Trello card comments, fixes any critical issues
+9. Launches Validator subagent only for agent/SDK changes
+10. Commits, moves card to Done, adds retro comment
+11. Epic splitting: parent gets Epic label, phase cards named `Epic > Phase N > Description` created in In Progress
+12. Every Done card gets a retro comment (what went well/wrong, optimizations)

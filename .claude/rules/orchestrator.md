@@ -80,7 +80,13 @@ Launch in parallel via Task tool with `mode: "bypassPermissions"`:
 - **code-reviewer**: Check code quality
 - **validator**: Only if changes touch `src/agent/`, Claude SDK, or router
 
-If critical issues found, fix them directly and re-run the failed gate.
+**Post results to Trello:** After each reviewer completes, post their output as a Trello comment using `add_comment`. Format the comment with a header identifying the reviewer:
+- Test reviewer: `## Test Review\n\n{output}`
+- Code reviewer: `## Code Review\n\n{output}`
+- Validator: `## Validation\n\n{output}`
+
+If critical issues are found, fix them directly and re-run the failed gate. After fixing, post a follow-up comment summarizing what was addressed: `## Review Fixes\n\n{summary of changes made}`.
+
 Check off "Code Review".
 
 ### Step 6: Check Off Acceptance Criteria
