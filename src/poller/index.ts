@@ -153,11 +153,11 @@ export function start(): void {
   const intervalSeconds = config.pollerIntervalMs / 1000;
   log.info(`Started — polling every ${intervalSeconds}s`);
 
-  // Check for existing lock file from a previous team that may still be running
+  // Remove stale lock file from a previous run that shut down uncleanly.
+  // Only one poller instance runs at a time, so a leftover lock is always stale.
   if (existsSync(lockFile)) {
-    log.warn("Lock file found — previous team may still be running, watching for completion");
-    teamRunning = true;
-    startLockWatch();
+    log.warn("Stale lock file found — removing");
+    unlinkSync(lockFile);
   }
 
   poll();

@@ -292,38 +292,44 @@ describe("start", () => {
     _resetForTesting();
   });
 
-  it("enters watching mode if lock file exists on startup", async () => {
-    // Lock file exists on startup
-    mockExistsSync.mockReturnValue(true);
+  it("removes stale lock file at startup and proceeds normally", async () => {
+    // First existsSync call (start lock check): true — stale lock exists
+    // Second existsSync call (poll pre-spawn check): false — lock was removed
+    mockExistsSync
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     start();
     await vi.advanceTimersByTimeAsync(0);
 
-    // Even with cards available, should not spawn because lock file was detected
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-    await vi.advanceTimersByTimeAsync(60000);
+    // Lock file should be removed at startup
+    expect(mockUnlinkSync).toHaveBeenCalledWith(
+      expect.stringContaining(".poller-running"),
+    );
 
-    expect(mockSpawn).not.toHaveBeenCalled();
+    // Should proceed to spawn since lock was cleared
+    expect(mockSpawn).toHaveBeenCalled();
   });
 
-  it("resumes polling after lock file is removed during watching mode", async () => {
-    // Lock file exists initially
-    mockExistsSync.mockReturnValue(true);
+  it("does not call unlinkSync when no lock file exists at startup", async () => {
+    mockExistsSync.mockReturnValue(false);
+    mockFetchTodoCards.mockResolvedValue([]);
 
     start();
     await vi.advanceTimersByTimeAsync(0);
 
-    // Lock file disappears — simulating team completion
-    mockExistsSync.mockReturnValue(false);
+    expect(mockUnlinkSync).not.toHaveBeenCalled();
+  });
 
-    // Advance past lock check interval (5s)
-    await vi.advanceTimersByTimeAsync(5000);
+  it("crashes if unlinkSync fails on stale lock file", () => {
+    mockExistsSync.mockReturnValueOnce(true);
+    mockUnlinkSync.mockImplementation(() => {
+      throw new Error("EPERM: operation not permitted");
+    });
 
-    // Now poll should work — provide cards
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-    await vi.advanceTimersByTimeAsync(60000);
-
-    expect(mockSpawn).toHaveBeenCalled();
+    expect(() => start()).toThrow("EPERM");
   });
 });
 
