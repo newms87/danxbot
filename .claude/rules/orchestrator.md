@@ -101,7 +101,19 @@ Stage and commit changes. Check off "Committed".
 
 1. Move card to Done (position: `"top"`)
 2. **For Bug cards:** Add a "Bug Diagnosis" comment with: Problem (what the user saw), Root Cause (why it happened), Solution (what was changed and why)
-3. Add retro comment (what went well, what went wrong, optimizations)
+3. Add a retro comment using this exact format:
+
+```
+## Retro
+
+**What went well:** [1-2 sentences about what worked]
+
+**What went wrong:** [1-2 sentences about problems, or "Nothing"]
+
+**Action items:** [Improvements for next iteration, or "Nothing"]
+
+**Commits:** [commit sha(s)]
+```
 
 ### Step 9: Self-Terminate
 

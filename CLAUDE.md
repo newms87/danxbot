@@ -104,4 +104,4 @@ Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP too
 9. Launches Validator subagent only for agent/SDK changes
 10. Commits, moves card to Done, adds retro comment
 11. Epic splitting: parent gets Epic label, phase cards named `Epic > Phase N > Description` created in In Progress
-12. Every Done card gets a retro comment (what went well/wrong, optimizations)
+12. Every Done card gets a retro comment (What went well, What went wrong, Action items, Commits)
