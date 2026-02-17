@@ -115,7 +115,6 @@ export async function runRouter(
     max_tokens: 256,
     system: ROUTER_SYSTEM_PROMPT,
     messages,
-    output_config: { effort: "low" as const },
   };
 
   try {

@@ -151,6 +151,23 @@ describe("generateHeartbeatMessage emoji validation", () => {
     expect(result.update.emoji).toBe(":rocket:");
   });
 
+  it("does not send output_config (Haiku does not support effort)", async () => {
+    mockCreate.mockResolvedValueOnce({
+      usage: MOCK_USAGE,
+      content: [
+        {
+          type: "text",
+          text: '{"emoji": ":mag:", "color": "#3498db", "text": "Searching"}',
+        },
+      ],
+    });
+
+    await generateHeartbeatMessage("Elapsed: 10s", []);
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.output_config).toBeUndefined();
+  });
+
   it("accepts a sample of emojis from the valid list", async () => {
     for (const emoji of VALID_SLACK_EMOJIS.slice(0, 3)) {
       mockCreate.mockResolvedValueOnce({

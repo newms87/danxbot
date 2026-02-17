@@ -426,7 +426,7 @@ describe("runRouter", () => {
     expect(callArgs.max_tokens).toBe(256);
   });
 
-  it("sets effort to low for efficient routing", async () => {
+  it("does not send output_config (Haiku does not support effort)", async () => {
     mockRouterResponse({
       quickResponse: "hi",
       needsAgent: false,
@@ -436,7 +436,7 @@ describe("runRouter", () => {
     await runRouter("hi");
 
     const callArgs = mockCreate.mock.calls[0][0];
-    expect(callArgs.output_config).toEqual({ effort: "low" });
+    expect(callArgs.output_config).toBeUndefined();
   });
 
   it("includes system prompt in request", async () => {
