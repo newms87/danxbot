@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { DanxChip } from "danx-ui";
 import type { ParsedResult } from "../../types";
 import { formatMs } from "../../utils/format";
 
@@ -13,14 +14,11 @@ defineProps<{ entry: ParsedResult }>();
       : 'border-purple-300 dark:border-purple-800 bg-purple-50/50 dark:bg-purple-950/20'"
   >
     <div class="flex items-center gap-2 text-xs mb-1">
-      <span
-        class="inline-flex items-center px-1.5 py-0.5 rounded font-medium"
-        :class="entry.isError
-          ? 'bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-300'
-          : 'bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300'"
-      >
-        {{ entry.subtype }}
-      </span>
+      <DanxChip
+        :type="entry.isError ? 'danger' : ''"
+        size="xs"
+        :label="entry.subtype"
+      />
       <span class="text-gray-600 dark:text-gray-400 font-mono text-[10px]">{{ entry.numTurns }} turns</span>
       <span class="text-gray-400 dark:text-gray-600">|</span>
       <span class="text-gray-600 dark:text-gray-400 font-mono text-[10px]">{{ formatMs(entry.durationMs) }} wall</span>
