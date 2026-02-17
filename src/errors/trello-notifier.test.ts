@@ -112,10 +112,15 @@ describe("card creation", () => {
       ok: true,
       json: async () => [],
     });
-    // Second fetch: create card — returns success
+    // Second fetch: create card — returns success with id
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ id: "new-card-id" }),
+    });
+    // Third fetch: add marker comment — returns success
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "comment-id" }),
     });
   });
 
@@ -126,7 +131,7 @@ describe("card creation", () => {
       channelId: "C-TEST",
     });
 
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
 
     // Second call is the POST to create card
     const createCall = mockFetch.mock.calls[1];
@@ -176,6 +181,33 @@ describe("card creation", () => {
     expect(name.length).toBeLessThanOrEqual(100);
     expect(name).toMatch(/\.\.\.$/);
   });
+
+  it("adds a flytebot marker comment after creating the card", async () => {
+    await notifyError("Agent Timeout", "timed out", {});
+
+    // Third call is the comment POST
+    const commentCall = mockFetch.mock.calls[2];
+    const url = commentCall[0] as string;
+    const opts = commentCall[1] as RequestInit;
+
+    expect(url).toContain("/cards/new-card-id/actions/comments");
+    expect(opts.method).toBe("POST");
+
+    const params = new URLSearchParams(url.split("?")[1]);
+    expect(params.get("text")).toContain("<!-- flytebot -->");
+  });
+
+  it("still succeeds when marker comment POST fails", async () => {
+    // Reset mocks to control the comment response
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: "new-card-id" }) });
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 500, statusText: "Server Error" });
+
+    // Should not throw even though the comment POST failed
+    await expect(notifyError("Agent Timeout", "timed out", {})).resolves.toBeUndefined();
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
 });
 
 // ============================================================
@@ -193,6 +225,11 @@ describe("list and label overrides", () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ id: "new-card-id" }),
+    });
+    // Third fetch: add marker comment — returns success
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "comment-id" }),
     });
   });
 
@@ -248,6 +285,10 @@ describe("list and label overrides", () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ id: "new-card-id" }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "comment-id" }),
     });
 
     await notifyError("Router Error", "credit error", {}, {

@@ -41,7 +41,7 @@ YOU are the orchestrator. Do NOT launch a separate orchestrator agent.
 1. Read the card description, check the card's labels, and fetch all comments using `get_card_comments` (cardId). Comments contain user context, previous investigation results, and clarifications that are essential for understanding the full scope of work.
 2. Fetch the "Acceptance Criteria" checklist using `get_acceptance_criteria` (cardId). These criteria were written by the ideator and define what "done" means for this card
 3. **For Bug cards:** Investigate the root cause first. Read logs, relevant source files, and error messages. Understand what's broken and why before planning the fix.
-4. **Check for Needs Help:** If the task requires human intervention outside the dev environment (changing Slack/Trello settings, external service config, manual account setup, etc.), add the `Needs Help` label using `update_card_details`, add a comment explaining what help is needed, move the card to Needs Help list, and skip this card.
+4. **Check for Needs Help:** If the task requires human intervention outside the dev environment (changing Slack/Trello settings, external service config, manual account setup, etc.), add the `Needs Help` label using `update_card_details`, add a comment explaining what help is needed with `<!-- flytebot -->` appended at the end, move the card to Needs Help list, and skip this card. The `<!-- flytebot -->` marker is REQUIRED — the poller uses it to distinguish bot comments from user responses.
 5. Design the implementation approach, ensuring every acceptance criterion is addressed
 6. Check off "Planning"
 

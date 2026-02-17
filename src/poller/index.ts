@@ -2,9 +2,9 @@ import { spawn } from "node:child_process";
 import { existsSync, writeFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { config } from "./config.js";
+import { config, TODO_LIST_ID } from "./config.js";
 import { createLogger } from "../logger.js";
-import { fetchTodoCards } from "./trello-client.js";
+import { fetchTodoCards, fetchNeedsHelpCards, fetchLatestComment, moveCardToList, isUserResponse } from "./trello-client.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const lockFile = resolve(projectRoot, ".poller-running");
@@ -15,12 +15,51 @@ let teamRunning = false;
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let lockCheckId: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * Check Needs Help cards for user responses. Cards where a user has replied
+ * (latest comment lacks the flytebot marker) are moved to the top of ToDo
+ * so they get higher priority than existing ToDo cards.
+ */
+async function checkNeedsHelp(): Promise<number> {
+  let cards;
+  try {
+    cards = await fetchNeedsHelpCards();
+  } catch (error) {
+    log.error("Error fetching Needs Help cards", error);
+    return 0;
+  }
+
+  if (cards.length === 0) return 0;
+
+  let movedCount = 0;
+  for (const card of cards) {
+    try {
+      const latestComment = await fetchLatestComment(card.id);
+      if (isUserResponse(latestComment)) {
+        log.info(`User responded on "${card.name}" — moving to ToDo`);
+        await moveCardToList(card.id, TODO_LIST_ID, "top");
+        movedCount++;
+      }
+    } catch (error) {
+      log.error(`Error checking comments for card "${card.name}"`, error);
+    }
+  }
+
+  return movedCount;
+}
+
 export async function poll(): Promise<void> {
   if (teamRunning) {
     return;
   }
 
-  log.info("Checking ToDo list...");
+  log.info("Checking Needs Help + ToDo lists...");
+
+  // Check Needs Help first — user-responded cards get moved to ToDo top
+  const movedFromNeedsHelp = await checkNeedsHelp();
+  if (movedFromNeedsHelp > 0) {
+    log.info(`Moved ${movedFromNeedsHelp} card${movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`);
+  }
 
   let cards;
   try {

@@ -3,11 +3,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Mock dependencies before importing module under test
 vi.mock("./config.js", () => ({
   config: { pollerIntervalMs: 60000 },
+  TODO_LIST_ID: "698fc5be16a280cc321a13ec",
 }));
 
 const mockFetchTodoCards = vi.fn();
+const mockFetchNeedsHelpCards = vi.fn();
+const mockFetchLatestComment = vi.fn();
+const mockMoveCardToList = vi.fn();
+const mockIsUserResponse = vi.fn();
 vi.mock("./trello-client.js", () => ({
   fetchTodoCards: (...args: unknown[]) => mockFetchTodoCards(...args),
+  fetchNeedsHelpCards: (...args: unknown[]) => mockFetchNeedsHelpCards(...args),
+  fetchLatestComment: (...args: unknown[]) => mockFetchLatestComment(...args),
+  moveCardToList: (...args: unknown[]) => mockMoveCardToList(...args),
+  isUserResponse: (...args: unknown[]) => mockIsUserResponse(...args),
 }));
 
 const mockSpawn = vi.fn();
@@ -45,6 +54,8 @@ describe("poll", () => {
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
     mockExistsSync.mockReturnValue(false);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockMoveCardToList.mockResolvedValue(undefined);
   });
 
   it("skips when teamRunning is true", async () => {
@@ -54,9 +65,11 @@ describe("poll", () => {
     // Second call: should skip because teamRunning is true
     mockFetchTodoCards.mockClear();
     mockSpawn.mockClear();
+    mockFetchNeedsHelpCards.mockClear();
     await poll();
 
     expect(mockFetchTodoCards).not.toHaveBeenCalled();
+    expect(mockFetchNeedsHelpCards).not.toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
@@ -126,6 +139,139 @@ describe("poll", () => {
   });
 });
 
+describe("poll — Needs Help checking", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    mockExistsSync.mockReturnValue(false);
+    mockMoveCardToList.mockResolvedValue(undefined);
+  });
+
+  it("checks Needs Help list before ToDo", async () => {
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    await poll();
+
+    // Needs Help should be called first
+    expect(mockFetchNeedsHelpCards).toHaveBeenCalled();
+    expect(mockFetchTodoCards).toHaveBeenCalled();
+  });
+
+  it("moves user-responded cards from Needs Help to ToDo", async () => {
+    const needsHelpCard = { id: "nh1", name: "Blocked card" };
+    const userComment = { id: "a1", data: { text: "I fixed the config" } };
+
+    mockFetchNeedsHelpCards.mockResolvedValue([needsHelpCard]);
+    mockFetchLatestComment.mockResolvedValue(userComment);
+    mockIsUserResponse.mockReturnValue(true);
+    mockFetchTodoCards.mockResolvedValue([needsHelpCard]); // Card now in ToDo
+
+    await poll();
+
+    expect(mockFetchLatestComment).toHaveBeenCalledWith("nh1");
+    expect(mockIsUserResponse).toHaveBeenCalledWith(userComment);
+    expect(mockMoveCardToList).toHaveBeenCalledWith("nh1", "698fc5be16a280cc321a13ec", "top");
+  });
+
+  it("does not move cards still waiting for user (bot comment is latest)", async () => {
+    const needsHelpCard = { id: "nh1", name: "Blocked card" };
+    const botComment = { id: "a1", data: { text: "Needs config change\n\n<!-- flytebot -->" } };
+
+    mockFetchNeedsHelpCards.mockResolvedValue([needsHelpCard]);
+    mockFetchLatestComment.mockResolvedValue(botComment);
+    mockIsUserResponse.mockReturnValue(false);
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    await poll();
+
+    expect(mockMoveCardToList).not.toHaveBeenCalled();
+  });
+
+  it("does not move cards with no comments", async () => {
+    const needsHelpCard = { id: "nh1", name: "New error card" };
+
+    mockFetchNeedsHelpCards.mockResolvedValue([needsHelpCard]);
+    mockFetchLatestComment.mockResolvedValue(null);
+    mockIsUserResponse.mockReturnValue(false);
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    await poll();
+
+    expect(mockMoveCardToList).not.toHaveBeenCalled();
+  });
+
+  it("only moves user-responded cards in a mixed set", async () => {
+    const cards = [
+      { id: "nh1", name: "Bot waiting" },
+      { id: "nh2", name: "User replied" },
+      { id: "nh3", name: "No comments" },
+    ];
+    const botComment = { id: "a1", data: { text: "Needs help\n\n<!-- flytebot -->" } };
+    const userComment = { id: "a2", data: { text: "Done, try again" } };
+
+    mockFetchNeedsHelpCards.mockResolvedValue(cards);
+    mockFetchLatestComment
+      .mockResolvedValueOnce(botComment)   // nh1: bot comment
+      .mockResolvedValueOnce(userComment)  // nh2: user reply
+      .mockResolvedValueOnce(null);        // nh3: no comments
+    mockIsUserResponse
+      .mockReturnValueOnce(false)  // nh1
+      .mockReturnValueOnce(true)   // nh2
+      .mockReturnValueOnce(false); // nh3
+    mockFetchTodoCards.mockResolvedValue([{ id: "nh2", name: "User replied" }]);
+
+    await poll();
+
+    // Only nh2 should be moved
+    expect(mockMoveCardToList).toHaveBeenCalledTimes(1);
+    expect(mockMoveCardToList).toHaveBeenCalledWith("nh2", "698fc5be16a280cc321a13ec", "top");
+  });
+
+  it("handles fetchNeedsHelpCards failure gracefully", async () => {
+    mockFetchNeedsHelpCards.mockRejectedValue(new Error("API error"));
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    // Should not throw — continues to check ToDo
+    await expect(poll()).resolves.toBeUndefined();
+    expect(mockFetchTodoCards).toHaveBeenCalled();
+  });
+
+  it("handles individual card comment check failure gracefully", async () => {
+    mockFetchNeedsHelpCards.mockResolvedValue([
+      { id: "nh1", name: "Card 1" },
+      { id: "nh2", name: "Card 2" },
+    ]);
+    // First card throws, second succeeds
+    mockFetchLatestComment
+      .mockRejectedValueOnce(new Error("API error"))
+      .mockResolvedValueOnce({ id: "a1", data: { text: "User reply" } });
+    mockIsUserResponse.mockReturnValue(true);
+    mockFetchTodoCards.mockResolvedValue([{ id: "nh2", name: "Card 2" }]);
+
+    await poll();
+
+    // Only second card should be moved
+    expect(mockMoveCardToList).toHaveBeenCalledTimes(1);
+    expect(mockMoveCardToList).toHaveBeenCalledWith("nh2", "698fc5be16a280cc321a13ec", "top");
+  });
+
+  it("spawns team when Needs Help cards are moved and no ToDo cards existed before", async () => {
+    const needsHelpCard = { id: "nh1", name: "User replied" };
+
+    mockFetchNeedsHelpCards.mockResolvedValue([needsHelpCard]);
+    mockFetchLatestComment.mockResolvedValue({ id: "a1", data: { text: "Done" } });
+    mockIsUserResponse.mockReturnValue(true);
+    // After moving, the card appears in ToDo
+    mockFetchTodoCards.mockResolvedValue([needsHelpCard]);
+
+    await poll();
+
+    expect(mockSpawn).toHaveBeenCalled();
+  });
+});
+
 describe("start", () => {
   let mockExit: ReturnType<typeof vi.spyOn>;
 
@@ -135,6 +281,7 @@ describe("start", () => {
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
     mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockExistsSync.mockReturnValue(false);
     mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
   });
@@ -188,6 +335,7 @@ describe("shutdown", () => {
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
     mockExistsSync.mockReturnValue(false);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
   });
 

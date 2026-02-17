@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
+import { FLYTEBOT_COMMENT_MARKER } from "../poller/constants.js";
 
 const log = createLogger("trello-notifier");
 
@@ -102,7 +103,20 @@ export async function notifyError(
       return;
     }
 
+    const createdCard = (await createResponse.json()) as { id: string };
     log.info(`Created error card: ${cardName}`);
+
+    // Add a flytebot marker comment so the poller can distinguish bot vs user comments
+    const commentParams = new URLSearchParams({
+      key: apiKey,
+      token: apiToken,
+      text: `This card was automatically created by Flytebot.\n\n${FLYTEBOT_COMMENT_MARKER}`,
+    });
+    const commentUrl = `https://api.trello.com/1/cards/${createdCard.id}/actions/comments?${commentParams.toString()}`;
+    const commentResponse = await fetch(commentUrl, { method: "POST" });
+    if (!commentResponse.ok) {
+      log.warn(`Failed to add marker comment: ${commentResponse.status} ${commentResponse.statusText}`);
+    }
   } catch (error) {
     log.error(
       "Failed to send error notification to Trello",

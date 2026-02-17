@@ -27,5 +27,4 @@ export function createConfig(): PollerConfig {
 
 export const config = createConfig();
 
-export const BOARD_ID = "698fc5b8847b787a3818ad82";
-export const TODO_LIST_ID = "698fc5be16a280cc321a13ec";
+export { BOARD_ID, TODO_LIST_ID, NEEDS_HELP_LIST_ID, FLYTEBOT_COMMENT_MARKER } from "./constants.js";
