@@ -117,10 +117,10 @@ Stage and commit changes. Check off "Committed".
 
 ### Step 9: Self-Terminate
 
-After ALL cards are processed (or when the workflow is fully complete), remove the lock file and terminate the Claude process so the terminal tab closes:
+After completing ONE card (or when the card is moved to Needs Help), remove the lock file and terminate the Claude process so the terminal tab closes:
 
 ```bash
 rm -f .poller-running && kill $PPID
 ```
 
-The lock file removal signals the poller that work is complete. The `kill $PPID` kills the Claude CLI process, and the parent bash shell exits, closing the terminal tab. This step is MANDATORY — never leave the session open after work is done.
+**One card per Claude instance.** The poller spawns a fresh Claude process for each card. After completing your card, terminate immediately. Do NOT loop to the next card — the poller handles scheduling. The lock file removal signals the poller that work is complete, and it will spawn a new instance if more cards remain in ToDo.
