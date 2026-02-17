@@ -10,7 +10,7 @@ SELECT name, status FROM campaigns WHERE status = 'running' LIMIT 25
 ```
 ````
 
-Run queries yourself via Bash only when you need to inspect results to form an answer.
+**CRITICAL: Never execute SQL via Bash or mysql commands.** Only use `sql:execute` blocks — the system handles execution and displays results automatically. Use multiple `sql:execute` blocks if you need to investigate data before answering.
 
 **For unfamiliar tables:** Run `/flytebot/app/src/agent/describe-tables.sh table1 table2` to get current column definitions before constructing the query. For complex JOINs on unfamiliar tables, consult `/flytebot/app/docs/schema/model-relationships.md`. For the common tables listed below, you can query directly.
 
