@@ -28,8 +28,10 @@ import {
   extractSqlBlocks,
   isSafeQuery,
   formatResultsAsTable,
+  formatResultsAsCsv,
   executeQuery,
   processResponse,
+  processResponseWithAttachments,
 } from "./sql-executor.js";
 
 beforeEach(() => {
@@ -388,5 +390,111 @@ describe("processResponse", () => {
       expect.stringContaining("Unsafe query rejected"),
       expect.any(String),
     );
+  });
+});
+
+describe("formatResultsAsCsv", () => {
+  it("formats columns and rows as CSV", () => {
+    const result = formatResultsAsCsv(["id", "name"], [["1", "Alice"], ["2", "Bob"]]);
+    expect(result).toBe("id,name\n1,Alice\n2,Bob");
+  });
+
+  it("returns header only for empty rows", () => {
+    const result = formatResultsAsCsv(["id", "name"], []);
+    expect(result).toBe("id,name");
+  });
+
+  it("quotes values containing commas", () => {
+    const result = formatResultsAsCsv(["name"], [["Smith, John"]]);
+    expect(result).toBe('name\n"Smith, John"');
+  });
+
+  it("quotes values containing double quotes and escapes them", () => {
+    const result = formatResultsAsCsv(["desc"], [['He said "hello"']]);
+    expect(result).toBe('desc\n"He said ""hello"""');
+  });
+
+  it("quotes values containing newlines", () => {
+    const result = formatResultsAsCsv(["text"], [["line1\nline2"]]);
+    expect(result).toBe('text\n"line1\nline2"');
+  });
+
+  it("quotes column names containing commas", () => {
+    const result = formatResultsAsCsv(["a,b"], [["val"]]);
+    expect(result).toBe('"a,b"\nval');
+  });
+});
+
+describe("processResponseWithAttachments", () => {
+  it("returns text and empty attachments when no sql:execute blocks", async () => {
+    const result = await processResponseWithAttachments("Just text.");
+    expect(result.text).toBe("Just text.");
+    expect(result.attachments).toEqual([]);
+  });
+
+  it("replaces sql:execute blocks and returns CSV attachments", async () => {
+    const fields = [{ name: "id" }, { name: "name" }];
+    const rows = [{ id: 1, name: "Alice" }];
+    mockPool.query.mockResolvedValue([rows, fields]);
+
+    const text = "Results:\n```sql:execute\nSELECT * FROM users\n```\nDone.";
+    const result = await processResponseWithAttachments(text);
+
+    // Text should have markdown table inline
+    expect(result.text).toContain("| id | name |");
+    expect(result.text).not.toContain("sql:execute");
+
+    // Should have one CSV attachment
+    expect(result.attachments).toHaveLength(1);
+    expect(result.attachments[0].csv).toBe("id,name\n1,Alice");
+    expect(result.attachments[0].filename).toMatch(/^query-result.*\.csv$/);
+    expect(result.attachments[0].query).toBe("SELECT * FROM users");
+  });
+
+  it("does not create attachments for failed queries", async () => {
+    mockPool.query.mockRejectedValue(new Error("Table not found"));
+
+    const text = "```sql:execute\nSELECT * FROM bad_table\n```";
+    const result = await processResponseWithAttachments(text);
+
+    expect(result.text).toContain("Query execution failed");
+    expect(result.attachments).toEqual([]);
+  });
+
+  it("does not create attachments for unsafe queries", async () => {
+    const text = "```sql:execute\nDROP TABLE users\n```";
+    const result = await processResponseWithAttachments(text);
+
+    expect(result.text).toContain("Only SELECT queries are allowed");
+    expect(result.attachments).toEqual([]);
+  });
+
+  it("does not create attachments for empty results", async () => {
+    const fields = [{ name: "id" }];
+    mockPool.query.mockResolvedValue([[], fields]);
+
+    const text = "```sql:execute\nSELECT * FROM empty_table\n```";
+    const result = await processResponseWithAttachments(text);
+
+    expect(result.text).toContain("No results found");
+    expect(result.attachments).toEqual([]);
+  });
+
+  it("creates multiple attachments for multiple blocks", async () => {
+    const fields1 = [{ name: "count" }];
+    const rows1 = [{ count: 42 }];
+    const fields2 = [{ name: "name" }];
+    const rows2 = [{ name: "Alice" }];
+
+    mockPool.query
+      .mockResolvedValueOnce([rows1, fields1])
+      .mockResolvedValueOnce([rows2, fields2]);
+
+    const text = "First:\n```sql:execute\nSELECT COUNT(*) as count FROM users\n```\nSecond:\n```sql:execute\nSELECT name FROM users LIMIT 1\n```";
+    const result = await processResponseWithAttachments(text);
+
+    expect(result.attachments).toHaveLength(2);
+    expect(result.attachments[0].csv).toBe("count\n42");
+    expect(result.attachments[1].csv).toBe("name\nAlice");
   });
 });

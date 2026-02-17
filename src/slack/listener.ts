@@ -8,7 +8,8 @@ import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
 import { resolveUserName } from "./user-cache.js";
 import { runRouter } from "../agent/router.js";
 import { runAgent } from "../agent/agent.js";
-import { processResponse, extractSqlBlocks } from "../agent/sql-executor.js";
+import { processResponseWithAttachments, extractSqlBlocks } from "../agent/sql-executor.js";
+import type { SqlAttachment } from "../agent/sql-executor.js";
 import type { ApiCallUsage } from "../types.js";
 import { notifyError } from "../errors/trello-notifier.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
@@ -65,14 +66,42 @@ export function resetListenerState(): void {
 
 /**
  * Process sql:execute blocks in agent response text.
- * Falls back to raw text if processing fails.
+ * Returns processed text and CSV attachments for Slack file upload.
+ * Falls back to raw text with no attachments if processing fails.
  */
-async function processSqlInResponse(text: string): Promise<string> {
+async function processSqlInResponse(text: string): Promise<{ text: string; attachments: SqlAttachment[] }> {
   try {
-    return await processResponse(text);
+    return await processResponseWithAttachments(text);
   } catch (err) {
     log.warn("SQL processing failed, using raw response", err);
-    return text;
+    return { text, attachments: [] };
+  }
+}
+
+/**
+ * Upload CSV attachments to a Slack thread.
+ */
+async function uploadCsvAttachments(
+  client: ReturnType<typeof getSlackClient>,
+  channel: string,
+  threadTs: string,
+  attachments: SqlAttachment[],
+): Promise<void> {
+  if (!client || attachments.length === 0) return;
+
+  for (const attachment of attachments) {
+    try {
+      await client.filesUploadV2({
+        channel_id: channel,
+        thread_ts: threadTs,
+        filename: attachment.filename,
+        content: attachment.csv,
+        title: attachment.filename,
+        initial_comment: "",
+      });
+    } catch (err) {
+      log.warn(`Failed to upload CSV attachment ${attachment.filename}`, err);
+    }
   }
 }
 
@@ -236,7 +265,7 @@ export async function startSlackListener(): Promise<void> {
 
             // Count SQL blocks and process them before formatting
             const sqlBlockCount = extractSqlBlocks(response.text).length;
-            const processedText = await processSqlInResponse(response.text);
+            const sqlResult = await processSqlInResponse(response.text);
 
             updateEvent(dashEvent.id, {
               status: "complete",
@@ -257,7 +286,7 @@ export async function startSlackListener(): Promise<void> {
               updateSessionId(thread, response.sessionId);
             }
 
-            const slackText = markdownToSlackMrkdwn(processedText);
+            const slackText = markdownToSlackMrkdwn(sqlResult.text);
             const chunks = splitMessage(slackText);
 
             await client.chat.update({
@@ -281,6 +310,9 @@ export async function startSlackListener(): Promise<void> {
               ts: Date.now().toString(),
               isBot: true,
             });
+
+            // Upload CSV attachments if any SQL results
+            await uploadCsvAttachments(client, message.channel, threadTs, sqlResult.attachments);
 
             await swapReaction(client, message.channel, message.ts, "brain", "white_check_mark");
 
@@ -418,7 +450,7 @@ export async function startSlackListener(): Promise<void> {
 
                 // Count SQL blocks and process them before formatting
                 const sqlBlockCount = extractSqlBlocks(response.text).length;
-                const processedText = await processSqlInResponse(response.text);
+                const sqlResult = await processSqlInResponse(response.text);
 
                 // Collect heartbeat snapshots for dashboard timeline
                 const heartbeatSnapshots = hbManager.getSnapshots();
@@ -445,7 +477,7 @@ export async function startSlackListener(): Promise<void> {
                 }
 
                 // Final update: replace placeholder with formatted response
-                const slackText = markdownToSlackMrkdwn(processedText);
+                const slackText = markdownToSlackMrkdwn(sqlResult.text);
                 const chunks = splitMessage(slackText);
 
                 // Update the placeholder with the first chunk (remove thinking attachment)
@@ -471,6 +503,9 @@ export async function startSlackListener(): Promise<void> {
                   ts: Date.now().toString(),
                   isBot: true,
                 });
+
+                // Upload CSV attachments if any SQL results
+                await uploadCsvAttachments(client, message.channel, threadTs, sqlResult.attachments);
 
                 await swapReaction(
                   client,

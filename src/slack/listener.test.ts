@@ -58,11 +58,11 @@ vi.mock("../agent/agent.js", () => ({
   runAgent: mockRunAgent,
 }));
 
-const mockProcessResponse = vi.fn().mockImplementation((text: string) => Promise.resolve(text));
+const mockProcessResponseWithAttachments = vi.fn().mockImplementation((text: string) => Promise.resolve({ text, attachments: [] }));
 const mockExtractSqlBlocks = vi.fn().mockReturnValue([]);
 
 vi.mock("../agent/sql-executor.js", () => ({
-  processResponse: (...args: unknown[]) => mockProcessResponse(...args),
+  processResponseWithAttachments: (...args: unknown[]) => mockProcessResponseWithAttachments(...args),
   extractSqlBlocks: (...args: unknown[]) => mockExtractSqlBlocks(...args),
 }));
 
@@ -153,7 +153,7 @@ let client: ReturnType<typeof createMockWebClient>;
 beforeEach(async () => {
   vi.clearAllMocks();
   mockIsRateLimited.mockReturnValue(false);
-  mockProcessResponse.mockImplementation((text: string) => Promise.resolve(text));
+  mockProcessResponseWithAttachments.mockImplementation((text: string) => Promise.resolve({ text, attachments: [] }));
   mockExtractSqlBlocks.mockReturnValue([]);
 
   // Reset listener state (shutdown flag and in-flight tracking)
@@ -1451,12 +1451,12 @@ describe("SQL processing in agent responses", () => {
     const responseWithSql = "Here are the results:\n```sql:execute\nSELECT * FROM users\n```";
     const processedText = "Here are the results:\n| id | name |\n|---|---|\n| 1 | Alice |";
     mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
-    mockProcessResponse.mockResolvedValue(processedText);
+    mockProcessResponseWithAttachments.mockResolvedValue({ text: processedText, attachments: [] });
 
     await handler({ message: makeSlackMessage(), client });
 
-    // processResponse was called with the raw agent response
-    expect(mockProcessResponse).toHaveBeenCalledWith(responseWithSql);
+    // processResponseWithAttachments was called with the raw agent response
+    expect(mockProcessResponseWithAttachments).toHaveBeenCalledWith(responseWithSql);
 
     // Slack received the processed text (not raw SQL blocks)
     expect(client.chat.update).toHaveBeenCalledWith(
@@ -1478,11 +1478,11 @@ describe("SQL processing in agent responses", () => {
     const responseWithSql = "Results:\n```sql:execute\nSELECT count(*) FROM orders\n```";
     const processedText = "Results:\n| count(*) |\n|---|\n| 42 |";
     mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
-    mockProcessResponse.mockResolvedValue(processedText);
+    mockProcessResponseWithAttachments.mockResolvedValue({ text: processedText, attachments: [] });
 
     await handler({ message: makeSlackMessage(), client });
 
-    expect(mockProcessResponse).toHaveBeenCalledWith(responseWithSql);
+    expect(mockProcessResponseWithAttachments).toHaveBeenCalledWith(responseWithSql);
 
     expect(client.chat.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1502,7 +1502,7 @@ describe("SQL processing in agent responses", () => {
 
     const rawText = "Here is some text with ```sql:execute\nSELECT 1\n```";
     mockRunAgent.mockResolvedValue(makeAgentResponse({ text: rawText }));
-    mockProcessResponse.mockRejectedValue(new Error("DB connection failed"));
+    mockProcessResponseWithAttachments.mockRejectedValue(new Error("DB connection failed"));
 
     await handler({ message: makeSlackMessage(), client });
 
@@ -1525,7 +1525,7 @@ describe("SQL processing in agent responses", () => {
 
     const rawText = "Text with ```sql:execute\nSELECT 1\n```";
     mockRunAgent.mockResolvedValue(makeAgentResponse({ text: rawText }));
-    mockProcessResponse.mockRejectedValue(new Error("DB connection failed"));
+    mockProcessResponseWithAttachments.mockRejectedValue(new Error("DB connection failed"));
 
     await handler({ message: makeSlackMessage(), client });
 
@@ -1548,7 +1548,7 @@ describe("SQL processing in agent responses", () => {
 
     const responseWithSql = "Results:\n```sql:execute\nSELECT 1\n```\n```sql:execute\nSELECT 2\n```";
     mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
-    mockProcessResponse.mockResolvedValue("processed text");
+    mockProcessResponseWithAttachments.mockResolvedValue({ text: "processed text", attachments: [] });
     mockExtractSqlBlocks.mockReturnValue([
       { fullMatch: "```sql:execute\nSELECT 1\n```", query: "SELECT 1" },
       { fullMatch: "```sql:execute\nSELECT 2\n```", query: "SELECT 2" },
@@ -1596,7 +1596,7 @@ describe("SQL processing in agent responses", () => {
 
     const responseWithSql = "```sql:execute\nSELECT 1\n```";
     mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
-    mockProcessResponse.mockResolvedValue("| col |\n|---|\n| 1 |");
+    mockProcessResponseWithAttachments.mockResolvedValue({ text: "| col |\n|---|\n| 1 |", attachments: [] });
     mockExtractSqlBlocks.mockReturnValue([
       { fullMatch: "```sql:execute\nSELECT 1\n```", query: "SELECT 1" },
     ]);
@@ -1610,5 +1610,125 @@ describe("SQL processing in agent responses", () => {
         sqlQueriesProcessed: 1,
       }),
     );
+  });
+});
+
+describe("CSV file upload for SQL results", () => {
+  it("uploads CSV attachments in very_low path", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Quick...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "results" }));
+    mockProcessResponseWithAttachments.mockResolvedValue({
+      text: "| id |\n|---|\n| 1 |",
+      attachments: [
+        { csv: "id\n1", filename: "query-result-123-1.csv", query: "SELECT id FROM users" },
+      ],
+    });
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(client.filesUploadV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel_id: "C-TEST",
+        filename: "query-result-123-1.csv",
+        content: "id\n1",
+      }),
+    );
+  });
+
+  it("uploads CSV attachments in full agent path", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Looking...",
+      needsAgent: true,
+      complexity: "high",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "results" }));
+    mockProcessResponseWithAttachments.mockResolvedValue({
+      text: "| id |\n|---|\n| 1 |",
+      attachments: [
+        { csv: "id\n1", filename: "query-result-456-1.csv", query: "SELECT id FROM users" },
+      ],
+    });
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(client.filesUploadV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel_id: "C-TEST",
+        filename: "query-result-456-1.csv",
+        content: "id\n1",
+      }),
+    );
+  });
+
+  it("uploads multiple CSV files for multiple SQL blocks", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Quick...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "results" }));
+    mockProcessResponseWithAttachments.mockResolvedValue({
+      text: "table1\ntable2",
+      attachments: [
+        { csv: "id\n1", filename: "query-result-1.csv", query: "SELECT 1" },
+        { csv: "id\n2", filename: "query-result-2.csv", query: "SELECT 2" },
+      ],
+    });
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(client.filesUploadV2).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not call filesUploadV2 when no attachments", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Quick...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "no sql here" }));
+    mockProcessResponseWithAttachments.mockResolvedValue({
+      text: "no sql here",
+      attachments: [],
+    });
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(client.filesUploadV2).not.toHaveBeenCalled();
+  });
+
+  it("continues gracefully when CSV upload fails", async () => {
+    const routerResult = makeRouterResult({
+      quickResponse: "Quick...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "results" }));
+    mockProcessResponseWithAttachments.mockResolvedValue({
+      text: "| id |\n|---|\n| 1 |",
+      attachments: [
+        { csv: "id\n1", filename: "query-result-1.csv", query: "SELECT 1" },
+      ],
+    });
+    client.filesUploadV2.mockRejectedValueOnce(new Error("Upload failed"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Should still complete the response (chat.update called)
+    expect(client.chat.update).toHaveBeenCalled();
   });
 });

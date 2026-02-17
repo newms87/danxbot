@@ -17,6 +17,7 @@ export function createMockWebClient() {
     conversations: {
       replies: vi.fn().mockResolvedValue({ messages: [] }),
     },
+    filesUploadV2: vi.fn().mockResolvedValue({}),
   };
 }
 

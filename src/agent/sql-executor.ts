@@ -60,6 +60,26 @@ export function isSafeQuery(query: string): boolean {
 }
 
 /**
+ * Escape a CSV field: quote if it contains comma, double-quote, or newline.
+ */
+function escapeCsvField(value: string): string {
+  if (value.includes(",") || value.includes('"') || value.includes("\n")) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+/**
+ * Format query results as CSV.
+ */
+export function formatResultsAsCsv(columns: string[], rows: string[][]): string {
+  const header = columns.map(escapeCsvField).join(",");
+  if (rows.length === 0) return header;
+  const body = rows.map((row) => row.map(escapeCsvField).join(",")).join("\n");
+  return `${header}\n${body}`;
+}
+
+/**
  * Format query results as a markdown table.
  */
 export function formatResultsAsTable(
@@ -128,12 +148,34 @@ export async function executeQuery(query: string): Promise<QueryResult> {
  * and replacing them with formatted results.
  */
 export async function processResponse(text: string): Promise<string> {
-  const blocks = extractSqlBlocks(text);
-  if (blocks.length === 0) return text;
+  return (await processResponseWithAttachments(text)).text;
+}
 
-  // Build replacements for each block
+export interface SqlAttachment {
+  csv: string;
+  filename: string;
+  query: string;
+}
+
+export interface ProcessedResponse {
+  text: string;
+  attachments: SqlAttachment[];
+}
+
+/**
+ * Process agent response text, executing sql:execute blocks,
+ * replacing them with formatted tables, and collecting CSV attachments.
+ */
+export async function processResponseWithAttachments(text: string): Promise<ProcessedResponse> {
+  const blocks = extractSqlBlocks(text);
+  if (blocks.length === 0) return { text, attachments: [] };
+
   const replacements: string[] = [];
-  for (const block of blocks) {
+  const attachments: SqlAttachment[] = [];
+  const timestamp = Date.now();
+
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
     let replacement: string;
 
     if (!isSafeQuery(block.query)) {
@@ -144,12 +186,19 @@ export async function processResponse(text: string): Promise<string> {
       if (queryResult.error) {
         log.warn("Query execution failed", queryResult.error);
         replacement = "_Query execution failed._";
+      } else if (queryResult.rows.length === 0) {
+        replacement = "*No results found.*";
       } else {
         replacement = formatResultsAsTable(
           queryResult.columns,
           queryResult.rows,
           queryResult.totalRows,
         );
+        attachments.push({
+          csv: formatResultsAsCsv(queryResult.columns, queryResult.rows),
+          filename: `query-result-${timestamp}-${i + 1}.csv`,
+          query: block.query,
+        });
       }
     }
 
@@ -170,5 +219,5 @@ export async function processResponse(text: string): Promise<string> {
     result = result.slice(0, m.index) + replacements[i] + result.slice(m.index + m[0].length);
   }
 
-  return result;
+  return { text: result, attachments };
 }
