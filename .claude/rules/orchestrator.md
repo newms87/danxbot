@@ -14,6 +14,7 @@ Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP too
 | Needs Help | `6990129be21ee37b649281a5` |
 | Done | `698fc5c3396c0c24e921e3f5` |
 | Cancelled | `698fc5c598cfdb751069f71c` |
+| Action Items | `6994dfb6b3e5311d367a289e` |
 
 ## Labels
 
@@ -115,6 +116,11 @@ Stage and commit changes. Check off "Committed".
 
 **Commits:** [commit sha(s)]
 ```
+
+4. **Create Action Item cards:** If the retro has action items (not "Nothing"), create a new card in the **Action Items** list for each action item:
+   - Card name: The action item text
+   - Card description: `Action item from [card name](card URL).\n\n**Context:** [1 sentence explaining why this action item was created]`
+   - After creating the card, update the retro comment to include links: replace each action item with `[action item text](new card URL)`
 
 ### Step 9: Self-Terminate
 

@@ -90,6 +90,7 @@ Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP too
 | Needs Help | Blocked on human intervention |
 | Done | Completed cards |
 | Cancelled | Dropped cards |
+| Action Items | Retro action items for future improvement |
 
 ### Workflow
 
@@ -105,3 +106,4 @@ Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP too
 10. Commits, moves card to Done, adds retro comment
 11. Epic splitting: parent gets Epic label, phase cards named `Epic > Phase N > Description` created in In Progress
 12. Every Done card gets a retro comment (What went well, What went wrong, Action items, Commits)
+13. Retro action items create linked cards in the Action Items list
