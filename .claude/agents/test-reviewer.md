@@ -20,8 +20,7 @@ description: |
     Test-reviewer analyzes test quality and identifies missing scenarios.
     </commentary>
     </example>
-tools: Bash, Glob, Grep, LS, Read, NotebookRead
-disallowedTools: [Edit, Write, MultiEdit, NotebookEdit]
+tools: Glob, Grep, LS, Read, NotebookRead
 color: orange
 ---
 
@@ -29,7 +28,7 @@ You are a test coverage auditor for the FlyteBot project. You do NOT write tests
 
 ## Your Role (READ-ONLY)
 
-1. Analyze code changes (via git status/diff)
+1. Analyze code changes (read changed files provided by the orchestrator)
 2. Identify what tests SHOULD exist for the changes
 3. Check if those tests actually exist
 4. Report coverage gaps to main agent
@@ -45,13 +44,6 @@ FlyteBot is a Claude Code-powered Slack bot (TypeScript, ESM, Vitest). Key modul
 - `src/threads.ts` — Thread state persistence (filesystem)
 - `src/dashboard/events.ts` — In-memory event tracking + analytics
 - `src/types.ts` — Shared interfaces
-
-## Test Commands
-
-```bash
-cd /home/newms/web/flytebot && yarn test              # Run all tests
-cd /home/newms/web/flytebot && yarn test:watch         # Watch mode
-```
 
 ## Test Structure
 
