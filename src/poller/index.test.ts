@@ -333,6 +333,99 @@ describe("start", () => {
   });
 });
 
+describe("startLockWatch — immediate re-poll on completion", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    _resetForTesting();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    mockExistsSync.mockReturnValue(false);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchTodoCards.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    _resetForTesting();
+  });
+
+  it("calls poll immediately when lock file disappears", async () => {
+    // First poll: cards available, lock file doesn't exist → spawns team
+    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
+
+    await poll();
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Reset mocks to track the re-poll triggered by lock watch
+    mockFetchNeedsHelpCards.mockClear();
+    mockFetchTodoCards.mockClear();
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+
+    // Lock watch checks every 5s — simulate lock file disappearing
+    mockExistsSync.mockReturnValue(false);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    // poll() should have been called immediately — verify by checking fetchTodoCards
+    expect(mockFetchTodoCards).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-poll can spawn a new team if more cards exist", async () => {
+    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
+
+    await poll();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // On re-poll, return another card so a second team spawns
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c2", name: "Card 2" }]);
+
+    mockExistsSync.mockReturnValue(false);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears interval after detecting lock removal (no repeated polls)", async () => {
+    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
+
+    await poll();
+
+    mockFetchTodoCards.mockClear();
+    mockFetchNeedsHelpCards.mockClear();
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+
+    // Lock disappears on first check
+    mockExistsSync.mockReturnValue(false);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(mockFetchTodoCards).toHaveBeenCalledTimes(1);
+
+    // Advance another 5s — should NOT poll again (interval was cleared)
+    mockFetchTodoCards.mockClear();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+  });
+
+  it("does not poll when lock file is still present", async () => {
+    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
+
+    await poll();
+
+    mockFetchTodoCards.mockClear();
+    mockFetchNeedsHelpCards.mockClear();
+
+    // Lock file still exists after 5s
+    mockExistsSync.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+  });
+});
+
 describe("shutdown", () => {
   let mockExit: ReturnType<typeof vi.spyOn>;
 

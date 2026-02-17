@@ -142,6 +142,7 @@ function startLockWatch(): void {
       lockCheckId = null;
       log.info("Team finished — resuming polling");
       teamRunning = false;
+      poll().catch((err) => log.error("Re-poll after team completion failed", err));
     }
   }, 5000);
 }
