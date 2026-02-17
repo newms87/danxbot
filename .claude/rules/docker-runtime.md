@@ -65,6 +65,17 @@ Look for `Dashboard running at http://localhost:5555` and `Flytebot is running (
 | `/home/newms/web/platform` | `/flytebot/platform` |
 | `~/.claude.json` | → copied to `/root/.claude.json` at startup |
 
+## Tools Available Inside the Container
+
+The Docker image includes dev tools beyond Node.js. Use `docker exec flytebot <command>` to access them:
+
+- **gh** — GitHub CLI for creating PRs, managing issues
+- **git** — Full git client (HTTPS token auth via gh)
+- **php8.3** / **composer** — For platform repo operations (tests, artisan)
+- **mysql** — MySQL client for direct DB access
+
+**NEVER try to install these tools on the host.** They are already in the Docker image. Run them inside the container.
+
 ## Never Run the Bot on the Host
 
 Do not use `npm start` or `npm run dev` on the host. The bot requires:

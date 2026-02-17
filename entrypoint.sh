@@ -25,6 +25,21 @@ else
     echo "Platform repo already present (volume-mounted or previously cloned)."
 fi
 
+# Mark platform repo as safe (owned by host user, different from container user)
+git config --global --add safe.directory /flytebot/platform
+su -s /bin/bash flytebot -c "git config --global --add safe.directory /flytebot/platform"
+
+# Configure git identity and GitHub auth for platform PRs
+su -s /bin/bash flytebot -c "git config --global user.email 'flytebot@flytedesk.com' && git config --global user.name 'Flytebot'"
+if [ -n "$GITHUB_TOKEN" ]; then
+    su -s /bin/bash flytebot -c "gh auth setup-git"
+    # Ensure platform remote uses HTTPS (token auth, not SSH)
+    if [ -d "$PLATFORM_DIR/.git" ]; then
+        su -s /bin/bash flytebot -c "git -C $PLATFORM_DIR remote set-url origin https://github.com/Flytedesk/platform.git 2>/dev/null || true"
+    fi
+    echo "GitHub auth configured for platform PRs."
+fi
+
 # Set up Claude Code auth for the flytebot user (copy from read-only directory mounts)
 if [ -f "/flytebot/claude-auth/home/.claude.json" ]; then
     cp /flytebot/claude-auth/home/.claude.json "$FLYTEBOT_HOME/.claude.json"

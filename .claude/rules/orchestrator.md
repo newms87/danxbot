@@ -42,8 +42,9 @@ YOU are the orchestrator. Do NOT launch a separate orchestrator agent.
 2. Fetch the "Acceptance Criteria" checklist using `get_acceptance_criteria` (cardId). These criteria were written by the ideator and define what "done" means for this card
 3. **For Bug cards:** Investigate the root cause first. Read logs, relevant source files, and error messages. Understand what's broken and why before planning the fix.
 4. **Check for Needs Help:** If the task requires human intervention outside the dev environment (changing Slack/Trello settings, external service config, manual account setup, etc.), add the `Needs Help` label using `update_card_details`, add a comment explaining what help is needed with `<!-- flytebot -->` appended at the end, move the card to Needs Help list, and skip this card. The `<!-- flytebot -->` marker is REQUIRED — the poller uses it to distinguish bot comments from user responses.
-5. Design the implementation approach, ensuring every acceptance criterion is addressed
-6. Check off "Planning"
+5. **Detect target repo:** If the card involves platform changes (Laravel, Vue, migrations, `ssap/`, `mva/`, media kit, etc.), follow the platform workflow in `.claude/rules/platform-workflow.md`. Platform cards use feature branches, push to the platform repo, and open PRs instead of committing to flytebot's main branch.
+6. Design the implementation approach, ensuring every acceptance criterion is addressed
+7. Check off "Planning"
 
 ### Step 3: Evaluate Scope
 
@@ -63,7 +64,7 @@ If 3+ phases, different domains, or >500 lines — split into epic:
 The orchestrator implements the code directly using strict TDD:
 
 1. **Write failing test** — Create or update test file with tests that verify the expected behavior
-2. **Run tests** — `npx vitest run` — Confirm the new test fails
+2. **Run tests** — `npx vitest run` (flytebot) or `php artisan test` via Docker (platform cards, see `platform-workflow.md`) — Confirm the new test fails
 3. **Implement** — Write the minimum code to make the test pass
 4. **Run tests** — Confirm all tests pass (new AND existing)
 5. **Refactor** — Clean up if needed, run tests again
