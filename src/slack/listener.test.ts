@@ -882,6 +882,38 @@ describe("feedback reactions", () => {
     expect(mockUpdateEvent).toHaveBeenCalledWith("dash-alias-neg", { feedback: "negative" });
   });
 
+  it("records positive feedback on thumbsup with skin-tone modifier", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+    const mockDashEvent = { id: "dash-skin-pos" };
+    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
+
+    await reactionHandler({
+      event: {
+        reaction: "+1::skin-tone-2",
+        user: "U-HUMAN",
+        item: { channel: "C-TEST", ts: "1234.5678" },
+      },
+    });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-skin-pos", { feedback: "positive" });
+  });
+
+  it("records negative feedback on thumbsdown with skin-tone modifier", async () => {
+    const reactionHandler = capturedEventHandlers["reaction_added"];
+    const mockDashEvent = { id: "dash-skin-neg" };
+    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
+
+    await reactionHandler({
+      event: {
+        reaction: "-1::skin-tone-4",
+        user: "U-HUMAN",
+        item: { channel: "C-TEST", ts: "5678.1234" },
+      },
+    });
+
+    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-skin-neg", { feedback: "negative" });
+  });
+
   it("ignores reactions other than thumbsup/thumbsdown", async () => {
     const reactionHandler = capturedEventHandlers["reaction_added"];
 
