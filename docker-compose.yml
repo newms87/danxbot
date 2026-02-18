@@ -15,8 +15,10 @@ services:
       - ./dashboard:/flytebot/app/dashboard
       # Persistent thread cache
       - flytebot-threads:/flytebot/threads
-      # Mount local platform repo (faster than cloning)
-      - /home/newms/web/platform:/flytebot/platform
+      # Shared repo volume (cloned at startup, used by sibling containers)
+      - flytebot-repos:/flytebot/repos
+      # Docker socket (for managing sibling containers)
+      - /var/run/docker.sock:/var/run/docker.sock
       # Claude Code auth (directory mounts survive inode changes from file rewrites)
       - /home/newms/.claude:/flytebot/claude-auth/dot-claude:ro
       - /home/newms:/flytebot/claude-auth/home:ro
@@ -53,11 +55,77 @@ services:
         max-size: "5m"
         max-file: "1"
 
+  # --- Platform sibling container (started on demand via `docker compose run --rm platform`) ---
+
+  platform:
+    build:
+      context: ./repo-containers/platform
+      dockerfile: Dockerfile
+    container_name: flytebot-platform
+    profiles: ["platform"]
+    volumes:
+      - flytebot-repos:/flytebot/repos
+      - platform-vendor:/flytebot/repos/platform/ssap/vendor
+      - ./platform.env.template:/flytebot/platform.env.template:ro
+    working_dir: /flytebot/repos/platform/ssap
+    entrypoint: ["/flytebot/platform-entrypoint.sh"]
+    environment:
+      - PLATFORM_DB_HOST=platform-mysql
+      - PLATFORM_DB_USER=sail
+      - PLATFORM_DB_PASSWORD=password
+      - PLATFORM_DB_NAME=platform_test
+    depends_on:
+      platform-mysql:
+        condition: service_healthy
+      platform-redis:
+        condition: service_started
+    networks:
+      - default
+      - platform-test
+
+  platform-mysql:
+    image: mysql/mysql-server:8.0
+    profiles: ["platform"]
+    tmpfs:
+      - /var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: platform_test
+      MYSQL_USER: sail
+      MYSQL_PASSWORD: password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-ppassword"]
+      interval: 5s
+      retries: 5
+      timeout: 3s
+    networks:
+      - platform-test
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
+
+  platform-redis:
+    image: redis:alpine
+    profiles: ["platform"]
+    networks:
+      - platform-test
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
+
 volumes:
   flytebot-threads:
   flytebot-mysql:
+  flytebot-repos:
+  platform-vendor:
 
 networks:
   sail:
     external: true
     name: ssap_sail
+  platform-test:

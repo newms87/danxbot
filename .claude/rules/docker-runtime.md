@@ -62,8 +62,16 @@ Look for `Dashboard running at http://localhost:5555` and `Flytebot is running (
 |-----------|---------------|
 | `./src` | `/flytebot/app/src` |
 | `./package.json` | `/flytebot/app/package.json` |
-| `/home/newms/web/platform` | `/flytebot/platform` |
 | `~/.claude.json` | → copied to `/root/.claude.json` at startup |
+| (shared volume) | `/flytebot/repos/<name>` |
+
+## Sibling Container Architecture
+
+External repos (e.g., platform) are cloned into a shared Docker volume at `/flytebot/repos/`. Each repo has its own **sibling container** with the correct runtime (PHP, Python, etc.), started on demand via `docker compose run --rm <service>`.
+
+- **File browsing** (Read, Glob, Grep) works directly from the main flytebot container — files are at `/flytebot/repos/<name>/`
+- **Runtime commands** (tests, artisan, tinker) run in the sibling container
+- **Git/gh commands** run in the main flytebot container (it has git + gh CLI)
 
 ## Tools Available Inside the Container
 
@@ -71,7 +79,7 @@ The Docker image includes dev tools beyond Node.js. Use `docker exec flytebot <c
 
 - **gh** — GitHub CLI for creating PRs, managing issues
 - **git** — Full git client (HTTPS token auth via gh)
-- **php8.3** / **composer** — For platform repo operations (tests, artisan)
+- **docker** / **docker compose** — For managing sibling containers
 - **mysql** — MySQL client for direct DB access
 
 **NEVER try to install these tools on the host.** They are already in the Docker image. Run them inside the container.
@@ -82,6 +90,6 @@ Do not use `npm start` or `npm run dev` on the host. The bot requires:
 - Claude Code CLI installed globally
 - Claude auth at `/root/.claude.json`
 - Network access to the platform database (via Docker `sail` network)
-- Access to the platform repo at `/flytebot/platform`
+- Access to repo clones at `/flytebot/repos/`
 
 All of these are configured inside the container.

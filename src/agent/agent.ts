@@ -1,7 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
-import { config, COMPLEXITY_PROFILES } from "../config.js";
+import { config, COMPLEXITY_PROFILES, getRepoPath } from "../config.js";
 import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST } from "./features.js";
@@ -328,7 +328,8 @@ export async function runAgent(
   const queryOptions = {
     model,
     systemPrompt: promptText,
-    cwd: config.platform.repoPath,
+    cwd: getRepoPath("platform"),
+    settingSources: ["project"],
     tools: ["Read", "Glob", "Grep", "Bash"],
     allowedTools: ["Read", "Glob", "Grep", "Bash"],
     permissionMode: "bypassPermissions" as const,

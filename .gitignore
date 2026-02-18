@@ -7,3 +7,5 @@ data/
 dashboard/dist/
 dashboard/node_modules/
 *.tsbuildinfo
+
+.claude/clad.json

@@ -91,6 +91,12 @@ export interface AgentUsageSummary {
   modelUsage: Record<string, ModelUsage>;
 }
 
+export interface RepoConfig {
+  name: string;
+  url: string;
+  localPath: string;
+}
+
 export interface AgentResponse {
   text: string;
   sessionId: string | null;

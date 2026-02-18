@@ -125,6 +125,21 @@ When asked about a specific domain, read the corresponding reference doc first f
 - Activity logging: SchoolDataActivityLogger with methods start(), update(), complete(), incomplete(), fail()
 - Broadcasting: Events use ShouldBroadcastNow for real-time websocket updates
 
+## Running Platform Commands
+
+For platform commands (PHP, artisan, composer, tinker), use the sibling container:
+
+```bash
+docker compose -f /flytebot/app/docker-compose.yml run --rm platform <command>
+```
+
+Examples:
+- `docker compose -f /flytebot/app/docker-compose.yml run --rm platform php artisan tinker`
+- `docker compose -f /flytebot/app/docker-compose.yml run --rm platform php artisan test --filter=UserTest`
+- `docker compose -f /flytebot/app/docker-compose.yml run --rm platform php artisan migrate:status`
+
+File browsing (Read, Glob, Grep) works directly — platform files are at `/flytebot/repos/platform/`.
+
 ## Response Format
 
 Format your responses for Slack:

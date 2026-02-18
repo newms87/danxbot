@@ -1,43 +1,45 @@
 #!/bin/bash
 set -e
 
-PLATFORM_DIR="/flytebot/platform"
 APP_DIR="/flytebot/app"
+REPOS_DIR="/flytebot/repos"
 FLYTEBOT_HOME="/home/flytebot"
 
-if [ ! -d "$PLATFORM_DIR/.git" ]; then
-    if [ "$PLATFORM_REPO_URL" != "skip" ]; then
-        echo "Cloning platform repo..."
-        git clone --depth 1 "$PLATFORM_REPO_URL" "$PLATFORM_DIR"
+# Clone/update repos from REPOS env var (format: name:url,name:url)
+if [ -n "$REPOS" ]; then
+    IFS=',' read -ra REPO_ENTRIES <<< "$REPOS"
+    for entry in "${REPO_ENTRIES[@]}"; do
+        name="${entry%%:*}"
+        url="${entry#*:}"
+        repo_path="$REPOS_DIR/$name"
 
-        # Install PHP dependencies for artisan commands
-        echo "Installing composer dependencies..."
-        cd "$PLATFORM_DIR/ssap" && composer install --no-dev --no-interaction --quiet
-        chown -R flytebot:flytebot "$PLATFORM_DIR"
+        if [ ! -d "$repo_path/.git" ]; then
+            echo "Cloning $name repo..."
+            git clone --depth 1 "$url" "$repo_path"
+        else
+            echo "Updating $name repo..."
+            git -C "$repo_path" fetch origin && git -C "$repo_path" reset --hard origin/HEAD
+        fi
 
-        # Set up platform .env for artisan/tinker commands
-        echo "Setting up platform .env..."
-        envsubst < "$APP_DIR/platform.env.template" > "$PLATFORM_DIR/ssap/.env"
-    else
-        echo "No platform repo found and PLATFORM_REPO_URL=skip, skipping clone."
-    fi
+        # Mark as safe directory for both root and flytebot users
+        git config --global --add safe.directory "$repo_path"
+        su -s /bin/bash flytebot -c "git config --global --add safe.directory '$repo_path'"
+    done
+    chown -R flytebot:flytebot "$REPOS_DIR"
 else
-    echo "Platform repo already present (volume-mounted or previously cloned)."
+    echo "No REPOS configured, skipping repo setup."
 fi
 
-# Mark platform repo as safe (owned by host user, different from container user)
-git config --global --add safe.directory /flytebot/platform
-su -s /bin/bash flytebot -c "git config --global --add safe.directory /flytebot/platform"
-
-# Configure git identity and GitHub auth for platform PRs
+# Configure git identity and GitHub auth
 su -s /bin/bash flytebot -c "git config --global user.email 'flytebot@flytedesk.com' && git config --global user.name 'Flytebot'"
 if [ -n "$GITHUB_TOKEN" ]; then
     su -s /bin/bash flytebot -c "gh auth setup-git"
-    # Ensure platform remote uses HTTPS (token auth, not SSH)
-    if [ -d "$PLATFORM_DIR/.git" ]; then
-        su -s /bin/bash flytebot -c "git -C $PLATFORM_DIR remote set-url origin https://github.com/Flytedesk/platform.git 2>/dev/null || true"
-    fi
-    echo "GitHub auth configured for platform PRs."
+    echo "GitHub auth configured."
+fi
+
+# Add flytebot user to docker group (for sibling container management)
+if getent group docker > /dev/null 2>&1; then
+    usermod -aG docker flytebot
 fi
 
 # Set up Claude Code auth for the flytebot user (copy from read-only directory mounts)

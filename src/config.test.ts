@@ -7,7 +7,7 @@ function validEnv(): Record<string, string> {
     SLACK_APP_TOKEN: "xapp-test",
     SLACK_CHANNEL_ID: "C-TEST",
     ANTHROPIC_API_KEY: "test-key",
-    PLATFORM_REPO_URL: "https://test.example.com",
+    REPOS: "platform:https://github.com/Flytedesk/platform.git",
     PLATFORM_DB_HOST: "localhost",
     PLATFORM_DB_USER: "test",
     PLATFORM_DB_PASSWORD: "test",
@@ -40,6 +40,79 @@ async function importConfig(envOverrides: Record<string, string> = {}, omitKeys:
 
 beforeEach(() => {
   vi.resetModules();
+});
+
+describe("repos config", () => {
+  it("parses multiple repos from REPOS env var", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git,docs:https://github.com/Flytedesk/docs.git",
+    });
+    expect(mod.repos).toEqual([
+      { name: "platform", url: "https://github.com/Flytedesk/platform.git", localPath: "/flytebot/repos/platform" },
+      { name: "docs", url: "https://github.com/Flytedesk/docs.git", localPath: "/flytebot/repos/docs" },
+    ]);
+  });
+
+  it("parses a single repo", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git",
+    });
+    expect(mod.repos).toHaveLength(1);
+    expect(mod.repos[0].name).toBe("platform");
+  });
+
+  it("returns empty array when REPOS is empty", async () => {
+    const mod = await importConfig({ REPOS: "" });
+    expect(mod.repos).toEqual([]);
+  });
+
+  it("returns empty array when REPOS is unset", async () => {
+    const mod = await importConfig({}, ["REPOS"]);
+    expect(mod.repos).toEqual([]);
+  });
+
+  it("throws on invalid format (missing colon)", async () => {
+    await expect(
+      importConfig({ REPOS: "platform" }),
+    ).rejects.toThrow('Invalid REPOS entry');
+  });
+
+  it("throws on empty name", async () => {
+    await expect(
+      importConfig({ REPOS: ":https://example.com" }),
+    ).rejects.toThrow('Invalid REPOS entry');
+  });
+
+  it("throws on empty URL after colon", async () => {
+    await expect(
+      importConfig({ REPOS: "platform:" }),
+    ).rejects.toThrow('name and url must not be empty');
+  });
+
+  it("trims whitespace from name and URL", async () => {
+    const mod = await importConfig({
+      REPOS: " platform : https://example.com ",
+    });
+    expect(mod.repos).toHaveLength(1);
+    expect(mod.repos[0].name).toBe("platform");
+    expect(mod.repos[0].url).toBe("https://example.com");
+  });
+});
+
+describe("getRepoPath", () => {
+  it("returns localPath for configured repo", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git",
+    });
+    expect(mod.getRepoPath("platform")).toBe("/flytebot/repos/platform");
+  });
+
+  it("throws for unconfigured repo", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git",
+    });
+    expect(() => mod.getRepoPath("unknown")).toThrow('Repo "unknown" is not configured');
+  });
 });
 
 describe("required DB config", () => {

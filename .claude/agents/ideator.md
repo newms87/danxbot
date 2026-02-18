@@ -59,7 +59,7 @@ Score every feature that is NOT "Complete" using the rubric in the "Score Featur
 ### 2. Explore and Discover
 
 1. Explore the Flytebot codebase to understand current features
-2. Explore the Flytedesk platform codebase at `/flytebot/platform` for integration opportunities
+2. Explore the Flytedesk platform codebase at `/flytebot/repos/platform` for integration opportunities
 3. Query the database (READ-ONLY) to understand real-world usage
 4. Update the Feature Inventory section of `docs/features.md` with findings
 

@@ -1,4 +1,4 @@
-import type { ComplexityLevel, ComplexityProfile } from "./types.js";
+import type { ComplexityLevel, ComplexityProfile, RepoConfig } from "./types.js";
 
 export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
   very_low:  { model: "claude-haiku-4-5",   maxTurns: 5,  maxBudgetUsd: 0.10, maxThinkingTokens: 2048,  systemPrompt: "fast" },
@@ -20,6 +20,32 @@ function optional(name: string, defaultValue: string): string {
   return process.env[name] || defaultValue;
 }
 
+function parseRepos(envValue: string): RepoConfig[] {
+  if (!envValue.trim()) return [];
+  return envValue.split(",").map((entry) => {
+    const colonIndex = entry.indexOf(":");
+    if (colonIndex <= 0) {
+      throw new Error(`Invalid REPOS entry "${entry}" — expected "name:url" format`);
+    }
+    const name = entry.slice(0, colonIndex).trim();
+    const url = entry.slice(colonIndex + 1).trim();
+    if (!name || !url) {
+      throw new Error(`Invalid REPOS entry "${entry}" — name and url must not be empty`);
+    }
+    return { name, url, localPath: `/flytebot/repos/${name}` };
+  });
+}
+
+export const repos: RepoConfig[] = parseRepos(optional("REPOS", ""));
+
+export function getRepoPath(name: string): string {
+  const repo = repos.find((r) => r.name === name);
+  if (!repo) {
+    throw new Error(`Repo "${name}" is not configured in REPOS env var`);
+  }
+  return repo.localPath;
+}
+
 export const config = {
   slack: {
     botToken: required("SLACK_BOT_TOKEN"),
@@ -30,8 +56,6 @@ export const config = {
     apiKey: required("ANTHROPIC_API_KEY"),
   },
   platform: {
-    repoUrl: required("PLATFORM_REPO_URL"),
-    repoPath: "/flytebot/platform",
     db: {
       host: required("PLATFORM_DB_HOST"),
       user: required("PLATFORM_DB_USER"),

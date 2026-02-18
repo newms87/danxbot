@@ -30,7 +30,7 @@ vi.mock("../config.js", () => ({
   config: {
     anthropic: { apiKey: "test-key" },
     agent: { model: "test-model", maxTurns: 5, maxBudgetUsd: 1.0, maxThinkingTokens: 8000, maxThreadMessages: 20 },
-    platform: { repoPath: "/test" },
+    platform: {},
     trello: { reviewListId: "test-review-list-id" },
     logsDir: "/test/logs",
   },
@@ -41,6 +41,7 @@ vi.mock("../config.js", () => ({
     high:      { model: "claude-sonnet-4-5", maxTurns: 12, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
     very_high: { model: "claude-opus-4-6", maxTurns: 18, maxBudgetUsd: 5.00, maxThinkingTokens: 32768, systemPrompt: "full" },
   },
+  getRepoPath: (name: string) => `/flytebot/repos/${name}`,
 }));
 
 vi.mock("../logger.js", () => ({
@@ -517,6 +518,29 @@ describe("runAgent", () => {
     expect(result.subscriptionCostUsd).toBe(0.123);
     expect(result.turns).toBe(3);
     expect(result.sessionId).toBe("sess-4");
+  });
+
+  it("sets cwd to platform repo path and settingSources to project-only", async () => {
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "sess-cwd" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "Done.",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          duration_ms: 100,
+          duration_api_ms: 80,
+        },
+      ]),
+    );
+
+    await runAgent("test", null);
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.cwd).toBe("/flytebot/repos/platform");
+    expect(callArgs.options.settingSources).toEqual(["project"]);
   });
 
   it("returns error message on failure", async () => {

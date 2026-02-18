@@ -8,9 +8,7 @@ RUN apt-get update && apt-get install -y \
     git \
     openssh-client \
     mysql-client \
-    software-properties-common \
     gnupg2 \
-    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 20
@@ -18,22 +16,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# PHP 8.3 + extensions
-RUN add-apt-repository ppa:ondrej/php -y \
+# Docker CLI + Compose plugin (for managing sibling containers)
+RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu jammy stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
     && apt-get update \
-    && apt-get install -y \
-    php8.3-cli \
-    php8.3-mysql \
-    php8.3-mbstring \
-    php8.3-xml \
-    php8.3-curl \
-    php8.3-redis \
-    php8.3-bcmath \
-    php8.3-zip \
+    && apt-get install -y docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
-
-# Composer
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
 # GitHub CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -49,7 +37,7 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN useradd -m -s /bin/bash flytebot
 
 # Working directories (owned by flytebot user)
-RUN mkdir -p /flytebot/app /flytebot/platform /flytebot/threads /flytebot/data /flytebot/logs \
+RUN mkdir -p /flytebot/app /flytebot/repos /flytebot/threads /flytebot/data /flytebot/logs \
     && chown -R flytebot:flytebot /flytebot
 
 WORKDIR /flytebot/app
