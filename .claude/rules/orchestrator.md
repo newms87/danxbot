@@ -35,7 +35,7 @@ YOU are the orchestrator. Do NOT launch a separate orchestrator agent.
 
 1. Move card to In Progress (position: `"top"`)
 2. If the card has no label, add the appropriate label (Bug or Feature) using `update_card_details`
-3. Add a "Progress" checklist with items: Planning, Tests Written, Implementation, Tests Pass, Code Review, Committed
+3. Add a **Progress** checklist with items: Planning, Tests Written, Implementation, Tests Pass, Code Review, Committed
 
 ### Step 2: Plan
 
@@ -52,7 +52,7 @@ YOU are the orchestrator. Do NOT launch a separate orchestrator agent.
 If 3+ phases, different domains, or >500 lines — split into epic:
 1. Change the parent card's label to `Epic` using `update_card_details` (labels: `["698fc5b8847b787a3818adad"]`)
 2. Add a "Phases" checklist to the epic card with one item per phase
-3. Create N new phase cards in **In Progress** (position: `"top"`): `Epic Name > Phase N > Description`
+3. Create N new phase cards in **In Progress** (position: `"top"`): `Epic Title > Phase N: Description`
 4. Each phase card gets its own description, acceptance criteria, and the appropriate label (Bug or Feature)
 5. Add a split comment to the epic card listing all phases
 6. Move the epic card to Done

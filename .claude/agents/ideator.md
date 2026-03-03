@@ -132,22 +132,34 @@ Every card MUST have a label. Pass the `labels` array when calling `add_card_to_
 | Needs Help | `698fc5b8847b787a3818adaa` | Requires human intervention |
 
 Each card must have:
-- Clear, actionable title
-- A label (Bug or Feature)
-- Description (Problem, Solution, ICE Score — see template below)
-- Acceptance criteria as a Trello checklist (NOT in the description)
+- **Title** — Imperative verb phrase for features, `Fix:` prefix for bugs (see `~/.claude/rules/trello.md`)
+- **Label** — Bug or Feature
+- **Description** — follows the global template (see below), plus ICE Score
+- **Acceptance Criteria** — Trello checklist (NOT in the description), each item specific, verifiable, starts with a verb
 
 #### Card Description Template
 
 Write factual, direct descriptions. No selling ("this would be great..."), no filler. Write for a developer who will implement this.
 
-**Problem:** What's wrong or missing today? Reference specific files, modules, or user-visible behavior. Length scales with complexity — one sentence for a simple bug, a paragraph for a complex feature.
+**For Feature cards:**
 
-**Solution:** What should be built or changed? High-level approach, not implementation details (those go in acceptance criteria). Enough that a developer understands the direction.
+**Context:** What exists today and why it needs to change. Reference specific files, modules, or user-visible behavior. Length scales with complexity.
 
-**ICE Score:** N = I × C × E (I: X — justification. C: X — justification. E: X — justification.)
+**Solution:** What should be built or changed? High-level approach, not implementation details (those go in acceptance criteria).
 
-That's it. No other sections. Acceptance criteria go ONLY in the "Acceptance Criteria" checklist created via `create_checklist` + `add_checklist_item`.
+**ICE Score:** N = I x C x E (I: X — justification. C: X — justification. E: X — justification.)
+
+**For Bug cards:**
+
+**Problem:** What the user sees or what's broken.
+
+**Root Cause:** Why it happens, or "TBD — needs investigation" if unknown.
+
+**Solution:** What to change and why.
+
+**ICE Score:** N = I x C x E (I: X — justification. C: X — justification. E: X — justification.)
+
+No other sections. Acceptance criteria go ONLY in the "Acceptance Criteria" checklist created via `create_checklist` + `add_checklist_item`.
 
 ### 7. Save State and Commit
 
