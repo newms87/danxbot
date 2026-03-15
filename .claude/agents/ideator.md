@@ -182,7 +182,7 @@ If you discover platform knowledge gaps while exploring, also update:
 
 1. **Always in context** — `src/agent/system-prompt.md` (concise domain routing)
 2. **Read on demand** — `docs/domains/*.md` (detailed reference docs)
-3. **Dev team** — `.claude/rules/platform-overview.md`
+3. **Dev team** — `.claude/rules/repo-overview.md`
 
 ## Platform Access
 

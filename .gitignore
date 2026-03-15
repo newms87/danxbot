@@ -12,6 +12,7 @@ dashboard/node_modules/
 agent-notes.md
 .claude/rules/trello-config.md
 .claude/rules/repo-config.md
+.claude/rules/repo-overview.md
 repo-overrides/*
 !repo-overrides/.gitkeep
 repo-config.yml

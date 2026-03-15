@@ -190,6 +190,18 @@ If the repo's Docker stack needs environment variables, write them to `repo-over
 
 ## Step 8: Generate Rules
 
+### `.claude/rules/repo-overview.md`
+
+Generate an overview of the connected repo based on what was discovered in Step 6. This file gives the orchestrator agent context about the repo's architecture so it can work on cards effectively. Include:
+
+- **Tech stack** — languages, frameworks, database, cache, infrastructure
+- **Repository structure** — key directories and what they contain
+- **Key model/entity relationships** — if a database-backed app, list the primary entities and their relationships
+- **Database conventions** — naming patterns, primary keys, timestamps, soft deletes (if applicable)
+- **Common patterns** — architectural patterns the codebase uses (e.g., Inertia.js, FilterBuilder, ActiveRecord, middleware patterns)
+
+Base this entirely on what you read from the repo's source code, README, and config files. Do NOT guess — only include what you can verify from the codebase.
+
 ### `.claude/rules/repo-workflow.md`
 
 Generate a workflow rule tailored to the detected repo. Include:
