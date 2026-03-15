@@ -115,7 +115,9 @@ You are the interactive setup wizard for Flytebot. Guide the user through each s
 6. Ask: "Is this correct? Anything to change?"
 7. Apply any corrections the user provides.
 
-## Step 7: Generate `repo-config.yml`
+## Step 7: Generate `repo-config.yml` and Docker Overrides
+
+### 7a: Write `repo-config.yml`
 
 Write `repo-config.yml` at project root with the discovered config:
 
@@ -133,7 +135,7 @@ commands:
   dev: "php artisan serve"
 
 docker:
-  compose_file: "docker-compose.yml"
+  compose_file: "<repo-name>-compose.yml"
   service_name: "laravel.test"
   project_name: "flytebot-<repo-name>"
 
@@ -143,6 +145,48 @@ paths:
 ```
 
 Adjust the structure based on what was actually detected. If no Docker setup, omit the `docker` section and set `runtime: local`.
+
+### 7b: Generate Docker Compose Override (if runtime is `docker`)
+
+If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an isolated compose override at `repo-overrides/<name>-compose.yml`. This file runs the repo's own Docker stack with an isolated project name and network, so it doesn't conflict with the host's setup.
+
+**Key principles:**
+- Use the repo's own Docker images (build from its Dockerfile or reference its images)
+- Mount `/flytebot/repos` so code is accessible
+- Set `working_dir` to `/flytebot/repos/<name>/<subdir>` (where the main app lives)
+- Use isolated ports (offset from standard: 13306 for MySQL, 16379 for Redis, etc.)
+- Use an isolated bridge network named `sail` within the compose project
+- Set environment to `testing` mode for running tests
+
+**For Laravel/Sail projects**, the compose override should include:
+- `laravel.test` service built from the repo's own `docker/<php-version>/Dockerfile`
+- `mysql` and `redis` services for testing
+- Environment variables for testing (DB_CONNECTION, CACHE_DRIVER=array, QUEUE_CONNECTION=sync)
+
+**For Node.js projects**, the compose override is usually unnecessary — tests run directly via `docker exec flytebot`.
+
+**For other frameworks**, adapt based on what the repo's own docker-compose.yml defines.
+
+### 7c: Generate Post-Clone Hook (if needed)
+
+If the repo needs setup after cloning (auth files, dependency install, config copy), create `repo-overrides/post-clone-<name>.sh`:
+
+```bash
+#!/bin/bash
+REPOS_DIR="$1"
+REPO="$REPOS_DIR/<name>"
+
+# Example: copy auth credentials for private package registries
+if [ -f "/flytebot/app/repo-overrides/<name>-auth.json" ] && [ -d "$REPO/<subdir>" ]; then
+    cp "/flytebot/app/repo-overrides/<name>-auth.json" "$REPO/<subdir>/auth.json"
+fi
+```
+
+Ask the user: "Does this repo require any auth files or credentials for package installation (e.g., Composer auth for private packages, npm tokens)?" If yes, collect the credentials and write them to `repo-overrides/`.
+
+### 7d: Generate Env File (if Docker runtime)
+
+If the repo's Docker stack needs environment variables, write them to `repo-overrides/<name>.env`. This keeps repo-specific env vars separate from flytebot's `.env`.
 
 ## Step 8: Generate Rules
 
@@ -155,7 +199,7 @@ Generate a workflow rule tailored to the detected repo. Include:
 - Git workflow: feature branches (`flytebot/<kebab-case>`), commit format, PR creation via `gh`
 - Always return to main after PR creation
 
-Use the existing `external-repo-workflow.md` as a template for the structure, but fill in the actual detected commands.
+Use `.claude/rules/repo-workflow.md` (already in the repo) as the template. It uses generic `<name>` placeholders — the generated version should fill in the actual repo name, commands, and Docker details.
 
 ### `.claude/rules/repo-config.md`
 
@@ -183,16 +227,21 @@ FLYTEBOT_DB_USER=flytebot
 FLYTEBOT_DB_PASSWORD=flytebot
 FLYTEBOT_DB_NAME=flytebot_chat
 
-# Platform Database (leave empty if not applicable)
-PLATFORM_DB_HOST=
-PLATFORM_DB_USER=
-PLATFORM_DB_PASSWORD=
-PLATFORM_DB_NAME=
+# Claude auth directories (for Docker volume mounts)
+CLAUDE_AUTH_DIR=<user's ~/.claude directory>
+CLAUDE_AUTH_HOME=<user's home directory>
 
 # Poller
 POLLER_INTERVAL_MS=60000
 TRELLO_REVIEW_MIN_CARDS=10
 ```
+
+Ask the user: "Where is your Claude config directory? (usually `~/.claude`)" and "What is your home directory? (usually `~`)" — resolve to absolute paths and write as `CLAUDE_AUTH_DIR` and `CLAUDE_AUTH_HOME`.
+
+If the repo has a database that the agent should query (read-only), ask:
+- "Does the connected repo have a database the agent should have read access to? (yes/no)"
+- If yes, collect host, user, password, database name and write as `PLATFORM_DB_HOST`, `PLATFORM_DB_USER`, `PLATFORM_DB_PASSWORD`, `PLATFORM_DB_NAME`
+- If no, leave these empty (the agent won't have SQL query capability)
 
 Read back the final `.env` (masking secrets) and present to user for confirmation.
 

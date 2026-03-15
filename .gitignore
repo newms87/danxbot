@@ -9,7 +9,10 @@ dashboard/node_modules/
 *.tsbuildinfo
 
 .claude/clad.json
-platform-auth.json
 agent-notes.md
 .claude/rules/trello-config.md
+.claude/rules/repo-config.md
+repo-overrides/*
+!repo-overrides/.gitkeep
+repo-config.yml
 repos/

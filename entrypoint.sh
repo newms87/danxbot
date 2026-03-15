@@ -41,11 +41,12 @@ else
     echo "No REPOS configured, skipping repo setup."
 fi
 
-# Copy platform composer auth (Nova credentials) into cloned repo if available
-if [ -f "/flytebot/platform-auth.json" ] && [ -d "$REPOS_DIR/platform/ssap" ]; then
-    cp /flytebot/platform-auth.json "$REPOS_DIR/platform/ssap/auth.json"
-    chown flytebot:flytebot "$REPOS_DIR/platform/ssap/auth.json"
-    echo "Platform composer auth configured."
+# Run repo-specific post-clone hooks (e.g., auth files, dependency setup)
+HOOKS_DIR="/flytebot/app/repo-overrides"
+if [ -d "$HOOKS_DIR" ]; then
+    for hook in "$HOOKS_DIR"/post-clone-*.sh; do
+        [ -f "$hook" ] && bash "$hook" "$REPOS_DIR"
+    done
 fi
 
 # Configure git auth for the flytebot user too (for runtime git operations)
