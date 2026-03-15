@@ -10,10 +10,10 @@ Process a SINGLE card from the ToDo list using the orchestrator workflow defined
 ## Steps
 
 1. Fetch cards from the ToDo list
-2. If the list is empty, report "No cards to process" and self-terminate: `rm -f .poller-running && kill $PPID`
+2. If the list is empty, report "No cards to process" and self-terminate only if `FLYTEBOT_EPHEMERAL=1`: `rm -f .poller-running && kill $PPID`
 3. Take the top card (first in the list) and report which card is being processed
 4. Process the card using the Card Processing Workflow (Steps 1-9 in the orchestrator rule)
-5. **Stop after this single card.** Step 9 handles self-termination.
+5. **Stop after this single card.** Step 9 handles self-termination when `FLYTEBOT_EPHEMERAL=1` is set.
 
 ## Report
 

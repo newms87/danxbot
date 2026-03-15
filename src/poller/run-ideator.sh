@@ -7,6 +7,7 @@ source ~/.profile 2>/dev/null || true
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 cd "$PROJECT_ROOT"
+export FLYTEBOT_EPHEMERAL=1
 claude '/ideate' --dangerously-skip-permissions || true
 
 # Clean up lock file so poller knows we're done

@@ -114,9 +114,11 @@ Check off "Committed".
    - Card description: `Action item from [card name](card URL).\n\n**Context:** [1 sentence explaining why this action item was created]`
    - After creating the card, update the retro comment to include links: replace each action item with `[action item text](new card URL)`
 
-### Step 9: Self-Terminate
+### Step 9: Self-Terminate (Ephemeral Sessions Only)
 
-After completing ONE card (or when the card is moved to Needs Help), remove the lock file and terminate the Claude process so the terminal tab closes:
+**Only self-terminate when `FLYTEBOT_EPHEMERAL=1` is set in the environment.** The poller sets this env var when spawning temporary Claude sessions. Interactive sessions (user-invoked commands) do NOT have this set and must never self-terminate.
+
+When `FLYTEBOT_EPHEMERAL=1` is set, remove the lock file and terminate the Claude process after completing ONE card (or when the card is moved to Needs Help):
 
 ```bash
 rm -f .poller-running && kill $PPID

@@ -24,3 +24,4 @@ Launch the ideator agent for feature discovery and card generation. Use `mode: "
    - ICE scores and top priorities
    - Trello cards created (with titles)
    - Knowledge docs updated (if any)
+4. **Self-terminate if ephemeral:** If `FLYTEBOT_EPHEMERAL=1` is set in the environment (poller-spawned session), remove the lock file and terminate: `rm -f .poller-running && kill $PPID`. If NOT set (interactive session), do nothing — just report results.
