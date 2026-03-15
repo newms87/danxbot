@@ -2,9 +2,12 @@
 
 This rule defines how the autonomous agent team processes Trello cards. The `/start-team` and `/next-card` skills trigger this workflow.
 
-## Trello Config
+## Config Sources
 
-All board IDs, list IDs, and label IDs are in `.claude/rules/trello-config.md` (auto-generated from env vars by the poller). Reference that file for any Trello resource IDs.
+- **Trello IDs:** `.claude/rules/trello-config.md` (auto-generated from env vars by the poller)
+- **Repo config:** `.claude/rules/repo-config.md` (auto-generated from `repo-config.yml` by the poller)
+
+Reference these files for all board/list/label IDs and repo commands. Never hardcode IDs or commands.
 
 Every card MUST have a label. Apply labels when creating cards or picking them up.
 
@@ -24,14 +27,14 @@ YOU are the orchestrator. Do NOT launch a separate orchestrator agent.
 2. Fetch the "Acceptance Criteria" checklist using `get_acceptance_criteria` (cardId). These criteria were written by the ideator and define what "done" means for this card
 3. **For Bug cards:** Investigate the root cause first. Read logs, relevant source files, and error messages. Understand what's broken and why before planning the fix.
 4. **Check for Needs Help:** If the task requires human intervention outside the dev environment (changing Slack/Trello settings, external service config, manual account setup, etc.), add the `Needs Help` label using `update_card_details`, add a comment explaining what help is needed with `<!-- flytebot -->` appended at the end, move the card to Needs Help list, and skip this card. The `<!-- flytebot -->` marker is REQUIRED — the poller uses it to distinguish bot comments from user responses.
-5. **Detect target repo:** Determine whether changes target flytebot (`src/`) or an external repo (`repos/platform/`). A card targets the platform when its description mentions: the platform repo, Laravel, PHP, Vue components, `ssap/`, `mva/`, migrations, models, controllers, media kit, ad shop, or other platform features. When targeting the platform, follow `.claude/rules/external-repo-workflow.md` — edit files at `repos/platform/`, use feature branches, and open PRs instead of committing to flytebot's main branch.
+5. **Detect target repo:** Determine whether changes target flytebot (`src/`) or the connected repo (`repos/<name>/`). A card targets the connected repo when its description references that repo's domain, framework, models, components, or directories. When targeting the connected repo, follow `.claude/rules/repo-workflow.md` — edit files at `repos/<name>/`, use feature branches, and open PRs instead of committing to flytebot's main branch. Read `.claude/rules/repo-config.md` for the repo name, paths, and commands.
 6. Design the implementation approach, ensuring every acceptance criterion is addressed
 7. Check off "Planning"
 
 ### Step 3: Evaluate Scope
 
 If 3+ phases, different domains, or >500 lines — split into epic:
-1. Change the parent card's label to `Epic` using `update_card_details` (labels: `["698fc5b8847b787a3818adad"]`)
+1. Change the parent card's label to `Epic` using `update_card_details` (read the Epic label ID from `.claude/rules/trello-config.md`)
 2. Add a "Phases" checklist to the epic card with one item per phase
 3. Create N new phase cards in **In Progress** (position: `"top"`): `Epic Title > Phase N: Description`
 4. Each phase card gets its own description, acceptance criteria, and the appropriate label (Bug or Feature)
@@ -46,11 +49,11 @@ If 3+ phases, different domains, or >500 lines — split into epic:
 The orchestrator implements the code directly using strict TDD:
 
 1. **Write failing test** — Create or update test file with tests that verify the expected behavior
-2. **Run tests** — Confirm the new test fails. For flytebot: `npx vitest run`. For platform cards: `docker exec flytebot docker compose -p flytebot-platform -f /flytebot/app/platform-compose.override.yml run --rm laravel.test php artisan test` (see `external-repo-workflow.md`)
+2. **Run tests** — Confirm the new test fails. For flytebot: `npx vitest run`. For connected repo cards: read the test command from `.claude/rules/repo-config.md` and run it via the method described in `.claude/rules/repo-workflow.md`
 3. **Implement** — Write the minimum code to make the test pass
 4. **Run tests** — Confirm all tests pass (new AND existing)
 5. **Refactor** — Clean up if needed, run tests again
-6. **Type check** — `npx tsc --noEmit` (flytebot only, skip for platform)
+6. **Type check** — `npx tsc --noEmit` (flytebot only; for connected repo, read type_check command from repo-config.md — skip if empty)
 
 **Documentation-only changes** (README, comments, docs): Skip TDD — just make the edit directly. Check off "Tests Written", "Implementation", "Tests Pass" together.
 
@@ -82,7 +85,7 @@ After implementation and quality gates pass, verify each acceptance criterion is
 
 **For flytebot cards:** Stage and commit changes directly.
 
-**For platform cards:** Follow the git workflow in `external-repo-workflow.md`:
+**For connected repo cards:** Follow the git workflow in `.claude/rules/repo-workflow.md`:
 1. Create feature branch (`flytebot/<kebab-case>`)
 2. Stage and commit
 3. Push to origin

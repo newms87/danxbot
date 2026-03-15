@@ -50,6 +50,12 @@ vi.mock("./db/migrate.js", () => ({
   runMigrations: mockRunMigrations,
 }));
 
+vi.mock("./config.js", () => ({
+  config: {
+    slack: { enabled: true, botToken: "xoxb-test", appToken: "xapp-test", channelId: "C123" },
+  },
+}));
+
 vi.mock("./logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),

@@ -3,7 +3,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Mock dependencies before importing module under test
 vi.mock("./config.js", () => ({
   config: { pollerIntervalMs: 60000 },
+  BOARD_ID: "mock-board-id",
+  REVIEW_LIST_ID: "mock-review-list-id",
   TODO_LIST_ID: "698fc5be16a280cc321a13ec",
+  IN_PROGRESS_LIST_ID: "mock-in-progress-list-id",
+  NEEDS_HELP_LIST_ID: "mock-needs-help-list-id",
+  DONE_LIST_ID: "mock-done-list-id",
+  CANCELLED_LIST_ID: "mock-cancelled-list-id",
+  ACTION_ITEMS_LIST_ID: "mock-action-items-list-id",
+  BUG_LABEL_ID: "mock-bug-label-id",
+  FEATURE_LABEL_ID: "mock-feature-label-id",
+  EPIC_LABEL_ID: "mock-epic-label-id",
+  NEEDS_HELP_LABEL_ID: "mock-needs-help-label-id",
+  REVIEW_MIN_CARDS: 10,
 }));
 
 const mockFetchTodoCards = vi.fn();
@@ -34,10 +46,12 @@ vi.mock("../logger.js", () => ({
 }));
 
 const mockExistsSync = vi.fn();
+const mockReadFileSync = vi.fn();
 const mockWriteFileSync = vi.fn();
 const mockUnlinkSync = vi.fn();
 vi.mock("node:fs", () => ({
   existsSync: (...args: unknown[]) => mockExistsSync(...args),
+  readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
 }));

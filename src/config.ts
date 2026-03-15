@@ -46,21 +46,28 @@ export function getRepoPath(name: string): string {
   return repo.localPath;
 }
 
+const slackBotToken = optional("SLACK_BOT_TOKEN", "");
+const slackAppToken = optional("SLACK_APP_TOKEN", "");
+const slackChannelId = optional("SLACK_CHANNEL_ID", "");
+const slackEnabled = !!(slackBotToken && slackAppToken && slackChannelId);
+
 export const config = {
   slack: {
-    botToken: required("SLACK_BOT_TOKEN"),
-    appToken: required("SLACK_APP_TOKEN"),
-    channelId: required("SLACK_CHANNEL_ID"),
+    enabled: slackEnabled,
+    botToken: slackBotToken,
+    appToken: slackAppToken,
+    channelId: slackChannelId,
   },
   anthropic: {
     apiKey: required("ANTHROPIC_API_KEY"),
   },
   platform: {
     db: {
-      host: required("PLATFORM_DB_HOST"),
-      user: required("PLATFORM_DB_USER"),
-      password: required("PLATFORM_DB_PASSWORD"),
-      database: required("PLATFORM_DB_NAME"),
+      host: optional("PLATFORM_DB_HOST", ""),
+      user: optional("PLATFORM_DB_USER", ""),
+      password: optional("PLATFORM_DB_PASSWORD", ""),
+      database: optional("PLATFORM_DB_NAME", ""),
+      enabled: !!(process.env.PLATFORM_DB_HOST && process.env.PLATFORM_DB_USER),
     },
   },
   db: {
