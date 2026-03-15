@@ -12,34 +12,53 @@ A card targets the platform repo when its description mentions:
 - The `ssap/` or `mva/` directories
 - Media kit, ad shop, digital module, or other platform features
 
-If the card targets the platform, all implementation work happens on the shared volume at `/flytebot/repos/platform`.
-
 ## File Editing
 
-Edit files directly inside the flytebot container using the standard Edit/Write tools. The shared volume at `/flytebot/repos/platform` is mounted in both the main flytebot container and the sibling containers.
+Edit files directly on the host using the standard Read/Edit/Write tools. The platform repo is at `repos/platform/` (relative to the flytebot project root). For example:
+- Laravel code: `repos/platform/ssap/app/...`
+- Vue frontend: `repos/platform/mva/src/...`
+- Migrations: `repos/platform/ssap/database/migrations/...`
+
+This directory is bind-mounted into both the flytebot container and all platform containers at `/flytebot/repos/platform`, so edits on the host are immediately visible everywhere.
 
 ## Running Platform Commands
 
-Platform commands (PHP, artisan, composer, tests) run in the sibling container:
+Platform commands (PHP, artisan, tests) run via docker exec through the flytebot container:
 
 ```bash
-docker compose -f /flytebot/app/docker-compose.yml run --rm platform <command>
+docker exec flytebot docker compose -p flytebot-platform \
+  -f /flytebot/app/platform-compose.override.yml \
+  run --rm laravel.test <command>
+```
+
+### Ensure services are running
+
+Before running any platform command, make sure mysql and redis are up:
+
+```bash
+docker exec flytebot docker compose -p flytebot-platform \
+  -f /flytebot/app/platform-compose.override.yml \
+  up -d mysql redis
 ```
 
 ### Run Tests
 
 ```bash
-docker compose -f /flytebot/app/docker-compose.yml run --rm platform php artisan test
+docker exec flytebot docker compose -p flytebot-platform \
+  -f /flytebot/app/platform-compose.override.yml \
+  run --rm laravel.test php artisan test
 ```
 
 For targeted tests:
 ```bash
-docker compose -f /flytebot/app/docker-compose.yml run --rm platform php artisan test --filter=TestClassName
+docker exec flytebot docker compose -p flytebot-platform \
+  -f /flytebot/app/platform-compose.override.yml \
+  run --rm laravel.test php artisan test --filter=TestClassName
 ```
 
 ## Git Workflow
 
-Git and gh commands run inside the **main flytebot container** (it has git + gh CLI):
+Git and gh commands run inside the **flytebot container** (which has git + gh CLI configured with auth):
 
 ### 1. Create a Feature Branch
 
@@ -59,11 +78,10 @@ docker exec -u flytebot flytebot git -C /flytebot/repos/platform push -u origin 
 ### 3. Create a Pull Request
 
 ```bash
-docker exec -u flytebot flytebot gh pr create \
-  --repo Flytedesk/platform \
+docker exec -u flytebot flytebot bash -c "cd /flytebot/repos/platform && gh pr create \
   --base main \
-  --title "<PR title>" \
-  --body "<PR description>"
+  --title '<PR title>' \
+  --body '<PR description>'"
 ```
 
 ### 4. Return to Main
@@ -92,4 +110,5 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 - **NEVER force-push** to external repos
 - **NEVER commit to main** — always use a feature branch
 - **Always run tests** before pushing
-- The repo remote uses HTTPS via `GITHUB_TOKEN` for auth (configured automatically by `gh`)
+- The repo remote uses HTTPS via `GITHUB_TOKEN` for auth (configured automatically in the entrypoint)
+- The platform containers are fully isolated: own network (`flytebot-platform_sail`), own MySQL (port 13306), own Redis (port 16379)

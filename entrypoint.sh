@@ -5,6 +5,15 @@ APP_DIR="/flytebot/app"
 REPOS_DIR="/flytebot/repos"
 FLYTEBOT_HOME="/home/flytebot"
 
+# Configure git identity and GitHub auth (must happen before repo cloning)
+git config --global user.email 'flytebot@flytedesk.com'
+git config --global user.name 'Flytebot'
+if [ -n "$GITHUB_TOKEN" ]; then
+    echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
+    git config --global credential.helper store
+    echo "GitHub auth configured."
+fi
+
 # Clone/update repos from REPOS env var (format: name:url,name:url)
 if [ -n "$REPOS" ]; then
     IFS=',' read -ra REPO_ENTRIES <<< "$REPOS"
@@ -25,16 +34,27 @@ if [ -n "$REPOS" ]; then
         git config --global --add safe.directory "$repo_path"
         su -s /bin/bash flytebot -c "git config --global --add safe.directory '$repo_path'"
     done
+    # Make repos accessible to all users (frontend containers run as node/1000)
+    chmod -R a+rwX "$REPOS_DIR"
     chown -R flytebot:flytebot "$REPOS_DIR"
 else
     echo "No REPOS configured, skipping repo setup."
 fi
 
-# Configure git identity and GitHub auth
+# Copy platform composer auth (Nova credentials) into cloned repo if available
+if [ -f "/flytebot/platform-auth.json" ] && [ -d "$REPOS_DIR/platform/ssap" ]; then
+    cp /flytebot/platform-auth.json "$REPOS_DIR/platform/ssap/auth.json"
+    chown flytebot:flytebot "$REPOS_DIR/platform/ssap/auth.json"
+    echo "Platform composer auth configured."
+fi
+
+# Configure git auth for the flytebot user too (for runtime git operations)
 su -s /bin/bash flytebot -c "git config --global user.email 'flytebot@flytedesk.com' && git config --global user.name 'Flytebot'"
 if [ -n "$GITHUB_TOKEN" ]; then
-    su -s /bin/bash flytebot -c "gh auth setup-git"
-    echo "GitHub auth configured."
+    su -s /bin/bash flytebot -c "
+        echo 'https://x-access-token:${GITHUB_TOKEN}@github.com' > ~/.git-credentials
+        git config --global credential.helper store
+    "
 fi
 
 # Add flytebot user to docker group (for sibling container management)

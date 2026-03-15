@@ -1,4 +1,4 @@
-import { config, TODO_LIST_ID, NEEDS_HELP_LIST_ID, FLYTEBOT_COMMENT_MARKER } from "./config.js";
+import { config, REVIEW_LIST_ID, TODO_LIST_ID, NEEDS_HELP_LIST_ID, FLYTEBOT_COMMENT_MARKER } from "./config.js";
 
 export interface TrelloCard {
   id: string;
@@ -24,6 +24,10 @@ async function fetchCardsFromList(listId: string): Promise<TrelloCard[]> {
 
   const cards = (await response.json()) as Array<{ id: string; name: string }>;
   return cards.map((card) => ({ id: card.id, name: card.name }));
+}
+
+export async function fetchReviewCards(): Promise<TrelloCard[]> {
+  return fetchCardsFromList(REVIEW_LIST_ID);
 }
 
 export async function fetchTodoCards(): Promise<TrelloCard[]> {

@@ -9,3 +9,7 @@ dashboard/node_modules/
 *.tsbuildinfo
 
 .claude/clad.json
+platform-auth.json
+agent-notes.md
+.claude/rules/trello-config.md
+repos/

@@ -118,18 +118,11 @@ Also verify the feature is not already implemented in the codebase.
 
 Generate 3-5 cards in the Review list from the highest-ICE-scored features. Always add cards to the **bottom** of the list (pass `position: "bottom"` to `add_card_to_list`) so the human reviews them in the order they were created.
 
-Board ID: `698fc5b8847b787a3818ad82`
-Review list ID: `698fc5bdfa44ac685050fa35`
+Read board ID, list IDs, and label IDs from `.claude/rules/trello-config.md`. Use the Review list ID when creating cards.
 
 #### Labels
 
-Every card MUST have a label. Pass the `labels` array when calling `add_card_to_list`.
-
-| Label | ID | Use |
-|-------|----|-----|
-| Bug | `698fc5b8847b787a3818adac` | Defects, crashes, incorrect behavior |
-| Feature | `698fc5b8847b787a3818adae` | New functionality, enhancements |
-| Needs Help | `698fc5b8847b787a3818adaa` | Requires human intervention |
+Every card MUST have a label. Pass the `labels` array when calling `add_card_to_list`. Get label IDs from `.claude/rules/trello-config.md`.
 
 Each card must have:
 - **Title** — Imperative verb phrase for features, `Fix:` prefix for bugs (see `~/.claude/rules/trello.md`)

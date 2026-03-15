@@ -1,0 +1,147 @@
+# Isolated platform stack for flytebot.
+# Uses the platform's own Sail image + pre-built frontend images.
+#
+# Usage (from inside flytebot container):
+#   COMPOSE="docker compose -p flytebot-platform -f /flytebot/app/platform-compose.override.yml"
+#   $COMPOSE up -d                              # Start everything
+#   $COMPOSE run --rm laravel.test php artisan test  # Run tests
+
+services:
+  # --- Backend ---
+
+  laravel.test:
+    build:
+      context: /home/newms/web/flytebot/repos/platform/ssap/docker/8.3
+      dockerfile: Dockerfile
+      args:
+        WWWGROUP: "1000"
+    image: sail-8.3/app
+    volumes:
+      - /home/newms/web/flytebot/repos:/flytebot/repos
+    working_dir: /flytebot/repos/platform/ssap
+    ports:
+      - "18081:80"
+    environment:
+      WWWUSER: "1000"
+      LARAVEL_SAIL: 1
+      APP_ENV: testing
+      APP_KEY: "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      APP_URL: "http://localhost:18081"
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: testing
+      DB_USERNAME: sail
+      DB_PASSWORD: password
+      REDIS_HOST: redis
+      CACHE_DRIVER: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+      SUPERVISOR_PHP_COMMAND: "/usr/bin/php -d variables_order=EGPCS /flytebot/repos/platform/ssap/artisan serve --host=0.0.0.0 --port=80"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - sail
+
+  # --- Frontends ---
+
+  mva:
+    image: ssap-mva:latest
+    tty: true
+    entrypoint: dev_entrypoint.sh
+    command: yarn dev
+    volumes:
+      - /home/newms/web/flytebot/repos:/flytebot/repos
+      - mva_node_modules:/flytebot/repos/platform/mva/node_modules
+    working_dir: /flytebot/repos/platform/mva
+    ports:
+      - "9090:9090"
+    environment:
+      DANX_USE_NPM: "1"
+    networks:
+      - sail
+
+  web:
+    image: ssap-web:latest
+    entrypoint: dev_entrypoint.sh
+    command: yarn serve
+    volumes:
+      - /home/newms/web/flytebot/repos:/flytebot/repos
+      - web_node_modules:/flytebot/repos/platform/web/node_modules
+    working_dir: /flytebot/repos/platform/web
+    ports:
+      - "8000:8000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    networks:
+      - sail
+
+  v4:
+    image: ssap-v4:latest
+    tty: true
+    entrypoint: dev_entrypoint.sh
+    command: yarn serve
+    volumes:
+      - /home/newms/web/flytebot/repos:/flytebot/repos
+      - v4_node_modules:/flytebot/repos/platform/v4/node_modules
+    working_dir: /flytebot/repos/platform/v4
+    ports:
+      - "8004:8004"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8004"
+    networks:
+      - sail
+
+  # --- Data ---
+
+  mysql:
+    image: mysql/mysql-server:8.0
+    ports:
+      - "13306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: testing
+      MYSQL_USER: sail
+      MYSQL_PASSWORD: password
+      MYSQL_ALLOW_EMPTY_PASSWORD: 1
+    volumes:
+      - sail-mysql:/var/lib/mysql
+    command: mysqld --log-bin-trust-function-creators=1 --disable-log-bin
+    healthcheck:
+      test: ["CMD", "mysql", "-usail", "-ppassword", "-e", "SELECT 1"]
+      interval: 5s
+      retries: 10
+      timeout: 3s
+      start_period: 10s
+    networks:
+      - sail
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "16379:6379"
+    volumes:
+      - sail-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      retries: 3
+      timeout: 5s
+    networks:
+      - sail
+
+volumes:
+  sail-mysql:
+  sail-redis:
+  mva_node_modules:
+  web_node_modules:
+  v4_node_modules:
+
+networks:
+  sail:
+    driver: bridge

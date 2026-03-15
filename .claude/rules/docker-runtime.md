@@ -65,13 +65,14 @@ Look for `Dashboard running at http://localhost:5555` and `Flytebot is running (
 | `~/.claude.json` | → copied to `/root/.claude.json` at startup |
 | (shared volume) | `/flytebot/repos/<name>` |
 
-## Sibling Container Architecture
+## External Repo Architecture
 
-External repos (e.g., platform) are cloned into a shared Docker volume at `/flytebot/repos/`. Each repo has its own **sibling container** with the correct runtime (PHP, Python, etc.), started on demand via `docker compose run --rm <service>`.
+External repos (e.g., platform) are cloned into a shared Docker volume at `/flytebot/repos/`. Each repo uses its **own Docker compose stack** (the repo's own images) launched with an isolated project name and network.
 
 - **File browsing** (Read, Glob, Grep) works directly from the main flytebot container — files are at `/flytebot/repos/<name>/`
-- **Runtime commands** (tests, artisan, tinker) run in the sibling container
+- **Runtime commands** (tests, artisan, tinker) run via `docker compose -p flytebot-platform -f /flytebot/app/platform-compose.override.yml run --rm laravel.test <command>`
 - **Git/gh commands** run in the main flytebot container (it has git + gh CLI)
+- See `external-repo-workflow.md` for full details
 
 ## Tools Available Inside the Container
 

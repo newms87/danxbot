@@ -80,7 +80,7 @@ The main Claude Code session acts as the orchestrator. Subagents are launched vi
 
 ### Trello Board
 
-Board ID: `698fc5b8847b787a3818ad82` (always pass as `boardId` to Trello MCP tools)
+Board/list/label IDs are in `.claude/rules/trello-config.md` (auto-generated from `.env` by the poller).
 
 | List | Purpose |
 |------|---------|
