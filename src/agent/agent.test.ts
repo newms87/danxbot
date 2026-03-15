@@ -42,6 +42,7 @@ vi.mock("../config.js", () => ({
     very_high: { model: "claude-opus-4-6", maxTurns: 18, maxBudgetUsd: 5.00, maxThinkingTokens: 32768, systemPrompt: "full" },
   },
   getRepoPath: (name: string) => `/flytebot/repos/${name}`,
+  getPrimaryRepoPath: () => `/flytebot/repos/test-repo`,
 }));
 
 vi.mock("../logger.js", () => ({
@@ -539,7 +540,7 @@ describe("runAgent", () => {
     await runAgent("test", null);
 
     const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options.cwd).toBe("/flytebot/repos/platform");
+    expect(callArgs.options.cwd).toBe("/flytebot/repos/test-repo");
     expect(callArgs.options.settingSources).toEqual(["project"]);
   });
 

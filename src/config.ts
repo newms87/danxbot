@@ -46,6 +46,13 @@ export function getRepoPath(name: string): string {
   return repo.localPath;
 }
 
+export function getPrimaryRepoPath(): string {
+  if (repos.length === 0) {
+    throw new Error("No repos configured in REPOS env var");
+  }
+  return repos[0].localPath;
+}
+
 const slackBotToken = optional("SLACK_BOT_TOKEN", "");
 const slackAppToken = optional("SLACK_APP_TOKEN", "");
 const slackChannelId = optional("SLACK_CHANNEL_ID", "");
