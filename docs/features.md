@@ -2,22 +2,22 @@
 
 This file is the Ideator agent's persistent memory. It tracks all features, their status, and prioritized ideas for improvement.
 
-Last updated: 2026-02-14 (session 7)
+Last updated: 2026-03-15 (session 8)
 
 ---
 
 ## Feature Inventory
 
 <!-- Status: Complete | Upgradeable | Incomplete | Removeable | Changeable -->
-<!-- ICE format: Total (IxCxE) — e.g. 336 (8×7×6) -->
+<!-- ICE format: Total (IxCxE) — e.g. 336 (8x7x6) -->
 
 | Feature | Status | ICE | Notes |
 |---------|--------|-----|-------|
 | Slack Socket Mode listener | Complete | — | Receives messages, handles threads |
-| Haiku router (triage) | Complete | — | Error fallback with user-friendly message |
+| Haiku router (triage) | Complete | — | Error fallback returns needsAgent:false |
 | Claude Code SDK agent | Complete | — | Deep exploration via `query()` |
 | Real-time streaming | Complete | — | Heartbeat updates during agent runs |
-| Heartbeat manager | Complete | — | Throttled Slack updates, comprehensive unit tests |
+| Heartbeat manager | Complete | — | Throttled Slack updates, orchestrator-generated messages |
 | Dashboard + SSE | Complete | — | Events table, analytics, search/filter, light/dark theme |
 | Markdown-to-Slack formatter | Complete | — | Full markdown support including tables |
 | Thread state persistence | Complete | — | DB-backed, 7-day cleanup |
@@ -32,50 +32,60 @@ Last updated: 2026-02-14 (session 7)
 | Test fixtures/helpers | Complete | — | Shared mocks and factories |
 | Router + parse-json-response tests | Complete | — | Full test coverage |
 | Dashboard server + helpers tests | Complete | — | Full test coverage |
-| Per-user rate limiting | Complete | — | In-memory cooldown per user, integrated in listener |
-| Poller (Trello automation) | Complete | — | Polls ToDo list, spawns /start-team, signal handlers |
-| Poller tests (all modules) | Complete | — | trello-client, config, index all tested |
-| Slack user display names | Complete | — | User cache resolves IDs to names for dashboard |
+| Per-user rate limiting | Complete | — | In-memory cooldown per user |
+| Poller (Trello automation) | Complete | — | Polls ToDo list, spawns /start-team |
+| Poller tests (all modules) | Complete | — | Full test coverage |
+| Slack user display names | Complete | — | User cache resolves IDs to names |
 | Dashboard search/filter | Complete | — | Text + status filter controls |
-| Health check endpoint | Complete | — | GET /health returns status, uptime, memory, event count |
-| Listener tests | Complete | — | Filters, happy paths, threads, errors, rate limiting, feedback |
-| Graceful shutdown | Complete | — | Signal handlers, in-flight placeholder updates, DB pool close |
-| Thread context window limit | Complete | — | Trims thread messages to MAX_THREAD_MESSAGES |
-| Error notifications to ops | Complete | — | Posts error cards to Trello ToDo |
-| Config validation on startup | Complete | — | Validates numeric config for NaN/negative |
-| Structured JSON logging | Complete | — | createLogger() emits JSON with timestamp, level, component |
-| Index.ts unit tests | Complete | — | Entrypoint startup order tested |
-| Agent retry on transient failure | Complete | — | maxRetries config, retry loop with escalation |
-| Dashboard data export | Complete | — | CSV and JSON export via /api/events/export |
-| 5-level complexity routing | Complete | — | very_low through very_high with model/budget profiles |
-| Feature discovery (router) | Complete | — | Router suggests features for uncertain users |
+| Health check endpoint | Complete | — | Checks Slack + DB connectivity |
+| Listener tests | Complete | — | Full test coverage |
+| Graceful shutdown | Complete | — | Signal handlers, placeholder cleanup, pool close |
+| Thread context window limit | Complete | — | Trims to MAX_THREAD_MESSAGES |
+| Error notifications to ops | Complete | — | Posts error cards to Trello |
+| Config validation on startup | Complete | — | Validates numeric config |
+| Structured JSON logging | Complete | — | createLogger() with JSON output |
+| Index.ts unit tests | Complete | — | Entrypoint startup tested |
+| Agent retry on transient failure | Complete | — | maxRetries with escalation |
+| Dashboard data export | Complete | — | CSV and JSON via /api/events/export |
+| 5-level complexity routing | Complete | — | very_low through very_high profiles |
+| Feature discovery (router) | Complete | — | Suggests features to uncertain users |
 | DB persistence (events, threads, users) | Complete | — | 3-phase migration, full schema |
-| Fast system prompt | Complete | — | Lightweight prompt for very_low/low complexity |
-| Router error fallback | Changeable | 504 (7×9×8) | Returns needsAgent:true + very_high on router failure, wasting up to $2 |
-| Health check | Upgradeable | 280 (7×8×5) | Missing DB connectivity check; only checks Slack |
-| github.webhookSecret config | Removeable | — | Exists in config but unused anywhere |
-| Daily cost tracking + alerts | Incomplete | 245 (7×7×5) | Card in Review; no persistent cost tracking yet |
+| Fast system prompt | Complete | — | Lightweight prompt for very_low/low |
+| Router error fallback | Complete | — | Returns needsAgent:false on failure (was Bug, fixed) |
+| Health check DB connectivity | Complete | — | Pings DB with 2s timeout |
+| DB events TTL/cleanup | Complete | — | cleanupOldEvents() every 6h, configurable max age |
+| DB connect timeout | Complete | — | connectTimeoutMs config |
+| SQL execution in responses | Complete | — | sql:execute blocks auto-run and format as tables |
+| CSV attachments for SQL results | Complete | — | Uploads CSV files to Slack threads |
+| Agent log parser | Complete | — | Structured parsing for dashboard timeline |
+| Pricing module | Complete | — | Per-model cost calculation |
+| Perf stats | Complete | — | Tool call breakdown, timing stats |
+| Dashboard timeline (LLM conversation) | Complete | — | Router, assistant, tool, heartbeat cards |
+| Dashboard cost breakdown | Complete | — | Per-turn and total cost display |
+| Schema verification workflow | Complete | — | describe-tables.sh + model-relationships.md |
+| Feature request via agent | Complete | — | Agent creates Trello cards for user requests |
+| github.webhookSecret config | Removeable | 270 (9x10x3) | Dead code in config.ts and fixtures, never used |
+| Daily cost tracking + alerts | Incomplete | 245 (7x7x5) | Card in Review; no persistent cost tracking yet |
+| Router misroutes data queries | Changeable | 378 (7x9x6) | Routes "make me a csv" as very_low/no-agent when it needs agent |
 
 ---
 
 ## Desired Features
 
-<!-- ICE format: Total (IxCxE) — e.g. 336 (8×7×6) -->
+<!-- ICE format: Total (IxCxE) — e.g. 336 (8x7x6) -->
 <!-- Type: Carded | Valuable | Maintenance | Dependent | Exploratory -->
 
 | Feature Idea | Type | ICE | Description |
 |--------------|------|-----|-------------|
-| Daily cost tracking + alerts | Carded | 245 (7×7×5) | Track daily spend, alert on threshold (already in Review) |
-| Fix router error fallback | Valuable | 504 (7×9×8) | Stop triggering very_high agent on router failure |
-| DB events TTL/cleanup | Maintenance | 360 (6×8×8) | Events table grows unbounded; add periodic cleanup |
-| Health check DB connectivity | Maintenance | 280 (7×8×5) | /health should verify DB pool is alive |
-| Remove unused github config | Maintenance | 270 (9×10×3) | github.webhookSecret is dead code; 9x10=90, 90x3=270 |
-| Response caching | Valuable | 140 (7×5×4) | Cache common platform queries |
-| Event archiving beyond 500 | Valuable | 175 (7×5×5) | Persist older events to archive when cap is reached |
-| Multi-channel support | Exploratory | 168 (7×6×4) | Support beyond single Slack channel |
-| Agent response quality scoring | Exploratory | 72 (9×4×2) | Auto-evaluate response quality via LLM judge |
-| Dashboard per-user analytics | Valuable | 210 (7×6×5) | Show top users, per-user cost, usage patterns |
-| DB query timeout | Maintenance | 288 (8×8×5) | No query timeout on connection pool; could hang |
+| Daily cost tracking + alerts | Carded | 245 (7x7x5) | Already in Review |
+| Router data query accuracy | Carded | 378 (7x9x6) | Carded session 8 |
+| Low complexity fast path | Carded | 336 (7x8x6) | Carded session 8 |
+| Remove unused github config | Carded | 300 (3x10x10) | Carded session 8 |
+| Feedback prompt in responses | Carded | 252 (6x7x6) | Carded session 8 |
+| Dashboard per-user analytics | Valuable | 210 (7x6x5) | Show top users, per-user cost, usage patterns |
+| Response caching | Valuable | 140 (7x5x4) | Cache common platform queries |
+| Multi-channel support | Exploratory | 168 (7x6x4) | Support beyond single Slack channel |
+| Agent response quality scoring | Exploratory | 72 (9x4x2) | Auto-evaluate quality via LLM judge |
 
 ---
 
@@ -83,38 +93,40 @@ Last updated: 2026-02-14 (session 7)
 
 <!-- Overwritten each session — only the most recent notes live here -->
 
-2026-02-14 (session 7): Major progress since session 6. The autonomous team completed nearly all remaining cards.
+2026-03-15 (session 8): Massive codebase growth since session 7. The autonomous team completed ~15+ cards.
 
-Newly completed since session 6:
-- Persistent Storage phases 1-3 (migration infra, events DB, threads/users DB)
-- Feature discovery in router (suggests features to uncertain users)
-- Multiple bug fixes (feedback not updating, wrong Slack icons, multiple poller spawns)
-- Labels for Trello cards
-- Error notification card cleanup
+Completed since session 7:
+- Router error fallback fixed (returns needsAgent:false)
+- Health check DB connectivity added
+- DB events cleanup added
+- DB connect timeout added
+- SQL execution in agent responses (sql:execute blocks)
+- CSV file attachments for SQL query results
+- Agent log parser and dashboard timeline
+- Pricing module with per-model costs
+- Perf stats for tool breakdown
+- Dashboard LLM conversation view (router, assistant, tool, heartbeat cards)
+- Schema verification workflow (describe-tables.sh, model-relationships.md)
+- Feature request creation via agent
+- Platform integration (sibling containers, external repo workflow)
 
-Board state: Review has 1 card (daily cost tracking). ToDo is empty. In Progress is empty. Done has 33 cards. Needs Help and Cancelled are empty.
+Board state: Review has 2 cards (daily cost tracking, platform creative transcoding). ToDo empty. In Progress empty.
 
-Codebase stats: 32 test files, 478 tests, all passing. Up from 248 tests in session 6.
+DB stats: 22 events (18 complete, 4 error). 1 user (newms87). Complexity: 10 very_low, 8 low. Avg cost $0.08 for low. Total spend ~$0.63.
 
-New files since session 6:
-- src/db/connection.ts, threads-db.ts, users-db.ts, migrate.ts + migrations/
-- src/dashboard/events-db.ts, export.ts
-- src/errors/trello-notifier.ts
-- src/shutdown.ts
-- src/agent/features.ts, fast-system-prompt.md, heartbeat.ts
-- src/agent/router.ts (extracted from agent.ts)
+Error patterns: 2 credit balance errors, 1 JSON parse error (agent returned raw CSV), 1 effort param not supported.
 
-Discovered issues:
-1. Router error fallback sets needsAgent:true + very_high complexity, wasting $2 on router failures (Bug)
-2. Events table in DB has no TTL/cleanup -- grows unbounded
-3. Health check doesn't verify DB connectivity
-4. github.webhookSecret exists in config.ts but is used nowhere
-5. DB connection pool has no query timeout
+Key findings:
+1. Router misroutes data queries ("make me a csv") as very_low/no-agent when they need the agent
+2. github.webhookSecret still dead code
+3. Very low feedback rate (1/22) - users may not notice reaction prompts
+4. Low complexity goes through full heartbeat path unnecessarily
+5. Only 1 active user so far - still early adoption phase
 
-Created 4 new Trello cards in Review:
-1. Fix router error fallback to not trigger agent on failure (ICE 504, Bug)
-2. Add periodic cleanup for events DB table (ICE 360, Maintenance)
-3. Add DB query timeout to connection pool (ICE 288, Maintenance)
-4. Add DB connectivity check to health endpoint (ICE 280, Feature)
+Created 4 new cards in Review:
+1. [Router] Improve data query routing accuracy (ICE 378)
+2. [Agent] Add low complexity fast path (ICE 336)
+3. [Config] Remove unused github.webhookSecret (ICE 270)
+4. [Agent] Add feedback prompt to responses (ICE 252)
 
-Mix: 1 Bug + 2 Maintenance + 1 Feature (Valuable). Next priorities: remove unused github config (ICE 270), daily cost tracking (already carded, ICE 245), per-user dashboard analytics (ICE 210).
+Mix: 2 Valuable + 2 Maintenance. Prioritized by ICE score.
