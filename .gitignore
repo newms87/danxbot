@@ -10,11 +10,13 @@ dashboard/node_modules/
 
 .claude/clad.json
 agent-notes.md
+claude-auth/*
+!claude-auth/.gitkeep
 .claude/rules/trello-config.md
 
-# Repo-specific files (all live in repo/, synced to targets by poller)
-repo/*
-!repo/.gitkeep
+# Repo-specific files (all live in repo-config/, synced to targets by poller)
+repo-config/*
+!repo-config/.gitkeep
 .claude/rules/repo-config.md
 .claude/rules/repo-overview.md
 .claude/rules/repo-workflow.md

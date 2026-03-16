@@ -14,8 +14,8 @@ import { fetchTodoCards, fetchNeedsHelpCards, fetchReviewCards, fetchLatestComme
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const lockFile = resolve(projectRoot, ".poller-running");
 const trelloConfigRule = resolve(projectRoot, ".claude/rules/trello-config.md");
-const repoDir = resolve(projectRoot, "repo");
-const repoConfigYml = resolve(repoDir, "config.yml");
+const repoConfigDir = resolve(projectRoot, "repo-config");
+const repoConfigYml = resolve(repoConfigDir, "config.yml");
 
 const log = createLogger("poller");
 
@@ -72,6 +72,10 @@ export async function poll(): Promise<void> {
 }
 
 async function _poll(): Promise<void> {
+  // Sync repo config to target locations on every poll cycle
+  writeTrelloConfigRule();
+  syncRepoFiles();
+
   log.info("Checking Needs Help + ToDo lists...");
 
   // Check Needs Help first — user-responded cards get moved to ToDo top
@@ -170,39 +174,152 @@ function parseSimpleYaml(content: string): Record<string, string> {
 }
 
 /**
- * Sync all repo-specific files from repo/ to their target locations.
- * This is the single distribution point — repo/ is the source of truth.
+ * Validate that repo-config/ and env vars are fully configured.
+ * Throws if anything is missing or empty — the poller must not run without valid config.
  */
-function syncRepoFiles(): void {
-  if (!existsSync(repoDir)) return;
+export function validateRepoConfig(): void {
+  const errors: string[] = [];
 
-  const rulesDir = resolve(projectRoot, ".claude/rules");
-  const docsDir = resolve(projectRoot, "docs");
-  const overridesDir = resolve(projectRoot, "repo-overrides");
+  // 1. repo-config/ directory must exist
+  if (!existsSync(repoConfigDir)) {
+    throw new Error(
+      `repo-config/ directory not found. Run ./install.sh to set up flytebot.`,
+    );
+  }
 
-  // 1. Generate repo-config.md from repo/config.yml
+  // 2. Required files must exist and not be empty
+  const requiredFiles = [
+    { path: "config.yml", label: "Repo configuration" },
+    { path: "overview.md", label: "Repo overview" },
+    { path: "workflow.md", label: "Repo workflow" },
+  ];
+
+  for (const { path, label } of requiredFiles) {
+    const fullPath = resolve(repoConfigDir, path);
+    if (!existsSync(fullPath)) {
+      errors.push(`Missing repo-config/${path} (${label})`);
+    } else {
+      const content = readFileSync(fullPath, "utf-8").trim();
+      if (!content) {
+        errors.push(`Empty repo-config/${path} (${label})`);
+      }
+    }
+  }
+
+  // 3. config.yml must have required fields with non-empty values
   if (existsSync(repoConfigYml)) {
     const raw = readFileSync(repoConfigYml, "utf-8");
     const cfg = parseSimpleYaml(raw);
 
-    const name = cfg.name || "unknown";
-    const url = cfg.url || "";
-    const runtime = cfg.runtime || "local";
-    const language = cfg.language || "";
-    const framework = cfg.framework || "";
-    const testCmd = cfg["commands.test"] || "";
-    const lintCmd = cfg["commands.lint"] || "";
-    const typeCheckCmd = cfg["commands.type_check"] || "";
-    const devCmd = cfg["commands.dev"] || "";
-    const composeFile = cfg["docker.compose_file"] || "";
-    const serviceName = cfg["docker.service_name"] || "";
-    const projectName = cfg["docker.project_name"] || "";
-    const sourcePath = cfg["paths.source"] || "";
-    const testsPath = cfg["paths.tests"] || "";
+    const requiredFields = [
+      { key: "name", label: "Repo name" },
+      { key: "url", label: "Repo URL" },
+      { key: "runtime", label: "Runtime (docker or local)" },
+      { key: "language", label: "Language" },
+    ];
 
-    let content = `# Repo Config (auto-generated — do not edit)
+    for (const { key, label } of requiredFields) {
+      if (!cfg[key] || !cfg[key].trim()) {
+        errors.push(`Missing '${key}' in repo-config/config.yml (${label})`);
+      }
+    }
 
-This file is synced by the poller from \`repo/config.yml\` before each run.
+    // If runtime is docker, compose config is required
+    if (cfg.runtime === "docker") {
+      const dockerFields = [
+        { key: "docker.compose_file", label: "Docker compose file" },
+        { key: "docker.service_name", label: "Docker service name" },
+        { key: "docker.project_name", label: "Docker project name" },
+      ];
+      for (const { key, label } of dockerFields) {
+        if (!cfg[key] || !cfg[key].trim()) {
+          errors.push(`Missing '${key}' in repo-config/config.yml (${label} — required when runtime is docker)`);
+        }
+      }
+
+      // Compose file must actually exist
+      const composeFile = resolve(repoConfigDir, "compose.yml");
+      if (!existsSync(composeFile)) {
+        errors.push(`Missing repo-config/compose.yml (required when runtime is docker)`);
+      }
+    }
+  }
+
+  // 4. Required environment variables
+  const requiredEnvVars = [
+    { name: "ANTHROPIC_API_KEY", label: "Anthropic API key" },
+    { name: "GITHUB_TOKEN", label: "GitHub token" },
+    { name: "REPOS", label: "Connected repo (name:url)" },
+    { name: "TRELLO_API_KEY", label: "Trello API key" },
+    { name: "TRELLO_API_TOKEN", label: "Trello API token" },
+    { name: "TRELLO_BOARD_ID", label: "Trello board ID" },
+    { name: "TRELLO_REVIEW_LIST_ID", label: "Trello Review list ID" },
+    { name: "TRELLO_TODO_LIST_ID", label: "Trello ToDo list ID" },
+    { name: "TRELLO_IN_PROGRESS_LIST_ID", label: "Trello In Progress list ID" },
+    { name: "TRELLO_NEEDS_HELP_LIST_ID", label: "Trello Needs Help list ID" },
+    { name: "TRELLO_DONE_LIST_ID", label: "Trello Done list ID" },
+    { name: "TRELLO_CANCELLED_LIST_ID", label: "Trello Cancelled list ID" },
+    { name: "TRELLO_ACTION_ITEMS_LIST_ID", label: "Trello Action Items list ID" },
+    { name: "TRELLO_BUG_LABEL_ID", label: "Trello Bug label ID" },
+    { name: "TRELLO_FEATURE_LABEL_ID", label: "Trello Feature label ID" },
+    { name: "TRELLO_EPIC_LABEL_ID", label: "Trello Epic label ID" },
+    { name: "TRELLO_NEEDS_HELP_LABEL_ID", label: "Trello Needs Help label ID" },
+  ];
+
+  for (const { name, label } of requiredEnvVars) {
+    const value = process.env[name];
+    if (!value || !value.trim()) {
+      errors.push(`Missing env var ${name} (${label})`);
+    }
+  }
+
+  // 5. Claude auth files must exist
+  const claudeAuthDir = resolve(projectRoot, "claude-auth");
+  const claudeJson = resolve(claudeAuthDir, ".claude.json");
+  if (!existsSync(claudeJson)) {
+    errors.push(`Missing claude-auth/.claude.json (Claude Code credentials — run ./install.sh Step 6)`);
+  }
+
+  if (errors.length > 0) {
+    throw new Error(
+      `Repo config validation failed:\n  - ${errors.join("\n  - ")}\n\nRun ./install.sh to complete setup.`,
+    );
+  }
+
+  log.info("Repo config validated successfully");
+}
+
+/**
+ * Sync all repo-specific files from repo-config/ to their target locations.
+ * Called on every poll cycle to ensure targets are always up to date.
+ */
+function syncRepoFiles(): void {
+  const rulesDir = resolve(projectRoot, ".claude/rules");
+  const docsDir = resolve(projectRoot, "docs");
+  const overridesDir = resolve(projectRoot, "repo-overrides");
+
+  // 1. Generate repo-config.md from repo-config/config.yml
+  const raw = readFileSync(repoConfigYml, "utf-8");
+  const cfg = parseSimpleYaml(raw);
+
+  const name = cfg.name || "unknown";
+  const url = cfg.url || "";
+  const runtime = cfg.runtime || "local";
+  const language = cfg.language || "";
+  const framework = cfg.framework || "";
+  const testCmd = cfg["commands.test"] || "";
+  const lintCmd = cfg["commands.lint"] || "";
+  const typeCheckCmd = cfg["commands.type_check"] || "";
+  const devCmd = cfg["commands.dev"] || "";
+  const composeFile = cfg["docker.compose_file"] || "";
+  const serviceName = cfg["docker.service_name"] || "";
+  const projectName = cfg["docker.project_name"] || "";
+  const sourcePath = cfg["paths.source"] || "";
+  const testsPath = cfg["paths.tests"] || "";
+
+  let content = `# Repo Config (auto-generated — do not edit)
+
+This file is synced by the poller from \`repo-config/config.yml\` on every poll cycle.
 
 ## Repo
 
@@ -232,8 +349,8 @@ This file is synced by the poller from \`repo/config.yml\` before each run.
 | Tests | \`${testsPath}\` |
 `;
 
-    if (runtime === "docker" && composeFile) {
-      content += `
+  if (runtime === "docker" && composeFile) {
+    content += `
 ## Docker
 
 | Field | Value |
@@ -242,53 +359,45 @@ This file is synced by the poller from \`repo/config.yml\` before each run.
 | Service Name | \`${serviceName}\` |
 | Project Name | \`${projectName}\` |
 `;
-    }
-
-    writeFileSync(resolve(rulesDir, "repo-config.md"), content);
-
-    // 4. Copy compose override to repo-overrides/
-    const composeSource = resolve(repoDir, "compose.yml");
-    if (existsSync(composeSource)) {
-      mkdirSync(overridesDir, { recursive: true });
-      copyFileSync(composeSource, resolve(overridesDir, `${name}-compose.yml`));
-    }
-
-    // 5. Copy post-clone hook to repo-overrides/
-    const hookSource = resolve(repoDir, "post-clone.sh");
-    if (existsSync(hookSource)) {
-      mkdirSync(overridesDir, { recursive: true });
-      copyFileSync(hookSource, resolve(overridesDir, `post-clone-${name}.sh`));
-    }
-
-    // 6. Copy repo.env to repo-overrides/
-    const envSource = resolve(repoDir, "repo.env");
-    if (existsSync(envSource)) {
-      mkdirSync(overridesDir, { recursive: true });
-      copyFileSync(envSource, resolve(overridesDir, `${name}.env`));
-    }
   }
+
+  writeFileSync(resolve(rulesDir, "repo-config.md"), content);
 
   // 2. Copy overview.md → .claude/rules/repo-overview.md
-  const overviewSource = resolve(repoDir, "overview.md");
-  if (existsSync(overviewSource)) {
-    copyFileSync(overviewSource, resolve(rulesDir, "repo-overview.md"));
-  }
+  copyFileSync(resolve(repoConfigDir, "overview.md"), resolve(rulesDir, "repo-overview.md"));
 
   // 3. Copy workflow.md → .claude/rules/repo-workflow.md
-  const workflowSource = resolve(repoDir, "workflow.md");
-  if (existsSync(workflowSource)) {
-    copyFileSync(workflowSource, resolve(rulesDir, "repo-workflow.md"));
+  copyFileSync(resolve(repoConfigDir, "workflow.md"), resolve(rulesDir, "repo-workflow.md"));
+
+  // 4. Copy compose override to repo-overrides/ (optional)
+  const composeSource = resolve(repoConfigDir, "compose.yml");
+  if (existsSync(composeSource)) {
+    mkdirSync(overridesDir, { recursive: true });
+    copyFileSync(composeSource, resolve(overridesDir, `${name}-compose.yml`));
+  }
+
+  // 5. Copy post-clone hook to repo-overrides/ (optional)
+  const hookSource = resolve(repoConfigDir, "post-clone.sh");
+  if (existsSync(hookSource)) {
+    mkdirSync(overridesDir, { recursive: true });
+    copyFileSync(hookSource, resolve(overridesDir, `post-clone-${name}.sh`));
+  }
+
+  // 6. Copy repo.env to repo-overrides/ (optional)
+  const envSource = resolve(repoConfigDir, "repo.env");
+  if (existsSync(envSource)) {
+    mkdirSync(overridesDir, { recursive: true });
+    copyFileSync(envSource, resolve(overridesDir, `${name}.env`));
   }
 
   // 7. Copy docs/ → docs/ (domains and schema)
-  const repoDocsDir = resolve(repoDir, "docs");
+  const repoDocsDir = resolve(repoConfigDir, "docs");
   if (existsSync(repoDocsDir)) {
     for (const subdir of ["domains", "schema"]) {
       const srcDir = resolve(repoDocsDir, subdir);
       if (!existsSync(srcDir)) continue;
       const destDir = resolve(docsDir, subdir);
       mkdirSync(destDir, { recursive: true });
-      // Read directory and copy each file
       for (const file of readdirSync(srcDir)) {
         copyFileSync(resolve(srcDir, file), resolve(destDir, file));
       }
@@ -296,7 +405,7 @@ This file is synced by the poller from \`repo/config.yml\` before each run.
   }
 
   // 8. Copy features.md → docs/features.md (only if docs/ version doesn't exist yet)
-  const featuresSource = resolve(repoDir, "features.md");
+  const featuresSource = resolve(repoConfigDir, "features.md");
   const featuresDest = resolve(docsDir, "features.md");
   if (existsSync(featuresSource) && !existsSync(featuresDest)) {
     mkdirSync(docsDir, { recursive: true });
@@ -312,8 +421,6 @@ function spawnClaude(title: string, scriptName: string): void {
   }
 
   teamRunning = true;
-  writeTrelloConfigRule();
-  syncRepoFiles();
   log.info(`Spawning Claude in new terminal tab (${title})...`);
 
   const env = { ...process.env };
@@ -398,6 +505,9 @@ function startLockWatch(): void {
 export function start(): void {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  // Validate all config before starting — halt immediately if anything is wrong
+  validateRepoConfig();
 
   const intervalSeconds = config.pollerIntervalMs / 1000;
   log.info(`Started — polling every ${intervalSeconds}s`);

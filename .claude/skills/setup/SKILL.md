@@ -77,14 +77,27 @@ You are the interactive setup wizard for Flytebot. Guide the user through each s
 ## Step 5: Slack Setup (Optional)
 
 1. Ask: "Do you want to connect Slack? (yes/no)"
-2. **If no:** Write empty values to `.env` (`SLACK_BOT_TOKEN=`, `SLACK_APP_TOKEN=`, `SLACK_CHANNEL_ID=`) and skip to Step 6.
+2. **If no:** Write empty values to `.env` (`SLACK_BOT_TOKEN=`, `SLACK_APP_TOKEN=`, `SLACK_CHANNEL_ID=`) and skip to Step 7.
 3. **If yes:**
    - Ask for `SLACK_BOT_TOKEN` (starts with `xoxb-`)
    - Ask for `SLACK_APP_TOKEN` (starts with `xapp-`)
    - Ask for `SLACK_CHANNEL_ID` (starts with `C`)
    - Save all three to `.env`
 
-## Step 6: Clone and Explore Repo
+## Step 6: Claude Code Auth
+
+The bot runs inside Docker and needs Claude Code CLI credentials to make agent calls (subscription-based, separate from the API key).
+
+1. Ask: "Where is your Claude Code config? Typically `~/.claude.json` — enter the full path (or press enter for default):"
+2. Resolve the path. If default, use `~/.claude.json`.
+3. Verify the file exists. If not, tell the user to run `claude` on the host first to authenticate, then retry.
+4. Copy the file: `cp <path> claude-auth/.claude.json`
+5. Check if `~/.claude/.credentials.json` exists (same parent directory as `.claude.json` but inside `.claude/`). If so, copy it: `cp ~/.claude/.credentials.json claude-auth/.credentials.json`
+6. Confirm: "Claude auth copied to claude-auth/ — the container will use these credentials."
+
+**Note:** These are OAuth tokens, not API keys. They're gitignored and stay local.
+
+## Step 7: Clone and Explore Repo
 
 1. Create the `repos/` directory if it doesn't exist
 2. Clone the repo: `gh repo clone <nameWithOwner> repos/<name>`
@@ -115,13 +128,13 @@ You are the interactive setup wizard for Flytebot. Guide the user through each s
 6. Ask: "Is this correct? Anything to change?"
 7. Apply any corrections the user provides.
 
-## Step 7: Generate Repo Config (all files go in `repo/`)
+## Step 8: Generate Repo Config (all files go in `repo-config/`)
 
-**All repo-specific files live in the `repo/` directory.** This is the single source of truth. The poller syncs files from `repo/` to their target locations (`.claude/rules/`, `docs/`, `repo-overrides/`) before each Claude spawn.
+**All repo-specific files live in the `repo-config/` directory.** This is the single source of truth. The poller syncs files from `repo-config/` to their target locations (`.claude/rules/`, `docs/`, `repo-overrides/`) before each Claude spawn.
 
-### 7a: Write `repo/config.yml`
+### 8a: Write `repo-config/config.yml`
 
-Write `repo/config.yml` with the discovered config:
+Write `repo-config/config.yml` with the discovered config:
 
 ```yaml
 name: <repo-name>
@@ -148,9 +161,9 @@ paths:
 
 Adjust the structure based on what was actually detected. If no Docker setup, omit the `docker` section and set `runtime: local`.
 
-### 7b: Generate Docker Compose Override (if runtime is `docker`)
+### 8b: Generate Docker Compose Override (if runtime is `docker`)
 
-If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an isolated compose override at `repo/compose.yml`. This file runs the repo's own Docker stack with an isolated project name and network, so it doesn't conflict with the host's setup.
+If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an isolated compose override at `repo-config/compose.yml`. This file runs the repo's own Docker stack with an isolated project name and network, so it doesn't conflict with the host's setup.
 
 **Key principles:**
 - Use the repo's own Docker images (build from its Dockerfile or reference its images)
@@ -169,9 +182,9 @@ If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an is
 
 **For other frameworks**, adapt based on what the repo's own docker-compose.yml defines.
 
-### 7c: Generate Post-Clone Hook (if needed)
+### 8c: Generate Post-Clone Hook (if needed)
 
-If the repo needs setup after cloning (auth files, dependency install, config copy), create `repo/post-clone.sh`:
+If the repo needs setup after cloning (auth files, dependency install, config copy), create `repo-config/post-clone.sh`:
 
 ```bash
 #!/bin/bash
@@ -184,19 +197,19 @@ if [ -f "/flytebot/app/repo-overrides/<name>-auth.json" ] && [ -d "$REPO/<subdir
 fi
 ```
 
-Ask the user: "Does this repo require any auth files or credentials for package installation (e.g., Composer auth for private packages, npm tokens)?" If yes, collect the credentials and write them to `repo/`.
+Ask the user: "Does this repo require any auth files or credentials for package installation (e.g., Composer auth for private packages, npm tokens)?" If yes, collect the credentials and write them to `repo-config/`.
 
-### 7d: Generate Env File (if Docker runtime)
+### 8d: Generate Env File (if Docker runtime)
 
-If the repo's Docker stack needs environment variables, write them to `repo/repo.env`. This keeps repo-specific env vars separate from flytebot's `.env`.
+If the repo's Docker stack needs environment variables, write them to `repo-config/repo.env`. This keeps repo-specific env vars separate from flytebot's `.env`.
 
-## Step 8: Generate Rules (all files go in `repo/`)
+## Step 9: Generate Rules (all files go in `repo-config/`)
 
-All generated rules go into `repo/`. The poller's sync function distributes them to their target locations before each Claude spawn.
+All generated rules go into `repo-config/`. The poller's sync function distributes them to their target locations before each Claude spawn.
 
-### `repo/overview.md`
+### `repo-config/overview.md`
 
-Generate an overview of the connected repo based on what was discovered in Step 6. This file gives the orchestrator agent context about the repo's architecture so it can work on cards effectively. Include:
+Generate an overview of the connected repo based on what was discovered in Step 7. This file gives the orchestrator agent context about the repo's architecture so it can work on cards effectively. Include:
 
 - **Tech stack** — languages, frameworks, database, cache, infrastructure
 - **Repository structure** — key directories and what they contain
@@ -208,7 +221,7 @@ Base this entirely on what you read from the repo's source code, README, and con
 
 Synced to: `.claude/rules/repo-overview.md`
 
-### `repo/workflow.md`
+### `repo-config/workflow.md`
 
 Generate a workflow rule tailored to the detected repo. Include:
 - How to edit files (path prefix: `repos/<name>/`)
@@ -221,16 +234,16 @@ Use the existing `.claude/rules/repo-workflow.md` as a template for the structur
 
 Synced to: `.claude/rules/repo-workflow.md`
 
-### `repo/docs/schema/` and `repo/docs/domains/` (if database is configured)
+### `repo-config/docs/schema/` and `repo-config/docs/domains/` (if database is configured)
 
 If the connected repo has a database, generate domain documentation:
 
-**`repo/docs/schema/model-relationships.md`** — A relationship map showing how the key database tables connect via foreign keys. Base this on:
+**`repo-config/docs/schema/model-relationships.md`** — A relationship map showing how the key database tables connect via foreign keys. Base this on:
 - Reading model files (Eloquent relationships, ActiveRecord associations, etc.)
 - Running DESCRIBE on key tables
 - Tracing foreign key relationships
 
-**`repo/docs/domains/*.md`** — One file per major domain area (e.g., `users.md`, `billing.md`). Each should contain:
+**`repo-config/docs/domains/*.md`** — One file per major domain area (e.g., `users.md`, `billing.md`). Each should contain:
 - What the domain covers
 - Key models/tables involved
 - Important relationships and workflows
@@ -242,9 +255,20 @@ If no database is configured, create placeholder files noting that database docs
 
 Synced to: `docs/domains/` and `docs/schema/`
 
-### Note: `repo-config.md` is auto-generated
+### Initial sync
 
-The poller generates `.claude/rules/repo-config.md` from `repo/config.yml` automatically — do NOT create this file manually.
+After writing all files to `repo-config/`, immediately sync them to their target locations so the orchestrator can work without waiting for the poller:
+
+1. Copy `repo-config/overview.md` → `.claude/rules/repo-overview.md`
+2. Copy `repo-config/workflow.md` → `.claude/rules/repo-workflow.md`
+3. Copy `repo-config/docs/domains/*` → `docs/domains/`
+4. Copy `repo-config/docs/schema/*` → `docs/schema/`
+5. Copy `repo-config/compose.yml` → `repo-overrides/<name>-compose.yml` (if exists)
+6. Copy `repo-config/post-clone.sh` → `repo-overrides/post-clone-<name>.sh` (if exists)
+7. Copy `repo-config/repo.env` → `repo-overrides/<name>.env` (if exists)
+8. Generate `.claude/rules/repo-config.md` from `repo-config/config.yml` (same format the poller uses — a markdown file with tables for repo name, commands, paths, and Docker config)
+
+The poller will re-sync these before each Claude spawn, but this initial sync ensures everything works immediately.
 
 ### Update `CLAUDE.md`
 
@@ -253,7 +277,7 @@ Add a section about the connected repo under "## Connected Repo" with:
 - Tech stack detected
 - Key commands
 
-## Step 9: Finalize `.env`
+## Step 10: Finalize `.env`
 
 Ensure `.env` has all values. Add defaults for anything not yet set:
 
@@ -264,16 +288,10 @@ FLYTEBOT_DB_USER=flytebot
 FLYTEBOT_DB_PASSWORD=flytebot
 FLYTEBOT_DB_NAME=flytebot_chat
 
-# Claude auth directories (for Docker volume mounts)
-CLAUDE_AUTH_DIR=<user's ~/.claude directory>
-CLAUDE_AUTH_HOME=<user's home directory>
-
 # Poller
 POLLER_INTERVAL_MS=60000
 TRELLO_REVIEW_MIN_CARDS=10
 ```
-
-Ask the user: "Where is your Claude config directory? (usually `~/.claude`)" and "What is your home directory? (usually `~`)" — resolve to absolute paths and write as `CLAUDE_AUTH_DIR` and `CLAUDE_AUTH_HOME`.
 
 If the repo has a database that the agent should query (read-only), ask:
 - "Does the connected repo have a database the agent should have read access to? (yes/no)"
@@ -282,7 +300,7 @@ If the repo has a database that the agent should query (read-only), ask:
 
 Read back the final `.env` (masking secrets) and present to user for confirmation.
 
-## Step 10: Smoke Test
+## Step 11: Smoke Test
 
 1. Start flytebot: `docker compose up -d --build`
 2. Wait 10 seconds for startup
@@ -293,7 +311,7 @@ Read back the final `.env` (masking secrets) and present to user for confirmatio
 7. Create a feature branch in the repo, add a "## Flytebot" section to the repo's README (describing what Flytebot does for this repo), commit, push, and open a PR as proof of life
 8. Report the PR URL to the user
 
-## Step 11: Finish
+## Step 12: Finish
 
 1. Ask if the user has any questions or corrections
 2. Summarize what was set up:

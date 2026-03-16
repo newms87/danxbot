@@ -63,13 +63,18 @@ if getent group docker > /dev/null 2>&1; then
     usermod -aG docker flytebot
 fi
 
-# Set up Claude Code auth for the flytebot user (copy from read-only directory mounts)
-if [ -f "/flytebot/claude-auth/home/.claude.json" ]; then
-    cp /flytebot/claude-auth/home/.claude.json "$FLYTEBOT_HOME/.claude.json"
+# Set up Claude Code auth for the flytebot user (copied into project by /setup)
+if [ -f "/flytebot/claude-auth/.claude.json" ]; then
+    cp /flytebot/claude-auth/.claude.json "$FLYTEBOT_HOME/.claude.json"
     mkdir -p "$FLYTEBOT_HOME/.claude"
-    cp /flytebot/claude-auth/dot-claude/.credentials.json "$FLYTEBOT_HOME/.claude/.credentials.json"
+    if [ -f "/flytebot/claude-auth/.credentials.json" ]; then
+        cp /flytebot/claude-auth/.credentials.json "$FLYTEBOT_HOME/.claude/.credentials.json"
+    fi
     chown -R flytebot:flytebot "$FLYTEBOT_HOME/.claude.json" "$FLYTEBOT_HOME/.claude"
     echo "Claude Code auth configured."
+else
+    echo "WARNING: No Claude auth found at /flytebot/claude-auth/ — agent will not work."
+    echo "Run ./install.sh or manually copy .claude.json and .credentials.json to claude-auth/"
 fi
 
 # Fix ownership of runtime directories (volumes may have been created as root)

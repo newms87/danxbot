@@ -21,9 +21,8 @@ services:
       - ./repo-overrides:/flytebot/app/repo-overrides:ro
       # Docker socket (for managing sibling containers)
       - /var/run/docker.sock:/var/run/docker.sock
-      # Claude Code auth (directory mounts survive inode changes from file rewrites)
-      - ${CLAUDE_AUTH_DIR:-/dev/null}:/flytebot/claude-auth/dot-claude:ro
-      - ${CLAUDE_AUTH_HOME:-/dev/null}:/flytebot/claude-auth/home:ro
+      # Claude Code auth (copied into project by /setup)
+      - ./claude-auth:/flytebot/claude-auth:ro
     depends_on:
       flytebot-mysql:
         condition: service_healthy

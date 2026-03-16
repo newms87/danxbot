@@ -68,12 +68,47 @@ function createFakeSpawnResult() {
   return { unref: vi.fn() };
 }
 
+const FAKE_CONFIG_YML = `name: test-repo
+url: https://github.com/org/repo.git
+runtime: local
+language: node
+framework: express
+
+commands:
+  test: "npm test"
+  lint: ""
+  type_check: ""
+  dev: ""
+
+paths:
+  source: "src/"
+  tests: "tests/"
+`;
+
+/** Make existsSync return true for repo-config/ paths, false for lock file by default */
+function setupRepoConfigMocks() {
+  mockExistsSync.mockImplementation((path: string) => {
+    if (typeof path === "string" && (
+      path.endsWith("repo-config") ||
+      path.endsWith("config.yml") ||
+      path.endsWith("overview.md") ||
+      path.endsWith("workflow.md")
+    )) return true;
+    return false;
+  });
+  mockReadFileSync.mockImplementation((path: string) => {
+    if (typeof path === "string" && path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+    if (typeof path === "string" && path.endsWith(".md")) return "# placeholder";
+    return "";
+  });
+}
+
 describe("poll", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
-    mockExistsSync.mockReturnValue(false);
+    setupRepoConfigMocks();
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockMoveCardToList.mockResolvedValue(undefined);
   });
@@ -164,7 +199,7 @@ describe("poll — Needs Help checking", () => {
     vi.clearAllMocks();
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
-    mockExistsSync.mockReturnValue(false);
+    setupRepoConfigMocks();
     mockMoveCardToList.mockResolvedValue(undefined);
   });
 
@@ -294,6 +329,27 @@ describe("poll — Needs Help checking", () => {
 
 describe("start", () => {
   let mockExit: ReturnType<typeof vi.spyOn>;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  const requiredEnvVars: Record<string, string> = {
+    ANTHROPIC_API_KEY: "sk-ant-test",
+    GITHUB_TOKEN: "ghp_test",
+    REPOS: "test:https://github.com/org/repo.git",
+    TRELLO_API_KEY: "trello-key",
+    TRELLO_API_TOKEN: "trello-token",
+    TRELLO_BOARD_ID: "board-id",
+    TRELLO_REVIEW_LIST_ID: "review-id",
+    TRELLO_TODO_LIST_ID: "todo-id",
+    TRELLO_IN_PROGRESS_LIST_ID: "ip-id",
+    TRELLO_NEEDS_HELP_LIST_ID: "nh-id",
+    TRELLO_DONE_LIST_ID: "done-id",
+    TRELLO_CANCELLED_LIST_ID: "cancel-id",
+    TRELLO_ACTION_ITEMS_LIST_ID: "ai-id",
+    TRELLO_BUG_LABEL_ID: "bug-id",
+    TRELLO_FEATURE_LABEL_ID: "feat-id",
+    TRELLO_EPIC_LABEL_ID: "epic-id",
+    TRELLO_NEEDS_HELP_LABEL_ID: "nh-label-id",
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -302,7 +358,18 @@ describe("start", () => {
     mockSpawn.mockReturnValue(createFakeSpawnResult());
     mockFetchTodoCards.mockResolvedValue([]);
     mockFetchNeedsHelpCards.mockResolvedValue([]);
-    mockExistsSync.mockReturnValue(false);
+    setupRepoConfigMocks();
+    // Also return true for claude-auth/.claude.json
+    const origImpl = mockExistsSync.getMockImplementation()!;
+    mockExistsSync.mockImplementation((path: string) => {
+      if (typeof path === "string" && path.endsWith(".claude.json")) return true;
+      return origImpl(path);
+    });
+    // Set required env vars for validation
+    for (const [key, value] of Object.entries(requiredEnvVars)) {
+      savedEnv[key] = process.env[key];
+      process.env[key] = value;
+    }
     mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
   });
 
@@ -310,14 +377,24 @@ describe("start", () => {
     mockExit.mockRestore();
     vi.useRealTimers();
     _resetForTesting();
+    // Restore env vars
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   it("removes stale lock file at startup and proceeds normally", async () => {
-    // First existsSync call (start lock check): true — stale lock exists
-    // Second existsSync call (poll pre-spawn check): false — lock was removed
-    mockExistsSync
-      .mockReturnValueOnce(true)
-      .mockReturnValueOnce(false);
+    // Lock file exists at startup — should be removed
+    // Track whether unlinkSync has been called (simulates lock file removal)
+    let lockRemoved = false;
+    mockUnlinkSync.mockImplementation(() => { lockRemoved = true; });
+
+    const origImpl = mockExistsSync.getMockImplementation()!;
+    mockExistsSync.mockImplementation((path: string) => {
+      if (typeof path === "string" && path.endsWith(".poller-running")) return !lockRemoved;
+      return origImpl(path);
+    });
 
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
@@ -325,16 +402,13 @@ describe("start", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     // Lock file should be removed at startup
-    expect(mockUnlinkSync).toHaveBeenCalledWith(
-      expect.stringContaining(".poller-running"),
-    );
+    expect(lockRemoved).toBe(true);
 
     // Should proceed to spawn since lock was cleared
     expect(mockSpawn).toHaveBeenCalled();
   });
 
   it("does not call unlinkSync when no lock file exists at startup", async () => {
-    mockExistsSync.mockReturnValue(false);
     mockFetchTodoCards.mockResolvedValue([]);
 
     start();
@@ -344,7 +418,11 @@ describe("start", () => {
   });
 
   it("crashes if unlinkSync fails on stale lock file", () => {
-    mockExistsSync.mockReturnValueOnce(true);
+    const origImpl = mockExistsSync.getMockImplementation()!;
+    mockExistsSync.mockImplementation((path: string) => {
+      if (typeof path === "string" && path.endsWith(".poller-running")) return true;
+      return origImpl(path);
+    });
     mockUnlinkSync.mockImplementation(() => {
       throw new Error("EPERM: operation not permitted");
     });
@@ -359,7 +437,7 @@ describe("startLockWatch — immediate re-poll on completion", () => {
     vi.useFakeTimers();
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
-    mockExistsSync.mockReturnValue(false);
+    setupRepoConfigMocks();
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockFetchTodoCards.mockResolvedValue([]);
   });
@@ -453,7 +531,7 @@ describe("shutdown", () => {
     vi.clearAllMocks();
     _resetForTesting();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
-    mockExistsSync.mockReturnValue(false);
+    setupRepoConfigMocks();
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
   });
