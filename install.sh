@@ -28,9 +28,14 @@ if ! command -v claude &>/dev/null; then
 fi
 echo "Claude Code CLI OK"
 
-# Install dependencies
+# Install dependencies (both root and dashboard)
 echo "Installing dependencies..."
 npm install
+cd dashboard && npm install && cd ..
+
+# Build dashboard so the volume mount has dist/ on the host
+echo "Building dashboard..."
+cd dashboard && npm run build && cd ..
 
 # Hand off to Claude's interactive setup skill
 echo ""

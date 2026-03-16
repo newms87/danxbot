@@ -1,22 +1,64 @@
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+import { readFileSync } from "node:fs";
+
+/**
+ * Load Trello IDs from .danxbot/config/trello.yml in the connected repo.
+ * Falls back to a simple flat YAML parser (key: value per line, with one level of nesting).
+ */
+function loadTrelloYaml(): Record<string, string> {
+  const repos = process.env.REPOS;
+  if (!repos) throw new Error("Missing required environment variable: REPOS");
+  const name = repos.split(",")[0].split(":")[0].trim();
+  if (!name) throw new Error("Invalid REPOS format — expected 'name:url'");
+
+  const trelloYmlPath = `/danxbot/repos/${name}/.danxbot/config/trello.yml`;
+  const content = readFileSync(trelloYmlPath, "utf-8");
+
+  const result: Record<string, string> = {};
+  let currentSection = "";
+
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.trimEnd();
+    if (!line || line.startsWith("#")) continue;
+
+    const sectionMatch = line.match(/^(\w[\w_]*):\s*$/);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1];
+      continue;
+    }
+
+    const kvMatch = line.match(/^(\s*)(\w[\w_]*):\s*"?([^"]*)"?\s*$/);
+    if (kvMatch) {
+      const [, indent, key, value] = kvMatch;
+      const prefix = indent && indent.length > 0 ? `${currentSection}.` : "";
+      if (!indent || indent.length === 0) currentSection = "";
+      result[`${prefix}${key}`] = value.trim();
+    }
+  }
+
+  return result;
+}
+
+function requiredTrello(config: Record<string, string>, key: string): string {
+  const value = config[key];
+  if (!value) throw new Error(`Missing required Trello config key '${key}' in .danxbot/config/trello.yml`);
   return value;
 }
 
-export const BOARD_ID = required("TRELLO_BOARD_ID");
-export const REVIEW_LIST_ID = required("TRELLO_REVIEW_LIST_ID");
-export const TODO_LIST_ID = required("TRELLO_TODO_LIST_ID");
-export const IN_PROGRESS_LIST_ID = required("TRELLO_IN_PROGRESS_LIST_ID");
-export const NEEDS_HELP_LIST_ID = required("TRELLO_NEEDS_HELP_LIST_ID");
-export const DONE_LIST_ID = required("TRELLO_DONE_LIST_ID");
-export const CANCELLED_LIST_ID = required("TRELLO_CANCELLED_LIST_ID");
-export const ACTION_ITEMS_LIST_ID = required("TRELLO_ACTION_ITEMS_LIST_ID");
+const trello = loadTrelloYaml();
 
-export const BUG_LABEL_ID = required("TRELLO_BUG_LABEL_ID");
-export const FEATURE_LABEL_ID = required("TRELLO_FEATURE_LABEL_ID");
-export const EPIC_LABEL_ID = required("TRELLO_EPIC_LABEL_ID");
-export const NEEDS_HELP_LABEL_ID = required("TRELLO_NEEDS_HELP_LABEL_ID");
+export const BOARD_ID = requiredTrello(trello, "board_id");
+export const REVIEW_LIST_ID = requiredTrello(trello, "lists.review");
+export const TODO_LIST_ID = requiredTrello(trello, "lists.todo");
+export const IN_PROGRESS_LIST_ID = requiredTrello(trello, "lists.in_progress");
+export const NEEDS_HELP_LIST_ID = requiredTrello(trello, "lists.needs_help");
+export const DONE_LIST_ID = requiredTrello(trello, "lists.done");
+export const CANCELLED_LIST_ID = requiredTrello(trello, "lists.cancelled");
+export const ACTION_ITEMS_LIST_ID = requiredTrello(trello, "lists.action_items");
+
+export const BUG_LABEL_ID = requiredTrello(trello, "labels.bug");
+export const FEATURE_LABEL_ID = requiredTrello(trello, "labels.feature");
+export const EPIC_LABEL_ID = requiredTrello(trello, "labels.epic");
+export const NEEDS_HELP_LABEL_ID = requiredTrello(trello, "labels.needs_help");
 
 export const REVIEW_MIN_CARDS = parseInt(process.env.TRELLO_REVIEW_MIN_CARDS || "10", 10);
 

@@ -14,8 +14,17 @@ import { fetchTodoCards, fetchNeedsHelpCards, fetchReviewCards, fetchLatestComme
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const lockFile = resolve(projectRoot, ".poller-running");
 const trelloConfigRule = resolve(projectRoot, ".claude/rules/trello-config.md");
-const repoConfigDir = resolve(projectRoot, "repo-config");
-const repoConfigYml = resolve(repoConfigDir, "config.yml");
+
+/** Derive the .danxbot/config/ path from the REPOS env var. */
+function getDanxbotConfigDir(): string {
+  const repos = process.env.REPOS || "";
+  const name = repos.split(",")[0].split(":")[0].trim();
+  if (!name) return "";
+  return `/danxbot/repos/${name}/.danxbot/config`;
+}
+
+const danxbotConfigDir = getDanxbotConfigDir();
+const repoConfigYml = danxbotConfigDir ? resolve(danxbotConfigDir, "config.yml") : "";
 
 const log = createLogger("poller");
 
@@ -174,16 +183,16 @@ function parseSimpleYaml(content: string): Record<string, string> {
 }
 
 /**
- * Validate that repo-config/ and env vars are fully configured.
+ * Validate that .danxbot/config/ in the connected repo and env vars are fully configured.
  * Throws if anything is missing or empty — the poller must not run without valid config.
  */
 export function validateRepoConfig(): void {
   const errors: string[] = [];
 
-  // 1. repo-config/ directory must exist
-  if (!existsSync(repoConfigDir)) {
+  // 1. .danxbot/config/ directory must exist in the connected repo
+  if (!danxbotConfigDir || !existsSync(danxbotConfigDir)) {
     throw new Error(
-      `repo-config/ directory not found. Run ./install.sh to set up danxbot.`,
+      `.danxbot/config/ not found in connected repo. Run ./install.sh to set up danxbot.`,
     );
   }
 
@@ -192,22 +201,23 @@ export function validateRepoConfig(): void {
     { path: "config.yml", label: "Repo configuration" },
     { path: "overview.md", label: "Repo overview" },
     { path: "workflow.md", label: "Repo workflow" },
+    { path: "trello.yml", label: "Trello board/list/label IDs" },
   ];
 
   for (const { path, label } of requiredFiles) {
-    const fullPath = resolve(repoConfigDir, path);
+    const fullPath = resolve(danxbotConfigDir, path);
     if (!existsSync(fullPath)) {
-      errors.push(`Missing repo-config/${path} (${label})`);
+      errors.push(`Missing .danxbot/config/${path} (${label})`);
     } else {
       const content = readFileSync(fullPath, "utf-8").trim();
       if (!content) {
-        errors.push(`Empty repo-config/${path} (${label})`);
+        errors.push(`Empty .danxbot/config/${path} (${label})`);
       }
     }
   }
 
   // 3. config.yml must have required fields with non-empty values
-  if (existsSync(repoConfigYml)) {
+  if (repoConfigYml && existsSync(repoConfigYml)) {
     const raw = readFileSync(repoConfigYml, "utf-8");
     const cfg = parseSimpleYaml(raw);
 
@@ -220,7 +230,7 @@ export function validateRepoConfig(): void {
 
     for (const { key, label } of requiredFields) {
       if (!cfg[key] || !cfg[key].trim()) {
-        errors.push(`Missing '${key}' in repo-config/config.yml (${label})`);
+        errors.push(`Missing '${key}' in .danxbot/config/config.yml (${label})`);
       }
     }
 
@@ -233,37 +243,25 @@ export function validateRepoConfig(): void {
       ];
       for (const { key, label } of dockerFields) {
         if (!cfg[key] || !cfg[key].trim()) {
-          errors.push(`Missing '${key}' in repo-config/config.yml (${label} — required when runtime is docker)`);
+          errors.push(`Missing '${key}' in .danxbot/config/config.yml (${label} — required when runtime is docker)`);
         }
       }
 
       // Compose file must actually exist
-      const composeFile = resolve(repoConfigDir, "compose.yml");
+      const composeFile = resolve(danxbotConfigDir, "compose.yml");
       if (!existsSync(composeFile)) {
-        errors.push(`Missing repo-config/compose.yml (required when runtime is docker)`);
+        errors.push(`Missing .danxbot/config/compose.yml (required when runtime is docker)`);
       }
     }
   }
 
-  // 4. Required environment variables
+  // 4. Required environment variables (secrets only — IDs come from trello.yml)
   const requiredEnvVars = [
     { name: "ANTHROPIC_API_KEY", label: "Anthropic API key" },
     { name: "GITHUB_TOKEN", label: "GitHub token" },
     { name: "REPOS", label: "Connected repo (name:url)" },
     { name: "TRELLO_API_KEY", label: "Trello API key" },
     { name: "TRELLO_API_TOKEN", label: "Trello API token" },
-    { name: "TRELLO_BOARD_ID", label: "Trello board ID" },
-    { name: "TRELLO_REVIEW_LIST_ID", label: "Trello Review list ID" },
-    { name: "TRELLO_TODO_LIST_ID", label: "Trello ToDo list ID" },
-    { name: "TRELLO_IN_PROGRESS_LIST_ID", label: "Trello In Progress list ID" },
-    { name: "TRELLO_NEEDS_HELP_LIST_ID", label: "Trello Needs Help list ID" },
-    { name: "TRELLO_DONE_LIST_ID", label: "Trello Done list ID" },
-    { name: "TRELLO_CANCELLED_LIST_ID", label: "Trello Cancelled list ID" },
-    { name: "TRELLO_ACTION_ITEMS_LIST_ID", label: "Trello Action Items list ID" },
-    { name: "TRELLO_BUG_LABEL_ID", label: "Trello Bug label ID" },
-    { name: "TRELLO_FEATURE_LABEL_ID", label: "Trello Feature label ID" },
-    { name: "TRELLO_EPIC_LABEL_ID", label: "Trello Epic label ID" },
-    { name: "TRELLO_NEEDS_HELP_LABEL_ID", label: "Trello Needs Help label ID" },
   ];
 
   for (const { name, label } of requiredEnvVars) {
@@ -290,15 +288,17 @@ export function validateRepoConfig(): void {
 }
 
 /**
- * Sync all repo-specific files from repo-config/ to their target locations.
- * Called on every poll cycle to ensure targets are always up to date.
+ * Sync repo-specific files from .danxbot/config/ in the connected repo to their
+ * target locations in danxbot. Called on every poll cycle to keep targets up to date.
  */
 function syncRepoFiles(): void {
+  if (!danxbotConfigDir) return;
+
   const rulesDir = resolve(projectRoot, ".claude/rules");
   const docsDir = resolve(projectRoot, "docs");
   const overridesDir = resolve(projectRoot, "repo-overrides");
 
-  // 1. Generate repo-config.md from repo-config/config.yml
+  // 1. Generate repo-config.md from .danxbot/config/config.yml
   const raw = readFileSync(repoConfigYml, "utf-8");
   const cfg = parseSimpleYaml(raw);
 
@@ -319,7 +319,7 @@ function syncRepoFiles(): void {
 
   let content = `# Repo Config (auto-generated — do not edit)
 
-This file is synced by the poller from \`repo-config/config.yml\` on every poll cycle.
+This file is synced by the poller from \`.danxbot/config/config.yml\` on every poll cycle.
 
 ## Repo
 
@@ -364,34 +364,27 @@ This file is synced by the poller from \`repo-config/config.yml\` on every poll 
   writeFileSync(resolve(rulesDir, "repo-config.md"), content);
 
   // 2. Copy overview.md → .claude/rules/repo-overview.md
-  copyFileSync(resolve(repoConfigDir, "overview.md"), resolve(rulesDir, "repo-overview.md"));
+  copyFileSync(resolve(danxbotConfigDir, "overview.md"), resolve(rulesDir, "repo-overview.md"));
 
   // 3. Copy workflow.md → .claude/rules/repo-workflow.md
-  copyFileSync(resolve(repoConfigDir, "workflow.md"), resolve(rulesDir, "repo-workflow.md"));
+  copyFileSync(resolve(danxbotConfigDir, "workflow.md"), resolve(rulesDir, "repo-workflow.md"));
 
   // 4. Copy compose override to repo-overrides/ (optional)
-  const composeSource = resolve(repoConfigDir, "compose.yml");
+  const composeSource = resolve(danxbotConfigDir, "compose.yml");
   if (existsSync(composeSource)) {
     mkdirSync(overridesDir, { recursive: true });
     copyFileSync(composeSource, resolve(overridesDir, `${name}-compose.yml`));
   }
 
   // 5. Copy post-clone hook to repo-overrides/ (optional)
-  const hookSource = resolve(repoConfigDir, "post-clone.sh");
+  const hookSource = resolve(danxbotConfigDir, "post-clone.sh");
   if (existsSync(hookSource)) {
     mkdirSync(overridesDir, { recursive: true });
     copyFileSync(hookSource, resolve(overridesDir, `post-clone-${name}.sh`));
   }
 
-  // 6. Copy repo.env to repo-overrides/ (optional)
-  const envSource = resolve(repoConfigDir, "repo.env");
-  if (existsSync(envSource)) {
-    mkdirSync(overridesDir, { recursive: true });
-    copyFileSync(envSource, resolve(overridesDir, `${name}.env`));
-  }
-
-  // 7. Copy docs/ → docs/ (domains and schema)
-  const repoDocsDir = resolve(repoConfigDir, "docs");
+  // 6. Copy docs/ → docs/ (domains and schema)
+  const repoDocsDir = resolve(danxbotConfigDir, "docs");
   if (existsSync(repoDocsDir)) {
     for (const subdir of ["domains", "schema"]) {
       const srcDir = resolve(repoDocsDir, subdir);
@@ -404,8 +397,9 @@ This file is synced by the poller from \`repo-config/config.yml\` on every poll 
     }
   }
 
-  // 8. Copy features.md → docs/features.md (only if docs/ version doesn't exist yet)
-  const featuresSource = resolve(repoConfigDir, "features.md");
+  // 7. Copy .danxbot/features.md → docs/features.md (only if docs/ version doesn't exist yet)
+  const danxbotDir = resolve(danxbotConfigDir, "..");
+  const featuresSource = resolve(danxbotDir, "features.md");
   const featuresDest = resolve(docsDir, "features.md");
   if (existsSync(featuresSource) && !existsSync(featuresDest)) {
     mkdirSync(docsDir, { recursive: true });

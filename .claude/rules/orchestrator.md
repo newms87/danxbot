@@ -117,14 +117,14 @@ Check off "Committed".
    - Card description: `Action item from [card name](card URL).\n\n**Context:** [1 sentence explaining why this action item was created]`
    - After creating the card, update the retro comment to include links: replace each action item with `[action item text](new card URL)`
 
-### Step 9: Self-Terminate (Ephemeral Sessions Only)
+### Step 9: Self-Termination Check (MANDATORY)
 
-**Only self-terminate when `DANXBOT_EPHEMERAL=1` is set in the environment.** The poller sets this env var when spawning temporary Claude sessions. Interactive sessions (user-invoked commands) do NOT have this set and must never self-terminate.
+**This step is MANDATORY after every card completion or Needs Help move. Never skip it.**
 
-When `DANXBOT_EPHEMERAL=1` is set, remove the lock file and terminate the Claude process after completing ONE card (or when the card is moved to Needs Help):
+1. Run `echo $DANXBOT_EPHEMERAL` to check the environment variable
+2. If the output is `1`: execute `rm -f .poller-running && kill $PPID` immediately
+3. If the output is NOT `1`: do nothing (interactive session)
 
-```bash
-rm -f .poller-running && kill $PPID
-```
+**Never assume you know the session type.** Always run the check. The poller sets `DANXBOT_EPHEMERAL=1` when spawning temporary sessions. Interactive sessions (user-invoked `/next-card`) do NOT have this set. The only way to know is to check — guessing is a workflow violation.
 
 **One card per Claude instance.** The poller spawns a fresh Claude process for each card. After completing your card, terminate immediately. Do NOT loop to the next card — the poller handles scheduling. The lock file removal signals the poller that work is complete, and it will spawn a new instance if more cards remain in ToDo.

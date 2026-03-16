@@ -61,7 +61,7 @@ describe("runMigrations", () => {
     await runMigrations();
 
     expect(mockQuery).toHaveBeenCalledWith(
-      "CREATE DATABASE IF NOT EXISTS `flytebot_chat`",
+      "CREATE DATABASE IF NOT EXISTS `danxbot_chat`",
     );
   });
 
@@ -69,7 +69,7 @@ describe("runMigrations", () => {
     const { runMigrations } = await importMigrate();
     await runMigrations();
 
-    expect(mockQuery).toHaveBeenCalledWith("USE `flytebot_chat`");
+    expect(mockQuery).toHaveBeenCalledWith("USE `danxbot_chat`");
   });
 
   it("creates the migrations tracking table", async () => {

@@ -43,13 +43,14 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
    curl -s -o /dev/null -w "%{http_code}" "https://api.trello.com/1/members/me?key=<API_KEY>&token=<TOKEN>"
    ```
 5. If 200, credentials are valid. Otherwise re-prompt.
-6. Save `TRELLO_API_KEY` and `TRELLO_API_TOKEN` to `.env`
+6. Save `TRELLO_API_KEY` and `TRELLO_API_TOKEN` to `.env` (secrets — stay in danxbot)
+7. **Hold the API key and token in memory** — they're needed for Step 4 and Step 4b.
 
 ## Step 4: Trello Board Setup
 
 1. Fetch boards: `curl -s "https://api.trello.com/1/members/me/boards?fields=name,url&key=<KEY>&token=<TOKEN>"`
 2. Present numbered list. Ask: "Which Trello board should Danxbot use?"
-3. Save `TRELLO_BOARD_ID=<id>` to `.env`
+3. Save the board ID in memory (it goes to `trello.yml` in Step 8, NOT to `.env`)
 4. Fetch the board's lists: `curl -s "https://api.trello.com/1/boards/<BOARD_ID>/lists?fields=name&key=<KEY>&token=<TOKEN>"`
 5. Fetch the board's labels: `curl -s "https://api.trello.com/1/boards/<BOARD_ID>/labels?fields=name,color&key=<KEY>&token=<TOKEN>"`
 
@@ -70,9 +71,31 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 9. Create any missing lists via: `curl -s -X POST "https://api.trello.com/1/boards/<BOARD_ID>/lists?name=<NAME>&key=<KEY>&token=<TOKEN>"`
 10. Create any missing labels via: `curl -s -X POST "https://api.trello.com/1/boards/<BOARD_ID>/labels?name=<NAME>&color=<COLOR>&key=<KEY>&token=<TOKEN>"`
     - Bug: red, Feature: green, Epic: purple, Needs Help: orange
-11. Save all IDs to `.env`:
-    - `TRELLO_REVIEW_LIST_ID`, `TRELLO_TODO_LIST_ID`, `TRELLO_IN_PROGRESS_LIST_ID`, `TRELLO_NEEDS_HELP_LIST_ID`, `TRELLO_DONE_LIST_ID`, `TRELLO_CANCELLED_LIST_ID`, `TRELLO_ACTION_ITEMS_LIST_ID`
-    - `TRELLO_BUG_LABEL_ID`, `TRELLO_FEATURE_LABEL_ID`, `TRELLO_EPIC_LABEL_ID`, `TRELLO_NEEDS_HELP_LABEL_ID`
+11. **Hold all IDs in memory** — they go to `.danxbot/config/trello.yml` in Step 8, NOT to `.env`
+
+## Step 4b: Configure Trello MCP Server
+
+The Claude Code CLI uses an MCP (Model Context Protocol) server to interact with Trello. This must be configured in the project's settings so that `/next-card`, `/start-team`, and other skills can read/write Trello cards.
+
+1. Read the existing `.claude/settings.local.json`
+2. Add or update the `mcpServers.trello` section with the credentials from Step 3:
+   ```json
+   {
+     "mcpServers": {
+       "trello": {
+         "command": "npx",
+         "args": ["-y", "@anthropic-ai/trello-mcp-server@latest"],
+         "env": {
+           "TRELLO_API_KEY": "<API_KEY from Step 3>",
+           "TRELLO_TOKEN": "<TOKEN from Step 3>"
+         }
+       }
+     }
+   }
+   ```
+3. **IMPORTANT:** The MCP server uses `TRELLO_TOKEN` (not `TRELLO_API_TOKEN`). Use the same token value from Step 3.
+4. Merge with existing settings — preserve all existing `env`, `permissions`, and other fields.
+5. Write the merged result back to `.claude/settings.local.json`.
 
 ## Step 5: Slack Setup (Optional)
 
@@ -128,13 +151,15 @@ The bot runs inside Docker and needs Claude Code CLI credentials to make agent c
 6. Ask: "Is this correct? Anything to change?"
 7. Apply any corrections the user provides.
 
-## Step 8: Generate Repo Config (all files go in `repo-config/`)
+## Step 8: Generate Config in Connected Repo
 
-**All repo-specific files live in the `repo-config/` directory.** This is the single source of truth. The poller syncs files from `repo-config/` to their target locations (`.claude/rules/`, `docs/`, `repo-overrides/`) before each Claude spawn.
+**All repo-specific config lives in `.danxbot/config/` inside the connected repo.** This directory is version controlled (committed to the connected repo). The poller syncs files from `.danxbot/config/` to their target locations (`.claude/rules/`, `docs/`, `repo-overrides/`) before each Claude spawn.
 
-### 8a: Write `repo-config/config.yml`
+Create the directory: `mkdir -p repos/<name>/.danxbot/config/docs/domains repos/<name>/.danxbot/config/docs/schema`
 
-Write `repo-config/config.yml` with the discovered config:
+### 8a: Write `.danxbot/config/config.yml`
+
+Write `repos/<name>/.danxbot/config/config.yml` with the discovered config:
 
 ```yaml
 name: <repo-name>
@@ -161,9 +186,34 @@ paths:
 
 Adjust the structure based on what was actually detected. If no Docker setup, omit the `docker` section and set `runtime: local`.
 
-### 8b: Generate Docker Compose Override (if runtime is `docker`)
+### 8b: Write `.danxbot/config/trello.yml`
 
-If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an isolated compose override at `repo-config/compose.yml`. This file runs the repo's own Docker stack with an isolated project name and network, so it doesn't conflict with the host's setup.
+Write all Trello IDs collected in Step 4 to `repos/<name>/.danxbot/config/trello.yml`:
+
+```yaml
+board_id: <BOARD_ID>
+
+lists:
+  review: <REVIEW_LIST_ID>
+  todo: <TODO_LIST_ID>
+  in_progress: <IN_PROGRESS_LIST_ID>
+  needs_help: <NEEDS_HELP_LIST_ID>
+  done: <DONE_LIST_ID>
+  cancelled: <CANCELLED_LIST_ID>
+  action_items: <ACTION_ITEMS_LIST_ID>
+
+labels:
+  bug: <BUG_LABEL_ID>
+  feature: <FEATURE_LABEL_ID>
+  epic: <EPIC_LABEL_ID>
+  needs_help: <NEEDS_HELP_LABEL_ID>
+```
+
+**These IDs are NOT secrets** — they're safe to commit to version control.
+
+### 8c: Generate Docker Compose Override (if runtime is `docker`)
+
+If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an isolated compose override at `repos/<name>/.danxbot/config/compose.yml`. This file runs the repo's own Docker stack with an isolated project name and network, so it doesn't conflict with the host's setup.
 
 **Key principles:**
 - Use the repo's own Docker images (build from its Dockerfile or reference its images)
@@ -182,9 +232,9 @@ If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an is
 
 **For other frameworks**, adapt based on what the repo's own docker-compose.yml defines.
 
-### 8c: Generate Post-Clone Hook (if needed)
+### 8d: Generate Post-Clone Hook (if needed)
 
-If the repo needs setup after cloning (auth files, dependency install, config copy), create `repo-config/post-clone.sh`:
+If the repo needs setup after cloning (auth files, dependency install, config copy), create `repos/<name>/.danxbot/config/post-clone.sh`:
 
 ```bash
 #!/bin/bash
@@ -197,17 +247,31 @@ if [ -f "/danxbot/app/repo-overrides/<name>-auth.json" ] && [ -d "$REPO/<subdir>
 fi
 ```
 
-Ask the user: "Does this repo require any auth files or credentials for package installation (e.g., Composer auth for private packages, npm tokens)?" If yes, collect the credentials and write them to `repo-config/`.
+Ask the user: "Does this repo require any auth files or credentials for package installation (e.g., Composer auth for private packages, npm tokens)?" If yes, collect the credentials and write them to the appropriate location.
 
-### 8d: Generate Env File (if Docker runtime)
+### 8e: Generate Env File (if Docker runtime, secrets only)
 
-If the repo's Docker stack needs environment variables, write them to `repo-config/repo.env`. This keeps repo-specific env vars separate from danxbot's `.env`.
+If the repo's Docker stack needs environment variables with secrets (DB passwords, API keys), write them to `repo-overrides/<name>.env` in danxbot (NOT in `.danxbot/config/` — secrets stay local):
 
-## Step 9: Generate Rules (all files go in `repo-config/`)
+```bash
+mkdir -p repo-overrides
+```
 
-All generated rules go into `repo-config/`. The poller's sync function distributes them to their target locations before each Claude spawn.
+This keeps repo-specific secrets separate from both danxbot's `.env` and the version-controlled `.danxbot/config/`.
 
-### `repo-config/overview.md`
+### 8f: Create `.danxbot/.gitignore`
+
+Write `repos/<name>/.danxbot/.gitignore` to exclude generated files:
+
+```
+features.md
+```
+
+## Step 9: Generate Rules (in `.danxbot/config/`)
+
+All generated rules go into `repos/<name>/.danxbot/config/`. The poller's sync function distributes them to their target locations before each Claude spawn.
+
+### `.danxbot/config/overview.md`
 
 Generate an overview of the connected repo based on what was discovered in Step 7. This file gives the orchestrator agent context about the repo's architecture so it can work on cards effectively. Include:
 
@@ -221,7 +285,7 @@ Base this entirely on what you read from the repo's source code, README, and con
 
 Synced to: `.claude/rules/repo-overview.md`
 
-### `repo-config/workflow.md`
+### `.danxbot/config/workflow.md`
 
 Generate a workflow rule tailored to the detected repo. Include:
 - How to edit files (path prefix: `repos/<name>/`)
@@ -234,16 +298,16 @@ Use the existing `.claude/rules/repo-workflow.md` as a template for the structur
 
 Synced to: `.claude/rules/repo-workflow.md`
 
-### `repo-config/docs/schema/` and `repo-config/docs/domains/` (if database is configured)
+### `.danxbot/config/docs/schema/` and `.danxbot/config/docs/domains/` (if database is configured)
 
 If the connected repo has a database, generate domain documentation:
 
-**`repo-config/docs/schema/model-relationships.md`** — A relationship map showing how the key database tables connect via foreign keys. Base this on:
+**`.danxbot/config/docs/schema/model-relationships.md`** — A relationship map showing how the key database tables connect via foreign keys. Base this on:
 - Reading model files (Eloquent relationships, ActiveRecord associations, etc.)
 - Running DESCRIBE on key tables
 - Tracing foreign key relationships
 
-**`repo-config/docs/domains/*.md`** — One file per major domain area (e.g., `users.md`, `billing.md`). Each should contain:
+**`.danxbot/config/docs/domains/*.md`** — One file per major domain area (e.g., `users.md`, `billing.md`). Each should contain:
 - What the domain covers
 - Key models/tables involved
 - Important relationships and workflows
@@ -257,16 +321,16 @@ Synced to: `docs/domains/` and `docs/schema/`
 
 ### Initial sync
 
-After writing all files to `repo-config/`, immediately sync them to their target locations so the orchestrator can work without waiting for the poller:
+After writing all files to `.danxbot/config/`, immediately sync them to their target locations so the orchestrator can work without waiting for the poller:
 
-1. Copy `repo-config/overview.md` → `.claude/rules/repo-overview.md`
-2. Copy `repo-config/workflow.md` → `.claude/rules/repo-workflow.md`
-3. Copy `repo-config/docs/domains/*` → `docs/domains/`
-4. Copy `repo-config/docs/schema/*` → `docs/schema/`
-5. Copy `repo-config/compose.yml` → `repo-overrides/<name>-compose.yml` (if exists)
-6. Copy `repo-config/post-clone.sh` → `repo-overrides/post-clone-<name>.sh` (if exists)
-7. Copy `repo-config/repo.env` → `repo-overrides/<name>.env` (if exists)
-8. Generate `.claude/rules/repo-config.md` from `repo-config/config.yml` (same format the poller uses — a markdown file with tables for repo name, commands, paths, and Docker config)
+1. Copy `.danxbot/config/overview.md` → `.claude/rules/repo-overview.md`
+2. Copy `.danxbot/config/workflow.md` → `.claude/rules/repo-workflow.md`
+3. Copy `.danxbot/config/docs/domains/*` → `docs/domains/`
+4. Copy `.danxbot/config/docs/schema/*` → `docs/schema/`
+5. Copy `.danxbot/config/compose.yml` → `repo-overrides/<name>-compose.yml` (if exists)
+6. Copy `.danxbot/config/post-clone.sh` → `repo-overrides/post-clone-<name>.sh` (if exists)
+7. Generate `.claude/rules/repo-config.md` from `.danxbot/config/config.yml` (same format the poller uses — a markdown file with tables for repo name, commands, paths, and Docker config)
+8. Generate `.claude/rules/trello-config.md` from `.danxbot/config/trello.yml` (same format the poller uses — a markdown file with tables for board, list, and label IDs)
 
 The poller will re-sync these before each Claude spawn, but this initial sync ensures everything works immediately.
 
@@ -293,6 +357,8 @@ POLLER_INTERVAL_MS=60000
 TRELLO_REVIEW_MIN_CARDS=10
 ```
 
+**Note:** Trello IDs are NOT in `.env` — they live in `.danxbot/config/trello.yml` in the connected repo.
+
 If the repo has a database that the agent should query (read-only), ask:
 - "Does the connected repo have a database the agent should have read access to? (yes/no)"
 - If yes, collect host, user, password, database name and write as `PLATFORM_DB_HOST`, `PLATFORM_DB_USER`, `PLATFORM_DB_PASSWORD`, `PLATFORM_DB_NAME`
@@ -313,17 +379,31 @@ Read back the final `.env` (masking secrets) and present to user for confirmatio
 
 ## Step 12: Finish
 
-1. Ask if the user has any questions or corrections
-2. Summarize what was set up:
-   - Connected repo
+Present the results clearly:
+
+1. Summarize what was set up:
+   - Connected repo name and tech stack
    - Trello board with lists/labels
    - Slack (enabled/disabled)
-   - Dashboard URL (localhost:5555)
-3. Provide next steps:
-   - `npm run poller` — start the autonomous card processor
-   - Add cards to the Trello board's ToDo list
-   - View the dashboard at localhost:5555
-   - If Slack is enabled: mention @Danxbot in the configured channel
+   - Dashboard URL: **http://localhost:5555**
+
+2. **How to start the autonomous agent:**
+   ```
+   docker compose up -d    # Start the bot (if not already running)
+   npm run poller           # Start the card processor (polls Trello, spawns Claude)
+   ```
+
+3. **Interactive commands** (run from this directory with `claude`):
+   - `/next-card` — Process the top ToDo card
+   - `/start-team` — Process all ToDo cards
+   - `/ideate` — Explore the repo and generate feature cards
+
+4. **Adding work:**
+   - Add cards to the Trello board's **ToDo** list with descriptions
+   - The poller picks them up automatically, or use `/next-card` manually
+   - If Slack is enabled: mention @Danxbot in the configured channel for questions
+
+5. Ask: "Any questions before we dive in?"
 
 ## Helper: `.env` Management
 

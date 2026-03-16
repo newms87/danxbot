@@ -222,12 +222,12 @@ describe("isUserResponse", () => {
     expect(isUserResponse(null)).toBe(false);
   });
 
-  it("returns false when comment contains the flytebot marker", () => {
-    const comment = { id: "a1", data: { text: "This needs help\n\n<!-- flytebot -->" } };
+  it("returns false when comment contains the danxbot marker", () => {
+    const comment = { id: "a1", data: { text: "This needs help\n\n<!-- danxbot -->" } };
     expect(isUserResponse(comment)).toBe(false);
   });
 
-  it("returns true when comment does not contain the flytebot marker", () => {
+  it("returns true when comment does not contain the danxbot marker", () => {
     const comment = { id: "a1", data: { text: "I've updated the Slack config, try again" } };
     expect(isUserResponse(comment)).toBe(true);
   });
@@ -238,7 +238,7 @@ describe("isUserResponse", () => {
   });
 
   it("returns false when marker is embedded in longer text", () => {
-    const comment = { id: "a1", data: { text: "Auto-created error card\n\nSome details here\n\n<!-- flytebot -->" } };
+    const comment = { id: "a1", data: { text: "Auto-created error card\n\nSome details here\n\n<!-- danxbot -->" } };
     expect(isUserResponse(comment)).toBe(false);
   });
 });

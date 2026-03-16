@@ -14,11 +14,11 @@ Run `./install.sh` to launch the interactive setup wizard. It checks prerequisit
 6. Config and rules generation
 7. Smoke test + proof-of-life PR
 
-The setup generates `repo-config/`, `.env`, and tailored rules files. No manual `.env` editing needed.
+The setup generates `.danxbot/config/` in the connected repo, `.env`, and tailored rules files. No manual `.env` editing needed.
 
 ## Connected Repo
 
-All repo-specific config lives in `repo-config/` (source of truth). The poller syncs to `.claude/rules/repo-config.md`, `docs/`, and `repo-overrides/` before each Claude spawn. The connected repo is cloned to `repos/<name>/` and is the target for Trello card work.
+All repo-specific config lives in `.danxbot/config/` inside the connected repo (version controlled). Trello IDs, repo commands, overview, workflow, and domain docs are stored there. Secrets (API keys, tokens, passwords) stay in danxbot's `.env`. The poller syncs config to `.claude/rules/`, `docs/`, and `repo-overrides/` before each Claude spawn. The connected repo is cloned to `repos/<name>/` and is the target for Trello card work.
 
 ## Architecture
 

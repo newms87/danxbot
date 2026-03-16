@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { makeConfig } from "../__tests__/helpers/fixtures.js";
+
+// Mock constants before import — prevents YAML file read
+vi.mock("../poller/constants.js", () => ({
+  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
+}));
+
 import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
 
 // --- Mocks (top-level, before dynamic import) ---
@@ -183,7 +189,7 @@ describe("card creation", () => {
     expect(name).toMatch(/\.\.\.$/);
   });
 
-  it("adds a flytebot marker comment after creating the card", async () => {
+  it("adds a danxbot marker comment after creating the card", async () => {
     await notifyError("Agent Timeout", "timed out", {});
 
     // Third call is the comment POST
@@ -195,7 +201,7 @@ describe("card creation", () => {
     expect(opts.method).toBe("POST");
 
     const params = new URLSearchParams(url.split("?")[1]);
-    expect(params.get("text")).toContain("<!-- flytebot -->");
+    expect(params.get("text")).toContain("<!-- danxbot -->");
   });
 
   it("still succeeds when marker comment POST fails", async () => {

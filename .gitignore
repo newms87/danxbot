@@ -14,9 +14,7 @@ claude-auth/*
 !claude-auth/.gitkeep
 .claude/rules/trello-config.md
 
-# Repo-specific files (all live in repo-config/, synced to targets by poller)
-repo-config/*
-!repo-config/.gitkeep
+# Repo-specific files (source of truth: .danxbot/config/ in connected repo, synced by poller)
 .claude/rules/repo-config.md
 .claude/rules/repo-overview.md
 .claude/rules/repo-workflow.md

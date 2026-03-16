@@ -8,6 +8,24 @@ vi.hoisted(() => {
   process.env.TRELLO_API_TOKEN = "test-token";
 });
 
+// Mock constants.ts since it reads from a YAML file that doesn't exist in tests
+vi.mock("./constants.js", () => ({
+  BOARD_ID: "mock-board-id",
+  REVIEW_LIST_ID: "mock-review-list-id",
+  TODO_LIST_ID: "mock-todo-list-id",
+  IN_PROGRESS_LIST_ID: "mock-in-progress-list-id",
+  NEEDS_HELP_LIST_ID: "mock-needs-help-list-id",
+  DONE_LIST_ID: "mock-done-list-id",
+  CANCELLED_LIST_ID: "mock-cancelled-list-id",
+  ACTION_ITEMS_LIST_ID: "mock-action-items-list-id",
+  BUG_LABEL_ID: "mock-bug-label-id",
+  FEATURE_LABEL_ID: "mock-feature-label-id",
+  EPIC_LABEL_ID: "mock-epic-label-id",
+  NEEDS_HELP_LABEL_ID: "mock-needs-help-label-id",
+  REVIEW_MIN_CARDS: 10,
+  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
+}));
+
 import { createConfig, BOARD_ID, TODO_LIST_ID, NEEDS_HELP_LIST_ID, DANXBOT_COMMENT_MARKER } from "./config.js";
 
 describe("createConfig", () => {
@@ -50,10 +68,10 @@ describe("createConfig", () => {
 });
 
 describe("constants", () => {
-  it("exports board and list IDs", () => {
-    expect(BOARD_ID).toBe("698fc5b8847b787a3818ad82");
-    expect(TODO_LIST_ID).toBe("698fc5be16a280cc321a13ec");
-    expect(NEEDS_HELP_LIST_ID).toBe("6990129be21ee37b649281a5");
+  it("exports board and list IDs from trello.yml", () => {
+    expect(BOARD_ID).toBe("mock-board-id");
+    expect(TODO_LIST_ID).toBe("mock-todo-list-id");
+    expect(NEEDS_HELP_LIST_ID).toBe("mock-needs-help-list-id");
   });
 
   it("exports danxbot comment marker", () => {

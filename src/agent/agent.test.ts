@@ -41,8 +41,8 @@ vi.mock("../config.js", () => ({
     high:      { model: "claude-sonnet-4-5", maxTurns: 12, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
     very_high: { model: "claude-opus-4-6", maxTurns: 18, maxBudgetUsd: 5.00, maxThinkingTokens: 32768, systemPrompt: "full" },
   },
-  getRepoPath: (name: string) => `/flytebot/repos/${name}`,
-  getPrimaryRepoPath: () => `/flytebot/repos/test-repo`,
+  getRepoPath: (name: string) => `/danxbot/repos/${name}`,
+  getPrimaryRepoPath: () => `/danxbot/repos/test-repo`,
 }));
 
 vi.mock("../logger.js", () => ({
@@ -540,7 +540,7 @@ describe("runAgent", () => {
     await runAgent("test", null);
 
     const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options.cwd).toBe("/flytebot/repos/test-repo");
+    expect(callArgs.options.cwd).toBe("/danxbot/repos/test-repo");
     expect(callArgs.options.settingSources).toEqual(["project"]);
   });
 

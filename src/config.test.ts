@@ -1,5 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// Mock poller/constants.js since config.ts now imports from it and it reads a YAML file
+vi.mock("./poller/constants.js", () => ({
+  BOARD_ID: "mock-board-id",
+  REVIEW_LIST_ID: "mock-review-list-id",
+  TODO_LIST_ID: "mock-todo-list-id",
+  IN_PROGRESS_LIST_ID: "mock-in-progress-list-id",
+  NEEDS_HELP_LIST_ID: "mock-needs-help-list-id",
+  DONE_LIST_ID: "mock-done-list-id",
+  CANCELLED_LIST_ID: "mock-cancelled-list-id",
+  ACTION_ITEMS_LIST_ID: "mock-action-items-list-id",
+  BUG_LABEL_ID: "mock-bug-label-id",
+  FEATURE_LABEL_ID: "mock-feature-label-id",
+  EPIC_LABEL_ID: "mock-epic-label-id",
+  NEEDS_HELP_LABEL_ID: "mock-needs-help-label-id",
+  REVIEW_MIN_CARDS: 10,
+  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
+}));
+
 // Helper to set up a valid env and dynamically import config
 function validEnv(): Record<string, string> {
   return {
@@ -48,8 +66,8 @@ describe("repos config", () => {
       REPOS: "platform:https://github.com/Flytedesk/platform.git,docs:https://github.com/Flytedesk/docs.git",
     });
     expect(mod.repos).toEqual([
-      { name: "platform", url: "https://github.com/Flytedesk/platform.git", localPath: "/flytebot/repos/platform" },
-      { name: "docs", url: "https://github.com/Flytedesk/docs.git", localPath: "/flytebot/repos/docs" },
+      { name: "platform", url: "https://github.com/Flytedesk/platform.git", localPath: "/danxbot/repos/platform" },
+      { name: "docs", url: "https://github.com/Flytedesk/docs.git", localPath: "/danxbot/repos/docs" },
     ]);
   });
 
@@ -104,7 +122,7 @@ describe("getRepoPath", () => {
     const mod = await importConfig({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
     });
-    expect(mod.getRepoPath("platform")).toBe("/flytebot/repos/platform");
+    expect(mod.getRepoPath("platform")).toBe("/danxbot/repos/platform");
   });
 
   it("throws for unconfigured repo", async () => {
@@ -116,21 +134,21 @@ describe("getRepoPath", () => {
 });
 
 describe("required DB config", () => {
-  it("throws when FLYTEBOT_DB_HOST is missing", async () => {
-    await expect(importConfig({}, ["FLYTEBOT_DB_HOST"])).rejects.toThrow("FLYTEBOT_DB_HOST");
+  it("throws when DANXBOT_DB_HOST is missing", async () => {
+    await expect(importConfig({}, ["DANXBOT_DB_HOST"])).rejects.toThrow("DANXBOT_DB_HOST");
   });
 
-  it("uses FLYTEBOT_DB_HOST for db.host", async () => {
-    const mod = await importConfig({ FLYTEBOT_DB_HOST: "custom-host" });
+  it("uses DANXBOT_DB_HOST for db.host", async () => {
+    const mod = await importConfig({ DANXBOT_DB_HOST: "custom-host" });
     expect(mod.config.db.host).toBe("custom-host");
   });
 
-  it("throws when FLYTEBOT_DB_USER is missing", async () => {
-    await expect(importConfig({}, ["FLYTEBOT_DB_USER"])).rejects.toThrow("FLYTEBOT_DB_USER");
+  it("throws when DANXBOT_DB_USER is missing", async () => {
+    await expect(importConfig({}, ["DANXBOT_DB_USER"])).rejects.toThrow("DANXBOT_DB_USER");
   });
 
-  it("throws when FLYTEBOT_DB_PASSWORD is missing", async () => {
-    await expect(importConfig({}, ["FLYTEBOT_DB_PASSWORD"])).rejects.toThrow("FLYTEBOT_DB_PASSWORD");
+  it("throws when DANXBOT_DB_PASSWORD is missing", async () => {
+    await expect(importConfig({}, ["DANXBOT_DB_PASSWORD"])).rejects.toThrow("DANXBOT_DB_PASSWORD");
   });
 });
 

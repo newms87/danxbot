@@ -1,4 +1,8 @@
 import type { ComplexityLevel, ComplexityProfile, RepoConfig } from "./types.js";
+import {
+  BOARD_ID, TODO_LIST_ID, BUG_LABEL_ID,
+  NEEDS_HELP_LIST_ID, NEEDS_HELP_LABEL_ID, REVIEW_LIST_ID,
+} from "./poller/constants.js";
 
 export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
   very_low:  { model: "claude-haiku-4-5",   maxTurns: 5,  maxBudgetUsd: 0.10, maxThinkingTokens: 2048,  systemPrompt: "fast" },
@@ -32,7 +36,7 @@ function parseRepos(envValue: string): RepoConfig[] {
     if (!name || !url) {
       throw new Error(`Invalid REPOS entry "${entry}" — name and url must not be empty`);
     }
-    return { name, url, localPath: `/flytebot/repos/${name}` };
+    return { name, url, localPath: `/danxbot/repos/${name}` };
   });
 }
 
@@ -100,12 +104,12 @@ export const config = {
   trello: {
     apiKey: process.env.TRELLO_API_KEY || "",
     apiToken: process.env.TRELLO_API_TOKEN || "",
-    boardId: process.env.TRELLO_BOARD_ID || "",
-    reviewListId: process.env.TRELLO_REVIEW_LIST_ID || "",
-    todoListId: process.env.TRELLO_TODO_LIST_ID || "",
-    bugLabelId: process.env.TRELLO_BUG_LABEL_ID || "",
-    needsHelpListId: process.env.TRELLO_NEEDS_HELP_LIST_ID || "",
-    needsHelpLabelId: process.env.TRELLO_NEEDS_HELP_LABEL_ID || "",
+    boardId: BOARD_ID,
+    reviewListId: REVIEW_LIST_ID,
+    todoListId: TODO_LIST_ID,
+    bugLabelId: BUG_LABEL_ID,
+    needsHelpListId: NEEDS_HELP_LIST_ID,
+    needsHelpLabelId: NEEDS_HELP_LABEL_ID,
   },
   rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),

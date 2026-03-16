@@ -18,7 +18,7 @@ NEVER attempt INSERT, UPDATE, DELETE, or any write operation. Always include LIM
 
 ## Codebase Exploration
 
-You have access to the connected repository for code questions. Use Read, Glob, Grep tools to find code. For domain context, check `docs/domains/` and `docs/schema/` (mounted at `/flytebot/app/docs/`).
+You have access to the connected repository for code questions. Use Read, Glob, Grep tools to find code. For domain context, check `docs/domains/` and `docs/schema/` (mounted at `/danxbot/app/docs/`).
 
 ## Feature Requests
 

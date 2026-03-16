@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+// Set REPOS before index.ts loads so getDanxbotConfigDir() resolves a path
+vi.hoisted(() => {
+  process.env.REPOS = "test-repo:https://github.com/org/repo.git";
+});
+
 // Mock dependencies before importing module under test
 vi.mock("./config.js", () => ({
   config: { pollerIntervalMs: 60000 },
@@ -85,19 +90,21 @@ paths:
   tests: "tests/"
 `;
 
-/** Make existsSync return true for repo-config/ paths, false for lock file by default */
+/** Make existsSync return true for .danxbot/config/ paths, false for lock file by default */
 function setupRepoConfigMocks() {
   mockExistsSync.mockImplementation((path: string) => {
     if (typeof path === "string" && (
-      path.endsWith("repo-config") ||
+      path.includes(".danxbot/config") ||
       path.endsWith("config.yml") ||
       path.endsWith("overview.md") ||
-      path.endsWith("workflow.md")
+      path.endsWith("workflow.md") ||
+      path.endsWith("trello.yml")
     )) return true;
     return false;
   });
   mockReadFileSync.mockImplementation((path: string) => {
     if (typeof path === "string" && path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+    if (typeof path === "string" && path.endsWith("trello.yml")) return "board_id: mock-board-id\n";
     if (typeof path === "string" && path.endsWith(".md")) return "# placeholder";
     return "";
   });
@@ -337,18 +344,6 @@ describe("start", () => {
     REPOS: "test:https://github.com/org/repo.git",
     TRELLO_API_KEY: "trello-key",
     TRELLO_API_TOKEN: "trello-token",
-    TRELLO_BOARD_ID: "board-id",
-    TRELLO_REVIEW_LIST_ID: "review-id",
-    TRELLO_TODO_LIST_ID: "todo-id",
-    TRELLO_IN_PROGRESS_LIST_ID: "ip-id",
-    TRELLO_NEEDS_HELP_LIST_ID: "nh-id",
-    TRELLO_DONE_LIST_ID: "done-id",
-    TRELLO_CANCELLED_LIST_ID: "cancel-id",
-    TRELLO_ACTION_ITEMS_LIST_ID: "ai-id",
-    TRELLO_BUG_LABEL_ID: "bug-id",
-    TRELLO_FEATURE_LABEL_ID: "feat-id",
-    TRELLO_EPIC_LABEL_ID: "epic-id",
-    TRELLO_NEEDS_HELP_LABEL_ID: "nh-label-id",
   };
 
   beforeEach(() => {
