@@ -1,6 +1,6 @@
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
-import { FLYTEBOT_COMMENT_MARKER } from "../poller/constants.js";
+import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
 
 const log = createLogger("trello-notifier");
 
@@ -106,11 +106,11 @@ export async function notifyError(
     const createdCard = (await createResponse.json()) as { id: string };
     log.info(`Created error card: ${cardName}`);
 
-    // Add a flytebot marker comment so the poller can distinguish bot vs user comments
+    // Add a danxbot marker comment so the poller can distinguish bot vs user comments
     const commentParams = new URLSearchParams({
       key: apiKey,
       token: apiToken,
-      text: `This card was automatically created by Flytebot.\n\n${FLYTEBOT_COMMENT_MARKER}`,
+      text: `This card was automatically created by Danxbot.\n\n${DANXBOT_COMMENT_MARKER}`,
     });
     const commentUrl = `https://api.trello.com/1/cards/${createdCard.id}/actions/comments?${commentParams.toString()}`;
     const commentResponse = await fetch(commentUrl, { method: "POST" });

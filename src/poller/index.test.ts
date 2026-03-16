@@ -144,7 +144,7 @@ describe("poll", () => {
 
     expect(mockSpawn).toHaveBeenCalledWith(
       "wt.exe",
-      expect.arrayContaining(["new-tab", "--title", "Flytebot Team", "bash", expect.stringContaining("run-team.sh")]),
+      expect.arrayContaining(["new-tab", "--title", "Danxbot Team", "bash", expect.stringContaining("run-team.sh")]),
       expect.objectContaining({
         detached: true,
       }),
@@ -232,7 +232,7 @@ describe("poll — Needs Help checking", () => {
 
   it("does not move cards still waiting for user (bot comment is latest)", async () => {
     const needsHelpCard = { id: "nh1", name: "Blocked card" };
-    const botComment = { id: "a1", data: { text: "Needs config change\n\n<!-- flytebot -->" } };
+    const botComment = { id: "a1", data: { text: "Needs config change\n\n<!-- danxbot -->" } };
 
     mockFetchNeedsHelpCards.mockResolvedValue([needsHelpCard]);
     mockFetchLatestComment.mockResolvedValue(botComment);
@@ -263,7 +263,7 @@ describe("poll — Needs Help checking", () => {
       { id: "nh2", name: "User replied" },
       { id: "nh3", name: "No comments" },
     ];
-    const botComment = { id: "a1", data: { text: "Needs help\n\n<!-- flytebot -->" } };
+    const botComment = { id: "a1", data: { text: "Needs help\n\n<!-- danxbot -->" } };
     const userComment = { id: "a2", data: { text: "Done, try again" } };
 
     mockFetchNeedsHelpCards.mockResolvedValue(cards);

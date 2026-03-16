@@ -98,7 +98,7 @@ function convertTables(text: string): string {
 
 /**
  * Converts Claude's markdown output to Slack mrkdwn format.
- * Ported from FlytebotSlackApi::markdownToSlackMrkdwn() in the platform codebase.
+ * Ported from DanxbotSlackApi::markdownToSlackMrkdwn() in the platform codebase.
  */
 export function markdownToSlackMrkdwn(markdown: string): string {
   let text = markdown;

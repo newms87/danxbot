@@ -6,7 +6,7 @@ vi.mock("./config.js", () => ({
   },
   TODO_LIST_ID: "698fc5be16a280cc321a13ec",
   NEEDS_HELP_LIST_ID: "6990129be21ee37b649281a5",
-  FLYTEBOT_COMMENT_MARKER: "<!-- flytebot -->",
+  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
 }));
 
 import { fetchTodoCards, fetchNeedsHelpCards, fetchLatestComment, moveCardToList, isUserResponse } from "./trello-client.js";

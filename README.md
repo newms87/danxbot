@@ -1,4 +1,4 @@
-# Flytebot
+# Danxbot
 
 An autonomous AI agent powered by the Claude Code SDK. Connects to any repo, processes Trello cards, and optionally answers questions via Slack.
 
@@ -20,7 +20,7 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 ## Quick Start
 
 ```bash
-git clone <this-repo> flytebot && cd flytebot && ./install.sh
+git clone <this-repo> danxbot && cd danxbot && ./install.sh
 ```
 
 The interactive setup wizard guides you through credentials, Trello board setup, repo connection, and generates all config files. No manual `.env` editing needed.
@@ -67,7 +67,7 @@ docker compose up -d --force-recreate
 docker compose up -d --build
 
 # Tail logs
-docker logs flytebot -f
+docker logs danxbot -f
 ```
 
 ## Tech Stack

@@ -78,10 +78,10 @@ export const config = {
     },
   },
   db: {
-    host: required("FLYTEBOT_DB_HOST"),
-    user: required("FLYTEBOT_DB_USER"),
-    password: required("FLYTEBOT_DB_PASSWORD"),
-    database: optional("FLYTEBOT_DB_NAME", "flytebot_chat"),
+    host: required("DANXBOT_DB_HOST"),
+    user: required("DANXBOT_DB_USER"),
+    password: required("DANXBOT_DB_PASSWORD"),
+    database: optional("DANXBOT_DB_NAME", "danxbot_chat"),
     connectTimeoutMs: parseInt(optional("DB_CONNECT_TIMEOUT_MS", "5000"), 10),
     eventsMaxAgeDays: parseInt(optional("EVENTS_MAX_AGE_DAYS", "30"), 10),
   },
@@ -109,7 +109,7 @@ export const config = {
   },
   rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),
-  logsDir: "/flytebot/logs",
+  logsDir: "/danxbot/logs",
 } as const;
 
 interface NumericRule {

@@ -8,7 +8,7 @@ vi.hoisted(() => {
   process.env.TRELLO_API_TOKEN = "test-token";
 });
 
-import { createConfig, BOARD_ID, TODO_LIST_ID, NEEDS_HELP_LIST_ID, FLYTEBOT_COMMENT_MARKER } from "./config.js";
+import { createConfig, BOARD_ID, TODO_LIST_ID, NEEDS_HELP_LIST_ID, DANXBOT_COMMENT_MARKER } from "./config.js";
 
 describe("createConfig", () => {
   beforeEach(() => {
@@ -56,7 +56,7 @@ describe("constants", () => {
     expect(NEEDS_HELP_LIST_ID).toBe("6990129be21ee37b649281a5");
   });
 
-  it("exports flytebot comment marker", () => {
-    expect(FLYTEBOT_COMMENT_MARKER).toBe("<!-- flytebot -->");
+  it("exports danxbot comment marker", () => {
+    expect(DANXBOT_COMMENT_MARKER).toBe("<!-- danxbot -->");
   });
 });

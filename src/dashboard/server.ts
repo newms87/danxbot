@@ -79,7 +79,7 @@ export async function startDashboard(): Promise<void> {
         const body = JSON.stringify(getEvents(), null, 2);
         res.writeHead(200, {
           "Content-Type": "application/json",
-          "Content-Disposition": 'attachment; filename="flytebot-events.json"',
+          "Content-Disposition": 'attachment; filename="danxbot-events.json"',
         });
         res.end(body);
         return;
@@ -88,7 +88,7 @@ export async function startDashboard(): Promise<void> {
         const body = eventsToCSV(getEvents());
         res.writeHead(200, {
           "Content-Type": "text/csv",
-          "Content-Disposition": 'attachment; filename="flytebot-events.csv"',
+          "Content-Disposition": 'attachment; filename="danxbot-events.csv"',
         });
         res.end(body);
         return;

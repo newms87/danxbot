@@ -10,7 +10,7 @@ import { config } from "./config.js";
 const log = createLogger("startup");
 
 async function main(): Promise<void> {
-  log.info("Starting Flytebot...");
+  log.info("Starting Danxbot...");
 
   // Run database migrations
   await runMigrations();

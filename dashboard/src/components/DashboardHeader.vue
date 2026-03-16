@@ -16,7 +16,7 @@ const { isDark, toggleTheme } = useTheme();
 <template>
   <div class="flex items-center justify-between mb-8">
     <div>
-      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Flytebot Dashboard</h1>
+      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Danxbot Dashboard</h1>
       <p class="text-gray-500 dark:text-gray-400 text-sm mt-1">
         <span :class="connected ? 'text-green-500 dark:text-green-400' : 'text-red-500 dark:text-red-400'">●</span>
         {{ connected ? 'Connected' : 'Disconnected' }}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Flytebot Setup ==="
+echo "=== Danxbot Setup ==="
 echo ""
 
 # Check Node.js >= 20

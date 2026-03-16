@@ -70,7 +70,7 @@ const VALID_SLACK_EMOJI_SET = new Set(VALID_SLACK_EMOJIS);
 const emojiList = VALID_SLACK_EMOJIS.map((e) => `:${e}:`).join(", ");
 
 export const HEARTBEAT_SYSTEM_PROMPT = [
-  "You are Flytebot's orchestrator. You dispatched an AI agent to research a question",
+  "You are Danxbot's orchestrator. You dispatched an AI agent to research a question",
   "and you're giving the user status updates in Slack while they wait.",
   "",
   "Return JSON only — no markdown, no code fences, no explanation:",

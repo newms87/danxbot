@@ -3,7 +3,7 @@
 # Usage: ./describe-tables.sh table1 table2 table3
 #
 # Returns DESCRIBE output for each table, plus foreign key constraints.
-# Used by the Flytebot agent to verify schema before constructing queries.
+# Used by the Danxbot agent to verify schema before constructing queries.
 
 if [ $# -eq 0 ]; then
   echo "Usage: describe-tables.sh <table1> [table2] [table3] ..."

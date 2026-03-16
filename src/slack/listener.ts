@@ -148,7 +148,7 @@ export async function startSlackListener(): Promise<void> {
     }).catch(() => {});
 
     try {
-      // For thread replies, only respond if Flytebot is already participating
+      // For thread replies, only respond if Danxbot is already participating
       if (isThreadReply) {
         const participating = await isBotParticipant(threadTs);
         if (!participating) return;
@@ -190,7 +190,7 @@ export async function startSlackListener(): Promise<void> {
         });
 
         addMessageToThread(thread, {
-          user: "flytebot",
+          user: "danxbot",
           text: routerResult.quickResponse,
           ts: Date.now().toString(),
           isBot: true,
@@ -498,7 +498,7 @@ export async function startSlackListener(): Promise<void> {
                 }
 
                 addMessageToThread(thread, {
-                  user: "flytebot",
+                  user: "danxbot",
                   text: response.text,
                   ts: Date.now().toString(),
                   isBot: true,
@@ -689,5 +689,5 @@ export async function startSlackListener(): Promise<void> {
 
   await app.start();
   slackConnected = true;
-  log.info("Flytebot is running (Socket Mode)");
+  log.info("Danxbot is running (Socket Mode)");
 }

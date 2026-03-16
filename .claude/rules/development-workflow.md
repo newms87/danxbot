@@ -4,8 +4,8 @@
 
 1. Edit files in `src/` on the host
 2. Type-check: `npx tsc --noEmit`
-3. Restart the container: `docker restart flytebot`
-4. Check logs: `docker logs flytebot --tail 20`
+3. Restart the container: `docker restart danxbot`
+4. Check logs: `docker logs danxbot --tail 20`
 5. Test in the dashboard (localhost:5555) or Slack
 
 ## No Build Step

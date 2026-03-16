@@ -366,7 +366,7 @@ describe("dashboard server", () => {
 
       expect(res._getStatusCode()).toBe(200);
       expect(res._getHeaders()["content-type"]).toBe("application/json");
-      expect(res._getHeaders()["content-disposition"]).toBe('attachment; filename="flytebot-events.json"');
+      expect(res._getHeaders()["content-disposition"]).toBe('attachment; filename="danxbot-events.json"');
       expect(JSON.parse(res._getBody())).toEqual(events);
     });
 
@@ -380,7 +380,7 @@ describe("dashboard server", () => {
 
       expect(res._getStatusCode()).toBe(200);
       expect(res._getHeaders()["content-type"]).toBe("text/csv");
-      expect(res._getHeaders()["content-disposition"]).toBe('attachment; filename="flytebot-events.csv"');
+      expect(res._getHeaders()["content-disposition"]).toBe('attachment; filename="danxbot-events.csv"');
       expect(mockEventsToCSV).toHaveBeenCalledWith(events);
     });
 

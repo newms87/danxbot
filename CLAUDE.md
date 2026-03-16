@@ -1,4 +1,4 @@
-# Flytebot
+# Danxbot
 
 An autonomous AI agent powered by Claude Code SDK. Connects to a repo, processes Trello cards, and optionally answers questions via Slack. Run `./install.sh` for interactive setup.
 

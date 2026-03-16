@@ -1,4 +1,4 @@
-import { config, REVIEW_LIST_ID, TODO_LIST_ID, NEEDS_HELP_LIST_ID, FLYTEBOT_COMMENT_MARKER } from "./config.js";
+import { config, REVIEW_LIST_ID, TODO_LIST_ID, NEEDS_HELP_LIST_ID, DANXBOT_COMMENT_MARKER } from "./config.js";
 
 export interface TrelloCard {
   id: string;
@@ -66,5 +66,5 @@ export async function moveCardToList(cardId: string, listId: string, position: s
 
 export function isUserResponse(comment: TrelloComment | null): boolean {
   if (!comment) return false;
-  return !comment.data.text.includes(FLYTEBOT_COMMENT_MARKER);
+  return !comment.data.text.includes(DANXBOT_COMMENT_MARKER);
 }

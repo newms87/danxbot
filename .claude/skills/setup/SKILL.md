@@ -3,9 +3,9 @@ name: setup
 description: Interactive installer — guides user through credentials, Trello, repo connection, and rules generation.
 ---
 
-# Flytebot Setup
+# Danxbot Setup
 
-You are the interactive setup wizard for Flytebot. Guide the user through each step below, collecting credentials and configuring everything. The user should never need to manually edit `.env`.
+You are the interactive setup wizard for Danxbot. Guide the user through each step below, collecting credentials and configuring everything. The user should never need to manually edit `.env`.
 
 **Important:** Use `AskUserQuestion` for every prompt. Validate inputs before proceeding. If a step fails, explain what went wrong and retry — never skip.
 
@@ -30,14 +30,14 @@ You are the interactive setup wizard for Flytebot. Guide the user through each s
 3. Run: `echo "<TOKEN>" | gh auth login --with-token 2>&1` to authenticate the gh CLI
 4. If auth fails, show the error and re-prompt
 5. Run: `gh repo list --json nameWithOwner,description --limit 50`
-6. Present a numbered list of repos. Ask: "Which repo should Flytebot connect to? Enter the number:"
+6. Present a numbered list of repos. Ask: "Which repo should Danxbot connect to? Enter the number:"
 7. Save `REPOS=<name>:<clone_url>` to `.env` where `<name>` is the repo's short name (after the `/`) and `<clone_url>` is `https://github.com/<nameWithOwner>.git`
 
 ## Step 3: Trello Credentials
 
 1. Ask: "Enter your Trello API key. Get it from: https://trello.com/power-ups/admin — click on a Power-Up (or create one), then find the API key."
-2. Construct the auth URL: `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=<API_KEY>&name=Flytebot`
-3. Ask: "Visit this URL to authorize Flytebot, then paste the token you receive:"
+2. Construct the auth URL: `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=<API_KEY>&name=Danxbot`
+3. Ask: "Visit this URL to authorize Danxbot, then paste the token you receive:"
 4. Validate both by running:
    ```bash
    curl -s -o /dev/null -w "%{http_code}" "https://api.trello.com/1/members/me?key=<API_KEY>&token=<TOKEN>"
@@ -48,7 +48,7 @@ You are the interactive setup wizard for Flytebot. Guide the user through each s
 ## Step 4: Trello Board Setup
 
 1. Fetch boards: `curl -s "https://api.trello.com/1/members/me/boards?fields=name,url&key=<KEY>&token=<TOKEN>"`
-2. Present numbered list. Ask: "Which Trello board should Flytebot use?"
+2. Present numbered list. Ask: "Which Trello board should Danxbot use?"
 3. Save `TRELLO_BOARD_ID=<id>` to `.env`
 4. Fetch the board's lists: `curl -s "https://api.trello.com/1/boards/<BOARD_ID>/lists?fields=name&key=<KEY>&token=<TOKEN>"`
 5. Fetch the board's labels: `curl -s "https://api.trello.com/1/boards/<BOARD_ID>/labels?fields=name,color&key=<KEY>&token=<TOKEN>"`
@@ -152,7 +152,7 @@ commands:
 docker:
   compose_file: "<repo-name>-compose.yml"
   service_name: "laravel.test"
-  project_name: "flytebot-<repo-name>"
+  project_name: "danxbot-<repo-name>"
 
 paths:
   source: "app/"
@@ -167,8 +167,8 @@ If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an is
 
 **Key principles:**
 - Use the repo's own Docker images (build from its Dockerfile or reference its images)
-- Mount `/flytebot/repos` so code is accessible
-- Set `working_dir` to `/flytebot/repos/<name>/<subdir>` (where the main app lives)
+- Mount `/danxbot/repos` so code is accessible
+- Set `working_dir` to `/danxbot/repos/<name>/<subdir>` (where the main app lives)
 - Use isolated ports (offset from standard: 13306 for MySQL, 16379 for Redis, etc.)
 - Use an isolated bridge network named `sail` within the compose project
 - Set environment to `testing` mode for running tests
@@ -178,7 +178,7 @@ If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an is
 - `mysql` and `redis` services for testing
 - Environment variables for testing (DB_CONNECTION, CACHE_DRIVER=array, QUEUE_CONNECTION=sync)
 
-**For Node.js projects**, the compose override is usually unnecessary — tests run directly via `docker exec flytebot`.
+**For Node.js projects**, the compose override is usually unnecessary — tests run directly via `docker exec danxbot`.
 
 **For other frameworks**, adapt based on what the repo's own docker-compose.yml defines.
 
@@ -192,8 +192,8 @@ REPOS_DIR="$1"
 REPO="$REPOS_DIR/<name>"
 
 # Example: copy auth credentials for private package registries
-if [ -f "/flytebot/app/repo-overrides/<name>-auth.json" ] && [ -d "$REPO/<subdir>" ]; then
-    cp "/flytebot/app/repo-overrides/<name>-auth.json" "$REPO/<subdir>/auth.json"
+if [ -f "/danxbot/app/repo-overrides/<name>-auth.json" ] && [ -d "$REPO/<subdir>" ]; then
+    cp "/danxbot/app/repo-overrides/<name>-auth.json" "$REPO/<subdir>/auth.json"
 fi
 ```
 
@@ -201,7 +201,7 @@ Ask the user: "Does this repo require any auth files or credentials for package 
 
 ### 8d: Generate Env File (if Docker runtime)
 
-If the repo's Docker stack needs environment variables, write them to `repo-config/repo.env`. This keeps repo-specific env vars separate from flytebot's `.env`.
+If the repo's Docker stack needs environment variables, write them to `repo-config/repo.env`. This keeps repo-specific env vars separate from danxbot's `.env`.
 
 ## Step 9: Generate Rules (all files go in `repo-config/`)
 
@@ -227,7 +227,7 @@ Generate a workflow rule tailored to the detected repo. Include:
 - How to edit files (path prefix: `repos/<name>/`)
 - How to run tests (via docker exec if Docker, direct if local)
 - How to run lint/type-check
-- Git workflow: feature branches (`flytebot/<kebab-case>`), commit format, PR creation via `gh`
+- Git workflow: feature branches (`danxbot/<kebab-case>`), commit format, PR creation via `gh`
 - Always return to main after PR creation
 
 Use the existing `.claude/rules/repo-workflow.md` as a template for the structure — it has generic `<name>` placeholders. Fill in the actual repo name, commands, and Docker details.
@@ -282,11 +282,11 @@ Add a section about the connected repo under "## Connected Repo" with:
 Ensure `.env` has all values. Add defaults for anything not yet set:
 
 ```
-# Flytebot Database
-FLYTEBOT_DB_HOST=flytebot-mysql
-FLYTEBOT_DB_USER=flytebot
-FLYTEBOT_DB_PASSWORD=flytebot
-FLYTEBOT_DB_NAME=flytebot_chat
+# Danxbot Database
+DANXBOT_DB_HOST=danxbot-mysql
+DANXBOT_DB_USER=danxbot
+DANXBOT_DB_PASSWORD=danxbot
+DANXBOT_DB_NAME=danxbot_chat
 
 # Poller
 POLLER_INTERVAL_MS=60000
@@ -302,13 +302,13 @@ Read back the final `.env` (masking secrets) and present to user for confirmatio
 
 ## Step 11: Smoke Test
 
-1. Start flytebot: `docker compose up -d --build`
+1. Start danxbot: `docker compose up -d --build`
 2. Wait 10 seconds for startup
 3. Check health: `curl -s localhost:5555/health`
 4. If healthy, report success
-5. If unhealthy, check `docker logs flytebot --tail 30` and troubleshoot
+5. If unhealthy, check `docker logs danxbot --tail 30` and troubleshoot
 6. Run the repo's test suite (if Docker is configured) to verify the repo setup works
-7. Create a feature branch in the repo, add a "## Flytebot" section to the repo's README (describing what Flytebot does for this repo), commit, push, and open a PR as proof of life
+7. Create a feature branch in the repo, add a "## Danxbot" section to the repo's README (describing what Danxbot does for this repo), commit, push, and open a PR as proof of life
 8. Report the PR URL to the user
 
 ## Step 12: Finish
@@ -323,7 +323,7 @@ Read back the final `.env` (masking secrets) and present to user for confirmatio
    - `npm run poller` — start the autonomous card processor
    - Add cards to the Trello board's ToDo list
    - View the dashboard at localhost:5555
-   - If Slack is enabled: mention @Flytebot in the configured channel
+   - If Slack is enabled: mention @Danxbot in the configured channel
 
 ## Helper: `.env` Management
 

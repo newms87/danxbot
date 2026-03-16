@@ -11,7 +11,7 @@ source ~/.profile 2>/dev/null || true
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 cd "$PROJECT_ROOT"
-export FLYTEBOT_EPHEMERAL=1
+export DANXBOT_EPHEMERAL=1
 claude '/next-card' --dangerously-skip-permissions || true
 
 exit 0

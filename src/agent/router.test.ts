@@ -36,7 +36,7 @@ const { buildConversationMessages, runRouter } = await import("./router.js");
 function msg(
   text: string,
   isBot: boolean,
-  user = isBot ? "flytebot" : "U123",
+  user = isBot ? "danxbot" : "U123",
 ): ThreadMessage {
   return { user, text, ts: Date.now().toString(), isBot };
 }

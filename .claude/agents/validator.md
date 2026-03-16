@@ -22,7 +22,7 @@ Only run when the card's changes touch:
 ## How to Run
 
 ```bash
-cd /home/newms/web/flytebot && npm run test:validate
+cd /home/newms/web/danxbot && npm run test:validate
 ```
 
 This runs `vitest run --config vitest.validation.config.ts` which executes only the tests in `src/__tests__/validation/`.

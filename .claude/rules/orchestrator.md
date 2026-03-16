@@ -26,8 +26,8 @@ YOU are the orchestrator. Do NOT launch a separate orchestrator agent.
 1. Read the card description, check the card's labels, and fetch all comments using `get_card_comments` (cardId). Comments contain user context, previous investigation results, and clarifications that are essential for understanding the full scope of work.
 2. Fetch the "Acceptance Criteria" checklist using `get_acceptance_criteria` (cardId). These criteria were written by the ideator and define what "done" means for this card
 3. **For Bug cards:** Investigate the root cause first. Read logs, relevant source files, and error messages. Understand what's broken and why before planning the fix.
-4. **Check for Needs Help:** If the task requires human intervention outside the dev environment (changing Slack/Trello settings, external service config, manual account setup, etc.), add the `Needs Help` label using `update_card_details`, add a comment explaining what help is needed with `<!-- flytebot -->` appended at the end, move the card to Needs Help list, and skip this card. The `<!-- flytebot -->` marker is REQUIRED — the poller uses it to distinguish bot comments from user responses.
-5. **Detect target repo:** Determine whether changes target flytebot (`src/`) or the connected repo (`repos/<name>/`). A card targets the connected repo when its description references that repo's domain, framework, models, components, or directories. When targeting the connected repo, follow `.claude/rules/repo-workflow.md` — edit files at `repos/<name>/`, use feature branches, and open PRs instead of committing to flytebot's main branch. Read `.claude/rules/repo-config.md` for the repo name, paths, and commands.
+4. **Check for Needs Help:** If the task requires human intervention outside the dev environment (changing Slack/Trello settings, external service config, manual account setup, etc.), add the `Needs Help` label using `update_card_details`, add a comment explaining what help is needed with `<!-- danxbot -->` appended at the end, move the card to Needs Help list, and skip this card. The `<!-- danxbot -->` marker is REQUIRED — the poller uses it to distinguish bot comments from user responses.
+5. **Detect target repo:** Determine whether changes target danxbot (`src/`) or the connected repo (`repos/<name>/`). A card targets the connected repo when its description references that repo's domain, framework, models, components, or directories. When targeting the connected repo, follow `.claude/rules/repo-workflow.md` — edit files at `repos/<name>/`, use feature branches, and open PRs instead of committing to danxbot's main branch. Read `.claude/rules/repo-config.md` for the repo name, paths, and commands.
 6. Design the implementation approach, ensuring every acceptance criterion is addressed
 7. Check off "Planning"
 
@@ -49,11 +49,11 @@ If 3+ phases, different domains, or >500 lines — split into epic:
 The orchestrator implements the code directly using strict TDD:
 
 1. **Write failing test** — Create or update test file with tests that verify the expected behavior
-2. **Run tests** — Confirm the new test fails. For flytebot: `npx vitest run`. For connected repo cards: read the test command from `.claude/rules/repo-config.md` and run it via the method described in `.claude/rules/repo-workflow.md`
+2. **Run tests** — Confirm the new test fails. For danxbot: `npx vitest run`. For connected repo cards: read the test command from `.claude/rules/repo-config.md` and run it via the method described in `.claude/rules/repo-workflow.md`
 3. **Implement** — Write the minimum code to make the test pass
 4. **Run tests** — Confirm all tests pass (new AND existing)
 5. **Refactor** — Clean up if needed, run tests again
-6. **Type check** — `npx tsc --noEmit` (flytebot only; for connected repo, read type_check command from repo-config.md — skip if empty)
+6. **Type check** — `npx tsc --noEmit` (danxbot only; for connected repo, read type_check command from repo-config.md — skip if empty)
 
 **Documentation-only changes** (README, comments, docs): Skip TDD — just make the edit directly. Check off "Tests Written", "Implementation", "Tests Pass" together.
 
@@ -83,10 +83,10 @@ After implementation and quality gates pass, verify each acceptance criterion is
 
 ### Step 7: Commit
 
-**For flytebot cards:** Stage and commit changes directly.
+**For danxbot cards:** Stage and commit changes directly.
 
 **For connected repo cards:** Follow the git workflow in `.claude/rules/repo-workflow.md`:
-1. Create feature branch (`flytebot/<kebab-case>`)
+1. Create feature branch (`danxbot/<kebab-case>`)
 2. Stage and commit
 3. Push to origin
 4. Create PR via `gh pr create`
@@ -119,9 +119,9 @@ Check off "Committed".
 
 ### Step 9: Self-Terminate (Ephemeral Sessions Only)
 
-**Only self-terminate when `FLYTEBOT_EPHEMERAL=1` is set in the environment.** The poller sets this env var when spawning temporary Claude sessions. Interactive sessions (user-invoked commands) do NOT have this set and must never self-terminate.
+**Only self-terminate when `DANXBOT_EPHEMERAL=1` is set in the environment.** The poller sets this env var when spawning temporary Claude sessions. Interactive sessions (user-invoked commands) do NOT have this set and must never self-terminate.
 
-When `FLYTEBOT_EPHEMERAL=1` is set, remove the lock file and terminate the Claude process after completing ONE card (or when the card is moved to Needs Help):
+When `DANXBOT_EPHEMERAL=1` is set, remove the lock file and terminate the Claude process after completing ONE card (or when the card is moved to Needs Help):
 
 ```bash
 rm -f .poller-running && kill $PPID

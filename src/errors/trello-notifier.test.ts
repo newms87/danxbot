@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { makeConfig } from "../__tests__/helpers/fixtures.js";
+import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
 
 // --- Mocks (top-level, before dynamic import) ---
 

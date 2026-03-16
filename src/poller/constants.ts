@@ -20,5 +20,5 @@ export const NEEDS_HELP_LABEL_ID = required("TRELLO_NEEDS_HELP_LABEL_ID");
 
 export const REVIEW_MIN_CARDS = parseInt(process.env.TRELLO_REVIEW_MIN_CARDS || "10", 10);
 
-/** Marker appended to all Flytebot-posted Trello comments. The poller uses this to distinguish bot comments from user responses. */
-export const FLYTEBOT_COMMENT_MARKER = "<!-- flytebot -->";
+/** Marker appended to all Danxbot-posted Trello comments. The poller uses this to distinguish bot comments from user responses. */
+export const DANXBOT_COMMENT_MARKER = "<!-- danxbot -->";

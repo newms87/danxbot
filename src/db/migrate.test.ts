@@ -25,7 +25,7 @@ vi.mock("../config.js", () => ({
       host: "test-host",
       user: "test-user",
       password: "test-pass",
-      database: "flytebot_chat",
+      database: "danxbot_chat",
     },
   },
 }));

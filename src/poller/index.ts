@@ -25,7 +25,7 @@ let lockCheckId: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Check Needs Help cards for user responses. Cards where a user has replied
- * (latest comment lacks the flytebot marker) are moved to the top of ToDo
+ * (latest comment lacks the danxbot marker) are moved to the top of ToDo
  * so they get higher priority than existing ToDo cards.
  */
 async function checkNeedsHelp(): Promise<number> {
@@ -101,7 +101,7 @@ async function _poll(): Promise<void> {
   log.info(`Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`);
   cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.name}`));
 
-  spawnClaude("Flytebot Team", "run-team.sh");
+  spawnClaude("Danxbot Team", "run-team.sh");
 }
 
 /**
@@ -183,7 +183,7 @@ export function validateRepoConfig(): void {
   // 1. repo-config/ directory must exist
   if (!existsSync(repoConfigDir)) {
     throw new Error(
-      `repo-config/ directory not found. Run ./install.sh to set up flytebot.`,
+      `repo-config/ directory not found. Run ./install.sh to set up danxbot.`,
     );
   }
 
@@ -462,7 +462,7 @@ async function checkAndSpawnIdeator(): Promise<void> {
   }
 
   log.info(`Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — spawning ideator`);
-  spawnClaude("Flytebot Ideator", "run-ideator.sh");
+  spawnClaude("Danxbot Ideator", "run-ideator.sh");
 }
 
 export function shutdown(): void {

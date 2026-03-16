@@ -36,7 +36,7 @@ function basePoolOptions(): PoolOptions {
 }
 
 /**
- * Get a connection pool connected to the flytebot_chat database.
+ * Get a connection pool connected to the danxbot_chat database.
  * Used for normal application queries.
  */
 export function getPool(): Pool {

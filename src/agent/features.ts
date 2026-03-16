@@ -1,5 +1,5 @@
 /**
- * Feature capabilities list for Flytebot.
+ * Feature capabilities list for Danxbot.
  * Used by both the router system prompt and agent system prompts
  * to suggest relevant features to users.
  */
