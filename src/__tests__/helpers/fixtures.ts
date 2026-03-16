@@ -142,7 +142,7 @@ export function makeAgentResponse(
 export function makeSlackMessage(overrides?: Record<string, unknown>) {
   return {
     user: "U-HUMAN",
-    text: "Hello flytebot",
+    text: "Hello danxbot",
     ts: "1234567890.000100",
     channel: "C-TEST",
     type: "message" as const,

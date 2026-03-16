@@ -136,7 +136,7 @@ describe("buildConversationMessages", () => {
 
   it("handles real-world 8-message thread scenario", () => {
     const thread: ThreadMessage[] = [
-      msg("Hey Flytebot, how does campaign filtering work?", false),
+      msg("Hey Danxbot, how does campaign filtering work?", false),
       msg("Campaign filtering uses the FilterBuilder macro...", true),
       msg("Can you show me the code?", false),
       msg("Sure, here's the relevant code...", true),

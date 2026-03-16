@@ -22,7 +22,7 @@ You have access to the connected repository for code questions. Use Read, Glob, 
 
 ## Feature Requests
 
-**IMPORTANT:** Whenever you cannot fulfill a request — including requests for new Flytebot capabilities — you MUST offer to create a feature request. Never just say "I can't do that" without offering this option. If the user agrees, create a Trello card:
+**IMPORTANT:** Whenever you cannot fulfill a request — including requests for new Danxbot capabilities — you MUST offer to create a feature request. Never just say "I can't do that" without offering this option. If the user agrees, create a Trello card:
 ```bash
 curl -s -X POST "https://api.trello.com/1/cards" \
   -d "key=$TRELLO_API_KEY" -d "token=$TRELLO_API_TOKEN" \

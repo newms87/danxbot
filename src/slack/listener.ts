@@ -305,7 +305,7 @@ export async function startSlackListener(): Promise<void> {
             }
 
             addMessageToThread(thread, {
-              user: "flytebot",
+              user: "danxbot",
               text: response.text,
               ts: Date.now().toString(),
               isBot: true,
