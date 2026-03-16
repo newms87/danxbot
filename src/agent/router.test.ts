@@ -465,7 +465,7 @@ describe("runRouter", () => {
 
     const callArgs = mockCreate.mock.calls[0][0];
     expect(callArgs.system).toContain("Data Lookups");
-    expect(callArgs.system).toContain("Platform Knowledge");
+    expect(callArgs.system).toContain("Codebase Knowledge");
     expect(callArgs.system).toContain("Database Queries");
   });
 
@@ -479,7 +479,7 @@ describe("runRouter", () => {
     await runRouter("hi");
 
     const callArgs = mockCreate.mock.calls[0][0];
-    expect(callArgs.system).toContain("How many active campaigns");
+    expect(callArgs.system).toContain("How many active records");
     expect(callArgs.system).toContain("Example questions");
   });
 
