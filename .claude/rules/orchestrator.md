@@ -85,12 +85,21 @@ After implementation and quality gates pass, verify each acceptance criterion is
 
 **For danxbot cards:** Stage and commit changes directly.
 
-**For connected repo cards:** Follow the git workflow in `.claude/rules/repo-workflow.md`:
+**For connected repo cards:** Check the `Git Mode` field in `.claude/rules/repo-config.md`, then follow `.claude/rules/repo-workflow.md`:
+
+**If Git Mode is `pr`:**
 1. Create feature branch (`danxbot/<kebab-case>`)
 2. Stage and commit
 3. Push to origin
 4. Create PR via `gh pr create`
 5. Return to main branch
+
+**If Git Mode is `auto-merge`:**
+1. Create feature branch (`danxbot/<kebab-case>`)
+2. Stage and commit
+3. Push to origin
+4. Merge into main: checkout main, merge the branch, push main
+5. Delete the feature branch (local and remote)
 
 Check off "Committed".
 

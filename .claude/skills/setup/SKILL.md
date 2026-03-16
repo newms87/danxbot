@@ -150,6 +150,10 @@ The bot runs inside Docker and needs Claude Code CLI credentials to make agent c
    ```
 6. Ask: "Is this correct? Anything to change?"
 7. Apply any corrections the user provides.
+8. Ask: "How should Danxbot handle completed work in this repo?"
+   - **Auto-merge** (recommended for personal/small team repos): Work is done on a feature branch, automatically merged into main, and the branch is cleaned up. No PR review step.
+   - **Pull Request**: Work is done on a feature branch and a PR is created for human review before merging.
+9. Save the choice as `git_mode: auto-merge` or `git_mode: pr` in the config.
 
 ## Step 8: Generate Config in Connected Repo
 
@@ -167,6 +171,7 @@ url: <clone-url>
 runtime: docker  # or "local"
 language: php    # or node, go, python, ruby, rust
 framework: laravel  # or express, vue, django, rails, etc.
+git_mode: auto-merge  # or "pr"
 
 commands:
   test: "php artisan test"
@@ -291,10 +296,12 @@ Generate a workflow rule tailored to the detected repo. Include:
 - How to edit files (path prefix: `repos/<name>/`)
 - How to run tests (via docker exec if Docker, direct if local)
 - How to run lint/type-check
-- Git workflow: feature branches (`danxbot/<kebab-case>`), commit format, PR creation via `gh`
-- Always return to main after PR creation
+- Git workflow based on `git_mode` from Step 7:
+  - **`auto-merge`**: feature branches, commit, push, merge into main, delete branch
+  - **`pr`**: feature branches, commit, push, create PR via `gh pr create`, return to main
+- Commit format
 
-Use the existing `.claude/rules/repo-workflow.md` as a template for the structure — it has generic `<name>` placeholders. Fill in the actual repo name, commands, and Docker details.
+Use the existing `.claude/rules/repo-workflow.md` as a template for the structure — it has generic `<name>` placeholders. Fill in the actual repo name, commands, Docker details, and git mode.
 
 Synced to: `.claude/rules/repo-workflow.md`
 

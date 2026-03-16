@@ -317,6 +317,7 @@ function syncRepoFiles(): void {
   const projectName = cfg["docker.project_name"] || "";
   const sourcePath = cfg["paths.source"] || "";
   const testsPath = cfg["paths.tests"] || "";
+  const gitMode = cfg.git_mode || "pr";
 
   let content = `# Repo Config (auto-generated — do not edit)
 
@@ -332,6 +333,7 @@ This file is synced by the poller from \`.danxbot/config/config.yml\` on every p
 | Runtime | \`${runtime}\` |
 | Language | \`${language}\` |
 | Framework | \`${framework}\` |
+| Git Mode | \`${gitMode}\` |
 
 ## Commands
 
