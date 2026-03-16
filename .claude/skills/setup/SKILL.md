@@ -115,11 +115,13 @@ You are the interactive setup wizard for Flytebot. Guide the user through each s
 6. Ask: "Is this correct? Anything to change?"
 7. Apply any corrections the user provides.
 
-## Step 7: Generate `repo-config.yml` and Docker Overrides
+## Step 7: Generate Repo Config (all files go in `repo/`)
 
-### 7a: Write `repo-config.yml`
+**All repo-specific files live in the `repo/` directory.** This is the single source of truth. The poller syncs files from `repo/` to their target locations (`.claude/rules/`, `docs/`, `repo-overrides/`) before each Claude spawn.
 
-Write `repo-config.yml` at project root with the discovered config:
+### 7a: Write `repo/config.yml`
+
+Write `repo/config.yml` with the discovered config:
 
 ```yaml
 name: <repo-name>
@@ -148,7 +150,7 @@ Adjust the structure based on what was actually detected. If no Docker setup, om
 
 ### 7b: Generate Docker Compose Override (if runtime is `docker`)
 
-If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an isolated compose override at `repo-overrides/<name>-compose.yml`. This file runs the repo's own Docker stack with an isolated project name and network, so it doesn't conflict with the host's setup.
+If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an isolated compose override at `repo/compose.yml`. This file runs the repo's own Docker stack with an isolated project name and network, so it doesn't conflict with the host's setup.
 
 **Key principles:**
 - Use the repo's own Docker images (build from its Dockerfile or reference its images)
@@ -169,7 +171,7 @@ If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an is
 
 ### 7c: Generate Post-Clone Hook (if needed)
 
-If the repo needs setup after cloning (auth files, dependency install, config copy), create `repo-overrides/post-clone-<name>.sh`:
+If the repo needs setup after cloning (auth files, dependency install, config copy), create `repo/post-clone.sh`:
 
 ```bash
 #!/bin/bash
@@ -182,15 +184,17 @@ if [ -f "/flytebot/app/repo-overrides/<name>-auth.json" ] && [ -d "$REPO/<subdir
 fi
 ```
 
-Ask the user: "Does this repo require any auth files or credentials for package installation (e.g., Composer auth for private packages, npm tokens)?" If yes, collect the credentials and write them to `repo-overrides/`.
+Ask the user: "Does this repo require any auth files or credentials for package installation (e.g., Composer auth for private packages, npm tokens)?" If yes, collect the credentials and write them to `repo/`.
 
 ### 7d: Generate Env File (if Docker runtime)
 
-If the repo's Docker stack needs environment variables, write them to `repo-overrides/<name>.env`. This keeps repo-specific env vars separate from flytebot's `.env`.
+If the repo's Docker stack needs environment variables, write them to `repo/repo.env`. This keeps repo-specific env vars separate from flytebot's `.env`.
 
-## Step 8: Generate Rules
+## Step 8: Generate Rules (all files go in `repo/`)
 
-### `.claude/rules/repo-overview.md`
+All generated rules go into `repo/`. The poller's sync function distributes them to their target locations before each Claude spawn.
+
+### `repo/overview.md`
 
 Generate an overview of the connected repo based on what was discovered in Step 6. This file gives the orchestrator agent context about the repo's architecture so it can work on cards effectively. Include:
 
@@ -202,7 +206,9 @@ Generate an overview of the connected repo based on what was discovered in Step 
 
 Base this entirely on what you read from the repo's source code, README, and config files. Do NOT guess — only include what you can verify from the codebase.
 
-### `.claude/rules/repo-workflow.md`
+Synced to: `.claude/rules/repo-overview.md`
+
+### `repo/workflow.md`
 
 Generate a workflow rule tailored to the detected repo. Include:
 - How to edit files (path prefix: `repos/<name>/`)
@@ -211,15 +217,34 @@ Generate a workflow rule tailored to the detected repo. Include:
 - Git workflow: feature branches (`flytebot/<kebab-case>`), commit format, PR creation via `gh`
 - Always return to main after PR creation
 
-Use `.claude/rules/repo-workflow.md` (already in the repo) as the template. It uses generic `<name>` placeholders — the generated version should fill in the actual repo name, commands, and Docker details.
+Use the existing `.claude/rules/repo-workflow.md` as a template for the structure — it has generic `<name>` placeholders. Fill in the actual repo name, commands, and Docker details.
 
-### `.claude/rules/repo-config.md`
+Synced to: `.claude/rules/repo-workflow.md`
 
-Generate the config rule (same format as `trello-config.md` — auto-generated, machine-readable) with:
-- Repo name, URL, local path
-- All detected commands
-- Docker config (if applicable)
-- Source and test paths
+### `repo/docs/schema/` and `repo/docs/domains/` (if database is configured)
+
+If the connected repo has a database, generate domain documentation:
+
+**`repo/docs/schema/model-relationships.md`** — A relationship map showing how the key database tables connect via foreign keys. Base this on:
+- Reading model files (Eloquent relationships, ActiveRecord associations, etc.)
+- Running DESCRIBE on key tables
+- Tracing foreign key relationships
+
+**`repo/docs/domains/*.md`** — One file per major domain area (e.g., `users.md`, `billing.md`). Each should contain:
+- What the domain covers
+- Key models/tables involved
+- Important relationships and workflows
+- Common query patterns
+
+Base these entirely on what you discover from the codebase and database. The ideator agent will expand these over time.
+
+If no database is configured, create placeholder files noting that database docs will be populated when a DB connection is added.
+
+Synced to: `docs/domains/` and `docs/schema/`
+
+### Note: `repo-config.md` is auto-generated
+
+The poller generates `.claude/rules/repo-config.md` from `repo/config.yml` automatically — do NOT create this file manually.
 
 ### Update `CLAUDE.md`
 

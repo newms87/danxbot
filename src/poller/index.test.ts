@@ -47,12 +47,18 @@ vi.mock("../logger.js", () => ({
 
 const mockExistsSync = vi.fn();
 const mockReadFileSync = vi.fn();
+const mockReaddirSync = vi.fn().mockReturnValue([]);
 const mockWriteFileSync = vi.fn();
+const mockMkdirSync = vi.fn();
+const mockCopyFileSync = vi.fn();
 const mockUnlinkSync = vi.fn();
 vi.mock("node:fs", () => ({
   existsSync: (...args: unknown[]) => mockExistsSync(...args),
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
+  readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
+  mkdirSync: (...args: unknown[]) => mockMkdirSync(...args),
+  copyFileSync: (...args: unknown[]) => mockCopyFileSync(...args),
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
 }));
 
