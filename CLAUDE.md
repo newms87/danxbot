@@ -91,7 +91,7 @@ The main Claude Code session acts as the orchestrator. Subagents are launched vi
 
 | Agent | File | Role |
 |-------|------|------|
-| Ideator | `.claude/agents/ideator.md` | Platform knowledge + feature generation |
+| Ideator | `.claude/agents/ideator.md` | Repo knowledge + feature generation |
 | Validator | `.claude/agents/validator.md` | Runs real Claude API validation tests |
 | Test Reviewer | `.claude/agents/test-reviewer.md` | Audits test coverage (read-only) |
 | Code Reviewer | `.claude/agents/code-reviewer.md` | Reviews code quality (read-only) |

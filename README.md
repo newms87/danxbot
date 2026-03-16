@@ -1,6 +1,6 @@
 # Flytebot
 
-A Slack bot powered by the Claude Code SDK that answers questions about the Flytedesk platform by exploring its codebase and querying its database.
+An autonomous AI agent powered by the Claude Code SDK. Connects to any repo, processes Trello cards, and optionally answers questions via Slack.
 
 ## How It Works
 
@@ -10,11 +10,20 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
                Agent (Claude Code SDK) → detailed response to Slack
 ```
 
-1. A message arrives in the configured Slack channel
+1. A message arrives in the configured Slack channel (optional)
 2. The **Router** (a fast Haiku call) triages the message: sends an instant reply and decides whether the full agent is needed
-3. If needed, the **Agent** (Claude Code SDK) explores the platform repo, queries the database, and streams a detailed answer back to Slack
+3. If needed, the **Agent** (Claude Code SDK) explores the connected repo, queries the database, and streams a detailed answer back to Slack
 4. A **Heartbeat Orchestrator** posts entertaining status updates while the agent works
 5. A **Dashboard** on port 5555 shows live event tracking and analytics
+6. A **Poller** watches a Trello board and autonomously processes cards (works without Slack)
+
+## Quick Start
+
+```bash
+git clone <this-repo> flytebot && cd flytebot && ./install.sh
+```
+
+The interactive setup wizard guides you through credentials, Trello board setup, repo connection, and generates all config files. No manual `.env` editing needed.
 
 ## Architecture
 
@@ -28,58 +37,17 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 | `src/slack/helpers.ts` | Shared Slack API helpers (reactions, attachments) |
 | `src/slack/formatter.ts` | Markdown to Slack mrkdwn conversion |
 | `src/dashboard/` | Vue 3 + Tailwind monitoring dashboard |
-| `src/threads.ts` | Thread state persistence (JSON files) |
+| `src/poller/` | Trello card poller + autonomous agent launcher |
+| `src/threads.ts` | Thread state persistence |
 
 ## Prerequisites
 
+- Node.js 20+
 - Docker and Docker Compose
-- The platform repo checked out locally
-- A Slack app with Socket Mode enabled
+- Claude Code CLI (`npm i -g @anthropic-ai/claude-code`)
 - An Anthropic API key
-- Claude Code CLI auth (`~/.claude.json`)
-
-## Setup
-
-1. Clone this repo and the platform repo side by side:
-
-   ```
-   ~/web/platform/   # Flytedesk platform repo
-   ~/web/flytebot/   # This repo
-   ```
-
-2. Copy `.env.example` to `.env` and fill in the values:
-
-   ```
-   SLACK_BOT_TOKEN=xoxb-...
-   SLACK_APP_TOKEN=xapp-...
-   SLACK_CHANNEL_ID=C...
-   ANTHROPIC_API_KEY=sk-ant-...
-   REPOS=platform:https://github.com/Flytedesk/platform.git
-   PLATFORM_DB_HOST=...
-   PLATFORM_DB_USER=...
-   PLATFORM_DB_PASSWORD=...
-   PLATFORM_DB_NAME=...
-   ```
-
-3. Make sure the platform's Docker network exists (the bot connects to it for database access):
-
-   ```bash
-   docker network ls | grep ssap_sail
-   ```
-
-4. Start the bot:
-
-   ```bash
-   docker compose up -d
-   ```
-
-5. Verify it's running:
-
-   ```bash
-   docker logs flytebot --tail 20
-   # Should see: "Dashboard running at http://localhost:5555"
-   # Should see: "Flytebot is running (Socket Mode)"
-   ```
+- A GitHub personal access token
+- A Trello account
 
 ## Development
 
@@ -102,13 +70,11 @@ docker compose up -d --build
 docker logs flytebot -f
 ```
 
-HTML/CSS changes to the dashboard are visible on browser refresh without a restart.
-
 ## Tech Stack
 
 - **Runtime**: Node.js 20 + tsx
-- **Slack**: @slack/bolt (Socket Mode)
+- **Slack**: @slack/bolt (Socket Mode) — optional
 - **AI**: @anthropic-ai/sdk (router), @anthropic-ai/claude-agent-sdk (agent)
-- **Dashboard**: Vue 3 + Tailwind CSS (CDN, single HTML file)
+- **Dashboard**: Vite + Vue 3 + Tailwind CSS 4
 - **Testing**: Vitest
-- **Container**: Docker with Ubuntu 22.04, PHP 8.3, MySQL client
+- **Container**: Docker with Ubuntu 22.04
