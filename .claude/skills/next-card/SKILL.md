@@ -14,7 +14,7 @@ Process a SINGLE card from the ToDo list using the orchestrator workflow defined
 3. Take the top card (first in the list) and report which card is being processed
 4. Process the card using the Card Processing Workflow (Steps 1-8 in the orchestrator rule)
 5. **Stop after this single card.**
-6. **MANDATORY — Self-termination check (never skip):** Run `echo $DANXBOT_EPHEMERAL` and check the output. If the value is `1`, execute `rm -f .poller-running && kill $PPID` immediately. If it is not `1`, do nothing. **You must always run this check — never assume you know the session type.**
+6. **MANDATORY — Self-termination check (never skip):** Run `./scripts/self-terminate.sh $PPID` via Bash. The script checks `DANXBOT_EPHEMERAL` and handles lock file removal and process termination atomically. Never assume you know the session type — always run the script.
 
 ## Report
 
