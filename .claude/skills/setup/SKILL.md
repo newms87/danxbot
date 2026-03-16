@@ -347,7 +347,7 @@ Ensure `.env` has all values. Add defaults for anything not yet set:
 
 ```
 # Danxbot Database
-DANXBOT_DB_HOST=danxbot-mysql
+DANXBOT_DB_HOST=mysql
 DANXBOT_DB_USER=danxbot
 DANXBOT_DB_PASSWORD=danxbot
 DANXBOT_DB_NAME=danxbot_chat
@@ -372,7 +372,7 @@ Read back the final `.env` (masking secrets) and present to user for confirmatio
 2. Wait 10 seconds for startup
 3. Check health: `curl -s localhost:5555/health`
 4. If healthy, report success
-5. If unhealthy, check `docker logs danxbot --tail 30` and troubleshoot
+5. If unhealthy, check `docker compose logs danxbot --tail 30` and troubleshoot
 6. Run the repo's test suite (if Docker is configured) to verify the repo setup works
 7. Create a feature branch in the repo, add a "## Danxbot" section to the repo's README (describing what Danxbot does for this repo), commit, push, and open a PR as proof of life
 8. Report the PR URL to the user

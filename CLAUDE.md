@@ -40,8 +40,8 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 | `docker compose up -d` | Start the bot |
 | `docker compose down` | Stop the bot |
 | `docker compose up -d --force-recreate` | Restart (picks up code changes) |
-| `docker logs flytebot -f` | Tail logs |
-| `curl localhost:5555/health` | Check bot health status |
+| `docker compose logs danxbot -f` | Tail logs |
+| `curl localhost:$DASHBOARD_PORT/health` | Check bot health status |
 | `npx tsc --noEmit` | Type-check only (host) |
 | `npm run dashboard:dev` | Vite dev server on 5173 (HMR) |
 | `npm run dashboard:build` | Build dashboard for production |

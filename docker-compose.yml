@@ -1,12 +1,11 @@
 services:
   danxbot:
     build: .
-    container_name: danxbot
     restart: always
     stop_grace_period: 120s
     env_file: .env
     ports:
-      - "5555:5555"
+      - "${DASHBOARD_PORT:-5555}:${DASHBOARD_PORT:-5555}"
     volumes:
       # Hot-reload during development
       - ./src:/danxbot/app/src
@@ -24,7 +23,7 @@ services:
       # Claude Code auth (copied into project by /setup)
       - ./claude-auth:/danxbot/claude-auth:ro
     depends_on:
-      danxbot-mysql:
+      mysql:
         condition: service_healthy
     logging:
       driver: json-file
@@ -32,10 +31,10 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  danxbot-mysql:
+  mysql:
     image: mysql/mysql-server:8.0
     volumes:
-      - danxbot-mysql:/var/lib/mysql
+      - mysql-data:/var/lib/mysql
     environment:
       MYSQL_ROOT_PASSWORD: danxbot
       MYSQL_ROOT_HOST: "%"
@@ -55,4 +54,4 @@ services:
 
 volumes:
   danxbot-threads:
-  danxbot-mysql:
+  mysql-data:

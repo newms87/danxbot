@@ -30,7 +30,7 @@ function validEnv(): Record<string, string> {
     PLATFORM_DB_USER: "test",
     PLATFORM_DB_PASSWORD: "test",
     PLATFORM_DB_NAME: "test",
-    DANXBOT_DB_HOST: "danxbot-mysql",
+    DANXBOT_DB_HOST: "mysql",
     DANXBOT_DB_USER: "danxbot",
     DANXBOT_DB_PASSWORD: "danxbot",
     MAX_TURNS: "10",

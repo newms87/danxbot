@@ -61,6 +61,6 @@ COPY entrypoint.sh /danxbot/entrypoint.sh
 RUN chmod +x /danxbot/entrypoint.sh
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -f http://localhost:5555/health || exit 1
+  CMD curl -f http://localhost:${DASHBOARD_PORT:-5555}/health || exit 1
 
 ENTRYPOINT ["/danxbot/entrypoint.sh"]

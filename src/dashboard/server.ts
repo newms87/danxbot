@@ -7,7 +7,7 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("dashboard");
 
-const PORT = 5555;
+const PORT = parseInt(process.env.DASHBOARD_PORT || "5555", 10);
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html",

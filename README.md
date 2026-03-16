@@ -67,7 +67,7 @@ docker compose up -d --force-recreate
 docker compose up -d --build
 
 # Tail logs
-docker logs danxbot -f
+docker compose logs danxbot -f
 ```
 
 ## Tech Stack

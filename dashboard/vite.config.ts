@@ -3,6 +3,8 @@ import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 
+const apiPort = process.env.DASHBOARD_PORT || "5555";
+
 export default defineConfig({
   plugins: [vue(), tailwindcss()],
   resolve: {
@@ -13,8 +15,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:5555",
-      "/health": "http://localhost:5555",
+      "/api": `http://localhost:${apiPort}`,
+      "/health": `http://localhost:${apiPort}`,
     },
   },
 });
