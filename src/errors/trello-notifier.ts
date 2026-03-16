@@ -7,7 +7,7 @@ const log = createLogger("trello-notifier");
 const MAX_CARD_NAME_LENGTH = 100;
 
 function buildCardName(errorType: string, errorMessage: string): string {
-  const prefix = `[Error] ${errorType}: `;
+  const prefix = `[Danxbot > Error] ${errorType}: `;
   const maxMessageLength = MAX_CARD_NAME_LENGTH - prefix.length;
 
   if (errorMessage.length > maxMessageLength) {

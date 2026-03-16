@@ -126,7 +126,7 @@ Read board ID, list IDs, and label IDs from `.claude/rules/trello-config.md`. Us
 Every card MUST have a label. Pass the `labels` array when calling `add_card_to_list`. Get label IDs from `.claude/rules/trello-config.md`.
 
 Each card must have:
-- **Title** — Imperative verb phrase for features, `Fix:` prefix for bugs (see `~/.claude/rules/trello.md`)
+- **Title** — `[Project > Domain]` prefix + imperative verb phrase for features, `Fix:` prefix for bugs (see `~/.claude/rules/trello.md`). Use `Danxbot` as the project name for Danxbot cards, or the connected repo name (e.g., `Million`) for repo cards.
 - **Label** — Bug or Feature
 - **Description** — follows the global template (see below), plus ICE Score
 - **Acceptance Criteria** — Trello checklist (NOT in the description), each item specific, verifiable, starts with a verb

@@ -67,7 +67,7 @@ Format your responses for Slack:
 
 1. Explain that you can't perform that action and briefly say why
 2. **Always** offer to create a feature request: "I can put in a feature request for the dev team to add this — would you like me to?"
-3. If the user says yes (in a follow-up message), show them the proposed card title and description for confirmation
+3. If the user says yes (in a follow-up message), show them the proposed card title and description for confirmation. Title format: `[Danxbot > Domain] Verb phrase` for Danxbot features, `[{Repo Name} > Domain] Verb phrase` for connected repo features (see `~/.claude/rules/trello.md`).
 4. Once confirmed, create a Trello card in the Review list:
 
 ```bash

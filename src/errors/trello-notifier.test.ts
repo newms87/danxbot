@@ -90,7 +90,7 @@ describe("when Trello creds are not configured", () => {
 
 describe("duplicate detection", () => {
   it("does not create a card when duplicate exists in ToDo", async () => {
-    const cardName = "[Error] Agent Timeout: timed out";
+    const cardName = "[Danxbot > Error] Agent Timeout: timed out";
 
     // First fetch: list cards — returns a duplicate
     mockFetch.mockResolvedValueOnce({
@@ -149,7 +149,7 @@ describe("card creation", () => {
     expect(opts.method).toBe("POST");
 
     const params = new URLSearchParams(url.split("?")[1]);
-    expect(params.get("name")).toBe("[Error] Agent Timeout: Agent timed out after 300s");
+    expect(params.get("name")).toBe("[Danxbot > Error] Agent Timeout: Agent timed out after 300s");
     expect(params.get("pos")).toBe("top");
     expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adac"); // Bug label
     expect(params.get("idList")).toBe("698fc5be16a280cc321a13ec"); // ToDo list
