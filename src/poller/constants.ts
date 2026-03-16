@@ -1,4 +1,16 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+
+/**
+ * Resolve the base repos directory. Inside the Docker container this is
+ * `/danxbot/repos/`; on the host it is `repos/` relative to the project root.
+ */
+export function getReposBase(): string {
+  if (existsSync("/danxbot/repos")) return "/danxbot/repos";
+  const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  return resolve(projectRoot, "repos");
+}
 
 /**
  * Load Trello IDs from .danxbot/config/trello.yml in the connected repo.
@@ -10,7 +22,7 @@ function loadTrelloYaml(): Record<string, string> {
   const name = repos.split(",")[0].split(":")[0].trim();
   if (!name) throw new Error("Invalid REPOS format — expected 'name:url'");
 
-  const trelloYmlPath = `/danxbot/repos/${name}/.danxbot/config/trello.yml`;
+  const trelloYmlPath = resolve(getReposBase(), name, ".danxbot/config/trello.yml");
   const content = readFileSync(trelloYmlPath, "utf-8");
 
   const result: Record<string, string> = {};

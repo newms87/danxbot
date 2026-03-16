@@ -2,6 +2,7 @@ import type { ComplexityLevel, ComplexityProfile, RepoConfig } from "./types.js"
 import {
   BOARD_ID, TODO_LIST_ID, BUG_LABEL_ID,
   NEEDS_HELP_LIST_ID, NEEDS_HELP_LABEL_ID, REVIEW_LIST_ID,
+  getReposBase,
 } from "./poller/constants.js";
 
 export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
@@ -36,7 +37,7 @@ function parseRepos(envValue: string): RepoConfig[] {
     if (!name || !url) {
       throw new Error(`Invalid REPOS entry "${entry}" — name and url must not be empty`);
     }
-    return { name, url, localPath: `/danxbot/repos/${name}` };
+    return { name, url, localPath: `${getReposBase()}/${name}` };
   });
 }
 

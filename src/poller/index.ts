@@ -8,6 +8,7 @@ import {
   DONE_LIST_ID, CANCELLED_LIST_ID, ACTION_ITEMS_LIST_ID,
   BUG_LABEL_ID, FEATURE_LABEL_ID, EPIC_LABEL_ID, NEEDS_HELP_LABEL_ID,
 } from "./config.js";
+import { getReposBase } from "./constants.js";
 import { createLogger } from "../logger.js";
 import { fetchTodoCards, fetchNeedsHelpCards, fetchReviewCards, fetchLatestComment, moveCardToList, isUserResponse } from "./trello-client.js";
 
@@ -20,7 +21,7 @@ function getDanxbotConfigDir(): string {
   const repos = process.env.REPOS || "";
   const name = repos.split(",")[0].split(":")[0].trim();
   if (!name) return "";
-  return `/danxbot/repos/${name}/.danxbot/config`;
+  return resolve(getReposBase(), name, ".danxbot/config");
 }
 
 const danxbotConfigDir = getDanxbotConfigDir();
