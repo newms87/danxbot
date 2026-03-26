@@ -27,7 +27,7 @@ if [ -n "$REPOS" ]; then
             git clone --depth 1 "$url" "$repo_path"
         else
             echo "Updating $name repo..."
-            git -C "$repo_path" fetch origin && git -C "$repo_path" reset --hard origin/HEAD
+            git -C "$repo_path" fetch origin && git -C "$repo_path" pull --ff-only origin HEAD || echo "  (skipped — local changes exist)"
         fi
 
         # Mark as safe directory for both root and danxbot users
