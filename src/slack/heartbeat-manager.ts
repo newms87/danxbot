@@ -167,12 +167,6 @@ export class HeartbeatManager {
 
   private flushToSlack(): void {
     if (!this.latestStreamText) return;
-    const preview = markdownToSlackMrkdwn(this.latestStreamText);
-    const truncated =
-      preview.length > STREAM_TRUNCATE_LIMIT
-        ? preview.slice(0, STREAM_TRUNCATE_LIMIT) +
-          "\n\n_...still generating..._"
-        : preview;
 
     const elapsed = Math.round(
       (Date.now() - this.heartbeatStart) / 1000,
@@ -182,7 +176,7 @@ export class HeartbeatManager {
       .update({
         channel: this.channel,
         ts: this.placeholderTs,
-        text: truncated,
+        text: this.truncateStreamText(),
         attachments: buildHeartbeatAttachment(this.latestHeartbeat, elapsed),
       })
       .catch((err: unknown) =>
@@ -190,6 +184,14 @@ export class HeartbeatManager {
       );
 
     this.lastFlushTime = Date.now();
+  }
+
+  private truncateStreamText(): string {
+    if (!this.latestStreamText) return " ";
+    const preview = markdownToSlackMrkdwn(this.latestStreamText);
+    return preview.length > STREAM_TRUNCATE_LIMIT
+      ? preview.slice(0, STREAM_TRUNCATE_LIMIT) + "\n\n_...still generating..._"
+      : preview;
   }
 
   private updateHeartbeatSlack(hb: HeartbeatUpdate): void {
@@ -200,9 +202,7 @@ export class HeartbeatManager {
       .update({
         channel: this.channel,
         ts: this.placeholderTs,
-        text: this.latestStreamText
-          ? markdownToSlackMrkdwn(this.latestStreamText)
-          : " ",
+        text: this.truncateStreamText(),
         attachments: buildHeartbeatAttachment(hb, elapsed),
       })
       .catch((err: unknown) =>

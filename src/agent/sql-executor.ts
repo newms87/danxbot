@@ -189,11 +189,8 @@ export async function processResponseWithAttachments(text: string): Promise<Proc
       } else if (queryResult.rows.length === 0) {
         replacement = "*No results found.*";
       } else {
-        replacement = formatResultsAsTable(
-          queryResult.columns,
-          queryResult.rows,
-          queryResult.totalRows,
-        );
+        const rowCount = queryResult.totalRows ?? queryResult.rows.length;
+        replacement = `_Query returned ${rowCount} row${rowCount === 1 ? "" : "s"} — see attached CSV._`;
         attachments.push({
           csv: formatResultsAsCsv(queryResult.columns, queryResult.rows),
           filename: `query-result-${timestamp}-${i + 1}.csv`,

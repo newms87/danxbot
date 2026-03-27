@@ -18,7 +18,11 @@ The setup generates `.danxbot/config/` in the connected repo, `.env`, and tailor
 
 ## Connected Repo
 
-All repo-specific config lives in `.danxbot/config/` inside the connected repo (version controlled). Trello IDs, repo commands, overview, workflow, and domain docs are stored there. Secrets (API keys, tokens, passwords) stay in danxbot's `.env`. The poller syncs config to `.claude/rules/`, `docs/`, and `repo-overrides/` before each Claude spawn. The connected repo is cloned to `repos/<name>/` and is the target for Trello card work.
+All repo-specific config lives in `.danxbot/config/` inside the connected repo (version controlled). Trello IDs, repo commands, overview, workflow, domain docs, and agent tools are stored there. Secrets (API keys, tokens, passwords) stay in danxbot's `.env`. The poller syncs config to `.claude/rules/`, `docs/`, and `repo-overrides/` before each Claude spawn. The connected repo is cloned to `repos/<name>/` and is the target for Trello card work.
+
+### Agent Tools
+
+Each connected repo can define a `tools.md` in `.danxbot/config/` that lists commands available to SDK agents (database schema helpers, test runners, lint commands, etc.). The poller syncs this to the repo's `.claude/rules/tools.md`, where it's automatically loaded by the Claude Code SDK via `settingSources: ["project"]`. This keeps tool definitions repo-specific — danxbot's system prompts reference the tools generically without hardcoding paths.
 
 ## Architecture
 

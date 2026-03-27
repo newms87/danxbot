@@ -77,7 +77,7 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 
 The Claude Code CLI uses an MCP (Model Context Protocol) server to interact with Trello. This must be configured in the project's settings so that `/next-card`, `/start-team`, and other skills can read/write Trello cards.
 
-1. Read the existing `.claude/settings.local.json`
+1. Read the existing `.mcp.json` in the project root (create if missing)
 2. Add or update the `mcpServers.trello` section with the credentials from Step 3:
    ```json
    {
@@ -94,8 +94,9 @@ The Claude Code CLI uses an MCP (Model Context Protocol) server to interact with
    }
    ```
 3. **IMPORTANT:** The MCP server uses `TRELLO_TOKEN` (not `TRELLO_API_TOKEN`). Use the same token value from Step 3.
-4. Merge with existing settings — preserve all existing `env`, `permissions`, and other fields.
-5. Write the merged result back to `.claude/settings.local.json`.
+4. Merge with existing servers — preserve any other MCP server entries.
+5. Write the merged result back to `.mcp.json`.
+6. Ensure `.mcp.json` is in `.gitignore` (it contains credentials).
 
 ## Step 5: Slack Setup (Optional)
 

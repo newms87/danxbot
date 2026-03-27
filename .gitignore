@@ -9,6 +9,7 @@ dashboard/node_modules/
 *.tsbuildinfo
 
 .claude/clad.json
+.mcp.json
 agent-notes.md
 claude-auth/*
 !claude-auth/.gitkeep

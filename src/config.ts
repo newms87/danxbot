@@ -6,11 +6,11 @@ import {
 } from "./poller/constants.js";
 
 export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
-  very_low:  { model: "claude-haiku-4-5",   maxTurns: 5,  maxBudgetUsd: 0.10, maxThinkingTokens: 2048,  systemPrompt: "fast" },
-  low:       { model: "claude-haiku-4-5",   maxTurns: 6,  maxBudgetUsd: 0.20, maxThinkingTokens: 4096,  systemPrompt: "fast" },
-  medium:    { model: "claude-sonnet-4-5",  maxTurns: 8,  maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
-  high:      { model: "claude-sonnet-4-5",  maxTurns: 12, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
-  very_high: { model: "claude-opus-4-6",    maxTurns: 18, maxBudgetUsd: 5.00, maxThinkingTokens: 32768, systemPrompt: "full" },
+  very_low:  { model: "claude-haiku-4-5",   maxTurns: 8,  maxBudgetUsd: 0.10, maxThinkingTokens: 2048,  systemPrompt: "fast" },
+  low:       { model: "claude-haiku-4-5",   maxTurns: 12, maxBudgetUsd: 0.20, maxThinkingTokens: 4096,  systemPrompt: "fast" },
+  medium:    { model: "claude-sonnet-4-5",  maxTurns: 16, maxBudgetUsd: 0.50, maxThinkingTokens: 8192,  systemPrompt: "full" },
+  high:      { model: "claude-sonnet-4-5",  maxTurns: 24, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
+  very_high: { model: "claude-opus-4-6",    maxTurns: 30, maxBudgetUsd: 5.00, maxThinkingTokens: 32768, systemPrompt: "full" },
 };
 
 function required(name: string): string {

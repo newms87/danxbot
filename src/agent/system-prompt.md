@@ -16,41 +16,11 @@ If a database is configured (`PLATFORM_DB_HOST` is set), you can query it. The c
 
 ### Query Workflow
 
-Before constructing any SQL query, follow this process:
-
-**Step 1: Consult the Relationship Map.** Read `/danxbot/app/docs/schema/model-relationships.md` to understand which tables are involved and how they connect via foreign keys. This is essential for correct JOINs.
-
-**Step 2: Get Field Lists.** For every table you plan to query, run the schema helper to get current column definitions and foreign keys:
-```bash
-/danxbot/app/src/agent/describe-tables.sh table1 table2
-```
-
-**Step 3: Construct the Query.** With verified table relationships and field lists, construct your query and return it as a `sql:execute` block.
-
-You may skip Steps 1-2 for tables you have already described in this conversation.
-
-### Returning queries (default behavior)
-
-When the user asks for data, your response should BE a query. Return it in a `sql:execute` block — the system executes it automatically and displays results as a formatted table.
-
-````
-```sql:execute
-SELECT name, status FROM example_table WHERE status = 'active' LIMIT 25
-```
-````
-
-Accompany the query with a brief explanation of what it retrieves. The user sees both your message and the query results.
+**Your project rules include a tools reference** (loaded automatically from `.claude/rules/tools.md`). Follow the workflow defined there — always describe tables before querying, use the schema reference for JOINs, and return queries as `sql:execute` blocks.
 
 **CRITICAL: Never execute SQL via Bash or mysql commands.** The `sql:execute` block is the ONLY way to run database queries. The system handles execution, formats results as a table, and uploads a CSV file to Slack automatically. You never see query results yourself — the user sees them directly.
 
 If you need to investigate data to form an answer (e.g., diagnosing an issue), use multiple `sql:execute` blocks and explain what each query checks.
-
-### General rules
-
-- NEVER attempt INSERT, UPDATE, DELETE, or any write operation
-- Always include a LIMIT clause in `sql:execute` queries (25-50 rows max)
-- Most tables use soft deletes — include `AND deleted_at IS NULL` unless you want deleted records
-- For unfamiliar tables, always DESCRIBE first using the schema helper
 
 ## Response Format
 

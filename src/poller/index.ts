@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import {
@@ -400,7 +400,36 @@ This file is synced by the poller from \`.danxbot/config/config.yml\` on every p
     }
   }
 
-  // 7. Copy .danxbot/features.md → docs/features.md (only if docs/ version doesn't exist yet)
+  // 7. Sync tools to connected repo's .claude/ (for SDK agent context)
+  const repos = process.env.REPOS || "";
+  const repoName = repos.split(",")[0].split(":")[0].trim();
+  if (repoName) {
+    const repoClaudeDir = resolve(getReposBase(), repoName, ".claude");
+    const repoRulesDir = resolve(repoClaudeDir, "rules");
+    mkdirSync(repoRulesDir, { recursive: true });
+
+    // 7a. Copy tools.md → .claude/rules/tools.md
+    const toolsDocSource = resolve(danxbotConfigDir, "tools.md");
+    if (existsSync(toolsDocSource)) {
+      copyFileSync(toolsDocSource, resolve(repoRulesDir, "tools.md"));
+    }
+
+    // 7b. Copy tools/ scripts → .claude/tools/ (executable)
+    const toolsScriptsSource = resolve(danxbotConfigDir, "tools");
+    if (existsSync(toolsScriptsSource)) {
+      const repoToolsDir = resolve(repoClaudeDir, "tools");
+      mkdirSync(repoToolsDir, { recursive: true });
+      for (const file of readdirSync(toolsScriptsSource)) {
+        const src = resolve(toolsScriptsSource, file);
+        const dest = resolve(repoToolsDir, file);
+        copyFileSync(src, dest);
+        // Make scripts executable
+        try { chmodSync(dest, 0o755); } catch {}
+      }
+    }
+  }
+
+  // 8. Copy .danxbot/features.md → docs/features.md (only if docs/ version doesn't exist yet)
   const danxbotDir = resolve(danxbotConfigDir, "..");
   const featuresSource = resolve(danxbotDir, "features.md");
   const featuresDest = resolve(docsDir, "features.md");

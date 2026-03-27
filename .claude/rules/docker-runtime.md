@@ -87,6 +87,7 @@ repos/<name>/.danxbot/
     trello.yml       # board ID, list IDs, label IDs
     overview.md      # tech stack, architecture, patterns
     workflow.md      # how to edit, test, commit, PR
+    tools.md         # agent tool commands (synced to repo's .claude/rules/)
     compose.yml      # Docker override (optional)
     post-clone.sh    # runs after cloning (optional)
     docs/
