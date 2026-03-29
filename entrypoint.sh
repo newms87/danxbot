@@ -6,7 +6,7 @@ REPOS_DIR="/danxbot/repos"
 DANXBOT_HOME="/home/danxbot"
 
 # Configure git identity and GitHub auth (must happen before repo cloning)
-git config --global user.email 'danxbot@flytedesk.com'
+git config --global user.email '${DANXBOT_GIT_EMAIL:-danxbot@example.com}'
 git config --global user.name 'Danxbot'
 if [ -n "$GITHUB_TOKEN" ]; then
     echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
@@ -50,7 +50,7 @@ if [ -d "$HOOKS_DIR" ]; then
 fi
 
 # Configure git auth for the danxbot user too (for runtime git operations)
-su -s /bin/bash danxbot -c "git config --global user.email 'danxbot@flytedesk.com' && git config --global user.name 'Danxbot'"
+su -s /bin/bash danxbot -c "git config --global user.email '${DANXBOT_GIT_EMAIL:-danxbot@example.com}' && git config --global user.name 'Danxbot'"
 if [ -n "$GITHUB_TOKEN" ]; then
     su -s /bin/bash danxbot -c "
         echo 'https://x-access-token:${GITHUB_TOKEN}@github.com' > ~/.git-credentials

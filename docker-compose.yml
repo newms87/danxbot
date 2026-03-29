@@ -24,7 +24,7 @@ services:
       - ./claude-auth:/danxbot/claude-auth:ro
     networks:
       - default
-      - ssap_sail
+      - repo_network
     depends_on:
       mysql:
         condition: service_healthy
@@ -36,12 +36,14 @@ services:
 
   mysql:
     image: mysql/mysql-server:8.0
+    ports:
+      - "${DANXBOT_DB_PORT:-3307}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     environment:
       MYSQL_ROOT_PASSWORD: danxbot
       MYSQL_ROOT_HOST: "%"
-      MYSQL_DATABASE: danxbot_chat
+      MYSQL_DATABASE: ${DANXBOT_DB_NAME:-danxbot_chat}
       MYSQL_USER: danxbot
       MYSQL_PASSWORD: danxbot
     healthcheck:
@@ -56,7 +58,8 @@ services:
         max-file: "1"
 
 networks:
-  ssap_sail:
+  repo_network:
+    name: ${DOCKER_NETWORK}
     external: true
 
 volumes:

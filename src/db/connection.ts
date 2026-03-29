@@ -13,6 +13,7 @@ let platformPool: Pool | null = null;
 
 interface DbConfig {
   host: string;
+  port?: number;
   user: string;
   password: string;
   database?: string;
@@ -21,6 +22,7 @@ interface DbConfig {
 function createPoolOptions(dbConfig: DbConfig): PoolOptions {
   return {
     host: dbConfig.host,
+    ...(dbConfig.port ? { port: dbConfig.port } : {}),
     user: dbConfig.user,
     password: dbConfig.password,
     ...(dbConfig.database ? { database: dbConfig.database } : {}),
@@ -31,7 +33,12 @@ function createPoolOptions(dbConfig: DbConfig): PoolOptions {
 }
 
 function basePoolOptions(): PoolOptions {
-  const { database: _, ...dbWithoutDatabase } = config.db;
+  const {
+    database: _,
+    connectTimeoutMs: __,
+    eventsMaxAgeDays: ___,
+    ...dbWithoutDatabase
+  } = config.db;
   return createPoolOptions(dbWithoutDatabase);
 }
 
