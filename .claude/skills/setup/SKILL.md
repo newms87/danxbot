@@ -123,10 +123,13 @@ The bot runs inside Docker and needs Claude Code CLI credentials to make agent c
 
 **Note:** These are OAuth tokens, not API keys. They're gitignored and stay local.
 
-## Step 7: Clone and Explore Repo
+## Step 7: Link and Explore Repo
 
 1. Create the `repos/` directory if it doesn't exist
-2. Clone the repo using the GitHub token for auth: `git clone https://<GITHUB_TOKEN>@github.com/<nameWithOwner>.git repos/<name>`
+2. **Check if the repo already exists locally** (e.g., at `../<name>/` or another common location). Ask the user: "Do you have a local checkout of this repo? If so, what's the path?"
+   - **If local checkout exists:** Create a symlink: `ln -s /absolute/path/to/repo repos/<name>`
+   - **If no local checkout:** Clone using the GitHub token: `git clone https://<GITHUB_TOKEN>@github.com/<nameWithOwner>.git repos/<name>`
+   - **NEVER delete `repos/<name>/` if it already exists.** If it's a stale clone or wrong symlink, ask the user how to handle it.
 3. Explore the repo deeply — read these files if they exist:
    - `README.md` or `README`
    - `package.json`, `composer.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `Gemfile`
