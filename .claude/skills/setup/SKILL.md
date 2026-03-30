@@ -360,6 +360,9 @@ DANXBOT_DB_USER=danxbot
 DANXBOT_DB_PASSWORD=danxbot
 DANXBOT_DB_NAME=danxbot_chat
 
+# Git identity for commits
+DANXBOT_GIT_EMAIL=danxbot@example.com
+
 # Poller
 POLLER_INTERVAL_MS=60000
 TRELLO_REVIEW_MIN_CARDS=10
@@ -367,10 +370,55 @@ TRELLO_REVIEW_MIN_CARDS=10
 
 **Note:** Trello IDs are NOT in `.env` — they live in `.danxbot/config/trello.yml` in the connected repo.
 
+### Docker Network
+
+The danxbot container must join the connected repo's Docker network so it can communicate with the repo's services (database, web server, etc.).
+
+1. Detect the connected repo's Docker network by running: `docker network ls --format '{{.Name}}' | grep -i <repo-name>`
+2. If found, set `DOCKER_NETWORK=<network-name>` in `.env`
+3. If not found (repo's Docker stack isn't running), ask: "What is the Docker network name for the connected repo? (e.g., `gpt-manager_sail`)"
+4. Verify the network exists: `docker network inspect <network-name> > /dev/null 2>&1`
+
+### Platform Database
+
 If the repo has a database that the agent should query (read-only), ask:
 - "Does the connected repo have a database the agent should have read access to? (yes/no)"
 - If yes, collect host, user, password, database name and write as `PLATFORM_DB_HOST`, `PLATFORM_DB_USER`, `PLATFORM_DB_PASSWORD`, `PLATFORM_DB_NAME`
+- **Important:** The DB host must be the container/service name on the shared Docker network (e.g., `gpt-manager-pgsql-1`), NOT `localhost`
 - If no, leave these empty (the agent won't have SQL query capability)
+
+### Remote Agent Dispatch (MCP Server)
+
+Check if the connected repo has an MCP server by looking for `mcp-server/` directory in the repo root.
+
+**If an MCP server exists:**
+
+1. Tell the user: "This repo has an MCP server at `mcp-server/`. This enables remote agent dispatch — the repo can launch Claude agents via danxbot's HTTP API."
+2. Set these in `.env`:
+   ```
+   # Dispatch — remote agent launch via HTTP
+   MCP_SERVER_PATH=/danxbot/repos/<repo-name>/mcp-server/src/index.ts
+   DEFAULT_API_URL=http://<repo-web-container>:<port>
+   DISPATCH_AGENT_TIMEOUT=600
+   ```
+3. `MCP_SERVER_PATH` must use the **container-internal path** (`/danxbot/repos/...`), NOT the host path
+4. `DEFAULT_API_URL` is the URL the MCP server uses to reach the connected repo's web server from inside Docker. Ask: "What is the connected repo's web server URL on the Docker network?" (e.g., `http://laravel.test:80` for Sail projects)
+5. Ask: "What timeout (in seconds) for agent dispatch runs? Default is 600 (10 minutes):"
+
+**If no MCP server exists:** Skip this section. Dispatch is automatically disabled when `MCP_SERVER_PATH` is unset.
+
+### Update Connected Repo's `.env`
+
+The connected repo needs to know how to reach danxbot for dispatching agents:
+
+1. Ask: "Should I update the connected repo's `.env` with the danxbot URL? (yes/no)"
+2. If yes, add to the connected repo's `.env`:
+   ```
+   DANXBOT_GPT_MANAGER_URL=http://danxbot:<DASHBOARD_PORT>
+   ```
+   Where `danxbot` is the container hostname on the shared Docker network and `<DASHBOARD_PORT>` is the port from this danxbot instance's `.env`
+
+### Final Confirmation
 
 Read back the final `.env` (masking secrets) and present to user for confirmation.
 
@@ -378,7 +426,7 @@ Read back the final `.env` (masking secrets) and present to user for confirmatio
 
 1. Start danxbot: `docker compose up -d --build`
 2. Wait 10 seconds for startup
-3. Check health: `curl -s localhost:5555/health`
+3. Check health: `curl -s localhost:$DASHBOARD_PORT/health` (read `DASHBOARD_PORT` from `.env`)
 4. If healthy, report success
 5. If unhealthy, check `docker compose logs danxbot --tail 30` and troubleshoot
 6. Run the repo's test suite (if Docker is configured) to verify the repo setup works
@@ -393,7 +441,7 @@ Present the results clearly:
    - Connected repo name and tech stack
    - Trello board with lists/labels
    - Slack (enabled/disabled)
-   - Dashboard URL: **http://localhost:5555**
+   - Dashboard URL: **http://localhost:$DASHBOARD_PORT**
 
 2. **How to start the autonomous agent:**
    ```
