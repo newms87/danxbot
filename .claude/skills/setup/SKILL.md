@@ -27,11 +27,13 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 
 1. Ask: "Enter a GitHub personal access token with `repo` scope. Create one at: https://github.com/settings/tokens/new?scopes=repo"
 2. Save the token to `.env` as `GITHUB_TOKEN=<TOKEN>`
-3. Run: `echo "<TOKEN>" | gh auth login --with-token 2>&1` to authenticate the gh CLI
-4. If auth fails, show the error and re-prompt
-5. Run: `gh repo list --json nameWithOwner,description --limit 50`
-6. Present a numbered list of repos. Ask: "Which repo should Danxbot connect to? Enter the number:"
-7. Save `REPOS=<name>:<clone_url>` to `.env` where `<name>` is the repo's short name (after the `/`) and `<clone_url>` is `https://github.com/<nameWithOwner>.git`
+3. Validate by listing repos via the GitHub API (gh CLI is not available on the host — it's inside Docker):
+   ```bash
+   curl -s -H "Authorization: token <TOKEN>" "https://api.github.com/user/repos?per_page=50&sort=updated&type=owner"
+   ```
+4. If the response is a 401 or error, show it and re-prompt
+5. Present a numbered list of repos. Ask: "Which repo should Danxbot connect to? Enter the number:"
+6. Save `REPOS=<name>:<clone_url>` to `.env` where `<name>` is the repo's short name (after the `/`) and `<clone_url>` is `https://github.com/<nameWithOwner>.git`
 
 ## Step 3: Trello Credentials
 
@@ -124,7 +126,7 @@ The bot runs inside Docker and needs Claude Code CLI credentials to make agent c
 ## Step 7: Clone and Explore Repo
 
 1. Create the `repos/` directory if it doesn't exist
-2. Clone the repo: `gh repo clone <nameWithOwner> repos/<name>`
+2. Clone the repo using the GitHub token for auth: `git clone https://<GITHUB_TOKEN>@github.com/<nameWithOwner>.git repos/<name>`
 3. Explore the repo deeply — read these files if they exist:
    - `README.md` or `README`
    - `package.json`, `composer.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `Gemfile`
@@ -289,7 +291,7 @@ Generate an overview of the connected repo based on what was discovered in Step 
 
 Base this entirely on what you read from the repo's source code, README, and config files. Do NOT guess — only include what you can verify from the codebase.
 
-Synced to: `.claude/rules/repo-overview.md`
+Synced by poller to: `.claude/rules/repo-overview.md`
 
 ### `.danxbot/config/workflow.md`
 
@@ -304,7 +306,7 @@ Generate a workflow rule tailored to the detected repo. Include:
 
 Use the existing `.claude/rules/repo-workflow.md` as a template for the structure — it has generic `<name>` placeholders. Fill in the actual repo name, commands, Docker details, and git mode.
 
-Synced to: `.claude/rules/repo-workflow.md`
+Synced by poller to: `.claude/rules/repo-workflow.md`
 
 ### `.danxbot/config/docs/schema/` and `.danxbot/config/docs/domains/` (if database is configured)
 
@@ -325,29 +327,25 @@ Base these entirely on what you discover from the codebase and database. The ide
 
 If no database is configured, create placeholder files noting that database docs will be populated when a DB connection is added.
 
-Synced to: `docs/domains/` and `docs/schema/`
+Synced by poller to: `docs/domains/` and `docs/schema/`
 
-### Initial sync
+### CRITICAL: Do NOT manually sync to danxbot's `.claude/` directory
 
-After writing all files to `.danxbot/config/`, immediately sync them to their target locations so the orchestrator can work without waiting for the poller:
+**Never create, copy, or write files in danxbot's `.claude/rules/`, `docs/`, or `repo-overrides/` directories during setup.** The poller (`src/poller/index.ts:syncRepoFiles()`) handles all syncing automatically:
 
-1. Copy `.danxbot/config/overview.md` → `.claude/rules/repo-overview.md`
-2. Copy `.danxbot/config/workflow.md` → `.claude/rules/repo-workflow.md`
-3. Copy `.danxbot/config/docs/domains/*` → `docs/domains/`
-4. Copy `.danxbot/config/docs/schema/*` → `docs/schema/`
-5. Copy `.danxbot/config/compose.yml` → `repo-overrides/<name>-compose.yml` (if exists)
-6. Copy `.danxbot/config/post-clone.sh` → `repo-overrides/post-clone-<name>.sh` (if exists)
-7. Generate `.claude/rules/repo-config.md` from `.danxbot/config/config.yml` (same format the poller uses — a markdown file with tables for repo name, commands, paths, and Docker config)
-8. Generate `.claude/rules/trello-config.md` from `.danxbot/config/trello.yml` (same format the poller uses — a markdown file with tables for board, list, and label IDs)
+- `.danxbot/config/config.yml` → generates `.claude/rules/repo-config.md`
+- `.danxbot/config/trello.yml` → generates `.claude/rules/trello-config.md`
+- `.danxbot/config/overview.md` → copies to `.claude/rules/repo-overview.md`
+- `.danxbot/config/workflow.md` → copies to `.claude/rules/repo-workflow.md`
+- `.danxbot/config/compose.yml` → copies to `repo-overrides/<name>-compose.yml`
+- `.danxbot/config/post-clone.sh` → copies to `repo-overrides/post-clone-<name>.sh`
+- `.danxbot/config/docs/` → copies to `docs/domains/` and `docs/schema/`
 
-The poller will re-sync these before each Claude spawn, but this initial sync ensures everything works immediately.
+All of these target paths are gitignored in danxbot. They are generated artifacts, not source files. The poller syncs them before each Claude spawn.
 
-### Update `CLAUDE.md`
+**Also do NOT edit danxbot's `CLAUDE.md`.** It describes danxbot itself and is committed to git. Connected repo information reaches the agent via the synced rule files above.
 
-Add a section about the connected repo under "## Connected Repo" with:
-- Repo name and what it is (based on README)
-- Tech stack detected
-- Key commands
+The setup's only job is to write source-of-truth files into `.danxbot/config/` inside the connected repo. The poller takes care of the rest when it starts.
 
 ## Step 10: Finalize `.env`
 
@@ -429,8 +427,13 @@ Read back the final `.env` (masking secrets) and present to user for confirmatio
 3. Check health: `curl -s localhost:$DASHBOARD_PORT/health` (read `DASHBOARD_PORT` from `.env`)
 4. If healthy, report success
 5. If unhealthy, check `docker compose logs danxbot --tail 30` and troubleshoot
-6. Run the repo's test suite (if Docker is configured) to verify the repo setup works
-7. Create a feature branch in the repo, add a "## Danxbot" section to the repo's README (describing what Danxbot does for this repo), commit, push, and open a PR as proof of life
+6. Verify the poller can validate config: `docker compose exec danxbot npx tsx src/poller/validate.ts` (or check logs for "Repo config validated successfully")
+7. **Proof of life:** Inside the danxbot container (which has `git` and `gh`), create a feature branch in the connected repo, add a "## Danxbot" section to the repo's README (describing what Danxbot does for this repo), commit, push, and open a PR:
+   ```bash
+   docker compose exec -u danxbot danxbot bash -c 'cd /danxbot/repos/<name> && git checkout -b danxbot/proof-of-life && ...'
+   docker compose exec -u danxbot danxbot gh pr create --repo <owner>/<name> --title "..." --body "..."
+   ```
+   **Note:** `gh` and `git` are available inside the container, NOT on the host.
 8. Report the PR URL to the user
 
 ## Step 12: Finish
