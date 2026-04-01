@@ -377,7 +377,7 @@ The danxbot container must join the connected repo's Docker network so it can co
 
 1. Detect the connected repo's Docker network by running: `docker network ls --format '{{.Name}}' | grep -i <repo-name>`
 2. If found, set `DOCKER_NETWORK=<network-name>` in `.env`
-3. If not found (repo's Docker stack isn't running), ask: "What is the Docker network name for the connected repo? (e.g., `gpt-manager_sail`)"
+3. If not found (repo's Docker stack isn't running), ask: "What is the Docker network name for the connected repo? (e.g., `<repo-name>_sail`)"
 4. Verify the network exists: `docker network inspect <network-name> > /dev/null 2>&1`
 
 ### Platform Database
@@ -385,7 +385,7 @@ The danxbot container must join the connected repo's Docker network so it can co
 If the repo has a database that the agent should query (read-only), ask:
 - "Does the connected repo have a database the agent should have read access to? (yes/no)"
 - If yes, collect host, user, password, database name and write as `PLATFORM_DB_HOST`, `PLATFORM_DB_USER`, `PLATFORM_DB_PASSWORD`, `PLATFORM_DB_NAME`
-- **Important:** The DB host must be the container/service name on the shared Docker network (e.g., `gpt-manager-pgsql-1`), NOT `localhost`
+- **Important:** The DB host must be the container/service name on the shared Docker network (e.g., `<repo-name>-mysql-1`), NOT `localhost`
 - If no, leave these empty (the agent won't have SQL query capability)
 
 ### Remote Agent Dispatch (MCP Server)

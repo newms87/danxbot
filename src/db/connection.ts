@@ -91,7 +91,7 @@ export async function closeAdminPool(): Promise<void> {
 
 /**
  * Get a connection pool connected to the platform database.
- * Used for executing SQL queries against the Flytedesk platform DB.
+ * Used for executing SQL queries against the connected repo's platform DB.
  */
 export function getPlatformPool(): Pool {
   if (!platformPool) {
