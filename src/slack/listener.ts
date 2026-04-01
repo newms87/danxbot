@@ -329,11 +329,14 @@ export async function startSlackListener(): Promise<void> {
             );
             return;
           } catch (fastError) {
+            const fastErrorMsg = fastError instanceof Error ? fastError.message : String(fastError);
             log.warn(
-              `Agent (very_low) failed in thread ${threadTs}, escalating to medium: ${
-                fastError instanceof Error ? fastError.message : String(fastError)
-              }`,
+              `Agent (very_low) failed in thread ${threadTs}, escalating to medium: ${fastErrorMsg}`,
             );
+            // Clear session if conversation got too long so escalated path starts fresh
+            if (fastErrorMsg.includes("msg_too_long")) {
+              clearSessionId(thread);
+            }
             // Escalate: override complexity to medium for the full path below
             routerResult.complexity = "medium";
             // Remove brain reaction — will be re-added by full agent path below
@@ -536,7 +539,7 @@ export async function startSlackListener(): Promise<void> {
                   : String(agentError);
 
               // Clear stale session ID so retry starts a fresh conversation
-              if (errorMsg.includes("No conversation found")) {
+              if (errorMsg.includes("No conversation found") || errorMsg.includes("msg_too_long")) {
                 clearSessionId(thread);
                 log.warn("Cleared stale session ID, retrying with fresh session");
               }

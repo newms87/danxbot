@@ -382,6 +382,9 @@ describe("complexity routing", () => {
         attachments: [],
       }),
     );
+
+    // Session NOT cleared for generic errors (only msg_too_long triggers clearing)
+    expect(mockClearSessionId).not.toHaveBeenCalled();
   });
 
   it("uses full path with heartbeat for low complexity", async () => {
@@ -1251,6 +1254,152 @@ describe("stale session recovery", () => {
     expect(mockClearSessionId).toHaveBeenCalledWith(thread);
 
     // Error attachment posted after retries exhausted
+    expect(mockPostErrorAttachment).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      "mock-ts",
+      expect.stringContaining("crashed"),
+    );
+  });
+
+  it("clears session ID and retries fresh when msg_too_long error occurs", async () => {
+    const thread = makeThreadState({ sessionId: "long-session-id" });
+    mockGetOrCreateThread.mockResolvedValue(thread);
+
+    const agentResponse = makeAgentResponse({ text: "Fresh response after msg_too_long." });
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("An API error occurred: msg_too_long"))
+      .mockResolvedValueOnce(agentResponse);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called twice (first with long session, second with null)
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+
+    // First call had the session ID
+    expect(mockRunAgent.mock.calls[0][1]).toBe("long-session-id");
+
+    // Second call had null session ID (fresh conversation)
+    expect(mockRunAgent.mock.calls[1][1]).toBeNull();
+
+    // clearSessionId was called to persist the null session
+    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
+
+    // Successful response was sent
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "Fresh response after msg_too_long.",
+        attachments: [],
+      }),
+    );
+  });
+
+  it("clears session ID in very_low path before escalating to medium on msg_too_long", async () => {
+    const thread = makeThreadState({ sessionId: "long-session-id" });
+    mockGetOrCreateThread.mockResolvedValue(thread);
+
+    const routerResult = makeRouterResult({
+      quickResponse: "Looking...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    const agentResponse = makeAgentResponse({ text: "Recovered via medium." });
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("An API error occurred: msg_too_long"))
+      .mockResolvedValueOnce(agentResponse);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Session was cleared before escalation
+    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
+
+    // Agent called twice: first very_low (failed), then medium (succeeded)
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+    expect(mockRunAgent.mock.calls[0][5]).toBe("very_low");
+    expect(mockRunAgent.mock.calls[1][5]).toBe("medium");
+
+    // Second call had null session ID
+    expect(mockRunAgent.mock.calls[1][1]).toBeNull();
+  });
+
+  it("shows error when msg_too_long retry also fails", async () => {
+    const thread = makeThreadState({ sessionId: "long-session-id" });
+    mockGetOrCreateThread.mockResolvedValue(thread);
+
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("An API error occurred: msg_too_long"))
+      .mockRejectedValueOnce(new Error("Still too long"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Agent called twice
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+
+    // Session was cleared before retry
+    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
+
+    // Error attachment posted after retries exhausted
+    expect(mockPostErrorAttachment).toHaveBeenCalledWith(
+      client,
+      "C-TEST",
+      "mock-ts",
+      expect.stringContaining("crashed"),
+    );
+  });
+
+  it("handles msg_too_long gracefully when no session exists", async () => {
+    const thread = makeThreadState({ sessionId: null });
+    mockGetOrCreateThread.mockResolvedValue(thread);
+
+    const agentResponse = makeAgentResponse({ text: "Recovered." });
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("An API error occurred: msg_too_long"))
+      .mockResolvedValueOnce(agentResponse);
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // clearSessionId called (no-op when already null, but safe)
+    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
+
+    // Retry succeeded
+    expect(mockRunAgent).toHaveBeenCalledTimes(2);
+    expect(client.chat.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "Recovered.",
+        attachments: [],
+      }),
+    );
+  });
+
+  it("shows error when very_low msg_too_long escalation to medium also fails", async () => {
+    const thread = makeThreadState({ sessionId: "long-session-id" });
+    mockGetOrCreateThread.mockResolvedValue(thread);
+
+    const routerResult = makeRouterResult({
+      quickResponse: "Looking...",
+      needsAgent: true,
+      complexity: "very_low",
+    });
+    mockRunRouter.mockResolvedValue(routerResult);
+
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("An API error occurred: msg_too_long"))
+      .mockRejectedValueOnce(new Error("Medium also failed"))
+      .mockRejectedValueOnce(new Error("Medium retry also failed"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Session cleared on very_low failure
+    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
+
+    // very_low (1) + medium attempts (2) = 3 total calls
+    expect(mockRunAgent).toHaveBeenCalledTimes(3);
+    expect(mockRunAgent.mock.calls[0][5]).toBe("very_low");
+    expect(mockRunAgent.mock.calls[1][5]).toBe("medium");
+
+    // Error surfaced after medium retries exhausted
     expect(mockPostErrorAttachment).toHaveBeenCalledWith(
       client,
       "C-TEST",
