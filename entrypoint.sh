@@ -22,6 +22,10 @@ if [ -n "$REPOS" ]; then
         url="${entry#*:}"
         repo_path="$REPOS_DIR/$name"
 
+        # Mark as safe directory before any git operations
+        git config --global --add safe.directory "$repo_path"
+        su -s /bin/bash danxbot -c "git config --global --add safe.directory '$repo_path'"
+
         if [ ! -d "$repo_path/.git" ]; then
             echo "Cloning $name repo..."
             git clone --depth 1 "$url" "$repo_path"
@@ -29,10 +33,6 @@ if [ -n "$REPOS" ]; then
             echo "Updating $name repo..."
             git -C "$repo_path" fetch origin && git -C "$repo_path" pull --ff-only origin HEAD || echo "  (skipped — local changes exist)"
         fi
-
-        # Mark as safe directory for both root and danxbot users
-        git config --global --add safe.directory "$repo_path"
-        su -s /bin/bash danxbot -c "git config --global --add safe.directory '$repo_path'"
     done
     # Make repos accessible to all users (frontend containers run as node/1000)
     chmod -R a+rwX "$REPOS_DIR"

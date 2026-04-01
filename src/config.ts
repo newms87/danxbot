@@ -135,8 +135,8 @@ export const config = {
     },
   },
   db: {
-    host: optional("DANXBOT_DB_HOST", isHost ? "127.0.0.1" : "mysql"),
-    port: parseInt(optional("DANXBOT_DB_PORT", isHost ? "3307" : "3306"), 10),
+    host: required("DANXBOT_DB_HOST"),
+    port: parseInt(optional("DANXBOT_DB_INTERNAL_PORT", "3306"), 10),
     user: required("DANXBOT_DB_USER"),
     password: required("DANXBOT_DB_PASSWORD"),
     database: optional("DANXBOT_DB_NAME", "danxbot_chat"),
