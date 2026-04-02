@@ -42,10 +42,22 @@ else
 fi
 
 # Run repo-specific post-clone hooks (e.g., auth files, dependency setup)
+# Check two locations: repo-overrides/ (synced by poller) and each repo's .danxbot/config/
 HOOKS_DIR="/danxbot/app/repo-overrides"
 if [ -d "$HOOKS_DIR" ]; then
     for hook in "$HOOKS_DIR"/post-clone-*.sh; do
         [ -f "$hook" ] && bash "$hook" "$REPOS_DIR"
+    done
+fi
+# Also run hooks directly from each repo's .danxbot/config/ (works on first boot
+# before the poller has synced to repo-overrides/). Skip if already run via
+# repo-overrides/ to avoid duplicate execution on subsequent boots.
+if [ -d "$REPOS_DIR" ]; then
+    for repo_hook in "$REPOS_DIR"/*/.danxbot/config/post-clone.sh; do
+        [ -f "$repo_hook" ] || continue
+        repo_name="$(basename "$(dirname "$(dirname "$(dirname "$repo_hook")")")")"
+        [ -f "$HOOKS_DIR/post-clone-${repo_name}.sh" ] && continue
+        bash "$repo_hook" "$REPOS_DIR"
     done
 fi
 
