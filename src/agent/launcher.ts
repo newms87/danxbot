@@ -334,24 +334,37 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
   // Start heartbeat loop
   startHeartbeat(job, options.apiToken);
 
-  // Timeout handler
-  const timeoutHandle = setTimeout(() => {
-    if (job.status === "running") {
-      console.log(
-        `[Job ${jobId}] Timeout after ${options.timeout / 1000}s — killing process`,
-      );
-      child.kill("SIGTERM");
-      job.status = "timeout";
-      job.summary = `Agent timed out after ${Math.round(options.timeout / 1000)} seconds`;
-      job.completedAt = new Date();
-      stopHeartbeat(job);
-      putStatus(job, options.apiToken, "failed", job.summary);
-      cleanup();
-    }
-  }, options.timeout);
+  // Inactivity timeout — resets on every stdout event (MCP calls, assistant messages, tool results).
+  // If the agent produces no output for the configured duration, it is presumed stuck and killed.
+  let inactivityHandle: ReturnType<typeof setTimeout>;
+  const inactivityMs = options.timeout;
+
+  function resetInactivityTimeout(): void {
+    clearTimeout(inactivityHandle);
+    inactivityHandle = setTimeout(() => {
+      if (job.status === "running") {
+        console.log(
+          `[Job ${jobId}] Inactivity timeout — no output for ${inactivityMs / 1000}s — killing process`,
+        );
+        child.kill("SIGTERM");
+        job.status = "timeout";
+        job.summary = `Agent timed out after ${Math.round(inactivityMs / 1000)} seconds of inactivity`;
+        job.completedAt = new Date();
+        stopHeartbeat(job);
+        putStatus(job, options.apiToken, "failed", job.summary);
+        cleanup();
+      }
+    }, inactivityMs);
+  }
+
+  // Reset on every stdout chunk — the agent is alive as long as it produces output
+  child.stdout?.on("data", () => resetInactivityTimeout());
+
+  // Start the initial inactivity timer
+  resetInactivityTimeout();
 
   function cleanup(): void {
-    clearTimeout(timeoutHandle);
+    clearTimeout(inactivityHandle);
     try {
       rmSync(settingsDir, { recursive: true, force: true });
     } catch {
