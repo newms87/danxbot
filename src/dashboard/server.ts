@@ -183,6 +183,9 @@ export async function startDashboard(): Promise<void> {
         const apiUrl =
           (body.api_url as string) || config.dispatch.defaultApiUrl;
         const statusUrl = body.status_url as string | undefined;
+        const schemaDefinitionId = body.schema_definition_id as
+          | string
+          | undefined;
 
         if (!task || !apiToken) {
           json(res, 400, { error: "Missing required fields: task, api_token" });
@@ -194,6 +197,7 @@ export async function startDashboard(): Promise<void> {
           apiToken,
           apiUrl,
           statusUrl,
+          schemaDefinitionId,
           mcpServerPath: config.dispatch.mcpServerPath,
           timeout: config.dispatch.agentTimeoutMs,
         });
