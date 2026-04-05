@@ -72,6 +72,7 @@ Validation tests require `ANTHROPIC_API_KEY` env var and are excluded from the d
 
 Every phase or unit of work follows this exact order:
 
+0. **Load `/wow`** — invoke Ways of Working skill to reload critical rules into recency
 1. **Implement** — write the code, run `npx vitest run` and `npx tsc --noEmit`
 2. **Test coverage** — launch `test-reviewer` agent to audit coverage, then write tests to fill all gaps
 3. **Code review** — launch `code-reviewer` agent, fix all findings
