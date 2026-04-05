@@ -366,11 +366,19 @@ This file is synced by the poller from \`.danxbot/config/config.yml\` on every p
 
   writeFileSync(resolve(rulesDir, "repo-config.md"), content);
 
-  // 2. Copy overview.md → .claude/rules/repo-overview.md
-  copyFileSync(resolve(danxbotConfigDir, "overview.md"), resolve(rulesDir, "repo-overview.md"));
-
-  // 3. Copy workflow.md → .claude/rules/repo-workflow.md
-  copyFileSync(resolve(danxbotConfigDir, "workflow.md"), resolve(rulesDir, "repo-workflow.md"));
+  // 2. Copy overview.md → .claude/rules/repo-overview.md (with source header)
+  // 3. Copy workflow.md → .claude/rules/repo-workflow.md (with source header)
+  for (const [src, dest] of [
+    ["overview.md", "repo-overview.md"],
+    ["workflow.md", "repo-workflow.md"],
+  ] as const) {
+    const srcPath = resolve(danxbotConfigDir, src);
+    if (existsSync(srcPath)) {
+      const header = `<!-- AUTO-GENERATED from repos/${name}/.danxbot/config/${src} — NEVER edit this file. Edit the source and the poller will sync it. -->\n\n`;
+      const body = readFileSync(srcPath, "utf-8");
+      writeFileSync(resolve(rulesDir, dest), header + body);
+    }
+  }
 
   // 4. Copy compose override to repo-overrides/ (optional)
   const composeSource = resolve(danxbotConfigDir, "compose.yml");
