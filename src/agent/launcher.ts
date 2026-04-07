@@ -12,9 +12,10 @@
 
 import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { config } from "../config.js";
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const TERMINAL_STATUS_RETRIES = 3;
@@ -30,12 +31,14 @@ export function findJob(jobId: string): AgentJob | undefined {
 
 export interface LaunchOptions {
   task: string;
+  agents?: Array<Record<string, unknown>>;
   apiToken: string;
   apiUrl: string;
   statusUrl?: string;
   schemaDefinitionId?: string;
   mcpServerPath: string;
   timeout: number;
+  maxRuntimeMs?: number;
 }
 
 export interface AgentJob {
@@ -223,8 +226,8 @@ function handleStreamEvent(
       message += `: ${toolInput.message}`;
     } else if (toolInput?.field_name) {
       message += `: ${toolInput.field_name}`;
-    } else if (toolInput?.model_name) {
-      message += `: ${toolInput.model_name}`;
+    } else if (toolInput?.title) {
+      message += `: ${toolInput.title}`;
     }
     postProgress(apiUrl, apiToken, message, "tool_use");
   }
@@ -249,14 +252,8 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
     statusUrl: options.statusUrl,
   };
 
-  // Build the prompt
-  const prompt = [
-    `You are a schema builder agent. Your task: ${options.task}`,
-    "",
-    "Use the schema MCP tools to read and modify the schema.",
-    "Create annotations to document your research, decisions, and questions.",
-    "When done, provide a summary of what you accomplished.",
-  ].join("\n");
+  // The task field contains the full orchestrator prompt from SchemaBuilderContextBuilder
+  const prompt = options.task;
 
   // Clean environment — remove CLAUDECODE vars to prevent nesting issues
   const env: Record<string, string> = {};
@@ -277,8 +274,29 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
     prompt,
   ];
 
+  // Add sub-agent definitions if provided
+  if (options.agents && options.agents.length > 0) {
+    args.push("--agents", JSON.stringify(options.agents));
+  }
+
   console.log(`[Job ${jobId}] Launching Claude Code agent`);
   console.log(`[Job ${jobId}] Task: ${options.task.substring(0, 200)}`);
+
+  // Write full prompt and agents to persistent logs dir for debugging
+  const logDir = join(config.logsDir, jobId);
+  try {
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(join(logDir, "prompt.md"), prompt);
+    if (options.agents && options.agents.length > 0) {
+      writeFileSync(
+        join(logDir, "agents.json"),
+        JSON.stringify(options.agents, null, 2),
+      );
+    }
+    console.log(`[Job ${jobId}] Prompt and agents logged to ${logDir}`);
+  } catch (err) {
+    console.error(`[Job ${jobId}] Failed to write agent logs:`, err);
+  }
 
   let lastAssistantText = "";
   let stderr = "";
@@ -363,8 +381,28 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
   // Start the initial inactivity timer
   resetInactivityTimeout();
 
+  // Max runtime timeout — hard cap on total agent execution time (does NOT reset)
+  let maxRuntimeHandle: ReturnType<typeof setTimeout> | undefined;
+  if (options.maxRuntimeMs) {
+    maxRuntimeHandle = setTimeout(() => {
+      if (job.status === "running") {
+        console.log(
+          `[Job ${jobId}] Max runtime exceeded — ${options.maxRuntimeMs! / 1000}s — killing process`,
+        );
+        child.kill("SIGTERM");
+        job.status = "timeout";
+        job.summary = `Agent exceeded max runtime of ${Math.round(options.maxRuntimeMs! / 1000 / 60)} minutes`;
+        job.completedAt = new Date();
+        stopHeartbeat(job);
+        putStatus(job, options.apiToken, "failed", job.summary);
+        cleanup();
+      }
+    }, options.maxRuntimeMs);
+  }
+
   function cleanup(): void {
     clearTimeout(inactivityHandle);
+    if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
     try {
       rmSync(settingsDir, { recursive: true, force: true });
     } catch {

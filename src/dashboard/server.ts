@@ -179,6 +179,9 @@ export async function startDashboard(): Promise<void> {
       try {
         const body = await parseBody(req);
         const task = body.task as string;
+        const agents = body.agents as
+          | Array<Record<string, unknown>>
+          | undefined;
         const apiToken = body.api_token as string;
         const apiUrl =
           (body.api_url as string) || config.dispatch.defaultApiUrl;
@@ -192,14 +195,18 @@ export async function startDashboard(): Promise<void> {
           return;
         }
 
+        const maxRuntimeMs = body.max_runtime_ms as number | undefined;
+
         const job = await launchAgent({
           task,
+          agents,
           apiToken,
           apiUrl,
           statusUrl,
           schemaDefinitionId,
           mcpServerPath: config.dispatch.mcpServerPath,
           timeout: config.dispatch.agentTimeoutMs,
+          maxRuntimeMs,
         });
 
         activeJobs.set(job.id, job);

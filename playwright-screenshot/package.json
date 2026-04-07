@@ -1,0 +1,19 @@
+{
+  "name": "playwright-screenshot",
+  "version": "1.0.0",
+  "description": "Lightweight HTTP API for capturing webpage screenshots via Playwright",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc && node dist/server.js"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.2",
+    "typescript": "^5.8.3"
+  }
+}
