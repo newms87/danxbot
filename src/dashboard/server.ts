@@ -170,12 +170,6 @@ export async function startDashboard(): Promise<void> {
     const method = req.method?.toUpperCase() || "GET";
 
     if (method === "POST" && url.pathname === "/api/launch") {
-      if (!config.dispatch.enabled) {
-        json(res, 501, {
-          error: "Dispatch not configured (MCP_SERVER_PATH not set)",
-        });
-        return;
-      }
       try {
         const body = await parseBody(req);
         const task = body.task as string;
@@ -204,7 +198,6 @@ export async function startDashboard(): Promise<void> {
           apiUrl,
           statusUrl,
           schemaDefinitionId,
-          mcpServerPath: config.dispatch.mcpServerPath,
           timeout: config.dispatch.agentTimeoutMs,
           maxRuntimeMs,
         });

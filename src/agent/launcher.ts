@@ -21,14 +21,6 @@ const HEARTBEAT_INTERVAL_MS = 10_000;
 const TERMINAL_STATUS_RETRIES = 3;
 const TERMINAL_STATUS_RETRY_DELAY_MS = 2_000;
 
-/** Active jobs indexed by job ID for cancel/status lookups */
-const activeJobs = new Map<string, AgentJob>();
-
-/** Find an active job by ID */
-export function findJob(jobId: string): AgentJob | undefined {
-  return activeJobs.get(jobId);
-}
-
 export interface LaunchOptions {
   task: string;
   agents?: Array<Record<string, unknown>>;
@@ -36,7 +28,6 @@ export interface LaunchOptions {
   apiUrl: string;
   statusUrl?: string;
   schemaDefinitionId?: string;
-  mcpServerPath: string;
   timeout: number;
   maxRuntimeMs?: number;
 }
@@ -171,7 +162,7 @@ function buildMcpSettings(options: LaunchOptions): string {
     mcpServers: {
       schema: {
         command: "npx",
-        args: ["tsx", options.mcpServerPath],
+        args: ["@thehammer/schema-mcp-server"],
         env: {
           SCHEMA_API_URL: options.apiUrl,
           SCHEMA_API_TOKEN: options.apiToken,
@@ -431,10 +422,6 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
       cleanup();
     }
   });
-
-  // Store in active jobs map for cancel/status lookups
-  activeJobs.set(jobId, job);
-  setTimeout(() => activeJobs.delete(jobId), 3600_000); // Clean up after 1 hour
 
   child.on("error", (err: Error) => {
     if (job.status === "running") {

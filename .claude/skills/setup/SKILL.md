@@ -394,19 +394,18 @@ Check if the connected repo has an MCP server by looking for `mcp-server/` direc
 
 **If an MCP server exists:**
 
-1. Tell the user: "This repo has an MCP server at `mcp-server/`. This enables remote agent dispatch — the repo can launch Claude agents via danxbot's HTTP API."
-2. Set these in `.env`:
+1. Tell the user: "This repo has an MCP server published as an npm package. This enables remote agent dispatch — the repo can launch Claude agents via danxbot's HTTP API."
+2. Ensure the MCP server npm package is installed: `npm install @thehammer/schema-mcp-server`
+3. Set these in `.env`:
    ```
    # Dispatch — remote agent launch via HTTP
-   MCP_SERVER_PATH=/danxbot/repos/<repo-name>/mcp-server/src/index.ts
    DEFAULT_API_URL=http://<repo-web-container>:<port>
    DISPATCH_AGENT_TIMEOUT=600
    ```
-3. `MCP_SERVER_PATH` must use the **container-internal path** (`/danxbot/repos/...`), NOT the host path
 4. `DEFAULT_API_URL` is the URL the MCP server uses to reach the connected repo's web server from inside Docker. Ask: "What is the connected repo's web server URL on the Docker network?" (e.g., `http://laravel.test:80` for Sail projects)
 5. Ask: "What timeout (in seconds) for agent dispatch runs? Default is 600 (10 minutes):"
 
-**If no MCP server exists:** Skip this section. Dispatch is automatically disabled when `MCP_SERVER_PATH` is unset.
+**If no MCP server exists:** Skip this section.
 
 ### Update Connected Repo's `.env`
 

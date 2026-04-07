@@ -156,12 +156,9 @@ export const config = {
     needsHelpLabelId: NEEDS_HELP_LABEL_ID,
   },
   dispatch: {
-    enabled: !!process.env.MCP_SERVER_PATH,
-    mcpServerPath: optional("MCP_SERVER_PATH", ""),
     defaultApiUrl: optional("DEFAULT_API_URL", "http://localhost:80"),
     agentTimeoutMs:
       parseInt(optional("DISPATCH_AGENT_TIMEOUT", "3600"), 10) * 1000,
-    port: parseInt(optional("DISPATCH_PORT", "0"), 10),
   },
   rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),
