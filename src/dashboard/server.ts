@@ -14,8 +14,14 @@ import {
   launchAgent,
   cancelJob,
   getJobStatus,
+  buildMcpSettings,
   type AgentJob,
 } from "../agent/launcher.js";
+import { spawnInTerminal, buildDispatchScript } from "../terminal.js";
+import { getReposBase } from "../poller/constants.js";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 const log = createLogger("dashboard");
 
@@ -191,7 +197,7 @@ export async function startDashboard(): Promise<void> {
 
         const maxRuntimeMs = body.max_runtime_ms as number | undefined;
 
-        const job = await launchAgent({
+        const launchOptions = {
           task,
           agents,
           apiToken,
@@ -200,22 +206,72 @@ export async function startDashboard(): Promise<void> {
           schemaDefinitionId,
           timeout: config.dispatch.agentTimeoutMs,
           maxRuntimeMs,
-        });
+        };
 
-        activeJobs.set(job.id, job);
+        if (config.dispatch.interactiveTerminal) {
+          // Interactive mode: open in a Windows Terminal tab (same as poller)
+          const jobId = randomUUID();
+          const settingsDir = buildMcpSettings(launchOptions);
 
-        // Clean up completed jobs after 1 hour
-        const cleanupInterval = setInterval(() => {
-          if (
-            job.status !== "running" &&
-            Date.now() - (job.completedAt?.getTime() || 0) > 3600000
-          ) {
-            activeJobs.delete(job.id);
-            clearInterval(cleanupInterval);
+          const promptFile = join(settingsDir, "prompt.md");
+          writeFileSync(promptFile, task);
+
+          let agentsFile: string | undefined;
+          if (agents && agents.length > 0) {
+            agentsFile = join(settingsDir, "agents.json");
+            writeFileSync(agentsFile, JSON.stringify(agents));
           }
-        }, 60000);
 
-        json(res, 200, { job_id: job.id, status: "launched" });
+          // Write debug logs
+          const logDir = join(config.logsDir, jobId);
+          try {
+            mkdirSync(logDir, { recursive: true });
+            writeFileSync(join(logDir, "prompt.md"), task);
+          } catch {}
+
+          const scriptPath = buildDispatchScript(settingsDir, {
+            promptFile,
+            mcpConfigPath: join(settingsDir, "settings.json"),
+            agentsFile,
+            statusUrl,
+            apiToken,
+          });
+
+          // Use the repo directory as cwd (already trusted by claude)
+          const repoName = (process.env.REPOS || "")
+            .split(",")[0]
+            .split(":")[0]
+            .trim();
+          const agentCwd = repoName
+            ? join(getReposBase(), repoName)
+            : process.env.HOME || settingsDir;
+
+          spawnInTerminal({
+            title: `Schema Agent ${jobId.substring(0, 8)}`,
+            script: scriptPath,
+            cwd: agentCwd,
+          });
+
+          json(res, 200, { job_id: jobId, status: "launched" });
+        } else {
+          // Piped mode: stream-json with heartbeats and status tracking
+          const job = await launchAgent(launchOptions);
+
+          activeJobs.set(job.id, job);
+
+          // Clean up completed jobs after 1 hour
+          const cleanupInterval = setInterval(() => {
+            if (
+              job.status !== "running" &&
+              Date.now() - (job.completedAt?.getTime() || 0) > 3600000
+            ) {
+              activeJobs.delete(job.id);
+              clearInterval(cleanupInterval);
+            }
+          }, 60000);
+
+          json(res, 200, { job_id: job.id, status: "launched" });
+        }
       } catch (err) {
         log.error("Launch failed", err);
         json(res, 500, {

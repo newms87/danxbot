@@ -1,16 +1,42 @@
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, copyFileSync, unlinkSync, chmodSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  mkdirSync,
+  copyFileSync,
+  unlinkSync,
+  chmodSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import {
-  config, TODO_LIST_ID, REVIEW_MIN_CARDS,
-  BOARD_ID, REVIEW_LIST_ID, IN_PROGRESS_LIST_ID, NEEDS_HELP_LIST_ID,
-  DONE_LIST_ID, CANCELLED_LIST_ID, ACTION_ITEMS_LIST_ID,
-  BUG_LABEL_ID, FEATURE_LABEL_ID, EPIC_LABEL_ID, NEEDS_HELP_LABEL_ID,
+  config,
+  TODO_LIST_ID,
+  REVIEW_MIN_CARDS,
+  BOARD_ID,
+  REVIEW_LIST_ID,
+  IN_PROGRESS_LIST_ID,
+  NEEDS_HELP_LIST_ID,
+  DONE_LIST_ID,
+  CANCELLED_LIST_ID,
+  ACTION_ITEMS_LIST_ID,
+  BUG_LABEL_ID,
+  FEATURE_LABEL_ID,
+  EPIC_LABEL_ID,
+  NEEDS_HELP_LABEL_ID,
 } from "./config.js";
 import { getReposBase } from "./constants.js";
 import { createLogger } from "../logger.js";
-import { fetchTodoCards, fetchNeedsHelpCards, fetchReviewCards, fetchLatestComment, moveCardToList, isUserResponse } from "./trello-client.js";
+import { spawnInTerminal } from "../terminal.js";
+import {
+  fetchTodoCards,
+  fetchNeedsHelpCards,
+  fetchReviewCards,
+  fetchLatestComment,
+  moveCardToList,
+  isUserResponse,
+} from "./trello-client.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const lockFile = resolve(projectRoot, ".poller-running");
@@ -25,7 +51,9 @@ function getDanxbotConfigDir(): string {
 }
 
 const danxbotConfigDir = getDanxbotConfigDir();
-const repoConfigYml = danxbotConfigDir ? resolve(danxbotConfigDir, "config.yml") : "";
+const repoConfigYml = danxbotConfigDir
+  ? resolve(danxbotConfigDir, "config.yml")
+  : "";
 
 const log = createLogger("poller");
 
@@ -91,7 +119,9 @@ async function _poll(): Promise<void> {
   // Check Needs Help first — user-responded cards get moved to ToDo top
   const movedFromNeedsHelp = await checkNeedsHelp();
   if (movedFromNeedsHelp > 0) {
-    log.info(`Moved ${movedFromNeedsHelp} card${movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`);
+    log.info(
+      `Moved ${movedFromNeedsHelp} card${movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`,
+    );
   }
 
   let cards;
@@ -108,7 +138,9 @@ async function _poll(): Promise<void> {
     return;
   }
 
-  log.info(`Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`);
+  log.info(
+    `Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`,
+  );
   cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.name}`));
 
   spawnClaude("Danxbot Team", "run-team.sh");
@@ -231,7 +263,9 @@ export function validateRepoConfig(): void {
 
     for (const { key, label } of requiredFields) {
       if (!cfg[key] || !cfg[key].trim()) {
-        errors.push(`Missing '${key}' in .danxbot/config/config.yml (${label})`);
+        errors.push(
+          `Missing '${key}' in .danxbot/config/config.yml (${label})`,
+        );
       }
     }
 
@@ -244,14 +278,18 @@ export function validateRepoConfig(): void {
       ];
       for (const { key, label } of dockerFields) {
         if (!cfg[key] || !cfg[key].trim()) {
-          errors.push(`Missing '${key}' in .danxbot/config/config.yml (${label} — required when runtime is docker)`);
+          errors.push(
+            `Missing '${key}' in .danxbot/config/config.yml (${label} — required when runtime is docker)`,
+          );
         }
       }
 
       // Compose file must actually exist
       const composeFile = resolve(danxbotConfigDir, "compose.yml");
       if (!existsSync(composeFile)) {
-        errors.push(`Missing .danxbot/config/compose.yml (required when runtime is docker)`);
+        errors.push(
+          `Missing .danxbot/config/compose.yml (required when runtime is docker)`,
+        );
       }
     }
   }
@@ -276,7 +314,9 @@ export function validateRepoConfig(): void {
   const claudeAuthDir = resolve(projectRoot, "claude-auth");
   const claudeJson = resolve(claudeAuthDir, ".claude.json");
   if (!existsSync(claudeJson)) {
-    errors.push(`Missing claude-auth/.claude.json (Claude Code credentials — run ./install.sh Step 6)`);
+    errors.push(
+      `Missing claude-auth/.claude.json (Claude Code credentials — run ./install.sh Step 6)`,
+    );
   }
 
   if (errors.length > 0) {
@@ -432,7 +472,9 @@ This file is synced by the poller from \`.danxbot/config/config.yml\` on every p
         const dest = resolve(repoToolsDir, file);
         copyFileSync(src, dest);
         // Make scripts executable
-        try { chmodSync(dest, 0o755); } catch {}
+        try {
+          chmodSync(dest, 0o755);
+        } catch {}
       }
     }
   }
@@ -455,27 +497,13 @@ function spawnClaude(title: string, scriptName: string): void {
   }
 
   teamRunning = true;
-  log.info(`Spawning Claude in new terminal tab (${title})...`);
-
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("CLAUDECODE")) {
-      delete env[key];
-    }
-  }
 
   // Lock file signals that the team is running. The script removes it via EXIT trap.
   writeFileSync(lockFile, String(process.pid));
 
   const script = resolve(dirname(fileURLToPath(import.meta.url)), scriptName);
 
-  // wt.exe returns immediately — the Claude process runs in the new tab.
-  spawn("wt.exe", ["-w", "0", "new-tab", "--title", title, "wsl.exe", "-e", "bash", script], {
-    cwd: projectRoot,
-    stdio: "ignore",
-    env,
-    detached: true,
-  }).unref();
+  spawnInTerminal({ title, script, cwd: projectRoot });
 
   // Watch for lock file removal to detect completion.
   startLockWatch();
@@ -491,11 +519,15 @@ async function checkAndSpawnIdeator(): Promise<void> {
   }
 
   if (reviewCards.length >= REVIEW_MIN_CARDS) {
-    log.info(`Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — no ideation needed`);
+    log.info(
+      `Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — no ideation needed`,
+    );
     return;
   }
 
-  log.info(`Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — spawning ideator`);
+  log.info(
+    `Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — spawning ideator`,
+  );
   spawnClaude("Danxbot Ideator", "run-ideator.sh");
 }
 
@@ -518,7 +550,9 @@ export function shutdown(): void {
   } else {
     try {
       if (existsSync(lockFile)) unlinkSync(lockFile);
-    } catch (e) { log.warn("Failed to remove lock file", e); }
+    } catch (e) {
+      log.warn("Failed to remove lock file", e);
+    }
   }
 
   process.exit(0);
@@ -531,7 +565,9 @@ function startLockWatch(): void {
       lockCheckId = null;
       log.info("Team finished — resuming polling");
       teamRunning = false;
-      poll().catch((err) => log.error("Re-poll after team completion failed", err));
+      poll().catch((err) =>
+        log.error("Re-poll after team completion failed", err),
+      );
     }
   }, 5000);
 }

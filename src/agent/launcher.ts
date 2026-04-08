@@ -155,7 +155,7 @@ function stopHeartbeat(job: AgentJob): void {
  * Creates a temporary directory with settings.json that configures
  * the Schema MCP server as a tool provider for Claude Code.
  */
-function buildMcpSettings(options: LaunchOptions): string {
+export function buildMcpSettings(options: LaunchOptions): string {
   const tempDir = mkdtempSync(join(tmpdir(), "danxbot-mcp-"));
 
   const settings = {
@@ -204,6 +204,7 @@ function handleStreamEvent(
             block.text.length > 500
               ? block.text.substring(0, 500) + "…"
               : block.text;
+          console.log(`[Job ${jobId}] 💬 ${text}`);
           postProgress(apiUrl, apiToken, text, "thinking");
         }
       }
@@ -220,16 +221,20 @@ function handleStreamEvent(
     } else if (toolInput?.title) {
       message += `: ${toolInput.title}`;
     }
+    console.log(`[Job ${jobId}] 🔧 ${message}`);
     postProgress(apiUrl, apiToken, message, "tool_use");
   }
 }
 
 /**
- * Launch a Claude Code agent for schema building.
+ * Launch a Claude Code agent in piped mode (headless).
  *
- * Spawns `claude` CLI with the Schema MCP server configured, starts a heartbeat
- * loop, streams events in real-time, and monitors the process for clean exit,
- * crash, or timeout. Reports all status changes to the status_url via PUT.
+ * Spawns `claude` CLI with stream-json output, starts a heartbeat loop,
+ * parses events in real-time, and monitors for clean exit, crash, or timeout.
+ * Reports all status changes to the status_url via PUT.
+ *
+ * For interactive terminal mode, the dashboard server handles launching
+ * directly via spawnInTerminal (same mechanism as the Trello poller).
  */
 export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
   const jobId = randomUUID();
@@ -243,13 +248,17 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
     statusUrl: options.statusUrl,
   };
 
-  // The task field contains the full orchestrator prompt from SchemaBuilderContextBuilder
   const prompt = options.task;
 
-  // Clean environment — remove CLAUDECODE vars to prevent nesting issues
+  // Clean environment — remove CLAUDECODE vars to prevent nesting issues.
+  // In subscription mode, also strip ANTHROPIC_API_KEY so the claude CLI
+  // falls back to the host's OAuth session (~/.claude/) for billing.
+  const useSubscription = config.anthropic.authMode === "subscription";
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!key.startsWith("CLAUDECODE") && value !== undefined) {
+    if (key.startsWith("CLAUDECODE")) continue;
+    if (useSubscription && key === "ANTHROPIC_API_KEY") continue;
+    if (value !== undefined) {
       env[key] = value;
     }
   }
@@ -265,7 +274,6 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
     prompt,
   ];
 
-  // Add sub-agent definitions if provided
   if (options.agents && options.agents.length > 0) {
     args.push("--agents", JSON.stringify(options.agents));
   }
@@ -273,7 +281,6 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
   console.log(`[Job ${jobId}] Launching Claude Code agent`);
   console.log(`[Job ${jobId}] Task: ${options.task.substring(0, 200)}`);
 
-  // Write full prompt and agents to persistent logs dir for debugging
   const logDir = join(config.logsDir, jobId);
   try {
     mkdirSync(logDir, { recursive: true });

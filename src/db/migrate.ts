@@ -38,9 +38,7 @@ export async function runMigrations(): Promise<void> {
     `);
 
     // Get already-applied migrations
-    const [rows] = await pool.query(
-      "SELECT name FROM migrations ORDER BY id",
-    );
+    const [rows] = await pool.query("SELECT name FROM migrations ORDER BY id");
     const applied = new Set(
       (rows as Array<{ name: string }>).map((r) => r.name),
     );
@@ -53,7 +51,11 @@ export async function runMigrations(): Promise<void> {
     let files: string[];
     try {
       files = (await readdir(migrationsDir)).filter(
-        (f) => f.endsWith(".ts") && !f.endsWith(".test.ts"),
+        (f) =>
+          (f.endsWith(".ts") || f.endsWith(".js")) &&
+          !f.endsWith(".test.ts") &&
+          !f.endsWith(".test.js") &&
+          !f.endsWith(".d.ts"),
       );
     } catch {
       log.info("No migrations directory found, skipping");
@@ -61,10 +63,16 @@ export async function runMigrations(): Promise<void> {
     }
     files.sort();
 
-    // Apply pending migrations
+    // Apply pending migrations (normalize names without extension so .ts and .js match)
     let appliedCount = 0;
     for (const file of files) {
-      if (applied.has(file)) {
+      const baseName = file.replace(/\.(ts|js)$/, "");
+      if (
+        applied.has(file) ||
+        applied.has(baseName) ||
+        applied.has(`${baseName}.ts`) ||
+        applied.has(`${baseName}.js`)
+      ) {
         log.debug(`Skipping already-applied migration: ${file}`);
         continue;
       }
@@ -74,7 +82,7 @@ export async function runMigrations(): Promise<void> {
       const migration: Migration = await import(modulePath);
       await migration.up(pool);
 
-      await pool.query("INSERT INTO migrations (name) VALUES (?)", [file]);
+      await pool.query("INSERT INTO migrations (name) VALUES (?)", [baseName]);
       appliedCount++;
       log.info(`Applied migration: ${file}`);
     }

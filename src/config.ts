@@ -105,6 +105,15 @@ const slackAppToken = optional("SLACK_APP_TOKEN", "");
 const slackChannelId = optional("SLACK_CHANNEL_ID", "");
 const slackEnabled = !!(slackBotToken && slackAppToken && slackChannelId);
 
+const claudeAuthMode = optional("CLAUDE_AUTH_MODE", "api") as
+  | "api"
+  | "subscription";
+if (claudeAuthMode !== "api" && claudeAuthMode !== "subscription") {
+  throw new Error(
+    `CLAUDE_AUTH_MODE must be "api" or "subscription" (got "${claudeAuthMode}")`,
+  );
+}
+
 export const config = {
   slack: {
     enabled: slackEnabled,
@@ -113,7 +122,11 @@ export const config = {
     channelId: slackChannelId,
   },
   anthropic: {
-    apiKey: required("ANTHROPIC_API_KEY"),
+    apiKey:
+      claudeAuthMode === "subscription"
+        ? optional("ANTHROPIC_API_KEY", "")
+        : required("ANTHROPIC_API_KEY"),
+    authMode: claudeAuthMode,
   },
   platform: {
     db: {
@@ -159,10 +172,11 @@ export const config = {
     defaultApiUrl: optional("DEFAULT_API_URL", "http://localhost:80"),
     agentTimeoutMs:
       parseInt(optional("DISPATCH_AGENT_TIMEOUT", "3600"), 10) * 1000,
+    interactiveTerminal: optional("DISPATCH_INTERACTIVE", "false") === "true",
   },
   rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),
-  logsDir: "/danxbot/logs",
+  logsDir: optional("DANXBOT_LOGS_DIR", "/danxbot/logs"),
 } as const;
 
 interface NumericRule {
