@@ -6,8 +6,8 @@ REPOS_DIR="/danxbot/repos"
 DANXBOT_HOME="/home/danxbot"
 
 # Configure git identity and GitHub auth (must happen before repo cloning)
-git config --global user.email '${DANXBOT_GIT_EMAIL:-danxbot@example.com}'
-git config --global user.name 'Danxbot'
+git config --global user.email "${DANXBOT_GIT_EMAIL:-danxbot@example.com}"
+git config --global user.name "Danxbot"
 if [ -n "$GITHUB_TOKEN" ]; then
     echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
     git config --global credential.helper store
@@ -26,7 +26,9 @@ if [ -n "$REPOS" ]; then
         git config --global --add safe.directory "$repo_path"
         su -s /bin/bash danxbot -c "git config --global --add safe.directory '$repo_path'"
 
-        if [ ! -d "$repo_path/.git" ]; then
+        if [ -L "$repo_path" ]; then
+            echo "Symlink detected for $name, skipping clone/pull."
+        elif [ ! -d "$repo_path/.git" ]; then
             echo "Cloning $name repo..."
             git clone --depth 1 "$url" "$repo_path"
         else
@@ -35,8 +37,15 @@ if [ -n "$REPOS" ]; then
         fi
     done
     # Make repos accessible to all users (frontend containers run as node/1000)
-    chmod -R a+rwX "$REPOS_DIR"
-    chown -R danxbot:danxbot "$REPOS_DIR"
+    # Skip symlinked repos — they point to the user's actual working copy
+    for entry in "${REPO_ENTRIES[@]}"; do
+        name="${entry%%:*}"
+        repo_path="$REPOS_DIR/$name"
+        if [ ! -L "$repo_path" ]; then
+            chmod -R a+rwX "$repo_path"
+            chown -R danxbot:danxbot "$repo_path"
+        fi
+    done
 else
     echo "No REPOS configured, skipping repo setup."
 fi
@@ -62,7 +71,7 @@ if [ -d "$REPOS_DIR" ]; then
 fi
 
 # Configure git auth for the danxbot user too (for runtime git operations)
-su -s /bin/bash danxbot -c "git config --global user.email '${DANXBOT_GIT_EMAIL:-danxbot@example.com}' && git config --global user.name 'Danxbot'"
+su -s /bin/bash danxbot -c "git config --global user.email \"${DANXBOT_GIT_EMAIL:-danxbot@example.com}\" && git config --global user.name \"Danxbot\""
 if [ -n "$GITHUB_TOKEN" ]; then
     su -s /bin/bash danxbot -c "
         echo 'https://x-access-token:${GITHUB_TOKEN}@github.com' > ~/.git-credentials

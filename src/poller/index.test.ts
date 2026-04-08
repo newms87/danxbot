@@ -5,6 +5,10 @@ vi.hoisted(() => {
   process.env.REPOS = "test-repo:https://github.com/org/repo.git";
 });
 
+vi.mock("./constants.js", () => ({
+  getReposBase: () => "/danxbot/repos",
+}));
+
 // Mock dependencies before importing module under test
 vi.mock("./config.js", () => ({
   config: { pollerIntervalMs: 60000 },

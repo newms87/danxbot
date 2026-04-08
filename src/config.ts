@@ -12,6 +12,7 @@ import {
   REVIEW_LIST_ID,
   getReposBase,
 } from "./poller/constants.js";
+import { required, optional } from "./env.js";
 
 export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
   very_low: {
@@ -50,18 +51,6 @@ export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
     systemPrompt: "full",
   },
 };
-
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
-function optional(name: string, defaultValue: string): string {
-  return process.env[name] || defaultValue;
-}
 
 function parseRepos(envValue: string): RepoConfig[] {
   if (!envValue.trim()) return [];
@@ -153,11 +142,11 @@ export const config = {
     maxRetries: Math.max(0, parseInt(optional("AGENT_MAX_RETRIES", "1"), 10)),
   },
   github: {
-    webhookSecret: process.env.GITHUB_WEBHOOK_SECRET || "",
+    webhookSecret: optional("GITHUB_WEBHOOK_SECRET", ""),
   },
   trello: {
-    apiKey: process.env.TRELLO_API_KEY || "",
-    apiToken: process.env.TRELLO_API_TOKEN || "",
+    apiKey: optional("TRELLO_API_KEY", ""),
+    apiToken: optional("TRELLO_API_TOKEN", ""),
     boardId: BOARD_ID,
     reviewListId: REVIEW_LIST_ID,
     todoListId: TODO_LIST_ID,

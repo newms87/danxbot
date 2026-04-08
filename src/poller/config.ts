@@ -1,14 +1,4 @@
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-  return value;
-}
-
-function optional(name: string, defaultValue: string): string {
-  return process.env[name] || defaultValue;
-}
+import { required, optional } from "../env.js";
 
 export interface PollerConfig {
   trello: { apiKey: string; apiToken: string };

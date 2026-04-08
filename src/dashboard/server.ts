@@ -229,7 +229,9 @@ export async function startDashboard(): Promise<void> {
           try {
             mkdirSync(logDir, { recursive: true });
             writeFileSync(join(logDir, "prompt.md"), task);
-          } catch {}
+          } catch (e) {
+            log.warn("Failed to write dispatch debug log:", e);
+          }
 
           const scriptPath = buildDispatchScript(settingsDir, {
             promptFile,

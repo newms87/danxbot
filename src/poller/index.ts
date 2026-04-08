@@ -27,6 +27,7 @@ import {
   NEEDS_HELP_LABEL_ID,
 } from "./config.js";
 import { getReposBase } from "./constants.js";
+import { parseSimpleYaml } from "./parse-yaml.js";
 import { createLogger } from "../logger.js";
 import { spawnInTerminal } from "../terminal.js";
 import {
@@ -186,36 +187,6 @@ Board ID: \`${BOARD_ID}\`
 }
 
 /**
- * Parse a simple YAML file into a flat key-value structure with dot-notation keys.
- * Handles the repo-config.yml format (scalar values and one level of nesting).
- */
-function parseSimpleYaml(content: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  let currentSection = "";
-
-  for (const rawLine of content.split("\n")) {
-    const line = rawLine.trimEnd();
-    if (!line || line.startsWith("#")) continue;
-
-    const sectionMatch = line.match(/^(\w[\w_]*):\s*$/);
-    if (sectionMatch) {
-      currentSection = sectionMatch[1];
-      continue;
-    }
-
-    const kvMatch = line.match(/^(\s*)(\w[\w_]*):\s*"?([^"]*)"?\s*$/);
-    if (kvMatch) {
-      const [, indent, key, value] = kvMatch;
-      const prefix = indent && indent.length > 0 ? `${currentSection}.` : "";
-      if (!indent || indent.length === 0) currentSection = "";
-      result[`${prefix}${key}`] = value;
-    }
-  }
-
-  return result;
-}
-
-/**
  * Validate that .danxbot/config/ in the connected repo and env vars are fully configured.
  * Throws if anything is missing or empty — the poller must not run without valid config.
  */
@@ -369,7 +340,7 @@ This file is synced by the poller from \`.danxbot/config/config.yml\` on every p
 |-------|-------|
 | Name | \`${name}\` |
 | URL | \`${url}\` |
-| Local Path | \`repos/${name}/\` |
+| Local Path | \`${getReposBase()}/${name}/\` |
 | Runtime | \`${runtime}\` |
 | Language | \`${language}\` |
 | Framework | \`${framework}\` |
@@ -414,7 +385,7 @@ This file is synced by the poller from \`.danxbot/config/config.yml\` on every p
   ] as const) {
     const srcPath = resolve(danxbotConfigDir, src);
     if (existsSync(srcPath)) {
-      const header = `<!-- AUTO-GENERATED from repos/${name}/.danxbot/config/${src} — NEVER edit this file. Edit the source and the poller will sync it. -->\n\n`;
+      const header = `<!-- AUTO-GENERATED from ${getReposBase()}/${name}/.danxbot/config/${src} — NEVER edit this file. Edit the source and the poller will sync it. -->\n\n`;
       const body = readFileSync(srcPath, "utf-8");
       writeFileSync(resolve(rulesDir, dest), header + body);
     }
@@ -474,7 +445,9 @@ This file is synced by the poller from \`.danxbot/config/config.yml\` on every p
         // Make scripts executable
         try {
           chmodSync(dest, 0o755);
-        } catch {}
+        } catch (e) {
+          log.warn(`Failed to chmod ${dest}:`, e);
+        }
       }
     }
   }

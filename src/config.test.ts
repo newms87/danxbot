@@ -16,6 +16,7 @@ vi.mock("./poller/constants.js", () => ({
   NEEDS_HELP_LABEL_ID: "mock-needs-help-label-id",
   REVIEW_MIN_CARDS: 10,
   DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
+  getReposBase: () => "/danxbot/repos",
 }));
 
 // Helper to set up a valid env and dynamically import config

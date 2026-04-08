@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { optional } from "../env.js";
+import { parseSimpleYaml } from "./parse-yaml.js";
 
 /**
  * Resolve the base repos directory. Always `/danxbot/repos/` — contains symlinks
@@ -34,30 +36,7 @@ function loadTrelloYaml(): Record<string, string> {
     ".danxbot/config/trello.yml",
   );
   const content = readFileSync(trelloYmlPath, "utf-8");
-
-  const result: Record<string, string> = {};
-  let currentSection = "";
-
-  for (const rawLine of content.split("\n")) {
-    const line = rawLine.trimEnd();
-    if (!line || line.startsWith("#")) continue;
-
-    const sectionMatch = line.match(/^(\w[\w_]*):\s*$/);
-    if (sectionMatch) {
-      currentSection = sectionMatch[1];
-      continue;
-    }
-
-    const kvMatch = line.match(/^(\s*)(\w[\w_]*):\s*"?([^"]*)"?\s*$/);
-    if (kvMatch) {
-      const [, indent, key, value] = kvMatch;
-      const prefix = indent && indent.length > 0 ? `${currentSection}.` : "";
-      if (!indent || indent.length === 0) currentSection = "";
-      result[`${prefix}${key}`] = value.trim();
-    }
-  }
-
-  return result;
+  return parseSimpleYaml(content);
 }
 
 function requiredTrello(config: Record<string, string>, key: string): string {
@@ -89,7 +68,7 @@ export const EPIC_LABEL_ID = requiredTrello(trello, "labels.epic");
 export const NEEDS_HELP_LABEL_ID = requiredTrello(trello, "labels.needs_help");
 
 export const REVIEW_MIN_CARDS = parseInt(
-  process.env.TRELLO_REVIEW_MIN_CARDS || "10",
+  optional("TRELLO_REVIEW_MIN_CARDS", "10"),
   10,
 );
 

@@ -39,6 +39,11 @@ vi.mock("../config.js", () => ({
   config: {},
 }));
 
+// Mock constants (prevents module-level YAML loading)
+vi.mock("../poller/constants.js", () => ({
+  getReposBase: () => "/danxbot/repos",
+}));
+
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
