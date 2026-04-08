@@ -123,9 +123,7 @@ export const config = {
     channelId: slackChannelId,
   },
   anthropic: {
-    apiKey: isHost
-      ? optional("ANTHROPIC_API_KEY", "")
-      : required("ANTHROPIC_API_KEY"),
+    apiKey: optional("ANTHROPIC_API_KEY", ""),
   },
   platform: {
     db: {
