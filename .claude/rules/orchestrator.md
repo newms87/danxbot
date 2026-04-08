@@ -17,7 +17,7 @@ YOU are the orchestrator. Do NOT launch a separate orchestrator agent.
 1. Read card description, labels, and all comments via `get_card_comments` (cardId)
 2. Fetch "Acceptance Criteria" checklist via `get_acceptance_criteria` (cardId)
 3. **For Bug cards:** Investigate root cause first
-4. **Check for Needs Help:** If task requires human intervention (Slack/Trello settings, external config, manual setup), add `Needs Help` label, comment with explanation + `<!-- danxbot -->` marker, move to Needs Help list, skip this card
+4. **Check for Needs Help:** If task requires human intervention (Slack/Trello settings, external config, manual setup), add `Needs Help` label, comment with explanation + `<!-- danxbot -->` marker, move to Needs Help list (position: `"top"`), skip this card
 5. **Detect target repo:** Card targets danxbot (`src/`) or connected repo (`repos/<name>/`)? Check description for domain/framework/model references. If connected repo, follow `.claude/rules/repo-workflow.md` (feature branches, no direct main commits)
 6. Design implementation approach
 7. Invoke `/wow` to load Ways of Working skill for recency
@@ -32,7 +32,7 @@ If 3+ phases, different domains, or >500 lines: split into epic.
 3. Create N phase cards in In Progress (position: `"top"`): `Epic Title > Phase N: Description`
 4. Each phase card: own description, acceptance criteria, Bug or Feature label
 5. Add split comment listing all phases to epic
-6. Move epic to Done
+6. Move epic to Done (position: `"top"`)
 7. Pick up first phase card
 
 After completing a phase, search In Progress for next phase (not ToDo) — keeps epic phases prioritized.

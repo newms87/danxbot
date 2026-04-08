@@ -119,14 +119,14 @@ Board/list/label IDs are in `.claude/rules/trello-config.md` (auto-generated fro
 
 1. Human moves approved cards from Review to ToDo
 2. `/start-team` or `/next-card` triggers the workflow
-3. Main session picks up card, moves to In Progress, creates progress checklist
-4. If the card requires human intervention (external service settings, account config, etc.), adds `Needs Help` label and moves to Needs Help list
+3. Main session picks up card, moves to In Progress (position: `"top"`), creates progress checklist
+4. If the card requires human intervention (external service settings, account config, etc.), adds `Needs Help` label and moves to Needs Help list (position: `"top"`)
 5. Evaluates scope — splits into epic phases if too large (3+ phases), labels parent as Epic, creates phase cards in In Progress
 6. Orchestrator implements directly using TDD (failing test, implement, pass, refactor)
 7. Launches Test Reviewer + Code Reviewer subagents for quality gates
 8. Posts review results as Trello card comments, fixes any critical issues
 9. Launches Validator subagent only for agent/SDK changes
-10. Commits, moves card to Done, adds retro comment
+10. Commits, moves card to Done (position: `"top"`), adds retro comment
 11. Epic splitting: parent gets Epic label, phase cards named `Epic > Phase N > Description` created in In Progress
 12. Every Done card gets a retro comment (What went well, What went wrong, Action items, Commits)
 13. Retro action items create linked cards in the Action Items list
