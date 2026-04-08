@@ -105,16 +105,17 @@ const slackAppToken = optional("SLACK_APP_TOKEN", "");
 const slackChannelId = optional("SLACK_CHANNEL_ID", "");
 const slackEnabled = !!(slackBotToken && slackAppToken && slackChannelId);
 
-const claudeAuthMode = optional("CLAUDE_AUTH_MODE", "api") as
-  | "api"
-  | "subscription";
-if (claudeAuthMode !== "api" && claudeAuthMode !== "subscription") {
+const runtime = optional("DANXBOT_RUNTIME", "docker") as "docker" | "host";
+if (runtime !== "docker" && runtime !== "host") {
   throw new Error(
-    `CLAUDE_AUTH_MODE must be "api" or "subscription" (got "${claudeAuthMode}")`,
+    `DANXBOT_RUNTIME must be "docker" or "host" (got "${runtime}")`,
   );
 }
+const isHost = runtime === "host";
 
 export const config = {
+  runtime,
+  isHost,
   slack: {
     enabled: slackEnabled,
     botToken: slackBotToken,
@@ -122,11 +123,9 @@ export const config = {
     channelId: slackChannelId,
   },
   anthropic: {
-    apiKey:
-      claudeAuthMode === "subscription"
-        ? optional("ANTHROPIC_API_KEY", "")
-        : required("ANTHROPIC_API_KEY"),
-    authMode: claudeAuthMode,
+    apiKey: isHost
+      ? optional("ANTHROPIC_API_KEY", "")
+      : required("ANTHROPIC_API_KEY"),
   },
   platform: {
     db: {
@@ -138,8 +137,8 @@ export const config = {
     },
   },
   db: {
-    host: required("DANXBOT_DB_HOST"),
-    port: parseInt(optional("DANXBOT_DB_PORT", "3306"), 10),
+    host: optional("DANXBOT_DB_HOST", isHost ? "127.0.0.1" : "mysql"),
+    port: parseInt(optional("DANXBOT_DB_PORT", isHost ? "3307" : "3306"), 10),
     user: required("DANXBOT_DB_USER"),
     password: required("DANXBOT_DB_PASSWORD"),
     database: optional("DANXBOT_DB_NAME", "danxbot_chat"),
@@ -172,11 +171,10 @@ export const config = {
     defaultApiUrl: optional("DEFAULT_API_URL", "http://localhost:80"),
     agentTimeoutMs:
       parseInt(optional("DISPATCH_AGENT_TIMEOUT", "3600"), 10) * 1000,
-    interactiveTerminal: optional("DISPATCH_INTERACTIVE", "false") === "true",
   },
   rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),
-  logsDir: optional("DANXBOT_LOGS_DIR", "/danxbot/logs"),
+  logsDir: optional("DANXBOT_LOGS_DIR", isHost ? "./logs" : "/danxbot/logs"),
 } as const;
 
 interface NumericRule {

@@ -208,7 +208,7 @@ export async function startDashboard(): Promise<void> {
           maxRuntimeMs,
         };
 
-        if (config.dispatch.interactiveTerminal) {
+        if (config.isHost) {
           // Interactive mode: open in a Windows Terminal tab (same as poller)
           const jobId = randomUUID();
           const settingsDir = buildMcpSettings(launchOptions);

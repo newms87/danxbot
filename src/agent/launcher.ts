@@ -253,7 +253,7 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
   // Clean environment — remove CLAUDECODE vars to prevent nesting issues.
   // In subscription mode, also strip ANTHROPIC_API_KEY so the claude CLI
   // falls back to the host's OAuth session (~/.claude/) for billing.
-  const useSubscription = config.anthropic.authMode === "subscription";
+  const useSubscription = config.isHost;
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (key.startsWith("CLAUDECODE")) continue;
