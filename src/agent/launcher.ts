@@ -16,6 +16,7 @@ import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
+import { getReposBase } from "../poller/constants.js";
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const TERMINAL_STATUS_RETRIES = 3;
@@ -28,6 +29,7 @@ export interface LaunchOptions {
   apiUrl: string;
   statusUrl?: string;
   schemaDefinitionId?: string;
+  schemaRole?: string;
   timeout: number;
   maxRuntimeMs?: number;
 }
@@ -169,6 +171,7 @@ export function buildMcpSettings(options: LaunchOptions): string {
           ...(options.schemaDefinitionId
             ? { SCHEMA_DEFINITION_ID: String(options.schemaDefinitionId) }
             : {}),
+          ...(options.schemaRole ? { SCHEMA_ROLE: options.schemaRole } : {}),
         },
       },
     },
@@ -296,10 +299,19 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
   let stderr = "";
   let stdoutBuffer = "";
 
+  // Resolve agent working directory — fail loudly if not configured
+  const repoName = (process.env.REPOS || "").split(",")[0].split(":")[0].trim();
+  if (!repoName) {
+    throw new Error(
+      "REPOS env var is not configured — cannot determine agent working directory",
+    );
+  }
+  const agentCwd = join(getReposBase(), repoName);
+
   const child = spawn("claude", args, {
     env,
     stdio: ["ignore", "pipe", "pipe"],
-    cwd: settingsDir,
+    cwd: agentCwd,
   });
 
   job.process = child;

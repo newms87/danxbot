@@ -18,7 +18,7 @@ The setup generates `.danxbot/config/` in the connected repo, `.env`, and tailor
 
 ## Connected Repo
 
-All repo-specific config lives in `.danxbot/config/` inside the connected repo (version controlled). Trello IDs, repo commands, overview, workflow, domain docs, and agent tools are stored there. Secrets (API keys, tokens, passwords) stay in danxbot's `.env`. The poller syncs config to `.claude/rules/`, `docs/`, and `repo-overrides/` before each Claude spawn. The connected repo is cloned to `repos/<name>/` and is the target for Trello card work.
+All repo-specific config lives in `.danxbot/config/` inside the connected repo (version controlled). Trello IDs, repo commands, overview, workflow, domain docs, and agent tools are stored there. Secrets (API keys, tokens, passwords) stay in danxbot's `.env`. The poller syncs config to `.claude/rules/`, `docs/`, and `repo-overrides/` before each Claude spawn. Connected repos live at `/danxbot/repos/<name>/` (symlinks to the actual working copies, e.g., `/home/newms/web/gpt-manager`). This is the agent's working directory for Trello card work and schema builder dispatches.
 
 ### Agent Tools
 

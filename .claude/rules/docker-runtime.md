@@ -35,25 +35,60 @@ docker compose up -d --build
 | Host | Container |
 |------|-----------|
 | `./src` | `/danxbot/app/src` |
-| `./repos/` | `/danxbot/repos/` |
+| `./package.json` | `/danxbot/app/package.json` |
+| `/danxbot/repos/` | Symlinks to working copies (e.g., `/home/newms/web/gpt-manager`) |
+| `./repo-overrides/` | `/danxbot/app/repo-overrides/` |
 
 ## Connected Repo Architecture
 
-Connected repos are cloned to `repos/<name>/` at startup. The danxbot container has git, gh, docker, and docker compose available.
+Connected repos live at `/danxbot/repos/<name>/` — these are symlinks to the actual working copies (e.g., `/danxbot/repos/gpt-manager` → `/home/newms/web/gpt-manager`). The `getReposBase()` function in `src/poller/constants.ts` always resolves to `/danxbot/repos/` and throws if it doesn't exist. There is no fallback to a project-local `repos/` directory.
 
-- **File browsing**: Read, Glob, Grep work directly at `repos/<name>/` on host
-- **Runtime commands**: Run via docker compose inside the container (see `.claude/rules/repo-workflow.md`)
-- **Git commands**: Run in the danxbot container: `docker compose exec -u danxbot danxbot git -C /danxbot/repos/<name> <command>`
+- **File browsing** (Read, Glob, Grep) works directly — files are at `/danxbot/repos/<name>/` which symlinks to the working copy
+- **Runtime commands** depend on the repo's runtime setting in `repo-config/config.yml`:
+  - **Docker runtime:** Commands run via `docker compose exec danxbot docker compose -p <project_name> -f /danxbot/app/repo-overrides/<compose_file> run --rm <service> <command>`
+  - **Local runtime:** Commands run directly in the repo directory
+- **Git/gh commands** run in the danxbot container: `docker compose exec -u danxbot danxbot git -C /danxbot/repos/<name> <command>`
+- Read `.claude/rules/repo-config.md` for the exact commands, service names, and paths
 
 All repo config lives in `.danxbot/config/` (version controlled). Secrets stay in danxbot's `.env` and `repo-overrides/`.
 
 ## Tools Inside Container
 
-The Docker image includes: gh, git, docker, docker compose, mysql. Never try to install these on the host — they're already in the image. Access them via `docker compose exec danxbot <tool>`.
+```
+/danxbot/repos/<name>/.danxbot/
+  config/
+    config.yml       # name, url, commands, docker, paths
+    trello.yml       # board ID, list IDs, label IDs
+    overview.md      # tech stack, architecture, patterns
+    workflow.md      # how to edit, test, commit, PR
+    tools.md         # agent tool commands (synced to repo's .claude/rules/)
+    compose.yml      # Docker override (optional)
+    post-clone.sh    # runs after cloning (optional)
+    docs/
+      domains/*.md   # domain knowledge
+      schema/*.md    # DB relationships
+  features.md        # ideator's persistent memory (gitignored)
+```
+
+Secrets (API keys, tokens, passwords) stay in danxbot's `.env` and `repo-overrides/<name>.env`. The poller syncs `.danxbot/config/` to target locations (`.claude/rules/`, `docs/`, `repo-overrides/`) before each Claude spawn.
+
+## Tools Available Inside the Container
+
+The Docker image includes dev tools beyond Node.js. Use `docker compose exec danxbot <command>` to access them:
+
+- **gh** — GitHub CLI for creating PRs, managing issues
+- **git** — Full git client (HTTPS token auth via gh)
+- **docker** / **docker compose** — For managing sibling containers
+- **mysql** — MySQL client for direct DB access
+
+**NEVER try to install these tools on the host.** They are already in the Docker image. Run them inside the container.
 
 ## Never Run the Bot on the Host
 
-Do not use `npm start` or `npm run dev` on the host. The bot requires Claude Code CLI, Claude auth at `/root/.claude.json`, and access to `/danxbot/repos/`. All configured inside the container.
+Do not use `npm start` or `npm run dev` on the host. The bot requires:
+- Claude Code CLI installed globally
+- Claude auth at `/root/.claude.json`
+- Access to repo symlinks at `/danxbot/repos/`
 
 ## Key Files
 

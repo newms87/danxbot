@@ -196,6 +196,7 @@ export async function startDashboard(): Promise<void> {
         }
 
         const maxRuntimeMs = body.max_runtime_ms as number | undefined;
+        const schemaRole = body.schema_role as string | undefined;
 
         const launchOptions = {
           task,
@@ -204,6 +205,7 @@ export async function startDashboard(): Promise<void> {
           apiUrl,
           statusUrl,
           schemaDefinitionId,
+          schemaRole,
           timeout: config.dispatch.agentTimeoutMs,
           maxRuntimeMs,
         };
@@ -237,14 +239,19 @@ export async function startDashboard(): Promise<void> {
             apiToken,
           });
 
-          // Use the repo directory as cwd (already trusted by claude)
+          // Resolve agent working directory — fail loudly if not configured
           const repoName = (process.env.REPOS || "")
             .split(",")[0]
             .split(":")[0]
             .trim();
-          const agentCwd = repoName
-            ? join(getReposBase(), repoName)
-            : process.env.HOME || settingsDir;
+          if (!repoName) {
+            json(res, 500, {
+              error:
+                "REPOS env var is not configured — cannot determine agent working directory",
+            });
+            return;
+          }
+          const agentCwd = join(getReposBase(), repoName);
 
           spawnInTerminal({
             title: `Schema Agent ${jobId.substring(0, 8)}`,

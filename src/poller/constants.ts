@@ -1,15 +1,21 @@
 import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
 /**
- * Resolve the base repos directory. Inside the Docker container this is
- * `/danxbot/repos/`; on the host it is `repos/` relative to the project root.
+ * Resolve the base repos directory. Always `/danxbot/repos/` — contains symlinks
+ * to the actual working copies (e.g., /home/newms/web/gpt-manager).
+ *
+ * Fails loudly if the directory doesn't exist rather than falling back to a
+ * project-local repos/ dir that may be a stale clone.
  */
 export function getReposBase(): string {
-  if (existsSync("/danxbot/repos")) return "/danxbot/repos";
-  const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  return resolve(projectRoot, "repos");
+  const reposPath = "/danxbot/repos";
+  if (!existsSync(reposPath)) {
+    throw new Error(
+      `Repos directory not found at ${reposPath}. Create it with symlinks to target repos.`,
+    );
+  }
+  return reposPath;
 }
 
 /**
@@ -22,7 +28,11 @@ function loadTrelloYaml(): Record<string, string> {
   const name = repos.split(",")[0].split(":")[0].trim();
   if (!name) throw new Error("Invalid REPOS format — expected 'name:url'");
 
-  const trelloYmlPath = resolve(getReposBase(), name, ".danxbot/config/trello.yml");
+  const trelloYmlPath = resolve(
+    getReposBase(),
+    name,
+    ".danxbot/config/trello.yml",
+  );
   const content = readFileSync(trelloYmlPath, "utf-8");
 
   const result: Record<string, string> = {};
@@ -52,7 +62,10 @@ function loadTrelloYaml(): Record<string, string> {
 
 function requiredTrello(config: Record<string, string>, key: string): string {
   const value = config[key];
-  if (!value) throw new Error(`Missing required Trello config key '${key}' in .danxbot/config/trello.yml`);
+  if (!value)
+    throw new Error(
+      `Missing required Trello config key '${key}' in .danxbot/config/trello.yml`,
+    );
   return value;
 }
 
@@ -65,14 +78,20 @@ export const IN_PROGRESS_LIST_ID = requiredTrello(trello, "lists.in_progress");
 export const NEEDS_HELP_LIST_ID = requiredTrello(trello, "lists.needs_help");
 export const DONE_LIST_ID = requiredTrello(trello, "lists.done");
 export const CANCELLED_LIST_ID = requiredTrello(trello, "lists.cancelled");
-export const ACTION_ITEMS_LIST_ID = requiredTrello(trello, "lists.action_items");
+export const ACTION_ITEMS_LIST_ID = requiredTrello(
+  trello,
+  "lists.action_items",
+);
 
 export const BUG_LABEL_ID = requiredTrello(trello, "labels.bug");
 export const FEATURE_LABEL_ID = requiredTrello(trello, "labels.feature");
 export const EPIC_LABEL_ID = requiredTrello(trello, "labels.epic");
 export const NEEDS_HELP_LABEL_ID = requiredTrello(trello, "labels.needs_help");
 
-export const REVIEW_MIN_CARDS = parseInt(process.env.TRELLO_REVIEW_MIN_CARDS || "10", 10);
+export const REVIEW_MIN_CARDS = parseInt(
+  process.env.TRELLO_REVIEW_MIN_CARDS || "10",
+  10,
+);
 
 /** Marker appended to all Danxbot-posted Trello comments. The poller uses this to distinguish bot comments from user responses. */
 export const DANXBOT_COMMENT_MARKER = "<!-- danxbot -->";
