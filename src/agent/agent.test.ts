@@ -231,7 +231,7 @@ describe("runRouter", () => {
     expect(callArgs.messages).toEqual([{ role: "user", content: "hello" }]);
   });
 
-  it("passes multi-turn messages when thread history exists", async () => {
+  it("combines user-only thread history into single context message", async () => {
     mockCreate.mockResolvedValueOnce({
       usage: MOCK_USAGE,
       content: [
@@ -251,11 +251,12 @@ describe("runRouter", () => {
     const result = await runRouter("Can you show me?", thread);
 
     const callArgs = mockCreate.mock.calls[0][0];
-    // Should use multi-turn conversation (thread.length > 1)
-    expect(callArgs.messages.length).toBe(3);
+    // Bot messages filtered — user messages combined into single message
+    expect(callArgs.messages.length).toBe(1);
     expect(callArgs.messages[0].role).toBe("user");
-    expect(callArgs.messages[1].role).toBe("assistant");
-    expect(callArgs.messages[2].role).toBe("user");
+    expect(callArgs.messages[0].content).toContain("How does auth work?");
+    expect(callArgs.messages[0].content).toContain("Can you show me?");
+    expect(callArgs.messages[0].content).not.toContain("JWT tokens");
   });
 
   it("parses JSON response correctly", async () => {

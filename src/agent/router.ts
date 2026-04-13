@@ -103,12 +103,20 @@ export async function runRouter(
   messageText: string,
   threadMessages: ThreadMessage[] = [],
 ): Promise<RouterResult> {
-  // Trim thread messages to prevent token overflow, then build conversation
+  // Trim thread messages to prevent token overflow.
+  // Only send user messages as context — bot responses are natural language
+  // that confuses the model into responding conversationally instead of as JSON.
   const trimmed = trimThreadMessages(threadMessages, config.agent.maxThreadMessages);
-  const messages =
-    trimmed.length > 1
-      ? buildConversationMessages(trimmed)
-      : [{ role: "user" as const, content: messageText }];
+  const userMessages = trimmed.filter((m) => !m.isBot);
+  let messages: Array<{ role: "user" | "assistant"; content: string }>;
+  if (userMessages.length > 1) {
+    // Combine earlier user messages as context, current message separate
+    const history = userMessages.slice(0, -1).map((m) => m.text).join("\n");
+    const current = userMessages[userMessages.length - 1].text;
+    messages = [{ role: "user", content: `[Earlier in thread]\n${history}\n\n[Current message]\n${current}` }];
+  } else {
+    messages = [{ role: "user", content: messageText }];
+  }
 
   const routerModel = config.agent.routerModel;
   const request = {
@@ -125,6 +133,11 @@ export async function runRouter(
     try {
       const response = await anthropic.messages.create(request);
       const usage = buildApiCallUsage(response.usage, routerModel, "router");
+      const rawText = response.content
+        .filter((b: { type: string }) => b.type === "text")
+        .map((b: { text: string }) => b.text)
+        .join("");
+      log.debug(`Router raw response: ${rawText.slice(0, 500)}`);
       const parsed = parseJsonResponse(response);
 
       const VALID_LEVELS = new Set<ComplexityLevel>(["very_low", "low", "medium", "high", "very_high"]);
