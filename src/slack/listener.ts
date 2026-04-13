@@ -265,7 +265,9 @@ export async function startSlackListener(): Promise<void> {
 
             // Count SQL blocks and process them before formatting
             const sqlBlockCount = extractSqlBlocks(response.text).length;
+            log.info(`SQL blocks found: ${sqlBlockCount} in response (${response.text.length} chars)`);
             const sqlResult = await processSqlInResponse(response.text);
+            log.info(`SQL processed: ${sqlResult.attachments.length} attachments, text preview: ${sqlResult.text.slice(0, 200)}`);
 
             updateEvent(dashEvent.id, {
               status: "complete",
@@ -445,6 +447,10 @@ export async function startSlackListener(): Promise<void> {
                 notifyError("Agent Timeout", `Agent timed out after ${elapsed}s`, errorContext).catch(() => {});
                 handled = true;
               } else {
+                // Stop heartbeat BEFORE posting final response to prevent race conditions
+                // where a late heartbeat flush overwrites the processed SQL result
+                hbManager.stop();
+
                 // Agent succeeded — collect usage: router + heartbeats
                 const apiCalls: ApiCallUsage[] = [];
                 if (routerResult.usage) apiCalls.push(routerResult.usage);
@@ -453,7 +459,9 @@ export async function startSlackListener(): Promise<void> {
 
                 // Count SQL blocks and process them before formatting
                 const sqlBlockCount = extractSqlBlocks(response.text).length;
+                log.info(`[full-path] SQL blocks found: ${sqlBlockCount} in response (${response.text.length} chars)`);
                 const sqlResult = await processSqlInResponse(response.text);
+                log.info(`[full-path] SQL processed: ${sqlResult.attachments.length} attachments, text preview: ${sqlResult.text.slice(0, 200)}`);
 
                 // Collect heartbeat snapshots for dashboard timeline
                 const heartbeatSnapshots = hbManager.getSnapshots();

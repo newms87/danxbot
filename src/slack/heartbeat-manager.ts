@@ -50,6 +50,7 @@ export class HeartbeatManager {
   private lastFlushTime = 0;
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private latestStreamText = "";
+  private stopped = false;
 
   constructor(
     client: WebClient,
@@ -149,8 +150,9 @@ export class HeartbeatManager {
     }, HEARTBEAT_TICK_MS);
   }
 
-  /** Clears all timers and pending flushes. Call in a finally block. */
+  /** Clears all timers and prevents any further Slack updates. Call before posting final response. */
   stop(): void {
+    this.stopped = true;
     this.clearInterval();
     if (this.pendingTimer) {
       clearTimeout(this.pendingTimer);
@@ -171,6 +173,8 @@ export class HeartbeatManager {
     const elapsed = Math.round(
       (Date.now() - this.heartbeatStart) / 1000,
     );
+
+    if (this.stopped) return;
 
     this.client.chat
       .update({
@@ -195,6 +199,8 @@ export class HeartbeatManager {
   }
 
   private updateHeartbeatSlack(hb: HeartbeatUpdate): void {
+    if (this.stopped) return;
+
     const elapsed = Math.round(
       (Date.now() - this.heartbeatStart) / 1000,
     );
