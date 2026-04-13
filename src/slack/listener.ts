@@ -673,14 +673,16 @@ export async function startSlackListener(): Promise<void> {
   const negativeReactions = new Set(["thumbsdown", "-1"]);
 
   app.event("reaction_added", async ({ event }) => {
+    // Only process reactions from the configured channel
+    if (!("channel" in event.item) || event.item.channel !== config.slack.channelId) return;
+    if (botUserId && event.user === botUserId) return;
+
     // Strip skin-tone modifiers (e.g. "+1::skin-tone-2" → "+1")
     const reaction = event.reaction.replace(/::skin-tone-\d+$/, "");
-    log.info(`Reaction received: ${event.reaction} (normalized: ${reaction}) from ${event.user}`);
+    log.info(`Reaction received: ${reaction} from ${event.user}`);
     const isPositive = positiveReactions.has(reaction);
     const isNegative = negativeReactions.has(reaction);
     if (!isPositive && !isNegative) return;
-    if (!("channel" in event.item) || event.item.channel !== config.slack.channelId) return;
-    if (botUserId && event.user === botUserId) return;
 
     const dashEvent = findEventByResponseTs(event.item.ts);
     if (!dashEvent) return;
