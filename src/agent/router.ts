@@ -118,46 +118,61 @@ export async function runRouter(
     messages,
   };
 
-  try {
-    const response = await anthropic.messages.create(request);
-    const usage = buildApiCallUsage(response.usage, routerModel, "router");
-    const parsed = parseJsonResponse(response);
+  const maxAttempts = 2;
+  let lastError: unknown = null;
 
-    const VALID_LEVELS = new Set<ComplexityLevel>(["very_low", "low", "medium", "high", "very_high"]);
-    const rawComplexity = String(parsed.complexity || "");
-    const complexity: ComplexityLevel = VALID_LEVELS.has(rawComplexity as ComplexityLevel)
-      ? (rawComplexity as ComplexityLevel)
-      : "high";
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = await anthropic.messages.create(request);
+      const usage = buildApiCallUsage(response.usage, routerModel, "router");
+      const parsed = parseJsonResponse(response);
 
-    return {
-      quickResponse: String(parsed.quickResponse || ""),
-      needsAgent: parsed.needsAgent === true,
-      complexity,
-      reason: String(parsed.reason || ""),
-      error: null,
-      request: request as unknown as Record<string, unknown>,
-      rawResponse: response as unknown as Record<string, unknown>,
-      usage,
-    };
-  } catch (error) {
-    log.error("Router error", error);
+      const VALID_LEVELS = new Set<ComplexityLevel>(["very_low", "low", "medium", "high", "very_high"]);
+      const rawComplexity = String(parsed.complexity || "");
+      const complexity: ComplexityLevel = VALID_LEVELS.has(rawComplexity as ComplexityLevel)
+        ? (rawComplexity as ComplexityLevel)
+        : "high";
 
-    const errorMessage = error instanceof Error ? error.message : String(error);
+      return {
+        quickResponse: String(parsed.quickResponse || ""),
+        needsAgent: parsed.needsAgent === true,
+        complexity,
+        reason: String(parsed.reason || ""),
+        error: null,
+        request: request as unknown as Record<string, unknown>,
+        rawResponse: response as unknown as Record<string, unknown>,
+        usage,
+      };
+    } catch (error) {
+      lastError = error;
+      const errorMessage = error instanceof Error ? error.message : String(error);
 
-    const isOperational = isOperationalError(errorMessage);
+      // Only retry on JSON parse errors — API errors won't improve on retry
+      if (error instanceof SyntaxError && attempt < maxAttempts - 1) {
+        log.warn(`Router JSON parse failed (attempt ${attempt + 1}/${maxAttempts}), retrying: ${errorMessage}`);
+        continue;
+      }
 
-    return {
-      quickResponse: isOperational
-        ? "I'm temporarily unavailable due to a service configuration issue. The team has been notified."
-        : "I'm having a moment — give me a sec and try again.",
-      needsAgent: false,
-      complexity: "very_low",
-      reason: "router error",
-      error: errorMessage,
-      isOperational,
-      request: request as unknown as Record<string, unknown>,
-      rawResponse: {},
-      usage: null,
-    };
+      break;
+    }
   }
+
+  const errorMessage = lastError instanceof Error ? lastError.message : String(lastError);
+  log.error("Router error", lastError);
+
+  const isOperational = isOperationalError(errorMessage);
+
+  return {
+    quickResponse: isOperational
+      ? "I'm temporarily unavailable due to a service configuration issue. The team has been notified."
+      : "I'm having a moment — give me a sec and try again.",
+    needsAgent: false,
+    complexity: "very_low",
+    reason: "router error",
+    error: errorMessage,
+    isOperational,
+    request: request as unknown as Record<string, unknown>,
+    rawResponse: {},
+    usage: null,
+  };
 }
