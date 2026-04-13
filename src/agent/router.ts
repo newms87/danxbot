@@ -133,11 +133,6 @@ export async function runRouter(
     try {
       const response = await anthropic.messages.create(request);
       const usage = buildApiCallUsage(response.usage, routerModel, "router");
-      const rawText = response.content
-        .filter((b: { type: string }) => b.type === "text")
-        .map((b: { text: string }) => b.text)
-        .join("");
-      log.debug(`Router raw response: ${rawText.slice(0, 500)}`);
       const parsed = parseJsonResponse(response);
 
       const VALID_LEVELS = new Set<ComplexityLevel>(["very_low", "low", "medium", "high", "very_high"]);

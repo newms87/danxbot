@@ -265,9 +265,7 @@ export async function startSlackListener(): Promise<void> {
 
             // Count SQL blocks and process them before formatting
             const sqlBlockCount = extractSqlBlocks(response.text).length;
-            log.info(`SQL blocks found: ${sqlBlockCount} in response (${response.text.length} chars)`);
             const sqlResult = await processSqlInResponse(response.text);
-            log.info(`SQL processed: ${sqlResult.attachments.length} attachments, text preview: ${sqlResult.text.slice(0, 200)}`);
 
             updateEvent(dashEvent.id, {
               status: "complete",
@@ -459,9 +457,7 @@ export async function startSlackListener(): Promise<void> {
 
                 // Count SQL blocks and process them before formatting
                 const sqlBlockCount = extractSqlBlocks(response.text).length;
-                log.info(`[full-path] SQL blocks found: ${sqlBlockCount} in response (${response.text.length} chars)`);
                 const sqlResult = await processSqlInResponse(response.text);
-                log.info(`[full-path] SQL processed: ${sqlResult.attachments.length} attachments, text preview: ${sqlResult.text.slice(0, 200)}`);
 
                 // Collect heartbeat snapshots for dashboard timeline
                 const heartbeatSnapshots = hbManager.getSnapshots();
