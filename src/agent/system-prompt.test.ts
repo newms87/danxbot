@@ -60,6 +60,7 @@ describe("fast-system-prompt.md", () => {
 
   it("instructs agent to use sql:execute blocks", () => {
     expect(prompt).toContain("sql:execute");
-    expect(prompt).toMatch(/never.*(?:execute|run).*sql.*(?:bash|mysql)/i);
+    // Fast prompt delegates query restrictions to the tools rule file
+    expect(prompt).toMatch(/tools\.md/i);
   });
 });

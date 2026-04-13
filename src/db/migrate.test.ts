@@ -125,7 +125,7 @@ describe("runMigrations", () => {
         typeof call[0] === "string" && (call[0] as string).includes("INSERT INTO migrations"),
     );
     expect(insertCalls).toHaveLength(1);
-    expect(insertCalls[0][1]).toEqual(["001_initial_schema.ts"]);
+    expect(insertCalls[0][1]).toEqual(["001_initial_schema"]);
   });
 
   it("skips already-applied migrations", async () => {

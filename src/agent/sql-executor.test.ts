@@ -289,7 +289,7 @@ describe("processResponse", () => {
     expect(result).toBe(text);
   });
 
-  it("replaces sql:execute blocks with formatted results", async () => {
+  it("replaces sql:execute blocks with CSV attachment reference", async () => {
     const fields = [{ name: "id" }, { name: "name" }];
     const rows = [{ id: 1, name: "Alice" }];
     mockPool.query.mockResolvedValue([rows, fields]);
@@ -297,8 +297,8 @@ describe("processResponse", () => {
     const text = "Results:\n```sql:execute\nSELECT * FROM users\n```\nDone.";
     const result = await processResponse(text);
 
-    expect(result).toContain("| id | name |");
-    expect(result).toContain("| 1 | Alice |");
+    expect(result).toContain("Query returned 1 row");
+    expect(result).toContain("see attached CSV");
     expect(result).toContain("Results:");
     expect(result).toContain("Done.");
     expect(result).not.toContain("sql:execute");
@@ -335,10 +335,9 @@ describe("processResponse", () => {
     const text = "Count:\n```sql:execute\nSELECT COUNT(*) as count FROM users\n```\nNames:\n```sql:execute\nSELECT name FROM users LIMIT 1\n```";
     const result = await processResponse(text);
 
-    expect(result).toContain("| count |");
-    expect(result).toContain("| 42 |");
-    expect(result).toContain("| name |");
-    expect(result).toContain("| Alice |");
+    expect(result).toContain("Query returned 1 row");
+    expect(result).toContain("Count:");
+    expect(result).toContain("Names:");
     expect(result).not.toContain("sql:execute");
   });
 
@@ -350,7 +349,7 @@ describe("processResponse", () => {
     const text = "Safe:\n```sql:execute\nSELECT * FROM users\n```\nUnsafe:\n```sql:execute\nDELETE FROM users\n```";
     const result = await processResponse(text);
 
-    expect(result).toContain("| id |");
+    expect(result).toContain("Query returned 1 row");
     expect(result).toContain("Only SELECT queries are allowed");
     expect(result).not.toContain("sql:execute");
   });
@@ -440,8 +439,9 @@ describe("processResponseWithAttachments", () => {
     const text = "Results:\n```sql:execute\nSELECT * FROM users\n```\nDone.";
     const result = await processResponseWithAttachments(text);
 
-    // Text should have markdown table inline
-    expect(result.text).toContain("| id | name |");
+    // Text should have CSV attachment reference (not inline table)
+    expect(result.text).toContain("Query returned 1 row");
+    expect(result.text).toContain("see attached CSV");
     expect(result.text).not.toContain("sql:execute");
 
     // Should have one CSV attachment
