@@ -1503,7 +1503,7 @@ describe("shutdown handling", () => {
 describe("usage collection", () => {
   const mockRouterUsage = {
     source: "router" as const,
-    model: "claude-haiku-4-5",
+    model: "test-router-model",
     inputTokens: 100,
     outputTokens: 50,
     cacheCreationInputTokens: 0,

@@ -1,7 +1,5 @@
 import type Anthropic from "@anthropic-ai/sdk";
 
-export const HAIKU_MODEL = "claude-haiku-4-5-20251001" as const;
-
 /**
  * Extracts text from an Anthropic API response, strips code fences,
  * and parses the result as JSON.

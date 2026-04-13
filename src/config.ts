@@ -134,6 +134,7 @@ export const config = {
   },
   agent: {
     model: optional("CLAUDE_MODEL", "claude-sonnet-4-6"),
+    routerModel: optional("CLAUDE_ROUTER_MODEL", "claude-haiku-4-5-20251001"),
     maxTurns: parseInt(optional("MAX_TURNS", "10"), 10),
     maxBudgetUsd: parseFloat(optional("MAX_BUDGET_USD", "1.00")),
     maxThinkingTokens: parseInt(optional("MAX_THINKING_TOKENS", "8000"), 10),

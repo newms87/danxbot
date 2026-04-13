@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
-import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
+import { parseJsonResponse } from "./parse-json-response.js";
 
 // --- Helpers ---
 
@@ -11,7 +11,7 @@ function makeResponse(
     id: "msg_test",
     type: "message",
     role: "assistant",
-    model: HAIKU_MODEL,
+    model: "test-model",
     content: texts.map((text) => ({
       type: "text" as const,
       text,
@@ -72,7 +72,7 @@ describe("parseJsonResponse", () => {
       id: "msg_test",
       type: "message",
       role: "assistant",
-      model: HAIKU_MODEL,
+      model: "test-model",
       content: [],
       stop_reason: "end_turn",
       stop_sequence: null,
@@ -96,7 +96,7 @@ describe("parseJsonResponse", () => {
       id: "msg_test",
       type: "message",
       role: "assistant",
-      model: HAIKU_MODEL,
+      model: "test-model",
       content: [
         {
           type: "tool_use",
@@ -159,9 +159,5 @@ describe("parseJsonResponse", () => {
     const result = parseJsonResponse(response);
 
     expect(result).toEqual({ key: "value" });
-  });
-
-  it("exports HAIKU_MODEL constant", () => {
-    expect(HAIKU_MODEL).toBe("claude-haiku-4-5-20251001");
   });
 });

@@ -137,7 +137,7 @@ describe("events-db", () => {
 
     it("JSON-stringifies apiCalls array", () => {
       const apiCalls = [
-        { source: "router", model: "claude-haiku-4-5", inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, costUsd: 0.0001, timestamp: 1000 },
+        { source: "router", model: "test-router-model", inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, costUsd: 0.0001, timestamp: 1000 },
       ];
       const event = makeFullEvent({ apiCalls: apiCalls as any });
       const row = eventToRow(event);
@@ -156,7 +156,7 @@ describe("events-db", () => {
         outputTokens: 1200,
         cacheCreationInputTokens: 100,
         cacheReadInputTokens: 300,
-        modelUsage: { "claude-sonnet-4-5": { inputTokens: 5000, outputTokens: 1200, cacheReadInputTokens: 300, cacheCreationInputTokens: 100, costUsd: 0.25 } },
+        modelUsage: { "test-medium-model": { inputTokens: 5000, outputTokens: 1200, cacheReadInputTokens: 300, cacheCreationInputTokens: 100, costUsd: 0.25 } },
       };
       const event = makeFullEvent({ agentUsage: agentUsage as any });
       const row = eventToRow(event);
@@ -244,7 +244,7 @@ describe("events-db", () => {
 
     it("parses api_calls JSON column to ApiCallUsage array", () => {
       const apiCalls = [
-        { source: "router", model: "claude-haiku-4-5", inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, costUsd: 0.0001, timestamp: 1000 },
+        { source: "router", model: "test-router-model", inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, costUsd: 0.0001, timestamp: 1000 },
       ];
       const event = rowToEvent({
         id: "t-1-m-1", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",

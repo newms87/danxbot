@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
-import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
+import { parseJsonResponse } from "./parse-json-response.js";
 import type {
   AgentLogEntry,
   ApiCallUsage,
@@ -180,14 +180,15 @@ export async function generateHeartbeatMessage(
   messages.push({ role: "user", content: currentSummary });
 
   try {
+    const routerModel = config.agent.routerModel;
     const response = await anthropic.messages.create({
-      model: HAIKU_MODEL,
+      model: routerModel,
       max_tokens: 150,
       system: HEARTBEAT_SYSTEM_PROMPT,
       messages,
     });
 
-    const usage = buildApiCallUsage(response.usage, HAIKU_MODEL, "heartbeat");
+    const usage = buildApiCallUsage(response.usage, routerModel, "heartbeat");
     const parsed = parseJsonResponse(response);
 
     const rawEmoji = String(parsed.emoji || HEARTBEAT_FALLBACK.emoji);

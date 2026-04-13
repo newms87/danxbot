@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { isOperationalError } from "../errors/patterns.js";
-import { parseJsonResponse, HAIKU_MODEL } from "./parse-json-response.js";
+import { parseJsonResponse } from "./parse-json-response.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST, FEATURE_EXAMPLES } from "./features.js";
 import type { ApiCallUsage, ComplexityLevel, RouterResult, ThreadMessage } from "../types.js";
@@ -110,8 +110,9 @@ export async function runRouter(
       ? buildConversationMessages(trimmed)
       : [{ role: "user" as const, content: messageText }];
 
+  const routerModel = config.agent.routerModel;
   const request = {
-    model: HAIKU_MODEL,
+    model: routerModel,
     max_tokens: 256,
     system: ROUTER_SYSTEM_PROMPT,
     messages,
@@ -119,7 +120,7 @@ export async function runRouter(
 
   try {
     const response = await anthropic.messages.create(request);
-    const usage = buildApiCallUsage(response.usage, HAIKU_MODEL, "router");
+    const usage = buildApiCallUsage(response.usage, routerModel, "router");
     const parsed = parseJsonResponse(response);
 
     const VALID_LEVELS = new Set<ComplexityLevel>(["very_low", "low", "medium", "high", "very_high"]);

@@ -495,7 +495,7 @@ describe("HeartbeatManager", () => {
 
       const mockUsage = {
         source: "heartbeat" as const,
-        model: "claude-haiku-4-5",
+        model: "test-router-model",
         inputTokens: 100,
         outputTokens: 50,
         cacheCreationInputTokens: 0,
