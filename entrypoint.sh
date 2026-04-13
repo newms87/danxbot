@@ -2,7 +2,7 @@
 set -e
 
 APP_DIR="/danxbot/app"
-REPOS_DIR="/danxbot/repos"
+REPOS_DIR="/danxbot/app/repos"
 DANXBOT_HOME="/home/danxbot"
 
 # Configure git identity and GitHub auth (must happen before repo cloning)

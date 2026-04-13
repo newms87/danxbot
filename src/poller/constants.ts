@@ -1,20 +1,21 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { optional } from "../env.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+
 /**
- * Resolve the base repos directory. Always `/danxbot/repos/` — contains symlinks
- * to the actual working copies (e.g., /home/newms/web/gpt-manager).
- *
- * Fails loudly if the directory doesn't exist rather than falling back to a
- * project-local repos/ dir that may be a stale clone.
+ * Resolve the base repos directory. Uses the project-relative `repos/` directory,
+ * which works in both host mode (symlinks resolve natively) and Docker mode
+ * (the directory is volume-mounted, and per-repo compose overrides mount symlink targets).
  */
 export function getReposBase(): string {
-  const reposPath = "/danxbot/repos";
+  const reposPath = resolve(projectRoot, "repos");
   if (!existsSync(reposPath)) {
     throw new Error(
-      `Repos directory not found at ${reposPath}. Create it with symlinks to target repos.`,
+      `Repos directory not found at ${reposPath}. Create a repos/ directory with symlinks to target repos.`,
     );
   }
   return reposPath;

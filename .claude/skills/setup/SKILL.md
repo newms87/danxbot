@@ -77,7 +77,7 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 
 ## Step 4b: Configure Trello MCP Server
 
-The Claude Code CLI uses an MCP (Model Context Protocol) server to interact with Trello. This must be configured in the project's settings so that `/next-card`, `/start-team`, and other skills can read/write Trello cards.
+The Claude Code CLI uses an MCP (Model Context Protocol) server to interact with Trello. This must be configured in the project's settings so that `/danx-next`, `/danx-start`, and other skills can read/write Trello cards.
 
 1. Read the existing `.mcp.json` in the project root (create if missing)
 2. Add or update the `mcpServers.trello` section with the credentials from Step 3:
@@ -454,14 +454,14 @@ Present the results clearly:
    npm run poller           # Start the card processor (polls Trello, spawns Claude)
    ```
 
-3. **Interactive commands** (run from this directory with `claude`):
-   - `/next-card` — Process the top ToDo card
-   - `/start-team` — Process all ToDo cards
-   - `/ideate` — Explore the repo and generate feature cards
+3. **Interactive commands** (run from the target repo directory with `claude`):
+   - `/danx-next` — Process the top ToDo card
+   - `/danx-start` — Process all ToDo cards
+   - `/danx-ideate` — Explore the repo and generate feature cards
 
 4. **Adding work:**
    - Add cards to the Trello board's **ToDo** list with descriptions
-   - The poller picks them up automatically, or use `/next-card` manually
+   - The poller picks them up automatically, or use `/danx-next` manually
    - If Slack is enabled: mention @Danxbot in the configured channel for questions
 
 5. Ask: "Any questions before we dive in?"

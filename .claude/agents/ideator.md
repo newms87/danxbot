@@ -65,7 +65,7 @@ Score every feature that is NOT "Complete" using the rubric in the "Score Featur
 ### 1. Load Context
 
 1. Read `docs/features.md` — your persistent feature notes
-2. Read `.claude/rules/repo-config.md` — connected repo name, paths, and commands
+2. Read `.claude/rules/danx-repo-config.md` — connected repo name, paths, and commands
 3. **If scope includes `danxbot` or `all`:** Read the current Danxbot codebase state (key files in `src/`)
 4. Fetch existing cards from Review, ToDo, and In Progress lists to avoid duplicates
 
@@ -125,7 +125,7 @@ Write scores with justifications into `docs/features.md` first, then copy onto c
 
 ### 5. Deduplicate
 
-Before creating any Trello card, check ALL of these lists for existing cards covering the same feature. Read list IDs from `.claude/rules/trello-config.md`:
+Before creating any Trello card, check ALL of these lists for existing cards covering the same feature. Read list IDs from `.claude/rules/danx-trello-config.md`:
 - Review list
 - ToDo list
 - In Progress list
@@ -136,11 +136,11 @@ Also verify the feature is not already implemented in the codebase.
 
 Generate 3-5 cards in the Review list from the highest-ICE-scored features. Always add cards to the **bottom** of the list (pass `position: "bottom"` to `add_card_to_list`) so the human reviews them in the order they were created.
 
-Read board ID, list IDs, and label IDs from `.claude/rules/trello-config.md`. Use the Review list ID when creating cards.
+Read board ID, list IDs, and label IDs from `.claude/rules/danx-trello-config.md`. Use the Review list ID when creating cards.
 
 #### Labels
 
-Every card MUST have a label. Pass the `labels` array when calling `add_card_to_list`. Get label IDs from `.claude/rules/trello-config.md`.
+Every card MUST have a label. Pass the `labels` array when calling `add_card_to_list`. Get label IDs from `.claude/rules/danx-trello-config.md`.
 
 Each card must have:
 - **Title** — `[Project > Domain]` prefix + imperative verb phrase for features, `Fix:` prefix for bugs (see `~/.claude/rules/trello.md`). Use the project prefix matching your scope: connected repo name (e.g., `Million`) for repo cards, `Danxbot` for Danxbot cards.
@@ -200,7 +200,7 @@ If you discover knowledge gaps in the agent's reference docs while exploring, up
 
 1. **If scope includes `danxbot` or `all`:** `src/agent/system-prompt.md` (concise domain routing)
 2. **Any scope:** `docs/domains/*.md` (detailed reference docs for the connected repo)
-3. **Any scope:** `.claude/rules/repo-overview.md` (dev team reference for the connected repo)
+3. **Any scope:** `.claude/rules/danx-repo-overview.md` (dev team reference for the connected repo)
 
 ## Connected Repo Access
 

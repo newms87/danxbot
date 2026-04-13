@@ -1,18 +1,18 @@
 ---
-name: start-team
+name: danx-start
 description: Process all ToDo cards from the Trello board sequentially using the autonomous workflow.
 ---
 
-# Start Team
+# Danx Start Team
 
-Process ALL cards in the ToDo list sequentially using the orchestrator workflow defined in `.claude/rules/orchestrator.md`.
+Process ALL cards in the ToDo list sequentially using the card processing workflow from `/danx-next`.
 
 ## Steps
 
 1. Fetch all cards from the ToDo list
 2. If the list is empty, report "No cards to process" and stop
 3. Report how many cards are queued and list their titles
-4. Process each card using the Card Processing Workflow (Steps 1-8 in the orchestrator rule)
+4. For each card, invoke `/danx-next` workflow (Steps 1-8 from that skill)
 5. After each card, re-fetch the ToDo list (epic splitting may have added new cards)
 6. Loop until ToDo is empty
 
