@@ -1,36 +1,58 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Mock poller/constants.js since config.ts now imports from it and it reads a YAML file
+// Mock poller/constants.js since config.ts imports from it
 vi.mock("./poller/constants.js", () => ({
-  BOARD_ID: "mock-board-id",
-  REVIEW_LIST_ID: "mock-review-list-id",
-  TODO_LIST_ID: "mock-todo-list-id",
-  IN_PROGRESS_LIST_ID: "mock-in-progress-list-id",
-  NEEDS_HELP_LIST_ID: "mock-needs-help-list-id",
-  DONE_LIST_ID: "mock-done-list-id",
-  CANCELLED_LIST_ID: "mock-cancelled-list-id",
-  ACTION_ITEMS_LIST_ID: "mock-action-items-list-id",
-  BUG_LABEL_ID: "mock-bug-label-id",
-  FEATURE_LABEL_ID: "mock-feature-label-id",
-  EPIC_LABEL_ID: "mock-epic-label-id",
-  NEEDS_HELP_LABEL_ID: "mock-needs-help-label-id",
+  getReposBase: () => "/danxbot/repos",
+  loadTrelloIds: () => ({
+    boardId: "mock-board-id",
+    reviewListId: "mock-review-list-id",
+    todoListId: "mock-todo-list-id",
+    inProgressListId: "mock-in-progress-list-id",
+    needsHelpListId: "mock-needs-help-list-id",
+    doneListId: "mock-done-list-id",
+    cancelledListId: "mock-cancelled-list-id",
+    actionItemsListId: "mock-action-items-list-id",
+    bugLabelId: "mock-bug-label-id",
+    featureLabelId: "mock-feature-label-id",
+    epicLabelId: "mock-epic-label-id",
+    needsHelpLabelId: "mock-needs-help-label-id",
+  }),
   REVIEW_MIN_CARDS: 10,
   DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
-  getReposBase: () => "/danxbot/repos",
 }));
+
+// Mock env-file.js to avoid reading actual .env files from repos
+vi.mock("./env-file.js", () => ({
+  parseEnvFile: () => ({
+    DANX_TRELLO_API_KEY: "mock-trello-key",
+    DANX_TRELLO_API_TOKEN: "mock-trello-token",
+    DANX_SLACK_BOT_TOKEN: "",
+    DANX_SLACK_APP_TOKEN: "",
+    DANX_SLACK_CHANNEL_ID: "",
+    DANX_GITHUB_TOKEN: "mock-github-token",
+  }),
+}));
+
+// Mock fs to make existsSync return true for .danxbot/.env paths
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual("node:fs");
+  return {
+    ...actual,
+    existsSync: (path: string) => {
+      if (path.includes(".danxbot/.env")) return true;
+      if (typeof (actual as any).existsSync === "function") {
+        return (actual as any).existsSync(path);
+      }
+      return false;
+    },
+  };
+});
 
 // Helper to set up a valid env and dynamically import config
 function validEnv(): Record<string, string> {
   return {
-    SLACK_BOT_TOKEN: "xoxb-test",
-    SLACK_APP_TOKEN: "xapp-test",
-    SLACK_CHANNEL_ID: "C-TEST",
     ANTHROPIC_API_KEY: "test-key",
     REPOS: "platform:https://github.com/Danxdesk/platform.git",
-    PLATFORM_DB_HOST: "localhost",
-    PLATFORM_DB_USER: "test",
-    PLATFORM_DB_PASSWORD: "test",
-    PLATFORM_DB_NAME: "test",
     DANXBOT_DB_HOST: "mysql",
     DANXBOT_DB_USER: "danxbot",
     DANXBOT_DB_PASSWORD: "danxbot",
@@ -130,6 +152,41 @@ describe("getRepoPath", () => {
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
     });
     expect(() => mod.getRepoPath("unknown")).toThrow('Repo "unknown" is not configured');
+  });
+});
+
+describe("repoContexts", () => {
+  it("loads repo contexts for all configured repos", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git",
+    });
+    expect(mod.repoContexts).toHaveLength(1);
+    expect(mod.repoContexts[0].name).toBe("platform");
+    expect(mod.repoContexts[0].trello.boardId).toBe("mock-board-id");
+    expect(mod.repoContexts[0].trello.apiKey).toBe("mock-trello-key");
+  });
+
+  it("returns empty when no repos configured", async () => {
+    const mod = await importConfig({ REPOS: "" });
+    expect(mod.repoContexts).toEqual([]);
+  });
+});
+
+describe("getRepoContext", () => {
+  it("returns context for a configured repo", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git",
+    });
+    const ctx = mod.getRepoContext("platform");
+    expect(ctx.name).toBe("platform");
+    expect(ctx.trello.apiKey).toBe("mock-trello-key");
+  });
+
+  it("throws for unknown repo", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git",
+    });
+    expect(() => mod.getRepoContext("unknown")).toThrow('Repo "unknown" is not configured');
   });
 });
 

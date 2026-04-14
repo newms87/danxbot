@@ -180,11 +180,18 @@ describe("closeAdminPool", () => {
   });
 });
 
+const PLATFORM_DB_CONFIG = {
+  host: "platform-host",
+  user: "platform-user",
+  password: "platform-pass",
+  database: "platform-db",
+};
+
 describe("getPlatformPool", () => {
   it("creates a pool with the platform database config", async () => {
     vi.resetModules();
     const mod = await import("./connection.js");
-    const pool = mod.getPlatformPool();
+    const pool = mod.getPlatformPool(PLATFORM_DB_CONFIG);
 
     expect(mockCreatePool).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -200,7 +207,7 @@ describe("getPlatformPool", () => {
   it("returns the same pool on subsequent calls", async () => {
     vi.resetModules();
     const mod = await import("./connection.js");
-    const pool1 = mod.getPlatformPool();
+    const pool1 = mod.getPlatformPool(PLATFORM_DB_CONFIG);
     const pool2 = mod.getPlatformPool();
 
     expect(pool1).toBe(pool2);
@@ -210,7 +217,7 @@ describe("getPlatformPool", () => {
   it("uses shared pool settings (connectionLimit, waitForConnections, connectTimeout)", async () => {
     vi.resetModules();
     const mod = await import("./connection.js");
-    mod.getPlatformPool();
+    mod.getPlatformPool(PLATFORM_DB_CONFIG);
 
     expect(mockCreatePool).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -220,13 +227,19 @@ describe("getPlatformPool", () => {
       }),
     );
   });
+
+  it("throws when called without dbConfig and pool not initialized", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    expect(() => mod.getPlatformPool()).toThrow("Platform pool not initialized");
+  });
 });
 
 describe("closePlatformPool", () => {
   it("calls end on the platform pool", async () => {
     vi.resetModules();
     const mod = await import("./connection.js");
-    mod.getPlatformPool();
+    mod.getPlatformPool(PLATFORM_DB_CONFIG);
     await mod.closePlatformPool();
 
     expect(mockPool.end).toHaveBeenCalled();

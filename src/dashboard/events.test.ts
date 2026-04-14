@@ -57,6 +57,7 @@ beforeEach(() => {
 
 function makeEvent(overrides: Partial<Parameters<typeof createEvent>[0]> = {}) {
   return createEvent({
+    repoName: overrides.repoName ?? "test-repo",
     threadTs: overrides.threadTs ?? `t-${Date.now()}-${Math.random()}`,
     messageTs: overrides.messageTs ?? `m-${Date.now()}-${Math.random()}`,
     channelId: overrides.channelId ?? "C123",
@@ -85,6 +86,7 @@ describe("createEvent", () => {
 
   it("generates ID from threadTs-messageTs", () => {
     const event = createEvent({
+      repoName: "test-repo",
       threadTs: "1234.5678",
       messageTs: "9999.0000",
       channelId: "C1",

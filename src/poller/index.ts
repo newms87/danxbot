@@ -10,23 +10,8 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import {
-  config,
-  TODO_LIST_ID,
-  REVIEW_MIN_CARDS,
-  BOARD_ID,
-  REVIEW_LIST_ID,
-  IN_PROGRESS_LIST_ID,
-  NEEDS_HELP_LIST_ID,
-  DONE_LIST_ID,
-  CANCELLED_LIST_ID,
-  ACTION_ITEMS_LIST_ID,
-  BUG_LABEL_ID,
-  FEATURE_LABEL_ID,
-  EPIC_LABEL_ID,
-  NEEDS_HELP_LABEL_ID,
-} from "./config.js";
-import { getReposBase } from "./constants.js";
+import { config, repoContexts } from "../config.js";
+import { getReposBase, REVIEW_MIN_CARDS, DANXBOT_COMMENT_MARKER } from "./constants.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { createLogger } from "../logger.js";
 import { spawnInTerminal } from "../terminal.js";
@@ -38,38 +23,47 @@ import {
   moveCardToList,
   isUserResponse,
 } from "./trello-client.js";
+import type { RepoContext, TrelloConfig } from "../types.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const lockFile = resolve(projectRoot, ".poller-running");
-
-/** Derive the .danxbot/config/ path from the REPOS env var. */
-function getDanxbotConfigDir(): string {
-  const repos = process.env.REPOS || "";
-  const name = repos.split(",")[0].split(":")[0].trim();
-  if (!name) return "";
-  return resolve(getReposBase(), name, ".danxbot/config");
-}
-
-const danxbotConfigDir = getDanxbotConfigDir();
-const repoConfigYml = danxbotConfigDir
-  ? resolve(danxbotConfigDir, "config.yml")
-  : "";
 
 const log = createLogger("poller");
 
-let teamRunning = false;
-let intervalId: ReturnType<typeof setInterval> | null = null;
-let lockCheckId: ReturnType<typeof setInterval> | null = null;
+/** Per-repo poller state */
+interface RepoPollerState {
+  teamRunning: boolean;
+  polling: boolean;
+  lockFile: string;
+  lockCheckId: ReturnType<typeof setInterval> | null;
+  intervalId: ReturnType<typeof setInterval> | null;
+}
+
+const repoState = new Map<string, RepoPollerState>();
+
+function getState(repoName: string): RepoPollerState {
+  let state = repoState.get(repoName);
+  if (!state) {
+    state = {
+      teamRunning: false,
+      polling: false,
+      lockFile: resolve(projectRoot, `.poller-running-${repoName}`),
+      lockCheckId: null,
+      intervalId: null,
+    };
+    repoState.set(repoName, state);
+  }
+  return state;
+}
 
 /**
  * Check Needs Help cards for user responses. Cards where a user has replied
  * (latest comment lacks the danxbot marker) are moved to the top of ToDo
  * so they get higher priority than existing ToDo cards.
  */
-async function checkNeedsHelp(): Promise<number> {
+async function checkNeedsHelp(trello: TrelloConfig): Promise<number> {
   let cards;
   try {
-    cards = await fetchNeedsHelpCards();
+    cards = await fetchNeedsHelpCards(trello);
   } catch (error) {
     log.error("Error fetching Needs Help cards", error);
     return 0;
@@ -80,10 +74,10 @@ async function checkNeedsHelp(): Promise<number> {
   let movedCount = 0;
   for (const card of cards) {
     try {
-      const latestComment = await fetchLatestComment(card.id);
+      const latestComment = await fetchLatestComment(trello, card.id);
       if (isUserResponse(latestComment)) {
         log.info(`User responded on "${card.name}" — moving to ToDo`);
-        await moveCardToList(card.id, TODO_LIST_ID, "top");
+        await moveCardToList(trello, card.id, trello.todoListId, "top");
         movedCount++;
       }
     } catch (error) {
@@ -94,64 +88,59 @@ async function checkNeedsHelp(): Promise<number> {
   return movedCount;
 }
 
-let polling = false;
-
-export async function poll(): Promise<void> {
-  if (teamRunning || polling) {
+export async function poll(repo: RepoContext): Promise<void> {
+  const state = getState(repo.name);
+  if (state.teamRunning || state.polling) {
     return;
   }
 
-  polling = true;
+  state.polling = true;
   try {
-    await _poll();
+    await _poll(repo);
   } finally {
-    polling = false;
+    state.polling = false;
   }
 }
 
-async function _poll(): Promise<void> {
+async function _poll(repo: RepoContext): Promise<void> {
   // Sync danxbot config into target repo on every poll cycle
-  syncRepoFiles();
+  syncRepoFiles(repo);
 
-  // Write Trello config into target repo's rules (needs repoRulesDir from sync)
-  const repos = process.env.REPOS || "";
-  const repoName = repos.split(",")[0].split(":")[0].trim();
-  if (repoName) {
-    const repoRulesDir = resolve(getReposBase(), repoName, ".claude/rules");
-    mkdirSync(repoRulesDir, { recursive: true });
-    writeTrelloConfigRule(repoRulesDir);
-  }
+  // Write Trello config into target repo's rules
+  const repoRulesDir = resolve(repo.localPath, ".claude/rules");
+  mkdirSync(repoRulesDir, { recursive: true });
+  writeTrelloConfigRule(repo.trello, repoRulesDir);
 
-  log.info("Checking Needs Help + ToDo lists...");
+  log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
 
   // Check Needs Help first — user-responded cards get moved to ToDo top
-  const movedFromNeedsHelp = await checkNeedsHelp();
+  const movedFromNeedsHelp = await checkNeedsHelp(repo.trello);
   if (movedFromNeedsHelp > 0) {
     log.info(
-      `Moved ${movedFromNeedsHelp} card${movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`,
+      `[${repo.name}] Moved ${movedFromNeedsHelp} card${movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`,
     );
   }
 
   let cards;
   try {
-    cards = await fetchTodoCards();
+    cards = await fetchTodoCards(repo.trello);
   } catch (error) {
-    log.error("Error fetching cards", error);
+    log.error(`[${repo.name}] Error fetching cards`, error);
     return;
   }
 
   if (cards.length === 0) {
-    log.info("No cards in ToDo — checking if ideator needed");
-    await checkAndSpawnIdeator();
+    log.info(`[${repo.name}] No cards in ToDo — checking if ideator needed`);
+    await checkAndSpawnIdeator(repo);
     return;
   }
 
   log.info(
-    `Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`,
+    `[${repo.name}] Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`,
   );
   cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.name}`));
 
-  spawnClaude("Danxbot Team", "run-team.sh");
+  spawnClaude(repo, "Danxbot Team", "run-team.sh");
 }
 
 /** Directory containing files to inject into target repos. */
@@ -160,37 +149,37 @@ const injectDir = resolve(dirname(fileURLToPath(import.meta.url)), "inject");
 /**
  * Write the Trello config rule file into the target repo so the spawned
  * Claude agent always has the correct IDs — even after context compaction.
- * Generated from env vars, making .env the single source of truth.
+ * Generated from the repo's TrelloConfig, making it the single source of truth.
  */
-function writeTrelloConfigRule(repoRulesDir: string): void {
+function writeTrelloConfigRule(trello: TrelloConfig, repoRulesDir: string): void {
   const content = `# Trello Config (auto-generated — do not edit)
 
 This file is generated by the danxbot poller from environment variables before each run.
 
 ## Board
 
-Board ID: \`${BOARD_ID}\`
+Board ID: \`${trello.boardId}\`
 
 ## Lists
 
 | List | ID |
 |------|----|
-| Review | \`${REVIEW_LIST_ID}\` |
-| ToDo | \`${TODO_LIST_ID}\` |
-| In Progress | \`${IN_PROGRESS_LIST_ID}\` |
-| Needs Help | \`${NEEDS_HELP_LIST_ID}\` |
-| Done | \`${DONE_LIST_ID}\` |
-| Cancelled | \`${CANCELLED_LIST_ID}\` |
-| Action Items | \`${ACTION_ITEMS_LIST_ID}\` |
+| Review | \`${trello.reviewListId}\` |
+| ToDo | \`${trello.todoListId}\` |
+| In Progress | \`${trello.inProgressListId}\` |
+| Needs Help | \`${trello.needsHelpListId}\` |
+| Done | \`${trello.doneListId}\` |
+| Cancelled | \`${trello.cancelledListId}\` |
+| Action Items | \`${trello.actionItemsListId}\` |
 
 ## Labels
 
 | Label | ID |
 |-------|----|
-| Bug | \`${BUG_LABEL_ID}\` |
-| Feature | \`${FEATURE_LABEL_ID}\` |
-| Epic | \`${EPIC_LABEL_ID}\` |
-| Needs Help | \`${NEEDS_HELP_LABEL_ID}\` |
+| Bug | \`${trello.bugLabelId}\` |
+| Feature | \`${trello.featureLabelId}\` |
+| Epic | \`${trello.epicLabelId}\` |
+| Needs Help | \`${trello.needsHelpLabelId}\` |
 `;
 
   writeFileSync(resolve(repoRulesDir, "danx-trello-config.md"), content);
@@ -200,13 +189,14 @@ Board ID: \`${BOARD_ID}\`
  * Validate that .danxbot/config/ in the connected repo and env vars are fully configured.
  * Throws if anything is missing or empty — the poller must not run without valid config.
  */
-export function validateRepoConfig(): void {
+export function validateRepoConfig(repo: RepoContext): void {
   const errors: string[] = [];
+  const danxbotConfigDir = resolve(repo.localPath, ".danxbot/config");
 
   // 1. .danxbot/config/ directory must exist in the connected repo
-  if (!danxbotConfigDir || !existsSync(danxbotConfigDir)) {
+  if (!existsSync(danxbotConfigDir)) {
     throw new Error(
-      `.danxbot/config/ not found in connected repo. Run ./install.sh to set up danxbot.`,
+      `[${repo.name}] .danxbot/config/ not found in connected repo. Run ./install.sh to set up danxbot.`,
     );
   }
 
@@ -231,7 +221,8 @@ export function validateRepoConfig(): void {
   }
 
   // 3. config.yml must have required fields with non-empty values
-  if (repoConfigYml && existsSync(repoConfigYml)) {
+  const repoConfigYml = resolve(danxbotConfigDir, "config.yml");
+  if (existsSync(repoConfigYml)) {
     const raw = readFileSync(repoConfigYml, "utf-8");
     const cfg = parseSimpleYaml(raw);
 
@@ -275,13 +266,10 @@ export function validateRepoConfig(): void {
     }
   }
 
-  // 4. Required environment variables (secrets only — IDs come from trello.yml)
+  // 4. Required environment variables (secrets)
   const requiredEnvVars = [
     { name: "ANTHROPIC_API_KEY", label: "Anthropic API key" },
-    { name: "GITHUB_TOKEN", label: "GitHub token" },
-    { name: "REPOS", label: "Connected repo (name:url)" },
-    { name: "TRELLO_API_KEY", label: "Trello API key" },
-    { name: "TRELLO_API_TOKEN", label: "Trello API token" },
+    { name: "REPOS", label: "Connected repos (name:url,...)" },
   ];
 
   for (const { name, label } of requiredEnvVars) {
@@ -291,7 +279,12 @@ export function validateRepoConfig(): void {
     }
   }
 
-  // 5. Claude auth files must exist
+  // 5. Per-repo secrets must be set (loaded via RepoContext)
+  if (!repo.trello.apiKey) errors.push(`Missing DANX_TRELLO_API_KEY in ${repo.name}/.danxbot/.env`);
+  if (!repo.trello.apiToken) errors.push(`Missing DANX_TRELLO_API_TOKEN in ${repo.name}/.danxbot/.env`);
+  if (!repo.githubToken) errors.push(`Missing DANX_GITHUB_TOKEN in ${repo.name}/.danxbot/.env`);
+
+  // 6. Claude auth files must exist
   const claudeAuthDir = resolve(projectRoot, "claude-auth");
   const claudeJson = resolve(claudeAuthDir, ".claude.json");
   if (!existsSync(claudeJson)) {
@@ -302,11 +295,11 @@ export function validateRepoConfig(): void {
 
   if (errors.length > 0) {
     throw new Error(
-      `Repo config validation failed:\n  - ${errors.join("\n  - ")}\n\nRun ./install.sh to complete setup.`,
+      `[${repo.name}] Repo config validation failed:\n  - ${errors.join("\n  - ")}\n\nRun ./install.sh to complete setup.`,
     );
   }
 
-  log.info("Repo config validated successfully");
+  log.info(`[${repo.name}] Repo config validated successfully`);
 }
 
 /**
@@ -314,14 +307,11 @@ export function validateRepoConfig(): void {
  * files use the `danx-` prefix so they're clearly identifiable and gitignore-able.
  * Called on every poll cycle to keep targets up to date.
  */
-function syncRepoFiles(): void {
-  if (!danxbotConfigDir) return;
+function syncRepoFiles(repo: RepoContext): void {
+  const danxbotConfigDir = resolve(repo.localPath, ".danxbot/config");
+  if (!existsSync(danxbotConfigDir)) return;
 
-  const repos = process.env.REPOS || "";
-  const repoName = repos.split(",")[0].split(":")[0].trim();
-  if (!repoName) return;
-
-  const repoDir = resolve(getReposBase(), repoName);
+  const repoDir = repo.localPath;
   const repoClaudeDir = resolve(repoDir, ".claude");
   const repoRulesDir = resolve(repoClaudeDir, "rules");
   const repoSkillsDir = resolve(repoClaudeDir, "skills");
@@ -332,6 +322,7 @@ function syncRepoFiles(): void {
   mkdirSync(repoToolsDir, { recursive: true });
 
   // 1. Generate danx-repo-config.md from .danxbot/config/config.yml
+  const repoConfigYml = resolve(danxbotConfigDir, "config.yml");
   const raw = readFileSync(repoConfigYml, "utf-8");
   const cfg = parseSimpleYaml(raw);
 
@@ -496,84 +487,89 @@ function syncRepoFiles(): void {
   }
 }
 
-function spawnClaude(title: string, scriptName: string): void {
+function spawnClaude(repo: RepoContext, title: string, scriptName: string): void {
+  const state = getState(repo.name);
+
   // Safety net: refuse to spawn if lock file already exists (race condition guard)
-  if (existsSync(lockFile)) {
-    log.error("Lock file exists but teamRunning was false — refusing to spawn");
+  if (existsSync(state.lockFile)) {
+    log.error(`[${repo.name}] Lock file exists but teamRunning was false — refusing to spawn`);
     return;
   }
 
-  teamRunning = true;
+  state.teamRunning = true;
 
   // Lock file signals that the team is running. The script removes it via EXIT trap.
-  writeFileSync(lockFile, String(process.pid));
+  writeFileSync(state.lockFile, String(process.pid));
 
   const script = resolve(dirname(fileURLToPath(import.meta.url)), scriptName);
 
-  spawnInTerminal({ title, script, cwd: projectRoot });
+  spawnInTerminal({ title: `${title} [${repo.name}]`, script, cwd: projectRoot, env: { ...process.env, DANXBOT_REPO_NAME: repo.name } });
 
   // Watch for lock file removal to detect completion.
-  startLockWatch();
+  startLockWatch(repo);
 }
 
-async function checkAndSpawnIdeator(): Promise<void> {
+async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {
   let reviewCards;
   try {
-    reviewCards = await fetchReviewCards();
+    reviewCards = await fetchReviewCards(repo.trello);
   } catch (error) {
-    log.error("Error fetching Review cards", error);
+    log.error(`[${repo.name}] Error fetching Review cards`, error);
     return;
   }
 
   if (reviewCards.length >= REVIEW_MIN_CARDS) {
     log.info(
-      `Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — no ideation needed`,
+      `[${repo.name}] Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — no ideation needed`,
     );
     return;
   }
 
   log.info(
-    `Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — spawning ideator`,
+    `[${repo.name}] Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — spawning ideator`,
   );
-  spawnClaude("Danxbot Ideator", "run-ideator.sh");
+  spawnClaude(repo, "Danxbot Ideator", "run-ideator.sh");
 }
 
 export function shutdown(): void {
   log.info("Shutting down...");
 
-  if (intervalId) {
-    clearInterval(intervalId);
-    intervalId = null;
-  }
+  for (const [repoName, state] of repoState) {
+    if (state.intervalId) {
+      clearInterval(state.intervalId);
+      state.intervalId = null;
+    }
 
-  if (lockCheckId) {
-    clearInterval(lockCheckId);
-    lockCheckId = null;
-  }
+    if (state.lockCheckId) {
+      clearInterval(state.lockCheckId);
+      state.lockCheckId = null;
+    }
 
-  // Only remove lock file if no team is running — run-team.sh handles cleanup otherwise
-  if (teamRunning) {
-    log.info("Team is running — leaving lock file for run-team.sh to clean up");
-  } else {
-    try {
-      if (existsSync(lockFile)) unlinkSync(lockFile);
-    } catch (e) {
-      log.warn("Failed to remove lock file", e);
+    // Only remove lock file if no team is running
+    if (state.teamRunning) {
+      log.info(`[${repoName}] Team is running — leaving lock file for script to clean up`);
+    } else {
+      try {
+        if (existsSync(state.lockFile)) unlinkSync(state.lockFile);
+      } catch (e) {
+        log.warn(`[${repoName}] Failed to remove lock file`, e);
+      }
     }
   }
 
   process.exit(0);
 }
 
-function startLockWatch(): void {
-  lockCheckId = setInterval(() => {
-    if (!existsSync(lockFile)) {
-      clearInterval(lockCheckId!);
-      lockCheckId = null;
-      log.info("Team finished — resuming polling");
-      teamRunning = false;
-      poll().catch((err) =>
-        log.error("Re-poll after team completion failed", err),
+function startLockWatch(repo: RepoContext): void {
+  const state = getState(repo.name);
+  state.lockCheckId = setInterval(() => {
+    if (!existsSync(state.lockFile)) {
+      clearInterval(state.lockCheckId!);
+      state.lockCheckId = null;
+      log.info(`[${repo.name}] Team finished — resuming polling`);
+      state.teamRunning = false;
+      poll(repo).catch((err) =>
+        log.error(`[${repo.name}] Re-poll after team completion failed`, err),
       );
     }
   }, 5000);
@@ -583,39 +579,48 @@ export function start(): void {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  // Validate all config before starting — halt immediately if anything is wrong
-  validateRepoConfig();
-
-  const intervalSeconds = config.pollerIntervalMs / 1000;
-  log.info(`Started — polling every ${intervalSeconds}s`);
-
-  // Remove stale lock file from a previous run that shut down uncleanly.
-  // Only one poller instance runs at a time, so a leftover lock is always stale.
-  if (existsSync(lockFile)) {
-    log.warn("Stale lock file found — removing");
-    unlinkSync(lockFile);
+  if (repoContexts.length === 0) {
+    log.error("No repos configured — nothing to poll");
+    return;
   }
 
-  poll();
-  intervalId = setInterval(poll, config.pollerIntervalMs);
+  // Validate and start polling for each repo independently
+  for (const repo of repoContexts) {
+    validateRepoConfig(repo);
+
+    const state = getState(repo.name);
+    const intervalSeconds = config.pollerIntervalMs / 1000;
+    log.info(`[${repo.name}] Started — polling every ${intervalSeconds}s`);
+
+    // Remove stale lock file from a previous run
+    if (existsSync(state.lockFile)) {
+      log.warn(`[${repo.name}] Stale lock file found — removing`);
+      unlinkSync(state.lockFile);
+    }
+
+    poll(repo);
+    state.intervalId = setInterval(() => poll(repo), config.pollerIntervalMs);
+  }
 }
 
 /** Reset module state for testing. Do not use in production. */
 export function _resetForTesting(): void {
-  teamRunning = false;
-  if (intervalId) {
-    clearInterval(intervalId);
-    intervalId = null;
+  for (const state of repoState.values()) {
+    state.teamRunning = false;
+    state.polling = false;
+    if (state.intervalId) {
+      clearInterval(state.intervalId);
+      state.intervalId = null;
+    }
+    if (state.lockCheckId) {
+      clearInterval(state.lockCheckId);
+      state.lockCheckId = null;
+    }
   }
-  if (lockCheckId) {
-    clearInterval(lockCheckId);
-    lockCheckId = null;
-  }
+  repoState.clear();
 }
 
 // Auto-start when run as the direct entrypoint.
-// First condition: standard Node.js ESM check.
-// Second condition: tsx rewrites import.meta.url, so fall back to argv path match.
 const isDirectEntrypoint =
   import.meta.url === `file://${process.argv[1]}` ||
   process.argv[1]?.endsWith("src/poller/index.ts");

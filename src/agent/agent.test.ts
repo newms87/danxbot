@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { ThreadMessage, HeartbeatSnapshot, AgentLogEntry } from "../types.js";
+import type { ThreadMessage, HeartbeatSnapshot, AgentLogEntry, RepoContext } from "../types.js";
 
 // --- Mocks ---
 
@@ -30,8 +30,6 @@ vi.mock("../config.js", () => ({
   config: {
     anthropic: { apiKey: "test-key" },
     agent: { model: "test-model", maxTurns: 5, maxBudgetUsd: 1.0, maxThinkingTokens: 8000, maxThreadMessages: 20, routerModel: "test-router-model" },
-    platform: {},
-    trello: { reviewListId: "test-review-list-id" },
     logsDir: "/test/logs",
   },
   COMPLEXITY_PROFILES: {
@@ -42,7 +40,6 @@ vi.mock("../config.js", () => ({
     very_high: { model: "test-large-model",  maxTurns: 18, maxBudgetUsd: 5.00, maxThinkingTokens: 32768, systemPrompt: "full" },
   },
   getRepoPath: (name: string) => `/danxbot/repos/${name}`,
-  getPrimaryRepoPath: () => `/danxbot/repos/test-repo`,
 }));
 
 vi.mock("../logger.js", () => ({
@@ -53,6 +50,31 @@ vi.mock("../logger.js", () => ({
     error: vi.fn(),
   }),
 }));
+
+const MOCK_REPO_CONTEXT: RepoContext = {
+  name: "test-repo",
+  url: "https://example.com/test.git",
+  localPath: "/test/repos/test-repo",
+  trello: {
+    apiKey: "test-trello-key",
+    apiToken: "test-trello-token",
+    boardId: "test-board-id",
+    reviewListId: "test-review-list-id",
+    todoListId: "test-todo-list-id",
+    inProgressListId: "test-in-progress-list-id",
+    needsHelpListId: "test-needs-help-list-id",
+    doneListId: "test-done-list-id",
+    cancelledListId: "test-cancelled-list-id",
+    actionItemsListId: "test-action-items-list-id",
+    bugLabelId: "test-bug-label-id",
+    featureLabelId: "test-feature-label-id",
+    epicLabelId: "test-epic-label-id",
+    needsHelpLabelId: "test-needs-help-label-id",
+  },
+  slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
+  db: { host: "", user: "", password: "", database: "", enabled: false },
+  githubToken: "",
+};
 
 const { buildConversationMessages, runRouter } = await import("./router.js");
 const { buildActivitySummary, generateHeartbeatMessage } = await import("./heartbeat.js");
@@ -380,7 +402,7 @@ describe("runAgent", () => {
       msg("Tell me more about X", false),
     ];
 
-    await runAgent("Tell me more about X", null, undefined, undefined, thread);
+    await runAgent(MOCK_REPO_CONTEXT, "Tell me more about X", null, undefined, undefined, thread);
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.prompt).toContain("[Thread context]");
@@ -408,7 +430,7 @@ describe("runAgent", () => {
 
     const thread = [msg("context msg", false), msg("more context", false)];
 
-    await runAgent("follow up", "sess-existing", undefined, undefined, thread);
+    await runAgent(MOCK_REPO_CONTEXT, "follow up", "sess-existing", undefined, undefined, thread);
 
     const callArgs = mockQuery.mock.calls[0][0];
     // When sessionId exists, prompt is just the message text (no thread context)
@@ -449,7 +471,7 @@ describe("runAgent", () => {
     const streamCalls: string[] = [];
     const onStream = (text: string) => streamCalls.push(text);
 
-    await runAgent("test", null, onStream);
+    await runAgent(MOCK_REPO_CONTEXT, "test", null, onStream);
 
     expect(streamCalls).toEqual(["Hello ", "Hello world"]);
   });
@@ -492,7 +514,7 @@ describe("runAgent", () => {
     );
 
     const streamCalls: string[] = [];
-    await runAgent("test", null, (text) => streamCalls.push(text));
+    await runAgent(MOCK_REPO_CONTEXT, "test", null, (text) => streamCalls.push(text));
 
     // Only the text_delta should trigger the callback
     expect(streamCalls).toEqual(["Answer"]);
@@ -514,7 +536,7 @@ describe("runAgent", () => {
       ]),
     );
 
-    const result = await runAgent("what is the answer?", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "what is the answer?", null);
 
     expect(result.text).toBe("The answer is 42.");
     expect(result.subscriptionCostUsd).toBe(0.123);
@@ -538,10 +560,10 @@ describe("runAgent", () => {
       ]),
     );
 
-    await runAgent("test", null);
+    await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options.cwd).toBe("/danxbot/repos/test-repo");
+    expect(callArgs.options.cwd).toBe("/test/repos/test-repo");
     expect(callArgs.options.settingSources).toEqual(["project"]);
   });
 
@@ -562,7 +584,7 @@ describe("runAgent", () => {
       ]),
     );
 
-    const result = await runAgent("expensive question", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "expensive question", null);
 
     expect(result.text).toContain("error");
     expect(result.text).toContain("Budget exceeded");
@@ -607,7 +629,7 @@ describe("runAgent", () => {
     const onLogEntry = (entry: import("../types.js").AgentLogEntry) =>
       entries.push(entry);
 
-    await runAgent("test log", null, undefined, onLogEntry);
+    await runAgent(MOCK_REPO_CONTEXT, "test log", null, undefined, onLogEntry);
 
     const types = entries.map((e) => e.type);
     expect(types).toEqual(["system", "assistant", "user", "tool_progress", "result"]);
@@ -634,7 +656,7 @@ describe("runAgent", () => {
       ]),
     );
 
-    const result = await runAgent("test", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     expect(result.log).toHaveLength(2);
     expect(result.log[0].type).toBe("system");
@@ -663,7 +685,7 @@ describe("runAgent with complexity", () => {
       ]),
     );
 
-    await runAgent("how many campaigns?", null, undefined, undefined, [], "very_low");
+    await runAgent(MOCK_REPO_CONTEXT, "how many campaigns?", null, undefined, undefined, [], "very_low");
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("test-fast-model");
@@ -688,7 +710,7 @@ describe("runAgent with complexity", () => {
       ]),
     );
 
-    await runAgent("show recent campaigns", null, undefined, undefined, [], "low");
+    await runAgent(MOCK_REPO_CONTEXT, "show recent campaigns", null, undefined, undefined, [], "low");
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("test-fast-model");
@@ -713,7 +735,7 @@ describe("runAgent with complexity", () => {
       ]),
     );
 
-    await runAgent("how does filtering work?", null, undefined, undefined, [], "medium");
+    await runAgent(MOCK_REPO_CONTEXT, "how does filtering work?", null, undefined, undefined, [], "medium");
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("test-medium-model");
@@ -738,7 +760,7 @@ describe("runAgent with complexity", () => {
       ]),
     );
 
-    await runAgent("explain billing lifecycle", null, undefined, undefined, [], "very_high");
+    await runAgent(MOCK_REPO_CONTEXT, "explain billing lifecycle", null, undefined, undefined, [], "very_high");
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("test-large-model");
@@ -763,7 +785,7 @@ describe("runAgent with complexity", () => {
       ]),
     );
 
-    await runAgent("test", null);
+    await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.model).toBe("test-model");
@@ -788,7 +810,7 @@ describe("runAgent with complexity", () => {
       ]),
     );
 
-    const result = await runAgent("quick question", null, undefined, undefined, [], "very_low");
+    const result = await runAgent(MOCK_REPO_CONTEXT, "quick question", null, undefined, undefined, [], "very_low");
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.persistSession).toBe(true);
@@ -817,7 +839,7 @@ describe("runAgent with complexity", () => {
       msg("Show me more", false),
     ];
 
-    await runAgent("Show me more", null, undefined, undefined, thread, "very_low");
+    await runAgent(MOCK_REPO_CONTEXT, "Show me more", null, undefined, undefined, thread, "very_low");
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.prompt).toContain("[Thread context]");
@@ -832,7 +854,7 @@ describe("runAgent with complexity", () => {
     );
 
     await expect(
-      runAgent("broken query", null, undefined, undefined, [], "very_low"),
+      runAgent(MOCK_REPO_CONTEXT, "broken query", null, undefined, undefined, [], "very_low"),
     ).rejects.toThrow("Agent crashed");
   });
 });
@@ -873,7 +895,7 @@ describe("runAgent extracts AgentUsageSummary from SDK result", () => {
       ]),
     );
 
-    const result = await runAgent("test", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     expect(result.usage).not.toBeNull();
     expect(result.usage!.totalCostUsd).toBe(0.25);
@@ -909,7 +931,7 @@ describe("runAgent extracts AgentUsageSummary from SDK result", () => {
       ]),
     );
 
-    const result = await runAgent("test", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     expect(result.usage).toBeNull();
   });
@@ -952,7 +974,7 @@ describe("runAgent extracts AgentUsageSummary from SDK result", () => {
       ]),
     );
 
-    const result = await runAgent("test", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     expect(Object.keys(result.usage!.modelUsage)).toHaveLength(2);
     expect(result.usage!.modelUsage["model-a"].costUsd).toBe(0.40);
@@ -985,7 +1007,7 @@ describe("runAgent extracts AgentUsageSummary from SDK result", () => {
       ]),
     );
 
-    const result = await runAgent("test", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     const mu = result.usage!.modelUsage["some-model"];
     expect(mu.cacheReadInputTokens).toBe(0);
@@ -1015,7 +1037,7 @@ describe("runAgent extracts AgentUsageSummary from SDK result", () => {
       ]),
     );
 
-    const result = await runAgent("test", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     expect(result.usage).not.toBeNull();
     expect(result.usage!.inputTokens).toBe(1000);
@@ -1047,7 +1069,7 @@ describe("runAgent handles is_error on result messages", () => {
 
     // When is_error is true, the result should be treated as an error
     // even though subtype is "success"
-    const result = await runAgent("test query", null);
+    const result = await runAgent(MOCK_REPO_CONTEXT, "test query", null);
     // The result text should contain the billing error, not a generic fallback
     expect(result.text).toContain("Credit balance is too low");
   });
@@ -1072,7 +1094,7 @@ describe("runAgent handles is_error on result messages", () => {
     );
 
     await expect(
-      runAgent("test query", null),
+      runAgent(MOCK_REPO_CONTEXT, "test query", null),
     ).rejects.toThrow("Credit balance is too low");
   });
 
@@ -1085,7 +1107,7 @@ describe("runAgent handles is_error on result messages", () => {
     );
 
     await expect(
-      runAgent("test query", null),
+      runAgent(MOCK_REPO_CONTEXT, "test query", null),
     ).rejects.toThrow("Claude Code process exited with code 1");
   });
 });

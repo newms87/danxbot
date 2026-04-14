@@ -1,7 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
-import { config, COMPLEXITY_PROFILES, getPrimaryRepoPath } from "../config.js";
+import { config, COMPLEXITY_PROFILES } from "../config.js";
+import type { RepoContext } from "../types.js";
 import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST } from "./features.js";
@@ -12,31 +13,29 @@ export { summarizeToolInput, truncStr } from "./tool-summary.js";
 
 const log = createLogger("agent");
 
-let systemPrompt: string | null = null;
-let fastSystemPrompt: string | null = null;
+let systemPromptRaw: string | null = null;
+let fastSystemPromptRaw: string | null = null;
 
-async function getSystemPrompt(): Promise<string> {
-  if (!systemPrompt) {
-    const raw = await readFile(
+async function getSystemPrompt(reviewListId: string): Promise<string> {
+  if (!systemPromptRaw) {
+    systemPromptRaw = await readFile(
       new URL("./system-prompt.md", import.meta.url),
       "utf-8",
     );
-    systemPrompt = raw
-      .replace("{{FEATURE_LIST}}", FEATURE_LIST)
-      .replace(/\{\{REVIEW_LIST_ID\}\}/g, config.trello.reviewListId);
   }
-  return systemPrompt;
+  return systemPromptRaw
+    .replace("{{FEATURE_LIST}}", FEATURE_LIST)
+    .replace(/\{\{REVIEW_LIST_ID\}\}/g, reviewListId);
 }
 
-async function getFastSystemPrompt(): Promise<string> {
-  if (!fastSystemPrompt) {
-    const raw = await readFile(
+async function getFastSystemPrompt(reviewListId: string): Promise<string> {
+  if (!fastSystemPromptRaw) {
+    fastSystemPromptRaw = await readFile(
       new URL("./fast-system-prompt.md", import.meta.url),
       "utf-8",
     );
-    fastSystemPrompt = raw.replace(/\{\{REVIEW_LIST_ID\}\}/g, config.trello.reviewListId);
   }
-  return fastSystemPrompt;
+  return fastSystemPromptRaw.replace(/\{\{REVIEW_LIST_ID\}\}/g, reviewListId);
 }
 
 interface ExecuteAgentOptions {
@@ -297,6 +296,7 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
  * When onStream is provided, partial text deltas are streamed via the callback.
  */
 export async function runAgent(
+  repoContext: RepoContext,
   messageText: string,
   sessionId: string | null,
   onStream?: (accumulatedText: string) => void,
@@ -306,9 +306,10 @@ export async function runAgent(
 ): Promise<AgentResponse> {
   // Resolve profile overrides if complexity is specified
   const profile = complexity ? COMPLEXITY_PROFILES[complexity] : null;
+  const reviewListId = repoContext.trello.reviewListId;
   const promptText = profile && profile.systemPrompt === "fast"
-    ? await getFastSystemPrompt()
-    : await getSystemPrompt();
+    ? await getFastSystemPrompt(reviewListId)
+    : await getSystemPrompt(reviewListId);
   const model = profile?.model ?? config.agent.model;
 
   // Trim thread messages to prevent token overflow
@@ -328,7 +329,7 @@ export async function runAgent(
   const queryOptions = {
     model,
     systemPrompt: promptText,
-    cwd: getPrimaryRepoPath(),
+    cwd: repoContext.localPath,
     settingSources: ["project"],
     tools: ["Read", "Glob", "Grep", "Bash"],
     allowedTools: ["Read", "Glob", "Grep", "Bash"],

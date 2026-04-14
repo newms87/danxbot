@@ -39,6 +39,7 @@ import { COLUMN_MAP } from "./events-db.js";
 
 function makeEvent(overrides: Partial<Parameters<typeof createEvent>[0]> = {}) {
   return createEvent({
+    repoName: overrides.repoName ?? "test-repo",
     threadTs: overrides.threadTs ?? `t-${Date.now()}-${Math.random()}`,
     messageTs: overrides.messageTs ?? `m-${Date.now()}-${Math.random()}`,
     channelId: overrides.channelId ?? "C123",
@@ -67,8 +68,9 @@ describe("DB persistence", () => {
       const [sql, params] = mockExecute.mock.calls[0];
       expect(sql).toContain("INSERT INTO events");
       expect(params[0]).toBe("t-1-m-1"); // id
-      expect(params[1]).toBe("t-1"); // thread_ts
-      expect(params[2]).toBe("m-1"); // message_ts
+      expect(params[1]).toBe("test-repo"); // repoName
+      expect(params[2]).toBe("t-1"); // thread_ts
+      expect(params[3]).toBe("m-1"); // message_ts
     });
 
     it("does not break in-memory flow when DB insert fails", async () => {

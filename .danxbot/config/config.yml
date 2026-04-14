@@ -1,0 +1,17 @@
+name: danxbot
+url: https://github.com/newms/danxbot-flytebot.git
+runtime: local
+language: typescript
+framework: node
+
+commands:
+  test: npx vitest run
+  lint: npx tsc --noEmit
+  type_check: npx tsc --noEmit
+  dev: npm run dashboard:dev
+
+paths:
+  source: src
+  tests: src
+
+git_mode: main

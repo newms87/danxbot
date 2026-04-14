@@ -11,7 +11,7 @@ import { runRouter } from "../agent/router.js";
 import { runAgent } from "../agent/agent.js";
 import { processResponseWithAttachments, extractSqlBlocks } from "../agent/sql-executor.js";
 import type { SqlAttachment } from "../agent/sql-executor.js";
-import type { ApiCallUsage } from "../types.js";
+import type { ApiCallUsage, RepoContext } from "../types.js";
 import { notifyError } from "../errors/trello-notifier.js";
 import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
@@ -23,6 +23,9 @@ import {
 } from "../threads.js";
 
 const log = createLogger("slack");
+
+/** The RepoContext this listener is bound to. Set by startSlackListener(). */
+let repoCtx: RepoContext;
 
 let app: App;
 let botUserId: string | null = null;
@@ -156,8 +159,8 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
     if (!("text" in message) || !message.text) return;
     if ("bot_id" in message && message.bot_id) return;
 
-    // Only process messages from the configured channel
-    if (message.channel !== config.slack.channelId) return;
+    // Only process messages from this repo's configured channel
+    if (message.channel !== repoCtx.slack.channelId) return;
 
     // Reject new messages during shutdown
     if (isShuttingDown) return;
@@ -169,6 +172,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
 
     // Track in dashboard
     const dashEvent = createEvent({
+      repoName: repoCtx.name,
       threadTs,
       messageTs: message.ts,
       channelId: message.channel,
@@ -268,6 +272,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
         if (routerResult.complexity === "very_low") {
           try {
             const response = await runAgent(
+              repoCtx,
               message.text,
               thread.sessionId,
               undefined,
@@ -452,6 +457,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
           for (let attempt = 0; attempt < maxAttempts && !handled; attempt++) {
             try {
               const agentPromise = runAgent(
+                repoCtx,
                 message.text,
                 thread.sessionId,
                 (text) => hbManager.onStream(text),
@@ -486,7 +492,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
                   "brain",
                   "warning",
                 );
-                notifyError("Agent Timeout", `Agent timed out after ${elapsed}s`, errorContext).catch(() => {});
+                notifyError(repoCtx.trello, "Agent Timeout", `Agent timed out after ${elapsed}s`, errorContext).catch(() => {});
                 handled = true;
               } else {
                 // Stop heartbeat BEFORE posting final response to prevent race conditions
@@ -624,7 +630,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
                   "brain",
                   "x",
                 );
-                notifyError("Agent Crash", errorMsg, errorContext).catch(() => {});
+                notifyError(repoCtx.trello, "Agent Crash", errorMsg, errorContext).catch(() => {});
                 handled = true;
               } else {
                 // Retry — update placeholder with retrying status
@@ -681,12 +687,12 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
           .catch(() => {});
 
         if (routerResult.isOperational) {
-          notifyError("Router Error", routerResult.error, errorContext, {
-            listId: config.trello.needsHelpListId,
-            labelId: config.trello.needsHelpLabelId,
+          notifyError(repoCtx.trello, "Router Error", routerResult.error, errorContext, {
+            listId: repoCtx.trello.needsHelpListId,
+            labelId: repoCtx.trello.needsHelpLabelId,
           }).catch(() => {});
         } else {
-          notifyError("Router Error", routerResult.error, errorContext).catch(() => {});
+          notifyError(repoCtx.trello, "Router Error", routerResult.error, errorContext).catch(() => {});
         }
       } else {
         // Router-only response, mark complete — capture router API usage
@@ -715,14 +721,15 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
         })
         .catch(() => {});
 
-      notifyError("Handler Error", error instanceof Error ? error.message : String(error), errorContext).catch(() => {});
+      notifyError(repoCtx.trello, "Handler Error", error instanceof Error ? error.message : String(error), errorContext).catch(() => {});
     }
 }
 
-export async function startSlackListener(): Promise<void> {
+export async function startSlackListener(repo: RepoContext): Promise<void> {
+  repoCtx = repo;
   app = new App({
-    token: config.slack.botToken,
-    appToken: config.slack.appToken,
+    token: repo.slack.botToken,
+    appToken: repo.slack.appToken,
     socketMode: true,
   });
 
@@ -739,7 +746,7 @@ export async function startSlackListener(): Promise<void> {
 
   app.event("reaction_added", async ({ event }) => {
     // Only process reactions from the configured channel
-    if (!("channel" in event.item) || event.item.channel !== config.slack.channelId) return;
+    if (!("channel" in event.item) || event.item.channel !== repoCtx.slack.channelId) return;
     if (botUserId && event.user === botUserId) return;
 
     // Strip skin-tone modifiers (e.g. "+1::skin-tone-2" → "+1")

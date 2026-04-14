@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   makeConfig,
+  makeRepoContext,
   makeSlackMessage,
   makeSlackThreadReply,
   makeThreadState,
@@ -173,7 +174,7 @@ beforeEach(async () => {
   resetListenerState();
 
   // Re-register handler each test (startSlackListener calls app.message(handler))
-  await startSlackListener();
+  await startSlackListener(makeRepoContext());
   handler = capturedMessageHandler as typeof handler;
   client = createMockWebClient();
 
@@ -350,7 +351,7 @@ describe("complexity routing", () => {
 
     // Agent called with very_low complexity
     expect(mockRunAgent).toHaveBeenCalledOnce();
-    expect(mockRunAgent.mock.calls[0][5]).toBe("very_low");
+    expect(mockRunAgent.mock.calls[0][6]).toBe("very_low");
 
     // Placeholder updated with response
     expect(client.chat.update).toHaveBeenCalledWith(
@@ -385,8 +386,8 @@ describe("complexity routing", () => {
 
     // First call: very_low, second call: medium (escalated)
     expect(mockRunAgent).toHaveBeenCalledTimes(2);
-    expect(mockRunAgent.mock.calls[0][5]).toBe("very_low");
-    expect(mockRunAgent.mock.calls[1][5]).toBe("medium");
+    expect(mockRunAgent.mock.calls[0][6]).toBe("very_low");
+    expect(mockRunAgent.mock.calls[1][6]).toBe("medium");
 
     // Final response from medium agent
     expect(client.chat.update).toHaveBeenCalledWith(
@@ -413,7 +414,7 @@ describe("complexity routing", () => {
 
     // Agent called with low complexity via the full path
     expect(mockRunAgent).toHaveBeenCalledOnce();
-    expect(mockRunAgent.mock.calls[0][5]).toBe("low");
+    expect(mockRunAgent.mock.calls[0][6]).toBe("low");
   });
 
   it("uses full path with heartbeat for high complexity", async () => {
@@ -428,7 +429,7 @@ describe("complexity routing", () => {
     await handler({ message: makeSlackMessage(), client });
 
     expect(mockRunAgent).toHaveBeenCalledOnce();
-    expect(mockRunAgent.mock.calls[0][5]).toBe("high");
+    expect(mockRunAgent.mock.calls[0][6]).toBe("high");
   });
 
   it("passes complexity to runAgent on the full path", async () => {
@@ -443,7 +444,7 @@ describe("complexity routing", () => {
     await handler({ message: makeSlackMessage(), client });
 
     expect(mockRunAgent).toHaveBeenCalledOnce();
-    expect(mockRunAgent.mock.calls[0][5]).toBe("very_high");
+    expect(mockRunAgent.mock.calls[0][6]).toBe("very_high");
   });
 
   it("tracks routerComplexity in dashboard events", async () => {
@@ -536,6 +537,7 @@ describe("error paths", () => {
 
     // Trello notifier called with Agent Timeout
     expect(mockNotifyError).toHaveBeenCalledWith(
+      expect.any(Object),
       "Agent Timeout",
       expect.stringContaining("timed out"),
       expect.objectContaining({
@@ -585,6 +587,7 @@ describe("error paths", () => {
 
     // Trello notifier called with Agent Crash
     expect(mockNotifyError).toHaveBeenCalledWith(
+      expect.any(Object),
       "Agent Crash",
       "SDK process died",
       expect.objectContaining({
@@ -628,6 +631,7 @@ describe("error paths", () => {
 
     // Trello notifier called
     expect(mockNotifyError).toHaveBeenCalledWith(
+      expect.any(Object),
       "Router Error",
       "credit balance is too low",
       expect.objectContaining({
@@ -654,6 +658,7 @@ describe("error paths", () => {
 
     // notifyError called with Needs Help overrides
     expect(mockNotifyError).toHaveBeenCalledWith(
+      expect.any(Object),
       "Router Error",
       "credit balance is too low",
       expect.objectContaining({
@@ -662,8 +667,8 @@ describe("error paths", () => {
         channelId: "C-TEST",
       }),
       {
-        listId: "6990129be21ee37b649281a5",
-        labelId: "698fc5b8847b787a3818adaa",
+        listId: "test-needs-help-list-id",
+        labelId: "test-needs-help-label-id",
       },
     );
   });
@@ -680,6 +685,7 @@ describe("error paths", () => {
 
     // notifyError called WITHOUT overrides (3 args, no 4th)
     expect(mockNotifyError).toHaveBeenCalledWith(
+      expect.any(Object),
       "Router Error",
       "API rate limit exceeded",
       expect.objectContaining({
@@ -697,6 +703,7 @@ describe("error paths", () => {
     await handler({ message: makeSlackMessage(), client });
 
     expect(mockNotifyError).toHaveBeenCalledWith(
+      expect.any(Object),
       "Handler Error",
       "Thread DB failure",
       expect.objectContaining({
@@ -1247,10 +1254,10 @@ describe("stale session recovery", () => {
     expect(mockRunAgent).toHaveBeenCalledTimes(2);
 
     // First call had the stale session ID
-    expect(mockRunAgent.mock.calls[0][1]).toBe("stale-session-id");
+    expect(mockRunAgent.mock.calls[0][2]).toBe("stale-session-id");
 
     // Second call had null session ID (fresh conversation)
-    expect(mockRunAgent.mock.calls[1][1]).toBeNull();
+    expect(mockRunAgent.mock.calls[1][2]).toBeNull();
 
     // clearSessionId was called to persist the null session
     expect(mockClearSessionId).toHaveBeenCalledWith(thread);
@@ -1331,10 +1338,10 @@ describe("stale session recovery", () => {
     expect(mockRunAgent).toHaveBeenCalledTimes(2);
 
     // First call had the session ID
-    expect(mockRunAgent.mock.calls[0][1]).toBe("long-session-id");
+    expect(mockRunAgent.mock.calls[0][2]).toBe("long-session-id");
 
     // Second call had null session ID (fresh conversation)
-    expect(mockRunAgent.mock.calls[1][1]).toBeNull();
+    expect(mockRunAgent.mock.calls[1][2]).toBeNull();
 
     // clearSessionId was called to persist the null session
     expect(mockClearSessionId).toHaveBeenCalledWith(thread);
@@ -1371,11 +1378,11 @@ describe("stale session recovery", () => {
 
     // Agent called twice: first very_low (failed), then medium (succeeded)
     expect(mockRunAgent).toHaveBeenCalledTimes(2);
-    expect(mockRunAgent.mock.calls[0][5]).toBe("very_low");
-    expect(mockRunAgent.mock.calls[1][5]).toBe("medium");
+    expect(mockRunAgent.mock.calls[0][6]).toBe("very_low");
+    expect(mockRunAgent.mock.calls[1][6]).toBe("medium");
 
     // Second call had null session ID
-    expect(mockRunAgent.mock.calls[1][1]).toBeNull();
+    expect(mockRunAgent.mock.calls[1][2]).toBeNull();
   });
 
   it("shows error when msg_too_long retry also fails", async () => {
@@ -1450,8 +1457,8 @@ describe("stale session recovery", () => {
 
     // very_low (1) + medium attempts (2) = 3 total calls
     expect(mockRunAgent).toHaveBeenCalledTimes(3);
-    expect(mockRunAgent.mock.calls[0][5]).toBe("very_low");
-    expect(mockRunAgent.mock.calls[1][5]).toBe("medium");
+    expect(mockRunAgent.mock.calls[0][6]).toBe("very_low");
+    expect(mockRunAgent.mock.calls[1][6]).toBe("medium");
 
     // Error surfaced after medium retries exhausted
     expect(mockPostErrorAttachment).toHaveBeenCalledWith(

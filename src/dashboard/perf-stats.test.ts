@@ -6,6 +6,7 @@ import type { AgentLogEntry } from "../types.js";
 function makeEvent(overrides: Partial<MessageEvent> = {}): MessageEvent {
   return {
     id: "t1-m1",
+    repoName: "test-repo",
     threadTs: "t1",
     messageTs: "m1",
     channelId: "C1",

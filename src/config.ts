@@ -2,17 +2,14 @@ import type {
   ComplexityLevel,
   ComplexityProfile,
   RepoConfig,
+  RepoContext,
+  TrelloConfig,
 } from "./types.js";
-import {
-  BOARD_ID,
-  TODO_LIST_ID,
-  BUG_LABEL_ID,
-  NEEDS_HELP_LIST_ID,
-  NEEDS_HELP_LABEL_ID,
-  REVIEW_LIST_ID,
-  getReposBase,
-} from "./poller/constants.js";
+import { getReposBase, loadTrelloIds } from "./poller/constants.js";
 import { required, optional } from "./env.js";
+import { parseEnvFile } from "./env-file.js";
+import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 
 export const COMPLEXITY_PROFILES: Record<ComplexityLevel, ComplexityProfile> = {
   very_low: {
@@ -82,18 +79,6 @@ export function getRepoPath(name: string): string {
   return repo.localPath;
 }
 
-export function getPrimaryRepoPath(): string {
-  if (repos.length === 0) {
-    throw new Error("No repos configured in REPOS env var");
-  }
-  return repos[0].localPath;
-}
-
-const slackBotToken = optional("SLACK_BOT_TOKEN", "");
-const slackAppToken = optional("SLACK_APP_TOKEN", "");
-const slackChannelId = optional("SLACK_CHANNEL_ID", "");
-const slackEnabled = !!(slackBotToken && slackAppToken && slackChannelId);
-
 const runtime = optional("DANXBOT_RUNTIME", "docker") as "docker" | "host";
 if (runtime !== "docker" && runtime !== "host") {
   throw new Error(
@@ -102,26 +87,15 @@ if (runtime !== "docker" && runtime !== "host") {
 }
 const isHost = runtime === "host";
 
+/**
+ * Shared infrastructure config — NOT per-repo.
+ * Per-repo config (trello, slack, db) lives in RepoContext.
+ */
 export const config = {
   runtime,
   isHost,
-  slack: {
-    enabled: slackEnabled,
-    botToken: slackBotToken,
-    appToken: slackAppToken,
-    channelId: slackChannelId,
-  },
   anthropic: {
     apiKey: optional("ANTHROPIC_API_KEY", ""),
-  },
-  platform: {
-    db: {
-      host: optional("PLATFORM_DB_HOST", ""),
-      user: optional("PLATFORM_DB_USER", ""),
-      password: optional("PLATFORM_DB_PASSWORD", ""),
-      database: optional("PLATFORM_DB_NAME", ""),
-      enabled: !!(process.env.PLATFORM_DB_HOST && process.env.PLATFORM_DB_USER),
-    },
   },
   db: {
     host: required("DANXBOT_DB_HOST"),
@@ -145,16 +119,6 @@ export const config = {
   github: {
     webhookSecret: optional("GITHUB_WEBHOOK_SECRET", ""),
   },
-  trello: {
-    apiKey: optional("TRELLO_API_KEY", ""),
-    apiToken: optional("TRELLO_API_TOKEN", ""),
-    boardId: BOARD_ID,
-    reviewListId: REVIEW_LIST_ID,
-    todoListId: TODO_LIST_ID,
-    bugLabelId: BUG_LABEL_ID,
-    needsHelpListId: NEEDS_HELP_LIST_ID,
-    needsHelpLabelId: NEEDS_HELP_LABEL_ID,
-  },
   dispatch: {
     defaultApiUrl: optional("DEFAULT_API_URL", "http://localhost:80"),
     agentTimeoutMs:
@@ -162,6 +126,7 @@ export const config = {
   },
   logLevel: optional("LOG_LEVEL", "info"),
   logsDir: optional("DANXBOT_LOGS_DIR", isHost ? "./logs" : "/danxbot/logs"),
+  pollerIntervalMs: parseInt(optional("POLLER_INTERVAL_MS", "60000"), 10),
 } as const;
 
 interface NumericRule {
@@ -247,3 +212,94 @@ export function validateConfig(): void {
 }
 
 validateConfig();
+
+/**
+ * Load a single repo's context from its .danxbot/ directory.
+ * Reads trello.yml for board IDs and .env for secrets (Slack, Trello API, DB).
+ */
+function loadRepoContext(repo: RepoConfig): RepoContext {
+  const envPath = resolve(repo.localPath, ".danxbot/.env");
+  if (!existsSync(envPath)) {
+    throw new Error(
+      `Per-repo .env not found at ${envPath}. Create ${repo.name}/.danxbot/.env with DANX_* variables.`,
+    );
+  }
+  const env = parseEnvFile(envPath);
+
+  function reqEnv(key: string): string {
+    const value = env[key];
+    if (!value) {
+      throw new Error(
+        `Missing required variable '${key}' in ${envPath}`,
+      );
+    }
+    return value;
+  }
+
+  function optEnv(key: string, fallback: string): string {
+    return env[key] || fallback;
+  }
+
+  const trelloIds = loadTrelloIds(repo.localPath);
+
+  const slackBotToken = optEnv("DANX_SLACK_BOT_TOKEN", "");
+  const slackAppToken = optEnv("DANX_SLACK_APP_TOKEN", "");
+  const slackChannelId = optEnv("DANX_SLACK_CHANNEL_ID", "");
+  const slackEnabled = !!(slackBotToken && slackAppToken && slackChannelId);
+
+  const dbHost = optEnv("DANX_DB_HOST", "");
+  const dbUser = optEnv("DANX_DB_USER", "");
+  const dbPassword = optEnv("DANX_DB_PASSWORD", "");
+  const dbName = optEnv("DANX_DB_NAME", "");
+  const dbEnabled = !!(dbHost && dbUser);
+
+  return {
+    name: repo.name,
+    url: repo.url,
+    localPath: repo.localPath,
+    trello: {
+      apiKey: reqEnv("DANX_TRELLO_API_KEY"),
+      apiToken: reqEnv("DANX_TRELLO_API_TOKEN"),
+      ...trelloIds,
+    },
+    slack: {
+      enabled: slackEnabled,
+      botToken: slackBotToken,
+      appToken: slackAppToken,
+      channelId: slackChannelId,
+    },
+    db: {
+      host: dbHost,
+      user: dbUser,
+      password: dbPassword,
+      database: dbName,
+      enabled: dbEnabled,
+    },
+    githubToken: optEnv("DANX_GITHUB_TOKEN", ""),
+  };
+}
+
+/**
+ * Load RepoContext for all configured repos.
+ * Each repo must have .danxbot/config/trello.yml and .danxbot/.env.
+ */
+export function loadRepoContexts(): RepoContext[] {
+  return repos.map(loadRepoContext);
+}
+
+/**
+ * All loaded repo contexts. Loaded at startup.
+ * Empty if no repos are configured (e.g., during testing without REPOS env var).
+ */
+export const repoContexts: RepoContext[] = repos.length > 0 ? loadRepoContexts() : [];
+
+/**
+ * Get a specific repo's context by name. Throws if not found.
+ */
+export function getRepoContext(name: string): RepoContext {
+  const ctx = repoContexts.find((r) => r.name === name);
+  if (!ctx) {
+    throw new Error(`Repo "${name}" is not configured or not loaded`);
+  }
+  return ctx;
+}

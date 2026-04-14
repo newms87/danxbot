@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { makeRepoContext } from "./__tests__/helpers/fixtures.js";
 
 // --- Mocks (top-level, before dynamic import) ---
 
@@ -10,6 +11,8 @@ const mockStartSlackListener = vi.fn().mockResolvedValue(undefined);
 const mockGetSlackClient = vi.fn().mockReturnValue({ chat: {} });
 const mockInitShutdownHandlers = vi.fn();
 const mockRunMigrations = vi.fn().mockResolvedValue(undefined);
+
+const MOCK_REPO = makeRepoContext();
 
 vi.mock("./slack/listener.js", () => ({
   startSlackListener: mockStartSlackListener,
@@ -51,9 +54,8 @@ vi.mock("./db/migrate.js", () => ({
 }));
 
 vi.mock("./config.js", () => ({
-  config: {
-    slack: { enabled: true, botToken: "xoxb-test", appToken: "xapp-test", channelId: "C123" },
-  },
+  config: {},
+  repoContexts: [MOCK_REPO],
 }));
 
 vi.mock("./logger.js", () => ({

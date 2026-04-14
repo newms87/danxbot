@@ -5,6 +5,7 @@ import type {
   AgentResponse,
   AgentLogEntry,
   ComplexityLevel,
+  RepoContext,
 } from "../../types.js";
 
 /**
@@ -19,19 +20,15 @@ export function msg(
 }
 
 /**
- * Creates a full config object matching the shape of src/config.ts.
- * Pass overrides for any nested section.
+ * Creates a shared config object matching the shape of src/config.ts.
+ * Only shared infrastructure — no per-repo config (trello, slack, platform).
  */
 export function makeConfig(overrides?: Record<string, unknown>) {
   return {
-    slack: {
-      botToken: "xoxb-test",
-      appToken: "xapp-test",
-      channelId: "C-TEST",
-    },
     anthropic: { apiKey: "test-key" },
     agent: {
       model: "test-model",
+      routerModel: "test-router-model",
       maxTurns: 5,
       maxBudgetUsd: 1.0,
       maxThinkingTokens: 8000,
@@ -39,28 +36,52 @@ export function makeConfig(overrides?: Record<string, unknown>) {
       maxThreadMessages: 20,
       maxRetries: 1,
     },
-    platform: {
-      repoUrl: "https://test.example.com",
-      repoPath: "/test",
-      db: {
-        host: "localhost",
-        user: "test",
-        password: "test",
-        database: "test",
-      },
-    },
     github: { webhookSecret: "" },
-    trello: {
-      apiKey: "",
-      apiToken: "",
-      boardId: "698fc5b8847b787a3818ad82",
-      todoListId: "698fc5be16a280cc321a13ec",
-      bugLabelId: "698fc5b8847b787a3818adac",
-      needsHelpListId: "6990129be21ee37b649281a5",
-      needsHelpLabelId: "698fc5b8847b787a3818adaa",
-    },
     logLevel: "info",
     logsDir: "/test/logs",
+    pollerIntervalMs: 60000,
+    ...overrides,
+  };
+}
+
+/**
+ * Creates a RepoContext with sensible test defaults.
+ */
+export function makeRepoContext(overrides?: Partial<RepoContext>): RepoContext {
+  return {
+    name: "test-repo",
+    url: "https://example.com/test.git",
+    localPath: "/test/repos/test-repo",
+    trello: {
+      apiKey: "test-trello-key",
+      apiToken: "test-trello-token",
+      boardId: "test-board-id",
+      reviewListId: "test-review-list-id",
+      todoListId: "test-todo-list-id",
+      inProgressListId: "test-in-progress-list-id",
+      needsHelpListId: "test-needs-help-list-id",
+      doneListId: "test-done-list-id",
+      cancelledListId: "test-cancelled-list-id",
+      actionItemsListId: "test-action-items-list-id",
+      bugLabelId: "test-bug-label-id",
+      featureLabelId: "test-feature-label-id",
+      epicLabelId: "test-epic-label-id",
+      needsHelpLabelId: "test-needs-help-label-id",
+    },
+    slack: {
+      enabled: true,
+      botToken: "xoxb-test",
+      appToken: "xapp-test",
+      channelId: "C-TEST",
+    },
+    db: {
+      host: "localhost",
+      user: "test",
+      password: "test",
+      database: "test",
+      enabled: true,
+    },
+    githubToken: "test-github-token",
     ...overrides,
   };
 }

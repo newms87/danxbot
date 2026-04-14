@@ -1,4 +1,4 @@
-import { config } from "../config.js";
+import type { TrelloConfig } from "../types.js";
 import { createLogger } from "../logger.js";
 import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
 
@@ -49,13 +49,14 @@ export interface NotifyErrorOptions {
 }
 
 export async function notifyError(
+  trello: TrelloConfig,
   errorType: string,
   errorMessage: string,
   context: Record<string, string>,
   options?: NotifyErrorOptions,
 ): Promise<void> {
   try {
-    const { apiKey, apiToken, todoListId, bugLabelId } = config.trello;
+    const { apiKey, apiToken, todoListId, bugLabelId } = trello;
 
     if (!apiKey || !apiToken) {
       log.debug("Trello creds not configured, skipping error notification");

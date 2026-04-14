@@ -97,6 +97,48 @@ export interface RepoConfig {
   localPath: string;
 }
 
+export interface TrelloConfig {
+  apiKey: string;
+  apiToken: string;
+  boardId: string;
+  reviewListId: string;
+  todoListId: string;
+  inProgressListId: string;
+  needsHelpListId: string;
+  doneListId: string;
+  cancelledListId: string;
+  actionItemsListId: string;
+  bugLabelId: string;
+  featureLabelId: string;
+  epicLabelId: string;
+  needsHelpLabelId: string;
+}
+
+export interface SlackConfig {
+  enabled: boolean;
+  botToken: string;
+  appToken: string;
+  channelId: string;
+}
+
+export interface RepoDatabaseConfig {
+  host: string;
+  user: string;
+  password: string;
+  database: string;
+  enabled: boolean;
+}
+
+export interface RepoContext {
+  name: string;
+  url: string;
+  localPath: string;
+  trello: TrelloConfig;
+  slack: SlackConfig;
+  db: RepoDatabaseConfig;
+  githubToken: string;
+}
+
 export interface AgentResponse {
   text: string;
   sessionId: string | null;

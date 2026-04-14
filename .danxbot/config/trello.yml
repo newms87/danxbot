@@ -1,0 +1,16 @@
+board_id: 69ddc215fd43f1b7f1a710f2
+
+lists:
+  review: 69ddc38ebcc5e2d70d2c27d5
+  todo: 69ddc38d9322fe56867b9de4
+  in_progress: 69ddc39f8208297c5bf74a32
+  needs_help: 69ddc39eee773f39baef379f
+  done: 69ddc38c53a99eda3c237f2b
+  cancelled: 69ddc38cb9f480b00b13482c
+  action_items: 69ddc39d84b99c0e340a2088
+
+labels:
+  bug: 69ddc215fd43f1b7f1a71180
+  feature: 69ddc215fd43f1b7f1a7117d
+  epic: 69ddc215fd43f1b7f1a7117f
+  needs_help: 69ddc215fd43f1b7f1a71181

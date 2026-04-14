@@ -10,6 +10,7 @@ const log = createLogger("events-db");
 /** Map from camelCase MessageEvent key to raw snake_case DB column name */
 export const COLUMN_MAP: Record<string, string> = {
   id: "id",
+  repoName: "repo_name",
   threadTs: "thread_ts",
   messageTs: "message_ts",
   channelId: "channel_id",
@@ -73,6 +74,7 @@ export function eventToRow(event: MessageEvent): unknown[] {
 
 export interface EventRow {
   id: string;
+  repo_name: string;
   thread_ts: string;
   message_ts: string;
   channel_id: string;
@@ -125,6 +127,7 @@ export function rowToEvent(row: EventRow): MessageEvent {
 
   return {
     id: row.id,
+    repoName: row.repo_name || "unknown",
     threadTs: row.thread_ts,
     messageTs: row.message_ts,
     channelId: row.channel_id,

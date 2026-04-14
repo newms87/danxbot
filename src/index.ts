@@ -5,7 +5,7 @@ import { loadEvents, startEventCleanup } from "./dashboard/events.js";
 import { initShutdownHandlers } from "./shutdown.js";
 import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
-import { config } from "./config.js";
+import { repoContexts } from "./config.js";
 
 const log = createLogger("startup");
 
@@ -27,16 +27,24 @@ async function main(): Promise<void> {
   // Start the monitoring dashboard
   await startDashboard();
 
-  // Start Slack Socket Mode listener (only if configured)
-  if (config.slack.enabled) {
-    await startSlackListener();
-    log.info("Slack integration enabled");
-  } else {
-    log.info("Slack not configured — running without Slack integration");
+  // Start Slack listeners for each repo that has Slack configured
+  const slackClients: ReturnType<typeof getSlackClient>[] = [];
+  for (const repo of repoContexts) {
+    if (repo.slack.enabled) {
+      await startSlackListener(repo);
+      slackClients.push(getSlackClient());
+      log.info(`[${repo.name}] Slack integration enabled`);
+    } else {
+      log.info(`[${repo.name}] Slack not configured — running without Slack integration`);
+    }
   }
 
-  // Initialize shutdown handlers
-  const slackClient = config.slack.enabled ? getSlackClient() : undefined;
+  if (repoContexts.length === 0) {
+    log.info("No repos configured — running dashboard only");
+  }
+
+  // Initialize shutdown handlers (use last Slack client for cleanup)
+  const slackClient = slackClients.length > 0 ? slackClients[slackClients.length - 1] : undefined;
   initShutdownHandlers({ threadCleanupInterval, eventCleanupInterval, slackClient });
 }
 

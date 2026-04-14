@@ -1,4 +1,5 @@
-import { config, REVIEW_LIST_ID, TODO_LIST_ID, NEEDS_HELP_LIST_ID, DANXBOT_COMMENT_MARKER } from "./config.js";
+import type { TrelloConfig } from "../types.js";
+import { DANXBOT_COMMENT_MARKER } from "./constants.js";
 
 export interface TrelloCard {
   id: string;
@@ -10,12 +11,12 @@ export interface TrelloComment {
   data: { text: string };
 }
 
-function authParams(): string {
-  return `key=${config.trello.apiKey}&token=${config.trello.apiToken}`;
+function authParams(trello: TrelloConfig): string {
+  return `key=${trello.apiKey}&token=${trello.apiToken}`;
 }
 
-async function fetchCardsFromList(listId: string): Promise<TrelloCard[]> {
-  const url = `https://api.trello.com/1/lists/${listId}/cards?${authParams()}&fields=id,name`;
+async function fetchCardsFromList(trello: TrelloConfig, listId: string): Promise<TrelloCard[]> {
+  const url = `https://api.trello.com/1/lists/${listId}/cards?${authParams(trello)}&fields=id,name`;
 
   const response = await fetch(url);
   if (!response.ok) {
@@ -26,20 +27,20 @@ async function fetchCardsFromList(listId: string): Promise<TrelloCard[]> {
   return cards.map((card) => ({ id: card.id, name: card.name }));
 }
 
-export async function fetchReviewCards(): Promise<TrelloCard[]> {
-  return fetchCardsFromList(REVIEW_LIST_ID);
+export async function fetchReviewCards(trello: TrelloConfig): Promise<TrelloCard[]> {
+  return fetchCardsFromList(trello, trello.reviewListId);
 }
 
-export async function fetchTodoCards(): Promise<TrelloCard[]> {
-  return fetchCardsFromList(TODO_LIST_ID);
+export async function fetchTodoCards(trello: TrelloConfig): Promise<TrelloCard[]> {
+  return fetchCardsFromList(trello, trello.todoListId);
 }
 
-export async function fetchNeedsHelpCards(): Promise<TrelloCard[]> {
-  return fetchCardsFromList(NEEDS_HELP_LIST_ID);
+export async function fetchNeedsHelpCards(trello: TrelloConfig): Promise<TrelloCard[]> {
+  return fetchCardsFromList(trello, trello.needsHelpListId);
 }
 
-export async function fetchLatestComment(cardId: string): Promise<TrelloComment | null> {
-  const url = `https://api.trello.com/1/cards/${cardId}/actions?${authParams()}&filter=commentCard&limit=1`;
+export async function fetchLatestComment(trello: TrelloConfig, cardId: string): Promise<TrelloComment | null> {
+  const url = `https://api.trello.com/1/cards/${cardId}/actions?${authParams(trello)}&filter=commentCard&limit=1`;
 
   const response = await fetch(url);
   if (!response.ok) {
@@ -50,8 +51,8 @@ export async function fetchLatestComment(cardId: string): Promise<TrelloComment 
   return actions.length > 0 ? actions[0] : null;
 }
 
-export async function moveCardToList(cardId: string, listId: string, position: string = "top"): Promise<void> {
-  const url = `https://api.trello.com/1/cards/${cardId}?${authParams()}`;
+export async function moveCardToList(trello: TrelloConfig, cardId: string, listId: string, position: string = "top"): Promise<void> {
+  const url = `https://api.trello.com/1/cards/${cardId}?${authParams(trello)}`;
 
   const response = await fetch(url, {
     method: "PUT",

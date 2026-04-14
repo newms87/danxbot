@@ -37,6 +37,7 @@ import type { MessageEvent } from "./events.js";
 function makeFullEvent(overrides: Partial<MessageEvent> = {}): MessageEvent {
   return {
     id: "t-1-m-1",
+    repoName: "test-repo",
     threadTs: "t-1",
     messageTs: "m-1",
     channelId: "C123",
@@ -105,7 +106,8 @@ describe("events-db", () => {
       const event = makeFullEvent();
       const row = eventToRow(event);
       expect(row[0]).toBe("t-1-m-1"); // id
-      expect(row[1]).toBe("t-1"); // thread_ts
+      expect(row[1]).toBe("test-repo"); // repoName
+      expect(row[2]).toBe("t-1"); // thread_ts
       expect(row).toHaveLength(Object.keys(COLUMN_MAP).length);
     });
 
@@ -170,6 +172,7 @@ describe("events-db", () => {
     it("converts a DB row to a MessageEvent", () => {
       const event = rowToEvent({
         id: "t-1-m-1",
+        repo_name: "test-repo",
         thread_ts: "t-1",
         message_ts: "m-1",
         channel_id: "C123",
@@ -208,6 +211,7 @@ describe("events-db", () => {
     it("converts DECIMAL string to number for subscription_cost_usd", () => {
       const event = rowToEvent({
         id: "t-1-m-1",
+        repo_name: "test-repo",
         thread_ts: "t-1",
         message_ts: "m-1",
         channel_id: "C123",
@@ -247,7 +251,7 @@ describe("events-db", () => {
         { source: "router", model: "test-router-model", inputTokens: 100, outputTokens: 50, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, costUsd: 0.0001, timestamp: 1000 },
       ];
       const event = rowToEvent({
-        id: "t-1-m-1", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
+        id: "t-1-m-1", repo_name: "test-repo", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
         user: "U456", user_name: null, text: "test", received_at: 1000,
         router_response_at: null, router_response: null, router_needs_agent: null,
         router_complexity: null, agent_response_at: null, agent_response: null,
@@ -273,7 +277,7 @@ describe("events-db", () => {
         modelUsage: {},
       };
       const event = rowToEvent({
-        id: "t-1-m-1", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
+        id: "t-1-m-1", repo_name: "test-repo", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
         user: "U456", user_name: null, text: "test", received_at: 1000,
         router_response_at: null, router_response: null, router_needs_agent: null,
         router_complexity: null, agent_response_at: null, agent_response: null,
@@ -287,7 +291,7 @@ describe("events-db", () => {
 
     it("converts DECIMAL string to number for api_cost_usd", () => {
       const event = rowToEvent({
-        id: "t-1-m-1", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
+        id: "t-1-m-1", repo_name: "test-repo", thread_ts: "t-1", message_ts: "m-1", channel_id: "C123",
         user: "U456", user_name: null, text: "test", received_at: 1000,
         router_response_at: null, router_response: null, router_needs_agent: null,
         router_complexity: null, agent_response_at: null, agent_response: null,
@@ -303,6 +307,7 @@ describe("events-db", () => {
     it("returns null for malformed JSON instead of crashing", () => {
       const event = rowToEvent({
         id: "t-1-m-1",
+        repo_name: "test-repo",
         thread_ts: "t-1",
         message_ts: "m-1",
         channel_id: "C123",
@@ -339,6 +344,7 @@ describe("events-db", () => {
     it("logs a warning when JSON parsing fails", () => {
       rowToEvent({
         id: "t-1-m-1",
+        repo_name: "test-repo",
         thread_ts: "t-1",
         message_ts: "m-1",
         channel_id: "C123",

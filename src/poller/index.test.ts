@@ -1,30 +1,67 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { RepoContext } from "../types.js";
 
 // Set REPOS before index.ts loads so getDanxbotConfigDir() resolves a path
 vi.hoisted(() => {
   process.env.REPOS = "test-repo:https://github.com/org/repo.git";
 });
 
-vi.mock("./constants.js", () => ({
-  getReposBase: () => "/danxbot/repos",
-}));
+const MOCK_REPO_CONTEXT: RepoContext = {
+  name: "test-repo",
+  url: "https://example.com/test.git",
+  localPath: "/test/repos/test-repo",
+  trello: {
+    apiKey: "test-key",
+    apiToken: "test-token",
+    boardId: "test-board",
+    reviewListId: "review-list",
+    todoListId: "todo-list",
+    inProgressListId: "ip-list",
+    needsHelpListId: "nh-list",
+    doneListId: "done-list",
+    cancelledListId: "cancelled-list",
+    actionItemsListId: "ai-list",
+    bugLabelId: "bug-label",
+    featureLabelId: "feature-label",
+    epicLabelId: "epic-label",
+    needsHelpLabelId: "nh-label",
+  },
+  slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
+  db: { host: "", user: "", password: "", database: "", enabled: false },
+  githubToken: "test-github-token",
+};
 
 // Mock dependencies before importing module under test
-vi.mock("./config.js", () => ({
+// NOTE: vi.mock factories are hoisted and can't reference MOCK_REPO_CONTEXT directly.
+// Use vi.hoisted to make it available at hoist time.
+const { mockRepoContexts } = vi.hoisted(() => {
+  const ctx = {
+    name: "test-repo",
+    url: "https://example.com/test.git",
+    localPath: "/test/repos/test-repo",
+    trello: {
+      apiKey: "test-key", apiToken: "test-token", boardId: "test-board",
+      reviewListId: "review-list", todoListId: "todo-list", inProgressListId: "ip-list",
+      needsHelpListId: "nh-list", doneListId: "done-list", cancelledListId: "cancelled-list",
+      actionItemsListId: "ai-list", bugLabelId: "bug-label", featureLabelId: "feature-label",
+      epicLabelId: "epic-label", needsHelpLabelId: "nh-label",
+    },
+    slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
+    db: { host: "", user: "", password: "", database: "", enabled: false },
+    githubToken: "test-github-token",
+  };
+  return { mockRepoContexts: [ctx] };
+});
+
+vi.mock("../config.js", () => ({
   config: { pollerIntervalMs: 60000 },
-  BOARD_ID: "mock-board-id",
-  REVIEW_LIST_ID: "mock-review-list-id",
-  TODO_LIST_ID: "698fc5be16a280cc321a13ec",
-  IN_PROGRESS_LIST_ID: "mock-in-progress-list-id",
-  NEEDS_HELP_LIST_ID: "mock-needs-help-list-id",
-  DONE_LIST_ID: "mock-done-list-id",
-  CANCELLED_LIST_ID: "mock-cancelled-list-id",
-  ACTION_ITEMS_LIST_ID: "mock-action-items-list-id",
-  BUG_LABEL_ID: "mock-bug-label-id",
-  FEATURE_LABEL_ID: "mock-feature-label-id",
-  EPIC_LABEL_ID: "mock-epic-label-id",
-  NEEDS_HELP_LABEL_ID: "mock-needs-help-label-id",
+  repoContexts: mockRepoContexts,
+}));
+
+vi.mock("./constants.js", () => ({
+  getReposBase: () => "/danxbot/repos",
   REVIEW_MIN_CARDS: 10,
+  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
 }));
 
 const mockFetchTodoCards = vi.fn();
@@ -126,13 +163,13 @@ describe("poll", () => {
 
   it("skips when teamRunning is true", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     // Second call: should skip because teamRunning is true
     mockFetchTodoCards.mockClear();
     mockSpawn.mockClear();
     mockFetchNeedsHelpCards.mockClear();
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     expect(mockFetchTodoCards).not.toHaveBeenCalled();
     expect(mockFetchNeedsHelpCards).not.toHaveBeenCalled();
@@ -142,7 +179,7 @@ describe("poll", () => {
   it("does nothing when no cards in ToDo", async () => {
     mockFetchTodoCards.mockResolvedValue([]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     expect(mockFetchTodoCards).toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
@@ -151,11 +188,11 @@ describe("poll", () => {
   it("spawns wt.exe to open new terminal tab", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     expect(mockSpawn).toHaveBeenCalledWith(
       "wt.exe",
-      expect.arrayContaining(["new-tab", "--title", "Danxbot Team", "bash", expect.stringContaining("run-team.sh")]),
+      expect.arrayContaining(["new-tab", "--title", "Danxbot Team [test-repo]", "bash", expect.stringContaining("run-team.sh")]),
       expect.objectContaining({
         detached: true,
       }),
@@ -165,7 +202,7 @@ describe("poll", () => {
   it("creates lock file when spawning", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       expect.stringContaining(".poller-running"),
@@ -177,7 +214,7 @@ describe("poll", () => {
     mockFetchTodoCards.mockRejectedValue(new Error("Network error"));
 
     // Should not throw
-    await expect(poll()).resolves.toBeUndefined();
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
@@ -186,7 +223,7 @@ describe("poll", () => {
 
     process.env.CLAUDECODE_TEST = "should-be-removed";
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     const spawnEnv = mockSpawn.mock.calls[0][2].env;
     expect(spawnEnv).not.toHaveProperty("CLAUDECODE_TEST");
@@ -198,7 +235,7 @@ describe("poll", () => {
     mockExistsSync.mockReturnValue(true);
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     // Should not spawn because lock file already exists
     expect(mockSpawn).not.toHaveBeenCalled();
@@ -218,7 +255,7 @@ describe("poll — Needs Help checking", () => {
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockFetchTodoCards.mockResolvedValue([]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     // Needs Help should be called first
     expect(mockFetchNeedsHelpCards).toHaveBeenCalled();
@@ -234,11 +271,11 @@ describe("poll — Needs Help checking", () => {
     mockIsUserResponse.mockReturnValue(true);
     mockFetchTodoCards.mockResolvedValue([needsHelpCard]); // Card now in ToDo
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockFetchLatestComment).toHaveBeenCalledWith("nh1");
+    expect(mockFetchLatestComment).toHaveBeenCalledWith(MOCK_REPO_CONTEXT.trello, "nh1");
     expect(mockIsUserResponse).toHaveBeenCalledWith(userComment);
-    expect(mockMoveCardToList).toHaveBeenCalledWith("nh1", "698fc5be16a280cc321a13ec", "top");
+    expect(mockMoveCardToList).toHaveBeenCalledWith(MOCK_REPO_CONTEXT.trello, "nh1", MOCK_REPO_CONTEXT.trello.todoListId, "top");
   });
 
   it("does not move cards still waiting for user (bot comment is latest)", async () => {
@@ -250,7 +287,7 @@ describe("poll — Needs Help checking", () => {
     mockIsUserResponse.mockReturnValue(false);
     mockFetchTodoCards.mockResolvedValue([]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     expect(mockMoveCardToList).not.toHaveBeenCalled();
   });
@@ -263,7 +300,7 @@ describe("poll — Needs Help checking", () => {
     mockIsUserResponse.mockReturnValue(false);
     mockFetchTodoCards.mockResolvedValue([]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     expect(mockMoveCardToList).not.toHaveBeenCalled();
   });
@@ -288,11 +325,11 @@ describe("poll — Needs Help checking", () => {
       .mockReturnValueOnce(false); // nh3
     mockFetchTodoCards.mockResolvedValue([{ id: "nh2", name: "User replied" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     // Only nh2 should be moved
     expect(mockMoveCardToList).toHaveBeenCalledTimes(1);
-    expect(mockMoveCardToList).toHaveBeenCalledWith("nh2", "698fc5be16a280cc321a13ec", "top");
+    expect(mockMoveCardToList).toHaveBeenCalledWith(MOCK_REPO_CONTEXT.trello, "nh2", MOCK_REPO_CONTEXT.trello.todoListId, "top");
   });
 
   it("handles fetchNeedsHelpCards failure gracefully", async () => {
@@ -300,7 +337,7 @@ describe("poll — Needs Help checking", () => {
     mockFetchTodoCards.mockResolvedValue([]);
 
     // Should not throw — continues to check ToDo
-    await expect(poll()).resolves.toBeUndefined();
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
     expect(mockFetchTodoCards).toHaveBeenCalled();
   });
 
@@ -316,11 +353,11 @@ describe("poll — Needs Help checking", () => {
     mockIsUserResponse.mockReturnValue(true);
     mockFetchTodoCards.mockResolvedValue([{ id: "nh2", name: "Card 2" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     // Only second card should be moved
     expect(mockMoveCardToList).toHaveBeenCalledTimes(1);
-    expect(mockMoveCardToList).toHaveBeenCalledWith("nh2", "698fc5be16a280cc321a13ec", "top");
+    expect(mockMoveCardToList).toHaveBeenCalledWith(MOCK_REPO_CONTEXT.trello, "nh2", MOCK_REPO_CONTEXT.trello.todoListId, "top");
   });
 
   it("spawns team when Needs Help cards are moved and no ToDo cards existed before", async () => {
@@ -332,7 +369,7 @@ describe("poll — Needs Help checking", () => {
     // After moving, the card appears in ToDo
     mockFetchTodoCards.mockResolvedValue([needsHelpCard]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     expect(mockSpawn).toHaveBeenCalled();
   });
@@ -391,12 +428,13 @@ describe("start", () => {
 
     const origImpl = mockExistsSync.getMockImplementation()!;
     mockExistsSync.mockImplementation((path: string) => {
-      if (typeof path === "string" && path.endsWith(".poller-running")) return !lockRemoved;
+      if (typeof path === "string" && path.includes(".poller-running")) return !lockRemoved;
       return origImpl(path);
     });
 
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
+    // poll() is called from start(), no need to pass argument
     start();
     await vi.advanceTimersByTimeAsync(0);
 
@@ -419,7 +457,7 @@ describe("start", () => {
   it("crashes if unlinkSync fails on stale lock file", () => {
     const origImpl = mockExistsSync.getMockImplementation()!;
     mockExistsSync.mockImplementation((path: string) => {
-      if (typeof path === "string" && path.endsWith(".poller-running")) return true;
+      if (typeof path === "string" && path.includes(".poller-running")) return true;
       return origImpl(path);
     });
     mockUnlinkSync.mockImplementation(() => {
@@ -450,7 +488,7 @@ describe("startLockWatch — immediate re-poll on completion", () => {
     // First poll: cards available, lock file doesn't exist → spawns team
     mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     expect(mockSpawn).toHaveBeenCalledTimes(1);
 
@@ -471,7 +509,7 @@ describe("startLockWatch — immediate re-poll on completion", () => {
   it("re-poll can spawn a new team if more cards exist", async () => {
     mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
     expect(mockSpawn).toHaveBeenCalledTimes(1);
 
     // On re-poll, return another card so a second team spawns
@@ -487,7 +525,7 @@ describe("startLockWatch — immediate re-poll on completion", () => {
   it("clears interval after detecting lock removal (no repeated polls)", async () => {
     mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     mockFetchTodoCards.mockClear();
     mockFetchNeedsHelpCards.mockClear();
@@ -510,7 +548,7 @@ describe("startLockWatch — immediate re-poll on completion", () => {
   it("does not poll when lock file is still present", async () => {
     mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
 
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     mockFetchTodoCards.mockClear();
     mockFetchNeedsHelpCards.mockClear();
@@ -539,7 +577,11 @@ describe("shutdown", () => {
     mockExit.mockRestore();
   });
 
-  it("removes lock file when no team is running", () => {
+  it("removes lock file when no team is running", async () => {
+    // Initialize repo state by polling once (no cards, returns immediately)
+    mockFetchTodoCards.mockResolvedValue([]);
+    await poll(MOCK_REPO_CONTEXT);
+
     mockExistsSync.mockReturnValue(true);
 
     shutdown();
@@ -554,7 +596,7 @@ describe("shutdown", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     // Spawn a team so teamRunning becomes true
-    await poll();
+    await poll(MOCK_REPO_CONTEXT);
 
     // Now shut down — lock file should NOT be removed
     shutdown();

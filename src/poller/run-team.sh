@@ -3,6 +3,8 @@
 # Each card gets its own Claude instance — the poller spawns a new
 # terminal tab per card, ensuring fresh context every time.
 # Lock file is removed ONLY after Claude actually exits.
+#
+# The poller passes the repo name via DANXBOT_REPO_NAME env var.
 
 # Non-login shells (wsl.exe -e bash) don't load ~/.profile, so PATH
 # may not include ~/.local/bin where claude is installed.
@@ -21,19 +23,25 @@ if [ "${CLAUDE_AUTH_MODE:-api-key}" = "subscription" ]; then
   if [ ! -f "$HOME/.claude/.credentials.json" ]; then
     echo "ERROR: CLAUDE_AUTH_MODE=subscription but ~/.claude/.credentials.json not found"
     echo "Run 'claude' interactively to authenticate first."
-    rm -f "$DANXBOT_ROOT/.poller-running"
+    rm -f "$DANXBOT_ROOT/.poller-running-${DANXBOT_REPO_NAME}"
     exit 1
   fi
 fi
 
-# Resolve the primary repo from REPOS env var (first entry, format: name:url)
-REPO_NAME="${REPOS%%:*}"
-REPO_NAME="${REPO_NAME%%,*}"
+# Resolve repo from DANXBOT_REPO_NAME (set by the poller)
+# Falls back to first REPOS entry for backwards compatibility during migration
+if [ -n "$DANXBOT_REPO_NAME" ]; then
+  REPO_NAME="$DANXBOT_REPO_NAME"
+else
+  REPO_NAME="${REPOS%%:*}"
+  REPO_NAME="${REPO_NAME%%,*}"
+fi
+
 REPO_DIR="$DANXBOT_ROOT/repos/$REPO_NAME"
 
 if [ ! -d "$REPO_DIR" ]; then
   echo "ERROR: Target repo not found at $REPO_DIR"
-  rm -f "$DANXBOT_ROOT/.poller-running"
+  rm -f "$DANXBOT_ROOT/.poller-running-${REPO_NAME}"
   exit 1
 fi
 

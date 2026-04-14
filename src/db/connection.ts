@@ -90,13 +90,17 @@ export async function closeAdminPool(): Promise<void> {
 }
 
 /**
- * Get a connection pool connected to the platform database.
+ * Get a connection pool connected to a repo's database.
  * Used for executing SQL queries against the connected repo's platform DB.
+ * The caller provides the repo's database config from its RepoContext.
  */
-export function getPlatformPool(): Pool {
+export function getPlatformPool(dbConfig?: DbConfig): Pool {
   if (!platformPool) {
+    if (!dbConfig) {
+      throw new Error("Platform pool not initialized — call getPlatformPool(dbConfig) first");
+    }
     log.info("Creating platform database pool");
-    platformPool = mysql.createPool(createPoolOptions(config.platform.db));
+    platformPool = mysql.createPool(createPoolOptions(dbConfig));
   }
   return platformPool;
 }

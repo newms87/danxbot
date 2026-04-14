@@ -9,7 +9,7 @@ import {
 import { eventsToCSV } from "./export.js";
 import { getHealthStatus } from "./health.js";
 import { createLogger } from "../logger.js";
-import { config } from "../config.js";
+import { config, getRepoContext, repoContexts } from "../config.js";
 import {
   launchAgent,
   cancelJob,
@@ -195,6 +195,20 @@ export async function startDashboard(): Promise<void> {
           return;
         }
 
+        // Resolve target repo — required field, must match a configured repo
+        const repoName = body.repo as string | undefined;
+        if (!repoName) {
+          json(res, 400, { error: "Missing required field: repo" });
+          return;
+        }
+        try {
+          getRepoContext(repoName);
+        } catch {
+          const available = repoContexts.map((r) => r.name).join(", ");
+          json(res, 400, { error: `Unknown repo "${repoName}". Available: ${available}` });
+          return;
+        }
+
         const maxRuntimeMs = body.max_runtime_ms as number | undefined;
         const schemaRole = body.schema_role as string | undefined;
 
@@ -208,6 +222,7 @@ export async function startDashboard(): Promise<void> {
           schemaRole,
           timeout: config.dispatch.agentTimeoutMs,
           maxRuntimeMs,
+          repoName,
         };
 
         if (config.isHost) {
@@ -241,18 +256,6 @@ export async function startDashboard(): Promise<void> {
             apiToken,
           });
 
-          // Resolve agent working directory — fail loudly if not configured
-          const repoName = (process.env.REPOS || "")
-            .split(",")[0]
-            .split(":")[0]
-            .trim();
-          if (!repoName) {
-            json(res, 500, {
-              error:
-                "REPOS env var is not configured — cannot determine agent working directory",
-            });
-            return;
-          }
           const agentCwd = join(getReposBase(), repoName);
 
           spawnInTerminal({

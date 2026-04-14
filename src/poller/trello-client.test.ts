@@ -1,15 +1,24 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-
-vi.mock("./config.js", () => ({
-  config: {
-    trello: { apiKey: "test-key", apiToken: "test-token" },
-  },
-  TODO_LIST_ID: "698fc5be16a280cc321a13ec",
-  NEEDS_HELP_LIST_ID: "6990129be21ee37b649281a5",
-  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
-}));
+import type { TrelloConfig } from "../types.js";
 
 import { fetchTodoCards, fetchNeedsHelpCards, fetchLatestComment, moveCardToList, isUserResponse } from "./trello-client.js";
+
+const MOCK_TRELLO: TrelloConfig = {
+  apiKey: "test-key",
+  apiToken: "test-token",
+  boardId: "test-board",
+  reviewListId: "review-list",
+  todoListId: "698fc5be16a280cc321a13ec",
+  inProgressListId: "ip-list",
+  needsHelpListId: "6990129be21ee37b649281a5",
+  doneListId: "done-list",
+  cancelledListId: "cancelled-list",
+  actionItemsListId: "ai-list",
+  bugLabelId: "bug-label",
+  featureLabelId: "feature-label",
+  epicLabelId: "epic-label",
+  needsHelpLabelId: "nh-label",
+};
 
 describe("fetchTodoCards", () => {
   const originalFetch = globalThis.fetch;
@@ -27,7 +36,7 @@ describe("fetchTodoCards", () => {
       new Response(JSON.stringify([]), { status: 200 }),
     );
 
-    await fetchTodoCards();
+    await fetchTodoCards(MOCK_TRELLO);
 
     const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
     expect(calledUrl).toContain("/1/lists/698fc5be16a280cc321a13ec/cards");
@@ -45,7 +54,7 @@ describe("fetchTodoCards", () => {
       new Response(JSON.stringify(apiResponse), { status: 200 }),
     );
 
-    const cards = await fetchTodoCards();
+    const cards = await fetchTodoCards(MOCK_TRELLO);
 
     expect(cards).toEqual([
       { id: "card1", name: "First card" },
@@ -58,7 +67,7 @@ describe("fetchTodoCards", () => {
       new Response(JSON.stringify([]), { status: 200 }),
     );
 
-    const cards = await fetchTodoCards();
+    const cards = await fetchTodoCards(MOCK_TRELLO);
 
     expect(cards).toEqual([]);
   });
@@ -68,7 +77,7 @@ describe("fetchTodoCards", () => {
       new Response("Unauthorized", { status: 401, statusText: "Unauthorized" }),
     );
 
-    await expect(fetchTodoCards()).rejects.toThrow(
+    await expect(fetchTodoCards(MOCK_TRELLO)).rejects.toThrow(
       "Trello API error: 401 Unauthorized",
     );
   });
@@ -81,7 +90,7 @@ describe("fetchTodoCards", () => {
       }),
     );
 
-    await expect(fetchTodoCards()).rejects.toThrow(
+    await expect(fetchTodoCards(MOCK_TRELLO)).rejects.toThrow(
       "Trello API error: 500 Internal Server Error",
     );
   });
@@ -103,7 +112,7 @@ describe("fetchNeedsHelpCards", () => {
       new Response(JSON.stringify([]), { status: 200 }),
     );
 
-    await fetchNeedsHelpCards();
+    await fetchNeedsHelpCards(MOCK_TRELLO);
 
     const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
     expect(calledUrl).toContain("/1/lists/6990129be21ee37b649281a5/cards");
@@ -114,7 +123,7 @@ describe("fetchNeedsHelpCards", () => {
       new Response(JSON.stringify([{ id: "c1", name: "Help card" }]), { status: 200 }),
     );
 
-    const cards = await fetchNeedsHelpCards();
+    const cards = await fetchNeedsHelpCards(MOCK_TRELLO);
     expect(cards).toEqual([{ id: "c1", name: "Help card" }]);
   });
 });
@@ -135,7 +144,7 @@ describe("fetchLatestComment", () => {
       new Response(JSON.stringify([]), { status: 200 }),
     );
 
-    await fetchLatestComment("card123");
+    await fetchLatestComment(MOCK_TRELLO, "card123");
 
     const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
     expect(calledUrl).toContain("/1/cards/card123/actions");
@@ -149,7 +158,7 @@ describe("fetchLatestComment", () => {
       new Response(JSON.stringify([comment]), { status: 200 }),
     );
 
-    const result = await fetchLatestComment("card123");
+    const result = await fetchLatestComment(MOCK_TRELLO, "card123");
     expect(result).toEqual(comment);
   });
 
@@ -158,7 +167,7 @@ describe("fetchLatestComment", () => {
       new Response(JSON.stringify([]), { status: 200 }),
     );
 
-    const result = await fetchLatestComment("card123");
+    const result = await fetchLatestComment(MOCK_TRELLO, "card123");
     expect(result).toBeNull();
   });
 
@@ -167,7 +176,7 @@ describe("fetchLatestComment", () => {
       new Response("Not Found", { status: 404, statusText: "Not Found" }),
     );
 
-    await expect(fetchLatestComment("card123")).rejects.toThrow("Trello API error: 404 Not Found");
+    await expect(fetchLatestComment(MOCK_TRELLO, "card123")).rejects.toThrow("Trello API error: 404 Not Found");
   });
 });
 
@@ -187,7 +196,7 @@ describe("moveCardToList", () => {
       new Response(JSON.stringify({}), { status: 200 }),
     );
 
-    await moveCardToList("card123", "list456", "top");
+    await moveCardToList(MOCK_TRELLO, "card123", "list456", "top");
 
     const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
     const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
@@ -202,7 +211,7 @@ describe("moveCardToList", () => {
       new Response(JSON.stringify({}), { status: 200 }),
     );
 
-    await moveCardToList("card123", "list456");
+    await moveCardToList(MOCK_TRELLO, "card123", "list456");
 
     const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
     expect(JSON.parse(opts.body as string).pos).toBe("top");
@@ -213,7 +222,7 @@ describe("moveCardToList", () => {
       new Response("Forbidden", { status: 403, statusText: "Forbidden" }),
     );
 
-    await expect(moveCardToList("card123", "list456")).rejects.toThrow("Trello API error: 403 Forbidden");
+    await expect(moveCardToList(MOCK_TRELLO, "card123", "list456")).rejects.toThrow("Trello API error: 403 Forbidden");
   });
 });
 

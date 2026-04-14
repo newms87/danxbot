@@ -32,6 +32,7 @@ export interface LaunchOptions {
   schemaRole?: string;
   timeout: number;
   maxRuntimeMs?: number;
+  repoName: string;
 }
 
 export interface AgentJob {
@@ -299,14 +300,8 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
   let stderr = "";
   let stdoutBuffer = "";
 
-  // Resolve agent working directory — fail loudly if not configured
-  const repoName = (process.env.REPOS || "").split(",")[0].split(":")[0].trim();
-  if (!repoName) {
-    throw new Error(
-      "REPOS env var is not configured — cannot determine agent working directory",
-    );
-  }
-  const agentCwd = join(getReposBase(), repoName);
+  // Resolve agent working directory from the launch options
+  const agentCwd = join(getReposBase(), options.repoName);
 
   const child = spawn("claude", args, {
     env,

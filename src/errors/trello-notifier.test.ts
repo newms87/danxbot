@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { makeConfig } from "../__tests__/helpers/fixtures.js";
+import type { TrelloConfig } from "../types.js";
 
 // Mock constants before import — prevents YAML file read
 vi.mock("../poller/constants.js", () => ({
@@ -8,23 +8,9 @@ vi.mock("../poller/constants.js", () => ({
 
 import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
 
-// --- Mocks (top-level, before dynamic import) ---
-
-const mockConfig = makeConfig({
-  trello: {
-    apiKey: "test-key",
-    apiToken: "test-token",
-    boardId: "698fc5b8847b787a3818ad82",
-    todoListId: "698fc5be16a280cc321a13ec",
-    bugLabelId: "698fc5b8847b787a3818adac",
-    needsHelpListId: "6990129be21ee37b649281a5",
-    needsHelpLabelId: "698fc5b8847b787a3818adaa",
-  },
-});
-
-vi.mock("../config.js", () => ({
-  config: mockConfig,
-}));
+// Mock global fetch
+const mockFetch = vi.fn();
+vi.stubGlobal("fetch", mockFetch);
 
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
@@ -35,25 +21,28 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
-// Mock global fetch
-const mockFetch = vi.fn();
-vi.stubGlobal("fetch", mockFetch);
-
 // Dynamic import after mocks
 const { notifyError } = await import("./trello-notifier.js");
 
+const MOCK_TRELLO_CONFIG: TrelloConfig = {
+  apiKey: "test-key",
+  apiToken: "test-token",
+  boardId: "test-board",
+  reviewListId: "review-list",
+  todoListId: "todo-list",
+  inProgressListId: "ip-list",
+  needsHelpListId: "nh-list",
+  doneListId: "done-list",
+  cancelledListId: "cancelled-list",
+  actionItemsListId: "ai-list",
+  bugLabelId: "bug-label",
+  featureLabelId: "feature-label",
+  epicLabelId: "epic-label",
+  needsHelpLabelId: "nh-label",
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
-  // Reset trello config to valid creds
-  (mockConfig as Record<string, unknown>).trello = {
-    apiKey: "test-key",
-    apiToken: "test-token",
-    boardId: "698fc5b8847b787a3818ad82",
-    todoListId: "698fc5be16a280cc321a13ec",
-    bugLabelId: "698fc5b8847b787a3818adac",
-    needsHelpListId: "6990129be21ee37b649281a5",
-    needsHelpLabelId: "698fc5b8847b787a3818adaa",
-  };
 });
 
 // ============================================================
@@ -62,23 +51,23 @@ beforeEach(() => {
 
 describe("when Trello creds are not configured", () => {
   it("returns without calling fetch when apiKey is empty", async () => {
-    (mockConfig as Record<string, unknown>).trello = {
-      apiKey: "",
-      apiToken: "test-token",
-    };
-
-    await notifyError("Agent Timeout", "timed out", {});
+    await notifyError(
+      { ...MOCK_TRELLO_CONFIG, apiKey: "" },
+      "Agent Timeout",
+      "timed out",
+      {},
+    );
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("returns without calling fetch when apiToken is empty", async () => {
-    (mockConfig as Record<string, unknown>).trello = {
-      apiKey: "test-key",
-      apiToken: "",
-    };
-
-    await notifyError("Agent Crash", "crashed", {});
+    await notifyError(
+      { ...MOCK_TRELLO_CONFIG, apiToken: "" },
+      "Agent Crash",
+      "crashed",
+      {},
+    );
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -98,7 +87,7 @@ describe("duplicate detection", () => {
       json: async () => [{ id: "existing-card", name: cardName }],
     });
 
-    await notifyError("Agent Timeout", "timed out", {});
+    await notifyError(MOCK_TRELLO_CONFIG, "Agent Timeout", "timed out", {});
 
     // Only one fetch call (list cards), no POST to create
     expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -132,11 +121,16 @@ describe("card creation", () => {
   });
 
   it("creates a card with correct name, label, and position", async () => {
-    await notifyError("Agent Timeout", "Agent timed out after 300s", {
-      threadTs: "123.456",
-      user: "U-HUMAN",
-      channelId: "C-TEST",
-    });
+    await notifyError(
+      MOCK_TRELLO_CONFIG,
+      "Agent Timeout",
+      "Agent timed out after 300s",
+      {
+        threadTs: "123.456",
+        user: "U-HUMAN",
+        channelId: "C-TEST",
+      },
+    );
 
     expect(mockFetch).toHaveBeenCalledTimes(3);
 
@@ -151,16 +145,21 @@ describe("card creation", () => {
     const params = new URLSearchParams(url.split("?")[1]);
     expect(params.get("name")).toBe("[Danxbot > Error] Agent Timeout: Agent timed out after 300s");
     expect(params.get("pos")).toBe("top");
-    expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adac"); // Bug label
-    expect(params.get("idList")).toBe("698fc5be16a280cc321a13ec"); // ToDo list
+    expect(params.get("idLabels")).toBe("bug-label");
+    expect(params.get("idList")).toBe("todo-list");
   });
 
   it("includes context fields in card description", async () => {
-    await notifyError("Agent Crash", "SDK process died", {
-      threadTs: "123.456",
-      user: "U-HUMAN",
-      channelId: "C-TEST",
-    });
+    await notifyError(
+      MOCK_TRELLO_CONFIG,
+      "Agent Crash",
+      "SDK process died",
+      {
+        threadTs: "123.456",
+        user: "U-HUMAN",
+        channelId: "C-TEST",
+      },
+    );
 
     const createCall = mockFetch.mock.calls[1];
     const url = createCall[0] as string;
@@ -178,7 +177,7 @@ describe("card creation", () => {
   it("truncates card name when error message is very long", async () => {
     const longMessage = "x".repeat(200);
 
-    await notifyError("Agent Timeout", longMessage, {});
+    await notifyError(MOCK_TRELLO_CONFIG, "Agent Timeout", longMessage, {});
 
     const createCall = mockFetch.mock.calls[1];
     const url = createCall[0] as string;
@@ -190,7 +189,7 @@ describe("card creation", () => {
   });
 
   it("adds a danxbot marker comment after creating the card", async () => {
-    await notifyError("Agent Timeout", "timed out", {});
+    await notifyError(MOCK_TRELLO_CONFIG, "Agent Timeout", "timed out", {});
 
     // Third call is the comment POST
     const commentCall = mockFetch.mock.calls[2];
@@ -212,7 +211,7 @@ describe("card creation", () => {
     mockFetch.mockResolvedValueOnce({ ok: false, status: 500, statusText: "Server Error" });
 
     // Should not throw even though the comment POST failed
-    await expect(notifyError("Agent Timeout", "timed out", {})).resolves.toBeUndefined();
+    await expect(notifyError(MOCK_TRELLO_CONFIG, "Agent Timeout", "timed out", {})).resolves.toBeUndefined();
     expect(mockFetch).toHaveBeenCalledTimes(3);
   });
 });
@@ -241,9 +240,15 @@ describe("list and label overrides", () => {
   });
 
   it("creates card in custom list when options.listId is provided", async () => {
-    await notifyError("Router Error", "credit balance is too low", {}, {
-      listId: "6990129be21ee37b649281a5",
-    });
+    await notifyError(
+      MOCK_TRELLO_CONFIG,
+      "Router Error",
+      "credit balance is too low",
+      {},
+      {
+        listId: "6990129be21ee37b649281a5",
+      },
+    );
 
     const createCall = mockFetch.mock.calls[1];
     const url = createCall[0] as string;
@@ -251,13 +256,19 @@ describe("list and label overrides", () => {
 
     expect(params.get("idList")).toBe("6990129be21ee37b649281a5");
     // Label should still be default bugLabelId
-    expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adac");
+    expect(params.get("idLabels")).toBe("bug-label");
   });
 
   it("creates card with custom label when options.labelId is provided", async () => {
-    await notifyError("Router Error", "credit balance is too low", {}, {
-      labelId: "698fc5b8847b787a3818adaa",
-    });
+    await notifyError(
+      MOCK_TRELLO_CONFIG,
+      "Router Error",
+      "credit balance is too low",
+      {},
+      {
+        labelId: "698fc5b8847b787a3818adaa",
+      },
+    );
 
     const createCall = mockFetch.mock.calls[1];
     const url = createCall[0] as string;
@@ -265,14 +276,20 @@ describe("list and label overrides", () => {
 
     expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adaa");
     // List should still be default todoListId
-    expect(params.get("idList")).toBe("698fc5be16a280cc321a13ec");
+    expect(params.get("idList")).toBe("todo-list");
   });
 
   it("creates card with both custom list and label when both provided", async () => {
-    await notifyError("Router Error", "credit balance is too low", {}, {
-      listId: "6990129be21ee37b649281a5",
-      labelId: "698fc5b8847b787a3818adaa",
-    });
+    await notifyError(
+      MOCK_TRELLO_CONFIG,
+      "Router Error",
+      "credit balance is too low",
+      {},
+      {
+        listId: "6990129be21ee37b649281a5",
+        labelId: "698fc5b8847b787a3818adaa",
+      },
+    );
 
     const createCall = mockFetch.mock.calls[1];
     const url = createCall[0] as string;
@@ -298,9 +315,15 @@ describe("list and label overrides", () => {
       json: async () => ({ id: "comment-id" }),
     });
 
-    await notifyError("Router Error", "credit error", {}, {
-      listId: "6990129be21ee37b649281a5",
-    });
+    await notifyError(
+      MOCK_TRELLO_CONFIG,
+      "Router Error",
+      "credit error",
+      {},
+      {
+        listId: "6990129be21ee37b649281a5",
+      },
+    );
 
     // First fetch should query the custom list for duplicates
     const listCall = mockFetch.mock.calls[0][0] as string;
@@ -317,7 +340,7 @@ describe("error handling", () => {
     mockFetch.mockRejectedValue(new Error("Network error"));
 
     // Should not throw
-    await expect(notifyError("Agent Crash", "crashed", {})).resolves.toBeUndefined();
+    await expect(notifyError(MOCK_TRELLO_CONFIG, "Agent Crash", "crashed", {})).resolves.toBeUndefined();
   });
 
   it("never throws when card creation POST returns non-ok", async () => {
@@ -333,7 +356,7 @@ describe("error handling", () => {
       statusText: "Forbidden",
     });
 
-    await expect(notifyError("Agent Crash", "crashed", {})).resolves.toBeUndefined();
+    await expect(notifyError(MOCK_TRELLO_CONFIG, "Agent Crash", "crashed", {})).resolves.toBeUndefined();
     expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
@@ -344,6 +367,6 @@ describe("error handling", () => {
       statusText: "Internal Server Error",
     });
 
-    await expect(notifyError("Agent Crash", "crashed", {})).resolves.toBeUndefined();
+    await expect(notifyError(MOCK_TRELLO_CONFIG, "Agent Crash", "crashed", {})).resolves.toBeUndefined();
   });
 });

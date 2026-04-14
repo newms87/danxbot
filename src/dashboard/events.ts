@@ -8,6 +8,7 @@ const log = createLogger("events");
 
 export interface MessageEvent {
   id: string;
+  repoName: string;
   threadTs: string;
   messageTs: string;
   channelId: string;
@@ -72,6 +73,7 @@ export async function loadEvents(): Promise<void> {
 }
 
 export function createEvent(partial: {
+  repoName: string;
   threadTs: string;
   messageTs: string;
   channelId: string;

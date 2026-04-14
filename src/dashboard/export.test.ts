@@ -36,6 +36,7 @@ beforeEach(() => {
 
 function makeEvent(overrides: Partial<Parameters<typeof createEvent>[0]> = {}) {
   return createEvent({
+    repoName: overrides.repoName ?? "test-repo",
     threadTs: overrides.threadTs ?? `t-${Date.now()}-${Math.random()}`,
     messageTs: overrides.messageTs ?? `m-${Date.now()}-${Math.random()}`,
     channelId: overrides.channelId ?? "C123",
