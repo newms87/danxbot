@@ -1,4 +1,4 @@
-import { createServer, IncomingMessage, ServerResponse } from "http";
+import { createServer, ServerResponse } from "http";
 import { readFile, access } from "fs/promises";
 import {
   getEvents,

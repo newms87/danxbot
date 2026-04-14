@@ -57,4 +57,7 @@ export DANXBOT_EPHEMERAL=1
 export DANXBOT_PROJECT_ROOT="$DANXBOT_ROOT"
 claude '/danx-next' --dangerously-skip-permissions || true
 
+# Clean up lock file so poller knows we're done
+rm -f "$DANXBOT_ROOT/.poller-running-${REPO_NAME}"
+
 exit 0
