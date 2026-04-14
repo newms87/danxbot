@@ -59,7 +59,6 @@ export function makeConfig(overrides?: Record<string, unknown>) {
       needsHelpListId: "6990129be21ee37b649281a5",
       needsHelpLabelId: "698fc5b8847b787a3818adaa",
     },
-    rateLimitSeconds: 30,
     logLevel: "info",
     logsDir: "/test/logs",
     ...overrides,

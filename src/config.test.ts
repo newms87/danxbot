@@ -40,7 +40,6 @@ function validEnv(): Record<string, string> {
     AGENT_TIMEOUT_MS: "300000",
     MAX_THREAD_MESSAGES: "20",
     AGENT_MAX_RETRIES: "1",
-    RATE_LIMIT_SECONDS: "30",
   };
 }
 
@@ -188,12 +187,6 @@ describe("validateConfig", () => {
     ).rejects.toThrow("agent.maxTurns");
   });
 
-  it("throws for zero rateLimitSeconds", async () => {
-    await expect(
-      importConfig({ RATE_LIMIT_SECONDS: "0" }),
-    ).rejects.toThrow("rateLimitSeconds");
-  });
-
   it("throws for negative maxRetries", async () => {
     // maxRetries has Math.max(0, ...) so parseInt("-1") => -1 => Math.max(0,-1) => 0
     // 0 is valid for maxRetries, so this should NOT throw
@@ -213,8 +206,7 @@ describe("validateConfig", () => {
       importConfig({
         MAX_TURNS: "abc",
         MAX_BUDGET_USD: "-1",
-        RATE_LIMIT_SECONDS: "0",
       }),
-    ).rejects.toThrow(/agent\.maxTurns.*agent\.maxBudgetUsd.*rateLimitSeconds/s);
+    ).rejects.toThrow(/agent\.maxTurns.*agent\.maxBudgetUsd/s);
   });
 });

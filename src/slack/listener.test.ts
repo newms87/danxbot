@@ -84,12 +84,24 @@ const mockClearSessionId = vi.fn().mockImplementation((t: { sessionId: string | 
 });
 const mockIsBotParticipant = vi.fn();
 
-const mockIsRateLimited = vi.fn().mockReturnValue(false);
-const mockRecordAgentRun = vi.fn();
+const mockIsProcessing = vi.fn().mockReturnValue(false);
+const mockMarkProcessing = vi.fn();
+const mockMarkIdle = vi.fn();
+const mockEnqueue = vi.fn();
+const mockDequeue = vi.fn().mockReturnValue(undefined);
+const mockResetQueue = vi.fn();
+const mockGetQueueStats = vi.fn().mockReturnValue({});
+const mockGetTotalQueuedCount = vi.fn().mockReturnValue(0);
 
-vi.mock("./rate-limiter.js", () => ({
-  isRateLimited: (...args: unknown[]) => mockIsRateLimited(...args),
-  recordAgentRun: (...args: unknown[]) => mockRecordAgentRun(...args),
+vi.mock("./message-queue.js", () => ({
+  isProcessing: (...args: unknown[]) => mockIsProcessing(...args),
+  markProcessing: (...args: unknown[]) => mockMarkProcessing(...args),
+  markIdle: (...args: unknown[]) => mockMarkIdle(...args),
+  enqueue: (...args: unknown[]) => mockEnqueue(...args),
+  dequeue: (...args: unknown[]) => mockDequeue(...args),
+  resetQueue: (...args: unknown[]) => mockResetQueue(...args),
+  getQueueStats: (...args: unknown[]) => mockGetQueueStats(...args),
+  getTotalQueuedCount: (...args: unknown[]) => mockGetTotalQueuedCount(...args),
 }));
 
 vi.mock("./user-cache.js", () => ({
@@ -152,7 +164,8 @@ let client: ReturnType<typeof createMockWebClient>;
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  mockIsRateLimited.mockReturnValue(false);
+  mockIsProcessing.mockReturnValue(false);
+  mockDequeue.mockReturnValue(undefined);
   mockProcessResponseWithAttachments.mockImplementation((text: string) => Promise.resolve({ text, attachments: [] }));
   mockExtractSqlBlocks.mockReturnValue([]);
 
@@ -696,12 +709,12 @@ describe("error paths", () => {
 });
 
 // ============================================================
-// Rate limiting
+// Message queue
 // ============================================================
 
-describe("rate limiting", () => {
-  it("blocks agent run when user is rate limited", async () => {
-    mockIsRateLimited.mockReturnValue(true);
+describe("message queue", () => {
+  it("queues message when thread is already processing", async () => {
+    mockIsProcessing.mockReturnValue(true);
     mockRunRouter.mockResolvedValue(
       makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
     );
@@ -713,25 +726,34 @@ describe("rate limiting", () => {
       expect.objectContaining({ text: "Looking..." }),
     );
 
-    // Rate limit message sent
+    // Queue acknowledgement sent
     expect(client.chat.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: "I'm still working on your previous question. I'll get to this one next.",
+        text: "I'll get to this after your current question.",
+      }),
+    );
+
+    // Message enqueued
+    expect(mockEnqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadTs: expect.any(String),
+        userId: "U-HUMAN",
+        text: "Hello danxbot",
       }),
     );
 
     // Agent never called
     expect(mockRunAgent).not.toHaveBeenCalled();
 
-    // Event marked complete (not error)
+    // Event marked queued
     expect(mockUpdateEvent).toHaveBeenCalledWith(
       "test-id",
-      expect.objectContaining({ status: "complete" }),
+      expect.objectContaining({ status: "queued" }),
     );
   });
 
-  it("does not rate limit router-only responses", async () => {
-    mockIsRateLimited.mockReturnValue(true);
+  it("does not queue router-only responses", async () => {
+    mockIsProcessing.mockReturnValue(true);
     mockRunRouter.mockResolvedValue(
       makeRouterResult({ needsAgent: false, quickResponse: "Hi!" }),
     );
@@ -743,19 +765,21 @@ describe("rate limiting", () => {
       expect.objectContaining({ text: "Hi!" }),
     );
 
-    // isRateLimited should not have been checked since needsAgent is false
-    // (the rate limit message should not appear)
+    // No queue acknowledgement
     const postCalls = client.chat.postMessage.mock.calls;
-    const rateLimitMsgs = postCalls.filter(
+    const queueMsgs = postCalls.filter(
       (call) =>
         typeof call[0].text === "string" &&
-        call[0].text.includes("still working"),
+        call[0].text.includes("after your current question"),
     );
-    expect(rateLimitMsgs).toHaveLength(0);
+    expect(queueMsgs).toHaveLength(0);
+
+    // Nothing enqueued
+    expect(mockEnqueue).not.toHaveBeenCalled();
   });
 
-  it("records agent run when not rate limited", async () => {
-    mockIsRateLimited.mockReturnValue(false);
+  it("marks thread as processing when starting agent", async () => {
+    mockIsProcessing.mockReturnValue(false);
     mockRunRouter.mockResolvedValue(
       makeRouterResult({ needsAgent: true, quickResponse: "On it..." }),
     );
@@ -763,19 +787,46 @@ describe("rate limiting", () => {
 
     await handler({ message: makeSlackMessage(), client });
 
-    expect(mockRecordAgentRun).toHaveBeenCalledWith("U-HUMAN");
+    expect(mockMarkProcessing).toHaveBeenCalledWith(expect.any(String));
     expect(mockRunAgent).toHaveBeenCalled();
   });
 
-  it("does not record agent run when rate limited", async () => {
-    mockIsRateLimited.mockReturnValue(true);
+  it("marks thread as idle and drains queue after agent completes", async () => {
+    mockIsProcessing.mockReturnValue(false);
     mockRunRouter.mockResolvedValue(
       makeRouterResult({ needsAgent: true, quickResponse: "On it..." }),
     );
+    mockRunAgent.mockResolvedValue(makeAgentResponse());
 
     await handler({ message: makeSlackMessage(), client });
 
-    expect(mockRecordAgentRun).not.toHaveBeenCalled();
+    expect(mockMarkIdle).toHaveBeenCalledWith(expect.any(String));
+    expect(mockDequeue).toHaveBeenCalledWith(expect.any(String));
+  });
+
+  it("marks thread as idle after agent error", async () => {
+    mockIsProcessing.mockReturnValue(false);
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "On it..." }),
+    );
+    mockRunAgent.mockRejectedValue(new Error("Agent crashed"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockMarkIdle).toHaveBeenCalledWith(expect.any(String));
+  });
+
+  it("marks thread as idle after very_low agent succeeds", async () => {
+    mockIsProcessing.mockReturnValue(false);
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Quick...", complexity: "very_low" }),
+    );
+    mockRunAgent.mockResolvedValue(makeAgentResponse());
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockMarkIdle).toHaveBeenCalledWith(expect.any(String));
+    expect(mockDequeue).toHaveBeenCalledWith(expect.any(String));
   });
 });
 
@@ -1072,6 +1123,9 @@ describe("agent retry on crash", () => {
       "mock-ts",
       expect.stringContaining("Timed out"),
     );
+
+    // Thread marked idle even on timeout
+    expect(mockMarkIdle).toHaveBeenCalledWith(expect.any(String));
 
     // Restore timeout
     (mockConfig.agent as Record<string, unknown>).timeoutMs = 300000;

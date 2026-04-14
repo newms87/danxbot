@@ -1,5 +1,5 @@
 import { getEvents } from "./events.js";
-import { isSlackConnected } from "../slack/listener.js";
+import { isSlackConnected, getQueueStats, getTotalQueuedCount } from "../slack/listener.js";
 import { getPool } from "../db/connection.js";
 
 export interface HealthStatus {
@@ -9,6 +9,8 @@ export interface HealthStatus {
   db_connected: boolean;
   events_count: number;
   memory_usage_mb: number;
+  queued_messages: number;
+  queue_by_thread: Record<string, number>;
 }
 
 const DB_PING_TIMEOUT_MS = 2000;
@@ -40,5 +42,7 @@ export async function getHealthStatus(): Promise<HealthStatus> {
     db_connected: dbConnected,
     events_count: getEvents().length,
     memory_usage_mb: Math.round((process.memoryUsage().rss / 1024 / 1024) * 10) / 10,
+    queued_messages: getTotalQueuedCount(),
+    queue_by_thread: getQueueStats(),
   };
 }

@@ -4,7 +4,8 @@ import { createLogger } from "../logger.js";
 import { markdownToSlackMrkdwn, splitMessage } from "./formatter.js";
 import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
-import { isRateLimited, recordAgentRun } from "./rate-limiter.js";
+import { isProcessing, markProcessing, markIdle, enqueue, dequeue, getQueueStats, getTotalQueuedCount, resetQueue } from "./message-queue.js";
+import type { QueuedMessage } from "./message-queue.js";
 import { resolveUserName } from "./user-cache.js";
 import { runRouter } from "../agent/router.js";
 import { runAgent } from "../agent/agent.js";
@@ -62,6 +63,7 @@ export function resetListenerState(): void {
   isShuttingDown = false;
   inFlightPlaceholders.clear();
   placeholderData.clear();
+  resetQueue();
 }
 
 /**
@@ -105,18 +107,50 @@ async function uploadCsvAttachments(
   }
 }
 
-export async function startSlackListener(): Promise<void> {
-  app = new App({
-    token: config.slack.botToken,
-    appToken: config.slack.appToken,
-    socketMode: true,
+export { getQueueStats, getTotalQueuedCount } from "./message-queue.js";
+
+/**
+ * Drains queued messages for a thread by re-injecting them into the handler.
+ * Runs asynchronously (fire-and-forget) so the current handler can return.
+ */
+function drainQueue(
+  threadTs: string,
+  client: ReturnType<typeof getSlackClient>,
+): void {
+  const next = dequeue(threadTs);
+  if (!next || !client) return;
+
+  // Re-inject the queued message as if it just arrived.
+  // The handler will see isProcessing = false (we just called markIdle)
+  // and process it normally.
+  const syntheticMessage = {
+    user: next.userId,
+    text: next.text,
+    ts: next.messageTs,
+    channel: next.channelId,
+    thread_ts: threadTs,
+    type: "message" as const,
+  };
+
+  // Fire-and-forget — errors are caught by handleMessage's own try/catch
+  handleMessage(syntheticMessage, client).catch((err) => {
+    log.error(`Error processing queued message in thread ${threadTs}`, err);
   });
+}
 
-  // Resolve the bot's own user ID so we can ignore its self-reactions
-  const authResult = await app.client.auth.test();
-  botUserId = authResult.user_id ?? null;
+interface SlackMessage {
+  subtype?: string;
+  text?: string;
+  bot_id?: string;
+  user?: string;
+  ts: string;
+  thread_ts?: string;
+  channel: string;
+  type: string;
+}
 
-  app.message(async ({ message, client }) => {
+async function handleMessage(message: SlackMessage, client: ReturnType<typeof getSlackClient>): Promise<void> {
+  if (!client) return;
     // Type guard: only handle regular messages
     if (message.subtype) return;
     if (!("text" in message) || !message.text) return;
@@ -199,17 +233,25 @@ export async function startSlackListener(): Promise<void> {
 
       // Step 2: If the router says we need the agent, run it
       if (routerResult.needsAgent) {
-        // Check rate limit before starting agent
-        if (isRateLimited(userId)) {
+        // If an agent is already running for this thread, queue the message
+        if (isProcessing(threadTs)) {
+          enqueue({
+            threadTs,
+            messageTs: message.ts,
+            channelId: message.channel,
+            userId,
+            text: message.text,
+            queuedAt: Date.now(),
+          });
           await client.chat.postMessage({
             channel: message.channel,
             thread_ts: threadTs,
-            text: "I'm still working on your previous question. I'll get to this one next.",
+            text: "I'll get to this after your current question.",
           });
-          updateEvent(dashEvent.id, { status: "complete" });
+          updateEvent(dashEvent.id, { status: "queued" });
           return;
         }
-        recordAgentRun(userId);
+        markProcessing(threadTs);
 
         updateEvent(dashEvent.id, { status: "agent_running" });
 
@@ -327,6 +369,8 @@ export async function startSlackListener(): Promise<void> {
             log.info(
               `Agent (very_low) responded in thread ${threadTs} (cost: $${response.subscriptionCostUsd.toFixed(4)}, turns: ${response.turns})`,
             );
+            markIdle(threadTs);
+            drainQueue(threadTs, client);
             return;
           } catch (fastError) {
             const fastErrorMsg = fastError instanceof Error ? fastError.message : String(fastError);
@@ -618,6 +662,8 @@ export async function startSlackListener(): Promise<void> {
           // Remove from in-flight tracking
           inFlightPlaceholders.delete(placeholderId);
           placeholderData.delete(placeholderId);
+          markIdle(threadTs);
+          drainQueue(threadTs, client);
         }
       } else if (routerResult.error) {
         // Router errored — still send the friendly message but mark as error
@@ -671,6 +717,21 @@ export async function startSlackListener(): Promise<void> {
 
       notifyError("Handler Error", error instanceof Error ? error.message : String(error), errorContext).catch(() => {});
     }
+}
+
+export async function startSlackListener(): Promise<void> {
+  app = new App({
+    token: config.slack.botToken,
+    appToken: config.slack.appToken,
+    socketMode: true,
+  });
+
+  // Resolve the bot's own user ID so we can ignore its self-reactions
+  const authResult = await app.client.auth.test();
+  botUserId = authResult.user_id ?? null;
+
+  app.message(async ({ message, client }) => {
+    await handleMessage(message as SlackMessage, client);
   });
 
   const positiveReactions = new Set(["thumbsup", "+1"]);

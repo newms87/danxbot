@@ -26,7 +26,7 @@ export interface MessageEvent {
   apiCalls: ApiCallUsage[] | null;
   apiCostUsd: number | null;
   agentUsage: AgentUsageSummary | null;
-  status: "received" | "routing" | "routed" | "agent_running" | "complete" | "error";
+  status: "received" | "routing" | "routed" | "agent_running" | "queued" | "complete" | "error";
   error: string | null;
   routerRequest: Record<string, unknown> | null;
   routerRawResponse: Record<string, unknown> | null;

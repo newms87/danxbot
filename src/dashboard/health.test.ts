@@ -7,8 +7,12 @@ vi.mock("./events.js", () => ({
 }));
 
 const mockIsSlackConnected = vi.fn();
+const mockGetQueueStats = vi.fn().mockReturnValue({});
+const mockGetTotalQueuedCount = vi.fn().mockReturnValue(0);
 vi.mock("../slack/listener.js", () => ({
   isSlackConnected: (...args: unknown[]) => mockIsSlackConnected(...args),
+  getQueueStats: (...args: unknown[]) => mockGetQueueStats(...args),
+  getTotalQueuedCount: (...args: unknown[]) => mockGetTotalQueuedCount(...args),
 }));
 
 const mockQuery = vi.fn();
@@ -143,5 +147,37 @@ describe("getHealthStatus", () => {
     const health = await getHealthStatus();
 
     expect(health.events_count).toBe(0);
+  });
+
+  it("returns queued_messages count from queue", async () => {
+    mockIsSlackConnected.mockReturnValue(true);
+    mockGetEvents.mockReturnValue([]);
+    mockGetTotalQueuedCount.mockReturnValue(3);
+
+    const health = await getHealthStatus();
+
+    expect(health.queued_messages).toBe(3);
+  });
+
+  it("returns queue_by_thread from queue stats", async () => {
+    mockIsSlackConnected.mockReturnValue(true);
+    mockGetEvents.mockReturnValue([]);
+    mockGetQueueStats.mockReturnValue({ "thread-A": 2, "thread-B": 1 });
+
+    const health = await getHealthStatus();
+
+    expect(health.queue_by_thread).toEqual({ "thread-A": 2, "thread-B": 1 });
+  });
+
+  it("returns zero queued_messages when queue is empty", async () => {
+    mockIsSlackConnected.mockReturnValue(true);
+    mockGetEvents.mockReturnValue([]);
+    mockGetTotalQueuedCount.mockReturnValue(0);
+    mockGetQueueStats.mockReturnValue({});
+
+    const health = await getHealthStatus();
+
+    expect(health.queued_messages).toBe(0);
+    expect(health.queue_by_thread).toEqual({});
   });
 });

@@ -160,7 +160,6 @@ export const config = {
     agentTimeoutMs:
       parseInt(optional("DISPATCH_AGENT_TIMEOUT", "3600"), 10) * 1000,
   },
-  rateLimitSeconds: parseInt(optional("RATE_LIMIT_SECONDS", "30"), 10),
   logLevel: optional("LOG_LEVEL", "info"),
   logsDir: optional("DANXBOT_LOGS_DIR", isHost ? "./logs" : "/danxbot/logs"),
 } as const;
@@ -214,12 +213,6 @@ export function validateConfig(): void {
       path: "agent.maxRetries",
       value: config.agent.maxRetries,
       min: 0,
-      exclusive: false,
-    },
-    {
-      path: "rateLimitSeconds",
-      value: config.rateLimitSeconds,
-      min: 1,
       exclusive: false,
     },
     {
