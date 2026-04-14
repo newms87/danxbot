@@ -21,18 +21,9 @@ import {
   clearSessionId,
   isBotParticipant,
 } from "../threads.js";
+import { isOperationalError } from "../errors/patterns.js";
 
 const log = createLogger("slack");
-
-/** The RepoContext this listener is bound to. Set by startSlackListener(). */
-let repoCtx: RepoContext;
-
-let app: App;
-let botUserId: string | null = null;
-let slackConnected = false;
-let isShuttingDown = false;
-
-import { isOperationalError } from "../errors/patterns.js";
 
 // Track in-flight agent placeholders for graceful shutdown
 interface InFlightPlaceholder {
@@ -40,11 +31,25 @@ interface InFlightPlaceholder {
   ts: string;
   threadTs: string;
 }
-const inFlightPlaceholders = new Set<string>();
-const placeholderData = new Map<string, InFlightPlaceholder>();
+
+/** Per-repo listener state. Each repo with Slack gets its own independent entry. */
+interface ListenerState {
+  repo: RepoContext;
+  app: App;
+  botUserId: string | null;
+  connected: boolean;
+  inFlightPlaceholders: Set<string>;
+  placeholderData: Map<string, InFlightPlaceholder>;
+}
+
+const listeners = new Map<string, ListenerState>();
+let isShuttingDown = false;
 
 export function isSlackConnected(): boolean {
-  return slackConnected;
+  for (const state of listeners.values()) {
+    if (state.connected) return true;
+  }
+  return false;
 }
 
 export function stopSlackListener(): void {
@@ -52,11 +57,19 @@ export function stopSlackListener(): void {
 }
 
 export function getInFlightPlaceholders(): InFlightPlaceholder[] {
-  return Array.from(placeholderData.values());
+  const all: InFlightPlaceholder[] = [];
+  for (const state of listeners.values()) {
+    all.push(...state.placeholderData.values());
+  }
+  return all;
 }
 
 export function getSlackClient() {
-  return app?.client;
+  // Return the first connected listener's client (for shutdown cleanup)
+  for (const state of listeners.values()) {
+    if (state.connected) return state.app.client;
+  }
+  return undefined;
 }
 
 /**
@@ -64,8 +77,7 @@ export function getSlackClient() {
  */
 export function resetListenerState(): void {
   isShuttingDown = false;
-  inFlightPlaceholders.clear();
-  placeholderData.clear();
+  listeners.clear();
   resetQueue();
 }
 
@@ -117,15 +129,13 @@ export { getQueueStats, getTotalQueuedCount } from "./message-queue.js";
  * Runs asynchronously (fire-and-forget) so the current handler can return.
  */
 function drainQueue(
+  ls: ListenerState,
   threadTs: string,
   client: ReturnType<typeof getSlackClient>,
 ): void {
   const next = dequeue(threadTs);
   if (!next || !client) return;
 
-  // Re-inject the queued message as if it just arrived.
-  // The handler will see isProcessing = false (we just called markIdle)
-  // and process it normally.
   const syntheticMessage = {
     user: next.userId,
     text: next.text,
@@ -135,8 +145,7 @@ function drainQueue(
     type: "message" as const,
   };
 
-  // Fire-and-forget — errors are caught by handleMessage's own try/catch
-  handleMessage(syntheticMessage, client).catch((err) => {
+  handleMessage(ls, syntheticMessage, client).catch((err) => {
     log.error(`Error processing queued message in thread ${threadTs}`, err);
   });
 }
@@ -152,7 +161,7 @@ interface SlackMessage {
   type: string;
 }
 
-async function handleMessage(message: SlackMessage, client: ReturnType<typeof getSlackClient>): Promise<void> {
+async function handleMessage(ls: ListenerState, message: SlackMessage, client: ReturnType<typeof getSlackClient>): Promise<void> {
   if (!client) return;
     // Type guard: only handle regular messages
     if (message.subtype) return;
@@ -160,7 +169,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
     if ("bot_id" in message && message.bot_id) return;
 
     // Only process messages from this repo's configured channel
-    if (message.channel !== repoCtx.slack.channelId) return;
+    if (message.channel !== ls.repo.slack.channelId) return;
 
     // Reject new messages during shutdown
     if (isShuttingDown) return;
@@ -172,7 +181,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
 
     // Track in dashboard
     const dashEvent = createEvent({
-      repoName: repoCtx.name,
+      repoName: ls.repo.name,
       threadTs,
       messageTs: message.ts,
       channelId: message.channel,
@@ -216,7 +225,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
         routerRawResponse: routerResult.rawResponse,
       });
       log.info(
-        `Router: needsAgent=${routerResult.needsAgent}, reason="${routerResult.reason}"`,
+        `[${ls.repo.name}] Router: needsAgent=${routerResult.needsAgent}, reason="${routerResult.reason}"`,
       );
 
       // Send the quick response immediately
@@ -272,7 +281,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
         if (routerResult.complexity === "very_low") {
           try {
             const response = await runAgent(
-              repoCtx,
+              ls.repo,
               message.text,
               thread.sessionId,
               undefined,
@@ -372,15 +381,15 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
               .catch(() => {});
 
             log.info(
-              `Agent (very_low) responded in thread ${threadTs} (cost: $${response.subscriptionCostUsd.toFixed(4)}, turns: ${response.turns})`,
+              `[${ls.repo.name}] Agent (very_low) responded in thread ${threadTs} (cost: $${response.subscriptionCostUsd.toFixed(4)}, turns: ${response.turns})`,
             );
             markIdle(threadTs);
-            drainQueue(threadTs, client);
+            drainQueue(ls, threadTs, client);
             return;
           } catch (fastError) {
             const fastErrorMsg = fastError instanceof Error ? fastError.message : String(fastError);
             log.warn(
-              `Agent (very_low) failed in thread ${threadTs}, escalating to medium: ${fastErrorMsg}`,
+              `[${ls.repo.name}] Agent (very_low) failed in thread ${threadTs}, escalating to medium: ${fastErrorMsg}`,
             );
             // Clear session if conversation got too long so escalated path starts fresh
             if (fastErrorMsg.includes("msg_too_long")) {
@@ -425,8 +434,8 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
 
         // Track in-flight placeholder for shutdown cleanup
         const placeholderId = `${message.channel}-${placeholderTs}`;
-        inFlightPlaceholders.add(placeholderId);
-        placeholderData.set(placeholderId, {
+        ls.inFlightPlaceholders.add(placeholderId);
+        ls.placeholderData.set(placeholderId, {
           channel: message.channel,
           ts: placeholderTs,
           threadTs,
@@ -457,7 +466,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
           for (let attempt = 0; attempt < maxAttempts && !handled; attempt++) {
             try {
               const agentPromise = runAgent(
-                repoCtx,
+                ls.repo,
                 message.text,
                 thread.sessionId,
                 (text) => hbManager.onStream(text),
@@ -471,7 +480,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
                 // Agent timed out — do NOT retry
                 const elapsed = Math.round(timeoutMs / 1000);
                 log.error(
-                  `Agent timed out after ${elapsed}s in thread ${threadTs}`,
+                  `[${ls.repo.name}] Agent timed out after ${elapsed}s in thread ${threadTs}`,
                 );
 
                 updateEvent(dashEvent.id, {
@@ -492,7 +501,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
                   "brain",
                   "warning",
                 );
-                notifyError(repoCtx.trello, "Agent Timeout", `Agent timed out after ${elapsed}s`, errorContext).catch(() => {});
+                notifyError(ls.repo.trello, "Agent Timeout", `Agent timed out after ${elapsed}s`, errorContext).catch(() => {});
                 handled = true;
               } else {
                 // Stop heartbeat BEFORE posting final response to prevent race conditions
@@ -582,7 +591,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
                   .catch(() => {});
 
                 log.info(
-                  `Agent responded in thread ${threadTs} (cost: $${response.subscriptionCostUsd.toFixed(4)}, turns: ${response.turns})`,
+                  `[${ls.repo.name}] Agent responded in thread ${threadTs} (cost: $${response.subscriptionCostUsd.toFixed(4)}, turns: ${response.turns})`,
                 );
                 handled = true;
               }
@@ -609,7 +618,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
                   (Date.now() - heartbeatStart) / 1000,
                 );
                 log.error(
-                  `Agent crashed after ${elapsed}s in thread ${threadTs}: ${errorMsg}`,
+                  `[${ls.repo.name}] Agent crashed after ${elapsed}s in thread ${threadTs}: ${errorMsg}`,
                 );
 
                 updateEvent(dashEvent.id, {
@@ -630,13 +639,13 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
                   "brain",
                   "x",
                 );
-                notifyError(repoCtx.trello, "Agent Crash", errorMsg, errorContext).catch(() => {});
+                notifyError(ls.repo.trello, "Agent Crash", errorMsg, errorContext).catch(() => {});
                 handled = true;
               } else {
                 // Retry — update placeholder with retrying status
                 agentRetried = true;
                 log.warn(
-                  `Agent crashed in thread ${threadTs} (attempt ${attempt + 1}/${maxAttempts}), retrying: ${errorMsg}`,
+                  `[${ls.repo.name}] Agent crashed in thread ${threadTs} (attempt ${attempt + 1}/${maxAttempts}), retrying: ${errorMsg}`,
                 );
 
                 await client.chat.update({
@@ -666,10 +675,10 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
         } finally {
           hbManager.stop();
           // Remove from in-flight tracking
-          inFlightPlaceholders.delete(placeholderId);
-          placeholderData.delete(placeholderId);
+          ls.inFlightPlaceholders.delete(placeholderId);
+          ls.placeholderData.delete(placeholderId);
           markIdle(threadTs);
-          drainQueue(threadTs, client);
+          drainQueue(ls, threadTs, client);
         }
       } else if (routerResult.error) {
         // Router errored — still send the friendly message but mark as error
@@ -687,12 +696,12 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
           .catch(() => {});
 
         if (routerResult.isOperational) {
-          notifyError(repoCtx.trello, "Router Error", routerResult.error, errorContext, {
-            listId: repoCtx.trello.needsHelpListId,
-            labelId: repoCtx.trello.needsHelpLabelId,
+          notifyError(ls.repo.trello, "Router Error", routerResult.error, errorContext, {
+            listId: ls.repo.trello.needsHelpListId,
+            labelId: ls.repo.trello.needsHelpLabelId,
           }).catch(() => {});
         } else {
-          notifyError(repoCtx.trello, "Router Error", routerResult.error, errorContext).catch(() => {});
+          notifyError(ls.repo.trello, "Router Error", routerResult.error, errorContext).catch(() => {});
         }
       } else {
         // Router-only response, mark complete — capture router API usage
@@ -706,7 +715,7 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
         });
       }
     } catch (error) {
-      log.error(`Error handling message in thread ${threadTs}`, error);
+      log.error(`[${ls.repo.name}] Error handling message in thread ${threadTs}`, error);
       updateEvent(dashEvent.id, {
         status: "error",
         error: error instanceof Error ? error.message : String(error),
@@ -721,37 +730,47 @@ async function handleMessage(message: SlackMessage, client: ReturnType<typeof ge
         })
         .catch(() => {});
 
-      notifyError(repoCtx.trello, "Handler Error", error instanceof Error ? error.message : String(error), errorContext).catch(() => {});
+      notifyError(ls.repo.trello, "Handler Error", error instanceof Error ? error.message : String(error), errorContext).catch(() => {});
     }
 }
 
 export async function startSlackListener(repo: RepoContext): Promise<void> {
-  repoCtx = repo;
-  app = new App({
+  const app = new App({
     token: repo.slack.botToken,
     appToken: repo.slack.appToken,
     socketMode: true,
   });
 
+  const ls: ListenerState = {
+    repo,
+    app,
+    botUserId: null,
+    connected: false,
+    inFlightPlaceholders: new Set(),
+    placeholderData: new Map(),
+  };
+
+  listeners.set(repo.name, ls);
+
   // Resolve the bot's own user ID so we can ignore its self-reactions
   const authResult = await app.client.auth.test();
-  botUserId = authResult.user_id ?? null;
+  ls.botUserId = authResult.user_id ?? null;
 
   app.message(async ({ message, client }) => {
-    await handleMessage(message as SlackMessage, client);
+    await handleMessage(ls, message as SlackMessage, client);
   });
 
   const positiveReactions = new Set(["thumbsup", "+1"]);
   const negativeReactions = new Set(["thumbsdown", "-1"]);
 
   app.event("reaction_added", async ({ event }) => {
-    // Only process reactions from the configured channel
-    if (!("channel" in event.item) || event.item.channel !== repoCtx.slack.channelId) return;
-    if (botUserId && event.user === botUserId) return;
+    // Only process reactions from this repo's configured channel
+    if (!("channel" in event.item) || event.item.channel !== ls.repo.slack.channelId) return;
+    if (ls.botUserId && event.user === ls.botUserId) return;
 
     // Strip skin-tone modifiers (e.g. "+1::skin-tone-2" → "+1")
     const reaction = event.reaction.replace(/::skin-tone-\d+$/, "");
-    log.info(`Reaction received: ${reaction} from ${event.user}`);
+    log.info(`[${ls.repo.name}] Reaction received: ${reaction} from ${event.user}`);
     const isPositive = positiveReactions.has(reaction);
     const isNegative = negativeReactions.has(reaction);
     if (!isPositive && !isNegative) return;
@@ -761,10 +780,10 @@ export async function startSlackListener(repo: RepoContext): Promise<void> {
 
     const feedback = isPositive ? "positive" : "negative";
     updateEvent(dashEvent.id, { feedback });
-    log.info(`Feedback recorded: ${feedback} for event ${dashEvent.id} (reaction: ${event.reaction})`);
+    log.info(`[${ls.repo.name}] Feedback recorded: ${feedback} for event ${dashEvent.id} (reaction: ${event.reaction})`);
   });
 
   await app.start();
-  slackConnected = true;
-  log.info("Danxbot is running (Socket Mode)");
+  ls.connected = true;
+  log.info(`[${repo.name}] Slack listener running (Socket Mode)`);
 }

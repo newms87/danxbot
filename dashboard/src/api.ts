@@ -1,12 +1,26 @@
 import type { MessageEvent, AnalyticsSummary } from "./types";
 
-export async function fetchEvents(): Promise<MessageEvent[]> {
-  const res = await fetch("/api/events");
+export interface RepoInfo {
+  name: string;
+  url: string;
+  slackEnabled: boolean;
+  dbEnabled: boolean;
+}
+
+export async function fetchRepos(): Promise<RepoInfo[]> {
+  const res = await fetch("/api/repos");
   return res.json();
 }
 
-export async function fetchAnalytics(): Promise<AnalyticsSummary> {
-  const res = await fetch("/api/analytics");
+export async function fetchEvents(repo?: string): Promise<MessageEvent[]> {
+  const params = repo ? `?repo=${encodeURIComponent(repo)}` : "";
+  const res = await fetch(`/api/events${params}`);
+  return res.json();
+}
+
+export async function fetchAnalytics(repo?: string): Promise<AnalyticsSummary> {
+  const params = repo ? `?repo=${encodeURIComponent(repo)}` : "";
+  const res = await fetch(`/api/analytics${params}`);
   return res.json();
 }
 

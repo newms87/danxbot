@@ -89,9 +89,24 @@ export async function startDashboard(): Promise<void> {
       return;
     }
 
+    if (url.pathname === "/api/repos") {
+      json(res, 200, repoContexts.map((r) => ({
+        name: r.name,
+        url: r.url,
+        slackEnabled: r.slack.enabled,
+        dbEnabled: r.db.enabled,
+      })));
+      return;
+    }
+
     if (url.pathname === "/api/events") {
+      const repoFilter = url.searchParams.get("repo");
+      let events = getEvents();
+      if (repoFilter) {
+        events = events.filter((e) => e.repoName === repoFilter);
+      }
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(getEvents()));
+      res.end(JSON.stringify(events));
       return;
     }
 
@@ -121,8 +136,9 @@ export async function startDashboard(): Promise<void> {
     }
 
     if (url.pathname === "/api/analytics") {
+      const repoFilter = url.searchParams.get("repo");
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(getAnalytics()));
+      res.end(JSON.stringify(getAnalytics(repoFilter || undefined)));
       return;
     }
 

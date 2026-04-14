@@ -9,6 +9,8 @@ import DetailPanel from "./components/DetailPanel.vue";
 const {
   events,
   analytics,
+  repos,
+  selectedRepo,
   selectedEvent,
   connected,
   searchQuery,
@@ -28,8 +30,10 @@ onUnmounted(destroy);
 <template>
   <div class="max-w-7xl mx-auto px-4 py-6">
     <DashboardHeader
+      v-model:selected-repo="selectedRepo"
       :connected="connected"
       :event-count="events.length"
+      :repos="repos"
       @refresh="fetchAll"
     />
 

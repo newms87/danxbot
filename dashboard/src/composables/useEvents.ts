@@ -1,6 +1,7 @@
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import type { MessageEvent, AnalyticsSummary } from "../types";
-import { fetchEvents, fetchAnalytics, connectSSE } from "../api";
+import { fetchEvents, fetchAnalytics, fetchRepos, connectSSE } from "../api";
+import type { RepoInfo } from "../api";
 
 const events = ref<MessageEvent[]>([]);
 const analytics = ref<AnalyticsSummary>({
@@ -19,6 +20,8 @@ const analytics = ref<AnalyticsSummary>({
   feedbackNegative: 0,
   feedbackRate: 0,
 });
+const repos = ref<RepoInfo[]>([]);
+const selectedRepo = ref<string>("");
 const selectedEvent = ref<MessageEvent | null>(null);
 const connected = ref(false);
 const searchQuery = ref("");
@@ -28,6 +31,10 @@ let cleanup: (() => void) | null = null;
 
 const filteredEvents = computed(() => {
   let filtered = events.value;
+  // Repo filtering is done server-side, but also filter SSE events client-side
+  if (selectedRepo.value) {
+    filtered = filtered.filter((e) => e.repoName === selectedRepo.value);
+  }
   if (searchQuery.value) {
     const q = searchQuery.value.toLowerCase();
     filtered = filtered.filter((e) => e.text.toLowerCase().includes(q));
@@ -45,7 +52,8 @@ const filteredEvents = computed(() => {
 });
 
 async function fetchAll() {
-  const [evts, stats] = await Promise.all([fetchEvents(), fetchAnalytics()]);
+  const repo = selectedRepo.value || undefined;
+  const [evts, stats] = await Promise.all([fetchEvents(repo), fetchAnalytics(repo)]);
   events.value = evts;
   analytics.value = stats;
 }
@@ -59,6 +67,11 @@ function clearSelection() {
 }
 
 function init() {
+  // Load available repos
+  fetchRepos().then((r) => {
+    repos.value = r;
+  });
+
   fetchAll();
   cleanup = connectSSE(
     (updated) => {
@@ -71,11 +84,17 @@ function init() {
       if (selectedEvent.value?.id === updated.id) {
         selectedEvent.value = updated;
       }
-      fetchAnalytics().then((data) => (analytics.value = data));
+      const repo = selectedRepo.value || undefined;
+      fetchAnalytics(repo).then((data) => (analytics.value = data));
     },
     () => (connected.value = true),
     () => (connected.value = false),
   );
+
+  // Re-fetch when repo filter changes
+  watch(selectedRepo, () => {
+    fetchAll();
+  });
 }
 
 function destroy() {
@@ -87,6 +106,8 @@ export function useEvents() {
   return {
     events,
     analytics,
+    repos,
+    selectedRepo,
     selectedEvent,
     connected,
     searchQuery,

@@ -145,8 +145,9 @@ export function getResponseTimeMs(event: MessageEvent): number {
   return (event.agentResponseAt || event.routerResponseAt || event.receivedAt) - event.receivedAt;
 }
 
-export function getAnalytics(): AnalyticsSummary {
-  const completed = events.filter((e) => e.status === "complete");
+export function getAnalytics(repoFilter?: string): AnalyticsSummary {
+  const base = repoFilter ? events.filter((e) => e.repoName === repoFilter) : events;
+  const completed = base.filter((e) => e.status === "complete");
   const withAgent = completed.filter((e) => e.agentResponseAt !== null);
   const routerOnly = completed.filter((e) => e.agentResponseAt === null);
 
@@ -164,12 +165,12 @@ export function getAnalytics(): AnalyticsSummary {
   const totalSubscriptionCost = withAgent.reduce((sum, e) => sum + (e.subscriptionCostUsd || 0), 0);
   const totalApiCost = completed.reduce((sum, e) => sum + (e.apiCostUsd || 0), 0);
 
-  const feedbackPositive = events.filter((e) => e.feedback === "positive").length;
-  const feedbackNegative = events.filter((e) => e.feedback === "negative").length;
+  const feedbackPositive = base.filter((e) => e.feedback === "positive").length;
+  const feedbackNegative = base.filter((e) => e.feedback === "negative").length;
   const feedbackTotal = feedbackPositive + feedbackNegative;
 
   return {
-    totalMessages: events.length,
+    totalMessages: base.length,
     completedMessages: completed.length,
     routerOnlyMessages: routerOnly.length,
     agentMessages: withAgent.length,
@@ -179,7 +180,7 @@ export function getAnalytics(): AnalyticsSummary {
     totalSubscriptionCostUsd: totalSubscriptionCost,
     totalApiCostUsd: totalApiCost,
     totalCombinedCostUsd: totalSubscriptionCost + totalApiCost,
-    errorCount: events.filter((e) => e.status === "error").length,
+    errorCount: base.filter((e) => e.status === "error").length,
     feedbackPositive,
     feedbackNegative,
     feedbackRate: completed.length ? feedbackTotal / completed.length : 0,
