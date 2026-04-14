@@ -16,9 +16,18 @@ Run `./install.sh` to launch the interactive setup wizard. It checks prerequisit
 
 The setup generates `.danxbot/config/` in the connected repo, `.env`, and tailored rules files. No manual `.env` editing needed.
 
-## Connected Repo
+## Connected Repos (Multi-Repo)
 
-All repo-specific config lives in `.danxbot/config/` inside the connected repo (version controlled). Trello IDs, repo commands, overview, workflow, domain docs, and agent tools are stored there. Secrets (API keys, tokens, passwords) stay in danxbot's `.env`. The poller syncs config to `.claude/rules/`, `docs/`, and `repo-overrides/` before each Claude spawn. Connected repos live at `/danxbot/repos/<name>/` (symlinks to the actual working copies, e.g., `/home/newms/web/gpt-manager`). This is the agent's working directory for Trello card work and schema builder dispatches.
+Danxbot manages multiple repos simultaneously. Each repo is fully isolated — its own poller, Slack connection, Trello board, and database credentials. Danxbot remains a single server.
+
+Repo-specific config lives in two places inside each connected repo:
+
+1. `<repo>/.danxbot/config/` (committed) — config.yml, trello.yml, overview.md, workflow.md, compose.yml, tools, docs
+2. `<repo>/.danxbot/.env` (gitignored) — secrets only, standardized DANX_* prefix: DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN
+
+Danxbot's own `.env` keeps only shared infrastructure: ANTHROPIC_API_KEY, CLAUDE_AUTH_MODE, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL.
+
+Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists all repos: `platform:url,danxbot:url`. At startup, `loadRepoContexts()` builds a `RepoContext[]` array from each repo's config. All services (poller, Slack, agent) receive `RepoContext` as a parameter.
 
 ### Agent Tools
 
@@ -32,10 +41,11 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
                Agent (Claude Code SDK) → detailed response to Slack
 ```
 
-- **Router** (`src/agent/agent.ts:runRouter`): Anthropic API call to Haiku for instant triage
-- **Agent** (`src/agent/agent.ts:runAgent`): Claude Code SDK `query()` for deep exploration
-- **Dashboard** (`dashboard/`): Vite + Vue 3 + Tailwind CSS 4 SPA; API server on port 5555, Vite dev on 5173
-- **Slack listener** (`src/slack/listener.ts`): Socket Mode via @slack/bolt (optional — bot works without Slack for Trello card processing)
+- **Router** (`src/agent/router.ts`): Anthropic API call to Haiku for instant triage
+- **Agent** (`src/agent/agent.ts:runAgent`): Claude Code SDK `query()` for deep exploration — accepts `RepoContext` for cwd
+- **Dashboard** (`dashboard/`): Vite + Vue 3 + Tailwind CSS 4 SPA; API server on port 5555, Vite dev on 5173. Supports `?repo=` filtering and repo selector.
+- **Slack listener** (`src/slack/listener.ts`): One `@slack/bolt` App per repo via `Map<string, ListenerState>`. Each repo with Slack gets independent state.
+- **Poller** (`src/poller/index.ts`): One poller per repo via `Map<string, RepoPollerState>`. Independent lock files (`.poller-running-<name>`).
 
 ## Key Commands
 

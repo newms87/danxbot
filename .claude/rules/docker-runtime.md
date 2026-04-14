@@ -70,7 +70,7 @@ All repo config lives in `.danxbot/config/` (version controlled). Secrets stay i
   features.md        # ideator's persistent memory (gitignored)
 ```
 
-Secrets (API keys, tokens, passwords) stay in danxbot's `.env` and `repo-overrides/<name>.env`. The poller syncs `.danxbot/config/` to target locations (`.claude/rules/`, `docs/`, `repo-overrides/`) before each Claude spawn.
+Per-repo secrets live in `<repo>/.danxbot/.env` (gitignored) using standardized DANX_* prefix: DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN. Danxbot's own `.env` keeps only shared infrastructure (ANTHROPIC_API_KEY, REPOS, DANXBOT_DB_*, etc.). The poller syncs `.danxbot/config/` to target locations (`.claude/rules/`, `docs/`, `repo-overrides/`) before each Claude spawn.
 
 ## Tools Available Inside the Container
 
@@ -99,6 +99,8 @@ Do not use `npm start` or `npm run dev` on the host. The bot requires:
 | `src/slack/listener.ts` | Slack message handler, orchestrates router → agent flow |
 | `src/dashboard/events.ts` | Event tracking, SSE broadcasting, analytics |
 | `src/dashboard/server.ts` | HTTP server: API routes + static file serving |
-| `src/config.ts` | Environment variable configuration |
+| `src/config.ts` | Shared config + loadRepoContexts() for per-repo config |
+| `src/types.ts` | RepoContext, TrelloConfig, SlackConfig interfaces |
+| `src/env-file.ts` | Parser for per-repo .danxbot/.env files |
 | `src/threads.ts` | Thread state persistence |
 | `src/slack/formatter.ts` | Markdown → Slack mrkdwn conversion |
