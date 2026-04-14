@@ -41,6 +41,12 @@ if [ ! -d "$REPO_DIR" ]; then
 fi
 
 cd "$REPO_DIR"
+
+# Source the target repo's .env so MCP env var placeholders resolve correctly.
+if [ -f "$REPO_DIR/.env" ]; then
+  source "$REPO_DIR/.env"
+fi
+
 export DANXBOT_EPHEMERAL=1
 export DANXBOT_PROJECT_ROOT="$DANXBOT_ROOT"
 claude '/danx-ideate' --dangerously-skip-permissions || true

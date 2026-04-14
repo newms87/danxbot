@@ -69,7 +69,7 @@ logs: ## Tail logs for infra or a worker (usage: make logs or make logs REPO=pla
 
 launch-worker-host: ## Start a worker on the host (usage: make launch-worker-host REPO=platform)
 	@if [ -z "$(REPO)" ]; then echo "Error: REPO is required"; exit 1; fi
-	DANXBOT_REPO_NAME=$(REPO) npx tsx src/index.ts
+	@set -a && . ./.env && set +a && DANXBOT_REPO_NAME=$(REPO) npx tsx src/index.ts
 
 launch-dashboard-host: ## Start the dashboard on the host
-	npx tsx src/index.ts
+	@set -a && . ./.env && set +a && npx tsx src/index.ts

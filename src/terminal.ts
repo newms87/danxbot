@@ -44,8 +44,8 @@ export function buildDispatchScript(
   settingsDir: string,
   options: DispatchScriptOptions,
 ): string {
-  const agentsFlag = options.agentsFile
-    ? `--agents "$(cat '${options.agentsFile}')"`
+  const agentsLine = options.agentsFile
+    ? `  --agents "$(cat '${options.agentsFile}')" \\\n`
     : "";
 
   const scriptPath = join(settingsDir, "run-agent.sh");
@@ -67,11 +67,10 @@ report_status() {
 
 report_status "running" ""
 
-claude --dangerously-skip-permissions \\
+claude --mcp-config '${options.mcpConfigPath}' \\
+  --dangerously-skip-permissions \\
   --verbose \\
-  --mcp-config '${options.mcpConfigPath}' \\
-  ${agentsFlag} \\
-  "Read ${options.promptFile} and execute the task described in it."
+${agentsLine}  "Read ${options.promptFile} and execute the task described in it."
 
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 0 ]; then

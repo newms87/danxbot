@@ -46,6 +46,13 @@ if [ ! -d "$REPO_DIR" ]; then
 fi
 
 cd "$REPO_DIR"
+
+# Source the target repo's .env so MCP env var placeholders resolve correctly.
+# This overrides danxbot's .env values with repo-specific ones (e.g., TRELLO_API_KEY).
+if [ -f "$REPO_DIR/.env" ]; then
+  source "$REPO_DIR/.env"
+fi
+
 export DANXBOT_EPHEMERAL=1
 export DANXBOT_PROJECT_ROOT="$DANXBOT_ROOT"
 claude '/danx-next' --dangerously-skip-permissions || true
