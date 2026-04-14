@@ -3,8 +3,6 @@ import type { MessageEvent, AnalyticsSummary } from "./types";
 export interface RepoInfo {
   name: string;
   url: string;
-  slackEnabled: boolean;
-  dbEnabled: boolean;
 }
 
 export async function fetchRepos(): Promise<RepoInfo[]> {

@@ -36,12 +36,10 @@ vi.mock("fs/promises", () => ({
 
 // Mock config
 vi.mock("../config.js", () => ({
-  config: {},
-}));
-
-// Mock constants (prevents module-level YAML loading)
-vi.mock("../poller/constants.js", () => ({
-  getReposBase: () => "/danxbot/repos",
+  repos: [
+    { name: "platform", url: "https://github.com/test/platform.git", localPath: "/danxbot/repos/platform" },
+    { name: "danxbot", url: "https://github.com/test/danxbot.git", localPath: "/danxbot/repos/danxbot" },
+  ],
 }));
 
 vi.mock("../logger.js", () => ({

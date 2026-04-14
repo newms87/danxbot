@@ -156,14 +156,34 @@ describe("getRepoPath", () => {
 });
 
 describe("repoContexts", () => {
-  it("loads repo contexts for all configured repos", async () => {
+  it("loads repo contexts in host mode (legacy single-process)", async () => {
     const mod = await importConfig({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
+      DANXBOT_RUNTIME: "host",
     });
     expect(mod.repoContexts).toHaveLength(1);
     expect(mod.repoContexts[0].name).toBe("platform");
     expect(mod.repoContexts[0].trello.boardId).toBe("mock-board-id");
     expect(mod.repoContexts[0].trello.apiKey).toBe("mock-trello-key");
+  });
+
+  it("returns empty in docker mode without DANXBOT_REPO_NAME (dashboard mode)", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git",
+      DANXBOT_RUNTIME: "docker",
+    });
+    expect(mod.repoContexts).toEqual([]);
+    expect(mod.isDashboardMode).toBe(true);
+  });
+
+  it("loads only named repo in worker mode", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git,danxbot:https://github.com/test/danxbot.git",
+      DANXBOT_REPO_NAME: "platform",
+    });
+    expect(mod.repoContexts).toHaveLength(1);
+    expect(mod.repoContexts[0].name).toBe("platform");
+    expect(mod.isWorkerMode).toBe(true);
   });
 
   it("returns empty when no repos configured", async () => {
@@ -173,18 +193,29 @@ describe("repoContexts", () => {
 });
 
 describe("getRepoContext", () => {
-  it("returns context for a configured repo", async () => {
+  it("returns context for a configured repo in host mode", async () => {
     const mod = await importConfig({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
+      DANXBOT_RUNTIME: "host",
     });
     const ctx = mod.getRepoContext("platform");
     expect(ctx.name).toBe("platform");
     expect(ctx.trello.apiKey).toBe("mock-trello-key");
   });
 
+  it("returns context for named repo in worker mode", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://github.com/Flytedesk/platform.git",
+      DANXBOT_REPO_NAME: "platform",
+    });
+    const ctx = mod.getRepoContext("platform");
+    expect(ctx.name).toBe("platform");
+  });
+
   it("throws for unknown repo", async () => {
     const mod = await importConfig({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
+      DANXBOT_RUNTIME: "host",
     });
     expect(() => mod.getRepoContext("unknown")).toThrow('Repo "unknown" is not configured');
   });

@@ -9,46 +9,11 @@ import {
 import { eventsToCSV } from "./export.js";
 import { getHealthStatus } from "./health.js";
 import { createLogger } from "../logger.js";
-import { config, getRepoContext, repoContexts } from "../config.js";
-import {
-  launchAgent,
-  cancelJob,
-  getJobStatus,
-  buildMcpSettings,
-  type AgentJob,
-} from "../agent/launcher.js";
-import { spawnInTerminal, buildDispatchScript } from "../terminal.js";
-import { getReposBase } from "../poller/constants.js";
-import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { repos } from "../config.js";
 
 const log = createLogger("dashboard");
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || "5555", 10);
-
-/** Active dispatch jobs indexed by job ID */
-const activeJobs = new Map<string, AgentJob>();
-
-/** Parse JSON body from request */
-async function parseBody(
-  req: IncomingMessage,
-): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk: Buffer) => {
-      body += chunk.toString();
-    });
-    req.on("end", () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch {
-        reject(new Error("Invalid JSON body"));
-      }
-    });
-    req.on("error", reject);
-  });
-}
 
 /** Send JSON response */
 function json(res: ServerResponse, status: number, data: unknown): void {
@@ -90,11 +55,11 @@ export async function startDashboard(): Promise<void> {
     }
 
     if (url.pathname === "/api/repos") {
-      json(res, 200, repoContexts.map((r) => ({
+      // Dashboard reads repo names from REPOS env var (parsed at startup).
+      // Per-repo details (Slack, DB) are not available in dashboard mode.
+      json(res, 200, repos.map((r) => ({
         name: r.name,
         url: r.url,
-        slackEnabled: r.slack.enabled,
-        dbEnabled: r.db.enabled,
       })));
       return;
     }
@@ -186,160 +151,6 @@ export async function startDashboard(): Promise<void> {
       req.on("close", () => removeSSEClient(client));
       return;
     }
-
-    // --- Dispatch API (for remote agent launches from GPT Manager) ---
-
-    const method = req.method?.toUpperCase() || "GET";
-
-    if (method === "POST" && url.pathname === "/api/launch") {
-      try {
-        const body = await parseBody(req);
-        const task = body.task as string;
-        const agents = body.agents as
-          | Array<Record<string, unknown>>
-          | undefined;
-        const apiToken = body.api_token as string;
-        const apiUrl =
-          (body.api_url as string) || config.dispatch.defaultApiUrl;
-        const statusUrl = body.status_url as string | undefined;
-        const schemaDefinitionId = body.schema_definition_id as
-          | string
-          | undefined;
-
-        if (!task || !apiToken) {
-          json(res, 400, { error: "Missing required fields: task, api_token" });
-          return;
-        }
-
-        // Resolve target repo — required field, must match a configured repo
-        const repoName = body.repo as string | undefined;
-        if (!repoName) {
-          json(res, 400, { error: "Missing required field: repo" });
-          return;
-        }
-        try {
-          getRepoContext(repoName);
-        } catch {
-          const available = repoContexts.map((r) => r.name).join(", ");
-          json(res, 400, { error: `Unknown repo "${repoName}". Available: ${available}` });
-          return;
-        }
-
-        const maxRuntimeMs = body.max_runtime_ms as number | undefined;
-        const schemaRole = body.schema_role as string | undefined;
-
-        const launchOptions = {
-          task,
-          agents,
-          apiToken,
-          apiUrl,
-          statusUrl,
-          schemaDefinitionId,
-          schemaRole,
-          timeout: config.dispatch.agentTimeoutMs,
-          maxRuntimeMs,
-          repoName,
-        };
-
-        if (config.isHost) {
-          // Interactive mode: open in a Windows Terminal tab (same as poller)
-          const jobId = randomUUID();
-          const settingsDir = buildMcpSettings(launchOptions);
-
-          const promptFile = join(settingsDir, "prompt.md");
-          writeFileSync(promptFile, task);
-
-          let agentsFile: string | undefined;
-          if (agents && agents.length > 0) {
-            agentsFile = join(settingsDir, "agents.json");
-            writeFileSync(agentsFile, JSON.stringify(agents));
-          }
-
-          // Write debug logs
-          const logDir = join(config.logsDir, jobId);
-          try {
-            mkdirSync(logDir, { recursive: true });
-            writeFileSync(join(logDir, "prompt.md"), task);
-          } catch (e) {
-            log.warn("Failed to write dispatch debug log:", e);
-          }
-
-          const scriptPath = buildDispatchScript(settingsDir, {
-            promptFile,
-            mcpConfigPath: join(settingsDir, "settings.json"),
-            agentsFile,
-            statusUrl,
-            apiToken,
-          });
-
-          const agentCwd = join(getReposBase(), repoName);
-
-          spawnInTerminal({
-            title: `Schema Agent ${jobId.substring(0, 8)}`,
-            script: scriptPath,
-            cwd: agentCwd,
-          });
-
-          json(res, 200, { job_id: jobId, status: "launched" });
-        } else {
-          // Piped mode: stream-json with heartbeats and status tracking
-          const job = await launchAgent(launchOptions);
-
-          activeJobs.set(job.id, job);
-
-          // Clean up completed jobs after 1 hour
-          const cleanupInterval = setInterval(() => {
-            if (
-              job.status !== "running" &&
-              Date.now() - (job.completedAt?.getTime() || 0) > 3600000
-            ) {
-              activeJobs.delete(job.id);
-              clearInterval(cleanupInterval);
-            }
-          }, 60000);
-
-          json(res, 200, { job_id: job.id, status: "launched" });
-        }
-      } catch (err) {
-        log.error("Launch failed", err);
-        json(res, 500, {
-          error: err instanceof Error ? err.message : "Launch failed",
-        });
-      }
-      return;
-    }
-
-    const cancelMatch = url.pathname.match(/^\/api\/cancel\/(.+)$/);
-    if (method === "POST" && cancelMatch) {
-      const jobId = cancelMatch[1];
-      const job = activeJobs.get(jobId);
-      if (!job) {
-        json(res, 404, { error: "Job not found" });
-        return;
-      }
-      if (job.status !== "running") {
-        json(res, 409, { error: `Job is not running (status: ${job.status})` });
-        return;
-      }
-      const body = await parseBody(req);
-      await cancelJob(job, (body.api_token as string) || "");
-      json(res, 200, { status: "canceled" });
-      return;
-    }
-
-    const statusMatch = url.pathname.match(/^\/api\/status\/(.+)$/);
-    if (method === "GET" && statusMatch) {
-      const jobId = statusMatch[1];
-      const job = activeJobs.get(jobId);
-      if (!job) {
-        json(res, 404, { error: "Job not found" });
-        return;
-      }
-      json(res, 200, getJobStatus(job));
-      return;
-    }
-
-    // --- End Dispatch API ---
 
     // Serve static assets from dashboard/dist/
     if (url.pathname.startsWith("/assets/")) {

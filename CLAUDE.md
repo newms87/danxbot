@@ -51,11 +51,14 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 
 | Command | Use |
 |---------|-----|
-| `docker compose up -d` | Start the bot |
-| `docker compose down` | Stop the bot |
-| `docker compose up -d --force-recreate` | Restart (picks up code changes) |
-| `docker compose logs danxbot -f` | Tail logs |
-| `curl localhost:$DASHBOARD_PORT/health` | Check bot health status |
+| `make launch-infra` | Start shared infra (MySQL + dashboard) |
+| `make launch-worker REPO=platform` | Start a worker for a repo |
+| `make launch-all-workers` | Start workers for all configured repos |
+| `make stop-worker REPO=platform` | Stop a worker |
+| `make stop-infra` | Stop shared infrastructure |
+| `make logs` | Tail infra logs |
+| `make logs REPO=platform` | Tail worker logs |
+| `make build` | Build the danxbot Docker image |
 | `npx tsc --noEmit` | Type-check only (host) |
 | `npm run dashboard:dev` | Vite dev server on 5173 (HMR) |
 | `npm run dashboard:build` | Build dashboard for production |

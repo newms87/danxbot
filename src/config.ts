@@ -71,6 +71,17 @@ function parseRepos(envValue: string): RepoConfig[] {
 
 export const repos: RepoConfig[] = parseRepos(optional("REPOS", ""));
 
+/**
+ * Worker mode: DANXBOT_REPO_NAME is set — this process manages one repo only
+ * (poller, Slack listener, dispatch API). Dashboard is not started.
+ *
+ * Dashboard mode: DANXBOT_REPO_NAME is not set — this process runs the shared
+ * dashboard, migrations, and cleanup. No poller or Slack.
+ */
+export const workerRepoName = optional("DANXBOT_REPO_NAME", "");
+export const isWorkerMode = !!workerRepoName;
+export const isDashboardMode = !isWorkerMode;
+
 export function getRepoPath(name: string): string {
   const repo = repos.find((r) => r.name === name);
   if (!repo) {
@@ -289,9 +300,28 @@ export function loadRepoContexts(): RepoContext[] {
 
 /**
  * All loaded repo contexts. Loaded at startup.
- * Empty if no repos are configured (e.g., during testing without REPOS env var).
+ *
+ * Worker mode: loads only the named repo's context (one entry).
+ * Dashboard mode: empty — dashboard reads repo names from REPOS env var
+ * or the database, not from filesystem-loaded contexts.
+ * Legacy mode (no DANXBOT_REPO_NAME, REPOS set): loads all repos (backwards compat for tests/host).
  */
-export const repoContexts: RepoContext[] = repos.length > 0 ? loadRepoContexts() : [];
+function loadActiveRepoContexts(): RepoContext[] {
+  if (isWorkerMode) {
+    // Worker: load only the named repo
+    const existing = repos.find((r) => r.name === workerRepoName);
+    const repo = existing || { name: workerRepoName, url: "", localPath: `${getReposBase()}/${workerRepoName}` };
+    return [loadRepoContext(repo)];
+  }
+  // Dashboard mode or no repos: don't load repo contexts
+  // Legacy host mode (REPOS set, no DANXBOT_REPO_NAME): load all for backwards compat
+  if (repos.length > 0 && runtime === "host") {
+    return loadRepoContexts();
+  }
+  return [];
+}
+
+export const repoContexts: RepoContext[] = loadActiveRepoContexts();
 
 /**
  * Get a specific repo's context by name. Throws if not found.

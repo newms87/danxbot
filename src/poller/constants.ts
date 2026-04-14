@@ -11,15 +11,13 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
  * Resolve the base repos directory. Uses the project-relative `repos/` directory,
  * which works in both host mode (symlinks resolve natively) and Docker mode
  * (the directory is volume-mounted, and per-repo compose overrides mount symlink targets).
+ *
+ * Does NOT check existence — callers that need filesystem access should validate
+ * the path themselves. This allows dashboard mode to parse REPOS env var without
+ * requiring a repos/ directory on disk.
  */
 export function getReposBase(): string {
-  const reposPath = resolve(projectRoot, "repos");
-  if (!existsSync(reposPath)) {
-    throw new Error(
-      `Repos directory not found at ${reposPath}. Create a repos/ directory with symlinks to target repos.`,
-    );
-  }
-  return reposPath;
+  return resolve(projectRoot, "repos");
 }
 
 /**

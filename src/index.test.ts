@@ -7,10 +7,12 @@ const mockStartThreadCleanup = vi.fn().mockReturnValue("mock-thread-interval");
 const mockLoadEvents = vi.fn().mockResolvedValue(undefined);
 const mockStartEventCleanup = vi.fn().mockReturnValue("mock-event-interval");
 const mockStartDashboard = vi.fn().mockResolvedValue(undefined);
+const mockStartWorkerServer = vi.fn().mockResolvedValue(undefined);
 const mockStartSlackListener = vi.fn().mockResolvedValue(undefined);
 const mockGetSlackClient = vi.fn().mockReturnValue({ chat: {} });
 const mockInitShutdownHandlers = vi.fn();
 const mockRunMigrations = vi.fn().mockResolvedValue(undefined);
+const mockStartPoller = vi.fn();
 
 const MOCK_REPO = makeRepoContext();
 
@@ -36,6 +38,10 @@ vi.mock("./dashboard/server.js", () => ({
   startDashboard: mockStartDashboard,
 }));
 
+vi.mock("./worker/server.js", () => ({
+  startWorkerServer: mockStartWorkerServer,
+}));
+
 vi.mock("./dashboard/events.js", () => ({
   loadEvents: mockLoadEvents,
   startEventCleanup: mockStartEventCleanup,
@@ -53,9 +59,17 @@ vi.mock("./db/migrate.js", () => ({
   runMigrations: mockRunMigrations,
 }));
 
+vi.mock("./poller/index.js", () => ({
+  start: mockStartPoller,
+}));
+
+// Default: legacy mode (repoContexts populated, no DANXBOT_REPO_NAME)
 vi.mock("./config.js", () => ({
   config: {},
   repoContexts: [MOCK_REPO],
+  isWorkerMode: false,
+  isDashboardMode: true,
+  workerRepoName: "",
 }));
 
 vi.mock("./logger.js", () => ({
@@ -79,6 +93,7 @@ beforeEach(() => {
   mockLoadEvents.mockResolvedValue(undefined);
   mockStartEventCleanup.mockReturnValue("mock-event-interval");
   mockStartDashboard.mockResolvedValue(undefined);
+  mockStartWorkerServer.mockResolvedValue(undefined);
   mockStartSlackListener.mockResolvedValue(undefined);
   mockGetSlackClient.mockReturnValue({ chat: {} });
 });
@@ -91,10 +106,10 @@ async function importIndex(): Promise<void> {
 }
 
 // ============================================================
-// Startup flow tests
+// Legacy mode tests (repoContexts populated, no DANXBOT_REPO_NAME)
 // ============================================================
 
-describe("main startup flow", () => {
+describe("legacy mode startup flow", () => {
   it("calls startup functions without throwing", async () => {
     await importIndex();
 

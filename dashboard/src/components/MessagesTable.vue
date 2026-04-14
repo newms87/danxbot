@@ -114,7 +114,7 @@ const emit = defineEmits<{
           </tr>
           <tr v-if="filteredEvents.length === 0">
             <td colspan="8" class="px-4 py-8 text-center text-gray-400 dark:text-gray-600">
-              <template v-if="totalCount === 0">No messages yet. Send a message in the Slack channel to see it here.</template>
+              <template v-if="totalCount === 0">No messages yet. Events will appear here when agents process messages.</template>
               <template v-else>No messages match your filters.</template>
             </td>
           </tr>

@@ -1,0 +1,51 @@
+# Danxbot worker for the Danxbot repo (self-referential).
+#
+# Joins danxbot-net (shared MySQL + dashboard).
+# Exposes dispatch API on port 5561.
+#
+# Usage: make launch-worker REPO=danxbot (from danxbot-flytebot/)
+
+services:
+  danxbot-worker:
+    image: danxbot:latest
+    container_name: danxbot-worker-danxbot
+    restart: always
+    stop_grace_period: 120s
+    env_file:
+      - ../.env
+    environment:
+      DANXBOT_REPO_NAME: danxbot
+      DANXBOT_WORKER_PORT: "5561"
+      DANXBOT_DB_HOST: mysql
+      DANXBOT_DB_USER: danxbot
+      DANXBOT_DB_PASSWORD: danxbot
+      DANXBOT_DB_NAME: danxbot_chat
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CLAUDE_AUTH_MODE: ${CLAUDE_AUTH_MODE:-subscription}
+      POLLER_INTERVAL_MS: ${POLLER_INTERVAL_MS:-60000}
+      TRELLO_REVIEW_MIN_CARDS: ${TRELLO_REVIEW_MIN_CARDS:-10}
+      DANXBOT_GIT_EMAIL: ${DANXBOT_GIT_EMAIL:-danxbot@example.com}
+      DANXBOT_RUNTIME: ${DANXBOT_RUNTIME:-docker}
+    volumes:
+      - ${DANXBOT_HOST_DIR:-/home/newms/web/danxbot-flytebot}:/danxbot/repos/danxbot
+      - ${DANXBOT_HOST_DIR:-/home/newms/web/danxbot-flytebot}/claude-auth:/danxbot/claude-auth:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "5561:5561"
+    networks:
+      - danxbot-net
+    healthcheck:
+      test: curl -f http://localhost:5561/health || exit 1
+      interval: 30s
+      timeout: 5s
+      start-period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  danxbot-net:
+    external: true

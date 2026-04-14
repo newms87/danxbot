@@ -12,7 +12,7 @@ For detailed domain knowledge, check `docs/domains/` (mounted at `/danxbot/app/d
 
 ## Database Access
 
-If a database is configured (`PLATFORM_DB_HOST` is set), you can query it. The connection is READ-ONLY.
+If a database is configured (DANX_DB_HOST is set in the repo's `.danxbot/.env`), you can query it. The connection is READ-ONLY.
 
 ### Query Workflow
 
@@ -42,8 +42,8 @@ Format your responses for Slack:
 
 ```bash
 curl -s -X POST "https://api.trello.com/1/cards" \
-  -d "key=$TRELLO_API_KEY" \
-  -d "token=$TRELLO_API_TOKEN" \
+  -d "key=$DANX_TRELLO_API_KEY" \
+  -d "token=$DANX_TRELLO_API_TOKEN" \
   -d "idList={{REVIEW_LIST_ID}}" \
   --data-urlencode "name=TITLE" \
   --data-urlencode "desc=DESCRIPTION"

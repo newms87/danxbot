@@ -82,8 +82,8 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
 }
 
 export function initShutdownHandlers(options: {
-  threadCleanupInterval: NodeJS.Timeout;
-  eventCleanupInterval: NodeJS.Timeout;
+  threadCleanupInterval?: NodeJS.Timeout;
+  eventCleanupInterval?: NodeJS.Timeout;
   slackClient?: WebClient;
 }): void {
   const handleShutdown = () => {
