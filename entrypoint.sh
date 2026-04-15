@@ -83,11 +83,6 @@ if [ -n "$GITHUB_TOKEN" ]; then
     "
 fi
 
-# Add danxbot user to docker group (for sibling container management)
-if getent group docker > /dev/null 2>&1; then
-    usermod -aG docker danxbot
-fi
-
 # Set up Claude Code auth for the danxbot user (copied into project by /setup)
 if [ -f "/danxbot/claude-auth/.claude.json" ]; then
     cp /danxbot/claude-auth/.claude.json "$DANXBOT_HOME/.claude.json"

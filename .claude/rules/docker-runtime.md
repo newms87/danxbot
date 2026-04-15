@@ -66,7 +66,6 @@ All repo config lives in `<repo>/.danxbot/config/` (version controlled). Secrets
     overview.md      # tech stack, architecture, patterns
     workflow.md      # how to edit, test, commit, PR
     tools.md         # agent tool commands (synced to repo's .claude/rules/)
-    post-clone.sh    # runs after cloning (optional)
     docs/
       domains/*.md   # domain knowledge
       schema/*.md    # DB relationships
@@ -98,7 +97,6 @@ The Docker image includes dev tools beyond Node.js:
 
 - **gh** — GitHub CLI for creating PRs, managing issues
 - **git** — Full git client (HTTPS token auth via gh)
-- **docker** / **docker compose** — For managing sibling containers
 - **mysql** — MySQL client for direct DB access
 
 ## Key Files

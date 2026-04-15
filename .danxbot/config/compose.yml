@@ -28,9 +28,8 @@ services:
       DANXBOT_RUNTIME: ${DANXBOT_RUNTIME:-docker}
       REPOS: ${REPOS}
     volumes:
-      - ${DANXBOT_HOST_DIR:-/home/newms/web/danxbot-flytebot}:/danxbot/app/repos/danxbot
-      - ${DANXBOT_HOST_DIR:-/home/newms/web/danxbot-flytebot}/claude-auth:/danxbot/claude-auth:ro
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/newms/web/danxbot-flytebot:/danxbot/app/repos/danxbot
+      - /home/newms/web/danxbot-flytebot/claude-auth:/danxbot/claude-auth:ro
     ports:
       - "5561:5561"
     networks:
