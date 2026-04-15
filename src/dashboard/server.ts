@@ -1,4 +1,4 @@
-import { createServer, ServerResponse } from "http";
+import { createServer } from "http";
 import { readFile, access } from "fs/promises";
 import {
   getEvents,
@@ -8,18 +8,13 @@ import {
 } from "./events.js";
 import { eventsToCSV } from "./export.js";
 import { getHealthStatus } from "./health.js";
+import { json } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import { repos } from "../config.js";
 
 const log = createLogger("dashboard");
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || "5555", 10);
-
-/** Send JSON response */
-function json(res: ServerResponse, status: number, data: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(data));
-}
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html",

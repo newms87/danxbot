@@ -1,5 +1,5 @@
 import { getEvents } from "./events.js";
-import { getPool } from "../db/connection.js";
+import { checkDbConnection } from "../db/health.js";
 
 export interface HealthStatus {
   status: "ok" | "degraded";
@@ -9,23 +9,8 @@ export interface HealthStatus {
   memory_usage_mb: number;
 }
 
-const DB_PING_TIMEOUT_MS = 2000;
-
 export async function getHealthStatus(): Promise<HealthStatus> {
-  let dbConnected = false;
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const pool = getPool();
-    const timeoutPromise = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("DB ping timeout")), DB_PING_TIMEOUT_MS);
-    });
-    await Promise.race([pool.query("SELECT 1"), timeoutPromise]);
-    dbConnected = true;
-  } catch {
-    // DB unreachable or timed out
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  const dbConnected = await checkDbConnection();
 
   return {
     status: dbConnected ? "ok" : "degraded",

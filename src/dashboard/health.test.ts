@@ -6,10 +6,9 @@ vi.mock("./events.js", () => ({
   getEvents: (...args: unknown[]) => mockGetEvents(...args),
 }));
 
-const mockQuery = vi.fn();
-const mockGetPool = vi.fn(() => ({ query: mockQuery }));
-vi.mock("../db/connection.js", () => ({
-  getPool: () => mockGetPool(),
+const mockCheckDbConnection = vi.fn();
+vi.mock("../db/health.js", () => ({
+  checkDbConnection: (...args: unknown[]) => mockCheckDbConnection(...args),
 }));
 
 import { getHealthStatus } from "./health.js";
@@ -17,7 +16,7 @@ import { getHealthStatus } from "./health.js";
 describe("getHealthStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockQuery.mockResolvedValue([]);
+    mockCheckDbConnection.mockResolvedValue(true);
   });
 
   it("returns all required fields", async () => {
@@ -34,7 +33,7 @@ describe("getHealthStatus", () => {
 
   it("returns status 'ok' when DB is connected", async () => {
     mockGetEvents.mockReturnValue([]);
-    mockQuery.mockResolvedValue([]);
+    mockCheckDbConnection.mockResolvedValue(true);
 
     const health = await getHealthStatus();
 
@@ -44,17 +43,17 @@ describe("getHealthStatus", () => {
 
   it("returns db_connected true when DB ping succeeds", async () => {
     mockGetEvents.mockReturnValue([]);
-    mockQuery.mockResolvedValue([]);
+    mockCheckDbConnection.mockResolvedValue(true);
 
     const health = await getHealthStatus();
 
     expect(health.db_connected).toBe(true);
-    expect(mockQuery).toHaveBeenCalledWith("SELECT 1");
+    expect(mockCheckDbConnection).toHaveBeenCalled();
   });
 
   it("returns db_connected false when DB ping fails", async () => {
     mockGetEvents.mockReturnValue([]);
-    mockQuery.mockRejectedValue(new Error("Connection refused"));
+    mockCheckDbConnection.mockResolvedValue(false);
 
     const health = await getHealthStatus();
 
@@ -63,7 +62,7 @@ describe("getHealthStatus", () => {
 
   it("returns degraded when DB unreachable", async () => {
     mockGetEvents.mockReturnValue([]);
-    mockQuery.mockRejectedValue(new Error("ECONNREFUSED"));
+    mockCheckDbConnection.mockResolvedValue(false);
 
     const health = await getHealthStatus();
 

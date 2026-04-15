@@ -8,11 +8,12 @@
  * - POST /api/cancel/:jobId — cancel a running job
  */
 
-import { createServer, IncomingMessage, ServerResponse } from "http";
+import { createServer } from "http";
 import { createLogger } from "../logger.js";
 import { config } from "../config.js";
 import { isSlackConnected, getQueueStats, getTotalQueuedCount } from "../slack/listener.js";
-import { getPool } from "../db/connection.js";
+import { checkDbConnection } from "../db/health.js";
+import { json, parseBody } from "../http/helpers.js";
 import {
   launchAgent,
   cancelJob,
@@ -31,42 +32,9 @@ const log = createLogger("worker-server");
 
 const activeJobs = new Map<string, AgentJob>();
 
-async function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-    req.on("end", () => {
-      try { resolve(body ? JSON.parse(body) : {}); }
-      catch { reject(new Error("Invalid JSON body")); }
-    });
-    req.on("error", reject);
-  });
-}
-
-function json(res: ServerResponse, status: number, data: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(data));
-}
-
-const DB_PING_TIMEOUT_MS = 2000;
-
 async function getHealthStatus(repo: RepoContext) {
   const slackConnected = isSlackConnected();
-
-  let dbConnected = false;
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    const pool = getPool();
-    const timeoutPromise = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("DB ping timeout")), DB_PING_TIMEOUT_MS);
-    });
-    await Promise.race([pool.query("SELECT 1"), timeoutPromise]);
-    dbConnected = true;
-  } catch {
-    // DB unreachable or timed out
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  const dbConnected = await checkDbConnection();
 
   const slackExpected = repo.slack.enabled;
   const allHealthy = dbConnected && (!slackExpected || slackConnected);
