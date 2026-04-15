@@ -6,7 +6,8 @@ import { loadEvents, startEventCleanup } from "./dashboard/events.js";
 import { initShutdownHandlers } from "./shutdown.js";
 import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
-import { repoContexts, isWorkerMode, isDashboardMode, workerRepoName } from "./config.js";
+import { isWorkerMode, isDashboardMode, workerRepoName } from "./config.js";
+import { repoContexts } from "./repo-context.js";
 import { start as startPoller } from "./poller/index.js";
 
 const log = createLogger("startup");

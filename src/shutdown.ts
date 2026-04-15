@@ -1,6 +1,7 @@
 import { stopSlackListener, getInFlightPlaceholders } from "./slack/listener.js";
 import { stopThreadCleanup } from "./threads.js";
 import { stopEventCleanup } from "./dashboard/events.js";
+import { clearJobCleanupIntervals } from "./worker/dispatch.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
 import type { WebClient } from "@slack/web-api";
@@ -69,6 +70,9 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
   if (eventCleanupInterval) {
     stopEventCleanup(eventCleanupInterval);
   }
+
+  // Clear per-job cleanup intervals from worker dispatch
+  clearJobCleanupIntervals();
 
   // Close database connection pools
   await closePool();

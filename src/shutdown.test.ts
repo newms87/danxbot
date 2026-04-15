@@ -38,6 +38,14 @@ vi.mock("./dashboard/server.js", () => ({
   startDashboard: vi.fn(),
 }));
 
+const mockClearJobCleanupIntervals = vi.fn();
+vi.mock("./worker/dispatch.js", () => ({
+  clearJobCleanupIntervals: (...args: unknown[]) => mockClearJobCleanupIntervals(...args),
+  handleLaunch: vi.fn(),
+  handleCancel: vi.fn(),
+  handleStatus: vi.fn(),
+}));
+
 const mockClosePool = vi.fn();
 const mockClosePlatformPool = vi.fn();
 

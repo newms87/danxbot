@@ -1,7 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
-import { config, COMPLEXITY_PROFILES } from "../config.js";
+import { config } from "../config.js";
+import { COMPLEXITY_PROFILES } from "./complexity.js";
 import type { RepoContext } from "../types.js";
 import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";

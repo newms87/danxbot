@@ -78,6 +78,19 @@ async function importConfig(envOverrides: Record<string, string> = {}, omitKeys:
   }
 }
 
+async function importRepoContext(envOverrides: Record<string, string> = {}) {
+  const env = { ...validEnv(), ...envOverrides };
+  const originalEnv = process.env;
+  process.env = { ...env };
+  try {
+    const configMod = await import("./config.js");
+    const repoMod = await import("./repo-context.js");
+    return { ...configMod, ...repoMod };
+  } finally {
+    process.env = originalEnv;
+  }
+}
+
 beforeEach(() => {
   vi.resetModules();
 });
@@ -157,7 +170,7 @@ describe("getRepoPath", () => {
 
 describe("repoContexts", () => {
   it("loads repo contexts in host mode (legacy single-process)", async () => {
-    const mod = await importConfig({
+    const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
       DANXBOT_RUNTIME: "host",
     });
@@ -168,7 +181,7 @@ describe("repoContexts", () => {
   });
 
   it("returns empty in docker mode without DANXBOT_REPO_NAME (dashboard mode)", async () => {
-    const mod = await importConfig({
+    const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
       DANXBOT_RUNTIME: "docker",
     });
@@ -177,7 +190,7 @@ describe("repoContexts", () => {
   });
 
   it("loads only named repo in worker mode", async () => {
-    const mod = await importConfig({
+    const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git,danxbot:https://github.com/test/danxbot.git",
       DANXBOT_REPO_NAME: "platform",
     });
@@ -187,14 +200,14 @@ describe("repoContexts", () => {
   });
 
   it("returns empty when no repos configured", async () => {
-    const mod = await importConfig({ REPOS: "" });
+    const mod = await importRepoContext({ REPOS: "" });
     expect(mod.repoContexts).toEqual([]);
   });
 });
 
 describe("getRepoContext", () => {
   it("returns context for a configured repo in host mode", async () => {
-    const mod = await importConfig({
+    const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
       DANXBOT_RUNTIME: "host",
     });
@@ -204,7 +217,7 @@ describe("getRepoContext", () => {
   });
 
   it("returns context for named repo in worker mode", async () => {
-    const mod = await importConfig({
+    const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
       DANXBOT_REPO_NAME: "platform",
     });
@@ -213,7 +226,7 @@ describe("getRepoContext", () => {
   });
 
   it("throws for unknown repo", async () => {
-    const mod = await importConfig({
+    const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
       DANXBOT_RUNTIME: "host",
     });

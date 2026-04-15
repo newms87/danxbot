@@ -63,6 +63,9 @@ const { mockConfig } = vi.hoisted(() => ({
 }));
 vi.mock("../config.js", () => ({
   config: mockConfig,
+}));
+
+vi.mock("../repo-context.js", () => ({
   repoContexts: mockRepoContexts,
 }));
 

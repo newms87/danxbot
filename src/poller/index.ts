@@ -10,7 +10,8 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { config, repoContexts } from "../config.js";
+import { config } from "../config.js";
+import { repoContexts } from "../repo-context.js";
 import { getReposBase, REVIEW_MIN_CARDS, DANXBOT_COMMENT_MARKER, SCRIPT_PROMPTS } from "./constants.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { createLogger } from "../logger.js";

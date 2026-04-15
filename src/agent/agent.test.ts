@@ -32,6 +32,10 @@ vi.mock("../config.js", () => ({
     agent: { model: "test-model", maxTurns: 5, maxBudgetUsd: 1.0, maxThinkingTokens: 8000, maxThreadMessages: 20, routerModel: "test-router-model" },
     logsDir: "/test/logs",
   },
+  getRepoPath: (name: string) => `/danxbot/repos/${name}`,
+}));
+
+vi.mock("./complexity.js", () => ({
   COMPLEXITY_PROFILES: {
     very_low:  { model: "test-fast-model",   maxTurns: 5,  maxBudgetUsd: 0.10, maxThinkingTokens: 2048,  systemPrompt: "fast" },
     low:       { model: "test-fast-model",   maxTurns: 6,  maxBudgetUsd: 0.20, maxThinkingTokens: 4096,  systemPrompt: "fast" },
@@ -39,7 +43,6 @@ vi.mock("../config.js", () => ({
     high:      { model: "test-medium-model", maxTurns: 12, maxBudgetUsd: 1.00, maxThinkingTokens: 8192,  systemPrompt: "full" },
     very_high: { model: "test-large-model",  maxTurns: 18, maxBudgetUsd: 5.00, maxThinkingTokens: 32768, systemPrompt: "full" },
   },
-  getRepoPath: (name: string) => `/danxbot/repos/${name}`,
 }));
 
 vi.mock("../logger.js", () => ({

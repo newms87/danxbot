@@ -66,10 +66,13 @@ vi.mock("./poller/index.js", () => ({
 // Default: legacy mode (repoContexts populated, no DANXBOT_REPO_NAME)
 vi.mock("./config.js", () => ({
   config: {},
-  repoContexts: [MOCK_REPO],
   isWorkerMode: false,
   isDashboardMode: true,
   workerRepoName: "",
+}));
+
+vi.mock("./repo-context.js", () => ({
+  repoContexts: [MOCK_REPO],
 }));
 
 vi.mock("./logger.js", () => ({
