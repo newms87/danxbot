@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "http";
+import { createMockReqRes } from "../__tests__/helpers/http-mocks.js";
 
 // Mock events module
 const mockGetEvents = vi.fn();
@@ -74,41 +75,6 @@ vi.mock("http", async () => {
 });
 
 import { startDashboard } from "./server.js";
-
-// Helper to make a fake request/response pair
-function createMockReqRes(method: string, url: string) {
-  const req = new http.IncomingMessage(null as any);
-  req.method = method;
-  req.url = url;
-
-  const headers: Record<string, string | number> = {};
-  let statusCode = 200;
-  let body = "";
-
-  const res = {
-    setHeader: vi.fn((name: string, value: string) => {
-      headers[name.toLowerCase()] = value;
-    }),
-    writeHead: vi.fn((code: number, hdrs?: Record<string, string>) => {
-      statusCode = code;
-      if (hdrs) {
-        for (const [k, v] of Object.entries(hdrs)) {
-          headers[k.toLowerCase()] = v;
-        }
-      }
-    }),
-    end: vi.fn((data?: string) => {
-      if (data) body = data;
-    }),
-    write: vi.fn(),
-    getHeader: vi.fn((name: string) => headers[name.toLowerCase()]),
-    _getStatusCode: () => statusCode,
-    _getHeaders: () => headers,
-    _getBody: () => body,
-  };
-
-  return { req, res: res as any };
-}
 
 describe("dashboard server", () => {
   beforeAll(async () => {

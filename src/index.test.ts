@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { makeRepoContext } from "./__tests__/helpers/fixtures.js";
 
 // --- Mocks (top-level, before dynamic import) ---
@@ -64,15 +64,21 @@ vi.mock("./poller/index.js", () => ({
 }));
 
 // Default: legacy mode (repoContexts populated, no DANXBOT_REPO_NAME)
+// These mocks are overridden in worker/dashboard describe blocks via vi.doMock
+let mockIsWorkerMode = false;
+let mockIsDashboardMode = true;
+let mockWorkerRepoName = "";
+let mockRepoContexts = [MOCK_REPO];
+
 vi.mock("./config.js", () => ({
-  config: {},
-  isWorkerMode: false,
-  isDashboardMode: true,
-  workerRepoName: "",
+  get config() { return {}; },
+  get isWorkerMode() { return mockIsWorkerMode; },
+  get isDashboardMode() { return mockIsDashboardMode; },
+  get workerRepoName() { return mockWorkerRepoName; },
 }));
 
 vi.mock("./repo-context.js", () => ({
-  repoContexts: [MOCK_REPO],
+  get repoContexts() { return mockRepoContexts; },
 }));
 
 vi.mock("./logger.js", () => ({
@@ -221,5 +227,167 @@ describe("legacy mode startup flow", () => {
     expect(mockExit).toHaveBeenCalledWith(1);
 
     mockExit.mockRestore();
+  });
+});
+
+// ============================================================
+// Worker mode tests (DANXBOT_REPO_NAME set)
+// ============================================================
+
+describe("worker mode startup flow", () => {
+  beforeEach(() => {
+    mockIsWorkerMode = true;
+    mockIsDashboardMode = false;
+    mockWorkerRepoName = "test-repo";
+    mockRepoContexts = [MOCK_REPO];
+  });
+
+  afterEach(() => {
+    // Reset to legacy defaults
+    mockIsWorkerMode = false;
+    mockIsDashboardMode = true;
+    mockWorkerRepoName = "";
+    mockRepoContexts = [MOCK_REPO];
+  });
+
+  it("calls startWorkerServer with repo context", async () => {
+    await importIndex();
+
+    expect(mockStartWorkerServer).toHaveBeenCalledWith(MOCK_REPO);
+  });
+
+  it("starts poller", async () => {
+    await importIndex();
+
+    expect(mockStartPoller).toHaveBeenCalledOnce();
+  });
+
+  it("starts Slack listener when repo has Slack enabled", async () => {
+    await importIndex();
+
+    expect(mockStartSlackListener).toHaveBeenCalledWith(MOCK_REPO);
+    expect(mockGetSlackClient).toHaveBeenCalledOnce();
+  });
+
+  it("skips Slack listener when repo has Slack disabled", async () => {
+    mockRepoContexts = [makeRepoContext({
+      slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
+    })];
+
+    await importIndex();
+
+    expect(mockStartSlackListener).not.toHaveBeenCalled();
+    expect(mockGetSlackClient).not.toHaveBeenCalled();
+  });
+
+  it("does NOT start dashboard or run migrations", async () => {
+    await importIndex();
+
+    expect(mockStartDashboard).not.toHaveBeenCalled();
+    expect(mockRunMigrations).not.toHaveBeenCalled();
+  });
+
+  it("does NOT start thread or event cleanup", async () => {
+    await importIndex();
+
+    expect(mockStartThreadCleanup).not.toHaveBeenCalled();
+    expect(mockLoadEvents).not.toHaveBeenCalled();
+    expect(mockStartEventCleanup).not.toHaveBeenCalled();
+  });
+
+  it("calls initShutdownHandlers with slackClient when Slack enabled", async () => {
+    const mockClient = { chat: { update: vi.fn() } };
+    mockGetSlackClient.mockReturnValue(mockClient);
+
+    await importIndex();
+
+    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
+      slackClient: mockClient,
+    });
+  });
+
+  it("calls initShutdownHandlers without slackClient when Slack disabled", async () => {
+    mockRepoContexts = [makeRepoContext({
+      slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
+    })];
+
+    await importIndex();
+
+    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
+      slackClient: undefined,
+    });
+  });
+
+  it("throws when no repo context is loaded", async () => {
+    const mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
+    mockRepoContexts = [];
+
+    await importIndex();
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+    mockExit.mockRestore();
+  });
+});
+
+// ============================================================
+// Dashboard mode tests (isDashboardMode + no repos)
+// ============================================================
+
+describe("dashboard mode startup flow", () => {
+  beforeEach(() => {
+    mockIsWorkerMode = false;
+    mockIsDashboardMode = true;
+    mockWorkerRepoName = "";
+    mockRepoContexts = [];
+  });
+
+  afterEach(() => {
+    // Reset to legacy defaults
+    mockRepoContexts = [MOCK_REPO];
+  });
+
+  it("runs migrations", async () => {
+    await importIndex();
+
+    expect(mockRunMigrations).toHaveBeenCalledOnce();
+  });
+
+  it("starts dashboard server", async () => {
+    await importIndex();
+
+    expect(mockStartDashboard).toHaveBeenCalledOnce();
+  });
+
+  it("starts thread and event cleanup", async () => {
+    await importIndex();
+
+    expect(mockStartThreadCleanup).toHaveBeenCalledOnce();
+    expect(mockLoadEvents).toHaveBeenCalledOnce();
+    expect(mockStartEventCleanup).toHaveBeenCalledOnce();
+  });
+
+  it("does NOT start poller or Slack", async () => {
+    await importIndex();
+
+    expect(mockStartPoller).not.toHaveBeenCalled();
+    expect(mockStartSlackListener).not.toHaveBeenCalled();
+  });
+
+  it("does NOT start worker server", async () => {
+    await importIndex();
+
+    expect(mockStartWorkerServer).not.toHaveBeenCalled();
+  });
+
+  it("calls initShutdownHandlers with cleanup intervals", async () => {
+    mockStartThreadCleanup.mockReturnValue("dash-thread-interval");
+    mockStartEventCleanup.mockReturnValue("dash-event-interval");
+
+    await importIndex();
+
+    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
+      threadCleanupInterval: "dash-thread-interval",
+      eventCleanupInterval: "dash-event-interval",
+    });
   });
 });
