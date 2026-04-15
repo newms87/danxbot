@@ -69,3 +69,9 @@ export const REVIEW_MIN_CARDS = parseInt(
 
 /** Marker appended to all Danxbot-posted Trello comments. The poller uses this to distinguish bot comments from user responses. */
 export const DANXBOT_COMMENT_MARKER = "<!-- danxbot -->";
+
+/** Maps shell script names (host mode) to their equivalent claude CLI prompts (Docker mode). */
+export const SCRIPT_PROMPTS: Record<string, string> = {
+  "run-team.sh": "/danx-next",
+  "run-ideator.sh": "/danx-ideate",
+};

@@ -11,10 +11,11 @@ import {
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { config, repoContexts } from "../config.js";
-import { getReposBase, REVIEW_MIN_CARDS, DANXBOT_COMMENT_MARKER } from "./constants.js";
+import { getReposBase, REVIEW_MIN_CARDS, DANXBOT_COMMENT_MARKER, SCRIPT_PROMPTS } from "./constants.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { createLogger } from "../logger.js";
 import { spawnInTerminal } from "../terminal.js";
+import { spawnHeadlessAgent } from "../agent/launcher.js";
 import {
   fetchTodoCards,
   fetchNeedsHelpCards,
@@ -498,15 +499,46 @@ function spawnClaude(repo: RepoContext, title: string, scriptName: string): void
 
   state.teamRunning = true;
 
-  // Lock file signals that the team is running. The script removes it via EXIT trap.
+  // Lock file signals that the team is running.
   writeFileSync(state.lockFile, String(process.pid));
 
-  const script = resolve(dirname(fileURLToPath(import.meta.url)), scriptName);
+  if (config.isHost) {
+    // Host mode: open a Windows Terminal tab with the shell script.
+    // The script removes the lock file via EXIT trap.
+    const script = resolve(dirname(fileURLToPath(import.meta.url)), scriptName);
+    spawnInTerminal({ title: `${title} [${repo.name}]`, script, cwd: projectRoot, env: { ...process.env, DANXBOT_REPO_NAME: repo.name } });
+    startLockWatch(repo);
+  } else {
+    // Docker mode: spawn a headless claude CLI process.
+    // Completion is handled by the onComplete callback.
+    const prompt = SCRIPT_PROMPTS[scriptName];
+    if (!prompt) {
+      throw new Error(`No prompt mapping for script: ${scriptName}`);
+    }
 
-  spawnInTerminal({ title: `${title} [${repo.name}]`, script, cwd: projectRoot, env: { ...process.env, DANXBOT_REPO_NAME: repo.name } });
-
-  // Watch for lock file removal to detect completion.
-  startLockWatch(repo);
+    spawnHeadlessAgent({
+      prompt,
+      repoName: repo.name,
+      timeoutMs: config.pollerIntervalMs * 60, // generous timeout: 60x poll interval
+      env: {
+        DANXBOT_REPO_NAME: repo.name,
+        DANXBOT_EPHEMERAL: "1",
+        DANXBOT_PROJECT_ROOT: projectRoot,
+      },
+      onComplete: () => {
+        log.info(`[${repo.name}] Headless agent finished — resuming polling`);
+        state.teamRunning = false;
+        try {
+          if (existsSync(state.lockFile)) unlinkSync(state.lockFile);
+        } catch (e) {
+          log.warn(`[${repo.name}] Failed to remove lock file after headless agent`, e);
+        }
+        poll(repo).catch((err) =>
+          log.error(`[${repo.name}] Re-poll after headless agent failed`, err),
+        );
+      },
+    });
+  }
 }
 
 async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {

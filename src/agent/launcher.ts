@@ -12,11 +12,18 @@
 
 import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { getReposBase } from "../poller/constants.js";
+import {
+  buildCleanEnv,
+  attachStreamParser,
+  logPromptToDisk,
+  createInactivityTimer,
+  setupProcessHandlers,
+} from "./process-utils.js";
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const TERMINAL_STATUS_RETRIES = 3;
@@ -252,16 +259,7 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
     statusUrl: options.statusUrl,
   };
 
-  const prompt = options.task;
-
-  // Clean environment — remove CLAUDECODE vars to prevent nesting issues.
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key.startsWith("CLAUDECODE")) continue;
-    if (value !== undefined) {
-      env[key] = value;
-    }
-  }
+  const env = buildCleanEnv();
 
   const args = [
     "--dangerously-skip-permissions",
@@ -271,7 +269,7 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
     "--mcp-config",
     join(settingsDir, "settings.json"),
     "-p",
-    prompt,
+    options.task,
   ];
 
   if (options.agents && options.agents.length > 0) {
@@ -281,26 +279,8 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
   console.log(`[Job ${jobId}] Launching Claude Code agent`);
   console.log(`[Job ${jobId}] Task: ${options.task.substring(0, 200)}`);
 
-  const logDir = join(config.logsDir, jobId);
-  try {
-    mkdirSync(logDir, { recursive: true });
-    writeFileSync(join(logDir, "prompt.md"), prompt);
-    if (options.agents && options.agents.length > 0) {
-      writeFileSync(
-        join(logDir, "agents.json"),
-        JSON.stringify(options.agents, null, 2),
-      );
-    }
-    console.log(`[Job ${jobId}] Prompt and agents logged to ${logDir}`);
-  } catch (err) {
-    console.error(`[Job ${jobId}] Failed to write agent logs:`, err);
-  }
+  logPromptToDisk(config.logsDir, jobId, options.task, options.agents);
 
-  let lastAssistantText = "";
-  let stderr = "";
-  let stdoutBuffer = "";
-
-  // Resolve agent working directory from the launch options
   const agentCwd = join(getReposBase(), options.repoName);
 
   const child = spawn("claude", args, {
@@ -311,78 +291,32 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
 
   job.process = child;
 
-  // Parse stream-json output line by line
-  child.stdout?.on("data", (data: Buffer) => {
-    stdoutBuffer += data.toString();
-
-    // Process complete JSON lines
-    let newlineIdx: number;
-    while ((newlineIdx = stdoutBuffer.indexOf("\n")) !== -1) {
-      const line = stdoutBuffer.substring(0, newlineIdx).trim();
-      stdoutBuffer = stdoutBuffer.substring(newlineIdx + 1);
-
-      if (!line) continue;
-
-      try {
-        const event = JSON.parse(line) as Record<string, unknown>;
-        handleStreamEvent(event, options.apiUrl, options.apiToken, jobId);
-
-        // Capture last assistant text for the summary
-        if (event.type === "assistant") {
-          const message = event.message as
-            | { content?: Array<{ type: string; text?: string }> }
-            | undefined;
-          if (message?.content) {
-            for (const block of message.content) {
-              if (block.type === "text" && block.text) {
-                lastAssistantText = block.text;
-              }
-            }
-          }
-        }
-      } catch {
-        // Not JSON — accumulate as raw output
-      }
-    }
+  // Stream parser with dispatch-specific progress forwarding
+  const { getLastAssistantText } = attachStreamParser(child, (event) => {
+    handleStreamEvent(event, options.apiUrl, options.apiToken, jobId);
   });
 
+  let stderr = "";
   child.stderr?.on("data", (data: Buffer) => {
     stderr += data.toString();
   });
 
-  // Start heartbeat loop
+  // Start heartbeat loop for status reporting
   startHeartbeat(job, options.apiToken);
 
-  // Inactivity timeout — resets on every stdout event (MCP calls, assistant messages, tool results).
-  // If the agent produces no output for the configured duration, it is presumed stuck and killed.
-  let inactivityHandle: ReturnType<typeof setTimeout>;
-  const inactivityMs = options.timeout;
+  // Inactivity timeout — kills the agent if no stdout for the configured duration
+  const inactivityTimer = createInactivityTimer(
+    child,
+    options.timeout,
+    () => {
+      stopHeartbeat(job);
+      putStatus(job, options.apiToken, "failed", job.summary);
+      cleanupSettingsDir();
+    },
+    job,
+  );
 
-  function resetInactivityTimeout(): void {
-    clearTimeout(inactivityHandle);
-    inactivityHandle = setTimeout(() => {
-      if (job.status === "running") {
-        console.log(
-          `[Job ${jobId}] Inactivity timeout — no output for ${inactivityMs / 1000}s — killing process`,
-        );
-        child.kill("SIGTERM");
-        job.status = "timeout";
-        job.summary = `Agent timed out after ${Math.round(inactivityMs / 1000)} seconds of inactivity`;
-        job.completedAt = new Date();
-        stopHeartbeat(job);
-        putStatus(job, options.apiToken, "failed", job.summary);
-        cleanup();
-      }
-    }, inactivityMs);
-  }
-
-  // Reset on every stdout chunk — the agent is alive as long as it produces output
-  child.stdout?.on("data", () => resetInactivityTimeout());
-
-  // Start the initial inactivity timer
-  resetInactivityTimeout();
-
-  // Max runtime timeout — hard cap on total agent execution time (does NOT reset)
+  // Max runtime timeout — hard cap that does NOT reset on activity
   let maxRuntimeHandle: ReturnType<typeof setTimeout> | undefined;
   if (options.maxRuntimeMs) {
     maxRuntimeHandle = setTimeout(() => {
@@ -396,14 +330,12 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
         job.completedAt = new Date();
         stopHeartbeat(job);
         putStatus(job, options.apiToken, "failed", job.summary);
-        cleanup();
+        cleanupAll();
       }
     }, options.maxRuntimeMs);
   }
 
-  function cleanup(): void {
-    clearTimeout(inactivityHandle);
-    if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
+  function cleanupSettingsDir(): void {
     try {
       rmSync(settingsDir, { recursive: true, force: true });
     } catch {
@@ -411,40 +343,19 @@ export async function launchAgent(options: LaunchOptions): Promise<AgentJob> {
     }
   }
 
-  child.on("close", (code: number | null) => {
-    if (job.status === "running") {
-      const isSuccess = code === 0;
-      job.status = isSuccess ? "completed" : "failed";
-      job.summary = isSuccess
-        ? lastAssistantText.trim() || "Agent completed successfully"
-        : `Process exited with code ${code}: ${stderr.trim() || lastAssistantText.trim() || "No output"}`;
-      job.completedAt = new Date();
+  function cleanupAll(): void {
+    inactivityTimer.clear();
+    if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
+    cleanupSettingsDir();
+  }
 
-      console.log(`[Job ${jobId}] ${job.status} (exit code: ${code})`);
-
-      stopHeartbeat(job);
-      putStatus(
-        job,
-        options.apiToken,
-        isSuccess ? "completed" : "failed",
-        job.summary,
-      );
-      cleanup();
-    }
-  });
-
-  child.on("error", (err: Error) => {
-    if (job.status === "running") {
-      job.status = "failed";
-      job.summary = `Process error: ${err.message}`;
-      job.completedAt = new Date();
-
-      console.error(`[Job ${jobId}] Process error:`, err);
-
-      stopHeartbeat(job);
-      putStatus(job, options.apiToken, "failed", job.summary);
-      cleanup();
-    }
+  setupProcessHandlers(child, job, getLastAssistantText, () => stderr, {
+    onComplete: (j) => {
+      stopHeartbeat(j);
+      const isSuccess = j.status === "completed";
+      putStatus(j, options.apiToken, isSuccess ? "completed" : "failed", j.summary);
+    },
+    cleanup: cleanupAll,
   });
 
   return job;
@@ -480,6 +391,84 @@ export async function cancelJob(
 
   stopHeartbeat(job);
   await putStatus(job, apiToken, "canceled", job.summary);
+}
+
+export interface HeadlessAgentOptions {
+  /** The prompt/command to pass to claude CLI (e.g. "/danx-next") */
+  prompt: string;
+  /** Repo name — used to resolve cwd to repos/<name> */
+  repoName: string;
+  /** Inactivity timeout in milliseconds — kills the agent if no stdout for this duration */
+  timeoutMs: number;
+  /** Additional env vars to merge into the spawned process environment */
+  env?: Record<string, string>;
+  /** Called when the agent finishes (success, failure, or timeout) */
+  onComplete?: (job: AgentJob) => void;
+}
+
+/**
+ * Spawn a headless Claude Code agent without dispatch/MCP dependencies.
+ *
+ * Used by the poller (Docker mode) and any other caller that needs a simple
+ * Claude CLI process with stream-json output, inactivity timeout, and
+ * completion tracking — but no MCP schema server, heartbeat, or status PUT.
+ */
+export async function spawnHeadlessAgent(options: HeadlessAgentOptions): Promise<AgentJob> {
+  const jobId = randomUUID();
+
+  const job: AgentJob = {
+    id: jobId,
+    status: "running",
+    summary: "",
+    startedAt: new Date(),
+  };
+
+  const env = buildCleanEnv(options.env);
+
+  const args = [
+    "--dangerously-skip-permissions",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "-p",
+    options.prompt,
+  ];
+
+  const agentCwd = join(getReposBase(), options.repoName);
+
+  console.log(`[Job ${jobId}] Launching headless agent`);
+  console.log(`[Job ${jobId}] Prompt: ${options.prompt.substring(0, 200)}`);
+
+  logPromptToDisk(config.logsDir, jobId, options.prompt);
+
+  const child = spawn("claude", args, {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+    cwd: agentCwd,
+  });
+
+  job.process = child;
+
+  const { getLastAssistantText } = attachStreamParser(child);
+
+  let stderr = "";
+  child.stderr?.on("data", (data: Buffer) => {
+    stderr += data.toString();
+  });
+
+  const inactivityTimer = createInactivityTimer(
+    child,
+    options.timeoutMs,
+    (j) => options.onComplete?.(j),
+    job,
+  );
+
+  setupProcessHandlers(child, job, getLastAssistantText, () => stderr, {
+    onComplete: options.onComplete,
+    cleanup: () => inactivityTimer.clear(),
+  });
+
+  return job;
 }
 
 /**
