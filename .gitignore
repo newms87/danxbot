@@ -8,6 +8,7 @@ dashboard/dist/
 dashboard/node_modules/
 *.tsbuildinfo
 
+.claude/settings.local.json
 .claude/clad.json
 .claude/agent-self-improvement.md
 .claude/projects/

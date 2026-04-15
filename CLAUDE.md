@@ -27,6 +27,8 @@ Repo-specific config lives in two places inside each connected repo:
 
 Danxbot's own `.env` keeps only shared infrastructure: ANTHROPIC_API_KEY, CLAUDE_AUTH_MODE, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL.
 
+Each repo also needs MCP credentials in `<repo>/.claude/settings.local.json` (gitignored) under the `env` key — Claude Code does not load `.env` files for MCP servers. Required vars: `MCP_TRELLO_PATH`, `TRELLO_API_KEY`, `TRELLO_API_TOKEN`. See `docker-runtime.md` for details.
+
 Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists all repos: `platform:url,danxbot:url`. At startup, `loadRepoContexts()` builds a `RepoContext[]` array from each repo's config. All services (poller, Slack, agent) receive `RepoContext` as a parameter.
 
 ### Agent Tools

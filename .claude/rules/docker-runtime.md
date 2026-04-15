@@ -76,6 +76,22 @@ All repo config lives in `<repo>/.danxbot/config/` (version controlled). Secrets
 
 Per-repo secrets live in `<repo>/.danxbot/.env` (gitignored) using standardized DANX_* prefix: DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN. Danxbot's own `.env` keeps only shared infrastructure (ANTHROPIC_API_KEY, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL).
 
+## MCP Environment Variables
+
+Claude Code does NOT load `.env` files for MCP server startup — it only reads from the shell environment. Per-repo MCP credentials (Trello API key/token, MCP server path) must be set in `<repo>/.claude/settings.local.json` under the `env` key:
+
+```json
+{
+  "env": {
+    "MCP_TRELLO_PATH": "/home/newms/web/mcp-server-trello",
+    "TRELLO_API_KEY": "<repo-specific-key>",
+    "TRELLO_API_TOKEN": "<repo-specific-token>"
+  }
+}
+```
+
+This file is gitignored (contains secrets). The `.mcp.json` in each repo references these via `${VAR}` syntax. When connecting a new repo, add these three env vars to its `settings.local.json` using the Trello credentials from that repo's `.danxbot/.env`.
+
 ## Tools Available Inside Containers
 
 The Docker image includes dev tools beyond Node.js:
