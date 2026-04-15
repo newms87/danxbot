@@ -13,6 +13,7 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 | Dashboard/worker mode detection | Complete | DANXBOT_REPO_NAME determines mode; legacy host mode for backwards compat |
 | Startup entrypoint (src/index.ts) | Complete | Branches cleanly into startDashboardMode / startWorkerMode / startLegacyMode |
 | Config validation on startup | Complete | validateConfig() checks all numeric bounds; validateRepoConfig() checks files + env vars |
+| POLLER_ENABLED flag | Complete | config.pollerEnabled; start() returns early with log message when false |
 
 ### Agent Pipeline
 
@@ -56,7 +57,7 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Per-user rate limiting | Incomplete | No throttle on message rate per user — a fast user can flood the queue. Carded: https://trello.com/c/ZArDwOLG |
-| listener.ts very_low/full path duplication | Changeable | ~300 lines of parallel code between very_low fast path and full agent path: identical SQL processing, reactions, event updates. Candidate for shared helper extraction |
+| listener.ts very_low/full path duplication | Changeable | ~60-80 lines of identical response finalization logic in both paths (SQL, format, post, upload, react). Carded: https://trello.com/c/[69df29f886f7be49aaf74c63] |
 
 ### Poller
 
@@ -73,6 +74,7 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 | Host mode (Windows Terminal tab) | Complete | spawnInTerminal opens wt.exe tab with run-team.sh / run-ideator.sh |
 | Docker mode (headless agent) | Complete | spawnHeadlessAgent() with SCRIPT_PROMPTS mapping |
 | Lock watch interval | Complete | setInterval(5000) polls for lock file removal to detect team completion |
+| POLLER_ENABLED guard | Complete | start() checks config.pollerEnabled before polling; logs and returns when disabled |
 
 ### Trello Client + Error Notifier
 
@@ -99,7 +101,7 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| SSE stream repo filtering | Incomplete | /api/stream broadcasts all events to all clients regardless of repo. Carded: https://trello.com/c/[existing card in Review] |
+| SSE stream repo filtering | Incomplete | /api/stream broadcasts all events to all clients regardless of repo. Carded: https://trello.com/c/[69df24dc32dfa2044ef76c04] |
 | Event pagination | Incomplete | /api/events returns all 500 events in one payload; no offset/limit support. Carded: https://trello.com/c/lFW8Hclr |
 
 ### Worker HTTP Server
@@ -108,11 +110,12 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 |---------|--------|-------|
 | Worker HTTP server (server.ts) | Complete | POST /api/launch, GET /api/status/:id, POST /api/cancel/:id, GET /health |
 | Schema MCP agent dispatch | Complete | launchAgent with MCP settings temp dir, heartbeat, status PUT, max runtime |
+| Worker /health endpoint | Upgradeable | Reports Slack + DB connectivity but not poller state (enabled, teamRunning, lastPollAt). Carded: https://trello.com/c/[69df29baef8a77eb7ec58d54] |
 | activeJobs map | Incomplete | No max size cap; cleanup interval is 60min — jobs accumulate for up to 1 hour. Carded: https://trello.com/c/McdkRqeX |
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Worker server unit tests | Incomplete | server.ts has zero test coverage despite being a critical entry point. Carded: https://trello.com/c/[existing card in Review] |
+| Worker server unit tests | Incomplete | server.ts has zero test coverage despite being a critical entry point. Carded: https://trello.com/c/[69df24845335a140e70b701d] |
 
 ### Database
 
@@ -137,21 +140,33 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 | env-file parser | Complete | parseEnvFile reads per-repo .danxbot/.env files for secrets |
 | terminal.ts | Complete | spawnInTerminal (wt.exe) and buildDispatchScript for host mode |
 
+### Known Bugs
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| POLLER_ENABLED test regression | Incomplete | Two start() tests fail because mockConfig in poller/index.test.ts doesn't include pollerEnabled. Carded: https://trello.com/c/[69df29a292d99d588652a666] |
+
 ## Desired Features
 
 | Type | ICE | Feature |
 |------|-----|---------|
+| Carded | 600 (6×10×10) | Fix POLLER_ENABLED test regression — add pollerEnabled: true to mockConfig (https://trello.com/c/69df29a292d99d588652a666) |
 | Carded | 567 (7×9×9) | Route notifyError default to reviewListId (https://trello.com/c/TluqNyiI) |
 | Carded | 336 (6×8×7) | Add agent log rotation + size cap (https://trello.com/c/670o7RTR) |
+| Carded | 320 (5×8×8) | Expose poller state in worker /health endpoint (https://trello.com/c/69df29baef8a77eb7ec58d54) |
+| Carded | 270 (3×9×10) | Add REVIEW_MIN_CARDS to validateConfig numeric rules (https://trello.com/c/69df29d7c7fdf7db077dbda9) |
 | Carded | 245 (5×7×7) | Per-user Slack rate limiting (https://trello.com/c/ZArDwOLG) |
 | Carded | 243 (3×9×9) | Cap activeJobs map size + reduce cleanup interval (https://trello.com/c/McdkRqeX) |
 | Carded | 224 (4×8×7) | Dashboard /api/events pagination (https://trello.com/c/lFW8Hclr) |
-| Maintenance | 160 (5×8×4) | Extract listener.ts very_low/full path shared logic into helper functions to eliminate ~300 lines of duplication |
+| Carded | 160 (5×8×4) | Extract shared response finalization from listener.ts very_low/full paths (https://trello.com/c/69df29f886f7be49aaf74c63) |
+| Maintenance | 196 (4×7×7) | notifyError duplicate check: also scan review + in-progress lists to avoid repeat cards for same error |
+| Maintenance | 150 (5×6×5) | Worker port collision: validate/document per-worker DANXBOT_WORKER_PORT uniqueness requirement; default ports differ per repo |
 | Maintenance | 144 (4×6×6) | Reduce launcher.ts (489 lines) — split dispatch-specific launchAgent from shared headless logic more cleanly |
 | Exploratory | 90 (3×5×6) | Proactive codebase change summaries — daily digest of recent commits sent to Slack |
+| Exploratory | 84 (2×7×6) | syncRepoFiles change detection — hash/mtime check to skip unchanged files on poll cycles |
 
 ## Session Log
 
-**Date:** 2026-04-15
+**Date:** 2026-04-15 (session 2)
 **Scope:** danxbot (src/ only)
-**Summary:** First Danxbot-scoped ideator session. Explored the full src/ codebase (13 modules, 40 test files, 813 passing tests). Architecture is multi-repo worker/dashboard split with host+Docker modes. Key findings: (1) notifyError defaults to todoListId — error auto-cards get picked up by agents, should go to reviewListId instead; (2) no agent log rotation — files accumulate indefinitely in logsDir; (3) no per-user rate limiting on Slack — queue flooding risk; (4) activeJobs map in worker/server.ts has 60-min cleanup but no size cap; (5) dashboard /api/events sends all 500 events without pagination. Created 5 cards in Review list. Two pre-existing Review cards: worker server unit tests and SSE stream repo filtering — both found and deduped. The listener.ts duplication (very_low vs full path, ~300 lines each) is notable tech debt but was not carded — scored 160, lower priority than carded items.
+**Summary:** Explored changes since last session. Only 2 files changed: src/config.ts and src/poller/index.ts (POLLER_ENABLED flag added). This introduced a regression: mockConfig in poller/index.test.ts doesn't include pollerEnabled, causing 2 start() tests to fail (pollerEnabled is undefined → falsy → start() returns early). All 7 previously-carded Review cards are still in Review and unchanged. Created 4 new cards: (1) bug fix for POLLER_ENABLED test regression (ICE 600), (2) expose poller state in /health endpoint (ICE 320), (3) REVIEW_MIN_CARDS validation in validateConfig (ICE 270), (4) listener.ts shared response finalization refactor (ICE 160, previously in scratchpad as Maintenance). Also identified notifyError duplicate check gap (ICE 196) and worker port collision issue (ICE 150) — both left in scratchpad as Maintenance.
