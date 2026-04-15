@@ -609,6 +609,11 @@ export function start(): void {
     return;
   }
 
+  if (!config.pollerEnabled) {
+    log.info("Poller disabled via POLLER_ENABLED=false");
+    return;
+  }
+
   // Validate and start polling for each repo independently
   for (const repo of repoContexts) {
     validateRepoConfig(repo);
