@@ -11,7 +11,7 @@ export
 
 REPOS_DIR := ./repos
 
-.PHONY: help launch-infra stop-infra launch-worker stop-worker launch-all-workers stop-all-workers build logs
+.PHONY: help launch-infra stop-infra launch-worker stop-worker launch-all-workers stop-all-workers build logs validate-repos
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -65,6 +65,39 @@ logs: ## Tail logs for infra or a worker (usage: make logs or make logs REPO=pla
 	else \
 		docker compose -p "danxbot-worker-$(REPO)" logs -f; \
 	fi
+
+validate-repos: ## Check host prerequisites for all connected repos before launching workers
+	@if [ -z "$(REPOS)" ]; then echo "Error: REPOS not set in .env"; exit 1; fi; \
+	ERRORS=0; \
+	IFS=',' read -ra ENTRIES <<< "$(REPOS)"; \
+	for entry in "$${ENTRIES[@]}"; do \
+		name="$${entry%%:*}"; \
+		repo_path="$(REPOS_DIR)/$$name"; \
+		echo "Checking $$name..."; \
+		if [ ! -d "$$repo_path" ] && [ ! -L "$$repo_path" ]; then \
+			echo "  ERROR: $$repo_path does not exist (create symlink or clone repo)"; \
+			ERRORS=$$((ERRORS + 1)); \
+			continue; \
+		fi; \
+		REPO_OK=1; \
+		if [ ! -f "$$repo_path/.danxbot/.env" ]; then \
+			echo "  ERROR: $$repo_path/.danxbot/.env missing (repo secrets required)"; \
+			ERRORS=$$((ERRORS + 1)); REPO_OK=0; \
+		fi; \
+		if [ ! -f "$$repo_path/.danxbot/config/compose.yml" ]; then \
+			echo "  ERROR: $$repo_path/.danxbot/config/compose.yml missing"; \
+			ERRORS=$$((ERRORS + 1)); REPO_OK=0; \
+		fi; \
+		if [ -f "$$repo_path/composer.json" ] && [ ! -d "$$repo_path/ssap/vendor" ] && [ ! -d "$$repo_path/vendor" ]; then \
+			echo "  WARNING: No vendor/ found — run composer install on the host first"; \
+		fi; \
+		if [ -f "$$repo_path/package.json" ] && [ ! -d "$$repo_path/node_modules" ]; then \
+			echo "  WARNING: No node_modules/ found — run npm install on the host first"; \
+		fi; \
+		if [ "$$REPO_OK" -eq 1 ]; then echo "  $$name OK"; fi; \
+	done; \
+	if [ "$$ERRORS" -gt 0 ]; then echo ""; echo "$$ERRORS error(s) found. Fix before launching workers."; exit 1; fi; \
+	echo ""; echo "All repos validated."
 
 # Host-mode targets (for local development without Docker workers)
 

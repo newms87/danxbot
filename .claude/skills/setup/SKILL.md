@@ -243,24 +243,7 @@ If the repo uses Docker (has a docker-compose.yml or Dockerfile), generate an is
 
 **For other frameworks**, adapt based on what the repo's own docker-compose.yml defines.
 
-### 8d: Generate Post-Clone Hook (if needed)
-
-If the repo needs setup after cloning (auth files, dependency install, config copy), create `repos/<name>/.danxbot/config/post-clone.sh`:
-
-```bash
-#!/bin/bash
-REPOS_DIR="$1"
-REPO="$REPOS_DIR/<name>"
-
-# Example: copy auth credentials for private package registries
-if [ -f "/danxbot/app/repo-overrides/<name>-auth.json" ] && [ -d "$REPO/<subdir>" ]; then
-    cp "/danxbot/app/repo-overrides/<name>-auth.json" "$REPO/<subdir>/auth.json"
-fi
-```
-
-Ask the user: "Does this repo require any auth files or credentials for package installation (e.g., Composer auth for private packages, npm tokens)?" If yes, collect the credentials and write them to the appropriate location.
-
-### 8e: Generate Env File (if Docker runtime, secrets only)
+### 8d: Generate Env File (if Docker runtime, secrets only)
 
 If the repo's Docker stack needs environment variables with secrets (DB passwords, API keys), write them to `repo-overrides/<name>.env` in danxbot (NOT in `.danxbot/config/` — secrets stay local):
 
@@ -341,7 +324,6 @@ Synced by poller to: `docs/domains/` and `docs/schema/`
 - `.danxbot/config/overview.md` → copies to `.claude/rules/repo-overview.md`
 - `.danxbot/config/workflow.md` → copies to `.claude/rules/repo-workflow.md`
 - `.danxbot/config/compose.yml` → copies to `repo-overrides/<name>-compose.yml`
-- `.danxbot/config/post-clone.sh` → copies to `repo-overrides/post-clone-<name>.sh`
 - `.danxbot/config/docs/` → copies to `docs/domains/` and `docs/schema/`
 
 All of these target paths are gitignored in danxbot. They are generated artifacts, not source files. The poller syncs them before each Claude spawn.
@@ -373,12 +355,11 @@ TRELLO_REVIEW_MIN_CARDS=10
 
 ### Docker Network
 
-The danxbot container must join the connected repo's Docker network so it can communicate with the repo's services (database, web server, etc.).
+The danxbot worker container must join the connected repo's Docker network so it can communicate with the repo's services (database, web server, etc.). This is configured in the per-repo `compose.yml`, not in `.env`.
 
 1. Detect the connected repo's Docker network by running: `docker network ls --format '{{.Name}}' | grep -i <repo-name>`
-2. If found, set `DOCKER_NETWORK=<network-name>` in `.env`
-3. If not found (repo's Docker stack isn't running), ask: "What is the Docker network name for the connected repo? (e.g., `<repo-name>_sail`)"
-4. Verify the network exists: `docker network inspect <network-name> > /dev/null 2>&1`
+2. If not found (repo's Docker stack isn't running), ask: "What is the Docker network name for the connected repo? (e.g., `<repo-name>_sail`)"
+3. Add the network to the repo's `.danxbot/config/compose.yml` under `networks:` as an external network
 
 ### Platform Database
 

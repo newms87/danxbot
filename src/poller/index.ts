@@ -456,14 +456,7 @@ function syncRepoFiles(repo: RepoContext): void {
     copyFileSync(composeSource, resolve(overridesDir, `${name}-compose.yml`));
   }
 
-  // 8. Copy post-clone hook to repo-overrides/ (optional)
-  const hookSource = resolve(danxbotConfigDir, "post-clone.sh");
-  if (existsSync(hookSource)) {
-    mkdirSync(overridesDir, { recursive: true });
-    copyFileSync(hookSource, resolve(overridesDir, `post-clone-${name}.sh`));
-  }
-
-  // 9. Copy docs/ → danxbot docs dir (domains and schema)
+  // 8. Copy docs/ → danxbot docs dir (domains and schema)
   const repoDocsDir = resolve(danxbotConfigDir, "docs");
   if (existsSync(repoDocsDir)) {
     const docsDir = resolve(projectRoot, "docs");
@@ -478,7 +471,7 @@ function syncRepoFiles(repo: RepoContext): void {
     }
   }
 
-  // 10. Copy .danxbot/features.md → docs/features.md (only if not already present)
+  // 9. Copy .danxbot/features.md → docs/features.md (only if not already present)
   const danxbotDir = resolve(danxbotConfigDir, "..");
   const featuresSource = resolve(danxbotDir, "features.md");
   const featuresDest = resolve(projectRoot, "docs", "features.md");
