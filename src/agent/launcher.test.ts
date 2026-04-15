@@ -328,6 +328,76 @@ describe("spawnHeadlessAgent", () => {
     expect(job.summary).toBe("Completed the task successfully");
   });
 
+  it("writes stderr.log to disk on failure", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnHeadlessAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Emit stderr
+    child.stderr.emit("data", Buffer.from("Error: auth failed\n"));
+
+    // Close with failure
+    child.emit("close", 1);
+
+    // Should write stderr.log
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("stderr.log"),
+      expect.stringContaining("auth failed"),
+    );
+  });
+
+  it("writes stdout.jsonl to disk on completion", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnHeadlessAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Emit stdout
+    const event = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "hello" }] } });
+    child.stdout.emit("data", Buffer.from(event + "\n"));
+
+    // Close with success
+    child.emit("close", 0);
+
+    // Should write stdout.jsonl
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("stdout.jsonl"),
+      expect.stringContaining(event),
+    );
+  });
+
+  it("logs job.summary to console on failure", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await spawnHeadlessAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    child.stderr.emit("data", Buffer.from("Permission denied"));
+    child.emit("close", 1);
+
+    // setupProcessHandlers should log the summary via console.error
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("test-uuid-1234"),
+      // The summary message (no need to match exact format)
+    );
+
+    consoleErrorSpy.mockRestore();
+  });
+
   it("includes stderr in failure summary", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
@@ -346,6 +416,71 @@ describe("spawnHeadlessAgent", () => {
 
     expect(job.status).toBe("failed");
     expect(job.summary).toContain("permission denied");
+  });
+
+  it("writes stderr and stdout to disk on timeout", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnHeadlessAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 60_000,
+    });
+
+    // Emit some output before timeout
+    child.stderr.emit("data", Buffer.from("timeout stderr\n"));
+    child.stdout.emit("data", Buffer.from('{"type":"system"}\n'));
+
+    // Trigger timeout
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("stderr.log"),
+      expect.stringContaining("timeout stderr"),
+    );
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining("stdout.jsonl"),
+      expect.stringContaining('{"type":"system"}'),
+    );
+  });
+
+  it("does not write stderr.log when stderr is empty", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnHeadlessAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Close with success, no stderr
+    child.emit("close", 0);
+
+    const stderrCalls = mockWriteFileSync.mock.calls.filter(
+      (call: unknown[]) => typeof call[0] === "string" && (call[0] as string).includes("stderr.log"),
+    );
+    expect(stderrCalls).toHaveLength(0);
+  });
+
+  it("does not write stdout.jsonl when stdout is empty", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnHeadlessAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Close with success, no stdout
+    child.emit("close", 0);
+
+    const stdoutCalls = mockWriteFileSync.mock.calls.filter(
+      (call: unknown[]) => typeof call[0] === "string" && (call[0] as string).includes("stdout.jsonl"),
+    );
+    expect(stdoutCalls).toHaveLength(0);
   });
 
   it("prevents double status transition (close after timeout)", async () => {

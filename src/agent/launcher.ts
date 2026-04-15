@@ -23,6 +23,7 @@ import {
   logPromptToDisk,
   createInactivityTimer,
   setupProcessHandlers,
+  writeJobLogs,
 } from "./process-utils.js";
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
@@ -456,15 +457,27 @@ export async function spawnHeadlessAgent(options: HeadlessAgentOptions): Promise
     stderr += data.toString();
   });
 
+  // Accumulate raw stdout for disk logging
+  let stdout = "";
+  child.stdout?.on("data", (data: Buffer) => {
+    stdout += data.toString();
+  });
+
   const inactivityTimer = createInactivityTimer(
     child,
     options.timeoutMs,
-    (j) => options.onComplete?.(j),
+    (j) => {
+      writeJobLogs(config.logsDir, jobId, stderr, stdout);
+      options.onComplete?.(j);
+    },
     job,
   );
 
   setupProcessHandlers(child, job, getLastAssistantText, () => stderr, {
-    onComplete: options.onComplete,
+    onComplete: (j) => {
+      writeJobLogs(config.logsDir, jobId, stderr, stdout);
+      options.onComplete?.(j);
+    },
     cleanup: () => inactivityTimer.clear(),
   });
 

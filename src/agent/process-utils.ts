@@ -115,6 +115,26 @@ export function logPromptToDisk(
 }
 
 /**
+ * Write stderr and stdout logs to disk for post-mortem debugging.
+ * Non-fatal — errors are logged but don't stop execution.
+ */
+export function writeJobLogs(
+  logsDir: string,
+  jobId: string,
+  stderr: string,
+  stdout: string,
+): void {
+  const logDir = join(logsDir, jobId);
+  try {
+    mkdirSync(logDir, { recursive: true });
+    if (stderr) writeFileSync(join(logDir, "stderr.log"), stderr);
+    if (stdout) writeFileSync(join(logDir, "stdout.jsonl"), stdout);
+  } catch (err) {
+    console.error(`[Job ${jobId}] Failed to write job logs:`, err);
+  }
+}
+
+/**
  * Create an inactivity timer that kills the child process after a period of no stdout.
  * Returns reset/clear functions. The timer auto-resets on every stdout data event.
  */
@@ -184,6 +204,9 @@ export function setupProcessHandlers(
       job.completedAt = new Date();
 
       console.log(`[Job ${job.id}] ${job.status} (exit code: ${code})`);
+      if (!isSuccess && job.summary) {
+        console.error(`[Job ${job.id}] ${job.summary}`);
+      }
       options.onComplete?.(job);
     }
   });

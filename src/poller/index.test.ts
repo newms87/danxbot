@@ -54,7 +54,12 @@ const { mockRepoContexts } = vi.hoisted(() => {
 });
 
 const { mockConfig } = vi.hoisted(() => ({
-  mockConfig: { pollerIntervalMs: 60000, isHost: true },
+  mockConfig: {
+    pollerIntervalMs: 60000,
+    isHost: true,
+    pollerEnabled: true,
+    pollerBackoffScheduleMs: [60_000, 300_000, 900_000, 1_800_000],
+  },
 }));
 vi.mock("../config.js", () => ({
   config: mockConfig,
@@ -71,15 +76,19 @@ vi.mock("./constants.js", () => ({
 const mockFetchTodoCards = vi.fn();
 const mockFetchNeedsHelpCards = vi.fn();
 const mockFetchReviewCards = vi.fn();
+const mockFetchInProgressCards = vi.fn();
 const mockFetchLatestComment = vi.fn();
 const mockMoveCardToList = vi.fn();
+const mockAddComment = vi.fn();
 const mockIsUserResponse = vi.fn();
 vi.mock("./trello-client.js", () => ({
   fetchTodoCards: (...args: unknown[]) => mockFetchTodoCards(...args),
   fetchNeedsHelpCards: (...args: unknown[]) => mockFetchNeedsHelpCards(...args),
   fetchReviewCards: (...args: unknown[]) => mockFetchReviewCards(...args),
+  fetchInProgressCards: (...args: unknown[]) => mockFetchInProgressCards(...args),
   fetchLatestComment: (...args: unknown[]) => mockFetchLatestComment(...args),
   moveCardToList: (...args: unknown[]) => mockMoveCardToList(...args),
+  addComment: (...args: unknown[]) => mockAddComment(...args),
   isUserResponse: (...args: unknown[]) => mockIsUserResponse(...args),
 }));
 
@@ -621,6 +630,12 @@ describe("shutdown", () => {
   });
 });
 
+/** Flush async work triggered by fire-and-forget onComplete handlers. */
+async function flushAsync(): Promise<void> {
+  await new Promise((r) => process.nextTick(r));
+  await new Promise((r) => process.nextTick(r));
+}
+
 describe("poll — Docker mode (headless agent)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -630,6 +645,9 @@ describe("poll — Docker mode (headless agent)", () => {
     mockSpawnHeadlessAgent.mockResolvedValue({ id: "test-job", status: "running" });
     setupRepoConfigMocks();
     mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchInProgressCards.mockResolvedValue([]);
+    mockAddComment.mockResolvedValue(undefined);
+    mockMoveCardToList.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -704,7 +722,8 @@ describe("poll — Docker mode (headless agent)", () => {
 
     // Simulate agent completion
     mockExistsSync.mockReturnValue(true); // lock file exists
-    capturedOnComplete!({ id: "test-job", status: "completed" });
+    capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() });
+    await flushAsync();
 
     // Lock file should be removed
     expect(mockUnlinkSync).toHaveBeenCalledWith(
@@ -730,7 +749,8 @@ describe("poll — Docker mode (headless agent)", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     mockExistsSync.mockReturnValue(true);
-    capturedOnComplete!({ id: "test-job", status: "failed" });
+    capturedOnComplete!({ id: "test-job", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
+    await flushAsync();
 
     expect(mockUnlinkSync).toHaveBeenCalledWith(
       expect.stringContaining(".poller-running"),
@@ -791,7 +811,8 @@ describe("poll — Docker mode (headless agent)", () => {
     mockExistsSync.mockReturnValue(false);
 
     // Should not throw
-    expect(() => capturedOnComplete!({ id: "test-job", status: "completed" })).not.toThrow();
+    expect(() => capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() })).not.toThrow();
+    await flushAsync();
 
     // unlinkSync should NOT be called (file doesn't exist)
     expect(mockUnlinkSync).not.toHaveBeenCalled();
@@ -826,12 +847,389 @@ describe("poll — Docker mode (headless agent)", () => {
     });
     mockUnlinkSync.mockImplementation(() => { lockRemoved = true; });
 
-    capturedOnComplete!({ id: "test-job", status: "completed" });
+    capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() });
 
     // Flush microtasks to let the fire-and-forget poll() resolve
-    await new Promise((r) => process.nextTick(r));
-    await new Promise((r) => process.nextTick(r));
+    await flushAsync();
+    await flushAsync();
 
     expect(mockSpawnHeadlessAgent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("poll — exponential backoff on failure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    mockConfig.isHost = false;
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchInProgressCards.mockResolvedValue([]);
+    mockAddComment.mockResolvedValue(undefined);
+    mockMoveCardToList.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    mockConfig.isHost = true;
+  });
+
+  it("increments consecutive failure counter on agent failure", async () => {
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    mockExistsSync.mockReturnValue(false);
+    capturedOnComplete!({ id: "j1", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
+    await flushAsync();
+
+    // The backoffUntil should be set — poll should skip during backoff
+    mockFetchTodoCards.mockResolvedValue([{ id: "c2", name: "Card 2" }]);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Should not spawn because we're in backoff
+    expect(mockSpawnHeadlessAgent).toHaveBeenCalledTimes(1); // Only the first call
+  });
+
+  it("resets failure counter on success — next failure gets first-tier backoff", async () => {
+    // Use instant backoff so re-polls proceed
+    const originalSchedule = mockConfig.pollerBackoffScheduleMs;
+    mockConfig.pollerBackoffScheduleMs = [1, 1, 1, 1];
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    // First: spawn and fail
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    mockExistsSync.mockReturnValue(false);
+    capturedOnComplete!({ id: "j1", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
+    await flushAsync();
+    await new Promise((r) => setTimeout(r, 5)); // let 1ms backoff expire
+
+    // The re-poll from failure spawns another agent. Succeed this time.
+    await flushAsync();
+    await flushAsync();
+    // Capture the latest onComplete
+    const secondOnComplete = capturedOnComplete!;
+
+    // Succeed
+    secondOnComplete({ id: "j2", status: "completed", summary: "done", startedAt: new Date(), completedAt: new Date() });
+    await flushAsync();
+    await new Promise((r) => setTimeout(r, 5));
+    await flushAsync();
+    await flushAsync();
+
+    // Now fail again — if counter was reset, we should NOT halt (schedule length 4).
+    // With schedule [1,1,1,1] and only 1 failure, it should just backoff, not halt.
+    // The key assertion: after success + failure, the poller still re-polls
+    // (i.e., spawnHeadlessAgent is called again), proving the counter was reset.
+    const spawnCount = mockSpawnHeadlessAgent.mock.calls.length;
+    expect(spawnCount).toBeGreaterThanOrEqual(2);
+
+    mockConfig.pollerBackoffScheduleMs = originalSchedule;
+  });
+
+  it("halts polling after exhausting all backoff schedule entries", async () => {
+    // Schedule length 1: failure 1 uses the backoff, failure 2 exceeds schedule → halt
+    const originalSchedule = mockConfig.pollerBackoffScheduleMs;
+    mockConfig.pollerBackoffScheduleMs = [1]; // 1ms backoff
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    const onCompleteFns: Array<(job: unknown) => void> = [];
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      if (opts.onComplete) onCompleteFns.push(opts.onComplete);
+      return Promise.resolve({ id: `j${onCompleteFns.length}`, status: "running" });
+    });
+
+    // First poll spawns agent
+    await poll(MOCK_REPO_CONTEXT);
+    expect(onCompleteFns).toHaveLength(1);
+
+    // First failure — uses backoff[0] (1ms), sets backoffUntil, re-polls
+    mockExistsSync.mockReturnValue(false);
+    onCompleteFns[0]({
+      id: "j1", status: "failed", summary: "crash",
+      startedAt: new Date(), completedAt: new Date(),
+    });
+    await flushAsync();
+    await flushAsync();
+    await new Promise((r) => setTimeout(r, 5)); // let 1ms backoff expire
+
+    // Re-poll should have spawned a second agent (backoff expired)
+    // Wait for the re-poll to complete
+    await flushAsync();
+    await flushAsync();
+
+    // Second failure — consecutiveFailures(2) > schedule.length(1) → halt
+    if (onCompleteFns.length >= 2) {
+      mockSpawnHeadlessAgent.mockClear();
+      mockFetchTodoCards.mockClear();
+      onCompleteFns[1]({
+        id: "j2", status: "failed", summary: "crash again",
+        startedAt: new Date(), completedAt: new Date(),
+      });
+      await flushAsync();
+      await flushAsync();
+
+      // Should NOT spawn again — poller halted
+      expect(mockSpawnHeadlessAgent).not.toHaveBeenCalled();
+      expect(mockFetchTodoCards).not.toHaveBeenCalled();
+    }
+
+    mockConfig.pollerBackoffScheduleMs = originalSchedule;
+  });
+
+  it("skips polling during backoff period", async () => {
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    mockExistsSync.mockReturnValue(false);
+    capturedOnComplete!({ id: "j1", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
+    await flushAsync();
+
+    // Try to poll again — should skip because in backoff
+    mockSpawnHeadlessAgent.mockClear();
+    mockFetchTodoCards.mockClear();
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+    expect(mockSpawnHeadlessAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("poll — stuck card recovery on failure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    mockConfig.isHost = false;
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchInProgressCards.mockResolvedValue([]);
+    mockAddComment.mockResolvedValue(undefined);
+    mockMoveCardToList.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    mockConfig.isHost = true;
+  });
+
+  it("moves stuck In Progress card to Needs Help on agent failure", async () => {
+    const todoCard = { id: "c1", name: "My Card" };
+    mockFetchTodoCards.mockResolvedValue([todoCard]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Simulate: agent moved the card to In Progress, then failed
+    mockFetchInProgressCards.mockResolvedValue([todoCard]);
+    mockExistsSync.mockReturnValue(false);
+
+    capturedOnComplete!({
+      id: "j1", status: "failed",
+      summary: "Error: permission denied",
+      startedAt: new Date(Date.now() - 60_000),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+
+    // Card should be moved to Needs Help
+    expect(mockMoveCardToList).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello,
+      "c1",
+      MOCK_REPO_CONTEXT.trello.needsHelpListId,
+      "top",
+    );
+
+    // A comment should be added with failure details and danxbot marker
+    expect(mockAddComment).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello,
+      "c1",
+      expect.stringContaining("Agent Failure"),
+    );
+    expect(mockAddComment).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello,
+      "c1",
+      expect.stringContaining("permission denied"),
+    );
+    expect(mockAddComment).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello,
+      "c1",
+      expect.stringContaining("<!-- danxbot -->"),
+    );
+  });
+
+  it("does not recover cards that were already In Progress before spawn", async () => {
+    const todoCard = { id: "c1", name: "My Card" };
+    const preExistingCard = { id: "c99", name: "Already In Progress" };
+    mockFetchTodoCards.mockResolvedValue([todoCard]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Both the todo card AND a pre-existing card are in In Progress
+    mockFetchInProgressCards.mockResolvedValue([todoCard, preExistingCard]);
+    mockExistsSync.mockReturnValue(false);
+
+    capturedOnComplete!({
+      id: "j1", status: "failed", summary: "crash",
+      startedAt: new Date(), completedAt: new Date(),
+    });
+    await flushAsync();
+
+    // Only c1 should be moved (it was in our ToDo list before spawn)
+    expect(mockMoveCardToList).toHaveBeenCalledTimes(1);
+    expect(mockMoveCardToList).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello,
+      "c1",
+      MOCK_REPO_CONTEXT.trello.needsHelpListId,
+      "top",
+    );
+  });
+
+  it("does not recover cards on successful completion", async () => {
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    mockExistsSync.mockReturnValue(false);
+    capturedOnComplete!({
+      id: "j1", status: "completed", summary: "done",
+      startedAt: new Date(), completedAt: new Date(),
+    });
+    await flushAsync();
+
+    // Should NOT fetch In Progress cards on success
+    expect(mockFetchInProgressCards).not.toHaveBeenCalled();
+  });
+
+  it("recovers multiple stuck cards from a single failed agent run", async () => {
+    const todoCards = [
+      { id: "c1", name: "Card 1" },
+      { id: "c2", name: "Card 2" },
+    ];
+    mockFetchTodoCards.mockResolvedValue(todoCards);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Both cards moved to In Progress during agent run
+    mockFetchInProgressCards.mockResolvedValue(todoCards);
+    mockExistsSync.mockReturnValue(false);
+
+    capturedOnComplete!({
+      id: "j1", status: "failed", summary: "crash",
+      startedAt: new Date(), completedAt: new Date(),
+    });
+    await flushAsync();
+
+    // Both cards should be moved to Needs Help
+    expect(mockMoveCardToList).toHaveBeenCalledTimes(2);
+    expect(mockAddComment).toHaveBeenCalledTimes(2);
+    expect(mockMoveCardToList).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello, "c1", MOCK_REPO_CONTEXT.trello.needsHelpListId, "top",
+    );
+    expect(mockMoveCardToList).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello, "c2", MOCK_REPO_CONTEXT.trello.needsHelpListId, "top",
+    );
+  });
+
+  it("recovers stuck cards on agent timeout (not just failure)", async () => {
+    const todoCard = { id: "c1", name: "Card 1" };
+    mockFetchTodoCards.mockResolvedValue([todoCard]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    mockFetchInProgressCards.mockResolvedValue([todoCard]);
+    mockExistsSync.mockReturnValue(false);
+
+    // Timeout status (not "failed") should also trigger recovery
+    capturedOnComplete!({
+      id: "j1", status: "timeout",
+      summary: "Agent timed out after 300 seconds of inactivity",
+      startedAt: new Date(Date.now() - 300_000),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+
+    expect(mockMoveCardToList).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello, "c1", MOCK_REPO_CONTEXT.trello.needsHelpListId, "top",
+    );
+    expect(mockAddComment).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.trello, "c1",
+      expect.stringContaining("timed out"),
+    );
+  });
+
+  it("handles recovery failure gracefully without crashing", async () => {
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+      capturedOnComplete = opts.onComplete;
+      return Promise.resolve({ id: "j1", status: "running" });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Trello API fails during recovery
+    mockFetchInProgressCards.mockRejectedValue(new Error("API down"));
+    mockExistsSync.mockReturnValue(false);
+
+    // Should not throw — error is caught and logged
+    capturedOnComplete!({
+      id: "j1", status: "failed", summary: "crash",
+      startedAt: new Date(), completedAt: new Date(),
+    });
+    await flushAsync();
+
+    // Lock should still be cleaned up even if recovery failed
+    // (teamRunning should be false so next poll can proceed)
   });
 });

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { TrelloConfig } from "../types.js";
 
-import { fetchTodoCards, fetchNeedsHelpCards, fetchLatestComment, moveCardToList, isUserResponse } from "./trello-client.js";
+import { fetchTodoCards, fetchNeedsHelpCards, fetchInProgressCards, fetchLatestComment, moveCardToList, addComment, isUserResponse } from "./trello-client.js";
 
 const MOCK_TRELLO: TrelloConfig = {
   apiKey: "test-key",
@@ -223,6 +223,76 @@ describe("moveCardToList", () => {
     );
 
     await expect(moveCardToList(MOCK_TRELLO, "card123", "list456")).rejects.toThrow("Trello API error: 403 Forbidden");
+  });
+});
+
+describe("fetchInProgressCards", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("calls the In Progress list URL", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify([]), { status: 200 }),
+    );
+
+    await fetchInProgressCards(MOCK_TRELLO);
+
+    const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
+    expect(calledUrl).toContain("/1/lists/ip-list/cards");
+    expect(calledUrl).toContain("key=test-key");
+    expect(calledUrl).toContain("token=test-token");
+  });
+
+  it("returns mapped card objects", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify([{ id: "c1", name: "In Progress card" }]), { status: 200 }),
+    );
+
+    const cards = await fetchInProgressCards(MOCK_TRELLO);
+    expect(cards).toEqual([{ id: "c1", name: "In Progress card" }]);
+  });
+});
+
+describe("addComment", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("sends POST to the comments endpoint with text body", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({}), { status: 200 }),
+    );
+
+    await addComment(MOCK_TRELLO, "card123", "Agent failed with error");
+
+    const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
+    const opts = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+
+    expect(calledUrl).toContain("/1/cards/card123/actions/comments");
+    expect(calledUrl).toContain("key=test-key");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body as string)).toEqual({ text: "Agent failed with error" });
+  });
+
+  it("throws on non-ok response", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response("Forbidden", { status: 403, statusText: "Forbidden" }),
+    );
+
+    await expect(addComment(MOCK_TRELLO, "card123", "test")).rejects.toThrow("Trello API error: 403 Forbidden");
   });
 });
 

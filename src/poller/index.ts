@@ -20,10 +20,13 @@ import {
   fetchTodoCards,
   fetchNeedsHelpCards,
   fetchReviewCards,
+  fetchInProgressCards,
   fetchLatestComment,
   moveCardToList,
+  addComment,
   isUserResponse,
 } from "./trello-client.js";
+import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext, TrelloConfig } from "../types.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -37,6 +40,9 @@ interface RepoPollerState {
   lockFile: string;
   lockCheckId: ReturnType<typeof setInterval> | null;
   intervalId: ReturnType<typeof setInterval> | null;
+  consecutiveFailures: number;
+  backoffUntil: number;
+  priorTodoCardIds: string[];
 }
 
 const repoState = new Map<string, RepoPollerState>();
@@ -50,6 +56,9 @@ function getState(repoName: string): RepoPollerState {
       lockFile: resolve(projectRoot, `.poller-running-${repoName}`),
       lockCheckId: null,
       intervalId: null,
+      consecutiveFailures: 0,
+      backoffUntil: 0,
+      priorTodoCardIds: [],
     };
     repoState.set(repoName, state);
   }
@@ -92,6 +101,12 @@ async function checkNeedsHelp(trello: TrelloConfig): Promise<number> {
 export async function poll(repo: RepoContext): Promise<void> {
   const state = getState(repo.name);
   if (state.teamRunning || state.polling) {
+    return;
+  }
+
+  if (Date.now() < state.backoffUntil) {
+    const remainingSeconds = Math.round((state.backoffUntil - Date.now()) / 1000);
+    log.info(`[${repo.name}] In backoff — ${remainingSeconds}s remaining (${state.consecutiveFailures} consecutive failures)`);
     return;
   }
 
@@ -140,6 +155,10 @@ async function _poll(repo: RepoContext): Promise<void> {
     `[${repo.name}] Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`,
   );
   cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.name}`));
+
+  // Save card IDs for stuck-card recovery on failure
+  const state = getState(repo.name);
+  state.priorTodoCardIds = cards.map((c) => c.id);
 
   spawnClaude(repo, "Danxbot Team", "run-team.sh");
 }
@@ -518,20 +537,117 @@ function spawnClaude(repo: RepoContext, title: string, scriptName: string): void
         DANXBOT_EPHEMERAL: "1",
         DANXBOT_PROJECT_ROOT: projectRoot,
       },
-      onComplete: () => {
-        log.info(`[${repo.name}] Headless agent finished — resuming polling`);
-        state.teamRunning = false;
-        try {
-          if (existsSync(state.lockFile)) unlinkSync(state.lockFile);
-        } catch (e) {
-          log.warn(`[${repo.name}] Failed to remove lock file after headless agent`, e);
-        }
-        poll(repo).catch((err) =>
-          log.error(`[${repo.name}] Re-poll after headless agent failed`, err),
+      onComplete: (job) => {
+        handleAgentCompletion(repo, state, job).catch((err) =>
+          log.error(`[${repo.name}] Error in post-completion handler`, err),
         );
       },
     });
   }
+}
+
+/**
+ * Handle agent completion: track failures, apply backoff, recover stuck cards.
+ * On success, resets the failure counter. On failure, increments the counter,
+ * recovers stuck cards, and applies exponential backoff.
+ */
+async function handleAgentCompletion(
+  repo: RepoContext,
+  state: RepoPollerState,
+  job: AgentJob,
+): Promise<void> {
+  const isFailure = job.status !== "completed";
+
+  if (isFailure) {
+    state.consecutiveFailures++;
+    log.warn(
+      `[${repo.name}] Agent ${job.status} (${state.consecutiveFailures} consecutive failure${state.consecutiveFailures > 1 ? "s" : ""})`,
+    );
+
+    // Recover stuck cards before backoff
+    await recoverStuckCards(repo, state, job);
+
+    const schedule = config.pollerBackoffScheduleMs;
+    if (state.consecutiveFailures > schedule.length) {
+      log.error(
+        `[${repo.name}] Max consecutive failures (${state.consecutiveFailures}) exceeded schedule — halting poller`,
+      );
+      cleanupAfterAgent(state);
+      return; // Don't resume polling
+    }
+
+    const backoffMs = schedule[state.consecutiveFailures - 1];
+    state.backoffUntil = Date.now() + backoffMs;
+    log.warn(`[${repo.name}] Backing off ${backoffMs / 1000}s before next attempt`);
+  } else {
+    if (state.consecutiveFailures > 0) {
+      log.info(`[${repo.name}] Agent succeeded — resetting failure counter`);
+    }
+    state.consecutiveFailures = 0;
+    state.backoffUntil = 0;
+  }
+
+  cleanupAfterAgent(state);
+  log.info(`[${repo.name}] Headless agent finished — resuming polling`);
+  poll(repo).catch((err) =>
+    log.error(`[${repo.name}] Re-poll after headless agent failed`, err),
+  );
+}
+
+function cleanupAfterAgent(state: RepoPollerState): void {
+  state.teamRunning = false;
+  state.priorTodoCardIds = [];
+  try {
+    if (existsSync(state.lockFile)) unlinkSync(state.lockFile);
+  } catch (e) {
+    console.warn(`Failed to remove lock file: ${e}`);
+  }
+}
+
+/**
+ * After agent failure, check if any cards moved from ToDo to In Progress
+ * during the agent's run. If so, move them to Needs Help with a comment.
+ */
+async function recoverStuckCards(
+  repo: RepoContext,
+  state: RepoPollerState,
+  job: AgentJob,
+): Promise<void> {
+  if (state.priorTodoCardIds.length === 0) return;
+
+  try {
+    const inProgressCards = await fetchInProgressCards(repo.trello);
+    const stuckCards = inProgressCards.filter((card) =>
+      state.priorTodoCardIds.includes(card.id),
+    );
+
+    for (const card of stuckCards) {
+      log.warn(`[${repo.name}] Recovering stuck card "${card.name}" → Needs Help`);
+      await moveCardToList(repo.trello, card.id, repo.trello.needsHelpListId, "top");
+
+      const elapsed = formatElapsed(job);
+      const comment = `## Agent Failure — Card Recovery
+
+The agent working on this card ${job.status} after ${elapsed}.
+
+**Error:** ${job.summary || "No details available"}
+
+This card was automatically moved to Needs Help. Review the error and move back to ToDo to retry.
+
+${DANXBOT_COMMENT_MARKER}`;
+
+      await addComment(repo.trello, card.id, comment);
+    }
+  } catch (err) {
+    log.error(`[${repo.name}] Failed to recover stuck cards`, err);
+  }
+}
+
+function formatElapsed(job: AgentJob): string {
+  const ms = (job.completedAt?.getTime() ?? Date.now()) - job.startedAt.getTime();
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.round(seconds / 60)}min`;
 }
 
 async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {

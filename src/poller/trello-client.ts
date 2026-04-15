@@ -65,6 +65,22 @@ export async function moveCardToList(trello: TrelloConfig, cardId: string, listI
   }
 }
 
+export async function fetchInProgressCards(trello: TrelloConfig): Promise<TrelloCard[]> {
+  return fetchCardsFromList(trello, trello.inProgressListId);
+}
+
+export async function addComment(trello: TrelloConfig, cardId: string, text: string): Promise<void> {
+  const url = `https://api.trello.com/1/cards/${cardId}/actions/comments?${authParams(trello)}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) {
+    throw new Error(`Trello API error: ${response.status} ${response.statusText}`);
+  }
+}
+
 export function isUserResponse(comment: TrelloComment | null): boolean {
   if (!comment) return false;
   return !comment.data.text.includes(DANXBOT_COMMENT_MARKER);
