@@ -111,7 +111,7 @@ vi.mock("node:fs", () => ({
 import { poll, shutdown, start, _resetForTesting } from "./index.js";
 
 function createFakeSpawnResult() {
-  return { unref: vi.fn() };
+  return { unref: vi.fn(), on: vi.fn() };
 }
 
 const FAKE_CONFIG_YML = `name: test-repo

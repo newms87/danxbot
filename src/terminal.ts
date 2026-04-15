@@ -104,7 +104,7 @@ export function spawnInTerminal(options: TerminalLaunchOptions): void {
 
   log.info(`Spawning in new terminal tab: ${options.title}`);
 
-  spawn(
+  const child = spawn(
     "wt.exe",
     [
       "-w",
@@ -118,5 +118,9 @@ export function spawnInTerminal(options: TerminalLaunchOptions): void {
       options.script,
     ],
     { cwd: options.cwd, stdio: "ignore", env, detached: true },
-  ).unref();
+  );
+  child.on("error", (err) => {
+    log.error(`Failed to spawn terminal: ${err.message} — is wt.exe available? (Docker containers need the dispatch API instead)`);
+  });
+  child.unref();
 }

@@ -18,6 +18,7 @@ help: ## Show this help
 
 build: ## Build the danxbot Docker image
 	docker compose build
+	docker tag danxbot-flytebot-dashboard:latest danxbot:latest
 
 launch-infra: ## Start shared infrastructure (MySQL + dashboard)
 	docker compose up -d

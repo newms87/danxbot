@@ -26,8 +26,9 @@ services:
       TRELLO_REVIEW_MIN_CARDS: ${TRELLO_REVIEW_MIN_CARDS:-10}
       DANXBOT_GIT_EMAIL: ${DANXBOT_GIT_EMAIL:-danxbot@example.com}
       DANXBOT_RUNTIME: ${DANXBOT_RUNTIME:-docker}
+      REPOS: ${REPOS}
     volumes:
-      - ${DANXBOT_HOST_DIR:-/home/newms/web/danxbot-flytebot}:/danxbot/repos/danxbot
+      - ${DANXBOT_HOST_DIR:-/home/newms/web/danxbot-flytebot}:/danxbot/app/repos/danxbot
       - ${DANXBOT_HOST_DIR:-/home/newms/web/danxbot-flytebot}/claude-auth:/danxbot/claude-auth:ro
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
@@ -38,7 +39,7 @@ services:
       test: curl -f http://localhost:5561/health || exit 1
       interval: 30s
       timeout: 5s
-      start-period: 30s
+      start_period: 30s
       retries: 3
     logging:
       driver: json-file
