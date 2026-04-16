@@ -66,5 +66,12 @@ export function setupValidationMocks(): void {
     addMessageToThread: vi.fn(),
     updateSessionId: vi.fn(),
     isBotParticipant: vi.fn().mockResolvedValue(false),
+    trimThreadMessages: vi.fn().mockImplementation(
+      (messages: unknown[], limit: number) => {
+        if (messages.length <= limit) return messages;
+        if (limit <= 1) return messages.length > 0 ? [messages[0]] : [];
+        return [messages[0], ...messages.slice(-(limit - 1))];
+      },
+    ),
   }));
 }

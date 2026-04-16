@@ -1,34 +1,11 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { BudgetTracker, hasApiKey } from "./setup.js";
-import type { RepoContext } from "../../types.js";
+import { makeRepoContext } from "../helpers/fixtures.js";
 
 const budget = new BudgetTracker(2.0);
 let savedSessionId: string | null = null;
 
-const MOCK_REPO_CONTEXT: RepoContext = {
-  name: "test-repo",
-  url: "https://example.com/test.git",
-  localPath: "/test/repos/test-repo",
-  trello: {
-    apiKey: "test-key",
-    apiToken: "test-token",
-    boardId: "test-board",
-    reviewListId: "review-list",
-    todoListId: "todo-list",
-    inProgressListId: "ip-list",
-    needsHelpListId: "nh-list",
-    doneListId: "done-list",
-    cancelledListId: "cancelled-list",
-    actionItemsListId: "ai-list",
-    bugLabelId: "bug-label",
-    featureLabelId: "feature-label",
-    epicLabelId: "epic-label",
-    needsHelpLabelId: "nh-label",
-  },
-  slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
-  db: { host: "", user: "", password: "", database: "", enabled: false },
-  githubToken: "",
-} as any;
+const MOCK_REPO_CONTEXT = makeRepoContext();
 
 describe.skipIf(!hasApiKey())("validation: real Claude API", () => {
   let runRouter: typeof import("../../agent/router.js").runRouter;
