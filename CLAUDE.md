@@ -76,14 +76,54 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 
 ## Testing
 
+Three test layers, each with different requirements and costs:
+
+### Layer 1 — Unit + Integration (free, no external deps)
+
 | Command | Purpose |
 |---------|---------|
-| `npx vitest run` | Unit tests (all) |
-| `npx vitest run src/path` | Unit tests (specific) |
-| `npm run test:validate` | Validation tests (real Claude API, $2 budget) |
+| `make test` | All unit + integration tests |
+| `make test-unit` | Unit tests only (mocked, fast) |
+| `make test-integration` | Integration tests only (fake-claude + capture server) |
+| `npx vitest run src/path` | Specific test file or directory |
 | `npx tsc --noEmit` | Type-check only |
 
-Validation tests require `ANTHROPIC_API_KEY` env var and are excluded from the default `npx vitest run`.
+Integration tests use a fake-claude process that writes JSONL to disk and a capture HTTP server that records requests. No Claude API calls, no Docker needed.
+
+### Layer 2 — Validation (real Claude API, ~$1 per run)
+
+| Command | Purpose |
+|---------|---------|
+| `make test-validate` | All validation tests (budget-capped at 150k tokens) |
+
+Requires `ANTHROPIC_API_KEY` in `.env`. Spawns real Claude CLI/SDK processes. Tests JSONL creation, watcher discovery, summary extraction. Excluded from `make test`.
+
+### Layer 3 — System (real Docker workers + Claude API, ~$1 per run)
+
+| Command | Purpose |
+|---------|---------|
+| `make test-system` | All system tests sequentially |
+| `make test-system-health` | Worker /health endpoint |
+| `make test-system-dispatch` | Dispatch API happy path |
+| `make test-system-heartbeat` | Heartbeat + event forwarding |
+| `make test-system-cancel` | Job cancellation |
+| `make test-system-error` | Error recovery |
+| `make test-system-stall` | Stall detection (host mode only) |
+| `make test-system-poller` | Trello poller card lifecycle |
+| `make test-system-cleanup` | Orphaned temp dirs + zombie jobs |
+
+Requires running Docker infrastructure (`make launch-infra` + `make launch-worker REPO=danxbot`) and `ANTHROPIC_API_KEY` in `.env`. Tests the full stack: real HTTP, real Claude, real Trello.
+
+### Key files
+
+| Path | Purpose |
+|------|---------|
+| `src/__tests__/` | Unit tests (co-located with source) |
+| `src/__tests__/integration/` | Integration tests (fake-claude + capture server) |
+| `src/__tests__/integration/helpers/` | fake-claude.ts, capture-server.ts, capture-server-cli.ts |
+| `src/__tests__/validation/` | Validation tests (real Claude API) |
+| `src/__tests__/system/run-system-tests.sh` | System test runner (shell script) |
+| `vitest.validation.config.ts` | Validation-specific vitest config |
 
 ## Build Workflow
 

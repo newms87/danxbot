@@ -257,7 +257,7 @@ test_health() {
     fail "uptime_seconds is '$uptime' (expected > 0)"
   fi
 
-  log_info "Worker repo: $repo (${SECONDS - start_time}s)"
+  log_info "Worker repo: $repo ($((SECONDS - start_time))s)"
 }
 
 test_dispatch() {

@@ -12,7 +12,8 @@ export
 REPOS_DIR := ./repos
 
 .PHONY: help launch-infra stop-infra launch-worker stop-worker launch-all-workers stop-all-workers build logs validate-repos \
-       test-system test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
+       test test-unit test-integration test-validate test-system \
+       test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
        test-system-error test-system-stall test-system-poller test-system-cleanup
 
 help: ## Show this help
@@ -110,7 +111,38 @@ launch-worker-host: ## Start a worker on the host (usage: make launch-worker-hos
 launch-dashboard-host: ## Start the dashboard on the host
 	@set -a && . ./.env && set +a && npx tsx src/index.ts
 
-# --- System Tests (real Docker dispatch, real Claude API) ---
+# --- Testing ---
+#
+# Three test layers, each with different requirements:
+#
+# Layer 1 — Unit + Integration (no external deps, free)
+#   make test           Run all unit + integration tests
+#   make test-unit      Unit tests only (mocked, fast)
+#   make test-integration  Integration tests only (fake-claude + capture server)
+#
+# Layer 2 — Validation (real Claude API, ~$0.50-1.00 per run)
+#   make test-validate  Real Claude CLI/SDK calls, budget-capped at 150k tokens
+#                       Requires ANTHROPIC_API_KEY in .env
+#
+# Layer 3 — System (real Docker workers + real Claude API, ~$0.50-1.00 per run)
+#   make test-system    All system tests against running Docker workers
+#   make test-system-*  Individual system test targets (see below)
+#                       Requires: make launch-infra + make launch-worker
+#
+
+test: ## Run all unit + integration tests (Layer 1 — free, no external deps)
+	@npx vitest run
+
+test-unit: ## Run unit tests only (excludes integration + validation)
+	@npx vitest run --exclude '**/integration/**' --exclude '**/validation/**'
+
+test-integration: ## Run integration tests only (fake-claude + capture server)
+	@npx vitest run src/__tests__/integration
+
+test-validate: ## Run validation tests (Layer 2 — real Claude API, ~$1)
+	@npx vitest run --config vitest.validation.config.ts
+
+# --- System Tests (Layer 3 — real Docker dispatch, real Claude API) ---
 
 SYSTEM_TEST_SCRIPT := ./src/__tests__/system/run-system-tests.sh
 SYSTEM_TEST_FLAGS :=
