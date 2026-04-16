@@ -78,14 +78,17 @@ export class TerminalOutputWatcher {
 
     try {
       const fileStats = await stat(this.logPath);
+      // Re-check after async: stop() may have been called while stat() was pending
+      if (!this.running) return;
       if (fileStats.size <= this.byteOffset) return;
 
       const fd = await open(this.logPath, "r");
       try {
+        if (!this.running) return;
         const bytesToRead = fileStats.size - this.byteOffset;
         const buffer = Buffer.alloc(bytesToRead);
         const { bytesRead } = await fd.read(buffer, 0, bytesToRead, this.byteOffset);
-        if (bytesRead === 0) return;
+        if (bytesRead === 0 || !this.running) return;
         this.byteOffset += bytesRead;
         this.processChunk(buffer.toString("utf-8", 0, bytesRead));
       } finally {
