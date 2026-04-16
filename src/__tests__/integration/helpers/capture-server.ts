@@ -42,7 +42,7 @@ export class CaptureServer {
       });
 
       this.server.on("error", reject);
-      this.server.listen(listenPort, () => {
+      this.server.listen(listenPort, "0.0.0.0", () => {
         const addr = this.server!.address();
         if (typeof addr === "object" && addr !== null) {
           this.port = addr.port;

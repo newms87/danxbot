@@ -64,7 +64,7 @@ vi.mock("../terminal.js", () => ({
   spawnInTerminal: (...args: unknown[]) => mockSpawnInTerminal(...args),
 }));
 
-import { spawnAgent } from "./launcher.js";
+import { spawnAgent, cancelJob } from "./launcher.js";
 
 function createMockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -903,5 +903,151 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
 
     // rmSync should not be called for terminal settings dir (no temp dir created)
     expect(mockRmSync).not.toHaveBeenCalled();
+  });
+});
+
+describe("cancelJob", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockWatcherEntryCallbacks.length = 0;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("sets _canceling=true before sending SIGTERM", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "long task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    let cancelingWasSetBeforeKill = false;
+    child.kill = vi.fn().mockImplementation(() => {
+      if (job._canceling) cancelingWasSetBeforeKill = true;
+    });
+
+    const cancelPromise = cancelJob(job, "test-token");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    expect(cancelingWasSetBeforeKill).toBe(true);
+  });
+
+  it("results in status=canceled when process exits immediately on SIGTERM", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "long task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Simulate fast process exit triggered by SIGTERM (before 5s wait)
+    child.kill = vi.fn().mockImplementation((sig: string) => {
+      if (sig === "SIGTERM") {
+        // Close with non-zero exit code (typical SIGTERM behavior)
+        child.emit("close", 143);
+      }
+    });
+
+    mockFetch.mockResolvedValue({ ok: true });
+
+    const cancelPromise = cancelJob(job, "test-token");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    expect(job.status).toBe("canceled");
+    expect(job.summary).toBe("Agent was canceled by user request");
+    expect(job.completedAt).toBeInstanceOf(Date);
+  });
+
+  it("sends canceled status PUT when statusUrl is available", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "long task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok-cancel",
+    });
+
+    const cancelPromise = cancelJob(job, "tok-cancel");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://example.com/status",
+      expect.objectContaining({
+        method: "PUT",
+        body: expect.stringContaining('"canceled"'),
+      }),
+    );
+  });
+
+  it("is a no-op when job is not running", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "test",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    child.emit("close", 0);
+    expect(job.status).toBe("completed");
+
+    await cancelJob(job, "test-token");
+
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(job.status).toBe("completed");
+  });
+
+  it("sends SIGKILL after 5s when process does not exit on SIGTERM", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "long task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Don't emit "close" — process never exits naturally
+    const cancelPromise = cancelJob(job, "test-token");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    const killCalls = child.kill.mock.calls.map((c: unknown[]) => c[0]);
+    expect(killCalls).toContain("SIGTERM");
+    expect(killCalls).toContain("SIGKILL");
+  });
+
+  it("is a no-op when job.process is undefined", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "test",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    job.process = undefined;
+    job.status = "running";
+
+    await cancelJob(job, "test-token");
+
+    expect(child.kill).not.toHaveBeenCalled();
   });
 });
