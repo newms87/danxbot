@@ -1,10 +1,8 @@
 /**
  * Laravel Event Forwarder — Maps AgentLogEntry to EventPayload and POSTs to Laravel.
  *
- * Replaces EventBatcher + handleStreamEvent from the old stdout parsing path.
- * Registered as a SessionLogWatcher consumer, it receives entries, maps them to
- * the EventPayload format expected by the bulk events endpoint, batches
- * them, and flushes on size threshold (10 events) or time interval (5 seconds).
+ * Registered as a SessionLogWatcher consumer, buffers events, and flushes
+ * on size threshold (10 events) or time interval (5 seconds).
  */
 
 import { createLogger } from "../logger.js";
@@ -18,7 +16,7 @@ const log = createLogger("laravel-forwarder");
 
 const EVENT_BATCH_SIZE = 10;
 const EVENT_BATCH_INTERVAL_MS = 5_000;
-const TOOL_RESULT_MAX_BYTES = 10_240;
+const TOOL_RESULT_MAX_CHARS = 10_240;
 
 export interface EventPayload {
   type: string;
@@ -27,14 +25,15 @@ export interface EventPayload {
 }
 
 /**
- * Truncate tool_result content to ~10KB with a marker.
+ * Truncate tool_result content to ~10KB.
+ * Accepts unknown input and JSON-stringifies non-strings.
  */
 export function truncateToolResultContent(content: unknown): string {
   const text = typeof content === "string" ? content : JSON.stringify(content);
 
-  if (text && text.length > TOOL_RESULT_MAX_BYTES) {
+  if (text.length > TOOL_RESULT_MAX_CHARS) {
     return (
-      text.substring(0, TOOL_RESULT_MAX_BYTES) +
+      text.substring(0, TOOL_RESULT_MAX_CHARS) +
       `... [truncated from ${text.length} bytes]`
     );
   }
@@ -43,8 +42,13 @@ export function truncateToolResultContent(content: unknown): string {
 }
 
 /**
- * Convert an AgentLogEntry to one or more EventPayload objects.
- * An assistant entry with multiple content blocks produces multiple events.
+ * Convert an AgentLogEntry to zero or more EventPayload objects.
+ *
+ * - system/init        → session_init  (data: session_id, model, agents)
+ * - assistant text     → agent_event   (message: text; data.usage on first per turn)
+ * - assistant tool_use → tool_call     (message: toolName; data.tool_use_id, input, [usage])
+ * - user tool_result   → tool_result   (data: tool_use_id, content, is_error)
+ * - thinking-only      → thinking      (data.usage, only if usage is present)
  */
 export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
   const events: EventPayload[] = [];
@@ -72,7 +76,6 @@ export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
       for (const block of content) {
         if (block.type === "text" && block.text) {
           const eventData: Record<string, unknown> = {};
-          // Attach usage to the first agent_event per assistant turn
           if (usage && !usageAttached) {
             eventData.usage = usage;
             usageAttached = true;
@@ -95,20 +98,15 @@ export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
         }
       }
 
-      // If no text blocks but usage exists, attach to the first tool_call
+      // If no text blocks but usage exists, attach to first event (tool_call)
       if (usage && !usageAttached && events.length > 0) {
-        const first = events[0];
-        first.data = { ...first.data, usage };
+        events[0].data = { ...events[0].data, usage };
         usageAttached = true;
       }
 
-      // Thinking-only entries (no text, no tool_use) still carry usage that must
-      // be tracked. Emit a dedicated thinking event so the usage isn't lost.
+      // Thinking-only entries with usage → dedicated thinking event
       if (usage && !usageAttached) {
-        events.push({
-          type: "thinking",
-          data: { usage },
-        });
+        events.push({ type: "thinking", data: { usage } });
       }
       break;
     }
@@ -130,48 +128,15 @@ export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
       break;
     }
 
-    // "result" entries are not present in JSONL session files — Claude Code only
-    // emits them via the SDK streaming API. No mapping needed.
+    // "result" entries have no mapping
   }
 
   return events;
 }
 
 /**
- * POST batched events to the dispatch events endpoint.
- * Fire-and-forget — errors are logged but don't affect the agent.
- * The events endpoint accepts events unconditionally (even for terminal dispatches).
- */
-async function postEvents(
-  eventsUrl: string,
-  apiToken: string,
-  events: EventPayload[],
-  jobId: string,
-): Promise<void> {
-  if (events.length === 0) return;
-
-  try {
-    const response = await fetch(eventsUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiToken}`,
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ events }),
-    });
-
-    if (!response.ok) {
-      log.error(`[Job ${jobId}] Event POST failed: HTTP ${response.status}`);
-    }
-  } catch (err) {
-    log.error(`[Job ${jobId}] Event POST error:`, err);
-  }
-}
-
-/**
  * Derive the events endpoint URL from the status URL.
- * status URL: .../agent-dispatch/{id}/status → .../agent-dispatch/{id}/events
+ * .../agent-dispatch/{id}/status → .../agent-dispatch/{id}/events
  */
 export function deriveEventsUrl(statusUrl: string): string {
   return statusUrl.replace(/\/status$/, "/events");
@@ -204,6 +169,37 @@ async function putSessionId(
   }
 }
 
+/**
+ * POST batched events to the dispatch events endpoint.
+ * Fire-and-forget — errors are logged but don't affect the agent.
+ */
+async function postEvents(
+  eventsUrl: string,
+  apiToken: string,
+  events: EventPayload[],
+  jobId: string,
+): Promise<void> {
+  if (events.length === 0) return;
+
+  try {
+    const response = await fetch(eventsUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiToken}`,
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ events }),
+    });
+
+    if (!response.ok) {
+      log.error(`[Job ${jobId}] Event POST failed: HTTP ${response.status}`);
+    }
+  } catch (err) {
+    log.error(`[Job ${jobId}] Event POST error:`, err);
+  }
+}
+
 export interface LaravelForwarderOptions {
   eventsUrl: string;
   apiToken: string;
@@ -215,9 +211,6 @@ export interface LaravelForwarderOptions {
 /**
  * Creates a SessionLogWatcher consumer that forwards events to Laravel.
  * Returns the consumer function and a flush() method for cleanup.
- *
- * The events endpoint accepts events unconditionally (even for terminal dispatches)
- * so the forwarder never self-terminates — it runs until the watcher is stopped externally.
  */
 export function createLaravelForwarder(options: LaravelForwarderOptions): {
   consumer: EntryConsumer;
@@ -277,10 +270,7 @@ export interface EventForwardingOptions {
 
 /**
  * Creates a SessionLogWatcher + Laravel forwarder wired together.
- * Used by both piped mode (launcher.ts) and terminal mode (server.ts).
- *
- * Returns the watcher (for additional consumers and lifecycle management)
- * and a flush function for final event delivery.
+ * Returns the watcher and a flush function for final event delivery.
  */
 export function startEventForwarding(options: EventForwardingOptions): {
   watcher: SessionLogWatcher;
