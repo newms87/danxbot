@@ -5,7 +5,6 @@ import {
   writeFileSync,
   mkdirSync,
   copyFileSync,
-  unlinkSync,
   chmodSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -15,8 +14,7 @@ import { repoContexts } from "../repo-context.js";
 import { getReposBase, REVIEW_MIN_CARDS, DANXBOT_COMMENT_MARKER, SCRIPT_PROMPTS } from "./constants.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { createLogger } from "../logger.js";
-import { spawnInTerminal } from "../terminal.js";
-import { spawnHeadlessAgent } from "../agent/launcher.js";
+import { spawnAgent } from "../agent/launcher.js";
 import {
   fetchTodoCards,
   fetchNeedsHelpCards,
@@ -38,8 +36,6 @@ const log = createLogger("poller");
 interface RepoPollerState {
   teamRunning: boolean;
   polling: boolean;
-  lockFile: string;
-  lockCheckId: ReturnType<typeof setInterval> | null;
   intervalId: ReturnType<typeof setInterval> | null;
   consecutiveFailures: number;
   backoffUntil: number;
@@ -54,8 +50,6 @@ function getState(repoName: string): RepoPollerState {
     state = {
       teamRunning: false,
       polling: false,
-      lockFile: resolve(projectRoot, `.poller-running-${repoName}`),
-      lockCheckId: null,
       intervalId: null,
       consecutiveFailures: 0,
       backoffUntil: 0,
@@ -504,47 +498,29 @@ function syncRepoFiles(repo: RepoContext): void {
 function spawnClaude(repo: RepoContext, title: string, scriptName: string): void {
   const state = getState(repo.name);
 
-  // Safety net: refuse to spawn if lock file already exists (race condition guard)
-  if (existsSync(state.lockFile)) {
-    log.error(`[${repo.name}] Lock file exists but teamRunning was false — refusing to spawn`);
-    return;
-  }
-
   state.teamRunning = true;
 
-  // Lock file signals that the team is running.
-  writeFileSync(state.lockFile, String(process.pid));
-
-  if (config.isHost) {
-    // Host mode: open a Windows Terminal tab with the shell script.
-    // The script removes the lock file via EXIT trap.
-    const script = resolve(dirname(fileURLToPath(import.meta.url)), scriptName);
-    spawnInTerminal({ title: `${title} [${repo.name}]`, script, cwd: projectRoot, env: { ...process.env, DANXBOT_REPO_NAME: repo.name } });
-    startLockWatch(repo);
-  } else {
-    // Docker mode: spawn a headless claude CLI process.
-    // Completion is handled by the onComplete callback.
-    const prompt = SCRIPT_PROMPTS[scriptName];
-    if (!prompt) {
-      throw new Error(`No prompt mapping for script: ${scriptName}`);
-    }
-
-    spawnHeadlessAgent({
-      prompt,
-      repoName: repo.name,
-      timeoutMs: config.pollerIntervalMs * 60, // generous timeout: 60x poll interval
-      env: {
-        DANXBOT_REPO_NAME: repo.name,
-        DANXBOT_EPHEMERAL: "1",
-        DANXBOT_PROJECT_ROOT: projectRoot,
-      },
-      onComplete: (job) => {
-        handleAgentCompletion(repo, state, job).catch((err) =>
-          log.error(`[${repo.name}] Error in post-completion handler`, err),
-        );
-      },
-    });
+  const prompt = SCRIPT_PROMPTS[scriptName];
+  if (!prompt) {
+    throw new Error(`No prompt mapping for script: ${scriptName}`);
   }
+
+  spawnAgent({
+    prompt,
+    repoName: repo.name,
+    timeoutMs: config.pollerIntervalMs * 60, // generous timeout: 60x poll interval
+    env: {
+      DANXBOT_REPO_NAME: repo.name,
+      DANXBOT_EPHEMERAL: "1",
+      DANXBOT_PROJECT_ROOT: projectRoot,
+    },
+    openTerminal: config.isHost,
+    onComplete: (job) => {
+      handleAgentCompletion(repo, state, job).catch((err) =>
+        log.error(`[${repo.name}] Error in post-completion handler`, err),
+      );
+    },
+  });
 }
 
 /**
@@ -598,11 +574,6 @@ async function handleAgentCompletion(
 function cleanupAfterAgent(state: RepoPollerState): void {
   state.teamRunning = false;
   state.priorTodoCardIds = [];
-  try {
-    if (existsSync(state.lockFile)) unlinkSync(state.lockFile);
-  } catch (e) {
-    console.warn(`Failed to remove lock file: ${e}`);
-  }
 }
 
 /**
@@ -676,46 +647,16 @@ async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {
 export function shutdown(): void {
   log.info("Shutting down...");
 
-  for (const [repoName, state] of repoState) {
+  for (const [, state] of repoState) {
     if (state.intervalId) {
       clearInterval(state.intervalId);
       state.intervalId = null;
-    }
-
-    if (state.lockCheckId) {
-      clearInterval(state.lockCheckId);
-      state.lockCheckId = null;
-    }
-
-    // Only remove lock file if no team is running
-    if (state.teamRunning) {
-      log.info(`[${repoName}] Team is running — leaving lock file for script to clean up`);
-    } else {
-      try {
-        if (existsSync(state.lockFile)) unlinkSync(state.lockFile);
-      } catch (e) {
-        log.warn(`[${repoName}] Failed to remove lock file`, e);
-      }
     }
   }
 
   process.exit(0);
 }
 
-function startLockWatch(repo: RepoContext): void {
-  const state = getState(repo.name);
-  state.lockCheckId = setInterval(() => {
-    if (!existsSync(state.lockFile)) {
-      clearInterval(state.lockCheckId!);
-      state.lockCheckId = null;
-      log.info(`[${repo.name}] Team finished — resuming polling`);
-      state.teamRunning = false;
-      poll(repo).catch((err) =>
-        log.error(`[${repo.name}] Re-poll after team completion failed`, err),
-      );
-    }
-  }, 5000);
-}
 
 export function start(): void {
   process.on("SIGINT", shutdown);
@@ -739,12 +680,6 @@ export function start(): void {
     const intervalSeconds = config.pollerIntervalMs / 1000;
     log.info(`[${repo.name}] Started — polling every ${intervalSeconds}s`);
 
-    // Remove stale lock file from a previous run
-    if (existsSync(state.lockFile)) {
-      log.warn(`[${repo.name}] Stale lock file found — removing`);
-      unlinkSync(state.lockFile);
-    }
-
     poll(repo);
     state.intervalId = setInterval(() => poll(repo), config.pollerIntervalMs);
   }
@@ -758,10 +693,6 @@ export function _resetForTesting(): void {
     if (state.intervalId) {
       clearInterval(state.intervalId);
       state.intervalId = null;
-    }
-    if (state.lockCheckId) {
-      clearInterval(state.lockCheckId);
-      state.lockCheckId = null;
     }
   }
   repoState.clear();

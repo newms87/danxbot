@@ -32,8 +32,7 @@ import {
   SessionLogWatcher,
   DISPATCH_TAG_PREFIX,
 } from "./session-log-watcher.js";
-import { createLaravelForwarder, deriveEventsUrl } from "./laravel-forwarder.js";
-import { spawnInTerminal } from "../terminal.js";
+import { createLaravelForwarder } from "./laravel-forwarder.js";
 
 const log = createLogger("launcher");
 
@@ -50,6 +49,8 @@ export interface AgentJob {
   statusUrl?: string;
   process?: ChildProcess;
   heartbeatInterval?: ReturnType<typeof setInterval>;
+  /** Internal cleanup callback — tears down watcher, forwarder, timers. Set by spawnAgent. */
+  _cleanup?: () => void;
 }
 
 export interface SpawnAgentOptions {
@@ -287,7 +288,6 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
   // --- Optional event forwarding ---
   let forwarderFlush: (() => void) | undefined;
   if (options.eventForwarding) {
-    const eventsUrl = deriveEventsUrl(options.eventForwarding.statusUrl);
     const forwarder = createLaravelForwarder(
       options.eventForwarding.statusUrl,
       options.eventForwarding.apiToken,
@@ -309,6 +309,7 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     child,
     options.timeoutMs,
     (j) => {
+      cleanup();
       options.onComplete?.(j);
     },
     job,
@@ -347,6 +348,8 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     stopHeartbeat(job);
     if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
   }
+
+  job._cleanup = cleanup;
 
   setupProcessHandlers(child, job, () => lastAssistantText, () => stderr, {
     onComplete: (j) => {
@@ -401,7 +404,7 @@ export async function cancelJob(
     job.completedAt = new Date();
   }
 
-  stopHeartbeat(job);
+  job._cleanup?.();
   await putStatus(job, apiToken, "canceled", job.summary);
 }
 

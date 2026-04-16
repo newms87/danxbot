@@ -2,17 +2,14 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { config } from "../config.js";
 import { json, parseBody } from "../http/helpers.js";
 import {
-  launchAgent,
+  spawnAgent,
   cancelJob,
   getJobStatus,
   buildMcpSettings,
+  cleanupMcpSettings,
   type AgentJob,
 } from "../agent/launcher.js";
-import { spawnInTerminal, buildDispatchScript } from "../terminal.js";
-import { getReposBase } from "../poller/constants.js";
-import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
 
@@ -58,72 +55,44 @@ export async function handleLaunch(
       return;
     }
 
-    const launchOptions = {
-      task,
-      agents,
-      apiToken,
-      apiUrl,
-      statusUrl,
-      schemaDefinitionId,
-      schemaRole,
-      timeout: config.dispatch.agentTimeoutMs,
-      maxRuntimeMs,
-      repoName: repo.name,
-    };
+    const settingsDir = buildMcpSettings({ apiToken, apiUrl, schemaDefinitionId, schemaRole });
 
-    if (config.isHost) {
-      const jobId = randomUUID();
-      const settingsDir = buildMcpSettings(launchOptions);
-
-      const promptFile = join(settingsDir, "prompt.md");
-      writeFileSync(promptFile, task);
-
-      let agentsFile: string | undefined;
-      if (agents && agents.length > 0) {
-        agentsFile = join(settingsDir, "agents.json");
-        writeFileSync(agentsFile, JSON.stringify(agents));
-      }
-
-      const logDir = join(config.logsDir, jobId);
-      try {
-        mkdirSync(logDir, { recursive: true });
-        writeFileSync(join(logDir, "prompt.md"), task);
-      } catch (e) {
-        log.warn("Failed to write dispatch debug log:", e);
-      }
-
-      const scriptPath = buildDispatchScript(settingsDir, {
-        promptFile,
+    let job;
+    try {
+      job = await spawnAgent({
+        prompt: task,
+        repoName: repo.name,
+        timeoutMs: config.dispatch.agentTimeoutMs,
         mcpConfigPath: join(settingsDir, "settings.json"),
-        agentsFile,
+        agents,
         statusUrl,
         apiToken,
+        maxRuntimeMs,
+        eventForwarding: statusUrl
+          ? { statusUrl, apiToken }
+          : undefined,
+        openTerminal: config.isHost,
+        onComplete: () => {
+          cleanupMcpSettings(settingsDir);
+        },
       });
-
-      const agentCwd = join(getReposBase(), repo.name);
-
-      spawnInTerminal({
-        title: `Schema Agent ${jobId.substring(0, 8)}`,
-        script: scriptPath,
-        cwd: agentCwd,
-      });
-
-      json(res, 200, { job_id: jobId, status: "launched" });
-    } else {
-      const job = await launchAgent(launchOptions);
-      activeJobs.set(job.id, job);
-
-      const cleanupInterval = setInterval(() => {
-        if (job.status !== "running" && Date.now() - (job.completedAt?.getTime() || 0) > 3600000) {
-          activeJobs.delete(job.id);
-          clearInterval(cleanupInterval);
-          jobCleanupIntervals.delete(cleanupInterval);
-        }
-      }, 60000);
-      jobCleanupIntervals.add(cleanupInterval);
-
-      json(res, 200, { job_id: job.id, status: "launched" });
+    } catch (spawnErr) {
+      cleanupMcpSettings(settingsDir);
+      throw spawnErr;
     }
+
+    activeJobs.set(job.id, job);
+
+    const cleanupInterval = setInterval(() => {
+      if (job.status !== "running" && Date.now() - (job.completedAt?.getTime() || 0) > 3600000) {
+        activeJobs.delete(job.id);
+        clearInterval(cleanupInterval);
+        jobCleanupIntervals.delete(cleanupInterval);
+      }
+    }, 60000);
+    jobCleanupIntervals.add(cleanupInterval);
+
+    json(res, 200, { job_id: job.id, status: "launched" });
   } catch (err) {
     log.error("Launch failed", err);
     json(res, 500, { error: err instanceof Error ? err.message : "Launch failed" });

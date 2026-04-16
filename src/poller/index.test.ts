@@ -100,9 +100,9 @@ vi.mock("node:child_process", () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
-const mockSpawnHeadlessAgent = vi.fn();
+const mockSpawnAgent = vi.fn();
 vi.mock("../agent/launcher.js", () => ({
-  spawnHeadlessAgent: (...args: unknown[]) => mockSpawnHeadlessAgent(...args),
+  spawnAgent: (...args: unknown[]) => mockSpawnAgent(...args),
 }));
 
 vi.mock("../logger.js", () => ({
@@ -154,7 +154,7 @@ paths:
   tests: "tests/"
 `;
 
-/** Make existsSync return true for .danxbot/config/ paths, false for lock file by default */
+/** Make existsSync return true for .danxbot/config/ paths, false by default */
 function setupRepoConfigMocks() {
   mockExistsSync.mockImplementation((path: string) => {
     if (typeof path === "string" && (
@@ -209,28 +209,21 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("spawns wt.exe to open new terminal tab", async () => {
+  it("calls spawnAgent with correct options when cards exist", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawn).toHaveBeenCalledWith(
-      "wt.exe",
-      expect.arrayContaining(["new-tab", "--title", "Danxbot Team [test-repo]", "bash", expect.stringContaining("run-team.sh")]),
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
-        detached: true,
+        prompt: expect.any(String),
+        repoName: "test-repo",
+        openTerminal: true, // config.isHost is true in test
+        env: expect.objectContaining({
+          DANXBOT_REPO_NAME: "test-repo",
+          DANXBOT_EPHEMERAL: "1",
+        }),
       }),
-    );
-  });
-
-  it("creates lock file when spawning", async () => {
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      expect.stringContaining(".poller-running"),
-      expect.any(String),
     );
   });
 
@@ -242,28 +235,6 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("strips CLAUDECODE env vars from spawned process", async () => {
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-
-    process.env.CLAUDECODE_TEST = "should-be-removed";
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    const spawnEnv = mockSpawn.mock.calls[0][2].env;
-    expect(spawnEnv).not.toHaveProperty("CLAUDECODE_TEST");
-
-    delete process.env.CLAUDECODE_TEST;
-  });
-
-  it("refuses to spawn if lock file already exists (pre-spawn safety check)", async () => {
-    mockExistsSync.mockReturnValue(true);
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    // Should not spawn because lock file already exists
-    expect(mockSpawn).not.toHaveBeenCalled();
-  });
 });
 
 describe("poll — Needs Help checking", () => {
@@ -396,7 +367,7 @@ describe("poll — Needs Help checking", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawn).toHaveBeenCalled();
+    expect(mockSpawnAgent).toHaveBeenCalled();
   });
 });
 
@@ -445,145 +416,11 @@ describe("start", () => {
     }
   });
 
-  it("removes stale lock file at startup and proceeds normally", async () => {
-    // Lock file exists at startup — should be removed
-    // Track whether unlinkSync has been called (simulates lock file removal)
-    let lockRemoved = false;
-    mockUnlinkSync.mockImplementation(() => { lockRemoved = true; });
-
-    const origImpl = mockExistsSync.getMockImplementation()!;
-    mockExistsSync.mockImplementation((path: string) => {
-      if (typeof path === "string" && path.includes(".poller-running")) return !lockRemoved;
-      return origImpl(path);
-    });
-
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-
-    // poll() is called from start(), no need to pass argument
-    start();
-    await vi.advanceTimersByTimeAsync(0);
-
-    // Lock file should be removed at startup
-    expect(lockRemoved).toBe(true);
-
-    // Should proceed to spawn since lock was cleared
-    expect(mockSpawn).toHaveBeenCalled();
-  });
-
-  it("does not call unlinkSync when no lock file exists at startup", async () => {
-    mockFetchTodoCards.mockResolvedValue([]);
-
-    start();
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(mockUnlinkSync).not.toHaveBeenCalled();
-  });
-
-  it("crashes if unlinkSync fails on stale lock file", () => {
-    const origImpl = mockExistsSync.getMockImplementation()!;
-    mockExistsSync.mockImplementation((path: string) => {
-      if (typeof path === "string" && path.includes(".poller-running")) return true;
-      return origImpl(path);
-    });
-    mockUnlinkSync.mockImplementation(() => {
-      throw new Error("EPERM: operation not permitted");
-    });
-
-    expect(() => start()).toThrow("EPERM");
-  });
-});
-
-describe("startLockWatch — immediate re-poll on completion", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.useFakeTimers();
-    _resetForTesting();
-    mockSpawn.mockReturnValue(createFakeSpawnResult());
-    setupRepoConfigMocks();
-    mockFetchNeedsHelpCards.mockResolvedValue([]);
+  it("starts polling without errors", () => {
     mockFetchTodoCards.mockResolvedValue([]);
     mockFetchReviewCards.mockResolvedValue(Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `Review ${i}` })));
-  });
 
-  afterEach(() => {
-    vi.useRealTimers();
-    _resetForTesting();
-  });
-
-  it("calls poll immediately when lock file disappears", async () => {
-    // First poll: cards available, lock file doesn't exist → spawns team
-    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockSpawn).toHaveBeenCalledTimes(1);
-
-    // Reset mocks to track the re-poll triggered by lock watch
-    mockFetchNeedsHelpCards.mockClear();
-    mockFetchTodoCards.mockClear();
-    mockFetchTodoCards.mockResolvedValue([]);
-    mockFetchNeedsHelpCards.mockResolvedValue([]);
-
-    // Lock watch checks every 5s — simulate lock file disappearing
-    mockExistsSync.mockReturnValue(false);
-    await vi.advanceTimersByTimeAsync(5000);
-
-    // poll() should have been called immediately — verify by checking fetchTodoCards
-    expect(mockFetchTodoCards).toHaveBeenCalledTimes(1);
-  });
-
-  it("re-poll can spawn a new team if more cards exist", async () => {
-    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
-
-    await poll(MOCK_REPO_CONTEXT);
-    expect(mockSpawn).toHaveBeenCalledTimes(1);
-
-    // On re-poll, return another card so a second team spawns
-    mockFetchNeedsHelpCards.mockResolvedValue([]);
-    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c2", name: "Card 2" }]);
-
-    mockExistsSync.mockReturnValue(false);
-    await vi.advanceTimersByTimeAsync(5000);
-
-    expect(mockSpawn).toHaveBeenCalledTimes(2);
-  });
-
-  it("clears interval after detecting lock removal (no repeated polls)", async () => {
-    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    mockFetchTodoCards.mockClear();
-    mockFetchNeedsHelpCards.mockClear();
-    mockFetchTodoCards.mockResolvedValue([]);
-    mockFetchNeedsHelpCards.mockResolvedValue([]);
-
-    // Lock disappears on first check
-    mockExistsSync.mockReturnValue(false);
-    await vi.advanceTimersByTimeAsync(5000);
-
-    expect(mockFetchTodoCards).toHaveBeenCalledTimes(1);
-
-    // Advance another 5s — should NOT poll again (interval was cleared)
-    mockFetchTodoCards.mockClear();
-    await vi.advanceTimersByTimeAsync(5000);
-
-    expect(mockFetchTodoCards).not.toHaveBeenCalled();
-  });
-
-  it("does not poll when lock file is still present", async () => {
-    mockFetchTodoCards.mockResolvedValueOnce([{ id: "c1", name: "Card 1" }]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    mockFetchTodoCards.mockClear();
-    mockFetchNeedsHelpCards.mockClear();
-
-    // Lock file still exists after 5s
-    mockExistsSync.mockReturnValue(true);
-    await vi.advanceTimersByTimeAsync(5000);
-
-    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+    expect(() => start()).not.toThrow();
   });
 });
 
@@ -593,7 +430,6 @@ describe("shutdown", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
-    mockSpawn.mockReturnValue(createFakeSpawnResult());
     setupRepoConfigMocks();
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockFetchReviewCards.mockResolvedValue(Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `Review ${i}` })));
@@ -604,31 +440,8 @@ describe("shutdown", () => {
     mockExit.mockRestore();
   });
 
-  it("removes lock file when no team is running", async () => {
-    // Initialize repo state by polling once (no cards, returns immediately)
-    mockFetchTodoCards.mockResolvedValue([]);
-    await poll(MOCK_REPO_CONTEXT);
-
-    mockExistsSync.mockReturnValue(true);
-
+  it("calls process.exit(0)", () => {
     shutdown();
-
-    expect(mockUnlinkSync).toHaveBeenCalledWith(
-      expect.stringContaining(".poller-running"),
-    );
-    expect(mockExit).toHaveBeenCalledWith(0);
-  });
-
-  it("preserves lock file when a team is actively running", async () => {
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-
-    // Spawn a team so teamRunning becomes true
-    await poll(MOCK_REPO_CONTEXT);
-
-    // Now shut down — lock file should NOT be removed
-    shutdown();
-
-    expect(mockUnlinkSync).not.toHaveBeenCalled();
     expect(mockExit).toHaveBeenCalledWith(0);
   });
 });
@@ -645,7 +458,7 @@ describe("poll — Docker mode (headless agent)", () => {
     _resetForTesting();
     mockConfig.isHost = false;
     mockSpawn.mockReturnValue(createFakeSpawnResult());
-    mockSpawnHeadlessAgent.mockResolvedValue({ id: "test-job", status: "running" });
+    mockSpawnAgent.mockResolvedValue({ id: "test-job", status: "running" });
     setupRepoConfigMocks();
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockFetchInProgressCards.mockResolvedValue([]);
@@ -657,15 +470,15 @@ describe("poll — Docker mode (headless agent)", () => {
     mockConfig.isHost = true;
   });
 
-  it("calls spawnHeadlessAgent instead of spawnInTerminal when not host", async () => {
+  it("calls spawnAgent instead of spawnInTerminal when not host", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     // Should NOT spawn wt.exe
     expect(mockSpawn).not.toHaveBeenCalled();
-    // Should call spawnHeadlessAgent
-    expect(mockSpawnHeadlessAgent).toHaveBeenCalledWith(
+    // Should call spawnAgent
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         prompt: expect.stringContaining("/danx-next"),
         repoName: "test-repo",
@@ -678,7 +491,7 @@ describe("poll — Docker mode (headless agent)", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnHeadlessAgent).toHaveBeenCalledWith(
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         prompt: expect.stringContaining("/danx-next"),
       }),
@@ -692,30 +505,19 @@ describe("poll — Docker mode (headless agent)", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnHeadlessAgent).toHaveBeenCalledWith(
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         prompt: expect.stringContaining("/danx-ideate"),
       }),
     );
   });
 
-  it("creates lock file before launching headless agent", async () => {
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      expect.stringContaining(".poller-running"),
-      expect.any(String),
-    );
-  });
-
-  it("removes lock file and resets teamRunning via onComplete callback", async () => {
+  it("resets teamRunning via onComplete callback", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     // Capture the onComplete callback
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "test-job", status: "running" });
     });
@@ -724,14 +526,8 @@ describe("poll — Docker mode (headless agent)", () => {
     expect(capturedOnComplete).toBeDefined();
 
     // Simulate agent completion
-    mockExistsSync.mockReturnValue(true); // lock file exists
     capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() });
     await flushAsync();
-
-    // Lock file should be removed
-    expect(mockUnlinkSync).toHaveBeenCalledWith(
-      expect.stringContaining(".poller-running"),
-    );
 
     // Should be able to poll again (teamRunning reset)
     mockFetchTodoCards.mockResolvedValue([]);
@@ -740,35 +536,25 @@ describe("poll — Docker mode (headless agent)", () => {
     expect(mockFetchTodoCards).toHaveBeenCalled();
   });
 
-  it("removes lock file even on agent failure", async () => {
+  it("resets teamRunning on agent failure", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "test-job", status: "running" });
     });
 
     await poll(MOCK_REPO_CONTEXT);
 
-    mockExistsSync.mockReturnValue(true);
     capturedOnComplete!({ id: "test-job", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
     await flushAsync();
 
-    expect(mockUnlinkSync).toHaveBeenCalledWith(
-      expect.stringContaining(".poller-running"),
-    );
-  });
-
-  it("does not start lock file watch interval in Docker mode", async () => {
-    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
-
+    // Should be able to poll again after failure
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
     await poll(MOCK_REPO_CONTEXT);
-
-    // In Docker mode, completion is handled by onComplete callback,
-    // not by polling for lock file removal. The lock file watch (setInterval)
-    // should not be started — verify by checking that spawnInTerminal was not called.
-    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockFetchTodoCards).toHaveBeenCalled();
   });
 
   it("passes DANXBOT_REPO_NAME and DANXBOT_EPHEMERAL env vars", async () => {
@@ -776,7 +562,7 @@ describe("poll — Docker mode (headless agent)", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnHeadlessAgent).toHaveBeenCalledWith(
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         env: expect.objectContaining({
           DANXBOT_REPO_NAME: "test-repo",
@@ -792,71 +578,55 @@ describe("poll — Docker mode (headless agent)", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnHeadlessAgent).toHaveBeenCalledWith(
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
         timeoutMs: 60000 * 60, // pollerIntervalMs (60000) * 60
       }),
     );
   });
 
-  it("handles onComplete when lock file is already removed", async () => {
+  it("handles onComplete without throwing", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "test-job", status: "running" });
     });
 
     await poll(MOCK_REPO_CONTEXT);
-
-    // Lock file already gone before onComplete fires
-    mockExistsSync.mockReturnValue(false);
 
     // Should not throw
     expect(() => capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() })).not.toThrow();
     await flushAsync();
-
-    // unlinkSync should NOT be called (file doesn't exist)
-    expect(mockUnlinkSync).not.toHaveBeenCalled();
   });
 
-  it("onComplete re-poll chains into another spawnHeadlessAgent if more cards", async () => {
+  it("onComplete re-poll chains into another spawnAgent if more cards", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "test-job", status: "running" });
     });
 
     await poll(MOCK_REPO_CONTEXT);
-    expect(mockSpawnHeadlessAgent).toHaveBeenCalledTimes(1);
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
 
     // Reset for re-poll
-    mockSpawnHeadlessAgent.mockClear();
-    mockSpawnHeadlessAgent.mockResolvedValue({ id: "test-job-2", status: "running" });
+    mockSpawnAgent.mockClear();
+    mockSpawnAgent.mockResolvedValue({ id: "test-job-2", status: "running" });
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockFetchTodoCards.mockResolvedValue([{ id: "c2", name: "Card 2" }]);
 
     // Simulate agent completion — onComplete fires poll() asynchronously.
-    // existsSync must return true for lock file removal but false for
-    // the lock file safety check in the next spawnClaude call.
-    let lockRemoved = false;
-    const origImpl = mockExistsSync.getMockImplementation();
-    mockExistsSync.mockImplementation((path: string) => {
-      if (typeof path === "string" && path.includes(".poller-running")) return !lockRemoved;
-      return origImpl ? origImpl(path) : false;
-    });
-    mockUnlinkSync.mockImplementation(() => { lockRemoved = true; });
-
     capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() });
 
     // Flush microtasks to let the fire-and-forget poll() resolve
     await flushAsync();
     await flushAsync();
 
-    expect(mockSpawnHeadlessAgent).toHaveBeenCalledTimes(1);
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -881,7 +651,7 @@ describe("poll — exponential backoff on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -898,7 +668,7 @@ describe("poll — exponential backoff on failure", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     // Should not spawn because we're in backoff
-    expect(mockSpawnHeadlessAgent).toHaveBeenCalledTimes(1); // Only the first call
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1); // Only the first call
   });
 
   it("resets failure counter on success — next failure gets first-tier backoff", async () => {
@@ -909,7 +679,7 @@ describe("poll — exponential backoff on failure", () => {
 
     // First: spawn and fail
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -937,8 +707,8 @@ describe("poll — exponential backoff on failure", () => {
     // Now fail again — if counter was reset, we should NOT halt (schedule length 4).
     // With schedule [1,1,1,1] and only 1 failure, it should just backoff, not halt.
     // The key assertion: after success + failure, the poller still re-polls
-    // (i.e., spawnHeadlessAgent is called again), proving the counter was reset.
-    const spawnCount = mockSpawnHeadlessAgent.mock.calls.length;
+    // (i.e., spawnAgent is called again), proving the counter was reset.
+    const spawnCount = mockSpawnAgent.mock.calls.length;
     expect(spawnCount).toBeGreaterThanOrEqual(2);
 
     mockConfig.pollerBackoffScheduleMs = originalSchedule;
@@ -951,7 +721,7 @@ describe("poll — exponential backoff on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     const onCompleteFns: Array<(job: unknown) => void> = [];
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       if (opts.onComplete) onCompleteFns.push(opts.onComplete);
       return Promise.resolve({ id: `j${onCompleteFns.length}`, status: "running" });
     });
@@ -977,7 +747,7 @@ describe("poll — exponential backoff on failure", () => {
 
     // Second failure — consecutiveFailures(2) > schedule.length(1) → halt
     if (onCompleteFns.length >= 2) {
-      mockSpawnHeadlessAgent.mockClear();
+      mockSpawnAgent.mockClear();
       mockFetchTodoCards.mockClear();
       onCompleteFns[1]({
         id: "j2", status: "failed", summary: "crash again",
@@ -987,7 +757,7 @@ describe("poll — exponential backoff on failure", () => {
       await flushAsync();
 
       // Should NOT spawn again — poller halted
-      expect(mockSpawnHeadlessAgent).not.toHaveBeenCalled();
+      expect(mockSpawnAgent).not.toHaveBeenCalled();
       expect(mockFetchTodoCards).not.toHaveBeenCalled();
     }
 
@@ -998,7 +768,7 @@ describe("poll — exponential backoff on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1010,12 +780,12 @@ describe("poll — exponential backoff on failure", () => {
     await flushAsync();
 
     // Try to poll again — should skip because in backoff
-    mockSpawnHeadlessAgent.mockClear();
+    mockSpawnAgent.mockClear();
     mockFetchTodoCards.mockClear();
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockFetchTodoCards).not.toHaveBeenCalled();
-    expect(mockSpawnHeadlessAgent).not.toHaveBeenCalled();
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 });
 
@@ -1041,7 +811,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([todoCard]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1092,7 +862,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([todoCard]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1123,7 +893,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1149,7 +919,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue(todoCards);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1182,7 +952,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([todoCard]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1214,7 +984,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnHeadlessAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
