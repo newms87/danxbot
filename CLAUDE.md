@@ -97,6 +97,14 @@ Every phase or unit of work follows this exact order:
 
 This applies per-phase in phased plans and to any standalone work (>10 lines or multiple files). Steps 2-3 are mandatory quality gates — never skip or defer them.
 
+## Agent Spawn Architecture
+
+IMPORTANT: Agent spawning is being unified (see epic https://trello.com/c/ZNJnJ0Rn). Currently there are 3 spawn functions (launchAgent, spawnHeadlessAgent, spawnInTerminal) with inconsistent monitoring. The target is a single spawnAgent() that monitors all agents identically via SessionLogWatcher (reading Claude Code's native JSONL from ~/.claude/projects/).
+
+Key principle: `DANXBOT_RUNTIME=host` vs `docker` affects ONLY presentation (interactive terminal tab vs headless). Monitoring, heartbeat, event forwarding, stall detection — all must behave identically regardless of runtime mode. There is ZERO behavioral difference between host and Docker mode from danxbot's perspective.
+
+Reference implementation: `/home/newms/web/danxbot-gpt-manager/src/agent/` has the mature versions of SessionLogWatcher, laravel-forwarder, stall-detector, and terminal-output-watcher that need to be ported.
+
 ## Autonomous Agent Team
 
 ### Triggers

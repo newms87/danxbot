@@ -17,9 +17,11 @@ All containers join the `danxbot-net` bridge network. Workers also join their re
 |---------|-----|
 | `make validate-repos` | Check host prerequisites for all repos |
 | `make launch-infra` | Start MySQL + dashboard |
-| `make launch-worker REPO=platform` | Start worker for a repo |
-| `make launch-all-workers` | Start all repo workers |
-| `make stop-worker REPO=platform` | Stop a worker |
+| `make launch-worker REPO=platform` | Start Docker worker for a repo |
+| `make launch-worker-host REPO=platform` | Start host worker (interactive terminals) |
+| `make launch-dashboard-host` | Start dashboard on host (no Docker) |
+| `make launch-all-workers` | Start Docker workers for all repos |
+| `make stop-worker REPO=platform` | Stop a Docker worker |
 | `make build` | Build the danxbot Docker image |
 | `make logs REPO=platform` | Tail worker logs |
 
@@ -93,6 +95,19 @@ Claude Code does NOT load `.env` files for MCP server startup — it only reads 
 ```
 
 This file is gitignored (contains secrets). The `.mcp.json` in each repo references these via `${VAR}` syntax. When connecting a new repo, add these three env vars to its `settings.local.json` using the Trello credentials from that repo's `.danxbot/.env`.
+
+## Claude Code Session Logs (JSONL)
+
+Claude Code writes native JSONL session logs to `~/.claude/projects/<cwd-path>/<session-uuid>.jsonl` for ALL invocation modes — verified empirically:
+- CLI with `--output-format stream-json` (launchAgent, spawnHeadlessAgent)
+- CLI interactive (spawnInTerminal via bash script)
+- SDK `query()` (Slack agent)
+
+These files contain the full session history: assistant messages, tool calls, tool results, system events, usage stats. They are the canonical source of truth for what an agent did during a session.
+
+The `SessionLogWatcher` (being ported from danxbot-gpt-manager — see epic https://trello.com/c/ZNJnJ0Rn) polls these files to provide runtime-agnostic monitoring. This is how danxbot monitors agents regardless of whether they run in an interactive terminal or headless.
+
+IMPORTANT: Do NOT write redundant JSONL logs to danxbot's own logs directory. Claude Code already handles session persistence. danxbot's `writeJobLogs()` in process-utils.ts is redundant and will be removed.
 
 ## Tools Available Inside Containers
 

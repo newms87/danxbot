@@ -1,8 +1,8 @@
 /**
  * Shared process utilities for spawning Claude Code CLI agents.
  *
- * Extracted from launchAgent and spawnHeadlessAgent to eliminate duplication.
- * Both functions compose from these building blocks.
+ * Building blocks used by spawnAgent(): env setup, disk logging,
+ * inactivity timer, and process exit/error handling.
  */
 
 import { ChildProcess } from "node:child_process";

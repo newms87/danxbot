@@ -29,7 +29,7 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 | SQL executor | Complete | sql:execute blocks extracted, validated (SELECT-only), executed, formatted as table + CSV upload |
 | Stream text callbacks | Complete | Partial text deltas forwarded to heartbeat for live preview |
 | Feature list for router + agent | Complete | Shared FEATURE_LIST / FEATURE_EXAMPLES in features.ts |
-| Headless agent spawning | Complete | spawnHeadlessAgent() for Docker poller mode; inactivity timer + completion callback |
+| Unified agent spawning | Complete | spawnAgent() for all modes; SessionLogWatcher + inactivity timer + onComplete callback |
 | Dispatch agent launching (launchAgent) | Complete | Schema MCP server, heartbeat, status PUT, max runtime cap |
 | Process utilities (process-utils.ts) | Complete | Extracted shared: buildCleanEnv, attachStreamParser, setupProcessHandlers, createInactivityTimer |
 | Tool input summarizer | Complete | tool-summary.ts gives human-readable one-liner for each tool call type |
@@ -67,13 +67,10 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 | ToDo card processing | Complete | fetchTodoCards → spawnClaude (team or ideator) |
 | Needs Help re-triage | Complete | checkNeedsHelp checks latest comment; moves user-responded cards to ToDo top |
 | Ideator auto-spawn | Complete | Spawns ideator when Review < REVIEW_MIN_CARDS and ToDo is empty |
-| Lock file mechanism | Complete | File-based lock prevents concurrent team spawns; stale lock cleanup on startup |
 | Repo file sync (syncRepoFiles) | Complete | Injects danx-* skills, rules, tools, docs into target repo on every poll cycle |
 | Trello config rule generation | Complete | writeTrelloConfigRule() generates danx-trello-config.md from TrelloConfig |
 | Repo config validation | Complete | validateRepoConfig() checks .danxbot/config/, required fields, claude-auth/ |
-| Host mode (Windows Terminal tab) | Complete | spawnInTerminal opens wt.exe tab with run-team.sh / run-ideator.sh |
-| Docker mode (headless agent) | Complete | spawnHeadlessAgent() with SCRIPT_PROMPTS mapping |
-| Lock watch interval | Complete | setInterval(5000) polls for lock file removal to detect team completion |
+| Unified agent spawn | Complete | spawnAgent() with SessionLogWatcher monitoring, openTerminal flag for host mode |
 | POLLER_ENABLED guard | Complete | start() checks config.pollerEnabled before polling; logs and returns when disabled |
 
 ### Trello Client + Error Notifier
