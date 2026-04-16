@@ -122,6 +122,7 @@ function createHarness(options?: {
   stallThresholdMs?: number;
   checkIntervalMs?: number;
   maxNudges?: number;
+  confirmationWindowMs?: number;
 }): TestHarness {
   const dir = mkdtempSync(join(tmpdir(), "stall-e2e-"));
   const termLogPath = join(dir, "terminal.log");
@@ -150,6 +151,7 @@ function createHarness(options?: {
     stallThresholdMs: options?.stallThresholdMs ?? STALL_THRESHOLD_MS,
     checkIntervalMs: options?.checkIntervalMs ?? CHECK_INTERVAL_MS,
     maxNudges: options?.maxNudges ?? 3,
+    confirmationWindowMs: options?.confirmationWindowMs ?? 0,
     onStall: () => {
       stallTimestamps.push(Date.now());
     },
@@ -401,6 +403,7 @@ describe("StallDetector E2E (real files, real timers)", () => {
       stallThresholdMs: 3_000,
       checkIntervalMs: 1_000,
       maxNudges: 3,
+      confirmationWindowMs: 0,
       onStall: () => {
         stallTimestamps.push(Date.now());
       },
@@ -462,6 +465,7 @@ function createRealClaudeHarness(options: {
   stallThresholdMs?: number;
   checkIntervalMs?: number;
   maxNudges?: number;
+  confirmationWindowMs?: number;
 }): RealClaudeHarness {
   const dispatchId = randomUUID();
   const cwd = mkdtempSync(join(tmpdir(), "stall-e2e-real-"));
@@ -502,6 +506,7 @@ function createRealClaudeHarness(options: {
     stallThresholdMs: options.stallThresholdMs ?? STALL_THRESHOLD_MS,
     checkIntervalMs: options.checkIntervalMs ?? CHECK_INTERVAL_MS,
     maxNudges: options.maxNudges ?? 3,
+    confirmationWindowMs: options.confirmationWindowMs ?? 0,
     onStall: () => {
       stallTimestamps.push(Date.now());
     },

@@ -5,18 +5,23 @@
  * continuously while actively thinking — its absence means the agent is frozen.
  * Detection happens within seconds, not minutes.
  *
- * Three states:
+ * Three observable states (from getState()):
  *  - thinking: Agent is actively working. ✻ visible, text being emitted, or JSONL entries appearing.
  *  - waiting: Agent is waiting for something external. Pending tool_use (Read, Bash, Agent, etc.)
  *    or no tool_result has happened yet (first turn). NOT stalled regardless of elapsed time.
  *  - stalled: All tool_results received, no ✻, no terminal text, no new JSONL entries for
  *    stallThresholdMs. Agent is frozen.
  *
+ * Confirmation window: When getState() first returns "stalled", the detector enters a
+ * confirmation phase (default 10s). Only if the stall persists for the full confirmation
+ * window does onStall fire. If activity resumes during confirmation, it cancels silently.
+ * This prevents false positives from brief pauses, slow API responses, or network hiccups.
+ *
  * Stall detection only activates after the first tool_result entry appears in the JSONL.
  * Before that, the agent is in its initial response — not stalled.
  *
- * On detecting a stall, `onStall` is called. Limited to `maxNudges` attempts before
- * the detector gives up (to avoid infinite nudge loops).
+ * On detecting a confirmed stall, `onStall` is called. Limited to `maxNudges` attempts
+ * before the detector gives up (to avoid infinite nudge loops).
  *
  * Key helpers (exported for testing):
  *  - isToolCallPending(entries): true if any tool_use lacks a matching tool_result
@@ -37,6 +42,7 @@ export const DEFAULT_STALL_THRESHOLD_MS = 5_000; // 5 seconds (with terminal wat
 const DEFAULT_FALLBACK_STALL_THRESHOLD_MS = 7 * 60 * 1000; // 7 minutes (Docker, no terminal)
 export const DEFAULT_CHECK_INTERVAL_MS = 2_000; // 2 seconds
 export const DEFAULT_MAX_NUDGES = 3;
+export const DEFAULT_CONFIRMATION_WINDOW_MS = 10_000; // 10 seconds
 
 export interface StallDetectorOptions {
   /** The SessionLogWatcher whose entries will be inspected for tool call state. */
@@ -58,6 +64,12 @@ export interface StallDetectorOptions {
   checkIntervalMs?: number;
   /** Maximum number of nudges before giving up. Default: 3. */
   maxNudges?: number;
+  /**
+   * How long the stall must persist after initial detection before firing onStall.
+   * Prevents false positives from brief pauses, slow API responses, or network hiccups.
+   * Default: 10 seconds.
+   */
+  confirmationWindowMs?: number;
 }
 
 /** Extract content blocks from an AgentLogEntry, safely handling missing data. */
@@ -122,12 +134,15 @@ export class StallDetector {
   private readonly stallThresholdMs: number;
   private readonly checkIntervalMs: number;
   private readonly maxNudges: number;
+  private readonly confirmationWindowMs: number;
 
   private checkTimer: ReturnType<typeof setInterval> | undefined;
   private nudgeCount = 0;
   private running = false;
   /** Prevents concurrent stall handler invocations when onStall is async. */
   private _handlerRunning = false;
+  /** Timestamp when the stall was first detected (confirmation window start). Null = not confirming. */
+  private _confirmingStartedAt: number | null = null;
 
   constructor(options: StallDetectorOptions) {
     this.watcher = options.watcher;
@@ -137,6 +152,7 @@ export class StallDetector {
       (options.terminalWatcher ? DEFAULT_STALL_THRESHOLD_MS : DEFAULT_FALLBACK_STALL_THRESHOLD_MS);
     this.checkIntervalMs = options.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.maxNudges = options.maxNudges ?? DEFAULT_MAX_NUDGES;
+    this.confirmationWindowMs = options.confirmationWindowMs ?? DEFAULT_CONFIRMATION_WINDOW_MS;
   }
 
   /** Start periodic stall checks. */
@@ -210,16 +226,44 @@ export class StallDetector {
 
     const state = this.getState();
 
-    if (state !== "stalled") return;
+    if (state !== "stalled") {
+      // Activity resumed during confirmation — cancel silently
+      if (this._confirmingStartedAt !== null) {
+        log.info("Activity resumed during confirmation window — cancelling stall");
+        this._confirmingStartedAt = null;
+      }
+      return;
+    }
 
+    // State is stalled — enter or continue confirmation window
+    if (this._confirmingStartedAt === null) {
+      this._confirmingStartedAt = Date.now();
+      log.info("Stall detected — entering confirmation window");
+      return;
+    }
+
+    // Check if confirmation window has elapsed
+    if (Date.now() - this._confirmingStartedAt < this.confirmationWindowMs) {
+      return;
+    }
+
+    // Confirmed stall — _confirmingStartedAt is intentionally NOT reset after the
+    // first nudge. This means subsequent nudges fire immediately on each check interval
+    // without re-entering the confirmation window. Only activity resumption (state !== stalled)
+    // resets the confirmation state.
+    this.fireNudge();
+  }
+
+  /** Execute a nudge: check limits, increment counter, invoke onStall callback. */
+  private fireNudge(): void {
     if (this.nudgeCount >= this.maxNudges) {
-      log.warn(`Stall detected but max nudges (${this.maxNudges}) reached — stopping detector`);
+      log.warn(`Stall confirmed but max nudges (${this.maxNudges}) reached — stopping detector`);
       this.stop();
       return;
     }
 
     this.nudgeCount++;
-    log.warn(`Stall detected (nudge ${this.nudgeCount}/${this.maxNudges}) — calling onStall`);
+    log.warn(`Stall confirmed (nudge ${this.nudgeCount}/${this.maxNudges}) — calling onStall`);
 
     this._handlerRunning = true;
     try {

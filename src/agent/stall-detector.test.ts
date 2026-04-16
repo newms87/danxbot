@@ -520,6 +520,7 @@ describe("StallDetector start/stop and nudge", () => {
       watcher: makeWatcher(entries),
       onStall,
       checkIntervalMs: 1_000,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
@@ -545,6 +546,7 @@ describe("StallDetector start/stop and nudge", () => {
       terminalWatcher: terminal,
       onStall,
       checkIntervalMs: 1_000,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
@@ -571,10 +573,11 @@ describe("StallDetector start/stop and nudge", () => {
       terminalWatcher: terminal,
       onStall,
       checkIntervalMs: 1_000,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
-    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.advanceTimersByTimeAsync(2_500);
     detector.stop();
 
     expect(onStall).toHaveBeenCalledTimes(1);
@@ -599,6 +602,7 @@ describe("StallDetector start/stop and nudge", () => {
       onStall,
       checkIntervalMs: 500,
       maxNudges: 2,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
@@ -625,6 +629,7 @@ describe("StallDetector start/stop and nudge", () => {
       terminalWatcher: terminal,
       onStall,
       checkIntervalMs: 100,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
@@ -652,10 +657,11 @@ describe("StallDetector start/stop and nudge", () => {
       terminalWatcher: terminal,
       onStall,
       checkIntervalMs: 1_000,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
-    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.advanceTimersByTimeAsync(2_500);
     expect(onStall).toHaveBeenCalledTimes(1);
 
     // Simulate new tool_use — enters waiting state
@@ -684,6 +690,7 @@ describe("StallDetector start/stop and nudge", () => {
       terminalWatcher: terminal,
       onStall,
       checkIntervalMs: 500,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
@@ -709,6 +716,7 @@ describe("StallDetector start/stop and nudge", () => {
       terminalWatcher: terminal,
       onStall,
       checkIntervalMs: 500,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
@@ -740,10 +748,11 @@ describe("StallDetector start/stop and nudge", () => {
       onStall,
       checkIntervalMs: 500,
       maxNudges: 3,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
-    await vi.advanceTimersByTimeAsync(1_200);
+    await vi.advanceTimersByTimeAsync(1_600);
     detector.stop();
 
     expect(onStall).toHaveBeenCalledTimes(2);
@@ -767,11 +776,12 @@ describe("StallDetector start/stop and nudge", () => {
       onStall,
       checkIntervalMs: 1_000,
       maxNudges: 10,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
     detector.start();
-    await vi.advanceTimersByTimeAsync(2_500);
+    await vi.advanceTimersByTimeAsync(3_500);
     detector.stop();
 
     expect(onStall).toHaveBeenCalledTimes(2);
@@ -792,6 +802,7 @@ describe("StallDetector start/stop and nudge", () => {
       watcher: makeWatcher(entries),
       terminalWatcher: terminal,
       onStall: vi.fn(),
+      confirmationWindowMs: 0,
     });
     // 6s > 5s default → stalled
     expect(detector.getState()).toBe("stalled");
@@ -807,6 +818,7 @@ describe("StallDetector start/stop and nudge", () => {
       watcher: makeWatcher(entries),
       // no terminalWatcher
       onStall: vi.fn(),
+      confirmationWindowMs: 0,
     });
     // 6s is not enough for 7-min fallback
     expect(detector.getState()).toBe("thinking");
@@ -830,6 +842,7 @@ describe("StallDetector start/stop and nudge", () => {
       terminalWatcher: terminal,
       stallThresholdMs: 20_000,
       onStall: vi.fn(),
+      confirmationWindowMs: 0,
     });
     expect(detector.getState()).toBe("thinking");
   });
@@ -838,6 +851,7 @@ describe("StallDetector start/stop and nudge", () => {
     const detector = new StallDetector({
       watcher: makeWatcher([]),
       onStall: vi.fn(),
+      confirmationWindowMs: 0,
     });
     // Should not throw
     detector.stop();
@@ -860,6 +874,7 @@ describe("StallDetector start/stop and nudge", () => {
       terminalWatcher: terminal,
       onStall,
       checkIntervalMs: 500,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
@@ -875,6 +890,7 @@ describe("StallDetector start/stop and nudge", () => {
     const detector = new StallDetector({
       watcher: makeWatcher([]),
       onStall: vi.fn(),
+      confirmationWindowMs: 0,
     });
     expect(detector.getNudgeCount()).toBe(0);
   });
@@ -896,6 +912,7 @@ describe("StallDetector start/stop and nudge", () => {
       onStall,
       checkIntervalMs: 100,
       maxNudges: 2,
+      confirmationWindowMs: 0,
     });
 
     detector.start();
@@ -930,5 +947,219 @@ describe("StallDetector start/stop and nudge", () => {
     };
     // Non-string IDs should be safely skipped
     expect(isToolCallPending([entry])).toBe(false);
+  });
+});
+
+// --- Confirmation window ---
+
+describe("StallDetector confirmation window", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeStalledSetup(overrides?: { confirmationWindowMs?: number; checkIntervalMs?: number; maxNudges?: number }) {
+    const onStall = vi.fn();
+    const now = Date.now();
+    const entries = [
+      assistantEntry(["t1"]),
+      toolResultEntry(["t1"], now - DEFAULT_STALL_THRESHOLD_MS - 1_000),
+    ];
+    const terminal = makeTerminalWatcher({
+      lastThinkingAt: null,
+      lastActivityAt: now - DEFAULT_STALL_THRESHOLD_MS - 1_000,
+    });
+    const detector = new StallDetector({
+      watcher: makeWatcher(entries),
+      terminalWatcher: terminal,
+      onStall,
+      checkIntervalMs: overrides?.checkIntervalMs ?? 500,
+      confirmationWindowMs: overrides?.confirmationWindowMs ?? 10_000,
+      maxNudges: overrides?.maxNudges ?? 3,
+    });
+    return { onStall, entries, terminal, detector };
+  }
+
+  it("does NOT fire onStall during the confirmation window", async () => {
+    const { onStall, detector } = makeStalledSetup();
+
+    detector.start();
+    // Advance 9s — inside the 10s confirmation window
+    await vi.advanceTimersByTimeAsync(9_000);
+    detector.stop();
+
+    expect(onStall).not.toHaveBeenCalled();
+  });
+
+  it("fires onStall after the confirmation window elapses", async () => {
+    const { onStall, detector } = makeStalledSetup({ maxNudges: 1 });
+
+    detector.start();
+    // Advance past 10s confirmation window (+ check interval margin)
+    await vi.advanceTimersByTimeAsync(11_000);
+    detector.stop();
+
+    expect(onStall).toHaveBeenCalledTimes(1);
+    expect(detector.getNudgeCount()).toBe(1);
+  });
+
+  it("cancels confirmation when activity resumes during the window", async () => {
+    const { onStall, entries, terminal, detector } = makeStalledSetup();
+
+    detector.start();
+    // Advance 5s into confirmation window
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(onStall).not.toHaveBeenCalled();
+
+    // Simulate activity resuming — terminal activity becomes recent
+    const now = Date.now();
+    terminal.lastActivityAt = now;
+    terminal.lastThinkingAt = now;
+
+    // Advance another 2s — should cancel confirmation and not fire
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(onStall).not.toHaveBeenCalled();
+
+    detector.stop();
+  });
+
+  it("re-enters confirmation if activity resumes then stalls again", async () => {
+    const { onStall, terminal, detector } = makeStalledSetup({ confirmationWindowMs: 3_000, maxNudges: 1 });
+
+    detector.start();
+
+    // First confirmation window — advance 2s (inside 3s window)
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(onStall).not.toHaveBeenCalled();
+
+    // Activity resumes
+    terminal.lastActivityAt = Date.now();
+    terminal.lastThinkingAt = Date.now();
+    await vi.advanceTimersByTimeAsync(500);
+
+    // Activity stops again — must re-enter confirmation from scratch
+    terminal.lastActivityAt = Date.now() - DEFAULT_STALL_THRESHOLD_MS - 1_000;
+    terminal.lastThinkingAt = null;
+
+    // Advance less than confirmationWindowMs — should NOT fire
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(onStall).not.toHaveBeenCalled();
+
+    // Advance past the full confirmation window (3s from re-entry at ~3000ms)
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(onStall).toHaveBeenCalledTimes(1);
+
+    detector.stop();
+  });
+
+  it("confirmationWindowMs is configurable", async () => {
+    const { onStall, detector } = makeStalledSetup({ confirmationWindowMs: 2_000, maxNudges: 1 });
+
+    detector.start();
+    // 1.5s — inside 2s window
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(onStall).not.toHaveBeenCalled();
+
+    // Past 2s window
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onStall).toHaveBeenCalledTimes(1);
+
+    detector.stop();
+  });
+
+  it("subsequent nudges fire without re-entering confirmation", async () => {
+    const { onStall, detector } = makeStalledSetup({ confirmationWindowMs: 3_000, maxNudges: 3 });
+
+    detector.start();
+    // First nudge fires at ~3.5s (3s confirmation + 500ms check interval alignment)
+    // Advance to just past that first nudge
+    await vi.advanceTimersByTimeAsync(3_600);
+    expect(onStall).toHaveBeenCalledTimes(1);
+
+    // Second nudge should fire on next check interval (no re-confirmation needed)
+    await vi.advanceTimersByTimeAsync(500);
+    expect(onStall).toHaveBeenCalledTimes(2);
+
+    detector.stop();
+  });
+
+  it("defaults to 10s confirmation window", async () => {
+    const onStall = vi.fn();
+    const now = Date.now();
+    const entries = [
+      assistantEntry(["t1"]),
+      toolResultEntry(["t1"], now - DEFAULT_STALL_THRESHOLD_MS - 1_000),
+    ];
+    const terminal = makeTerminalWatcher({
+      lastThinkingAt: null,
+      lastActivityAt: now - DEFAULT_STALL_THRESHOLD_MS - 1_000,
+    });
+    // No confirmationWindowMs — should use default 10s
+    const detector = new StallDetector({
+      watcher: makeWatcher(entries),
+      terminalWatcher: terminal,
+      onStall,
+      checkIntervalMs: 500,
+      maxNudges: 1,
+    });
+
+    detector.start();
+    await vi.advanceTimersByTimeAsync(9_500);
+    expect(onStall).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(onStall).toHaveBeenCalledTimes(1);
+
+    detector.stop();
+  });
+
+  it("works in fallback mode (no terminal watcher, JSONL-only)", async () => {
+    const onStall = vi.fn();
+    const now = Date.now();
+    const FALLBACK_MS = 3_000; // short threshold for test speed
+    const entries = [
+      assistantEntry(["t1"]),
+      toolResultEntry(["t1"], now - FALLBACK_MS - 1_000),
+    ];
+    // No terminalWatcher — uses JSONL-only fallback path
+    const detector = new StallDetector({
+      watcher: makeWatcher(entries),
+      onStall,
+      stallThresholdMs: FALLBACK_MS,
+      checkIntervalMs: 500,
+      confirmationWindowMs: 2_000,
+      maxNudges: 1,
+    });
+
+    detector.start();
+    // Inside 2s confirmation window — should not fire
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(onStall).not.toHaveBeenCalled();
+
+    // Past confirmation window — should fire
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(onStall).toHaveBeenCalledTimes(1);
+
+    detector.stop();
+  });
+
+  it("stop() during confirmation prevents onStall from firing", async () => {
+    const { onStall, detector } = makeStalledSetup({ confirmationWindowMs: 5_000 });
+
+    detector.start();
+    // Advance partway into confirmation window
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(onStall).not.toHaveBeenCalled();
+
+    // Stop the detector mid-confirmation
+    detector.stop();
+
+    // Advance well past the confirmation window — onStall should never fire
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onStall).not.toHaveBeenCalled();
   });
 });
