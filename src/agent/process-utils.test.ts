@@ -277,6 +277,36 @@ describe("setupProcessHandlers", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
+  it("sets status to 'canceled' when _canceling flag is set before close", () => {
+    const job = makeJob();
+    const child = makeChild();
+    const onComplete = vi.fn();
+
+    setupProcessHandlers(child as never, job, () => "some text", () => "", { onComplete });
+
+    // Simulate cancelJob setting the flag before SIGTERM triggers close
+    job._canceling = true;
+    child.emit("close", null); // SIGTERM causes null exit code
+
+    expect(job.status).toBe("canceled");
+    expect(job.summary).toBe("Agent was canceled by user request");
+    expect(job.completedAt).toBeInstanceOf(Date);
+    expect(onComplete).toHaveBeenCalledWith(job);
+  });
+
+  it("sets status to 'canceled' even with non-zero exit code when _canceling is set", () => {
+    const job = makeJob();
+    const child = makeChild();
+
+    setupProcessHandlers(child as never, job, () => "", () => "killed", {});
+
+    job._canceling = true;
+    child.emit("close", 1); // non-zero from SIGTERM
+
+    expect(job.status).toBe("canceled");
+    expect(job.summary).toBe("Agent was canceled by user request");
+  });
+
   it("calls cleanup function on both close and error events", () => {
     const cleanup = vi.fn();
 

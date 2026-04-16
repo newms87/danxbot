@@ -324,10 +324,9 @@ describe("Integration: dispatch pipeline", () => {
       await new Promise((r) => setTimeout(r, 500));
       await cancelJob(job, "test-token");
 
-      // cancelJob sends SIGTERM, the process dies, and the close handler fires
-      // before cancelJob can set status to "canceled". cancelJob still sends a
-      // "canceled" PUT to the status endpoint regardless.
-      expect(job.status).not.toBe("running");
+      // cancelJob sets _canceling flag before SIGTERM, so the close handler
+      // correctly uses "canceled" status instead of "failed".
+      expect(job.status).toBe("canceled");
       expect(job.completedAt).toBeInstanceOf(Date);
 
       await waitForRequests(isStatusPut("canceled"), 1);

@@ -63,6 +63,8 @@ export interface AgentJob {
   terminalLogPath?: string;
   /** Internal cleanup callback — tears down watcher, forwarder, timers. Set by spawnAgent. */
   _cleanup?: () => void;
+  /** Set by cancelJob() before sending SIGTERM so process-utils knows to use "canceled" status. */
+  _canceling?: boolean;
   /**
    * Agent-initiated stop — signals that the agent completed or failed gracefully.
    * Sends SIGTERM, waits 5s, then SIGKILL if needed, then fires onComplete.
@@ -475,6 +477,7 @@ export async function cancelJob(
 
   log.info(`[Job ${job.id}] Cancel requested — sending SIGTERM`);
 
+  job._canceling = true;
   job.process.kill("SIGTERM");
 
   // Wait 5 seconds for graceful shutdown

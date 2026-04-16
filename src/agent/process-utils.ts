@@ -115,11 +115,15 @@ export function setupProcessHandlers(
   child.on("close", (code: number | null) => {
     options.cleanup?.();
     if (job.status === "running") {
-      const isSuccess = code === 0;
-      job.status = isSuccess ? "completed" : "failed";
-      job.summary = isSuccess
-        ? getLastAssistantText().trim() || "Agent completed successfully"
-        : `Process exited with code ${code}: ${getStderr().trim() || getLastAssistantText().trim() || "No output"}`;
+      // If cancelJob() set _canceling before sending SIGTERM, honor that intent
+      const isCanceled = job._canceling === true;
+      const isSuccess = !isCanceled && code === 0;
+      job.status = isCanceled ? "canceled" : isSuccess ? "completed" : "failed";
+      job.summary = isCanceled
+        ? "Agent was canceled by user request"
+        : isSuccess
+          ? getLastAssistantText().trim() || "Agent completed successfully"
+          : `Process exited with code ${code}: ${getStderr().trim() || getLastAssistantText().trim() || "No output"}`;
       job.completedAt = new Date();
 
       log.info(`[Job ${job.id}] ${job.status} (exit code: ${code})`);
