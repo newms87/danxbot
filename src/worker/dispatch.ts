@@ -12,6 +12,8 @@ import {
 import { join } from "node:path";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
+import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
+import { StallDetector, DEFAULT_MAX_NUDGES } from "../agent/stall-detector.js";
 
 const log = createLogger("worker-dispatch");
 
@@ -82,6 +84,32 @@ export async function handleLaunch(
     }
 
     activeJobs.set(job.id, job);
+
+    // --- Stall detection (host mode only, when statusUrl is present) ---
+    // Uses TerminalOutputWatcher to detect the thinking indicator (✻) captured
+    // by `script -q -f` in the dispatch script, so StallDetector can distinguish
+    // "actively thinking" from "frozen" — both look identical in the JSONL file.
+    if (config.isHost && statusUrl && job.watcher && job.terminalLogPath) {
+      const termWatcher = new TerminalOutputWatcher(job.terminalLogPath);
+      const stallDetector = new StallDetector({
+        watcher: job.watcher,
+        terminalWatcher: termWatcher,
+        onStall: () => {
+          log.warn(`[Job ${job.id}] Stall detected — agent may be stuck (nudge ${stallDetector.getNudgeCount()}/${DEFAULT_MAX_NUDGES})`);
+        },
+      });
+
+      termWatcher.start();
+      stallDetector.start();
+
+      // Tear down stall detection when the job completes
+      const originalCleanup = job._cleanup;
+      job._cleanup = () => {
+        termWatcher.stop();
+        stallDetector.stop();
+        originalCleanup?.();
+      };
+    }
 
     const cleanupInterval = setInterval(() => {
       if (job.status !== "running" && Date.now() - (job.completedAt?.getTime() || 0) > 3600000) {

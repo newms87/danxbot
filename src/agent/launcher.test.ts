@@ -55,8 +55,13 @@ vi.mock("./laravel-forwarder.js", () => ({
   deriveEventsUrl: vi.fn((url: string) => url.replace(/\/status$/, "/events")),
 }));
 
+const mockBuildDispatchScript = vi.fn().mockReturnValue("/tmp/danxbot-term-test/run-agent.sh");
+const mockGetTerminalLogPath = vi.fn().mockReturnValue("/tmp/danxbot-terminal-test-uuid-1234.log");
+const mockSpawnInTerminal = vi.fn();
 vi.mock("../terminal.js", () => ({
-  spawnInTerminal: vi.fn(),
+  buildDispatchScript: (...args: unknown[]) => mockBuildDispatchScript(...args),
+  getTerminalLogPath: (...args: unknown[]) => mockGetTerminalLogPath(...args),
+  spawnInTerminal: (...args: unknown[]) => mockSpawnInTerminal(...args),
 }));
 
 import { spawnAgent } from "./launcher.js";
@@ -709,5 +714,194 @@ describe("spawnAgent", () => {
     await stopPromise;
 
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("spawnAgent — job.watcher and terminal mode", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockWatcherEntryCallbacks.length = 0;
+    mockMkdtempSync.mockReturnValue("/tmp/danxbot-mcp-test");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("sets job.watcher after spawn", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    expect(job.watcher).toBeDefined();
+  });
+
+  it("does not call spawnInTerminal when openTerminal is false (default)", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    expect(mockSpawnInTerminal).not.toHaveBeenCalled();
+    expect(mockBuildDispatchScript).not.toHaveBeenCalled();
+  });
+
+  it("calls buildDispatchScript and spawnInTerminal when openTerminal is true", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    // spawnAgent only calls mkdtempSync once (for the terminal settings dir)
+    mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-test");
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+      apiToken: "test-token",
+    });
+
+    expect(mockGetTerminalLogPath).toHaveBeenCalledWith("test-uuid-1234");
+    expect(mockBuildDispatchScript).toHaveBeenCalledWith(
+      "/tmp/danxbot-term-test",
+      expect.objectContaining({
+        jobId: "test-uuid-1234",
+        terminalLogPath: "/tmp/danxbot-terminal-test-uuid-1234.log",
+        apiToken: "test-token",
+      }),
+    );
+    expect(mockSpawnInTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: expect.stringContaining("platform"),
+        script: "/tmp/danxbot-term-test/run-agent.sh",
+        cwd: "/danxbot/repos/platform",
+      }),
+    );
+  });
+
+  it("sets job.terminalLogPath when openTerminal is true", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    expect(job.terminalLogPath).toBe("/tmp/danxbot-terminal-test-uuid-1234.log");
+  });
+
+  it("does not set job.terminalLogPath when openTerminal is false", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: false,
+    });
+
+    expect(job.terminalLogPath).toBeUndefined();
+  });
+
+  it("passes tagged prompt to buildDispatchScript", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "do the work",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    const buildCall = mockBuildDispatchScript.mock.calls[0];
+    expect(buildCall[1].prompt).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
+    expect(buildCall[1].prompt).toContain("do the work");
+  });
+
+  it("serializes agents array as agentsJson when openTerminal is true", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const agents = [{ name: "Validator" }, { name: "TestReviewer" }];
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+      agents,
+    });
+
+    const buildCall = mockBuildDispatchScript.mock.calls[0];
+    expect(buildCall[1].agentsJson).toBe(JSON.stringify(agents));
+  });
+
+  it("omits agentsJson when agents array is empty", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+      agents: [],
+    });
+
+    const buildCall = mockBuildDispatchScript.mock.calls[0];
+    expect(buildCall[1].agentsJson).toBeUndefined();
+  });
+
+  it("cleans up terminal settings temp dir when job exits", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-cleanup-test");
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    child.emit("close", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(mockRmSync).toHaveBeenCalledWith(
+      "/tmp/danxbot-term-cleanup-test",
+      expect.objectContaining({ recursive: true }),
+    );
+  });
+
+  it("does not call rmSync for terminal dir when openTerminal is false", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: false,
+    });
+
+    child.emit("close", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // rmSync should not be called for terminal settings dir (no temp dir created)
+    expect(mockRmSync).not.toHaveBeenCalled();
   });
 });

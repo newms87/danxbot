@@ -33,6 +33,11 @@ import {
   DISPATCH_TAG_PREFIX,
 } from "./session-log-watcher.js";
 import { createLaravelForwarder } from "./laravel-forwarder.js";
+import {
+  buildDispatchScript,
+  getTerminalLogPath,
+  spawnInTerminal,
+} from "../terminal.js";
 
 const log = createLogger("launcher");
 
@@ -49,6 +54,13 @@ export interface AgentJob {
   statusUrl?: string;
   process?: ChildProcess;
   heartbeatInterval?: ReturnType<typeof setInterval>;
+  /** The SessionLogWatcher monitoring this job's JSONL session file. */
+  watcher?: SessionLogWatcher;
+  /**
+   * Path where `script -q -f` writes terminal output when openTerminal is true.
+   * Used by TerminalOutputWatcher + StallDetector for thinking indicator detection.
+   */
+  terminalLogPath?: string;
   /** Internal cleanup callback — tears down watcher, forwarder, timers. Set by spawnAgent. */
   _cleanup?: () => void;
   /**
@@ -276,6 +288,7 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     pollIntervalMs: 5_000,
     dispatchId: jobId,
   });
+  job.watcher = watcher;
 
   // Track last assistant text for job summary + reset inactivity timeout
   watcher.onEntry((entry) => {
@@ -347,12 +360,21 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     }, options.maxRuntimeMs);
   }
 
+  let termSettingsDirToClean: string | undefined;
+
   function cleanup(): void {
     watcher.stop();
     forwarderFlush?.();
     inactivityTimer.clear();
     stopHeartbeat(job);
     if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
+    if (termSettingsDirToClean) {
+      try {
+        rmSync(termSettingsDirToClean, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   }
 
   job._cleanup = cleanup;
@@ -408,14 +430,35 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
   });
 
   // --- Optional terminal viewer (host mode) ---
+  // Opens an interactive Windows Terminal tab showing the agent session.
+  // Uses `script -q -f` to capture terminal output so StallDetector can
+  // detect the thinking indicator (✻) and distinguish active vs stuck agents.
   if (options.openTerminal) {
-    // The terminal tab shows the SAME agent session interactively.
-    // The SessionLogWatcher monitors the JSONL file in parallel.
-    // This is a "view-only" terminal — the actual agent process is `child` above.
-    // NOTE: In terminal mode, the agent runs piped AND has a terminal viewer.
-    // Future phases may switch to running claude interactively in the terminal
-    // instead of piped mode, with `script -q -f` capturing output.
-    log.info(`[Job ${jobId}] Opening terminal viewer`);
+    const termLogPath = getTerminalLogPath(jobId);
+    job.terminalLogPath = termLogPath;
+
+    termSettingsDirToClean = mkdtempSync(join(tmpdir(), "danxbot-term-"));
+    const termSettingsDir = termSettingsDirToClean;
+    const scriptPath = buildDispatchScript(termSettingsDir, {
+      prompt: taggedPrompt,
+      jobId,
+      mcpConfigPath: options.mcpConfigPath,
+      agentsJson:
+        options.agents && options.agents.length > 0
+          ? JSON.stringify(options.agents)
+          : undefined,
+      statusUrl: options.statusUrl,
+      apiToken: options.apiToken ?? "",
+      terminalLogPath: termLogPath,
+    });
+
+    log.info(`[Job ${jobId}] Opening terminal viewer (log: ${termLogPath})`);
+    spawnInTerminal({
+      title: `danxbot: ${options.repoName} [${jobId.slice(0, 8)}]`,
+      script: scriptPath,
+      cwd: agentCwd,
+      env: env as Record<string, string | undefined>,
+    });
   }
 
   return job;

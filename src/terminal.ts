@@ -8,6 +8,7 @@
 import { spawn } from "node:child_process";
 import { writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("terminal");
@@ -24,29 +25,54 @@ export interface TerminalLaunchOptions {
 }
 
 export interface DispatchScriptOptions {
-  /** Absolute path to the prompt file */
-  promptFile: string;
-  /** Absolute path to the MCP settings.json */
-  mcpConfigPath: string;
-  /** Absolute path to agents.json (optional) */
-  agentsFile?: string;
+  /** The tagged prompt string (including dispatch tag) */
+  prompt: string;
+  /** Job ID — used to name the terminal log path via getTerminalLogPath() */
+  jobId: string;
+  /** Absolute path to the MCP settings.json (optional) */
+  mcpConfigPath?: string;
+  /** Agent definitions as JSON string (optional) */
+  agentsJson?: string;
   /** Status URL for reporting back to Laravel */
   statusUrl?: string;
   /** API token for status reporting */
   apiToken: string;
+  /** Path where terminal output is captured by `script -q -f` */
+  terminalLogPath: string;
 }
 
 /**
- * Build a bash script that launches claude interactively with MCP config
- * and reports status back to Laravel on exit via curl.
+ * Returns the path for the terminal output log file for a given job.
+ * The dispatch script writes to this path via `script -q -f`.
+ * The TerminalOutputWatcher reads from this path to detect the thinking indicator.
+ */
+export function getTerminalLogPath(jobId: string): string {
+  return join(tmpdir(), `danxbot-terminal-${jobId}.log`);
+}
+
+/**
+ * Build a bash script that launches claude interactively with `script -q -f`
+ * to capture terminal output, and reports status back on exit via curl.
+ *
+ * The script:
+ * 1. Writes the prompt to a temp file (avoids shell quoting issues)
+ * 2. Wraps claude with `script -q -f <terminalLogPath>` so the thinking indicator
+ *    (✻) is captured and the StallDetector can detect active vs stuck agents
+ * 3. Reports status to statusUrl on completion
  */
 export function buildDispatchScript(
   settingsDir: string,
   options: DispatchScriptOptions,
 ): string {
-  const agentsLine = options.agentsFile
-    ? `  --agents "$(cat '${options.agentsFile}')" \\\n`
+  const mcpLine = options.mcpConfigPath
+    ? `  --mcp-config '${options.mcpConfigPath}' \\\n`
     : "";
+  const agentsLine = options.agentsJson
+    ? `  --agents '${options.agentsJson}' \\\n`
+    : "";
+  const promptFile = join(settingsDir, "prompt.txt");
+  // Write the prompt to disk to avoid shell quoting issues with special characters
+  writeFileSync(promptFile, options.prompt, "utf-8");
 
   const scriptPath = join(settingsDir, "run-agent.sh");
   writeFileSync(
@@ -57,6 +83,8 @@ unset \${!CLAUDECODE@}
 
 STATUS_URL='${options.statusUrl || ""}'
 API_TOKEN='${options.apiToken}'
+TERMINAL_LOG='${options.terminalLogPath}'
+PROMPT_FILE='${promptFile}'
 
 report_status() {
   [ -n "$STATUS_URL" ] && curl -s -X PUT "$STATUS_URL" \\
@@ -67,10 +95,10 @@ report_status() {
 
 report_status "running" ""
 
-claude --mcp-config '${options.mcpConfigPath}' \\
-  --dangerously-skip-permissions \\
+script -q -f "$TERMINAL_LOG" -c "claude \\
+${mcpLine}  --dangerously-skip-permissions \\
   --verbose \\
-${agentsLine}  "Read ${options.promptFile} and execute the task described in it."
+${agentsLine}  -p \\"\\$(cat '$PROMPT_FILE')\\""
 
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 0 ]; then

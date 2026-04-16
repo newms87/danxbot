@@ -8,7 +8,10 @@
 import { ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createLogger } from "../logger.js";
 import type { AgentJob } from "./launcher.js";
+
+const log = createLogger("process-utils");
 
 /**
  * Build a clean environment by stripping CLAUDECODE vars from process.env.
@@ -45,9 +48,9 @@ export function logPromptToDisk(
     if (agents && agents.length > 0) {
       writeFileSync(join(logDir, "agents.json"), JSON.stringify(agents, null, 2));
     }
-    console.log(`[Job ${jobId}] Prompt logged to ${logDir}`);
+    log.info(`[Job ${jobId}] Prompt logged to ${logDir}`);
   } catch (err) {
-    console.error(`[Job ${jobId}] Failed to write agent logs:`, err);
+    log.error(`[Job ${jobId}] Failed to write agent logs:`, err);
   }
 }
 
@@ -67,7 +70,7 @@ export function createInactivityTimer(
     clearTimeout(handle);
     handle = setTimeout(() => {
       if (job.status === "running") {
-        console.log(
+        log.info(
           `[Job ${job.id}] Inactivity timeout — no output for ${timeoutMs / 1000}s — killing process`,
         );
         child.kill("SIGTERM");
@@ -119,9 +122,9 @@ export function setupProcessHandlers(
         : `Process exited with code ${code}: ${getStderr().trim() || getLastAssistantText().trim() || "No output"}`;
       job.completedAt = new Date();
 
-      console.log(`[Job ${job.id}] ${job.status} (exit code: ${code})`);
+      log.info(`[Job ${job.id}] ${job.status} (exit code: ${code})`);
       if (!isSuccess && job.summary) {
-        console.error(`[Job ${job.id}] ${job.summary}`);
+        log.error(`[Job ${job.id}] ${job.summary}`);
       }
       options.onComplete?.(job);
     }
@@ -134,7 +137,7 @@ export function setupProcessHandlers(
       job.summary = `Process error: ${err.message}`;
       job.completedAt = new Date();
 
-      console.error(`[Job ${job.id}] Process error:`, err);
+      log.error(`[Job ${job.id}] Process error:`, err);
       options.onComplete?.(job);
     }
   });

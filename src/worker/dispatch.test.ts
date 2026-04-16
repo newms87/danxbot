@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
 import { createMockReqWithBody, createMockRes } from "../__tests__/helpers/http-mocks.js";
 
@@ -18,20 +18,77 @@ vi.mock("../agent/launcher.js", () => ({
   cleanupMcpSettings: (...args: unknown[]) => mockCleanupMcpSettings(...args),
 }));
 
+// Use vi.hoisted so these mocks are available inside the vi.mock factories (which are hoisted)
+const {
+  mockTerminalWatcherStart,
+  mockTerminalWatcherStop,
+  mockTerminalOutputWatcherCtor,
+  mockStallDetectorStart,
+  mockStallDetectorStop,
+  mockStallDetectorGetNudgeCount,
+  mockStallDetectorCtor,
+} = vi.hoisted(() => {
+  const mockTerminalWatcherStart = vi.fn();
+  const mockTerminalWatcherStop = vi.fn();
+  const mockTerminalOutputWatcherCtor = vi.fn().mockImplementation(function () {
+    return {
+      start: mockTerminalWatcherStart,
+      stop: mockTerminalWatcherStop,
+    };
+  });
+  const mockStallDetectorStart = vi.fn();
+  const mockStallDetectorStop = vi.fn();
+  const mockStallDetectorGetNudgeCount = vi.fn().mockReturnValue(0);
+  const mockStallDetectorCtor = vi.fn().mockImplementation(function () {
+    return {
+      start: mockStallDetectorStart,
+      stop: mockStallDetectorStop,
+      getNudgeCount: mockStallDetectorGetNudgeCount,
+    };
+  });
+  return {
+    mockTerminalWatcherStart,
+    mockTerminalWatcherStop,
+    mockTerminalOutputWatcherCtor,
+    mockStallDetectorStart,
+    mockStallDetectorStop,
+    mockStallDetectorGetNudgeCount,
+    mockStallDetectorCtor,
+  };
+});
+
+vi.mock("../agent/terminal-output-watcher.js", () => ({
+  TerminalOutputWatcher: function TerminalOutputWatcher(...args: unknown[]) {
+    mockTerminalOutputWatcherCtor(...args);
+    return { start: mockTerminalWatcherStart, stop: mockTerminalWatcherStop };
+  },
+}));
+
+vi.mock("../agent/stall-detector.js", () => ({
+  StallDetector: function StallDetector(...args: unknown[]) {
+    mockStallDetectorCtor(...args);
+    return { start: mockStallDetectorStart, stop: mockStallDetectorStop, getNudgeCount: mockStallDetectorGetNudgeCount };
+  },
+  DEFAULT_MAX_NUDGES: 3,
+}));
+
 vi.mock("../poller/constants.js", () => ({
   getReposBase: () => "/test/repos",
 }));
 
-vi.mock("../config.js", () => ({
-  config: {
+const { mockDispatchConfig } = vi.hoisted(() => {
+  const mockDispatchConfig = {
     isHost: false,
     dispatch: {
       defaultApiUrl: "http://localhost:80",
       agentTimeoutMs: 3600000,
     },
     logsDir: "/test/logs",
-  },
-}));
+  };
+  return { mockDispatchConfig };
+});
+
+vi.mock("../config.js", () => ({ config: mockDispatchConfig }));
 
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
@@ -413,5 +470,200 @@ describe("clearJobCleanupIntervals", () => {
     expect(clearIntervalSpy).not.toHaveBeenCalled();
 
     clearIntervalSpy.mockRestore();
+  });
+});
+
+describe("handleLaunch — stall detection (host mode)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockDispatchConfig.isHost = false;
+    mockBuildMcpSettings.mockReturnValue("/tmp/danxbot-mcp-test");
+  });
+
+  afterEach(() => {
+    mockDispatchConfig.isHost = false;
+  });
+
+  function makeMockWatcher() {
+    return {
+      getEntries: vi.fn().mockReturnValue([]),
+      onEntry: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    };
+  }
+
+  it("starts TerminalOutputWatcher and StallDetector when isHost + statusUrl + watcher present", async () => {
+    mockDispatchConfig.isHost = true;
+
+    const mockWatcher = makeMockWatcher();
+    const mockJob = {
+      id: "job-stall-test",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      watcher: mockWatcher,
+      terminalLogPath: "/tmp/danxbot-terminal-job-stall-test.log",
+      _cleanup: vi.fn(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      status_url: "http://example.com/status",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockTerminalOutputWatcherCtor).toHaveBeenCalledWith(
+      "/tmp/danxbot-terminal-job-stall-test.log",
+    );
+    expect(mockTerminalWatcherStart).toHaveBeenCalled();
+    expect(mockStallDetectorCtor).toHaveBeenCalled();
+    expect(mockStallDetectorStart).toHaveBeenCalled();
+  });
+
+  it("does not start stall detection when statusUrl is absent", async () => {
+    mockDispatchConfig.isHost = true;
+
+    const mockWatcher = makeMockWatcher();
+    const mockJob = {
+      id: "job-no-stall",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      watcher: mockWatcher,
+      terminalLogPath: "/tmp/danxbot-terminal-job-no-stall.log",
+      _cleanup: vi.fn(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
+    expect(mockStallDetectorCtor).not.toHaveBeenCalled();
+  });
+
+  it("does not start stall detection when job.terminalLogPath is absent", async () => {
+    mockDispatchConfig.isHost = true;
+
+    const mockJob = {
+      id: "job-no-log",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      watcher: makeMockWatcher(),
+      terminalLogPath: undefined,
+      _cleanup: vi.fn(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      status_url: "http://example.com/status",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
+    expect(mockStallDetectorCtor).not.toHaveBeenCalled();
+  });
+
+  it("stall detection cleanup is wired into job._cleanup", async () => {
+    mockDispatchConfig.isHost = true;
+
+    const originalCleanup = vi.fn();
+    const mockWatcher = makeMockWatcher();
+    const mockJob = {
+      id: "job-cleanup-test",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      watcher: mockWatcher,
+      terminalLogPath: "/tmp/danxbot-terminal-job-cleanup-test.log",
+      _cleanup: originalCleanup,
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      status_url: "http://example.com/status",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    // Trigger the wrapped cleanup
+    mockJob._cleanup();
+
+    expect(mockTerminalWatcherStop).toHaveBeenCalled();
+    expect(mockStallDetectorStop).toHaveBeenCalled();
+    expect(originalCleanup).toHaveBeenCalled();
+  });
+
+  it("does not start stall detection when isHost is false (even with statusUrl + watcher + terminalLogPath)", async () => {
+    // isHost is false (set in beforeEach) — stall detection must not activate
+    const mockWatcher = makeMockWatcher();
+    const mockJob = {
+      id: "job-docker-mode",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      watcher: mockWatcher,
+      terminalLogPath: "/tmp/danxbot-terminal-job-docker-mode.log",
+      _cleanup: vi.fn(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      status_url: "http://example.com/status",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
+    expect(mockStallDetectorCtor).not.toHaveBeenCalled();
+  });
+
+  it("does not start stall detection when job.watcher is absent", async () => {
+    mockDispatchConfig.isHost = true;
+
+    const mockJob = {
+      id: "job-no-watcher",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      watcher: undefined, // no watcher
+      terminalLogPath: "/tmp/danxbot-terminal-job-no-watcher.log",
+      _cleanup: vi.fn(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      status_url: "http://example.com/status",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
+    expect(mockStallDetectorCtor).not.toHaveBeenCalled();
   });
 });

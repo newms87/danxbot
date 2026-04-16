@@ -8,9 +8,7 @@ import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST } from "./features.js";
 import type { AgentLogEntry, AgentResponse, AgentUsageSummary, ComplexityLevel, ModelUsage, ThreadMessage } from "../types.js";
-import { summarizeToolInput } from "./tool-summary.js";
-
-export { summarizeToolInput, truncStr } from "./tool-summary.js";
+import { buildAssistantSummary, buildToolResultSummary } from "./tool-summary.js";
 
 const log = createLogger("agent");
 
@@ -45,6 +43,16 @@ interface ExecuteAgentOptions {
   modelLabel: string;
   onStream?: (accumulatedText: string) => void;
   onLogEntry?: (entry: AgentLogEntry) => void;
+}
+
+/** Extract the content array and usage from an SDK message's nested .message body. */
+function extractMessageBody(message: unknown): { content: Record<string, unknown>[]; usage: unknown } {
+  const msg = message as Record<string, unknown>;
+  const body = msg.message as Record<string, unknown> | undefined;
+  return {
+    content: (body?.content ?? []) as Record<string, unknown>[],
+    usage: body?.usage,
+  };
 }
 
 /**
@@ -91,74 +99,50 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
     for await (const message of conversation) {
       if (message.type === "system" && message.subtype === "init") {
         resultSessionId = message.session_id;
-        const msg = message as any;
         pushLog({
           timestamp: Date.now(),
           type: "system",
           subtype: "init",
-          summary: `Session initialized: ${msg.model || modelLabel}`,
+          summary: `Session initialized: ${message.model || modelLabel}`,
           data: {
             session_id: message.session_id,
-            model: msg.model,
-            tools: msg.tools,
-            raw: msg,
+            model: message.model,
+            tools: message.tools,
+            raw: message,
           },
         });
       } else if (message.type === "assistant") {
-        const msg = message as any;
-        const content = msg.message?.content || [];
-        const toolUses = content.filter((b: any) => b.type === "tool_use");
-        const textBlocks = content.filter((b: any) => b.type === "text");
-        const toolNames = toolUses
-          .map((t: any) => {
-            const name = t.name || "unknown";
-            const input = t.input || {};
-            const detail = summarizeToolInput(name, input);
-            return detail ? `${name}(${detail})` : name;
-          })
-          .join(", ");
-        const textPreview = textBlocks
-          .map((b: any) => b.text)
-          .join(" ")
-          .slice(0, 200);
-        const summary = toolNames
-          ? `Tools: ${toolNames}`
-          : `Text: ${textPreview || "(empty)"}`;
+        const { content, usage } = extractMessageBody(message);
         pushLog({
           timestamp: Date.now(),
           type: "assistant",
-          summary,
+          summary: buildAssistantSummary(content),
           data: {
             content,
-            usage: msg.message?.usage,
-            raw: msg,
+            usage,
+            raw: message,
           },
         });
       } else if (message.type === "user") {
-        const msg = message as any;
-        const results = msg.message?.content || [];
-        const toolNames = results
-          .map((r: any) => r.tool_use_id || "result")
-          .join(", ");
+        const { content } = extractMessageBody(message);
         pushLog({
           timestamp: Date.now(),
           type: "user",
-          summary: `Tool results: ${toolNames}`,
+          summary: buildToolResultSummary(content),
           data: {
-            content: results,
-            raw: msg,
+            content,
+            raw: message,
           },
         });
       } else if (message.type === "tool_progress") {
-        const msg = message as any;
         pushLog({
           timestamp: Date.now(),
           type: "tool_progress",
-          summary: `${msg.tool_name || "tool"} running (${msg.elapsed_time_seconds || 0}s)`,
+          summary: `${message.tool_name || "tool"} running (${message.elapsed_time_seconds || 0}s)`,
           data: {
-            tool_name: msg.tool_name,
-            elapsed_time_seconds: msg.elapsed_time_seconds,
-            raw: msg,
+            tool_name: message.tool_name,
+            elapsed_time_seconds: message.elapsed_time_seconds,
+            raw: message,
           },
         });
       } else if (message.type === "stream_event") {
@@ -178,30 +162,27 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
         }
         // Skip logging stream_event — no diagnostic value
       } else if (message.type === "result") {
-        const msg = message as any;
-        subscriptionCostUsd = msg.total_cost_usd;
-        turns = msg.num_turns;
+        subscriptionCostUsd = message.total_cost_usd;
+        turns = message.num_turns;
 
         // Extract granular usage from SDK result
-        const sdkUsage = msg.usage as { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | undefined;
-        const sdkModelUsage = msg.model_usage as Record<string, { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cost?: number }> | undefined;
+        const sdkUsage = message.usage;
+        const sdkModelUsage = message.modelUsage;
         if (sdkUsage) {
           const modelUsage: Record<string, ModelUsage> = {};
-          if (sdkModelUsage) {
-            for (const [model, mu] of Object.entries(sdkModelUsage)) {
-              modelUsage[model] = {
-                inputTokens: mu.input_tokens ?? 0,
-                outputTokens: mu.output_tokens ?? 0,
-                cacheReadInputTokens: mu.cache_read_input_tokens ?? 0,
-                cacheCreationInputTokens: mu.cache_creation_input_tokens ?? 0,
-                costUsd: mu.cost ?? 0,
-              };
-            }
+          for (const [model, mu] of Object.entries(sdkModelUsage ?? {})) {
+            modelUsage[model] = {
+              inputTokens: mu.inputTokens ?? 0,
+              outputTokens: mu.outputTokens ?? 0,
+              cacheReadInputTokens: mu.cacheReadInputTokens ?? 0,
+              cacheCreationInputTokens: mu.cacheCreationInputTokens ?? 0,
+              costUsd: mu.costUSD ?? 0,
+            };
           }
           resultUsage = {
             totalCostUsd: subscriptionCostUsd,
-            durationMs: msg.duration_ms ?? 0,
-            durationApiMs: msg.duration_api_ms ?? 0,
+            durationMs: message.duration_ms ?? 0,
+            durationApiMs: message.duration_api_ms ?? 0,
             numTurns: turns,
             inputTokens: sdkUsage.input_tokens ?? 0,
             outputTokens: sdkUsage.output_tokens ?? 0,
@@ -211,31 +192,32 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
           };
         }
 
-        if (msg.subtype === "success" && !msg.is_error) {
-          resultText = msg.result;
-        } else if (msg.subtype === "success" && msg.is_error) {
-          resultText = msg.result;
-          resultError = msg.result;
+        if (message.subtype === "success" && !message.is_error) {
+          resultText = message.result;
+        } else if (message.subtype === "success" && message.is_error) {
+          resultText = message.result;
+          resultError = message.result;
         } else {
+          const errors = "errors" in message ? (message.errors as string[]) : [];
           resultText =
-            `I ran into an issue while researching your question: ${msg.subtype}. ${msg.errors?.join(", ") || ""}`.trim();
+            `I ran into an issue while researching your question: ${message.subtype}. ${errors?.join(", ") || ""}`.trim();
         }
 
         pushLog({
           timestamp: Date.now(),
           type: "result",
-          subtype: msg.subtype,
-          summary: `${msg.subtype}: ${turns} turns, $${subscriptionCostUsd.toFixed(4)}, ${msg.duration_ms || 0}ms (api: ${msg.duration_api_ms || 0}ms)`,
+          subtype: message.subtype,
+          summary: `${message.subtype}: ${turns} turns, $${subscriptionCostUsd.toFixed(4)}, ${message.duration_ms || 0}ms (api: ${message.duration_api_ms || 0}ms)`,
           data: {
-            subtype: msg.subtype,
+            subtype: message.subtype,
             result_text: resultText,
             total_cost_usd: subscriptionCostUsd,
             num_turns: turns,
-            duration_ms: msg.duration_ms,
-            duration_api_ms: msg.duration_api_ms,
-            is_error: msg.subtype !== "success",
-            errors: msg.errors,
-            raw: msg,
+            duration_ms: message.duration_ms,
+            duration_api_ms: message.duration_api_ms,
+            is_error: message.subtype !== "success",
+            errors: "errors" in message ? message.errors : undefined,
+            raw: message,
           },
         });
       }
@@ -282,7 +264,7 @@ async function executeAgent(opts: ExecuteAgentOptions): Promise<AgentResponse> {
     sessionId: resultSessionId,
     subscriptionCostUsd,
     turns,
-    config: fullOptions as unknown as Record<string, unknown>,
+    config: fullOptions as Record<string, unknown>,
     log: agentLog,
     usage: resultUsage,
   };

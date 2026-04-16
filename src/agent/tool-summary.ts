@@ -62,7 +62,8 @@ export function buildAssistantSummary(
 export function buildToolResultSummary(
   content: Record<string, unknown>[],
 ): string {
-  const ids = content
+  const toolResults = content.filter((r) => r.type === "tool_result");
+  const ids = toolResults
     .map((r) => (r.tool_use_id as string) || "result")
     .join(", ");
   return `Tool results: ${ids}`;

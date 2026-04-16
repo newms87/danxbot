@@ -81,7 +81,7 @@ const MOCK_REPO_CONTEXT: RepoContext = {
 
 const { buildConversationMessages, runRouter } = await import("./router.js");
 const { buildActivitySummary, generateHeartbeatMessage } = await import("./heartbeat.js");
-const { summarizeToolInput, truncStr, runAgent } = await import("./agent.js");
+const { runAgent } = await import("./agent.js");
 
 // --- Helpers ---
 
@@ -179,57 +179,6 @@ describe("buildConversationMessages", () => {
     for (let i = 1; i < result.length; i++) {
       expect(result[i].role).not.toBe(result[i - 1].role);
     }
-  });
-});
-
-describe("summarizeToolInput", () => {
-  it("summarizes Read tool with file path", () => {
-    expect(summarizeToolInput("Read", { file_path: "/src/index.ts" })).toBe(
-      "/src/index.ts",
-    );
-  });
-
-  it("summarizes Grep tool with pattern", () => {
-    expect(summarizeToolInput("Grep", { pattern: "filterBuilder" })).toBe(
-      "filterBuilder",
-    );
-  });
-
-  it("summarizes Glob tool with pattern", () => {
-    expect(summarizeToolInput("Glob", { pattern: "**/*.ts" })).toBe("**/*.ts");
-  });
-
-  it("summarizes Bash tool with command", () => {
-    expect(summarizeToolInput("Bash", { command: "ls -la" })).toBe("ls -la");
-  });
-
-  it("returns empty string for unknown tools", () => {
-    expect(summarizeToolInput("Write", { content: "test" })).toBe("");
-  });
-
-  it("truncates long file paths", () => {
-    const longPath = "/a".repeat(100);
-    const result = summarizeToolInput("Read", { file_path: longPath });
-    expect(result.length).toBe(83); // 80 chars + "..."
-    expect(result.endsWith("...")).toBe(true);
-  });
-});
-
-describe("truncStr", () => {
-  it("returns short strings unchanged", () => {
-    expect(truncStr("hello", 10)).toBe("hello");
-  });
-
-  it("truncates long strings with ellipsis", () => {
-    expect(truncStr("hello world", 5)).toBe("hello...");
-  });
-
-  it("returns string unchanged when exactly at max", () => {
-    expect(truncStr("12345", 5)).toBe("12345");
-  });
-
-  it("handles empty string", () => {
-    expect(truncStr("", 10)).toBe("");
   });
 });
 
@@ -885,13 +834,13 @@ describe("runAgent extracts AgentUsageSummary from SDK result", () => {
             cache_read_input_tokens: 300,
             cache_creation_input_tokens: 100,
           },
-          model_usage: {
+          modelUsage: {
             "some-model": {
-              input_tokens: 5000,
-              output_tokens: 1200,
-              cache_read_input_tokens: 300,
-              cache_creation_input_tokens: 100,
-              cost: 0.25,
+              inputTokens: 5000,
+              outputTokens: 1200,
+              cacheReadInputTokens: 300,
+              cacheCreationInputTokens: 100,
+              costUSD: 0.25,
             },
           },
         },
@@ -957,20 +906,20 @@ describe("runAgent extracts AgentUsageSummary from SDK result", () => {
             cache_read_input_tokens: 500,
             cache_creation_input_tokens: 200,
           },
-          model_usage: {
+          modelUsage: {
             "model-a": {
-              input_tokens: 8000,
-              output_tokens: 2000,
-              cache_read_input_tokens: 400,
-              cache_creation_input_tokens: 150,
-              cost: 0.40,
+              inputTokens: 8000,
+              outputTokens: 2000,
+              cacheReadInputTokens: 400,
+              cacheCreationInputTokens: 150,
+              costUSD: 0.40,
             },
             "model-b": {
-              input_tokens: 2000,
-              output_tokens: 1000,
-              cache_read_input_tokens: 100,
-              cache_creation_input_tokens: 50,
-              cost: 0.10,
+              inputTokens: 2000,
+              outputTokens: 1000,
+              cacheReadInputTokens: 100,
+              cacheCreationInputTokens: 50,
+              costUSD: 0.10,
             },
           },
         },
@@ -1000,10 +949,10 @@ describe("runAgent extracts AgentUsageSummary from SDK result", () => {
             input_tokens: 100,
             output_tokens: 50,
           },
-          model_usage: {
+          modelUsage: {
             "some-model": {
-              input_tokens: 100,
-              output_tokens: 50,
+              inputTokens: 100,
+              outputTokens: 50,
             },
           },
         },
