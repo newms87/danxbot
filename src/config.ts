@@ -62,8 +62,8 @@ export const config = {
     apiKey: optional("ANTHROPIC_API_KEY", ""),
   },
   db: {
-    host: required("DANXBOT_DB_HOST"),
-    port: parseInt(optional("DANXBOT_DB_INTERNAL_PORT", "3306"), 10),
+    host: isHost ? "127.0.0.1" : "mysql",
+    port: isHost ? parseInt(optional("DANXBOT_DB_PORT", "3308"), 10) : 3306,
     user: required("DANXBOT_DB_USER"),
     password: required("DANXBOT_DB_PASSWORD"),
     database: optional("DANXBOT_DB_NAME", "danxbot_chat"),

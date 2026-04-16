@@ -53,7 +53,6 @@ function validEnv(): Record<string, string> {
   return {
     ANTHROPIC_API_KEY: "test-key",
     REPOS: "platform:https://github.com/Danxdesk/platform.git",
-    DANXBOT_DB_HOST: "mysql",
     DANXBOT_DB_USER: "danxbot",
     DANXBOT_DB_PASSWORD: "danxbot",
     MAX_TURNS: "10",
@@ -235,13 +234,17 @@ describe("getRepoContext", () => {
 });
 
 describe("required DB config", () => {
-  it("throws when DANXBOT_DB_HOST is missing", async () => {
-    await expect(importConfig({}, ["DANXBOT_DB_HOST"])).rejects.toThrow("DANXBOT_DB_HOST");
+  it("derives db.host from runtime — docker uses mysql, host uses 127.0.0.1", async () => {
+    // Default is docker mode (DANXBOT_RUNTIME not set)
+    const mod = await importConfig({});
+    expect(mod.config.db.host).toBe("mysql");
+    expect(mod.config.db.port).toBe(3306);
   });
 
-  it("uses DANXBOT_DB_HOST for db.host", async () => {
-    const mod = await importConfig({ DANXBOT_DB_HOST: "custom-host" });
-    expect(mod.config.db.host).toBe("custom-host");
+  it("derives db.host as 127.0.0.1 in host mode", async () => {
+    const mod = await importConfig({ DANXBOT_RUNTIME: "host" });
+    expect(mod.config.db.host).toBe("127.0.0.1");
+    expect(mod.config.db.port).toBe(3308); // default host port
   });
 
   it("throws when DANXBOT_DB_USER is missing", async () => {

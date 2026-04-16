@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { config } from "../config.js";
 import { repoContexts } from "../repo-context.js";
-import { getReposBase, REVIEW_MIN_CARDS, DANXBOT_COMMENT_MARKER, SCRIPT_PROMPTS } from "./constants.js";
+import { getReposBase, REVIEW_MIN_CARDS, DANXBOT_COMMENT_MARKER, TEAM_PROMPT, IDEATOR_PROMPT } from "./constants.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { createLogger } from "../logger.js";
 import { spawnAgent } from "../agent/launcher.js";
@@ -155,7 +155,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   const state = getState(repo.name);
   state.priorTodoCardIds = cards.map((c) => c.id);
 
-  spawnClaude(repo, "Danxbot Team", "run-team.sh");
+  spawnClaude(repo, TEAM_PROMPT);
 }
 
 /** Directory containing files to inject into target repos. */
@@ -495,15 +495,10 @@ function syncRepoFiles(repo: RepoContext): void {
   }
 }
 
-function spawnClaude(repo: RepoContext, title: string, scriptName: string): void {
+function spawnClaude(repo: RepoContext, prompt: string): void {
   const state = getState(repo.name);
 
   state.teamRunning = true;
-
-  const prompt = SCRIPT_PROMPTS[scriptName];
-  if (!prompt) {
-    throw new Error(`No prompt mapping for script: ${scriptName}`);
-  }
 
   spawnAgent({
     prompt,
@@ -641,7 +636,7 @@ async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {
   log.info(
     `[${repo.name}] Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — spawning ideator`,
   );
-  spawnClaude(repo, "Danxbot Ideator", "run-ideator.sh");
+  spawnClaude(repo, IDEATOR_PROMPT);
 }
 
 export function shutdown(): void {
