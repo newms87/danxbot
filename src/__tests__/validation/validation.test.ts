@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { BudgetTracker, hasApiKey } from "./setup.js";
 import { makeRepoContext } from "../helpers/fixtures.js";
+import { tmpdir } from "os";
 
 const budget = new BudgetTracker(2.0);
 let savedSessionId: string | null = null;
 
-const MOCK_REPO_CONTEXT = makeRepoContext();
+// Validation tests spawn real Claude Code — cwd must exist on disk
+const MOCK_REPO_CONTEXT = makeRepoContext({ localPath: tmpdir() });
 
 describe.skipIf(!hasApiKey())("validation: real Claude API", () => {
   let runRouter: typeof import("../../agent/router.js").runRouter;
