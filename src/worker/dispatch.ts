@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "http";
+import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { json, parseBody } from "../http/helpers.js";
 import {
@@ -7,13 +8,18 @@ import {
   getJobStatus,
   buildMcpSettings,
   cleanupMcpSettings,
+  buildCompletionInstruction,
   type AgentJob,
+  type McpSettingsOptions,
 } from "../agent/launcher.js";
 import { join } from "node:path";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
 import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
-import { StallDetector, DEFAULT_MAX_NUDGES } from "../agent/stall-detector.js";
+import { StallDetector } from "../agent/stall-detector.js";
+
+/** Maximum number of stall-recovery respawns before giving up and marking failed. */
+const MAX_STALL_RESUMES = 3;
 
 const log = createLogger("worker-dispatch");
 
@@ -57,52 +63,131 @@ export async function handleLaunch(
       return;
     }
 
-    const settingsDir = buildMcpSettings({ apiToken, apiUrl, schemaDefinitionId, schemaRole });
+    // Stable ID returned to the caller — persists across stall-recovery respawns.
+    const dispatchId = randomUUID();
+    const workerPort = parseInt(process.env.DANXBOT_WORKER_PORT ?? "5560", 10);
+    const workerStopUrl = `http://localhost:${workerPort}/api/stop/${dispatchId}`;
 
-    let job;
-    try {
-      job = await spawnAgent({
-        prompt: task,
-        repoName: repo.name,
-        timeoutMs: config.dispatch.agentTimeoutMs,
-        mcpConfigPath: join(settingsDir, "settings.json"),
-        agents,
-        statusUrl,
-        apiToken,
-        maxRuntimeMs,
-        eventForwarding: statusUrl
-          ? { statusUrl, apiToken }
-          : undefined,
-        openTerminal: config.isHost,
-        onComplete: () => {
-          cleanupMcpSettings(settingsDir);
-        },
-      });
-    } catch (spawnErr) {
-      cleanupMcpSettings(settingsDir);
-      throw spawnErr;
+    const mcpOptions: McpSettingsOptions = {
+      apiToken,
+      apiUrl,
+      schemaDefinitionId,
+      schemaRole,
+      // Always inject the danxbot_complete tool so agents can signal completion.
+      danxbotStopUrl: workerStopUrl,
+    };
+
+    // Append completion instruction to every dispatched task.
+    const taskWithInstruction = task + buildCompletionInstruction();
+
+    let resumeCount = 0;
+
+    /**
+     * Spawn a new agent for this dispatch slot.
+     * On initial spawn: uses the stable dispatchId.
+     * On respawn: generates a fresh internal UUID for JSONL disambiguation,
+     * but keeps dispatchId as the activeJobs key.
+     */
+    async function spawnForDispatch(
+      prompt: string,
+      isRespawn: boolean,
+    ): Promise<AgentJob> {
+      const jobId = isRespawn ? randomUUID() : dispatchId;
+      const settingsDir = buildMcpSettings(mcpOptions);
+
+      let job: AgentJob;
+      try {
+        job = await spawnAgent({
+          jobId,
+          prompt,
+          repoName: repo.name,
+          timeoutMs: config.dispatch.agentTimeoutMs,
+          mcpConfigPath: join(settingsDir, "settings.json"),
+          agents,
+          statusUrl,
+          apiToken,
+          maxRuntimeMs,
+          eventForwarding: statusUrl ? { statusUrl, apiToken } : undefined,
+          openTerminal: config.isHost,
+          onComplete: () => {
+            cleanupMcpSettings(settingsDir);
+          },
+        });
+      } catch (spawnErr) {
+        cleanupMcpSettings(settingsDir);
+        throw spawnErr;
+      }
+
+      // Always index under the stable dispatchId so callers can still poll.
+      activeJobs.set(dispatchId, job);
+      return job;
     }
 
-    activeJobs.set(job.id, job);
+    /**
+     * Wire stall detection for a job. When a stall fires:
+     * - If resumeCount < MAX_STALL_RESUMES: kill + respawn with nudge prompt.
+     * - Otherwise: mark job as failed.
+     */
+    function setupStallDetection(job: AgentJob): void {
+      if (!config.isHost || !statusUrl || !job.watcher || !job.terminalLogPath) return;
 
-    // --- Stall detection (host mode only, when statusUrl is present) ---
-    // Uses TerminalOutputWatcher to detect the ✻ thinking indicator as a heartbeat.
-    // With terminal watcher: 5s stall threshold, 2s check interval (~7s detection).
-    // Without terminal watcher (Docker): falls back to 7-minute JSONL-only timeout.
-    if (config.isHost && statusUrl && job.watcher && job.terminalLogPath) {
       const termWatcher = new TerminalOutputWatcher(job.terminalLogPath);
       const stallDetector = new StallDetector({
         watcher: job.watcher,
         terminalWatcher: termWatcher,
-        onStall: () => {
-          log.warn(`[Job ${job.id}] Stall detected — agent may be stuck (nudge ${stallDetector.getNudgeCount()}/${DEFAULT_MAX_NUDGES})`);
+        maxNudges: 1, // Each detector fires once; resumeCount tracks the total.
+        onStall: async () => {
+          resumeCount++;
+          const currentJob = activeJobs.get(dispatchId);
+          if (!currentJob || currentJob.status !== "running") return;
+
+          termWatcher.stop();
+          stallDetector.stop();
+
+          if (resumeCount >= MAX_STALL_RESUMES) {
+            log.warn(
+              `[Dispatch ${dispatchId}] Max stall resumes (${MAX_STALL_RESUMES}) reached — marking job failed`,
+            );
+            await currentJob.stop?.("failed", "Agent stalled repeatedly and did not recover");
+            return;
+          }
+
+          log.warn(
+            `[Dispatch ${dispatchId}] Stall detected (resume ${resumeCount}/${MAX_STALL_RESUMES}) — killing and resuming`,
+          );
+
+          // Kill stalled process — stop() sends SIGTERM + SIGKILL + fires onComplete.
+          // We don't await it since we want to spawn immediately after kill.
+          if (currentJob.status === "running" && currentJob.process) {
+            currentJob.process.kill("SIGTERM");
+            await new Promise<void>((r) => setTimeout(r, 5_000));
+            if (currentJob.status === "running" && currentJob.process) {
+              currentJob.process.kill("SIGKILL");
+            }
+          }
+
+          // Use the original task (not taskWithInstruction) as the base so the
+          // completion instruction appears exactly once, followed by the stall note.
+          const nudgePrompt =
+            task +
+            buildCompletionInstruction() +
+            `\n\n---\nNOTE: Your previous session appeared to stall after receiving ` +
+            `a tool result (resume ${resumeCount}/${MAX_STALL_RESUMES}). ` +
+            `Continue your work from where it was left off.`;
+
+          try {
+            const newJob = await spawnForDispatch(nudgePrompt, true);
+            setupStallDetection(newJob);
+          } catch (err) {
+            log.error(`[Dispatch ${dispatchId}] Failed to respawn after stall:`, err);
+          }
         },
       });
 
       termWatcher.start();
       stallDetector.start();
 
-      // Tear down stall detection when the job completes
+      // Tear down when the job completes.
       const originalCleanup = job._cleanup;
       job._cleanup = () => {
         termWatcher.stop();
@@ -111,16 +196,24 @@ export async function handleLaunch(
       };
     }
 
+    const job = await spawnForDispatch(taskWithInstruction, false);
+    setupStallDetection(job);
+
     const cleanupInterval = setInterval(() => {
-      if (job.status !== "running" && Date.now() - (job.completedAt?.getTime() || 0) > 3600000) {
-        activeJobs.delete(job.id);
+      const currentJob = activeJobs.get(dispatchId);
+      if (
+        currentJob &&
+        currentJob.status !== "running" &&
+        Date.now() - (currentJob.completedAt?.getTime() ?? 0) > 3_600_000
+      ) {
+        activeJobs.delete(dispatchId);
         clearInterval(cleanupInterval);
         jobCleanupIntervals.delete(cleanupInterval);
       }
-    }, 60000);
+    }, 60_000);
     jobCleanupIntervals.add(cleanupInterval);
 
-    json(res, 200, { job_id: job.id, status: "launched" });
+    json(res, 200, { job_id: dispatchId, status: "launched" });
   } catch (err) {
     log.error("Launch failed", err);
     json(res, 500, { error: err instanceof Error ? err.message : "Launch failed" });

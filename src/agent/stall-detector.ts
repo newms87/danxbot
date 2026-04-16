@@ -43,8 +43,11 @@ export interface StallDetectorOptions {
   watcher: SessionLogWatcher;
   /** Optional terminal output watcher for thinking indicator detection. */
   terminalWatcher?: TerminalOutputWatcher;
-  /** Called when a stall is detected. Should nudge the agent to resume. */
-  onStall: () => void;
+  /**
+   * Called when a stall is detected. May be async — concurrent invocations are
+   * suppressed by an internal `_handlerRunning` flag until the previous call resolves.
+   */
+  onStall: () => void | Promise<void>;
   /**
    * How long without terminal activity before declaring a stall.
    * When terminalWatcher is present: default 5 seconds.
@@ -115,7 +118,7 @@ export function getLastToolResultTimestamp(entries: AgentLogEntry[]): number | n
 export class StallDetector {
   private readonly watcher: SessionLogWatcher;
   private readonly terminalWatcher: TerminalOutputWatcher | undefined;
-  private readonly onStall: () => void;
+  private readonly onStall: () => void | Promise<void>;
   private readonly stallThresholdMs: number;
   private readonly checkIntervalMs: number;
   private readonly maxNudges: number;
@@ -123,6 +126,8 @@ export class StallDetector {
   private checkTimer: ReturnType<typeof setInterval> | undefined;
   private nudgeCount = 0;
   private running = false;
+  /** Prevents concurrent stall handler invocations when onStall is async. */
+  private _handlerRunning = false;
 
   constructor(options: StallDetectorOptions) {
     this.watcher = options.watcher;
@@ -201,7 +206,7 @@ export class StallDetector {
   }
 
   private check(): void {
-    if (!this.running) return;
+    if (!this.running || this._handlerRunning) return;
 
     const state = this.getState();
 
@@ -215,9 +220,19 @@ export class StallDetector {
 
     this.nudgeCount++;
     log.warn(`Stall detected (nudge ${this.nudgeCount}/${this.maxNudges}) — calling onStall`);
+
+    this._handlerRunning = true;
     try {
-      this.onStall();
+      const result = this.onStall();
+      if (result instanceof Promise) {
+        result
+          .catch((err) => log.error("onStall async callback threw:", err))
+          .finally(() => { this._handlerRunning = false; });
+      } else {
+        this._handlerRunning = false;
+      }
     } catch (err) {
+      this._handlerRunning = false;
       log.error("onStall callback threw:", err);
     }
   }

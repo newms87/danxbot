@@ -18,7 +18,8 @@ import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { getReposBase } from "../poller/constants.js";
@@ -40,6 +41,12 @@ import {
 } from "../terminal.js";
 
 const log = createLogger("launcher");
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+/** Absolute path to the danxbot MCP server script (src/mcp/danxbot-server.ts). */
+const DANXBOT_MCP_SERVER_PATH = resolve(__dirname, "../mcp/danxbot-server.ts");
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const TERMINAL_STATUS_RETRIES = 3;
@@ -78,6 +85,9 @@ export interface SpawnAgentOptions {
   prompt: string;
   /** Repo name — used to resolve cwd to repos/<name> */
   repoName: string;
+  /** Optional pre-generated job ID. If not set, a UUID is generated. Used to keep
+   *  the activeJobs key stable across stall-recovery respawns. */
+  jobId?: string;
   /** Inactivity timeout in milliseconds */
   timeoutMs: number;
   /** Additional env vars to merge into the spawned process environment */
@@ -108,6 +118,12 @@ export interface McpSettingsOptions {
   apiUrl: string;
   schemaDefinitionId?: string;
   schemaRole?: string;
+  /**
+   * When set, adds the danxbot MCP server to the settings, providing the
+   * danxbot_complete tool. The value is the full stop URL that the tool will POST to
+   * (e.g., "http://localhost:5560/api/stop/:jobId").
+   */
+  danxbotStopUrl?: string;
 }
 
 /**
@@ -195,33 +211,56 @@ export function stopHeartbeat(job: AgentJob): void {
 /**
  * Build the MCP settings JSON for a dispatch agent session.
  * Creates a temporary directory with settings.json that configures
- * the Schema MCP server as a tool provider for Claude Code.
+ * the Schema MCP server and optionally the danxbot lifecycle tools.
  * Returns the temp directory path (caller must clean it up).
  */
 export function buildMcpSettings(options: McpSettingsOptions): string {
   const tempDir = mkdtempSync(join(tmpdir(), "danxbot-mcp-"));
 
-  const settings = {
-    mcpServers: {
-      schema: {
-        command: "npx",
-        args: ["@thehammer/schema-mcp-server"],
-        env: {
-          SCHEMA_API_URL: options.apiUrl,
-          SCHEMA_API_TOKEN: options.apiToken,
-          ...(options.schemaDefinitionId
-            ? { SCHEMA_DEFINITION_ID: String(options.schemaDefinitionId) }
-            : {}),
-          ...(options.schemaRole ? { SCHEMA_ROLE: options.schemaRole } : {}),
-        },
+  const mcpServers: Record<string, unknown> = {
+    schema: {
+      command: "npx",
+      args: ["@thehammer/schema-mcp-server"],
+      env: {
+        SCHEMA_API_URL: options.apiUrl,
+        SCHEMA_API_TOKEN: options.apiToken,
+        ...(options.schemaDefinitionId
+          ? { SCHEMA_DEFINITION_ID: String(options.schemaDefinitionId) }
+          : {}),
+        ...(options.schemaRole ? { SCHEMA_ROLE: options.schemaRole } : {}),
       },
     },
   };
 
+  if (options.danxbotStopUrl) {
+    mcpServers["danxbot"] = {
+      command: "npx",
+      args: ["tsx", DANXBOT_MCP_SERVER_PATH],
+      env: {
+        DANXBOT_STOP_URL: options.danxbotStopUrl,
+      },
+    };
+  }
+
   const settingsPath = join(tempDir, "settings.json");
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  writeFileSync(settingsPath, JSON.stringify({ mcpServers }, null, 2));
 
   return tempDir;
+}
+
+/**
+ * Returns the system instruction appended to dispatch agent prompts when the
+ * danxbot_complete MCP tool is available. Tells the agent to call the tool
+ * instead of silently stopping output.
+ */
+export function buildCompletionInstruction(): string {
+  return (
+    "\n\n---\nIMPORTANT: When you have finished all work, you MUST call the " +
+    "`danxbot_complete` tool with status 'completed' and a brief summary. " +
+    "Do not simply stop producing output — always call the completion tool to " +
+    "signal that you are done. If you encounter a fatal error, call it with " +
+    "status 'failed' and a description of the error."
+  );
 }
 
 /**
@@ -235,7 +274,7 @@ export function buildMcpSettings(options: McpSettingsOptions): string {
  * so the watcher can deterministically find the correct JSONL file.
  */
 export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> {
-  const jobId = randomUUID();
+  const jobId = options.jobId ?? randomUUID();
 
   const job: AgentJob = {
     id: jobId,
@@ -412,7 +451,9 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
       child.kill("SIGKILL");
     }
 
-    cleanup();
+    // Use job._cleanup rather than the internal closure so any wrappers registered
+    // after spawn (e.g. stall detection teardown from setupStallDetection) are honored.
+    (job._cleanup ?? cleanup)();
 
     if (options.statusUrl && options.apiToken) {
       await putStatus(job, options.apiToken, status, job.summary);

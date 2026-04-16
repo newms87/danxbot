@@ -16,6 +16,7 @@ vi.mock("../agent/launcher.js", () => ({
   getJobStatus: (...args: unknown[]) => mockGetJobStatus(...args),
   buildMcpSettings: (...args: unknown[]) => mockBuildMcpSettings(...args),
   cleanupMcpSettings: (...args: unknown[]) => mockCleanupMcpSettings(...args),
+  buildCompletionInstruction: () => " [completion-instruction]",
 }));
 
 // Use vi.hoisted so these mocks are available inside the vi.mock factories (which are hoisted)
@@ -167,7 +168,8 @@ describe("handleLaunch", () => {
 
     expect(res._getStatusCode()).toBe(200);
     const body = JSON.parse(res._getBody());
-    expect(body.job_id).toBe("job-abc-123");
+    // job_id is the stable dispatchId (UUID), not the internal job id
+    expect(body.job_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
     expect(body.status).toBe("launched");
   });
 
@@ -187,7 +189,8 @@ describe("handleLaunch", () => {
 
     expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
-        prompt: "Build schema",
+        // Prompt includes the completion instruction appended by handleLaunch
+        prompt: expect.stringContaining("Build schema"),
         repoName: "test-repo",
         timeoutMs: 3600000,
         mcpConfigPath: expect.stringContaining("settings.json"),
@@ -234,12 +237,16 @@ describe("handleLaunch", () => {
 
     await handleLaunch(req, res, MOCK_REPO);
 
-    expect(mockBuildMcpSettings).toHaveBeenCalledWith({
-      apiToken: "tok-abc",
-      apiUrl: "http://custom-api.com",
-      schemaDefinitionId: "def-42",
-      schemaRole: "builder",
-    });
+    expect(mockBuildMcpSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiToken: "tok-abc",
+        apiUrl: "http://custom-api.com",
+        schemaDefinitionId: "def-42",
+        schemaRole: "builder",
+        // danxbotStopUrl is always included for dispatched agents
+        danxbotStopUrl: expect.stringContaining("/api/stop/"),
+      }),
+    );
   });
 
   it("cleans up MCP settings on spawn failure", async () => {
@@ -293,8 +300,11 @@ describe("handleStatus", () => {
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
 
+    // Use the stable dispatchId returned from launch, not the internal job id
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+
     const res = createMockRes();
-    handleStatus(res, "job-status-test");
+    handleStatus(res, dispatchId);
 
     expect(res._getStatusCode()).toBe(200);
     expect(JSON.parse(res._getBody())).toEqual({ id: "job-status-test", status: "running" });
@@ -319,10 +329,11 @@ describe("handleCancel", () => {
     const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
 
     const cancelReq = createMockReqWithBody("POST", { api_token: "tok-123" });
     const cancelRes = createMockRes();
-    await handleCancel(cancelReq, cancelRes, "job-completed");
+    await handleCancel(cancelReq, cancelRes, dispatchId);
 
     expect(cancelRes._getStatusCode()).toBe(409);
   });
@@ -335,10 +346,11 @@ describe("handleCancel", () => {
     const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
 
     const cancelReq = createMockReqWithBody("POST", { api_token: "tok-cancel" });
     const cancelRes = createMockRes();
-    await handleCancel(cancelReq, cancelRes, "job-to-cancel");
+    await handleCancel(cancelReq, cancelRes, dispatchId);
 
     expect(cancelRes._getStatusCode()).toBe(200);
     expect(JSON.parse(cancelRes._getBody())).toEqual({ status: "canceled" });
@@ -364,10 +376,11 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, "job-stopped");
+    await handleStop(stopReq, stopRes, dispatchId);
 
     expect(stopRes._getStatusCode()).toBe(409);
   });
@@ -379,10 +392,11 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, "job-no-stop");
+    await handleStop(stopReq, stopRes, dispatchId);
 
     expect(stopRes._getStatusCode()).toBe(500);
     expect(JSON.parse(stopRes._getBody())).toEqual({ error: "Job does not support agent-initiated stop" });
@@ -396,10 +410,11 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
 
     const stopReq = createMockReqWithBody("POST", { status: "completed", summary: "All done" });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, "job-stoppable");
+    await handleStop(stopReq, stopRes, dispatchId);
 
     expect(stopRes._getStatusCode()).toBe(200);
     expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
@@ -414,10 +429,11 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, "job-default-status");
+    await handleStop(stopReq, stopRes, dispatchId);
 
     expect(stopRes._getStatusCode()).toBe(200);
     expect(mockStop).toHaveBeenCalledWith("completed", undefined);
@@ -431,10 +447,11 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
 
     const stopReq = createMockReqWithBody("POST", { status: "failed", summary: "Something went wrong" });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, "job-fail-stop");
+    await handleStop(stopReq, stopRes, dispatchId);
 
     expect(mockStop).toHaveBeenCalledWith("failed", "Something went wrong");
   });
@@ -665,5 +682,172 @@ describe("handleLaunch — stall detection (host mode)", () => {
 
     expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
     expect(mockStallDetectorCtor).not.toHaveBeenCalled();
+  });
+
+  it("onStall callback: skips when the current job is no longer running", async () => {
+    mockDispatchConfig.isHost = true;
+
+    const mockWatcher = makeMockWatcher();
+    const mockJob = {
+      id: "job-already-done",
+      status: "completed" as const, // already done when onStall fires
+      summary: "Done",
+      startedAt: new Date(),
+      completedAt: new Date(),
+      watcher: mockWatcher,
+      terminalLogPath: "/tmp/danxbot-terminal-job-already-done.log",
+      _cleanup: vi.fn(),
+      stop: vi.fn(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      status_url: "http://example.com/status",
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+
+    // Extract the onStall callback from the StallDetector constructor args
+    const stallDetectorArgs = mockStallDetectorCtor.mock.calls[0][0] as { onStall: () => Promise<void> };
+    const onStall = stallDetectorArgs.onStall;
+
+    await onStall();
+
+    // Since the job is not running, no stop and no respawn should occur
+    expect(mockJob.stop).not.toHaveBeenCalled();
+    // spawnAgent was called once initially; should not be called again
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("onStall callback: kills and respawns with nudge prompt on first stall", async () => {
+    mockDispatchConfig.isHost = true;
+    vi.useFakeTimers();
+
+    try {
+      const mockKill = vi.fn();
+      const mockWatcher = makeMockWatcher();
+      const mockJob = {
+        id: "job-stall-respawn",
+        status: "running" as string,
+        summary: "",
+        startedAt: new Date(),
+        watcher: mockWatcher,
+        terminalLogPath: "/tmp/danxbot-terminal-job-stall-respawn.log",
+        _cleanup: vi.fn(),
+        process: { kill: mockKill },
+      };
+      const mockRespawnJob = {
+        id: "job-respawn-new",
+        status: "running" as string,
+        summary: "",
+        startedAt: new Date(),
+        watcher: makeMockWatcher(),
+        terminalLogPath: "/tmp/danxbot-terminal-job-respawn-new.log",
+        _cleanup: vi.fn(),
+      };
+      mockSpawnAgent.mockResolvedValueOnce(mockJob).mockResolvedValueOnce(mockRespawnJob);
+
+      const req = createMockReqWithBody("POST", {
+        task: "Build the feature",
+        api_token: "tok-123",
+        status_url: "http://example.com/status",
+      });
+      const res = createMockRes();
+      await handleLaunch(req, res, MOCK_REPO);
+      const dispatchId = JSON.parse(res._getBody()).job_id;
+
+      const stallDetectorArgs = mockStallDetectorCtor.mock.calls[0][0] as { onStall: () => Promise<void> };
+      const onStall = stallDetectorArgs.onStall;
+
+      // Start onStall (it awaits a 5s timer inside)
+      const onStallPromise = onStall();
+      // Advance past the 5-second kill wait
+      await vi.advanceTimersByTimeAsync(6_000);
+      await onStallPromise;
+
+      // spawnAgent should have been called twice: initial + respawn
+      expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
+
+      // Respawn prompt should contain the original task
+      const respawnOpts = mockSpawnAgent.mock.calls[1][0] as { prompt: string; jobId: string };
+      expect(respawnOpts.prompt).toContain("Build the feature");
+      expect(respawnOpts.prompt).toContain("stall");
+
+      // Respawn uses a DIFFERENT jobId from the dispatchId
+      expect(respawnOpts.jobId).not.toBe(dispatchId);
+
+      // Active job under dispatchId is now the respawned job
+      const statusRes = createMockRes();
+      mockGetJobStatus.mockReturnValue({ status: "running" });
+      handleStatus(statusRes, dispatchId);
+      expect(statusRes._getStatusCode()).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("onStall callback: marks job failed when MAX_STALL_RESUMES exhausted", async () => {
+    mockDispatchConfig.isHost = true;
+    vi.useFakeTimers();
+
+    try {
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+
+      function makeStallJob(id: string) {
+        return {
+          id,
+          status: "running" as string,
+          summary: "",
+          startedAt: new Date(),
+          watcher: makeMockWatcher(),
+          terminalLogPath: `/tmp/danxbot-terminal-${id}.log`,
+          _cleanup: vi.fn(),
+          process: { kill: vi.fn() },
+          stop: mockStop,
+        };
+      }
+
+      const job0 = makeStallJob("job-max-0");
+      const job1 = makeStallJob("job-max-1");
+      const job2 = makeStallJob("job-max-2");
+      // Only 3 total spawns: initial + 2 respawns (3rd stall → mark failed, no respawn)
+      mockSpawnAgent
+        .mockResolvedValueOnce(job0)
+        .mockResolvedValueOnce(job1)
+        .mockResolvedValueOnce(job2);
+
+      const req = createMockReqWithBody("POST", {
+        task: "Long task",
+        api_token: "tok-123",
+        status_url: "http://example.com/status",
+      });
+      const res = createMockRes();
+      await handleLaunch(req, res, MOCK_REPO);
+
+      // Helper: fire onStall from the nth StallDetector (0-indexed) and advance past kill wait
+      async function fireStall(detectorIndex: number): Promise<void> {
+        const args = mockStallDetectorCtor.mock.calls[detectorIndex][0] as { onStall: () => Promise<void> };
+        const promise = args.onStall();
+        await vi.advanceTimersByTimeAsync(6_000);
+        await promise;
+      }
+
+      // Resume 1 (resumeCount 0→1, < 3): kill + respawn
+      await fireStall(0);
+      expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
+
+      // Resume 2 (resumeCount 1→2, < 3): kill + respawn
+      await fireStall(1);
+      expect(mockSpawnAgent).toHaveBeenCalledTimes(3);
+
+      // Resume 3 (resumeCount 2→3, >= 3): mark failed, NO respawn
+      await fireStall(2);
+      expect(mockSpawnAgent).toHaveBeenCalledTimes(3); // still 3 — no 4th spawn
+      expect(mockStop).toHaveBeenCalledWith("failed", expect.stringContaining("stall"));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
