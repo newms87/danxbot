@@ -22,8 +22,8 @@ export class CaptureServer {
   private requests: CapturedRequest[] = [];
   private port = 0;
 
-  /** Start the server on a random available port. */
-  async start(): Promise<void> {
+  /** Start the server on a given port (0 = random available port). */
+  async start(listenPort = 0): Promise<void> {
     return new Promise((resolve, reject) => {
       this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
         let body = "";
@@ -42,7 +42,7 @@ export class CaptureServer {
       });
 
       this.server.on("error", reject);
-      this.server.listen(0, () => {
+      this.server.listen(listenPort, () => {
         const addr = this.server!.address();
         if (typeof addr === "object" && addr !== null) {
           this.port = addr.port;

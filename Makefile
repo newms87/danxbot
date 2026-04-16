@@ -11,7 +11,9 @@ export
 
 REPOS_DIR := ./repos
 
-.PHONY: help launch-infra stop-infra launch-worker stop-worker launch-all-workers stop-all-workers build logs validate-repos
+.PHONY: help launch-infra stop-infra launch-worker stop-worker launch-all-workers stop-all-workers build logs validate-repos \
+       test-system test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
+       test-system-error test-system-stall test-system-poller test-system-cleanup
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -107,3 +109,35 @@ launch-worker-host: ## Start a worker on the host (usage: make launch-worker-hos
 
 launch-dashboard-host: ## Start the dashboard on the host
 	@set -a && . ./.env && set +a && npx tsx src/index.ts
+
+# --- System Tests (real Docker dispatch, real Claude API) ---
+
+SYSTEM_TEST_SCRIPT := ./src/__tests__/system/run-system-tests.sh
+SYSTEM_TEST_FLAGS :=
+
+test-system: ## Run all system tests (requires running workers + ANTHROPIC_API_KEY)
+	@$(SYSTEM_TEST_SCRIPT) $(SYSTEM_TEST_FLAGS)
+
+test-system-health: ## Test worker health endpoints
+	@$(SYSTEM_TEST_SCRIPT) --test health
+
+test-system-dispatch: ## Test dispatch API happy path
+	@$(SYSTEM_TEST_SCRIPT) --test dispatch
+
+test-system-heartbeat: ## Test heartbeat + event forwarding via capture server
+	@$(SYSTEM_TEST_SCRIPT) --test heartbeat
+
+test-system-cancel: ## Test job cancellation
+	@$(SYSTEM_TEST_SCRIPT) --test cancel
+
+test-system-error: ## Test error recovery
+	@$(SYSTEM_TEST_SCRIPT) --test error
+
+test-system-stall: ## Test stall detection (host mode only)
+	@$(SYSTEM_TEST_SCRIPT) --test stall --host-mode
+
+test-system-poller: ## Test Trello poller flow (requires TRELLO_API_KEY/TOKEN)
+	@$(SYSTEM_TEST_SCRIPT) --test poller
+
+test-system-cleanup: ## Verify no orphaned temp dirs or zombie jobs
+	@$(SYSTEM_TEST_SCRIPT) --test cleanup
