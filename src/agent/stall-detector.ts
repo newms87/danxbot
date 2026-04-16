@@ -1,22 +1,26 @@
 /**
  * StallDetector — Detects agents that are stuck after receiving tool results.
  *
- * An agent is "stalled" when:
- * 1. All outstanding tool calls have received results (no sub-agent is running), AND
- * 2. The agent hasn't shown the thinking indicator (✻) in the terminal recently, AND
- * 3. No terminal activity has been seen for stallThresholdMs (default: 7 minutes).
+ * Uses the ✻ thinking indicator as a positive heartbeat signal. Claude Code emits ✻
+ * continuously while actively thinking — its absence means the agent is frozen.
+ * Detection happens within seconds, not minutes.
  *
  * Three states:
- *  - sub_agent_running: tool_use with no matching tool_result yet. Claude is waiting
- *    for an external tool — this is NOT a stall regardless of elapsed time.
- *  - actively_thinking: tool_results received; terminal shows ✻ or recent activity.
- *  - stalled: tool_results received; no terminal activity for stallThresholdMs.
+ *  - thinking: Agent is actively working. ✻ visible, text being emitted, or JSONL entries appearing.
+ *  - waiting: Agent is waiting for something external. Pending tool_use (Read, Bash, Agent, etc.)
+ *    or no tool_result has happened yet (first turn). NOT stalled regardless of elapsed time.
+ *  - stalled: All tool_results received, no ✻, no terminal text, no new JSONL entries for
+ *    stallThresholdMs. Agent is frozen.
+ *
+ * Stall detection only activates after the first tool_result entry appears in the JSONL.
+ * Before that, the agent is in its initial response — not stalled.
  *
  * On detecting a stall, `onStall` is called. Limited to `maxNudges` attempts before
  * the detector gives up (to avoid infinite nudge loops).
  *
  * Key helpers (exported for testing):
- *  - isSubAgentRunning(entries): true if any tool_use lacks a matching tool_result
+ *  - isToolCallPending(entries): true if any tool_use lacks a matching tool_result
+ *  - hasReceivedToolResult(entries): true if at least one tool_result exists
  *  - getLastToolResultTimestamp(entries): timestamp of the most recent tool_result
  */
 
@@ -27,13 +31,11 @@ import type { AgentLogEntry } from "../types.js";
 
 const log = createLogger("stall-detector");
 
-export type StallState = "sub_agent_running" | "actively_thinking" | "stalled";
+export type StallState = "thinking" | "waiting" | "stalled";
 
-/** Threshold for how recently the thinking indicator must have appeared. */
-const THINKING_ACTIVE_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
-
-export const DEFAULT_STALL_THRESHOLD_MS = 7 * 60 * 1000; // 7 minutes
-export const DEFAULT_CHECK_INTERVAL_MS = 30 * 1000; // 30 seconds
+export const DEFAULT_STALL_THRESHOLD_MS = 5_000; // 5 seconds (with terminal watcher)
+const DEFAULT_FALLBACK_STALL_THRESHOLD_MS = 7 * 60 * 1000; // 7 minutes (Docker, no terminal)
+export const DEFAULT_CHECK_INTERVAL_MS = 2_000; // 2 seconds
 export const DEFAULT_MAX_NUDGES = 3;
 
 export interface StallDetectorOptions {
@@ -43,37 +45,40 @@ export interface StallDetectorOptions {
   terminalWatcher?: TerminalOutputWatcher;
   /** Called when a stall is detected. Should nudge the agent to resume. */
   onStall: () => void;
-  /** How long without terminal activity before declaring a stall. Default: 7 minutes. */
+  /**
+   * How long without terminal activity before declaring a stall.
+   * When terminalWatcher is present: default 5 seconds.
+   * When absent (Docker fallback): default 7 minutes.
+   */
   stallThresholdMs?: number;
-  /** How often to check for stalls. Default: 30 seconds. */
+  /** How often to check for stalls. Default: 2 seconds. */
   checkIntervalMs?: number;
   /** Maximum number of nudges before giving up. Default: 3. */
   maxNudges?: number;
 }
 
+/** Extract content blocks from an AgentLogEntry, safely handling missing data. */
+function getContentBlocks(entry: AgentLogEntry): Array<Record<string, unknown>> {
+  return (entry.data.content ?? []) as Array<Record<string, unknown>>;
+}
+
 /**
  * Returns true if there is at least one outstanding tool_use in the JSONL entries
  * that has not received a matching tool_result.
- *
- * Scans all entries in order: assistant entries add tool_use IDs to a pending set,
- * user entries (tool_result blocks) remove them. Any remaining IDs are unresolved.
  */
-export function isSubAgentRunning(entries: AgentLogEntry[]): boolean {
+export function isToolCallPending(entries: AgentLogEntry[]): boolean {
   const pendingToolUseIds = new Set<string>();
 
   for (const entry of entries) {
     if (entry.type === "assistant") {
-      const content = (entry.data.content ?? []) as Array<Record<string, unknown>>;
-      for (const block of content) {
+      for (const block of getContentBlocks(entry)) {
         if (block.type === "tool_use" && typeof block.id === "string") {
           pendingToolUseIds.add(block.id);
         }
       }
     }
-
     if (entry.type === "user") {
-      const content = (entry.data.content ?? []) as Array<Record<string, unknown>>;
-      for (const block of content) {
+      for (const block of getContentBlocks(entry)) {
         if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
           pendingToolUseIds.delete(block.tool_use_id);
         }
@@ -85,16 +90,23 @@ export function isSubAgentRunning(entries: AgentLogEntry[]): boolean {
 }
 
 /**
+ * Returns true if any tool_result entry exists in the JSONL entries.
+ * Stall detection only activates after the first tool_result.
+ */
+export function hasReceivedToolResult(entries: AgentLogEntry[]): boolean {
+  return entries.some(
+    (e) => e.type === "user" && getContentBlocks(e).some((b) => b.type === "tool_result"),
+  );
+}
+
+/**
  * Returns the timestamp (ms) of the most recent tool_result entry, or null if none.
  */
 export function getLastToolResultTimestamp(entries: AgentLogEntry[]): number | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    if (entry.type === "user") {
-      const content = (entry.data.content ?? []) as Array<Record<string, unknown>>;
-      if (content.some((b) => b.type === "tool_result")) {
-        return entry.timestamp;
-      }
+    if (entry.type === "user" && getContentBlocks(entry).some((b) => b.type === "tool_result")) {
+      return entry.timestamp;
     }
   }
   return null;
@@ -116,7 +128,8 @@ export class StallDetector {
     this.watcher = options.watcher;
     this.terminalWatcher = options.terminalWatcher;
     this.onStall = options.onStall;
-    this.stallThresholdMs = options.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+    this.stallThresholdMs = options.stallThresholdMs ??
+      (options.terminalWatcher ? DEFAULT_STALL_THRESHOLD_MS : DEFAULT_FALLBACK_STALL_THRESHOLD_MS);
     this.checkIntervalMs = options.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.maxNudges = options.maxNudges ?? DEFAULT_MAX_NUDGES;
   }
@@ -145,47 +158,46 @@ export class StallDetector {
   /**
    * Compute the current stall state from JSONL entries + terminal output.
    *
-   * - sub_agent_running: outstanding tool_use with no tool_result yet
-   * - actively_thinking: thinking indicator seen recently OR recent terminal activity
-   * - stalled: no terminal activity for stallThresholdMs
+   * - waiting: no tool_result yet (first turn), or tool_use pending (waiting for tool)
+   * - thinking: terminal activity within stallThresholdMs, or new JSONL entries appearing
+   * - stalled: no terminal activity for stallThresholdMs after all tool_results received
    */
   getState(): StallState {
     const entries = this.watcher.getEntries();
 
-    // No entries yet — agent just started, not stalled
-    if (entries.length === 0) return "actively_thinking";
+    // No entries yet — agent just started, waiting for first output
+    if (entries.length === 0) return "waiting";
 
-    // If a tool is still pending (tool_use without tool_result), not stalled
-    if (isSubAgentRunning(entries)) return "sub_agent_running";
+    // No tool_result has happened yet — first turn, agent is still in initial response
+    if (!hasReceivedToolResult(entries)) return "waiting";
 
-    const now = Date.now();
+    // A tool call is pending (tool_use without matching tool_result) — waiting for tool
+    if (isToolCallPending(entries)) return "waiting";
 
-    if (this.terminalWatcher) {
-      const { lastThinkingAt, lastActivityAt } = this.terminalWatcher;
+    // All tool_results received — check activity signals
+    return this.terminalWatcher
+      ? this.getTerminalStallState(this.terminalWatcher)
+      : this.getFallbackStallState(entries);
+  }
 
-      // No terminal activity yet — agent is starting up, not stalled
-      if (lastActivityAt === null) return "actively_thinking";
+  /** Check stall state using terminal output timestamps (host mode). */
+  private getTerminalStallState(tw: TerminalOutputWatcher): StallState {
+    // No terminal activity yet — agent is starting up, not stalled
+    if (tw.lastActivityAt === null) return "thinking";
 
-      // Thinking indicator seen recently → agent is actively working
-      if (lastThinkingAt !== null && now - lastThinkingAt < THINKING_ACTIVE_WINDOW_MS) {
-        return "actively_thinking";
-      }
+    // lastActivityAt is always >= lastThinkingAt (processChunk updates both),
+    // so checking lastActivityAt alone covers the ✻ heartbeat case too.
+    if (Date.now() - tw.lastActivityAt < this.stallThresholdMs) return "thinking";
 
-      // Activity within stall threshold → not stalled yet
-      if (now - lastActivityAt < this.stallThresholdMs) {
-        return "actively_thinking";
-      }
+    return "stalled";
+  }
 
-      // Activity older than stall threshold → stalled
-      return "stalled";
-    }
-
-    // Fallback when no terminal watcher: use last tool_result timestamp
+  /** Check stall state using JSONL timestamps only (Docker fallback). */
+  private getFallbackStallState(entries: AgentLogEntry[]): StallState {
     const lastResultTs = getLastToolResultTimestamp(entries);
-    if (lastResultTs === null) return "actively_thinking";
-    if (now - lastResultTs >= this.stallThresholdMs) return "stalled";
-
-    return "actively_thinking";
+    if (lastResultTs === null) return "waiting";
+    if (Date.now() - lastResultTs >= this.stallThresholdMs) return "stalled";
+    return "thinking";
   }
 
   private check(): void {

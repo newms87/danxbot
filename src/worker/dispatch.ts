@@ -86,9 +86,9 @@ export async function handleLaunch(
     activeJobs.set(job.id, job);
 
     // --- Stall detection (host mode only, when statusUrl is present) ---
-    // Uses TerminalOutputWatcher to detect the thinking indicator (✻) captured
-    // by `script -q -f` in the dispatch script, so StallDetector can distinguish
-    // "actively thinking" from "frozen" — both look identical in the JSONL file.
+    // Uses TerminalOutputWatcher to detect the ✻ thinking indicator as a heartbeat.
+    // With terminal watcher: 5s stall threshold, 2s check interval (~7s detection).
+    // Without terminal watcher (Docker): falls back to 7-minute JSONL-only timeout.
     if (config.isHost && statusUrl && job.watcher && job.terminalLogPath) {
       const termWatcher = new TerminalOutputWatcher(job.terminalLogPath);
       const stallDetector = new StallDetector({
