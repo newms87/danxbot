@@ -99,15 +99,15 @@ This file is gitignored (contains secrets). The `.mcp.json` in each repo referen
 ## Claude Code Session Logs (JSONL)
 
 Claude Code writes native JSONL session logs to `~/.claude/projects/<cwd-path>/<session-uuid>.jsonl` for ALL invocation modes — verified empirically:
-- CLI with `--output-format stream-json` (launchAgent, spawnHeadlessAgent)
-- CLI interactive (spawnInTerminal via bash script)
+- CLI with `--output-format stream-json` (piped/headless via `spawnAgent()`)
+- CLI interactive (terminal mode via `spawnInTerminal()` bash script)
 - SDK `query()` (Slack agent)
 
 These files contain the full session history: assistant messages, tool calls, tool results, system events, usage stats. They are the canonical source of truth for what an agent did during a session.
 
-The `SessionLogWatcher` (being ported from danxbot-gpt-manager — see epic https://trello.com/c/ZNJnJ0Rn) polls these files to provide runtime-agnostic monitoring. This is how danxbot monitors agents regardless of whether they run in an interactive terminal or headless.
+`SessionLogWatcher` polls these files to provide runtime-agnostic monitoring. It is always started by `spawnAgent()` and uses a dispatch tag prepended to the prompt to find the correct JSONL file when multiple sessions are active.
 
-IMPORTANT: Do NOT write redundant JSONL logs to danxbot's own logs directory. Claude Code already handles session persistence. danxbot's `writeJobLogs()` in process-utils.ts is redundant and will be removed.
+Note: `logPromptToDisk()` in `process-utils.ts` writes debug artifacts (`prompt.md`, `agents.json`) to `logs/<jobId>/` for debugging — this is separate from JSONL session logs and intentional.
 
 ## Tools Available Inside Containers
 
@@ -124,7 +124,9 @@ The Docker image includes dev tools beyond Node.js:
 | `src/index.ts` | Entrypoint: branches into worker, dashboard, or legacy mode |
 | `src/worker/server.ts` | Worker HTTP server: /api/launch, /health, /api/status |
 | `src/dashboard/server.ts` | Dashboard HTTP server: API routes + static file serving |
-| `src/agent/agent.ts` | Router (Haiku) and Agent (Claude Code SDK) |
+| `src/agent/launcher.ts` | Unified `spawnAgent()` entrypoint + AgentJob lifecycle |
+| `src/agent/router.ts` | Router (Haiku) — instant message triage |
+| `src/agent/agent.ts` | Agent (Claude Code SDK query) — deep Slack responses |
 | `src/slack/listener.ts` | Slack message handler, orchestrates router → agent flow |
 | `src/dashboard/events.ts` | Event tracking, SSE broadcasting, analytics |
 | `src/config.ts` | Shared config + worker/dashboard mode detection |

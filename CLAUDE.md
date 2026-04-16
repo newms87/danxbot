@@ -99,11 +99,15 @@ This applies per-phase in phased plans and to any standalone work (>10 lines or 
 
 ## Agent Spawn Architecture
 
-IMPORTANT: Agent spawning is being unified (see epic https://trello.com/c/ZNJnJ0Rn). Currently there are 3 spawn functions (launchAgent, spawnHeadlessAgent, spawnInTerminal) with inconsistent monitoring. The target is a single spawnAgent() that monitors all agents identically via SessionLogWatcher (reading Claude Code's native JSONL from ~/.claude/projects/).
+All agents are spawned via a single `spawnAgent()` function in `src/agent/launcher.ts`. Every agent process is monitored by `SessionLogWatcher` (reading Claude Code's native JSONL from `~/.claude/projects/`).
 
-Key principle: `DANXBOT_RUNTIME=host` vs `docker` affects ONLY presentation (interactive terminal tab vs headless). Monitoring, heartbeat, event forwarding, stall detection — all must behave identically regardless of runtime mode. There is ZERO behavioral difference between host and Docker mode from danxbot's perspective.
+Key principle: `DANXBOT_RUNTIME=host` vs `docker` affects ONLY presentation (interactive terminal tab vs headless). Monitoring, heartbeat, event forwarding, stall detection — all behave identically regardless of runtime mode.
 
-Reference implementation: `/home/newms/web/danxbot-gpt-manager/src/agent/` has the mature versions of SessionLogWatcher, laravel-forwarder, stall-detector, and terminal-output-watcher that need to be ported.
+Core monitoring components (all in `src/agent/`):
+- **SessionLogWatcher** — polls Claude's JSONL session files; the canonical monitoring source
+- **LaravelForwarder** — batches and POSTs agent events to the Laravel API
+- **StallDetector** — detects agents stuck after receiving tool results; wired in `dispatch.ts`
+- **TerminalOutputWatcher** — tails terminal log captured by `script -q -f`; feeds StallDetector
 
 ## Autonomous Agent Team
 
