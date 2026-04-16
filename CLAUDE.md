@@ -55,9 +55,10 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 |---------|-----|
 | `make validate-repos` | Check host prerequisites before launching workers |
 | `make launch-infra` | Start shared infra (MySQL + dashboard) |
-| `make launch-worker REPO=platform` | Start a worker for a repo |
-| `make launch-all-workers` | Start workers for all configured repos |
-| `make stop-worker REPO=platform` | Stop a worker |
+| `make launch-worker REPO=platform` | Start a Docker worker for a repo |
+| `make launch-worker-host REPO=platform` | Start a host worker (interactive terminals) |
+| `make launch-all-workers` | Start Docker workers for all configured repos |
+| `make stop-worker REPO=platform` | Stop a Docker worker |
 | `make stop-infra` | Stop shared infrastructure |
 | `make logs` | Tail infra logs |
 | `make logs REPO=platform` | Tail worker logs |

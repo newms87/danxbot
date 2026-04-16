@@ -1,156 +1,67 @@
 /**
- * Laravel Event Forwarder — Maps AgentLogEntry to EventPayload and POSTs to Laravel.
+ * Laravel Event Forwarder — Batches and POSTs AgentLogEntry events to the Laravel API.
  *
- * Registered as a SessionLogWatcher consumer, buffers events, and flushes
- * on size threshold (10 events) or time interval (5 seconds).
+ * Replaces the per-event postProgress/handleStreamEvent in the old launcher.ts.
+ * Buffers up to 10 events or 5 seconds, then sends them as a bulk POST.
+ *
+ * Used by spawnAgent when the eventForwarding option is provided.
  */
 
-import { createLogger } from "../logger.js";
+import { SessionLogWatcher } from "./session-log-watcher.js";
 import type { AgentLogEntry } from "../types.js";
-import {
-  SessionLogWatcher,
-  type EntryConsumer,
-} from "./session-log-watcher.js";
 
-const log = createLogger("laravel-forwarder");
-
-const EVENT_BATCH_SIZE = 10;
-const EVENT_BATCH_INTERVAL_MS = 5_000;
-const TOOL_RESULT_MAX_CHARS = 10_240;
+const MAX_TOOL_RESULT_BYTES = 10 * 1024; // 10KB
+const BATCH_SIZE = 10;
+const BATCH_TIMEOUT_MS = 5_000;
 
 export interface EventPayload {
   type: string;
+  timestamp: number;
   message?: string;
-  data?: Record<string, unknown>;
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  tool_use_id?: string;
+  is_error?: boolean;
+  session_id?: string;
+}
+
+export interface StartEventForwardingOptions {
+  dir: string;
+  dispatchId: string;
+  statusUrl: string;
+  apiToken: string;
+  pollIntervalMs?: number;
+}
+
+export interface EventForwardingHandle {
+  watcher: SessionLogWatcher;
+  flush: () => void;
 }
 
 /**
- * Truncate tool_result content to ~10KB.
- * Accepts unknown input and JSON-stringifies non-strings.
- */
-export function truncateToolResultContent(content: unknown): string {
-  const text = typeof content === "string" ? content : JSON.stringify(content);
-
-  if (text.length > TOOL_RESULT_MAX_CHARS) {
-    return (
-      text.substring(0, TOOL_RESULT_MAX_CHARS) +
-      `... [truncated from ${text.length} bytes]`
-    );
-  }
-
-  return text;
-}
-
-/**
- * Convert an AgentLogEntry to zero or more EventPayload objects.
- *
- * - system/init        → session_init  (data: session_id, model, agents)
- * - assistant text     → agent_event   (message: text; data.usage on first per turn)
- * - assistant tool_use → tool_call     (message: toolName; data.tool_use_id, input, [usage])
- * - user tool_result   → tool_result   (data: tool_use_id, content, is_error)
- * - thinking-only      → thinking      (data.usage, only if usage is present)
- */
-export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
-  const events: EventPayload[] = [];
-
-  switch (entry.type) {
-    case "system": {
-      if (entry.subtype === "init") {
-        events.push({
-          type: "session_init",
-          data: {
-            session_id: entry.data.session_id,
-            model: entry.data.model,
-            agents: entry.data.tools,
-          },
-        });
-      }
-      break;
-    }
-
-    case "assistant": {
-      const content = (entry.data.content ?? []) as Record<string, unknown>[];
-      const usage = entry.data.usage as Record<string, unknown> | undefined;
-      let usageAttached = false;
-
-      for (const block of content) {
-        if (block.type === "text" && block.text) {
-          const eventData: Record<string, unknown> = {};
-          if (usage && !usageAttached) {
-            eventData.usage = usage;
-            usageAttached = true;
-          }
-          events.push({
-            type: "agent_event",
-            message: block.text as string,
-            ...(Object.keys(eventData).length > 0 ? { data: eventData } : {}),
-          });
-        } else if (block.type === "tool_use" && block.name) {
-          events.push({
-            type: "tool_call",
-            message: block.name as string,
-            data: {
-              tool: block.name,
-              tool_use_id: block.id,
-              input: block.input,
-            },
-          });
-        }
-      }
-
-      // If no text blocks but usage exists, attach to first event (tool_call)
-      if (usage && !usageAttached && events.length > 0) {
-        events[0].data = { ...events[0].data, usage };
-        usageAttached = true;
-      }
-
-      // Thinking-only entries with usage → dedicated thinking event
-      if (usage && !usageAttached) {
-        events.push({ type: "thinking", data: { usage } });
-      }
-      break;
-    }
-
-    case "user": {
-      const content = (entry.data.content ?? []) as Record<string, unknown>[];
-      for (const block of content) {
-        if (block.type === "tool_result" && block.tool_use_id) {
-          events.push({
-            type: "tool_result",
-            data: {
-              tool_use_id: block.tool_use_id,
-              content: truncateToolResultContent(block.content),
-              is_error: block.is_error || false,
-            },
-          });
-        }
-      }
-      break;
-    }
-
-    // "result" entries have no mapping
-  }
-
-  return events;
-}
-
-/**
- * Derive the events endpoint URL from the status URL.
- * .../agent-dispatch/{id}/status → .../agent-dispatch/{id}/events
+ * Derive the bulk events URL from a status URL.
+ * Replaces the trailing /status segment with /events.
  */
 export function deriveEventsUrl(statusUrl: string): string {
   return statusUrl.replace(/\/status$/, "/events");
 }
 
 /**
- * PUT the danxbot_session_id to the status endpoint.
- * Non-blocking — best-effort delivery.
+ * Truncate tool result content to MAX_TOOL_RESULT_BYTES characters.
  */
-async function putSessionId(
+export function truncateToolResultContent(content: string): string {
+  if (content.length <= MAX_TOOL_RESULT_BYTES) return content;
+  return content.slice(0, MAX_TOOL_RESULT_BYTES) + "…[truncated]";
+}
+
+/**
+ * Report the danxbot_session_id to the status endpoint on init.
+ * Fire-and-forget — errors are logged silently.
+ */
+export async function putSessionId(
   statusUrl: string,
   apiToken: string,
   sessionId: string,
-  jobId: string,
 ): Promise<void> {
   try {
     await fetch(statusUrl, {
@@ -159,136 +70,171 @@ async function putSessionId(
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiToken}`,
       },
-      body: JSON.stringify({
-        status: "running",
-        danxbot_session_id: sessionId,
-      }),
+      body: JSON.stringify({ danxbot_session_id: sessionId }),
     });
-  } catch (err) {
-    log.error(`[Job ${jobId}] Failed to PUT session_id:`, err);
+  } catch {
+    // Non-fatal — session ID reporting is best-effort
   }
 }
 
 /**
- * POST batched events to the dispatch events endpoint.
- * Fire-and-forget — errors are logged but don't affect the agent.
+ * Map an AgentLogEntry to zero or more EventPayloads for the bulk events endpoint.
+ *
+ * One JSONL entry can produce multiple events:
+ *   - assistant with text → agent_event
+ *   - assistant with tool_use → tool_call
+ *   - user/tool_result → tool_result
+ *   - system/init → session_init
  */
-async function postEvents(
-  eventsUrl: string,
-  apiToken: string,
-  events: EventPayload[],
-  jobId: string,
-): Promise<void> {
-  if (events.length === 0) return;
+export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
+  const { type, subtype, timestamp, data } = entry;
 
-  try {
-    const response = await fetch(eventsUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiToken}`,
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ events }),
-    });
+  if (type === "system" && subtype === "init") {
+    return [{
+      type: "session_init",
+      timestamp,
+      session_id: data.session_id as string | undefined,
+    }];
+  }
 
-    if (!response.ok) {
-      log.error(`[Job ${jobId}] Event POST failed: HTTP ${response.status}`);
+  if (type === "assistant") {
+    const content = Array.isArray(data.content)
+      ? (data.content as Record<string, unknown>[])
+      : [];
+    const events: EventPayload[] = [];
+
+    for (const block of content) {
+      if (block.type === "text" && block.text) {
+        events.push({
+          type: "agent_event",
+          timestamp,
+          message: block.text as string,
+        });
+      } else if (block.type === "tool_use") {
+        events.push({
+          type: "tool_call",
+          timestamp,
+          tool_name: block.name as string | undefined,
+          tool_input: block.input as Record<string, unknown> | undefined,
+          tool_use_id: block.id as string | undefined,
+        });
+      }
     }
-  } catch (err) {
-    log.error(`[Job ${jobId}] Event POST error:`, err);
-  }
-}
 
-export interface LaravelForwarderOptions {
-  eventsUrl: string;
-  apiToken: string;
-  jobId: string;
-  /** Status URL for PUT session_id on init. If omitted, session_id is not reported. */
-  statusUrl?: string;
+    return events;
+  }
+
+  if (type === "user") {
+    const content = Array.isArray(data.content)
+      ? (data.content as Record<string, unknown>[])
+      : [];
+    return content
+      .filter((b) => b.type === "tool_result")
+      .map((b) => ({
+        type: "tool_result",
+        timestamp,
+        message: truncateToolResultContent(String(b.content ?? "")),
+        tool_use_id: b.tool_use_id as string | undefined,
+        is_error: Boolean(b.is_error),
+      }));
+  }
+
+  return [];
 }
 
 /**
- * Creates a SessionLogWatcher consumer that forwards events to Laravel.
- * Returns the consumer function and a flush() method for cleanup.
+ * Create a batched consumer that buffers up to BATCH_SIZE events or BATCH_TIMEOUT_MS,
+ * then POSTs them as a bulk request to the Laravel events endpoint.
+ *
+ * Returns `consume` (register as watcher consumer) and `flush` (drain on shutdown).
  */
-export function createLaravelForwarder(options: LaravelForwarderOptions): {
-  consumer: EntryConsumer;
-  flush: () => void;
-} {
-  let buffer: EventPayload[] = [];
-  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+export function createLaravelForwarder(
+  statusUrl: string,
+  apiToken: string,
+): { consume: (entry: AgentLogEntry) => void; flush: () => void } {
+  const eventsUrl = deriveEventsUrl(statusUrl);
+  let batch: EventPayload[] = [];
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function sendBatch(events: EventPayload[]): Promise<void> {
+    if (events.length === 0) return;
+    try {
+      await fetch(eventsUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body: JSON.stringify({ events }),
+      });
+    } catch {
+      // Non-fatal — event forwarding is best-effort
+    }
+  }
+
+  function scheduleFlush(): void {
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      const toSend = batch;
+      batch = [];
+      sendBatch(toSend);
+    }, BATCH_TIMEOUT_MS);
+  }
 
   function flush(): void {
     if (flushTimer) {
       clearTimeout(flushTimer);
-      flushTimer = undefined;
+      flushTimer = null;
     }
-    if (buffer.length === 0) return;
-    const batch = buffer;
-    buffer = [];
-    postEvents(options.eventsUrl, options.apiToken, batch, options.jobId);
+    const toSend = batch;
+    batch = [];
+    sendBatch(toSend);
   }
 
-  function push(event: EventPayload): void {
-    buffer.push(event);
-    if (buffer.length >= EVENT_BATCH_SIZE) {
-      flush();
-    } else if (!flushTimer) {
-      flushTimer = setTimeout(() => flush(), EVENT_BATCH_INTERVAL_MS);
+  function consume(entry: AgentLogEntry): void {
+    // Report session ID to status endpoint on init
+    if (entry.type === "system" && entry.subtype === "init" && entry.data.session_id) {
+      putSessionId(statusUrl, apiToken, entry.data.session_id as string);
     }
-  }
 
-  const consumer: EntryConsumer = (entry: AgentLogEntry) => {
     const events = mapEntryToEvents(entry);
+    if (events.length === 0) return;
 
-    for (const event of events) {
-      if (event.type === "session_init" && options.statusUrl) {
-        const sessionId = event.data?.session_id as string | undefined;
-        if (sessionId) {
-          putSessionId(
-            options.statusUrl,
-            options.apiToken,
-            sessionId,
-            options.jobId,
-          );
-        }
+    batch.push(...events);
+
+    if (batch.length >= BATCH_SIZE) {
+      const toSend = batch;
+      batch = [];
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
       }
-      push(event);
+      sendBatch(toSend);
+    } else {
+      scheduleFlush();
     }
-  };
+  }
 
-  return { consumer, flush };
-}
-
-export interface EventForwardingOptions {
-  cwd: string;
-  statusUrl: string;
-  apiToken: string;
-  jobId: string;
+  return { consume, flush };
 }
 
 /**
- * Creates a SessionLogWatcher + Laravel forwarder wired together.
- * Returns the watcher and a flush function for final event delivery.
+ * Convenience: creates SessionLogWatcher + forwarder wired together, starts the watcher.
+ * Returns the watcher (for inactivity timer hookup) and a flush function.
  */
-export function startEventForwarding(options: EventForwardingOptions): {
-  watcher: SessionLogWatcher;
-  flush: () => void;
-} {
+export function startEventForwarding(
+  options: StartEventForwardingOptions,
+): EventForwardingHandle {
+  const { dir, dispatchId, statusUrl, apiToken, pollIntervalMs } = options;
   const watcher = new SessionLogWatcher({
-    cwd: options.cwd,
-    pollIntervalMs: 5_000,
-    dispatchId: options.jobId,
+    cwd: dir,
+    sessionDir: dir,
+    dispatchId,
+    pollIntervalMs,
   });
-  const eventsUrl = deriveEventsUrl(options.statusUrl);
-  const forwarder = createLaravelForwarder({
-    eventsUrl,
-    apiToken: options.apiToken,
-    jobId: options.jobId,
-    statusUrl: options.statusUrl,
-  });
-  watcher.onEntry(forwarder.consumer);
+  const forwarder = createLaravelForwarder(statusUrl, apiToken);
+  watcher.onEntry(forwarder.consume);
   watcher.start();
   return { watcher, flush: forwarder.flush };
 }
