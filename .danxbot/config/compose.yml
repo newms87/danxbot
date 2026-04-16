@@ -16,7 +16,6 @@ services:
     environment:
       DANXBOT_REPO_NAME: danxbot
       DANXBOT_WORKER_PORT: "5561"
-      DANXBOT_DB_HOST: mysql
       DANXBOT_DB_USER: danxbot
       DANXBOT_DB_PASSWORD: danxbot
       DANXBOT_DB_NAME: danxbot_chat

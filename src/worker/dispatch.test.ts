@@ -42,7 +42,7 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
-import { handleLaunch, handleCancel, handleStatus, clearJobCleanupIntervals } from "./dispatch.js";
+import { handleLaunch, handleCancel, handleStatus, handleStop, clearJobCleanupIntervals } from "./dispatch.js";
 
 const MOCK_REPO = makeRepoContext();
 
@@ -286,6 +286,100 @@ describe("handleCancel", () => {
     expect(cancelRes._getStatusCode()).toBe(200);
     expect(JSON.parse(cancelRes._getBody())).toEqual({ status: "canceled" });
     expect(mockCancelJob).toHaveBeenCalledWith(mockJob, "tok-cancel");
+  });
+});
+
+describe("handleStop", () => {
+  it("returns 404 for unknown job", async () => {
+    const req = createMockReqWithBody("POST", {});
+    const res = createMockRes();
+
+    await handleStop(req, res, "nonexistent-job");
+
+    expect(res._getStatusCode()).toBe(404);
+    expect(JSON.parse(res._getBody())).toEqual({ error: "Job not found" });
+  });
+
+  it("returns 409 for non-running job", async () => {
+    const mockJob = { id: "job-stopped", status: "completed", summary: "Done", startedAt: new Date(), completedAt: new Date() };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+
+    const stopReq = createMockReqWithBody("POST", {});
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-stopped");
+
+    expect(stopRes._getStatusCode()).toBe(409);
+  });
+
+  it("returns 500 when job has no stop method", async () => {
+    const mockJob = { id: "job-no-stop", status: "running", summary: "", startedAt: new Date() };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+
+    const stopReq = createMockReqWithBody("POST", {});
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-no-stop");
+
+    expect(stopRes._getStatusCode()).toBe(500);
+    expect(JSON.parse(stopRes._getBody())).toEqual({ error: "Job does not support agent-initiated stop" });
+  });
+
+  it("returns 200 and calls job.stop on success", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = { id: "job-stoppable", status: "running", summary: "", startedAt: new Date(), stop: mockStop };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+
+    const stopReq = createMockReqWithBody("POST", { status: "completed", summary: "All done" });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-stoppable");
+
+    expect(stopRes._getStatusCode()).toBe(200);
+    expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
+    expect(mockStop).toHaveBeenCalledWith("completed", "All done");
+  });
+
+  it("defaults to completed status when status not specified", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = { id: "job-default-status", status: "running", summary: "", startedAt: new Date(), stop: mockStop };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+
+    const stopReq = createMockReqWithBody("POST", {});
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-default-status");
+
+    expect(stopRes._getStatusCode()).toBe(200);
+    expect(mockStop).toHaveBeenCalledWith("completed", undefined);
+  });
+
+  it("passes failed status when specified", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = { id: "job-fail-stop", status: "running", summary: "", startedAt: new Date(), stop: mockStop };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+
+    const stopReq = createMockReqWithBody("POST", { status: "failed", summary: "Something went wrong" });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-fail-stop");
+
+    expect(mockStop).toHaveBeenCalledWith("failed", "Something went wrong");
   });
 });
 

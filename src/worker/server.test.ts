@@ -13,10 +13,12 @@ vi.mock("./health.js", () => ({
 const mockHandleLaunch = vi.fn();
 const mockHandleCancel = vi.fn();
 const mockHandleStatus = vi.fn();
+const mockHandleStop = vi.fn();
 vi.mock("./dispatch.js", () => ({
   handleLaunch: (...args: unknown[]) => mockHandleLaunch(...args),
   handleCancel: (...args: unknown[]) => mockHandleCancel(...args),
   handleStatus: (...args: unknown[]) => mockHandleStatus(...args),
+  handleStop: (...args: unknown[]) => mockHandleStop(...args),
 }));
 
 vi.mock("../logger.js", () => ({
@@ -183,6 +185,25 @@ describe("worker server", () => {
       await requestHandler(req, res);
 
       expect(mockHandleCancel).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("POST /api/stop/:jobId", () => {
+    it("delegates to handleStop with req, res, and jobId", async () => {
+      mockHandleStop.mockResolvedValue(undefined);
+
+      const { req, res } = createMockReqRes("POST", "/api/stop/job-789");
+      await requestHandler(req, res);
+
+      expect(mockHandleStop).toHaveBeenCalledWith(req, res, "job-789");
+    });
+
+    it("does not match GET /api/stop/:jobId", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/stop/job-789");
+      await requestHandler(req, res);
+
+      expect(mockHandleStop).not.toHaveBeenCalled();
       expect(res._getStatusCode()).toBe(404);
     });
   });

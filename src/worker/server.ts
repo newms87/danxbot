@@ -6,13 +6,14 @@
  * - POST /api/launch — dispatch an agent for this repo
  * - GET /api/status/:jobId — check job status
  * - POST /api/cancel/:jobId — cancel a running job
+ * - POST /api/stop/:jobId — agent self-stop (lifecycle tool callback)
  */
 
 import { createServer } from "http";
 import { createLogger } from "../logger.js";
 import { json } from "../http/helpers.js";
 import { getHealthStatus } from "./health.js";
-import { handleLaunch, handleCancel, handleStatus } from "./dispatch.js";
+import { handleLaunch, handleCancel, handleStatus, handleStop } from "./dispatch.js";
 import type { RepoContext } from "../types.js";
 
 const log = createLogger("worker-server");
@@ -41,6 +42,12 @@ export async function startWorkerServer(repo: RepoContext): Promise<void> {
     const cancelMatch = url.pathname.match(/^\/api\/cancel\/(.+)$/);
     if (method === "POST" && cancelMatch) {
       await handleCancel(req, res, cancelMatch[1]);
+      return;
+    }
+
+    const stopMatch = url.pathname.match(/^\/api\/stop\/(.+)$/);
+    if (method === "POST" && stopMatch) {
+      await handleStop(req, res, stopMatch[1]);
       return;
     }
 

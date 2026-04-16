@@ -117,3 +117,26 @@ export function handleStatus(res: ServerResponse, jobId: string): void {
   if (!job) { json(res, 404, { error: "Job not found" }); return; }
   json(res, 200, getJobStatus(job));
 }
+
+export async function handleStop(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+): Promise<void> {
+  try {
+    const job = activeJobs.get(jobId);
+    if (!job) { json(res, 404, { error: "Job not found" }); return; }
+    if (job.status !== "running") { json(res, 409, { error: `Job is not running (status: ${job.status})` }); return; }
+    if (!job.stop) { json(res, 500, { error: "Job does not support agent-initiated stop" }); return; }
+
+    const body = await parseBody(req);
+    const status = (body.status as string) === "failed" ? "failed" : "completed";
+    const summary = body.summary as string | undefined;
+
+    await job.stop(status, summary);
+    json(res, 200, { status });
+  } catch (err) {
+    log.error("Stop failed", err);
+    json(res, 500, { error: err instanceof Error ? err.message : "Stop failed" });
+  }
+}

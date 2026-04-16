@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 
+const mockFetch = vi.fn();
+vi.stubGlobal("fetch", mockFetch);
+
 vi.mock("../config.js", () => ({
   config: {
     logsDir: "/tmp/danxbot-test-logs",
@@ -477,5 +480,234 @@ describe("spawnAgent", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     expect(job.status).toBe("timeout");
     expect(job.summary).toContain("max runtime");
+  });
+
+  it("job.stop is defined after spawn", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    expect(job.stop).toBeDefined();
+  });
+
+  it("stop sends SIGTERM and sets status to completed", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const stopPromise = job.stop!("completed", "All tasks done");
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(job.status).toBe("completed");
+    expect(job.summary).toBe("All tasks done");
+    expect(job.completedAt).toBeInstanceOf(Date);
+  });
+
+  it("stop sends SIGTERM and sets status to failed", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const stopPromise = job.stop!("failed", "Agent encountered an error");
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    expect(job.status).toBe("failed");
+    expect(job.summary).toBe("Agent encountered an error");
+  });
+
+  it("stop sends SIGKILL after 5s if process still alive", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const stopPromise = job.stop!("completed");
+
+    // At t=0, SIGTERM sent. At t=5s, check again.
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    // SIGTERM at stop call, SIGKILL after 5s since mock doesn't exit
+    const killCalls = child.kill.mock.calls.map((c: unknown[]) => c[0]);
+    expect(killCalls).toContain("SIGTERM");
+    expect(killCalls).toContain("SIGKILL");
+  });
+
+  it("stop is no-op when job is not running", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    child.emit("close", 0);
+    expect(job.status).toBe("completed");
+
+    // Calling stop on a completed job should be a no-op
+    await job.stop!("failed");
+
+    expect(job.status).toBe("completed");
+  });
+
+  it("stop calls onComplete callback", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const onComplete = vi.fn();
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      onComplete,
+    });
+
+    const stopPromise = job.stop!("completed", "Done");
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    expect(onComplete).toHaveBeenCalledWith(job);
+  });
+
+  it("stop does not trigger double onComplete after close event", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const onComplete = vi.fn();
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      onComplete,
+    });
+
+    const stopPromise = job.stop!("completed", "Done");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    // Process finally closes after stop
+    child.emit("close", 0);
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("stop does not send SIGKILL when process exits within 5s", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const stopPromise = job.stop!("completed");
+
+    // Simulate fast exit before the 5s wait completes
+    child.emit("close", 0);
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    const killCalls = child.kill.mock.calls.map((c: unknown[]) => c[0]);
+    expect(killCalls).toContain("SIGTERM");
+    expect(killCalls).not.toContain("SIGKILL");
+  });
+
+  it("stop preserves status set before close handler fires", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Start stop (sets status to "completed" before kill)
+    const stopPromise = job.stop!("completed", "All done");
+
+    // Simulate close event firing (non-zero exit from SIGTERM)
+    child.emit("close", 143);
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    // Status should be "completed" (from stop), not "failed" (from close handler)
+    expect(job.status).toBe("completed");
+    expect(job.summary).toBe("All done");
+  });
+
+  it("stop calls putStatus when statusUrl and apiToken are set", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok-abc",
+    });
+
+    const stopPromise = job.stop!("completed", "Done");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://example.com/status",
+      expect.objectContaining({
+        method: "PUT",
+        headers: expect.objectContaining({
+          Authorization: "Bearer tok-abc",
+        }),
+      }),
+    );
+  });
+
+  it("stop does not call fetch when statusUrl is not set", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const stopPromise = job.stop!("completed", "Done");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });

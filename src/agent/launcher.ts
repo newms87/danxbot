@@ -51,6 +51,12 @@ export interface AgentJob {
   heartbeatInterval?: ReturnType<typeof setInterval>;
   /** Internal cleanup callback — tears down watcher, forwarder, timers. Set by spawnAgent. */
   _cleanup?: () => void;
+  /**
+   * Agent-initiated stop — signals that the agent completed or failed gracefully.
+   * Sends SIGTERM, waits 5s, then SIGKILL if needed, then fires onComplete.
+   * Use for lifecycle tool callbacks (dispatch agents). For user cancellations, use cancelJob().
+   */
+  stop?: (status: "completed" | "failed", summary?: string) => Promise<void>;
 }
 
 export interface SpawnAgentOptions {
@@ -350,6 +356,45 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
   }
 
   job._cleanup = cleanup;
+
+  // --- Agent-initiated stop mechanism ---
+  // The agent calls stop() via the HTTP /api/stop/:jobId endpoint when lifecycle
+  // tools signal completion. This is distinct from cancelJob() (user-initiated).
+  job.stop = async (
+    status: "completed" | "failed",
+    summary?: string,
+  ): Promise<void> => {
+    if (job.status !== "running" || !job.process) return;
+
+    log.info(`[Job ${jobId}] Agent self-stop (${status}) — sending SIGTERM`);
+
+    // Set terminal status BEFORE killing to prevent the close handler from overriding it
+    job.status = status;
+    if (summary) job.summary = summary;
+    job.completedAt = new Date();
+
+    // Register close listener BEFORE kill to avoid missing a fast exit
+    let processExited = false;
+    child.once("close", () => {
+      processExited = true;
+    });
+
+    child.kill("SIGTERM");
+
+    // Wait 5s for graceful shutdown, then SIGKILL if still alive
+    await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+    if (!processExited) {
+      log.info(`[Job ${jobId}] Still alive after 5s — sending SIGKILL`);
+      child.kill("SIGKILL");
+    }
+
+    cleanup();
+
+    if (options.statusUrl && options.apiToken) {
+      await putStatus(job, options.apiToken, status, job.summary);
+    }
+    options.onComplete?.(job);
+  };
 
   setupProcessHandlers(child, job, () => lastAssistantText, () => stderr, {
     onComplete: (j) => {
