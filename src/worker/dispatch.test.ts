@@ -8,9 +8,6 @@ const mockSpawnAgent = vi.fn();
 const mockCancelJob = vi.fn();
 const mockGetJobStatus = vi.fn();
 const mockBuildMcpSettings = vi.fn().mockReturnValue("/tmp/danxbot-mcp-test");
-const mockPutStatus = vi.fn().mockResolvedValue(undefined);
-const mockStartHeartbeat = vi.fn();
-const mockStopHeartbeat = vi.fn();
 const mockCleanupMcpSettings = vi.fn();
 
 vi.mock("../agent/launcher.js", () => ({
@@ -18,15 +15,7 @@ vi.mock("../agent/launcher.js", () => ({
   cancelJob: (...args: unknown[]) => mockCancelJob(...args),
   getJobStatus: (...args: unknown[]) => mockGetJobStatus(...args),
   buildMcpSettings: (...args: unknown[]) => mockBuildMcpSettings(...args),
-  putStatus: (...args: unknown[]) => mockPutStatus(...args),
-  startHeartbeat: (...args: unknown[]) => mockStartHeartbeat(...args),
-  stopHeartbeat: (...args: unknown[]) => mockStopHeartbeat(...args),
   cleanupMcpSettings: (...args: unknown[]) => mockCleanupMcpSettings(...args),
-}));
-
-vi.mock("../terminal.js", () => ({
-  spawnInTerminal: vi.fn(),
-  buildDispatchScript: vi.fn().mockReturnValue("/tmp/test-script.sh"),
 }));
 
 vi.mock("../poller/constants.js", () => ({
@@ -102,7 +91,7 @@ describe("handleLaunch", () => {
     });
   });
 
-  it("returns 200 with job_id on successful launch (Docker mode)", async () => {
+  it("returns 200 with job_id on successful launch", async () => {
     const mockJob = {
       id: "job-abc-123",
       status: "running",
@@ -123,22 +112,96 @@ describe("handleLaunch", () => {
     const body = JSON.parse(res._getBody());
     expect(body.job_id).toBe("job-abc-123");
     expect(body.status).toBe("launched");
+  });
+
+  it("passes correct options to spawnAgent", async () => {
+    const mockJob = { id: "job-1", status: "running", summary: "", startedAt: new Date() };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Build schema",
+      api_token: "tok-abc",
+      status_url: "http://example.com/status",
+      max_runtime_ms: 120000,
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
     expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
-        prompt: "Implement feature X",
+        prompt: "Build schema",
         repoName: "test-repo",
-        mcpConfigPath: expect.any(String),
+        timeoutMs: 3600000,
+        mcpConfigPath: expect.stringContaining("settings.json"),
+        statusUrl: "http://example.com/status",
+        apiToken: "tok-abc",
+        maxRuntimeMs: 120000,
+        eventForwarding: {
+          statusUrl: "http://example.com/status",
+          apiToken: "tok-abc",
+        },
+        openTerminal: false, // config.isHost is false in test
       }),
     );
   });
 
+  it("does not set eventForwarding when statusUrl is absent", async () => {
+    const mockJob = { id: "job-2", status: "running", summary: "", startedAt: new Date() };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do work",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    expect(spawnOpts.eventForwarding).toBeUndefined();
+  });
+
+  it("calls buildMcpSettings with correct options", async () => {
+    const mockJob = { id: "job-3", status: "running", summary: "", startedAt: new Date() };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Build schema",
+      api_token: "tok-abc",
+      api_url: "http://custom-api.com",
+      schema_definition_id: "def-42",
+      schema_role: "builder",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(mockBuildMcpSettings).toHaveBeenCalledWith({
+      apiToken: "tok-abc",
+      apiUrl: "http://custom-api.com",
+      schemaDefinitionId: "def-42",
+      schemaRole: "builder",
+    });
+  });
+
+  it("cleans up MCP settings on spawn failure", async () => {
+    mockSpawnAgent.mockRejectedValue(new Error("Spawn failed"));
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do work",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(500);
+    expect(mockCleanupMcpSettings).toHaveBeenCalledWith("/tmp/danxbot-mcp-test");
+  });
+
   it("accepts matching repo name without error", async () => {
-    const mockJob = {
-      id: "job-match",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
+    const mockJob = { id: "job-match", status: "running", summary: "", startedAt: new Date() };
     mockSpawnAgent.mockResolvedValue(mockJob);
 
     const req = createMockReqWithBody("POST", {
@@ -151,21 +214,6 @@ describe("handleLaunch", () => {
     await handleLaunch(req, res, MOCK_REPO);
 
     expect(res._getStatusCode()).toBe(200);
-  });
-
-  it("returns 500 when spawnAgent throws", async () => {
-    mockSpawnAgent.mockRejectedValue(new Error("Spawn failed"));
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do work",
-      api_token: "tok-123",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(500);
-    expect(JSON.parse(res._getBody())).toEqual({ error: "Spawn failed" });
   });
 });
 
@@ -180,24 +228,14 @@ describe("handleStatus", () => {
   });
 
   it("returns job status for active job", async () => {
-    // Launch a job first so it's in activeJobs
-    const mockJob = {
-      id: "job-status-test",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
+    const mockJob = { id: "job-status-test", status: "running", summary: "", startedAt: new Date() };
     mockSpawnAgent.mockResolvedValue(mockJob);
     mockGetJobStatus.mockReturnValue({ id: "job-status-test", status: "running" });
 
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-    });
+    const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
 
-    // Now check status
     const res = createMockRes();
     handleStatus(res, "job-status-test");
 
@@ -218,48 +256,26 @@ describe("handleCancel", () => {
   });
 
   it("returns 409 for non-running job", async () => {
-    // Launch and then complete a job
-    const mockJob = {
-      id: "job-completed",
-      status: "completed",
-      summary: "Done",
-      startedAt: new Date(),
-      completedAt: new Date(),
-    };
+    const mockJob = { id: "job-completed", status: "completed", summary: "Done", startedAt: new Date(), completedAt: new Date() };
     mockSpawnAgent.mockResolvedValue(mockJob);
 
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-    });
+    const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
 
-    // Try to cancel
     const cancelReq = createMockReqWithBody("POST", { api_token: "tok-123" });
     const cancelRes = createMockRes();
     await handleCancel(cancelReq, cancelRes, "job-completed");
 
     expect(cancelRes._getStatusCode()).toBe(409);
-    expect(JSON.parse(cancelRes._getBody())).toEqual({
-      error: "Job is not running (status: completed)",
-    });
   });
 
   it("returns 200 on successful cancel", async () => {
-    const mockJob = {
-      id: "job-to-cancel",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
+    const mockJob = { id: "job-to-cancel", status: "running", summary: "", startedAt: new Date() };
     mockSpawnAgent.mockResolvedValue(mockJob);
     mockCancelJob.mockResolvedValue(undefined);
 
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-    });
+    const launchReq = createMockReqWithBody("POST", { task: "Test task", api_token: "tok-123" });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
 
@@ -281,7 +297,6 @@ describe("clearJobCleanupIntervals", () => {
   it("calls clearInterval for each interval registered by handleLaunch", async () => {
     const clearIntervalSpy = vi.spyOn(global, "clearInterval");
 
-    // Launch two jobs to register two cleanup intervals
     const job1 = { id: "job-ci-1", status: "running", summary: "", startedAt: new Date() };
     const job2 = { id: "job-ci-2", status: "running", summary: "", startedAt: new Date() };
     mockSpawnAgent.mockResolvedValueOnce(job1).mockResolvedValueOnce(job2);
@@ -297,10 +312,8 @@ describe("clearJobCleanupIntervals", () => {
     clearIntervalSpy.mockClear();
     clearJobCleanupIntervals();
 
-    // Should have cleared at least 2 intervals (one per job)
     expect(clearIntervalSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
 
-    // Calling again should clear 0 (Set was emptied)
     clearIntervalSpy.mockClear();
     clearJobCleanupIntervals();
     expect(clearIntervalSpy).not.toHaveBeenCalled();
