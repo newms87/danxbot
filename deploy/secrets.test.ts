@@ -125,7 +125,7 @@ describe("buildSsmPutCommands", () => {
       ),
     );
     expect(cmds).toContainEqual(
-      expect.stringContaining(`--value "sk-xxx"`),
+      expect.stringContaining(`--value 'sk-xxx'`),
     );
     expect(cmds).toContainEqual(
       expect.stringContaining(
@@ -145,22 +145,72 @@ describe("buildSsmPutCommands", () => {
     );
   });
 
-  it("escapes double quotes in secret values", () => {
+  it("single-quote-wraps values so shell does not interpolate $VAR / backticks", () => {
     const cfg = makeConfig({
       ssmPrefix: "/danxbot-test",
       aws: { profile: "p" },
     });
     const collected = {
-      shared: { WEIRD: 'has"quotes' },
+      shared: {
+        LITERAL_DOLLAR: "${APP_NAME}",
+        LITERAL_BACKTICK: "has`cmd`sub",
+        QUOTED: 'has"quotes',
+      },
       perRepo: {},
     };
     const cmds = buildSsmPutCommands(cfg, collected);
-    expect(cmds[0]).toContain(`--value "has\\"quotes"`);
+    expect(cmds.find((c) => c.includes("LITERAL_DOLLAR"))).toContain(
+      `--value '\${APP_NAME}'`,
+    );
+    expect(cmds.find((c) => c.includes("LITERAL_BACKTICK"))).toContain(
+      "--value 'has`cmd`sub'",
+    );
+    // Double quotes pass through single-quoted values untouched.
+    expect(cmds.find((c) => c.includes("QUOTED"))).toContain(
+      `--value 'has"quotes'`,
+    );
+  });
+
+  it("escapes embedded single quotes in secret values", () => {
+    const cfg = makeConfig({
+      ssmPrefix: "/danxbot-test",
+      aws: { profile: "p" },
+    });
+    const cmds = buildSsmPutCommands(cfg, {
+      shared: { SQ: "it's fine" },
+      perRepo: {},
+    });
+    // Single-quote escape: `'` → `'\''` → closing quote + escaped quote + reopen
+    expect(cmds[0]).toContain(`--value 'it'\\''s fine'`);
   });
 
   it("emits zero commands when nothing is collected", () => {
     const cfg = makeConfig({ ssmPrefix: "/d", aws: { profile: "p" } });
     const cmds = buildSsmPutCommands(cfg, { shared: {}, perRepo: {} });
     expect(cmds).toEqual([]);
+  });
+
+  it("skips empty-string values (SSM rejects them)", () => {
+    const cfg = makeConfig({
+      ssmPrefix: "/danxbot-test",
+      aws: { profile: "p" },
+      repos: [{ name: "app", url: "https://github.com/x/a.git" }],
+    });
+    const cmds = buildSsmPutCommands(cfg, {
+      shared: { FILLED: "value", EMPTY: "" },
+      perRepo: {
+        app: {
+          danxbot: { TOKEN: "xoxb", BLANK: "" },
+          app: { APP_KEY: "k", EMPTY_APP: "" },
+        },
+      },
+    });
+    const joined = cmds.join("\n");
+    expect(joined).toContain("/danxbot-test/shared/FILLED");
+    expect(joined).not.toContain("/danxbot-test/shared/EMPTY");
+    expect(joined).toContain("/danxbot-test/repos/app/TOKEN");
+    expect(joined).not.toContain("/danxbot-test/repos/app/BLANK");
+    expect(joined).toContain("/danxbot-test/repos/app/REPO_ENV_APP_KEY");
+    expect(joined).not.toContain("/danxbot-test/repos/app/REPO_ENV_EMPTY_APP");
   });
 });

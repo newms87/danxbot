@@ -63,23 +63,30 @@ export function buildSsmPutCommands(
   collected: CollectedSecrets,
 ): string[] {
   const cmds: string[] = [];
+  // Single-quote the value so the shell does not interpolate `$VAR` or
+  // evaluate backticks. Laravel-style values like `${APP_NAME}` are stored
+  // literally in SSM and resolved later by the app reading the materialized
+  // .env. Single-quote escape for embedded quotes: `'` → `'\''`.
   const putOne = (name: string, value: string): string =>
     awsCmd(
       config.aws.profile,
-      `ssm put-parameter --name "${name}" --type SecureString --overwrite --region ${config.region} --value "${value.replace(/"/g, '\\"')}"`,
+      `ssm put-parameter --name "${name}" --type SecureString --overwrite --region ${config.region} --value '${value.replace(/'/g, "'\\''")}'`,
     );
+  // SSM rejects empty values — skip them. A key with an empty local value is
+  // effectively "not set" and will be absent from the materialized .env.
+  const pushIfSet = (name: string, value: string): void => {
+    if (value !== "") cmds.push(putOne(name, value));
+  };
 
   for (const [k, v] of Object.entries(collected.shared)) {
-    cmds.push(putOne(`${config.ssmPrefix}/shared/${k}`, v));
+    pushIfSet(`${config.ssmPrefix}/shared/${k}`, v);
   }
   for (const [repoName, groups] of Object.entries(collected.perRepo)) {
     for (const [k, v] of Object.entries(groups.danxbot)) {
-      cmds.push(putOne(`${config.ssmPrefix}/repos/${repoName}/${k}`, v));
+      pushIfSet(`${config.ssmPrefix}/repos/${repoName}/${k}`, v);
     }
     for (const [k, v] of Object.entries(groups.app)) {
-      cmds.push(
-        putOne(`${config.ssmPrefix}/repos/${repoName}/REPO_ENV_${k}`, v),
-      );
+      pushIfSet(`${config.ssmPrefix}/repos/${repoName}/REPO_ENV_${k}`, v);
     }
   }
   return cmds;

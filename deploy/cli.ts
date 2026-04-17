@@ -117,7 +117,15 @@ async function deploy(config: DeployConfig): Promise<void> {
 
   remote.uploadClaudeAuth();
 
-  // Materialize secrets: upload the script, run it with the deployment's ssm prefix
+  // Clone repos FIRST so the materializer writes .env files into existing
+  // git checkouts (not into empty dirs that would block a later clone).
+  // Tokens come from SSM directly via aws get-parameter, not via materialize,
+  // so there is no chicken-and-egg here.
+  const tokens = fetchRepoTokens(config);
+  syncRepos(remote, config, tokens);
+
+  // Materialize secrets: /danxbot/.env (shared) + per-repo .env into the
+  // cloned repo dirs.
   const materializeScript = resolve(
     __dirname,
     "templates/materialize-secrets.sh",
@@ -131,11 +139,7 @@ async function deploy(config: DeployConfig): Promise<void> {
     `sudo DANXBOT_ROOT=/danxbot /usr/local/bin/materialize-secrets.sh ${config.ssmPrefix} ${config.region} ${repoArgs}`,
   );
 
-  // Sync repos (clone/pull) using per-repo tokens
-  const tokens = fetchRepoTokens(config);
-  syncRepos(remote, config, tokens);
-
-  // Run each repo's bootstrap.sh
+  // Run each repo's bootstrap.sh (deps install now that code + .env both exist)
   runBootstrapScripts(remote, config);
 
   // Launch shared-infra compose
