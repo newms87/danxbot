@@ -7,7 +7,8 @@
 
 services:
   danxbot-worker:
-    image: danxbot:latest
+    # Image: prod injects DANXBOT_WORKER_IMAGE=<ECR URL>; local falls back to the built danxbot:latest.
+    image: ${DANXBOT_WORKER_IMAGE:-danxbot:latest}
     container_name: danxbot-worker-danxbot
     restart: always
     stop_grace_period: 120s
@@ -27,8 +28,11 @@ services:
       DANXBOT_RUNTIME: ${DANXBOT_RUNTIME:-docker}
       REPOS: ${REPOS}
     volumes:
-      - /home/newms/web/danxbot-flytebot:/danxbot/app/repos/danxbot
-      - /home/newms/web/danxbot-flytebot/claude-auth:/danxbot/claude-auth:ro
+      # Repo bind: .. goes up to .danxbot/, ../.. is the repo root.
+      # Resolves to /home/newms/web/danxbot-flytebot (dev) or /danxbot/repos/danxbot (prod).
+      - ../..:/danxbot/app/repos/danxbot
+      # Claude auth: prod injects CLAUDE_AUTH_DIR=/danxbot/claude-auth; dev default is relative to danxbot-flytebot checkout.
+      - ${CLAUDE_AUTH_DIR:-../../claude-auth}:/danxbot/claude-auth:ro
     ports:
       - "5561:5561"
     networks:
