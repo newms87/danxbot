@@ -18,6 +18,7 @@ import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
 import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
 import { StallDetector } from "../agent/stall-detector.js";
+import { normalizeCallbackUrl } from "./url-normalizer.js";
 
 /** Maximum number of stall-recovery respawns before giving up and marking failed. */
 const MAX_STALL_RESUMES = 3;
@@ -47,11 +48,23 @@ export async function handleLaunch(
     const task = body.task as string;
     const agents = body.agents as Array<Record<string, unknown>> | undefined;
     const apiToken = body.api_token as string;
-    const apiUrl = (body.api_url as string) || config.dispatch.defaultApiUrl;
-    const statusUrl = body.status_url as string | undefined;
+    // Dispatchers (e.g., GPT Manager) send callback URLs from the host's
+    // perspective — `http://localhost:80/...`. In docker runtime those resolve
+    // to the worker container itself and the callback fails. Rewrite to the
+    // docker-host alias here so the rest of the pipeline is runtime-agnostic.
+    // Normalize AFTER the defaultApiUrl fallback so the default (also a
+    // loopback URL) gets rewritten in docker runtime too.
+    const rawApiUrl =
+      (body.api_url as string | undefined) ?? config.dispatch.defaultApiUrl;
+    const apiUrl = normalizeCallbackUrl(rawApiUrl, config.isHost) as string;
+    const statusUrl = normalizeCallbackUrl(
+      body.status_url as string | undefined,
+      config.isHost,
+    );
     const schemaDefinitionId = body.schema_definition_id as string | undefined;
     const maxRuntimeMs = body.max_runtime_ms as number | undefined;
     const schemaRole = body.schema_role as string | undefined;
+    const title = body.title as string | undefined;
 
     if (!task || !apiToken) {
       json(res, 400, { error: "Missing required fields: task, api_token" });
@@ -60,7 +73,9 @@ export async function handleLaunch(
 
     const requestedRepo = body.repo as string | undefined;
     if (requestedRepo && requestedRepo !== repo.name) {
-      json(res, 400, { error: `This worker manages "${repo.name}", not "${requestedRepo}"` });
+      json(res, 400, {
+        error: `This worker manages "${repo.name}", not "${requestedRepo}"`,
+      });
       return;
     }
 
@@ -101,6 +116,7 @@ export async function handleLaunch(
         job = await spawnAgent({
           jobId,
           prompt,
+          title,
           repoName: repo.name,
           timeoutMs: config.dispatch.agentTimeoutMs,
           mcpConfigPath: join(settingsDir, "settings.json"),
@@ -130,7 +146,8 @@ export async function handleLaunch(
      * - Otherwise: mark job as failed.
      */
     function setupStallDetection(job: AgentJob): void {
-      if (!config.isHost || !statusUrl || !job.watcher || !job.terminalLogPath) return;
+      if (!config.isHost || !statusUrl || !job.watcher || !job.terminalLogPath)
+        return;
 
       const termWatcher = new TerminalOutputWatcher(job.terminalLogPath);
       const stallDetector = new StallDetector({
@@ -149,7 +166,10 @@ export async function handleLaunch(
             log.warn(
               `[Dispatch ${dispatchId}] Max stall resumes (${MAX_STALL_RESUMES}) reached — marking job failed`,
             );
-            await currentJob.stop?.("failed", "Agent stalled repeatedly and did not recover");
+            await currentJob.stop?.(
+              "failed",
+              "Agent stalled repeatedly and did not recover",
+            );
             return;
           }
 
@@ -178,7 +198,10 @@ export async function handleLaunch(
             const newJob = await spawnForDispatch(nudgePrompt, true);
             setupStallDetection(newJob);
           } catch (err) {
-            log.error(`[Dispatch ${dispatchId}] Failed to respawn after stall:`, err);
+            log.error(
+              `[Dispatch ${dispatchId}] Failed to respawn after stall:`,
+              err,
+            );
           }
         },
       });
@@ -215,7 +238,9 @@ export async function handleLaunch(
     json(res, 200, { job_id: dispatchId, status: "launched" });
   } catch (err) {
     log.error("Launch failed", err);
-    json(res, 500, { error: err instanceof Error ? err.message : "Launch failed" });
+    json(res, 500, {
+      error: err instanceof Error ? err.message : "Launch failed",
+    });
   }
 }
 
@@ -225,8 +250,14 @@ export async function handleCancel(
   jobId: string,
 ): Promise<void> {
   const job = activeJobs.get(jobId);
-  if (!job) { json(res, 404, { error: "Job not found" }); return; }
-  if (job.status !== "running") { json(res, 409, { error: `Job is not running (status: ${job.status})` }); return; }
+  if (!job) {
+    json(res, 404, { error: "Job not found" });
+    return;
+  }
+  if (job.status !== "running") {
+    json(res, 409, { error: `Job is not running (status: ${job.status})` });
+    return;
+  }
   const body = await parseBody(req);
   await cancelJob(job, (body.api_token as string) || "");
   json(res, 200, { status: "canceled" });
@@ -234,7 +265,10 @@ export async function handleCancel(
 
 export function handleStatus(res: ServerResponse, jobId: string): void {
   const job = activeJobs.get(jobId);
-  if (!job) { json(res, 404, { error: "Job not found" }); return; }
+  if (!job) {
+    json(res, 404, { error: "Job not found" });
+    return;
+  }
   json(res, 200, getJobStatus(job));
 }
 
@@ -245,18 +279,30 @@ export async function handleStop(
 ): Promise<void> {
   try {
     const job = activeJobs.get(jobId);
-    if (!job) { json(res, 404, { error: "Job not found" }); return; }
-    if (job.status !== "running") { json(res, 409, { error: `Job is not running (status: ${job.status})` }); return; }
-    if (!job.stop) { json(res, 500, { error: "Job does not support agent-initiated stop" }); return; }
+    if (!job) {
+      json(res, 404, { error: "Job not found" });
+      return;
+    }
+    if (job.status !== "running") {
+      json(res, 409, { error: `Job is not running (status: ${job.status})` });
+      return;
+    }
+    if (!job.stop) {
+      json(res, 500, { error: "Job does not support agent-initiated stop" });
+      return;
+    }
 
     const body = await parseBody(req);
-    const status = (body.status as string) === "failed" ? "failed" : "completed";
+    const status =
+      (body.status as string) === "failed" ? "failed" : "completed";
     const summary = body.summary as string | undefined;
 
     await job.stop(status, summary);
     json(res, 200, { status });
   } catch (err) {
     log.error("Stop failed", err);
-    json(res, 500, { error: err instanceof Error ? err.message : "Stop failed" });
+    json(res, 500, {
+      error: err instanceof Error ? err.message : "Stop failed",
+    });
   }
 }

@@ -35,6 +35,12 @@ services:
       - ${CLAUDE_AUTH_DIR:-../../claude-auth}:/danxbot/claude-auth:ro
     ports:
       - "5561:5561"
+    # In docker runtime, src/worker/url-normalizer.ts rewrites dispatcher
+    # callback URLs from `localhost` to `host.docker.internal` so the worker
+    # can reach services on the docker host. This extra_hosts entry is what
+    # makes that alias resolve on Linux; Docker Desktop adds it implicitly.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - danxbot-net
     healthcheck:
