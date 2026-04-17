@@ -17,7 +17,6 @@ import {
   convertJsonlEntry,
   DISPATCH_TAG_PREFIX,
 } from "./session-log-watcher.js";
-import { parseAgentLog } from "./log-parser.js";
 import type { AgentLogEntry } from "../types.js";
 
 // --- Test helpers ---
@@ -454,68 +453,6 @@ describe("convertJsonlEntry", () => {
   });
 });
 
-describe("convertJsonlEntry -> parseAgentLog compatibility", () => {
-  it("produces AgentLogEntry that parseAgentLog parses correctly", () => {
-    const entries: AgentLogEntry[] = [];
-    let lastTs = 0;
-
-    for (const raw of [rawAssistantEntry(), rawToolResultEntry()]) {
-      const result = convertJsonlEntry(raw, lastTs);
-      if (result) {
-        entries.push(result.entry);
-        lastTs = result.timestamp;
-      }
-    }
-
-    const parsed = parseAgentLog(entries);
-    expect(parsed).toHaveLength(2);
-
-    // Assistant entry
-    expect(parsed[0].type).toBe("assistant");
-    if (parsed[0].type === "assistant") {
-      expect(parsed[0].thinking).toBe("Let me analyze this.");
-      expect(parsed[0].text).toBe("I'll read the file.");
-      expect(parsed[0].toolCalls).toHaveLength(1);
-      expect(parsed[0].toolCalls[0].name).toBe("Read");
-      expect(parsed[0].model).toBe("claude-sonnet-4-5-20250929");
-      expect(parsed[0].usage).not.toBeNull();
-      expect(parsed[0].usage!.inputTokens).toBe(500);
-      expect(parsed[0].costUsd).toBeGreaterThan(0);
-    }
-
-    // Tool result entry
-    expect(parsed[1].type).toBe("tool_result");
-    if (parsed[1].type === "tool_result") {
-      expect(parsed[1].results).toHaveLength(1);
-      expect(parsed[1].results[0].toolUseId).toBe("toolu_01");
-      expect(parsed[1].results[0].content).toBe("File contents here...");
-    }
-  });
-
-  it("parses system init entry correctly", () => {
-    const result = convertJsonlEntry(rawSystemInit(), 0);
-    const parsed = parseAgentLog([result!.entry]);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0].type).toBe("system_init");
-    if (parsed[0].type === "system_init") {
-      expect(parsed[0].sessionId).toBe("sess-abc-123");
-      expect(parsed[0].model).toBe("claude-sonnet-4-5-20250929");
-    }
-  });
-
-  it("parses result entry correctly", () => {
-    const result = convertJsonlEntry(rawResultEntry(), 0);
-    const parsed = parseAgentLog([result!.entry]);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0].type).toBe("result");
-    if (parsed[0].type === "result") {
-      expect(parsed[0].totalCostUsd).toBe(0.0125);
-      expect(parsed[0].numTurns).toBe(5);
-      expect(parsed[0].durationMs).toBe(30000);
-    }
-  });
-});
-
 describe("SessionLogWatcher", () => {
   let tempDir: string;
 
@@ -791,7 +728,7 @@ describe("SessionLogWatcher", () => {
     expect(entries.length).toBe(countAfterStop);
   });
 
-  it("full session produces parseAgentLog-compatible output", async () => {
+  it("full session produces a stream of typed entries", async () => {
     writeJsonlFile(tempDir, "session.jsonl", [
       rawAssistantEntry(),
       rawToolResultEntry(),
@@ -821,18 +758,20 @@ describe("SessionLogWatcher", () => {
     watcher.stop();
 
     const accumulated = watcher.getEntries();
-    const parsed = parseAgentLog(accumulated);
 
-    // init + assistant + tool_result + assistant = 4
-    expect(parsed).toHaveLength(4);
-    expect(parsed[0].type).toBe("system_init");
-    expect(parsed[1].type).toBe("assistant");
-    expect(parsed[2].type).toBe("tool_result");
-    expect(parsed[3].type).toBe("assistant");
+    // synthesized init + assistant + user (tool_result) + assistant = 4
+    expect(accumulated).toHaveLength(4);
+    expect(accumulated[0].type).toBe("system");
+    expect(accumulated[0].subtype).toBe("init");
+    expect(accumulated[1].type).toBe("assistant");
+    expect(accumulated[2].type).toBe("user");
+    expect(accumulated[3].type).toBe("assistant");
 
-    if (parsed[3].type === "assistant") {
-      expect(parsed[3].text).toBe("Done! The task is complete.");
-    }
+    const lastAssistantContent = accumulated[3].data.content as Array<{
+      type: string;
+      text?: string;
+    }>;
+    expect(lastAssistantContent[0].text).toBe("Done! The task is complete.");
   });
 
   it("handles malformed JSON lines gracefully", async () => {

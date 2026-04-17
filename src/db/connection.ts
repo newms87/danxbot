@@ -38,7 +38,6 @@ function basePoolOptions(): PoolOptions {
   const {
     database: _,
     connectTimeoutMs: __,
-    eventsMaxAgeDays: ___,
     ...dbWithoutDatabase
   } = config.db;
   return createPoolOptions(dbWithoutDatabase);

@@ -1,6 +1,5 @@
 /**
  * Summarizes a tool's input into a short human-readable string.
- * Shared between agent.ts (log creation) and log-parser.ts (log parsing).
  */
 export function summarizeToolInput(
   name: string,

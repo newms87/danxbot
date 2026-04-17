@@ -4,8 +4,6 @@ import { makeRepoContext } from "./__tests__/helpers/fixtures.js";
 // --- Mocks (top-level, before dynamic import) ---
 
 const mockStartThreadCleanup = vi.fn().mockReturnValue("mock-thread-interval");
-const mockLoadEvents = vi.fn().mockResolvedValue(undefined);
-const mockStartEventCleanup = vi.fn().mockReturnValue("mock-event-interval");
 const mockStartDashboard = vi.fn().mockResolvedValue(undefined);
 const mockStartWorkerServer = vi.fn().mockResolvedValue(undefined);
 const mockStartSlackListener = vi.fn().mockResolvedValue(undefined);
@@ -41,15 +39,6 @@ vi.mock("./dashboard/server.js", () => ({
 
 vi.mock("./worker/server.js", () => ({
   startWorkerServer: mockStartWorkerServer,
-}));
-
-vi.mock("./dashboard/events.js", () => ({
-  loadEvents: mockLoadEvents,
-  startEventCleanup: mockStartEventCleanup,
-  createEvent: vi.fn(),
-  updateEvent: vi.fn(),
-  getEvents: vi.fn().mockReturnValue([]),
-  stopEventCleanup: vi.fn(),
 }));
 
 vi.mock("./shutdown.js", () => ({
@@ -110,8 +99,6 @@ beforeEach(() => {
   // Re-wire mocks after resetModules clears them
   mockRunMigrations.mockResolvedValue(undefined);
   mockStartThreadCleanup.mockReturnValue("mock-thread-interval");
-  mockLoadEvents.mockResolvedValue(undefined);
-  mockStartEventCleanup.mockReturnValue("mock-event-interval");
   mockStartDashboard.mockResolvedValue(undefined);
   mockStartWorkerServer.mockResolvedValue(undefined);
   mockStartSlackListener.mockResolvedValue(undefined);
@@ -189,12 +176,10 @@ describe("worker mode startup flow", () => {
     expect(mockRunMigrations).not.toHaveBeenCalled();
   });
 
-  it("does NOT start thread or event cleanup", async () => {
+  it("does NOT start thread cleanup", async () => {
     await importIndex();
 
     expect(mockStartThreadCleanup).not.toHaveBeenCalled();
-    expect(mockLoadEvents).not.toHaveBeenCalled();
-    expect(mockStartEventCleanup).not.toHaveBeenCalled();
   });
 
   it("calls initShutdownHandlers with slackClient when Slack enabled", async () => {
@@ -259,12 +244,10 @@ describe("dashboard mode startup flow", () => {
     expect(mockStartDashboard).toHaveBeenCalledOnce();
   });
 
-  it("starts thread and event cleanup", async () => {
+  it("starts thread cleanup", async () => {
     await importIndex();
 
     expect(mockStartThreadCleanup).toHaveBeenCalledOnce();
-    expect(mockLoadEvents).toHaveBeenCalledOnce();
-    expect(mockStartEventCleanup).toHaveBeenCalledOnce();
   });
 
   it("does NOT start poller or Slack", async () => {
@@ -286,15 +269,13 @@ describe("dashboard mode startup flow", () => {
     expect(mockInitPlatformPool).not.toHaveBeenCalled();
   });
 
-  it("calls initShutdownHandlers with cleanup intervals", async () => {
+  it("calls initShutdownHandlers with thread cleanup interval", async () => {
     mockStartThreadCleanup.mockReturnValue("dash-thread-interval");
-    mockStartEventCleanup.mockReturnValue("dash-event-interval");
 
     await importIndex();
 
     expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
       threadCleanupInterval: "dash-thread-interval",
-      eventCleanupInterval: "dash-event-interval",
     });
   });
 });

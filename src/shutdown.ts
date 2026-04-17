@@ -1,6 +1,5 @@
 import { stopSlackListener, getInFlightPlaceholders } from "./slack/listener.js";
 import { stopThreadCleanup } from "./threads.js";
-import { stopEventCleanup } from "./dashboard/events.js";
 import { clearJobCleanupIntervals } from "./worker/dispatch.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
@@ -13,12 +12,11 @@ const SHUTDOWN_TIMEOUT_MS = 30000; // 30 seconds
 interface ShutdownOptions {
   exitProcess?: boolean;
   threadCleanupInterval?: NodeJS.Timeout;
-  eventCleanupInterval?: NodeJS.Timeout;
   slackClient?: WebClient;
 }
 
 export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
-  const { exitProcess = true, threadCleanupInterval, eventCleanupInterval, slackClient } = options;
+  const { exitProcess = true, threadCleanupInterval, slackClient } = options;
 
   log.info("Shutdown signal received, stopping new message processing...");
 
@@ -66,11 +64,6 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
     stopThreadCleanup(threadCleanupInterval);
   }
 
-  // Stop event cleanup interval
-  if (eventCleanupInterval) {
-    stopEventCleanup(eventCleanupInterval);
-  }
-
   // Clear per-job cleanup intervals from worker dispatch
   clearJobCleanupIntervals();
 
@@ -87,14 +80,12 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
 
 export function initShutdownHandlers(options: {
   threadCleanupInterval?: NodeJS.Timeout;
-  eventCleanupInterval?: NodeJS.Timeout;
   slackClient?: WebClient;
 }): void {
   const handleShutdown = () => {
     shutdown({
       exitProcess: true,
       threadCleanupInterval: options.threadCleanupInterval,
-      eventCleanupInterval: options.eventCleanupInterval,
       slackClient: options.slackClient,
     }).catch((error) => {
       log.error("Error during shutdown", error);

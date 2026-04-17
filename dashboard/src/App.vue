@@ -1,56 +1,28 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from "vue";
-import { useEvents } from "./composables/useEvents";
+import { onMounted, ref } from "vue";
 import DashboardHeader from "./components/DashboardHeader.vue";
-import AnalyticsCards from "./components/AnalyticsCards.vue";
-import MessagesTable from "./components/MessagesTable.vue";
-import DetailPanel from "./components/DetailPanel.vue";
+import { fetchRepos, type RepoInfo } from "./api";
 
-const {
-  events,
-  analytics,
-  repos,
-  selectedRepo,
-  selectedEvent,
-  connected,
-  searchQuery,
-  statusFilter,
-  filteredEvents,
-  fetchAll,
-  selectEvent,
-  clearSelection,
-  init,
-  destroy,
-} = useEvents();
+const repos = ref<RepoInfo[]>([]);
+const selectedRepo = ref<string>("");
 
-onMounted(init);
-onUnmounted(destroy);
+onMounted(async () => {
+  repos.value = await fetchRepos();
+});
 </script>
 
 <template>
   <div class="max-w-7xl mx-auto px-4 py-6">
     <DashboardHeader
       v-model:selected-repo="selectedRepo"
-      :connected="connected"
-      :event-count="events.length"
+      :connected="false"
+      :event-count="0"
       :repos="repos"
-      @refresh="fetchAll"
+      @refresh="() => {}"
     />
 
-    <AnalyticsCards :analytics="analytics" />
-
-    <MessagesTable
-      v-model:search-query="searchQuery"
-      v-model:status-filter="statusFilter"
-      :filtered-events="filteredEvents"
-      :total-count="events.length"
-      @select="selectEvent"
-    />
-
-    <DetailPanel
-      v-if="selectedEvent"
-      :event="selectedEvent"
-      @close="clearSelection"
-    />
+    <div class="mt-8 text-center text-sm text-slate-500 dark:text-slate-400">
+      Dispatch history is being rebuilt. Check back after the next deploy.
+    </div>
   </div>
 </template>

@@ -159,7 +159,7 @@ export async function findSessionFileByDispatchId(
 
 /**
  * Converts a raw JSONL entry from Claude Code's session log into an AgentLogEntry
- * compatible with log-parser.ts's parseAgentLog().
+ * used by downstream consumers (stall detection, event forwarding).
  *
  * JSONL format:
  *   { type: "assistant", message: { model, content: [...], usage: {...} }, timestamp: "ISO", sessionId, ... }

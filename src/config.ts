@@ -68,7 +68,6 @@ export const config = {
     password: required("DANXBOT_DB_PASSWORD"),
     database: optional("DANXBOT_DB_NAME", "danxbot_chat"),
     connectTimeoutMs: parseInt(optional("DB_CONNECT_TIMEOUT_MS", "5000"), 10),
-    eventsMaxAgeDays: parseInt(optional("EVENTS_MAX_AGE_DAYS", "30"), 10),
   },
   agent: {
     model: optional("CLAUDE_MODEL", "claude-sonnet-4-6"),
@@ -149,12 +148,6 @@ export function validateConfig(): void {
     {
       path: "db.connectTimeoutMs",
       value: config.db.connectTimeoutMs,
-      min: 1,
-      exclusive: false,
-    },
-    {
-      path: "db.eventsMaxAgeDays",
-      value: config.db.eventsMaxAgeDays,
       min: 1,
       exclusive: false,
     },

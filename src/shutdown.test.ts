@@ -24,16 +24,6 @@ vi.mock("./threads.js", () => ({
   cleanupOldThreads: vi.fn(),
 }));
 
-const mockStopEventCleanup = vi.fn();
-
-vi.mock("./dashboard/events.js", () => ({
-  createEvent: vi.fn(),
-  updateEvent: vi.fn(),
-  getEvents: vi.fn().mockReturnValue([]),
-  loadEvents: vi.fn(),
-  stopEventCleanup: mockStopEventCleanup,
-}));
-
 vi.mock("./dashboard/server.js", () => ({
   startDashboard: vi.fn(),
 }));
@@ -186,17 +176,6 @@ describe("shutdown", () => {
     expect(mockStopThreadCleanup).toHaveBeenCalledWith("test-interval");
   });
 
-  it("stops event cleanup with the stored interval", async () => {
-    const shutdownPromise = shutdown({
-      exitProcess: false,
-      eventCleanupInterval: "test-event-interval" as unknown as NodeJS.Timeout,
-    });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
-
-    expect(mockStopEventCleanup).toHaveBeenCalledWith("test-event-interval");
-  });
-
   it("closes database connection pool", async () => {
     const shutdownPromise = shutdown({ exitProcess: false });
     await vi.runAllTimersAsync();
@@ -274,7 +253,6 @@ describe("initShutdownHandlers", () => {
 
     initShutdownHandlers({
       threadCleanupInterval: "test-interval" as unknown as NodeJS.Timeout,
-      eventCleanupInterval: "test-event-interval" as unknown as NodeJS.Timeout,
     });
 
     expect(mockOn).toHaveBeenCalledWith("SIGTERM", expect.any(Function));
@@ -287,7 +265,6 @@ describe("initShutdownHandlers", () => {
 
     initShutdownHandlers({
       threadCleanupInterval: "test-interval" as unknown as NodeJS.Timeout,
-      eventCleanupInterval: "test-event-interval" as unknown as NodeJS.Timeout,
     });
 
     expect(mockOn).toHaveBeenCalledWith("SIGINT", expect.any(Function));

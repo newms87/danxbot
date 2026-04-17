@@ -67,16 +67,6 @@ vi.mock("../agent/sql-executor.js", () => ({
   extractSqlBlocks: (...args: unknown[]) => mockExtractSqlBlocks(...args),
 }));
 
-const mockCreateEvent = vi.fn().mockReturnValue({ id: "test-id" });
-const mockUpdateEvent = vi.fn();
-const mockFindEventByResponseTs = vi.fn();
-
-vi.mock("../dashboard/events.js", () => ({
-  createEvent: mockCreateEvent,
-  updateEvent: mockUpdateEvent,
-  findEventByResponseTs: mockFindEventByResponseTs,
-}));
-
 const mockGetOrCreateThread = vi.fn();
 const mockAddMessageToThread = vi.fn();
 const mockUpdateSessionId = vi.fn();
@@ -192,7 +182,6 @@ describe("message filters", () => {
     await handler({ message, client });
 
     expect(mockRunRouter).not.toHaveBeenCalled();
-    expect(mockCreateEvent).not.toHaveBeenCalled();
   });
 
   it("ignores messages with no text", async () => {
@@ -234,12 +223,6 @@ describe("happy paths", () => {
     // Quick response posted
     expect(client.chat.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ text: "Hi there!" }),
-    );
-
-    // Event marked complete
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({ status: "complete" }),
     );
 
     // Agent never called
@@ -289,15 +272,6 @@ describe("happy paths", () => {
       expect.any(String),
       "brain",
       "white_check_mark",
-    );
-
-    // Event updated with agent fields
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "complete",
-        agentResponse: "Here is the detailed answer.",
-      }),
     );
 
     // Session ID updated
@@ -447,22 +421,6 @@ describe("complexity routing", () => {
     expect(mockRunAgent.mock.calls[0][6]).toBe("very_high");
   });
 
-  it("tracks routerComplexity in dashboard events", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Looking...",
-      needsAgent: true,
-      complexity: "very_low",
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-    mockRunAgent.mockResolvedValue(makeAgentResponse());
-
-    await handler({ message: makeSlackMessage(), client });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({ routerComplexity: "very_low" }),
-    );
-  });
 });
 
 // ============================================================
@@ -488,8 +446,6 @@ describe("thread handling", () => {
     await handler({ message: makeSlackThreadReply(), client });
 
     expect(mockIsBotParticipant).toHaveBeenCalled();
-    // Event is created (for tracking) but router is never called
-    expect(mockCreateEvent).toHaveBeenCalled();
     expect(mockRunRouter).not.toHaveBeenCalled();
   });
 });
@@ -527,12 +483,6 @@ describe("error paths", () => {
       expect.any(String),
       "brain",
       "warning",
-    );
-
-    // Event status set to error
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({ status: "error" }),
     );
 
     // Trello notifier called with Agent Timeout
@@ -579,12 +529,6 @@ describe("error paths", () => {
       "x",
     );
 
-    // Event status set to error
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({ status: "error" }),
-    );
-
     // Trello notifier called with Agent Crash
     expect(mockNotifyError).toHaveBeenCalledWith(
       expect.any(Object),
@@ -612,15 +556,6 @@ describe("error paths", () => {
     expect(client.chat.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         text: "I'm having a moment — give me a sec and try again.",
-      }),
-    );
-
-    // Event marked as error with the error message
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "error",
-        error: "credit balance is too low",
       }),
     );
 
@@ -751,12 +686,6 @@ describe("message queue", () => {
 
     // Agent never called
     expect(mockRunAgent).not.toHaveBeenCalled();
-
-    // Event marked queued
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({ status: "queued" }),
-    );
   });
 
   it("does not queue router-only responses", async () => {
@@ -842,19 +771,6 @@ describe("message queue", () => {
 // ============================================================
 
 describe("feedback reactions", () => {
-  it("stores responseTs after successful agent response", async () => {
-    mockRunRouter.mockResolvedValue(
-      makeRouterResult({ needsAgent: true, quickResponse: "On it..." }),
-    );
-    mockRunAgent.mockResolvedValue(makeAgentResponse());
-
-    await handler({ message: makeSlackMessage(), client });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({ responseTs: "mock-ts" }),
-    );
-  });
 
   it("adds thumbsup and thumbsdown reactions to agent response", async () => {
     mockRunRouter.mockResolvedValue(
@@ -872,168 +788,8 @@ describe("feedback reactions", () => {
     );
   });
 
-  it("registers a reaction_added event handler", async () => {
-    expect(capturedEventHandlers["reaction_added"]).toBeDefined();
-  });
 
-  it("records positive feedback on thumbsup reaction", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-    const mockDashEvent = { id: "dash-1" };
-    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
 
-    await reactionHandler({
-      event: {
-        reaction: "thumbsup",
-        user: "U-HUMAN",
-        item: { channel: "C-TEST", ts: "1234.5678" },
-      },
-    });
-
-    expect(mockFindEventByResponseTs).toHaveBeenCalledWith("1234.5678");
-    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-1", { feedback: "positive" });
-  });
-
-  it("records negative feedback on thumbsdown reaction", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-    const mockDashEvent = { id: "dash-2" };
-    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
-
-    await reactionHandler({
-      event: {
-        reaction: "thumbsdown",
-        user: "U-HUMAN",
-        item: { channel: "C-TEST", ts: "5678.1234" },
-      },
-    });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-2", { feedback: "negative" });
-  });
-
-  it("records positive feedback on +1 reaction alias", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-    const mockDashEvent = { id: "dash-alias-pos" };
-    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
-
-    await reactionHandler({
-      event: {
-        reaction: "+1",
-        user: "U-HUMAN",
-        item: { channel: "C-TEST", ts: "1234.5678" },
-      },
-    });
-
-    expect(mockFindEventByResponseTs).toHaveBeenCalledWith("1234.5678");
-    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-alias-pos", { feedback: "positive" });
-  });
-
-  it("records negative feedback on -1 reaction alias", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-    const mockDashEvent = { id: "dash-alias-neg" };
-    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
-
-    await reactionHandler({
-      event: {
-        reaction: "-1",
-        user: "U-HUMAN",
-        item: { channel: "C-TEST", ts: "5678.1234" },
-      },
-    });
-
-    expect(mockFindEventByResponseTs).toHaveBeenCalledWith("5678.1234");
-    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-alias-neg", { feedback: "negative" });
-  });
-
-  it("records positive feedback on thumbsup with skin-tone modifier", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-    const mockDashEvent = { id: "dash-skin-pos" };
-    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
-
-    await reactionHandler({
-      event: {
-        reaction: "+1::skin-tone-2",
-        user: "U-HUMAN",
-        item: { channel: "C-TEST", ts: "1234.5678" },
-      },
-    });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-skin-pos", { feedback: "positive" });
-  });
-
-  it("records negative feedback on thumbsdown with skin-tone modifier", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-    const mockDashEvent = { id: "dash-skin-neg" };
-    mockFindEventByResponseTs.mockReturnValue(mockDashEvent);
-
-    await reactionHandler({
-      event: {
-        reaction: "-1::skin-tone-4",
-        user: "U-HUMAN",
-        item: { channel: "C-TEST", ts: "5678.1234" },
-      },
-    });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith("dash-skin-neg", { feedback: "negative" });
-  });
-
-  it("ignores reactions other than thumbsup/thumbsdown", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-
-    await reactionHandler({
-      event: {
-        reaction: "heart",
-        user: "U-HUMAN",
-        item: { channel: "C-TEST", ts: "1234.5678" },
-      },
-    });
-
-    expect(mockFindEventByResponseTs).not.toHaveBeenCalled();
-  });
-
-  it("ignores reactions from wrong channel", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-
-    await reactionHandler({
-      event: {
-        reaction: "thumbsup",
-        user: "U-HUMAN",
-        item: { channel: "C-OTHER", ts: "1234.5678" },
-      },
-    });
-
-    expect(mockFindEventByResponseTs).not.toHaveBeenCalled();
-  });
-
-  it("ignores reactions on unknown messages", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-    mockFindEventByResponseTs.mockReturnValue(undefined);
-
-    await reactionHandler({
-      event: {
-        reaction: "thumbsup",
-        user: "U-HUMAN",
-        item: { channel: "C-TEST", ts: "unknown.ts" },
-      },
-    });
-
-    expect(mockFindEventByResponseTs).toHaveBeenCalledWith("unknown.ts");
-    expect(mockUpdateEvent).not.toHaveBeenCalled();
-  });
-
-  it("ignores bot's own seed reactions", async () => {
-    const reactionHandler = capturedEventHandlers["reaction_added"];
-    mockFindEventByResponseTs.mockReturnValue({ id: "test-id" });
-
-    await reactionHandler({
-      event: {
-        reaction: "thumbsup",
-        user: "BOT_USER_ID",
-        item: { channel: "C-TEST", ts: "response.ts" },
-      },
-    });
-
-    expect(mockFindEventByResponseTs).not.toHaveBeenCalled();
-    expect(mockUpdateEvent).not.toHaveBeenCalled();
-  });
 });
 
 // ============================================================
@@ -1073,15 +829,6 @@ describe("agent retry on crash", () => {
       expect.any(String),
       "brain",
       "white_check_mark",
-    );
-
-    // Dashboard event tracks the retry
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "complete",
-        agentRetried: true,
-      }),
     );
   });
 
@@ -1561,121 +1308,6 @@ describe("shutdown handling", () => {
 // Usage collection across all flows
 // ============================================================
 
-describe("usage collection", () => {
-  const mockRouterUsage = {
-    source: "router" as const,
-    model: "test-router-model",
-    inputTokens: 100,
-    outputTokens: 50,
-    cacheCreationInputTokens: 0,
-    cacheReadInputTokens: 0,
-    costUsd: 0.0001,
-    timestamp: Date.now(),
-  };
-
-  const mockAgentUsage = {
-    totalCostUsd: 0.05,
-    durationMs: 1000,
-    durationApiMs: 800,
-    numTurns: 2,
-    inputTokens: 5000,
-    outputTokens: 1200,
-    cacheCreationInputTokens: 100,
-    cacheReadInputTokens: 300,
-    modelUsage: {},
-  };
-
-  it("passes router usage to updateEvent for router-only response", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Hi!",
-      needsAgent: false,
-      usage: mockRouterUsage,
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-
-    await handler({ message: makeSlackMessage(), client });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "complete",
-        apiCalls: [mockRouterUsage],
-        apiCostUsd: mockRouterUsage.costUsd,
-      }),
-    );
-  });
-
-  it("passes null apiCalls when router has no usage (router-only)", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Hi!",
-      needsAgent: false,
-      usage: null,
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-
-    await handler({ message: makeSlackMessage(), client });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "complete",
-        apiCalls: null,
-        apiCostUsd: null,
-      }),
-    );
-  });
-
-  it("passes router usage + agentUsage for very_low flow", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Quick...",
-      needsAgent: true,
-      complexity: "very_low",
-      usage: mockRouterUsage,
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-    mockRunAgent.mockResolvedValue(
-      makeAgentResponse({ usage: mockAgentUsage }),
-    );
-
-    await handler({ message: makeSlackMessage(), client });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "complete",
-        apiCalls: [mockRouterUsage],
-        apiCostUsd: mockRouterUsage.costUsd,
-        agentUsage: mockAgentUsage,
-      }),
-    );
-  });
-
-  it("passes router usage + agentUsage for standard agent flow", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Looking...",
-      needsAgent: true,
-      complexity: "high",
-      usage: mockRouterUsage,
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-    mockRunAgent.mockResolvedValue(
-      makeAgentResponse({ usage: mockAgentUsage }),
-    );
-
-    await handler({ message: makeSlackMessage(), client });
-
-    // Standard path includes router usage (heartbeat mock returns empty array)
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "complete",
-        apiCalls: [mockRouterUsage],
-        apiCostUsd: mockRouterUsage.costUsd,
-        agentUsage: mockAgentUsage,
-      }),
-    );
-  });
-});
 
 // ============================================================
 // SQL processing in agent responses
@@ -1780,79 +1412,6 @@ describe("SQL processing in agent responses", () => {
     );
   });
 
-  it("tracks sqlQueriesProcessed in event when SQL blocks are present", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Looking...",
-      needsAgent: true,
-      complexity: "high",
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-
-    const responseWithSql = "Results:\n```sql:execute\nSELECT 1\n```\n```sql:execute\nSELECT 2\n```";
-    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
-    mockProcessResponseWithAttachments.mockResolvedValue({ text: "processed text", attachments: [] });
-    mockExtractSqlBlocks.mockReturnValue([
-      { fullMatch: "```sql:execute\nSELECT 1\n```", query: "SELECT 1" },
-      { fullMatch: "```sql:execute\nSELECT 2\n```", query: "SELECT 2" },
-    ]);
-
-    await handler({ message: makeSlackMessage(), client });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "complete",
-        sqlQueriesProcessed: 2,
-      }),
-    );
-  });
-
-  it("does not set sqlQueriesProcessed when no SQL blocks in response", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Looking...",
-      needsAgent: true,
-      complexity: "high",
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-
-    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: "Plain response" }));
-    mockExtractSqlBlocks.mockReturnValue([]);
-
-    await handler({ message: makeSlackMessage(), client });
-
-    // The complete event update should NOT include sqlQueriesProcessed
-    const completeCall = mockUpdateEvent.mock.calls.find(
-      (call: unknown[]) => (call[1] as Record<string, unknown>).status === "complete",
-    );
-    expect(completeCall).toBeDefined();
-    expect((completeCall![1] as Record<string, unknown>).sqlQueriesProcessed).toBeUndefined();
-  });
-
-  it("tracks sqlQueriesProcessed in very_low path", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Quick...",
-      needsAgent: true,
-      complexity: "very_low",
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-
-    const responseWithSql = "```sql:execute\nSELECT 1\n```";
-    mockRunAgent.mockResolvedValue(makeAgentResponse({ text: responseWithSql }));
-    mockProcessResponseWithAttachments.mockResolvedValue({ text: "| col |\n|---|\n| 1 |", attachments: [] });
-    mockExtractSqlBlocks.mockReturnValue([
-      { fullMatch: "```sql:execute\nSELECT 1\n```", query: "SELECT 1" },
-    ]);
-
-    await handler({ message: makeSlackMessage(), client });
-
-    expect(mockUpdateEvent).toHaveBeenCalledWith(
-      "test-id",
-      expect.objectContaining({
-        status: "complete",
-        sqlQueriesProcessed: 1,
-      }),
-    );
-  });
 });
 
 describe("CSV file upload for SQL results", () => {

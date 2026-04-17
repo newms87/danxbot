@@ -1,12 +1,5 @@
 import { createServer } from "http";
 import { readFile, access } from "fs/promises";
-import {
-  getEvents,
-  getAnalytics,
-  addSSEClient,
-  removeSSEClient,
-} from "./events.js";
-import { eventsToCSV } from "./export.js";
 import { getHealthStatus } from "./health.js";
 import { json } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
@@ -56,94 +49,6 @@ export async function startDashboard(): Promise<void> {
         name: r.name,
         url: r.url,
       })));
-      return;
-    }
-
-    if (url.pathname === "/api/events") {
-      const repoFilter = url.searchParams.get("repo");
-      let events = getEvents();
-      if (repoFilter) {
-        events = events.filter((e) => e.repoName === repoFilter);
-      }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(events));
-      return;
-    }
-
-    // Detailed log for a single event: /api/events/:id/log
-    const logMatch = url.pathname.match(/^\/api\/events\/(.+)\/log$/);
-    if (logMatch) {
-      const event = getEvents().find((e) => e.id === logMatch[1]);
-      if (!event) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Event not found" }));
-        return;
-      }
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify(
-          {
-            id: event.id,
-            text: event.text,
-            status: event.status,
-            agentLog: event.agentLog,
-          },
-          null,
-          2,
-        ),
-      );
-      return;
-    }
-
-    if (url.pathname === "/api/analytics") {
-      const repoFilter = url.searchParams.get("repo");
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(getAnalytics(repoFilter || undefined)));
-      return;
-    }
-
-    if (url.pathname === "/api/events/export") {
-      const format = url.searchParams.get("format");
-      if (format === "json") {
-        const body = JSON.stringify(getEvents(), null, 2);
-        res.writeHead(200, {
-          "Content-Type": "application/json",
-          "Content-Disposition": 'attachment; filename="danxbot-events.json"',
-        });
-        res.end(body);
-        return;
-      }
-      if (format === "csv") {
-        const body = eventsToCSV(getEvents());
-        res.writeHead(200, {
-          "Content-Type": "text/csv",
-          "Content-Disposition": 'attachment; filename="danxbot-events.csv"',
-        });
-        res.end(body);
-        return;
-      }
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(
-        JSON.stringify({
-          error: 'Missing or invalid format parameter. Use "json" or "csv".',
-        }),
-      );
-      return;
-    }
-
-    if (url.pathname === "/api/stream") {
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      });
-
-      const client = (data: string) => {
-        res.write(`data: ${data}\n\n`);
-      };
-
-      addSSEClient(client);
-      req.on("close", () => removeSSEClient(client));
       return;
     }
 

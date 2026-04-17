@@ -5,15 +5,13 @@ import { markdownToSlackMrkdwn, splitMessage } from "./formatter.js";
 import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
 import { isProcessing, markProcessing, markIdle, enqueue, dequeue, getQueueStats, getTotalQueuedCount, resetQueue } from "./message-queue.js";
-import type { QueuedMessage } from "./message-queue.js";
 import { resolveUserName } from "./user-cache.js";
 import { runRouter } from "../agent/router.js";
 import { runAgent } from "../agent/agent.js";
 import { processResponseWithAttachments, extractSqlBlocks } from "../agent/sql-executor.js";
 import type { SqlAttachment } from "../agent/sql-executor.js";
-import type { ApiCallUsage, RepoContext } from "../types.js";
+import type { RepoContext } from "../types.js";
 import { notifyError } from "../errors/trello-notifier.js";
-import { createEvent, updateEvent, findEventByResponseTs } from "../dashboard/events.js";
 import {
   getOrCreateThread,
   addMessageToThread,
@@ -179,20 +177,8 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
     const userId = message.user || "unknown";
     const errorContext = { threadTs, user: userId, channelId: message.channel };
 
-    // Track in dashboard
-    const dashEvent = createEvent({
-      repoName: ls.repo.name,
-      threadTs,
-      messageTs: message.ts,
-      channelId: message.channel,
-      user: userId,
-      text: message.text,
-    });
-
     // Resolve user display name asynchronously (fire-and-forget)
-    resolveUserName(client, userId).then((name) => {
-      updateEvent(dashEvent.id, { userName: name });
-    }).catch(() => {});
+    resolveUserName(client, userId).catch(() => {});
 
     try {
       // For thread replies, only respond if Danxbot is already participating
@@ -213,17 +199,7 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
       });
 
       // Step 1: Router decides quick response + whether agent is needed
-      updateEvent(dashEvent.id, { status: "routing" });
       const routerResult = await runRouter(message.text, thread.messages);
-      updateEvent(dashEvent.id, {
-        status: "routed",
-        routerResponseAt: Date.now(),
-        routerResponse: routerResult.quickResponse,
-        routerNeedsAgent: routerResult.needsAgent,
-        routerComplexity: routerResult.complexity,
-        routerRequest: routerResult.request,
-        routerRawResponse: routerResult.rawResponse,
-      });
       log.info(
         `[${ls.repo.name}] Router: needsAgent=${routerResult.needsAgent}, reason="${routerResult.reason}"`,
       );
@@ -261,12 +237,9 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
             thread_ts: threadTs,
             text: "I'll get to this after your current question.",
           });
-          updateEvent(dashEvent.id, { status: "queued" });
           return;
         }
         markProcessing(threadTs);
-
-        updateEvent(dashEvent.id, { status: "agent_running" });
 
         // Add thinking reaction while agent works
         await client.reactions
@@ -314,28 +287,8 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
             });
             const fastPlaceholderTs = placeholder.ts!;
 
-            // Collect usage: router + agent (no heartbeat for very_low)
-            const apiCalls: ApiCallUsage[] = [];
-            if (routerResult.usage) apiCalls.push(routerResult.usage);
-            const apiCostUsd = apiCalls.reduce((sum, c) => sum + c.costUsd, 0);
-
-            // Count SQL blocks and process them before formatting
-            const sqlBlockCount = extractSqlBlocks(response.text).length;
+            // Process SQL blocks before formatting
             const sqlResult = await processSqlInResponse(response.text);
-
-            updateEvent(dashEvent.id, {
-              status: "complete",
-              agentResponseAt: Date.now(),
-              agentResponse: response.text,
-              subscriptionCostUsd: response.subscriptionCostUsd,
-              agentTurns: response.turns,
-              agentConfig: response.config,
-              agentLog: response.log,
-              apiCalls: apiCalls.length > 0 ? apiCalls : null,
-              apiCostUsd: apiCostUsd > 0 ? apiCostUsd : null,
-              agentUsage: response.usage,
-              ...(sqlBlockCount > 0 ? { sqlQueriesProcessed: sqlBlockCount } : {}),
-            });
 
             // Update session ID for conversation continuity
             if (response.sessionId) {
@@ -372,7 +325,6 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
 
             await swapReaction(client, message.channel, message.ts, "brain", "white_check_mark");
 
-            updateEvent(dashEvent.id, { responseTs: fastPlaceholderTs });
             await client.reactions
               .add({ channel: message.channel, timestamp: fastPlaceholderTs, name: "thumbsup" })
               .catch(() => {});
@@ -461,7 +413,6 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
 
         try {
           let handled = false;
-          let agentRetried = false;
 
           for (let attempt = 0; attempt < maxAttempts && !handled; attempt++) {
             try {
@@ -483,11 +434,6 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                   `[${ls.repo.name}] Agent timed out after ${elapsed}s in thread ${threadTs}`,
                 );
 
-                updateEvent(dashEvent.id, {
-                  status: "error",
-                  error: `Agent timed out after ${elapsed}s`,
-                });
-
                 await postErrorAttachment(
                   client,
                   message.channel,
@@ -508,34 +454,8 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                 // where a late heartbeat flush overwrites the processed SQL result
                 hbManager.stop();
 
-                // Agent succeeded — collect usage: router + heartbeats
-                const apiCalls: ApiCallUsage[] = [];
-                if (routerResult.usage) apiCalls.push(routerResult.usage);
-                apiCalls.push(...hbManager.getApiCalls());
-                const apiCostUsd = apiCalls.reduce((sum, c) => sum + c.costUsd, 0);
-
-                // Count SQL blocks and process them before formatting
-                const sqlBlockCount = extractSqlBlocks(response.text).length;
+                // Process SQL blocks before formatting
                 const sqlResult = await processSqlInResponse(response.text);
-
-                // Collect heartbeat snapshots for dashboard timeline
-                const heartbeatSnapshots = hbManager.getSnapshots();
-
-                updateEvent(dashEvent.id, {
-                  status: "complete",
-                  agentResponseAt: Date.now(),
-                  agentResponse: response.text,
-                  subscriptionCostUsd: response.subscriptionCostUsd,
-                  agentTurns: response.turns,
-                  agentConfig: response.config,
-                  agentLog: response.log,
-                  heartbeatSnapshots: heartbeatSnapshots.length > 0 ? heartbeatSnapshots : null,
-                  apiCalls: apiCalls.length > 0 ? apiCalls : null,
-                  apiCostUsd: apiCostUsd > 0 ? apiCostUsd : null,
-                  agentUsage: response.usage,
-                  ...(agentRetried ? { agentRetried: true } : {}),
-                  ...(sqlBlockCount > 0 ? { sqlQueriesProcessed: sqlBlockCount } : {}),
-                });
 
                 // Update session ID for conversation continuity
                 if (response.sessionId) {
@@ -581,8 +501,6 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                   "white_check_mark",
                 );
 
-                // Store responseTs and add feedback reactions
-                updateEvent(dashEvent.id, { responseTs: placeholderTs });
                 await client.reactions
                   .add({ channel: message.channel, timestamp: placeholderTs, name: "thumbsup" })
                   .catch(() => {});
@@ -621,11 +539,6 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                   `[${ls.repo.name}] Agent crashed after ${elapsed}s in thread ${threadTs}: ${errorMsg}`,
                 );
 
-                updateEvent(dashEvent.id, {
-                  status: "error",
-                  error: errorMsg,
-                });
-
                 await postErrorAttachment(
                   client,
                   message.channel,
@@ -643,7 +556,6 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                 handled = true;
               } else {
                 // Retry — update placeholder with retrying status
-                agentRetried = true;
                 log.warn(
                   `[${ls.repo.name}] Agent crashed in thread ${threadTs} (attempt ${attempt + 1}/${maxAttempts}), retrying: ${errorMsg}`,
                 );
@@ -682,11 +594,6 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
         }
       } else if (routerResult.error) {
         // Router errored — still send the friendly message but mark as error
-        updateEvent(dashEvent.id, {
-          status: "error",
-          error: routerResult.error,
-        });
-
         await client.reactions
           .add({
             channel: message.channel,
@@ -703,23 +610,9 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
         } else {
           notifyError(ls.repo.trello, "Router Error", routerResult.error, errorContext).catch(() => {});
         }
-      } else {
-        // Router-only response, mark complete — capture router API usage
-        const routerApiCalls: ApiCallUsage[] = [];
-        if (routerResult.usage) routerApiCalls.push(routerResult.usage);
-        const routerApiCost = routerApiCalls.reduce((sum, c) => sum + c.costUsd, 0);
-        updateEvent(dashEvent.id, {
-          status: "complete",
-          apiCalls: routerApiCalls.length > 0 ? routerApiCalls : null,
-          apiCostUsd: routerApiCost > 0 ? routerApiCost : null,
-        });
       }
     } catch (error) {
       log.error(`[${ls.repo.name}] Error handling message in thread ${threadTs}`, error);
-      updateEvent(dashEvent.id, {
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-      });
 
       // Add error reaction
       await client.reactions
@@ -758,29 +651,6 @@ export async function startSlackListener(repo: RepoContext): Promise<void> {
 
   app.message(async ({ message, client }) => {
     await handleMessage(ls, message as SlackMessage, client);
-  });
-
-  const positiveReactions = new Set(["thumbsup", "+1"]);
-  const negativeReactions = new Set(["thumbsdown", "-1"]);
-
-  app.event("reaction_added", async ({ event }) => {
-    // Only process reactions from this repo's configured channel
-    if (!("channel" in event.item) || event.item.channel !== ls.repo.slack.channelId) return;
-    if (ls.botUserId && event.user === ls.botUserId) return;
-
-    // Strip skin-tone modifiers (e.g. "+1::skin-tone-2" → "+1")
-    const reaction = event.reaction.replace(/::skin-tone-\d+$/, "");
-    log.info(`[${ls.repo.name}] Reaction received: ${reaction} from ${event.user}`);
-    const isPositive = positiveReactions.has(reaction);
-    const isNegative = negativeReactions.has(reaction);
-    if (!isPositive && !isNegative) return;
-
-    const dashEvent = findEventByResponseTs(event.item.ts);
-    if (!dashEvent) return;
-
-    const feedback = isPositive ? "positive" : "negative";
-    updateEvent(dashEvent.id, { feedback });
-    log.info(`[${ls.repo.name}] Feedback recorded: ${feedback} for event ${dashEvent.id} (reaction: ${event.reaction})`);
   });
 
   await app.start();
