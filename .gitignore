@@ -21,12 +21,20 @@ claude-auth/*
 .claude/rules/repo-config.md
 .claude/rules/repo-overview.md
 .claude/rules/repo-workflow.md
+.claude/rules/danx-repo-config.md
+.claude/rules/danx-repo-overview.md
+.claude/rules/danx-repo-workflow.md
+.claude/rules/danx-trello-config.md
+.claude/skills/danx-*/
 repo-overrides/*
 !repo-overrides/.gitkeep
 docs/domains/
 docs/schema/
 docs/features.md
 repos/
+
+# Runtime artifacts from dispatch + poller
+logs/
 
 # Terraform local state + generated tfvars
 deploy/terraform/.terraform/
