@@ -337,7 +337,7 @@ The setup's only job is to write source-of-truth files into `.danxbot/config/` i
 Ensure `.env` has all values. Add defaults for anything not yet set:
 
 ```
-# Danxbot Database (host/port derived from DANXBOT_RUNTIME)
+# Danxbot Database (host/port derived from runtime — auto-detected via /.dockerenv)
 DANXBOT_DB_USER=danxbot
 DANXBOT_DB_PASSWORD=danxbot
 DANXBOT_DB_NAME=danxbot_chat

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { RepoConfig } from "./types.js";
 import { getReposBase } from "./poller/constants.js";
 import { required, optional } from "./env.js";
@@ -43,13 +44,12 @@ export function getRepoPath(name: string): string {
   return repo.localPath;
 }
 
-const runtimeValue = optional("DANXBOT_RUNTIME", "docker") as "docker" | "host";
-if (runtimeValue !== "docker" && runtimeValue !== "host") {
-  throw new Error(
-    `DANXBOT_RUNTIME must be "docker" or "host" (got "${runtimeValue}")`,
-  );
-}
-const isHost = runtimeValue === "host";
+// Runtime is detected from the filesystem, never from an env var. A process
+// running inside a Docker container has /.dockerenv; a host process does not.
+// Conflating "how was I launched" with a config flag caused a long-standing
+// bug where host-mode launches still used docker paths/hostnames.
+const isHost = !existsSync("/.dockerenv");
+const runtimeValue: "docker" | "host" = isHost ? "host" : "docker";
 
 /**
  * Shared infrastructure config — NOT per-repo.

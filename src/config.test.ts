@@ -33,12 +33,18 @@ vi.mock("./env-file.js", () => ({
   }),
 }));
 
-// Mock fs to make existsSync return true for .danxbot/.env paths
+// Lets individual tests simulate running inside a Docker container by
+// flipping /.dockerenv presence without touching the real filesystem.
+let mockDockerenvExists = false;
+
+// Mock fs to make existsSync return true for .danxbot/.env paths and
+// controllable for /.dockerenv.
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual("node:fs");
   return {
     ...actual,
     existsSync: (path: string) => {
+      if (path === "/.dockerenv") return mockDockerenvExists;
       if (path.includes(".danxbot/.env")) return true;
       if (typeof (actual as any).existsSync === "function") {
         return (actual as any).existsSync(path);
@@ -92,6 +98,7 @@ async function importRepoContext(envOverrides: Record<string, string> = {}) {
 
 beforeEach(() => {
   vi.resetModules();
+  mockDockerenvExists = false;
 });
 
 describe("repos config", () => {
@@ -169,18 +176,18 @@ describe("getRepoPath", () => {
 
 describe("repoContexts", () => {
   it("returns empty in host mode without DANXBOT_REPO_NAME (dashboard mode)", async () => {
+    mockDockerenvExists = false;
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
-      DANXBOT_RUNTIME: "host",
     });
     expect(mod.repoContexts).toEqual([]);
     expect(mod.isDashboardMode).toBe(true);
   });
 
   it("returns empty in docker mode without DANXBOT_REPO_NAME (dashboard mode)", async () => {
+    mockDockerenvExists = true;
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
-      DANXBOT_RUNTIME: "docker",
     });
     expect(mod.repoContexts).toEqual([]);
     expect(mod.isDashboardMode).toBe(true);
@@ -222,16 +229,39 @@ describe("getRepoContext", () => {
   });
 });
 
+describe("runtime detection", () => {
+  it("isHost is true when /.dockerenv is absent", async () => {
+    mockDockerenvExists = false;
+    const mod = await importConfig({});
+    expect(mod.config.isHost).toBe(true);
+    expect(mod.config.runtime).toBe("host");
+  });
+
+  it("isHost is false when /.dockerenv is present", async () => {
+    mockDockerenvExists = true;
+    const mod = await importConfig({});
+    expect(mod.config.isHost).toBe(false);
+    expect(mod.config.runtime).toBe("docker");
+  });
+
+  it("ignores DANXBOT_RUNTIME env var — detection is filesystem-only", async () => {
+    mockDockerenvExists = true;
+    const mod = await importConfig({ DANXBOT_RUNTIME: "host" } as Record<string, string>);
+    expect(mod.config.isHost).toBe(false);
+  });
+});
+
 describe("required DB config", () => {
-  it("derives db.host from runtime — docker uses mysql, host uses 127.0.0.1", async () => {
-    // Default is docker mode (DANXBOT_RUNTIME not set)
+  it("derives db.host — docker uses mysql, host uses 127.0.0.1", async () => {
+    mockDockerenvExists = true;
     const mod = await importConfig({});
     expect(mod.config.db.host).toBe("mysql");
     expect(mod.config.db.port).toBe(3306);
   });
 
   it("derives db.host as 127.0.0.1 in host mode", async () => {
-    const mod = await importConfig({ DANXBOT_RUNTIME: "host" });
+    mockDockerenvExists = false;
+    const mod = await importConfig({});
     expect(mod.config.db.host).toBe("127.0.0.1");
     expect(mod.config.db.port).toBe(3308); // default host port
   });

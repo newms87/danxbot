@@ -25,7 +25,6 @@ services:
       POLLER_INTERVAL_MS: ${POLLER_INTERVAL_MS:-60000}
       TRELLO_REVIEW_MIN_CARDS: ${TRELLO_REVIEW_MIN_CARDS:-10}
       DANXBOT_GIT_EMAIL: ${DANXBOT_GIT_EMAIL:-danxbot@example.com}
-      DANXBOT_RUNTIME: ${DANXBOT_RUNTIME:-docker}
       REPOS: ${REPOS}
     volumes:
       # Repo bind: .. goes up to .danxbot/, ../.. is the repo root.

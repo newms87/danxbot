@@ -4,7 +4,7 @@ How danxbot launches a Claude Code agent for a Trello card, Slack message, or HT
 
 ## The Single Fork Principle
 
-Every dispatch spawns EXACTLY ONE claude process. The runtime mode (`DANXBOT_RUNTIME=docker|host`) determines only HOW that one process is spawned — it does not change what the process does, what it reports, or how it's monitored.
+Every dispatch spawns EXACTLY ONE claude process. Runtime mode is auto-detected from `/.dockerenv` (inside a container → docker; on host → host) and determines only HOW that one process is spawned — it does not change what the process does, what it reports, or how it's monitored. Runtime is never set via env var; the filesystem is the source of truth.
 
 | Concern | Docker runtime | Host runtime |
 |---------|----------------|--------------|

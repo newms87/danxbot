@@ -147,7 +147,7 @@ This applies per-phase in phased plans and to any standalone work (>10 lines or 
 
 All agents are spawned via a single `spawnAgent()` function in `src/agent/launcher.ts`. Every agent process is monitored by `SessionLogWatcher` (reading Claude Code's native JSONL from `~/.claude/projects/`).
 
-Key principle: `DANXBOT_RUNTIME=host` vs `docker` affects ONLY presentation (interactive terminal tab vs headless). Monitoring, heartbeat, event forwarding, stall detection — all behave identically regardless of runtime mode.
+Key principle: runtime is auto-detected from `/.dockerenv` at startup — inside a container → docker (headless) mode; on the host → host (interactive terminal) mode. Runtime affects ONLY presentation. Monitoring, heartbeat, event forwarding, stall detection — all behave identically regardless of runtime.
 
 Core monitoring components (all in `src/agent/`):
 - **SessionLogWatcher** — polls Claude's JSONL session files; the canonical monitoring source
@@ -198,7 +198,7 @@ Board/list/label IDs are in `.claude/rules/danx-trello-config.md` in the target 
 2. `/danx-start` or `/danx-next` triggers the workflow
 3. Main session picks up card, moves to In Progress (position: `"top"`), creates progress checklist
 4. If the card requires human intervention (external service settings, account config, etc.), adds `Needs Help` label and moves to Needs Help list (position: `"top"`)
-5. Evaluates scope — splits into epic phases if too large (3+ phases), labels parent as Epic, creates phase cards in In Progress
+5. Evaluates scope — splits into epic phases if too large (3+ phases), labels parent as Epic, creates phase cards in the same list as the epic
 6. Orchestrator implements directly using TDD (failing test, implement, pass, refactor)
 7. Launches Test Reviewer + Code Reviewer subagents for quality gates
 8. Posts review results as Trello card comments, fixes any critical issues
