@@ -118,8 +118,12 @@ export interface AgentJob {
  * Send `signal` to the agent process using whichever handle the runtime gave
  * us — the ChildProcess in docker mode or the tracked PID in host mode.
  * Safe to call when no handle is attached (e.g. after cleanup).
+ *
+ * Exported so callers outside the launcher (dispatch stall recovery, future
+ * lifecycle tools) can drive cancellation without duplicating the runtime
+ * fork — see `.claude/rules/agent-dispatch.md`, "Single Fork Principle".
  */
-function killAgentProcess(job: AgentJob, signal: NodeJS.Signals): void {
+export function killAgentProcess(job: AgentJob, signal: NodeJS.Signals): void {
   if (job.process) {
     job.process.kill(signal);
     return;
@@ -136,7 +140,7 @@ function killAgentProcess(job: AgentJob, signal: NodeJS.Signals): void {
  * `.killed` is intentionally NOT checked — it flips true as soon as `.kill()`
  * dispatches a signal, even if the process hasn't yet exited.
  */
-function isAgentProcessAlive(job: AgentJob): boolean {
+export function isAgentProcessAlive(job: AgentJob): boolean {
   if (job.process) {
     return job.process.exitCode == null;
   }

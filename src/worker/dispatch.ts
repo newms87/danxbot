@@ -9,6 +9,8 @@ import {
   buildMcpSettings,
   cleanupMcpSettings,
   buildCompletionInstruction,
+  killAgentProcess,
+  isAgentProcessAlive,
   type AgentJob,
   type McpSettingsOptions,
 } from "../agent/launcher.js";
@@ -156,13 +158,16 @@ export async function handleLaunch(
             `[Dispatch ${dispatchId}] Stall detected (resume ${resumeCount}/${MAX_STALL_RESUMES}) — killing and resuming`,
           );
 
-          // Kill stalled process — stop() sends SIGTERM + SIGKILL + fires onComplete.
-          // We don't await it since we want to spawn immediately after kill.
-          if (currentJob.status === "running" && currentJob.process) {
-            currentJob.process.kill("SIGTERM");
+          // Kill stalled process directly (no job.stop — we want to keep the
+          // slot "running" from the caller's perspective while we respawn, so
+          // we can't mark the job completed/failed here). Route through
+          // killAgentProcess so host mode (tracked PID) and docker mode
+          // (ChildProcess) both work — see `.claude/rules/agent-dispatch.md`.
+          if (currentJob.status === "running") {
+            killAgentProcess(currentJob, "SIGTERM");
             await new Promise<void>((r) => setTimeout(r, 5_000));
-            if (currentJob.status === "running" && currentJob.process) {
-              currentJob.process.kill("SIGKILL");
+            if (currentJob.status === "running" && isAgentProcessAlive(currentJob)) {
+              killAgentProcess(currentJob, "SIGKILL");
             }
           }
 

@@ -9,6 +9,8 @@ const mockCancelJob = vi.fn();
 const mockGetJobStatus = vi.fn();
 const mockBuildMcpSettings = vi.fn().mockReturnValue("/tmp/danxbot-mcp-test");
 const mockCleanupMcpSettings = vi.fn();
+const mockKillAgentProcess = vi.fn();
+const mockIsAgentProcessAlive = vi.fn().mockReturnValue(true);
 
 vi.mock("../agent/launcher.js", () => ({
   spawnAgent: (...args: unknown[]) => mockSpawnAgent(...args),
@@ -17,6 +19,8 @@ vi.mock("../agent/launcher.js", () => ({
   buildMcpSettings: (...args: unknown[]) => mockBuildMcpSettings(...args),
   cleanupMcpSettings: (...args: unknown[]) => mockCleanupMcpSettings(...args),
   buildCompletionInstruction: () => " [completion-instruction]",
+  killAgentProcess: (...args: unknown[]) => mockKillAgentProcess(...args),
+  isAgentProcessAlive: (...args: unknown[]) => mockIsAgentProcessAlive(...args),
 }));
 
 // Use vi.hoisted so these mocks are available inside the vi.mock factories (which are hoisted)
