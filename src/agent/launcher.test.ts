@@ -111,15 +111,13 @@ describe("spawnAgent", () => {
       "claude",
       expect.arrayContaining([
         "--dangerously-skip-permissions",
-        "--output-format",
-        "stream-json",
         "--verbose",
         "-p",
         expect.stringContaining("<!-- danxbot-dispatch:test-uuid-1234 -->"),
       ]),
       expect.objectContaining({
         cwd: "/danxbot/repos/platform",
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "ignore", "pipe"],
       }),
     );
 
@@ -128,6 +126,73 @@ describe("spawnAgent", () => {
     const promptArg = args[args.indexOf("-p") + 1];
     expect(promptArg).toContain("/danx-next");
     expect(promptArg).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
+  });
+
+  it("does NOT pass --output-format stream-json — watcher is the monitoring source", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args).not.toContain("--output-format");
+    expect(args).not.toContain("stream-json");
+  });
+
+  it("sets stdio stdout to 'ignore' — no stdout plumbing, watcher-only monitoring", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const spawnOpts = mockSpawn.mock.calls[0][2] as { stdio: unknown[] };
+    expect(spawnOpts.stdio[0]).toBe("ignore");
+    expect(spawnOpts.stdio[1]).toBe("ignore");
+    expect(spawnOpts.stdio[2]).toBe("pipe");
+  });
+
+  it("does not register a stdout 'data' listener — stdout is 'ignore'", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // The mock child still has a stdout EventEmitter, but the launcher must
+    // not attach any 'data' listener to it when stdout is ignored.
+    expect(child.stdout.listenerCount("data")).toBe(0);
+  });
+
+  it("inactivity timer is fully decoupled from stdout — phantom stdout data cannot reset it", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 60_000,
+    });
+
+    // Pump stdout data continuously — if any vestigial listener existed, the
+    // timer would reset and the job would never time out.
+    for (let i = 0; i < 12; i++) {
+      child.stdout.emit("data", Buffer.from("phantom output\n"));
+      await vi.advanceTimersByTimeAsync(5_500);
+    }
+
+    expect(job.status).toBe("timeout");
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
   it("does NOT include --mcp-config when not set", async () => {
@@ -285,25 +350,7 @@ describe("spawnAgent", () => {
     expect(child.kill).not.toHaveBeenCalled();
   });
 
-  it("also resets inactivity timeout on stdout data", async () => {
-    const child = createMockChildProcess();
-    mockSpawn.mockReturnValue(child);
-
-    const job = await spawnAgent({
-      prompt: "/danx-next",
-      repoName: "platform",
-      timeoutMs: 60_000,
-    });
-
-    await vi.advanceTimersByTimeAsync(50_000);
-    child.stdout.emit("data", Buffer.from("some output\n"));
-    await vi.advanceTimersByTimeAsync(50_000);
-
-    expect(job.status).toBe("running");
-    expect(child.kill).not.toHaveBeenCalled();
-  });
-
-  it("extracts last assistant text from watcher entries as job summary", async () => {
+it("extracts last assistant text from watcher entries as job summary", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 

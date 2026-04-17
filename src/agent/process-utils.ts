@@ -55,8 +55,10 @@ export function logPromptToDisk(
 }
 
 /**
- * Create an inactivity timer that kills the child process after a period of no stdout.
- * Returns reset/clear functions. Callers should attach reset() to child.stdout "data" events.
+ * Create an inactivity timer that kills the child process after a period of no
+ * watcher activity. Returns reset/clear functions. Callers attach `reset()` to
+ * `SessionLogWatcher.onEntry` — the single source of truth for agent activity
+ * (see `.claude/rules/agent-dispatch.md`). Stdout is not a monitoring channel.
  */
 export function createInactivityTimer(
   child: ChildProcess,

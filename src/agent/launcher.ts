@@ -291,8 +291,6 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
 
   const args = [
     "--dangerously-skip-permissions",
-    "--output-format",
-    "stream-json",
     "--verbose",
   ];
 
@@ -313,9 +311,13 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
 
   logPromptToDisk(config.logsDir, jobId, taggedPrompt, options.agents);
 
+  // stdio: stdin ignore (no user input expected), stdout ignore (watcher
+  // reads JSONL from disk — stdout was only kept for a redundant inactivity
+  // signal, which is now handled via watcher entries), stderr pipe so we can
+  // surface failure messages in job summaries.
   const child = spawn("claude", args, {
     env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe"],
     cwd: agentCwd,
   });
 
@@ -374,9 +376,6 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     },
     job,
   );
-
-  // Also reset on stdout data as a secondary signal (piped mode)
-  child.stdout?.on("data", () => inactivityTimer.reset());
 
   // --- Optional heartbeat ---
   if (options.statusUrl && options.apiToken) {

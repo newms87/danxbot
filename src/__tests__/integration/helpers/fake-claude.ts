@@ -8,7 +8,7 @@
  *
  * Usage:
  *   node --import tsx/esm fake-claude.ts --dangerously-skip-permissions \
- *     --output-format stream-json --verbose -p "<prompt>"
+ *     --verbose -p "<prompt>"
  *
  * Environment variables:
  *   FAKE_CLAUDE_SESSION_DIR — Override the session directory (required for test isolation)

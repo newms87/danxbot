@@ -110,7 +110,7 @@ This file is gitignored (contains secrets). The `.mcp.json` in each repo referen
 ## Claude Code Session Logs (JSONL)
 
 Claude Code writes native JSONL session logs to `~/.claude/projects/<cwd-path>/<session-uuid>.jsonl` for ALL invocation modes — verified empirically:
-- CLI with `--output-format stream-json` (piped/headless via `spawnAgent()`)
+- CLI headless via `spawnAgent()` (plain `-p`, no stream-json — stdout is ignored; JSONL is the monitoring source)
 - CLI interactive (terminal mode via `spawnInTerminal()` bash script)
 - SDK `query()` (Slack agent)
 
