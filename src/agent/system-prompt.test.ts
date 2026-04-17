@@ -41,6 +41,13 @@ describe("system-prompt.md", () => {
     expect(prompt).toContain("sql:execute");
     expect(prompt).toMatch(/never.*(?:execute|run).*sql.*(?:bash|mysql|command)/i);
   });
+
+  it("does not reference the bogus /danxbot/app/docs container path", () => {
+    // That path was never mounted in any compose file. Use cwd-relative
+    // .danxbot/config/docs/ so the agent behaves identically in both runtimes.
+    expect(prompt).not.toMatch(/\/danxbot\/app\/docs/);
+    expect(prompt).toContain(".danxbot/config/docs/");
+  });
 });
 
 describe("fast-system-prompt.md", () => {
@@ -62,5 +69,10 @@ describe("fast-system-prompt.md", () => {
     expect(prompt).toContain("sql:execute");
     // Fast prompt delegates query restrictions to the tools rule file
     expect(prompt).toMatch(/tools\.md/i);
+  });
+
+  it("does not reference the bogus /danxbot/app/docs container path", () => {
+    expect(prompt).not.toMatch(/\/danxbot\/app\/docs/);
+    expect(prompt).toContain(".danxbot/config/docs/");
   });
 });

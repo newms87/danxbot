@@ -90,7 +90,6 @@ export const config = {
   logLevel: optional("LOG_LEVEL", "info"),
   logsDir: optional("DANXBOT_LOGS_DIR", isHost ? "./logs" : "/danxbot/logs"),
   pollerIntervalMs: parseInt(optional("POLLER_INTERVAL_MS", "60000"), 10),
-  pollerEnabled: optional("POLLER_ENABLED", "true") === "true",
   pollerBackoffScheduleMs: [60_000, 300_000, 900_000, 1_800_000] as readonly number[],
 } as const;
 

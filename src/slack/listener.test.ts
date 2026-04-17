@@ -325,8 +325,8 @@ describe("happy paths", () => {
 // Complexity routing
 // ============================================================
 
-describe("complexity routing", () => {
-  it("uses very_low fast path for very_low complexity", async () => {
+describe("agent dispatch flow (unified across complexities)", () => {
+  it("very_low complexity goes through the same placeholder + heartbeat path as any other complexity", async () => {
     const routerResult = makeRouterResult({
       quickResponse: "Looking into it...",
       needsAgent: true,
@@ -337,11 +337,31 @@ describe("complexity routing", () => {
 
     await handler({ message: makeSlackMessage(), client });
 
-    // Agent called with very_low complexity
+    // Complexity propagates into the agent call (drives model/budget selection).
     expect(mockRunAgent).toHaveBeenCalledOnce();
     expect(mockRunAgent.mock.calls[0][6]).toBe("very_low");
 
-    // Placeholder updated with response
+    // Heartbeat callbacks are wired — no "fast path" shortcut that skips them.
+    expect(typeof mockRunAgent.mock.calls[0][3]).toBe("function");
+    expect(typeof mockRunAgent.mock.calls[0][4]).toBe("function");
+
+    // Placeholder is posted BEFORE the agent runs, then updated with the
+    // final response — same pattern every other complexity uses.
+    expect(client.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachments: expect.arrayContaining([
+          expect.objectContaining({
+            blocks: expect.arrayContaining([
+              expect.objectContaining({
+                elements: expect.arrayContaining([
+                  expect.objectContaining({ text: expect.stringContaining("Researching") }),
+                ]),
+              }),
+            ]),
+          }),
+        ]),
+      }),
+    );
     expect(client.chat.update).toHaveBeenCalledWith(
       expect.objectContaining({
         text: "Quick answer.",
@@ -357,36 +377,6 @@ describe("complexity routing", () => {
       "brain",
       "white_check_mark",
     );
-  });
-
-  it("escalates to medium when very_low fails", async () => {
-    const routerResult = makeRouterResult({
-      quickResponse: "Looking...",
-      needsAgent: true,
-      complexity: "very_low",
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-    mockRunAgent
-      .mockRejectedValueOnce(new Error("Agent crashed"))
-      .mockResolvedValueOnce(makeAgentResponse({ text: "Full agent answer." }));
-
-    await handler({ message: makeSlackMessage(), client });
-
-    // First call: very_low, second call: medium (escalated)
-    expect(mockRunAgent).toHaveBeenCalledTimes(2);
-    expect(mockRunAgent.mock.calls[0][6]).toBe("very_low");
-    expect(mockRunAgent.mock.calls[1][6]).toBe("medium");
-
-    // Final response from medium agent
-    expect(client.chat.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: "Full agent answer.",
-        attachments: [],
-      }),
-    );
-
-    // Session NOT cleared for generic errors (only msg_too_long triggers clearing)
-    expect(mockClearSessionId).not.toHaveBeenCalled();
   });
 
   it("uses full path with heartbeat for low complexity", async () => {
@@ -1167,7 +1157,7 @@ describe("stale session recovery", () => {
     );
   });
 
-  it("clears session ID in very_low path before escalating to medium on msg_too_long", async () => {
+  it("clears session ID and retries with the same complexity when a very_low dispatch hits msg_too_long", async () => {
     const thread = makeThreadState({ sessionId: "long-session-id" });
     mockGetOrCreateThread.mockResolvedValue(thread);
 
@@ -1178,22 +1168,22 @@ describe("stale session recovery", () => {
     });
     mockRunRouter.mockResolvedValue(routerResult);
 
-    const agentResponse = makeAgentResponse({ text: "Recovered via medium." });
+    const agentResponse = makeAgentResponse({ text: "Recovered." });
     mockRunAgent
       .mockRejectedValueOnce(new Error("An API error occurred: msg_too_long"))
       .mockResolvedValueOnce(agentResponse);
 
     await handler({ message: makeSlackMessage(), client });
 
-    // Session was cleared before escalation
+    // Session cleared so the retry starts a fresh conversation.
     expect(mockClearSessionId).toHaveBeenCalledWith(thread);
 
-    // Agent called twice: first very_low (failed), then medium (succeeded)
+    // Both calls keep the original complexity — no hidden escalation.
     expect(mockRunAgent).toHaveBeenCalledTimes(2);
     expect(mockRunAgent.mock.calls[0][6]).toBe("very_low");
-    expect(mockRunAgent.mock.calls[1][6]).toBe("medium");
+    expect(mockRunAgent.mock.calls[1][6]).toBe("very_low");
 
-    // Second call had null session ID
+    // Second call runs with the cleared session.
     expect(mockRunAgent.mock.calls[1][2]).toBeNull();
   });
 
@@ -1246,40 +1236,6 @@ describe("stale session recovery", () => {
     );
   });
 
-  it("shows error when very_low msg_too_long escalation to medium also fails", async () => {
-    const thread = makeThreadState({ sessionId: "long-session-id" });
-    mockGetOrCreateThread.mockResolvedValue(thread);
-
-    const routerResult = makeRouterResult({
-      quickResponse: "Looking...",
-      needsAgent: true,
-      complexity: "very_low",
-    });
-    mockRunRouter.mockResolvedValue(routerResult);
-
-    mockRunAgent
-      .mockRejectedValueOnce(new Error("An API error occurred: msg_too_long"))
-      .mockRejectedValueOnce(new Error("Medium also failed"))
-      .mockRejectedValueOnce(new Error("Medium retry also failed"));
-
-    await handler({ message: makeSlackMessage(), client });
-
-    // Session cleared on very_low failure
-    expect(mockClearSessionId).toHaveBeenCalledWith(thread);
-
-    // very_low (1) + medium attempts (2) = 3 total calls
-    expect(mockRunAgent).toHaveBeenCalledTimes(3);
-    expect(mockRunAgent.mock.calls[0][6]).toBe("very_low");
-    expect(mockRunAgent.mock.calls[1][6]).toBe("medium");
-
-    // Error surfaced after medium retries exhausted
-    expect(mockPostErrorAttachment).toHaveBeenCalledWith(
-      client,
-      "C-TEST",
-      "mock-ts",
-      expect.stringContaining("crashed"),
-    );
-  });
 });
 
 // ============================================================
@@ -1632,7 +1588,7 @@ describe("dispatch row lifecycle", () => {
     },
   ];
 
-  it("inserts a slack dispatch row and finalizes completed on the very_low fast path", async () => {
+  it("inserts a slack dispatch row and finalizes completed for very_low complexity", async () => {
     mockRunRouter.mockResolvedValue(
       makeRouterResult({
         quickResponse: "Quick...",
@@ -1796,10 +1752,11 @@ describe("dispatch row lifecycle", () => {
     });
   });
 
-  it("keeps a single dispatch row when very_low fails and escalation to medium succeeds", async () => {
-    // Guards the invariant at listener.ts:456-458 — the medium retry path
-    // reuses the SAME dispatch row. A regression that calls
-    // createSlackDispatch again or finalizes per-attempt would fail here.
+  it("keeps a single dispatch row across retry attempts within a single message", async () => {
+    // Guards the invariant that a dispatch row represents one user message,
+    // not one attempt. A regression that calls createSlackDispatch per
+    // attempt, or finalizes per-attempt instead of once at the end, would
+    // fail here.
     mockRunRouter.mockResolvedValue(
       makeRouterResult({
         quickResponse: "Looking...",
@@ -1808,10 +1765,10 @@ describe("dispatch row lifecycle", () => {
       }),
     );
     mockRunAgent
-      .mockRejectedValueOnce(new Error("very_low crashed"))
+      .mockRejectedValueOnce(new Error("first attempt crashed"))
       .mockResolvedValueOnce(
         makeAgentResponse({
-          text: "Escalated answer.",
+          text: "Retry answer.",
           usage: sampleUsage,
           log: sampleLog,
         }),
@@ -1819,15 +1776,15 @@ describe("dispatch row lifecycle", () => {
 
     await handler({ message: makeSlackMessage(), client });
 
-    // One insert — escalation must NOT create a second dispatch row
+    // One insert — retries must NOT create a second dispatch row
     expect(mockInsertDispatch).toHaveBeenCalledTimes(1);
 
-    // One finalize — the very_low catch block must NOT finalize on failure;
-    // the retry path owns the terminal status
+    // One finalize — early attempts must NOT finalize; only the terminal
+    // attempt owns the status write.
     expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
     expect(mockUpdateDispatch.mock.calls[0][1]).toMatchObject({
       status: "completed",
-      summary: "Escalated answer.",
+      summary: "Retry answer.",
       tokensIn: 100,
       tokensOut: 200,
       toolCallCount: 2,

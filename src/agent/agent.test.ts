@@ -74,9 +74,11 @@ const MOCK_REPO_CONTEXT: RepoContext = {
     epicLabelId: "test-epic-label-id",
     needsHelpLabelId: "test-needs-help-label-id",
   },
+  trelloEnabled: true,
   slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
-  db: { host: "", user: "", password: "", database: "", enabled: false },
+  db: { host: "", port: 3306, user: "", password: "", database: "", enabled: false },
   githubToken: "",
+  workerPort: 5562,
 };
 
 const { buildConversationMessages, runRouter } = await import("./router.js");

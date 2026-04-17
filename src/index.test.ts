@@ -214,6 +214,64 @@ describe("worker mode startup flow", () => {
     expect(mockExit).toHaveBeenCalledWith(1);
     mockExit.mockRestore();
   });
+
+  describe("DANX_DB_* process.env export", () => {
+    const DB_ENV_KEYS = [
+      "DANX_DB_HOST",
+      "DANX_DB_PORT",
+      "DANX_DB_USER",
+      "DANX_DB_PASSWORD",
+      "DANX_DB_NAME",
+    ];
+
+    beforeEach(() => {
+      for (const key of DB_ENV_KEYS) delete process.env[key];
+    });
+
+    afterEach(() => {
+      for (const key of DB_ENV_KEYS) delete process.env[key];
+    });
+
+    it("exports resolved repo.db values to process.env when db.enabled", async () => {
+      mockRepoContexts = [makeRepoContext({
+        db: {
+          host: "127.0.0.1",
+          port: 3306,
+          user: "sail",
+          password: "secret",
+          database: "flytedesk-dev",
+          enabled: true,
+        },
+      })];
+
+      await importIndex();
+
+      expect(process.env.DANX_DB_HOST).toBe("127.0.0.1");
+      expect(process.env.DANX_DB_PORT).toBe("3306");
+      expect(process.env.DANX_DB_USER).toBe("sail");
+      expect(process.env.DANX_DB_PASSWORD).toBe("secret");
+      expect(process.env.DANX_DB_NAME).toBe("flytedesk-dev");
+    });
+
+    it("does NOT set DANX_DB_* when repo.db.enabled is false", async () => {
+      mockRepoContexts = [makeRepoContext({
+        db: {
+          host: "",
+          port: 3306,
+          user: "",
+          password: "",
+          database: "",
+          enabled: false,
+        },
+      })];
+
+      await importIndex();
+
+      for (const key of DB_ENV_KEYS) {
+        expect(process.env[key]).toBeUndefined();
+      }
+    });
+  });
 });
 
 // ============================================================

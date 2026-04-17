@@ -693,13 +693,15 @@ export function start(): void {
     return;
   }
 
-  if (!config.pollerEnabled) {
-    log.info("Poller disabled via POLLER_ENABLED=false");
-    return;
-  }
-
-  // Validate and start polling for each repo independently
+  // Validate and start polling for each repo independently.
+  // Repos with DANX_TRELLO_ENABLED=false are skipped — same env var controls
+  // host and docker runtimes identically.
   for (const repo of repoContexts) {
+    if (!repo.trelloEnabled) {
+      log.info(`[${repo.name}] Trello disabled (DANX_TRELLO_ENABLED=false) — skipping poller`);
+      continue;
+    }
+
     validateRepoConfig(repo);
 
     const state = getState(repo.name);

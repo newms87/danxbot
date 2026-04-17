@@ -9,14 +9,58 @@ import type { RepoConfig, RepoContext } from "./types.js";
 import { getReposBase, loadTrelloIds } from "./poller/constants.js";
 import { parseEnvFile } from "./env-file.js";
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
-import { repos, isWorkerMode, workerRepoName } from "./config.js";
+import { existsSync, readFileSync } from "node:fs";
+import { repos, isWorkerMode, workerRepoName, config } from "./config.js";
+
+/**
+ * Read env.DANXBOT_WORKER_PORT from <repo>/.claude/settings.local.json.
+ * Throws if the file is missing or the value is absent or not a valid port.
+ * Single source of truth — used by both host and docker launchers and the
+ * worker process itself, so host/docker stay aligned.
+ */
+function readWorkerPort(repoLocalPath: string): number {
+  const settingsPath = resolve(repoLocalPath, ".claude/settings.local.json");
+  if (!existsSync(settingsPath)) {
+    throw new Error(
+      `Missing ${settingsPath}. Add {"env": {"DANXBOT_WORKER_PORT": "<port>"}} to configure the worker port.`,
+    );
+  }
+  const raw = readFileSync(settingsPath, "utf-8");
+  const parsed = JSON.parse(raw) as { env?: Record<string, string> };
+  const value = parsed?.env?.DANXBOT_WORKER_PORT;
+  if (!value) {
+    throw new Error(
+      `Missing env.DANXBOT_WORKER_PORT in ${settingsPath}`,
+    );
+  }
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(
+      `Invalid env.DANXBOT_WORKER_PORT "${value}" in ${settingsPath} — must be an integer 1-65535`,
+    );
+  }
+  return port;
+}
+
+/**
+ * A "docker service name" is a bare alphanumeric/hyphen hostname with no
+ * dots, colons, or numeric IP pattern — the kind docker-compose generates.
+ * These names are unreachable from the host; the caller translates them to
+ * 127.0.0.1 when the worker runs on host (ports are exposed via compose).
+ */
+function isDockerServiceName(host: string): boolean {
+  if (!host) return false;
+  if (host === "localhost") return false;
+  if (host.includes(".")) return false;       // FQDN or IPv4
+  if (host.includes(":")) return false;       // IPv6 literal
+  return true;
+}
 
 /**
  * Load a single repo's context from its .danxbot/ directory.
  * Reads trello.yml for board IDs and .env for secrets (Slack, Trello API, DB).
  */
-function loadRepoContext(repo: RepoConfig): RepoContext {
+export function loadRepoContext(repo: RepoConfig): RepoContext {
   const envPath = resolve(repo.localPath, ".danxbot/.env");
   if (!existsSync(envPath)) {
     throw new Error(
@@ -46,11 +90,18 @@ function loadRepoContext(repo: RepoConfig): RepoContext {
   const slackChannelId = optEnv("DANX_SLACK_CHANNEL_ID", "");
   const slackEnabled = !!(slackBotToken && slackAppToken && slackChannelId);
 
-  const dbHost = optEnv("DANX_DB_HOST", "");
+  const rawDbHost = optEnv("DANX_DB_HOST", "");
+  const dbPort = parseInt(optEnv("DANX_DB_PORT", "3306"), 10);
+  // Docker service names (e.g. "ssap-mysql-1") are unreachable from the
+  // host. When running on host, translate them to 127.0.0.1 — docker-compose
+  // exposes the same port on localhost. One deterministic rule, no fallback.
+  const dbHost = config.isHost && isDockerServiceName(rawDbHost)
+    ? "127.0.0.1"
+    : rawDbHost;
   const dbUser = optEnv("DANX_DB_USER", "");
   const dbPassword = optEnv("DANX_DB_PASSWORD", "");
   const dbName = optEnv("DANX_DB_NAME", "");
-  const dbEnabled = !!(dbHost && dbUser);
+  const dbEnabled = !!(rawDbHost && dbUser);
 
   return {
     name: repo.name,
@@ -61,6 +112,7 @@ function loadRepoContext(repo: RepoConfig): RepoContext {
       apiToken: reqEnv("DANX_TRELLO_API_TOKEN"),
       ...trelloIds,
     },
+    trelloEnabled: optEnv("DANX_TRELLO_ENABLED", "false") === "true",
     slack: {
       enabled: slackEnabled,
       botToken: slackBotToken,
@@ -69,12 +121,14 @@ function loadRepoContext(repo: RepoConfig): RepoContext {
     },
     db: {
       host: dbHost,
+      port: dbPort,
       user: dbUser,
       password: dbPassword,
       database: dbName,
       enabled: dbEnabled,
     },
     githubToken: optEnv("DANX_GITHUB_TOKEN", ""),
+    workerPort: readWorkerPort(repo.localPath),
   };
 }
 

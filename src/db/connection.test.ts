@@ -181,6 +181,7 @@ describe("closeAdminPool", () => {
 
 const PLATFORM_DB_CONFIG = {
   host: "platform-host",
+  port: 3306,
   user: "platform-user",
   password: "platform-pass",
   database: "platform-db",

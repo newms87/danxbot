@@ -40,14 +40,36 @@ export function extractSqlBlocks(text: string): SqlBlock[] {
 }
 
 /**
- * Check if a query is safe to execute (SELECT only).
+ * Check if a query is safe to execute. Allows the read-only introspection
+ * surface the Slack agent needs to discover + query platform schemas:
+ *
+ *   - SELECT …
+ *   - DESC[RIBE] <table>
+ *   - SHOW TABLES [LIKE …]
+ *   - SHOW COLUMNS FROM <table>
+ *   - SHOW INDEX[ES] FROM <table>
+ *   - SHOW CREATE TABLE <table>
+ *
+ * Rejects anything that writes, leaks cross-schema info, or runs a
+ * second statement (multi-statement, SELECT INTO OUTFILE/DUMPFILE).
  */
+const SAFE_QUERY_PREFIX = new RegExp(
+  [
+    "^\\s*SELECT\\b",
+    "^\\s*DESC(RIBE)?\\s+",
+    "^\\s*SHOW\\s+TABLES\\b",
+    "^\\s*SHOW\\s+COLUMNS\\b",
+    "^\\s*SHOW\\s+INDEX(ES)?\\b",
+    "^\\s*SHOW\\s+CREATE\\s+TABLE\\b",
+  ].join("|"),
+  "i",
+);
+
 export function isSafeQuery(query: string): boolean {
   const trimmed = query.trim();
   if (!trimmed) return false;
 
-  // Must start with SELECT
-  if (!/^\s*SELECT\b/i.test(trimmed)) return false;
+  if (!SAFE_QUERY_PREFIX.test(trimmed)) return false;
 
   // Block SELECT INTO OUTFILE/DUMPFILE (writes query results to disk)
   if (/INTO\s+(OUTFILE|DUMPFILE)\b/i.test(trimmed)) return false;

@@ -21,16 +21,21 @@ vi.mock("./poller/constants.js", () => ({
   DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
 }));
 
+// Per-test override of what parseEnvFile returns for a repo's .danxbot/.env.
+// Defaults cover the minimum required keys; tests can add DANX_DB_* etc.
+const DEFAULT_MOCK_ENV_FILE = {
+  DANX_TRELLO_API_KEY: "mock-trello-key",
+  DANX_TRELLO_API_TOKEN: "mock-trello-token",
+  DANX_SLACK_BOT_TOKEN: "",
+  DANX_SLACK_APP_TOKEN: "",
+  DANX_SLACK_CHANNEL_ID: "",
+  DANX_GITHUB_TOKEN: "mock-github-token",
+};
+let mockEnvFile: Record<string, string> = { ...DEFAULT_MOCK_ENV_FILE };
+
 // Mock env-file.js to avoid reading actual .env files from repos
 vi.mock("./env-file.js", () => ({
-  parseEnvFile: () => ({
-    DANX_TRELLO_API_KEY: "mock-trello-key",
-    DANX_TRELLO_API_TOKEN: "mock-trello-token",
-    DANX_SLACK_BOT_TOKEN: "",
-    DANX_SLACK_APP_TOKEN: "",
-    DANX_SLACK_CHANNEL_ID: "",
-    DANX_GITHUB_TOKEN: "mock-github-token",
-  }),
+  parseEnvFile: () => ({ ...mockEnvFile }),
 }));
 
 // Lets individual tests simulate running inside a Docker container by
@@ -99,6 +104,7 @@ async function importRepoContext(envOverrides: Record<string, string> = {}) {
 beforeEach(() => {
   vi.resetModules();
   mockDockerenvExists = false;
+  mockEnvFile = { ...DEFAULT_MOCK_ENV_FILE };
 });
 
 describe("repos config", () => {
@@ -206,6 +212,76 @@ describe("repoContexts", () => {
   it("returns empty when no repos configured", async () => {
     const mod = await importRepoContext({ REPOS: "" });
     expect(mod.repoContexts).toEqual([]);
+  });
+});
+
+describe("RepoContext database config", () => {
+  const DB_ENV = {
+    DANX_DB_HOST: "ssap-mysql-1",
+    DANX_DB_USER: "sail",
+    DANX_DB_PASSWORD: "password",
+    DANX_DB_NAME: "flytedesk-dev",
+  };
+
+  it("keeps docker service name verbatim in docker mode", async () => {
+    mockDockerenvExists = true;
+    mockEnvFile = { ...DEFAULT_MOCK_ENV_FILE, ...DB_ENV };
+    const mod = await importRepoContext({
+      REPOS: "platform:https://github.com/test/platform.git",
+      DANXBOT_REPO_NAME: "platform",
+    });
+    const ctx = mod.getRepoContext("platform");
+    expect(ctx.db.host).toBe("ssap-mysql-1");
+    expect(ctx.db.port).toBe(3306);
+    expect(ctx.db.enabled).toBe(true);
+  });
+
+  it("translates docker service name to 127.0.0.1 in host mode", async () => {
+    mockDockerenvExists = false;
+    mockEnvFile = { ...DEFAULT_MOCK_ENV_FILE, ...DB_ENV };
+    const mod = await importRepoContext({
+      REPOS: "platform:https://github.com/test/platform.git",
+      DANXBOT_REPO_NAME: "platform",
+    });
+    const ctx = mod.getRepoContext("platform");
+    expect(ctx.db.host).toBe("127.0.0.1");
+    expect(ctx.db.port).toBe(3306);
+  });
+
+  it("keeps an IP or localhost verbatim on host mode (no needless translation)", async () => {
+    mockDockerenvExists = false;
+    mockEnvFile = {
+      ...DEFAULT_MOCK_ENV_FILE,
+      ...DB_ENV,
+      DANX_DB_HOST: "10.0.0.5",
+    };
+    const mod = await importRepoContext({
+      REPOS: "platform:https://github.com/test/platform.git",
+      DANXBOT_REPO_NAME: "platform",
+    });
+    expect(mod.getRepoContext("platform").db.host).toBe("10.0.0.5");
+  });
+
+  it("respects DANX_DB_PORT in both runtimes", async () => {
+    mockDockerenvExists = true;
+    mockEnvFile = { ...DEFAULT_MOCK_ENV_FILE, ...DB_ENV, DANX_DB_PORT: "3307" };
+    const mod = await importRepoContext({
+      REPOS: "platform:https://github.com/test/platform.git",
+      DANXBOT_REPO_NAME: "platform",
+    });
+    expect(mod.getRepoContext("platform").db.port).toBe(3307);
+  });
+
+  it("disables db when DANX_DB_HOST is not set", async () => {
+    mockEnvFile = { ...DEFAULT_MOCK_ENV_FILE };
+    const mod = await importRepoContext({
+      REPOS: "platform:https://github.com/test/platform.git",
+      DANXBOT_REPO_NAME: "platform",
+    });
+    const ctx = mod.getRepoContext("platform");
+    expect(ctx.db.enabled).toBe(false);
+    expect(ctx.db.host).toBe("");
+    expect(ctx.db.port).toBe(3306);
   });
 });
 

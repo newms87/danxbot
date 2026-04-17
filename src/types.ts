@@ -123,6 +123,7 @@ export interface SlackConfig {
 
 export interface RepoDatabaseConfig {
   host: string;
+  port: number;
   user: string;
   password: string;
   database: string;
@@ -134,9 +135,11 @@ export interface RepoContext {
   url: string;
   localPath: string;
   trello: TrelloConfig;
+  trelloEnabled: boolean;
   slack: SlackConfig;
   db: RepoDatabaseConfig;
   githubToken: string;
+  workerPort: number;
 }
 
 export interface AgentResponse {

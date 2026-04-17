@@ -88,6 +88,20 @@ describe("system-prompt.md template", () => {
     // Permits clarification for large result sets / scope
     expect(template).toMatch(/large|unreasonabl|narrow|broad|scope/i);
   });
+
+  it("tells the agent to run read-only queries without asking permission", async () => {
+    const { readFile } = await import("fs/promises");
+    const template = await readFile(
+      new URL("./system-prompt.md", import.meta.url),
+      "utf-8",
+    );
+    // Explicit: running SELECT is not an action that needs approval.
+    expect(template).toMatch(/don't ask.*permission|without asking|take agency|just run/i);
+    // Frames reads as the agent's job, not a risky action.
+    expect(template).toMatch(/read-only|reading.*data|not.*modification/i);
+    // Forbids preamble like "I'll run a query for you"
+    expect(template).toMatch(/do not describe|don't preview|no preamble|skip.*confirmation/i);
+  });
 });
 
 describe("fast-system-prompt.md template", () => {
@@ -98,5 +112,14 @@ describe("fast-system-prompt.md template", () => {
       "utf-8",
     );
     expect(template).toContain("{{REPO_NAME}}");
+  });
+
+  it("also tells the agent to run queries without asking permission", async () => {
+    const { readFile } = await import("fs/promises");
+    const template = await readFile(
+      new URL("./fast-system-prompt.md", import.meta.url),
+      "utf-8",
+    );
+    expect(template).toMatch(/don't ask.*permission|without asking|take agency|just run/i);
   });
 });

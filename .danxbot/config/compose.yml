@@ -1,7 +1,8 @@
 # Danxbot worker for the Danxbot repo (self-referential).
 #
 # Joins danxbot-net (shared MySQL + dashboard).
-# Exposes dispatch API on port 5561.
+# Worker port is sourced from <repo>/.claude/settings.local.json env.DANXBOT_WORKER_PORT
+# (same source used by host mode) — exported by make launch-worker before compose up.
 #
 # Usage: make launch-worker REPO=danxbot (from danxbot-flytebot/)
 
@@ -16,7 +17,7 @@ services:
       - ../.env
     environment:
       DANXBOT_REPO_NAME: danxbot
-      DANXBOT_WORKER_PORT: "5561"
+      DANXBOT_WORKER_PORT: ${DANXBOT_WORKER_PORT:?Set DANXBOT_WORKER_PORT in repos/danxbot/.claude/settings.local.json env block}
       DANXBOT_DB_USER: danxbot
       DANXBOT_DB_PASSWORD: danxbot
       DANXBOT_DB_NAME: danxbot_chat
@@ -33,7 +34,7 @@ services:
       # Claude auth: prod injects CLAUDE_AUTH_DIR=/danxbot/claude-auth; dev default is relative to danxbot-flytebot checkout.
       - ${CLAUDE_AUTH_DIR:-../../claude-auth}:/danxbot/claude-auth:ro
     ports:
-      - "5561:5561"
+      - "${DANXBOT_WORKER_PORT}:${DANXBOT_WORKER_PORT}"
     # In docker runtime, src/worker/url-normalizer.ts rewrites dispatcher
     # callback URLs from `localhost` to `host.docker.internal` so the worker
     # can reach services on the docker host. This extra_hosts entry is what
@@ -43,7 +44,7 @@ services:
     networks:
       - danxbot-net
     healthcheck:
-      test: curl -f http://localhost:5561/health || exit 1
+      test: curl -f http://localhost:${DANXBOT_WORKER_PORT}/health || exit 1
       interval: 30s
       timeout: 5s
       start_period: 30s

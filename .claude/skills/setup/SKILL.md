@@ -364,8 +364,8 @@ The danxbot worker container must join the connected repo's Docker network so it
 
 If the repo has a database that the agent should query (read-only), ask:
 - "Does the connected repo have a database the agent should have read access to? (yes/no)"
-- If yes, collect host, user, password, database name and write as `PLATFORM_DB_HOST`, `PLATFORM_DB_USER`, `PLATFORM_DB_PASSWORD`, `PLATFORM_DB_NAME`
-- **Important:** The DB host must be the container/service name on the shared Docker network (e.g., `<repo-name>-mysql-1`), NOT `localhost`
+- If yes, collect host, user, password, database name and write as `DANX_DB_HOST`, `DANX_DB_USER`, `DANX_DB_PASSWORD`, `DANX_DB_NAME` in `<repo>/.danxbot/.env` (optionally `DANX_DB_PORT`, default 3306)
+- **Important:** Write the docker service name (e.g., `<repo-name>-mysql-1`). On host, the worker translates that to `127.0.0.1` automatically — in Docker it resolves via the shared network. One value works in both runtimes.
 - If no, leave these empty (the agent won't have SQL query capability)
 
 ### Remote Agent Dispatch (MCP Server)

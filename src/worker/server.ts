@@ -19,7 +19,7 @@ import type { RepoContext } from "../types.js";
 const log = createLogger("worker-server");
 
 export async function startWorkerServer(repo: RepoContext): Promise<void> {
-  const PORT = parseInt(process.env.DANXBOT_WORKER_PORT || "5560", 10);
+  const PORT = repo.workerPort;
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);

@@ -27,8 +27,10 @@ const MOCK_REPO_CONTEXT: RepoContext = {
     needsHelpLabelId: "nh-label",
   },
   slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
-  db: { host: "", user: "", password: "", database: "", enabled: false },
+  db: { host: "", port: 3306, user: "", password: "", database: "", enabled: false },
   githubToken: "test-github-token",
+  trelloEnabled: true,
+  workerPort: 5562,
 };
 
 // Mock dependencies before importing module under test
@@ -47,8 +49,10 @@ const { mockRepoContexts } = vi.hoisted(() => {
       epicLabelId: "epic-label", needsHelpLabelId: "nh-label",
     },
     slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
-    db: { host: "", user: "", password: "", database: "", enabled: false },
+    db: { host: "", port: 3306, user: "", password: "", database: "", enabled: false },
     githubToken: "test-github-token",
+    trelloEnabled: true,
+    workerPort: 5562,
   };
   return { mockRepoContexts: [ctx] };
 });
@@ -57,7 +61,6 @@ const { mockConfig } = vi.hoisted(() => ({
   mockConfig: {
     pollerIntervalMs: 60000,
     isHost: true,
-    pollerEnabled: true,
     pollerBackoffScheduleMs: [60_000, 300_000, 900_000, 1_800_000],
   },
 }));
@@ -422,6 +425,38 @@ describe("start", () => {
     mockFetchReviewCards.mockResolvedValue(Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `Review ${i}` })));
 
     expect(() => start()).not.toThrow();
+  });
+
+  it("skips repos where trelloEnabled is false", () => {
+    mockRepoContexts[0].trelloEnabled = false;
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue([]);
+
+    start();
+
+    expect(mockFetchNeedsHelpCards).not.toHaveBeenCalled();
+    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+    expect(mockFetchReviewCards).not.toHaveBeenCalled();
+
+    mockRepoContexts[0].trelloEnabled = true;
+  });
+
+  it("polls only trello-enabled repos when contexts include both", () => {
+    const enabledRepo = { ...mockRepoContexts[0], name: "enabled", trelloEnabled: true };
+    const disabledRepo = { ...mockRepoContexts[0], name: "disabled", trelloEnabled: false };
+    mockRepoContexts.length = 0;
+    mockRepoContexts.push(enabledRepo, disabledRepo);
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue([]);
+
+    start();
+
+    const trelloArgs = mockFetchNeedsHelpCards.mock.calls.map((c) => c[0]);
+    expect(trelloArgs.length).toBe(1);
+    expect(trelloArgs[0]).toBe(enabledRepo.trello);
+
+    mockRepoContexts.length = 0;
+    mockRepoContexts.push({ ...enabledRepo, name: "test-repo", trelloEnabled: true });
   });
 });
 

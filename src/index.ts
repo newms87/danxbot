@@ -48,6 +48,19 @@ async function startWorkerMode(): Promise<void> {
   // Disabled repos skip pool creation.
   initPlatformPool(repo.db);
 
+  // Propagate resolved DB credentials to process.env so that child processes
+  // (the Claude CLI and any Bash tool it spawns, e.g. describe-tables.sh)
+  // can reach the same database the worker is using. Resolved values —
+  // docker-service-name → 127.0.0.1 translation has already happened in
+  // repo-context when running on host.
+  if (repo.db.enabled) {
+    process.env.DANX_DB_HOST = repo.db.host;
+    process.env.DANX_DB_PORT = String(repo.db.port);
+    process.env.DANX_DB_USER = repo.db.user;
+    process.env.DANX_DB_PASSWORD = repo.db.password;
+    process.env.DANX_DB_NAME = repo.db.database;
+  }
+
   // Start the worker HTTP server (dispatch API + health)
   await startWorkerServer(repo);
 

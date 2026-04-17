@@ -68,6 +68,7 @@ export function makeRepoContext(overrides?: Partial<RepoContext>): RepoContext {
       epicLabelId: "test-epic-label-id",
       needsHelpLabelId: "test-needs-help-label-id",
     },
+    trelloEnabled: true,
     slack: {
       enabled: true,
       botToken: "xoxb-test",
@@ -76,12 +77,14 @@ export function makeRepoContext(overrides?: Partial<RepoContext>): RepoContext {
     },
     db: {
       host: "localhost",
+      port: 3306,
       user: "test",
       password: "test",
       database: "test",
       enabled: true,
     },
     githubToken: "test-github-token",
+    workerPort: 5562,
     ...overrides,
   };
 }

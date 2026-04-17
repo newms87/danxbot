@@ -147,6 +147,39 @@ describe("isSafeQuery", () => {
     expect(isSafeQuery("SELECT * INTO DUMPFILE '/tmp/data' FROM users")).toBe(false);
   });
 
+  it("allows DESCRIBE for schema introspection", () => {
+    expect(isSafeQuery("DESCRIBE suppliers")).toBe(true);
+    expect(isSafeQuery("describe suppliers")).toBe(true);
+    expect(isSafeQuery("DESC suppliers")).toBe(true);
+  });
+
+  it("allows SHOW TABLES", () => {
+    expect(isSafeQuery("SHOW TABLES")).toBe(true);
+    expect(isSafeQuery("show tables")).toBe(true);
+    expect(isSafeQuery("SHOW TABLES LIKE '%supplier%'")).toBe(true);
+  });
+
+  it("allows SHOW COLUMNS", () => {
+    expect(isSafeQuery("SHOW COLUMNS FROM suppliers")).toBe(true);
+  });
+
+  it("allows SHOW INDEX / INDEXES", () => {
+    expect(isSafeQuery("SHOW INDEX FROM suppliers")).toBe(true);
+    expect(isSafeQuery("SHOW INDEXES FROM suppliers")).toBe(true);
+  });
+
+  it("allows SHOW CREATE TABLE for schema reference", () => {
+    expect(isSafeQuery("SHOW CREATE TABLE suppliers")).toBe(true);
+  });
+
+  it("rejects SHOW DATABASES (can expose other tenants)", () => {
+    expect(isSafeQuery("SHOW DATABASES")).toBe(false);
+  });
+
+  it("rejects SHOW GRANTS (credential discovery)", () => {
+    expect(isSafeQuery("SHOW GRANTS FOR 'root'@'%'")).toBe(false);
+  });
+
   it("rejects INTO OUTFILE case-insensitively", () => {
     expect(isSafeQuery("select * into outfile '/tmp/data' from users")).toBe(false);
     expect(isSafeQuery("SELECT * Into Outfile '/tmp/data' FROM users")).toBe(false);

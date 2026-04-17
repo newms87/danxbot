@@ -83,8 +83,7 @@ export async function handleLaunch(
 
     // Stable ID returned to the caller — persists across stall-recovery respawns.
     const dispatchId = randomUUID();
-    const workerPort = parseInt(process.env.DANXBOT_WORKER_PORT ?? "5560", 10);
-    const workerStopUrl = `http://localhost:${workerPort}/api/stop/${dispatchId}`;
+    const workerStopUrl = `http://localhost:${repo.workerPort}/api/stop/${dispatchId}`;
 
     const mcpOptions: McpSettingsOptions = {
       apiToken,

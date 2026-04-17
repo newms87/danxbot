@@ -207,7 +207,7 @@ If you discover knowledge gaps in the agent's reference docs while exploring, up
 - **Codebase**: Read files from the connected repo (path in `repo-config.md`)
 - **Database** (if configured): READ-ONLY queries via mysql CLI
   ```bash
-  mysql -h "$PLATFORM_DB_HOST" -u "$PLATFORM_DB_USER" -p"$PLATFORM_DB_PASSWORD" "$PLATFORM_DB_NAME" -e "QUERY"
+  mysql -h "$DANX_DB_HOST" -P "${DANX_DB_PORT:-3306}" -u "$DANX_DB_USER" -p"$DANX_DB_PASSWORD" "$DANX_DB_NAME" -e "QUERY"
   ```
 
 ## Critical Rules

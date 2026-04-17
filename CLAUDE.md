@@ -29,11 +29,13 @@ Danxbot manages multiple repos simultaneously. Each repo is fully isolated — i
 Repo-specific config lives in two places inside each connected repo:
 
 1. `<repo>/.danxbot/config/` (committed) — config.yml, trello.yml, overview.md, workflow.md, compose.yml, tools, docs
-2. `<repo>/.danxbot/.env` (gitignored) — secrets only, standardized DANX_* prefix: DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN
+2. `<repo>/.danxbot/.env` (gitignored) — secrets + per-repo toggles, standardized DANX_* prefix: DANX_TRELLO_ENABLED, DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN
 
 Danxbot's own `.env` keeps only shared infrastructure: ANTHROPIC_API_KEY, CLAUDE_AUTH_MODE, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL.
 
-Each repo also needs MCP credentials in `<repo>/.claude/settings.local.json` (gitignored) under the `env` key — Claude Code does not load `.env` files for MCP servers. Required vars: `MCP_TRELLO_PATH`, `TRELLO_API_KEY`, `TRELLO_API_TOKEN`. See `docker-runtime.md` for details.
+Each repo also needs per-repo config in `<repo>/.claude/settings.local.json` (gitignored) under the `env` key — Claude Code does not load `.env` files for MCP servers. Required vars: `DANXBOT_WORKER_PORT` (dispatch API port, read by both host and docker runtimes), `MCP_TRELLO_PATH`, `TRELLO_API_KEY`, `TRELLO_API_TOKEN`. See `docker-runtime.md` for details.
+
+`DANX_TRELLO_ENABLED` in each repo's `.danxbot/.env` controls whether the poller processes that repo's Trello board. Defaults to `false` — explicit opt-in prevents unintentional auto-dispatch when a worker boots.
 
 Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists all repos: `platform:url,danxbot:url`. In worker mode, `loadRepoContext()` builds the single active `RepoContext` from the named repo's config. The dashboard reads the repo list directly from `REPOS`. All services (poller, Slack, agent) receive `RepoContext` as a parameter.
 

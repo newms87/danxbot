@@ -91,13 +91,17 @@ All repo config lives in `<repo>/.danxbot/config/` (version controlled). Secrets
 
 Per-repo secrets live in `<repo>/.danxbot/.env` (gitignored) using standardized DANX_* prefix: DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN. Danxbot's own `.env` keeps only shared infrastructure (ANTHROPIC_API_KEY, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL).
 
-## MCP Environment Variables
+## Per-Repo settings.local.json — MCP Env + Worker Port
 
-Claude Code does NOT load `.env` files for MCP server startup — it only reads from the shell environment. Per-repo MCP credentials (Trello API key/token, MCP server path) must be set in `<repo>/.claude/settings.local.json` under the `env` key:
+`<repo>/.claude/settings.local.json` is the single source of truth for two things:
+
+1. **MCP server env vars** — Claude Code does NOT load `.env` files for MCP server startup; it only reads from the shell environment.
+2. **Worker port** — `DANXBOT_WORKER_PORT` lives here so host and docker runtimes source the port identically. `make launch-worker` and `make launch-worker-host` both extract it via `jq` and export it before starting the process.
 
 ```json
 {
   "env": {
+    "DANXBOT_WORKER_PORT": "5562",
     "MCP_TRELLO_PATH": "/home/newms/web/mcp-server-trello",
     "TRELLO_API_KEY": "<repo-specific-key>",
     "TRELLO_API_TOKEN": "<repo-specific-token>"
@@ -105,7 +109,11 @@ Claude Code does NOT load `.env` files for MCP server startup — it only reads 
 }
 ```
 
-This file is gitignored (contains secrets). The `.mcp.json` in each repo references these via `${VAR}` syntax. When connecting a new repo, add these three env vars to its `settings.local.json` using the Trello credentials from that repo's `.danxbot/.env`.
+This file is gitignored (contains secrets). The `.mcp.json` in each repo references MCP vars via `${VAR}` syntax. When connecting a new repo, add these four env vars with the repo's credentials and a unique port.
+
+## Per-Repo Trello Toggle
+
+`DANX_TRELLO_ENABLED` in `<repo>/.danxbot/.env` controls whether the poller runs for that repo. Defaults to `false` (explicit opt-in). Both host and docker runtimes read this var the same way — docker via `env_file`, host via `make launch-worker-host` sourcing the per-repo `.env`.
 
 ## Claude Code Session Logs (JSONL)
 

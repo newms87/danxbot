@@ -92,7 +92,7 @@ These are regressions the team has already fixed. Do not reintroduce any of them
 
 ## Runtime Modes At A Glance
 
-- **Worker mode** (`DANXBOT_REPO_NAME` set): one process per repo. Starts dispatch API (`/api/launch`, `/api/cancel`, `/api/stop`, `/api/status`), Slack listener (if configured), and poller (unless `POLLER_ENABLED=false`). Spawned via `make launch-worker REPO=<name>` (docker) or `make launch-worker-host REPO=<name>` (host).
+- **Worker mode** (`DANXBOT_REPO_NAME` set): one process per repo. Starts dispatch API (`/api/launch`, `/api/cancel`, `/api/stop`, `/api/status`), Slack listener (if configured), and poller (only if `DANX_TRELLO_ENABLED=true` in the repo's `.danxbot/.env`). Worker port is sourced from the repo's `.claude/settings.local.json` `env.DANXBOT_WORKER_PORT`. Spawned via `make launch-worker REPO=<name>` (docker) or `make launch-worker-host REPO=<name>` (host).
 - **Dashboard mode** (`DANXBOT_REPO_NAME` unset): one shared process. Runs migrations, dashboard HTTP server, SSE stream, analytics. No poller, no Slack, no claude spawning.
 
 Dashboard mode never dispatches agents. Only worker mode spawns claude.
