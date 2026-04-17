@@ -1,0 +1,87 @@
+# Flytebot production infra compose (dashboard + mysql + playwright).
+# The deploy CLI SCPs this file to /danxbot/docker-compose.prod.yml with
+# ${ECR_IMAGE} and ${DASHBOARD_PORT} substituted.
+# Per-repo workers run from /danxbot/repos/<name>/.danxbot/config/compose.yml
+# via separate compose projects (`worker-<name>`) on the shared danxbot-net.
+
+services:
+  dashboard:
+    image: ${ECR_IMAGE}
+    restart: always
+    stop_grace_period: 30s
+    env_file: /danxbot/.env
+    ports:
+      - "${DASHBOARD_PORT}:${DASHBOARD_PORT}"
+    volumes:
+      - /danxbot/repos:/danxbot/app/repos
+      - /danxbot/threads:/danxbot/threads
+      - /danxbot/logs:/danxbot/logs
+      - /danxbot/claude-auth:/danxbot/claude-auth:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - danxbot-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: curl -f http://localhost:${DASHBOARD_PORT}/health || exit 1
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.40.0-jammy
+    restart: always
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      PORT: "3000"
+    networks:
+      - danxbot-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)throw 1}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
+
+  mysql:
+    image: mysql/mysql-server:8.0
+    restart: always
+    env_file: /danxbot/.env
+    volumes:
+      - /danxbot/mysql-data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DANXBOT_DB_PASSWORD}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: ${DANXBOT_DB_NAME:-danxbot_chat}
+      MYSQL_USER: ${DANXBOT_DB_USER}
+      MYSQL_PASSWORD: ${DANXBOT_DB_PASSWORD}
+    networks:
+      - danxbot-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-p${DANXBOT_DB_PASSWORD}"]
+      interval: 5s
+      retries: 5
+      timeout: 3s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
+
+networks:
+  danxbot-net:
+    name: danxbot-net
+    driver: bridge
