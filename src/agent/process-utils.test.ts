@@ -283,34 +283,26 @@ describe("setupProcessHandlers", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
-  it("sets status to 'canceled' when _canceling flag is set before close", () => {
+  // Close-handler cancel behavior is no longer driven by a _canceling flag.
+  // cancelJob now sets job.status="canceled" BEFORE sending SIGTERM, so the
+  // `job.status === "running"` guard below short-circuits this handler when
+  // the process exits under cancel. End-to-end coverage lives in
+  // launcher.test.ts ("keeps status='canceled' when host onExit fires ...").
+  // The test below locks down the guard itself.
+
+  it("preserves pre-set terminal status when close fires after cancelJob", () => {
     const job = makeJob();
+    job.status = "canceled";
+    job.summary = "Agent was canceled by user request";
     const child = makeChild();
     const onComplete = vi.fn();
 
-    setupProcessHandlers(child as never, job, () => "some text", () => "", { onComplete });
-
-    // Simulate cancelJob setting the flag before SIGTERM triggers close
-    job._canceling = true;
-    child.emit("close", null); // SIGTERM causes null exit code
+    setupProcessHandlers(child as never, job, () => "ignored", () => "ignored", { onComplete });
+    child.emit("close", 143);
 
     expect(job.status).toBe("canceled");
     expect(job.summary).toBe("Agent was canceled by user request");
-    expect(job.completedAt).toBeInstanceOf(Date);
-    expect(onComplete).toHaveBeenCalledWith(job);
-  });
-
-  it("sets status to 'canceled' even with non-zero exit code when _canceling is set", () => {
-    const job = makeJob();
-    const child = makeChild();
-
-    setupProcessHandlers(child as never, job, () => "", () => "killed", {});
-
-    job._canceling = true;
-    child.emit("close", 1); // non-zero from SIGTERM
-
-    expect(job.status).toBe("canceled");
-    expect(job.summary).toBe("Agent was canceled by user request");
+    expect(onComplete).not.toHaveBeenCalled();
   });
 
   it("calls cleanup function on both close and error events", () => {

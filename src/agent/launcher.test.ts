@@ -1419,7 +1419,7 @@ describe("cancelJob", () => {
     vi.useRealTimers();
   });
 
-  it("sets _canceling=true before sending SIGTERM", async () => {
+  it("sets job.status='canceled' before sending SIGTERM (mirrors job.stop() pattern)", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -1429,16 +1429,16 @@ describe("cancelJob", () => {
       timeoutMs: 300_000,
     });
 
-    let cancelingWasSetBeforeKill = false;
+    let statusAtKillTime: string | undefined;
     child.kill = vi.fn().mockImplementation(() => {
-      if (job._canceling) cancelingWasSetBeforeKill = true;
+      statusAtKillTime = job.status;
     });
 
     const cancelPromise = cancelJob(job, "test-token");
     await vi.advanceTimersByTimeAsync(5_001);
     await cancelPromise;
 
-    expect(cancelingWasSetBeforeKill).toBe(true);
+    expect(statusAtKillTime).toBe("canceled");
   });
 
   it("results in status=canceled when process exits immediately on SIGTERM", async () => {
@@ -1579,6 +1579,90 @@ describe("cancelJob", () => {
     expect(pidSignals).toContainEqual([555_666, "SIGTERM"]);
     expect(pidSignals).toContainEqual([555_666, "SIGKILL"]);
     expect(job.status).toBe("canceled");
+  });
+
+  // Card #41: cancelJob race — host onExit callback fires during the 5s grace
+  // wait and previously overwrote job.status with "completed"/"failed",
+  // hiding the cancel intent from any local consumer of job.status
+  // (dashboard, stall recovery, retries). cancelJob must set status="canceled"
+  // BEFORE SIGTERM so both docker close handler and host onExit early-return
+  // via their `if (job.status === "running")` guards.
+  // Regression: before card #62, cancelJob skipped options.onComplete because
+  // the close handler early-returned under pre-set "canceled" status. The
+  // dispatch layer relies on onComplete to clean up the per-dispatch MCP
+  // settings directory (src/worker/dispatch.ts:113). Without this call, those
+  // directories leak on every cancellation.
+  it("fires options.onComplete on cancel so dispatch-layer cleanup runs", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const onComplete = vi.fn();
+
+    const job = await spawnAgent({
+      prompt: "long task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      onComplete,
+    });
+
+    const cancelPromise = cancelJob(job, "tok");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledWith(job);
+    expect(job.status).toBe("canceled");
+  });
+
+  it("fires options.onComplete on cancel in host mode", async () => {
+    mockHostExitWatchers.length = 0;
+    mockReadPidFileWithTimeout.mockResolvedValue(333_444);
+    mockIsPidAlive.mockReturnValue(false);
+    const onComplete = vi.fn();
+
+    const job = await spawnAgent({
+      prompt: "host task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+      onComplete,
+    });
+
+    const cancelPromise = cancelJob(job, "tok");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete).toHaveBeenCalledWith(job);
+  });
+
+  it("keeps status='canceled' when host onExit fires during the 5s grace wait", async () => {
+    mockHostExitWatchers.length = 0;
+    mockReadPidFileWithTimeout.mockResolvedValue(888_111);
+    mockIsPidAlive.mockReturnValue(false);
+
+    const job = await spawnAgent({
+      prompt: "host task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok",
+    });
+
+    mockFetch.mockResolvedValue({ ok: true });
+
+    const cancelPromise = cancelJob(job, "tok");
+
+    // Simulate the host claude PID dying in response to SIGTERM: the watcher
+    // sees the process is gone and fires the onExit callback mid-wait. This
+    // is the exact race that motivated card #41.
+    mockHostExitWatchers[0].fire();
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    expect(job.status).toBe("canceled");
+    expect(job.summary).toBe("Agent was canceled by user request");
   });
 
   it("skips SIGKILL in host mode when isPidAlive returns false after SIGTERM", async () => {

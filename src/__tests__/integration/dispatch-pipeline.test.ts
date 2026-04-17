@@ -324,8 +324,9 @@ describe("Integration: dispatch pipeline", () => {
       await new Promise((r) => setTimeout(r, 500));
       await cancelJob(job, "test-token");
 
-      // cancelJob sets _canceling flag before SIGTERM, so the close handler
-      // correctly uses "canceled" status instead of "failed".
+      // cancelJob sets job.status="canceled" BEFORE sending SIGTERM, so the
+      // docker close handler and host onExit both early-return without
+      // overwriting it — the local status matches the remote PUT.
       expect(job.status).toBe("canceled");
       expect(job.completedAt).toBeInstanceOf(Date);
 

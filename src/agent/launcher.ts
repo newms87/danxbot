@@ -118,8 +118,13 @@ export interface AgentJob {
   terminalLogPath?: string;
   /** Internal cleanup callback — tears down watcher, forwarder, timers. Set by spawnAgent. */
   _cleanup?: () => void;
-  /** Set by cancelJob() before sending SIGTERM so process-utils knows to use "canceled" status. */
-  _canceling?: boolean;
+  /**
+   * Fires options.onComplete with the job when a terminal state is reached
+   * outside of the close/exit handler flow (i.e. from cancelJob). Lets
+   * dispatch-layer teardown such as cleanupMcpSettings run on cancel — the
+   * close handler would otherwise early-return because status is pre-set.
+   */
+  _onComplete?: () => void;
   /**
    * Agent-initiated stop — signals that the agent completed or failed gracefully.
    * Sends SIGTERM, waits 5s, then SIGKILL if needed, then fires onComplete.
@@ -525,6 +530,7 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
   }
 
   job._cleanup = cleanup;
+  job._onComplete = () => options.onComplete?.(job);
 
   // --- Agent-initiated stop mechanism ---
   // The agent calls stop() via the HTTP /api/stop/:jobId endpoint when lifecycle
@@ -762,6 +768,13 @@ async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
 /**
  * Cancel a running job by sending SIGTERM, then SIGKILL after 5 seconds.
  * Works identically in docker (ChildProcess handle) and host (tracked PID) modes.
+ *
+ * Sets job.status="canceled" BEFORE sending SIGTERM so the close/exit handlers
+ * (setupProcessHandlers in docker mode, spawnHostMode.onExit in host mode)
+ * see a non-running status and early-return via their `job.status === "running"`
+ * guards. Mirrors the pattern in job.stop() — the prior `_canceling` flag
+ * only covered the docker path, leaving a host-mode race where onExit
+ * overwrote status to "completed"/"failed" during the 5s grace wait.
  */
 export async function cancelJob(
   job: AgentJob,
@@ -772,17 +785,15 @@ export async function cancelJob(
 
   log.info(`[Job ${job.id}] Cancel requested — sending SIGTERM`);
 
-  job._canceling = true;
-  await terminateWithGrace(job, 5_000);
+  job.status = "canceled";
+  job.summary = "Agent was canceled by user request";
+  job.completedAt = new Date();
 
-  if (job.status === "running") {
-    job.status = "canceled";
-    job.summary = "Agent was canceled by user request";
-    job.completedAt = new Date();
-  }
+  await terminateWithGrace(job, 5_000);
 
   job._cleanup?.();
   await putStatus(job, apiToken, "canceled", job.summary);
+  job._onComplete?.();
 }
 
 /**
