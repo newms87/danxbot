@@ -17,3 +17,24 @@ export const OPERATIONAL_ERROR_PATTERNS = [
 export function isOperationalError(message: string): boolean {
   return OPERATIONAL_ERROR_PATTERNS.some((p) => p.test(message));
 }
+
+/**
+ * Error patterns that indicate transient network/infrastructure failures
+ * that are not bugs in the code and do not warrant a Trello notification.
+ */
+export const TRANSIENT_ERROR_PATTERNS = [
+  /ETIMEDOUT/,
+  /ECONNREFUSED/,
+  /ENOTFOUND/,
+  /ECONNRESET/,
+  /EHOSTUNREACH/,
+  /ECONNABORTED/,
+];
+
+/**
+ * Returns true if the error message matches a transient network error
+ * that should be logged but not reported to Trello.
+ */
+export function isTransientError(message: string): boolean {
+  return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(message));
+}

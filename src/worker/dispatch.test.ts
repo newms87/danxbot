@@ -329,7 +329,7 @@ describe("handleLaunch", () => {
     await handleLaunch(req, res, MOCK_REPO);
 
     expect(mockBuildMcpSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ apiUrl: "http://host.docker.internal/" }),
+      expect.objectContaining({ apiUrl: "http://host.docker.internal" }),
     );
     expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -361,7 +361,7 @@ describe("handleLaunch", () => {
     await handleLaunch(req, res, MOCK_REPO);
 
     expect(mockBuildMcpSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ apiUrl: "http://host.docker.internal/" }),
+      expect.objectContaining({ apiUrl: "http://host.docker.internal" }),
     );
   });
 

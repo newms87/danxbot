@@ -21,7 +21,7 @@ import { makeRepoContext } from "../helpers/fixtures.js";
 // --- Infrastructure mocks (not logic under test) ---
 
 // vi.hoisted uses require() because it runs before ESM imports are available
-const { testState } = vi.hoisted(() => {
+const { testState, mockConfig } = vi.hoisted(() => {
   const os = require("node:os");
   const fs = require("node:fs");
   const path = require("node:path");
@@ -30,20 +30,21 @@ const { testState } = vi.hoisted(() => {
       logsDir: fs.mkdtempSync(path.join(os.tmpdir(), "danxbot-test-logs-")),
       reposBase: "/tmp/danxbot-test-repos",
     },
+    mockConfig: {
+      runtime: "docker",
+      isHost: false,
+      dispatch: {
+        defaultApiUrl: "http://localhost:80",
+        agentTimeoutMs: 30_000,
+      },
+      logsDir: "",
+    },
   };
 });
 
-vi.mock("../../config.js", () => ({
-  config: {
-    runtime: "docker",
-    isHost: false,
-    dispatch: {
-      defaultApiUrl: "http://localhost:80",
-      agentTimeoutMs: 30_000,
-    },
-    logsDir: testState.logsDir,
-  },
-}));
+mockConfig.logsDir = testState.logsDir;
+
+vi.mock("../../config.js", () => ({ config: mockConfig }));
 
 vi.mock("../../poller/constants.js", () => ({
   getReposBase: () => testState.reposBase,
@@ -63,6 +64,12 @@ vi.mock("../../terminal.js", () => ({
   buildDispatchScript: vi.fn(),
   getTerminalLogPath: vi.fn(),
   spawnInTerminal: vi.fn(),
+}));
+
+// URL normalizer mock: integration tests run on the host, so localhost URLs are
+// valid as-is — bypassing the docker rewrite keeps status callbacks reachable.
+vi.mock("../../worker/url-normalizer.js", () => ({
+  normalizeCallbackUrl: (url: string | undefined) => url,
 }));
 
 // --- Real imports (the pipeline under test) ---
@@ -188,6 +195,8 @@ beforeAll(() => {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  // Reset mutable config to defaults between tests to prevent state leakage
+  mockConfig.isHost = false;
   captureServer.clear();
   await captureServer.start();
 

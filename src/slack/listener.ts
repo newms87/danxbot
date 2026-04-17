@@ -32,7 +32,7 @@ import {
   clearSessionId,
   isBotParticipant,
 } from "../threads.js";
-import { isOperationalError } from "../errors/patterns.js";
+import { isOperationalError, isTransientError } from "../errors/patterns.js";
 
 const log = createLogger("slack");
 
@@ -675,7 +675,9 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                   "brain",
                   "x",
                 );
-                notifyError(ls.repo.trello, "Agent Crash", errorMsg, errorContext).catch(() => {});
+                if (!isTransientError(errorMsg)) {
+                  notifyError(ls.repo.trello, "Agent Crash", errorMsg, errorContext).catch(() => {});
+                }
                 await slackDispatch.finalize("failed", { error: errorMsg });
                 handled = true;
               } else {
@@ -736,6 +738,7 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
         }
       }
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
       log.error(`[${ls.repo.name}] Error handling message in thread ${threadTs}`, error);
 
       // Add error reaction
@@ -747,7 +750,9 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
         })
         .catch(() => {});
 
-      notifyError(ls.repo.trello, "Handler Error", error instanceof Error ? error.message : String(error), errorContext).catch(() => {});
+      if (!isTransientError(errorMsg)) {
+        notifyError(ls.repo.trello, "Handler Error", errorMsg, errorContext).catch(() => {});
+      }
     }
 }
 
