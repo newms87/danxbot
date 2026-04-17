@@ -1,41 +1,16 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { writeFile, mkdir } from "fs/promises";
 import { join } from "path";
 import { config } from "../config.js";
 import { COMPLEXITY_PROFILES } from "./complexity.js";
 import type { RepoContext } from "../types.js";
 import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
-import { FEATURE_LIST } from "./features.js";
+import { loadSystemPrompt, loadFastSystemPrompt } from "./system-prompt-loader.js";
 import type { AgentLogEntry, AgentResponse, AgentUsageSummary, ComplexityLevel, ModelUsage, ThreadMessage } from "../types.js";
 import { buildAssistantSummary, buildToolResultSummary } from "./tool-summary.js";
 
 const log = createLogger("agent");
-
-let systemPromptRaw: string | null = null;
-let fastSystemPromptRaw: string | null = null;
-
-async function getSystemPrompt(reviewListId: string): Promise<string> {
-  if (!systemPromptRaw) {
-    systemPromptRaw = await readFile(
-      new URL("./system-prompt.md", import.meta.url),
-      "utf-8",
-    );
-  }
-  return systemPromptRaw
-    .replace("{{FEATURE_LIST}}", FEATURE_LIST)
-    .replace(/\{\{REVIEW_LIST_ID\}\}/g, reviewListId);
-}
-
-async function getFastSystemPrompt(reviewListId: string): Promise<string> {
-  if (!fastSystemPromptRaw) {
-    fastSystemPromptRaw = await readFile(
-      new URL("./fast-system-prompt.md", import.meta.url),
-      "utf-8",
-    );
-  }
-  return fastSystemPromptRaw.replace(/\{\{REVIEW_LIST_ID\}\}/g, reviewListId);
-}
 
 interface ExecuteAgentOptions {
   queryOptions: Record<string, unknown>;
@@ -289,10 +264,9 @@ export async function runAgent(
 ): Promise<AgentResponse> {
   // Resolve profile overrides if complexity is specified
   const profile = complexity ? COMPLEXITY_PROFILES[complexity] : null;
-  const reviewListId = repoContext.trello.reviewListId;
   const promptText = profile && profile.systemPrompt === "fast"
-    ? await getFastSystemPrompt(reviewListId)
-    : await getSystemPrompt(reviewListId);
+    ? await loadFastSystemPrompt(repoContext)
+    : await loadSystemPrompt(repoContext);
   const model = profile?.model ?? config.agent.model;
 
   // Trim thread messages to prevent token overflow

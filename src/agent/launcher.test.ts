@@ -55,8 +55,12 @@ vi.mock("./laravel-forwarder.js", () => ({
   deriveEventsUrl: vi.fn((url: string) => url.replace(/\/status$/, "/events")),
 }));
 
-const mockBuildDispatchScript = vi.fn().mockReturnValue("/tmp/danxbot-term-test/run-agent.sh");
-const mockGetTerminalLogPath = vi.fn().mockReturnValue("/tmp/danxbot-terminal-test-uuid-1234.log");
+const mockBuildDispatchScript = vi
+  .fn()
+  .mockReturnValue("/tmp/danxbot-term-test/run-agent.sh");
+const mockGetTerminalLogPath = vi
+  .fn()
+  .mockReturnValue("/tmp/danxbot-terminal-test-uuid-1234.log");
 const mockSpawnInTerminal = vi.fn();
 vi.mock("../terminal.js", () => ({
   buildDispatchScript: (...args: unknown[]) => mockBuildDispatchScript(...args),
@@ -90,13 +94,20 @@ const mockCreateHostExitWatcher = vi.fn().mockImplementation(() => {
 const mockIsPidAlive = vi.fn().mockReturnValue(true);
 const mockKillHostPid = vi.fn();
 vi.mock("./host-pid.js", () => ({
-  readPidFileWithTimeout: (...args: unknown[]) => mockReadPidFileWithTimeout(...args),
-  createHostExitWatcher: (...args: unknown[]) => mockCreateHostExitWatcher(...args),
+  readPidFileWithTimeout: (...args: unknown[]) =>
+    mockReadPidFileWithTimeout(...args),
+  createHostExitWatcher: (...args: unknown[]) =>
+    mockCreateHostExitWatcher(...args),
   isPidAlive: (...args: unknown[]) => mockIsPidAlive(...args),
   killHostPid: (...args: unknown[]) => mockKillHostPid(...args),
 }));
 
-import { spawnAgent, cancelJob, getJobStatus, type AgentJob } from "./launcher.js";
+import {
+  spawnAgent,
+  cancelJob,
+  getJobStatus,
+  type AgentJob,
+} from "./launcher.js";
 
 function createMockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -382,7 +393,7 @@ describe("spawnAgent", () => {
     expect(child.kill).not.toHaveBeenCalled();
   });
 
-it("extracts last assistant text from watcher entries as job summary", async () => {
+  it("extracts last assistant text from watcher entries as job summary", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -397,7 +408,9 @@ it("extracts last assistant text from watcher entries as job summary", async () 
       type: "assistant",
       timestamp: Date.now(),
       summary: "test",
-      data: { content: [{ type: "text", text: "Task completed successfully" }] },
+      data: {
+        content: [{ type: "text", text: "Task completed successfully" }],
+      },
     });
 
     child.emit("close", 0);
@@ -651,7 +664,10 @@ it("extracts last assistant text from watcher entries as job summary", async () 
       type: "assistant",
       timestamp: Date.now(),
       summary: "",
-      data: { content: [], usage: { output_tokens: 5, cache_read_input_tokens: 10 } },
+      data: {
+        content: [],
+        usage: { output_tokens: 5, cache_read_input_tokens: 10 },
+      },
     });
     emitWatcherEntry({
       type: "assistant",
@@ -663,7 +679,14 @@ it("extracts last assistant text from watcher entries as job summary", async () 
       type: "assistant",
       timestamp: Date.now(),
       summary: "",
-      data: { content: [], usage: { input_tokens: 3, output_tokens: 7, cache_creation_input_tokens: 1 } },
+      data: {
+        content: [],
+        usage: {
+          input_tokens: 3,
+          output_tokens: 7,
+          cache_creation_input_tokens: 1,
+        },
+      },
     });
 
     expect(job.usage).toEqual({
@@ -757,7 +780,7 @@ it("extracts last assistant text from watcher entries as job summary", async () 
     );
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       expect.stringContaining("prompt.md"),
-      expect.stringContaining("<!-- danxbot-dispatch:test-uuid-1234 -->"),
+      expect.stringContaining("/danx-next"),
     );
   });
 
@@ -826,7 +849,12 @@ it("extracts last assistant text from watcher entries as job summary", async () 
 
     // Keep activity going so inactivity doesn't trigger
     await vi.advanceTimersByTimeAsync(60_000);
-    emitWatcherEntry({ type: "assistant", timestamp: Date.now(), summary: "", data: { content: [] } });
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [] },
+    });
     await vi.advanceTimersByTimeAsync(61_000);
 
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
@@ -1279,7 +1307,9 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       openTerminal: true,
     });
 
-    expect(job.terminalLogPath).toBe("/tmp/danxbot-terminal-test-uuid-1234.log");
+    expect(job.terminalLogPath).toBe(
+      "/tmp/danxbot-terminal-test-uuid-1234.log",
+    );
   });
 
   it("does not set job.terminalLogPath when openTerminal is false", async () => {
@@ -1305,7 +1335,9 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     });
 
     const buildCall = mockBuildDispatchScript.mock.calls[0];
-    expect(buildCall[1].prompt).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
+    expect(buildCall[1].prompt).toContain(
+      "<!-- danxbot-dispatch:test-uuid-1234 -->",
+    );
     expect(buildCall[1].prompt).toContain("do the work");
   });
 
@@ -1573,9 +1605,10 @@ describe("cancelJob", () => {
     await vi.advanceTimersByTimeAsync(5_001);
     await cancelPromise;
 
-    const pidSignals = mockKillHostPid.mock.calls.map(
-      (c: unknown[]) => [c[0], c[1]],
-    );
+    const pidSignals = mockKillHostPid.mock.calls.map((c: unknown[]) => [
+      c[0],
+      c[1],
+    ]);
     expect(pidSignals).toContainEqual([555_666, "SIGTERM"]);
     expect(pidSignals).toContainEqual([555_666, "SIGKILL"]);
     expect(job.status).toBe("canceled");
@@ -1719,7 +1752,12 @@ describe("cancelJob", () => {
 
     // Keep inactivity timer from tripping first
     await vi.advanceTimersByTimeAsync(60_000);
-    emitWatcherEntry({ type: "assistant", timestamp: Date.now(), summary: "", data: { content: [] } });
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [] },
+    });
     await vi.advanceTimersByTimeAsync(61_000);
 
     expect(mockKillHostPid).toHaveBeenCalledWith(707_070, "SIGTERM");
