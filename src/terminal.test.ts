@@ -74,11 +74,27 @@ describe("buildDispatchScript", () => {
     expect(content).toContain("TERMINAL_LOG='/tmp/test-terminal.log'");
   });
 
-  it("includes PROMPT_FILE reference to avoid shell quoting issues", () => {
+  it("references PROMPT_FILE via a positional argument (interactive, not -p)", () => {
     const scriptPath = buildScript();
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain("PROMPT_FILE=");
-    expect(content).toContain("$(cat '$PROMPT_FILE')");
+    // Host mode MUST be interactive. The prompt is delivered as a positional
+    // argument pointing at the file — NOT piped via `-p` (which is headless).
+    expect(content).toContain("$PROMPT_FILE");
+    expect(content).toMatch(/"Read \$PROMPT_FILE/);
+  });
+
+  it("MUST NOT invoke claude with -p — host mode is interactive (see .claude/rules/host-mode-interactive.md)", () => {
+    const scriptPath = buildScript();
+    const content = readFileSync(scriptPath, "utf-8");
+    // The -p (print/headless) flag is FORBIDDEN in host terminal mode.
+    // It exits claude after one turn and defeats the entire purpose of this path.
+    // Strip bash comments and check remaining executable lines.
+    const executable = content
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("#"))
+      .join("\n");
+    expect(executable).not.toMatch(/\s-p\s/);
   });
 
   it("includes --dangerously-skip-permissions in the claude invocation", () => {

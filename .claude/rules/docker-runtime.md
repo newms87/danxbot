@@ -1,5 +1,16 @@
 # Docker Runtime
 
+## Runtime Modes: Docker (headless) vs Host (interactive)
+
+Danxbot has two runtime modes, and the distinction is load-bearing:
+
+- **Docker runtime** — the **headless** path. Agents run non-interactively (`claude -p`). No terminal, no user input during the session. Used for production workers.
+- **Host runtime** — the **interactive** path. Every agent dispatch opens a Windows Terminal tab running an interactive Claude Code TUI the user can watch and type into. `claude -p` is FORBIDDEN in this path — it defeats the entire purpose of host mode.
+
+Runtime mode ONLY decides how claude is spawned. Everything else — SessionLogWatcher, StallDetector, LaravelForwarder, heartbeat, MCP tools, usage tracking, completion signaling, cancellation — is identical across both modes. ONE claude process per dispatch, ONE JSONL, ONE watcher.
+
+Read `.claude/rules/agent-dispatch.md` before modifying anything in the dispatch/monitoring path. It is the spec for how this all fits together. For the host-mode interactivity invariant specifically, see `.claude/rules/host-mode-interactive.md`.
+
 ## Architecture: Host-First + Minimal Containers
 
 Danxbot uses a host-first model: the host environment is fully configured before containers start. Containers only run danxbot code (poller, Slack listener, dispatch API, dashboard). They read repo files via bind mounts and connect to pre-existing Docker networks — but never manage other containers.
@@ -121,7 +132,7 @@ The Docker image includes dev tools beyond Node.js:
 
 | File | Purpose |
 |------|---------|
-| `src/index.ts` | Entrypoint: branches into worker, dashboard, or legacy mode |
+| `src/index.ts` | Entrypoint: branches into worker or dashboard mode |
 | `src/worker/server.ts` | Worker HTTP server: /api/launch, /health, /api/status |
 | `src/dashboard/server.ts` | Dashboard HTTP server: API routes + static file serving |
 | `src/agent/launcher.ts` | Unified `spawnAgent()` entrypoint + AgentJob lifecycle |

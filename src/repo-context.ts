@@ -10,7 +10,7 @@ import { getReposBase, loadTrelloIds } from "./poller/constants.js";
 import { parseEnvFile } from "./env-file.js";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
-import { repos, isWorkerMode, workerRepoName, config } from "./config.js";
+import { repos, isWorkerMode, workerRepoName } from "./config.js";
 
 /**
  * Load a single repo's context from its .danxbot/ directory.
@@ -79,29 +79,17 @@ function loadRepoContext(repo: RepoConfig): RepoContext {
 }
 
 /**
- * Load RepoContext for all configured repos.
- * Each repo must have .danxbot/config/trello.yml and .danxbot/.env.
- */
-export function loadRepoContexts(): RepoContext[] {
-  return repos.map(loadRepoContext);
-}
-
-/**
  * All loaded repo contexts. Loaded at startup.
  *
  * Worker mode: loads only the named repo's context (one entry).
  * Dashboard mode: empty — dashboard reads repo names from REPOS env var
  * or the database, not from filesystem-loaded contexts.
- * Host mode (REPOS set, no DANXBOT_REPO_NAME): loads all repos.
  */
 function loadActiveRepoContexts(): RepoContext[] {
   if (isWorkerMode) {
     const existing = repos.find((r) => r.name === workerRepoName);
     const repo = existing || { name: workerRepoName, url: "", localPath: `${getReposBase()}/${workerRepoName}` };
     return [loadRepoContext(repo)];
-  }
-  if (repos.length > 0 && config.runtime === "host") {
-    return loadRepoContexts();
   }
   return [];
 }

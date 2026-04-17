@@ -168,15 +168,13 @@ describe("getRepoPath", () => {
 });
 
 describe("repoContexts", () => {
-  it("loads repo contexts in host mode (legacy single-process)", async () => {
+  it("returns empty in host mode without DANXBOT_REPO_NAME (dashboard mode)", async () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
       DANXBOT_RUNTIME: "host",
     });
-    expect(mod.repoContexts).toHaveLength(1);
-    expect(mod.repoContexts[0].name).toBe("platform");
-    expect(mod.repoContexts[0].trello.boardId).toBe("mock-board-id");
-    expect(mod.repoContexts[0].trello.apiKey).toBe("mock-trello-key");
+    expect(mod.repoContexts).toEqual([]);
+    expect(mod.isDashboardMode).toBe(true);
   });
 
   it("returns empty in docker mode without DANXBOT_REPO_NAME (dashboard mode)", async () => {
@@ -205,16 +203,6 @@ describe("repoContexts", () => {
 });
 
 describe("getRepoContext", () => {
-  it("returns context for a configured repo in host mode", async () => {
-    const mod = await importRepoContext({
-      REPOS: "platform:https://github.com/Flytedesk/platform.git",
-      DANXBOT_RUNTIME: "host",
-    });
-    const ctx = mod.getRepoContext("platform");
-    expect(ctx.name).toBe("platform");
-    expect(ctx.trello.apiKey).toBe("mock-trello-key");
-  });
-
   it("returns context for named repo in worker mode", async () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
@@ -222,12 +210,13 @@ describe("getRepoContext", () => {
     });
     const ctx = mod.getRepoContext("platform");
     expect(ctx.name).toBe("platform");
+    expect(ctx.trello.apiKey).toBe("mock-trello-key");
   });
 
-  it("throws for unknown repo", async () => {
+  it("throws for unknown repo in worker mode", async () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
-      DANXBOT_RUNTIME: "host",
+      DANXBOT_REPO_NAME: "platform",
     });
     expect(() => mod.getRepoContext("unknown")).toThrow('Repo "unknown" is not configured');
   });

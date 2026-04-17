@@ -51,14 +51,33 @@ export function getTerminalLogPath(jobId: string): string {
 }
 
 /**
- * Build a bash script that launches claude interactively with `script -q -f`
- * to capture terminal output, and reports status back on exit via curl.
+ * Build a bash script that launches claude INTERACTIVELY in a host terminal tab.
+ *
+ * ============================================================================
+ * CRITICAL INVARIANT — HOST MODE MUST BE INTERACTIVE. `claude -p` IS FORBIDDEN.
+ * ============================================================================
+ *
+ * The entire point of host runtime is to give the user an interactive Claude Code
+ * TUI they can read, scroll, and type into. Docker runtime handles the headless
+ * case. If this script ever uses `claude -p "<prompt>"`, host mode has no reason
+ * to exist — it becomes a slower, flakier duplicate of docker mode.
+ *
+ * See .claude/rules/host-mode-interactive.md for the full rule.
+ *
+ * Before editing this function, confirm:
+ *   1. The inner `claude` invocation is NOT `-p` and does NOT exit after one turn
+ *   2. The user gets a live TUI they can type into
+ *   3. `script -q -f` wrapping is fine; the process it wraps must still be the
+ *      interactive claude TUI
  *
  * The script:
- * 1. Writes the prompt to a temp file (avoids shell quoting issues)
- * 2. Wraps claude with `script -q -f <terminalLogPath>` so the thinking indicator
- *    (✻) is captured and the StallDetector can detect active vs stuck agents
- * 3. Reports status to statusUrl on completion
+ * 1. Writes the prompt to a temp file (avoids shell quoting issues with long
+ *    or special-character prompts)
+ * 2. Passes the file path as a positional prompt argument — claude reads the
+ *    file and runs interactively, keeping the TUI attached
+ * 3. Wraps claude with `script -q -f <terminalLogPath>` so the ✻ thinking
+ *    indicator is captured for the StallDetector
+ * 4. Reports status to statusUrl on completion
  */
 export function buildDispatchScript(
   settingsDir: string,
@@ -95,10 +114,16 @@ report_status() {
 
 report_status "running" ""
 
+# CRITICAL: Host mode MUST be interactive. The prompt is delivered as a
+# positional argument pointing at the prompt file — NOT piped via -p (headless
+# mode, exits after one turn). See .claude/rules/host-mode-interactive.md.
+# script -q -f wraps the interactive TUI so the ✻ thinking indicator is captured
+# for the StallDetector; the inner claude process remains an attached TUI the
+# user can read and type into.
 script -q -f "$TERMINAL_LOG" -c "claude \\
 ${mcpLine}  --dangerously-skip-permissions \\
   --verbose \\
-${agentsLine}  -p \\"\\$(cat '$PROMPT_FILE')\\""
+${agentsLine}  \\"Read $PROMPT_FILE and execute the task described in it.\\""
 
 EXIT_CODE=$?
 if [ $EXIT_CODE -eq 0 ]; then

@@ -63,12 +63,12 @@ vi.mock("./poller/index.js", () => ({
   start: mockStartPoller,
 }));
 
-// Default: legacy mode (repoContexts populated, no DANXBOT_REPO_NAME)
-// These mocks are overridden in worker/dashboard describe blocks via vi.doMock
+// Default: dashboard mode (no DANXBOT_REPO_NAME, no repo contexts)
+// These mocks are overridden in worker describe blocks via vi.doMock
 let mockIsWorkerMode = false;
 let mockIsDashboardMode = true;
 let mockWorkerRepoName = "";
-let mockRepoContexts = [MOCK_REPO];
+let mockRepoContexts: typeof MOCK_REPO[] = [];
 
 vi.mock("./config.js", () => ({
   get config() { return {}; },
@@ -115,122 +115,6 @@ async function importIndex(): Promise<void> {
 }
 
 // ============================================================
-// Legacy mode tests (repoContexts populated, no DANXBOT_REPO_NAME)
-// ============================================================
-
-describe("legacy mode startup flow", () => {
-  it("calls startup functions without throwing", async () => {
-    await importIndex();
-
-    expect(mockStartThreadCleanup).toHaveBeenCalledOnce();
-    expect(mockLoadEvents).toHaveBeenCalledOnce();
-    expect(mockStartEventCleanup).toHaveBeenCalledOnce();
-    expect(mockStartDashboard).toHaveBeenCalledOnce();
-    expect(mockStartSlackListener).toHaveBeenCalledOnce();
-  });
-
-  it("calls startup functions in correct order", async () => {
-    const callOrder: string[] = [];
-
-    mockRunMigrations.mockImplementation(async () => {
-      callOrder.push("runMigrations");
-    });
-    mockStartThreadCleanup.mockImplementation(() => {
-      callOrder.push("startThreadCleanup");
-      return "mock-thread-interval";
-    });
-    mockLoadEvents.mockImplementation(async () => {
-      callOrder.push("loadEvents");
-    });
-    mockStartEventCleanup.mockImplementation(() => {
-      callOrder.push("startEventCleanup");
-      return "mock-event-interval";
-    });
-    mockStartDashboard.mockImplementation(async () => {
-      callOrder.push("startDashboard");
-    });
-    mockStartSlackListener.mockImplementation(async () => {
-      callOrder.push("startSlackListener");
-    });
-    mockGetSlackClient.mockImplementation(() => {
-      callOrder.push("getSlackClient");
-      return { chat: {} };
-    });
-    mockInitShutdownHandlers.mockImplementation(() => {
-      callOrder.push("initShutdownHandlers");
-    });
-
-    await importIndex();
-
-    expect(callOrder).toEqual([
-      "runMigrations",
-      "startThreadCleanup",
-      "loadEvents",
-      "startEventCleanup",
-      "startDashboard",
-      "startSlackListener",
-      "getSlackClient",
-      "initShutdownHandlers",
-    ]);
-  });
-
-  it("waits for loadEvents to complete before calling startDashboard", async () => {
-    let loadEventsResolve: () => void;
-    const loadEventsPromise = new Promise<void>((resolve) => {
-      loadEventsResolve = resolve;
-    });
-
-    mockLoadEvents.mockReturnValue(loadEventsPromise);
-
-    // Start importing (triggers main())
-    const indexPromise = import("./index.js");
-
-    // Give microtasks a chance to run up to the await
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    // loadEvents has been called but startDashboard should NOT have been called yet
-    expect(mockLoadEvents).toHaveBeenCalledOnce();
-    expect(mockStartDashboard).not.toHaveBeenCalled();
-
-    // Now resolve loadEvents
-    loadEventsResolve!();
-    await indexPromise;
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    // Now startDashboard should have been called
-    expect(mockStartDashboard).toHaveBeenCalledOnce();
-  });
-
-  it("passes threadCleanupInterval, eventCleanupInterval, and slackClient to initShutdownHandlers", async () => {
-    const mockClient = { chat: { update: vi.fn() } };
-    mockStartThreadCleanup.mockReturnValue("test-thread-interval");
-    mockStartEventCleanup.mockReturnValue("test-event-interval");
-    mockGetSlackClient.mockReturnValue(mockClient);
-
-    await importIndex();
-
-    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
-      threadCleanupInterval: "test-thread-interval",
-      eventCleanupInterval: "test-event-interval",
-      slackClient: mockClient,
-    });
-  });
-
-  it("calls process.exit(1) on fatal startup error", async () => {
-    const mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
-
-    const startupError = new Error("Database connection failed");
-    mockLoadEvents.mockRejectedValue(startupError);
-
-    await importIndex();
-
-    expect(mockExit).toHaveBeenCalledWith(1);
-
-    mockExit.mockRestore();
-  });
-});
-
-// ============================================================
 // Worker mode tests (DANXBOT_REPO_NAME set)
 // ============================================================
 
@@ -243,11 +127,11 @@ describe("worker mode startup flow", () => {
   });
 
   afterEach(() => {
-    // Reset to legacy defaults
+    // Reset to dashboard defaults
     mockIsWorkerMode = false;
     mockIsDashboardMode = true;
     mockWorkerRepoName = "";
-    mockRepoContexts = [MOCK_REPO];
+    mockRepoContexts = [];
   });
 
   it("calls startWorkerServer with repo context", async () => {
@@ -342,8 +226,7 @@ describe("dashboard mode startup flow", () => {
   });
 
   afterEach(() => {
-    // Reset to legacy defaults
-    mockRepoContexts = [MOCK_REPO];
+    mockRepoContexts = [];
   });
 
   it("runs migrations", async () => {

@@ -10,8 +10,8 @@ Persistent memory for the Ideator agent. Scope: `danxbot` (Danxbot codebase only
 |---------|--------|-------|
 | Multi-repo worker/dashboard split | Complete | Worker per repo (poller + Slack + dispatch API), shared dashboard container |
 | Repo context loading (REPOS env + per-repo .danxbot/.env) | Complete | loadRepoContext() parses config.yml + trello.yml + .env secrets |
-| Dashboard/worker mode detection | Complete | DANXBOT_REPO_NAME determines mode; legacy host mode for backwards compat |
-| Startup entrypoint (src/index.ts) | Complete | Branches cleanly into startDashboardMode / startWorkerMode / startLegacyMode |
+| Dashboard/worker mode detection | Complete | DANXBOT_REPO_NAME determines mode (worker if set, dashboard otherwise) |
+| Startup entrypoint (src/index.ts) | Complete | Branches cleanly into startWorkerMode or startDashboardMode |
 | Config validation on startup | Complete | validateConfig() checks all numeric bounds; validateRepoConfig() checks files + env vars |
 | POLLER_ENABLED flag | Complete | config.pollerEnabled; start() returns early with log message when false |
 

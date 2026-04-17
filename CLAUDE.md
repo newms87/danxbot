@@ -2,6 +2,12 @@
 
 An autonomous AI agent powered by Claude Code SDK. Connects to a repo, processes Trello cards, and optionally answers questions via Slack. Run `./install.sh` for interactive setup.
 
+## CRITICAL: Read Before Touching Agent Dispatch
+
+Dispatch, monitoring, completion, and runtime modes have a tight design contract. Before editing `src/agent/launcher.ts`, `src/terminal.ts`, `src/agent/session-log-watcher.ts`, `src/agent/stall-detector.ts`, `src/agent/laravel-forwarder.ts`, `src/mcp/danxbot-server.ts`, or `src/worker/dispatch.ts`, read `.claude/rules/agent-dispatch.md`. That file describes the single-fork principle (one claude per dispatch, runtime only decides how it's spawned), the JSONL-watcher-only monitoring rule, and the completion-signaling flow. Regressions in this area are expensive — the doc exists to stop them.
+
+**Host mode invariant:** `claude -p` is forbidden anywhere in the host-mode terminal spawning path. Host runtime exists ONLY to give the user an interactive TUI; `-p` makes it headless. See `.claude/rules/host-mode-interactive.md`.
+
 ## Setup
 
 Run `./install.sh` to launch the interactive setup wizard. It checks prerequisites, installs dependencies, and launches `claude '/setup'` which guides you through:
@@ -29,7 +35,7 @@ Danxbot's own `.env` keeps only shared infrastructure: ANTHROPIC_API_KEY, CLAUDE
 
 Each repo also needs MCP credentials in `<repo>/.claude/settings.local.json` (gitignored) under the `env` key — Claude Code does not load `.env` files for MCP servers. Required vars: `MCP_TRELLO_PATH`, `TRELLO_API_KEY`, `TRELLO_API_TOKEN`. See `docker-runtime.md` for details.
 
-Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists all repos: `platform:url,danxbot:url`. At startup, `loadRepoContexts()` builds a `RepoContext[]` array from each repo's config. All services (poller, Slack, agent) receive `RepoContext` as a parameter.
+Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists all repos: `platform:url,danxbot:url`. In worker mode, `loadRepoContext()` builds the single active `RepoContext` from the named repo's config. The dashboard reads the repo list directly from `REPOS`. All services (poller, Slack, agent) receive `RepoContext` as a parameter.
 
 ### Agent Tools
 
