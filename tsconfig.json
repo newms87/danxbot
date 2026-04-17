@@ -8,11 +8,10 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "outDir": "dist",
-    "rootDir": "src",
     "declaration": true,
     "resolveJsonModule": true,
     "isolatedModules": true
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*", "deploy/**/*"],
   "exclude": ["node_modules", "dist"]
 }

@@ -21,7 +21,8 @@
     "@anthropic-ai/sdk": "^0.74.0",
     "@slack/bolt": "^4.1.0",
     "@thehammer/schema-mcp-server": "^1.0.3",
-    "mysql2": "^3.17.1"
+    "mysql2": "^3.17.1",
+    "yaml": "^2.3.4"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

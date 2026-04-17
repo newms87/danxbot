@@ -2,8 +2,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    root: "src",
     restoreMocks: true,
-    exclude: ["**/__tests__/validation/**"],
+    include: ["src/**/*.test.ts", "deploy/**/*.test.ts"],
+    exclude: ["**/__tests__/validation/**", "**/node_modules/**"],
   },
 });
