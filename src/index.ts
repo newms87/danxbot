@@ -6,6 +6,7 @@ import { loadEvents, startEventCleanup } from "./dashboard/events.js";
 import { initShutdownHandlers } from "./shutdown.js";
 import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
+import { initPlatformPool } from "./db/connection.js";
 import { isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
 import { start as startPoller } from "./poller/index.js";
@@ -43,6 +44,10 @@ async function startWorkerMode(): Promise<void> {
   if (!repo) {
     throw new Error(`Worker mode: no repo context loaded for "${workerRepoName}"`);
   }
+
+  // Platform pool must be ready before any sql:execute block runs.
+  // Disabled repos skip pool creation.
+  initPlatformPool(repo.db);
 
   // Start the worker HTTP server (dispatch API + health)
   await startWorkerServer(repo);

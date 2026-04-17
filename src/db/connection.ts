@@ -1,6 +1,7 @@
 import mysql from "mysql2/promise";
 import type { Pool, PoolOptions } from "mysql2/promise";
 import { config } from "../config.js";
+import type { RepoDatabaseConfig } from "../types.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("db");
@@ -10,6 +11,7 @@ const CONNECTION_LIMIT = 5;
 let pool: Pool | null = null;
 let adminPool: Pool | null = null;
 let platformPool: Pool | null = null;
+let platformPoolInitialized = false;
 
 interface DbConfig {
   host: string;
@@ -90,17 +92,32 @@ export async function closeAdminPool(): Promise<void> {
 }
 
 /**
- * Get a connection pool connected to a repo's database.
- * Used for executing SQL queries against the connected repo's platform DB.
- * The caller provides the repo's database config from its RepoContext.
+ * Initialize the platform database pool from the repo's database config.
+ * Called once at worker startup. No-op when the repo has db.enabled=false
+ * (the repo has no platform DB configured and no consumer will call
+ * getPlatformPool). Throws if called a second time — initialization is
+ * a startup responsibility; a second call indicates a bug.
  */
-export function getPlatformPool(dbConfig?: DbConfig): Pool {
+export function initPlatformPool(repoDb: RepoDatabaseConfig): void {
+  if (platformPoolInitialized) {
+    throw new Error("Platform pool already initialized — initPlatformPool must be called exactly once at worker startup");
+  }
+  platformPoolInitialized = true;
+  if (!repoDb.enabled) return;
+  log.info("Creating platform database pool");
+  platformPool = mysql.createPool(createPoolOptions(repoDb));
+}
+
+/**
+ * Get the initialized platform pool. Throws when the pool is unavailable —
+ * either initPlatformPool was never called (a wiring bug) or the repo's
+ * db.enabled is false (the repo has no platform DB configured).
+ */
+export function getPlatformPool(): Pool {
   if (!platformPool) {
-    if (!dbConfig) {
-      throw new Error("Platform pool not initialized — call getPlatformPool(dbConfig) first");
-    }
-    log.info("Creating platform database pool");
-    platformPool = mysql.createPool(createPoolOptions(dbConfig));
+    throw new Error(
+      "Platform DB pool not available — repo has db.enabled=false (no DANX_DB_HOST/DANX_DB_USER in .danxbot/.env) or initPlatformPool was not called at worker startup",
+    );
   }
   return platformPool;
 }
@@ -113,4 +130,5 @@ export async function closePlatformPool(): Promise<void> {
     await platformPool.end();
     platformPool = null;
   }
+  platformPoolInitialized = false;
 }

@@ -24,14 +24,6 @@ vi.mock("../config.js", () => ({
       database: "danxbot_chat",
       connectTimeoutMs: 5000,
     },
-    platform: {
-      db: {
-        host: "platform-host",
-        user: "platform-user",
-        password: "platform-pass",
-        database: "platform-db",
-      },
-    },
   },
 }));
 
@@ -44,10 +36,17 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
-import { getPool, getAdminPool, closePool, closeAdminPool, getPlatformPool, closePlatformPool } from "./connection.js";
+import {
+  getPool,
+  getAdminPool,
+  closePool,
+  closeAdminPool,
+  getPlatformPool,
+  initPlatformPool,
+  closePlatformPool,
+} from "./connection.js";
 
 beforeEach(() => {
-  vi.resetModules();
   vi.clearAllMocks();
 });
 
@@ -185,13 +184,14 @@ const PLATFORM_DB_CONFIG = {
   user: "platform-user",
   password: "platform-pass",
   database: "platform-db",
+  enabled: true,
 };
 
-describe("getPlatformPool", () => {
-  it("creates a pool with the platform database config", async () => {
+describe("initPlatformPool", () => {
+  it("creates a pool with the provided repo db config", async () => {
     vi.resetModules();
     const mod = await import("./connection.js");
-    const pool = mod.getPlatformPool(PLATFORM_DB_CONFIG);
+    mod.initPlatformPool(PLATFORM_DB_CONFIG);
 
     expect(mockCreatePool).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -201,23 +201,12 @@ describe("getPlatformPool", () => {
         database: "platform-db",
       }),
     );
-    expect(pool).toBe(mockPool);
   });
 
-  it("returns the same pool on subsequent calls", async () => {
+  it("applies shared pool settings (connectionLimit, waitForConnections, connectTimeout)", async () => {
     vi.resetModules();
     const mod = await import("./connection.js");
-    const pool1 = mod.getPlatformPool(PLATFORM_DB_CONFIG);
-    const pool2 = mod.getPlatformPool();
-
-    expect(pool1).toBe(pool2);
-    expect(mockCreatePool).toHaveBeenCalledTimes(1);
-  });
-
-  it("uses shared pool settings (connectionLimit, waitForConnections, connectTimeout)", async () => {
-    vi.resetModules();
-    const mod = await import("./connection.js");
-    mod.getPlatformPool(PLATFORM_DB_CONFIG);
+    mod.initPlatformPool(PLATFORM_DB_CONFIG);
 
     expect(mockCreatePool).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -228,10 +217,68 @@ describe("getPlatformPool", () => {
     );
   });
 
-  it("throws when called without dbConfig and pool not initialized", async () => {
+  it("is a no-op when db.enabled is false", async () => {
     vi.resetModules();
     const mod = await import("./connection.js");
-    expect(() => mod.getPlatformPool()).toThrow("Platform pool not initialized");
+    mod.initPlatformPool({ ...PLATFORM_DB_CONFIG, enabled: false });
+
+    expect(mockCreatePool).not.toHaveBeenCalled();
+    expect(() => mod.getPlatformPool()).toThrow(/db\.enabled=false/);
+  });
+
+  it("throws when called a second time — startup-only contract", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.initPlatformPool(PLATFORM_DB_CONFIG);
+
+    expect(() => mod.initPlatformPool(PLATFORM_DB_CONFIG)).toThrow(/already initialized/);
+    expect(mockCreatePool).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws on second call even if the first call was a disabled no-op", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.initPlatformPool({ ...PLATFORM_DB_CONFIG, enabled: false });
+
+    expect(() => mod.initPlatformPool(PLATFORM_DB_CONFIG)).toThrow(/already initialized/);
+  });
+
+  it("can be re-initialized after closePlatformPool — supports startup/shutdown lifecycle", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.initPlatformPool(PLATFORM_DB_CONFIG);
+    await mod.closePlatformPool();
+    mod.initPlatformPool(PLATFORM_DB_CONFIG);
+
+    expect(mockCreatePool).toHaveBeenCalledTimes(2);
+    expect(mod.getPlatformPool()).toBe(mockPool);
+  });
+});
+
+describe("getPlatformPool", () => {
+  it("returns the pool created by initPlatformPool", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.initPlatformPool(PLATFORM_DB_CONFIG);
+
+    expect(mod.getPlatformPool()).toBe(mockPool);
+  });
+
+  it("returns the same pool on subsequent calls", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    mod.initPlatformPool(PLATFORM_DB_CONFIG);
+    const pool1 = mod.getPlatformPool();
+    const pool2 = mod.getPlatformPool();
+
+    expect(pool1).toBe(pool2);
+    expect(mockCreatePool).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws an actionable error when called before initPlatformPool", async () => {
+    vi.resetModules();
+    const mod = await import("./connection.js");
+    expect(() => mod.getPlatformPool()).toThrow(/initPlatformPool/);
   });
 });
 
@@ -239,7 +286,7 @@ describe("closePlatformPool", () => {
   it("calls end on the platform pool", async () => {
     vi.resetModules();
     const mod = await import("./connection.js");
-    mod.getPlatformPool(PLATFORM_DB_CONFIG);
+    mod.initPlatformPool(PLATFORM_DB_CONFIG);
     await mod.closePlatformPool();
 
     expect(mockPool.end).toHaveBeenCalled();

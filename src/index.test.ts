@@ -13,6 +13,7 @@ const mockGetSlackClient = vi.fn().mockReturnValue({ chat: {} });
 const mockInitShutdownHandlers = vi.fn();
 const mockRunMigrations = vi.fn().mockResolvedValue(undefined);
 const mockStartPoller = vi.fn();
+const mockInitPlatformPool = vi.fn();
 
 const MOCK_REPO = makeRepoContext();
 
@@ -57,6 +58,16 @@ vi.mock("./shutdown.js", () => ({
 
 vi.mock("./db/migrate.js", () => ({
   runMigrations: mockRunMigrations,
+}));
+
+vi.mock("./db/connection.js", () => ({
+  initPlatformPool: mockInitPlatformPool,
+  getPlatformPool: vi.fn(),
+  closePlatformPool: vi.fn(),
+  getPool: vi.fn(),
+  getAdminPool: vi.fn(),
+  closePool: vi.fn(),
+  closeAdminPool: vi.fn(),
 }));
 
 vi.mock("./poller/index.js", () => ({
@@ -138,6 +149,13 @@ describe("worker mode startup flow", () => {
     await importIndex();
 
     expect(mockStartWorkerServer).toHaveBeenCalledWith(MOCK_REPO);
+  });
+
+  it("calls initPlatformPool with repo.db before starting the worker server", async () => {
+    await importIndex();
+
+    expect(mockInitPlatformPool).toHaveBeenCalledWith(MOCK_REPO.db);
+    expect(mockInitPlatformPool).toHaveBeenCalledBefore(mockStartWorkerServer);
   });
 
   it("starts poller", async () => {
@@ -260,6 +278,12 @@ describe("dashboard mode startup flow", () => {
     await importIndex();
 
     expect(mockStartWorkerServer).not.toHaveBeenCalled();
+  });
+
+  it("does NOT initialize the platform pool", async () => {
+    await importIndex();
+
+    expect(mockInitPlatformPool).not.toHaveBeenCalled();
   });
 
   it("calls initShutdownHandlers with cleanup intervals", async () => {
