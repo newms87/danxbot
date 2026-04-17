@@ -39,6 +39,13 @@ export interface DispatchScriptOptions {
   apiToken: string;
   /** Path where terminal output is captured by `script -q -f` */
   terminalLogPath: string;
+  /**
+   * Absolute path where the bash script writes its own PID ($$) before
+   * launching claude. Host-mode dispatches read this to track the running
+   * process so they can SIGTERM it on cancel/stop/timeout without spawning a
+   * second claude.
+   */
+  pidFilePath?: string;
 }
 
 /**
@@ -93,6 +100,23 @@ export function buildDispatchScript(
   // Write the prompt to disk to avoid shell quoting issues with special characters
   writeFileSync(promptFile, options.prompt, "utf-8");
 
+  const pidFileLine = options.pidFilePath
+    ? `PID_FILE='${options.pidFilePath}'\n`
+    : "";
+  // Writing $$ BEFORE exec'ing script -q -f captures the bash PID while it's
+  // still bash. Immediately after, `exec` replaces bash with `script` in-place —
+  // the PID stays the same, which means the value in PID_FILE is NOW the PID
+  // of `script` (the parent of claude's pty). SIGTERM to that PID tears down
+  // script -> claude cleanly. The terminal tab closes when script exits.
+  //
+  // This is how `.claude/rules/agent-dispatch.md` specifies the cascade:
+  // "killing the claude PID causes the bash script to exit and the Windows
+  // Terminal tab to close". `exec` is the idiom that makes bash and script
+  // the SAME tracked PID, avoiding orphan claude processes on cancel.
+  const pidEmit = options.pidFilePath
+    ? `echo $$ > "$PID_FILE"\n`
+    : "";
+
   const scriptPath = join(settingsDir, "run-agent.sh");
   writeFileSync(
     scriptPath,
@@ -104,7 +128,7 @@ STATUS_URL='${options.statusUrl || ""}'
 API_TOKEN='${options.apiToken}'
 TERMINAL_LOG='${options.terminalLogPath}'
 PROMPT_FILE='${promptFile}'
-
+${pidFileLine}
 report_status() {
   [ -n "$STATUS_URL" ] && curl -s -X PUT "$STATUS_URL" \\
     -H "Content-Type: application/json" \\
@@ -113,27 +137,25 @@ report_status() {
 }
 
 report_status "running" ""
-
+${pidEmit}
 # CRITICAL: Host mode MUST be interactive. The prompt is delivered as a
 # positional argument pointing at the prompt file — NOT piped via -p (headless
 # mode, exits after one turn). See .claude/rules/host-mode-interactive.md.
+#
+# \`exec\` replaces this bash process with \`script\` in place, keeping the PID
+# stable. Without exec, a SIGTERM to our bash PID may not reliably propagate
+# to script+claude — exec makes \$\$ (what we wrote to PID_FILE) equal to the
+# PID that actually wraps claude, so cancellation becomes a single, clean
+# SIGTERM. Post-claude status reporting is handled by the node-side launcher
+# (putStatus), so the bash "report exit code" branches are no longer needed.
+#
 # script -q -f wraps the interactive TUI so the ✻ thinking indicator is captured
 # for the StallDetector; the inner claude process remains an attached TUI the
 # user can read and type into.
-script -q -f "$TERMINAL_LOG" -c "claude \\
+exec script -q -f "$TERMINAL_LOG" -c "claude \\
 ${mcpLine}  --dangerously-skip-permissions \\
   --verbose \\
 ${agentsLine}  \\"Read $PROMPT_FILE and execute the task described in it.\\""
-
-EXIT_CODE=$?
-if [ $EXIT_CODE -eq 0 ]; then
-  report_status "completed" "Agent completed successfully"
-else
-  report_status "failed" "Process exited with code $EXIT_CODE"
-fi
-echo ""
-echo "Agent finished (exit code $EXIT_CODE). Press Enter to close."
-read
 `,
   );
   chmodSync(scriptPath, 0o755);

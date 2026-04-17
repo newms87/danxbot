@@ -55,13 +55,16 @@ export function logPromptToDisk(
 }
 
 /**
- * Create an inactivity timer that kills the child process after a period of no
+ * Create an inactivity timer that kills the agent process after a period of no
  * watcher activity. Returns reset/clear functions. Callers attach `reset()` to
  * `SessionLogWatcher.onEntry` — the single source of truth for agent activity
  * (see `.claude/rules/agent-dispatch.md`). Stdout is not a monitoring channel.
+ *
+ * `killProcess` abstracts the runtime difference: docker mode closes over a
+ * `ChildProcess.kill`; host mode closes over a PID-based `process.kill(pid, signal)`.
  */
 export function createInactivityTimer(
-  child: ChildProcess,
+  killProcess: (signal: NodeJS.Signals) => void,
   timeoutMs: number,
   onTimeout: (job: AgentJob) => void,
   job: AgentJob,
@@ -75,7 +78,7 @@ export function createInactivityTimer(
         log.info(
           `[Job ${job.id}] Inactivity timeout — no output for ${timeoutMs / 1000}s — killing process`,
         );
-        child.kill("SIGTERM");
+        killProcess("SIGTERM");
         job.status = "timeout";
         job.summary = `Agent timed out after ${Math.round(timeoutMs / 1000)} seconds of inactivity`;
         job.completedAt = new Date();

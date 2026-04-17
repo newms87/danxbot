@@ -121,31 +121,25 @@ describe("createInactivityTimer", () => {
     };
   }
 
-  function makeFakeChild() {
-    const emitter = new EventEmitter() as NodeJS.EventEmitter & { kill: ReturnType<typeof vi.fn> };
-    emitter.kill = vi.fn();
-    return emitter;
-  }
-
-  it("fires onTimeout after timeoutMs and kills the process", () => {
+  it("fires onTimeout after timeoutMs and kills the process via the injected kill fn", () => {
     const job = makeJob();
-    const child = makeFakeChild();
+    const killProcess = vi.fn();
     const onTimeout = vi.fn();
 
-    createInactivityTimer(child as never, 5000, onTimeout, job);
+    createInactivityTimer(killProcess, 5000, onTimeout, job);
 
     vi.advanceTimersByTime(5000);
-    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(killProcess).toHaveBeenCalledWith("SIGTERM");
     expect(onTimeout).toHaveBeenCalledWith(job);
     expect(job.status).toBe("timeout");
   });
 
   it("reset() restarts the clock and prevents premature timeout", () => {
     const job = makeJob();
-    const child = makeFakeChild();
+    const killProcess = vi.fn();
     const onTimeout = vi.fn();
 
-    const timer = createInactivityTimer(child as never, 5000, onTimeout, job);
+    const timer = createInactivityTimer(killProcess, 5000, onTimeout, job);
 
     vi.advanceTimersByTime(4000);
     timer.reset();
@@ -158,10 +152,10 @@ describe("createInactivityTimer", () => {
 
   it("clear() cancels the pending timeout", () => {
     const job = makeJob();
-    const child = makeFakeChild();
+    const killProcess = vi.fn();
     const onTimeout = vi.fn();
 
-    const timer = createInactivityTimer(child as never, 5000, onTimeout, job);
+    const timer = createInactivityTimer(killProcess, 5000, onTimeout, job);
     timer.clear();
     vi.advanceTimersByTime(10000);
     expect(onTimeout).not.toHaveBeenCalled();
@@ -169,10 +163,10 @@ describe("createInactivityTimer", () => {
 
   it("does not fire onTimeout when job is no longer 'running'", () => {
     const job = makeJob();
-    const child = makeFakeChild();
+    const killProcess = vi.fn();
     const onTimeout = vi.fn();
 
-    createInactivityTimer(child as never, 5000, onTimeout, job);
+    createInactivityTimer(killProcess, 5000, onTimeout, job);
     job.status = "completed";
     vi.advanceTimersByTime(5000);
     expect(onTimeout).not.toHaveBeenCalled();

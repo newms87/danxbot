@@ -74,6 +74,15 @@ describe("buildDispatchScript", () => {
     expect(content).toContain("TERMINAL_LOG='/tmp/test-terminal.log'");
   });
 
+  it("exec's script -q -f so bash is replaced in-place (PID cascade integrity)", () => {
+    const scriptPath = buildScript();
+    const content = readFileSync(scriptPath, "utf-8");
+    // `exec` is load-bearing: it makes the bash PID the same as the PID of
+    // `script` (claude's parent), which makes the PID written to PID_FILE
+    // usable for SIGTERM without spawning orphan claude processes.
+    expect(content).toMatch(/^exec script -q -f /m);
+  });
+
   it("references PROMPT_FILE via a positional argument (interactive, not -p)", () => {
     const scriptPath = buildScript();
     const content = readFileSync(scriptPath, "utf-8");
@@ -141,12 +150,14 @@ describe("buildDispatchScript", () => {
     expect(content).toContain("STATUS_URL=''");
   });
 
-  it("includes report_status curl calls for completion and failure", () => {
+  it("defines and invokes report_status with the running state before claude starts", () => {
+    // The post-exec 'completed'/'failed' branches are gone: node-side putStatus
+    // handles terminal status transitions. The 'running' PUT still fires before
+    // exec so the upstream caller learns the dispatch actually reached claude.
     const scriptPath = buildScript({ statusUrl: "http://example.com/status" });
     const content = readFileSync(scriptPath, "utf-8");
-    expect(content).toContain("report_status");
-    expect(content).toContain('"completed"');
-    expect(content).toContain('"failed"');
+    expect(content).toContain("report_status() {");
+    expect(content).toContain('report_status "running"');
   });
 
   it("guard in report_status skips curl when STATUS_URL is empty", () => {
@@ -154,5 +165,29 @@ describe("buildDispatchScript", () => {
     const content = readFileSync(scriptPath, "utf-8");
     // The guard should be present: [ -n "$STATUS_URL" ]
     expect(content).toContain('[ -n "$STATUS_URL" ]');
+  });
+
+  it("writes its PID ($$) to pidFilePath before launching claude", () => {
+    const pidFile = join(dir, "claude.pid");
+    const scriptPath = buildScript({ pidFilePath: pidFile });
+    const content = readFileSync(scriptPath, "utf-8");
+
+    expect(content).toContain(`PID_FILE='${pidFile}'`);
+    expect(content).toMatch(/echo \$\$ > "\$PID_FILE"/);
+
+    // The PID write must appear BEFORE the script/claude invocation so the
+    // launcher can read it while claude is starting up.
+    const pidIndex = content.indexOf("echo $$");
+    const claudeIndex = content.indexOf("script -q -f");
+    expect(pidIndex).toBeGreaterThan(-1);
+    expect(claudeIndex).toBeGreaterThan(-1);
+    expect(pidIndex).toBeLessThan(claudeIndex);
+  });
+
+  it("does not emit PID_FILE when pidFilePath is omitted", () => {
+    const scriptPath = buildScript({ pidFilePath: undefined });
+    const content = readFileSync(scriptPath, "utf-8");
+    expect(content).not.toMatch(/PID_FILE=/);
+    expect(content).not.toMatch(/echo \$\$ > "\$PID_FILE"/);
   });
 });

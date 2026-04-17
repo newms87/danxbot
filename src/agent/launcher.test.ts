@@ -64,7 +64,39 @@ vi.mock("../terminal.js", () => ({
   spawnInTerminal: (...args: unknown[]) => mockSpawnInTerminal(...args),
 }));
 
-import { spawnAgent, cancelJob } from "./launcher.js";
+// Host-mode PID tracking — mocked at the module boundary so launcher unit
+// tests don't touch the real filesystem or call process.kill.
+const mockReadPidFileWithTimeout = vi.fn();
+const mockHostExitWatchers: Array<{
+  onExit: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+  fire: () => void;
+}> = [];
+const mockCreateHostExitWatcher = vi.fn().mockImplementation(() => {
+  const callbacks: Array<() => void> = [];
+  const watcher = {
+    onExit: vi.fn((cb: () => void) => {
+      callbacks.push(cb);
+    }),
+    stop: vi.fn(),
+    fire: () => {
+      for (const cb of callbacks) cb();
+      callbacks.length = 0;
+    },
+  };
+  mockHostExitWatchers.push(watcher);
+  return watcher;
+});
+const mockIsPidAlive = vi.fn().mockReturnValue(true);
+const mockKillHostPid = vi.fn();
+vi.mock("./host-pid.js", () => ({
+  readPidFileWithTimeout: (...args: unknown[]) => mockReadPidFileWithTimeout(...args),
+  createHostExitWatcher: (...args: unknown[]) => mockCreateHostExitWatcher(...args),
+  isPidAlive: (...args: unknown[]) => mockIsPidAlive(...args),
+  killHostPid: (...args: unknown[]) => mockKillHostPid(...args),
+}));
+
+import { spawnAgent, cancelJob, type AgentJob } from "./launcher.js";
 
 function createMockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -769,7 +801,12 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     mockWatcherEntryCallbacks.length = 0;
+    mockHostExitWatchers.length = 0;
     mockMkdtempSync.mockReturnValue("/tmp/danxbot-mcp-test");
+    // Default host-mode setup: PID file resolves to a fake PID, liveness check
+    // says the process is alive. Individual tests override as needed.
+    mockReadPidFileWithTimeout.mockResolvedValue(424242);
+    mockIsPidAlive.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -804,9 +841,6 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
   });
 
   it("calls buildDispatchScript and spawnInTerminal when openTerminal is true", async () => {
-    const child = createMockChildProcess();
-    mockSpawn.mockReturnValue(child);
-    // spawnAgent only calls mkdtempSync once (for the terminal settings dir)
     mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-test");
 
     await spawnAgent({
@@ -824,6 +858,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
         jobId: "test-uuid-1234",
         terminalLogPath: "/tmp/danxbot-terminal-test-uuid-1234.log",
         apiToken: "test-token",
+        pidFilePath: "/tmp/danxbot-term-test/claude.pid",
       }),
     );
     expect(mockSpawnInTerminal).toHaveBeenCalledWith(
@@ -835,10 +870,86 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     );
   });
 
-  it("sets job.terminalLogPath when openTerminal is true", async () => {
-    const child = createMockChildProcess();
-    mockSpawn.mockReturnValue(child);
+  it("does NOT spawn a headless claude process when openTerminal is true — single-fork invariant", async () => {
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
 
+    // `mockSpawn` is the spy on node:child_process.spawn — the only caller in
+    // launcher.ts is the headless `spawn("claude", ...)` path. Host mode must
+    // never reach it.
+    const claudeSpawns = mockSpawn.mock.calls.filter(
+      (c: unknown[]) => c[0] === "claude",
+    );
+    expect(claudeSpawns).toHaveLength(0);
+  });
+
+  it("reads the host-mode PID file and stores job.claudePid", async () => {
+    mockReadPidFileWithTimeout.mockResolvedValue(987654);
+    mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-pid");
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    expect(mockReadPidFileWithTimeout).toHaveBeenCalledWith(
+      "/tmp/danxbot-term-pid/claude.pid",
+      2_000,
+      50,
+    );
+    expect(job.claudePid).toBe(987654);
+    expect(job.process).toBeUndefined();
+  });
+
+  it("attaches a host exit watcher to the tracked PID", async () => {
+    mockReadPidFileWithTimeout.mockResolvedValue(111222);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    expect(mockCreateHostExitWatcher).toHaveBeenCalledWith(111222, 500);
+    expect(job.hostExitWatcher).toBeDefined();
+  });
+
+  it("transitions the job to completed when the host-mode PID exits", async () => {
+    mockReadPidFileWithTimeout.mockResolvedValue(333444);
+    const onComplete = vi.fn();
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+      onComplete,
+    });
+
+    // Simulate a final assistant message being written to JSONL
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "test",
+      data: { content: [{ type: "text", text: "Task done" }] },
+    });
+
+    // Simulate claude PID going away
+    mockHostExitWatchers[0]!.fire();
+
+    expect(job.status).toBe("completed");
+    expect(job.summary).toBe("Task done");
+    expect(onComplete).toHaveBeenCalledWith(job);
+  });
+
+  it("sets job.terminalLogPath when openTerminal is true", async () => {
     const job = await spawnAgent({
       prompt: "/danx-next",
       repoName: "platform",
@@ -864,9 +975,6 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
   });
 
   it("passes tagged prompt to buildDispatchScript", async () => {
-    const child = createMockChildProcess();
-    mockSpawn.mockReturnValue(child);
-
     await spawnAgent({
       prompt: "do the work",
       repoName: "platform",
@@ -880,9 +988,6 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
   });
 
   it("serializes agents array as agentsJson when openTerminal is true", async () => {
-    const child = createMockChildProcess();
-    mockSpawn.mockReturnValue(child);
-
     const agents = [{ name: "Validator" }, { name: "TestReviewer" }];
 
     await spawnAgent({
@@ -898,9 +1003,6 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
   });
 
   it("omits agentsJson when agents array is empty", async () => {
-    const child = createMockChildProcess();
-    mockSpawn.mockReturnValue(child);
-
     await spawnAgent({
       prompt: "/danx-next",
       repoName: "platform",
@@ -914,8 +1016,6 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
   });
 
   it("cleans up terminal settings temp dir when job exits", async () => {
-    const child = createMockChildProcess();
-    mockSpawn.mockReturnValue(child);
     mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-cleanup-test");
 
     await spawnAgent({
@@ -925,11 +1025,40 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       openTerminal: true,
     });
 
-    child.emit("close", 0);
+    // Simulate the host claude PID going away
+    mockHostExitWatchers[0]!.fire();
     await vi.advanceTimersByTimeAsync(0);
 
     expect(mockRmSync).toHaveBeenCalledWith(
       "/tmp/danxbot-term-cleanup-test",
+      expect.objectContaining({ recursive: true }),
+    );
+  });
+
+  it("fails the job and runs cleanup when readPidFileWithTimeout rejects", async () => {
+    mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-timeout");
+    const pidErr = new Error("Timed out after 2000ms waiting for PID file");
+    mockReadPidFileWithTimeout.mockRejectedValue(pidErr);
+    const onComplete = vi.fn();
+
+    await expect(
+      spawnAgent({
+        prompt: "/danx-next",
+        repoName: "platform",
+        timeoutMs: 300_000,
+        openTerminal: true,
+        onComplete,
+      }),
+    ).rejects.toThrow(/Timed out after 2000ms/);
+
+    // onComplete must fire so the caller's lifecycle tracking runs even on spawn failure
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    const job = onComplete.mock.calls[0]![0] as AgentJob;
+    expect(job.status).toBe("failed");
+    expect(job.summary).toContain("Host-mode spawn failed");
+    // Temp dir must be removed — no resource leak on failure
+    expect(mockRmSync).toHaveBeenCalledWith(
+      "/tmp/danxbot-term-timeout",
       expect.objectContaining({ recursive: true }),
     );
   });
@@ -1096,5 +1225,77 @@ describe("cancelJob", () => {
     await cancelJob(job, "test-token");
 
     expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // Host-mode cancellation: no ChildProcess, just a tracked PID.
+  // ──────────────────────────────────────────────────────────────
+
+  it("sends SIGTERM + SIGKILL via killHostPid when canceling a host-mode job", async () => {
+    mockHostExitWatchers.length = 0;
+    mockReadPidFileWithTimeout.mockResolvedValue(555_666);
+    mockIsPidAlive.mockReturnValue(true);
+
+    const job = await spawnAgent({
+      prompt: "host task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    const cancelPromise = cancelJob(job, "tok");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    const pidSignals = mockKillHostPid.mock.calls.map(
+      (c: unknown[]) => [c[0], c[1]],
+    );
+    expect(pidSignals).toContainEqual([555_666, "SIGTERM"]);
+    expect(pidSignals).toContainEqual([555_666, "SIGKILL"]);
+    expect(job.status).toBe("canceled");
+  });
+
+  it("skips SIGKILL in host mode when isPidAlive returns false after SIGTERM", async () => {
+    mockHostExitWatchers.length = 0;
+    mockReadPidFileWithTimeout.mockResolvedValue(777_888);
+    // First call (during alive-check before SIGKILL) returns false — the
+    // process already exited on SIGTERM, so SIGKILL must NOT follow.
+    mockIsPidAlive.mockReturnValue(false);
+
+    const job = await spawnAgent({
+      prompt: "host task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    const cancelPromise = cancelJob(job, "tok");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    const signals = mockKillHostPid.mock.calls.map((c: unknown[]) => c[1]);
+    expect(signals).toContain("SIGTERM");
+    expect(signals).not.toContain("SIGKILL");
+  });
+
+  it("job.stop targets the tracked PID in host mode and transitions to completed", async () => {
+    mockHostExitWatchers.length = 0;
+    mockReadPidFileWithTimeout.mockResolvedValue(424_242);
+    mockIsPidAlive.mockReturnValue(false); // exits promptly on SIGTERM
+
+    const job = await spawnAgent({
+      prompt: "host task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    const stopPromise = job.stop!("completed", "Host agent done");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await stopPromise;
+
+    expect(mockKillHostPid).toHaveBeenCalledWith(424_242, "SIGTERM");
+    expect(job.status).toBe("completed");
+    expect(job.summary).toBe("Host agent done");
   });
 });

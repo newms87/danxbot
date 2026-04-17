@@ -39,6 +39,13 @@ import {
   getTerminalLogPath,
   spawnInTerminal,
 } from "../terminal.js";
+import {
+  readPidFileWithTimeout,
+  createHostExitWatcher,
+  killHostPid,
+  isPidAlive,
+  type HostExitWatcher,
+} from "./host-pid.js";
 
 const log = createLogger("launcher");
 
@@ -52,6 +59,13 @@ const HEARTBEAT_INTERVAL_MS = 10_000;
 const TERMINAL_STATUS_RETRIES = 3;
 const TERMINAL_STATUS_RETRY_DELAY_MS = 2_000;
 
+/** How long to wait for the host-mode bash script to write its PID file. */
+const HOST_PID_FILE_TIMEOUT_MS = 2_000;
+/** Polling cadence while waiting for the host-mode PID file to appear. */
+const HOST_PID_FILE_POLL_MS = 50;
+/** Polling cadence for the host-mode liveness check (SIGNAL 0 on the PID). */
+const HOST_EXIT_POLL_MS = 500;
+
 export interface AgentJob {
   id: string;
   status: "running" | "completed" | "failed" | "timeout" | "canceled";
@@ -59,7 +73,27 @@ export interface AgentJob {
   startedAt: Date;
   completedAt?: Date;
   statusUrl?: string;
+  /**
+   * Docker runtime: the headless claude ChildProcess. Undefined in host runtime —
+   * host mode does not spawn claude as a direct child of this node process
+   * (it runs inside a detached Windows Terminal tab). Use `claudePid` instead.
+   */
   process?: ChildProcess;
+  /**
+   * Host runtime: PID of the `script -q -f` process wrapping the claude TUI.
+   * The bash dispatch script writes `$$` to a file and immediately `exec`s
+   * `script`, which preserves the PID — so this value IS the `script` PID,
+   * and its direct child is claude. SIGTERM to this PID propagates through
+   * `script` to claude's pty and the terminal tab closes on exit. See
+   * `.claude/rules/agent-dispatch.md` and `src/terminal.ts` for the cascade.
+   */
+  claudePid?: number;
+  /**
+   * Host runtime: watcher that polls `process.kill(pid, 0)` to detect when
+   * the dispatched claude has exited, so the launcher can transition the job
+   * to a terminal state. Not set in docker runtime.
+   */
+  hostExitWatcher?: HostExitWatcher;
   heartbeatInterval?: ReturnType<typeof setInterval>;
   /** The SessionLogWatcher monitoring this job's JSONL session file. */
   watcher?: SessionLogWatcher;
@@ -78,6 +112,38 @@ export interface AgentJob {
    * Use for lifecycle tool callbacks (dispatch agents). For user cancellations, use cancelJob().
    */
   stop?: (status: "completed" | "failed", summary?: string) => Promise<void>;
+}
+
+/**
+ * Send `signal` to the agent process using whichever handle the runtime gave
+ * us — the ChildProcess in docker mode or the tracked PID in host mode.
+ * Safe to call when no handle is attached (e.g. after cleanup).
+ */
+function killAgentProcess(job: AgentJob, signal: NodeJS.Signals): void {
+  if (job.process) {
+    job.process.kill(signal);
+    return;
+  }
+  if (job.claudePid !== undefined) {
+    killHostPid(job.claudePid, signal);
+  }
+}
+
+/**
+ * Returns true when the runtime handle indicates the process is still running.
+ * Docker: the ChildProcess `exitCode` is nullish (per Node docs, exitCode is
+ * null for a running process). Host: the tracked PID still exists.
+ * `.killed` is intentionally NOT checked — it flips true as soon as `.kill()`
+ * dispatches a signal, even if the process hasn't yet exited.
+ */
+function isAgentProcessAlive(job: AgentJob): boolean {
+  if (job.process) {
+    return job.process.exitCode == null;
+  }
+  if (job.claudePid !== undefined) {
+    return isPidAlive(job.claudePid);
+  }
+  return false;
 }
 
 export interface SpawnAgentOptions {
@@ -311,19 +377,8 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
 
   logPromptToDisk(config.logsDir, jobId, taggedPrompt, options.agents);
 
-  // stdio: stdin ignore (no user input expected), stdout ignore (watcher
-  // reads JSONL from disk — stdout was only kept for a redundant inactivity
-  // signal, which is now handled via watcher entries), stderr pipe so we can
-  // surface failure messages in job summaries.
-  const child = spawn("claude", args, {
-    env,
-    stdio: ["ignore", "ignore", "pipe"],
-    cwd: agentCwd,
-  });
-
-  job.process = child;
-
-  // --- SessionLogWatcher: always runs for monitoring ---
+  // --- SessionLogWatcher: the single monitoring mechanism, runs identically in
+  //     both docker and host modes (see `.claude/rules/agent-dispatch.md`). ---
   let lastAssistantText = "";
 
   const watcher = new SessionLogWatcher({
@@ -360,15 +415,13 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
 
   watcher.start();
 
-  // --- Stderr accumulation (for failure summaries) ---
   let stderr = "";
-  child.stderr?.on("data", (data: Buffer) => {
-    stderr += data.toString();
-  });
+  let termSettingsDirToClean: string | undefined;
 
-  // --- Inactivity timer: resets on watcher entries ---
+  // --- Inactivity timer: resets on watcher entries, kills via the runtime-
+  //     aware handle (docker: child.kill; host: process.kill(pid, sig)). ---
   const inactivityTimer = createInactivityTimer(
-    child,
+    (signal) => killAgentProcess(job, signal),
     options.timeoutMs,
     (j) => {
       cleanup();
@@ -390,7 +443,7 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
         log.info(
           `[Job ${jobId}] Max runtime exceeded — ${options.maxRuntimeMs! / 1000}s — killing process`,
         );
-        child.kill("SIGTERM");
+        killAgentProcess(job, "SIGTERM");
         job.status = "timeout";
         job.summary = `Agent exceeded max runtime of ${Math.round(options.maxRuntimeMs! / 1000 / 60)} minutes`;
         job.completedAt = new Date();
@@ -400,14 +453,15 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     }, options.maxRuntimeMs);
   }
 
-  let termSettingsDirToClean: string | undefined;
-
   function cleanup(): void {
     watcher.stop();
     forwarderFlush?.();
     inactivityTimer.clear();
     stopHeartbeat(job);
     if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
+    if (job.hostExitWatcher) {
+      job.hostExitWatcher.stop();
+    }
     if (termSettingsDirToClean) {
       try {
         rmSync(termSettingsDirToClean, { recursive: true, force: true });
@@ -426,7 +480,8 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     status: "completed" | "failed",
     summary?: string,
   ): Promise<void> => {
-    if (job.status !== "running" || !job.process) return;
+    if (job.status !== "running") return;
+    if (!job.process && job.claudePid === undefined) return;
 
     log.info(`[Job ${jobId}] Agent self-stop (${status}) — sending SIGTERM`);
 
@@ -435,19 +490,26 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     if (summary) job.summary = summary;
     job.completedAt = new Date();
 
-    // Register close listener BEFORE kill to avoid missing a fast exit
+    // Register exit listener BEFORE kill to avoid missing a fast exit. Docker
+    // uses the ChildProcess close event; host uses the liveness-poll watcher.
     let processExited = false;
-    child.once("close", () => {
-      processExited = true;
-    });
+    if (job.process) {
+      job.process.once("close", () => {
+        processExited = true;
+      });
+    } else if (job.hostExitWatcher) {
+      job.hostExitWatcher.onExit(() => {
+        processExited = true;
+      });
+    }
 
-    child.kill("SIGTERM");
+    killAgentProcess(job, "SIGTERM");
 
     // Wait 5s for graceful shutdown, then SIGKILL if still alive
     await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
-    if (!processExited) {
+    if (!processExited && isAgentProcessAlive(job)) {
       log.info(`[Job ${jobId}] Still alive after 5s — sending SIGKILL`);
-      child.kill("SIGKILL");
+      killAgentProcess(job, "SIGKILL");
     }
 
     // Use job._cleanup rather than the internal closure so any wrappers registered
@@ -460,73 +522,182 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     options.onComplete?.(job);
   };
 
-  setupProcessHandlers(child, job, () => lastAssistantText, () => stderr, {
-    onComplete: (j) => {
-      if (options.statusUrl && options.apiToken) {
-        const status = j.status === "completed" ? "completed" : "failed";
-        putStatus(j, options.apiToken!, status, j.summary);
-      }
-      options.onComplete?.(j);
-    },
-    cleanup,
-  });
-
-  // --- Optional terminal viewer (host mode) ---
-  // Opens an interactive Windows Terminal tab showing the agent session.
-  // Uses `script -q -f` to capture terminal output so StallDetector can
-  // detect the thinking indicator (✻) and distinguish active vs stuck agents.
+  // ============================================================================
+  // Runtime fork — ONLY the spawn shape differs. Monitoring, heartbeat, stall
+  // detection, event forwarding, completion signaling, and cancellation are all
+  // identical across docker and host modes (see agent-dispatch.md).
+  // ============================================================================
   if (options.openTerminal) {
-    const termLogPath = getTerminalLogPath(jobId);
-    job.terminalLogPath = termLogPath;
-
-    termSettingsDirToClean = mkdtempSync(join(tmpdir(), "danxbot-term-"));
-    const termSettingsDir = termSettingsDirToClean;
-    const scriptPath = buildDispatchScript(termSettingsDir, {
-      prompt: taggedPrompt,
-      jobId,
-      mcpConfigPath: options.mcpConfigPath,
-      agentsJson:
-        options.agents && options.agents.length > 0
-          ? JSON.stringify(options.agents)
-          : undefined,
-      statusUrl: options.statusUrl,
-      apiToken: options.apiToken ?? "",
-      terminalLogPath: termLogPath,
+    try {
+      await spawnHostMode({
+        job,
+        jobId,
+        repoName: options.repoName,
+        taggedPrompt,
+        agentCwd,
+        mcpConfigPath: options.mcpConfigPath,
+        agents: options.agents,
+        statusUrl: options.statusUrl,
+        apiToken: options.apiToken,
+        env,
+        onExit: () => {
+          if (job.status !== "running") return;
+          job.status = "completed";
+          job.summary = lastAssistantText.trim() || "Agent completed successfully";
+          job.completedAt = new Date();
+          log.info(`[Job ${jobId}] Host-mode claude exited`);
+          cleanup();
+          if (options.statusUrl && options.apiToken) {
+            putStatus(job, options.apiToken, "completed", job.summary);
+          }
+          options.onComplete?.(job);
+        },
+        registerTermDir: (dir) => {
+          termSettingsDirToClean = dir;
+        },
+      });
+    } catch (err) {
+      // spawnHostMode can fail when the bash script never writes its PID file
+      // (wt.exe missing, script crashed, MCP config broken, etc.). If we let
+      // the exception escape without running cleanup, the watcher, heartbeat,
+      // max-runtime timer, and termSettingsDir all leak. Fail the job loudly
+      // so callers see the error, run cleanup so nothing is left dangling.
+      log.error(`[Job ${jobId}] Host-mode spawn failed:`, err);
+      job.status = "failed";
+      job.summary = `Host-mode spawn failed: ${(err as Error).message}`;
+      job.completedAt = new Date();
+      cleanup();
+      if (options.statusUrl && options.apiToken) {
+        await putStatus(job, options.apiToken, "failed", job.summary);
+      }
+      options.onComplete?.(job);
+      throw err;
+    }
+  } else {
+    // stdio: stdin ignore (no user input expected), stdout ignore (watcher
+    // reads JSONL from disk — stdout was only kept for a redundant inactivity
+    // signal, which is now handled via watcher entries), stderr pipe so we can
+    // surface failure messages in job summaries.
+    const child = spawn("claude", args, {
+      env,
+      stdio: ["ignore", "ignore", "pipe"],
+      cwd: agentCwd,
     });
 
-    log.info(`[Job ${jobId}] Opening terminal viewer (log: ${termLogPath})`);
-    spawnInTerminal({
-      title: `danxbot: ${options.repoName} [${jobId.slice(0, 8)}]`,
-      script: scriptPath,
-      cwd: agentCwd,
-      env: env as Record<string, string | undefined>,
+    job.process = child;
+
+    child.stderr?.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    setupProcessHandlers(child, job, () => lastAssistantText, () => stderr, {
+      onComplete: (j) => {
+        if (options.statusUrl && options.apiToken) {
+          const status = j.status === "completed" ? "completed" : "failed";
+          putStatus(j, options.apiToken!, status, j.summary);
+        }
+        options.onComplete?.(j);
+      },
+      cleanup,
     });
   }
 
   return job;
 }
 
+interface SpawnHostModeOptions {
+  job: AgentJob;
+  jobId: string;
+  repoName: string;
+  taggedPrompt: string;
+  agentCwd: string;
+  mcpConfigPath?: string;
+  agents?: Array<Record<string, unknown>>;
+  statusUrl?: string;
+  apiToken?: string;
+  env: Record<string, string>;
+  /** Called exactly once when the host claude PID is observed to have exited. */
+  onExit: () => void;
+  /** Share the temp settings dir with the outer cleanup closure. */
+  registerTermDir: (dir: string) => void;
+}
+
+/**
+ * Host-mode spawn: writes the dispatch bash script, launches it in a Windows
+ * Terminal tab via wt.exe, reads the claude PID the script emits, and wires
+ * a PID-liveness watcher so the outer lifecycle sees the exit. Does NOT spawn
+ * a second headless claude — that would defeat the single-fork invariant (see
+ * `.claude/rules/agent-dispatch.md`).
+ */
+async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
+  const { job, jobId, repoName, taggedPrompt, agentCwd, env, onExit } = opts;
+
+  const termLogPath = getTerminalLogPath(jobId);
+  job.terminalLogPath = termLogPath;
+
+  const termSettingsDir = mkdtempSync(join(tmpdir(), "danxbot-term-"));
+  opts.registerTermDir(termSettingsDir);
+
+  const pidFilePath = join(termSettingsDir, "claude.pid");
+
+  const scriptPath = buildDispatchScript(termSettingsDir, {
+    prompt: taggedPrompt,
+    jobId,
+    mcpConfigPath: opts.mcpConfigPath,
+    agentsJson:
+      opts.agents && opts.agents.length > 0
+        ? JSON.stringify(opts.agents)
+        : undefined,
+    statusUrl: opts.statusUrl,
+    apiToken: opts.apiToken ?? "",
+    terminalLogPath: termLogPath,
+    pidFilePath,
+  });
+
+  log.info(`[Job ${jobId}] Opening terminal viewer (log: ${termLogPath})`);
+  spawnInTerminal({
+    title: `danxbot: ${repoName} [${jobId.slice(0, 8)}]`,
+    script: scriptPath,
+    cwd: agentCwd,
+    env: env as Record<string, string | undefined>,
+  });
+
+  const pid = await readPidFileWithTimeout(
+    pidFilePath,
+    HOST_PID_FILE_TIMEOUT_MS,
+    HOST_PID_FILE_POLL_MS,
+  );
+  job.claudePid = pid;
+  log.info(`[Job ${jobId}] Host-mode dispatch PID: ${pid}`);
+
+  const hostExitWatcher = createHostExitWatcher(pid, HOST_EXIT_POLL_MS);
+  job.hostExitWatcher = hostExitWatcher;
+  hostExitWatcher.onExit(onExit);
+}
+
 /**
  * Cancel a running job by sending SIGTERM, then SIGKILL after 5 seconds.
+ * Works identically in docker (ChildProcess handle) and host (tracked PID) modes.
  */
 export async function cancelJob(
   job: AgentJob,
   apiToken: string,
 ): Promise<void> {
-  if (job.status !== "running" || !job.process) return;
+  if (job.status !== "running") return;
+  if (!job.process && job.claudePid === undefined) return;
 
   log.info(`[Job ${job.id}] Cancel requested — sending SIGTERM`);
 
   job._canceling = true;
-  job.process.kill("SIGTERM");
+  killAgentProcess(job, "SIGTERM");
 
   // Wait 5 seconds for graceful shutdown
   await new Promise((resolve) => setTimeout(resolve, 5000));
 
   // Force kill if still running
-  if (job.status === "running" && job.process) {
+  if (job.status === "running" && isAgentProcessAlive(job)) {
     log.info(`[Job ${job.id}] Still running after 5s — sending SIGKILL`);
-    job.process.kill("SIGKILL");
+    killAgentProcess(job, "SIGKILL");
   }
 
   if (job.status === "running") {
