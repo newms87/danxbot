@@ -12,15 +12,15 @@ describe("normalizeCallbackUrl", () => {
     });
 
     it("rewrites 127.0.0.1 to host.docker.internal", () => {
-      expect(
-        normalizeCallbackUrl("http://127.0.0.1:8080/status", false),
-      ).toBe("http://host.docker.internal:8080/status");
+      expect(normalizeCallbackUrl("http://127.0.0.1:8080/status", false)).toBe(
+        "http://host.docker.internal:8080/status",
+      );
     });
 
     it("rewrites IPv6 loopback [::1] to host.docker.internal", () => {
-      expect(
-        normalizeCallbackUrl("http://[::1]:8080/status", false),
-      ).toBe("http://host.docker.internal:8080/status");
+      expect(normalizeCallbackUrl("http://[::1]:8080/status", false)).toBe(
+        "http://host.docker.internal:8080/status",
+      );
     });
 
     it("rewrites uppercase LOCALHOST (URL lowercases hostnames)", () => {
@@ -45,9 +45,17 @@ describe("normalizeCallbackUrl", () => {
     });
 
     it("preserves https scheme and explicit port", () => {
-      expect(
-        normalizeCallbackUrl("https://localhost:8443/secure", false),
-      ).toBe("https://host.docker.internal:8443/secure");
+      expect(normalizeCallbackUrl("https://localhost:8443/secure", false)).toBe(
+        "https://host.docker.internal:8443/secure",
+      );
+    });
+
+    it("strips trailing slash from origin-only URLs to prevent double-slash when paths are concatenated", () => {
+      // MCP server builds URLs as `${API_URL}/api/path`. If API_URL ends with
+      // a slash, the result is `http://host.docker.internal//api/path` → 404.
+      expect(normalizeCallbackUrl("http://localhost:80", false)).toBe(
+        "http://host.docker.internal",
+      );
     });
 
     it("leaves non-loopback hostnames untouched", () => {

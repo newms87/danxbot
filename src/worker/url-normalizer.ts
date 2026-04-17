@@ -27,5 +27,8 @@ export function normalizeCallbackUrl(
   if (!LOOPBACK_HOSTNAMES.has(parsed.hostname)) return url;
 
   parsed.hostname = DOCKER_HOST_ALIAS;
-  return parsed.toString();
+  // WHATWG URL.toString() adds a trailing slash for origin-only URLs
+  // (e.g., "http://host.docker.internal/"). Consumers concatenate paths
+  // with `/api/...`, so a trailing slash produces double-slash 404s.
+  return parsed.toString().replace(/\/$/, "");
 }
