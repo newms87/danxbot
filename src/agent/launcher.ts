@@ -34,6 +34,12 @@ import {
   DISPATCH_TAG_PREFIX,
 } from "./session-log-watcher.js";
 import { createLaravelForwarder } from "./laravel-forwarder.js";
+import { getDanxbotCommit } from "./danxbot-commit.js";
+import {
+  startDispatchTracking,
+  type DispatchTracker,
+} from "../dashboard/dispatch-tracker.js";
+import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import {
   buildDispatchScript,
   getTerminalLogPath,
@@ -112,6 +118,11 @@ export interface AgentJob {
   /** The SessionLogWatcher monitoring this job's JSONL session file. */
   watcher?: SessionLogWatcher;
   /**
+   * Dispatch row tracker. Set when `options.dispatch` is passed to spawnAgent.
+   * Undefined for runs that should not appear in the dispatch history.
+   */
+  dispatchTracker?: DispatchTracker;
+  /**
    * Path where `script -q -f` writes terminal output when openTerminal is true.
    * Used by TerminalOutputWatcher + StallDetector for thinking indicator detection.
    */
@@ -189,6 +200,10 @@ export async function terminateWithGrace(
 export interface SpawnAgentOptions {
   /** The prompt/command to pass to claude CLI */
   prompt: string;
+  /** Short title shown in the agent's initial message alongside the prompt file reference.
+   *  Typically includes tracking IDs (e.g. "AgentDispatch #AGD-359, SchemaDefinition #SD-176")
+   *  so humans can identify the dispatch in session logs and thread UIs. */
+  title?: string;
   /** Repo name — used to resolve cwd to repos/<name> */
   repoName: string;
   /** Optional pre-generated job ID. If not set, a UUID is generated. Used to keep
@@ -217,6 +232,12 @@ export interface SpawnAgentOptions {
   maxRuntimeMs?: number;
   /** If true, also opens an interactive Windows Terminal tab for the agent */
   openTerminal?: boolean;
+  /**
+   * When set, a `dispatches` row is created for this spawn and finalized when
+   * the agent reaches a terminal state. Omit for runs that should not appear
+   * in the dispatch history (e.g., Slack router-only responses).
+   */
+  dispatch?: DispatchTriggerMetadata;
 }
 
 export interface McpSettingsOptions {
@@ -379,7 +400,9 @@ export function buildCompletionInstruction(): string {
  * The dispatch tag (`<!-- danxbot-dispatch:jobId -->`) is prepended to the prompt
  * so the watcher can deterministically find the correct JSONL file.
  */
-export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> {
+export async function spawnAgent(
+  options: SpawnAgentOptions,
+): Promise<AgentJob> {
   const jobId = options.jobId ?? randomUUID();
 
   const job: AgentJob = {
@@ -398,13 +421,7 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
 
   const env = buildCleanEnv(options.env);
 
-  // Prepend dispatch tag so SessionLogWatcher finds the right JSONL file
-  const taggedPrompt = `${DISPATCH_TAG_PREFIX}${jobId} -->\n\n${options.prompt}`;
-
-  const args = [
-    "--dangerously-skip-permissions",
-    "--verbose",
-  ];
+  const args = ["--dangerously-skip-permissions", "--verbose"];
 
   if (options.mcpConfigPath) {
     args.push("--mcp-config", options.mcpConfigPath);
@@ -414,6 +431,21 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     args.push("--agents", JSON.stringify(options.agents));
   }
 
+  // When a title is provided, write the prompt to a temp file and use the title
+  // as the initial message. This keeps the agent's first visible message short
+  // (with tracking IDs) while the full prompt lives in the file.
+  // Without a title, pipe the full prompt inline (existing behavior).
+  let promptDir: string | undefined;
+  let taggedPrompt: string;
+  if (options.title) {
+    promptDir = mkdtempSync(join(tmpdir(), "danxbot-prompt-"));
+    const promptFile = join(promptDir, "prompt.md");
+    writeFileSync(promptFile, options.prompt, "utf-8");
+    taggedPrompt = `${DISPATCH_TAG_PREFIX}${jobId} --> Read ${promptFile} and execute the task described in it. Tracking: ${options.title}`;
+  } else {
+    // Prepend dispatch tag so SessionLogWatcher finds the right JSONL file
+    taggedPrompt = `${DISPATCH_TAG_PREFIX}${jobId} -->\n\n${options.prompt}`;
+  }
   args.push("-p", taggedPrompt);
 
   const agentCwd = join(getReposBase(), options.repoName);
@@ -421,7 +453,7 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
   log.info(`[Job ${jobId}] Launching agent`);
   log.info(`[Job ${jobId}] Prompt: ${options.prompt.substring(0, 200)}`);
 
-  logPromptToDisk(config.logsDir, jobId, taggedPrompt, options.agents);
+  logPromptToDisk(config.logsDir, jobId, options.prompt, options.agents);
 
   // --- SessionLogWatcher: the single monitoring mechanism, runs identically in
   //     both docker and host modes (see `.claude/rules/agent-dispatch.md`). ---
@@ -467,6 +499,23 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     );
     watcher.onEntry(forwarder.consume);
     forwarderFlush = forwarder.flush;
+  }
+
+  // --- Optional dispatch tracking: create a dispatches row and finalize it
+  //     when a terminal state is reached. Callers that should not appear in
+  //     dispatch history (e.g., Slack router-only) omit options.dispatch. ---
+  let dispatchTracker: DispatchTracker | undefined;
+  if (options.dispatch) {
+    dispatchTracker = await startDispatchTracking({
+      jobId,
+      repoName: options.repoName,
+      trigger: options.dispatch,
+      runtimeMode: config.isHost ? "host" : "docker",
+      danxbotCommit: getDanxbotCommit(),
+      watcher,
+      startedAtMs: job.startedAt.getTime(),
+    });
+    job.dispatchTracker = dispatchTracker;
   }
 
   watcher.start();
@@ -518,6 +567,28 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     if (job.hostExitWatcher) {
       job.hostExitWatcher.stop();
     }
+    if (dispatchTracker && job.status !== "running") {
+      const dispatchStatus =
+        job.status === "completed"
+          ? "completed"
+          : job.status === "canceled"
+            ? "cancelled"
+            : "failed";
+      dispatchTracker
+        .finalize(dispatchStatus, {
+          summary: job.summary || null,
+          error: dispatchStatus === "failed" ? job.summary || null : null,
+          tokens: {
+            tokensIn: job.usage.input_tokens,
+            tokensOut: job.usage.output_tokens,
+            cacheRead: job.usage.cache_read_input_tokens,
+            cacheWrite: job.usage.cache_creation_input_tokens,
+          },
+        })
+        .catch((err) =>
+          log.error(`[Job ${jobId}] Dispatch finalize failed`, err),
+        );
+    }
     if (termSettingsDirToClean) {
       try {
         rmSync(termSettingsDirToClean, { recursive: true, force: true });
@@ -525,6 +596,13 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
         // ENOENT acceptable — the dir may never have been created if
         // `spawnHostMode` failed before mkdtempSync. force:true already
         // handles missing paths, so any error here is nonfatal.
+      }
+    }
+    if (promptDir) {
+      try {
+        rmSync(promptDir, { recursive: true, force: true });
+      } catch {
+        // Nonfatal — temp dir cleanup is best-effort.
       }
     }
   }
@@ -668,16 +746,22 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
       stderr += data.toString();
     });
 
-    setupProcessHandlers(child, job, () => lastAssistantText, () => stderr, {
-      onComplete: (j) => {
-        if (options.statusUrl && options.apiToken) {
-          const status = j.status === "completed" ? "completed" : "failed";
-          putStatus(j, options.apiToken!, status, j.summary);
-        }
-        options.onComplete?.(j);
+    setupProcessHandlers(
+      child,
+      job,
+      () => lastAssistantText,
+      () => stderr,
+      {
+        onComplete: (j) => {
+          if (options.statusUrl && options.apiToken) {
+            const status = j.status === "completed" ? "completed" : "failed";
+            putStatus(j, options.apiToken!, status, j.summary);
+          }
+          options.onComplete?.(j);
+        },
+        cleanup,
       },
-      cleanup,
-    });
+    );
   }
 
   return job;

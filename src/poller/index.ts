@@ -27,6 +27,10 @@ import {
 } from "./trello-client.js";
 import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext, TrelloConfig } from "../types.js";
+import type {
+  DispatchTriggerMetadata,
+  TrelloTriggerMetadata,
+} from "../dashboard/dispatches.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -155,7 +159,19 @@ async function _poll(repo: RepoContext): Promise<void> {
   const state = getState(repo.name);
   state.priorTodoCardIds = cards.map((c) => c.id);
 
-  spawnClaude(repo, TEAM_PROMPT);
+  // Record the first card as the dispatch trigger. One agent session processes
+  // the whole ToDo queue; tagging it with the primary card lets the dashboard
+  // show what kicked off the run. The UI can expand to show all processed cards
+  // by scanning the JSONL for Trello MCP calls.
+  const primary = cards[0];
+  const trelloMeta: TrelloTriggerMetadata = {
+    cardId: primary.id,
+    cardName: primary.name,
+    cardUrl: `https://trello.com/c/${primary.id}`,
+    listId: repo.trello.todoListId,
+    listName: "ToDo",
+  };
+  spawnClaude(repo, TEAM_PROMPT, { trigger: "trello", metadata: trelloMeta });
 }
 
 /** Directory containing files to inject into target repos. */
@@ -495,7 +511,11 @@ function syncRepoFiles(repo: RepoContext): void {
   }
 }
 
-function spawnClaude(repo: RepoContext, prompt: string): void {
+function spawnClaude(
+  repo: RepoContext,
+  prompt: string,
+  dispatch: DispatchTriggerMetadata,
+): void {
   const state = getState(repo.name);
 
   state.teamRunning = true;
@@ -510,6 +530,7 @@ function spawnClaude(repo: RepoContext, prompt: string): void {
       DANXBOT_PROJECT_ROOT: projectRoot,
     },
     openTerminal: config.isHost,
+    dispatch,
     onComplete: (job) => {
       handleAgentCompletion(repo, state, job).catch((err) =>
         log.error(`[${repo.name}] Error in post-completion handler`, err),
@@ -636,7 +657,17 @@ async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {
   log.info(
     `[${repo.name}] Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — spawning ideator`,
   );
-  spawnClaude(repo, IDEATOR_PROMPT);
+  // Ideator runs don't originate from a specific card — tag them as API
+  // dispatches so the poller run is still visible in dispatch history.
+  spawnClaude(repo, IDEATOR_PROMPT, {
+    trigger: "api",
+    metadata: {
+      endpoint: "poller/ideator",
+      callerIp: null,
+      statusUrl: null,
+      initialPrompt: IDEATOR_PROMPT.slice(0, 500),
+    },
+  });
 }
 
 export function shutdown(): void {

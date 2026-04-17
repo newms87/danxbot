@@ -1,0 +1,328 @@
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+const mockInsertDispatch = vi.fn();
+const mockUpdateDispatch = vi.fn();
+
+vi.mock("./dispatches-db.js", () => ({
+  insertDispatch: (...args: unknown[]) => mockInsertDispatch(...args),
+  updateDispatch: (...args: unknown[]) => mockUpdateDispatch(...args),
+}));
+
+vi.mock("../logger.js", () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
+import {
+  extractSessionUuidFromPath,
+  startDispatchTracking,
+  type FinalizeTokens,
+} from "./dispatch-tracker.js";
+import type { DispatchTriggerMetadata } from "./dispatches.js";
+import type { AgentLogEntry } from "../types.js";
+
+interface MockWatcher {
+  entryHandlers: Array<(entry: AgentLogEntry) => Promise<void> | void>;
+  onEntry: (fn: (entry: AgentLogEntry) => Promise<void> | void) => void;
+  getSessionFilePath: () => string | null;
+  sessionPath: string | null;
+}
+
+function makeMockWatcher(): MockWatcher {
+  const state: MockWatcher = {
+    entryHandlers: [],
+    sessionPath: null,
+    onEntry(fn) {
+      state.entryHandlers.push(fn);
+    },
+    getSessionFilePath() {
+      return state.sessionPath;
+    },
+  };
+  return state;
+}
+
+async function emitEntry(w: MockWatcher, entry: AgentLogEntry): Promise<void> {
+  for (const h of w.entryHandlers) {
+    await h(entry);
+  }
+}
+
+const slackTrigger: DispatchTriggerMetadata = {
+  trigger: "slack",
+  metadata: {
+    channelId: "C123",
+    threadTs: "1",
+    messageTs: "1",
+    user: "U1",
+    userName: "Dan",
+    messageText: "hi",
+  },
+};
+
+const noTokens: FinalizeTokens = {
+  tokensIn: 0,
+  tokensOut: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockInsertDispatch.mockResolvedValue(undefined);
+  mockUpdateDispatch.mockResolvedValue(undefined);
+});
+
+describe("extractSessionUuidFromPath", () => {
+  it("extracts UUID from a canonical session path", () => {
+    const p = "/home/newms/.claude/projects/-foo/12345678-90ab-cdef-1234-567890abcdef.jsonl";
+    expect(extractSessionUuidFromPath(p)).toBe(
+      "12345678-90ab-cdef-1234-567890abcdef",
+    );
+  });
+
+  it("returns null when the path does not contain a UUID", () => {
+    expect(extractSessionUuidFromPath("/tmp/weird.jsonl")).toBeNull();
+  });
+});
+
+describe("startDispatchTracking", () => {
+  it("inserts a running dispatch row at start", async () => {
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "job-1",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: "abc123",
+      watcher: watcher as never,
+      startedAtMs: 1000,
+    });
+
+    expect(mockInsertDispatch).toHaveBeenCalledOnce();
+    const inserted = mockInsertDispatch.mock.calls[0][0];
+    expect(inserted.id).toBe("job-1");
+    expect(inserted.repoName).toBe("danxbot");
+    expect(inserted.trigger).toBe("slack");
+    expect(inserted.triggerMetadata).toEqual(slackTrigger.metadata);
+    expect(inserted.status).toBe("running");
+    expect(inserted.runtimeMode).toBe("docker");
+    expect(inserted.danxbotCommit).toBe("abc123");
+    expect(inserted.startedAt).toBe(1000);
+    expect(inserted.sessionUuid).toBeNull();
+    expect(inserted.jsonlPath).toBeNull();
+  });
+
+  it("updates sessionUuid + jsonlPath on first entry after watcher attaches", async () => {
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "job-2",
+      repoName: "platform",
+      trigger: slackTrigger,
+      runtimeMode: "host",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    // Watcher not yet attached → entry before attach is a no-op for session path
+    await emitEntry(watcher, {
+      timestamp: 1,
+      type: "assistant",
+      summary: "",
+      data: { content: [] },
+    });
+    // No session update yet
+    const updatesBefore = mockUpdateDispatch.mock.calls.filter(
+      (c) => (c[1] as { sessionUuid?: string }).sessionUuid !== undefined,
+    );
+    expect(updatesBefore).toHaveLength(0);
+
+    // Attach
+    watcher.sessionPath =
+      "/home/newms/.claude/projects/-danxbot/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl";
+    await emitEntry(watcher, {
+      timestamp: 2,
+      type: "assistant",
+      summary: "",
+      data: { content: [] },
+    });
+
+    const sessionUpdate = mockUpdateDispatch.mock.calls.find(
+      (c) => (c[1] as { sessionUuid?: string }).sessionUuid !== undefined,
+    );
+    expect(sessionUpdate).toBeDefined();
+    expect(sessionUpdate![0]).toBe("job-2");
+    expect(sessionUpdate![1]).toEqual({
+      sessionUuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      jsonlPath:
+        "/home/newms/.claude/projects/-danxbot/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl",
+    });
+  });
+
+  it("records session update only once", async () => {
+    const watcher = makeMockWatcher();
+    watcher.sessionPath =
+      "/tmp/x/11111111-2222-3333-4444-555555555555.jsonl";
+
+    await startDispatchTracking({
+      jobId: "job-3",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    await emitEntry(watcher, {
+      timestamp: 1,
+      type: "assistant",
+      summary: "",
+      data: { content: [] },
+    });
+    await emitEntry(watcher, {
+      timestamp: 2,
+      type: "assistant",
+      summary: "",
+      data: { content: [] },
+    });
+
+    const sessionUpdates = mockUpdateDispatch.mock.calls.filter(
+      (c) => (c[1] as { sessionUuid?: string }).sessionUuid !== undefined,
+    );
+    expect(sessionUpdates).toHaveLength(1);
+  });
+
+  it("counts tool_use and Task sub-agent blocks across entries", async () => {
+    const watcher = makeMockWatcher();
+    const tracker = await startDispatchTracking({
+      jobId: "job-4",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    await emitEntry(watcher, {
+      timestamp: 1,
+      type: "assistant",
+      summary: "",
+      data: {
+        content: [
+          { type: "tool_use", name: "Read" },
+          { type: "tool_use", name: "Task" },
+        ],
+      },
+    });
+    await emitEntry(watcher, {
+      timestamp: 2,
+      type: "assistant",
+      summary: "",
+      data: {
+        content: [
+          { type: "text", text: "done" },
+          { type: "tool_use", name: "Grep" },
+        ],
+      },
+    });
+
+    await tracker.finalize("completed", {
+      summary: "done",
+      tokens: noTokens,
+    });
+
+    const finalCall = mockUpdateDispatch.mock.calls.at(-1);
+    expect(finalCall![1]).toMatchObject({
+      status: "completed",
+      toolCallCount: 3,
+      subagentCount: 1,
+    });
+  });
+
+  it("finalize computes tokensTotal from the four component counters", async () => {
+    const watcher = makeMockWatcher();
+    const tracker = await startDispatchTracking({
+      jobId: "job-5",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    await tracker.finalize("completed", {
+      summary: "ok",
+      tokens: {
+        tokensIn: 100,
+        tokensOut: 40,
+        cacheRead: 200,
+        cacheWrite: 20,
+      },
+    });
+
+    const args = mockUpdateDispatch.mock.calls.at(-1)![1];
+    expect(args.tokensTotal).toBe(360);
+    expect(args.tokensIn).toBe(100);
+    expect(args.tokensOut).toBe(40);
+    expect(args.cacheRead).toBe(200);
+    expect(args.cacheWrite).toBe(20);
+  });
+
+  it("finalize uses failed status with error string", async () => {
+    const watcher = makeMockWatcher();
+    const tracker = await startDispatchTracking({
+      jobId: "job-6",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    await tracker.finalize("failed", {
+      error: "oops",
+      tokens: noTokens,
+    });
+
+    const args = mockUpdateDispatch.mock.calls.at(-1)![1];
+    expect(args.status).toBe("failed");
+    expect(args.error).toBe("oops");
+    expect(args.summary).toBeNull();
+  });
+
+  it("recordNudge updates nudgeCount", async () => {
+    const watcher = makeMockWatcher();
+    const tracker = await startDispatchTracking({
+      jobId: "job-7",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    await tracker.recordNudge(2);
+    expect(mockUpdateDispatch).toHaveBeenLastCalledWith("job-7", {
+      nudgeCount: 2,
+    });
+  });
+
+  it("insert failure does not throw (agent run continues)", async () => {
+    mockInsertDispatch.mockRejectedValueOnce(new Error("db down"));
+    const watcher = makeMockWatcher();
+    await expect(
+      startDispatchTracking({
+        jobId: "job-8",
+        repoName: "r",
+        trigger: slackTrigger,
+        runtimeMode: "docker",
+        danxbotCommit: null,
+        watcher: watcher as never,
+      }),
+    ).resolves.toBeDefined();
+  });
+});

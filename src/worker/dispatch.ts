@@ -13,6 +13,8 @@ import {
   type AgentJob,
   type McpSettingsOptions,
 } from "../agent/launcher.js";
+import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
+import { updateDispatch } from "../dashboard/dispatches-db.js";
 import { join } from "node:path";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
@@ -96,6 +98,19 @@ export async function handleLaunch(
     // Append completion instruction to every dispatched task.
     const taskWithInstruction = task + buildCompletionInstruction();
 
+    const callerIp =
+      (req.socket?.remoteAddress ?? req.headers["x-forwarded-for"])?.toString() ?? null;
+
+    const apiDispatchMeta: DispatchTriggerMetadata = {
+      trigger: "api",
+      metadata: {
+        endpoint: "/api/launch",
+        callerIp,
+        statusUrl: statusUrl ?? null,
+        initialPrompt: task,
+      },
+    };
+
     let resumeCount = 0;
 
     /**
@@ -126,6 +141,10 @@ export async function handleLaunch(
           maxRuntimeMs,
           eventForwarding: statusUrl ? { statusUrl, apiToken } : undefined,
           openTerminal: config.isHost,
+          // Only the initial spawn records the dispatch row — stall-recovery
+          // respawns reuse the same dispatchId in `activeJobs` and should
+          // NOT create a second row for the same conceptual run.
+          dispatch: isRespawn ? undefined : apiDispatchMeta,
           onComplete: () => {
             cleanupMcpSettings(settingsDir);
           },
@@ -175,6 +194,18 @@ export async function handleLaunch(
 
           log.warn(
             `[Dispatch ${dispatchId}] Stall detected (resume ${resumeCount}/${MAX_STALL_RESUMES}) — killing and resuming`,
+          );
+
+          // Reflect the nudge count on the dispatch row. The row was created
+          // by the initial spawn's tracker; later respawns reuse the same
+          // dispatchId, so we update by id directly rather than chasing the
+          // tracker reference through respawns.
+          updateDispatch(dispatchId, { nudgeCount: resumeCount }).catch(
+            (err) =>
+              log.error(
+                `[Dispatch ${dispatchId}] Failed to record nudge count`,
+                err,
+              ),
           );
 
           // Kill stalled process directly (no job.stop — we want to keep the

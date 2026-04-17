@@ -1,4 +1,5 @@
 import { App } from "@slack/bolt";
+import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { markdownToSlackMrkdwn, splitMessage } from "./formatter.js";
@@ -10,8 +11,20 @@ import { runRouter } from "../agent/router.js";
 import { runAgent } from "../agent/agent.js";
 import { processResponseWithAttachments, extractSqlBlocks } from "../agent/sql-executor.js";
 import type { SqlAttachment } from "../agent/sql-executor.js";
-import type { RepoContext } from "../types.js";
+import type {
+  AgentLogEntry,
+  AgentUsageSummary,
+  RepoContext,
+} from "../types.js";
 import { notifyError } from "../errors/trello-notifier.js";
+import { insertDispatch, updateDispatch } from "../dashboard/dispatches-db.js";
+import { countToolCallsFromLog } from "../dashboard/dispatch-tracker.js";
+import type {
+  Dispatch,
+  DispatchStatus,
+  SlackTriggerMetadata,
+} from "../dashboard/dispatches.js";
+import { getDanxbotCommit } from "../agent/danxbot-commit.js";
 import {
   getOrCreateThread,
   addMessageToThread,
@@ -159,6 +172,84 @@ interface SlackMessage {
   type: string;
 }
 
+interface SlackDispatchHandle {
+  id: string;
+  finalize: (
+    status: DispatchStatus,
+    details: {
+      sessionId?: string | null;
+      summary?: string | null;
+      error?: string | null;
+      usage?: AgentUsageSummary | null;
+      log?: AgentLogEntry[];
+    },
+  ) => Promise<void>;
+}
+
+function createSlackDispatch(
+  repoName: string,
+  meta: SlackTriggerMetadata,
+): SlackDispatchHandle {
+  const id = randomUUID();
+  const row: Dispatch = {
+    id,
+    repoName,
+    trigger: "slack",
+    triggerMetadata: meta,
+    sessionUuid: null,
+    jsonlPath: null,
+    status: "running",
+    startedAt: Date.now(),
+    completedAt: null,
+    summary: null,
+    error: null,
+    runtimeMode: config.isHost ? "host" : "docker",
+    tokensTotal: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    toolCallCount: 0,
+    subagentCount: 0,
+    nudgeCount: 0,
+    danxbotCommit: getDanxbotCommit(),
+  };
+  insertDispatch(row).catch((err) =>
+    log.error(`[${repoName}] Failed to insert slack dispatch row`, err),
+  );
+
+  return {
+    id,
+    finalize: async (status, details) => {
+      const { toolCallCount, subagentCount } = countToolCallsFromLog(
+        details.log ?? [],
+      );
+      const tokensIn = details.usage?.inputTokens ?? 0;
+      const tokensOut = details.usage?.outputTokens ?? 0;
+      const cacheRead = details.usage?.cacheReadInputTokens ?? 0;
+      const cacheWrite = details.usage?.cacheCreationInputTokens ?? 0;
+      try {
+        await updateDispatch(id, {
+          status,
+          sessionUuid: details.sessionId ?? null,
+          summary: details.summary ?? null,
+          error: details.error ?? null,
+          completedAt: Date.now(),
+          tokensIn,
+          tokensOut,
+          cacheRead,
+          cacheWrite,
+          tokensTotal: tokensIn + tokensOut + cacheRead + cacheWrite,
+          toolCallCount,
+          subagentCount,
+        });
+      } catch (err) {
+        log.error(`[${repoName}] Failed to finalize slack dispatch ${id}`, err);
+      }
+    },
+  };
+}
+
 async function handleMessage(ls: ListenerState, message: SlackMessage, client: ReturnType<typeof getSlackClient>): Promise<void> {
   if (!client) return;
     // Type guard: only handle regular messages
@@ -241,6 +332,18 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
         }
         markProcessing(threadTs);
 
+        // Router-only messages are not dispatches (per the epic). We only
+        // create a dispatch row now that the agent is about to run.
+        const slackMeta: SlackTriggerMetadata = {
+          channelId: message.channel,
+          threadTs,
+          messageTs: message.ts,
+          user: userId,
+          userName: null,
+          messageText: message.text,
+        };
+        const slackDispatch = createSlackDispatch(ls.repo.name, slackMeta);
+
         // Add thinking reaction while agent works
         await client.reactions
           .add({
@@ -295,6 +398,13 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
               updateSessionId(thread, response.sessionId);
             }
 
+            await slackDispatch.finalize("completed", {
+              sessionId: response.sessionId,
+              summary: response.text,
+              usage: response.usage,
+              log: response.log,
+            });
+
             const slackText = markdownToSlackMrkdwn(sqlResult.text);
             const chunks = splitMessage(slackText);
 
@@ -343,6 +453,9 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
             log.warn(
               `[${ls.repo.name}] Agent (very_low) failed in thread ${threadTs}, escalating to medium: ${fastErrorMsg}`,
             );
+            // The very_low attempt failed; the medium retry below owns the
+            // same dispatch row. No finalize here — the retry path will
+            // either complete or fail the row.
             // Clear session if conversation got too long so escalated path starts fresh
             if (fastErrorMsg.includes("msg_too_long")) {
               clearSessionId(thread);
@@ -448,6 +561,9 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                   "warning",
                 );
                 notifyError(ls.repo.trello, "Agent Timeout", `Agent timed out after ${elapsed}s`, errorContext).catch(() => {});
+                await slackDispatch.finalize("failed", {
+                  error: `Agent timed out after ${elapsed}s`,
+                });
                 handled = true;
               } else {
                 // Stop heartbeat BEFORE posting final response to prevent race conditions
@@ -461,6 +577,13 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                 if (response.sessionId) {
                   updateSessionId(thread, response.sessionId);
                 }
+
+                await slackDispatch.finalize("completed", {
+                  sessionId: response.sessionId,
+                  summary: response.text,
+                  usage: response.usage,
+                  log: response.log,
+                });
 
                 // Final update: replace placeholder with formatted response
                 const slackText = markdownToSlackMrkdwn(sqlResult.text);
@@ -553,6 +676,7 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
                   "x",
                 );
                 notifyError(ls.repo.trello, "Agent Crash", errorMsg, errorContext).catch(() => {});
+                await slackDispatch.finalize("failed", { error: errorMsg });
                 handled = true;
               } else {
                 // Retry — update placeholder with retrying status
