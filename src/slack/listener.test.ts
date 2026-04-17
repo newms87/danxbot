@@ -122,6 +122,20 @@ vi.mock("../errors/trello-notifier.js", () => ({
   notifyError: (...args: unknown[]) => mockNotifyError(...args),
 }));
 
+const mockInsertDispatch = vi.fn().mockResolvedValue(undefined);
+const mockUpdateDispatch = vi.fn().mockResolvedValue(undefined);
+
+vi.mock("../dashboard/dispatches-db.js", () => ({
+  insertDispatch: (...args: unknown[]) => mockInsertDispatch(...args),
+  updateDispatch: (...args: unknown[]) => mockUpdateDispatch(...args),
+}));
+
+const mockGetDanxbotCommit = vi.fn().mockReturnValue("abc1234");
+
+vi.mock("../agent/danxbot-commit.js", () => ({
+  getDanxbotCommit: () => mockGetDanxbotCommit(),
+}));
+
 // Mock @slack/bolt — App must be a real class so `new App()` works
 let capturedMessageHandler: Function;
 const capturedEventHandlers: Record<string, Function> = {};
@@ -646,6 +660,57 @@ describe("error paths", () => {
         user: "U-HUMAN",
         channelId: "C-TEST",
       }),
+    );
+  });
+
+  it("does not call notifyError for transient ETIMEDOUT handler errors", async () => {
+    mockGetOrCreateThread.mockRejectedValue(new Error("connect ETIMEDOUT"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockNotifyError).not.toHaveBeenCalled();
+    // Still adds :x: reaction so the user sees failure
+    expect(client.reactions.add).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "x" }),
+    );
+  });
+
+  it("does not call notifyError for transient ECONNREFUSED handler errors", async () => {
+    mockGetOrCreateThread.mockRejectedValue(new Error("connect ECONNREFUSED 127.0.0.1:3306"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockNotifyError).not.toHaveBeenCalled();
+  });
+
+  it("does not call notifyError for transient ENOTFOUND handler errors", async () => {
+    mockGetOrCreateThread.mockRejectedValue(new Error("getaddrinfo ENOTFOUND api.anthropic.com"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockNotifyError).not.toHaveBeenCalled();
+  });
+
+  it("does not call notifyError when agent crashes with a transient network error", async () => {
+    mockRunRouter.mockResolvedValue(makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }));
+    mockRunAgent.mockRejectedValue(new Error("connect ETIMEDOUT 1.2.3.4:443"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockNotifyError).not.toHaveBeenCalled();
+  });
+
+  it("calls notifyError when agent crashes with a non-transient error", async () => {
+    mockRunRouter.mockResolvedValue(makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }));
+    mockRunAgent.mockRejectedValue(new Error("Internal server error"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockNotifyError).toHaveBeenCalledWith(
+      expect.any(Object),
+      "Agent Crash",
+      "Internal server error",
+      expect.any(Object),
     );
   });
 });
@@ -1531,5 +1596,304 @@ describe("CSV file upload for SQL results", () => {
 
     // Should still complete the response (chat.update called)
     expect(client.chat.update).toHaveBeenCalled();
+  });
+});
+
+// ============================================================
+// Dispatch row lifecycle (insertDispatch / updateDispatch wiring)
+// ============================================================
+
+describe("dispatch row lifecycle", () => {
+  const sampleUsage = {
+    totalCostUsd: 0.05,
+    durationMs: 1000,
+    durationApiMs: 800,
+    numTurns: 2,
+    inputTokens: 100,
+    outputTokens: 200,
+    cacheReadInputTokens: 50,
+    cacheCreationInputTokens: 25,
+    costUsd: 0.05,
+    modelUsage: {},
+  };
+
+  const sampleLog = [
+    {
+      timestamp: Date.now(),
+      type: "assistant",
+      summary: "",
+      data: {
+        content: [
+          { type: "tool_use", name: "Read" },
+          { type: "tool_use", name: "Task" },
+          { type: "text", text: "Hello" },
+        ],
+      },
+    },
+  ];
+
+  it("inserts a slack dispatch row and finalizes completed on the very_low fast path", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({
+        quickResponse: "Quick...",
+        needsAgent: true,
+        complexity: "very_low",
+      }),
+    );
+    mockRunAgent.mockResolvedValue(
+      makeAgentResponse({
+        text: "Quick answer.",
+        usage: sampleUsage,
+        log: sampleLog,
+      }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // Insert: one slack-trigger row in "running" state with full metadata
+    expect(mockInsertDispatch).toHaveBeenCalledTimes(1);
+    const row = mockInsertDispatch.mock.calls[0][0];
+    expect(row).toMatchObject({
+      repoName: "test-repo",
+      trigger: "slack",
+      status: "running",
+      triggerMetadata: {
+        channelId: "C-TEST",
+        threadTs: "1234567890.000100",
+        messageTs: "1234567890.000100",
+        user: "U-HUMAN",
+        userName: null,
+        messageText: "Hello danxbot",
+      },
+      danxbotCommit: "abc1234",
+    });
+    expect(typeof row.id).toBe("string");
+    expect(row.id.length).toBeGreaterThan(0);
+
+    // Finalize: status=completed + session + summary + tokens + tool counts
+    expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+    const [finalizeId, finalizeFields] = mockUpdateDispatch.mock.calls[0];
+    expect(finalizeId).toBe(row.id);
+    expect(finalizeFields).toMatchObject({
+      status: "completed",
+      sessionUuid: "sess-test-1",
+      summary: "Quick answer.",
+      error: null,
+      tokensIn: 100,
+      tokensOut: 200,
+      cacheRead: 50,
+      cacheWrite: 25,
+      tokensTotal: 375,
+      toolCallCount: 2,
+      subagentCount: 1,
+    });
+    expect(typeof finalizeFields.completedAt).toBe("number");
+    expect(finalizeFields.completedAt).toBeGreaterThanOrEqual(row.startedAt);
+  });
+
+  it("inserts a slack dispatch row and finalizes completed on the full path (medium complexity)", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({
+        quickResponse: "Looking...",
+        needsAgent: true,
+        complexity: "medium",
+      }),
+    );
+    mockRunAgent.mockResolvedValue(
+      makeAgentResponse({
+        text: "Medium answer.",
+        usage: sampleUsage,
+        log: sampleLog,
+      }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockInsertDispatch).toHaveBeenCalledTimes(1);
+    expect(mockInsertDispatch.mock.calls[0][0]).toMatchObject({
+      trigger: "slack",
+      status: "running",
+      triggerMetadata: expect.objectContaining({
+        channelId: "C-TEST",
+        user: "U-HUMAN",
+        messageText: "Hello danxbot",
+      }),
+    });
+
+    expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDispatch.mock.calls[0][1]).toMatchObject({
+      status: "completed",
+      sessionUuid: "sess-test-1",
+      summary: "Medium answer.",
+      tokensIn: 100,
+      tokensOut: 200,
+      cacheRead: 50,
+      cacheWrite: 25,
+      tokensTotal: 375,
+      toolCallCount: 2,
+      subagentCount: 1,
+    });
+  });
+
+  it("finalizes failed with a 'timed out' error when the agent times out", async () => {
+    (mockConfig.agent as Record<string, unknown>).timeoutMs = 50;
+
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Checking..." }),
+    );
+    // Agent never resolves — timeout race wins
+    mockRunAgent.mockReturnValue(new Promise(() => {}));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockInsertDispatch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+
+    const [, fields] = mockUpdateDispatch.mock.calls[0];
+    expect(fields).toMatchObject({
+      status: "failed",
+      sessionUuid: null,
+      summary: null,
+      tokensIn: 0,
+      tokensOut: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      tokensTotal: 0,
+      toolCallCount: 0,
+      subagentCount: 0,
+    });
+    expect(fields.error).toContain("timed out");
+
+    (mockConfig.agent as Record<string, unknown>).timeoutMs = 300000;
+  });
+
+  it("finalizes failed with the last error message when retries are exhausted", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("first crash"))
+      .mockRejectedValueOnce(new Error("final crash"));
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockInsertDispatch).toHaveBeenCalledTimes(1);
+
+    // Finalize runs once — only on the terminal failure, not per retry attempt
+    expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDispatch.mock.calls[0][1]).toMatchObject({
+      status: "failed",
+      error: "final crash",
+      sessionUuid: null,
+      summary: null,
+      tokensIn: 0,
+      tokensOut: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      tokensTotal: 0,
+      toolCallCount: 0,
+      subagentCount: 0,
+    });
+  });
+
+  it("keeps a single dispatch row when very_low fails and escalation to medium succeeds", async () => {
+    // Guards the invariant at listener.ts:456-458 — the medium retry path
+    // reuses the SAME dispatch row. A regression that calls
+    // createSlackDispatch again or finalizes per-attempt would fail here.
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({
+        quickResponse: "Looking...",
+        needsAgent: true,
+        complexity: "very_low",
+      }),
+    );
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("very_low crashed"))
+      .mockResolvedValueOnce(
+        makeAgentResponse({
+          text: "Escalated answer.",
+          usage: sampleUsage,
+          log: sampleLog,
+        }),
+      );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // One insert — escalation must NOT create a second dispatch row
+    expect(mockInsertDispatch).toHaveBeenCalledTimes(1);
+
+    // One finalize — the very_low catch block must NOT finalize on failure;
+    // the retry path owns the terminal status
+    expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDispatch.mock.calls[0][1]).toMatchObject({
+      status: "completed",
+      summary: "Escalated answer.",
+      tokensIn: 100,
+      tokensOut: 200,
+      toolCallCount: 2,
+      subagentCount: 1,
+    });
+  });
+
+  it("finalizes failed exactly once on a non-retryable error (no retry loop)", async () => {
+    // Billing/credit errors short-circuit via isOperationalError and take a
+    // different terminal path than retry-exhaustion.
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+    mockRunAgent.mockRejectedValueOnce(
+      new Error("Credit balance is too low"),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    // No retry on non-retryable errors
+    expect(mockRunAgent).toHaveBeenCalledTimes(1);
+
+    expect(mockInsertDispatch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDispatch.mock.calls[0][1]).toMatchObject({
+      status: "failed",
+      error: "Credit balance is too low",
+    });
+  });
+
+  it("finalizes exactly once (completed) when a retry succeeds on the second attempt", async () => {
+    // Guards against a regression that finalizes per-attempt — the failure
+    // path inside the catch block must NOT call finalize when the retry loop
+    // still has attempts remaining.
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ needsAgent: true, quickResponse: "Looking..." }),
+    );
+    mockRunAgent
+      .mockRejectedValueOnce(new Error("first crash"))
+      .mockResolvedValueOnce(
+        makeAgentResponse({
+          text: "Recovered.",
+          usage: sampleUsage,
+          log: sampleLog,
+        }),
+      );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockInsertDispatch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+    expect(mockUpdateDispatch.mock.calls[0][1]).toMatchObject({
+      status: "completed",
+      summary: "Recovered.",
+      error: null,
+    });
+  });
+
+  it("does NOT create a dispatch when router returns needsAgent=false (router-only responses are not dispatches)", async () => {
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ quickResponse: "Hi there!", needsAgent: false }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockInsertDispatch).not.toHaveBeenCalled();
+    expect(mockUpdateDispatch).not.toHaveBeenCalled();
   });
 });
