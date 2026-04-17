@@ -6,7 +6,7 @@ import {
   appendFileSync,
   symlinkSync,
 } from "node:fs";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -213,13 +213,18 @@ describe("findNewestJsonlFile", () => {
   });
 
   it("finds the newest jsonl file by mtime", async () => {
-    writeFileSync(join(tempDir, "old.jsonl"), "{}");
-    // Small delay to ensure different mtime
-    await new Promise((r) => setTimeout(r, 50));
-    writeFileSync(join(tempDir, "new.jsonl"), "{}");
+    // Use explicit utimes instead of wall-clock delay — filesystem mtime
+    // precision can be coarser than a setTimeout under load, causing flakes.
+    const oldPath = join(tempDir, "old.jsonl");
+    const newPath = join(tempDir, "new.jsonl");
+    writeFileSync(oldPath, "{}");
+    writeFileSync(newPath, "{}");
+    const now = Date.now() / 1000;
+    utimesSync(oldPath, now - 10, now - 10);
+    utimesSync(newPath, now, now);
 
     const result = await findNewestJsonlFile(tempDir);
-    expect(result).toBe(join(tempDir, "new.jsonl"));
+    expect(result).toBe(newPath);
   });
 
   it("finds specific session by ID", async () => {

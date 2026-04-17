@@ -30,34 +30,55 @@ fetch_path() {
     --output text
 }
 
+# Write atomically to tmp files then mv into place — if the fetch fails
+# partway through, the existing .env survives instead of being truncated.
+write_atomic() {
+  local dest="$1"
+  local tmp="${dest}.tmp.$$"
+  cat > "$tmp"
+  mv "$tmp" "$dest"
+}
+
 echo "── Materializing shared keys to $ROOT/.env ──"
 mkdir -p "$ROOT"
-: > "$ROOT/.env"
-fetch_path "$SSM_PREFIX/shared/" | while IFS=$'\t' read -r name value; do
-  [ -z "$name" ] && continue
-  key="${name##*/}"
-  printf '%s=%s\n' "$key" "$value" >> "$ROOT/.env"
-done
+fetch_path "$SSM_PREFIX/shared/" | awk -F'\t' '
+  NF >= 2 && $1 != "" {
+    n = split($1, parts, "/"); key = parts[n];
+    # Reconstruct value across any tab-split columns beyond the first
+    val = $2;
+    for (i = 3; i <= NF; i++) val = val "\t" $i;
+    printf "%s=%s\n", key, val;
+  }
+' | write_atomic "$ROOT/.env"
 
-for repo in "${REPOS[@]}"; do
+for repo in ${REPOS[@]+"${REPOS[@]}"}; do
   repo_root="$ROOT/repos/$repo"
   mkdir -p "$repo_root/.danxbot"
   danxbot_env="$repo_root/.danxbot/.env"
   app_env="$repo_root/.env"
-  : > "$danxbot_env"
-  : > "$app_env"
 
   echo "── Materializing $SSM_PREFIX/repos/$repo/ → $repo_root ──"
-  fetch_path "$SSM_PREFIX/repos/$repo/" | while IFS=$'\t' read -r name value; do
-    [ -z "$name" ] && continue
-    key="${name##*/}"
-    if [[ "$key" == REPO_ENV_* ]]; then
-      stripped="${key#REPO_ENV_}"
-      printf '%s=%s\n' "$stripped" "$value" >> "$app_env"
-    else
-      printf '%s=%s\n' "$key" "$value" >> "$danxbot_env"
-    fi
-  done
+  # Split SSM output into two files (danxbot env vs REPO_ENV_* app env)
+  raw=$(fetch_path "$SSM_PREFIX/repos/$repo/")
+  echo "$raw" | awk -F'\t' '
+    NF >= 2 && $1 != "" {
+      n = split($1, parts, "/"); key = parts[n];
+      val = $2;
+      for (i = 3; i <= NF; i++) val = val "\t" $i;
+      if (key ~ /^REPO_ENV_/) next;
+      printf "%s=%s\n", key, val;
+    }
+  ' | write_atomic "$danxbot_env"
+  echo "$raw" | awk -F'\t' '
+    NF >= 2 && $1 != "" {
+      n = split($1, parts, "/"); key = parts[n];
+      val = $2;
+      for (i = 3; i <= NF; i++) val = val "\t" $i;
+      if (key !~ /^REPO_ENV_/) next;
+      stripped = substr(key, length("REPO_ENV_") + 1);
+      printf "%s=%s\n", stripped, val;
+    }
+  ' | write_atomic "$app_env"
 done
 
 echo "── Done materializing ──"

@@ -43,4 +43,19 @@ describe("buildCloneOrPullCommand", () => {
     );
     expect(cmd).toMatch(/fetch origin main && git -C .* reset --hard/);
   });
+
+  it("rejects tokens containing shell-special characters (single-quote injection guard)", () => {
+    expect(() =>
+      buildCloneOrPullCommand(
+        { name: "app", url: "https://github.com/x/app.git" },
+        "ghp_'injection",
+      ),
+    ).toThrow("unsupported characters");
+    expect(() =>
+      buildCloneOrPullCommand(
+        { name: "app", url: "https://github.com/x/app.git" },
+        "ghp_$(evil)",
+      ),
+    ).toThrow("unsupported characters");
+  });
 });

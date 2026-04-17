@@ -20,6 +20,14 @@ export function buildCloneOrPullCommand(
       `Unsupported repo URL (need https://github.com/...): ${repo.url}`,
     );
   }
+  // Reject tokens with characters that would break single-quoted SSH wrapping
+  // (the token ends up inside `ssh user@host '...<token>...'`). Github tokens
+  // are [A-Za-z0-9_]+ in practice; anything else is a configuration bug.
+  if (!/^[A-Za-z0-9_-]+$/.test(githubToken)) {
+    throw new Error(
+      `GitHub token for repo "${repo.name}" contains unsupported characters`,
+    );
+  }
   const authedUrl = `https://x-access-token:${githubToken}@github.com/${m[1]}`;
   const repoDir = `/danxbot/repos/${repo.name}`;
 

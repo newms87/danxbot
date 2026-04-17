@@ -5,7 +5,8 @@
  * lives in one obvious place.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyTemplateVars, type RemoteHost } from "./remote.js";
@@ -31,7 +32,9 @@ export function uploadAndRestartInfra(
 ): void {
   console.log("\n── Uploading /danxbot/docker-compose.prod.yml ──");
   const rendered = renderProdCompose(ecrImage, dashboardPort);
-  const tmp = "/tmp/docker-compose.prod.yml";
+  // Unique tmp path so concurrent deploys from the same workstation don't stomp.
+  const localTmpDir = mkdtempSync(resolve(tmpdir(), "danxbot-compose-"));
+  const tmp = resolve(localTmpDir, "docker-compose.prod.yml");
   writeFileSync(tmp, rendered);
   remote.scpUpload(tmp, "/tmp/docker-compose.prod.yml");
   remote.sshRun(

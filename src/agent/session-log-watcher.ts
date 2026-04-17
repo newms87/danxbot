@@ -304,6 +304,7 @@ export class SessionLogWatcher {
   private dispatchId: string | undefined;
   private pollIntervalMs: number;
   private running = false;
+  private polling = false;
   private entries: AgentLogEntry[] = [];
   private initSynthesized = false;
 
@@ -384,16 +385,28 @@ export class SessionLogWatcher {
     );
   }
 
-  /** Read new lines from the session file and emit entries. */
+  /**
+   * Read new lines from the session file and emit entries.
+   * Guarded against:
+   *   1. Concurrent polls (`this.polling` flag) — setInterval can fire while
+   *      the previous poll is mid-await; without the guard two polls would
+   *      both read the same byte range and emit duplicates.
+   *   2. stop() racing with an in-flight poll — each await yields, and stop()
+   *      sets running=false. After each await we re-check running so a late
+   *      poll can't emit entries (or read the file state) after stop returned.
+   */
   private async poll(): Promise<void> {
-    if (!this.sessionFilePath || !this.running) return;
+    if (this.polling || !this.sessionFilePath || !this.running) return;
+    this.polling = true;
 
     try {
       const fileStats = await stat(this.sessionFilePath);
+      if (!this.running) return;
       if (fileStats.size <= this.byteOffset) return;
 
       const fd = await open(this.sessionFilePath, "r");
       try {
+        if (!this.running) return;
         const bytesToRead = fileStats.size - this.byteOffset;
         const buffer = Buffer.alloc(bytesToRead);
         const { bytesRead } = await fd.read(
@@ -402,6 +415,7 @@ export class SessionLogWatcher {
           bytesToRead,
           this.byteOffset,
         );
+        if (!this.running) return;
 
         if (bytesRead === 0) return;
 
@@ -422,6 +436,8 @@ export class SessionLogWatcher {
       } else {
         log.error("Poll error:", err);
       }
+    } finally {
+      this.polling = false;
     }
   }
 

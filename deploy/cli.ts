@@ -174,9 +174,12 @@ async function status(config: DeployConfig): Promise<void> {
 
     const health = await waitForHealthy(`https://${config.domain}`, 3, 2000);
     console.log(`\n  Health: ${health.healthy ? "HEALTHY" : "UNHEALTHY"}`);
-  } catch {
-    console.log("  No infrastructure deployed yet.");
-    console.log(`  Run: npx tsx deploy/cli.ts deploy <target>`);
+  } catch (err) {
+    console.log("  No infrastructure deployed yet (or status check failed).");
+    console.log(
+      `  Error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    console.log(`  Run: npx tsx deploy/cli.ts deploy ${config.name}`);
   }
 }
 
@@ -214,15 +217,17 @@ async function secretsPush(config: DeployConfig): Promise<void> {
 }
 
 async function smoke(config: DeployConfig): Promise<void> {
+  if (config.repos.length === 0) {
+    throw new Error(
+      `Cannot smoke-test ${config.name}: no repos configured in the deployment yml`,
+    );
+  }
   console.log("\n── Smoke: dispatching trivial prompt ──");
   const url = `https://${config.domain}`;
   const response = await fetch(`${url}/api/launch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: "echo",
-      repo: config.repos[0]?.name ?? "default",
-    }),
+    body: JSON.stringify({ prompt: "echo", repo: config.repos[0].name }),
   });
   if (!response.ok) {
     throw new Error(`Smoke failed: ${response.status}`);
