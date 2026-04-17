@@ -4,6 +4,12 @@ import { getHealthStatus } from "./health.js";
 import { json } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import { repos } from "../config.js";
+import {
+  handleListDispatches,
+  handleGetDispatch,
+  handleRawJsonl,
+  handleFollowDispatch,
+} from "./dispatches-routes.js";
 
 const log = createLogger("dashboard");
 
@@ -49,6 +55,31 @@ export async function startDashboard(): Promise<void> {
         name: r.name,
         url: r.url,
       })));
+      return;
+    }
+
+    if (url.pathname === "/api/dispatches") {
+      await handleListDispatches(res, url.searchParams);
+      return;
+    }
+
+    const detailMatch = url.pathname.match(/^\/api\/dispatches\/([^/]+)$/);
+    if (detailMatch) {
+      await handleGetDispatch(res, detailMatch[1]);
+      return;
+    }
+
+    const rawMatch = url.pathname.match(/^\/api\/dispatches\/([^/]+)\/raw$/);
+    if (rawMatch) {
+      await handleRawJsonl(res, rawMatch[1]);
+      return;
+    }
+
+    const followMatch = url.pathname.match(
+      /^\/api\/dispatches\/([^/]+)\/follow$/,
+    );
+    if (followMatch) {
+      await handleFollowDispatch(req, res, followMatch[1]);
       return;
     }
 

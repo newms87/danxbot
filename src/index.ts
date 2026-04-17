@@ -2,6 +2,7 @@ import { startSlackListener, getSlackClient } from "./slack/listener.js";
 import { startThreadCleanup } from "./threads.js";
 import { startDashboard } from "./dashboard/server.js";
 import { startWorkerServer } from "./worker/server.js";
+import { startRetentionCron } from "./dashboard/retention.js";
 import { initShutdownHandlers } from "./shutdown.js";
 import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
@@ -22,10 +23,11 @@ async function startDashboardMode(): Promise<void> {
   await runMigrations();
 
   const threadCleanupInterval = startThreadCleanup();
+  const retentionInterval = startRetentionCron();
 
   await startDashboard();
 
-  initShutdownHandlers({ threadCleanupInterval });
+  initShutdownHandlers({ threadCleanupInterval, retentionInterval });
 
   log.info("Dashboard mode ready — no poller or Slack (workers handle those)");
 }

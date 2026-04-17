@@ -269,13 +269,16 @@ describe("dashboard mode startup flow", () => {
     expect(mockInitPlatformPool).not.toHaveBeenCalled();
   });
 
-  it("calls initShutdownHandlers with thread cleanup interval", async () => {
+  it("calls initShutdownHandlers with thread cleanup + retention interval", async () => {
     mockStartThreadCleanup.mockReturnValue("dash-thread-interval");
 
     await importIndex();
 
-    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
-      threadCleanupInterval: "dash-thread-interval",
-    });
+    expect(mockInitShutdownHandlers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadCleanupInterval: "dash-thread-interval",
+        retentionInterval: expect.anything(),
+      }),
+    );
   });
 });
