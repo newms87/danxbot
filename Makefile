@@ -14,7 +14,8 @@ REPOS_DIR := ./repos
 .PHONY: help launch-infra stop-infra launch-worker stop-worker launch-all-workers stop-all-workers build logs validate-repos \
        test test-unit test-integration test-validate test-system \
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
-       test-system-error test-system-stall test-system-poller test-system-cleanup
+       test-system-error test-system-stall test-system-poller test-system-cleanup \
+       deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -173,3 +174,35 @@ test-system-poller: ## Test Trello poller flow (requires TRELLO_API_KEY/TOKEN)
 
 test-system-cleanup: ## Verify no orphaned temp dirs or zombie jobs
 	@$(SYSTEM_TEST_SCRIPT) --test cleanup
+
+# --- Deploy ---
+#
+# Production AWS deploy — per-deployment config at .danxbot/deployments/<TARGET>.yml.
+# Each TARGET is its own AWS account / region / resources — complete isolation.
+#
+
+_require_target:
+	@if [ -z "$(TARGET)" ]; then \
+		echo "Error: TARGET is required. Usage: make deploy TARGET=gpt"; exit 1; \
+	fi
+
+deploy: _require_target ## Deploy to AWS (usage: make deploy TARGET=gpt)
+	npx tsx deploy/cli.ts deploy $(TARGET) $(ARGS)
+
+deploy-status: _require_target ## Show infra state + health (usage: make deploy-status TARGET=gpt)
+	npx tsx deploy/cli.ts status $(TARGET)
+
+deploy-destroy: _require_target ## Tear down all AWS resources (usage: make deploy-destroy TARGET=gpt ARGS=--confirm)
+	npx tsx deploy/cli.ts destroy $(TARGET) $(ARGS)
+
+deploy-ssh: _require_target ## SSH to the deployed instance (usage: make deploy-ssh TARGET=gpt)
+	npx tsx deploy/cli.ts ssh $(TARGET)
+
+deploy-logs: _require_target ## Tail container logs (usage: make deploy-logs TARGET=gpt)
+	npx tsx deploy/cli.ts logs $(TARGET)
+
+deploy-secrets-push: _require_target ## Sync local .env files to SSM (usage: make deploy-secrets-push TARGET=gpt)
+	npx tsx deploy/cli.ts secrets-push $(TARGET)
+
+deploy-smoke: _require_target ## Smoke-test the deployed dashboard (usage: make deploy-smoke TARGET=gpt)
+	npx tsx deploy/cli.ts smoke $(TARGET)

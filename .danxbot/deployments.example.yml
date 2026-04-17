@@ -1,0 +1,46 @@
+# Danxbot deployment config — copy to .danxbot/deployments/<name>.yml
+# and fill in. The filename stem becomes the deployment TARGET.
+# Multiple deployments can coexist; deploy one with `make deploy TARGET=<name>`.
+
+# Deployment identifier (AWS resource prefix). Lowercase alphanumeric + hyphens.
+# For upgrade-in-place of the existing danxbot-gpt-manager deploy, use the
+# same name it uses (e.g. `danxbot-production`).
+name: example-deployment
+
+# AWS region
+region: us-east-1
+
+# Dashboard domain (must be in hosted_zone below, Route53)
+domain: danxbot.example.com
+hosted_zone: example.com
+
+# AWS CLI profile — REQUIRED. No default-chain fallback (multi-deploy safety).
+aws:
+  profile: default
+
+# EC2 instance
+instance:
+  type: t3.small          # new minimum default; bump per deployment as needed
+  volume_size: 30         # root volume (GB) — OS + Docker layers
+  data_volume_size: 100   # data volume (GB) — repos, mysql, logs; default is generous
+  ssh_key: ""             # empty = auto-generate and save to ~/.ssh/<name>-key.pem
+  ssh_allowed_cidrs:
+    - "0.0.0.0/0"         # restrict to your IP in real deployments
+
+# SSM Parameter Store subtree root — defaults to /danxbot-<TARGET> when omitted
+ssm_prefix: /danxbot-example
+
+# Path to a local directory containing .claude.json and .credentials.json.
+# Resolved relative to this file. Default ../../claude-auth.
+claude_auth_dir: ../../claude-auth
+
+# Dashboard port (inside the container)
+dashboard:
+  port: 5555
+
+# Git repos that get cloned and run as workers on the instance.
+# Each listed repo MUST have .danxbot/config/compose.yml and
+# .danxbot/scripts/bootstrap.sh committed in its repo.
+repos:
+  - name: danxbot
+    url: https://github.com/newms87/danxbot-flytebot.git

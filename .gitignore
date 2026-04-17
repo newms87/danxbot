@@ -31,3 +31,7 @@ repos/
 # Terraform local state + generated tfvars
 deploy/terraform/.terraform/
 deploy/terraform/terraform.tfvars.json
+
+# Real deploy configs (contain deployment-specific identifiers)
+.danxbot/deployments/*.yml
+!.danxbot/deployments.example.yml
