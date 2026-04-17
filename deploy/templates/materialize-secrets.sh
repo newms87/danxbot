@@ -39,15 +39,31 @@ write_atomic() {
   mv "$tmp" "$dest"
 }
 
+# awk snippet that writes a .env line, double-quoting values that contain
+# whitespace, `#`, `$`, `"`, or `\`. Simple alphanumeric/URL values stay
+# unquoted so docker-compose (which may treat literal quotes as-is) gets
+# clean values; Laravel's dotenv (which requires quoting around whitespace)
+# gets correctly-quoted values.
+AWK_EMIT='
+function emit(key, val) {
+  if (val ~ /[ \t#$"\\]/) {
+    gsub(/\\/, "\\\\", val)
+    gsub(/"/, "\\\"", val)
+    printf "%s=\"%s\"\n", key, val
+  } else {
+    printf "%s=%s\n", key, val
+  }
+}
+'
+
 echo "── Materializing shared keys to $ROOT/.env ──"
 mkdir -p "$ROOT"
-fetch_path "$SSM_PREFIX/shared/" | awk -F'\t' '
+fetch_path "$SSM_PREFIX/shared/" | awk -F'\t' "$AWK_EMIT"'
   NF >= 2 && $1 != "" {
     n = split($1, parts, "/"); key = parts[n];
-    # Reconstruct value across any tab-split columns beyond the first
     val = $2;
     for (i = 3; i <= NF; i++) val = val "\t" $i;
-    printf "%s=%s\n", key, val;
+    emit(key, val);
   }
 ' | write_atomic "$ROOT/.env"
 
@@ -58,25 +74,24 @@ for repo in ${REPOS[@]+"${REPOS[@]}"}; do
   app_env="$repo_root/.env"
 
   echo "── Materializing $SSM_PREFIX/repos/$repo/ → $repo_root ──"
-  # Split SSM output into two files (danxbot env vs REPO_ENV_* app env)
   raw=$(fetch_path "$SSM_PREFIX/repos/$repo/")
-  echo "$raw" | awk -F'\t' '
+  echo "$raw" | awk -F'\t' "$AWK_EMIT"'
     NF >= 2 && $1 != "" {
       n = split($1, parts, "/"); key = parts[n];
       val = $2;
       for (i = 3; i <= NF; i++) val = val "\t" $i;
       if (key ~ /^REPO_ENV_/) next;
-      printf "%s=%s\n", key, val;
+      emit(key, val);
     }
   ' | write_atomic "$danxbot_env"
-  echo "$raw" | awk -F'\t' '
+  echo "$raw" | awk -F'\t' "$AWK_EMIT"'
     NF >= 2 && $1 != "" {
       n = split($1, parts, "/"); key = parts[n];
       val = $2;
       for (i = 3; i <= NF; i++) val = val "\t" $i;
       if (key !~ /^REPO_ENV_/) next;
       stripped = substr(key, length("REPO_ENV_") + 1);
-      printf "%s=%s\n", stripped, val;
+      emit(stripped, val);
     }
   ' | write_atomic "$app_env"
 done

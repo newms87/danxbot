@@ -145,8 +145,13 @@ async function deploy(config: DeployConfig): Promise<void> {
   // Launch shared-infra compose
   uploadAndRestartInfra(remote, ecrImage, config.dashboard.port, config.region);
 
-  // Launch per-repo workers
-  launchWorkers(remote, config);
+  // Launch per-repo workers. Worker compose files reference
+  // ${DANXBOT_WORKER_IMAGE} + ${CLAUDE_AUTH_DIR} which only exist in prod —
+  // inject them inline so the same compose works in dev without changes.
+  launchWorkers(remote, config, {
+    workerImage: ecrImage,
+    claudeAuthDir: "/danxbot/claude-auth",
+  });
 
   // Health
   const health = await waitForHealthy(`https://${config.domain}`);
