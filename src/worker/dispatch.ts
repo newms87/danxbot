@@ -9,8 +9,7 @@ import {
   buildMcpSettings,
   cleanupMcpSettings,
   buildCompletionInstruction,
-  killAgentProcess,
-  isAgentProcessAlive,
+  terminateWithGrace,
   type AgentJob,
   type McpSettingsOptions,
 } from "../agent/launcher.js";
@@ -160,16 +159,11 @@ export async function handleLaunch(
 
           // Kill stalled process directly (no job.stop — we want to keep the
           // slot "running" from the caller's perspective while we respawn, so
-          // we can't mark the job completed/failed here). Route through
-          // killAgentProcess so host mode (tracked PID) and docker mode
-          // (ChildProcess) both work — see `.claude/rules/agent-dispatch.md`.
-          if (currentJob.status === "running") {
-            killAgentProcess(currentJob, "SIGTERM");
-            await new Promise<void>((r) => setTimeout(r, 5_000));
-            if (currentJob.status === "running" && isAgentProcessAlive(currentJob)) {
-              killAgentProcess(currentJob, "SIGKILL");
-            }
-          }
+          // we can't mark the job completed/failed here). `terminateWithGrace`
+          // is the shared SIGTERM/5s/SIGKILL helper; it routes through
+          // killAgentProcess so docker (ChildProcess) and host (tracked PID)
+          // both work — see `.claude/rules/agent-dispatch.md`.
+          await terminateWithGrace(currentJob, 5_000);
 
           // Use the original task (not taskWithInstruction) as the base so the
           // completion instruction appears exactly once, followed by the stall note.

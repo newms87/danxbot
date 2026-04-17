@@ -109,10 +109,15 @@ export function buildDispatchScript(
   // of `script` (the parent of claude's pty). SIGTERM to that PID tears down
   // script -> claude cleanly. The terminal tab closes when script exits.
   //
-  // This is how `.claude/rules/agent-dispatch.md` specifies the cascade:
-  // "killing the claude PID causes the bash script to exit and the Windows
-  // Terminal tab to close". `exec` is the idiom that makes bash and script
-  // the SAME tracked PID, avoiding orphan claude processes on cancel.
+  // Signal cascade: SIGTERM to `script`'s PID closes the pty that claude is
+  // attached to; claude receives SIGHUP (standard util-linux `script`
+  // behaviour on WSL2) and exits cleanly. No orphaned claude. This is the
+  // mechanism `.claude/rules/agent-dispatch.md` ("Cancellation") relies on.
+  //
+  // `exec` is load-bearing: without it, bash would remain the parent of
+  // script, and SIGTERM to bash's PID would NOT reliably propagate to script
+  // (bash doesn't forward signals to foreground children by default). The
+  // exec-to-script pattern is the idiomatic workaround.
   const pidEmit = options.pidFilePath
     ? `echo $$ > "$PID_FILE"\n`
     : "";

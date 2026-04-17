@@ -1,8 +1,14 @@
 /**
  * Shared process utilities for spawning Claude Code CLI agents.
  *
- * Building blocks used by spawnAgent(): env setup, disk logging,
- * inactivity timer, and process exit/error handling.
+ * Building blocks used by spawnAgent():
+ *   - `buildCleanEnv`          env setup (strip CLAUDECODE vars)
+ *   - `logPromptToDisk`        debug-log prompts + agent configs
+ *   - `createInactivityTimer`  runtime-agnostic timer — takes a kill callback
+ *                              so docker (ChildProcess.kill) and host
+ *                              (process.kill(pid, sig)) can share the logic
+ *   - `setupProcessHandlers`   docker-only close/error wiring (host mode
+ *                              uses the PID liveness watcher in host-pid.ts)
  */
 
 import { ChildProcess } from "node:child_process";

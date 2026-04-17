@@ -9,8 +9,9 @@ const mockCancelJob = vi.fn();
 const mockGetJobStatus = vi.fn();
 const mockBuildMcpSettings = vi.fn().mockReturnValue("/tmp/danxbot-mcp-test");
 const mockCleanupMcpSettings = vi.fn();
-const mockKillAgentProcess = vi.fn();
-const mockIsAgentProcessAlive = vi.fn().mockReturnValue(true);
+// terminateWithGrace records the jobs it's asked to kill so tests can assert
+// the Phase 3 contract (stall recovery uses it instead of ChildProcess.kill).
+const mockTerminateWithGrace = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../agent/launcher.js", () => ({
   spawnAgent: (...args: unknown[]) => mockSpawnAgent(...args),
@@ -19,8 +20,7 @@ vi.mock("../agent/launcher.js", () => ({
   buildMcpSettings: (...args: unknown[]) => mockBuildMcpSettings(...args),
   cleanupMcpSettings: (...args: unknown[]) => mockCleanupMcpSettings(...args),
   buildCompletionInstruction: () => " [completion-instruction]",
-  killAgentProcess: (...args: unknown[]) => mockKillAgentProcess(...args),
-  isAgentProcessAlive: (...args: unknown[]) => mockIsAgentProcessAlive(...args),
+  terminateWithGrace: (...args: unknown[]) => mockTerminateWithGrace(...args),
 }));
 
 // Use vi.hoisted so these mocks are available inside the vi.mock factories (which are hoisted)
@@ -787,6 +787,71 @@ describe("handleLaunch — stall detection (host mode)", () => {
       mockGetJobStatus.mockReturnValue({ status: "running" });
       handleStatus(statusRes, dispatchId);
       expect(statusRes._getStatusCode()).toBe(200);
+
+      // Phase 3 contract: stall recovery routes through terminateWithGrace —
+      // regression-proof against anyone re-inlining `job.process.kill(...)`,
+      // which would silently break host mode (no ChildProcess handle).
+      expect(mockTerminateWithGrace).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "job-stall-respawn" }),
+        5_000,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("onStall callback: kills via killAgentProcess when job has no ChildProcess (host mode)", async () => {
+    // Simulates a host-mode job: process is undefined, claudePid is set.
+    // Before Phase 3, stall recovery directly accessed job.process.kill,
+    // which was a no-op for host jobs — this test locks that contract.
+    mockDispatchConfig.isHost = true;
+    vi.useFakeTimers();
+
+    try {
+      const mockWatcher = makeMockWatcher();
+      const hostJob = {
+        id: "host-stall-job",
+        status: "running" as string,
+        summary: "",
+        startedAt: new Date(),
+        watcher: mockWatcher,
+        terminalLogPath: "/tmp/danxbot-terminal-host-stall-job.log",
+        _cleanup: vi.fn(),
+        // No `process` — host mode runs claude in a detached wt.exe tab.
+        claudePid: 424_242,
+      };
+      const respawnJob = {
+        id: "host-respawn",
+        status: "running" as string,
+        summary: "",
+        startedAt: new Date(),
+        watcher: makeMockWatcher(),
+        terminalLogPath: "/tmp/danxbot-terminal-host-respawn.log",
+        _cleanup: vi.fn(),
+        claudePid: 424_243,
+      };
+      mockSpawnAgent.mockResolvedValueOnce(hostJob).mockResolvedValueOnce(respawnJob);
+
+      const req = createMockReqWithBody("POST", {
+        task: "Host task",
+        api_token: "tok-host",
+        status_url: "http://example.com/status",
+      });
+      const res = createMockRes();
+      await handleLaunch(req, res, MOCK_REPO);
+
+      const stallArgs = mockStallDetectorCtor.mock.calls[0][0] as { onStall: () => Promise<void> };
+      const p = stallArgs.onStall();
+      await vi.advanceTimersByTimeAsync(6_000);
+      await p;
+
+      // Host-mode stall recovery passes the host job (no .process handle)
+      // through terminateWithGrace, which must be signature-agnostic.
+      expect(mockTerminateWithGrace).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "host-stall-job", claudePid: 424_242 }),
+        5_000,
+      );
+      expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

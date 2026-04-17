@@ -52,19 +52,24 @@ export async function readPidFileWithTimeout(
 }
 
 /**
- * Returns true if a signal can be sent to the given PID (process is alive).
- * Using signal 0 is the standard POSIX liveness check — it performs permission
- * checks and target lookup but delivers no signal.
+ * Returns true if the kernel reports the PID as existing. Uses signal 0, the
+ * POSIX idiom for a liveness check: no signal is delivered, but the kernel
+ * performs target lookup and permission checks.
+ *
+ * Error mapping:
+ *   - ESRCH  → process is gone (return false)
+ *   - EPERM  → process exists but we lack permission to signal it (return true,
+ *              because the PID is still live — the caller's concern is
+ *              "is there something at that PID?", not "can we kill it?")
+ *   - other  → propagate via the caller — this function treats them as dead
+ *              to keep liveness polling simple; unusual errors should have
+ *              already surfaced via killHostPid.
  */
 export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    // ESRCH = no such process; EPERM = process exists but we can't signal it.
-    // For liveness, EPERM still means "alive from the kernel's perspective",
-    // but in our use case the dispatched bash is our own descendant so EPERM
-    // shouldn't occur. Treat any error as "dead" to keep the semantics simple.
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "EPERM") return true;
     return false;

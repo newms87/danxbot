@@ -150,6 +150,23 @@ export function isAgentProcessAlive(job: AgentJob): boolean {
   return false;
 }
 
+/**
+ * Send SIGTERM, wait `graceMs`, then SIGKILL if the process is still alive.
+ * The two-phase pattern gives the agent a chance to flush state (final
+ * assistant message, usage totals) before forceful termination. Works
+ * identically in docker and host mode via the runtime-aware helpers.
+ */
+export async function terminateWithGrace(
+  job: AgentJob,
+  graceMs: number,
+): Promise<void> {
+  killAgentProcess(job, "SIGTERM");
+  await new Promise((resolve) => setTimeout(resolve, graceMs));
+  if (isAgentProcessAlive(job)) {
+    killAgentProcess(job, "SIGKILL");
+  }
+}
+
 export interface SpawnAgentOptions {
   /** The prompt/command to pass to claude CLI */
   prompt: string;
@@ -470,7 +487,9 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
       try {
         rmSync(termSettingsDirToClean, { recursive: true, force: true });
       } catch {
-        // Ignore cleanup errors
+        // ENOENT acceptable — the dir may never have been created if
+        // `spawnHostMode` failed before mkdtempSync. force:true already
+        // handles missing paths, so any error here is nonfatal.
       }
     }
   }
@@ -546,13 +565,32 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
         env,
         onExit: () => {
           if (job.status !== "running") return;
-          job.status = "completed";
-          job.summary = lastAssistantText.trim() || "Agent completed successfully";
+
+          // In host mode the PID died without going through job.stop()
+          // (which sets job.status before killing). Two paths land here:
+          //   1. The agent produced assistant output then exited — treat as
+          //      completed (e.g., user closed the tab after seeing results).
+          //   2. The agent produced NO output before dying — treat as failed.
+          //      Empty output means either the watcher never attached (bad
+          //      cwd / missing dispatch tag) or the claude process crashed at
+          //      startup. Reporting "completed" for that case is a silent
+          //      fallback — see `.claude/rules/code-quality.md` "fallbacks
+          //      are bugs". Fail loud so the caller can retry.
+          const finalText = lastAssistantText.trim();
+          if (finalText) {
+            job.status = "completed";
+            job.summary = finalText;
+            log.info(`[Job ${jobId}] Host-mode claude exited with output`);
+          } else {
+            job.status = "failed";
+            job.summary =
+              "Host-mode claude exited without producing any assistant output — watcher may not have attached or agent crashed at startup";
+            log.warn(`[Job ${jobId}] ${job.summary}`);
+          }
           job.completedAt = new Date();
-          log.info(`[Job ${jobId}] Host-mode claude exited`);
           cleanup();
           if (options.statusUrl && options.apiToken) {
-            putStatus(job, options.apiToken, "completed", job.summary);
+            putStatus(job, options.apiToken, job.status, job.summary);
           }
           options.onComplete?.(job);
         },
@@ -578,10 +616,10 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
       throw err;
     }
   } else {
-    // stdio: stdin ignore (no user input expected), stdout ignore (watcher
-    // reads JSONL from disk — stdout was only kept for a redundant inactivity
-    // signal, which is now handled via watcher entries), stderr pipe so we can
-    // surface failure messages in job summaries.
+    // stdio: stdin ignore (no interactive input in docker mode), stdout ignore
+    // (SessionLogWatcher reads the JSONL session file from disk — stdout is
+    // not a monitoring channel), stderr pipe so we can surface failure messages
+    // in the job summary when the process exits non-zero.
     const child = spawn("claude", args, {
       env,
       stdio: ["ignore", "ignore", "pipe"],
@@ -636,6 +674,15 @@ interface SpawnHostModeOptions {
 async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
   const { job, jobId, repoName, taggedPrompt, agentCwd, env, onExit } = opts;
 
+  // Paired: a statusUrl without an apiToken would bake an empty Bearer token
+  // into the bash curl (malformed auth header). Fail loud at the call site
+  // instead of pretending to post unauthenticated — per "fallbacks are bugs".
+  if (opts.statusUrl && !opts.apiToken) {
+    throw new Error(
+      `[Job ${jobId}] spawnAgent({openTerminal: true}) requires apiToken when statusUrl is set`,
+    );
+  }
+
   const termLogPath = getTerminalLogPath(jobId);
   job.terminalLogPath = termLogPath;
 
@@ -653,6 +700,9 @@ async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
         ? JSON.stringify(opts.agents)
         : undefined,
     statusUrl: opts.statusUrl,
+    // apiToken is guaranteed defined if statusUrl is set (guard above). If no
+    // statusUrl, the bash `report_status` guard short-circuits on empty URL,
+    // so the empty-string default here never reaches curl.
     apiToken: opts.apiToken ?? "",
     terminalLogPath: termLogPath,
     pidFilePath,
@@ -693,16 +743,7 @@ export async function cancelJob(
   log.info(`[Job ${job.id}] Cancel requested — sending SIGTERM`);
 
   job._canceling = true;
-  killAgentProcess(job, "SIGTERM");
-
-  // Wait 5 seconds for graceful shutdown
-  await new Promise((resolve) => setTimeout(resolve, 5000));
-
-  // Force kill if still running
-  if (job.status === "running" && isAgentProcessAlive(job)) {
-    log.info(`[Job ${job.id}] Still running after 5s — sending SIGKILL`);
-    killAgentProcess(job, "SIGKILL");
-  }
+  await terminateWithGrace(job, 5_000);
 
   if (job.status === "running") {
     job.status = "canceled";
