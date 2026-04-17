@@ -290,6 +290,181 @@ instance:
     expect(() => loadConfig(p)).toThrow("instance.ssh_allowed_cidrs must be an array");
   });
 
+  it("parses optional app_env_subpath on a repo", () => {
+    const p = writeDeployment(
+      "with-subpath",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: platform
+    url: https://github.com/user/platform.git
+    app_env_subpath: ssap
+  - name: simple
+    url: https://github.com/user/simple.git
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].name).toBe("platform");
+    expect(config.repos[0].appEnvSubpath).toBe("ssap");
+    expect(config.repos[1].name).toBe("simple");
+    // Unset field must remain undefined so existing repos keep default behavior.
+    expect(config.repos[1].appEnvSubpath).toBeUndefined();
+  });
+
+  it("rejects absolute app_env_subpath (deploy CLI would write outside the repo)", () => {
+    const p = writeDeployment(
+      "abs-subpath",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    app_env_subpath: /etc
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/app_env_subpath.*absolute/i);
+  });
+
+  it("rejects app_env_subpath containing path traversal", () => {
+    const p = writeDeployment(
+      "traversal",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    app_env_subpath: ../secrets
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/app_env_subpath.*traversal/i);
+  });
+
+  it("rejects app_env_subpath that is not a string", () => {
+    const p = writeDeployment(
+      "bad-type",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    app_env_subpath: 42
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/app_env_subpath.*string/i);
+  });
+
+  it("rejects empty app_env_subpath (no silent fallback on config keys)", () => {
+    const p = writeDeployment(
+      "empty-subpath",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    app_env_subpath: ""
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/app_env_subpath.*empty/i);
+  });
+
+  it("rejects app_env_subpath with non-leading .. segment", () => {
+    // Guards the segment-level check: the string contains ".." not at the
+    // start, which a naive substring check would miss — but our validator
+    // splits on `/` and rejects any exact `..` segment.
+    const p = writeDeployment(
+      "inner-traversal",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    app_env_subpath: ssap/../escape
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/app_env_subpath.*traversal/i);
+  });
+
+  it("accepts literal '..' as a substring but not a path segment (foo..bar)", () => {
+    // The shell script had a `*..*` glob bug — rejected legitimate names.
+    // This test pins the TS side and is the regression guard if anyone
+    // re-introduces a substring-based check.
+    const p = writeDeployment(
+      "substring-not-segment",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: odd
+    url: https://github.com/user/odd.git
+    app_env_subpath: foo..bar
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].appEnvSubpath).toBe("foo..bar");
+  });
+
+  it("normalizes a trailing slash on app_env_subpath (ssap/ → ssap)", () => {
+    const p = writeDeployment(
+      "trailing-slash",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: r
+    url: https://github.com/user/r.git
+    app_env_subpath: ssap/
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].appEnvSubpath).toBe("ssap");
+  });
+
   it("throws when a repo entry is missing name or url", () => {
     const p = writeDeployment(
       "bad-repo",

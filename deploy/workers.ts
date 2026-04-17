@@ -5,7 +5,7 @@
  * stop/startable without disturbing others.
  */
 
-import type { DeployConfig } from "./config.js";
+import type { DeployConfig, DeployRepo } from "./config.js";
 import type { RemoteHost } from "./remote.js";
 
 export interface LaunchEnv {
@@ -16,7 +16,7 @@ export interface LaunchEnv {
 }
 
 export function buildLaunchCommand(
-  repo: { name: string; url: string },
+  repo: Pick<DeployRepo, "name" | "url">,
   env: LaunchEnv,
 ): string {
   // Inline env vars feed docker-compose variable substitution in the repo's
@@ -27,10 +27,9 @@ export function buildLaunchCommand(
   return `${prefix} docker compose --env-file /danxbot/.env -f /danxbot/repos/${repo.name}/.danxbot/config/compose.yml -p worker-${repo.name} up -d --remove-orphans`;
 }
 
-export function buildStopCommand(repo: {
-  name: string;
-  url: string;
-}): string {
+export function buildStopCommand(
+  repo: Pick<DeployRepo, "name" | "url">,
+): string {
   return `docker compose -p worker-${repo.name} down`;
 }
 

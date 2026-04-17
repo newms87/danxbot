@@ -50,9 +50,15 @@ export function collectDeploymentSecrets(
   const shared = parseEnvFile(resolve(cwd, ".env"));
   const perRepo: CollectedSecrets["perRepo"] = {};
   for (const repo of config.repos) {
+    // When app_env_subpath is set the app .env lives under the subpath
+    // (e.g., platform's Sail env at ssap/.env). The danxbot agent env path
+    // is unchanged — it's a danxbot convention, not app-defined.
+    const appEnvPath = repo.appEnvSubpath
+      ? resolve(cwd, "repos", repo.name, repo.appEnvSubpath, ".env")
+      : resolve(cwd, "repos", repo.name, ".env");
     perRepo[repo.name] = {
       danxbot: parseEnvFile(resolve(cwd, "repos", repo.name, ".danxbot/.env")),
-      app: parseEnvFile(resolve(cwd, "repos", repo.name, ".env")),
+      app: parseEnvFile(appEnvPath),
     };
   }
   return { shared, perRepo };

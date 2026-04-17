@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCliArgs } from "./cli.js";
+import { parseCliArgs, buildMaterializeRepoArgs } from "./cli.js";
 
 describe("parseCliArgs", () => {
   it("parses `deploy gpt`", () => {
@@ -73,5 +73,48 @@ describe("parseCliArgs", () => {
     ]) {
       expect(parseCliArgs([cmd, "gpt"]).command).toBe(cmd);
     }
+  });
+});
+
+describe("buildMaterializeRepoArgs", () => {
+  it("emits bare name for repos without app_env_subpath", () => {
+    expect(
+      buildMaterializeRepoArgs([
+        { name: "danxbot", url: "https://github.com/x/d.git" },
+        { name: "gpt-manager", url: "https://github.com/x/g.git" },
+      ]),
+    ).toBe("danxbot gpt-manager");
+  });
+
+  it("emits name:subpath for repos with app_env_subpath", () => {
+    expect(
+      buildMaterializeRepoArgs([
+        {
+          name: "platform",
+          url: "https://github.com/x/p.git",
+          appEnvSubpath: "ssap",
+        },
+      ]),
+    ).toBe("platform:ssap");
+  });
+
+  it("mixes bare and :subpath forms in one call", () => {
+    // Regression guard for the order / concatenation: if anyone swaps
+    // `${r.name}:${r.appEnvSubpath}` → `${r.appEnvSubpath}:${r.name}`,
+    // this test fails immediately.
+    expect(
+      buildMaterializeRepoArgs([
+        {
+          name: "platform",
+          url: "https://github.com/x/p.git",
+          appEnvSubpath: "ssap",
+        },
+        { name: "danxbot", url: "https://github.com/x/d.git" },
+      ]),
+    ).toBe("platform:ssap danxbot");
+  });
+
+  it("returns empty string for zero repos (no deploy-without-repos ever needed it, but keep it safe)", () => {
+    expect(buildMaterializeRepoArgs([])).toBe("");
   });
 });

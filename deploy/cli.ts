@@ -17,7 +17,12 @@
 
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findConfigPath, loadConfig, type DeployConfig } from "./config.js";
+import {
+  findConfigPath,
+  loadConfig,
+  type DeployConfig,
+  type DeployRepo,
+} from "./config.js";
 import { bootstrapBackend } from "./bootstrap.js";
 import {
   terraformInit,
@@ -36,6 +41,19 @@ import { uploadAndRestartInfra } from "./compose-infra.js";
 import { awsCmd, run } from "./exec.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Compose the positional repo args for the remote `materialize-secrets.sh`
+ * invocation. Each repo becomes `name` or `name:app_env_subpath` (the latter
+ * when the repo's app .env lives in a subdirectory — e.g. platform's `ssap`).
+ * Args are joined by a single space — the repo name regex in config.ts
+ * forbids whitespace so no quoting is required.
+ */
+export function buildMaterializeRepoArgs(repos: DeployRepo[]): string {
+  return repos
+    .map((r) => (r.appEnvSubpath ? `${r.name}:${r.appEnvSubpath}` : r.name))
+    .join(" ");
+}
 
 const COMMANDS = [
   "deploy",
@@ -134,7 +152,7 @@ async function deploy(config: DeployConfig): Promise<void> {
   remote.sshRun(
     "sudo mv /tmp/materialize-secrets.sh /usr/local/bin/materialize-secrets.sh && sudo chmod +x /usr/local/bin/materialize-secrets.sh",
   );
-  const repoArgs = config.repos.map((r) => r.name).join(" ");
+  const repoArgs = buildMaterializeRepoArgs(config.repos);
   remote.sshRunStreaming(
     `sudo DANXBOT_ROOT=/danxbot /usr/local/bin/materialize-secrets.sh ${config.ssmPrefix} ${config.region} ${repoArgs}`,
   );

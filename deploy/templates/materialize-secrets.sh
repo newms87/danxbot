@@ -2,11 +2,14 @@
 # Materialize SSM secrets for one deployment into the expected file layout.
 #
 # Usage:
-#   materialize-secrets.sh <ssm_prefix> <region> [<repo_name>...]
+#   materialize-secrets.sh <ssm_prefix> <region> [<repo_spec>...]
 #
-# For each repo_name, materializes /<ssm_prefix>/repos/<repo_name>/* into
-# the repo's .danxbot/.env (non-REPO_ENV keys) and .env (REPO_ENV_* with
-# prefix stripped). Shared keys go to $DANXBOT_ROOT/.env.
+# Each repo_spec is "name" or "name:app_env_subpath". For each spec,
+# materializes /<ssm_prefix>/repos/<name>/* into:
+#   - <repo>/.danxbot/.env  — non-REPO_ENV keys (danxbot agent config)
+#   - <repo>/<subpath>/.env — REPO_ENV_* keys with prefix stripped (app config),
+#                             subpath omitted when the spec has no colon.
+# Shared keys go to $DANXBOT_ROOT/.env.
 #
 # DANXBOT_ROOT defaults to /danxbot when unset (production); tests can
 # override it to point at a temp directory.
@@ -67,13 +70,42 @@ fetch_path "$SSM_PREFIX/shared/" | awk -F'\t' "$AWK_EMIT"'
   }
 ' | write_atomic "$ROOT/.env"
 
-for repo in ${REPOS[@]+"${REPOS[@]}"}; do
+for spec in ${REPOS[@]+"${REPOS[@]}"}; do
+  # Parse "name[:subpath]". Empty subpath = app .env at repo root.
+  repo="${spec%%:*}"
+  subpath=""
+  if [[ "$spec" == *:* ]]; then
+    subpath="${spec#*:}"
+  fi
+  # Defense-in-depth: config.ts already validates, but if this script is ever
+  # invoked directly, reject absolute / traversing subpaths so we don't write
+  # outside the repo tree. Reject at the PATH-SEGMENT level — `*..*` would
+  # wrongly match legitimate names like "foo..bar".
+  if [[ "$subpath" == /* ]]; then
+    echo "ERROR: app_env_subpath \"$subpath\" must not be absolute (spec: \"$spec\")" >&2
+    exit 1
+  fi
+  if [ -n "$subpath" ]; then
+    IFS='/' read -r -a _segs <<< "$subpath"
+    for _seg in "${_segs[@]}"; do
+      if [ "$_seg" = ".." ]; then
+        echo "ERROR: app_env_subpath \"$subpath\" must not contain '..' segment (spec: \"$spec\")" >&2
+        exit 1
+      fi
+    done
+  fi
+
   repo_root="$ROOT/repos/$repo"
   mkdir -p "$repo_root/.danxbot"
   danxbot_env="$repo_root/.danxbot/.env"
-  app_env="$repo_root/.env"
+  if [ -n "$subpath" ]; then
+    mkdir -p "$repo_root/$subpath"
+    app_env="$repo_root/$subpath/.env"
+  else
+    app_env="$repo_root/.env"
+  fi
 
-  echo "── Materializing $SSM_PREFIX/repos/$repo/ → $repo_root ──"
+  echo "── Materializing $SSM_PREFIX/repos/$repo/ → $repo_root (app env: $app_env) ──"
   raw=$(fetch_path "$SSM_PREFIX/repos/$repo/")
   echo "$raw" | awk -F'\t' "$AWK_EMIT"'
     NF >= 2 && $1 != "" {

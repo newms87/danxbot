@@ -13,6 +13,17 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 
+/**
+ * One connected repo in a deployment. `appEnvSubpath`, when set, is the
+ * relative subdirectory (e.g. "ssap") where the app's .env lives for repos
+ * whose application does not sit at the repo root.
+ */
+export interface DeployRepo {
+  name: string;
+  url: string;
+  appEnvSubpath?: string;
+}
+
 export interface DeployConfig {
   name: string;
   region: string;
@@ -30,7 +41,7 @@ export interface DeployConfig {
   };
   ssmPrefix: string;
   claudeAuthDir: string;
-  repos: Array<{ name: string; url: string }>;
+  repos: DeployRepo[];
   dashboard: {
     port: number;
   };
@@ -196,14 +207,56 @@ export function loadConfig(configPath: string): DeployConfig {
   const configDir = dirname(configPath);
   const claudeAuthDir = resolve(configDir, claudeAuthRaw);
 
-  const repos: Array<{ name: string; url: string }> = [];
+  const repos: DeployRepo[] = [];
   if (Array.isArray(yaml.repos)) {
     for (const repo of yaml.repos) {
       if (typeof repo === "object" && repo !== null) {
         const r = repo as Record<string, unknown>;
         const rName = requireString(r, "name", "repos[].name");
         const rUrl = requireString(r, "url", "repos[].url");
-        if (rName && rUrl) repos.push({ name: rName, url: rUrl });
+
+        // app_env_subpath — optional relative subdirectory (e.g., "ssap") where
+        // the app .env lives, for repos whose app does not sit at the repo root.
+        // Validated to prevent path traversal or absolute writes during materialize.
+        let appEnvSubpath: string | undefined;
+        const rawSubpath = r["app_env_subpath"];
+        if (rawSubpath !== undefined && rawSubpath !== null) {
+          if (typeof rawSubpath !== "string") {
+            errors.push(
+              `repos[].app_env_subpath must be a string (got ${typeof rawSubpath})`,
+            );
+          } else {
+            // Strip a trailing slash ("ssap/") — normalizes the one case where
+            // authors write either form and we'd otherwise build "repo//.env".
+            const normalized = rawSubpath.trim().replace(/\/+$/, "");
+            if (normalized === "") {
+              // Empty or whitespace-only is a config mistake — omit the key
+              // instead. We used to silently collapse to "unset" but that is
+              // a silent fallback on a config key (per code-quality.md).
+              errors.push(
+                `repos[].app_env_subpath must not be empty — omit the key to use repo root`,
+              );
+            } else if (normalized.startsWith("/")) {
+              errors.push(
+                `repos[].app_env_subpath must not be absolute: "${normalized}"`,
+              );
+            } else if (normalized.split("/").some((seg) => seg === "..")) {
+              errors.push(
+                `repos[].app_env_subpath must not contain ".." path traversal: "${normalized}"`,
+              );
+            } else {
+              appEnvSubpath = normalized;
+            }
+          }
+        }
+
+        if (rName && rUrl) {
+          repos.push(
+            appEnvSubpath === undefined
+              ? { name: rName, url: rUrl }
+              : { name: rName, url: rUrl, appEnvSubpath },
+          );
+        }
       }
     }
   }

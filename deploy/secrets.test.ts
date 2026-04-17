@@ -85,6 +85,102 @@ describe("collectDeploymentSecrets", () => {
     });
   });
 
+  it("reads the app .env from <repo>/<app_env_subpath>/.env when subpath is set", () => {
+    // Simulate platform's layout: Sail .env lives at repos/platform/ssap/.env.
+    const cwd3 = resolve(TMP, "cwd-subpath");
+    mkdirSync(resolve(cwd3, "repos/platform/ssap"), { recursive: true });
+    mkdirSync(resolve(cwd3, "repos/platform/.danxbot"), { recursive: true });
+    writeFileSync(
+      resolve(cwd3, "repos/platform/ssap/.env"),
+      "APP_KEY=base64:plat\nDB_PASSWORD=plat-secret\n",
+    );
+    writeFileSync(
+      resolve(cwd3, "repos/platform/.danxbot/.env"),
+      "DANX_TRELLO_API_KEY=tr-xxx\n",
+    );
+    // Intentionally also place a decoy at repos/platform/.env — the collector
+    // must ignore it when app_env_subpath is set (otherwise the wrong .env
+    // would be pushed to SSM and materialized on the prod box).
+    writeFileSync(resolve(cwd3, "repos/platform/.env"), "DECOY=should-not-read\n");
+
+    const result = collectDeploymentSecrets(
+      makeConfig({
+        repos: [
+          {
+            name: "platform",
+            url: "https://github.com/x/platform.git",
+            appEnvSubpath: "ssap",
+          },
+        ],
+      }),
+      cwd3,
+    );
+
+    expect(result.perRepo.platform.app).toEqual({
+      APP_KEY: "base64:plat",
+      DB_PASSWORD: "plat-secret",
+    });
+    expect(result.perRepo.platform.danxbot).toEqual({
+      DANX_TRELLO_API_KEY: "tr-xxx",
+    });
+  });
+
+  it("handles mixed repos — one with app_env_subpath, one without — independently", () => {
+    const cwd4 = resolve(TMP, "cwd-mixed");
+    mkdirSync(resolve(cwd4, "repos/platform/ssap"), { recursive: true });
+    mkdirSync(resolve(cwd4, "repos/platform/.danxbot"), { recursive: true });
+    mkdirSync(resolve(cwd4, "repos/simple/.danxbot"), { recursive: true });
+    writeFileSync(
+      resolve(cwd4, "repos/platform/ssap/.env"),
+      "APP_KEY=base64:plat\n",
+    );
+    writeFileSync(resolve(cwd4, "repos/simple/.env"), "APP_KEY=base64:simp\n");
+
+    const result = collectDeploymentSecrets(
+      makeConfig({
+        repos: [
+          {
+            name: "platform",
+            url: "https://github.com/x/p.git",
+            appEnvSubpath: "ssap",
+          },
+          { name: "simple", url: "https://github.com/x/s.git" },
+        ],
+      }),
+      cwd4,
+    );
+
+    expect(result.perRepo.platform.app).toEqual({ APP_KEY: "base64:plat" });
+    expect(result.perRepo.simple.app).toEqual({ APP_KEY: "base64:simp" });
+  });
+
+  it("returns empty app env when app_env_subpath is set but the file is absent (no fallback to <repo>/.env)", () => {
+    // Guards against a future refactor silently falling back to the repo-root
+    // .env — which would push the wrong values to SSM.
+    const cwd5 = resolve(TMP, "cwd-miss-subpath");
+    mkdirSync(resolve(cwd5, "repos/platform/.danxbot"), { recursive: true });
+    // NO repos/platform/ssap/.env, but a decoy at repos/platform/.env.
+    writeFileSync(
+      resolve(cwd5, "repos/platform/.env"),
+      "DECOY=should-not-read\n",
+    );
+
+    const result = collectDeploymentSecrets(
+      makeConfig({
+        repos: [
+          {
+            name: "platform",
+            url: "https://github.com/x/p.git",
+            appEnvSubpath: "ssap",
+          },
+        ],
+      }),
+      cwd5,
+    );
+
+    expect(result.perRepo.platform.app).toEqual({});
+  });
+
   it("returns empty per-repo entries when files are missing", () => {
     const cwd2 = resolve(TMP, "cwd-missing");
     mkdirSync(cwd2, { recursive: true });

@@ -7,11 +7,11 @@
  * and testable.
  */
 
-import type { DeployConfig } from "./config.js";
+import type { DeployConfig, DeployRepo } from "./config.js";
 import type { RemoteHost } from "./remote.js";
 
 export function buildCloneOrPullCommand(
-  repo: { name: string; url: string },
+  repo: Pick<DeployRepo, "name" | "url">,
   githubToken: string,
 ): string {
   const m = repo.url.match(/^https:\/\/github\.com\/(.+\.git)$/);

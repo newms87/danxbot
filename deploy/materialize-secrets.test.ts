@@ -120,6 +120,175 @@ describe("materialize-secrets.sh", () => {
     expect(contents).toContain("NEW_KEY=fresh");
   });
 
+  it("writes app env to <repo>/<subpath>/.env when repo arg has :subpath form", () => {
+    // platform-style layout: Sail expects the app .env at ssap/.env.
+    // Danxbot-side .env is unchanged (.danxbot/.env) — only the app env moves.
+    mkdirSync(resolve(WORK, "danxbot/repos/platform/.danxbot"), {
+      recursive: true,
+    });
+    mkdirSync(resolve(WORK, "danxbot/repos/platform/ssap"), { recursive: true });
+
+    const bin = fakeAwsDir({
+      "/danxbot-test/shared/": [],
+      "/danxbot-test/repos/platform/": [
+        { Name: "/danxbot-test/repos/platform/DANX_TRELLO_API_KEY", Value: "tr" },
+        { Name: "/danxbot-test/repos/platform/REPO_ENV_APP_KEY", Value: "base64:p" },
+        { Name: "/danxbot-test/repos/platform/REPO_ENV_DB_PASSWORD", Value: "sec" },
+      ],
+    });
+
+    execSync(`bash ${SCRIPT} /danxbot-test us-east-1 platform:ssap`, {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        DANXBOT_ROOT: resolve(WORK, "danxbot"),
+      },
+    });
+
+    // Danxbot agent env stays at .danxbot/.env (subpath must NOT affect it).
+    const danxbotEnv = readFileSync(
+      resolve(WORK, "danxbot/repos/platform/.danxbot/.env"),
+      "utf-8",
+    );
+    expect(danxbotEnv).toContain("DANX_TRELLO_API_KEY=tr");
+
+    // App env lives under the subpath.
+    const appEnv = readFileSync(
+      resolve(WORK, "danxbot/repos/platform/ssap/.env"),
+      "utf-8",
+    );
+    expect(appEnv).toContain("APP_KEY=base64:p");
+    expect(appEnv).toContain("DB_PASSWORD=sec");
+
+    // Nothing written at the repo root (would confuse Sail).
+    expect(() =>
+      readFileSync(resolve(WORK, "danxbot/repos/platform/.env"), "utf-8"),
+    ).toThrow();
+  });
+
+  it("creates the subpath directory if missing on disk (fresh EC2)", () => {
+    // On a fresh deploy the app directory may not exist yet. The script
+    // must `mkdir -p` the subpath so the .env write doesn't fail.
+    // Intentionally do NOT mkdir repos/platform/ssap here.
+    mkdirSync(resolve(WORK, "danxbot/repos/platform/.danxbot"), {
+      recursive: true,
+    });
+
+    const bin = fakeAwsDir({
+      "/danxbot-test/shared/": [],
+      "/danxbot-test/repos/platform/": [
+        { Name: "/danxbot-test/repos/platform/REPO_ENV_APP_KEY", Value: "k" },
+      ],
+    });
+
+    execSync(`bash ${SCRIPT} /danxbot-test us-east-1 platform:ssap`, {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        DANXBOT_ROOT: resolve(WORK, "danxbot"),
+      },
+    });
+
+    expect(
+      readFileSync(
+        resolve(WORK, "danxbot/repos/platform/ssap/.env"),
+        "utf-8",
+      ),
+    ).toContain("APP_KEY=k");
+  });
+
+  it("handles mixed specs — bare repo and :subpath repo in one invocation", () => {
+    mkdirSync(resolve(WORK, "danxbot/repos/a/.danxbot"), { recursive: true });
+    mkdirSync(resolve(WORK, "danxbot/repos/b/.danxbot"), { recursive: true });
+
+    const bin = fakeAwsDir({
+      "/danxbot-test/shared/": [],
+      "/danxbot-test/repos/a/": [
+        { Name: "/danxbot-test/repos/a/REPO_ENV_K", Value: "from-a" },
+      ],
+      "/danxbot-test/repos/b/": [
+        { Name: "/danxbot-test/repos/b/REPO_ENV_K", Value: "from-b" },
+      ],
+    });
+
+    execSync(`bash ${SCRIPT} /danxbot-test us-east-1 a b:inner`, {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        DANXBOT_ROOT: resolve(WORK, "danxbot"),
+      },
+    });
+
+    // Bare repo arg: app env at repo root.
+    expect(
+      readFileSync(resolve(WORK, "danxbot/repos/a/.env"), "utf-8"),
+    ).toContain("K=from-a");
+    // :subpath repo arg: app env under subpath.
+    expect(
+      readFileSync(resolve(WORK, "danxbot/repos/b/inner/.env"), "utf-8"),
+    ).toContain("K=from-b");
+    // No stray app env at repo root for the subpath case.
+    expect(() =>
+      readFileSync(resolve(WORK, "danxbot/repos/b/.env"), "utf-8"),
+    ).toThrow();
+  });
+
+  it("rejects absolute subpath and exits non-zero (defense-in-depth)", () => {
+    mkdirSync(resolve(WORK, "danxbot/repos/bad/.danxbot"), { recursive: true });
+    const bin = fakeAwsDir({ "/danxbot-test/shared/": [] });
+
+    expect(() => {
+      execSync(`bash ${SCRIPT} /danxbot-test us-east-1 bad:/etc`, {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          DANXBOT_ROOT: resolve(WORK, "danxbot"),
+        },
+        stdio: "pipe",
+      });
+    }).toThrow(/absolute/i);
+  });
+
+  it("rejects traversing subpath and exits non-zero (defense-in-depth)", () => {
+    mkdirSync(resolve(WORK, "danxbot/repos/bad/.danxbot"), { recursive: true });
+    const bin = fakeAwsDir({ "/danxbot-test/shared/": [] });
+
+    expect(() => {
+      execSync(`bash ${SCRIPT} /danxbot-test us-east-1 bad:ssap/../escape`, {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          DANXBOT_ROOT: resolve(WORK, "danxbot"),
+        },
+        stdio: "pipe",
+      });
+    }).toThrow(/\.\./);
+  });
+
+  it("accepts a subpath with '..' as a substring but not a path segment (foo..bar)", () => {
+    // Segment-level guard, not substring. Directory names like "v8.3..sail"
+    // must not be rejected.
+    mkdirSync(resolve(WORK, "danxbot/repos/r/.danxbot"), { recursive: true });
+    const bin = fakeAwsDir({
+      "/danxbot-test/shared/": [],
+      "/danxbot-test/repos/r/": [
+        { Name: "/danxbot-test/repos/r/REPO_ENV_K", Value: "v" },
+      ],
+    });
+
+    execSync(`bash ${SCRIPT} /danxbot-test us-east-1 r:foo..bar`, {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        DANXBOT_ROOT: resolve(WORK, "danxbot"),
+      },
+    });
+
+    expect(
+      readFileSync(resolve(WORK, "danxbot/repos/r/foo..bar/.env"), "utf-8"),
+    ).toContain("K=v");
+  });
+
   it("handles multiple repos", () => {
     mkdirSync(resolve(WORK, "danxbot/repos/a/.danxbot"), { recursive: true });
     mkdirSync(resolve(WORK, "danxbot/repos/b/.danxbot"), { recursive: true });
