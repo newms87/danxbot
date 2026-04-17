@@ -27,3 +27,7 @@ docs/domains/
 docs/schema/
 docs/features.md
 repos/
+
+# Terraform local state + generated tfvars
+deploy/terraform/.terraform/
+deploy/terraform/terraform.tfvars.json
