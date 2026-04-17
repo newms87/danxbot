@@ -415,5 +415,55 @@ describe("Integration: dispatch pipeline", () => {
         }
       }
     }, 30_000);
+
+    it("GET /api/status returns summed token usage from the dispatch JSONL", async () => {
+      const { handleLaunch, handleStatus, clearJobCleanupIntervals } = await import(
+        "../../worker/dispatch.js"
+      );
+
+      const repo = makeRepoContext({ name: "test-repo", localPath: repoDir });
+
+      const originalPath = process.env.PATH;
+      const envKeys = Object.keys(fakeClasudeEnv());
+      Object.assign(process.env, fakeClasudeEnv());
+
+      try {
+        const launchReq = createMockReqWithBody("POST", {
+          task: "Usage aggregation end-to-end",
+          api_token: "test-token",
+          status_url: captureServer.statusUrl,
+        });
+        const launchRes = createMockRes();
+
+        await handleLaunch(launchReq, launchRes, repo);
+        const { job_id } = JSON.parse(launchRes._getBody());
+
+        await waitForRequests(isStatusPut("completed"), 1, 15_000);
+
+        const statusRes = createMockRes();
+        handleStatus(statusRes, job_id);
+        const status = JSON.parse(statusRes._getBody());
+
+        // Fake-claude "happy" scenario emits two assistant entries with usage:
+        //   { input_tokens: 100, output_tokens: 50 }
+        //   { input_tokens: 200, output_tokens: 80 }
+        // JSONL is the single canonical source; /api/status must sum these.
+        expect(status).toMatchObject({
+          job_id,
+          status: "completed",
+          input_tokens: 300,
+          output_tokens: 130,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        });
+
+        clearJobCleanupIntervals();
+      } finally {
+        process.env.PATH = originalPath;
+        for (const key of envKeys) {
+          if (key !== "PATH") delete process.env[key];
+        }
+      }
+    }, 30_000);
   });
 });

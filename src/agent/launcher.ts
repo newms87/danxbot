@@ -66,6 +66,13 @@ const HOST_PID_FILE_POLL_MS = 50;
 /** Polling cadence for the host-mode liveness check (SIGNAL 0 on the PID). */
 const HOST_EXIT_POLL_MS = 500;
 
+export interface AgentUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+}
+
 export interface AgentJob {
   id: string;
   status: "running" | "completed" | "failed" | "timeout" | "canceled";
@@ -73,6 +80,13 @@ export interface AgentJob {
   startedAt: Date;
   completedAt?: Date;
   statusUrl?: string;
+  /**
+   * Running totals accumulated from every assistant entry's `message.usage`
+   * in the single dispatch JSONL. Claude Code emits per-turn usage on each
+   * assistant entry; total = sum across entries. One JSONL per dispatch
+   * (see `.claude/rules/agent-dispatch.md`) means no double-counting.
+   */
+  usage: AgentUsage;
   /**
    * Docker runtime: the headless claude ChildProcess. Undefined in host runtime —
    * host mode does not spawn claude as a direct child of this node process
@@ -369,6 +383,12 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
     summary: "",
     startedAt: new Date(),
     statusUrl: options.statusUrl,
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
   };
 
   const env = buildCleanEnv(options.env);
@@ -409,7 +429,8 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
   });
   job.watcher = watcher;
 
-  // Track last assistant text for job summary + reset inactivity timeout
+  // Track last assistant text for job summary + accumulate per-turn usage
+  // totals + reset inactivity timeout.
   watcher.onEntry((entry) => {
     inactivityTimer.reset();
 
@@ -419,6 +440,15 @@ export async function spawnAgent(options: SpawnAgentOptions): Promise<AgentJob> 
         if (block.type === "text" && block.text) {
           lastAssistantText = block.text as string;
         }
+      }
+
+      const usage = entry.data.usage as Partial<AgentUsage> | undefined;
+      if (usage) {
+        job.usage.input_tokens += usage.input_tokens ?? 0;
+        job.usage.output_tokens += usage.output_tokens ?? 0;
+        job.usage.cache_read_input_tokens += usage.cache_read_input_tokens ?? 0;
+        job.usage.cache_creation_input_tokens +=
+          usage.cache_creation_input_tokens ?? 0;
       }
     }
   });
@@ -769,6 +799,10 @@ export function getJobStatus(job: AgentJob): Record<string, unknown> {
       ((job.completedAt?.getTime() || Date.now()) - job.startedAt.getTime()) /
         1000,
     ),
+    input_tokens: job.usage.input_tokens,
+    output_tokens: job.usage.output_tokens,
+    cache_read_input_tokens: job.usage.cache_read_input_tokens,
+    cache_creation_input_tokens: job.usage.cache_creation_input_tokens,
   };
 }
 

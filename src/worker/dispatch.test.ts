@@ -313,6 +313,39 @@ describe("handleStatus", () => {
     expect(res._getStatusCode()).toBe(200);
     expect(JSON.parse(res._getBody())).toEqual({ id: "job-status-test", status: "running" });
   });
+
+  it("passes token usage fields from getJobStatus straight through to the HTTP body", async () => {
+    const mockJob = { id: "job-tokens", status: "completed", summary: "done", startedAt: new Date() };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+    mockGetJobStatus.mockReturnValue({
+      job_id: "job-tokens",
+      status: "completed",
+      summary: "done",
+      started_at: "2026-04-17T00:00:00.000Z",
+      completed_at: "2026-04-17T00:00:05.000Z",
+      elapsed_seconds: 5,
+      input_tokens: 300,
+      output_tokens: 130,
+      cache_read_input_tokens: 1024,
+      cache_creation_input_tokens: 2048,
+    });
+
+    const launchReq = createMockReqWithBody("POST", { task: "Tokens pass-through", api_token: "tok-xyz" });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+
+    const res = createMockRes();
+    handleStatus(res, dispatchId);
+
+    const body = JSON.parse(res._getBody());
+    expect(body).toMatchObject({
+      input_tokens: 300,
+      output_tokens: 130,
+      cache_read_input_tokens: 1024,
+      cache_creation_input_tokens: 2048,
+    });
+  });
 });
 
 describe("handleCancel", () => {

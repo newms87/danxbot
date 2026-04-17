@@ -96,7 +96,7 @@ vi.mock("./host-pid.js", () => ({
   killHostPid: (...args: unknown[]) => mockKillHostPid(...args),
 }));
 
-import { spawnAgent, cancelJob, type AgentJob } from "./launcher.js";
+import { spawnAgent, cancelJob, getJobStatus, type AgentJob } from "./launcher.js";
 
 function createMockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -404,6 +404,274 @@ it("extracts last assistant text from watcher entries as job summary", async () 
 
     expect(job.status).toBe("completed");
     expect(job.summary).toBe("Task completed successfully");
+  });
+
+  it("accumulates usage tokens across every assistant entry", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Claude Code writes one assistant entry per model turn; each carries its
+    // own per-turn usage. Total = sum across entries — verified empirically
+    // against a real JSONL during card #57 validation.
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        content: [],
+        usage: {
+          input_tokens: 6,
+          output_tokens: 221,
+          cache_read_input_tokens: 18599,
+          cache_creation_input_tokens: 45182,
+        },
+      },
+    });
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        content: [],
+        usage: {
+          input_tokens: 1,
+          output_tokens: 84,
+          cache_read_input_tokens: 63781,
+          cache_creation_input_tokens: 445,
+        },
+      },
+    });
+
+    expect(job.usage).toEqual({
+      input_tokens: 7,
+      output_tokens: 305,
+      cache_read_input_tokens: 82380,
+      cache_creation_input_tokens: 45627,
+    });
+  });
+
+  it("treats missing usage fields as 0 and ignores non-assistant entries", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Assistant entry with no usage at all (e.g. partial / malformed)
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [] },
+    });
+    // Assistant entry with only input_tokens set — other three should default to 0
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [], usage: { input_tokens: 10 } },
+    });
+    // Non-assistant entry — must not contribute
+    emitWatcherEntry({
+      type: "user",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        content: [{ type: "tool_result", content: "ok" }],
+        usage: { input_tokens: 99999 },
+      },
+    });
+
+    expect(job.usage).toEqual({
+      input_tokens: 10,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  it("getJobStatus surfaces the four summed token fields", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        content: [],
+        usage: {
+          input_tokens: 12,
+          output_tokens: 34,
+          cache_read_input_tokens: 56,
+          cache_creation_input_tokens: 78,
+        },
+      },
+    });
+
+    const status = getJobStatus(job);
+    expect(status).toMatchObject({
+      job_id: job.id,
+      status: "running",
+      input_tokens: 12,
+      output_tokens: 34,
+      cache_read_input_tokens: 56,
+      cache_creation_input_tokens: 78,
+    });
+  });
+
+  it("getJobStatus reports zero tokens for a freshly spawned job", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    expect(getJobStatus(job)).toMatchObject({
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  it("getJobStatus preserves token totals after the job completes", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        content: [],
+        usage: {
+          input_tokens: 5,
+          output_tokens: 50,
+          cache_read_input_tokens: 500,
+          cache_creation_input_tokens: 5000,
+        },
+      },
+    });
+
+    child.emit("close", 0);
+
+    const status = getJobStatus(job);
+    expect(status).toMatchObject({
+      status: "completed",
+      input_tokens: 5,
+      output_tokens: 50,
+      cache_read_input_tokens: 500,
+      cache_creation_input_tokens: 5000,
+    });
+    expect(status.completed_at).not.toBeNull();
+  });
+
+  it("getJobStatus preserves token totals after cancelJob", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    mockFetch.mockResolvedValue({ ok: true });
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        content: [],
+        usage: {
+          input_tokens: 7,
+          output_tokens: 13,
+          cache_read_input_tokens: 42,
+          cache_creation_input_tokens: 91,
+        },
+      },
+    });
+
+    // Wire SIGTERM → child close so cancelJob's grace-wait resolves immediately.
+    child.kill = vi.fn().mockImplementation((sig: string) => {
+      if (sig === "SIGTERM") child.emit("close", 143);
+    });
+
+    const cancelPromise = cancelJob(job, "tok");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    expect(getJobStatus(job)).toMatchObject({
+      status: "canceled",
+      input_tokens: 7,
+      output_tokens: 13,
+      cache_read_input_tokens: 42,
+      cache_creation_input_tokens: 91,
+    });
+  });
+
+  it("sums every partial-usage shape independently — each field is accumulated from its own source", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Three entries, each missing a different subset of fields. If the
+    // subscriber short-circuits on any field, these sums won't all match.
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [], usage: { output_tokens: 5, cache_read_input_tokens: 10 } },
+    });
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [], usage: { cache_creation_input_tokens: 20 } },
+    });
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [], usage: { input_tokens: 3, output_tokens: 7, cache_creation_input_tokens: 1 } },
+    });
+
+    expect(job.usage).toEqual({
+      input_tokens: 3,
+      output_tokens: 12,
+      cache_read_input_tokens: 10,
+      cache_creation_input_tokens: 21,
+    });
   });
 
   it("calls onComplete callback when job finishes", async () => {
