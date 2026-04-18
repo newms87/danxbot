@@ -22,6 +22,15 @@ const log = createLogger("process-utils");
 /**
  * Build a clean environment by stripping CLAUDECODE vars from process.env.
  * Optionally merges additional vars on top.
+ *
+ * Forces ENABLE_TOOL_SEARCH=0 for dispatched agents. Claude Code's default
+ * deferred-tool-loading system lists MCP tool NAMES but hides their schemas
+ * until the agent calls ToolSearch. Dispatched prompts (schema-builder,
+ * gpt-manager orchestrator, etc.) expect mcp__* tools to be directly callable
+ * without ToolSearch discovery — they assume eager loading and forbid
+ * ToolSearch to keep the prompt tight. Setting ENABLE_TOOL_SEARCH=0 makes all
+ * MCP tools eager at session start, matching those prompts' assumptions.
+ * Callers can override via extras when they want deferred behavior.
  */
 export function buildCleanEnv(extra?: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
@@ -31,6 +40,7 @@ export function buildCleanEnv(extra?: Record<string, string>): Record<string, st
       env[key] = value;
     }
   }
+  env.ENABLE_TOOL_SEARCH = "0";
   if (extra) {
     Object.assign(env, extra);
   }

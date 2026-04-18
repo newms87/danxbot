@@ -56,6 +56,16 @@ describe("buildCleanEnv", () => {
     expect(keys).not.toContain("CLAUDECODE_SESSION");
     expect(keys).toContain("PATH");
   });
+
+  it("sets ENABLE_TOOL_SEARCH=0 so MCP tools load eagerly (dispatched agents must see mcp__* tools without ToolSearch)", () => {
+    const result = buildCleanEnv();
+    expect(result.ENABLE_TOOL_SEARCH).toBe("0");
+  });
+
+  it("allows caller to override ENABLE_TOOL_SEARCH via extras", () => {
+    const result = buildCleanEnv({ ENABLE_TOOL_SEARCH: "1" });
+    expect(result.ENABLE_TOOL_SEARCH).toBe("1");
+  });
 });
 
 // ─── logPromptToDisk ──────────────────────────────────────────────────────────
