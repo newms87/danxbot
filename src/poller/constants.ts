@@ -8,15 +8,25 @@ import type { TrelloConfig } from "../types.js";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /**
- * Resolve the base repos directory. Uses the project-relative `repos/` directory,
- * which works in both host mode (symlinks resolve natively) and Docker mode
- * (the directory is volume-mounted, and per-repo compose overrides mount symlink targets).
+ * Resolve the base repos directory.
+ *
+ * Checks DANXBOT_REPOS_BASE first — worker containers set this to the bind-mount
+ * path (e.g. `/danxbot/repos`) so the agent spawn cwd and SessionLogWatcher both
+ * derive the correct encoded directory name, avoiding the symlink-resolution bug
+ * where a dev-machine image bakes in `repos/<name> → /home/dev/web/<name>` and
+ * causes JSONL to land under the host path rather than the container path.
+ *
+ * Falls back to the project-relative `repos/` directory when the env var is
+ * absent, which works for host mode (symlinks resolve natively) and the
+ * dashboard container (volume-mounted at the default path).
  *
  * Does NOT check existence — callers that need filesystem access should validate
  * the path themselves. This allows dashboard mode to parse REPOS env var without
  * requiring a repos/ directory on disk.
  */
 export function getReposBase(): string {
+  const override = optional("DANXBOT_REPOS_BASE", "").trim();
+  if (override) return override;
   return resolve(projectRoot, "repos");
 }
 

@@ -27,4 +27,14 @@ describe("renderProdCompose", () => {
     expect(out).toContain('"9000:9000"');
     expect(out).toContain("localhost:9000/health");
   });
+
+  it("mounts the shared Claude Code JSONL directory so dashboard can read worker session logs", () => {
+    const out = renderProdCompose("img", 5555);
+    // Host dir → container path under the danxbot user's $HOME. Workers
+    // use the same target in repos/<name>/.danxbot/config/compose.yml so
+    // every container agrees on the storage location.
+    expect(out).toContain(
+      "/danxbot/claude-projects:/home/danxbot/.claude/projects",
+    );
+  });
 });

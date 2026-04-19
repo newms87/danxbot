@@ -9,6 +9,7 @@
 
 import type { DeployConfig, DeployRepo } from "./config.js";
 import type { RemoteHost } from "./remote.js";
+import { CONTAINER_REPOS_BASE } from "./constants.js";
 
 export function buildCloneOrPullCommand(
   repo: Pick<DeployRepo, "name" | "url">,
@@ -29,7 +30,7 @@ export function buildCloneOrPullCommand(
     );
   }
   const authedUrl = `https://x-access-token:${githubToken}@github.com/${m[1]}`;
-  const repoDir = `/danxbot/repos/${repo.name}`;
+  const repoDir = `${CONTAINER_REPOS_BASE}/${repo.name}`;
 
   return [
     `if [ -d ${repoDir} ]; then`,
@@ -62,7 +63,7 @@ export function runBootstrapScripts(
   config: DeployConfig,
 ): void {
   for (const repo of config.repos) {
-    const script = `/danxbot/repos/${repo.name}/.danxbot/scripts/bootstrap.sh`;
+    const script = `${CONTAINER_REPOS_BASE}/${repo.name}/.danxbot/scripts/bootstrap.sh`;
     console.log(`\n── Running bootstrap for ${repo.name} ──`);
     remote.sshRunStreaming(`test -x ${script} && bash ${script}`);
   }

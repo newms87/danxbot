@@ -46,8 +46,15 @@ runcmd:
   - systemctl enable caddy
 
   # ── Create data directories ──
-  - mkdir -p /danxbot/repos /danxbot/threads /danxbot/data /danxbot/logs /danxbot/claude-auth /danxbot/mysql-data
+  - mkdir -p /danxbot/repos /danxbot/threads /danxbot/data /danxbot/logs /danxbot/claude-auth /danxbot/mysql-data /danxbot/claude-projects
+  # Containers run as uid 1001 (useradd -m danxbot in the Dockerfile — first
+  # non-system user). The shared claude-projects mount must be writable by
+  # that uid from every container (workers write, dashboard reads).
   - chown -R ubuntu:ubuntu /danxbot
+  # Container uid is 1000 (useradd -m danxbot — first non-system uid).
+  # On Ubuntu hosts 1000 = ubuntu, so this no-op matches what the chown
+  # above already set; the explicit numeric chown documents the contract.
+  - chown -R 1000:1000 /danxbot/claude-projects
 
   # ── AWS CLI v2 ──
   - curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip

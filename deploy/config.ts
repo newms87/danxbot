@@ -22,6 +22,8 @@ export interface DeployRepo {
   name: string;
   url: string;
   appEnvSubpath?: string;
+  /** Host port the worker's dispatch API binds to (must be unique per repo on an instance). */
+  workerPort: number;
 }
 
 export interface DeployConfig {
@@ -250,11 +252,31 @@ export function loadConfig(configPath: string): DeployConfig {
           }
         }
 
-        if (rName && rUrl) {
+        const rawPort = r["worker_port"];
+        let workerPort = 0;
+        if (rawPort === undefined || rawPort === null) {
+          errors.push(
+            `repos[].worker_port is required (unique port per repo, e.g. 5561)`,
+          );
+        } else if (
+          typeof rawPort !== "number" ||
+          !Number.isInteger(rawPort) ||
+          rawPort < 1 ||
+          rawPort > 65535
+        ) {
+          errors.push(
+            `repos[].worker_port must be an integer in [1, 65535] (got ${typeof rawPort === "number" ? rawPort : typeof rawPort})`,
+          );
+        } else {
+          workerPort = rawPort;
+        }
+
+        if (rName && rUrl && workerPort) {
+          const base = { name: rName, url: rUrl, workerPort };
           repos.push(
             appEnvSubpath === undefined
-              ? { name: rName, url: rUrl }
-              : { name: rName, url: rUrl, appEnvSubpath },
+              ? base
+              : { ...base, appEnvSubpath },
           );
         }
       }

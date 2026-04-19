@@ -43,6 +43,16 @@ Connected repos live at `repos/<name>/` (symlinks to actual working copies). The
 
 Each connected repo can define a `tools.md` in `.danxbot/config/` that lists commands available to SDK agents (database schema helpers, test runners, lint commands, etc.). The poller syncs this to the repo's `.claude/rules/tools.md`, where it's automatically loaded by the Claude Code SDK via `settingSources: ["project"]`. This keeps tool definitions repo-specific — danxbot's system prompts reference the tools generically without hardcoding paths.
 
+## Deployment (AWS Production)
+
+Danxbot deploys per-target to isolated AWS accounts — each connected repo gets its own isolated deployment. Per-target config lives at `.danxbot/deployments/<target>.yml`. Deploy system source is `deploy/cli.ts` with templates in `deploy/templates/` and terraform in `deploy/terraform/`.
+
+**Current targets:** `gpt` (gpt-manager).
+
+**"Deploy the <X> danxbot" ALWAYS means `make deploy TARGET=<x>` from `/home/newms/web/danxbot-flytebot`.** It NEVER means `make launch-worker` (that's local docker) and NEVER means deploying the connected repo's own app (e.g. gpt-manager's Vapor). The word "production" always refers to the AWS deploy, never to local workers.
+
+See the deploy commands in the Key Commands table above.
+
 ## Architecture
 
 ```
@@ -67,6 +77,13 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 | `make launch-worker-host REPO=platform` | Start a host worker (interactive terminals) |
 | `make launch-all-workers` | Start Docker workers for all configured repos |
 | `make stop-worker REPO=platform` | Stop a Docker worker |
+| `make deploy TARGET=gpt` | Deploy danxbot to AWS production for target |
+| `make deploy-status TARGET=gpt` | Show AWS infra state + health |
+| `make deploy-logs TARGET=gpt` | Tail production container logs |
+| `make deploy-ssh TARGET=gpt` | SSH to production instance |
+| `make deploy-smoke TARGET=gpt` | Smoke-test deployed dashboard |
+| `make deploy-secrets-push TARGET=gpt` | Sync local .env files to SSM |
+| `make deploy-destroy TARGET=gpt ARGS=--confirm` | Tear down AWS resources |
 | `make stop-infra` | Stop shared infrastructure |
 | `make logs` | Tail infra logs |
 | `make logs REPO=platform` | Tail worker logs |

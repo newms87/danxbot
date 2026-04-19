@@ -1,0 +1,27 @@
+# Connected-repo working copies are host-only symlinks during local dev.
+# Baking them into the image resolves symlinks into host paths (e.g.
+# /home/newms/web/gpt-manager), which then land in the container and
+# cause Claude Code to encode JSONL session paths with the HOST cwd
+# instead of the container cwd. Bind mounts at runtime replace this
+# directory's contents.
+repos
+
+# Never ship build/test artifacts or secrets into the image.
+node_modules
+dashboard/node_modules
+dashboard/dist
+.git
+.env
+.env.*
+claude-auth
+logs
+threads
+data
+.poller-running-*
+.scheduled_tasks.lock
+coverage
+
+# Editor / OS cruft.
+.vscode
+.idea
+.DS_Store

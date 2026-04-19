@@ -45,8 +45,10 @@ claude_auth_dir: ../../claude-auth
 repos:
   - name: danxbot
     url: https://github.com/newms87/danxbot-flytebot.git
+    worker_port: 5561
   - name: gpt-manager
     url: https://github.com/newms87/gpt-manager.git
+    worker_port: 5562
 dashboard:
   port: 8080
 `,
@@ -201,8 +203,10 @@ aws:
 repos:
   - name: repo-a
     url: https://github.com/user/a.git
+    worker_port: 5561
   - name: repo-b
     url: https://github.com/user/b.git
+    worker_port: 5562
 `,
     );
 
@@ -303,9 +307,11 @@ aws:
 repos:
   - name: platform
     url: https://github.com/user/platform.git
+    worker_port: 5561
     app_env_subpath: ssap
   - name: simple
     url: https://github.com/user/simple.git
+    worker_port: 5562
 `,
     );
 
@@ -330,6 +336,7 @@ aws:
 repos:
   - name: bad
     url: https://github.com/user/bad.git
+    worker_port: 5561
     app_env_subpath: /etc
 `,
     );
@@ -350,6 +357,7 @@ aws:
 repos:
   - name: bad
     url: https://github.com/user/bad.git
+    worker_port: 5561
     app_env_subpath: ../secrets
 `,
     );
@@ -370,6 +378,7 @@ aws:
 repos:
   - name: bad
     url: https://github.com/user/bad.git
+    worker_port: 5561
     app_env_subpath: 42
 `,
     );
@@ -390,6 +399,7 @@ aws:
 repos:
   - name: bad
     url: https://github.com/user/bad.git
+    worker_port: 5561
     app_env_subpath: ""
 `,
     );
@@ -413,6 +423,7 @@ aws:
 repos:
   - name: bad
     url: https://github.com/user/bad.git
+    worker_port: 5561
     app_env_subpath: ssap/../escape
 `,
     );
@@ -436,6 +447,7 @@ aws:
 repos:
   - name: odd
     url: https://github.com/user/odd.git
+    worker_port: 5561
     app_env_subpath: foo..bar
 `,
     );
@@ -457,6 +469,7 @@ aws:
 repos:
   - name: r
     url: https://github.com/user/r.git
+    worker_port: 5561
     app_env_subpath: ssap/
 `,
     );
@@ -478,6 +491,7 @@ aws:
 repos:
   - name: complete
     url: https://example.com/a.git
+    worker_port: 5561
   - url: https://example.com/b.git
 `,
     );

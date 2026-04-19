@@ -19,6 +19,9 @@ services:
       - ./package.json:/danxbot/app/package.json
       # Dashboard built assets (mount for dev rebuilds)
       - ./dashboard:/danxbot/app/dashboard
+      # Shared Claude Code JSONL — must match workers' mount target so
+      # the dashboard can read each worker's session logs.
+      - ${CLAUDE_PROJECTS_DIR:-./claude-projects}:/home/danxbot/.claude/projects
     networks:
       - danxbot-net
     depends_on:

@@ -17,6 +17,12 @@ services:
       - /danxbot/threads:/danxbot/threads
       - /danxbot/logs:/danxbot/logs
       - /danxbot/claude-auth:/danxbot/claude-auth:ro
+      # Shared Claude Code session logs — workers write JSONL here, the
+      # dashboard reads them. The path inside the container is the
+      # danxbot user's $HOME/.claude/projects so every container agrees
+      # on the storage location. See Dockerfile (useradd -m danxbot →
+      # HOME=/home/danxbot).
+      - /danxbot/claude-projects:/home/danxbot/.claude/projects
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - danxbot-net

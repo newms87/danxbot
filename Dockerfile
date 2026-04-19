@@ -43,8 +43,14 @@ RUN npm install
 COPY --chown=danxbot:danxbot dashboard/package.json dashboard/package-lock.json* dashboard/
 RUN cd dashboard && npm install
 
-# Copy application code
+# Copy application code. .dockerignore excludes `repos/` so the host-only
+# symlinks that point at dev-machine paths (e.g. /home/newms/web/...) do
+# not end up in the image. Create the repos dir explicitly so runtime
+# bind mounts have a clean, non-symlink target — otherwise Claude Code
+# would resolve cwd through the baked-in symlink and write JSONL session
+# logs to the host path instead of the container repo path.
 COPY --chown=danxbot:danxbot . .
+RUN mkdir -p /danxbot/app/repos && chown danxbot:danxbot /danxbot/app/repos
 
 # Build dashboard for production
 RUN cd dashboard && npm run build

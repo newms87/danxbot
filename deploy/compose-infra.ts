@@ -41,6 +41,16 @@ export function uploadAndRestartInfra(
     "sudo mv /tmp/docker-compose.prod.yml /danxbot/docker-compose.prod.yml && sudo chown ubuntu:ubuntu /danxbot/docker-compose.prod.yml",
   );
 
+  // Ensure the shared Claude Code JSONL dir exists with ownership that
+  // matches the in-container danxbot user (uid 1000 — first non-system
+  // uid from `useradd -m danxbot` in the Dockerfile). On Ubuntu hosts
+  // uid 1000 is also `ubuntu`, so numeric ownership shows as ubuntu in
+  // `ls -la`. cloud-init handles fresh instances; this line handles
+  // existing instances and is idempotent (mkdir -p + chown).
+  remote.sshRun(
+    "sudo mkdir -p /danxbot/claude-projects && sudo chown 1000:1000 /danxbot/claude-projects",
+  );
+
   const registry = ecrImage.split("/")[0];
   remote.sshRun(
     `aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${registry}`,

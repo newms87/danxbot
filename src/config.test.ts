@@ -101,6 +101,8 @@ async function importRepoContext(envOverrides: Record<string, string> = {}) {
   }
 }
 
+const TEST_WORKER_PORT = "5561";
+
 beforeEach(() => {
   vi.resetModules();
   mockDockerenvExists = false;
@@ -203,6 +205,7 @@ describe("repoContexts", () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git,danxbot:https://github.com/test/danxbot.git",
       DANXBOT_REPO_NAME: "platform",
+      DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
     expect(mod.repoContexts).toHaveLength(1);
     expect(mod.repoContexts[0].name).toBe("platform");
@@ -229,6 +232,7 @@ describe("RepoContext database config", () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/test/platform.git",
       DANXBOT_REPO_NAME: "platform",
+      DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
     const ctx = mod.getRepoContext("platform");
     expect(ctx.db.host).toBe("ssap-mysql-1");
@@ -242,6 +246,7 @@ describe("RepoContext database config", () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/test/platform.git",
       DANXBOT_REPO_NAME: "platform",
+      DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
     const ctx = mod.getRepoContext("platform");
     expect(ctx.db.host).toBe("127.0.0.1");
@@ -258,6 +263,7 @@ describe("RepoContext database config", () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/test/platform.git",
       DANXBOT_REPO_NAME: "platform",
+      DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
     expect(mod.getRepoContext("platform").db.host).toBe("10.0.0.5");
   });
@@ -268,6 +274,7 @@ describe("RepoContext database config", () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/test/platform.git",
       DANXBOT_REPO_NAME: "platform",
+      DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
     expect(mod.getRepoContext("platform").db.port).toBe(3307);
   });
@@ -277,6 +284,7 @@ describe("RepoContext database config", () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/test/platform.git",
       DANXBOT_REPO_NAME: "platform",
+      DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
     const ctx = mod.getRepoContext("platform");
     expect(ctx.db.enabled).toBe(false);
@@ -290,6 +298,7 @@ describe("getRepoContext", () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
       DANXBOT_REPO_NAME: "platform",
+      DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
     const ctx = mod.getRepoContext("platform");
     expect(ctx.name).toBe("platform");
@@ -300,6 +309,7 @@ describe("getRepoContext", () => {
     const mod = await importRepoContext({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
       DANXBOT_REPO_NAME: "platform",
+      DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
     expect(() => mod.getRepoContext("unknown")).toThrow('Repo "unknown" is not configured');
   });

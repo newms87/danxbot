@@ -7,6 +7,7 @@
 
 import type { DeployConfig, DeployRepo } from "./config.js";
 import type { RemoteHost } from "./remote.js";
+import { CONTAINER_REPOS_BASE } from "./constants.js";
 
 export interface LaunchEnv {
   /** Full ECR image URL to run workers against (prod) or empty for local default. */
@@ -16,15 +17,24 @@ export interface LaunchEnv {
 }
 
 export function buildLaunchCommand(
-  repo: Pick<DeployRepo, "name" | "url">,
+  repo: Pick<DeployRepo, "name" | "url" | "workerPort">,
   env: LaunchEnv,
 ): string {
   // Inline env vars feed docker-compose variable substitution in the repo's
-  // compose.yml (image + claude-auth path + anything else parameterized).
-  // --env-file /danxbot/.env provides shared vars (ANTHROPIC_API_KEY, REPOS,
-  // DANXBOT_DB_*, etc.) the worker compose references via ${VAR}.
-  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}'`;
-  return `${prefix} docker compose --env-file /danxbot/.env -f /danxbot/repos/${repo.name}/.danxbot/config/compose.yml -p worker-${repo.name} up -d --remove-orphans`;
+  // compose.yml (image + claude-auth path + worker port + anything else
+  // parameterized). --env-file /danxbot/.env provides shared vars
+  // (ANTHROPIC_API_KEY, REPOS, DANXBOT_DB_*, etc.) the worker compose
+  // references via ${VAR}. DANXBOT_WORKER_PORT comes from the deploy config
+  // per-repo so host-mode settings.local.json (gitignored) is never required
+  // on the remote instance.
+  // DANXBOT_REPOS_BASE tells the worker process to use the container bind-mount
+  // path for repos (e.g. /danxbot/repos) rather than the image-baked repos/
+  // directory (which may contain stale dev-machine symlinks that resolve to
+  // host paths like /home/dev/web/<name>). This ensures the agent spawn cwd
+  // matches the path derived by SessionLogWatcher, so JSONL lands under the
+  // correct encoded-cwd directory.
+  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_PROJECTS_DIR='/danxbot/claude-projects' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
+  return `${prefix} docker compose --env-file /danxbot/.env -f ${CONTAINER_REPOS_BASE}/${repo.name}/.danxbot/config/compose.yml -p worker-${repo.name} up -d --remove-orphans`;
 }
 
 export function buildStopCommand(

@@ -118,6 +118,23 @@ describe("loadRepoContext — workerPort", () => {
     vi.clearAllMocks();
     setupFilesExist();
     mockParseEnvFile.mockReturnValue({ ...MINIMUM_ENV });
+    delete process.env.DANXBOT_WORKER_PORT;
+  });
+
+  it("prefers process.env.DANXBOT_WORKER_PORT over settings.local.json (prod deploy path)", () => {
+    process.env.DANXBOT_WORKER_PORT = "5571";
+    setupSettingsLocalJson("5562");
+    const ctx = loadRepoContext(TEST_REPO);
+    expect(ctx.workerPort).toBe(5571);
+    delete process.env.DANXBOT_WORKER_PORT;
+  });
+
+  it("throws on invalid process.env.DANXBOT_WORKER_PORT", () => {
+    process.env.DANXBOT_WORKER_PORT = "not-a-number";
+    expect(() => loadRepoContext(TEST_REPO)).toThrow(
+      /DANXBOT_WORKER_PORT/,
+    );
+    delete process.env.DANXBOT_WORKER_PORT;
   });
 
   it("reads env.DANXBOT_WORKER_PORT from .claude/settings.local.json", () => {
@@ -148,5 +165,26 @@ describe("loadRepoContext — workerPort", () => {
     expect(() => loadRepoContext(TEST_REPO)).toThrow(
       /DANXBOT_WORKER_PORT/,
     );
+  });
+
+  it("throws for port 0 (below valid range)", () => {
+    setupSettingsLocalJson("0");
+    expect(() => loadRepoContext(TEST_REPO)).toThrow(/DANXBOT_WORKER_PORT/);
+  });
+
+  it("throws for port 65536 (above valid range)", () => {
+    setupSettingsLocalJson("65536");
+    expect(() => loadRepoContext(TEST_REPO)).toThrow(/DANXBOT_WORKER_PORT/);
+  });
+
+  it("accepts port 65535 (max valid port)", () => {
+    setupSettingsLocalJson("65535");
+    const ctx = loadRepoContext(TEST_REPO);
+    expect(ctx.workerPort).toBe(65535);
+  });
+
+  it("throws for float port value (not an integer)", () => {
+    setupSettingsLocalJson("5561.5");
+    expect(() => loadRepoContext(TEST_REPO)).toThrow(/DANXBOT_WORKER_PORT/);
   });
 });

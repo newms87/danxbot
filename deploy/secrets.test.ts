@@ -70,7 +70,7 @@ describe("collectDeploymentSecrets", () => {
   it("collects shared + per-repo danxbot + per-repo app env", () => {
     const result = collectDeploymentSecrets(
       makeConfig({
-        repos: [{ name: "app", url: "https://github.com/x/app.git" }],
+        repos: [{ name: "app", url: "https://github.com/x/app.git", workerPort: 5561 }],
       }),
       CWD,
     );
@@ -110,6 +110,7 @@ describe("collectDeploymentSecrets", () => {
             name: "platform",
             url: "https://github.com/x/platform.git",
             appEnvSubpath: "ssap",
+            workerPort: 5563,
           },
         ],
       }),
@@ -143,8 +144,9 @@ describe("collectDeploymentSecrets", () => {
             name: "platform",
             url: "https://github.com/x/p.git",
             appEnvSubpath: "ssap",
+            workerPort: 5563,
           },
-          { name: "simple", url: "https://github.com/x/s.git" },
+          { name: "simple", url: "https://github.com/x/s.git", workerPort: 5564 },
         ],
       }),
       cwd4,
@@ -172,6 +174,7 @@ describe("collectDeploymentSecrets", () => {
             name: "platform",
             url: "https://github.com/x/p.git",
             appEnvSubpath: "ssap",
+            workerPort: 5563,
           },
         ],
       }),
@@ -186,7 +189,7 @@ describe("collectDeploymentSecrets", () => {
     mkdirSync(cwd2, { recursive: true });
     const result = collectDeploymentSecrets(
       makeConfig({
-        repos: [{ name: "ghost", url: "https://example.com/g.git" }],
+        repos: [{ name: "ghost", url: "https://example.com/g.git", workerPort: 5599 }],
       }),
       cwd2,
     );
@@ -202,7 +205,7 @@ describe("buildSsmPutCommands", () => {
       region: "us-west-2",
       ssmPrefix: "/danxbot-gpt",
       aws: { profile: "gpt" },
-      repos: [{ name: "app", url: "https://github.com/x/app.git" }],
+      repos: [{ name: "app", url: "https://github.com/x/app.git", workerPort: 5561 }],
     });
     const collected = {
       shared: { ANTHROPIC_API_KEY: "sk-xxx" },
@@ -290,7 +293,7 @@ describe("buildSsmPutCommands", () => {
     const cfg = makeConfig({
       ssmPrefix: "/danxbot-test",
       aws: { profile: "p" },
-      repos: [{ name: "app", url: "https://github.com/x/a.git" }],
+      repos: [{ name: "app", url: "https://github.com/x/a.git", workerPort: 5561 }],
     });
     const cmds = buildSsmPutCommands(cfg, {
       shared: { FILLED: "value", EMPTY: "" },

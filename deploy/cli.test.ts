@@ -80,8 +80,8 @@ describe("buildMaterializeRepoArgs", () => {
   it("emits bare name for repos without app_env_subpath", () => {
     expect(
       buildMaterializeRepoArgs([
-        { name: "danxbot", url: "https://github.com/x/d.git" },
-        { name: "gpt-manager", url: "https://github.com/x/g.git" },
+        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
+        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562 },
       ]),
     ).toBe("danxbot gpt-manager");
   });
@@ -93,6 +93,7 @@ describe("buildMaterializeRepoArgs", () => {
           name: "platform",
           url: "https://github.com/x/p.git",
           appEnvSubpath: "ssap",
+          workerPort: 5563,
         },
       ]),
     ).toBe("platform:ssap");
@@ -108,8 +109,9 @@ describe("buildMaterializeRepoArgs", () => {
           name: "platform",
           url: "https://github.com/x/p.git",
           appEnvSubpath: "ssap",
+          workerPort: 5563,
         },
-        { name: "danxbot", url: "https://github.com/x/d.git" },
+        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
       ]),
     ).toBe("platform:ssap danxbot");
   });
