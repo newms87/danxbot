@@ -873,6 +873,505 @@ describe("SessionLogWatcher", () => {
   });
 });
 
+describe("SessionLogWatcher — sub-agent coverage", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = makeTempDir();
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  /**
+   * Claude Code layout:
+   *   <sessionDir>/<session-uuid>.jsonl
+   *   <sessionDir>/<session-uuid>/subagents/agent-<hash>.jsonl
+   *   <sessionDir>/<session-uuid>/subagents/agent-<hash>.meta.json
+   */
+  function setupParentPlusSubagent(
+    parentStem: string,
+    subagentId: string,
+    parentEntries: Record<string, unknown>[],
+    subagentEntries: Record<string, unknown>[],
+    meta?: { agentType?: string; description?: string },
+  ): { parentPath: string; subagentPath: string; subagentDir: string } {
+    const parentPath = writeJsonlFile(
+      tempDir,
+      `${parentStem}.jsonl`,
+      parentEntries,
+    );
+    const subagentDir = join(tempDir, parentStem, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    const subagentPath = writeJsonlFile(
+      subagentDir,
+      `${subagentId}.jsonl`,
+      subagentEntries,
+    );
+    if (meta) {
+      writeFileSync(
+        join(subagentDir, `${subagentId}.meta.json`),
+        JSON.stringify(meta),
+      );
+    }
+    return { parentPath, subagentPath, subagentDir };
+  }
+
+  it("emits sub-agent entries with lineage in data", async () => {
+    const entries: AgentLogEntry[] = [];
+    const subagentAssistant = rawAssistantEntry({
+      sessionId: "subagent-sess-001",
+      message: {
+        model: "claude-sonnet-4-5-20250929",
+        content: [{ type: "text", text: "Sub-agent working." }],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+      timestamp: "2026-04-12T10:00:07.000Z",
+    });
+    setupParentPlusSubagent(
+      "parent-session",
+      "agent-abc",
+      [rawSystemInit(), rawAssistantEntry()],
+      [subagentAssistant],
+      { agentType: "Explore", description: "Explore the codebase" },
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    const subagentEntries = entries.filter(
+      (e) => e.data.subagent_id !== undefined,
+    );
+    expect(subagentEntries.length).toBeGreaterThan(0);
+    const assistantSub = subagentEntries.find((e) => e.type === "assistant");
+    expect(assistantSub).toBeDefined();
+    expect(assistantSub!.data.subagent_id).toBe("agent-abc");
+    expect(assistantSub!.data.parent_session_id).toBe("sess-abc-123");
+    expect(assistantSub!.data.agent_type).toBe("Explore");
+  });
+
+  it("parent entries do not carry any lineage fields", async () => {
+    const entries: AgentLogEntry[] = [];
+    setupParentPlusSubagent(
+      "parent-session",
+      "agent-abc",
+      [rawSystemInit(), rawAssistantEntry()],
+      [rawAssistantEntry({ sessionId: "sub-001" })],
+      { agentType: "Explore", description: "Explore" },
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    const parentEntries = entries.filter(
+      (e) => !Object.prototype.hasOwnProperty.call(e.data, "subagent_id"),
+    );
+    expect(parentEntries.length).toBeGreaterThan(0);
+    for (const entry of parentEntries) {
+      expect(entry.data).not.toHaveProperty("subagent_id");
+      expect(entry.data).not.toHaveProperty("parent_session_id");
+      expect(entry.data).not.toHaveProperty("agent_type");
+    }
+  });
+
+  it("propagates lineage on sub-agent tool_result (user) entries", async () => {
+    const entries: AgentLogEntry[] = [];
+    const { subagentPath } = setupParentPlusSubagent(
+      "parent-tr",
+      "agent-tr",
+      [rawSystemInit(), rawAssistantEntry()],
+      [rawAssistantEntry({ sessionId: "sub-tr" })],
+      { agentType: "Explore", description: "explore" },
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Append a tool_result (user entry) to the sub-agent file — lineage must stamp.
+    appendJsonlEntry(subagentPath, rawToolResultEntry({
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "sub-tool", content: "ok" },
+        ],
+      },
+      timestamp: "2026-04-12T10:00:11.000Z",
+    }));
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    const toolResult = entries.find(
+      (e) => e.type === "user" && e.data.subagent_id === "agent-tr",
+    );
+    expect(toolResult).toBeDefined();
+    expect(toolResult!.data.parent_session_id).toBe("sess-abc-123");
+    expect(toolResult!.data.agent_type).toBe("Explore");
+  });
+
+  it("back-fills agent_type when meta.json appears after the jsonl", async () => {
+    const entries: AgentLogEntry[] = [];
+    const parentStem = "parent-late-meta";
+    writeJsonlFile(tempDir, `${parentStem}.jsonl`, [
+      rawSystemInit(),
+      rawAssistantEntry(),
+    ]);
+    const subagentDir = join(tempDir, parentStem, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    // jsonl exists but meta does NOT — Claude Code splits those writes.
+    writeJsonlFile(subagentDir, "agent-slow.jsonl", [
+      rawAssistantEntry({ sessionId: "sub-slow" }),
+    ]);
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // No meta yet — first entry emitted with agent_type undefined.
+    const firstEmit = entries.find((e) => e.data.subagent_id === "agent-slow");
+    expect(firstEmit).toBeDefined();
+    expect(firstEmit!.data.agent_type).toBeUndefined();
+
+    // Now write meta + append a new sub-agent entry to force another poll read.
+    writeFileSync(
+      join(subagentDir, "agent-slow.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "explore" }),
+    );
+    appendJsonlEntry(
+      join(subagentDir, "agent-slow.jsonl"),
+      rawAssistantEntry({
+        sessionId: "sub-slow",
+        timestamp: "2026-04-12T10:00:20.000Z",
+      }),
+    );
+
+    await new Promise((r) => setTimeout(r, 200));
+    watcher.stop();
+
+    // The SECOND emission picks up the now-present agent_type.
+    const later = entries
+      .filter((e) => e.data.subagent_id === "agent-slow")
+      .slice(-1)[0];
+    expect(later.data.agent_type).toBe("Explore");
+  });
+
+  it("tolerates malformed meta.json without crashing the watcher", async () => {
+    const entries: AgentLogEntry[] = [];
+    const parentStem = "parent-bad-meta";
+    writeJsonlFile(tempDir, `${parentStem}.jsonl`, [
+      rawSystemInit(),
+      rawAssistantEntry(),
+    ]);
+    const subagentDir = join(tempDir, parentStem, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    writeJsonlFile(subagentDir, "agent-bad.jsonl", [
+      rawAssistantEntry({ sessionId: "sub-bad" }),
+    ]);
+    writeFileSync(
+      join(subagentDir, "agent-bad.meta.json"),
+      "{not valid json",
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    const sub = entries.find((e) => e.data.subagent_id === "agent-bad");
+    expect(sub).toBeDefined();
+    expect(sub!.data.agent_type).toBeUndefined();
+  });
+
+  it("drops sub-agent tail on ENOENT without resetting the parent tail", async () => {
+    const entries: AgentLogEntry[] = [];
+    const { parentPath, subagentPath } = setupParentPlusSubagent(
+      "parent-enoent",
+      "agent-drop",
+      [rawSystemInit(), rawAssistantEntry()],
+      [rawAssistantEntry({ sessionId: "sub-drop" })],
+      { agentType: "Explore", description: "explore" },
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Delete the sub-agent file mid-session.
+    rmSync(subagentPath);
+
+    // Append to the parent — it must keep emitting without rediscovery.
+    appendJsonlEntry(parentPath, rawToolResultEntry());
+    await new Promise((r) => setTimeout(r, 200));
+    watcher.stop();
+
+    // Parent path unchanged (no forced rediscovery).
+    expect(watcher.getSessionFilePath()).toBe(parentPath);
+    // Parent tool_result still came through.
+    const parentTR = entries.find(
+      (e) =>
+        e.type === "user" &&
+        !Object.prototype.hasOwnProperty.call(e.data, "subagent_id"),
+    );
+    expect(parentTR).toBeDefined();
+  });
+
+  it("picks up sub-agent files created after the watcher starts", async () => {
+    const entries: AgentLogEntry[] = [];
+    const parentPath = writeJsonlFile(tempDir, "parent.jsonl", [
+      rawSystemInit(),
+      rawAssistantEntry(),
+    ]);
+    const subagentDir = join(tempDir, "parent", "subagents");
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Now lazily create sub-agent directory + files
+    mkdirSync(subagentDir, { recursive: true });
+    writeJsonlFile(subagentDir, "agent-late.jsonl", [
+      rawAssistantEntry({ sessionId: "late-sub" }),
+    ]);
+    writeFileSync(
+      join(subagentDir, "agent-late.meta.json"),
+      JSON.stringify({ agentType: "test-reviewer", description: "review" }),
+    );
+
+    await new Promise((r) => setTimeout(r, 200));
+    watcher.stop();
+
+    const lateSub = entries.find((e) => e.data.subagent_id === "agent-late");
+    expect(lateSub).toBeDefined();
+    expect(lateSub!.data.agent_type).toBe("test-reviewer");
+    expect(parentPath).toContain("parent.jsonl");
+  });
+
+  it("leaves agent_type undefined when meta.json is absent but still emits entries", async () => {
+    const entries: AgentLogEntry[] = [];
+    setupParentPlusSubagent(
+      "parent-session",
+      "agent-nometa",
+      [rawSystemInit(), rawAssistantEntry()],
+      [rawAssistantEntry({ sessionId: "sub-nometa" })],
+      // no meta
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    const sub = entries.find((e) => e.data.subagent_id === "agent-nometa");
+    expect(sub).toBeDefined();
+    expect(sub!.data.agent_type).toBeUndefined();
+    expect(sub!.data.parent_session_id).toBe("sess-abc-123");
+  });
+
+  it("does not error and emits only parent entries when subagents/ is missing", async () => {
+    const entries: AgentLogEntry[] = [];
+    // Parent-only session — no subagents/ directory at all
+    writeJsonlFile(tempDir, "session.jsonl", [
+      rawSystemInit(),
+      rawAssistantEntry(),
+    ]);
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    expect(entries.length).toBeGreaterThan(0);
+    expect(
+      entries.every((e) => e.data.subagent_id === undefined),
+    ).toBe(true);
+  });
+
+  it("handles multiple sub-agents under the same parent", async () => {
+    const entries: AgentLogEntry[] = [];
+    const parentStem = "multi-parent";
+    writeJsonlFile(tempDir, `${parentStem}.jsonl`, [
+      rawSystemInit(),
+      rawAssistantEntry(),
+    ]);
+    const subagentDir = join(tempDir, parentStem, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    writeJsonlFile(subagentDir, "agent-one.jsonl", [
+      rawAssistantEntry({ sessionId: "sub-one" }),
+    ]);
+    writeFileSync(
+      join(subagentDir, "agent-one.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "e1" }),
+    );
+    writeJsonlFile(subagentDir, "agent-two.jsonl", [
+      rawAssistantEntry({ sessionId: "sub-two" }),
+    ]);
+    writeFileSync(
+      join(subagentDir, "agent-two.meta.json"),
+      JSON.stringify({ agentType: "code-reviewer", description: "e2" }),
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 200));
+    watcher.stop();
+
+    const subOne = entries.find((e) => e.data.subagent_id === "agent-one");
+    const subTwo = entries.find((e) => e.data.subagent_id === "agent-two");
+    expect(subOne).toBeDefined();
+    expect(subTwo).toBeDefined();
+    expect(subOne!.data.agent_type).toBe("Explore");
+    expect(subTwo!.data.agent_type).toBe("code-reviewer");
+  });
+
+  it("does not synthesize a system/init event for sub-agent streams", async () => {
+    const entries: AgentLogEntry[] = [];
+    setupParentPlusSubagent(
+      "parent-session",
+      "agent-abc",
+      [rawSystemInit(), rawAssistantEntry()],
+      [rawAssistantEntry({ sessionId: "sub-abc" })],
+      { agentType: "Explore", description: "Explore" },
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 200));
+    watcher.stop();
+
+    const subInits = entries.filter(
+      (e) =>
+        e.type === "system" &&
+        e.subtype === "init" &&
+        e.data.subagent_id !== undefined,
+    );
+    expect(subInits).toHaveLength(0);
+  });
+
+  it("picks up sub-agent entries appended after start", async () => {
+    const entries: AgentLogEntry[] = [];
+    const { subagentPath } = setupParentPlusSubagent(
+      "parent-session",
+      "agent-growing",
+      [rawSystemInit(), rawAssistantEntry()],
+      [rawAssistantEntry({ sessionId: "sub-grow" })],
+      { agentType: "Explore", description: "Explore" },
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 150));
+
+    const countBefore = entries.filter(
+      (e) => e.data.subagent_id === "agent-growing",
+    ).length;
+
+    appendJsonlEntry(
+      subagentPath,
+      rawToolResultEntry({
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-sub-1",
+              content: "sub result",
+            },
+          ],
+        },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    const countAfter = entries.filter(
+      (e) => e.data.subagent_id === "agent-growing",
+    ).length;
+    expect(countAfter).toBeGreaterThan(countBefore);
+  });
+});
+
 describe("DISPATCH_TAG_PREFIX", () => {
   it("is a recognizable tag format", () => {
     expect(DISPATCH_TAG_PREFIX).toBe("<!-- danxbot-dispatch:");

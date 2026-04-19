@@ -22,6 +22,18 @@ export interface AgentLogEntry {
   data: Record<string, unknown>;
 }
 
+/**
+ * Sub-agent lineage carried on AgentLogEntry.data (and propagated into every
+ * emitted EventPayload.data) so gpt-manager can attribute usage to the
+ * originating sub-agent within the same dispatch. Set by SessionLogWatcher for
+ * entries read from `<parent-session>/subagents/*.jsonl`; absent on parent entries.
+ */
+export interface AgentLineage {
+  subagent_id: string;
+  parent_session_id: string | null;
+  agent_type: string | undefined;
+}
+
 export type ComplexityLevel = "very_low" | "low" | "medium" | "high" | "very_high";
 
 export interface ComplexityProfile {

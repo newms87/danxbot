@@ -1,23 +1,28 @@
 /**
  * SessionLogWatcher — Polls Claude Code JSONL session files for new entries.
  *
- * Claude Code writes a complete session log to ~/.claude/projects/<cwd-path>/<session-uuid>.jsonl.
- * This watcher polls the file at a configurable interval, reads new lines from the last byte offset,
- * parses them as JSON, converts to AgentLogEntry format, and emits to registered consumers.
+ * Claude Code writes:
+ *   - Parent session:   ~/.claude/projects/<cwd-path>/<session-uuid>.jsonl
+ *   - Sub-agent sessions: ~/.claude/projects/<cwd-path>/<session-uuid>/subagents/agent-<hash>.jsonl
+ *                        + agent-<hash>.meta.json sidecar with {agentType, description}
  *
- * Used by all agent modes (SDK, piped, terminal) to provide unified session observability.
+ * The watcher tails the parent file and all sub-agent files in parallel, parses
+ * new lines, converts them to AgentLogEntry, and emits to registered consumers.
+ * Sub-agent entries are decorated with lineage metadata (subagent_id,
+ * parent_session_id, agent_type) inside `data` so downstream consumers can
+ * attribute usage correctly — they flow under the SAME dispatch, not a separate session.
  */
 
 import { realpathSync } from "node:fs";
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createLogger } from "../logger.js";
 import {
   buildAssistantSummary,
   buildToolResultSummary,
 } from "./tool-summary.js";
-import type { AgentLogEntry } from "../types.js";
+import type { AgentLineage, AgentLogEntry } from "../types.js";
 
 const log = createLogger("session-log-watcher");
 
@@ -160,16 +165,6 @@ export async function findSessionFileByDispatchId(
 /**
  * Converts a raw JSONL entry from Claude Code's session log into an AgentLogEntry
  * used by downstream consumers (stall detection, event forwarding).
- *
- * JSONL format:
- *   { type: "assistant", message: { model, content: [...], usage: {...} }, timestamp: "ISO", sessionId, ... }
- *   { type: "user", message: { content: [{type: "tool_result", ...}] }, timestamp: "ISO", sessionId, ... }
- *   { type: "system", subtype: "turn_duration", durationMs, messageCount, timestamp: "ISO", ... }
- *
- * Returns `{ entry, timestamp }` or null. The timestamp is returned separately so the
- * caller can track it for delta_ms computation across consecutive entries.
- *
- * Returns null for entries that should be skipped (metadata, non-loggable).
  */
 export function convertJsonlEntry(
   raw: Record<string, unknown>,
@@ -208,12 +203,10 @@ export function convertJsonlEntry(
       if (!message) return null;
       const content = message.content;
 
-      // Skip plain text user messages (prompts) — only tool results are loggable
       if (typeof content === "string") return null;
       const contentArr = (content ?? []) as Record<string, unknown>[];
       if (contentArr.length === 0) return null;
 
-      // Only process tool_result content blocks
       const hasToolResults = contentArr.some((b) => b.type === "tool_result");
       if (!hasToolResults) return null;
 
@@ -236,7 +229,6 @@ export function convertJsonlEntry(
       const subtype = raw.subtype as string | undefined;
 
       if (subtype === "init") {
-        // Rare — only present in SDK-mode JSONL, not interactive
         return {
           entry: {
             timestamp,
@@ -255,12 +247,10 @@ export function convertJsonlEntry(
         };
       }
 
-      // Skip non-loggable system subtypes
       return null;
     }
 
     case "result": {
-      // Result entry with cost/duration summary — written by Claude Code at session end
       const subtype = (raw.subtype as string) || "success";
       const costUsd = (raw.cost_usd as number) || 0;
       const numTurns = (raw.num_turns as number) || 0;
@@ -292,13 +282,25 @@ export function convertJsonlEntry(
   }
 }
 
+/**
+ * Per-file tail state. `lineage` is present for sub-agent files and used by
+ * `emitEntry` to decorate entries — callers never pass lineage separately.
+ */
+interface TailState {
+  filePath: string;
+  byteOffset: number;
+  lineBuffer: string;
+  lastTimestamp: number;
+  lineage?: AgentLineage;
+}
+
 export class SessionLogWatcher {
   private consumers: EntryConsumer[] = [];
   private pollTimer: ReturnType<typeof setInterval> | undefined;
-  private byteOffset = 0;
-  private lineBuffer = "";
-  private lastTimestamp = 0;
-  private sessionFilePath: string | null = null;
+  private parentTail: TailState | null = null;
+  private subagentsDir: string | null = null;
+  private subagentTails: Map<string, TailState> = new Map();
+  private parentSessionId: string | null = null;
   private sessionDir: string;
   private sessionId: string | undefined;
   private dispatchId: string | undefined;
@@ -325,9 +327,9 @@ export class SessionLogWatcher {
     return this.entries;
   }
 
-  /** Returns the discovered session file path, or null if not yet found. */
+  /** Returns the discovered parent session file path, or null if not yet found. */
   getSessionFilePath(): string | null {
-    return this.sessionFilePath;
+    return this.parentTail?.filePath ?? null;
   }
 
   /** Start polling for session log entries. */
@@ -335,13 +337,10 @@ export class SessionLogWatcher {
     if (this.running) return;
     this.running = true;
 
-    // Phase 1: Discover the session file
     await this.discoverSessionFile();
 
-    // Phase 2: Start polling for new entries
-    if (this.running && this.sessionFilePath) {
+    if (this.running && this.parentTail) {
       this.pollTimer = setInterval(() => this.poll(), this.pollIntervalMs);
-      // Run an immediate poll
       await this.poll();
     }
   }
@@ -363,14 +362,12 @@ export class SessionLogWatcher {
     for (let attempt = 0; attempt < MAX_FILE_DISCOVERY_ATTEMPTS; attempt++) {
       if (!this.running) return;
 
-      // When a dispatch ID is set, scan file content for the tag instead of
-      // relying on mtime (which can pick up the wrong session file).
       const filePath = this.dispatchId
         ? await findSessionFileByDispatchId(this.sessionDir, this.dispatchId)
         : await findNewestJsonlFile(this.sessionDir, this.sessionId);
 
       if (filePath) {
-        this.sessionFilePath = filePath;
+        this.setParentFile(filePath);
         log.info(`Watching session file: ${filePath}`);
         return;
       }
@@ -385,78 +382,192 @@ export class SessionLogWatcher {
     );
   }
 
+  /** Adopt a parent session file and derive the sub-agent directory. */
+  private setParentFile(filePath: string): void {
+    this.parentTail = {
+      filePath,
+      byteOffset: 0,
+      lineBuffer: "",
+      lastTimestamp: 0,
+    };
+    this.subagentsDir = join(
+      dirname(filePath),
+      basename(filePath, ".jsonl"),
+      "subagents",
+    );
+  }
+
   /**
-   * Read new lines from the session file and emit entries.
-   * Guarded against:
-   *   1. Concurrent polls (`this.polling` flag) — setInterval can fire while
-   *      the previous poll is mid-await; without the guard two polls would
-   *      both read the same byte range and emit duplicates.
-   *   2. stop() racing with an in-flight poll — each await yields, and stop()
-   *      sets running=false. After each await we re-check running so a late
-   *      poll can't emit entries (or read the file state) after stop returned.
+   * Poll all known files: the parent session, then re-enumerate + tail sub-agent files.
+   * Guarded against concurrent polls and against stop() racing an in-flight poll.
    */
   private async poll(): Promise<void> {
-    if (this.polling || !this.sessionFilePath || !this.running) return;
+    if (this.polling || !this.parentTail || !this.running) return;
     this.polling = true;
 
     try {
-      const fileStats = await stat(this.sessionFilePath);
+      await this.pollFile(this.parentTail);
       if (!this.running) return;
-      if (fileStats.size <= this.byteOffset) return;
-
-      const fd = await open(this.sessionFilePath, "r");
-      try {
+      await this.discoverNewSubagentFiles();
+      await this.refreshPendingAgentTypes();
+      for (const state of this.subagentTails.values()) {
         if (!this.running) return;
-        const bytesToRead = fileStats.size - this.byteOffset;
-        const buffer = Buffer.alloc(bytesToRead);
-        const { bytesRead } = await fd.read(
-          buffer,
-          0,
-          bytesToRead,
-          this.byteOffset,
-        );
-        if (!this.running) return;
-
-        if (bytesRead === 0) return;
-
-        this.byteOffset += bytesRead;
-        const text = buffer.toString("utf-8", 0, bytesRead);
-        this.processText(text);
-      } finally {
-        await fd.close();
-      }
-    } catch (err) {
-      // File may have been deleted or rotated — try to rediscover
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        log.warn("Session file disappeared, attempting rediscovery");
-        this.sessionFilePath = null;
-        this.byteOffset = 0;
-        this.lineBuffer = "";
-        await this.discoverSessionFile();
-      } else {
-        log.error("Poll error:", err);
+        await this.pollFile(state);
       }
     } finally {
       this.polling = false;
     }
   }
 
-  /** Process raw text from the file, handling partial lines. */
-  private processText(text: string): void {
-    this.lineBuffer += text;
+  /** Read any new bytes from `state.filePath` and emit resulting entries. */
+  private async pollFile(state: TailState): Promise<void> {
+    const isSubagent = state.lineage !== undefined;
+    try {
+      const fileStats = await stat(state.filePath);
+      if (!this.running) return;
+      if (fileStats.size <= state.byteOffset) return;
+
+      const fd = await open(state.filePath, "r");
+      try {
+        if (!this.running) return;
+        const bytesToRead = fileStats.size - state.byteOffset;
+        const buffer = Buffer.alloc(bytesToRead);
+        const { bytesRead } = await fd.read(
+          buffer,
+          0,
+          bytesToRead,
+          state.byteOffset,
+        );
+        if (!this.running) return;
+
+        if (bytesRead === 0) return;
+
+        state.byteOffset += bytesRead;
+        const text = buffer.toString("utf-8", 0, bytesRead);
+        this.processText(text, state);
+      } finally {
+        await fd.close();
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        if (isSubagent) {
+          // Sub-agent file gone — drop it; next discoverNewSubagentFiles
+          // will pick up any replacement.
+          this.subagentTails.delete(state.filePath);
+        } else {
+          log.warn("Parent session file disappeared, attempting rediscovery");
+          this.parentTail = null;
+          this.subagentsDir = null;
+          this.subagentTails.clear();
+          this.parentSessionId = null;
+          await this.discoverSessionFile();
+        }
+      } else {
+        log.error("Poll error:", err);
+      }
+    }
+  }
+
+  /**
+   * Re-enumerate the sub-agent directory and add tail states for any
+   * `agent-<hash>.jsonl` files not already being tailed.
+   */
+  private async discoverNewSubagentFiles(): Promise<void> {
+    if (!this.subagentsDir) return;
+
+    let files: string[];
+    try {
+      files = await readdir(this.subagentsDir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      log.error("Failed to enumerate sub-agent directory:", err);
+      return;
+    }
+
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const fullPath = join(this.subagentsDir, file);
+      if (this.subagentTails.has(fullPath)) continue;
+
+      const subagentId = basename(file, ".jsonl");
+      const agentType = await this.readAgentType(subagentId);
+      this.subagentTails.set(fullPath, {
+        filePath: fullPath,
+        byteOffset: 0,
+        lineBuffer: "",
+        lastTimestamp: 0,
+        lineage: {
+          subagent_id: subagentId,
+          parent_session_id: this.parentSessionId,
+          agent_type: agentType,
+        },
+      });
+    }
+  }
+
+  /**
+   * For sub-agent tails whose `agent_type` is still undefined (meta.json had
+   * not been written yet when the jsonl was first discovered), retry reading
+   * the sidecar on each poll. Claude Code writes .jsonl and .meta.json
+   * separately, so the meta can appear one or more ticks after the jsonl.
+   * Also back-fills parent_session_id once the parent init has emitted.
+   */
+  private async refreshPendingAgentTypes(): Promise<void> {
+    for (const state of this.subagentTails.values()) {
+      if (!state.lineage) continue;
+      let { agent_type, parent_session_id } = state.lineage;
+      if (agent_type === undefined) {
+        agent_type = await this.readAgentType(state.lineage.subagent_id);
+      }
+      if (parent_session_id === null && this.parentSessionId !== null) {
+        parent_session_id = this.parentSessionId;
+      }
+      state.lineage = {
+        subagent_id: state.lineage.subagent_id,
+        parent_session_id,
+        agent_type,
+      };
+    }
+  }
+
+  /**
+   * Read agentType from the `<subagentId>.meta.json` sidecar. Returns
+   * undefined only for ENOENT (file not written yet). Malformed JSON or
+   * permission errors are logged at WARN and return undefined — the watcher
+   * must not crash on bad sidecar files, but the failure is visible in logs.
+   */
+  private async readAgentType(
+    subagentId: string,
+  ): Promise<string | undefined> {
+    if (!this.subagentsDir) return undefined;
+    const metaPath = join(this.subagentsDir, `${subagentId}.meta.json`);
+    try {
+      const text = await readFile(metaPath, "utf-8");
+      const meta = JSON.parse(text) as { agentType?: unknown };
+      return typeof meta.agentType === "string" ? meta.agentType : undefined;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return undefined;
+      log.warn(`Failed to read sub-agent meta for ${subagentId}: ${String(err)}`);
+      return undefined;
+    }
+  }
+
+  /** Process raw text from a file tail, handling partial lines across poll ticks. */
+  private processText(text: string, state: TailState): void {
+    state.lineBuffer += text;
 
     let newlineIdx: number;
-    while ((newlineIdx = this.lineBuffer.indexOf("\n")) !== -1) {
-      const line = this.lineBuffer.substring(0, newlineIdx).trim();
-      this.lineBuffer = this.lineBuffer.substring(newlineIdx + 1);
+    while ((newlineIdx = state.lineBuffer.indexOf("\n")) !== -1) {
+      const line = state.lineBuffer.substring(0, newlineIdx).trim();
+      state.lineBuffer = state.lineBuffer.substring(newlineIdx + 1);
 
       if (!line) continue;
 
       try {
         const raw = JSON.parse(line) as Record<string, unknown>;
-        this.handleRawEntry(raw);
+        this.handleRawEntry(raw, state);
       } catch {
-        // Malformed JSON line — skip
         log.warn(`Skipping malformed JSONL line: ${line.substring(0, 100)}`);
       }
     }
@@ -465,20 +576,24 @@ export class SessionLogWatcher {
   /**
    * Convert a raw JSONL entry and emit to consumers.
    *
-   * Init synthesis: Interactive JSONL files lack a system/init event, so we synthesize
-   * one from the first assistant message's sessionId and model. If a real system/init
-   * entry arrives first (SDK-mode JSONL), convertJsonlEntry handles it and we set
-   * initSynthesized=true to prevent a duplicate. The check below only fires for
-   * assistant entries, so it never conflicts with a preceding system/init.
+   * Init synthesis (parent stream only): interactive JSONL files lack a
+   * system/init event, so we synthesize one from the first assistant message's
+   * sessionId and model. Sub-agent streams never synthesize — their entries
+   * flow under the parent dispatch's existing session.
    */
-  private handleRawEntry(raw: Record<string, unknown>): void {
-    // Synthesize a system init entry from the first assistant message
-    if (!this.initSynthesized && raw.type === "assistant") {
+  private handleRawEntry(
+    raw: Record<string, unknown>,
+    state: TailState,
+  ): void {
+    const isSubagent = state.lineage !== undefined;
+
+    if (!isSubagent && !this.initSynthesized && raw.type === "assistant") {
       const message = raw.message as Record<string, unknown> | undefined;
       const model = message?.model as string | undefined;
       const sessionId = raw.sessionId as string | undefined;
 
       if (sessionId || model) {
+        this.parentSessionId = sessionId ?? this.parentSessionId;
         const initEntry: AgentLogEntry = {
           timestamp: raw.timestamp
             ? new Date(raw.timestamp as string).getTime()
@@ -494,25 +609,43 @@ export class SessionLogWatcher {
             raw: {},
           },
         };
-        this.emitEntry(initEntry);
+        this.emitEntry(initEntry, state);
         this.initSynthesized = true;
       }
     }
 
-    const result = convertJsonlEntry(raw, this.lastTimestamp);
+    const result = convertJsonlEntry(raw, state.lastTimestamp);
     if (!result) return;
 
-    // Mark init as synthesized if a real system init comes through
-    if (result.entry.type === "system" && result.entry.subtype === "init") {
+    if (
+      !isSubagent &&
+      result.entry.type === "system" &&
+      result.entry.subtype === "init"
+    ) {
       this.initSynthesized = true;
+      const sid = result.entry.data.session_id as string | undefined;
+      if (sid) this.parentSessionId = sid;
     }
 
-    this.lastTimestamp = result.timestamp;
-    this.emitEntry(result.entry);
+    state.lastTimestamp = result.timestamp;
+    this.emitEntry(result.entry, state);
   }
 
-  /** Emit an entry to all consumers and the internal accumulator. */
-  private emitEntry(entry: AgentLogEntry): void {
+  /**
+   * Emit an entry to all consumers and the internal accumulator. For sub-agent
+   * streams, `state.lineage` decorates `entry.data` so the emitted EventPayload
+   * (via mapEntryToEvents) inherits subagent_id/parent_session_id/agent_type.
+   */
+  private emitEntry(entry: AgentLogEntry, state: TailState): void {
+    if (state.lineage) {
+      entry.data = {
+        ...entry.data,
+        subagent_id: state.lineage.subagent_id,
+        parent_session_id: state.lineage.parent_session_id,
+        agent_type: state.lineage.agent_type,
+      };
+    }
+
     this.entries.push(entry);
     for (const consumer of this.consumers) {
       try {

@@ -708,3 +708,106 @@ describe("startEventForwarding", () => {
     ]);
   });
 });
+
+// ─── Sub-agent lineage propagation (Phase 2) ────────────────────────────
+
+describe("createLaravelForwarder — sub-agent lineage", () => {
+  const LINEAGE = {
+    subagent_id: "agent-abc",
+    parent_session_id: "sess-parent-xyz",
+    agent_type: "Explore",
+  };
+
+  function makeSubagentAssistantEntry(
+    content: Record<string, unknown>[],
+    usage?: Record<string, number>,
+  ): AgentLogEntry {
+    return makeEntry({
+      type: "assistant",
+      data: { content, usage, delta_ms: 0, ...LINEAGE },
+    });
+  }
+
+  it("adds lineage fields to every event emitted from a sub-agent entry", async () => {
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    consume(
+      makeSubagentAssistantEntry(
+        [
+          { type: "text", text: "Sub speaking" },
+          { type: "tool_use", id: "t1", name: "Read", input: {} },
+        ],
+        SAMPLE_USAGE,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(postCalls()).toHaveLength(1);
+    const events = decodeBatch(postCalls()[0]);
+    expect(events).toHaveLength(2);
+    for (const event of events) {
+      expect(event.data).toMatchObject(LINEAGE);
+    }
+    // The first event (agent_event) still carries usage alongside lineage.
+    expect(events[0].data).toMatchObject({ ...LINEAGE, usage: SAMPLE_USAGE });
+  });
+
+  it("adds lineage fields to the fallback thinking event", async () => {
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    consume(makeSubagentAssistantEntry([], SAMPLE_USAGE));
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const events = decodeBatch(postCalls()[0]);
+    expect(events).toEqual([
+      {
+        type: "thinking",
+        data: { usage: SAMPLE_USAGE, ...LINEAGE },
+      },
+    ]);
+  });
+
+  it("does not add lineage fields to events from parent entries", async () => {
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    // Entry has NO lineage fields.
+    consume(makeAssistantEntry([{ type: "text", text: "Parent" }]));
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const events = decodeBatch(postCalls()[0]);
+    expect(events).toEqual([{ type: "agent_event", message: "Parent" }]);
+    expect(events[0].data).toBeUndefined();
+  });
+
+  it("propagates lineage through tool_result sub-agent events", async () => {
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    consume(
+      makeEntry({
+        type: "user",
+        data: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "sub-tool-1",
+              content: "sub result",
+            },
+          ],
+          delta_ms: 0,
+          ...LINEAGE,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const events = decodeBatch(postCalls()[0]);
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("tool_result");
+    expect(events[0].data).toMatchObject({
+      tool_use_id: "sub-tool-1",
+      content: "sub result",
+      is_error: false,
+      ...LINEAGE,
+    });
+  });
+});

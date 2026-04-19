@@ -11,7 +11,7 @@
  */
 
 import { SessionLogWatcher } from "./session-log-watcher.js";
-import type { AgentLogEntry } from "../types.js";
+import type { AgentLineage, AgentLogEntry } from "../types.js";
 
 const MAX_TOOL_RESULT_BYTES = 10 * 1024; // 10KB
 const BATCH_SIZE = 10;
@@ -52,6 +52,20 @@ export function truncateToolResultContent(content: unknown): string {
   const text = typeof content === "string" ? content : JSON.stringify(content);
   if (text.length <= MAX_TOOL_RESULT_BYTES) return text;
   return text.slice(0, MAX_TOOL_RESULT_BYTES) + "…[truncated]";
+}
+
+/**
+ * Extract sub-agent lineage (set by SessionLogWatcher on sub-agent entries)
+ * from entry.data, or null if this entry is from the parent stream.
+ */
+function extractLineage(entry: AgentLogEntry): AgentLineage | null {
+  if (entry.data.subagent_id === undefined) return null;
+  return {
+    subagent_id: entry.data.subagent_id as string,
+    parent_session_id:
+      (entry.data.parent_session_id as string | null | undefined) ?? null,
+    agent_type: entry.data.agent_type as string | undefined,
+  };
 }
 
 /**
@@ -109,6 +123,22 @@ async function authedFetch(
  * usage when no text/tool_use blocks were emitted).
  */
 export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
+  const events = computeEvents(entry);
+  const lineage = extractLineage(entry);
+  if (lineage) {
+    for (const event of events) {
+      event.data = {
+        ...event.data,
+        subagent_id: lineage.subagent_id,
+        parent_session_id: lineage.parent_session_id,
+        agent_type: lineage.agent_type,
+      };
+    }
+  }
+  return events;
+}
+
+function computeEvents(entry: AgentLogEntry): EventPayload[] {
   const { type, subtype, data } = entry;
 
   if (type === "system" && subtype === "init") {
