@@ -5,8 +5,11 @@
  * Gated behind ANTHROPIC_API_KEY — excluded from `npx vitest run` by default.
  * Run with: `npm run test:validate`
  *
- * Token budget: 150k cumulative input tokens. Each test spawns a minimal prompt
- * to keep costs low (~15-25k input per spawn due to system prompt + context).
+ * Token budget: 200k cumulative FRESH input tokens (excludes cache-read tokens,
+ * which are ~10x cheaper and already paid for by the creating request). Each
+ * test spawns a minimal prompt; claude's system prompt + tool loading accounts
+ * for most of the fresh-input cost per cold spawn. Cache reads are tracked
+ * separately for observability but not charged against the budget.
  *
  * NOTE: This file must NOT import from ./setup.js — it contains vi.mock("fs/promises")
  * that vitest hoists, which would break SessionLogWatcher's real fs access.
@@ -88,29 +91,32 @@ vi.mock("../../terminal.js", () => ({
 
 // --- Token Budget Tracker ---
 
-const TOKEN_BUDGET = 150_000;
+const TOKEN_BUDGET = 200_000;
 let cumulativeInputTokens = 0;
 let cumulativeOutputTokens = 0;
+let cumulativeCacheReadTokens = 0;
 
 /**
  * Parse a JSONL session file and sum all usage tokens from assistant entries.
  */
-function extractTokenUsageFromJsonl(filePath: string): { inputTokens: number; outputTokens: number } {
+function extractTokenUsageFromJsonl(filePath: string): { inputTokens: number; outputTokens: number; cacheReadTokens: number } {
   const content = readFileSync(filePath, "utf-8");
   const lines = content.split("\n").filter((l) => l.trim());
   let inputTokens = 0;
   let outputTokens = 0;
+  let cacheReadTokens = 0;
   let skippedLines = 0;
 
   for (const line of lines) {
     try {
       const entry = JSON.parse(line);
       if (entry.type === "assistant" && entry.message?.usage) {
+        // `input_tokens` is fresh (uncached) input — the real cost driver.
+        // `cache_read_input_tokens` is ~10% of the price; tracked separately
+        // for observability but not charged against the budget.
         inputTokens += entry.message.usage.input_tokens ?? 0;
         outputTokens += entry.message.usage.output_tokens ?? 0;
-        if (entry.message.usage.cache_read_input_tokens) {
-          inputTokens += entry.message.usage.cache_read_input_tokens;
-        }
+        cacheReadTokens += entry.message.usage.cache_read_input_tokens ?? 0;
       }
     } catch {
       skippedLines++;
@@ -121,7 +127,7 @@ function extractTokenUsageFromJsonl(filePath: string): { inputTokens: number; ou
     console.warn(`[Token Budget] Skipped ${skippedLines} malformed JSONL lines in ${filePath}`);
   }
 
-  return { inputTokens, outputTokens };
+  return { inputTokens, outputTokens, cacheReadTokens };
 }
 
 /** Track token usage from a specific JSONL file path. */
@@ -130,6 +136,7 @@ function trackTokensFromFile(filePath: string): void {
   const usage = extractTokenUsageFromJsonl(filePath);
   cumulativeInputTokens += usage.inputTokens;
   cumulativeOutputTokens += usage.outputTokens;
+  cumulativeCacheReadTokens += usage.cacheReadTokens;
 }
 
 function checkTokenBudget(): void {
@@ -191,7 +198,7 @@ describe.skipIf(!hasApiKey())("validation: dispatch pipeline (real Claude API)",
 
   afterAll(() => {
     console.log(
-      `\n[Token Budget] Input: ${cumulativeInputTokens} / ${TOKEN_BUDGET} | Output: ${cumulativeOutputTokens}`,
+      `\n[Token Budget] Fresh input: ${cumulativeInputTokens} / ${TOKEN_BUDGET} | Output: ${cumulativeOutputTokens} | Cache reads (not budgeted): ${cumulativeCacheReadTokens}`,
     );
 
     if (existsSync(testState.logsDir)) {

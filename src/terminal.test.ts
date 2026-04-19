@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { buildDispatchScript, getTerminalLogPath } from "./terminal.js";
 
 function makeTempDir(): string {
@@ -108,7 +109,7 @@ describe("buildDispatchScript", () => {
     expect(executable).not.toMatch(/\s-p\s/);
   });
 
-  it("embeds every flag as a bash single-quoted literal", () => {
+  it("embeds every flag as a bash single-quoted literal in the CLAUDE_ARGV array", () => {
     const scriptPath = buildScript({
       flags: [
         "--dangerously-skip-permissions",
@@ -119,7 +120,7 @@ describe("buildDispatchScript", () => {
     });
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain(
-      "claude '--dangerously-skip-permissions' '--verbose' '--mcp-config' '/tmp/mcp/settings.json'",
+      "CLAUDE_ARGV=('claude' '--dangerously-skip-permissions' '--verbose' '--mcp-config' '/tmp/mcp/settings.json'",
     );
   });
 
@@ -130,6 +131,69 @@ describe("buildDispatchScript", () => {
     });
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain(`'--agents' '${agentsJson}'`);
+  });
+
+  // Regression guard: every generated script MUST be valid bash. `bash -n` does
+  // a parse-only check (no side effects). Previous tests verified that the JSON
+  // appeared in the file as a substring — they did NOT verify the resulting
+  // file was parseable. The real bug: the outer double-quote wrapper in
+  // `exec script -c "claude ... '--agents' '{"x":"y"}' ..."` closes prematurely
+  // on the first `"` inside the JSON, leaving the file with an unterminated
+  // string. bash errors with: unexpected EOF while looking for matching `"`.
+  // This test reproduces that real-world dispatch failure at unit-test speed.
+  it("generated script parses as valid bash when --agents contains JSON with double quotes", () => {
+    const agentsJson = JSON.stringify({
+      "template-builder": {
+        description: "Builds templates",
+        prompt: "Instructions with \"quoted\" words and 'apostrophes' too.",
+      },
+      "schema-builder": {
+        description: "Builds the data model",
+        prompt: "Another prompt with \"embedded\" double quotes.",
+      },
+    });
+    const scriptPath = buildScript({
+      flags: [
+        "--dangerously-skip-permissions",
+        "--verbose",
+        "--mcp-config",
+        "/tmp/mcp/settings.json",
+        "--agents",
+        agentsJson,
+      ],
+      firstMessage:
+        "<!-- danxbot-dispatch:test --> Read /tmp/p/prompt.md and execute the task described in it. Tracking: AgentDispatch #AGD-99",
+    });
+
+    const result = spawnSync("bash", ["-n", scriptPath], {
+      encoding: "utf-8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+  });
+
+  it("generated script parses as valid bash with a realistic large JSON payload", () => {
+    // Mirror the shape GPT Manager's orchestrator sends — multiple agents,
+    // each with multi-line prompts and embedded quotes.
+    const bigPrompt = Array.from({ length: 40 }, (_, i) =>
+      `Line ${i}: An "instruction" with 'various' "punctuation" including $special and \\escapes.`,
+    ).join("\n");
+    const agentsJson = JSON.stringify({
+      "schema-builder": { description: "Schema sub-agent", prompt: bigPrompt },
+      "behavior-builder": { description: "Directive sub-agent", prompt: bigPrompt },
+      "template-builder": { description: "Template sub-agent", prompt: bigPrompt },
+    });
+    const scriptPath = buildScript({
+      flags: ["--dangerously-skip-permissions", "--verbose", "--agents", agentsJson],
+    });
+
+    const result = spawnSync("bash", ["-n", scriptPath], {
+      encoding: "utf-8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
   });
 
   it("sets STATUS_URL to the given statusUrl", () => {

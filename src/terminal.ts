@@ -94,8 +94,25 @@ export function buildDispatchScript(
   settingsDir: string,
   options: DispatchScriptOptions,
 ): string {
-  const quotedFlags = options.flags.map(bashSingleQuote).join(" ");
-  const quotedFirstMessage = bashSingleQuote(options.firstMessage);
+  // Build the claude argv as a bash array literal. Each element is wrapped in
+  // single quotes — safe for any content because single quotes don't interpret
+  // `$`, `"`, `\`, `!`, etc. A literal `'` inside a value is handled by the
+  // `'\''` idiom in bashSingleQuote.
+  //
+  // CRITICAL: we do NOT build `claude '--arg1' '--arg2' ...` inside an outer
+  // `"..."` for `script -c`. JSON values contain `"`, which would close that
+  // outer double-quote prematurely and produce an unparseable bash file. The
+  // array + `"${CLAUDE_ARGV[@]}"` expansion sidesteps the problem entirely:
+  // `printf '%q '` re-escapes each element for the nested `sh -c` that
+  // `script -c` performs, so the claude invocation is a single word to
+  // `script` regardless of what's inside the args.
+  const claudeArgvLiteral = [
+    "claude",
+    ...options.flags,
+    options.firstMessage,
+  ]
+    .map(bashSingleQuote)
+    .join(" ");
   const quotedStatusUrl = bashSingleQuote(options.statusUrl || "");
   const quotedApiToken = bashSingleQuote(options.apiToken);
   const quotedTerminalLog = bashSingleQuote(options.terminalLogPath);
@@ -154,7 +171,8 @@ ${pidEmit}
 # script -q -f wraps the interactive TUI so the ✻ thinking indicator is
 # captured for the StallDetector; the inner claude process remains an attached
 # TUI the user can read and type into.
-exec script -q -f "$TERMINAL_LOG" -c "claude ${quotedFlags} ${quotedFirstMessage}"
+CLAUDE_ARGV=(${claudeArgvLiteral})
+exec script -q -f "$TERMINAL_LOG" -c "$(printf '%q ' "\${CLAUDE_ARGV[@]}")"
 `,
   );
   chmodSync(scriptPath, 0o755);

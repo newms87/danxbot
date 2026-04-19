@@ -59,7 +59,7 @@ Edit files in `src/` on the host. Code changes are visible in the dashboard cont
 | Host | Container |
 |------|-----------|
 | `<repo>/` | `/danxbot/repos/<name>/` |
-| `./claude-auth/` | `/danxbot/claude-auth/` |
+| `./claude-auth/` | `/danxbot/app/claude-auth/` |
 
 ## Connected Repo Architecture
 
