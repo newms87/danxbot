@@ -107,6 +107,11 @@ export function pushSecrets(
 
   console.log(`\n── Pushing ${cmds.length} secret(s) to SSM ──`);
   for (const cmd of cmds) {
-    runStreaming(cmd);
+    // `aws ssm put-parameter --name "<path>" ... --value '<SECRET>'` — strip
+    // to the --name path for log output so secret values never hit stdout.
+    // Idempotent: put-parameter uses --overwrite in buildSsmPutCommands.
+    const nameMatch = cmd.match(/--name "([^"]+)"/);
+    const label = nameMatch ? `aws ssm put-parameter ${nameMatch[1]}` : "aws ssm put-parameter";
+    runStreaming(cmd, { logLabel: label });
   }
 }

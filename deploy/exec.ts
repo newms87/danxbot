@@ -26,13 +26,21 @@ export function run(cmd: string, options?: ExecSyncOptions): string {
 /**
  * Run a shell command, streaming stdout/stderr to the terminal.
  * Throws on non-zero exit.
+ *
+ * `logLabel`, when provided, replaces the echoed command in the log line so
+ * callers invoking commands with secrets in argv (e.g. `aws ssm put-parameter
+ * --value '<SECRET>'`) can show a non-sensitive label instead.
  */
-export function runStreaming(cmd: string, options?: ExecSyncOptions): void {
-  console.log(`  $ ${cmd}`);
+export function runStreaming(
+  cmd: string,
+  options?: ExecSyncOptions & { logLabel?: string },
+): void {
+  const { logLabel, ...execOptions } = options ?? {};
+  console.log(`  $ ${logLabel ?? cmd}`);
   execSync(cmd, {
     encoding: "utf-8",
     stdio: "inherit",
-    ...options,
+    ...execOptions,
   });
 }
 

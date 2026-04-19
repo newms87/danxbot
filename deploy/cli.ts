@@ -117,6 +117,14 @@ async function deploy(config: DeployConfig): Promise<void> {
   console.log(`  DEPLOYING ${config.name}`);
   console.log("═══════════════════════════════════════");
 
+  // Step 0: push local .env files to SSM. Runs every deploy so local secret
+  // changes reach the instance on the next deploy without a separate command.
+  // Idempotent — put-parameter uses --overwrite; unchanged values are a no-op
+  // from the instance's perspective. Secrets are redacted from stdout (see
+  // pushSecrets + runStreaming logLabel).
+  console.log("\n── Syncing local .env → SSM ──");
+  pushSecrets(config);
+
   ensureBackend(config);
   const outputs = terraformApply(config);
 

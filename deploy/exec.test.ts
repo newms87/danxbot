@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { run, tryRun, awsCmd } from "./exec.js";
+import { run, tryRun, awsCmd, runStreaming } from "./exec.js";
 
 describe("exec", () => {
   it("run returns trimmed stdout", () => {
@@ -38,5 +38,23 @@ describe("exec", () => {
 
   it("tryRun honors options.cwd", () => {
     expect(tryRun("pwd", { cwd: "/tmp" })).toBe("/tmp");
+  });
+
+  it("runStreaming with logLabel does not echo the raw command (secret redaction)", () => {
+    // Spy on console.log to catch what gets printed. Use a harmless echo as
+    // the real cmd; the "secret" is in argv but logLabel must replace it.
+    const originalLog = console.log;
+    const logs: string[] = [];
+    console.log = (msg: string) => {
+      logs.push(msg);
+    };
+    try {
+      runStreaming("echo harmless", { logLabel: "echo <REDACTED>" });
+    } finally {
+      console.log = originalLog;
+    }
+    const joined = logs.join("\n");
+    expect(joined).toContain("<REDACTED>");
+    expect(joined).not.toContain("harmless");
   });
 });
