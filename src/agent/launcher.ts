@@ -31,7 +31,11 @@ import {
 } from "./process-utils.js";
 import { SessionLogWatcher } from "./session-log-watcher.js";
 import { buildClaudeInvocation } from "./claude-invocation.js";
-import { createLaravelForwarder } from "./laravel-forwarder.js";
+import {
+  createLaravelForwarder,
+  deriveQueuePath,
+} from "./laravel-forwarder.js";
+import { EventQueue } from "./event-queue.js";
 import { getDanxbotCommit } from "./danxbot-commit.js";
 import {
   startDispatchTracking,
@@ -481,11 +485,15 @@ export async function spawnAgent(
   });
 
   // --- Optional event forwarding ---
-  let forwarderFlush: (() => void) | undefined;
+  let forwarderFlush: (() => Promise<void>) | undefined;
   if (options.eventForwarding) {
+    const queue = new EventQueue(
+      deriveQueuePath(join(config.logsDir, "event-queue"), jobId),
+    );
     const forwarder = createLaravelForwarder(
       options.eventForwarding.statusUrl,
       options.eventForwarding.apiToken,
+      { queue },
     );
     watcher.onEntry(forwarder.consume);
     forwarderFlush = forwarder.flush;
@@ -554,7 +562,7 @@ export async function spawnAgent(
     // cannot strand the temp dirs. Temp-dir cleanup MUST run.
     try {
       watcher.stop();
-      forwarderFlush?.();
+      void forwarderFlush?.();
       inactivityTimer.clear();
       stopHeartbeat(job);
       if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);

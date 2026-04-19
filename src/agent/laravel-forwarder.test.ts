@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // --- Mocks ---
 
@@ -28,12 +31,17 @@ vi.mock("./session-log-watcher.js", () => {
 
 import {
   deriveEventsUrl,
+  deriveQueuePath,
+  drainQueue,
+  postEventsWithRetry,
+  replayQueueOnBoot,
   truncateToolResultContent,
   mapEntryToEvents,
   createLaravelForwarder,
   startEventForwarding,
   type EventPayload,
 } from "./laravel-forwarder.js";
+import { EventQueue } from "./event-queue.js";
 import type { AgentLogEntry } from "../types.js";
 
 // --- Helpers ---
@@ -809,5 +817,291 @@ describe("createLaravelForwarder — sub-agent lineage", () => {
       is_error: false,
       ...LINEAGE,
     });
+  });
+});
+
+// ─── Phase 3: postEventsWithRetry ───────────────────────────────────────
+
+describe("postEventsWithRetry", () => {
+  const URL = "http://example.com/api/jobs/1/events";
+  const EVENTS: EventPayload[] = [{ type: "agent_event", message: "hi" }];
+  const DELAYS = [10, 20]; // small delays for fast tests — 2 retry attempts
+
+  it("returns 'ok' on first-try 2xx", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
+    const promise = postEventsWithRetry(URL, EVENTS, API_TOKEN, DELAYS);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await promise).toBe("ok");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries on 5xx with exponential backoff then succeeds", async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 503 })
+      .mockResolvedValueOnce({ ok: false, status: 502 })
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+    const promise = postEventsWithRetry(URL, EVENTS, API_TOKEN, DELAYS);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(DELAYS[0]);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(DELAYS[1]);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+
+    expect(await promise).toBe("ok");
+  });
+
+  it("retries on thrown network errors", async () => {
+    mockFetch
+      .mockRejectedValueOnce(new Error("ECONNRESET"))
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+    const promise = postEventsWithRetry(URL, EVENTS, API_TOKEN, DELAYS);
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(DELAYS[0]);
+
+    expect(await promise).toBe("ok");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns 'client-error' immediately on 4xx (no retry)", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
+    const promise = postEventsWithRetry(URL, EVENTS, API_TOKEN, DELAYS);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(await promise).toBe("client-error");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 'retry-later' after exhausting all retries", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 503 });
+    const promise = postEventsWithRetry(URL, EVENTS, API_TOKEN, DELAYS);
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(DELAYS[0]);
+    await vi.advanceTimersByTimeAsync(DELAYS[1]);
+
+    expect(await promise).toBe("retry-later");
+    expect(mockFetch).toHaveBeenCalledTimes(1 + DELAYS.length);
+  });
+
+  it("POSTs {events: [...]} with Authorization header", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
+    const promise = postEventsWithRetry(URL, EVENTS, API_TOKEN, DELAYS);
+    await vi.advanceTimersByTimeAsync(0);
+    await promise;
+
+    const [[fetchUrl, init]] = mockFetch.mock.calls;
+    expect(fetchUrl).toBe(URL);
+    expect((init as RequestInit).method).toBe("POST");
+    expect((init as { headers: Record<string, string> }).headers.Authorization).toBe(
+      `Bearer ${API_TOKEN}`,
+    );
+    expect(JSON.parse(init.body as string)).toEqual({ events: EVENTS });
+  });
+});
+
+// ─── Phase 3: drainQueue ───────────────────────────────────────────────
+
+describe("drainQueue", () => {
+  let queueDir: string;
+  const DELAYS = [5]; // 1 retry for fast tests
+
+  beforeEach(() => {
+    vi.useRealTimers();
+    queueDir = mkdtempSync(join(tmpdir(), "drain-queue-test-"));
+  });
+  afterEach(() => {
+    rmSync(queueDir, { recursive: true, force: true });
+    vi.useFakeTimers();
+  });
+
+  it("delivers all queued batches and clears the queue when every attempt succeeds", async () => {
+    const queue = new EventQueue(join(queueDir, "d.jsonl"));
+    await queue.enqueue([{ type: "agent_event", message: "a" }]);
+    await queue.enqueue([{ type: "agent_event", message: "b" }]);
+
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+    await drainQueue(queue, "http://example.com/events", API_TOKEN, DELAYS);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(await queue.hasPending()).toBe(false);
+  });
+
+  it("retains failed-and-subsequent batches when a middle send gives up", async () => {
+    const queue = new EventQueue(join(queueDir, "d.jsonl"));
+    await queue.enqueue([{ type: "agent_event", message: "first" }]);
+    await queue.enqueue([{ type: "agent_event", message: "stuck" }]);
+    await queue.enqueue([{ type: "agent_event", message: "after" }]);
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 }) // first
+      .mockResolvedValue({ ok: false, status: 503 }); // subsequent all fail
+
+    await drainQueue(queue, "http://example.com/events", API_TOKEN, DELAYS);
+
+    const remaining = await queue.peekAll();
+    expect(remaining).toEqual([
+      [{ type: "agent_event", message: "stuck" }],
+      [{ type: "agent_event", message: "after" }],
+    ]);
+  });
+
+  it("drops 4xx-rejected batches without retaining them", async () => {
+    const queue = new EventQueue(join(queueDir, "d.jsonl"));
+    await queue.enqueue([{ type: "agent_event", message: "bad" }]);
+    await queue.enqueue([{ type: "agent_event", message: "good" }]);
+
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 400 })
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+
+    await drainQueue(queue, "http://example.com/events", API_TOKEN, DELAYS);
+
+    expect(await queue.hasPending()).toBe(false);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("no-ops when the queue is empty", async () => {
+    const queue = new EventQueue(join(queueDir, "empty.jsonl"));
+    await drainQueue(
+      queue,
+      "http://example.com/events",
+      API_TOKEN,
+      DELAYS,
+    );
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Phase 3: createLaravelForwarder + EventQueue integration ──────────
+
+describe("createLaravelForwarder with EventQueue (write-ahead + retry)", () => {
+  let queueDir: string;
+  const DELAYS = [5];
+  const DISPATCH_ID = "dispatch-queued";
+
+  // Real timers for this block: we mix fake timers with real fs I/O, and
+  // libuv-backed fs callbacks don't resolve under fake timers. Use `flush()`
+  // directly instead of advancing the batch timeout.
+  beforeEach(() => {
+    vi.useRealTimers();
+    queueDir = mkdtempSync(join(tmpdir(), "fwd-queue-test-"));
+  });
+  afterEach(() => {
+    rmSync(queueDir, { recursive: true, force: true });
+    vi.useFakeTimers();
+  });
+
+  function makeForwarder() {
+    const queue = new EventQueue(deriveQueuePath(queueDir, DISPATCH_ID));
+    return {
+      queue,
+      ...createLaravelForwarder(STATUS_URL, API_TOKEN, {
+        queue,
+        retryDelaysMs: DELAYS,
+      }),
+    };
+  }
+
+  it("delivers successfully and leaves the queue empty on 2xx", async () => {
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+    const { queue, consume, flush } = makeForwarder();
+
+    consume(makeAssistantEntry([{ type: "text", text: "Hello" }]));
+    await flush();
+
+    expect(postCalls()).toHaveLength(1);
+    expect(await queue.hasPending()).toBe(false);
+  });
+
+  it("persists the batch in the on-disk queue after exhausting retries on 5xx", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 503 });
+    const { queue, consume, flush } = makeForwarder();
+
+    consume(makeAssistantEntry([{ type: "text", text: "Stuck" }]));
+    await flush();
+
+    expect(mockFetch).toHaveBeenCalledTimes(1 + DELAYS.length);
+    expect(await queue.hasPending()).toBe(true);
+    const pending = await queue.peekAll();
+    expect(pending).toEqual([[{ type: "agent_event", message: "Stuck" }]]);
+  });
+
+  it("drains previously-stuck queue batches BEFORE sending new events", async () => {
+    const { queue, consume, flush } = makeForwarder();
+    await queue.enqueue([{ type: "agent_event", message: "old" }]);
+
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+
+    consume(makeAssistantEntry([{ type: "text", text: "new" }]));
+    await flush();
+
+    expect(postCalls()).toHaveLength(2);
+    expect(decodeBatch(postCalls()[0])).toEqual([
+      { type: "agent_event", message: "old" },
+    ]);
+    expect(decodeBatch(postCalls()[1])).toEqual([
+      { type: "agent_event", message: "new" },
+    ]);
+    expect(await queue.hasPending()).toBe(false);
+  });
+
+  it("does NOT retry or requeue 4xx client errors", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 400 });
+    const { queue, consume, flush } = makeForwarder();
+
+    consume(makeAssistantEntry([{ type: "text", text: "bad shape" }]));
+    await flush();
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(await queue.hasPending()).toBe(false);
+  });
+});
+
+// ─── Phase 3: replayQueueOnBoot ────────────────────────────────────────
+
+describe("replayQueueOnBoot", () => {
+  let queueDir: string;
+  const DELAYS = [5];
+
+  beforeEach(() => {
+    vi.useRealTimers();
+    queueDir = mkdtempSync(join(tmpdir(), "replay-test-"));
+  });
+  afterEach(() => {
+    rmSync(queueDir, { recursive: true, force: true });
+    vi.useFakeTimers();
+  });
+
+  it("flushes pending events for a dispatch on boot and clears the file", async () => {
+    const queue = new EventQueue(deriveQueuePath(queueDir, "d-boot"));
+    await queue.enqueue([{ type: "agent_event", message: "survived" }]);
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+
+    await replayQueueOnBoot(
+      "d-boot",
+      queueDir,
+      STATUS_URL,
+      API_TOKEN,
+      DELAYS,
+    );
+
+    expect(postCalls()).toHaveLength(1);
+    expect(await queue.hasPending()).toBe(false);
+  });
+
+  it("is a no-op when the dispatch has no pending queue file", async () => {
+    await replayQueueOnBoot(
+      "never-had-a-queue",
+      queueDir,
+      STATUS_URL,
+      API_TOKEN,
+      DELAYS,
+    );
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
