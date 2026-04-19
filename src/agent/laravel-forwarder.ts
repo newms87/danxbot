@@ -1,8 +1,11 @@
 /**
  * Laravel Event Forwarder — Batches and POSTs AgentLogEntry events to the Laravel API.
  *
- * Replaces the per-event postProgress/handleStreamEvent in the old launcher.ts.
- * Buffers up to 10 events or 5 seconds, then sends them as a bulk POST.
+ * Produces the nested EventPayload shape expected by gpt-manager's
+ * AgentDispatchStatusController::events validator: { type, message?, data? }.
+ * Usage payloads are attached to the first emitted event per assistant turn
+ * (text → tool_call → dedicated thinking fallback) so per-turn token accounting
+ * lands in exactly one UsageEvent.
  *
  * Used by spawnAgent when the eventForwarding option is provided.
  */
@@ -16,13 +19,8 @@ const BATCH_TIMEOUT_MS = 5_000;
 
 export interface EventPayload {
   type: string;
-  timestamp: number;
   message?: string;
-  tool_name?: string;
-  tool_input?: Record<string, unknown>;
-  tool_use_id?: string;
-  is_error?: boolean;
-  session_id?: string;
+  data?: Record<string, unknown>;
 }
 
 export interface StartEventForwardingOptions {
@@ -48,53 +46,82 @@ export function deriveEventsUrl(statusUrl: string): string {
 
 /**
  * Truncate tool result content to MAX_TOOL_RESULT_BYTES characters.
+ * Non-string input is JSON-stringified first so object tool results are still bounded.
  */
-export function truncateToolResultContent(content: string): string {
-  if (content.length <= MAX_TOOL_RESULT_BYTES) return content;
-  return content.slice(0, MAX_TOOL_RESULT_BYTES) + "…[truncated]";
+export function truncateToolResultContent(content: unknown): string {
+  const text = typeof content === "string" ? content : JSON.stringify(content);
+  if (text.length <= MAX_TOOL_RESULT_BYTES) return text;
+  return text.slice(0, MAX_TOOL_RESULT_BYTES) + "…[truncated]";
 }
 
 /**
- * Report the danxbot_session_id to the status endpoint on init.
- * Fire-and-forget — errors are logged silently.
+ * Attach `usage` to the correct event per the three-way fallback contract:
+ *   1. First `agent_event` (text) — preferred.
+ *   2. First `tool_call` if no text blocks exist.
+ *   3. Appended `thinking` event if neither text nor tool_use blocks exist.
+ *
+ * Invariant: when invoked with a non-empty usage, exactly one event in `events`
+ * ends up carrying `data.usage` — never zero, never two.
  */
-export async function putSessionId(
-  statusUrl: string,
+function attachUsageToAssistantEvents(
+  events: EventPayload[],
+  usage: Record<string, unknown>,
+): void {
+  const target =
+    events.find((e) => e.type === "agent_event") ??
+    events.find((e) => e.type === "tool_call");
+  if (target) {
+    target.data = { ...target.data, usage };
+    return;
+  }
+  events.push({ type: "thinking", data: { usage } });
+}
+
+/**
+ * Best-effort authed JSON fetch. Non-2xx and network errors are swallowed
+ * at this boundary; Phase 3 replaces this with retry + on-disk queue.
+ */
+async function authedFetch(
+  url: string,
+  method: "POST" | "PUT",
+  body: unknown,
   apiToken: string,
-  sessionId: string,
 ): Promise<void> {
   try {
-    await fetch(statusUrl, {
-      method: "PUT",
+    await fetch(url, {
+      method,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiToken}`,
       },
-      body: JSON.stringify({ danxbot_session_id: sessionId }),
+      body: JSON.stringify(body),
     });
   } catch {
-    // Non-fatal — session ID reporting is best-effort
+    // Non-fatal — forwarding is best-effort until Phase 3.
   }
 }
 
 /**
  * Map an AgentLogEntry to zero or more EventPayloads for the bulk events endpoint.
  *
- * One JSONL entry can produce multiple events:
- *   - assistant with text → agent_event
- *   - assistant with tool_use → tool_call
- *   - user/tool_result → tool_result
- *   - system/init → session_init
+ * One JSONL entry can produce multiple events (an assistant turn with N content
+ * blocks produces up to N events plus at most one extra `thinking` event for
+ * usage when no text/tool_use blocks were emitted).
  */
 export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
-  const { type, subtype, timestamp, data } = entry;
+  const { type, subtype, data } = entry;
 
   if (type === "system" && subtype === "init") {
-    return [{
-      type: "session_init",
-      timestamp,
-      session_id: data.session_id as string | undefined,
-    }];
+    return [
+      {
+        type: "session_init",
+        data: {
+          session_id: data.session_id,
+          model: data.model,
+          agents: data.tools,
+        },
+      },
+    ];
   }
 
   if (type === "assistant") {
@@ -107,19 +134,23 @@ export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
       if (block.type === "text" && block.text) {
         events.push({
           type: "agent_event",
-          timestamp,
           message: block.text as string,
         });
-      } else if (block.type === "tool_use") {
+      } else if (block.type === "tool_use" && block.name) {
         events.push({
           type: "tool_call",
-          timestamp,
-          tool_name: block.name as string | undefined,
-          tool_input: block.input as Record<string, unknown> | undefined,
-          tool_use_id: block.id as string | undefined,
+          message: block.name as string,
+          data: {
+            tool: block.name,
+            tool_use_id: block.id,
+            input: block.input,
+          },
         });
       }
     }
+
+    const usage = data.usage as Record<string, unknown> | undefined;
+    if (usage) attachUsageToAssistantEvents(events, usage);
 
     return events;
   }
@@ -132,10 +163,11 @@ export function mapEntryToEvents(entry: AgentLogEntry): EventPayload[] {
       .filter((b) => b.type === "tool_result")
       .map((b) => ({
         type: "tool_result",
-        timestamp,
-        message: truncateToolResultContent(String(b.content ?? "")),
-        tool_use_id: b.tool_use_id as string | undefined,
-        is_error: Boolean(b.is_error),
+        data: {
+          tool_use_id: b.tool_use_id,
+          content: truncateToolResultContent(b.content),
+          is_error: Boolean(b.is_error),
+        },
       }));
   }
 
@@ -156,46 +188,36 @@ export function createLaravelForwarder(
   let batch: EventPayload[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
-  async function sendBatch(events: EventPayload[]): Promise<void> {
-    if (events.length === 0) return;
-    try {
-      await fetch(eventsUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiToken}`,
-        },
-        body: JSON.stringify({ events }),
-      });
-    } catch {
-      // Non-fatal — event forwarding is best-effort
+  function drainAndSend(): void {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
     }
+    if (batch.length === 0) return;
+    const toSend = batch;
+    batch = [];
+    authedFetch(eventsUrl, "POST", { events: toSend }, apiToken);
   }
 
   function scheduleFlush(): void {
     if (flushTimer) return;
     flushTimer = setTimeout(() => {
       flushTimer = null;
-      const toSend = batch;
-      batch = [];
-      sendBatch(toSend);
+      drainAndSend();
     }, BATCH_TIMEOUT_MS);
   }
 
-  function flush(): void {
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
-    const toSend = batch;
-    batch = [];
-    sendBatch(toSend);
+  function putSessionId(sessionId: string): void {
+    authedFetch(statusUrl, "PUT", { danxbot_session_id: sessionId }, apiToken);
   }
 
   function consume(entry: AgentLogEntry): void {
-    // Report session ID to status endpoint on init
-    if (entry.type === "system" && entry.subtype === "init" && entry.data.session_id) {
-      putSessionId(statusUrl, apiToken, entry.data.session_id as string);
+    if (
+      entry.type === "system" &&
+      entry.subtype === "init" &&
+      entry.data.session_id
+    ) {
+      putSessionId(entry.data.session_id as string);
     }
 
     const events = mapEntryToEvents(entry);
@@ -204,19 +226,13 @@ export function createLaravelForwarder(
     batch.push(...events);
 
     if (batch.length >= BATCH_SIZE) {
-      const toSend = batch;
-      batch = [];
-      if (flushTimer) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
-      sendBatch(toSend);
+      drainAndSend();
     } else {
       scheduleFlush();
     }
   }
 
-  return { consume, flush };
+  return { consume, flush: drainAndSend };
 }
 
 /**
