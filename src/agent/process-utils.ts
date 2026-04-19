@@ -55,13 +55,13 @@ export function logPromptToDisk(
   logsDir: string,
   jobId: string,
   prompt: string,
-  agents?: Array<Record<string, unknown>>,
+  agents?: Record<string, Record<string, unknown>>,
 ): void {
   const logDir = join(logsDir, jobId);
   try {
     mkdirSync(logDir, { recursive: true });
     writeFileSync(join(logDir, "prompt.md"), prompt);
-    if (agents && agents.length > 0) {
+    if (agents && Object.keys(agents).length > 0) {
       writeFileSync(join(logDir, "agents.json"), JSON.stringify(agents, null, 2));
     }
     log.info(`[Job ${jobId}] Prompt logged to ${logDir}`);

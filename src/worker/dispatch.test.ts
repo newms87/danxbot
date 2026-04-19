@@ -252,6 +252,35 @@ describe("handleLaunch", () => {
     );
   });
 
+  // Regression: the agents object on the request body must reach spawnAgent
+  // intact. See `.claude/rules/agent-dispatch.md`.
+  it("forwards the agents object from the request body to spawnAgent intact", async () => {
+    const mockJob = {
+      id: "job-agents",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const agents = {
+      "template-builder": { description: "Builds templates", prompt: "..." },
+      "schema-builder": { description: "Builds schemas", prompt: "..." },
+    };
+
+    const req = createMockReqWithBody("POST", {
+      task: "Build schema",
+      api_token: "tok-abc",
+      agents,
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    expect(spawnOpts.agents).toEqual(agents);
+  });
+
   it("does not set eventForwarding when statusUrl is absent", async () => {
     const mockJob = {
       id: "job-2",

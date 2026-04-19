@@ -88,16 +88,18 @@ describe("logPromptToDisk", () => {
     expect(readFileSync(promptPath, "utf-8")).toBe("my prompt");
   });
 
-  it("writes agents.json when agents are provided", () => {
-    const agents = [{ name: "test-agent" }];
+  it("writes agents.json when agents object is non-empty", () => {
+    const agents = {
+      "test-agent": { description: "test", prompt: "..." },
+    };
     logPromptToDisk(tmpDir, "job-2", "prompt", agents);
     const agentsPath = join(tmpDir, "job-2", "agents.json");
     expect(existsSync(agentsPath)).toBe(true);
     expect(JSON.parse(readFileSync(agentsPath, "utf-8"))).toEqual(agents);
   });
 
-  it("does not write agents.json when agents array is empty", () => {
-    logPromptToDisk(tmpDir, "job-3", "prompt", []);
+  it("does not write agents.json when agents object is empty", () => {
+    logPromptToDisk(tmpDir, "job-3", "prompt", {});
     const agentsPath = join(tmpDir, "job-3", "agents.json");
     expect(existsSync(agentsPath)).toBe(false);
   });

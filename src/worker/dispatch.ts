@@ -48,7 +48,10 @@ export async function handleLaunch(
   try {
     const body = await parseBody(req);
     const task = body.task as string;
-    const agents = body.agents as Array<Record<string, unknown>> | undefined;
+    // Object keyed by agent name — see `.claude/rules/agent-dispatch.md`.
+    const agents = body.agents as
+      | Record<string, Record<string, unknown>>
+      | undefined;
     const apiToken = body.api_token as string;
     // Dispatchers (e.g., GPT Manager) send callback URLs from the host's
     // perspective — `http://localhost:80/...`. In docker runtime those resolve
