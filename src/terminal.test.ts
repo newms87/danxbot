@@ -38,9 +38,13 @@ describe("buildDispatchScript", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function buildScript(overrides: Partial<Parameters<typeof buildDispatchScript>[1]> = {}) {
+  function buildScript(
+    overrides: Partial<Parameters<typeof buildDispatchScript>[1]> = {},
+  ) {
     return buildDispatchScript(dir, {
-      prompt: "<!-- danxbot-dispatch:test-job-id -->\n\nDo the work",
+      flags: ["--dangerously-skip-permissions", "--verbose"],
+      firstMessage:
+        "<!-- danxbot-dispatch:test-job-id --> Read /tmp/p/prompt.md and execute the task described in it.",
       jobId: "test-job-id",
       terminalLogPath: "/tmp/danxbot-terminal-test-job-id.log",
       apiToken: "test-token",
@@ -59,10 +63,24 @@ describe("buildDispatchScript", () => {
     expect(content).toContain("#!/usr/bin/env bash");
   });
 
-  it("writes prompt to prompt.txt in the settings directory", () => {
-    buildScript({ prompt: "my custom prompt content" });
-    const promptContent = readFileSync(join(dir, "prompt.txt"), "utf-8");
-    expect(promptContent).toBe("my custom prompt content");
+  it("passes the firstMessage verbatim as claude's positional argument", () => {
+    const scriptPath = buildScript({
+      firstMessage:
+        "<!-- danxbot-dispatch:id --> Read /tmp/X/prompt.md and execute the task described in it. Tracking: Card #42",
+    });
+    const content = readFileSync(scriptPath, "utf-8");
+    expect(content).toContain(
+      "'<!-- danxbot-dispatch:id --> Read /tmp/X/prompt.md and execute the task described in it. Tracking: Card #42'",
+    );
+  });
+
+  it("does NOT write prompt.txt — firstMessage is delivered inline, not via a file", () => {
+    // Host mode used to write the prompt to disk as prompt.txt and have claude
+    // "Read $PROMPT_FILE and execute..." — that double-indirection hid the
+    // Tracking line. The firstMessage is now passed directly, identical to
+    // how docker passes it via -p.
+    buildScript();
+    expect(() => readFileSync(join(dir, "prompt.txt"), "utf-8")).toThrow();
   });
 
   it("wraps claude with script -q -f for terminal output capture", () => {
@@ -77,28 +95,12 @@ describe("buildDispatchScript", () => {
   it("exec's script -q -f so bash is replaced in-place (PID cascade integrity)", () => {
     const scriptPath = buildScript();
     const content = readFileSync(scriptPath, "utf-8");
-    // `exec` is load-bearing: it makes the bash PID the same as the PID of
-    // `script` (claude's parent), which makes the PID written to PID_FILE
-    // usable for SIGTERM without spawning orphan claude processes.
     expect(content).toMatch(/^exec script -q -f /m);
-  });
-
-  it("references PROMPT_FILE via a positional argument (interactive, not -p)", () => {
-    const scriptPath = buildScript();
-    const content = readFileSync(scriptPath, "utf-8");
-    expect(content).toContain("PROMPT_FILE=");
-    // Host mode MUST be interactive. The prompt is delivered as a positional
-    // argument pointing at the file — NOT piped via `-p` (which is headless).
-    expect(content).toContain("$PROMPT_FILE");
-    expect(content).toMatch(/"Read \$PROMPT_FILE/);
   });
 
   it("MUST NOT invoke claude with -p — host mode is interactive (see .claude/rules/host-mode-interactive.md)", () => {
     const scriptPath = buildScript();
     const content = readFileSync(scriptPath, "utf-8");
-    // The -p (print/headless) flag is FORBIDDEN in host terminal mode.
-    // It exits claude after one turn and defeats the entire purpose of this path.
-    // Strip bash comments and check remaining executable lines.
     const executable = content
       .split("\n")
       .filter((line) => !line.trim().startsWith("#"))
@@ -106,36 +108,28 @@ describe("buildDispatchScript", () => {
     expect(executable).not.toMatch(/\s-p\s/);
   });
 
-  it("includes --dangerously-skip-permissions in the claude invocation", () => {
-    const scriptPath = buildScript();
-    const content = readFileSync(scriptPath, "utf-8");
-    expect(content).toContain("--dangerously-skip-permissions");
-  });
-
-  it("includes --mcp-config when mcpConfigPath is set", () => {
-    const scriptPath = buildScript({ mcpConfigPath: "/tmp/mcp/settings.json" });
-    const content = readFileSync(scriptPath, "utf-8");
-    expect(content).toContain("--mcp-config '/tmp/mcp/settings.json'");
-  });
-
-  it("does not include --mcp-config when mcpConfigPath is omitted", () => {
-    const scriptPath = buildScript({ mcpConfigPath: undefined });
-    const content = readFileSync(scriptPath, "utf-8");
-    expect(content).not.toContain("--mcp-config");
-  });
-
-  it("includes --agents when agentsJson is set", () => {
+  it("embeds every flag as a bash single-quoted literal", () => {
     const scriptPath = buildScript({
-      agentsJson: '[{"name":"Validator"}]',
+      flags: [
+        "--dangerously-skip-permissions",
+        "--verbose",
+        "--mcp-config",
+        "/tmp/mcp/settings.json",
+      ],
     });
     const content = readFileSync(scriptPath, "utf-8");
-    expect(content).toContain("--agents '[{\"name\":\"Validator\"}]'");
+    expect(content).toContain(
+      "claude '--dangerously-skip-permissions' '--verbose' '--mcp-config' '/tmp/mcp/settings.json'",
+    );
   });
 
-  it("does not include --agents when agentsJson is omitted", () => {
-    const scriptPath = buildScript({ agentsJson: undefined });
+  it("safely quotes flag values containing JSON (--agents)", () => {
+    const agentsJson = '{"Validator":{"description":"v","prompt":"p"}}';
+    const scriptPath = buildScript({
+      flags: ["--dangerously-skip-permissions", "--verbose", "--agents", agentsJson],
+    });
     const content = readFileSync(scriptPath, "utf-8");
-    expect(content).not.toContain("--agents");
+    expect(content).toContain(`'--agents' '${agentsJson}'`);
   });
 
   it("sets STATUS_URL to the given statusUrl", () => {
@@ -151,9 +145,6 @@ describe("buildDispatchScript", () => {
   });
 
   it("defines and invokes report_status with the running state before claude starts", () => {
-    // The post-exec 'completed'/'failed' branches are gone: node-side putStatus
-    // handles terminal status transitions. The 'running' PUT still fires before
-    // exec so the upstream caller learns the dispatch actually reached claude.
     const scriptPath = buildScript({ statusUrl: "http://example.com/status" });
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain("report_status() {");
@@ -163,7 +154,6 @@ describe("buildDispatchScript", () => {
   it("guard in report_status skips curl when STATUS_URL is empty", () => {
     const scriptPath = buildScript({ statusUrl: undefined });
     const content = readFileSync(scriptPath, "utf-8");
-    // The guard should be present: [ -n "$STATUS_URL" ]
     expect(content).toContain('[ -n "$STATUS_URL" ]');
   });
 
@@ -175,8 +165,6 @@ describe("buildDispatchScript", () => {
     expect(content).toContain(`PID_FILE='${pidFile}'`);
     expect(content).toMatch(/echo \$\$ > "\$PID_FILE"/);
 
-    // The PID write must appear BEFORE the script/claude invocation so the
-    // launcher can read it while claude is starting up.
     const pidIndex = content.indexOf("echo $$");
     const claudeIndex = content.indexOf("script -q -f");
     expect(pidIndex).toBeGreaterThan(-1);
@@ -189,5 +177,33 @@ describe("buildDispatchScript", () => {
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).not.toMatch(/PID_FILE=/);
     expect(content).not.toMatch(/echo \$\$ > "\$PID_FILE"/);
+  });
+
+  // Defense-in-depth: every interpolated value that reaches bash MUST pass
+  // through bashSingleQuote so an adversarial value can't break out of the
+  // single-quoted literal. These tests feed an embedded single quote through
+  // each var and assert the `'\''` escape survives end-to-end.
+  it("bash-quotes apiToken so embedded single quotes cannot break out", () => {
+    const scriptPath = buildScript({ apiToken: "abc'def" });
+    const content = readFileSync(scriptPath, "utf-8");
+    expect(content).toContain("API_TOKEN='abc'\\''def'");
+  });
+
+  it("bash-quotes statusUrl so embedded single quotes cannot break out", () => {
+    const scriptPath = buildScript({ statusUrl: "http://ex.com/a'b" });
+    const content = readFileSync(scriptPath, "utf-8");
+    expect(content).toContain("STATUS_URL='http://ex.com/a'\\''b'");
+  });
+
+  it("bash-quotes terminalLogPath so spaces and metachars are safe", () => {
+    const scriptPath = buildScript({ terminalLogPath: "/tmp/log'with $HOME" });
+    const content = readFileSync(scriptPath, "utf-8");
+    expect(content).toContain("TERMINAL_LOG='/tmp/log'\\''with $HOME'");
+  });
+
+  it("bash-quotes pidFilePath so unusual paths cannot break out", () => {
+    const scriptPath = buildScript({ pidFilePath: "/tmp/pid'file" });
+    const content = readFileSync(scriptPath, "utf-8");
+    expect(content).toContain("PID_FILE='/tmp/pid'\\''file'");
   });
 });

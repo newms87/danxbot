@@ -1,0 +1,93 @@
+/**
+ * Single source of truth for how a dispatched claude process is invoked.
+ *
+ * Produces three things used identically by both runtime paths (docker headless
+ * + host interactive):
+ *   - `promptDir`  — a fresh temp dir whose `prompt.md` holds the original prompt
+ *   - `firstMessage` — the exact string claude sees as its first user turn
+ *   - `flags`      — the shared CLI flag list (no prompt delivery mechanism)
+ *
+ * Docker adds `-p firstMessage` to flags. Host passes firstMessage as a
+ * positional arg inside the bash dispatch script. The claude-facing shape
+ * matches byte-for-byte in both modes (modulo the temp dir path) — the only
+ * divergence is the spawn envelope (direct child_process vs wt.exe + script).
+ *
+ * See `.claude/rules/agent-dispatch.md` (Single Fork Principle) and
+ * `.claude/rules/host-mode-interactive.md` for the invariants this enforces.
+ */
+
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DISPATCH_TAG_PREFIX } from "./session-log-watcher.js";
+
+/** Shape of the Read directive claude sees as its first user turn.
+ *  `${path}` is the absolute path to prompt.md. Any change to this template
+ *  is observable in every dispatched session's JSONL — keep it stable. */
+function readDirective(promptFile: string): string {
+  return `Read ${promptFile} and execute the task described in it.`;
+}
+
+export interface BuildClaudeInvocationOptions {
+  /** Full original prompt body. Written verbatim to prompt.md — never inlined
+   *  on the command line, so no shell quoting concerns apply. */
+  prompt: string;
+  /** Dispatch job ID — embedded in the firstMessage so SessionLogWatcher can
+   *  locate the JSONL session file for this spawn. */
+  jobId: string;
+  /** Optional short tracking label appended to firstMessage as a user-visible
+   *  suffix (e.g. "Tracking: AgentDispatch #AGD-359"). Empty/undefined = no suffix. */
+  title?: string;
+  /** Optional path to MCP settings JSON. Adds `--mcp-config <path>` to flags. */
+  mcpConfigPath?: string;
+  /** Optional agents map forwarded via `--agents <json>`. Empty object = no flag. */
+  agents?: Record<string, Record<string, unknown>>;
+}
+
+export interface ClaudeInvocation {
+  /** Absolute path to the freshly-created temp dir containing prompt.md.
+   *  Caller is responsible for rmSync-ing this directory once the agent exits. */
+  promptDir: string;
+  /** First user turn for the dispatched claude — contains the dispatch tag,
+   *  the Read directive pointing at prompt.md, and the optional tracking line. */
+  firstMessage: string;
+  /** Shared CLI flags. Docker appends `-p firstMessage`; host passes
+   *  firstMessage as a positional argument inside the bash script. */
+  flags: string[];
+}
+
+export function buildClaudeInvocation(
+  options: BuildClaudeInvocationOptions,
+): ClaudeInvocation {
+  const promptDir = mkdtempSync(join(tmpdir(), "danxbot-prompt-"));
+  const promptFile = join(promptDir, "prompt.md");
+  writeFileSync(promptFile, options.prompt, "utf-8");
+
+  const tracking = options.title ? ` Tracking: ${options.title}` : "";
+  const firstMessage =
+    `${DISPATCH_TAG_PREFIX}${options.jobId} --> ` +
+    readDirective(promptFile) +
+    tracking;
+
+  const flags: string[] = ["--dangerously-skip-permissions", "--verbose"];
+
+  if (options.mcpConfigPath) {
+    flags.push("--mcp-config", options.mcpConfigPath);
+  }
+
+  if (options.agents && Object.keys(options.agents).length > 0) {
+    flags.push("--agents", JSON.stringify(options.agents));
+  }
+
+  return { promptDir, firstMessage, flags };
+}
+
+/**
+ * Escape an arbitrary string for safe embedding inside a bash single-quoted
+ * literal. The `'\''` idiom closes the current quote, emits a literal quote,
+ * and reopens. Used by the host-mode dispatch script to pass firstMessage and
+ * flag values to claude without shell-injection risk.
+ */
+export function bashSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}

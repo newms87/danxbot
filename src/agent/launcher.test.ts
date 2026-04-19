@@ -140,7 +140,7 @@ describe("spawnAgent", () => {
     vi.useRealTimers();
   });
 
-  it("spawns claude CLI with correct args and dispatch tag in prompt", async () => {
+  it("spawns claude CLI with shared flags and firstMessage referencing prompt.md", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -164,11 +164,21 @@ describe("spawnAgent", () => {
       }),
     );
 
-    // The prompt should contain the dispatch tag AND the original prompt
+    // firstMessage (the -p value) is the Read directive, NOT the original
+    // prompt text. The original prompt is written verbatim to prompt.md.
     const args = mockSpawn.mock.calls[0][1] as string[];
     const promptArg = args[args.indexOf("-p") + 1];
-    expect(promptArg).toContain("/danx-next");
     expect(promptArg).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
+    expect(promptArg).toContain("Read ");
+    expect(promptArg).toContain("/prompt.md and execute the task described in it.");
+    expect(promptArg).not.toContain("/danx-next");
+
+    // Original prompt body lands in prompt.md — writeFileSync receives it.
+    const promptWrite = mockWriteFileSync.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).endsWith("prompt.md"),
+    );
+    expect(promptWrite).toBeDefined();
+    expect(promptWrite![1]).toBe("/danx-next");
   });
 
   it("does NOT pass --output-format stream-json — watcher is the monitoring source", async () => {
@@ -266,6 +276,60 @@ describe("spawnAgent", () => {
     const args = mockSpawn.mock.calls[0][1] as string[];
     expect(args).toContain("--mcp-config");
     expect(args).toContain("/tmp/mcp/settings.json");
+  });
+
+  // Regression: the agents payload must reach the CLI when given as an object
+  // keyed by agent name (Claude CLI's required shape). See
+  // `.claude/rules/agent-dispatch.md`.
+  it("passes --agents <json> to claude CLI when agents is a non-empty object", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const agents = {
+      "template-builder": { description: "Builds templates", prompt: "..." },
+      "schema-builder": { description: "Builds schemas", prompt: "..." },
+    };
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      agents,
+    });
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    const flagIdx = args.indexOf("--agents");
+    expect(flagIdx).toBeGreaterThanOrEqual(0);
+    expect(args[flagIdx + 1]).toBe(JSON.stringify(agents));
+  });
+
+  it("omits --agents when agents object is empty", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      agents: {},
+    });
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args).not.toContain("--agents");
+  });
+
+  it("omits --agents when agents is undefined", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args).not.toContain("--agents");
   });
 
   it("strips CLAUDECODE env vars from spawned process", async () => {
@@ -1092,13 +1156,37 @@ describe("spawnAgent", () => {
   });
 });
 
+// Route mkdtempSync by prefix so the three callers (mcp settings, prompt dir,
+// terminal settings dir) get distinct paths. Tests can assert on the right
+// cleanup path without being fragile to call order.
+function routeMkdtempByPrefix(prefix: string): string {
+  if (prefix.includes("danxbot-prompt-")) return "/tmp/danxbot-prompt-test";
+  if (prefix.includes("danxbot-term-")) return "/tmp/danxbot-term-test";
+  return "/tmp/danxbot-mcp-test";
+}
+
+/** Override the per-prefix mkdtempSync routing for a single test. */
+function mockTempDirs(overrides: {
+  prompt?: string;
+  term?: string;
+  mcp?: string;
+}): void {
+  mockMkdtempSync.mockImplementation((prefix: string) => {
+    if (prefix.includes("danxbot-prompt-"))
+      return overrides.prompt ?? "/tmp/danxbot-prompt-test";
+    if (prefix.includes("danxbot-term-"))
+      return overrides.term ?? "/tmp/danxbot-term-test";
+    return overrides.mcp ?? "/tmp/danxbot-mcp-test";
+  });
+}
+
 describe("spawnAgent — job.watcher and terminal mode", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     mockWatcherEntryCallbacks.length = 0;
     mockHostExitWatchers.length = 0;
-    mockMkdtempSync.mockReturnValue("/tmp/danxbot-mcp-test");
+    mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
     // Default host-mode setup: PID file resolves to a fake PID, liveness check
     // says the process is alive. Individual tests override as needed.
     mockReadPidFileWithTimeout.mockResolvedValue(424242);
@@ -1137,7 +1225,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
   });
 
   it("calls buildDispatchScript and spawnInTerminal when openTerminal is true", async () => {
-    mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-test");
+    mockTempDirs({ term: "/tmp/danxbot-term-test" });
 
     await spawnAgent({
       prompt: "/danx-next",
@@ -1185,7 +1273,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
 
   it("reads the host-mode PID file and stores job.claudePid", async () => {
     mockReadPidFileWithTimeout.mockResolvedValue(987654);
-    mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-pid");
+    mockTempDirs({ term: "/tmp/danxbot-term-pid" });
 
     const job = await spawnAgent({
       prompt: "/danx-next",
@@ -1326,7 +1414,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     expect(job.terminalLogPath).toBeUndefined();
   });
 
-  it("passes tagged prompt to buildDispatchScript", async () => {
+  it("passes the shared firstMessage (tag + Read directive) to buildDispatchScript", async () => {
     await spawnAgent({
       prompt: "do the work",
       repoName: "platform",
@@ -1335,14 +1423,20 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     });
 
     const buildCall = mockBuildDispatchScript.mock.calls[0];
-    expect(buildCall[1].prompt).toContain(
-      "<!-- danxbot-dispatch:test-uuid-1234 -->",
-    );
-    expect(buildCall[1].prompt).toContain("do the work");
+    const firstMessage = buildCall[1].firstMessage as string;
+    expect(firstMessage).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
+    expect(firstMessage).toContain("Read ");
+    expect(firstMessage).toContain("/prompt.md and execute the task described in it.");
+    // Original prompt body stays in the file — it is NEVER inlined on the
+    // command line in either runtime.
+    expect(firstMessage).not.toContain("do the work");
   });
 
-  it("serializes agents array as agentsJson when openTerminal is true", async () => {
-    const agents = [{ name: "Validator" }, { name: "TestReviewer" }];
+  it("includes --agents <json> in the shared flags when agents is non-empty", async () => {
+    const agents = {
+      Validator: { description: "Validator", prompt: "..." },
+      TestReviewer: { description: "Test reviewer", prompt: "..." },
+    };
 
     await spawnAgent({
       prompt: "/danx-next",
@@ -1353,24 +1447,44 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     });
 
     const buildCall = mockBuildDispatchScript.mock.calls[0];
-    expect(buildCall[1].agentsJson).toBe(JSON.stringify(agents));
+    const flags = buildCall[1].flags as string[];
+    const agentsIdx = flags.indexOf("--agents");
+    expect(agentsIdx).toBeGreaterThanOrEqual(0);
+    expect(flags[agentsIdx + 1]).toBe(JSON.stringify(agents));
   });
 
-  it("omits agentsJson when agents array is empty", async () => {
+  it("omits --agents from shared flags when agents object is empty", async () => {
     await spawnAgent({
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
       openTerminal: true,
-      agents: [],
+      agents: {},
     });
 
     const buildCall = mockBuildDispatchScript.mock.calls[0];
-    expect(buildCall[1].agentsJson).toBeUndefined();
+    const flags = buildCall[1].flags as string[];
+    expect(flags).not.toContain("--agents");
   });
 
-  it("cleans up terminal settings temp dir AND stops the host exit watcher when job exits", async () => {
-    mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-cleanup-test");
+  it("omits --agents from shared flags when agents is undefined in host mode", async () => {
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    const buildCall = mockBuildDispatchScript.mock.calls[0];
+    const flags = buildCall[1].flags as string[];
+    expect(flags).not.toContain("--agents");
+  });
+
+  it("cleans up BOTH promptDir and terminal settings dir AND stops the host exit watcher when job exits", async () => {
+    mockTempDirs({
+      prompt: "/tmp/danxbot-prompt-cleanup",
+      term: "/tmp/danxbot-term-cleanup",
+    });
 
     await spawnAgent({
       prompt: "/danx-next",
@@ -1385,16 +1499,18 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     mockHostExitWatchers[0]!.fire();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(mockRmSync).toHaveBeenCalledWith(
-      "/tmp/danxbot-term-cleanup-test",
-      expect.objectContaining({ recursive: true }),
-    );
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain("/tmp/danxbot-term-cleanup");
+    expect(rmPaths).toContain("/tmp/danxbot-prompt-cleanup");
     // Watcher must be stopped or its setInterval leaks
     expect(watcherStop).toHaveBeenCalled();
   });
 
   it("fails the job and runs cleanup when readPidFileWithTimeout rejects", async () => {
-    mockMkdtempSync.mockReturnValue("/tmp/danxbot-term-timeout");
+    mockTempDirs({
+      prompt: "/tmp/danxbot-prompt-timeout",
+      term: "/tmp/danxbot-term-timeout",
+    });
     const pidErr = new Error("Timed out after 2000ms waiting for PID file");
     mockReadPidFileWithTimeout.mockRejectedValue(pidErr);
     const onComplete = vi.fn();
@@ -1414,14 +1530,18 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     const job = onComplete.mock.calls[0]![0] as AgentJob;
     expect(job.status).toBe("failed");
     expect(job.summary).toContain("Host-mode spawn failed");
-    // Temp dir must be removed — no resource leak on failure
-    expect(mockRmSync).toHaveBeenCalledWith(
-      "/tmp/danxbot-term-timeout",
-      expect.objectContaining({ recursive: true }),
-    );
+    // Both temp dirs must be removed — no resource leak on failure
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain("/tmp/danxbot-term-timeout");
+    expect(rmPaths).toContain("/tmp/danxbot-prompt-timeout");
   });
 
-  it("does not call rmSync for terminal dir when openTerminal is false", async () => {
+  it("cleans up only the promptDir (no terminal settings dir) when openTerminal is false", async () => {
+    // Docker mode creates ONLY the prompt dir — no host terminal settings dir.
+    mockTempDirs({
+      prompt: "/tmp/danxbot-prompt-docker",
+      term: "/tmp/danxbot-term-docker-should-not-exist",
+    });
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -1435,8 +1555,68 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     child.emit("close", 0);
     await vi.advanceTimersByTimeAsync(0);
 
-    // rmSync should not be called for terminal settings dir (no temp dir created)
-    expect(mockRmSync).not.toHaveBeenCalled();
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain("/tmp/danxbot-prompt-docker");
+    expect(rmPaths).not.toContain("/tmp/danxbot-term-docker-should-not-exist");
+  });
+});
+
+describe("spawnAgent — docker/host invocation equivalence", () => {
+  // Contract: for identical SpawnAgentOptions, the claude-facing invocation
+  // (flags + firstMessage modulo the temp promptDir path) is byte-identical
+  // across runtime modes. Only the spawn envelope differs.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockWatcherEntryCallbacks.length = 0;
+    mockHostExitWatchers.length = 0;
+    mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
+    mockReadPidFileWithTimeout.mockResolvedValue(123456);
+    mockIsPidAlive.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("produces identical flags and firstMessage for docker and host runtimes", async () => {
+    const sharedOpts = {
+      prompt: "shared task body",
+      repoName: "platform" as const,
+      timeoutMs: 300_000,
+      title: "Card #42",
+      mcpConfigPath: "/tmp/mcp/settings.json",
+      agents: {
+        Validator: { description: "Validator", prompt: "v" },
+        TestReviewer: { description: "TestReviewer", prompt: "t" },
+      },
+    };
+
+    // Docker invocation
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    await spawnAgent(sharedOpts);
+    const dockerArgs = mockSpawn.mock.calls[0][1] as string[];
+    const dockerDashP = dockerArgs.indexOf("-p");
+    const dockerFlags = dockerArgs.slice(0, dockerDashP);
+    const dockerFirstMessage = dockerArgs[dockerDashP + 1];
+
+    // Host invocation — fresh call with the same options
+    vi.clearAllMocks();
+    mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
+    mockReadPidFileWithTimeout.mockResolvedValue(123456);
+    mockIsPidAlive.mockReturnValue(true);
+    await spawnAgent({ ...sharedOpts, openTerminal: true });
+    const hostBuild = mockBuildDispatchScript.mock.calls[0][1] as {
+      flags: string[];
+      firstMessage: string;
+    };
+
+    // flags: byte-identical (array equality, same ordering)
+    expect(hostBuild.flags).toEqual(dockerFlags);
+    // firstMessage: byte-identical (same promptDir in both thanks to prefix
+    // routing — the point is the shape + contents match exactly)
+    expect(hostBuild.firstMessage).toBe(dockerFirstMessage);
   });
 });
 
@@ -1445,6 +1625,7 @@ describe("cancelJob", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     mockWatcherEntryCallbacks.length = 0;
+    mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
   });
 
   afterEach(() => {
@@ -1565,6 +1746,95 @@ describe("cancelJob", () => {
     const killCalls = child.kill.mock.calls.map((c: unknown[]) => c[0]);
     expect(killCalls).toContain("SIGTERM");
     expect(killCalls).toContain("SIGKILL");
+  });
+
+  it("rm's the promptDir when cancelJob runs in docker mode", async () => {
+    mockTempDirs({ prompt: "/tmp/danxbot-prompt-cancel-docker" });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "long task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    const cancelPromise = cancelJob(job, "test-token");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain("/tmp/danxbot-prompt-cancel-docker");
+  });
+
+  it("rm's BOTH promptDir and termSettingsDir when cancelJob runs in host mode", async () => {
+    mockTempDirs({
+      prompt: "/tmp/danxbot-prompt-cancel-host",
+      term: "/tmp/danxbot-term-cancel-host",
+    });
+    mockHostExitWatchers.length = 0;
+    mockReadPidFileWithTimeout.mockResolvedValue(303030);
+    mockIsPidAlive.mockReturnValue(false);
+
+    const job = await spawnAgent({
+      prompt: "host task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      openTerminal: true,
+    });
+
+    const cancelPromise = cancelJob(job, "tok");
+    await vi.advanceTimersByTimeAsync(5_001);
+    await cancelPromise;
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain("/tmp/danxbot-prompt-cancel-host");
+    expect(rmPaths).toContain("/tmp/danxbot-term-cancel-host");
+  });
+
+  it("rm's the promptDir when the inactivity timer fires in docker mode", async () => {
+    mockTempDirs({ prompt: "/tmp/danxbot-prompt-inactivity" });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "task",
+      repoName: "platform",
+      timeoutMs: 60_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(61_000);
+    child.emit("close", 143);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain("/tmp/danxbot-prompt-inactivity");
+  });
+
+  it("rm's the promptDir when maxRuntimeMs fires in docker mode", async () => {
+    mockTempDirs({ prompt: "/tmp/danxbot-prompt-maxruntime" });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "task",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      maxRuntimeMs: 120_000,
+    });
+
+    // Keep inactivity timer alive, then trip maxRuntime
+    await vi.advanceTimersByTimeAsync(60_000);
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [] },
+    });
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain("/tmp/danxbot-prompt-maxruntime");
   });
 
   it("is a no-op when job.process is undefined", async () => {

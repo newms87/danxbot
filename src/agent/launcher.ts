@@ -16,7 +16,7 @@
 
 import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,10 +29,8 @@ import {
   createInactivityTimer,
   setupProcessHandlers,
 } from "./process-utils.js";
-import {
-  SessionLogWatcher,
-  DISPATCH_TAG_PREFIX,
-} from "./session-log-watcher.js";
+import { SessionLogWatcher } from "./session-log-watcher.js";
+import { buildClaudeInvocation } from "./claude-invocation.js";
 import { createLaravelForwarder } from "./laravel-forwarder.js";
 import { getDanxbotCommit } from "./danxbot-commit.js";
 import {
@@ -217,8 +215,14 @@ export interface SpawnAgentOptions {
   onComplete?: (job: AgentJob) => void;
   /** Path to MCP settings JSON. When set, adds --mcp-config to CLI args. */
   mcpConfigPath?: string;
-  /** Agent definitions forwarded as --agents JSON to Claude CLI */
-  agents?: Array<Record<string, unknown>>;
+  /**
+   * Agent definitions forwarded to Claude CLI's `--agents <json>` flag.
+   * Must be an object keyed by agent name (the shape Claude CLI requires) —
+   * a list silently falls back to built-in agents and makes
+   * `Agent(subagent_type: "<name>")` fail with "Agent type not found".
+   * See `.claude/rules/agent-dispatch.md`.
+   */
+  agents?: Record<string, Record<string, unknown>>;
   /** Status URL for heartbeat/putStatus (stored on AgentJob for startHeartbeat) */
   statusUrl?: string;
   /** API token for heartbeat and event forwarding */
@@ -421,32 +425,18 @@ export async function spawnAgent(
 
   const env = buildCleanEnv(options.env);
 
-  const args = ["--dangerously-skip-permissions", "--verbose"];
-
-  if (options.mcpConfigPath) {
-    args.push("--mcp-config", options.mcpConfigPath);
-  }
-
-  if (options.agents && options.agents.length > 0) {
-    args.push("--agents", JSON.stringify(options.agents));
-  }
-
-  // When a title is provided, write the prompt to a temp file and use the title
-  // as the initial message. This keeps the agent's first visible message short
-  // (with tracking IDs) while the full prompt lives in the file.
-  // Without a title, pipe the full prompt inline (existing behavior).
-  let promptDir: string | undefined;
-  let taggedPrompt: string;
-  if (options.title) {
-    promptDir = mkdtempSync(join(tmpdir(), "danxbot-prompt-"));
-    const promptFile = join(promptDir, "prompt.md");
-    writeFileSync(promptFile, options.prompt, "utf-8");
-    taggedPrompt = `${DISPATCH_TAG_PREFIX}${jobId} --> Read ${promptFile} and execute the task described in it. Tracking: ${options.title}`;
-  } else {
-    // Prepend dispatch tag so SessionLogWatcher finds the right JSONL file
-    taggedPrompt = `${DISPATCH_TAG_PREFIX}${jobId} -->\n\n${options.prompt}`;
-  }
-  args.push("-p", taggedPrompt);
+  // Single builder — docker and host paths share the exact flags + firstMessage.
+  // Runtime only decides whether firstMessage is appended via `-p` (docker
+  // headless) or passed as a positional argument inside the bash wrapper
+  // (host interactive). See `.claude/rules/agent-dispatch.md`.
+  const invocation = buildClaudeInvocation({
+    prompt: options.prompt,
+    jobId,
+    title: options.title,
+    mcpConfigPath: options.mcpConfigPath,
+    agents: options.agents,
+  });
+  const { flags, firstMessage, promptDir } = invocation;
 
   const agentCwd = join(getReposBase(), options.repoName);
 
@@ -559,50 +549,48 @@ export async function spawnAgent(
   }
 
   function cleanup(): void {
-    watcher.stop();
-    forwarderFlush?.();
-    inactivityTimer.clear();
-    stopHeartbeat(job);
-    if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
-    if (job.hostExitWatcher) {
-      job.hostExitWatcher.stop();
-    }
-    if (dispatchTracker && job.status !== "running") {
-      const dispatchStatus =
-        job.status === "completed"
-          ? "completed"
-          : job.status === "canceled"
-            ? "cancelled"
-            : "failed";
-      dispatchTracker
-        .finalize(dispatchStatus, {
-          summary: job.summary || null,
-          error: dispatchStatus === "failed" ? job.summary || null : null,
-          tokens: {
-            tokensIn: job.usage.input_tokens,
-            tokensOut: job.usage.output_tokens,
-            cacheRead: job.usage.cache_read_input_tokens,
-            cacheWrite: job.usage.cache_creation_input_tokens,
-          },
-        })
-        .catch((err) =>
-          log.error(`[Job ${jobId}] Dispatch finalize failed`, err),
-        );
-    }
-    if (termSettingsDirToClean) {
-      try {
-        rmSync(termSettingsDirToClean, { recursive: true, force: true });
-      } catch {
-        // ENOENT acceptable — the dir may never have been created if
-        // `spawnHostMode` failed before mkdtempSync. force:true already
-        // handles missing paths, so any error here is nonfatal.
+    // Observer teardown is wrapped in try/finally so a synchronous throw from
+    // any observer (watcher.stop, dispatchTracker.finalize, forwarder.flush)
+    // cannot strand the temp dirs. Temp-dir cleanup MUST run.
+    try {
+      watcher.stop();
+      forwarderFlush?.();
+      inactivityTimer.clear();
+      stopHeartbeat(job);
+      if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
+      if (job.hostExitWatcher) {
+        job.hostExitWatcher.stop();
       }
-    }
-    if (promptDir) {
-      try {
-        rmSync(promptDir, { recursive: true, force: true });
-      } catch {
-        // Nonfatal — temp dir cleanup is best-effort.
+      if (dispatchTracker && job.status !== "running") {
+        const dispatchStatus =
+          job.status === "completed"
+            ? "completed"
+            : job.status === "canceled"
+              ? "cancelled"
+              : "failed";
+        dispatchTracker
+          .finalize(dispatchStatus, {
+            summary: job.summary || null,
+            error: dispatchStatus === "failed" ? job.summary || null : null,
+            tokens: {
+              tokensIn: job.usage.input_tokens,
+              tokensOut: job.usage.output_tokens,
+              cacheRead: job.usage.cache_read_input_tokens,
+              cacheWrite: job.usage.cache_creation_input_tokens,
+            },
+          })
+          .catch((err) =>
+            log.error(`[Job ${jobId}] Dispatch finalize failed`, err),
+          );
+      }
+    } finally {
+      // rmSync with force:true is no-op on missing paths, so we don't need
+      // existence guards — only a promptDir sentinel for docker mode before
+      // buildClaudeInvocation ran would warrant one, and that cannot happen:
+      // `promptDir` is assigned before any spawn work.
+      rmSync(promptDir, { recursive: true, force: true });
+      if (termSettingsDirToClean) {
+        rmSync(termSettingsDirToClean, { recursive: true, force: true });
       }
     }
   }
@@ -670,10 +658,9 @@ export async function spawnAgent(
         job,
         jobId,
         repoName: options.repoName,
-        taggedPrompt,
+        flags,
+        firstMessage,
         agentCwd,
-        mcpConfigPath: options.mcpConfigPath,
-        agents: options.agents,
         statusUrl: options.statusUrl,
         apiToken: options.apiToken,
         env,
@@ -734,7 +721,7 @@ export async function spawnAgent(
     // (SessionLogWatcher reads the JSONL session file from disk — stdout is
     // not a monitoring channel), stderr pipe so we can surface failure messages
     // in the job summary when the process exits non-zero.
-    const child = spawn("claude", args, {
+    const child = spawn("claude", [...flags, "-p", firstMessage], {
       env,
       stdio: ["ignore", "ignore", "pipe"],
       cwd: agentCwd,
@@ -771,10 +758,11 @@ interface SpawnHostModeOptions {
   job: AgentJob;
   jobId: string;
   repoName: string;
-  taggedPrompt: string;
+  /** Pre-built claude CLI flags (shared with the docker path, byte-identical). */
+  flags: string[];
+  /** Pre-built first-user-message (shared with the docker path, byte-identical). */
+  firstMessage: string;
   agentCwd: string;
-  mcpConfigPath?: string;
-  agents?: Array<Record<string, unknown>>;
   statusUrl?: string;
   apiToken?: string;
   env: Record<string, string>;
@@ -792,12 +780,24 @@ interface SpawnHostModeOptions {
  * `.claude/rules/agent-dispatch.md`).
  */
 async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
-  const { job, jobId, repoName, taggedPrompt, agentCwd, env, onExit } = opts;
+  const {
+    job,
+    jobId,
+    repoName,
+    flags,
+    firstMessage,
+    agentCwd,
+    env,
+    onExit,
+    statusUrl,
+    apiToken,
+    registerTermDir,
+  } = opts;
 
   // Paired: a statusUrl without an apiToken would bake an empty Bearer token
   // into the bash curl (malformed auth header). Fail loud at the call site
   // instead of pretending to post unauthenticated — per "fallbacks are bugs".
-  if (opts.statusUrl && !opts.apiToken) {
+  if (statusUrl && !apiToken) {
     throw new Error(
       `[Job ${jobId}] spawnAgent({openTerminal: true}) requires apiToken when statusUrl is set`,
     );
@@ -807,23 +807,19 @@ async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
   job.terminalLogPath = termLogPath;
 
   const termSettingsDir = mkdtempSync(join(tmpdir(), "danxbot-term-"));
-  opts.registerTermDir(termSettingsDir);
+  registerTermDir(termSettingsDir);
 
   const pidFilePath = join(termSettingsDir, "claude.pid");
 
   const scriptPath = buildDispatchScript(termSettingsDir, {
-    prompt: taggedPrompt,
+    flags,
+    firstMessage,
     jobId,
-    mcpConfigPath: opts.mcpConfigPath,
-    agentsJson:
-      opts.agents && opts.agents.length > 0
-        ? JSON.stringify(opts.agents)
-        : undefined,
-    statusUrl: opts.statusUrl,
+    statusUrl,
     // apiToken is guaranteed defined if statusUrl is set (guard above). If no
     // statusUrl, the bash `report_status` guard short-circuits on empty URL,
     // so the empty-string default here never reaches curl.
-    apiToken: opts.apiToken ?? "",
+    apiToken: apiToken ?? "",
     terminalLogPath: termLogPath,
     pidFilePath,
   });

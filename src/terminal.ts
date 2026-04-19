@@ -1,8 +1,11 @@
 /**
- * Shared utility for spawning Claude Code in a Windows Terminal tab.
+ * Host runtime: launch an interactive Claude Code TUI in a Windows Terminal tab.
  *
- * Used by both the Trello poller (card-triggered) and the dispatch API
- * (HTTP-triggered from GPT Manager). One mechanism, two triggers.
+ * The claude-facing invocation (flags + first-user-message) is built once by
+ * `buildClaudeInvocation()` (src/agent/claude-invocation.ts) and handed to us
+ * fully formed. This module is responsible ONLY for the host-mode envelope:
+ * the bash wrapper that captures PID + terminal output + reports a "running"
+ * status, and the wt.exe launch. Zero knowledge of prompt/mcp/agent semantics.
  */
 
 import { spawn } from "node:child_process";
@@ -10,6 +13,7 @@ import { writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createLogger } from "./logger.js";
+import { bashSingleQuote } from "./agent/claude-invocation.js";
 
 const log = createLogger("terminal");
 
@@ -25,14 +29,16 @@ export interface TerminalLaunchOptions {
 }
 
 export interface DispatchScriptOptions {
-  /** The tagged prompt string (including dispatch tag) */
-  prompt: string;
+  /** Pre-built claude CLI flags (e.g. --dangerously-skip-permissions,
+   *  --mcp-config <path>, --agents <json>). Docker and host share this list
+   *  verbatim — see buildClaudeInvocation(). */
+  flags: string[];
+  /** The exact first-user-message for claude. Includes the dispatch tag,
+   *  the Read directive pointing at prompt.md, and the optional Tracking line.
+   *  Passed as a positional argument to keep the TUI interactive. */
+  firstMessage: string;
   /** Job ID — used to name the terminal log path via getTerminalLogPath() */
   jobId: string;
-  /** Absolute path to the MCP settings.json (optional) */
-  mcpConfigPath?: string;
-  /** Agent definitions as JSON string (optional) */
-  agentsJson?: string;
   /** Status URL for reporting back to Laravel */
   statusUrl?: string;
   /** API token for status reporting */
@@ -78,30 +84,24 @@ export function getTerminalLogPath(jobId: string): string {
  *      interactive claude TUI
  *
  * The script:
- * 1. Writes the prompt to a temp file (avoids shell quoting issues with long
- *    or special-character prompts)
- * 2. Passes the file path as a positional prompt argument — claude reads the
- *    file and runs interactively, keeping the TUI attached
- * 3. Wraps claude with `script -q -f <terminalLogPath>` so the ✻ thinking
- *    indicator is captured for the StallDetector
- * 4. Reports status to statusUrl on completion
+ * 1. Emits its own PID so the launcher can track and SIGTERM it later
+ * 2. Reports "running" status so upstream learns the dispatch reached claude
+ * 3. Execs `script -q -f` wrapping an interactive `claude flags firstMessage`
+ *    (positional arg — not -p) so the ✻ thinking indicator lands in the log
+ *    for StallDetector while the TUI stays attached for the user
  */
 export function buildDispatchScript(
   settingsDir: string,
   options: DispatchScriptOptions,
 ): string {
-  const mcpLine = options.mcpConfigPath
-    ? `  --mcp-config '${options.mcpConfigPath}' \\\n`
-    : "";
-  const agentsLine = options.agentsJson
-    ? `  --agents '${options.agentsJson}' \\\n`
-    : "";
-  const promptFile = join(settingsDir, "prompt.txt");
-  // Write the prompt to disk to avoid shell quoting issues with special characters
-  writeFileSync(promptFile, options.prompt, "utf-8");
+  const quotedFlags = options.flags.map(bashSingleQuote).join(" ");
+  const quotedFirstMessage = bashSingleQuote(options.firstMessage);
+  const quotedStatusUrl = bashSingleQuote(options.statusUrl || "");
+  const quotedApiToken = bashSingleQuote(options.apiToken);
+  const quotedTerminalLog = bashSingleQuote(options.terminalLogPath);
 
   const pidFileLine = options.pidFilePath
-    ? `PID_FILE='${options.pidFilePath}'\n`
+    ? `PID_FILE=${bashSingleQuote(options.pidFilePath)}\n`
     : "";
   // Writing $$ BEFORE exec'ing script -q -f captures the bash PID while it's
   // still bash. Immediately after, `exec` replaces bash with `script` in-place —
@@ -129,10 +129,9 @@ export function buildDispatchScript(
 source ~/.profile 2>/dev/null || true
 unset \${!CLAUDECODE@}
 
-STATUS_URL='${options.statusUrl || ""}'
-API_TOKEN='${options.apiToken}'
-TERMINAL_LOG='${options.terminalLogPath}'
-PROMPT_FILE='${promptFile}'
+STATUS_URL=${quotedStatusUrl}
+API_TOKEN=${quotedApiToken}
+TERMINAL_LOG=${quotedTerminalLog}
 ${pidFileLine}
 report_status() {
   [ -n "$STATUS_URL" ] && curl -s -X PUT "$STATUS_URL" \\
@@ -143,24 +142,19 @@ report_status() {
 
 report_status "running" ""
 ${pidEmit}
-# CRITICAL: Host mode MUST be interactive. The prompt is delivered as a
-# positional argument pointing at the prompt file — NOT piped via -p (headless
-# mode, exits after one turn). See .claude/rules/host-mode-interactive.md.
+# CRITICAL: Host mode MUST be interactive. firstMessage is delivered as a
+# positional argument (NOT piped via -p, which exits after one turn).
+# See .claude/rules/host-mode-interactive.md.
 #
 # \`exec\` replaces this bash process with \`script\` in place, keeping the PID
-# stable. Without exec, a SIGTERM to our bash PID may not reliably propagate
-# to script+claude — exec makes \$\$ (what we wrote to PID_FILE) equal to the
-# PID that actually wraps claude, so cancellation becomes a single, clean
-# SIGTERM. Post-claude status reporting is handled by the node-side launcher
-# (putStatus), so the bash "report exit code" branches are no longer needed.
+# stable so the PID in PID_FILE wraps claude's pty directly — cancellation
+# becomes a single clean SIGTERM. Post-claude status reporting is handled by
+# the node-side launcher (putStatus).
 #
-# script -q -f wraps the interactive TUI so the ✻ thinking indicator is captured
-# for the StallDetector; the inner claude process remains an attached TUI the
-# user can read and type into.
-exec script -q -f "$TERMINAL_LOG" -c "claude \\
-${mcpLine}  --dangerously-skip-permissions \\
-  --verbose \\
-${agentsLine}  \\"Read $PROMPT_FILE and execute the task described in it.\\""
+# script -q -f wraps the interactive TUI so the ✻ thinking indicator is
+# captured for the StallDetector; the inner claude process remains an attached
+# TUI the user can read and type into.
+exec script -q -f "$TERMINAL_LOG" -c "claude ${quotedFlags} ${quotedFirstMessage}"
 `,
   );
   chmodSync(scriptPath, 0o755);
