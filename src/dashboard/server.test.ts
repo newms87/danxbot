@@ -40,15 +40,49 @@ vi.mock("../config.js", () => ({
   ],
 }));
 
-// Stub dispatch-proxy so we only verify the router wires routes correctly;
-// the proxy logic itself has its own test file.
+// Stub only the per-request handlers so the router tests don't hit the
+// real dispatch upstream. `extractBearer` + `checkAuth` are the real
+// implementations — stubbing them would hide drift if either signature
+// changes. `loadDispatchToken` + `workerHost` are trivial pure fns we
+// override for deterministic expectations.
 const mockHandleLaunchProxy = vi.fn();
+const mockHandleResumeProxy = vi.fn();
 const mockHandleJobProxy = vi.fn();
-vi.mock("./dispatch-proxy.js", () => ({
-  handleLaunchProxy: (...args: unknown[]) => mockHandleLaunchProxy(...args),
-  handleJobProxy: (...args: unknown[]) => mockHandleJobProxy(...args),
-  loadDispatchToken: () => "test-token",
-  workerHost: (name: string) => `test-worker-${name}`,
+vi.mock("./dispatch-proxy.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("./dispatch-proxy.js")>(
+      "./dispatch-proxy.js",
+    );
+  return {
+    ...actual,
+    handleLaunchProxy: (...args: unknown[]) => mockHandleLaunchProxy(...args),
+    handleResumeProxy: (...args: unknown[]) => mockHandleResumeProxy(...args),
+    handleJobProxy: (...args: unknown[]) => mockHandleJobProxy(...args),
+    loadDispatchToken: () => "test-token",
+    workerHost: (name: string) => `test-worker-${name}`,
+  };
+});
+
+// agents-routes imports from auth-middleware + dispatches-db — the dashboard
+// side of the /api/agents/:repo/toggles handler. Stub it so server.test only
+// verifies the wiring; agents-routes.test.ts owns the full-path coverage.
+const mockHandleGetAgent = vi.fn();
+const mockHandleListAgents = vi.fn();
+const mockHandlePatchToggle = vi.fn();
+vi.mock("./agents-routes.js", () => ({
+  handleGetAgent: (...args: unknown[]) => mockHandleGetAgent(...args),
+  handleListAgents: (...args: unknown[]) => mockHandleListAgents(...args),
+  handlePatchToggle: (...args: unknown[]) => mockHandlePatchToggle(...args),
+}));
+
+// auth-routes depends on auth-db + auth-middleware; stub for the server test.
+const mockHandleLogin = vi.fn();
+const mockHandleLogout = vi.fn();
+const mockHandleMe = vi.fn();
+vi.mock("./auth-routes.js", () => ({
+  handleLogin: (...args: unknown[]) => mockHandleLogin(...args),
+  handleLogout: (...args: unknown[]) => mockHandleLogout(...args),
+  handleMe: (...args: unknown[]) => mockHandleMe(...args),
 }));
 
 // Stub dispatches-routes so router tests don't hit the dispatch DB.
@@ -71,6 +105,31 @@ vi.mock("../logger.js", () => ({
     error: vi.fn(),
   }),
 }));
+
+// Per-user auth gate backing store. `ok-token` is the valid bearer for tests
+// that exercise the authed path; anything else returns null (simulates
+// unknown/revoked/expired). Keeps the gate behavior local to this file.
+const mockValidateToken = vi.fn(async (t: string) =>
+  t === "ok-token" ? { userId: 1, username: "tester" } : null,
+);
+const mockLoginDashboardUser = vi.fn();
+const mockRevokeAllTokensForUser = vi.fn();
+
+vi.mock("./auth-db.js", () => ({
+  validateToken: (t: string) => mockValidateToken(t),
+  loginDashboardUser: (...args: unknown[]) => mockLoginDashboardUser(...args),
+  revokeAllTokensForUser: (...args: unknown[]) =>
+    mockRevokeAllTokensForUser(...args),
+}));
+
+/** Attach an Authorization: Bearer header to a mock IncomingMessage. */
+function withAuth(
+  req: http.IncomingMessage,
+  token = "ok-token",
+): http.IncomingMessage {
+  req.headers = { ...(req.headers ?? {}), authorization: `Bearer ${token}` };
+  return req;
+}
 
 let requestHandler: http.RequestListener;
 const mockServer = {
@@ -100,17 +159,30 @@ describe("dashboard server", () => {
     mockReadFile.mockReset();
     mockAccess.mockReset();
     mockHandleLaunchProxy.mockReset();
+    mockHandleResumeProxy.mockReset();
     mockHandleJobProxy.mockReset();
     mockHandleListDispatches.mockReset();
     mockHandleGetDispatch.mockReset();
     mockHandleRawJsonl.mockReset();
     mockHandleFollowDispatch.mockReset();
     mockGetHealthStatus.mockReset();
+    mockHandleGetAgent.mockReset();
+    mockHandleListAgents.mockReset();
+    mockHandlePatchToggle.mockReset();
+    mockHandleLogin.mockReset();
+    mockHandleLogout.mockReset();
+    mockHandleMe.mockReset();
+    mockValidateToken.mockClear();
+    // Re-install the default implementation (mockReset would wipe it).
+    mockValidateToken.mockImplementation(async (t: string) =>
+      t === "ok-token" ? { userId: 1, username: "tester" } : null,
+    );
   });
 
   describe("known routes", () => {
     it("GET /api/repos returns configured repos (without workerPort)", async () => {
       const { req, res } = createMockReqRes("GET", "/api/repos");
+      withAuth(req);
       await requestHandler(req, res);
       expect(res._getStatusCode()).toBe(200);
       expect(JSON.parse(res._getBody())).toEqual([
@@ -180,6 +252,7 @@ describe("dashboard server", () => {
 
     it("all routes include CORS header", async () => {
       const { req, res } = createMockReqRes("GET", "/api/repos");
+      withAuth(req);
       await requestHandler(req, res);
       expect(res.setHeader).toHaveBeenCalledWith("Access-Control-Allow-Origin", "*");
     });
@@ -187,18 +260,29 @@ describe("dashboard server", () => {
 
   describe("strict 404 for unknown routes", () => {
     const methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const;
-    const unknownPaths = [
-      "/not-a-route",
-      "/random/deep/path",
-      "/api/unknown",
-      "/api",
-      "/unknown.html",
-    ];
+    // Non-/api/ paths must 404 regardless of method, with or without auth.
+    const nonApiUnknownPaths = ["/not-a-route", "/random/deep/path", "/unknown.html"];
 
     for (const method of methods) {
-      for (const path of unknownPaths) {
+      for (const path of nonApiUnknownPaths) {
         it(`${method} ${path} returns 404 with JSON`, async () => {
           const { req, res } = createMockReqRes(method, path);
+          await requestHandler(req, res);
+          expect(res._getStatusCode()).toBe(404);
+          expect(res._getHeaders()["content-type"]).toBe("application/json");
+          expect(JSON.parse(res._getBody())).toEqual({ error: "Not found" });
+        });
+      }
+    }
+
+    // Unknown /api/* paths — with a valid bearer they must still 404
+    // (the auth gate shouldn't turn a missing route into a pretend 401).
+    const apiUnknownPaths = ["/api/unknown", "/api"];
+    for (const method of methods) {
+      for (const path of apiUnknownPaths) {
+        it(`${method} ${path} with auth returns 404 with JSON`, async () => {
+          const { req, res } = createMockReqRes(method, path);
+          withAuth(req);
           await requestHandler(req, res);
           expect(res._getStatusCode()).toBe(404);
           expect(res._getHeaders()["content-type"]).toBe("application/json");
@@ -220,11 +304,125 @@ describe("dashboard server", () => {
       expect(res._getStatusCode()).toBe(404);
     });
 
-    it("GET /api/launch returns 404 (launch is POST-only)", async () => {
+    it("GET /api/launch with auth returns 404 (launch is POST-only)", async () => {
       const { req, res } = createMockReqRes("GET", "/api/launch");
+      withAuth(req);
       await requestHandler(req, res);
       expect(res._getStatusCode()).toBe(404);
       expect(mockHandleLaunchProxy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("auth gate", () => {
+    it("GET /api/repos without auth returns 401", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/repos");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+      expect(JSON.parse(res._getBody())).toEqual({ error: "Unauthorized" });
+    });
+
+    it("GET /api/dispatches without auth returns 401", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/dispatches");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+      expect(mockHandleListDispatches).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/agents without auth returns 401", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/agents");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+    });
+
+    it("GET /api/agents/danxbot without auth returns 401", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/agents/danxbot");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+    });
+
+    it("GET / serves index.html unconditionally (no auth required)", async () => {
+      mockReadFile.mockResolvedValue("<html>Dashboard</html>");
+      const { req, res } = createMockReqRes("GET", "/");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(200);
+    });
+
+    it("GET /health open without auth", async () => {
+      mockGetHealthStatus.mockResolvedValue({
+        status: "ok",
+        uptime_seconds: 1,
+        db_connected: true,
+        memory_usage_mb: 10,
+      });
+      const { req, res } = createMockReqRes("GET", "/health");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(200);
+    });
+
+    it("GET /assets/foo.js open without auth", async () => {
+      mockAccess.mockResolvedValue(undefined);
+      mockReadFile.mockResolvedValue("//js");
+      const { req, res } = createMockReqRes("GET", "/assets/foo.js");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(200);
+    });
+
+    it("GET /api/repos with invalid bearer returns 401", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/repos");
+      withAuth(req, "bogus-token");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+    });
+
+    it("GET /api/dispatches/:id/follow requires a header bearer (no query-token fallback)", async () => {
+      mockHandleFollowDispatch.mockImplementation(
+        async (_req: unknown, res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.end("");
+        },
+      );
+
+      // No Authorization header → 401 even when `?token=` is present.
+      const unauthed = createMockReqRes(
+        "GET",
+        "/api/dispatches/abc-123/follow?token=ok-token",
+      );
+      await requestHandler(unauthed.req, unauthed.res);
+      expect(unauthed.res._getStatusCode()).toBe(401);
+      expect(mockHandleFollowDispatch).not.toHaveBeenCalled();
+
+      // With the real bearer header → handler runs.
+      const authed = createMockReqRes("GET", "/api/dispatches/abc-123/follow");
+      withAuth(authed.req);
+      await requestHandler(authed.req, authed.res);
+      expect(mockHandleFollowDispatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("array-form Authorization header is accepted", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/repos");
+      // Node preserves repeated headers as a string[]. Cast through unknown
+      // because `IncomingMessage.headers.authorization` is string|undefined
+      // in the public typing but the underlying implementation accepts
+      // arrays via raw headers.
+      (req.headers as unknown as Record<string, unknown>).authorization = [
+        "Bearer ok-token",
+      ];
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(200);
+    });
+
+    it("dispatch-proxy routes are NOT gated by user auth (they use their own token)", async () => {
+      mockHandleLaunchProxy.mockImplementation(
+        async (_req: unknown, res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        },
+      );
+      const { req, res } = createMockReqRes("POST", "/api/launch");
+      // No Authorization header — the handler itself checks the dispatch token.
+      await requestHandler(req, res);
+      expect(mockHandleLaunchProxy).toHaveBeenCalledTimes(1);
+      expect(res._getStatusCode()).toBe(200);
     });
   });
 

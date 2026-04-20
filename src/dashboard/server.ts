@@ -25,6 +25,12 @@ import {
   handleListAgents,
   handlePatchToggle,
 } from "./agents-routes.js";
+import {
+  handleLogin,
+  handleLogout,
+  handleMe,
+} from "./auth-routes.js";
+import { requireUser } from "./auth-middleware.js";
 import { optional } from "../env.js";
 
 const log = createLogger("dashboard");
@@ -47,14 +53,6 @@ function getMimeType(path: string): string {
 }
 
 const distDir = new URL("../../dashboard/dist", import.meta.url);
-
-/**
- * The list of explicitly-known frontend page routes the SPA handles client-side.
- * The SPA does not use vue-router today (everything lives under `/`), but the
- * list is still explicit — unknown paths MUST 404 rather than silently return
- * index.html.
- */
-const SPA_ROUTES: readonly string[] = ["/"] as const;
 
 interface JobProxyRoute {
   method: "GET" | "POST";
@@ -86,7 +84,11 @@ async function route(
 ): Promise<boolean> {
   const method = req.method?.toUpperCase() ?? "GET";
 
-  // Health.
+  // ── Always-open routes ──────────────────────────────────────────────
+  // Health probes, login bootstrap, static assets, and the SPA shell
+  // never require auth. The SPA itself decides whether to render Login
+  // or the dashboard based on a subsequent /api/auth/me call.
+
   if (method === "GET" && url.pathname === "/health") {
     const health = await getHealthStatus();
     const statusCode = health.status === "ok" ? 200 : 503;
@@ -95,7 +97,119 @@ async function route(
     return true;
   }
 
-  // Read-only dispatch API.
+  if (method === "POST" && url.pathname === "/api/auth/login") {
+    await handleLogin(req, res);
+    return true;
+  }
+
+  if (method === "GET" && url.pathname.startsWith("/assets/")) {
+    const filePath = new URL("." + url.pathname, distDir + "/");
+    try {
+      await access(filePath);
+      const content = await readFile(filePath);
+      res.writeHead(200, {
+        "Content-Type": getMimeType(url.pathname),
+        "Cache-Control": "public, max-age=31536000, immutable",
+      });
+      res.end(content);
+      return true;
+    } catch {
+      json(res, 404, { error: "Not found" });
+      return true;
+    }
+  }
+
+  // Only GET / serves the SPA shell. Any unknown path — even other GETs —
+  // must 404 so the SPA's router can't pretend to own routes it doesn't.
+  if (method === "GET" && url.pathname === "/") {
+    const indexPath = new URL("./index.html", distDir + "/");
+    try {
+      const html = await readFile(indexPath, "utf-8");
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+      });
+      res.end(html);
+    } catch {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Dashboard not built. Run: cd dashboard && npm run build");
+    }
+    return true;
+  }
+
+  // ── Dispatch proxy — authenticates internally with DANXBOT_DISPATCH_TOKEN.
+  // These routes are called by external dispatchers (gpt-manager, etc.) and
+  // MUST NOT be gated by requireUser. See .claude/rules/agent-dispatch.md.
+
+  if (method === "POST" && url.pathname === "/api/launch") {
+    await handleLaunchProxy(req, res, dispatchDeps);
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/resume") {
+    await handleResumeProxy(req, res, dispatchDeps);
+    return true;
+  }
+
+  for (const job of JOB_PROXY_ROUTES) {
+    const jobMatch = url.pathname.match(job.pattern);
+    if (method === job.method && jobMatch) {
+      await handleJobProxy(
+        req,
+        res,
+        {
+          method: job.method,
+          pathTemplate: job.pathTemplate,
+          jobId: decodeURIComponent(jobMatch[1]),
+          repoName: url.searchParams.get("repo"),
+        },
+        dispatchDeps,
+      );
+      return true;
+    }
+  }
+
+  // ── PATCH /api/agents/:repo/toggles — dual-allow stopgap (Phase 2).
+  // Accepts user bearer OR DANXBOT_DISPATCH_TOKEN. Phase 4 swaps this to
+  // requireUser-only. The handler itself does the auth check.
+
+  const agentTogglesMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/toggles$/,
+  );
+  if (method === "PATCH" && agentTogglesMatch) {
+    await handlePatchToggle(
+      req,
+      res,
+      decodeURIComponent(agentTogglesMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // User-auth gate for every remaining /api/* route. Bearer lives only in
+  // the Authorization header — SSE uses fetch+ReadableStream on the client
+  // so query-string tokens (which would leak into access logs) are never
+  // needed.
+  if (url.pathname.startsWith("/api/")) {
+    const auth = await requireUser(req);
+    if (!auth.ok) {
+      json(res, 401, { error: "Unauthorized" });
+      return true;
+    }
+  }
+
+  // ── Authed user routes ──────────────────────────────────────────────
+
+  if (method === "POST" && url.pathname === "/api/auth/logout") {
+    await handleLogout(req, res);
+    return true;
+  }
+
+  if (method === "GET" && url.pathname === "/api/auth/me") {
+    await handleMe(req, res);
+    return true;
+  }
+
   if (method === "GET" && url.pathname === "/api/repos") {
     json(
       res,
@@ -130,24 +244,8 @@ async function route(
     return true;
   }
 
-  // Agents tab API — per-repo settings + feature toggles. GET is open
-  // (parity with /api/dispatches); PATCH shares DANXBOT_DISPATCH_TOKEN
-  // auth with the dispatch proxy so the dashboard has ONE bearer token.
   if (method === "GET" && url.pathname === "/api/agents") {
     await handleListAgents(res, dispatchDeps);
-    return true;
-  }
-
-  const agentTogglesMatch = url.pathname.match(
-    /^\/api\/agents\/([^/]+)\/toggles$/,
-  );
-  if (method === "PATCH" && agentTogglesMatch) {
-    await handlePatchToggle(
-      req,
-      res,
-      decodeURIComponent(agentTogglesMatch[1]),
-      dispatchDeps,
-    );
     return true;
   }
 
@@ -158,74 +256,6 @@ async function route(
       decodeURIComponent(agentDetailMatch[1]),
       dispatchDeps,
     );
-    return true;
-  }
-
-  // External dispatch proxy — auth-gated, forwards to workers.
-  if (method === "POST" && url.pathname === "/api/launch") {
-    await handleLaunchProxy(req, res, dispatchDeps);
-    return true;
-  }
-
-  if (method === "POST" && url.pathname === "/api/resume") {
-    await handleResumeProxy(req, res, dispatchDeps);
-    return true;
-  }
-
-  // Job-scoped proxy routes share the same request shape: method + path
-  // template + jobId extracted from the URL + repo from ?repo=. Keeping
-  // them in a small table eliminates three near-identical match blocks
-  // and makes the route surface easy to read at a glance.
-  for (const job of JOB_PROXY_ROUTES) {
-    const jobMatch = url.pathname.match(job.pattern);
-    if (method === job.method && jobMatch) {
-      await handleJobProxy(
-        req,
-        res,
-        {
-          method: job.method,
-          pathTemplate: job.pathTemplate,
-          jobId: decodeURIComponent(jobMatch[1]),
-          repoName: url.searchParams.get("repo"),
-        },
-        dispatchDeps,
-      );
-      return true;
-    }
-  }
-
-  // Static assets from dashboard/dist/assets/.
-  if (method === "GET" && url.pathname.startsWith("/assets/")) {
-    const filePath = new URL("." + url.pathname, distDir + "/");
-    try {
-      await access(filePath);
-      const content = await readFile(filePath);
-      res.writeHead(200, {
-        "Content-Type": getMimeType(url.pathname),
-        "Cache-Control": "public, max-age=31536000, immutable",
-      });
-      res.end(content);
-      return true;
-    } catch {
-      json(res, 404, { error: "Not found" });
-      return true;
-    }
-  }
-
-  // Known SPA page routes — serve index.html.
-  if (method === "GET" && SPA_ROUTES.includes(url.pathname)) {
-    const indexPath = new URL("./index.html", distDir + "/");
-    try {
-      const html = await readFile(indexPath, "utf-8");
-      res.writeHead(200, {
-        "Content-Type": "text/html",
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-      });
-      res.end(html);
-    } catch {
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      res.end("Dashboard not built. Run: cd dashboard && npm run build");
-    }
     return true;
   }
 

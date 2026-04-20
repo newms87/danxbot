@@ -23,10 +23,8 @@ import { request as httpRequest } from "node:http";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import type { RepoConfig } from "../types.js";
-import {
-  checkAuth,
-  type DispatchProxyDeps,
-} from "./dispatch-proxy.js";
+import { type DispatchProxyDeps } from "./dispatch-proxy.js";
+import { checkAuthEither } from "./auth-middleware.js";
 import {
   countDispatchesByRepo,
   type RepoDispatchCounts,
@@ -225,16 +223,14 @@ export async function handlePatchToggle(
   repoName: string,
   deps: DispatchProxyDeps,
 ): Promise<void> {
-  const auth = checkAuth(req, deps.token);
+  // Dual-allow: user bearer (human operator) OR dispatch token (external
+  // client). Provenance is intentionally flat — `SettingsWriter` is a
+  // closed union that `readSettings` whitelists; widening it to carry
+  // the username requires extending the union + the validator + downstream
+  // dashboard rendering in a dedicated change.
+  const auth = await checkAuthEither(req, deps.token);
   if (!auth.ok) {
-    if (auth.reason === "server_missing_token") {
-      json(res, 500, {
-        error:
-          "DANXBOT_DISPATCH_TOKEN is not configured on this dashboard — toggles are disabled",
-      });
-    } else {
-      json(res, 401, { error: "Unauthorized" });
-    }
+    json(res, 401, { error: "Unauthorized" });
     return;
   }
 

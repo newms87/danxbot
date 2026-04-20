@@ -44,7 +44,7 @@ export function workerHost(repoName: string): string {
 }
 
 /** Strip the `Bearer ` prefix. Returns null when header is missing/malformed. */
-function extractBearer(header: string | string[] | undefined): string | null {
+export function extractBearer(header: string | string[] | undefined): string | null {
   if (!header) return null;
   const value = Array.isArray(header) ? header[0] : header;
   if (!value.startsWith("Bearer ")) return null;

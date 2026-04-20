@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useTheme } from "../composables/useTheme";
+import { useAuth } from "../composables/useAuth";
 import type { RepoInfo } from "../api";
 
 export type TabId = "dispatches" | "agents";
@@ -19,6 +20,11 @@ const emit = defineEmits<{
 }>();
 
 const { isDark, toggleTheme } = useTheme();
+const { currentUser, logout } = useAuth();
+
+async function onLogout(): Promise<void> {
+  await logout();
+}
 </script>
 
 <template>
@@ -33,6 +39,13 @@ const { isDark, toggleTheme } = useTheme();
         </p>
       </div>
       <div class="flex items-center gap-2">
+        <span
+          v-if="currentUser"
+          data-test="current-user"
+          class="text-sm text-gray-500 dark:text-gray-400 hidden sm:inline"
+        >
+          {{ currentUser.username }}
+        </span>
         <select
           v-if="repos.length > 1 && activeTab === 'dispatches'"
           :value="selectedRepo"
@@ -56,6 +69,14 @@ const { isDark, toggleTheme } = useTheme();
           @click="emit('refresh')"
         >
           Refresh
+        </button>
+        <button
+          v-if="currentUser"
+          data-test="logout-button"
+          class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300"
+          @click="onLogout"
+        >
+          Log out
         </button>
       </div>
     </div>

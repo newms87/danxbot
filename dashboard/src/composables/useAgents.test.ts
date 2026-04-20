@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { defineComponent, h, ref as vueRef, nextTick } from "vue";
+import { defineComponent, h, nextTick } from "vue";
 import { mount, flushPromises } from "@vue/test-utils";
 import type { AgentSnapshot } from "../types";
 
@@ -15,7 +15,6 @@ vi.mock("../api", () => ({
 // Import under test AFTER mock.
 import { useAgents } from "./useAgents";
 
-// Helper: build an AgentSnapshot shell for tests.
 function snap(
   name: string,
   overrides: Partial<Record<"slack" | "trelloPoller" | "dispatchApi", boolean | null>> = {},
@@ -41,11 +40,6 @@ function snap(
   } as AgentSnapshot;
 }
 
-/**
- * Mount a component that calls `useAgents()` inside setup so the
- * composable's `onMounted` / `onBeforeUnmount` hooks fire properly.
- * Exposes the composable return for assertions.
- */
 function mountWithAgents() {
   const exposed = { ret: null as ReturnType<typeof useAgents> | null };
   const Host = defineComponent({
@@ -61,14 +55,10 @@ function mountWithAgents() {
 beforeEach(() => {
   vi.clearAllMocks();
   mockFetchAgents.mockResolvedValue([snap("danxbot"), snap("platform")]);
-  sessionStorage.clear();
-  // Clean DOM prompt between tests so no leaked handler survives.
-  (globalThis as { prompt?: unknown }).prompt = undefined;
 });
 
 afterEach(() => {
   vi.useRealTimers();
-  sessionStorage.clear();
 });
 
 describe("useAgents — fetch + refresh", () => {
@@ -109,14 +99,12 @@ describe("useAgents — fetch + refresh", () => {
     wrapper.unmount();
 
     await vi.advanceTimersByTimeAsync(30_000);
-    // No further fetches after unmount — timer is cleared.
     expect(mockFetchAgents).toHaveBeenCalledTimes(2);
   });
 });
 
 describe("useAgents — optimistic toggle", () => {
   it("updates local state immediately and commits the server response", async () => {
-    sessionStorage.setItem("danxbot.dispatchToken", "tok-abc");
     const updated = snap("danxbot", { slack: false });
     updated.counts.total.slack = 99;
     mockPatchToggle.mockResolvedValue(updated);
@@ -125,27 +113,19 @@ describe("useAgents — optimistic toggle", () => {
     await flushPromises();
 
     const togglePromise = ret.toggle("danxbot", "slack", false);
-    // Optimistic update fires before the PATCH resolves.
     await nextTick();
     expect(ret.agents.value[0].settings.overrides.slack.enabled).toBe(false);
 
     await togglePromise;
-    // After the PATCH resolves, the server payload takes over (notice the
-    // count jump to 99, which the optimistic update wouldn't have done).
     expect(ret.agents.value[0].counts.total.slack).toBe(99);
-    expect(mockPatchToggle).toHaveBeenCalledWith(
-      "danxbot",
-      "slack",
-      false,
-      "tok-abc",
-    );
+    // No 4th arg — auth is provided by fetchWithAuth inside patchToggle.
+    expect(mockPatchToggle).toHaveBeenCalledWith("danxbot", "slack", false);
     expect(ret.error.value).toBeNull();
 
     wrapper.unmount();
   });
 
   it("rolls back the local override and surfaces an error when PATCH fails", async () => {
-    sessionStorage.setItem("danxbot.dispatchToken", "tok-abc");
     const err = Object.assign(new Error("disk full"), {
       status: 500,
       serverMessage: "disk full",
@@ -155,55 +135,23 @@ describe("useAgents — optimistic toggle", () => {
     const { wrapper, ret } = mountWithAgents();
     await flushPromises();
 
-    // Original override is null (env default).
     expect(ret.agents.value[0].settings.overrides.slack.enabled).toBeNull();
 
     await ret.toggle("danxbot", "slack", false);
     await flushPromises();
 
-    // Rolled back to null, error surfaced.
     expect(ret.agents.value[0].settings.overrides.slack.enabled).toBeNull();
     expect(ret.error.value).toBe("disk full");
 
     wrapper.unmount();
   });
 
-  it("prompts for a token when sessionStorage is empty", async () => {
-    // No token in sessionStorage — first PATCH should prompt.
-    const promptSpy = vi.fn().mockReturnValue("new-token");
-    (globalThis as { prompt: unknown }).prompt = promptSpy;
-    mockPatchToggle.mockResolvedValue(snap("danxbot", { dispatchApi: false }));
-
-    const { wrapper, ret } = mountWithAgents();
-    await flushPromises();
-
-    await ret.toggle("danxbot", "dispatchApi", false);
-    await flushPromises();
-
-    expect(promptSpy).toHaveBeenCalledTimes(1);
-    expect(sessionStorage.getItem("danxbot.dispatchToken")).toBe("new-token");
-    expect(mockPatchToggle).toHaveBeenCalledWith(
-      "danxbot",
-      "dispatchApi",
-      false,
-      "new-token",
-    );
-
-    wrapper.unmount();
-  });
-
-  it("clears the token and re-prompts on 401, then succeeds on retry", async () => {
-    sessionStorage.setItem("danxbot.dispatchToken", "stale");
+  it("rolls back on 401 (auth:expired handled centrally by fetchWithAuth)", async () => {
     const unauthorized = Object.assign(new Error("Unauthorized"), {
       status: 401,
       serverMessage: "Unauthorized",
     });
-    mockPatchToggle
-      .mockRejectedValueOnce(unauthorized)
-      .mockResolvedValueOnce(snap("danxbot", { trelloPoller: true }));
-
-    const promptSpy = vi.fn().mockReturnValue("fresh-token");
-    (globalThis as { prompt: unknown }).prompt = promptSpy;
+    mockPatchToggle.mockRejectedValue(unauthorized);
 
     const { wrapper, ret } = mountWithAgents();
     await flushPromises();
@@ -211,33 +159,20 @@ describe("useAgents — optimistic toggle", () => {
     await ret.toggle("danxbot", "trelloPoller", true);
     await flushPromises();
 
-    expect(promptSpy).toHaveBeenCalledTimes(1);
-    expect(mockPatchToggle).toHaveBeenCalledTimes(2);
-    expect(mockPatchToggle).toHaveBeenLastCalledWith(
-      "danxbot",
-      "trelloPoller",
-      true,
-      "fresh-token",
-    );
-    expect(sessionStorage.getItem("danxbot.dispatchToken")).toBe("fresh-token");
-    expect(ret.error.value).toBeNull();
+    expect(ret.agents.value[0].settings.overrides.trelloPoller.enabled).toBeNull();
+    expect(ret.error.value).toBe("Unauthorized");
 
     wrapper.unmount();
   });
 
-  it("rolls back and reports the error when the user cancels the token prompt", async () => {
-    const promptSpy = vi.fn().mockReturnValue(null);
-    (globalThis as { prompt: unknown }).prompt = promptSpy;
-
+  it("records an error and does NOT patch when the repo is unknown", async () => {
     const { wrapper, ret } = mountWithAgents();
     await flushPromises();
 
-    await ret.toggle("danxbot", "slack", false);
-    await flushPromises();
+    await ret.toggle("nonexistent", "slack", false);
 
     expect(mockPatchToggle).not.toHaveBeenCalled();
-    expect(ret.agents.value[0].settings.overrides.slack.enabled).toBeNull();
-    expect(ret.error.value).toContain("no token");
+    expect(ret.error.value).toContain("Unknown repo");
 
     wrapper.unmount();
   });

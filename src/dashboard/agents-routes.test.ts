@@ -31,6 +31,24 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
+// auth-middleware transitively loads db/connection which reads env at module
+// load. Stub it with a mock `checkAuthEither` whose behavior mirrors the
+// old checkAuth: accepts Bearer that matches the expected dispatch token.
+// Tests pass `token: "test-token"` via DispatchProxyDeps in the request body
+// → Authorization: Bearer test-token passes; anything else fails.
+vi.mock("./auth-middleware.js", () => ({
+  checkAuthEither: async (
+    req: { headers: { authorization?: string } },
+    dispatchToken: string,
+  ) => {
+    const h = req.headers?.authorization;
+    const t = h?.startsWith("Bearer ") ? h.slice(7).trim() : null;
+    if (!dispatchToken) return { ok: false, status: 401 };
+    if (!t) return { ok: false, status: 401 };
+    return t === dispatchToken ? { ok: true } : { ok: false, status: 401 };
+  },
+}));
+
 import {
   handleGetAgent,
   handleListAgents,
@@ -265,13 +283,15 @@ describe("handlePatchToggle", () => {
     expect(mockWriteSettings).not.toHaveBeenCalled();
   });
 
-  it("returns 500 when the dashboard has no token configured", async () => {
+  it("returns 401 when the dashboard has no dispatch token configured and no user bearer", async () => {
+    // With the Phase 2 dual-allow, a missing DANXBOT_DISPATCH_TOKEN no longer
+    // produces a 500 — user bearer is the primary path. The operator path (no
+    // auth at all, misconfigured dispatch token) gets a clean 401 instead.
     const req = authReq({ feature: "slack", enabled: false }, "anything");
     const res = createMockRes();
     await handlePatchToggle(req, res, "danxbot", deps({ token: "" }));
 
-    expect(res._getStatusCode()).toBe(500);
-    expect(JSON.parse(res._getBody()).error).toContain("DANXBOT_DISPATCH_TOKEN");
+    expect(res._getStatusCode()).toBe(401);
     expect(mockWriteSettings).not.toHaveBeenCalled();
   });
 
