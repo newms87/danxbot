@@ -412,7 +412,7 @@ describe("settings-file", () => {
     });
   });
 
-  describe("ensureSettingsFile", () => {
+  describe("ensureSettingsFile (syncSettingsFileOnBoot)", () => {
     it("creates the file with display populated when missing", async () => {
       const ctx = makeRepoContext({ localPath });
       await ensureSettingsFile(ctx, "docker");
@@ -424,19 +424,35 @@ describe("settings-file", () => {
       expect(s.overrides.slack.enabled).toBeNull();
     });
 
-    it("is a no-op when the file already exists (does not clobber overrides)", async () => {
-      const ctx = makeRepoContext({ localPath });
+    it("refreshes display on every call while preserving overrides", async () => {
+      // First: operator sets an override (imagine via the dashboard).
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
         writtenBy: "dashboard",
       });
 
+      // Then: worker boots with a new runtime (e.g. a deploy moves from
+      // host to docker). Display must refresh, override must survive.
+      const ctx = makeRepoContext({ localPath });
       await ensureSettingsFile(ctx, "docker");
 
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
-      // display was NOT populated by the self-seed path
-      expect(s.display.worker).toBeUndefined();
+      expect(s.display.worker?.runtime).toBe("docker");
+      expect(s.display.worker?.port).toBe(5562);
+    });
+
+    it("overwrites a stale display.worker on subsequent boots", async () => {
+      const ctx = makeRepoContext({ localPath, workerPort: 5562 });
+      await ensureSettingsFile(ctx, "host");
+      expect(readSettings(localPath).display.worker?.runtime).toBe("host");
+
+      // Next boot is in docker runtime on a different port.
+      const ctx2 = makeRepoContext({ localPath, workerPort: 5999 });
+      await ensureSettingsFile(ctx2, "docker");
+      const s = readSettings(localPath);
+      expect(s.display.worker?.runtime).toBe("docker");
+      expect(s.display.worker?.port).toBe(5999);
     });
   });
 

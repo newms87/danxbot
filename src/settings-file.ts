@@ -441,20 +441,38 @@ export function buildDisplayFromContext(
 }
 
 /**
- * Self-seed entry point. If `settings.json` is missing, write it with a
- * `display` snapshot built from `RepoContext`. No-op when the file
- * already exists — never clobbers `overrides` or previously-written
- * `display` values.
+ * Sync the `display` section from the current `RepoContext` on every
+ * worker boot. Creates the file on first boot and refreshes `display`
+ * on every subsequent boot so deploys (which always restart the
+ * worker) automatically surface the latest masked config to the
+ * dashboard — without a separate remote command that duplicates the
+ * display-building logic.
+ *
+ * `overrides` is NEVER touched: operator toggles in
+ * `.danxbot/settings.json` survive every deploy and every restart.
+ * See `.claude/rules/settings-file.md` for the full contract.
+ */
+export async function syncSettingsFileOnBoot(
+  ctx: RepoContext,
+  runtime: "docker" | "host",
+): Promise<void> {
+  await writeSettings(ctx.localPath, {
+    display: buildDisplayFromContext(ctx, runtime),
+    writtenBy: "worker",
+  });
+}
+
+/**
+ * @deprecated Use `syncSettingsFileOnBoot` — first-boot-only semantics
+ * were insufficient because display values drift after a redeploy with
+ * a new worker port / runtime / mask. The new name signals that this
+ * runs every boot, preserves overrides, and refreshes display.
  */
 export async function ensureSettingsFile(
   ctx: RepoContext,
   runtime: "docker" | "host",
 ): Promise<void> {
-  if (existsSync(settingsFilePath(ctx.localPath))) return;
-  await writeSettings(ctx.localPath, {
-    display: buildDisplayFromContext(ctx, runtime),
-    writtenBy: "worker",
-  });
+  await syncSettingsFileOnBoot(ctx, runtime);
 }
 
 /** Reset module state for testing. Do not call in production. */

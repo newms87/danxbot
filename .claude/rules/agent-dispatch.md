@@ -108,6 +108,18 @@ These are regressions the team has already fixed. Do not reintroduce any of them
 | Parsing the terminal log for anything other than the ✻ indicator | The log is for stall detection only. JSONL is for semantic events. |
 | Custom log files written alongside the JSONL | `writeJobLogs` was deleted in Phase 2. Claude Code writes JSONL natively — do not write parallel logs for monitoring. `logs/<jobId>/` for debug artifacts (prompt.md, agents.json) is OK. |
 | Legacy single-process mode | Removed. Only worker and dashboard modes exist. |
+| Bypassing `isFeatureEnabled` in `handleLaunch` | `/api/launch` must 503 when `dispatchApi` is disabled in `.danxbot/settings.json` — the very first line inside the handler's try block. Skipping the check lets disabled repos still dispatch, which the Agents tab advertises as impossible. See `.claude/rules/settings-file.md`. |
+
+## Dispatch API disabled state
+
+When an operator flips `overrides.dispatchApi.enabled = false` on the
+Agents tab, `POST /api/launch` returns `503 {"error": "Dispatch API is
+disabled for repo <name>"}` without parsing the body or running any
+spawn bookkeeping. The dashboard proxy in `dispatch-proxy.ts` forwards
+the status and body verbatim, so external callers (gpt-manager, smoke
+tests, curl) see exactly the same shape as an in-worker request. The
+check runs on every request — toggling back to enabled requires no
+worker restart.
 
 ## Runtime Modes At A Glance
 

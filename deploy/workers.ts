@@ -3,6 +3,16 @@
  * Each repo's worker runs from its own compose file under its own
  * compose project (`worker-<name>`) so workers are independently
  * stop/startable without disturbing others.
+ *
+ * Note on `.danxbot/settings.json` `display` section:
+ * Deploy does NOT write settings.json directly. The worker's
+ * `syncSettingsFileOnBoot` runs on every container start and refreshes
+ * `display` from the freshly-loaded RepoContext while preserving
+ * `overrides` (operator toggles). Since this `launchWorkers` step
+ * recreates the worker container on every deploy, display always
+ * reflects the latest masked config as soon as the worker comes back
+ * up — no separate remote JSON-writing step is required. See
+ * `.claude/rules/settings-file.md` for the full contract.
  */
 
 import type { DeployConfig, DeployRepo } from "./config.js";

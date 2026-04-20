@@ -63,9 +63,21 @@ Status/cancel/stop are proxied too: `GET /api/status/:jobId?repo=<name>`, `POST 
 
 The token is generated per-deployment on first `make deploy` (logged once, persisted to SSM). Retrieve later via `aws ssm get-parameter --name /<ssm_prefix>/shared/DANXBOT_DISPATCH_TOKEN`. `make deploy-smoke TARGET=<target>` performs a real end-to-end launch using this token.
 
+## Per-Repo Settings & Feature Toggles
+
+The dashboard's Agents tab shows one card per connected repo with three runtime toggles (Slack / Trello poller / Dispatch API), dispatch counts per trigger, worker reachability, and a collapsible masked-config table. State lives at `<repo>/.danxbot/settings.json` (gitignored) — three-valued overrides (`true` / `false` / `null`) where `null` defers to the env default on `RepoContext`. Workers re-read the file on every event, so toggles take effect with no restart.
+
+- Disabled Slack → `:no_entry_sign:` reaction + one-line reply, no router/agent call.
+- Disabled Trello poller → tick logs "poller disabled via settings — skipping" and returns.
+- Disabled Dispatch API → `POST /api/launch` returns `503 {error: "Dispatch API is disabled for repo <name>"}`; the dashboard proxy forwards the status verbatim.
+
+Toggle mutations go through `PATCH /api/agents/:repo/toggles` (bearer auth via `DANXBOT_DISPATCH_TOKEN`). Deploys and `setup` write only `display`; operator overrides survive every redeploy. See `.claude/rules/settings-file.md` for the ownership contract, and `docs/superpowers/specs/2026-04-20-agents-tab-design.md` for the full spec.
+
 ## Deployment (AWS Production)
 
 Danxbot deploys per-target to isolated AWS accounts — each connected repo gets its own isolated deployment. Per-target config lives at `.danxbot/deployments/<target>.yml`. Deploy system source is `deploy/cli.ts` with templates in `deploy/templates/` and terraform in `deploy/terraform/`.
+
+**Production IS reachable from this shell.** When asked about a deployed job, dispatch, session, or container, pull the data via the HTTP proxy, container logs, or SSH — do NOT say "I can't reach production from here." See `.claude/rules/production-access.md` for the canonical recipes (API status lookup via SSM token, `make deploy-logs`, direct SSH, `docker exec` on the instance).
 
 **Current targets:** `gpt` (gpt-manager).
 
