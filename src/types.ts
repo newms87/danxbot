@@ -107,6 +107,12 @@ export interface RepoConfig {
   name: string;
   url: string;
   localPath: string;
+  /**
+   * Dashboard-mode only: the worker container port used to forward external
+   * dispatch requests. Populated from REPO_WORKER_PORTS env var. Absent in
+   * worker mode (workerPort lives on RepoContext there).
+   */
+  workerPort?: number;
 }
 
 export interface TrelloConfig {

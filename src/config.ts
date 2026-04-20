@@ -23,7 +23,63 @@ function parseRepos(envValue: string): RepoConfig[] {
   });
 }
 
-export const repos: RepoConfig[] = parseRepos(optional("REPOS", ""));
+/**
+ * Parse REPO_WORKER_PORTS — companion env var for REPOS, maps repo name to
+ * worker container port. Format: "name:port,name:port". Used by the dashboard
+ * to forward external dispatch requests to the matching worker container on
+ * the danxbot-net docker network.
+ */
+function parseWorkerPorts(envValue: string): Record<string, number> {
+  if (!envValue.trim()) return {};
+  const result: Record<string, number> = {};
+  for (const entry of envValue.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const colonIndex = trimmed.indexOf(":");
+    if (colonIndex <= 0) {
+      throw new Error(
+        `Invalid REPO_WORKER_PORTS entry "${entry}" — expected "name:port" format`,
+      );
+    }
+    const name = trimmed.slice(0, colonIndex).trim();
+    const portStr = trimmed.slice(colonIndex + 1).trim();
+    const port = parseInt(portStr, 10);
+    if (!name || !Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(
+        `Invalid REPO_WORKER_PORTS entry "${entry}" — name required, port must be 1-65535`,
+      );
+    }
+    result[name] = port;
+  }
+  return result;
+}
+
+/**
+ * Attach workerPort entries from REPO_WORKER_PORTS onto matching REPOS entries.
+ * Throws on orphaned port entries (port name with no matching repo) — silent
+ * discards turn typos into 500s at proxy-request time.
+ */
+function attachWorkerPorts(
+  parsedRepos: RepoConfig[],
+  ports: Record<string, number>,
+): RepoConfig[] {
+  const repoNames = new Set(parsedRepos.map((r) => r.name));
+  for (const name of Object.keys(ports)) {
+    if (!repoNames.has(name)) {
+      throw new Error(
+        `REPO_WORKER_PORTS references unknown repo "${name}" — each name must match an entry in REPOS`,
+      );
+    }
+  }
+  return parsedRepos.map((r) =>
+    ports[r.name] !== undefined ? { ...r, workerPort: ports[r.name] } : r,
+  );
+}
+
+export const repos: RepoConfig[] = attachWorkerPorts(
+  parseRepos(optional("REPOS", "")),
+  parseWorkerPorts(optional("REPO_WORKER_PORTS", "")),
+);
 
 /**
  * Worker mode: DANXBOT_REPO_NAME is set — this process manages one repo only

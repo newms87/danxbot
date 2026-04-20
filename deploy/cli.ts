@@ -257,17 +257,50 @@ async function smoke(config: DeployConfig): Promise<void> {
       `Cannot smoke-test ${config.name}: no repos configured in the deployment yml`,
     );
   }
-  console.log("\n── Smoke: dispatching trivial prompt ──");
-  const url = `https://${config.domain}`;
-  const response = await fetch(`${url}/api/launch`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt: "echo", repo: config.repos[0].name }),
-  });
-  if (!response.ok) {
-    throw new Error(`Smoke failed: ${response.status}`);
+  const token = run(
+    awsCmd(
+      config.aws.profile,
+      `ssm get-parameter --name "${config.ssmPrefix}/shared/DANXBOT_DISPATCH_TOKEN" --with-decryption --region ${config.region} --query Parameter.Value --output text`,
+    ),
+  );
+  if (!token || token === "None") {
+    throw new Error(
+      `Cannot smoke-test ${config.name}: DANXBOT_DISPATCH_TOKEN is not set in SSM. Run secrets-push first.`,
+    );
   }
+
+  const repo = config.repos[0].name;
+  console.log(
+    `\n── Smoke: POST https://${config.domain}/api/launch (repo=${repo}) ──`,
+  );
+  // The worker's `api_token` is used as the bearer for status-callback POSTs
+  // to the configured `status_url`. Smoke omits `status_url` entirely so no
+  // callback is exercised, and we pass a placeholder api_token to keep the
+  // dispatch-auth credential (the bearer we sent above) separate from the
+  // worker-to-callback credential they represent at the semantic level.
+  const response = await fetch(`https://${config.domain}/api/launch`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      repo,
+      task:
+        "Connectivity smoke test. Reply with the word OK and immediately call danxbot_complete with status=completed and summary=\"smoke ok\". Do nothing else.",
+      api_token: "smoke-test-no-callback",
+    }),
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `Smoke failed: HTTP ${response.status} — ${body.slice(0, 500)}`,
+    );
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { parsed = body; }
   console.log(`  ✓ Smoke OK (${response.status})`);
+  console.log(`  Response: ${JSON.stringify(parsed)}`);
 }
 
 async function main(): Promise<void> {

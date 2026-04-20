@@ -43,6 +43,26 @@ Connected repos live at `repos/<name>/` (symlinks to actual working copies). The
 
 Each connected repo can define a `tools.md` in `.danxbot/config/` that lists commands available to SDK agents (database schema helpers, test runners, lint commands, etc.). The poller syncs this to the repo's `.claude/rules/tools.md`, where it's automatically loaded by the Claude Code SDK via `settingSources: ["project"]`. This keeps tool definitions repo-specific — danxbot's system prompts reference the tools generically without hardcoding paths.
 
+## External Dispatch API
+
+Production workers are not directly reachable from the public internet. The dashboard (fronted by Caddy on 443) proxies auth-gated dispatch requests to workers on the internal `danxbot-net`:
+
+```bash
+# Launch an agent on the deployed gpt-manager worker:
+curl -sS -X POST https://danxbot.sageus.ai/api/launch \
+  -H "Authorization: Bearer $DANXBOT_DISPATCH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "gpt-manager",
+    "task": "Connectivity smoke test. Reply OK and call danxbot_complete.",
+    "api_token": "'"$DANXBOT_DISPATCH_TOKEN"'"
+  }'
+```
+
+Status/cancel/stop are proxied too: `GET /api/status/:jobId?repo=<name>`, `POST /api/cancel/:jobId?repo=<name>`, `POST /api/stop/:jobId?repo=<name>`. All require `Authorization: Bearer <token>`. See `.claude/rules/agent-dispatch.md#external-entry` for the full route table.
+
+The token is generated per-deployment on first `make deploy` (logged once, persisted to SSM). Retrieve later via `aws ssm get-parameter --name /<ssm_prefix>/shared/DANXBOT_DISPATCH_TOKEN`. `make deploy-smoke TARGET=<target>` performs a real end-to-end launch using this token.
+
 ## Deployment (AWS Production)
 
 Danxbot deploys per-target to isolated AWS accounts — each connected repo gets its own isolated deployment. Per-target config lives at `.danxbot/deployments/<target>.yml`. Deploy system source is `deploy/cli.ts` with templates in `deploy/templates/` and terraform in `deploy/terraform/`.

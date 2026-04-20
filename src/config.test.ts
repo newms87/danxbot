@@ -166,6 +166,80 @@ describe("repos config", () => {
   });
 });
 
+describe("REPO_WORKER_PORTS", () => {
+  it("attaches workerPort to the matching repo", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://example.com/p.git,danxbot:https://example.com/d.git",
+      REPO_WORKER_PORTS: "platform:5561,danxbot:5562",
+    });
+    expect(mod.repos).toEqual([
+      expect.objectContaining({ name: "platform", workerPort: 5561 }),
+      expect.objectContaining({ name: "danxbot", workerPort: 5562 }),
+    ]);
+  });
+
+  it("leaves workerPort undefined on repos with no port entry (worker mode populates separately)", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://example.com/p.git,danxbot:https://example.com/d.git",
+      REPO_WORKER_PORTS: "platform:5561",
+    });
+    expect(mod.repos[0].workerPort).toBe(5561);
+    expect(mod.repos[1].workerPort).toBeUndefined();
+  });
+
+  it("returns empty mapping when REPO_WORKER_PORTS is unset", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://example.com/p.git",
+    }, ["REPO_WORKER_PORTS"]);
+    expect(mod.repos[0].workerPort).toBeUndefined();
+  });
+
+  it("throws on malformed entry (missing colon)", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform",
+      }),
+    ).rejects.toThrow("Invalid REPO_WORKER_PORTS entry");
+  });
+
+  it("throws on non-numeric port", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform:not-a-port",
+      }),
+    ).rejects.toThrow("Invalid REPO_WORKER_PORTS entry");
+  });
+
+  it("throws on port out of range", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform:70000",
+      }),
+    ).rejects.toThrow("Invalid REPO_WORKER_PORTS entry");
+  });
+
+  it("throws on port zero", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform:0",
+      }),
+    ).rejects.toThrow("Invalid REPO_WORKER_PORTS entry");
+  });
+
+  it("throws when a port references an unknown repo (fails loud on typos)", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "typod-repo:5562",
+      }),
+    ).rejects.toThrow(/unknown repo "typod-repo"/);
+  });
+});
+
 describe("getRepoPath", () => {
   it("returns localPath for configured repo", async () => {
     const mod = await importConfig({

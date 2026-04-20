@@ -5,6 +5,8 @@ import {
   parseEnvFile,
   collectDeploymentSecrets,
   buildSsmPutCommands,
+  buildTargetOverrides,
+  getOrCreateDispatchToken,
 } from "./secrets.js";
 import { makeConfig } from "./test-helpers.js";
 
@@ -317,5 +319,111 @@ describe("buildSsmPutCommands", () => {
     expect(joined).not.toContain("/danxbot-test/repos/app/BLANK");
     expect(joined).toContain("/danxbot-test/repos/app/REPO_ENV_APP_KEY");
     expect(joined).not.toContain("/danxbot-test/repos/app/REPO_ENV_EMPTY_APP");
+  });
+});
+
+describe("buildTargetOverrides", () => {
+  it("synthesizes REPOS from deploy config (not local .env)", () => {
+    const cfg = makeConfig({
+      repos: [
+        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
+        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562 },
+      ],
+    });
+    expect(buildTargetOverrides(cfg).REPOS).toBe(
+      "danxbot:https://github.com/x/d.git,gpt-manager:https://github.com/x/g.git",
+    );
+  });
+
+  it("synthesizes REPO_WORKER_PORTS matching each repo", () => {
+    const cfg = makeConfig({
+      repos: [
+        { name: "platform", url: "https://github.com/x/p.git", workerPort: 5561 },
+        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562 },
+      ],
+    });
+    expect(buildTargetOverrides(cfg).REPO_WORKER_PORTS).toBe(
+      "platform:5561,gpt-manager:5562",
+    );
+  });
+
+  it("returns empty strings when the deployment has no repos", () => {
+    const cfg = makeConfig({ repos: [] });
+    expect(buildTargetOverrides(cfg)).toEqual({
+      REPOS: "",
+      REPO_WORKER_PORTS: "",
+    });
+  });
+
+  it("emits SSM put commands for the override values when merged into shared", () => {
+    const cfg = makeConfig({
+      ssmPrefix: "/danxbot-gpt",
+      aws: { profile: "gpt" },
+      repos: [
+        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
+      ],
+    });
+    const overrides = buildTargetOverrides(cfg);
+    const cmds = buildSsmPutCommands(cfg, {
+      shared: { ...overrides, DANXBOT_DISPATCH_TOKEN: "tok" },
+      perRepo: {},
+    });
+    const joined = cmds.join("\n");
+    expect(joined).toContain("/danxbot-gpt/shared/REPOS");
+    expect(joined).toContain(
+      "--value 'danxbot:https://github.com/x/d.git'",
+    );
+    expect(joined).toContain("/danxbot-gpt/shared/REPO_WORKER_PORTS");
+    expect(joined).toContain("--value 'danxbot:5561'");
+    expect(joined).toContain("/danxbot-gpt/shared/DANXBOT_DISPATCH_TOKEN");
+  });
+});
+
+describe("getOrCreateDispatchToken", () => {
+  const cfg = makeConfig({
+    ssmPrefix: "/danxbot-gpt",
+    aws: { profile: "gpt" },
+  });
+
+  it("returns the existing SSM value when present", () => {
+    const exec = (_cmd: string): string => "existing-token-abc123";
+    expect(getOrCreateDispatchToken(cfg, exec)).toBe("existing-token-abc123");
+  });
+
+  it("trims surrounding whitespace/newlines from the SSM value", () => {
+    const exec = (_cmd: string): string => "  token-with-newline\n";
+    expect(getOrCreateDispatchToken(cfg, exec)).toBe("token-with-newline");
+  });
+
+  it('rejects the literal "None" emitted by aws-cli --output text on unset values', () => {
+    const exec = (_cmd: string): string => "None\n";
+    const result = getOrCreateDispatchToken(cfg, exec);
+    // Falls through to generation branch — must be a fresh hex token, not "None"
+    expect(result).not.toBe("None");
+    expect(result).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("generates a fresh 64-hex token on ParameterNotFound", () => {
+    const exec = (_cmd: string): string => {
+      throw new Error("An error occurred (ParameterNotFound): Parameter not found.");
+    };
+    const token = getOrCreateDispatchToken(cfg, exec);
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("re-throws on non-ParameterNotFound AWS errors (does not silently regenerate)", () => {
+    const exec = (_cmd: string): string => {
+      throw new Error("ExpiredTokenException: The security token included in the request is expired");
+    };
+    expect(() => getOrCreateDispatchToken(cfg, exec)).toThrow(/ExpiredTokenException/);
+  });
+
+  it("each generated token is unique (not deterministic)", () => {
+    const exec = (_cmd: string): string => {
+      throw new Error("ParameterNotFound");
+    };
+    const a = getOrCreateDispatchToken(cfg, exec);
+    const b = getOrCreateDispatchToken(cfg, exec);
+    expect(a).not.toBe(b);
   });
 });

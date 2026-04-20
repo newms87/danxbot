@@ -11,6 +11,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { randomBytes } from "node:crypto";
+import { execSync } from "node:child_process";
 import type { DeployConfig } from "./config.js";
 import { awsCmd, runStreaming } from "./exec.js";
 
@@ -102,11 +104,113 @@ export function buildSsmPutCommands(
   return cmds;
 }
 
+/**
+ * Build per-target overrides that are ALWAYS synthesized from the deploy YML
+ * (never from local .env). These keys must match the target's actual repo
+ * list — NOT the operator's local dev list, which may include unrelated
+ * repos. Returns:
+ *   REPOS — "<name>:<url>,..." for each repo in this deployment
+ *   REPO_WORKER_PORTS — "<name>:<port>,..." matching REPOS entries
+ */
+export function buildTargetOverrides(
+  config: DeployConfig,
+): Record<string, string> {
+  const reposValue = config.repos
+    .map((r) => `${r.name}:${r.url}`)
+    .join(",");
+  const portsValue = config.repos
+    .map((r) => `${r.name}:${r.workerPort}`)
+    .join(",");
+  return {
+    REPOS: reposValue,
+    REPO_WORKER_PORTS: portsValue,
+  };
+}
+
+/**
+ * Dispatch token lookup — existing SSM value wins; otherwise generate a fresh
+ * 64-hex token, print it once to stdout so the operator can save it, and
+ * return it for upload.
+ *
+ * Regenerating silently would invalidate active callers' credentials on every
+ * deploy, so we ONLY treat `ParameterNotFound` as "generate a new one." Any
+ * other AWS error (expired auth, throttling, network) re-throws and aborts
+ * the deploy — forcing the operator to fix the underlying problem instead of
+ * rotating every external caller's credentials.
+ */
+export function getOrCreateDispatchToken(
+  config: DeployConfig,
+  exec: (cmd: string) => string = defaultTokenFetch,
+): string {
+  const paramName = `${config.ssmPrefix}/shared/DANXBOT_DISPATCH_TOKEN`;
+  try {
+    const raw = exec(
+      awsCmd(
+        config.aws.profile,
+        `ssm get-parameter --name "${paramName}" --with-decryption --region ${config.region} --query Parameter.Value --output text`,
+      ),
+    );
+    const existing = raw.trim();
+    // `aws ssm get-parameter --output text` writes the literal string "None"
+    // when the parameter exists but has no value. Reject that as invalid —
+    // never treat it as a real token.
+    if (existing && existing !== "None") return existing;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("ParameterNotFound")) {
+      throw new Error(
+        `Failed to read ${paramName} from SSM (not a ParameterNotFound): ${msg}`,
+      );
+    }
+    // ParameterNotFound — fall through to generate below.
+  }
+  const generated = randomBytes(32).toString("hex");
+  console.log("");
+  console.log(
+    `  Generated new DANXBOT_DISPATCH_TOKEN for ${config.name}:`,
+  );
+  console.log(`    ${generated}`);
+  console.log(
+    "  SAVE THIS — required by external callers (Authorization: Bearer <token>).",
+  );
+  console.log("");
+  return generated;
+}
+
+/**
+ * Run an AWS CLI command, capturing stderr so ParameterNotFound can be
+ * distinguished from real errors. Throws an Error whose message includes the
+ * aws-cli stderr text — callers inspect `message` for `"ParameterNotFound"`.
+ */
+function defaultTokenFetch(cmd: string): string {
+  try {
+    return execSync(cmd, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).toString();
+  } catch (err) {
+    const e = err as { stderr?: Buffer | string; message?: string };
+    const stderr = typeof e.stderr === "string" ? e.stderr : e.stderr?.toString() ?? "";
+    throw new Error(`${e.message ?? "exec failed"}\n${stderr}`);
+  }
+}
+
 export function pushSecrets(
   config: DeployConfig,
   cwd: string = process.cwd(),
 ): void {
   const collected = collectDeploymentSecrets(config, cwd);
+  const overrides = buildTargetOverrides(config);
+  const token = getOrCreateDispatchToken(config);
+  // Target overrides win over local .env — prevents an operator's local
+  // REPOS (which lists every repo they work with) from leaking into a
+  // target that should only see its own repos.
+  collected.shared = {
+    ...collected.shared,
+    ...overrides,
+    DANXBOT_DISPATCH_TOKEN: token,
+  };
+
   const cmds = buildSsmPutCommands(config, collected);
 
   console.log(`\n── Pushing ${cmds.length} secret(s) to SSM ──`);
