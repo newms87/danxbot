@@ -225,6 +225,82 @@ export interface DeletedDispatch {
  * the corresponding JSONL files. Non-terminal dispatches (queued, running)
  * are preserved regardless of age.
  */
+export interface DispatchCountsByTrigger {
+  total: number;
+  slack: number;
+  trello: number;
+  api: number;
+}
+
+export interface RepoDispatchCounts {
+  total: DispatchCountsByTrigger;
+  last24h: DispatchCountsByTrigger;
+  today: DispatchCountsByTrigger;
+}
+
+/**
+ * Count dispatches per repo, broken out by trigger type across three time
+ * windows (all time / last 24h / since midnight UTC today). Used by the
+ * Agents tab API to render dispatch activity on each repo card.
+ *
+ * One SQL round-trip per call regardless of repo count — the CASE/SUM
+ * pattern keeps each window in the same group.
+ */
+export async function countDispatchesByRepo(): Promise<
+  Record<string, RepoDispatchCounts>
+> {
+  const now = Date.now();
+  const cutoff24h = now - 86_400_000;
+  const midnightToday = new Date();
+  midnightToday.setUTCHours(0, 0, 0, 0);
+  const cutoffToday = midnightToday.getTime();
+
+  const pool = getPool();
+  const [rows] = await pool.query(
+    `SELECT
+      repo_name,
+      \`trigger\`,
+      COUNT(*) AS total,
+      SUM(CASE WHEN started_at >= ? THEN 1 ELSE 0 END) AS last_24h,
+      SUM(CASE WHEN started_at >= ? THEN 1 ELSE 0 END) AS today
+    FROM dispatches
+    GROUP BY repo_name, \`trigger\``,
+    [cutoff24h, cutoffToday],
+  );
+
+  const typed = rows as Array<{
+    repo_name: string;
+    trigger: string;
+    total: number | string;
+    last_24h: number | string;
+    today: number | string;
+  }>;
+
+  const out: Record<string, RepoDispatchCounts> = {};
+  for (const r of typed) {
+    const entry =
+      out[r.repo_name] ??
+      (out[r.repo_name] = {
+        total: { total: 0, slack: 0, trello: 0, api: 0 },
+        last24h: { total: 0, slack: 0, trello: 0, api: 0 },
+        today: { total: 0, slack: 0, trello: 0, api: 0 },
+      });
+    const total = Number(r.total);
+    const last24h = Number(r.last_24h);
+    const today = Number(r.today);
+    const trigger = r.trigger as TriggerType;
+    entry.total.total += total;
+    entry.last24h.total += last24h;
+    entry.today.total += today;
+    if (trigger === "slack" || trigger === "trello" || trigger === "api") {
+      entry.total[trigger] += total;
+      entry.last24h[trigger] += last24h;
+      entry.today[trigger] += today;
+    }
+  }
+  return out;
+}
+
 export async function deleteOldDispatches(
   maxAgeMs: number,
 ): Promise<DeletedDispatch[]> {

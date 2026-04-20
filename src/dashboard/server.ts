@@ -19,6 +19,11 @@ import {
   workerHost,
   type DispatchProxyDeps,
 } from "./dispatch-proxy.js";
+import {
+  handleGetAgent,
+  handleListAgents,
+  handlePatchToggle,
+} from "./agents-routes.js";
 import { optional } from "../env.js";
 
 const log = createLogger("dashboard");
@@ -121,6 +126,37 @@ async function route(
   );
   if (method === "GET" && followMatch) {
     await handleFollowDispatch(req, res, decodeURIComponent(followMatch[1]));
+    return true;
+  }
+
+  // Agents tab API — per-repo settings + feature toggles. GET is open
+  // (parity with /api/dispatches); PATCH shares DANXBOT_DISPATCH_TOKEN
+  // auth with the dispatch proxy so the dashboard has ONE bearer token.
+  if (method === "GET" && url.pathname === "/api/agents") {
+    await handleListAgents(res, dispatchDeps);
+    return true;
+  }
+
+  const agentTogglesMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/toggles$/,
+  );
+  if (method === "PATCH" && agentTogglesMatch) {
+    await handlePatchToggle(
+      req,
+      res,
+      decodeURIComponent(agentTogglesMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  const agentDetailMatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
+  if (method === "GET" && agentDetailMatch) {
+    await handleGetAgent(
+      res,
+      decodeURIComponent(agentDetailMatch[1]),
+      dispatchDeps,
+    );
     return true;
   }
 
