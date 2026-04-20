@@ -28,6 +28,23 @@ Port 5555 serves the last production build from `dashboard/dist/`. The Docker bu
 
 To rebuild manually: `npm run dashboard:build`
 
+## Testing
+
+The dashboard has its own `vitest.config.ts` in the `dashboard/` directory (happy-dom environment, `include: ["src/**/*.test.ts"]`). Running vitest from the repo root only picks up backend tests at `src/**/*.test.ts` — dashboard tests are invisible from there.
+
+- Run all dashboard tests: `cd dashboard && npx vitest run`
+- Run one dashboard test file: `cd dashboard && npx vitest run src/composables/useAuth.test.ts`
+- Type-check Vue SFCs: `cd dashboard && npx vue-tsc --noEmit`
+
+Full pipeline verification should hit BOTH suites:
+
+    npx vitest run                            # backend (~1600 tests)
+    cd dashboard && npx vitest run            # dashboard (~50 tests)
+    npx tsc --noEmit                          # backend types
+    cd dashboard && npx vue-tsc --noEmit      # SPA types
+
+The dashboard vitest config sets `restoreMocks: true`, so `vi.spyOn` mocks auto-reset between tests — unlike the backend config. Don't add redundant `vi.restoreAllMocks()` in dashboard test `afterEach` unless you're also clearing explicit `mockImplementation`s.
+
 ## Key Files
 
 | Path | Purpose |
