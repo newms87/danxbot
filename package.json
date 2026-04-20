@@ -21,10 +21,12 @@
     "@anthropic-ai/sdk": "^0.74.0",
     "@slack/bolt": "^4.1.0",
     "@thehammer/schema-mcp-server": "^1.0.3",
+    "bcrypt": "^6.0.0",
     "mysql2": "^3.17.1",
     "yaml": "^2.3.4"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",

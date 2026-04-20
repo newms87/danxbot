@@ -1,3 +1,8 @@
+// Slack-domain user storage. Keyed on `slack_user_id`; tracks display name and
+// per-user Slack prefs. Dashboard login lives in `src/dashboard/auth-db.ts` —
+// see `upsertDashboardUser` there. The two paths share the `users` table but
+// never overwrite each other's columns (Slack uses slack_user_id+display_name;
+// dashboard uses username+password_hash; migration 011 extended the table).
 import { getPool } from "./connection.js";
 
 interface UserRow {
