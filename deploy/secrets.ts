@@ -73,10 +73,14 @@ export function buildSsmPutCommands(
   // evaluate backticks. Laravel-style values like `${APP_NAME}` are stored
   // literally in SSM and resolved later by the app reading the materialized
   // .env. Single-quote escape for embedded quotes: `'` → `'\''`.
+  // `--tier Intelligent-Tiering` lets SSM auto-promote parameters that exceed
+  // the 4KB Standard-tier limit (e.g. base64-encoded RSA keys) to Advanced
+  // tier automatically, without charging Advanced rates for sub-4KB params.
+  // Without this, any secret > 4KB fails deploy with a ValidationException.
   const putOne = (name: string, value: string): string =>
     awsCmd(
       config.aws.profile,
-      `ssm put-parameter --name "${name}" --type SecureString --overwrite --region ${config.region} --value '${value.replace(/'/g, "'\\''")}'`,
+      `ssm put-parameter --name "${name}" --type SecureString --overwrite --tier Intelligent-Tiering --region ${config.region} --value '${value.replace(/'/g, "'\\''")}'`,
     );
   // SSM rejects empty values — skip them. A key with an empty local value is
   // effectively "not set" and will be absent from the materialized .env.

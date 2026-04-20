@@ -65,6 +65,10 @@ export function runBootstrapScripts(
   for (const repo of config.repos) {
     const script = `${CONTAINER_REPOS_BASE}/${repo.name}/.danxbot/scripts/bootstrap.sh`;
     console.log(`\n── Running bootstrap for ${repo.name} ──`);
-    remote.sshRunStreaming(`test -x ${script} && bash ${script}`);
+    // `test -f` not `test -x`: git preserves file mode only if the exec bit
+    // was committed (`git update-index --chmod=+x`). We invoke via `bash
+    // <path>` which doesn't need the exec bit, so gating on it causes
+    // legitimate scripts to be silently skipped. Require only existence.
+    remote.sshRunStreaming(`test -f ${script} && bash ${script}`);
   }
 }

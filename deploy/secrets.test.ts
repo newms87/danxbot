@@ -242,6 +242,12 @@ describe("buildSsmPutCommands", () => {
     expect(cmds).toContainEqual(
       expect.stringContaining(`--type SecureString`),
     );
+    // Intelligent-Tiering lets SSM transparently promote >4KB values (e.g.
+    // base64 RSA keys) to Advanced tier without charging Advanced rates for
+    // sub-4KB values — regression guard against the old Standard-only form.
+    expect(cmds).toContainEqual(
+      expect.stringContaining(`--tier Intelligent-Tiering`),
+    );
   });
 
   it("single-quote-wraps values so shell does not interpolate $VAR / backticks", () => {
