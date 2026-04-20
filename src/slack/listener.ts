@@ -7,6 +7,7 @@ import { swapReaction, postErrorAttachment } from "./helpers.js";
 import { HeartbeatManager } from "./heartbeat-manager.js";
 import { isProcessing, markProcessing, markIdle, enqueue, dequeue, getQueueStats, getTotalQueuedCount, resetQueue } from "./message-queue.js";
 import { resolveUserName } from "./user-cache.js";
+import { isFeatureEnabled } from "../settings-file.js";
 import { runRouter } from "../agent/router.js";
 import { runAgent } from "../agent/agent.js";
 import { processResponseWithAttachments, extractSqlBlocks } from "../agent/sql-executor.js";
@@ -276,6 +277,30 @@ async function handleMessage(ls: ListenerState, message: SlackMessage, client: R
       if (isThreadReply) {
         const participating = await isBotParticipant(threadTs);
         if (!participating) return;
+      }
+
+      // Runtime toggle — when Slack is disabled for this repo via the
+      // settings file, react + reply so the user knows why there's no
+      // response, then skip router and agent entirely. The three-valued
+      // override (true/false/null) in `.danxbot/settings.json` wins over
+      // the env default carried on RepoContext. See
+      // `.claude/rules/settings-file.md`.
+      if (!isFeatureEnabled(ls.repo, "slack")) {
+        await client.reactions
+          .add({
+            channel: message.channel,
+            timestamp: message.ts,
+            name: "no_entry_sign",
+          })
+          .catch(() => {});
+        await client.chat
+          .postMessage({
+            channel: message.channel,
+            thread_ts: threadTs,
+            text: "Danxbot is currently disabled for this repo. Re-enable in the dashboard.",
+          })
+          .catch(() => {});
+        return;
       }
 
       // Get or create thread state

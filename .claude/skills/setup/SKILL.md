@@ -255,10 +255,16 @@ This keeps repo-specific secrets separate from both danxbot's `.env` and the ver
 
 ### 8f: Create `.danxbot/.gitignore`
 
-Write `repos/<name>/.danxbot/.gitignore` to exclude generated files:
+Write `repos/<name>/.danxbot/.gitignore` to exclude generated and
+runtime files — `features.md` (ideator memory), `.env` (secrets),
+`settings.json` (operational state — feature toggles + masked config),
+and `.settings.lock` (per-file lock):
 
 ```
 features.md
+.env
+settings.json
+.settings.lock
 ```
 
 ## Step 9: Generate Rules (in `.danxbot/config/`)

@@ -63,6 +63,11 @@ vi.mock("./poller/index.js", () => ({
   start: mockStartPoller,
 }));
 
+const mockEnsureSettingsFile = vi.fn().mockResolvedValue(undefined);
+vi.mock("./settings-file.js", () => ({
+  ensureSettingsFile: mockEnsureSettingsFile,
+}));
+
 // Default: dashboard mode (no DANXBOT_REPO_NAME, no repo contexts)
 // These mocks are overridden in worker describe blocks via vi.doMock
 let mockIsWorkerMode = false;
@@ -71,7 +76,7 @@ let mockWorkerRepoName = "";
 let mockRepoContexts: typeof MOCK_REPO[] = [];
 
 vi.mock("./config.js", () => ({
-  get config() { return {}; },
+  get config() { return { runtime: "host" }; },
   get isWorkerMode() { return mockIsWorkerMode; },
   get isDashboardMode() { return mockIsDashboardMode; },
   get workerRepoName() { return mockWorkerRepoName; },
@@ -143,6 +148,14 @@ describe("worker mode startup flow", () => {
 
     expect(mockInitPlatformPool).toHaveBeenCalledWith(MOCK_REPO.db);
     expect(mockInitPlatformPool).toHaveBeenCalledBefore(mockStartWorkerServer);
+  });
+
+  it("self-seeds the settings file before starting the worker server", async () => {
+    await importIndex();
+
+    expect(mockEnsureSettingsFile).toHaveBeenCalledWith(MOCK_REPO, "host");
+    expect(mockEnsureSettingsFile).toHaveBeenCalledBefore(mockInitPlatformPool);
+    expect(mockEnsureSettingsFile).toHaveBeenCalledBefore(mockStartWorkerServer);
   });
 
   it("starts poller", async () => {
@@ -325,6 +338,12 @@ describe("dashboard mode startup flow", () => {
     await importIndex();
 
     expect(mockInitPlatformPool).not.toHaveBeenCalled();
+  });
+
+  it("does NOT self-seed the settings file (workers do that, not dashboards)", async () => {
+    await importIndex();
+
+    expect(mockEnsureSettingsFile).not.toHaveBeenCalled();
   });
 
   it("calls initShutdownHandlers with thread cleanup + retention interval", async () => {

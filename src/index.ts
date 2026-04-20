@@ -7,9 +7,10 @@ import { initShutdownHandlers } from "./shutdown.js";
 import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
 import { initPlatformPool } from "./db/connection.js";
-import { isWorkerMode, workerRepoName } from "./config.js";
+import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
 import { start as startPoller } from "./poller/index.js";
+import { ensureSettingsFile } from "./settings-file.js";
 
 const log = createLogger("startup");
 
@@ -43,6 +44,12 @@ async function startWorkerMode(): Promise<void> {
   if (!repo) {
     throw new Error(`Worker mode: no repo context loaded for "${workerRepoName}"`);
   }
+
+  // Seed `.danxbot/settings.json` with a `display` snapshot if it's
+  // missing so the dashboard has something to render before deploy/setup
+  // write the authoritative values. This NEVER clobbers existing state —
+  // it's a first-boot backstop only. See `.claude/rules/settings-file.md`.
+  await ensureSettingsFile(repo, config.runtime);
 
   // Platform pool must be ready before any sql:execute block runs.
   // Disabled repos skip pool creation.

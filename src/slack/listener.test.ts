@@ -136,6 +136,12 @@ vi.mock("../agent/danxbot-commit.js", () => ({
   getDanxbotCommit: () => mockGetDanxbotCommit(),
 }));
 
+const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
+
+vi.mock("../settings-file.js", () => ({
+  isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
+}));
+
 // Mock @slack/bolt — App must be a real class so `new App()` works
 let capturedMessageHandler: Function;
 const capturedEventHandlers: Record<string, Function> = {};
@@ -173,6 +179,7 @@ beforeEach(async () => {
   mockDequeue.mockReturnValue(undefined);
   mockProcessResponseWithAttachments.mockImplementation((text: string) => Promise.resolve({ text, attachments: [] }));
   mockExtractSqlBlocks.mockReturnValue([]);
+  mockIsFeatureEnabled.mockReturnValue(true);
 
   // Reset listener state (shutdown flag and in-flight tracking)
   resetListenerState();
@@ -1236,6 +1243,63 @@ describe("stale session recovery", () => {
     );
   });
 
+});
+
+// ============================================================
+// Feature toggle (settings.json override)
+// ============================================================
+
+describe("Slack feature toggle via settings.json", () => {
+  it("posts disabled reply + no_entry_sign reaction and skips router+agent when disabled", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "slack",
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockIsFeatureEnabled).toHaveBeenCalledWith(
+      expect.any(Object),
+      "slack",
+    );
+    expect(client.reactions.add).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "no_entry_sign" }),
+    );
+    expect(client.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining("disabled"),
+      }),
+    );
+    expect(mockRunRouter).not.toHaveBeenCalled();
+    expect(mockRunAgent).not.toHaveBeenCalled();
+  });
+
+  it("runs the normal handler when Slack is enabled", async () => {
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockRunRouter.mockResolvedValue(
+      makeRouterResult({ quickResponse: "Hi!", needsAgent: false }),
+    );
+
+    await handler({ message: makeSlackMessage(), client });
+
+    expect(mockRunRouter).toHaveBeenCalled();
+    // No disabled-reply reaction
+    const reactionCalls = client.reactions.add.mock.calls.map(
+      (c) => (c[0] as { name: string }).name,
+    );
+    expect(reactionCalls).not.toContain("no_entry_sign");
+  });
+
+  it("does not post disabled reply to a thread it is not participating in", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "slack",
+    );
+    mockIsBotParticipant.mockResolvedValue(false);
+
+    await handler({ message: makeSlackThreadReply(), client });
+
+    expect(client.reactions.add).not.toHaveBeenCalled();
+    expect(client.chat.postMessage).not.toHaveBeenCalled();
+  });
 });
 
 // ============================================================

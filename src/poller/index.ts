@@ -27,6 +27,7 @@ import {
 } from "./trello-client.js";
 import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext, TrelloConfig } from "../types.js";
+import { isFeatureEnabled } from "../settings-file.js";
 import type {
   DispatchTriggerMetadata,
   TrelloTriggerMetadata,
@@ -100,6 +101,15 @@ async function checkNeedsHelp(trello: TrelloConfig): Promise<number> {
 export async function poll(repo: RepoContext): Promise<void> {
   const state = getState(repo.name);
   if (state.teamRunning || state.polling) {
+    return;
+  }
+
+  // Runtime toggle — when the Trello poller is disabled for this repo
+  // via the settings file, skip the tick entirely. Checked per-tick so
+  // operators can toggle without a worker restart. See
+  // `.claude/rules/settings-file.md`.
+  if (!isFeatureEnabled(repo, "trelloPoller")) {
+    log.info(`[${repo.name}] poller disabled via settings — skipping`);
     return;
   }
 
@@ -693,16 +703,21 @@ export function start(): void {
     return;
   }
 
-  // Validate and start polling for each repo independently.
-  // Repos with DANX_TRELLO_ENABLED=false are skipped — same env var controls
-  // host and docker runtimes identically.
+  // Every repo gets a polling interval scheduled regardless of the env
+  // default — the per-tick `isFeatureEnabled(repo, "trelloPoller")` check
+  // in `poll()` honors runtime overrides from `.danxbot/settings.json`, so
+  // boot-time skipping would defeat the toggle. Boot-time validation only
+  // runs when the env default says Trello is supposed to be on; a repo
+  // that opts in at runtime takes responsibility for ensuring its config
+  // is complete (the first enabled tick surfaces config gaps naturally).
   for (const repo of repoContexts) {
-    if (!repo.trelloEnabled) {
-      log.info(`[${repo.name}] Trello disabled (DANX_TRELLO_ENABLED=false) — skipping poller`);
-      continue;
+    if (repo.trelloEnabled) {
+      validateRepoConfig(repo);
+    } else {
+      log.info(
+        `[${repo.name}] Trello env-default disabled — skipping boot validation. Runtime override in settings.json can still enable the poller.`,
+      );
     }
-
-    validateRepoConfig(repo);
 
     const state = getState(repo.name);
     const intervalSeconds = config.pollerIntervalMs / 1000;

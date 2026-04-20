@@ -109,6 +109,11 @@ vi.mock("../agent/launcher.js", () => ({
   spawnAgent: (...args: unknown[]) => mockSpawnAgent(...args),
 }));
 
+const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
+vi.mock("../settings-file.js", () => ({
+  isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
+}));
+
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
@@ -239,6 +244,47 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+});
+
+describe("poll — trelloPoller feature toggle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `Review ${i}` })),
+    );
+    mockIsFeatureEnabled.mockReturnValue(true);
+  });
+
+  it("skips the tick and does not fetch cards when disabled", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "trelloPoller",
+    );
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockIsFeatureEnabled).toHaveBeenCalledWith(
+      expect.any(Object),
+      "trelloPoller",
+    );
+    expect(mockFetchNeedsHelpCards).not.toHaveBeenCalled();
+    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("runs normally when enabled", async () => {
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockFetchNeedsHelpCards).toHaveBeenCalled();
+    expect(mockFetchTodoCards).toHaveBeenCalled();
+  });
 });
 
 describe("poll — Needs Help checking", () => {
@@ -427,36 +473,57 @@ describe("start", () => {
     expect(() => start()).not.toThrow();
   });
 
-  it("skips repos where trelloEnabled is false", () => {
+  it("starts polling for every repo regardless of trelloEnabled — the per-tick isFeatureEnabled check decides whether to skip", () => {
+    // Boot-time skipping was removed in favor of the per-tick toggle. Every
+    // repo gets an interval scheduled so operators can flip `trelloPoller`
+    // on at runtime without restarting the worker. The skip happens inside
+    // `poll()` when `isFeatureEnabled(repo, "trelloPoller")` is false.
     mockRepoContexts[0].trelloEnabled = false;
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "trelloPoller",
+    );
     mockFetchTodoCards.mockResolvedValue([]);
     mockFetchReviewCards.mockResolvedValue([]);
 
     start();
 
+    // The initial poll ran but `isFeatureEnabled` returned false, so no
+    // Trello API calls were made.
+    expect(mockIsFeatureEnabled).toHaveBeenCalledWith(
+      expect.any(Object),
+      "trelloPoller",
+    );
     expect(mockFetchNeedsHelpCards).not.toHaveBeenCalled();
     expect(mockFetchTodoCards).not.toHaveBeenCalled();
     expect(mockFetchReviewCards).not.toHaveBeenCalled();
 
     mockRepoContexts[0].trelloEnabled = true;
+    mockIsFeatureEnabled.mockReturnValue(true);
   });
 
-  it("polls only trello-enabled repos when contexts include both", () => {
+  it("polls every repo in repoContexts — per-tick toggle decides which fetch Trello", () => {
     const enabledRepo = { ...mockRepoContexts[0], name: "enabled", trelloEnabled: true };
     const disabledRepo = { ...mockRepoContexts[0], name: "disabled", trelloEnabled: false };
     mockRepoContexts.length = 0;
     mockRepoContexts.push(enabledRepo, disabledRepo);
+    mockIsFeatureEnabled.mockImplementation((ctx: { name: string }, feature: string) => {
+      if (feature !== "trelloPoller") return true;
+      return ctx.name === "enabled";
+    });
     mockFetchTodoCards.mockResolvedValue([]);
     mockFetchReviewCards.mockResolvedValue([]);
 
     start();
 
     const trelloArgs = mockFetchNeedsHelpCards.mock.calls.map((c) => c[0]);
+    // Only the enabled repo's per-tick check returned true → only its
+    // Trello config was used.
     expect(trelloArgs.length).toBe(1);
     expect(trelloArgs[0]).toBe(enabledRepo.trello);
 
     mockRepoContexts.length = 0;
     mockRepoContexts.push({ ...enabledRepo, name: "test-repo", trelloEnabled: true });
+    mockIsFeatureEnabled.mockReturnValue(true);
   });
 });
 

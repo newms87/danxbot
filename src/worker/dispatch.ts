@@ -21,6 +21,7 @@ import type { RepoContext } from "../types.js";
 import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
 import { StallDetector } from "../agent/stall-detector.js";
 import { normalizeCallbackUrl } from "./url-normalizer.js";
+import { isFeatureEnabled } from "../settings-file.js";
 
 /** Maximum number of stall-recovery respawns before giving up and marking failed. */
 const MAX_STALL_RESUMES = 3;
@@ -46,6 +47,18 @@ export async function handleLaunch(
   repo: RepoContext,
 ): Promise<void> {
   try {
+    // Runtime toggle — when the dispatch API is disabled for this repo
+    // via the settings file, 503 before any bookkeeping. The dashboard
+    // proxy forwards the status+body verbatim so external callers see
+    // the same shape as an in-worker `curl`. See
+    // `.claude/rules/settings-file.md`.
+    if (!isFeatureEnabled(repo, "dispatchApi")) {
+      json(res, 503, {
+        error: `Dispatch API is disabled for repo ${repo.name}`,
+      });
+      return;
+    }
+
     const body = await parseBody(req);
     const task = body.task as string;
     // Object keyed by agent name — see `.claude/rules/agent-dispatch.md`.

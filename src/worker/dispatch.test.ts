@@ -111,6 +111,11 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
+const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
+vi.mock("../settings-file.js", () => ({
+  isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
+}));
+
 import {
   handleLaunch,
   handleCancel,
@@ -123,6 +128,7 @@ const MOCK_REPO = makeRepoContext();
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockIsFeatureEnabled.mockReturnValue(true);
 });
 
 describe("handleLaunch", () => {
@@ -483,6 +489,53 @@ describe("handleLaunch", () => {
     await handleLaunch(req, res, MOCK_REPO);
 
     expect(res._getStatusCode()).toBe(200);
+  });
+});
+
+describe("handleLaunch — dispatchApi feature toggle", () => {
+  it("returns 503 with the documented body when dispatchApi is disabled", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "dispatchApi",
+    );
+    const req = createMockReqWithBody("POST", {
+      task: "Do work",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(mockIsFeatureEnabled).toHaveBeenCalledWith(
+      expect.any(Object),
+      "dispatchApi",
+    );
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: `Dispatch API is disabled for repo ${MOCK_REPO.name}`,
+    });
+    // No spawn occurred — the 503 short-circuits before any bookkeeping.
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockBuildMcpSettings).not.toHaveBeenCalled();
+  });
+
+  it("runs normally when dispatchApi is enabled", async () => {
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockSpawnAgent.mockResolvedValue({
+      id: "job-enabled",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    });
+    const req = createMockReqWithBody("POST", {
+      task: "Do work",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockSpawnAgent).toHaveBeenCalled();
   });
 });
 
