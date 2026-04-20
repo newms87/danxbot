@@ -36,3 +36,16 @@ export interface DispatchDetail {
   timeline: JsonlBlock[];
   totals: JsonlTotals | null;
 }
+
+export type { AgentSnapshot, WorkerHealth } from "@backend/dashboard/agents-routes.js";
+export type {
+  Feature,
+  FeatureOverride,
+  Settings,
+  SettingsOverrides,
+  SettingsDisplay,
+  SettingsDisplaySection,
+  SettingsDisplayWorker,
+  SettingsMeta,
+} from "@backend/settings-file.js";
+export type { RepoDispatchCounts, DispatchCountsByTrigger } from "@backend/dashboard/dispatches-db.js";
