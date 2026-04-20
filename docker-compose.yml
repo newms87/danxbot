@@ -22,6 +22,16 @@ services:
       # Shared Claude Code JSONL — must match workers' mount target so
       # the dashboard can read each worker's session logs.
       - ${CLAUDE_PROJECTS_DIR:-./claude-projects}:/home/danxbot/.claude/projects
+      # The Agents tab reads each connected repo's .danxbot/settings.json
+      # via repo.localPath, which resolves to /danxbot/app/repos/<name>.
+      # ./repos/<name> is a symlink on the host pointing at the actual
+      # repo dir (e.g. /home/newms/web/danxbot-flytebot). Bind-mount both
+      # ./repos and the host parent dir so the symlinks resolve inside
+      # the container. (.dockerignore excludes repos/ from the image, so
+      # without these mounts /danxbot/app/repos is an empty directory.)
+      # Prod compose handles this with /danxbot/repos:/danxbot/app/repos.
+      - ./repos:/danxbot/app/repos:ro
+      - ..:/home/newms/web:ro
     networks:
       - danxbot-net
     depends_on:
