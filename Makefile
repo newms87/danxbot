@@ -15,7 +15,8 @@ REPOS_DIR := ./repos
        test test-unit test-integration test-validate test-system \
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
        test-system-error test-system-stall test-system-poller test-system-cleanup \
-       deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke
+       deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
+       create-user
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -219,3 +220,36 @@ deploy-secrets-push: _require_target ## Sync local .env files to SSM (usage: mak
 
 deploy-smoke: _require_target ## Smoke-test the deployed dashboard (usage: make deploy-smoke TARGET=gpt)
 	npx tsx deploy/cli.ts smoke $(TARGET)
+
+# --- Operator: create / rotate dashboard users ---
+#
+# Creates a new dashboard user OR updates an existing user's password and
+# rotates their API token. Prints the raw token to local stdout exactly once.
+# Password is never accepted as an argument — it's prompted on the local TTY
+# (or read from DANXBOT_CREATE_USER_PASSWORD for non-interactive use).
+#
+# For non-interactive use, pass the env var as a PREFIX to `make`, not as a
+# make variable assignment:
+#
+#   DANXBOT_CREATE_USER_PASSWORD=secret make create-user LOCALHOST=1 USERNAME=foo
+#
+# `make DANXBOT_CREATE_USER_PASSWORD=secret …` will NOT export the variable to
+# the recipe's shell and will silently fall into the interactive TTY branch.
+
+create-user: ## Create / rotate a dashboard user (usage: make create-user LOCALHOST=1 USERNAME=foo OR TARGET=gpt USERNAME=foo)
+ifdef LOCALHOST
+	@if [ -z "$(USERNAME)" ]; then echo "Error: USERNAME is required"; exit 1; fi
+	@if [ -n "$$DANXBOT_CREATE_USER_PASSWORD" ]; then \
+		docker exec -i -e DANXBOT_CREATE_USER_PASSWORD danxbot-flytebot-dashboard-1 npx tsx src/cli/create-user.ts --username $(USERNAME); \
+	else \
+		docker exec -it danxbot-flytebot-dashboard-1 npx tsx src/cli/create-user.ts --username $(USERNAME); \
+	fi
+else ifdef TARGET
+	@if [ -z "$(USERNAME)" ]; then echo "Error: USERNAME is required"; exit 1; fi
+	@npx tsx deploy/cli.ts create-user $(TARGET) $(USERNAME)
+else
+	@echo "Usage:"
+	@echo "  make create-user LOCALHOST=1 USERNAME=<name>"
+	@echo "  make create-user TARGET=<gpt|...> USERNAME=<name>"
+	@exit 1
+endif

@@ -39,6 +39,7 @@ import { syncRepos, runBootstrapScripts } from "./bootstrap-repos.js";
 import { launchWorkers } from "./workers.js";
 import { uploadAndRestartInfra } from "./compose-infra.js";
 import { awsCmd, run } from "./exec.js";
+import { createUser } from "./create-user.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -63,6 +64,7 @@ const COMMANDS = [
   "logs",
   "secrets-push",
   "smoke",
+  "create-user",
 ] as const;
 type Command = (typeof COMMANDS)[number];
 
@@ -71,6 +73,8 @@ export interface CliArgs {
   target: string;
   dryRun: boolean;
   confirm: boolean;
+  /** Third positional arg — required only by `create-user`. */
+  username?: string;
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
@@ -84,11 +88,24 @@ export function parseCliArgs(argv: string[]): CliArgs {
   if (!target || target.startsWith("--")) {
     throw new Error("TARGET is required (e.g., deploy gpt)");
   }
+
+  let username: string | undefined;
+  if (rawCommand === "create-user") {
+    const third = argv[2];
+    if (!third || third.startsWith("--")) {
+      throw new Error(
+        "USERNAME is required for create-user (e.g., create-user gpt alice)",
+      );
+    }
+    username = third;
+  }
+
   return {
     command: rawCommand as Command,
     target,
     dryRun: argv.includes("--dry-run"),
     confirm: argv.includes("--confirm"),
+    ...(username ? { username } : {}),
   };
 }
 
@@ -339,6 +356,15 @@ async function main(): Promise<void> {
     case "smoke":
       await smoke(config);
       break;
+    case "create-user":
+      // parseCliArgs guarantees args.username is set for this command.
+      ensureBackend(config);
+      await createUser(config, args.username!);
+      break;
+    default: {
+      const _exhaustive: never = args.command;
+      throw new Error(`Unhandled command: ${_exhaustive as string}`);
+    }
   }
 }
 

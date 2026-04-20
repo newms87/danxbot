@@ -3,7 +3,7 @@ import { parseCliArgs, buildMaterializeRepoArgs } from "./cli.js";
 
 describe("parseCliArgs", () => {
   it("parses `deploy gpt`", () => {
-    expect(parseCliArgs(["deploy", "gpt"])).toEqual({
+    expect(parseCliArgs(["deploy", "gpt"])).toMatchObject({
       command: "deploy",
       target: "gpt",
       dryRun: false,
@@ -12,7 +12,7 @@ describe("parseCliArgs", () => {
   });
 
   it("parses `status flytedesk`", () => {
-    expect(parseCliArgs(["status", "flytedesk"])).toEqual({
+    expect(parseCliArgs(["status", "flytedesk"])).toMatchObject({
       command: "status",
       target: "flytedesk",
       dryRun: false,
@@ -21,7 +21,7 @@ describe("parseCliArgs", () => {
   });
 
   it("parses --dry-run", () => {
-    expect(parseCliArgs(["deploy", "gpt", "--dry-run"])).toEqual({
+    expect(parseCliArgs(["deploy", "gpt", "--dry-run"])).toMatchObject({
       command: "deploy",
       target: "gpt",
       dryRun: true,
@@ -30,12 +30,35 @@ describe("parseCliArgs", () => {
   });
 
   it("parses --confirm for destroy", () => {
-    expect(parseCliArgs(["destroy", "gpt", "--confirm"])).toEqual({
+    expect(parseCliArgs(["destroy", "gpt", "--confirm"])).toMatchObject({
       command: "destroy",
       target: "gpt",
       dryRun: false,
       confirm: true,
     });
+  });
+
+  it("parses `create-user gpt alice` with username positional", () => {
+    expect(parseCliArgs(["create-user", "gpt", "alice"])).toMatchObject({
+      command: "create-user",
+      target: "gpt",
+      username: "alice",
+    });
+  });
+
+  it("throws when create-user is missing USERNAME", () => {
+    expect(() => parseCliArgs(["create-user", "gpt"])).toThrow(/USERNAME/);
+  });
+
+  it("throws when create-user is given a flag where USERNAME should be", () => {
+    expect(() => parseCliArgs(["create-user", "gpt", "--dry-run"])).toThrow(
+      /USERNAME/,
+    );
+  });
+
+  it("does NOT set username for non-create-user commands", () => {
+    const parsed = parseCliArgs(["deploy", "gpt", "extra-positional"]);
+    expect(parsed.username).toBeUndefined();
   });
 
   it("throws on unknown command", () => {
@@ -61,7 +84,7 @@ describe("parseCliArgs", () => {
     });
   });
 
-  it("parses all valid commands", () => {
+  it("parses all valid commands (create-user needs a 3rd positional)", () => {
     for (const cmd of [
       "deploy",
       "status",
@@ -73,6 +96,9 @@ describe("parseCliArgs", () => {
     ]) {
       expect(parseCliArgs([cmd, "gpt"]).command).toBe(cmd);
     }
+    expect(parseCliArgs(["create-user", "gpt", "alice"]).command).toBe(
+      "create-user",
+    );
   });
 });
 
