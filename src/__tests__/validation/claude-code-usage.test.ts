@@ -34,7 +34,7 @@ import {
 } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 function hasApiKey(): boolean {
   return !!process.env.ANTHROPIC_API_KEY;
@@ -103,6 +103,7 @@ interface UsageTrackingServer {
   statusUrl: string;
   stop: () => Promise<void>;
   postedBatches: () => Array<{ events: Array<Record<string, unknown>> }>;
+  totalPostAttempts: () => number;
   putCount: () => number;
   setPostResponder: (code: number) => void;
 }
@@ -110,7 +111,10 @@ interface UsageTrackingServer {
 async function startUsageServer(
   options: { failFirst?: number } = {},
 ): Promise<UsageTrackingServer> {
-  const postedBodies: string[] = [];
+  // Only track SUCCESSFUL POST bodies — failed-and-retried bodies would
+  // double-count usage in the sum assertions.
+  const acceptedBodies: string[] = [];
+  let totalPostAttempts = 0;
   let putCount = 0;
   let failRemaining = options.failFirst ?? 0;
   let postResponseCode = 200;
@@ -123,15 +127,15 @@ async function startUsageServer(
       });
       req.on("end", () => {
         if (req.method === "POST") {
-          // Record EVERY POST body — even failed ones — so tests can assert
-          // retry cadence.
-          postedBodies.push(body);
+          totalPostAttempts++;
           if (failRemaining > 0) {
             failRemaining--;
             res.writeHead(503, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "simulated outage" }));
             return;
           }
+          // Only record bodies the server accepted.
+          acceptedBodies.push(body);
           res.writeHead(postResponseCode, {
             "Content-Type": "application/json",
           });
@@ -164,7 +168,7 @@ async function startUsageServer(
     },
     postedBatches() {
       const batches: Array<{ events: Array<Record<string, unknown>> }> = [];
-      for (const body of postedBodies) {
+      for (const body of acceptedBodies) {
         try {
           batches.push(
             JSON.parse(body) as { events: Array<Record<string, unknown>> },
@@ -174,6 +178,9 @@ async function startUsageServer(
         }
       }
       return batches;
+    },
+    totalPostAttempts() {
+      return totalPostAttempts;
     },
     putCount() {
       return putCount;
@@ -262,10 +269,44 @@ function spawnAndAwait(
   });
 }
 
-// Wait for the forwarder's batch timeout to elapse + drain. The forwarder
-// flushes every 5s; we wait slightly longer so queued events reach the server.
-async function waitForFlush(ms = 7_000): Promise<void> {
-  await new Promise((r) => setTimeout(r, ms));
+/**
+ * Drive a watcher + forwarder over a COMPLETED session JSONL file and the
+ * (optional) subagents directory. Returns when the forwarder has flushed all
+ * entries it observed.
+ *
+ * Rationale: the launcher's own watcher stops in cleanup — any assistant turns
+ * written between its last poll and process exit are missed, which makes the
+ * captured side under-count against the JSONL ground truth. Running our own
+ * watcher post-completion reads the final file deterministically.
+ */
+async function replayJsonlToServer(
+  jsonlPath: string,
+  srv: UsageTrackingServer,
+  opts: { retryDelaysMs?: number[] } = {},
+): Promise<void> {
+  const { SessionLogWatcher } = await import(
+    "../../agent/session-log-watcher.js"
+  );
+  const { createLaravelForwarder } = await import(
+    "../../agent/laravel-forwarder.js"
+  );
+
+  const watcher = new SessionLogWatcher({
+    cwd: "/ignored",
+    sessionDir: dirname(jsonlPath),
+    sessionId: basename(jsonlPath, ".jsonl"),
+    pollIntervalMs: 100,
+  });
+  const forwarder = createLaravelForwarder(srv.statusUrl, "val-token", {
+    retryDelaysMs: opts.retryDelaysMs,
+  });
+  watcher.onEntry(forwarder.consume);
+
+  await watcher.start();
+  // Let the watcher complete at least one full poll pass over the file.
+  await new Promise((r) => setTimeout(r, 500));
+  watcher.stop();
+  await forwarder.flush();
 }
 
 describe.skipIf(!hasApiKey())(
@@ -296,18 +337,15 @@ describe.skipIf(!hasApiKey())(
       async () => {
         const job = await spawnAndAwait({
           prompt: "Reply with exactly one word: DONE",
-          statusUrl: server.statusUrl,
-          apiToken: "val-token",
-          eventForwarding: {
-            statusUrl: server.statusUrl,
-            apiToken: "val-token",
-          },
         });
 
         const watcherPath = job.watcher?.getSessionFilePath();
         expect(watcherPath).toBeTruthy();
 
-        await waitForFlush();
+        // Replay the completed JSONL through a fresh watcher+forwarder —
+        // avoids the launcher's in-flight watcher stopping before Claude's
+        // final JSONL writes.
+        await replayJsonlToServer(watcherPath!, server);
 
         const capturedSum = sumUsageFromCapturedBatches(server.postedBatches());
         const jsonlSum = sumUsageFromJsonl(watcherPath!);
@@ -317,7 +355,6 @@ describe.skipIf(!hasApiKey())(
         expect(capturedSum.cacheRead).toBe(jsonlSum.cacheRead);
         expect(capturedSum.cacheWrite).toBe(jsonlSum.cacheWrite);
 
-        // Sanity: we actually had usage to compare.
         expect(jsonlSum.input + jsonlSum.output).toBeGreaterThan(0);
       },
       180_000,
@@ -330,18 +367,12 @@ describe.skipIf(!hasApiKey())(
           prompt:
             'Use the Agent tool with subagent_type "Explore" and description "find README" ' +
             'to run a one-shot exploration, then reply DONE in one word.',
-          statusUrl: server.statusUrl,
-          apiToken: "val-token",
-          eventForwarding: {
-            statusUrl: server.statusUrl,
-            apiToken: "val-token",
-          },
         });
 
         const watcherPath = job.watcher?.getSessionFilePath();
         expect(watcherPath).toBeTruthy();
 
-        await waitForFlush();
+        await replayJsonlToServer(watcherPath!, server);
 
         // Sub-agent JSONL lives in <parent-dir>/<session-uuid>/subagents/*.jsonl
         const parentDir = watcherPath!.replace(/\.jsonl$/, "");
@@ -355,7 +386,6 @@ describe.skipIf(!hasApiKey())(
             }
           }
         }
-        // Parent + sub-agent must both exist for this scenario to be meaningful.
         expect(subagentFiles.length).toBeGreaterThan(0);
 
         const jsonlSum = emptySum();
@@ -371,7 +401,6 @@ describe.skipIf(!hasApiKey())(
         expect(capturedSum.cacheRead).toBe(jsonlSum.cacheRead);
         expect(capturedSum.cacheWrite).toBe(jsonlSum.cacheWrite);
 
-        // Sanity: the captured batches include events tagged with subagent lineage.
         const tagged = server.postedBatches().flatMap((b) =>
           b.events.filter(
             (e) =>
@@ -392,28 +421,31 @@ describe.skipIf(!hasApiKey())(
 
         const job = await spawnAndAwait({
           prompt: "Reply with exactly one word: RETRIED",
-          statusUrl: server.statusUrl,
-          apiToken: "val-token",
-          eventForwarding: {
-            statusUrl: server.statusUrl,
-            apiToken: "val-token",
-          },
         });
 
         const watcherPath = job.watcher?.getSessionFilePath();
         expect(watcherPath).toBeTruthy();
 
-        // Forwarder will retry with exponential backoff — give it room to land.
-        await waitForFlush(20_000);
+        // Small retry delays keep the test fast while still exercising the
+        // exponential-backoff path.
+        await replayJsonlToServer(watcherPath!, server, {
+          retryDelaysMs: [50, 100, 200, 400],
+        });
 
         const capturedSum = sumUsageFromCapturedBatches(server.postedBatches());
         const jsonlSum = sumUsageFromJsonl(watcherPath!);
 
-        // After retries, everything should have landed. Note captured is
-        // computed over successful+failed POST bodies; we check the POSTs
-        // that Claude actually tried to send match JSONL totals.
+        // The server failed the first 3 POST attempts — totalPostAttempts
+        // must exceed accepted batches, proving retries actually happened.
+        expect(server.totalPostAttempts()).toBeGreaterThan(
+          server.postedBatches().length,
+        );
+
+        // Accepted bodies (2xx-only) must sum to the JSONL ground truth.
         expect(capturedSum.input).toBe(jsonlSum.input);
         expect(capturedSum.output).toBe(jsonlSum.output);
+        expect(capturedSum.cacheRead).toBe(jsonlSum.cacheRead);
+        expect(capturedSum.cacheWrite).toBe(jsonlSum.cacheWrite);
         expect(jsonlSum.input + jsonlSum.output).toBeGreaterThan(0);
       },
       240_000,
