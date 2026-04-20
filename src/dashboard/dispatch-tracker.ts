@@ -81,6 +81,11 @@ export interface StartDispatchTrackingArgs {
   danxbotCommit: string | null;
   watcher: SessionLogWatcher;
   startedAtMs?: number;
+  /**
+   * Parent dispatch ID when this row is the child of a `POST /api/resume`.
+   * Persisted in `parent_job_id` so the resume chain is queryable.
+   */
+  parentJobId?: string | null;
 }
 
 /**
@@ -100,6 +105,7 @@ export async function startDispatchTracking(
     triggerMetadata: args.trigger.metadata,
     sessionUuid: null,
     jsonlPath: null,
+    parentJobId: args.parentJobId ?? null,
     status: "running",
     startedAt,
     completedAt: null,

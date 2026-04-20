@@ -9,6 +9,7 @@ Workers bind only on `danxbot-net` and are not reachable from the public interne
 | Route | Method | Notes |
 |-------|--------|-------|
 | `/api/launch` | POST | Body `{repo, task, api_token, ...}` — forwarded verbatim to `http://danxbot-worker-<repo>:<workerPort>/api/launch` |
+| `/api/resume` | POST | Body `{repo, job_id, task, api_token, ...}` — resumes the Claude session from a prior dispatch. See "Resume" below |
 | `/api/status/:jobId?repo=<name>` | GET | Forwards to the named worker's status endpoint |
 | `/api/cancel/:jobId?repo=<name>` | POST | Forwards to the named worker's cancel endpoint |
 | `/api/stop/:jobId?repo=<name>` | POST | Forwards to the named worker's stop endpoint (external stop, not the MCP callback — the in-agent `danxbot_complete` tool still targets `localhost:<workerPort>` inside the worker) |
@@ -39,6 +40,41 @@ Every dispatch spawns EXACTLY ONE claude process. Runtime mode is auto-detected 
 | Cancellation | SIGTERM `job.process` | SIGTERM tracked PID (claude inside terminal) |
 
 ONE fork, ONE process, ONE JSONL, ONE watcher. If you find yourself adding a second spawn, second observer, or duplicate monitoring path — STOP. That is the thing this doc exists to prevent.
+
+## Resume
+
+`POST /api/resume` spawns a fresh dispatch that inherits a prior job's Claude session via `claude --resume <sessionId>`. Claude loads the previous session's history and appends new turns to the SAME JSONL file. The new dispatch gets its OWN fresh dispatchId and its OWN dispatch tag — so `SessionLogWatcher` can still disambiguate this spawn's slice of the shared JSONL.
+
+**Caller contract:** body shape is `{repo, job_id, task, api_token, ...}` where `job_id` is the PARENT dispatch id the caller got back from `/api/launch`. Callers never see or pass the Claude session UUID — the worker resolves it internally by scanning `~/.claude/projects/<cwd>/` for the parent's dispatch tag. Works across worker restarts because the tag lives in the JSONL file, not in `activeJobs` memory.
+
+Response shape: `{job_id: <new dispatch id>, parent_job_id, status: "launched"}`. Subsequent `/api/status`, `/api/cancel`, `/api/stop` calls use the NEW `job_id`.
+
+**Errors:**
+- `400` — missing `job_id`, `task`, or `api_token`
+- `404` — parent session file not found in the repo's `~/.claude/projects/` dir (stale parent, different repo, never existed)
+- `503` — dispatch API disabled for this repo (same gate as `/api/launch`)
+
+**Worker flow:**
+
+1. Validate body → `isFeatureEnabled(repo, "dispatchApi")` → 503 if off
+2. `resolveParentSessionId(repoName, parentJobId)` scans the repo's session dir for the parent's dispatch tag via `findSessionFileByDispatchId`; returns the basename of the JSONL (= Claude session UUID) or null
+3. If null → `404`, no spawn
+4. New dispatchId, fresh MCP settings, fresh dispatch tag, `--resume <sessionId>` added to claude flags via `buildClaudeInvocation`
+5. `runDispatchSlot` — the SAME shared helper as `/api/launch`. Stall recovery, heartbeat, activeJobs registration, TTL eviction all identical
+6. Dispatch row carries `parent_job_id` so the chain is queryable
+7. Response: `{job_id, parent_job_id, status: "launched"}`
+
+**Invariants preserved:**
+
+- Single fork — resume is its own dispatch; there is still exactly one claude process per dispatchId
+- JSONL-only monitoring — the resume child's entries land in the same JSONL but are found by its fresh dispatch tag
+- `danxbot_complete` — same MCP tool, same `/api/stop/:jobId` callback
+- Host/docker parity — `--resume` flows through `buildClaudeInvocation`, which both runtime paths share
+
+**Do not:**
+- Return the Claude session UUID to callers — it's an internal detail. Callers resume by the dispatch `job_id`.
+- Write a second mapping table (jobId → sessionId) — the dispatch tag already provides a deterministic, disk-durable mapping.
+- Skip the fresh dispatch tag on resume — that breaks watcher disambiguation inside the shared JSONL.
 
 ## SessionLogWatcher Is The Only Monitoring Mechanism
 

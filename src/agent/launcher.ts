@@ -246,6 +246,20 @@ export interface SpawnAgentOptions {
    * in the dispatch history (e.g., Slack router-only responses).
    */
   dispatch?: DispatchTriggerMetadata;
+  /**
+   * Claude session UUID to resume via `claude --resume`. Passed through to
+   * `buildClaudeInvocation`. When set, claude loads the prior session's
+   * history; a fresh dispatch tag is still prepended so SessionLogWatcher can
+   * disambiguate this spawn's slice inside the shared JSONL.
+   */
+  resumeSessionId?: string;
+  /**
+   * Parent dispatch ID when this spawn is a resume child. Forwarded to the
+   * dispatches row so the resume chain is queryable. Requires `dispatch` to
+   * also be set — a non-tracked run with a parent would silently drop the
+   * lineage, so spawnAgent throws when parentJobId is set without dispatch.
+   */
+  parentJobId?: string | null;
 }
 
 export interface McpSettingsOptions {
@@ -411,6 +425,14 @@ export function buildCompletionInstruction(): string {
 export async function spawnAgent(
   options: SpawnAgentOptions,
 ): Promise<AgentJob> {
+  // Fail loud: a parent lineage without a dispatch row is a silent drop of
+  // resume context — callers that want resume MUST opt into tracking.
+  if (options.parentJobId && !options.dispatch) {
+    throw new Error(
+      "spawnAgent: parentJobId requires dispatch metadata — a resume without a dispatch row silently drops lineage",
+    );
+  }
+
   const jobId = options.jobId ?? randomUUID();
 
   const job: AgentJob = {
@@ -439,6 +461,7 @@ export async function spawnAgent(
     title: options.title,
     mcpConfigPath: options.mcpConfigPath,
     agents: options.agents,
+    resumeSessionId: options.resumeSessionId,
   });
   const { flags, firstMessage, promptDir } = invocation;
 
@@ -512,6 +535,7 @@ export async function spawnAgent(
       danxbotCommit: getDanxbotCommit(),
       watcher,
       startedAtMs: job.startedAt.getTime(),
+      parentJobId: options.parentJobId ?? null,
     });
     job.dispatchTracker = dispatchTracker;
   }

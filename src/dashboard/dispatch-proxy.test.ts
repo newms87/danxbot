@@ -5,6 +5,7 @@ import {
   checkAuth,
   workerHost,
   handleLaunchProxy,
+  handleResumeProxy,
   handleJobProxy,
   loadDispatchToken,
 } from "./dispatch-proxy.js";
@@ -313,6 +314,121 @@ describe("handleLaunchProxy", () => {
       resolveHost: testHostResolver,
     });
     expect((res as unknown as { _getStatusCode: () => number })._getStatusCode()).toBe(502);
+  });
+});
+
+describe("handleResumeProxy", () => {
+  // Resume follows the same auth + body.repo → worker pattern as launch.
+  // These tests verify the upstream PATH differs (/api/resume, not /api/launch)
+  // and that the resume-specific body fields (job_id) pass through verbatim —
+  // the worker is the one that validates them, the proxy is pass-through.
+  let worker: FakeWorker;
+  let repos: RepoConfig[];
+
+  beforeAll(async () => {
+    worker = await startFakeWorker();
+    repos = [
+      {
+        name: "platform",
+        url: "",
+        localPath: "/tmp/platform",
+        workerPort: worker.port,
+      },
+    ];
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => worker.server.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    worker.requests.length = 0;
+    worker.respondWith(200, {
+      job_id: "child-456",
+      parent_job_id: "parent-123",
+      status: "launched",
+    });
+  });
+
+  async function runResume(
+    body: Record<string, unknown>,
+    opts: { token?: string; auth?: string } = {},
+  ): Promise<{ status: number; body: string }> {
+    const { req, res } = createMockReqRes("POST", "/api/resume");
+    if (opts.auth) req.headers.authorization = opts.auth;
+    const bodyJson = JSON.stringify(body);
+    process.nextTick(() => {
+      req.emit("data", Buffer.from(bodyJson));
+      req.emit("end");
+    });
+    await handleResumeProxy(req, res, {
+      token: opts.token ?? "tok",
+      repos,
+      resolveHost: testHostResolver,
+    });
+    return {
+      status: (res as unknown as { _getStatusCode: () => number })._getStatusCode(),
+      body: (res as unknown as { _getBody: () => string })._getBody(),
+    };
+  }
+
+  it("rejects unauthenticated requests", async () => {
+    const { status } = await runResume({
+      repo: "platform",
+      job_id: "parent-123",
+      task: "continue",
+      api_token: "t",
+    });
+    expect(status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("forwards POST to /api/resume on the matching worker with body intact", async () => {
+    const { status, body } = await runResume(
+      {
+        repo: "platform",
+        job_id: "parent-123",
+        task: "continue from step 3",
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toEqual({
+      job_id: "child-456",
+      parent_job_id: "parent-123",
+      status: "launched",
+    });
+
+    expect(worker.requests).toHaveLength(1);
+    expect(worker.requests[0].method).toBe("POST");
+    // Critical: path is /api/resume, NOT /api/launch. Proves the refactor
+    // didn't accidentally re-route resume through launch.
+    expect(worker.requests[0].url).toBe("/api/resume");
+    expect(JSON.parse(worker.requests[0].body)).toEqual({
+      repo: "platform",
+      job_id: "parent-123",
+      task: "continue from step 3",
+      api_token: "t",
+    });
+  });
+
+  it("propagates upstream 404 verbatim when the parent session is missing", async () => {
+    worker.respondWith(404, {
+      error: `Parent job "missing" session file not found — cannot resume`,
+    });
+    const { status, body } = await runResume(
+      {
+        repo: "platform",
+        job_id: "missing",
+        task: "continue",
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(404);
+    expect(JSON.parse(body).error).toMatch(/session file not found/);
   });
 });
 

@@ -88,6 +88,24 @@ vi.mock("../poller/constants.js", () => ({
   getReposBase: () => "/test/repos",
 }));
 
+const mockFindSessionFileByDispatchId = vi.fn();
+vi.mock("../agent/session-log-watcher.js", () => ({
+  deriveSessionDir: (cwd: string) => `/fake/projects${cwd.replace(/\//g, "-")}`,
+  findSessionFileByDispatchId: (...args: unknown[]) =>
+    mockFindSessionFileByDispatchId(...args),
+}));
+
+// Default: the fake session dir appears to exist as a directory so
+// resolveParentSessionId proceeds to findSessionFileByDispatchId. Tests that
+// want to exercise the "no-session-dir" → 500 branch override this per-test.
+// Typed as accepting the path so TS doesn't complain about the forwarded arg.
+const mockStat = vi.fn(
+  async (_path: unknown) => ({ isDirectory: () => true }),
+);
+vi.mock("node:fs/promises", () => ({
+  stat: (path: unknown) => mockStat(path),
+}));
+
 const { mockDispatchConfig } = vi.hoisted(() => {
   const mockDispatchConfig = {
     isHost: false,
@@ -118,6 +136,7 @@ vi.mock("../settings-file.js", () => ({
 
 import {
   handleLaunch,
+  handleResume,
   handleCancel,
   handleStatus,
   handleStop,
@@ -232,6 +251,32 @@ describe("handleLaunch", () => {
         openTerminal: false, // config.isHost is false in test
       }),
     );
+  });
+
+  it("does NOT forward resume fields (resumeSessionId, parentJobId) on a fresh launch", async () => {
+    // Regression guard: the `expect.objectContaining` in the "passes correct
+    // options" test tolerates extra keys. A refactor that accidentally leaks
+    // resumeSessionId/parentJobId into handleLaunch would silently turn every
+    // fresh launch into a resume. This test locks their absence explicitly.
+    const mockJob = {
+      id: "job-no-leak",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Fresh launch",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    expect(spawnOpts.resumeSessionId).toBeUndefined();
+    expect(spawnOpts.parentJobId).toBeUndefined();
   });
 
   it("passes title to spawnAgent when provided", async () => {
@@ -536,6 +581,254 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
 
     expect(res._getStatusCode()).toBe(200);
     expect(mockSpawnAgent).toHaveBeenCalled();
+  });
+});
+
+describe("handleResume", () => {
+  beforeEach(() => {
+    mockFindSessionFileByDispatchId.mockReset();
+  });
+
+  it("returns 400 when job_id is missing", async () => {
+    const req = createMockReqWithBody("POST", {
+      task: "Keep going",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing required fields: job_id, task, api_token",
+    });
+    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when job_id is only whitespace (rejects non-empty but blank strings)", async () => {
+    // Truthiness lets `"   "` through; typeof+trim checks don't. Regression
+    // guard for code-quality.md "fail loud" — a whitespace id would have
+    // scanned every JSONL for a bogus tag and returned a misleading 404.
+    const req = createMockReqWithBody("POST", {
+      job_id: "   ",
+      task: "Keep going",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when task is only whitespace", async () => {
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "   ",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("returns 400 when job_id is not a string (type coercion safety)", async () => {
+    const req = createMockReqWithBody("POST", {
+      job_id: 12345,
+      task: "Keep going",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when task is missing", async () => {
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("returns 400 when api_token is missing", async () => {
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Keep going",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("returns 400 when repo name does not match", async () => {
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Keep going",
+      api_token: "tok-123",
+      repo: "wrong-repo",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: `This worker manages "test-repo", not "wrong-repo"`,
+    });
+  });
+
+  it("returns 404 when parent session file is not found on disk (tag not in any jsonl)", async () => {
+    mockFindSessionFileByDispatchId.mockResolvedValue(null);
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "missing-parent",
+      task: "Keep going",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(404);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: `Parent job "missing-parent" session file not found — cannot resume`,
+    });
+    // spawnAgent must not be called when parent resolution fails.
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 (not 404) when the Claude session directory does not exist at all", async () => {
+    // Distinct failure mode from "parent tag not found": the directory
+    // `~/.claude/projects/<cwd>/` itself is missing, meaning claude has never
+    // run in this repo's cwd. That's infrastructure, not a stale parent id —
+    // mapping it to 404 hides a real bug (wrong cwd, missing deploy, etc).
+    const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    mockStat.mockRejectedValueOnce(enoent);
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Keep going",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(500);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /Claude session directory .* does not exist/,
+    );
+    // Must NOT fall through to the tag scan — the dir doesn't exist.
+    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 with the documented body when dispatchApi is disabled", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "dispatchApi",
+    );
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Keep going",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: `Dispatch API is disabled for repo ${MOCK_REPO.name}`,
+    });
+    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 200 with {job_id, parent_job_id, status} and passes resumeSessionId + parentJobId to spawnAgent", async () => {
+    // Session file lives at /some/dir/<sessionId>.jsonl — extracted via basename.
+    mockFindSessionFileByDispatchId.mockResolvedValue(
+      "/home/claude/.claude/projects/-repos-test/566c1776-4c8b-43ef-b1c2-76f262450c4a.jsonl",
+    );
+    const mockJob = {
+      id: "resume-child",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "aea75840-6e0d-4977-84b3-ac3d07853cdf",
+      task: "Now do step 2",
+      api_token: "tok-abc",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body).toMatchObject({
+      parent_job_id: "aea75840-6e0d-4977-84b3-ac3d07853cdf",
+      status: "launched",
+    });
+    // The new dispatch id is a fresh UUID — distinct from the parent.
+    expect(body.job_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+    expect(body.job_id).not.toBe("aea75840-6e0d-4977-84b3-ac3d07853cdf");
+
+    // resumeSessionId is the basename of the parent's JSONL, passed through
+    // to spawnAgent so buildClaudeInvocation can emit `--resume <sessionId>`.
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resumeSessionId: "566c1776-4c8b-43ef-b1c2-76f262450c4a",
+        parentJobId: "aea75840-6e0d-4977-84b3-ac3d07853cdf",
+        repoName: "test-repo",
+        prompt: expect.stringContaining("Now do step 2"),
+      }),
+    );
+  });
+
+  it("passes max_runtime_ms and title to spawnAgent when provided", async () => {
+    mockFindSessionFileByDispatchId.mockResolvedValue(
+      "/home/claude/.claude/projects/-repos-test/parent-session.jsonl",
+    );
+    mockSpawnAgent.mockResolvedValue({
+      id: "resume-child",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    });
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Continue",
+      api_token: "tok-abc",
+      max_runtime_ms: 300_000,
+      title: "AgentDispatch #AGD-360",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(mockSpawnAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxRuntimeMs: 300_000,
+        title: "AgentDispatch #AGD-360",
+      }),
+    );
   });
 });
 

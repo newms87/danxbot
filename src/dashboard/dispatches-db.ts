@@ -32,6 +32,7 @@ const COLUMN_MAP: Readonly<Record<keyof Dispatch, string>> = {
   triggerMetadata: "trigger_metadata",
   sessionUuid: "session_uuid",
   jsonlPath: "jsonl_path",
+  parentJobId: "parent_job_id",
   status: "status",
   startedAt: "started_at",
   completedAt: "completed_at",
@@ -69,6 +70,7 @@ export interface DispatchRow {
   trigger_metadata: string | object;
   session_uuid: string | null;
   jsonl_path: string | null;
+  parent_job_id: string | null;
   status: string;
   started_at: number;
   completed_at: number | null;
@@ -106,6 +108,7 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     triggerMetadata: parseMetadata(row.trigger_metadata),
     sessionUuid: row.session_uuid,
     jsonlPath: row.jsonl_path,
+    parentJobId: row.parent_job_id,
     status: row.status as DispatchStatus,
     startedAt: Number(row.started_at),
     completedAt: row.completed_at === null ? null : Number(row.completed_at),

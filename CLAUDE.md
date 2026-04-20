@@ -61,6 +61,23 @@ curl -sS -X POST https://danxbot.sageus.ai/api/launch \
 
 Status/cancel/stop are proxied too: `GET /api/status/:jobId?repo=<name>`, `POST /api/cancel/:jobId?repo=<name>`, `POST /api/stop/:jobId?repo=<name>`. All require `Authorization: Bearer <token>`. See `.claude/rules/agent-dispatch.md#external-entry` for the full route table.
 
+To continue a prior dispatch (claude `--resume`), `POST /api/resume` with the parent dispatch's `job_id`:
+
+```bash
+curl -sS -X POST https://danxbot.sageus.ai/api/resume \
+  -H "Authorization: Bearer $DANXBOT_DISPATCH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "gpt-manager",
+    "job_id": "aea75840-6e0d-4977-84b3-ac3d07853cdf",
+    "task": "Now do step 2 with the context from before.",
+    "api_token": "'"$DANXBOT_DISPATCH_TOKEN"'"
+  }'
+# → { "job_id": "<new dispatch id>", "parent_job_id": "aea75840-…", "status": "launched" }
+```
+
+The caller tracks the NEW `job_id` for subsequent status/cancel/stop calls. The worker resolves the parent's Claude session UUID on disk via the dispatch tag, so resume works across worker restarts. See `.claude/rules/agent-dispatch.md#resume` for full semantics.
+
 The token is generated per-deployment on first `make deploy` (logged once, persisted to SSM). Retrieve later via `aws ssm get-parameter --name /<ssm_prefix>/shared/DANXBOT_DISPATCH_TOKEN`. `make deploy-smoke TARGET=<target>` performs a real end-to-end launch using this token.
 
 ## Per-Repo Settings & Feature Toggles

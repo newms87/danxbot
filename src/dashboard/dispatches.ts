@@ -58,6 +58,12 @@ export interface Dispatch {
     | ApiTriggerMetadata;
   sessionUuid: string | null;
   jsonlPath: string | null;
+  /**
+   * Dispatch ID of the parent job when this dispatch was spawned via
+   * `POST /api/resume`. Null for regular launches. Lets callers walk the
+   * resume chain without scanning JSONL files.
+   */
+  parentJobId: string | null;
   status: DispatchStatus;
   startedAt: number;
   completedAt: number | null;

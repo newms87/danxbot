@@ -42,6 +42,13 @@ export interface BuildClaudeInvocationOptions {
   mcpConfigPath?: string;
   /** Optional agents map forwarded via `--agents <json>`. Empty object = no flag. */
   agents?: Record<string, Record<string, unknown>>;
+  /**
+   * Claude session UUID to resume via `--resume <id>`. When set, claude loads
+   * the prior session's history and appends new turns to the same JSONL file.
+   * The dispatch tag is still prepended to the firstMessage, so SessionLogWatcher
+   * finds this spawn's slice of the shared JSONL by scanning for the new tag.
+   */
+  resumeSessionId?: string;
 }
 
 export interface ClaudeInvocation {
@@ -70,6 +77,10 @@ export function buildClaudeInvocation(
     tracking;
 
   const flags: string[] = ["--dangerously-skip-permissions", "--verbose"];
+
+  if (options.resumeSessionId) {
+    flags.push("--resume", options.resumeSessionId);
+  }
 
   if (options.mcpConfigPath) {
     flags.push("--mcp-config", options.mcpConfigPath);

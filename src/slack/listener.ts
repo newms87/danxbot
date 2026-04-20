@@ -199,6 +199,7 @@ function createSlackDispatch(
     triggerMetadata: meta,
     sessionUuid: null,
     jsonlPath: null,
+    parentJobId: null,
     status: "running",
     startedAt: Date.now(),
     completedAt: null,

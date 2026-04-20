@@ -6,6 +6,7 @@
  * Laravel app) a way to launch agents, the dashboard exposes:
  *
  *   POST /api/launch           — forwards to worker POST /api/launch
+ *   POST /api/resume           — forwards to worker POST /api/resume
  *   GET  /api/status/:jobId    — forwards to worker GET  /api/status/:jobId
  *   POST /api/cancel/:jobId    — forwards to worker POST /api/cancel/:jobId
  *   POST /api/stop/:jobId      — forwards to worker POST /api/stop/:jobId
@@ -248,12 +249,16 @@ async function authAndResolveRepo(
 }
 
 /**
- * POST /api/launch proxy — auth + body.repo → forward to worker.
+ * Auth + body.repo → forward to the matching worker at `upstreamPath`.
+ * Shared between `/api/launch` and `/api/resume` — both routes have the same
+ * request shape (repo is carried in the JSON body, not the URL) and the same
+ * auth contract.
  */
-export async function handleLaunchProxy(
+async function forwardRepoBodyToWorker(
   req: IncomingMessage,
   res: ServerResponse,
   deps: DispatchProxyDeps,
+  upstreamPath: string,
 ): Promise<void> {
   // Auth first — don't parse the body for unauthenticated callers.
   const authCheck = checkAuth(req, deps.token);
@@ -280,11 +285,35 @@ export async function handleLaunchProxy(
     {
       host: deps.resolveHost(repo.name),
       port: repo.workerPort as number,
-      path: "/api/launch",
+      path: upstreamPath,
       method: "POST",
     },
     JSON.stringify(body),
   );
+}
+
+/**
+ * POST /api/launch proxy — auth + body.repo → forward to worker.
+ */
+export async function handleLaunchProxy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  await forwardRepoBodyToWorker(req, res, deps, "/api/launch");
+}
+
+/**
+ * POST /api/resume proxy — auth + body.repo → forward to worker. The worker's
+ * resume handler validates `body.job_id` (parent dispatch id) and resolves
+ * the Claude session file on disk; the proxy is a pure pass-through.
+ */
+export async function handleResumeProxy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  await forwardRepoBodyToWorker(req, res, deps, "/api/resume");
 }
 
 /**

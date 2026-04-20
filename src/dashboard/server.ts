@@ -14,6 +14,7 @@ import {
 } from "./dispatches-routes.js";
 import {
   handleLaunchProxy,
+  handleResumeProxy,
   handleJobProxy,
   loadDispatchToken,
   workerHost,
@@ -163,6 +164,11 @@ async function route(
   // External dispatch proxy — auth-gated, forwards to workers.
   if (method === "POST" && url.pathname === "/api/launch") {
     await handleLaunchProxy(req, res, dispatchDeps);
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/resume") {
+    await handleResumeProxy(req, res, dispatchDeps);
     return true;
   }
 

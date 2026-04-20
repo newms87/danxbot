@@ -4,6 +4,7 @@
  * Runs in worker mode (DANXBOT_REPO_NAME set). Routes:
  * - GET /health — liveness check (DB + Slack)
  * - POST /api/launch — dispatch an agent for this repo
+ * - POST /api/resume — resume a prior dispatch's Claude session (--resume)
  * - GET /api/status/:jobId — check job status
  * - POST /api/cancel/:jobId — cancel a running job
  * - POST /api/stop/:jobId — agent self-stop (lifecycle tool callback)
@@ -13,7 +14,13 @@ import { createServer } from "http";
 import { createLogger } from "../logger.js";
 import { json } from "../http/helpers.js";
 import { getHealthStatus } from "./health.js";
-import { handleLaunch, handleCancel, handleStatus, handleStop } from "./dispatch.js";
+import {
+  handleLaunch,
+  handleResume,
+  handleCancel,
+  handleStatus,
+  handleStop,
+} from "./dispatch.js";
 import type { RepoContext } from "../types.js";
 
 const log = createLogger("worker-server");
@@ -36,6 +43,11 @@ export async function startWorkerServer(repo: RepoContext): Promise<void> {
 
     if (method === "POST" && url.pathname === "/api/launch") {
       await handleLaunch(req, res, repo);
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/resume") {
+      await handleResume(req, res, repo);
       return;
     }
 

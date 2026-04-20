@@ -115,6 +115,31 @@ describe("startDispatchTracking", () => {
     expect(inserted.startedAt).toBe(1000);
     expect(inserted.sessionUuid).toBeNull();
     expect(inserted.jsonlPath).toBeNull();
+    // Launch (no resume) → parentJobId defaults to null
+    expect(inserted.parentJobId).toBeNull();
+  });
+
+  it("persists parentJobId on the inserted row when the dispatch is a resume child", async () => {
+    // The chain handleResume → spawnAgent → startDispatchTracking → insertDispatch
+    // must preserve the parent lineage end-to-end. This is the single point of
+    // durability — without a positive assertion here, a refactor that drops the
+    // field silently passes all other tests.
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "resume-child-id",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: "abc123",
+      watcher: watcher as never,
+      startedAtMs: 2000,
+      parentJobId: "parent-aea75840",
+    });
+
+    expect(mockInsertDispatch).toHaveBeenCalledOnce();
+    expect(mockInsertDispatch.mock.calls[0][0].parentJobId).toBe(
+      "parent-aea75840",
+    );
   });
 
   it("updates sessionUuid + jsonlPath on first entry after watcher attaches", async () => {

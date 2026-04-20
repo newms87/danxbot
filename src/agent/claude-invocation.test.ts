@@ -117,6 +117,48 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(inv.flags).not.toContain("--agents");
   });
 
+  it("flags include --resume <sessionId> when resumeSessionId is provided", () => {
+    const inv = build({ resumeSessionId: "566c1776-4c8b-43ef-b1c2-76f262450c4a" });
+    const idx = inv.flags.indexOf("--resume");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(inv.flags[idx + 1]).toBe("566c1776-4c8b-43ef-b1c2-76f262450c4a");
+  });
+
+  it("flags omit --resume when resumeSessionId is undefined", () => {
+    const inv = build({ resumeSessionId: undefined });
+    expect(inv.flags).not.toContain("--resume");
+  });
+
+  it("--resume comes before --mcp-config and --agents in the flag list", () => {
+    // claude accepts flags in any order today, but locking resume at the front
+    // of the optional-flag block makes the CLI invocation easier to read in
+    // strace output and catches anyone reordering the emitter in a way that
+    // could interact with future claude CLI parsers.
+    const inv = build({
+      resumeSessionId: "abc-def",
+      mcpConfigPath: "/tmp/mcp/settings.json",
+      agents: { Validator: { description: "v", prompt: "p" } },
+    });
+    const resumeIdx = inv.flags.indexOf("--resume");
+    const mcpIdx = inv.flags.indexOf("--mcp-config");
+    const agentsIdx = inv.flags.indexOf("--agents");
+    expect(resumeIdx).toBeGreaterThanOrEqual(0);
+    expect(resumeIdx).toBeLessThan(mcpIdx);
+    expect(resumeIdx).toBeLessThan(agentsIdx);
+  });
+
+  it("firstMessage still carries the fresh dispatch tag on a resume so the watcher can disambiguate slices of the shared JSONL", () => {
+    // The parent session and the resume child share the SAME Claude session
+    // UUID (claude appends to the same JSONL on --resume). The dispatch tag
+    // is the only way SessionLogWatcher can find the resume child's entries
+    // inside that shared file.
+    const inv = build({
+      jobId: "resume-child-id",
+      resumeSessionId: "parent-session-uuid",
+    });
+    expect(inv.firstMessage.startsWith(`${DISPATCH_TAG_PREFIX}resume-child-id -->`)).toBe(true);
+  });
+
   it("docker and host consumers receive IDENTICAL firstMessage and flags for the same input", () => {
     // Invariant: the same SpawnAgent inputs produce the same claude-facing
     // invocation. Runtime differs only in the spawn envelope (direct vs bash).

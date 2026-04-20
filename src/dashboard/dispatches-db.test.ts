@@ -83,6 +83,7 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     triggerMetadata: makeApiMeta(),
     sessionUuid: null,
     jsonlPath: null,
+    parentJobId: null,
     status: "running",
     startedAt: 1_700_000_000_000,
     completedAt: null,
@@ -123,6 +124,44 @@ describe("dispatchToInsertParams", () => {
     expect(params[0]).toBe("xyz");
     expect(params[1]).toBe("danxbot");
   });
+
+  it("serializes parentJobId at its declared position in ORDERED_KEYS", () => {
+    // COLUMN_MAP iteration order is load-bearing — the INSERT statement binds
+    // placeholders positionally. If someone re-orders the map, the parent id
+    // silently lands in the wrong column. This test locks the contract: the
+    // value that went in as `parentJobId` must come out of the params array
+    // next to the corresponding column name.
+    const d = makeDispatch({ parentJobId: "parent-aea75840" });
+    const params = dispatchToInsertParams(d);
+
+    // Reconstruct the column→value mapping from INSERT_SQL order so a re-ordering
+    // of COLUMN_MAP is caught here rather than surfacing as data corruption.
+    // We look up the column index the same way dispatches-db.ts does: iterate
+    // ORDERED_KEYS in declaration order and find parentJobId.
+    const orderedKeys: Array<keyof typeof d> = [
+      "id", "repoName", "trigger", "triggerMetadata",
+      "sessionUuid", "jsonlPath", "parentJobId", "status",
+      "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
+      "toolCallCount", "subagentCount", "nudgeCount", "danxbotCommit",
+    ];
+    const idx = orderedKeys.indexOf("parentJobId");
+    expect(params[idx]).toBe("parent-aea75840");
+  });
+
+  it("sends null when parentJobId is null (launch path, not a resume)", () => {
+    const d = makeDispatch({ parentJobId: null });
+    const params = dispatchToInsertParams(d);
+    const orderedKeys: Array<keyof typeof d> = [
+      "id", "repoName", "trigger", "triggerMetadata",
+      "sessionUuid", "jsonlPath", "parentJobId", "status",
+      "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
+      "toolCallCount", "subagentCount", "nudgeCount", "danxbotCommit",
+    ];
+    const idx = orderedKeys.indexOf("parentJobId");
+    expect(params[idx]).toBeNull();
+  });
 });
 
 describe("rowToDispatch", () => {
@@ -134,6 +173,7 @@ describe("rowToDispatch", () => {
       trigger_metadata: JSON.stringify(makeTrelloMeta()),
       session_uuid: "sess-uuid",
       jsonl_path: "/tmp/session.jsonl",
+      parent_job_id: "parent-aea75840",
       status: "completed",
       started_at: 1000,
       completed_at: 2000,
@@ -157,6 +197,8 @@ describe("rowToDispatch", () => {
     expect(d.status).toBe("completed");
     expect(d.tokensTotal).toBe(100);
     expect(d.runtimeMode).toBe("host");
+    // Resume lineage round-trips through rowToDispatch.
+    expect(d.parentJobId).toBe("parent-aea75840");
   });
 
   it("handles pre-parsed JSON object in trigger_metadata (mysql2 auto-parse)", () => {
@@ -168,6 +210,7 @@ describe("rowToDispatch", () => {
       trigger_metadata: meta, // pre-parsed
       session_uuid: null,
       jsonl_path: null,
+      parent_job_id: null,
       status: "running",
       started_at: 1,
       completed_at: null,
