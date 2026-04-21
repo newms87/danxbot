@@ -1,9 +1,16 @@
-# Danxbot shared infrastructure — MySQL + Dashboard.
+# Danxbot shared infrastructure — MySQL + Dashboard (API) + Dashboard Dev (Vite HMR).
 # Per-repo workers live in <repo>/.danxbot/config/compose.yml.
 #
 # Usage:
-#   make launch-infra       # start this
+#   docker compose up -d              # start API + dashboard-dev (HMR) + mysql
 #   make launch-worker REPO=platform  # start a worker
+#
+# Dev surfaces:
+#   http://localhost:5173 → Vite dev server with HMR (edit .vue, see instantly)
+#   http://localhost:5555 → API + the baked dashboard/dist/ bundle (prod-style)
+#
+# Prod uses deploy/templates/docker-compose.prod.yml which has NO dashboard-dev
+# service — prod serves the baked bundle directly from the same API container.
 
 services:
   dashboard:
@@ -19,9 +26,16 @@ services:
       - ./package.json:/danxbot/app/package.json
       # Dashboard built assets (mount for dev rebuilds)
       - ./dashboard:/danxbot/app/dashboard
-      # Shared Claude Code JSONL — must match workers' mount target so
-      # the dashboard can read each worker's session logs.
+      # Shared Claude Code JSONL — host and docker workers both write to
+      # CLAUDE_PROJECTS_DIR (default ./claude-projects). Two mounts so the
+      # dashboard can resolve both flavors of stored absolute path:
+      #   docker-worker stored path: /home/danxbot/.claude/projects/...
+      #   host-worker  stored path:  $CLAUDE_PROJECTS_DIR/...
+      # When CLAUDE_PROJECTS_DIR points at the host's real ~/.claude/projects,
+      # host-mode dispatch JSONLs are readable inside the container at the
+      # exact same absolute path the watcher recorded.
       - ${CLAUDE_PROJECTS_DIR:-./claude-projects}:/home/danxbot/.claude/projects
+      - ${CLAUDE_PROJECTS_DIR:-./claude-projects}:${CLAUDE_PROJECTS_DIR:-/danxbot/host-claude-projects}:ro
       # The Agents tab reads each connected repo's .danxbot/settings.json
       # via repo.localPath, which resolves to /danxbot/app/repos/<name>.
       # ./repos/<name> is a symlink on the host pointing at the actual
@@ -48,6 +62,38 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Dev-only Vite HMR server. Same image as the API so node_modules are
+  # already present — we just override the command. Proxies /api + /health
+  # to the `dashboard` service over danxbot-net. Not present in prod compose
+  # (prod serves the baked bundle from the API container's dashboard/dist/).
+  dashboard-dev:
+    build: .
+    restart: unless-stopped
+    stop_grace_period: 5s
+    command: ["npm", "run", "dashboard:dev"]
+    working_dir: /danxbot/app
+    environment:
+      VITE_API_TARGET: http://dashboard:${DASHBOARD_PORT:-5555}
+    ports:
+      # Override DASHBOARD_DEV_PORT in .env if another project is already on 5173
+      # (e.g. gpt-manager's dev server). Vite inside the container always binds 5173.
+      - "${DASHBOARD_DEV_PORT:-5173}:5173"
+    volumes:
+      # Source mounts — Vite watches these and HMR propagates edits instantly.
+      - ./dashboard:/danxbot/app/dashboard
+      - ./src:/danxbot/app/src
+      - ./package.json:/danxbot/app/package.json
+    networks:
+      - danxbot-net
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
 
   playwright:
     build: ./playwright-screenshot

@@ -11,22 +11,33 @@ The dashboard is a Vite + Vue 3 + Tailwind CSS 4 SPA in the `dashboard/` directo
 
 ## Development Workflow
 
-1. `docker compose up -d` — starts backend API on port 5555
-2. `npm run dashboard:dev` — starts Vite dev server on port 5173 with HMR
-3. Open `http://localhost:5173` — full HMR development, API proxied to 5555
-4. Edit `.vue` files — changes appear instantly via HMR (no refresh needed)
+ONE command brings the whole dev stack up:
 
-## When to Restart
+1. `docker compose up -d` — starts MySQL + `dashboard` (API on 5555) + `dashboard-dev` (Vite HMR on 5173)
+2. Open `http://localhost:5173` — HMR-enabled dashboard; `/api/*` + `/health` proxied to the `dashboard` service at `http://dashboard:5555` via the `danxbot-net` network.
+3. Edit `.vue` files — changes appear instantly via HMR (no refresh needed)
 
-- **Vue/CSS changes**: Handled by Vite HMR — no restart needed
-- **Backend TypeScript** (`src/dashboard/*.ts`): `docker compose up -d --force-recreate`
-- **New dependencies**: `docker compose up -d --build`
+**Do not** run `npm run dashboard:dev` on the host — the `dashboard-dev` container does it inside compose so the dev stack is reproducible (`VITE_API_TARGET` points at the API service by DNS, not localhost). Running it on the host is redundant and causes port-5173 conflicts.
 
-## Production Build
+## Two Dev URLs
 
-Port 5555 serves the last production build from `dashboard/dist/`. The Docker build step runs `cd dashboard && npm run build` automatically.
+| URL | Serves | When to use |
+|-----|--------|-------------|
+| `http://localhost:5173` | Vite dev server — live source with HMR | Active development; changes appear immediately |
+| `http://localhost:5555` | API + the baked `dashboard/dist/` bundle | Verify production-style behavior; API testing |
 
-To rebuild manually: `npm run dashboard:build`
+5173 proxies API calls to 5555, so the Agents tab, dispatches list, auth — everything functions at :5173 identically to :5555.
+
+## When to Restart / Rebuild
+
+- **Vue/CSS changes**: Handled by Vite HMR — no restart
+- **Backend TypeScript** (`src/dashboard/*.ts`): `docker compose up -d --force-recreate dashboard` (HMR doesn't cover the API)
+- **New dependencies** (package.json): `docker compose up -d --build`
+- **Dashboard dist/ for :5555**: `npm run dashboard:build` from repo root (or `docker compose up -d --build dashboard` to rebake the image)
+
+## Production
+
+Prod uses `deploy/templates/docker-compose.prod.yml`, which has NO `dashboard-dev` service. Prod serves the SPA directly from the API container via the baked `dashboard/dist/` bundle. Dev-only Vite is never shipped to prod.
 
 ## Testing
 

@@ -50,6 +50,20 @@ for dir in /danxbot/threads /danxbot/data /danxbot/logs; do
     [ -d "$dir" ] && chown -R danxbot:danxbot "$dir"
 done
 
-# Start the Danxbot service as the non-root danxbot user
-echo "Starting Danxbot..."
-cd "$APP_DIR" && exec su -s /bin/bash danxbot -c "npm start"
+# Start the Danxbot service as the non-root danxbot user.
+# Docker compose's `command:` override comes in as positional args — honor them
+# so services like `dashboard-dev` can run `npm run dashboard:dev` instead of
+# the default API process. No args → default to the API (`npm start`).
+cd "$APP_DIR"
+if [ $# -gt 0 ]; then
+    # Quote each arg so values with spaces survive the bash -c round-trip.
+    quoted=""
+    for arg in "$@"; do
+        quoted+=" $(printf '%q' "$arg")"
+    done
+    echo "Starting container command:$quoted"
+    exec su -s /bin/bash danxbot -c "exec$quoted"
+else
+    echo "Starting Danxbot..."
+    exec su -s /bin/bash danxbot -c "npm start"
+fi
