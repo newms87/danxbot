@@ -566,6 +566,38 @@ describe("handleLaunch", () => {
 
     expect(res._getStatusCode()).toBe(200);
   });
+
+  it("returns 500 with the probe error and cleans up MCP settings when the MCP probe rejects", async () => {
+    // This is the card's central contract: a broken MCP config must surface
+    // as a named, descriptive 500, and the temp settings dir must not leak.
+    // spawnAgent's probe-failure path throws, and runDispatchSlot's try/catch
+    // must call cleanupMcpSettings on the settings dir before rethrowing
+    // to the outer handleLaunch catch.
+    const probeError = new Error(
+      'MCP server probe failed for [schema] before launching agent:\n  - MCP server "schema" exited with code 1 before responding: SCHEMA_DEFINITION_ID is required',
+    );
+    mockSpawnAgent.mockRejectedValueOnce(probeError);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do work",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(500);
+    const body = JSON.parse(res._getBody());
+    expect(body.error).toContain("schema");
+    expect(body.error).toContain("SCHEMA_DEFINITION_ID is required");
+
+    // The temp settings dir must be cleaned up — leaking here would create
+    // a long tail of orphaned /tmp/danxbot-mcp-* directories on every
+    // broken dispatch.
+    expect(mockCleanupMcpSettings).toHaveBeenCalledWith(
+      "/tmp/danxbot-mcp-test",
+    );
+  });
 });
 
 describe("handleLaunch — dispatchApi feature toggle", () => {
@@ -859,6 +891,37 @@ describe("handleResume", () => {
         maxRuntimeMs: 300_000,
         title: "AgentDispatch #AGD-360",
       }),
+    );
+  });
+
+  it("returns 500 with the probe error and cleans up MCP settings when the MCP probe rejects", async () => {
+    // Mirror of the handleLaunch probe-failure contract: resume paths must
+    // surface the probe error as a descriptive 500 and release the temp
+    // settings dir before the outer catch returns.
+    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
+      "/fake/projects/parent-session-uuid.jsonl",
+    );
+
+    const probeError = new Error(
+      'MCP server probe failed for [schema] before launching agent:\n  - MCP server "schema" timeout: no response to initialize',
+    );
+    mockSpawnAgent.mockRejectedValueOnce(probeError);
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-job",
+      task: "Continue",
+      api_token: "tok-abc",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(500);
+    const body = JSON.parse(res._getBody());
+    expect(body.error).toContain("schema");
+    expect(body.error).toContain("timeout");
+    expect(mockCleanupMcpSettings).toHaveBeenCalledWith(
+      "/tmp/danxbot-mcp-test",
     );
   });
 });

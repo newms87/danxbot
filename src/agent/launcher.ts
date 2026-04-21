@@ -31,6 +31,8 @@ import {
 } from "./process-utils.js";
 import { SessionLogWatcher } from "./session-log-watcher.js";
 import { buildClaudeInvocation } from "./claude-invocation.js";
+import { probeAllMcpServers } from "./mcp-server-probe.js";
+import type { McpServerConfig } from "./mcp-settings-shape.js";
 import {
   createLaravelForwarder,
   deriveQueuePath,
@@ -366,7 +368,7 @@ export function stopHeartbeat(job: AgentJob): void {
 export function buildMcpSettings(options: McpSettingsOptions): string {
   const tempDir = mkdtempSync(join(tmpdir(), "danxbot-mcp-"));
 
-  const mcpServers: Record<string, unknown> = {
+  const mcpServers: Record<string, McpServerConfig> = {
     schema: {
       command: "npx",
       args: ["@thehammer/schema-mcp-server"],
@@ -471,6 +473,37 @@ export async function spawnAgent(
   log.info(`[Job ${jobId}] Prompt: ${options.prompt.substring(0, 200)}`);
 
   logPromptToDisk(config.logsDir, jobId, options.prompt, options.agents);
+
+  // Pre-launch MCP probe — verify every configured MCP server can actually
+  // start and respond to an `initialize` request before claude is spawned.
+  // Claude launches happily even when an MCP server crashes on startup; the
+  // tools silently disappear from the agent's tool set and the agent either
+  // burns credits before noticing or never notices at all. Failing loudly
+  // here preserves the "fallbacks are bugs" invariant (see
+  // `.claude/rules/code-quality.md`).
+  //
+  // Cleanup on failure: we must rmSync `promptDir` ourselves because the
+  // internal `cleanup()` closure (defined below, which would normally handle
+  // it) isn't in scope yet. The outer `runDispatchSlot` catch handles
+  // `cleanupMcpSettings(settingsDir)` but does NOT know about `promptDir`.
+  // Skipping this would leak a /tmp/danxbot-prompt-* dir on every broken
+  // dispatch.
+  if (options.mcpConfigPath) {
+    const probeResult = await probeAllMcpServers(
+      options.mcpConfigPath,
+      config.dispatch.mcpProbeTimeoutMs,
+    );
+    if (!probeResult.ok) {
+      rmSync(promptDir, { recursive: true, force: true });
+      const names = probeResult.failures.map((f) => f.serverName).join(", ");
+      const details = probeResult.failures
+        .map((f) => `  - ${f.message}`)
+        .join("\n");
+      throw new Error(
+        `MCP server probe failed for [${names}] before launching agent:\n${details}`,
+      );
+    }
+  }
 
   // --- SessionLogWatcher: the single monitoring mechanism, runs identically in
   //     both docker and host modes (see `.claude/rules/agent-dispatch.md`). ---

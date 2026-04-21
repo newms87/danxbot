@@ -7,6 +7,9 @@ vi.stubGlobal("fetch", mockFetch);
 vi.mock("../config.js", () => ({
   config: {
     logsDir: "/tmp/danxbot-test-logs",
+    dispatch: {
+      mcpProbeTimeoutMs: 3_000,
+    },
   },
 }));
 
@@ -45,6 +48,16 @@ vi.mock("./session-log-watcher.js", () => ({
     stop = vi.fn();
   },
   DISPATCH_TAG_PREFIX: "<!-- danxbot-dispatch:",
+}));
+
+// Mock the MCP probe so launcher tests never spawn real subprocesses. Default
+// to a healthy response; individual tests override via mockResolvedValueOnce.
+const mockProbeAllMcpServers = vi.fn().mockResolvedValue({
+  ok: true,
+  failures: [],
+});
+vi.mock("./mcp-server-probe.js", () => ({
+  probeAllMcpServers: (...args: unknown[]) => mockProbeAllMcpServers(...args),
 }));
 
 vi.mock("./laravel-forwarder.js", () => ({
@@ -170,12 +183,15 @@ describe("spawnAgent", () => {
     const promptArg = args[args.indexOf("-p") + 1];
     expect(promptArg).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
     expect(promptArg).toContain("Read ");
-    expect(promptArg).toContain("/prompt.md and execute the task described in it.");
+    expect(promptArg).toContain(
+      "/prompt.md and execute the task described in it.",
+    );
     expect(promptArg).not.toContain("/danx-next");
 
     // Original prompt body lands in prompt.md — writeFileSync receives it.
     const promptWrite = mockWriteFileSync.mock.calls.find(
-      (c: unknown[]) => typeof c[0] === "string" && (c[0] as string).endsWith("prompt.md"),
+      (c: unknown[]) =>
+        typeof c[0] === "string" && (c[0] as string).endsWith("prompt.md"),
     );
     expect(promptWrite).toBeDefined();
     expect(promptWrite![1]).toBe("/danx-next");
@@ -1154,6 +1170,145 @@ describe("spawnAgent", () => {
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
+
+  describe("MCP server probe", () => {
+    it("does NOT probe when mcpConfigPath is absent", async () => {
+      const child = createMockChildProcess();
+      mockSpawn.mockReturnValue(child);
+
+      await spawnAgent({
+        prompt: "/danx-next",
+        repoName: "platform",
+        timeoutMs: 300_000,
+      });
+
+      expect(mockProbeAllMcpServers).not.toHaveBeenCalled();
+    });
+
+    it("probes the provided mcpConfigPath before spawning claude", async () => {
+      const child = createMockChildProcess();
+      mockSpawn.mockReturnValue(child);
+
+      await spawnAgent({
+        prompt: "/danx-next",
+        repoName: "platform",
+        timeoutMs: 300_000,
+        mcpConfigPath: "/tmp/mcp/settings.json",
+      });
+
+      expect(mockProbeAllMcpServers).toHaveBeenCalledWith(
+        "/tmp/mcp/settings.json",
+        expect.any(Number),
+      );
+      // Claude must run only after probe resolves healthy.
+      expect(mockSpawn).toHaveBeenCalled();
+      const probeOrder = mockProbeAllMcpServers.mock.invocationCallOrder[0];
+      const spawnOrder = mockSpawn.mock.invocationCallOrder[0];
+      expect(probeOrder).toBeLessThan(spawnOrder);
+    });
+
+    it("throws a named error listing the broken server when the probe fails", async () => {
+      mockProbeAllMcpServers.mockResolvedValueOnce({
+        ok: false,
+        failures: [
+          {
+            ok: false,
+            serverName: "schema",
+            reason: "exit",
+            exitCode: 1,
+            stderr: "SCHEMA_DEFINITION_ID is required\n",
+            message:
+              'MCP server "schema" exited with code 1 before responding: SCHEMA_DEFINITION_ID is required',
+          },
+        ],
+      });
+
+      await expect(
+        spawnAgent({
+          prompt: "/danx-next",
+          repoName: "platform",
+          timeoutMs: 300_000,
+          mcpConfigPath: "/tmp/mcp/settings.json",
+        }),
+      ).rejects.toThrow(/schema/);
+
+      // Claude must NOT have been spawned when the probe fails — the whole
+      // point is to fail before burning any API credits.
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it("error message includes every broken server when multiple fail", async () => {
+      mockProbeAllMcpServers.mockResolvedValueOnce({
+        ok: false,
+        failures: [
+          {
+            ok: false,
+            serverName: "schema",
+            reason: "exit",
+            exitCode: 1,
+            stderr: "",
+            message: 'MCP server "schema" exited with code 1 before responding',
+          },
+          {
+            ok: false,
+            serverName: "danxbot",
+            reason: "timeout",
+            stderr: "",
+            message: 'MCP server "danxbot" timeout: no response to initialize',
+          },
+        ],
+      });
+
+      await expect(
+        spawnAgent({
+          prompt: "/danx-next",
+          repoName: "platform",
+          timeoutMs: 300_000,
+          mcpConfigPath: "/tmp/mcp/settings.json",
+        }),
+      ).rejects.toThrow(/schema.*danxbot|danxbot.*schema/s);
+    });
+
+    it("cleans up the prompt temp directory on probe failure (no leak)", async () => {
+      // The outer runDispatchSlot catch handles `settingsDir` but has no
+      // awareness of `promptDir` — spawnAgent's internal cleanup closure
+      // isn't reachable yet. The probe-failure path must rmSync promptDir
+      // itself. This test guards against a regression where that inline
+      // cleanup gets accidentally deleted.
+      mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
+
+      mockProbeAllMcpServers.mockResolvedValueOnce({
+        ok: false,
+        failures: [
+          {
+            ok: false,
+            serverName: "schema",
+            reason: "exit",
+            exitCode: 1,
+            stderr: "SCHEMA_DEFINITION_ID is required",
+            message:
+              'MCP server "schema" exited with code 1 before responding: SCHEMA_DEFINITION_ID is required',
+          },
+        ],
+      });
+
+      await expect(
+        spawnAgent({
+          prompt: "/danx-next",
+          repoName: "platform",
+          timeoutMs: 300_000,
+          mcpConfigPath: "/tmp/mcp/settings.json",
+        }),
+      ).rejects.toThrow();
+
+      const promptCleanup = mockRmSync.mock.calls.find(
+        (c: unknown[]) =>
+          typeof c[0] === "string" &&
+          (c[0] as string) === "/tmp/danxbot-prompt-test",
+      );
+      expect(promptCleanup).toBeDefined();
+    });
+  });
 });
 
 // Route mkdtempSync by prefix so the three callers (mcp settings, prompt dir,
@@ -1430,7 +1585,9 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     const firstMessage = buildCall[1].firstMessage as string;
     expect(firstMessage).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
     expect(firstMessage).toContain("Read ");
-    expect(firstMessage).toContain("/prompt.md and execute the task described in it.");
+    expect(firstMessage).toContain(
+      "/prompt.md and execute the task described in it.",
+    );
     // Original prompt body stays in the file — it is NEVER inlined on the
     // command line in either runtime.
     expect(firstMessage).not.toContain("do the work");

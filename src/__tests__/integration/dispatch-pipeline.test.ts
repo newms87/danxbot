@@ -9,8 +9,23 @@
  * because they depend on env vars or OS-specific features — they are not logic under test.
  */
 
-import { describe, it, expect, vi, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
-import { mkdirSync, writeFileSync, chmodSync, rmSync, existsSync } from "node:fs";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from "vitest";
+import {
+  mkdirSync,
+  writeFileSync,
+  chmodSync,
+  rmSync,
+  existsSync,
+} from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,6 +51,7 @@ const { testState, mockConfig } = vi.hoisted(() => {
       dispatch: {
         defaultApiUrl: "http://localhost:80",
         agentTimeoutMs: 30_000,
+        mcpProbeTimeoutMs: 3_000,
       },
       logsDir: "",
     },
@@ -70,6 +86,17 @@ vi.mock("../../terminal.js", () => ({
 // valid as-is — bypassing the docker rewrite keeps status callbacks reachable.
 vi.mock("../../worker/url-normalizer.js", () => ({
   normalizeCallbackUrl: (url: string | undefined) => url,
+}));
+
+// MCP probe mock: the HTTP dispatch path calls buildMcpSettings, which
+// generates a real settings.json pointing at the schema + danxbot MCP
+// servers. The probe would try to run them for real, but these tests use
+// `fake-claude` via PATH override and never intended to exercise real
+// server binaries. The probe is covered by its own dedicated unit tests in
+// `src/agent/mcp-server-probe.test.ts`; stubbing it here keeps this suite
+// focused on the HTTP + JSONL pipeline it was written to verify.
+vi.mock("../../agent/mcp-server-probe.js", () => ({
+  probeAllMcpServers: vi.fn().mockResolvedValue({ ok: true, failures: [] }),
 }));
 
 // --- Real imports (the pipeline under test) ---
@@ -108,8 +135,11 @@ function createClaudeWrapper(binDir: string): void {
 function isStatusPut(status: string) {
   return (r: { method: string; body: string }) => {
     if (r.method !== "PUT") return false;
-    try { return JSON.parse(r.body).status === status; }
-    catch { return false; }
+    try {
+      return JSON.parse(r.body).status === status;
+    } catch {
+      return false;
+    }
   };
 }
 
@@ -122,10 +152,12 @@ function waitForRequests(
   return new Promise((resolve, reject) => {
     const deadline = setTimeout(() => {
       const matching = captureServer.getRequests().filter(predicate);
-      reject(new Error(
-        `Expected ${count} matching requests, got ${matching.length} within ${timeoutMs}ms. ` +
-        `Total requests: ${captureServer.getRequests().length}`,
-      ));
+      reject(
+        new Error(
+          `Expected ${count} matching requests, got ${matching.length} within ${timeoutMs}ms. ` +
+            `Total requests: ${captureServer.getRequests().length}`,
+        ),
+      );
     }, timeoutMs);
 
     const poll = setInterval(() => {
@@ -272,7 +304,10 @@ describe("Integration: dispatch pipeline", () => {
     it("forwards watcher entries as batched POSTs to events endpoint", async () => {
       await runToCompletion();
 
-      await waitForRequests((r) => r.method === "POST" && r.path === "/events", 1);
+      await waitForRequests(
+        (r) => r.method === "POST" && r.path === "/events",
+        1,
+      );
 
       const posts = captureServer.getRequestsByPath("/events");
       expect(posts.length).toBeGreaterThanOrEqual(1);
@@ -285,8 +320,12 @@ describe("Integration: dispatch pipeline", () => {
       }
 
       const allEvents = posts.flatMap((p) => JSON.parse(p.body).events);
-      const eventTypes = new Set(allEvents.map((e: { type: string }) => e.type));
-      expect(eventTypes.has("agent_event") || eventTypes.has("tool_call")).toBe(true);
+      const eventTypes = new Set(
+        allEvents.map((e: { type: string }) => e.type),
+      );
+      expect(eventTypes.has("agent_event") || eventTypes.has("tool_call")).toBe(
+        true,
+      );
     }, 20_000);
   });
 
@@ -310,7 +349,9 @@ describe("Integration: dispatch pipeline", () => {
 
       await waitForRequests(isStatusPut("failed"), 1);
 
-      const failedPut = captureServer.getRequestsByMethod("PUT").find(isStatusPut("failed"));
+      const failedPut = captureServer
+        .getRequestsByMethod("PUT")
+        .find(isStatusPut("failed"));
       expect(failedPut).toBeDefined();
     }, 20_000);
   });
@@ -341,7 +382,9 @@ describe("Integration: dispatch pipeline", () => {
 
       await waitForRequests(isStatusPut("canceled"), 1);
 
-      const cancelPut = captureServer.getRequestsByMethod("PUT").find(isStatusPut("canceled"));
+      const cancelPut = captureServer
+        .getRequestsByMethod("PUT")
+        .find(isStatusPut("canceled"));
       expect(cancelPut).toBeDefined();
     }, 20_000);
   });
@@ -356,7 +399,10 @@ describe("Integration: dispatch pipeline", () => {
     it("flushes forwarder on completion", async () => {
       await runToCompletion();
 
-      await waitForRequests((r) => r.method === "POST" && r.path === "/events", 1);
+      await waitForRequests(
+        (r) => r.method === "POST" && r.path === "/events",
+        1,
+      );
 
       const eventPosts = captureServer.getRequestsByPath("/events");
       expect(eventPosts.length).toBeGreaterThanOrEqual(1);
@@ -387,7 +433,9 @@ describe("Integration: dispatch pipeline", () => {
 
   describe("dispatch handleLaunch integration", () => {
     it("full HTTP path: POST /api/launch -> spawnAgent -> JSONL -> completion", async () => {
-      const { handleLaunch, clearJobCleanupIntervals } = await import("../../worker/dispatch.js");
+      const { handleLaunch, clearJobCleanupIntervals } = await import(
+        "../../worker/dispatch.js"
+      );
 
       const repo = makeRepoContext({ name: "test-repo", localPath: repoDir });
 
@@ -427,9 +475,8 @@ describe("Integration: dispatch pipeline", () => {
     }, 30_000);
 
     it("GET /api/status returns summed token usage from the dispatch JSONL", async () => {
-      const { handleLaunch, handleStatus, clearJobCleanupIntervals } = await import(
-        "../../worker/dispatch.js"
-      );
+      const { handleLaunch, handleStatus, clearJobCleanupIntervals } =
+        await import("../../worker/dispatch.js");
 
       const repo = makeRepoContext({ name: "test-repo", localPath: repoDir });
 

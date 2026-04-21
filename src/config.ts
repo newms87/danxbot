@@ -142,11 +142,22 @@ export const config = {
     defaultApiUrl: optional("DEFAULT_API_URL", "http://localhost:80"),
     agentTimeoutMs:
       parseInt(optional("DISPATCH_AGENT_TIMEOUT", "3600"), 10) * 1000,
+    // Per-server cap for the pre-launch MCP probe. All configured servers
+    // are probed in parallel, so total added dispatch latency is bounded by
+    // this value regardless of how many servers the agent uses. Set to the
+    // worst-case healthy-server startup time — 3s covers `npx` cold-cache
+    // resolution for the schema MCP server.
+    mcpProbeTimeoutMs: parseInt(
+      optional("DISPATCH_MCP_PROBE_TIMEOUT_MS", "3000"),
+      10,
+    ),
   },
   logLevel: optional("LOG_LEVEL", "info"),
   logsDir: optional("DANXBOT_LOGS_DIR", isHost ? "./logs" : "/danxbot/logs"),
   pollerIntervalMs: parseInt(optional("POLLER_INTERVAL_MS", "60000"), 10),
-  pollerBackoffScheduleMs: [60_000, 300_000, 900_000, 1_800_000] as readonly number[],
+  pollerBackoffScheduleMs: [
+    60_000, 300_000, 900_000, 1_800_000,
+  ] as readonly number[],
 } as const;
 
 interface NumericRule {

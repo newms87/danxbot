@@ -75,7 +75,10 @@ function validEnv(): Record<string, string> {
   };
 }
 
-async function importConfig(envOverrides: Record<string, string> = {}, omitKeys: string[] = []) {
+async function importConfig(
+  envOverrides: Record<string, string> = {},
+  omitKeys: string[] = [],
+) {
   const env = { ...validEnv(), ...envOverrides };
   for (const key of omitKeys) delete env[key];
   // Replace process.env entirely for isolation
@@ -112,11 +115,20 @@ beforeEach(() => {
 describe("repos config", () => {
   it("parses multiple repos from REPOS env var", async () => {
     const mod = await importConfig({
-      REPOS: "platform:https://github.com/Flytedesk/platform.git,docs:https://github.com/Flytedesk/docs.git",
+      REPOS:
+        "platform:https://github.com/Flytedesk/platform.git,docs:https://github.com/Flytedesk/docs.git",
     });
     expect(mod.repos).toEqual([
-      { name: "platform", url: "https://github.com/Flytedesk/platform.git", localPath: "/danxbot/repos/platform" },
-      { name: "docs", url: "https://github.com/Flytedesk/docs.git", localPath: "/danxbot/repos/docs" },
+      {
+        name: "platform",
+        url: "https://github.com/Flytedesk/platform.git",
+        localPath: "/danxbot/repos/platform",
+      },
+      {
+        name: "docs",
+        url: "https://github.com/Flytedesk/docs.git",
+        localPath: "/danxbot/repos/docs",
+      },
     ]);
   });
 
@@ -139,21 +151,21 @@ describe("repos config", () => {
   });
 
   it("throws on invalid format (missing colon)", async () => {
-    await expect(
-      importConfig({ REPOS: "platform" }),
-    ).rejects.toThrow('Invalid REPOS entry');
+    await expect(importConfig({ REPOS: "platform" })).rejects.toThrow(
+      "Invalid REPOS entry",
+    );
   });
 
   it("throws on empty name", async () => {
     await expect(
       importConfig({ REPOS: ":https://example.com" }),
-    ).rejects.toThrow('Invalid REPOS entry');
+    ).rejects.toThrow("Invalid REPOS entry");
   });
 
   it("throws on empty URL after colon", async () => {
-    await expect(
-      importConfig({ REPOS: "platform:" }),
-    ).rejects.toThrow('name and url must not be empty');
+    await expect(importConfig({ REPOS: "platform:" })).rejects.toThrow(
+      "name and url must not be empty",
+    );
   });
 
   it("trims whitespace from name and URL", async () => {
@@ -169,7 +181,8 @@ describe("repos config", () => {
 describe("REPO_WORKER_PORTS", () => {
   it("attaches workerPort to the matching repo", async () => {
     const mod = await importConfig({
-      REPOS: "platform:https://example.com/p.git,danxbot:https://example.com/d.git",
+      REPOS:
+        "platform:https://example.com/p.git,danxbot:https://example.com/d.git",
       REPO_WORKER_PORTS: "platform:5561,danxbot:5562",
     });
     expect(mod.repos).toEqual([
@@ -180,7 +193,8 @@ describe("REPO_WORKER_PORTS", () => {
 
   it("leaves workerPort undefined on repos with no port entry (worker mode populates separately)", async () => {
     const mod = await importConfig({
-      REPOS: "platform:https://example.com/p.git,danxbot:https://example.com/d.git",
+      REPOS:
+        "platform:https://example.com/p.git,danxbot:https://example.com/d.git",
       REPO_WORKER_PORTS: "platform:5561",
     });
     expect(mod.repos[0].workerPort).toBe(5561);
@@ -188,9 +202,12 @@ describe("REPO_WORKER_PORTS", () => {
   });
 
   it("returns empty mapping when REPO_WORKER_PORTS is unset", async () => {
-    const mod = await importConfig({
-      REPOS: "platform:https://example.com/p.git",
-    }, ["REPO_WORKER_PORTS"]);
+    const mod = await importConfig(
+      {
+        REPOS: "platform:https://example.com/p.git",
+      },
+      ["REPO_WORKER_PORTS"],
+    );
     expect(mod.repos[0].workerPort).toBeUndefined();
   });
 
@@ -252,7 +269,9 @@ describe("getRepoPath", () => {
     const mod = await importConfig({
       REPOS: "platform:https://github.com/Flytedesk/platform.git",
     });
-    expect(() => mod.getRepoPath("unknown")).toThrow('Repo "unknown" is not configured');
+    expect(() => mod.getRepoPath("unknown")).toThrow(
+      'Repo "unknown" is not configured',
+    );
   });
 });
 
@@ -277,7 +296,8 @@ describe("repoContexts", () => {
 
   it("loads only named repo in worker mode", async () => {
     const mod = await importRepoContext({
-      REPOS: "platform:https://github.com/Flytedesk/platform.git,danxbot:https://github.com/test/danxbot.git",
+      REPOS:
+        "platform:https://github.com/Flytedesk/platform.git,danxbot:https://github.com/test/danxbot.git",
       DANXBOT_REPO_NAME: "platform",
       DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
@@ -385,7 +405,9 @@ describe("getRepoContext", () => {
       DANXBOT_REPO_NAME: "platform",
       DANXBOT_WORKER_PORT: TEST_WORKER_PORT,
     });
-    expect(() => mod.getRepoContext("unknown")).toThrow('Repo "unknown" is not configured');
+    expect(() => mod.getRepoContext("unknown")).toThrow(
+      'Repo "unknown" is not configured',
+    );
   });
 });
 
@@ -406,7 +428,10 @@ describe("runtime detection", () => {
 
   it("ignores DANXBOT_RUNTIME env var — detection is filesystem-only", async () => {
     mockDockerenvExists = true;
-    const mod = await importConfig({ DANXBOT_RUNTIME: "host" } as Record<string, string>);
+    const mod = await importConfig({ DANXBOT_RUNTIME: "host" } as Record<
+      string,
+      string
+    >);
     expect(mod.config.isHost).toBe(false);
   });
 });
@@ -427,11 +452,15 @@ describe("required DB config", () => {
   });
 
   it("throws when DANXBOT_DB_USER is missing", async () => {
-    await expect(importConfig({}, ["DANXBOT_DB_USER"])).rejects.toThrow("DANXBOT_DB_USER");
+    await expect(importConfig({}, ["DANXBOT_DB_USER"])).rejects.toThrow(
+      "DANXBOT_DB_USER",
+    );
   });
 
   it("throws when DANXBOT_DB_PASSWORD is missing", async () => {
-    await expect(importConfig({}, ["DANXBOT_DB_PASSWORD"])).rejects.toThrow("DANXBOT_DB_PASSWORD");
+    await expect(importConfig({}, ["DANXBOT_DB_PASSWORD"])).rejects.toThrow(
+      "DANXBOT_DB_PASSWORD",
+    );
   });
 });
 
@@ -447,27 +476,27 @@ describe("validateConfig", () => {
   });
 
   it("throws for NaN values", async () => {
-    await expect(
-      importConfig({ MAX_TURNS: "abc" }),
-    ).rejects.toThrow("agent.maxTurns");
+    await expect(importConfig({ MAX_TURNS: "abc" })).rejects.toThrow(
+      "agent.maxTurns",
+    );
   });
 
   it("throws for negative values", async () => {
-    await expect(
-      importConfig({ MAX_BUDGET_USD: "-1" }),
-    ).rejects.toThrow("agent.maxBudgetUsd");
+    await expect(importConfig({ MAX_BUDGET_USD: "-1" })).rejects.toThrow(
+      "agent.maxBudgetUsd",
+    );
   });
 
   it("throws for zero maxBudgetUsd (exclusive minimum)", async () => {
-    await expect(
-      importConfig({ MAX_BUDGET_USD: "0" }),
-    ).rejects.toThrow("agent.maxBudgetUsd");
+    await expect(importConfig({ MAX_BUDGET_USD: "0" })).rejects.toThrow(
+      "agent.maxBudgetUsd",
+    );
   });
 
   it("throws for zero values on fields requiring > 0", async () => {
-    await expect(
-      importConfig({ MAX_TURNS: "0" }),
-    ).rejects.toThrow("agent.maxTurns");
+    await expect(importConfig({ MAX_TURNS: "0" })).rejects.toThrow(
+      "agent.maxTurns",
+    );
   });
 
   it("throws for negative maxRetries", async () => {
@@ -479,9 +508,9 @@ describe("validateConfig", () => {
   });
 
   it("throws for NaN maxRetries", async () => {
-    await expect(
-      importConfig({ AGENT_MAX_RETRIES: "abc" }),
-    ).rejects.toThrow("agent.maxRetries");
+    await expect(importConfig({ AGENT_MAX_RETRIES: "abc" })).rejects.toThrow(
+      "agent.maxRetries",
+    );
   });
 
   it("collects ALL invalid values into a single error", async () => {
@@ -491,5 +520,19 @@ describe("validateConfig", () => {
         MAX_BUDGET_USD: "-1",
       }),
     ).rejects.toThrow(/agent\.maxTurns.*agent\.maxBudgetUsd/s);
+  });
+});
+
+describe("dispatch config", () => {
+  it("defaults dispatch.mcpProbeTimeoutMs to 3000 when DISPATCH_MCP_PROBE_TIMEOUT_MS is unset", async () => {
+    const mod = await importConfig({}, ["DISPATCH_MCP_PROBE_TIMEOUT_MS"]);
+    expect(mod.config.dispatch.mcpProbeTimeoutMs).toBe(3_000);
+  });
+
+  it("reads DISPATCH_MCP_PROBE_TIMEOUT_MS as an integer override", async () => {
+    const mod = await importConfig({
+      DISPATCH_MCP_PROBE_TIMEOUT_MS: "7500",
+    });
+    expect(mod.config.dispatch.mcpProbeTimeoutMs).toBe(7_500);
   });
 });
