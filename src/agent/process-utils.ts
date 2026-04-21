@@ -134,7 +134,10 @@ export function setupProcessHandlers(
   options: ProcessHandlerOptions,
 ): void {
   child.on("close", (code: number | null) => {
-    options.cleanup?.();
+    // Order matters: transition job.status BEFORE invoking cleanup. Cleanup
+    // observers (DispatchTracker.finalize, Laravel forwarder flush) read
+    // job.status to decide what to write — running cleanup first leaves the
+    // dispatch row stuck at "running" forever. Mirrors job.stop()'s ordering.
     if (job.status === "running") {
       const isSuccess = code === 0;
       job.status = isSuccess ? "completed" : "failed";
@@ -147,19 +150,24 @@ export function setupProcessHandlers(
       if (!isSuccess && job.summary) {
         log.error(`[Job ${job.id}] ${job.summary}`);
       }
+      options.cleanup?.();
       options.onComplete?.(job);
+    } else {
+      options.cleanup?.();
     }
   });
 
   child.on("error", (err: Error) => {
-    options.cleanup?.();
     if (job.status === "running") {
       job.status = "failed";
       job.summary = `Process error: ${err.message}`;
       job.completedAt = new Date();
 
       log.error(`[Job ${job.id}] Process error:`, err);
+      options.cleanup?.();
       options.onComplete?.(job);
+    } else {
+      options.cleanup?.();
     }
   });
 }

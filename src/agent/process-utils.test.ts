@@ -336,4 +336,70 @@ describe("setupProcessHandlers", () => {
     child2.emit("error", new Error("boom"));
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
+
+  // Ordering invariant: cleanup observers (DispatchTracker.finalize, Laravel
+  // forwarder flush, etc.) read `job.status` to decide what to write. When
+  // they ran AFTER cleanup() but the close handler ran cleanup BEFORE the
+  // status transition, finalize was silently skipped — leaving the dispatch
+  // row stuck at "running" forever (production: 4fdbe75b on danxbot,
+  // bd7a3da6 on gpt-manager). Lock the order down so any future regression
+  // fails here, not in MySQL.
+  it("transitions job.status to 'completed' BEFORE invoking cleanup on clean exit", () => {
+    const job = makeJob();
+    const child = makeChild();
+    let observedStatusInsideCleanup: string | undefined;
+    const cleanup = vi.fn(() => {
+      observedStatusInsideCleanup = job.status;
+    });
+
+    setupProcessHandlers(child as never, job, () => "ok", () => "", { cleanup });
+    child.emit("close", 0);
+
+    expect(observedStatusInsideCleanup).toBe("completed");
+  });
+
+  it("transitions job.status to 'failed' BEFORE invoking cleanup on non-zero exit", () => {
+    const job = makeJob();
+    const child = makeChild();
+    let observedStatusInsideCleanup: string | undefined;
+    const cleanup = vi.fn(() => {
+      observedStatusInsideCleanup = job.status;
+    });
+
+    setupProcessHandlers(child as never, job, () => "", () => "boom", { cleanup });
+    child.emit("close", 1);
+
+    expect(observedStatusInsideCleanup).toBe("failed");
+  });
+
+  it("transitions job.status to 'failed' BEFORE invoking cleanup on spawn error", () => {
+    const job = makeJob();
+    const child = makeChild();
+    let observedStatusInsideCleanup: string | undefined;
+    const cleanup = vi.fn(() => {
+      observedStatusInsideCleanup = job.status;
+    });
+
+    setupProcessHandlers(child as never, job, () => "", () => "", { cleanup });
+    child.emit("error", new Error("spawn failed"));
+
+    expect(observedStatusInsideCleanup).toBe("failed");
+  });
+
+  it("populates job.summary and job.completedAt BEFORE invoking cleanup on clean exit", () => {
+    const job = makeJob();
+    const child = makeChild();
+    let observedSummary: string | undefined;
+    let observedCompletedAt: Date | undefined;
+    const cleanup = vi.fn(() => {
+      observedSummary = job.summary;
+      observedCompletedAt = job.completedAt;
+    });
+
+    setupProcessHandlers(child as never, job, () => "all done", () => "", { cleanup });
+    child.emit("close", 0);
+
+    expect(observedSummary).toBe("all done");
+    expect(observedCompletedAt).toBeInstanceOf(Date);
+  });
 });
