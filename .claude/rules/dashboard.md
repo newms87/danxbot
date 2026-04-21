@@ -13,20 +13,22 @@ The dashboard is a Vite + Vue 3 + Tailwind CSS 4 SPA in the `dashboard/` directo
 
 ONE command brings the whole dev stack up:
 
-1. `docker compose up -d` — starts MySQL + `dashboard` (API on 5555) + `dashboard-dev` (Vite HMR on 5173)
-2. Open `http://localhost:5173` — HMR-enabled dashboard; `/api/*` + `/health` proxied to the `dashboard` service at `http://dashboard:5555` via the `danxbot-net` network.
+1. `docker compose up -d` — starts MySQL + `dashboard` (API on 5555) + `dashboard-dev` (Vite HMR on **5566**)
+2. Open `http://localhost:5566` — HMR-enabled dashboard; `/api/*` + `/health` proxied to the `dashboard` service at `http://dashboard:5555` via the `danxbot-net` network.
 3. Edit `.vue` files — changes appear instantly via HMR (no refresh needed)
 
-**Do not** run `npm run dashboard:dev` on the host — the `dashboard-dev` container does it inside compose so the dev stack is reproducible (`VITE_API_TARGET` points at the API service by DNS, not localhost). Running it on the host is redundant and causes port-5173 conflicts.
+**Do not** run `npm run dashboard:dev` on the host — the `dashboard-dev` container does it inside compose so the dev stack is reproducible (`VITE_API_TARGET` points at the API service by DNS, not localhost). Running it on the host is redundant and would bind the same 5566.
+
+**Danxbot dev is permanently on 5566.** 5173 is Vite's default and collides with every other Vite-based project on the host (e.g. gpt-manager). 5566 is owned by danxbot and never moves. Do not change `DASHBOARD_DEV_PORT` in docs, scripts, or bookmarks.
 
 ## Two Dev URLs
 
 | URL | Serves | When to use |
 |-----|--------|-------------|
-| `http://localhost:5173` | Vite dev server — live source with HMR | Active development; changes appear immediately |
+| `http://localhost:5566` | Vite dev server — live source with HMR | Active development; changes appear immediately |
 | `http://localhost:5555` | API + the baked `dashboard/dist/` bundle | Verify production-style behavior; API testing |
 
-5173 proxies API calls to 5555, so the Agents tab, dispatches list, auth — everything functions at :5173 identically to :5555.
+5566 proxies API calls to 5555, so the Agents tab, dispatches list, auth — everything functions at :5566 identically to :5555.
 
 ## When to Restart / Rebuild
 

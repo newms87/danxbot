@@ -42,7 +42,7 @@ Edit files in `src/` on the host. Code changes are visible in the dashboard cont
 
 **Dashboard TypeScript changes:** `docker compose up -d --force-recreate`
 **Worker code changes:** `make build && make launch-worker REPO=platform`
-**Dashboard Vue/CSS changes:** `npm run dashboard:dev` for HMR on port 5173
+**Dashboard Vue/CSS changes:** HMR on port **5566** (served by the `dashboard-dev` compose service, started automatically by `docker compose up -d`)
 **New dependencies:** `make build`
 
 ## Container Paths

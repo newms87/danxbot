@@ -112,7 +112,7 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 
 - **Router** (`src/agent/router.ts`): Anthropic API call to Haiku for instant triage
 - **Agent** (`src/agent/agent.ts:runAgent`): Claude Code SDK `query()` for deep exploration — accepts `RepoContext` for cwd
-- **Dashboard** (`dashboard/`): Vite + Vue 3 + Tailwind CSS 4 SPA; API server on port 5555, Vite dev on 5173. Supports `?repo=` filtering and repo selector.
+- **Dashboard** (`dashboard/`): Vite + Vue 3 + Tailwind CSS 4 SPA; API server on port 5555, Vite HMR dev server on **5566** (started automatically by `docker compose up -d` as the `dashboard-dev` service). Supports `?repo=` filtering and repo selector.
 - **Slack listener** (`src/slack/listener.ts`): One `@slack/bolt` App per repo via `Map<string, ListenerState>`. Each repo with Slack gets independent state.
 - **Poller** (`src/poller/index.ts`): One poller per repo via `Map<string, RepoPollerState>`. Independent lock files (`.poller-running-<name>`).
 
@@ -138,7 +138,7 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 | `make logs REPO=platform` | Tail worker logs |
 | `make build` | Build the danxbot Docker image |
 | `npx tsc --noEmit` | Type-check only (host) |
-| `npm run dashboard:dev` | Vite dev server on 5173 (HMR) |
+| `docker compose up -d dashboard-dev` | Vite dev server on 5566 (HMR) — starts the container that runs `npm run dashboard:dev` internally |
 | `npm run dashboard:build` | Build dashboard for production |
 
 ## Tech Stack

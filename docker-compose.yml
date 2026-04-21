@@ -76,9 +76,10 @@ services:
     environment:
       VITE_API_TARGET: http://dashboard:${DASHBOARD_PORT:-5555}
     ports:
-      # Override DASHBOARD_DEV_PORT in .env if another project is already on 5173
-      # (e.g. gpt-manager's dev server). Vite inside the container always binds 5173.
-      - "${DASHBOARD_DEV_PORT:-5173}:5173"
+      # 5566 is the canonical danxbot dev-dashboard port — chosen so it never
+      # collides with Vite's default 5173 (other projects). Override only if
+      # 5566 itself is taken. Vite inside the container always binds 5173.
+      - "${DASHBOARD_DEV_PORT:-5566}:5173"
     volumes:
       # Source mounts — Vite watches these and HMR propagates edits instantly.
       - ./dashboard:/danxbot/app/dashboard
