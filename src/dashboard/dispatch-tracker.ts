@@ -10,6 +10,7 @@ import {
   type DispatchTriggerMetadata,
   type RuntimeMode,
 } from "./dispatches.js";
+import { eventBus } from "./event-bus.js";
 
 const log = createLogger("dispatch-tracker");
 
@@ -125,6 +126,9 @@ export async function startDispatchTracking(
 
   try {
     await insertDispatch(row);
+    // Notify SSE clients immediately so they see the new dispatch without
+    // waiting for the next DB change-detector poll cycle.
+    eventBus.publish({ topic: "dispatch:created", data: row });
   } catch (err) {
     // Dispatch insertion must not block the agent spawn — the agent still runs
     // even if the DB is temporarily unavailable. Log and continue; subsequent
@@ -179,11 +183,12 @@ export async function startDispatchTracking(
         fields.tokens.cacheWrite;
 
       try {
+        const completedAt = Date.now();
         await updateDispatch(args.jobId, {
           status,
           summary: fields.summary ?? null,
           error: fields.error ?? null,
-          completedAt: Date.now(),
+          completedAt,
           tokensIn: fields.tokens.tokensIn,
           tokensOut: fields.tokens.tokensOut,
           cacheRead: fields.tokens.cacheRead,
@@ -192,6 +197,19 @@ export async function startDispatchTracking(
           toolCallCount,
           subagentCount,
           nudgeCount: fields.nudgeCount ?? 0,
+        });
+        // Notify SSE clients immediately so they see the terminal state
+        // without waiting for the next DB change-detector poll cycle.
+        eventBus.publish({
+          topic: "dispatch:updated",
+          data: {
+            id: args.jobId,
+            status,
+            summary: fields.summary ?? null,
+            error: fields.error ?? null,
+            completedAt,
+            tokensTotal: total,
+          },
         });
       } catch (err) {
         log.error(`[Job ${args.jobId}] Failed to finalize dispatch`, err);

@@ -8,6 +8,11 @@ vi.mock("./dispatches-db.js", () => ({
   updateDispatch: (...args: unknown[]) => mockUpdateDispatch(...args),
 }));
 
+const mockPublish = vi.fn();
+vi.mock("./event-bus.js", () => ({
+  eventBus: { publish: (...args: unknown[]) => mockPublish(...args) },
+}));
+
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
@@ -349,5 +354,116 @@ describe("startDispatchTracking", () => {
         watcher: watcher as never,
       }),
     ).resolves.toBeDefined();
+  });
+});
+
+// ─── EventBus publishing ──────────────────────────────────────────────────────
+
+describe("startDispatchTracking — EventBus publishing", () => {
+  it("publishes dispatch:created with the full dispatch row on successful insert", async () => {
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "job-ev1",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: "abc",
+      watcher: watcher as never,
+      startedAtMs: 1000,
+    });
+
+    expect(mockPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ topic: "dispatch:created", data: expect.objectContaining({ id: "job-ev1", status: "running" }) }),
+    );
+  });
+
+  it("does NOT publish dispatch:created when insertDispatch throws", async () => {
+    mockInsertDispatch.mockRejectedValueOnce(new Error("db down"));
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "job-ev2",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    expect(mockPublish).not.toHaveBeenCalledWith(
+      expect.objectContaining({ topic: "dispatch:created" }),
+    );
+  });
+
+  it("publishes dispatch:updated on finalize with correct payload fields", async () => {
+    const watcher = makeMockWatcher();
+    const tracker = await startDispatchTracking({
+      jobId: "job-ev3",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+    mockPublish.mockClear();
+
+    await tracker.finalize("completed", {
+      summary: "all done",
+      tokens: { tokensIn: 10, tokensOut: 5, cacheRead: 2, cacheWrite: 1 },
+    });
+
+    const call = mockPublish.mock.calls[0][0] as { topic: string; data: Record<string, unknown> };
+    expect(call.topic).toBe("dispatch:updated");
+    expect(call.data.id).toBe("job-ev3");
+    expect(call.data.status).toBe("completed");
+    expect(call.data.summary).toBe("all done");
+    expect(call.data.error).toBeNull();
+    expect(call.data.tokensTotal).toBe(18); // 10+5+2+1
+    expect(call.data.completedAt).toBeTypeOf("number");
+  });
+
+  it("does NOT publish dispatch:updated when updateDispatch throws on finalize", async () => {
+    mockUpdateDispatch.mockRejectedValueOnce(new Error("db down"));
+    const watcher = makeMockWatcher();
+    const tracker = await startDispatchTracking({
+      jobId: "job-ev4",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+    mockPublish.mockClear();
+
+    await tracker.finalize("completed", {
+      summary: "done",
+      tokens: noTokens,
+    });
+
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  it("publishes error field and null summary on failed finalize", async () => {
+    const watcher = makeMockWatcher();
+    const tracker = await startDispatchTracking({
+      jobId: "job-ev5",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+    mockPublish.mockClear();
+
+    await tracker.finalize("failed", {
+      error: "Agent timed out",
+      tokens: noTokens,
+    });
+
+    const call = mockPublish.mock.calls[0][0] as { topic: string; data: Record<string, unknown> };
+    expect(call.topic).toBe("dispatch:updated");
+    expect(call.data.id).toBe("job-ev5");
+    expect(call.data.status).toBe("failed");
+    expect(call.data.error).toBe("Agent timed out");
+    expect(call.data.summary).toBeNull();
   });
 });
