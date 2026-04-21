@@ -360,6 +360,34 @@ export function stopHeartbeat(job: AgentJob): void {
 }
 
 /**
+ * Fire-and-forget terminal notification: PUT the external dispatcher (if
+ * configured) then invoke the caller's onComplete. Used by every sync-context
+ * terminal transition (inactivity timer, max-runtime timer, host onExit).
+ *
+ * The await-variants (job.stop, cancelJob, spawnHostMode spawn-error catch)
+ * compose this pattern inline because they need await for other reasons
+ * (5s grace wait, error propagation via rethrow). The docker close-handler
+ * wrapper has its own shape because it coerces status via exit-code mapping
+ * inside setupProcessHandlers. See the follow-up Action Items card
+ * `[Danxbot] Extract finalizeTerminalState helper` for the broader unification.
+ */
+function notifyTerminalStatus(
+  job: AgentJob,
+  options: {
+    statusUrl?: string;
+    apiToken?: string;
+    onComplete?: (j: AgentJob) => void;
+  },
+  status: string,
+  summary?: string,
+): void {
+  if (options.statusUrl && options.apiToken) {
+    putStatus(job, options.apiToken, status, summary);
+  }
+  options.onComplete?.(job);
+}
+
+/**
  * Build the MCP settings JSON for a dispatch agent session.
  * Creates a temporary directory with settings.json that configures
  * the Schema MCP server and optionally the danxbot lifecycle tools.
@@ -585,7 +613,11 @@ export async function spawnAgent(
     options.timeoutMs,
     (j) => {
       cleanup();
-      options.onComplete?.(j);
+      // The docker close-handler wrapper only PUTs when job.status === "running"
+      // at close time; by the time the child exits here it will not issue a
+      // terminal PUT. notifyTerminalStatus is the only signal the dispatcher
+      // receives for an inactivity timeout.
+      notifyTerminalStatus(j, options, "timeout", j.summary);
     },
     job,
   );
@@ -608,7 +640,9 @@ export async function spawnAgent(
         job.summary = `Agent exceeded max runtime of ${Math.round(options.maxRuntimeMs! / 1000 / 60)} minutes`;
         job.completedAt = new Date();
         cleanup();
-        options.onComplete?.(job);
+        // See the inactivity-timer comment above — docker close-handler will
+        // not issue a terminal PUT once job.status !== "running".
+        notifyTerminalStatus(job, options, "timeout", job.summary);
       }
     }, options.maxRuntimeMs);
   }
@@ -755,10 +789,7 @@ export async function spawnAgent(
           }
           job.completedAt = new Date();
           cleanup();
-          if (options.statusUrl && options.apiToken) {
-            putStatus(job, options.apiToken, job.status, job.summary);
-          }
-          options.onComplete?.(job);
+          notifyTerminalStatus(job, options, job.status, job.summary);
         },
         registerTermDir: (dir) => {
           termSettingsDirToClean = dir;

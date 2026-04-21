@@ -444,6 +444,126 @@ describe("spawnAgent", () => {
     expect(job.status).toBe("timeout");
   });
 
+  it("sends timeout status PUT when inactivity fires with statusUrl", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 60_000,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok-inactivity",
+    });
+
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    expect(job.status).toBe("timeout");
+    const timeoutCall = mockFetch.mock.calls.find(
+      (c: unknown[]) => typeof c[1] === "object" && c[1] !== null
+        && typeof (c[1] as { body?: unknown }).body === "string"
+        && ((c[1] as { body: string }).body).includes('"timeout"'),
+    );
+    expect(timeoutCall).toBeDefined();
+    expect(timeoutCall![0]).toBe("http://example.com/status");
+    const body = JSON.parse((timeoutCall![1] as { body: string }).body);
+    expect(body.status).toBe("timeout");
+    expect(body.message).toContain("seconds of inactivity");
+    expect(
+      (timeoutCall![1] as { headers: Record<string, string> }).headers.Authorization,
+    ).toBe("Bearer tok-inactivity");
+  });
+
+  it("does NOT issue a timeout PUT when statusUrl is set but apiToken is missing", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 60_000,
+      statusUrl: "http://example.com/status",
+      // apiToken intentionally omitted — guard must keep us from PUT'ing
+      // with a missing Bearer token
+    });
+
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    expect(job.status).toBe("timeout");
+    const anyTimeoutPut = mockFetch.mock.calls.some(
+      (c: unknown[]) => typeof c[1] === "object" && c[1] !== null
+        && typeof (c[1] as { body?: unknown }).body === "string"
+        && ((c[1] as { body: string }).body).includes('"timeout"'),
+    );
+    expect(anyTimeoutPut).toBe(false);
+  });
+
+  it("retries the terminal timeout PUT on a transient failure", async () => {
+    // Fail only the FIRST terminal "timeout" PUT — let heartbeat PUTs and
+    // subsequent terminal retries succeed. This pins the retry contract in
+    // putStatus (TERMINAL_STATUS_RETRIES=3, TERMINAL_STATUS_RETRY_DELAY_MS=2000)
+    // specifically for the timeout status; without conditioning on body the
+    // heartbeat PUTs would consume the failure and bypass the retry path.
+    let rejectedOnce = false;
+    mockFetch.mockImplementation(async (_url: string, init: unknown) => {
+      const body = (init as { body?: string })?.body ?? "";
+      if (body.includes('"timeout"') && !rejectedOnce) {
+        rejectedOnce = true;
+        return { ok: false, status: 502 };
+      }
+      return { ok: true };
+    });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 60_000,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok-retry",
+    });
+
+    await vi.advanceTimersByTimeAsync(61_000);
+    // Advance past the 2s terminal retry backoff so the second attempt fires
+    await vi.advanceTimersByTimeAsync(2_100);
+
+    expect(job.status).toBe("timeout");
+    const timeoutCalls = mockFetch.mock.calls.filter(
+      (c: unknown[]) => typeof c[1] === "object" && c[1] !== null
+        && typeof (c[1] as { body?: unknown }).body === "string"
+        && ((c[1] as { body: string }).body).includes('"timeout"'),
+    );
+    expect(timeoutCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("stops heartbeat PUTs after inactivity timeout fires", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 60_000,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok-heartbeat",
+    });
+
+    await vi.advanceTimersByTimeAsync(61_000);
+    const callsAtTimeout = mockFetch.mock.calls.length;
+
+    // Advance another 30s — no heartbeat PUT should fire because stopHeartbeat
+    // ran inside cleanup() before the terminal putStatus. A regression that
+    // flipped the order or dropped stopHeartbeat would cause new "running"
+    // PUTs to appear here.
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(mockFetch.mock.calls.length).toBe(callsAtTimeout);
+  });
+
   it("resets inactivity timeout on watcher entries", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
@@ -940,6 +1060,45 @@ describe("spawnAgent", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     expect(job.status).toBe("timeout");
     expect(job.summary).toContain("max runtime");
+  });
+
+  it("sends timeout status PUT when max runtime fires with statusUrl", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      maxRuntimeMs: 120_000,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok-max-runtime",
+    });
+
+    // Keep activity going so inactivity doesn't trigger first
+    await vi.advanceTimersByTimeAsync(60_000);
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: { content: [] },
+    });
+    await vi.advanceTimersByTimeAsync(61_000);
+
+    expect(job.status).toBe("timeout");
+    const timeoutCall = mockFetch.mock.calls.find(
+      (c: unknown[]) => typeof c[1] === "object" && c[1] !== null
+        && typeof (c[1] as { body?: unknown }).body === "string"
+        && ((c[1] as { body: string }).body).includes('"timeout"'),
+    );
+    expect(timeoutCall).toBeDefined();
+    const body = JSON.parse((timeoutCall![1] as { body: string }).body);
+    expect(body.status).toBe("timeout");
+    expect(body.message).toContain("max runtime");
+    expect(
+      (timeoutCall![1] as { headers: Record<string, string> }).headers.Authorization,
+    ).toBe("Bearer tok-max-runtime");
   });
 
   it("job.stop is defined after spawn", async () => {
@@ -2152,7 +2311,8 @@ describe("cancelJob", () => {
     expect(signals).not.toContain("SIGKILL");
   });
 
-  it("inactivity timeout in host mode kills via killHostPid", async () => {
+  it("inactivity timeout in host mode kills via killHostPid and issues timeout PUT", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
     mockHostExitWatchers.length = 0;
     mockReadPidFileWithTimeout.mockResolvedValue(606_060);
 
@@ -2161,15 +2321,24 @@ describe("cancelJob", () => {
       repoName: "platform",
       timeoutMs: 60_000,
       openTerminal: true,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok-host-inactivity",
     });
 
     await vi.advanceTimersByTimeAsync(61_000);
 
     expect(mockKillHostPid).toHaveBeenCalledWith(606_060, "SIGTERM");
     expect(job.status).toBe("timeout");
+    const timeoutCall = mockFetch.mock.calls.find(
+      (c: unknown[]) => typeof c[1] === "object" && c[1] !== null
+        && typeof (c[1] as { body?: unknown }).body === "string"
+        && ((c[1] as { body: string }).body).includes('"timeout"'),
+    );
+    expect(timeoutCall).toBeDefined();
   });
 
-  it("max runtime timeout in host mode kills via killHostPid", async () => {
+  it("max runtime timeout in host mode kills via killHostPid and issues timeout PUT", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
     mockHostExitWatchers.length = 0;
     mockReadPidFileWithTimeout.mockResolvedValue(707_070);
 
@@ -2179,6 +2348,8 @@ describe("cancelJob", () => {
       timeoutMs: 300_000,
       maxRuntimeMs: 120_000,
       openTerminal: true,
+      statusUrl: "http://example.com/status",
+      apiToken: "tok-host-max-runtime",
     });
 
     // Keep inactivity timer from tripping first
@@ -2194,6 +2365,14 @@ describe("cancelJob", () => {
     expect(mockKillHostPid).toHaveBeenCalledWith(707_070, "SIGTERM");
     expect(job.status).toBe("timeout");
     expect(job.summary).toContain("max runtime");
+    const timeoutCall = mockFetch.mock.calls.find(
+      (c: unknown[]) => typeof c[1] === "object" && c[1] !== null
+        && typeof (c[1] as { body?: unknown }).body === "string"
+        && ((c[1] as { body: string }).body).includes('"timeout"'),
+    );
+    expect(timeoutCall).toBeDefined();
+    const body = JSON.parse((timeoutCall![1] as { body: string }).body);
+    expect(body.message).toContain("max runtime");
   });
 
   it("job.stop targets the tracked PID in host mode and transitions to completed", async () => {
