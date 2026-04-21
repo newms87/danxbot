@@ -842,6 +842,10 @@ async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
   registerTermDir(termSettingsDir);
 
   const pidFilePath = join(termSettingsDir, "claude.pid");
+  // wt.exe's stdout+stderr land here. Read this file when diagnosing a
+  // host-mode PID-file timeout — it's the only window into what happened
+  // between `spawnInTerminal()` and the bash wrapper writing its PID.
+  const wtLogPath = join(termSettingsDir, "wt-stderr.log");
 
   const scriptPath = buildDispatchScript(termSettingsDir, {
     flags,
@@ -862,12 +866,14 @@ async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
     script: scriptPath,
     cwd: agentCwd,
     env: env as Record<string, string | undefined>,
+    wtLogPath,
   });
 
   const pid = await readPidFileWithTimeout(
     pidFilePath,
     HOST_PID_FILE_TIMEOUT_MS,
     HOST_PID_FILE_POLL_MS,
+    wtLogPath,
   );
   job.claudePid = pid;
   log.info(`[Job ${jobId}] Host-mode dispatch PID: ${pid}`);

@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { writeFileSync, chmodSync } from "node:fs";
+import { writeFileSync, chmodSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createLogger } from "./logger.js";
@@ -26,6 +26,22 @@ export interface TerminalLaunchOptions {
   cwd: string;
   /** Environment variables (CLAUDECODE vars are stripped automatically) */
   env?: Record<string, string | undefined>;
+  /**
+   * Optional absolute path where wt.exe's stdout + stderr are captured.
+   *
+   * When the host-mode PID-file poll times out, the REAL cause is almost
+   * never "2s is too short" — it is an upstream failure: wt.exe couldn't
+   * start, wsl.exe hung on Windows→WSL interop, or the script exited
+   * before writing its PID. Without captured output, the operator has no
+   * evidence of which. When this path is supplied, it is passed to wt.exe
+   * as its stdout+stderr file descriptor so a later timeout error can
+   * surface the captured output to the reader.
+   *
+   * When omitted, stdio falls back to `"ignore"` (the pre-diagnostic
+   * behavior) so callers that don't care about diagnostics don't have to
+   * manage a log file.
+   */
+  wtLogPath?: string;
 }
 
 export interface DispatchScriptOptions {
@@ -196,6 +212,20 @@ export function spawnInTerminal(options: TerminalLaunchOptions): void {
 
   log.info(`Spawning in new terminal tab: ${options.title}`);
 
+  // Capture wt.exe's stdout+stderr to disk when a path is supplied. Open
+  // the file synchronously BEFORE spawning so the descriptor exists even
+  // if wt.exe itself never executes — which is the exact scenario where
+  // the diagnostic is most valuable (stalled WSL interop, missing wt.exe,
+  // Windows path issues). Fresh per-dispatch dir makes "w" the correct
+  // mode: one file, one dispatch, no accumulation.
+  type Stdio = "ignore" | ["ignore", number, number];
+  let logFd: number | undefined;
+  let stdio: Stdio = "ignore";
+  if (options.wtLogPath) {
+    logFd = openSync(options.wtLogPath, "w");
+    stdio = ["ignore", logFd, logFd];
+  }
+
   const child = spawn(
     "wt.exe",
     [
@@ -209,10 +239,23 @@ export function spawnInTerminal(options: TerminalLaunchOptions): void {
       "bash",
       options.script,
     ],
-    { cwd: options.cwd, stdio: "ignore", env, detached: true },
+    { cwd: options.cwd, stdio, env, detached: true },
   );
   child.on("error", (err) => {
     log.error(`Failed to spawn terminal: ${err.message} — is wt.exe available? (Docker containers need the dispatch API instead)`);
+    // When spawn fails (ENOENT, permission, etc.) Node never plumbs the
+    // inherited FD to a child process, so the FD stays open for the worker's
+    // lifetime. This is the exact diagnostic case — leaking one FD per
+    // failed dispatch adds up. Close it here; the bytes already written
+    // (if any) stay on disk via the "w"-mode truncate+write.
+    if (logFd !== undefined) {
+      try {
+        closeSync(logFd);
+      } catch {
+        // FD may already be closed by Node during teardown — swallow.
+      }
+      logFd = undefined;
+    }
   });
   child.unref();
 }

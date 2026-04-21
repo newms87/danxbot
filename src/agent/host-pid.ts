@@ -22,11 +22,19 @@ const log = createLogger("host-pid");
  * the timeout expires. Returns the parsed PID on success; throws on timeout
  * or malformed contents — a missing PID means the bash script never launched
  * and the dispatch is unrecoverable.
+ *
+ * When `wtLogPath` is supplied (host runtime), a timeout does NOT mean "2s
+ * is too short" — the bash wrapper writes its PID as the first thing it
+ * does, so if the file never appeared the wrapper never ran. The error
+ * includes the wt.exe output log path + a concrete WSL interop probe so
+ * the operator can diagnose the real cause (usually a stalled
+ * Windows→WSL interop layer) in seconds instead of hours.
  */
 export async function readPidFileWithTimeout(
   pidFilePath: string,
   timeoutMs: number,
   pollIntervalMs: number,
+  wtLogPath?: string,
 ): Promise<number> {
   const deadline = Date.now() + timeoutMs;
 
@@ -46,8 +54,28 @@ export async function readPidFileWithTimeout(
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
+  const baseMessage = `Timed out after ${timeoutMs}ms waiting for PID file: ${pidFilePath}`;
+  if (!wtLogPath) {
+    throw new Error(baseMessage);
+  }
+  // The three real failure modes this message needs to cover:
+  //   1. wt.exe missing / failed to launch   → error in wt.exe log
+  //   2. Windows→WSL interop stalled          → wt.exe opens a tab but
+  //      wsl.exe never starts the wrapper    (most common on WSL2; probe below)
+  //   3. Wrapper started but crashed before
+  //      `echo $$ > $PID_FILE`                → bash error in wt.exe log
+  // "Bash wrapper didn't reach the PID-emit line" covers (2) AND (3); the
+  // hint points at (2) because it's by far the most frequent, and the log
+  // path covers (1) and (3) by content.
   throw new Error(
-    `Timed out after ${timeoutMs}ms waiting for PID file: ${pidFilePath}`,
+    `${baseMessage}\n` +
+      `  wt.exe output captured at: ${wtLogPath}\n` +
+      `  The bash wrapper didn't reach the PID-emit line. Either wt.exe / wsl.exe ` +
+      `never invoked it (most commonly: stalled Windows→WSL interop), OR the wrapper ` +
+      `crashed early — check the log above for bash errors. The 2s PID-file timeout ` +
+      `is NOT the real bug.\n` +
+      `  Probe: run \`time wsl.exe --exec /bin/true\` from inside WSL — healthy ≈ 100ms, ` +
+      `stalled > 10s. If stalled, reset with \`wsl --shutdown\` from a Windows PowerShell.`,
   );
 }
 

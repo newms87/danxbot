@@ -1286,6 +1286,10 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       "/tmp/danxbot-term-pid/claude.pid",
       2_000,
       50,
+      // The wt.exe output log lives alongside claude.pid in the same settings
+      // dir. Passing it here is what lets a later PID-file timeout surface
+      // the captured wt.exe output + interop-stall hint in the error.
+      "/tmp/danxbot-term-pid/wt-stderr.log",
     );
     expect(job.claudePid).toBe(987654);
     expect(job.process).toBeUndefined();
