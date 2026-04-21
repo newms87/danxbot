@@ -352,6 +352,13 @@ describe("dashboard server", () => {
       expect(res._getStatusCode()).toBe(401);
     });
 
+    it("GET /api/stream without auth returns 401", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/stream");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+      expect(mockHandleStream).not.toHaveBeenCalled();
+    });
+
     it("GET / serves index.html unconditionally (no auth required)", async () => {
       mockReadFile.mockResolvedValue("<html>Dashboard</html>");
       const { req, res } = createMockReqRes("GET", "/");

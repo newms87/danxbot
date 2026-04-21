@@ -149,11 +149,14 @@ export async function handleFollowDispatch(
   }
   // Derive the expected path without requiring the file to exist yet — the
   // tick loop will retry until the agent creates it.
-  const jsonlPath = expectedJsonlPath(dispatch);
-  if (!jsonlPath) {
+  const rawJsonlPath = expectedJsonlPath(dispatch);
+  if (!rawJsonlPath) {
     json(res, 404, { error: "No JSONL recorded yet" });
     return;
   }
+  // Capture as a non-nullable `const` so the `tick` closure below sees `string`
+  // rather than `string | null` (TypeScript doesn't narrow across async closures).
+  const jsonlPath: string = rawJsonlPath;
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",

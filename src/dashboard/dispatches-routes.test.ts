@@ -79,7 +79,7 @@ function makeDispatch(overrides = {}) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe("handleListDispatches", () => {

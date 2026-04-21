@@ -165,6 +165,10 @@ async function jsonlPollTick(jobId: string, watcher: JsonlWatcher): Promise<void
 /**
  * Start watching a JSONL file for a dispatch. Hydrates immediately with
  * existing content, then polls for new blocks. Idempotent per jobId.
+ *
+ * Guard against the startup race: if all subscribers for this topic
+ * disconnect while `readFile` is awaited, we skip registering the interval
+ * to avoid leaking a timer that can never be cleaned up.
  */
 export async function startJsonlWatcher(
   jobId: string,
@@ -183,6 +187,12 @@ export async function startJsonlWatcher(
     offset = Buffer.byteLength(existing, "utf-8");
   } catch {
     // File doesn't exist yet — tick will retry.
+  }
+
+  // If all subscribers disconnected while we were awaiting the file read,
+  // there is nobody left to deliver events to — skip registering the timer.
+  if (eventBus.subscriberCount(`dispatch:jsonl:${jobId}`) === 0) {
+    return;
   }
 
   const watcher: JsonlWatcher = {

@@ -9,8 +9,12 @@ vi.mock("./dispatches-db.js", () => ({
 }));
 
 const mockPublish = vi.fn();
+const mockSubscriberCount = vi.fn().mockReturnValue(1); // default: at least one subscriber
 vi.mock("./event-bus.js", () => ({
-  eventBus: { publish: (...args: unknown[]) => mockPublish(...args) },
+  eventBus: {
+    publish: (...args: unknown[]) => mockPublish(...args),
+    subscriberCount: (...args: unknown[]) => mockSubscriberCount(...args),
+  },
 }));
 
 const mockReadFile = vi.fn();
@@ -93,6 +97,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   _stopAll();
+  // Default: at least one subscriber (the normal case).
+  mockSubscriberCount.mockReturnValue(1);
 });
 
 afterEach(() => {
@@ -376,6 +382,29 @@ describe("JSONL watcher", () => {
     );
 
     // Should not throw.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushAsync();
+
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  it("does not register the poll interval when all subscribers disconnect during readFile", async () => {
+    // Simulate the early-disconnect race: the subscriber count drops to 0
+    // before startJsonlWatcher finishes awaiting readFile.
+    mockSubscriberCount.mockReturnValue(0);
+    mockReadFile.mockResolvedValue("");
+    mockParseJsonlContent.mockReturnValue({ blocks: [] });
+
+    await startJsonlWatcher(JOB_ID, JSONL_PATH);
+
+    // Verify no timer was registered by advancing time — publish should NOT be called.
+    mockPublish.mockClear();
+    const fh = {
+      stat: vi.fn().mockResolvedValue({ size: 50 }),
+      read: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    mockOpen.mockResolvedValue(fh);
     await vi.advanceTimersByTimeAsync(1_000);
     await flushAsync();
 

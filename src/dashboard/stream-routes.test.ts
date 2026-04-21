@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import type { IncomingMessage, ServerResponse } from "http";
 import { EventEmitter } from "events";
 
@@ -45,7 +45,7 @@ function makeReq(query: string): IncomingMessage {
   return emitter as unknown as IncomingMessage;
 }
 
-function makeRes(): ServerResponse & { written: string[]; statusCode: number; ended: boolean } {
+function makeRes(): ServerResponse & { written: string[]; statusCode: number; ended: boolean; headers: Record<string, string | number> } {
   const res = new EventEmitter() as ServerResponse & {
     written: string[];
     statusCode: number;
@@ -229,7 +229,7 @@ describe("handleStream — event forwarding", () => {
     expect(res.written.some((w) => w.includes('"id":"job-x"'))).toBe(true);
   });
 
-  it("unsubscribes when the client disconnects", async () => {
+  it("unsubscribes and ends the response when the client disconnects", async () => {
     const unsubSpy = vi.fn();
     mockSubscribe.mockReturnValue(unsubSpy);
 
@@ -240,5 +240,61 @@ describe("handleStream — event forwarding", () => {
     (req as unknown as EventEmitter).emit("close");
 
     expect(unsubSpy).toHaveBeenCalledOnce();
+    expect(res.ended).toBe(true);
+  });
+});
+
+describe("handleStream — keep-alive", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("emits a keep-alive SSE comment after the interval fires", async () => {
+    vi.useFakeTimers();
+
+    const req = makeReq("topics=dispatch:created");
+    const res = makeRes();
+    await handleStream(req, res, new URLSearchParams("topics=dispatch:created"));
+
+    // Advance time past the 15 s keep-alive threshold.
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    expect(res.written.some((w) => w === ": keep-alive\n\n")).toBe(true);
+  });
+});
+
+describe("handleStream — slow-consumer eviction", () => {
+  it("evicts the subscriber via isSlowConsumer and ends the response", async () => {
+    let capturedIsSlowConsumer: (() => boolean) | null = null;
+    let capturedOnEvict: (() => void) | null = null;
+
+    mockSubscribe.mockImplementation(
+      (
+        _topic: string,
+        _cb: unknown,
+        onEvict: () => void,
+        isSlowConsumer: () => boolean,
+      ) => {
+        capturedOnEvict = onEvict;
+        capturedIsSlowConsumer = isSlowConsumer;
+        return () => {};
+      },
+    );
+
+    const req = makeReq("topics=dispatch:created");
+    const res = makeRes();
+    // Simulate a full write buffer so isSlowConsumer() returns true.
+    (res as unknown as { writableLength: number }).writableLength = 65 * 1024;
+    await handleStream(req, res, new URLSearchParams("topics=dispatch:created"));
+
+    // isSlowConsumer should return true for this res.
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(capturedIsSlowConsumer!()).toBe(true);
+
+    // Trigger the eviction path.
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    capturedOnEvict!();
+
+    expect(res.ended).toBe(true);
   });
 });

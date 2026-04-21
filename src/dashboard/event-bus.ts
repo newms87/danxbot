@@ -7,10 +7,12 @@
  *   `dispatch:jsonl:${jobId}`  — new JSONL blocks for a dispatch; payload: JsonlBlock[]
  *   "agent:updated"            — repo settings/health changed; payload: AgentSnapshot
  *
- * Backpressure: each subscriber tracks how many pending publish calls are
- * queued. Publishers never block or await subscribers. If a subscriber's
- * pending count exceeds MAX_SUBSCRIBER_QUEUE, it is evicted and its
- * unsubscribe handler is called to tear down the SSE connection.
+ * Backpressure: before each delivery the bus calls the subscriber's
+ * `isSlowConsumer()` predicate. If it returns true the subscriber is evicted
+ * and its `onEvict` handler is called to tear down the SSE connection.
+ * Subscribers provide the predicate — typically checking `res.writableLength`
+ * against a threshold — so the bus itself has no I/O dependency.
+ * Publishers never block or await subscribers.
  */
 
 import type { Dispatch } from "./dispatches.js";
@@ -53,16 +55,10 @@ export type BusEvent =
 
 export type BusEventCallback = (event: BusEvent) => void;
 
-/**
- * How many pending (unresolved) publish calls a single subscriber may have
- * before it is considered "slow" and evicted.
- */
-const MAX_SUBSCRIBER_QUEUE = 100;
-
 interface Subscriber {
   callback: BusEventCallback;
-  pending: number;
   onEvict: () => void;
+  isSlowConsumer: () => boolean;
 }
 
 class EventBus {
@@ -70,29 +66,25 @@ class EventBus {
 
   /**
    * Publish a typed event to all subscribers of the given topic.
-   * Never blocks — slow subscribers (pending > MAX_SUBSCRIBER_QUEUE) are
-   * evicted before the call returns.
+   * Never blocks — subscribers whose `isSlowConsumer()` returns true are
+   * evicted synchronously before their callback is invoked. All other
+   * subscribers receive the event synchronously; errors are swallowed so
+   * one bad subscriber cannot interrupt others.
    */
   publish(event: BusEvent): void {
     const subs = this.topics.get(event.topic);
     if (!subs || subs.size === 0) return;
 
     for (const sub of [...subs]) {
-      if (sub.pending >= MAX_SUBSCRIBER_QUEUE) {
+      if (sub.isSlowConsumer()) {
         subs.delete(sub);
         sub.onEvict();
         continue;
       }
-      sub.pending++;
-      // Fire-and-forget — subscriber callbacks may be async but we do not
-      // await them. `pending` is incremented before and decremented inside
-      // the callback via the wrapper returned by `subscribe`.
       try {
         sub.callback(event);
       } catch {
         // Swallow errors to protect other subscribers.
-      } finally {
-        sub.pending--;
       }
     }
   }
@@ -100,20 +92,26 @@ class EventBus {
   /**
    * Subscribe to a topic. Returns an unsubscribe function.
    *
-   * @param topic  Exact topic string (e.g. "dispatch:created", "dispatch:jsonl:abc123")
-   * @param cb     Callback invoked on each matching publish
-   * @param onEvict Optional: called when the subscriber is evicted for being slow
+   * @param topic           Exact topic string (e.g. "dispatch:created", "dispatch:jsonl:abc123")
+   * @param cb              Callback invoked on each matching publish
+   * @param onEvict         Called when the subscriber is evicted for being slow
+   * @param isSlowConsumer  Predicate checked before each delivery; returning
+   *                        true evicts the subscriber. Typically checks
+   *                        `res.writableLength` against a byte threshold.
    */
   subscribe(
     topic: string,
     cb: BusEventCallback,
     onEvict: () => void = () => {},
+    isSlowConsumer: () => boolean = () => false,
   ): () => void {
-    if (!this.topics.has(topic)) {
-      this.topics.set(topic, new Set());
+    let subs = this.topics.get(topic);
+    if (!subs) {
+      subs = new Set();
+      this.topics.set(topic, subs);
     }
-    const sub: Subscriber = { callback: cb, pending: 0, onEvict };
-    this.topics.get(topic)!.add(sub);
+    const sub: Subscriber = { callback: cb, onEvict, isSlowConsumer };
+    subs.add(sub);
 
     return () => {
       const set = this.topics.get(topic);

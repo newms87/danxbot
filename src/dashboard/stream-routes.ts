@@ -33,6 +33,13 @@ const log = createLogger("stream-routes");
 /** SSE keep-alive interval. */
 const KEEPALIVE_INTERVAL_MS = 15_000;
 
+/**
+ * Evict a subscriber when its outbound write buffer exceeds this threshold.
+ * Prevents a slow client from causing the publisher to accumulate unbounded
+ * in-process data (64 KiB is generous for SSE, where messages are small).
+ */
+const MAX_WRITE_BUFFER_BYTES = 64 * 1024;
+
 const VALID_STATIC_TOPICS = new Set([
   "dispatch:created",
   "dispatch:updated",
@@ -136,6 +143,12 @@ export async function handleStream(
         stopJsonlWatcher(jobId);
       }
     }
+    // Finalize the response (no-op if already closed by the client).
+    try {
+      res.end();
+    } catch {
+      /* ignore */
+    }
   }
 
   // Keep-alive timer — assigned after declaration so cleanup() can reference it.
@@ -166,15 +179,11 @@ export async function handleStream(
         }
       },
       () => {
-        // Evicted by backpressure — cleanup owns the clearInterval.
+        // Evicted by backpressure — cleanup handles res.end() and clearInterval.
         log.warn(`SSE subscriber evicted for topic "${topic}" (slow consumer)`);
         cleanup();
-        try {
-          res.end();
-        } catch {
-          /* ignore */
-        }
       },
+      () => (res.writableLength ?? 0) > MAX_WRITE_BUFFER_BYTES,
     );
     unsubscribers.push(unsub);
   }
