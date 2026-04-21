@@ -18,8 +18,7 @@ import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { getReposBase } from "../poller/constants.js";
@@ -32,6 +31,7 @@ import {
 import { SessionLogWatcher } from "./session-log-watcher.js";
 import { buildClaudeInvocation } from "./claude-invocation.js";
 import { probeAllMcpServers } from "./mcp-server-probe.js";
+import { DANXBOT_MCP_SERVER_PATH } from "./mcp-registry.js";
 import type { McpServerConfig } from "./mcp-settings-shape.js";
 import {
   createLaravelForwarder,
@@ -58,12 +58,6 @@ import {
 } from "./host-pid.js";
 
 const log = createLogger("launcher");
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-/** Absolute path to the danxbot MCP server script (src/mcp/danxbot-server.ts). */
-const DANXBOT_MCP_SERVER_PATH = resolve(__dirname, "../mcp/danxbot-server.ts");
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const TERMINAL_STATUS_RETRIES = 3;
