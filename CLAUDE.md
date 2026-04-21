@@ -1,277 +1,196 @@
 # Danxbot
 
-An autonomous AI agent powered by Claude Code SDK. Connects to a repo, processes Trello cards, and optionally answers questions via Slack. Run `./install.sh` for interactive setup.
+Autonomous AI agent powered by the Claude Code SDK. Connects to one or more repos, processes Trello cards, and optionally answers questions in Slack. Run `./install.sh` for interactive setup.
 
-## CRITICAL: Read Before Touching Agent Dispatch
+## CRITICAL Pointers Before Touching Sensitive Areas
 
-Dispatch, monitoring, completion, and runtime modes have a tight design contract. Before editing `src/agent/launcher.ts`, `src/terminal.ts`, `src/agent/session-log-watcher.ts`, `src/agent/stall-detector.ts`, `src/agent/laravel-forwarder.ts`, `src/mcp/danxbot-server.ts`, or `src/worker/dispatch.ts`, read `.claude/rules/agent-dispatch.md`. That file describes the single-fork principle (one claude per dispatch, runtime only decides how it's spawned), the JSONL-watcher-only monitoring rule, and the completion-signaling flow. Regressions in this area are expensive — the doc exists to stop them.
+These rule files are auto-loaded; the pointers below exist so a fresh agent knows the contract BEFORE editing.
 
-**Host mode invariant:** `claude -p` is forbidden anywhere in the host-mode terminal spawning path. Host runtime exists ONLY to give the user an interactive TUI; `-p` makes it headless. See `.claude/rules/host-mode-interactive.md`.
-
-## Setup
-
-Run `./install.sh` to launch the interactive setup wizard. It checks prerequisites, installs dependencies, and launches `claude '/setup'` which guides you through:
-
-1. Anthropic API key
-2. GitHub token + repo selection
-3. Trello credentials + board setup
-4. Slack integration (optional)
-5. Repo cloning + exploration
-6. Config and rules generation
-7. Smoke test + proof-of-life PR
-
-The setup generates `.danxbot/config/` in the connected repo, `.env`, and tailored rules files. No manual `.env` editing needed.
-
-## Connected Repos (Multi-Repo)
-
-Danxbot manages multiple repos simultaneously. Each repo is fully isolated — its own poller, Slack connection, Trello board, and database credentials. Danxbot remains a single server.
-
-Repo-specific config lives in two places inside each connected repo:
-
-1. `<repo>/.danxbot/config/` (committed) — config.yml, trello.yml, overview.md, workflow.md, compose.yml, tools, docs
-2. `<repo>/.danxbot/.env` (gitignored) — secrets + per-repo toggles, standardized DANX_* prefix: DANX_TRELLO_ENABLED, DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN
-
-Danxbot's own `.env` keeps only shared infrastructure: ANTHROPIC_API_KEY, CLAUDE_AUTH_MODE, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL.
-
-Each repo also needs per-repo config in `<repo>/.claude/settings.local.json` (gitignored) under the `env` key — Claude Code does not load `.env` files for MCP servers. Required vars: `DANXBOT_WORKER_PORT` (dispatch API port, read by both host and docker runtimes), `MCP_TRELLO_PATH`, `TRELLO_API_KEY`, `TRELLO_API_TOKEN`. See `docker-runtime.md` for details.
-
-`DANX_TRELLO_ENABLED` in each repo's `.danxbot/.env` controls whether the poller processes that repo's Trello board. Defaults to `false` — explicit opt-in prevents unintentional auto-dispatch when a worker boots.
-
-Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists all repos: `platform:url,danxbot:url`. In worker mode, `loadRepoContext()` builds the single active `RepoContext` from the named repo's config. The dashboard reads the repo list directly from `REPOS`. All services (poller, Slack, agent) receive `RepoContext` as a parameter.
-
-### Agent Tools
-
-Each connected repo can define a `tools.md` in `.danxbot/config/` that lists commands available to SDK agents (database schema helpers, test runners, lint commands, etc.). The poller syncs this to the repo's `.claude/rules/tools.md`, where it's automatically loaded by the Claude Code SDK via `settingSources: ["project"]`. This keeps tool definitions repo-specific — danxbot's system prompts reference the tools generically without hardcoding paths.
-
-## External Dispatch API
-
-Production workers are not directly reachable from the public internet. The dashboard (fronted by Caddy on 443) proxies auth-gated dispatch requests to workers on the internal `danxbot-net`:
-
-```bash
-# Launch an agent on the deployed gpt-manager worker:
-curl -sS -X POST https://danxbot.sageus.ai/api/launch \
-  -H "Authorization: Bearer $DANXBOT_DISPATCH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "repo": "gpt-manager",
-    "task": "Connectivity smoke test. Reply OK and call danxbot_complete.",
-    "api_token": "'"$DANXBOT_DISPATCH_TOKEN"'"
-  }'
-```
-
-Status/cancel/stop are proxied too: `GET /api/status/:jobId?repo=<name>`, `POST /api/cancel/:jobId?repo=<name>`, `POST /api/stop/:jobId?repo=<name>`. All require `Authorization: Bearer <token>`. See `.claude/rules/agent-dispatch.md#external-entry` for the full route table.
-
-To continue a prior dispatch (claude `--resume`), `POST /api/resume` with the parent dispatch's `job_id`:
-
-```bash
-curl -sS -X POST https://danxbot.sageus.ai/api/resume \
-  -H "Authorization: Bearer $DANXBOT_DISPATCH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "repo": "gpt-manager",
-    "job_id": "aea75840-6e0d-4977-84b3-ac3d07853cdf",
-    "task": "Now do step 2 with the context from before.",
-    "api_token": "'"$DANXBOT_DISPATCH_TOKEN"'"
-  }'
-# → { "job_id": "<new dispatch id>", "parent_job_id": "aea75840-…", "status": "launched" }
-```
-
-The caller tracks the NEW `job_id` for subsequent status/cancel/stop calls. The worker resolves the parent's Claude session UUID on disk via the dispatch tag, so resume works across worker restarts. See `.claude/rules/agent-dispatch.md#resume` for full semantics.
-
-The token is generated per-deployment on first `make deploy` (logged once, persisted to SSM). Retrieve later via `aws ssm get-parameter --name /<ssm_prefix>/shared/DANXBOT_DISPATCH_TOKEN`. `make deploy-smoke TARGET=<target>` performs a real end-to-end launch using this token.
-
-## Per-Repo Settings & Feature Toggles
-
-The dashboard's Agents tab shows one card per connected repo with three runtime toggles (Slack / Trello poller / Dispatch API), dispatch counts per trigger, worker reachability, and a collapsible masked-config table. State lives at `<repo>/.danxbot/settings.json` (gitignored) — three-valued overrides (`true` / `false` / `null`) where `null` defers to the env default on `RepoContext`. Workers re-read the file on every event, so toggles take effect with no restart.
-
-- Disabled Slack → `:no_entry_sign:` reaction + one-line reply, no router/agent call.
-- Disabled Trello poller → tick logs "poller disabled via settings — skipping" and returns.
-- Disabled Dispatch API → `POST /api/launch` returns `503 {error: "Dispatch API is disabled for repo <name>"}`; the dashboard proxy forwards the status verbatim.
-
-Toggle mutations go through `PATCH /api/agents/:repo/toggles` (bearer auth via `DANXBOT_DISPATCH_TOKEN`). Deploys and `setup` write only `display`; operator overrides survive every redeploy. See `.claude/rules/settings-file.md` for the ownership contract, and `docs/superpowers/specs/2026-04-20-agents-tab-design.md` for the full spec.
-
-## Deployment (AWS Production)
-
-Danxbot deploys per-target to isolated AWS accounts — each connected repo gets its own isolated deployment. Per-target config lives at `.danxbot/deployments/<target>.yml`. Deploy system source is `deploy/cli.ts` with templates in `deploy/templates/` and terraform in `deploy/terraform/`.
-
-**Production IS reachable from this shell.** When asked about a deployed job, dispatch, session, or container, pull the data via the HTTP proxy, container logs, or SSH — do NOT say "I can't reach production from here." See `.claude/rules/production-access.md` for the canonical recipes (API status lookup via SSM token, `make deploy-logs`, direct SSH, `docker exec` on the instance).
-
-**Current targets:** `gpt` (gpt-manager).
-
-**"Deploy the <X> danxbot" ALWAYS means `make deploy TARGET=<x>` from `/home/newms/web/danxbot-flytebot`.** It NEVER means `make launch-worker` (that's local docker) and NEVER means deploying the connected repo's own app (e.g. gpt-manager's Vapor). The word "production" always refers to the AWS deploy, never to local workers.
-
-See the deploy commands in the Key Commands table above.
+| If you're touching… | Read first |
+|---|---|
+| `src/agent/launcher.ts`, `terminal.ts`, `session-log-watcher.ts`, `stall-detector.ts`, `laravel-forwarder.ts`, `mcp/danxbot-server.ts`, `worker/dispatch.ts` | `.claude/rules/agent-dispatch.md` (single-fork, JSONL-only monitoring, completion signaling) |
+| Anything that builds the host-mode bash dispatch script | `.claude/rules/host-mode-interactive.md` (`claude -p` is FORBIDDEN in host mode) |
+| `<repo>/.danxbot/settings.json` ownership / feature toggles | `.claude/rules/settings-file.md` |
+| Anything `make`-able | `.claude/rules/make-commands.md` |
+| Anything in production (logs, status, db, ssh) | `.claude/rules/production-access.md` |
+| Repo bind-mounts, container layout, runtime detection | `.claude/rules/docker-runtime.md` |
 
 ## Architecture
 
 ```
-Slack message → Router (Haiku, ~300ms) → quick response to Slack
+Slack message → Router (Haiku, ~300ms) → quick reply
                     ↓ (if needsAgent)
-               Agent (Claude Code SDK) → detailed response to Slack
+                Agent (Claude Code SDK query) → detailed reply
+
+Trello card    → Poller (per-repo)        → spawnAgent (Claude CLI)
+HTTP /launch   → Worker dispatch endpoint → spawnAgent
 ```
 
-- **Router** (`src/agent/router.ts`): Anthropic API call to Haiku for instant triage
-- **Agent** (`src/agent/agent.ts:runAgent`): Claude Code SDK `query()` for deep exploration — accepts `RepoContext` for cwd
-- **Dashboard** (`dashboard/`): Vite + Vue 3 + Tailwind CSS 4 SPA; API server on port 5555, Vite HMR dev server on **5566** (started automatically by `docker compose up -d` as the `dashboard-dev` service). Supports `?repo=` filtering and repo selector.
-- **Slack listener** (`src/slack/listener.ts`): One `@slack/bolt` App per repo via `Map<string, ListenerState>`. Each repo with Slack gets independent state.
-- **Poller** (`src/poller/index.ts`): One poller per repo via `Map<string, RepoPollerState>`. Independent lock files (`.poller-running-<name>`).
+| Component | Path | Role |
+|---|---|---|
+| Router | `src/agent/router.ts` | Anthropic SDK call to Haiku for instant Slack triage |
+| Agent (Slack) | `src/agent/agent.ts` (`runAgent`) | Claude Code SDK `query()` for deep Slack responses |
+| Launcher | `src/agent/launcher.ts` (`spawnAgent`) | Single entry point for every dispatched Claude CLI process |
+| Poller | `src/poller/index.ts` | Per-repo Trello tick loop. State is in-memory (`state.teamRunning`, `state.polling`) — no on-disk lock files. |
+| Slack listener | `src/slack/listener.ts` | One `@slack/bolt` App per Slack-enabled repo |
+| Dashboard API | `src/dashboard/server.ts` | REST + SSE on port 5555 |
+| Dashboard SPA | `dashboard/` | Vite + Vue 3 + Tailwind 4 |
 
-## Key Commands
-
-| Command | Use |
-|---------|-----|
-| `make validate-repos` | Check host prerequisites before launching workers |
-| `make launch-infra` | Start shared infra (MySQL + dashboard) |
-| `make launch-worker REPO=platform` | Start a Docker worker for a repo |
-| `make launch-worker-host REPO=platform` | Start a host worker (interactive terminals) |
-| `make launch-all-workers` | Start Docker workers for all configured repos |
-| `make stop-worker REPO=platform` | Stop a Docker worker |
-| `make deploy TARGET=gpt` | Deploy danxbot to AWS production for target |
-| `make deploy-status TARGET=gpt` | Show AWS infra state + health |
-| `make deploy-logs TARGET=gpt` | Tail production container logs |
-| `make deploy-ssh TARGET=gpt` | SSH to production instance |
-| `make deploy-smoke TARGET=gpt` | Smoke-test deployed dashboard |
-| `make deploy-secrets-push TARGET=gpt` | Sync local .env files to SSM |
-| `make deploy-destroy TARGET=gpt ARGS=--confirm` | Tear down AWS resources |
-| `make stop-infra` | Stop shared infrastructure |
-| `make logs` | Tail infra logs |
-| `make logs REPO=platform` | Tail worker logs |
-| `make build` | Build the danxbot Docker image |
-| `npx tsc --noEmit` | Type-check only (host) |
-| `docker compose up -d dashboard-dev` | Vite dev server on 5566 (HMR) — starts the container that runs `npm run dashboard:dev` internally |
-| `npm run dashboard:build` | Build dashboard for production |
+Runtime mode is auto-detected from `/.dockerenv` at startup — inside a container → docker (headless), on host → host (interactive Windows Terminal). Runtime affects ONLY the spawn shape; monitoring, heartbeat, event forwarding, and stall detection are identical. See `.claude/rules/agent-dispatch.md` for the full contract.
 
 ## Tech Stack
 
-- **Runtime**: Node.js 20 + `tsx` (TypeScript executed directly, no build step needed)
-- **Slack**: @slack/bolt (Socket Mode)
-- **AI**: @anthropic-ai/sdk (router), @anthropic-ai/claude-agent-sdk (agent)
-- **Dashboard**: Vite + Vue 3 SFCs + Tailwind CSS 4 (separate app in `dashboard/`)
+- **Runtime:** Node.js 20 + `tsx` (TypeScript executed directly, no build step)
+- **AI SDKs:** `@anthropic-ai/sdk` (router), `@anthropic-ai/claude-agent-sdk` (Slack agent)
+- **Slack:** `@slack/bolt` (Socket Mode)
+- **Dashboard:** Vite + Vue 3 SFCs + Tailwind 4
+
+## Setup
+
+`./install.sh` launches an interactive wizard (`/setup` skill). It collects Anthropic / GitHub / Trello / optional Slack credentials, clones + explores the repo, and generates `.danxbot/config/`, `.env`, and tailored rules. No manual `.env` editing required.
+
+## Connected Repos (Multi-Repo)
+
+Danxbot manages multiple repos from one server. Each repo has independent state — its own poller, Slack connection, Trello board, and DB credentials.
+
+**Per-repo config locations** (inside each connected repo):
+
+| Path | Purpose | Committed? |
+|---|---|---|
+| `<repo>/.danxbot/config/` | `config.yml`, `trello.yml`, `compose.yml`, `overview.md`, `workflow.md`, `tools.md`, `docs/` | yes |
+| `<repo>/.danxbot/.env` | Secrets + per-repo toggles (`DANX_*` prefix) | gitignored |
+| `<repo>/.claude/settings.local.json` | MCP env vars + `DANXBOT_WORKER_PORT` (Claude Code does not load `.env` for MCP) | gitignored |
+
+`<repo>/.danxbot/.env` standardized vars: `DANX_TRELLO_ENABLED` (default `false` — explicit opt-in), `DANX_SLACK_BOT_TOKEN`, `DANX_SLACK_APP_TOKEN`, `DANX_SLACK_CHANNEL_ID`, `DANX_DB_HOST/USER/PASSWORD/NAME`, `DANX_GITHUB_TOKEN`, `DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`.
+
+Danxbot's own root `.env` keeps only shared infrastructure: `ANTHROPIC_API_KEY`, `CLAUDE_AUTH_MODE`, `REPOS`, `DANXBOT_DB_*`, `DASHBOARD_PORT`, `DANXBOT_GIT_EMAIL`.
+
+Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists them: `platform:url,danxbot:url`. `loadRepoContext()` in worker mode builds the single active `RepoContext` from the named repo.
+
+### Agent Tools
+
+Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller syncs it to the repo's `.claude/rules/tools.md`, which the Claude Code SDK auto-loads via `settingSources: ["project"]`. Tool definitions stay repo-specific; danxbot's system prompts reference them generically without hardcoding paths.
+
+### Per-Repo Feature Toggles
+
+Three runtime toggles per repo (Slack / Trello poller / Dispatch API) live at `<repo>/.danxbot/settings.json` — three-valued (`true` / `false` / `null` defers to env default). Workers re-read on every event so toggles take effect with no restart. Operator overrides survive every redeploy. Full ownership contract + schema: `.claude/rules/settings-file.md`. Spec: `docs/superpowers/specs/2026-04-20-agents-tab-design.md`.
+
+## External Dispatch API (Production)
+
+Workers bind only on `danxbot-net`. The dashboard (Caddy → 443) proxies auth-gated dispatch requests to the right worker. Bearer token: `DANXBOT_DISPATCH_TOKEN` (per-deployment, persisted to SSM at `/<ssm_prefix>/shared/DANXBOT_DISPATCH_TOKEN`).
+
+Quickstart:
+
+```bash
+curl -sS -X POST https://danxbot.sageus.ai/api/launch \
+  -H "Authorization: Bearer $DANXBOT_DISPATCH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"repo": "gpt-manager", "task": "Reply OK and call danxbot_complete.", "api_token": "'"$DANXBOT_DISPATCH_TOKEN"'"}'
+```
+
+Full route table (`/api/launch`, `/api/resume`, `/api/status/:id`, `/api/cancel/:id`, `/api/stop/:id`), the resume protocol, the disabled-state semantics, and the proxy 404 invariant: `.claude/rules/agent-dispatch.md#external-entry`.
+
+## Deployment
+
+Per-target AWS deploys; per-target config at `.danxbot/deployments/<target>.yml`. Deploy source: `deploy/cli.ts`, terraform under `deploy/terraform/`.
+
+**Current targets:** `gpt` (hosts both `danxbot` and `gpt-manager` workers).
+
+**"Deploy the X danxbot" ALWAYS means `make deploy TARGET=<x>`** from this repo. NEVER `make launch-worker` (local docker), NEVER deploying the connected repo's own app.
+
+**Production IS reachable from this shell** — never say "I can't reach production from here". Use the proxy / SSH / `docker exec` recipes in `.claude/rules/production-access.md`.
+
+## Make Commands & Build Workflow
+
+All `make` targets, when to use which, and the production-vs-local invocation conventions: `.claude/rules/make-commands.md`. Required reading before running any `make` command — it's auto-loaded.
+
+Per-phase / per-unit-of-work pipeline (project-specific):
+
+0. Invoke `/wow` to reload critical rules into recency
+1. **Implement** — write code, run `npx vitest run` and `npx tsc --noEmit`
+2. **Test coverage** — launch the `test-reviewer` subagent, fill all gaps it flags
+3. **Code review** — launch the `code-reviewer` subagent, fix all findings
+4. **Report** — present results, wait for approval, commit via `/flow-commit`
+
+Steps 2 and 3 are mandatory quality gates. Applies to every phase in phased plans and every standalone change >10 lines or touching multiple files.
 
 ## Testing
 
-Three test layers, each with different requirements and costs:
+Three layers; commands and cost are in `.claude/rules/make-commands.md`. Layer 1 (unit + integration) is free and Docker-free. Layer 2 (validation) hits the real Claude API. Layer 3 (system) needs running infra + worker + `ANTHROPIC_API_KEY`.
 
-### Layer 1 — Unit + Integration (free, no external deps)
-
-| Command | Purpose |
-|---------|---------|
-| `make test` | All unit + integration tests |
-| `make test-unit` | Unit tests only (mocked, fast) |
-| `make test-integration` | Integration tests only (fake-claude + capture server) |
-| `npx vitest run src/path` | Specific test file or directory |
-| `npx tsc --noEmit` | Type-check only |
-
-Integration tests use a fake-claude process that writes JSONL to disk and a capture HTTP server that records requests. No Claude API calls, no Docker needed.
-
-### Layer 2 — Validation (real Claude API, ~$1 per run)
-
-| Command | Purpose |
-|---------|---------|
-| `make test-validate` | All validation tests (budget-capped at 150k tokens) |
-
-Requires `ANTHROPIC_API_KEY` in `.env`. Spawns real Claude CLI/SDK processes. Tests JSONL creation, watcher discovery, summary extraction. Excluded from `make test`.
-
-### Layer 3 — System (real Docker workers + Claude API, ~$1 per run)
-
-| Command | Purpose |
-|---------|---------|
-| `make test-system` | All system tests sequentially |
-| `make test-system-health` | Worker /health endpoint |
-| `make test-system-dispatch` | Dispatch API happy path |
-| `make test-system-heartbeat` | Heartbeat + event forwarding |
-| `make test-system-cancel` | Job cancellation |
-| `make test-system-error` | Error recovery |
-| `make test-system-stall` | Stall detection (host mode only) |
-| `make test-system-poller` | Trello poller card lifecycle |
-| `make test-system-cleanup` | Orphaned temp dirs + zombie jobs |
-
-Requires running Docker infrastructure (`make launch-infra` + `make launch-worker REPO=danxbot`) and `ANTHROPIC_API_KEY` in `.env`. Tests the full stack: real HTTP, real Claude, real Trello.
-
-### Key files
+Key test paths (project-specific, not duplicated elsewhere):
 
 | Path | Purpose |
-|------|---------|
-| `src/__tests__/` | Unit tests (co-located with source) |
-| `src/__tests__/integration/` | Integration tests (fake-claude + capture server) |
-| `src/__tests__/integration/helpers/` | fake-claude.ts, capture-server.ts, capture-server-cli.ts |
+|---|---|
+| `src/__tests__/` | Unit + integration test root |
+| `src/__tests__/integration/helpers/` | `fake-claude.ts`, `capture-server.ts`, `capture-server-cli.ts` |
 | `src/__tests__/validation/` | Validation tests (real Claude API) |
-| `src/__tests__/system/run-system-tests.sh` | System test runner (shell script) |
+| `src/__tests__/system/run-system-tests.sh` | System test runner shell script |
 | `vitest.validation.config.ts` | Validation-specific vitest config |
+| `dashboard/vitest.config.ts` | Dashboard SFC tests (separate from backend `vitest.config.ts`) |
 
-## Build Workflow
+Backend tests are at `src/**/*.test.ts`. Dashboard tests are at `dashboard/src/**/*.test.ts`. Running `npx vitest run` from the repo root only picks up backend — `cd dashboard && npx vitest run` for the SPA.
 
-Every phase or unit of work follows this exact order:
+## Agent Spawn Architecture (Summary)
 
-0. **Load `/wow`** — invoke Ways of Working skill to reload critical rules into recency
-1. **Implement** — write the code, run `npx vitest run` and `npx tsc --noEmit`
-2. **Test coverage** — launch `test-reviewer` agent to audit coverage, then write tests to fill all gaps
-3. **Code review** — launch `code-reviewer` agent, fix all findings
-4. **Report** — present results to user, wait for approval and commit
+Every dispatched agent goes through `spawnAgent()` in `src/agent/launcher.ts`. Every spawn is monitored by `SessionLogWatcher` reading Claude Code's native JSONL from `~/.claude/projects/`. ONE claude process per dispatch, ONE JSONL, ONE watcher. Runtime mode (auto-detected) only changes the spawn shape — everything downstream is identical.
 
-This applies per-phase in phased plans and to any standalone work (>10 lines or multiple files). Steps 2-3 are mandatory quality gates — never skip or defer them.
+| Component | File | Role |
+|---|---|---|
+| `SessionLogWatcher` | `src/agent/session-log-watcher.ts` | Canonical monitoring source — JSONL polling |
+| `LaravelForwarder` | `src/agent/laravel-forwarder.ts` | Batches and POSTs agent events to a Laravel API |
+| `StallDetector` | `src/agent/stall-detector.ts` | Detects stuck agents; nudges + kills |
+| `TerminalOutputWatcher` | `src/agent/terminal-output-watcher.ts` | Tails terminal log for ✻ thinking indicator (stall-input only) |
 
-## Agent Spawn Architecture
-
-All agents are spawned via a single `spawnAgent()` function in `src/agent/launcher.ts`. Every agent process is monitored by `SessionLogWatcher` (reading Claude Code's native JSONL from `~/.claude/projects/`).
-
-Key principle: runtime is auto-detected from `/.dockerenv` at startup — inside a container → docker (headless) mode; on the host → host (interactive terminal) mode. Runtime affects ONLY presentation. Monitoring, heartbeat, event forwarding, stall detection — all behave identically regardless of runtime.
-
-Core monitoring components (all in `src/agent/`):
-- **SessionLogWatcher** — polls Claude's JSONL session files; the canonical monitoring source
-- **LaravelForwarder** — batches and POSTs agent events to the Laravel API
-- **StallDetector** — detects agents stuck after receiving tool results; wired in `dispatch.ts`
-- **TerminalOutputWatcher** — tails terminal log captured by `script -q -f`; feeds StallDetector
+Full contract — what to do, what NOT to do, the forbidden-patterns table, the resume protocol — lives in `.claude/rules/agent-dispatch.md`.
 
 ## Autonomous Agent Team
 
 ### Triggers
 
-Skills are injected into the target repo by the poller (danx-* prefix, gitignored).
+Skills are injected into each connected repo by the poller (gitignored, `danx-*` prefix). The inject step is authoritative — files removed from `src/poller/inject/` are pruned from consuming repos on the next poll tick.
 
 | Skill | Purpose |
-|-------|---------|
+|---|---|
 | `/danx-start` | Process ALL cards in ToDo |
-| `/danx-next` | Process single top card |
+| `/danx-next` | Process the single top card |
 | `/danx-ideate` | Build knowledge + generate feature cards |
 
-### Team Roles
+### Subagent Roles
 
-The main Claude Code session acts as the orchestrator. Subagents are launched via the Task tool with `mode: "bypassPermissions"`.
+The main session is the orchestrator. Subagents are launched via Task with `mode: "bypassPermissions"`.
 
 | Agent | File | Role |
-|-------|------|------|
+|---|---|---|
 | Ideator | `.claude/agents/ideator.md` | Repo knowledge + feature generation |
-| Validator | `.claude/agents/validator.md` | Runs real Claude API validation tests |
+| Validator | `.claude/agents/validator.md` | Real Claude API validation tests |
 | Test Reviewer | `.claude/agents/test-reviewer.md` | Audits test coverage (read-only) |
 | Code Reviewer | `.claude/agents/code-reviewer.md` | Reviews code quality (read-only) |
 
 ### Trello Board
 
-Board/list/label IDs are in `.claude/rules/danx-trello-config.md` in the target repo (auto-generated by the poller).
+Board / list / label IDs are auto-generated by the poller into `.claude/rules/danx-trello-config.md` of each connected repo.
 
 | List | Purpose |
-|------|---------|
-| Review | New cards for human review |
+|---|---|
+| Review | New cards awaiting human review |
 | ToDo | Approved cards ready for work |
 | In Progress | Currently being worked on |
 | Needs Help | Blocked on human intervention |
-| Done | Completed cards |
-| Cancelled | Dropped cards |
+| Done | Completed |
+| Cancelled | Dropped |
 | Action Items | Retro action items for future improvement |
 
-### Workflow
+### Card Workflow (Orchestrator)
 
-1. Human moves approved cards from Review to ToDo
-2. `/danx-start` or `/danx-next` triggers the workflow
-3. Main session picks up card, moves to In Progress (position: `"top"`), creates progress checklist
-4. If the card requires human intervention (external service settings, account config, etc.), adds `Needs Help` label and moves to Needs Help list (position: `"top"`)
-5. Evaluates scope — splits into epic phases if too large (3+ phases), labels parent as Epic, creates phase cards in the same list as the epic
-6. Orchestrator implements directly using TDD (failing test, implement, pass, refactor)
-7. Launches Test Reviewer + Code Reviewer subagents for quality gates
-8. Posts review results as Trello card comments, fixes any critical issues
-9. Launches Validator subagent only for agent/SDK changes
-10. Commits, moves card to Done (position: `"top"`), adds retro comment
-11. Epic splitting: parent gets Epic label, phase cards named `Epic > Phase N > Description` created in In Progress
-12. Every Done card gets a retro comment (What went well, What went wrong, Action items, Commits)
-13. Retro action items create linked cards in the Action Items list
+1. Move approved card from Review → ToDo (human action)
+2. `/danx-start` or `/danx-next` triggers the orchestrator
+3. Pick up card → move to In Progress (`position: "top"`) → add Progress checklist
+4. If human intervention needed → add `Needs Help` label → move to Needs Help
+5. Evaluate scope; split into epic + phase cards if 3+ phases
+6. TDD implementation (failing test → implement → verify)
+7. Quality gates: launch Test Reviewer + Code Reviewer subagents in parallel; post results as Trello comments; fix critical findings
+8. Validator subagent only for agent / SDK changes
+9. Commit, move card to Done (`position: "top"`), add retro comment (What went well / What went wrong / Action items / Commits)
+10. Action items → linked cards in the Action Items list
+11. Signal completion via the `danxbot_complete` MCP tool — never exit silently. The worker uses the signal to finalize the dispatch row in MySQL.
