@@ -91,7 +91,7 @@ function selectDispatch(d: Dispatch): void {
     <Login />
   </template>
   <template v-else>
-    <div class="max-w-[1400px] mx-auto px-4 py-6">
+    <div class="w-full px-4 py-6">
       <DashboardHeader
         v-model:selected-repo="selectedRepo"
         v-model:active-tab="activeTab"

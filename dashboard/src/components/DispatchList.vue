@@ -56,25 +56,26 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
     <table class="w-full text-[12.5px] border-collapse">
       <thead>
         <tr class="text-left text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-800">
-          <th class="p-3">Started</th>
-          <th class="p-3">Trigger</th>
-          <th class="p-3">Repo</th>
-          <th class="p-3">Summary</th>
-          <th class="p-3">Status</th>
-          <th class="p-3 text-right">Duration</th>
-          <th class="p-3 text-right">Tools</th>
-          <th class="p-3 text-right">Sub-ag</th>
-          <th class="p-3 text-right">Tok total</th>
-          <th class="p-3 text-right">Tok in</th>
-          <th class="p-3 text-right">Tok out</th>
+          <th class="p-3 whitespace-nowrap">Started</th>
+          <th class="p-3 whitespace-nowrap">Job</th>
+          <th class="p-3 whitespace-nowrap">Trigger</th>
+          <th class="p-3 whitespace-nowrap">Repo</th>
+          <th class="p-3 whitespace-nowrap">Summary</th>
+          <th class="p-3 whitespace-nowrap">Status</th>
+          <th class="p-3 text-right whitespace-nowrap">Duration</th>
+          <th class="p-3 text-right whitespace-nowrap">Tools</th>
+          <th class="p-3 text-right whitespace-nowrap">Sub-ag</th>
+          <th class="p-3 text-right whitespace-nowrap">Tok total</th>
+          <th class="p-3 text-right whitespace-nowrap">Tok in</th>
+          <th class="p-3 text-right whitespace-nowrap">Tok out</th>
         </tr>
       </thead>
       <tbody>
         <tr v-if="loading && !hasDispatches" class="text-slate-500">
-          <td class="p-6 text-center" colspan="11">Loading…</td>
+          <td class="p-6 text-center" colspan="12">Loading…</td>
         </tr>
         <tr v-else-if="!hasDispatches" class="text-slate-500">
-          <td class="p-6 text-center" colspan="11">No dispatches yet.</td>
+          <td class="p-6 text-center" colspan="12">No dispatches yet.</td>
         </tr>
         <tr
           v-for="d in dispatches"
@@ -82,10 +83,11 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
           class="border-b border-slate-800/50 hover:bg-slate-800/20 cursor-pointer"
           @click="$emit('select', d)"
         >
-          <td class="p-3 font-mono">
+          <td class="p-3 font-mono whitespace-nowrap">
             <div class="text-[11px] text-slate-400">{{ formatDate(d.startedAt) }}</div>
             <div class="text-slate-200">{{ formatTime(d.startedAt) }}</div>
           </td>
+          <td class="p-3 font-mono text-slate-300 whitespace-nowrap" :title="d.id">{{ d.id.slice(0, 8) }}</td>
           <td class="p-3"><TriggerBadge :trigger="d.trigger" /></td>
           <td class="p-3 text-slate-400">{{ d.repoName }}</td>
           <td class="p-3">
