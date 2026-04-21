@@ -5,11 +5,13 @@
  *
  *   GET   /api/agents                     — per-repo aggregation
  *   GET   /api/agents/:repo               — single repo (for refresh after toggle)
- *   PATCH /api/agents/:repo/toggles       — mutate override (bearer auth)
+ *   PATCH /api/agents/:repo/toggles       — mutate override (user bearer auth)
  *
- * The GET routes are open (parity with `/api/dispatches`). PATCH reuses
- * the same `DANXBOT_DISPATCH_TOKEN` + `checkAuth` pair as the dispatch
- * proxy so there is ONE bearer token for the dashboard, not a new one.
+ * The GET routes are open (parity with `/api/dispatches`). PATCH is
+ * gated by a per-user bearer token issued from `/api/auth/login` —
+ * `DANXBOT_DISPATCH_TOKEN` is NOT accepted here (that's the bot↔repo
+ * credential, scoped to `/api/launch` and friends via `dispatch-proxy.ts`).
+ * See `.claude/rules/agent-dispatch.md` for the full separation.
  *
  * The routes NEVER read `.env` files or secrets — the settings file is
  * the only per-repo source of truth consulted here. Worker-reachability
@@ -23,13 +25,14 @@ import { request as httpRequest } from "node:http";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import type { RepoConfig } from "../types.js";
-import { type DispatchProxyDeps } from "./dispatch-proxy.js";
-import { checkAuthEither } from "./auth-middleware.js";
+import type { DispatchProxyDeps } from "./dispatch-proxy.js";
+import { requireUser } from "./auth-middleware.js";
 import {
   countDispatchesByRepo,
   type RepoDispatchCounts,
 } from "./dispatches-db.js";
 import {
+  DASHBOARD_PREFIX,
   FEATURES,
   readSettings,
   writeSettings,
@@ -212,10 +215,16 @@ export async function handleGetAgent(
 }
 
 /**
- * PATCH /api/agents/:repo/toggles — bearer-auth required. Mutates only
- * `overrides.<feature>` in `settings.json`; never touches `display` or
- * writes secrets. Returns the refreshed snapshot in the response body so
- * the SPA can commit the optimistic update without a second fetch.
+ * PATCH /api/agents/:repo/toggles — user-bearer auth required. Mutates
+ * only `overrides.<feature>` in `settings.json`; never touches `display`
+ * or writes secrets. Records the operator's username in `meta.updatedBy`
+ * as `dashboard:<username>` so audits show who flipped the toggle.
+ * Returns the refreshed snapshot in the response body so the SPA can
+ * commit the optimistic update without a second fetch.
+ *
+ * The dispatch token (`DANXBOT_DISPATCH_TOKEN`) is NOT accepted — that
+ * credential is bot↔repo and stays on the dispatch-proxy routes. See
+ * `.claude/rules/agent-dispatch.md` for why this split matters.
  */
 export async function handlePatchToggle(
   req: IncomingMessage,
@@ -223,12 +232,7 @@ export async function handlePatchToggle(
   repoName: string,
   deps: DispatchProxyDeps,
 ): Promise<void> {
-  // Dual-allow: user bearer (human operator) OR dispatch token (external
-  // client). Provenance is intentionally flat — `SettingsWriter` is a
-  // closed union that `readSettings` whitelists; widening it to carry
-  // the username requires extending the union + the validator + downstream
-  // dashboard rendering in a dedicated change.
-  const auth = await checkAuthEither(req, deps.token);
+  const auth = await requireUser(req);
   if (!auth.ok) {
     json(res, 401, { error: "Unauthorized" });
     return;
@@ -248,15 +252,20 @@ export async function handlePatchToggle(
     return;
   }
 
-  const feature = body["feature"];
+  const rawFeature = body["feature"];
   const enabled = body["enabled"];
 
-  if (typeof feature !== "string" || !(FEATURES as readonly string[]).includes(feature)) {
+  if (
+    typeof rawFeature !== "string" ||
+    !(FEATURES as readonly string[]).includes(rawFeature)
+  ) {
     json(res, 400, {
       error: `feature must be one of: ${FEATURES.join(", ")}`,
     });
     return;
   }
+  const feature = rawFeature as Feature;
+
   if (enabled !== true && enabled !== false && enabled !== null) {
     json(res, 400, {
       error: "enabled must be true, false, or null",
@@ -266,8 +275,8 @@ export async function handlePatchToggle(
 
   try {
     await writeSettings(repo.localPath, {
-      overrides: { [feature as Feature]: { enabled } },
-      writtenBy: "dashboard",
+      overrides: { [feature]: { enabled } },
+      writtenBy: `${DASHBOARD_PREFIX}${auth.user.username}`,
     });
     // Re-aggregate the single repo so the SPA gets fresh counts + worker
     // health alongside the new settings.

@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { IncomingMessage } from "http";
 
 const mockValidateToken = vi.fn();
@@ -7,7 +9,7 @@ vi.mock("./auth-db.js", () => ({
   validateToken: (...args: unknown[]) => mockValidateToken(...args),
 }));
 
-import { requireUser, checkAuthEither } from "./auth-middleware.js";
+import { requireUser } from "./auth-middleware.js";
 
 function makeReq(authHeader?: string): IncomingMessage {
   return {
@@ -61,45 +63,30 @@ describe("requireUser", () => {
   });
 });
 
-describe("checkAuthEither", () => {
-  const DISPATCH_TOKEN = "super-secret-dispatch-token";
-
-  it("accepts a valid user token and returns the user", async () => {
-    mockValidateToken.mockResolvedValueOnce({ userId: 7, username: "bob" });
-    const r = await checkAuthEither(
-      makeReq("Bearer user-token"),
-      DISPATCH_TOKEN,
-    );
-    expect(r.ok).toBe(true);
-    expect(r.user).toEqual({ userId: 7, username: "bob" });
+/**
+ * Phase 4 removes `checkAuthEither` — the dashboard PATCH routes no
+ * longer dual-allow the dispatch token. The dispatch-proxy routes
+ * continue to use `checkAuth` from `dispatch-proxy.ts` directly; no
+ * dashboard route imports `checkAuthEither` anywhere.
+ */
+describe("checkAuthEither (removed in Phase 4)", () => {
+  it("is no longer exported from auth-middleware.ts", async () => {
+    const mod = (await import("./auth-middleware.js")) as Record<string, unknown>;
+    expect(mod["checkAuthEither"]).toBeUndefined();
   });
 
-  it("accepts the dispatch token when user token is absent", async () => {
-    // No user match
-    mockValidateToken.mockResolvedValueOnce(null);
-    const r = await checkAuthEither(
-      makeReq(`Bearer ${DISPATCH_TOKEN}`),
-      DISPATCH_TOKEN,
-    );
-    expect(r.ok).toBe(true);
-    // Dispatch-token path does not resolve a user
-    expect(r.user).toBeUndefined();
-  });
-
-  it("rejects when neither matches", async () => {
-    mockValidateToken.mockResolvedValueOnce(null);
-    const r = await checkAuthEither(
-      makeReq("Bearer garbage"),
-      DISPATCH_TOKEN,
-    );
-    expect(r).toEqual({ ok: false, status: 401 });
-  });
-
-  it("rejects when header is missing entirely", async () => {
-    const r = await checkAuthEither(makeReq(undefined), DISPATCH_TOKEN);
-    expect(r).toEqual({ ok: false, status: 401 });
-    // When header is absent, requireUser returns 401 before validateToken runs;
-    // dispatch-token path also needs the header, so it also fails.
-    expect(mockValidateToken).not.toHaveBeenCalled();
+  it("is no longer referenced anywhere in dashboard route sources", () => {
+    // Source-level guard: a regression that re-imports `checkAuthEither`
+    // from a stale commit would compile, but this test pins the text.
+    const sources = [
+      "agents-routes.ts",
+      "server.ts",
+      "dispatch-proxy.ts",
+      "auth-middleware.ts",
+    ].map((f) => resolve(__dirname, f));
+    for (const path of sources) {
+      const body = readFileSync(path, "utf-8");
+      expect(body).not.toContain("checkAuthEither");
+    }
   });
 });

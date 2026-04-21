@@ -29,7 +29,7 @@ function snap(
         dispatchApi: { enabled: overrides.dispatchApi ?? null },
       },
       display: {},
-      meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard" },
+      meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:test" },
     },
     counts: {
       total: { total: 0, slack: 0, trello: 0, api: 0 },

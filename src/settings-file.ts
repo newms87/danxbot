@@ -10,8 +10,9 @@
  * - Workers READ on every event via `isFeatureEnabled(ctx, feature)`.
  * - Dashboard, deploy, and setup WRITE via `writeSettings`. Dashboard only
  *   ever writes `overrides`; deploy and setup only ever write `display`.
- * - Worker self-seeds `display` via `ensureSettingsFile` on first boot when
- *   the file is missing.
+ * - Worker self-seeds `display` via `syncSettingsFileOnBoot` on every boot
+ *   (creates the file when missing; refreshes `display` while preserving
+ *   `overrides`).
  *
  * Contracts:
  * - `overrides.<feature>.enabled` is three-valued: `true`/`false` is an
@@ -49,7 +50,20 @@ export const FEATURES: readonly Feature[] = [
   "dispatchApi",
 ] as const;
 
-export type SettingsWriter = "dashboard" | "deploy" | "setup" | "worker";
+/**
+ * Who last wrote `settings.json`. Dashboard writes carry the operator's
+ * username (`dashboard:<username>`) so toggles are attributable; machine
+ * writers (`deploy`, `setup`, `worker`) have no identity to record.
+ * See `.claude/rules/settings-file.md`.
+ */
+export type SettingsWriter = `${typeof DASHBOARD_PREFIX}${string}` | "deploy" | "setup" | "worker";
+
+/**
+ * Literal prefix for dashboard writers. Kept as a constant so the
+ * runtime validator (`normalizeUpdatedBy`) and the route handler that
+ * stamps the field both reference the same source of truth.
+ */
+export const DASHBOARD_PREFIX = "dashboard:" as const;
 
 export interface FeatureOverride {
   enabled: boolean | null;
@@ -140,6 +154,21 @@ function logParseErrorOnce(filePath: string, err: unknown): void {
   );
 }
 
+/**
+ * Accept `<DASHBOARD_PREFIX><username>` or one of the machine-writer
+ * literals. Anything else (including a bare `"dashboard"` or a prefix
+ * with an empty username) returns null so `normalize()` falls back to
+ * the default writer — the next write stamps the canonical shape.
+ */
+function normalizeUpdatedBy(raw: unknown): SettingsWriter | null {
+  if (typeof raw !== "string") return null;
+  if (raw === "deploy" || raw === "setup" || raw === "worker") return raw;
+  if (raw.startsWith(DASHBOARD_PREFIX) && raw.length > DASHBOARD_PREFIX.length) {
+    return raw as `${typeof DASHBOARD_PREFIX}${string}`;
+  }
+  return null;
+}
+
 function normalizeOverride(raw: unknown): FeatureOverride {
   if (raw && typeof raw === "object" && "enabled" in raw) {
     const enabled = (raw as FeatureOverride).enabled;
@@ -159,13 +188,7 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
       typeof partial.meta?.updatedAt === "string"
         ? partial.meta.updatedAt
         : d.meta.updatedAt,
-    updatedBy:
-      partial.meta?.updatedBy === "dashboard" ||
-      partial.meta?.updatedBy === "deploy" ||
-      partial.meta?.updatedBy === "setup" ||
-      partial.meta?.updatedBy === "worker"
-        ? partial.meta.updatedBy
-        : d.meta.updatedBy,
+    updatedBy: normalizeUpdatedBy(partial.meta?.updatedBy) ?? d.meta.updatedBy,
   };
 
   return {
@@ -460,19 +483,6 @@ export async function syncSettingsFileOnBoot(
     display: buildDisplayFromContext(ctx, runtime),
     writtenBy: "worker",
   });
-}
-
-/**
- * @deprecated Use `syncSettingsFileOnBoot` — first-boot-only semantics
- * were insufficient because display values drift after a redeploy with
- * a new worker port / runtime / mask. The new name signals that this
- * runs every boot, preserves overrides, and refreshes display.
- */
-export async function ensureSettingsFile(
-  ctx: RepoContext,
-  runtime: "docker" | "host",
-): Promise<void> {
-  await syncSettingsFileOnBoot(ctx, runtime);
 }
 
 /** Reset module state for testing. Do not call in production. */

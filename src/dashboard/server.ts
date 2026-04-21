@@ -169,9 +169,16 @@ async function route(
     }
   }
 
-  // ── PATCH /api/agents/:repo/toggles — dual-allow stopgap (Phase 2).
-  // Accepts user bearer OR DANXBOT_DISPATCH_TOKEN. Phase 4 swaps this to
-  // requireUser-only. The handler itself does the auth check.
+  // ── PATCH /api/agents/:repo/toggles — user bearer required.
+  // The route is intentionally matched HERE, ahead of the blanket
+  // `/api/*` gate below, so the handler's own `requireUser` call
+  // produces the 401 (and the handler can stamp
+  // `meta.updatedBy = dashboard:<username>` on success). That makes the
+  // three auth bands explicit: (1) open routes (health, login, SPA),
+  // (2) dispatch-proxy routes (dispatch-token auth inside the proxy),
+  // (3) user-gated routes (this block + the blanket gate below).
+  // `DANXBOT_DISPATCH_TOKEN` is NOT accepted here — see
+  // `.claude/rules/agent-dispatch.md`.
 
   const agentTogglesMatch = url.pathname.match(
     /^\/api\/agents\/([^/]+)\/toggles$/,

@@ -15,12 +15,12 @@ import {
   _resetForTesting,
   buildDisplayFromContext,
   defaultSettings,
-  ensureSettingsFile,
   isFeatureEnabled,
   mask,
   readSettings,
   settingsFilePath,
   settingsLockPath,
+  syncSettingsFileOnBoot,
   writeSettings,
   type Settings,
 } from "./settings-file.js";
@@ -28,7 +28,7 @@ import {
 /**
  * Shared test scaffolding — every test gets an isolated temp dir that
  * acts as the "repo localPath". The `.danxbot/` subdir is created so
- * writeSettings can land the file without a prior `ensureSettingsFile`
+ * writeSettings can land the file without a prior `syncSettingsFileOnBoot`
  * call.
  */
 function setupRepoDir(): string {
@@ -99,7 +99,7 @@ describe("settings-file", () => {
           dispatchApi: { enabled: null },
         },
         display: { worker: { port: 1234, runtime: "host" } },
-        meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard" },
+        meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:alice" },
       };
       writeFileSync(settingsFilePath(localPath), JSON.stringify(body));
 
@@ -108,7 +108,7 @@ describe("settings-file", () => {
       expect(s.overrides.trelloPoller.enabled).toBe(true);
       expect(s.overrides.dispatchApi.enabled).toBeNull();
       expect(s.display.worker).toEqual({ port: 1234, runtime: "host" });
-      expect(s.meta.updatedBy).toBe("dashboard");
+      expect(s.meta.updatedBy).toBe("dashboard:alice");
     });
 
     it("returns defaults on corrupt JSON without throwing", () => {
@@ -160,20 +160,20 @@ describe("settings-file", () => {
     it("creates the file if missing, stamps meta", async () => {
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
 
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
       expect(s.overrides.trelloPoller.enabled).toBeNull();
-      expect(s.meta.updatedBy).toBe("dashboard");
+      expect(s.meta.updatedBy).toBe("dashboard:test");
       expect(s.meta.updatedAt).not.toBe(defaultSettings().meta.updatedAt);
     });
 
     it("writes atomically (tmp + rename — no intermediate partial file)", async () => {
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
 
       // No lingering .tmp.* files
@@ -195,14 +195,14 @@ describe("settings-file", () => {
 
       await writeSettings(localPath, {
         overrides: { dispatchApi: { enabled: false } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
 
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
       expect(s.overrides.trelloPoller.enabled).toBe(true);
       expect(s.overrides.dispatchApi.enabled).toBe(false);
-      expect(s.meta.updatedBy).toBe("dashboard");
+      expect(s.meta.updatedBy).toBe("dashboard:test");
     });
 
     it("preserves display when patch only touches overrides", async () => {
@@ -213,7 +213,7 @@ describe("settings-file", () => {
 
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
 
       const s = readSettings(localPath);
@@ -253,7 +253,7 @@ describe("settings-file", () => {
       const writes = Array.from({ length: 10 }, (_, i) =>
         writeSettings(localPath, {
           overrides: { dispatchApi: { enabled: i % 2 === 0 } },
-          writtenBy: "dashboard",
+          writtenBy: "dashboard:test",
         }),
       );
       await Promise.all(writes);
@@ -275,14 +275,14 @@ describe("settings-file", () => {
       await expect(
         writeSettings(badPath, {
           overrides: { slack: { enabled: true } },
-          writtenBy: "dashboard",
+          writtenBy: "dashboard:test",
         }),
       ).rejects.toThrow();
 
       // Real path still works — queue is not stuck.
       await writeSettings(localPath, {
         overrides: { slack: { enabled: true } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
       expect(readSettings(localPath).overrides.slack.enabled).toBe(true);
     });
@@ -313,6 +313,51 @@ describe("settings-file", () => {
       });
       expect(readSettings(localPath).meta.updatedBy).toBe("setup");
     });
+
+    it("accepts dashboard:<username> as the writer (Phase 4+)", async () => {
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false } },
+        writtenBy: "dashboard:newms87",
+      });
+      expect(readSettings(localPath).meta.updatedBy).toBe("dashboard:newms87");
+    });
+
+    it("rejects bare 'dashboard' on disk (Phase 2/3 legacy) and falls back to default", () => {
+      // A settings file written by the old Phase 2/3 code carries a bare
+      // `updatedBy: "dashboard"`. Phase 4 tightens the shape so normalize
+      // rejects it and falls back to the default writer — the next write
+      // stamps the new `dashboard:<username>` form.
+      writeFileOnDisk({ updatedBy: "dashboard" });
+      expect(readSettings(localPath).meta.updatedBy).toBe("worker");
+    });
+
+    it("rejects 'dashboard:' with an empty username (prefix only)", () => {
+      writeFileOnDisk({ updatedBy: "dashboard:" });
+      expect(readSettings(localPath).meta.updatedBy).toBe("worker");
+    });
+
+    it("rejects arbitrary unknown writer strings", () => {
+      // Defense-in-depth: anything outside the four canonical forms
+      // (`dashboard:<name>`, `deploy`, `setup`, `worker`) is dropped.
+      writeFileOnDisk({ updatedBy: "hacker" });
+      expect(readSettings(localPath).meta.updatedBy).toBe("worker");
+    });
+
+    /** Stamp a settings file on disk with the given writer string. */
+    function writeFileOnDisk(meta: { updatedBy: unknown }): void {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            trelloPoller: { enabled: null },
+            dispatchApi: { enabled: null },
+          },
+          display: {},
+          meta: { updatedAt: "2026-04-19T12:00:00Z", ...meta },
+        }),
+      );
+    }
   });
 
   // ============================================================
@@ -340,7 +385,7 @@ describe("settings-file", () => {
     it("returns override value when override is true", async () => {
       await writeSettings(localPath, {
         overrides: { trelloPoller: { enabled: true } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
       const ctx = makeRepoContext({ localPath, trelloEnabled: false });
       expect(isFeatureEnabled(ctx, "trelloPoller")).toBe(true);
@@ -349,7 +394,7 @@ describe("settings-file", () => {
     it("returns override value when override is false", async () => {
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
       const ctx = makeRepoContext({
         localPath,
@@ -375,7 +420,7 @@ describe("settings-file", () => {
   });
 
   // ============================================================
-  // buildDisplayFromContext + ensureSettingsFile
+  // buildDisplayFromContext + syncSettingsFileOnBoot
   // ============================================================
 
   describe("buildDisplayFromContext", () => {
@@ -412,10 +457,10 @@ describe("settings-file", () => {
     });
   });
 
-  describe("ensureSettingsFile (syncSettingsFileOnBoot)", () => {
+  describe("syncSettingsFileOnBoot", () => {
     it("creates the file with display populated when missing", async () => {
       const ctx = makeRepoContext({ localPath });
-      await ensureSettingsFile(ctx, "docker");
+      await syncSettingsFileOnBoot(ctx, "docker");
 
       expect(existsSync(settingsFilePath(localPath))).toBe(true);
       const s = readSettings(localPath);
@@ -428,13 +473,13 @@ describe("settings-file", () => {
       // First: operator sets an override (imagine via the dashboard).
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
 
       // Then: worker boots with a new runtime (e.g. a deploy moves from
       // host to docker). Display must refresh, override must survive.
       const ctx = makeRepoContext({ localPath });
-      await ensureSettingsFile(ctx, "docker");
+      await syncSettingsFileOnBoot(ctx, "docker");
 
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
@@ -444,12 +489,12 @@ describe("settings-file", () => {
 
     it("overwrites a stale display.worker on subsequent boots", async () => {
       const ctx = makeRepoContext({ localPath, workerPort: 5562 });
-      await ensureSettingsFile(ctx, "host");
+      await syncSettingsFileOnBoot(ctx, "host");
       expect(readSettings(localPath).display.worker?.runtime).toBe("host");
 
       // Next boot is in docker runtime on a different port.
       const ctx2 = makeRepoContext({ localPath, workerPort: 5999 });
-      await ensureSettingsFile(ctx2, "docker");
+      await syncSettingsFileOnBoot(ctx2, "docker");
       const s = readSettings(localPath);
       expect(s.display.worker?.runtime).toBe("docker");
       expect(s.display.worker?.port).toBe(5999);
@@ -470,7 +515,7 @@ describe("settings-file", () => {
     it("removes the lock file after a successful write", async () => {
       await writeSettings(localPath, {
         overrides: { slack: { enabled: true } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
       expect(existsSync(settingsLockPath(localPath))).toBe(false);
     });
@@ -486,7 +531,7 @@ describe("settings-file", () => {
 
       await writeSettings(localPath, {
         overrides: { slack: { enabled: true } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
       expect(readSettings(localPath).overrides.slack.enabled).toBe(true);
       // The lock was stolen and then released cleanly.
@@ -502,7 +547,7 @@ describe("settings-file", () => {
     it("is valid JSON with trailing newline", async () => {
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:test",
       });
       const raw = readFileSync(settingsFilePath(localPath), "utf-8");
       expect(raw.endsWith("\n")).toBe(true);

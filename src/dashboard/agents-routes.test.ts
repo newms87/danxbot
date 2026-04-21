@@ -14,6 +14,7 @@ vi.mock("../settings-file.js", () => ({
   readSettings: (...args: unknown[]) => mockReadSettings(...args),
   writeSettings: (...args: unknown[]) => mockWriteSettings(...args),
   FEATURES: ["slack", "trelloPoller", "dispatchApi"],
+  DASHBOARD_PREFIX: "dashboard:",
 }));
 
 const mockCountDispatchesByRepo = vi.fn();
@@ -32,20 +33,20 @@ vi.mock("../logger.js", () => ({
 }));
 
 // auth-middleware transitively loads db/connection which reads env at module
-// load. Stub it with a mock `checkAuthEither` whose behavior mirrors the
-// old checkAuth: accepts Bearer that matches the expected dispatch token.
-// Tests pass `token: "test-token"` via DispatchProxyDeps in the request body
-// → Authorization: Bearer test-token passes; anything else fails.
+// load. Stub it with a mock `requireUser` that treats `Bearer user-<name>`
+// as authenticated and anything else (including the dispatch token) as a
+// 401. This mirrors the Phase 4 contract: PATCH takes ONLY user bearers,
+// `DANXBOT_DISPATCH_TOKEN` is rejected here.
 vi.mock("./auth-middleware.js", () => ({
-  checkAuthEither: async (
-    req: { headers: { authorization?: string } },
-    dispatchToken: string,
-  ) => {
+  requireUser: async (req: { headers: { authorization?: string } }) => {
     const h = req.headers?.authorization;
     const t = h?.startsWith("Bearer ") ? h.slice(7).trim() : null;
-    if (!dispatchToken) return { ok: false, status: 401 };
     if (!t) return { ok: false, status: 401 };
-    return t === dispatchToken ? { ok: true } : { ok: false, status: 401 };
+    if (!t.startsWith("user-")) return { ok: false, status: 401 };
+    return {
+      ok: true,
+      user: { userId: 1, username: t.slice("user-".length) },
+    };
   },
 }));
 
@@ -65,7 +66,7 @@ function settings(overrides?: Partial<{ slack: boolean | null; trelloPoller: boo
       dispatchApi: { enabled: overrides?.dispatchApi ?? null },
     },
     display: {},
-    meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard" },
+    meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:test" },
   };
 }
 
@@ -259,7 +260,16 @@ describe("handleGetAgent", () => {
 // ============================================================
 
 describe("handlePatchToggle", () => {
-  function authReq(body: Record<string, unknown>, token = "test-token"): IncomingMessage {
+  /**
+   * PATCH tests use `Bearer user-<name>` — the mocked `requireUser`
+   * treats those as authenticated and resolves the username after the
+   * `user-` prefix. Anything else (including the dispatch token) is a
+   * 401, enforcing the Phase 4 contract: dispatch tokens do NOT work
+   * on dashboard mutations.
+   */
+  const DEFAULT_TOKEN = "user-newms87";
+
+  function authReq(body: Record<string, unknown>, token = DEFAULT_TOKEN): IncomingMessage {
     const req = createMockReqWithBody("PATCH", body);
     (req.headers as Record<string, string>)["authorization"] = `Bearer ${token}`;
     return req;
@@ -274,7 +284,7 @@ describe("handlePatchToggle", () => {
     expect(mockWriteSettings).not.toHaveBeenCalled();
   });
 
-  it("returns 401 when the bearer token is wrong", async () => {
+  it("returns 401 when the bearer token is a non-user token (unknown/invalid)", async () => {
     const req = authReq({ feature: "slack", enabled: false }, "wrong-token");
     const res = createMockRes();
     await handlePatchToggle(req, res, "danxbot", deps());
@@ -283,13 +293,16 @@ describe("handlePatchToggle", () => {
     expect(mockWriteSettings).not.toHaveBeenCalled();
   });
 
-  it("returns 401 when the dashboard has no dispatch token configured and no user bearer", async () => {
-    // With the Phase 2 dual-allow, a missing DANXBOT_DISPATCH_TOKEN no longer
-    // produces a 500 — user bearer is the primary path. The operator path (no
-    // auth at all, misconfigured dispatch token) gets a clean 401 instead.
-    const req = authReq({ feature: "slack", enabled: false }, "anything");
+  it("returns 401 when the dispatch token is used instead of a user token", async () => {
+    // Phase 4 contract: DANXBOT_DISPATCH_TOKEN is bot↔repo only. Using
+    // it on dashboard mutations must fail — gpt-manager's launch flow
+    // still uses it on /api/launch (unchanged), but never here.
+    const req = authReq(
+      { feature: "slack", enabled: false },
+      "test-dispatch-token",
+    );
     const res = createMockRes();
-    await handlePatchToggle(req, res, "danxbot", deps({ token: "" }));
+    await handlePatchToggle(req, res, "danxbot", deps({ token: "test-dispatch-token" }));
 
     expect(res._getStatusCode()).toBe(401);
     expect(mockWriteSettings).not.toHaveBeenCalled();
@@ -324,7 +337,7 @@ describe("handlePatchToggle", () => {
     expect(mockWriteSettings).not.toHaveBeenCalled();
   });
 
-  it("writes the override and returns the refreshed snapshot on valid PATCH", async () => {
+  it("writes the override + `dashboard:<username>` writer on valid PATCH", async () => {
     mockWriteSettings.mockResolvedValue(settings({ slack: false }));
     mockReadSettings.mockReturnValue(settings({ slack: false }));
 
@@ -337,12 +350,26 @@ describe("handlePatchToggle", () => {
       "/repos/danxbot",
       expect.objectContaining({
         overrides: { slack: { enabled: false } },
-        writtenBy: "dashboard",
+        writtenBy: "dashboard:newms87",
       }),
     );
     const body = JSON.parse(res._getBody());
     expect(body.name).toBe("danxbot");
     expect(body.settings.overrides.slack.enabled).toBe(false);
+  });
+
+  it("records the actual operator's username in writtenBy", async () => {
+    mockWriteSettings.mockResolvedValue(settings());
+
+    const req = authReq({ feature: "dispatchApi", enabled: true }, "user-alice");
+    const res = createMockRes();
+    await handlePatchToggle(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockWriteSettings).toHaveBeenCalledWith(
+      "/repos/danxbot",
+      expect.objectContaining({ writtenBy: "dashboard:alice" }),
+    );
   });
 
   it("accepts enabled: null as an explicit 'defer to env default'", async () => {
@@ -385,7 +412,7 @@ describe("handlePatchToggle", () => {
     const patch = mockWriteSettings.mock.calls[0][1];
     expect(patch).toEqual({
       overrides: { dispatchApi: { enabled: false } },
-      writtenBy: "dashboard",
+      writtenBy: "dashboard:newms87",
     });
     // The `display` key on the incoming body must NOT pass through.
     expect(patch.display).toBeUndefined();

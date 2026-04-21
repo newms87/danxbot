@@ -63,10 +63,8 @@ vi.mock("./poller/index.js", () => ({
   start: mockStartPoller,
 }));
 
-const mockEnsureSettingsFile = vi.fn().mockResolvedValue(undefined);
 const mockSyncSettingsFileOnBoot = vi.fn().mockResolvedValue(undefined);
 vi.mock("./settings-file.js", () => ({
-  ensureSettingsFile: mockEnsureSettingsFile,
   syncSettingsFileOnBoot: mockSyncSettingsFileOnBoot,
 }));
 
@@ -346,7 +344,6 @@ describe("dashboard mode startup flow", () => {
     await importIndex();
 
     expect(mockSyncSettingsFileOnBoot).not.toHaveBeenCalled();
-    expect(mockEnsureSettingsFile).not.toHaveBeenCalled();
   });
 
   it("calls initShutdownHandlers with thread cleanup + retention interval", async () => {

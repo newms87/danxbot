@@ -24,10 +24,12 @@ function emitAuthExpired(): void {
  *
  * Contract: any 401 response dispatches the `auth:expired` window event
  * and returns the Response unchanged. App.vue listens for this and clears
- * local auth state, forcing a re-render to Login. This contract assumes
- * "any 401 = session dead"; when we introduce per-role authorization
- * (Phase 4+) a 403 will be the right path for "authed but not permitted"
- * and this function will need to distinguish.
+ * local auth state, forcing a re-render to Login. The current auth model
+ * is binary — authed or not — so 401 is the only failure mode. If
+ * role-based authorization lands later, 403 will be the "authed but not
+ * permitted" path and this function will need to distinguish; until
+ * that requirement exists, keeping both collapsed to 401-only removes
+ * a speculative branch.
  */
 export async function fetchWithAuth(
   input: string,
@@ -106,8 +108,9 @@ function toggleError(status: number, serverMessage?: string): ToggleError {
  * Toggle a feature on/off for a repo. `enabled` may be null to reset back
  * to the env default. Responds with the refreshed snapshot so the caller
  * can commit the optimistic update without a re-fetch. Auth flows through
- * `fetchWithAuth` — the PATCH route is dual-allow, so either a user
- * bearer (browser) or the dispatch token (external) authenticates.
+ * `fetchWithAuth` — the PATCH route requires a user bearer token. A 401
+ * fires the `auth:expired` event which App.vue handles by redirecting to
+ * Login (see Phase 4 auth contract).
  */
 export async function patchToggle(
   repo: string,
