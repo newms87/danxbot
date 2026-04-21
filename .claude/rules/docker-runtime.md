@@ -45,6 +45,14 @@ Edit files in `src/` on the host. Code changes are visible in the dashboard cont
 **Dashboard Vue/CSS changes:** HMR on port **5566** (served by the `dashboard-dev` compose service, started automatically by `docker compose up -d`)
 **New dependencies:** `make build`
 
+## Dev repo mounts — never bypass `make launch-infra`
+
+The dashboard needs RW access to each connected repo's `.danxbot/` dir so operator toggles on the Agents tab can write `settings.json`. Those per-repo RW binds live in a gitignored `docker-compose.override.yml` auto-generated from `REPOS` by `make launch-infra` (prereq: `generate-dev-override`). Compose auto-merges the override ONLY when invoked without `-f`.
+
+**Invariant:** use `make launch-infra` (or plain `docker compose up -d`) for dev infra. NEVER run `docker compose -f docker-compose.yml up` — `-f` suppresses override auto-merge and immediately regresses EROFS on the next settings write. If you're writing a new dev helper that needs an explicit `-f`, also pass `-f docker-compose.override.yml`.
+
+Prod is unaffected: its `docker compose -f docker-compose.prod.yml` invocation intentionally bypasses the override (dev-only file).
+
 ## Container Paths
 
 **Dashboard container:**
