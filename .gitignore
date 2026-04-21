@@ -36,6 +36,10 @@ repos/
 
 # Runtime artifacts from dispatch + poller
 logs/
+# Claude Code session logs for this repo's worker (bind-mounted to /home/danxbot/.claude/projects)
+claude-projects/
+# Tools injected by the danxbot poller
+.claude/tools/
 
 # Ephemeral scratch from superpowers:brainstorming sessions
 .superpowers/

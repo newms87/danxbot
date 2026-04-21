@@ -12,6 +12,8 @@ import {
   handleRawJsonl,
   handleFollowDispatch,
 } from "./dispatches-routes.js";
+import { handleStream } from "./stream-routes.js";
+import { startDbChangeDetector } from "./dispatch-stream.js";
 import {
   handleLaunchProxy,
   handleResumeProxy,
@@ -226,6 +228,11 @@ async function route(
     return true;
   }
 
+  if (method === "GET" && url.pathname === "/api/stream") {
+    await handleStream(req, res, url.searchParams);
+    return true;
+  }
+
   if (method === "GET" && url.pathname === "/api/dispatches") {
     await handleListDispatches(res, url.searchParams);
     return true;
@@ -316,6 +323,10 @@ export async function startDashboard(): Promise<void> {
   };
 
   await checkWorkerHostResolution(repos, workerHost);
+
+  // Start the DB change detector that publishes dispatch:created and
+  // dispatch:updated events to the EventBus for SSE subscribers.
+  startDbChangeDetector();
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);

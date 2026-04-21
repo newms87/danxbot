@@ -1,3 +1,7 @@
+import { mkdtempSync } from "node:fs";
+import { chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { makeRepoContext } from "./__tests__/helpers/fixtures.js";
 
@@ -357,5 +361,50 @@ describe("dashboard mode startup flow", () => {
         retentionInterval: expect.anything(),
       }),
     );
+  });
+});
+
+// ============================================================
+// assertJsonlDirectoryAccess unit tests
+// ============================================================
+
+describe("assertJsonlDirectoryAccess", () => {
+  // Import the exported function directly (does not trigger main())
+  let assertJsonlDirectoryAccess: (
+    repoName: string,
+    dir?: string,
+  ) => Promise<void>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ assertJsonlDirectoryAccess } = await import("./index.js"));
+  });
+
+  it("resolves without throwing when the directory exists and is writable", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "danxbot-assert-ok-"));
+    await expect(
+      assertJsonlDirectoryAccess("test-repo", tmpDir),
+    ).resolves.toBeUndefined();
+  });
+
+  it("resolves without throwing when the directory does not exist yet (mkdir creates it)", async () => {
+    const newDir = join(mkdtempSync(join(tmpdir(), "danxbot-assert-new-")), "sub");
+    await expect(
+      assertJsonlDirectoryAccess("test-repo", newDir),
+    ).resolves.toBeUndefined();
+  });
+
+  it("resolves without throwing when the directory is not writable (logs warn instead)", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "danxbot-assert-ro-"));
+    // Remove write permission so access(W_OK) fails
+    chmodSync(tmpDir, 0o555);
+    try {
+      await expect(
+        assertJsonlDirectoryAccess("test-repo", tmpDir),
+      ).resolves.toBeUndefined();
+    } finally {
+      // Restore permissions so tmp cleanup can remove the dir
+      chmodSync(tmpDir, 0o755);
+    }
   });
 });

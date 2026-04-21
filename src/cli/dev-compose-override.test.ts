@@ -24,9 +24,30 @@ describe("buildOverride", () => {
     );
   });
 
-  it("does NOT mark binds :ro — dashboard needs to write settings.json", () => {
+  it("emits one RO claude-projects bind per repo for JSONL access", () => {
+    const out = buildOverride(["danxbot", "gpt-manager", "platform"]);
+
+    expect(out).toContain(
+      "      - ./repos/danxbot/claude-projects:/danxbot/app/claude-projects/danxbot:ro",
+    );
+    expect(out).toContain(
+      "      - ./repos/gpt-manager/claude-projects:/danxbot/app/claude-projects/gpt-manager:ro",
+    );
+    expect(out).toContain(
+      "      - ./repos/platform/claude-projects:/danxbot/app/claude-projects/platform:ro",
+    );
+  });
+
+  it("marks claude-projects binds :ro but NOT repo binds (dashboard writes settings.json)", () => {
     const out = buildOverride(["danxbot"]);
-    expect(out).not.toMatch(/:ro\s*$/m);
+    // Repo bind must NOT have :ro
+    expect(out).not.toMatch(
+      /\.\/repos\/danxbot:\/danxbot\/app\/repos\/danxbot:ro/,
+    );
+    // claude-projects bind MUST have :ro
+    expect(out).toMatch(
+      /\.\/repos\/danxbot\/claude-projects:\/danxbot\/app\/claude-projects\/danxbot:ro/,
+    );
   });
 
   it("includes an auto-generated header so humans don't edit it", () => {
@@ -41,6 +62,7 @@ describe("buildOverride", () => {
     expect(out).not.toMatch(/dashboard:/);
     expect(out).not.toMatch(/volumes:/);
     expect(out).not.toMatch(/\/danxbot\/app\/repos\//);
+    expect(out).not.toMatch(/\/danxbot\/app\/claude-projects\//);
   });
 
   it("produces the expected structural shape (guards against indent regressions)", () => {
@@ -50,6 +72,10 @@ describe("buildOverride", () => {
     // space here silently breaks docker compose merge.
     expect(out).toMatch(
       /^services:\n {2}dashboard:\n {4}volumes:\n {6}- \.\/repos\/danxbot:/m,
+    );
+    // The :ro claude-projects bind must be at the same indent level (6 spaces).
+    expect(out).toMatch(
+      /^ {6}- \.\/repos\/danxbot\/claude-projects:\/danxbot\/app\/claude-projects\/danxbot:ro$/m,
     );
   });
 });

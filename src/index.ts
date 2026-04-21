@@ -1,3 +1,7 @@
+import { access, mkdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { startSlackListener, getSlackClient } from "./slack/listener.js";
 import { startThreadCleanup } from "./threads.js";
 import { startDashboard } from "./dashboard/server.js";
@@ -13,6 +17,40 @@ import { start as startPoller } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
 
 const log = createLogger("startup");
+
+/**
+ * Assert that the Claude Code session-log directory is accessible and writable.
+ *
+ * In docker runtime, Claude Code writes JSONL session logs to
+ * `~/.claude/projects/` inside the worker container. The compose.yml volume
+ * mount (`./repos/<name>/claude-projects:/home/danxbot/.claude/projects`)
+ * makes those logs visible to the host so the dashboard can read them via the
+ * per-repo override mounts. If that bind mount is missing or read-only, the
+ * dashboard will silently see no session data.
+ *
+ * This function detects and warns about such mismatches at startup rather than
+ * waiting for a live dispatch to fail silently.
+ *
+ * The optional `dir` parameter exists for testability; production callers omit
+ * it and use the real Claude Code projects path.
+ */
+export async function assertJsonlDirectoryAccess(
+  repoName: string,
+  dir: string = join(homedir(), ".claude", "projects"),
+): Promise<void> {
+  try {
+    await mkdir(dir, { recursive: true });
+    await access(dir, constants.W_OK);
+    log.info(`[${repoName}] JSONL projects dir OK: ${dir}`);
+  } catch (err) {
+    log.warn(
+      `[${repoName}] JSONL projects dir NOT writable: ${dir} — ` +
+        `ensure the compose.yml volume mount is correct so the dashboard can ` +
+        `read session logs via the per-repo claude-projects bind. ` +
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 /**
  * Dashboard mode: runs shared infrastructure (migrations, dashboard server, cleanup).
@@ -52,6 +90,11 @@ async function startWorkerMode(): Promise<void> {
   // `overrides` are preserved across restarts. See
   // `.claude/rules/settings-file.md`.
   await syncSettingsFileOnBoot(repo, config.runtime);
+
+  // Assert that the JSONL projects directory is accessible and writable.
+  // Catches missing or misconfigured bind mounts early so operators see a
+  // clear warning at startup rather than discovering it via a failed dispatch.
+  await assertJsonlDirectoryAccess(repo.name);
 
   // Platform pool must be ready before any sql:execute block runs.
   // Disabled repos skip pool creation.

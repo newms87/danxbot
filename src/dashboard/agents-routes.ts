@@ -39,6 +39,7 @@ import {
   type Feature,
   type Settings,
 } from "../settings-file.js";
+import { eventBus } from "./event-bus.js";
 
 const log = createLogger("agents-routes");
 
@@ -292,6 +293,8 @@ export async function handlePatchToggle(
       countsByRepo[repo.name] ?? emptyCounts(),
       deps.resolveHost,
     );
+    // Publish agent:updated so SSE clients see the toggle without polling.
+    eventBus.publish({ topic: "agent:updated", data: snapshot });
     json(res, 200, snapshot);
   } catch (err) {
     log.error(

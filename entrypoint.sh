@@ -32,17 +32,23 @@ if [ -n "$GITHUB_TOKEN" ]; then
     "
 fi
 
-# Set up Claude Code auth for the danxbot user
-if [ -f "/danxbot/claude-auth/.claude.json" ]; then
-    cp /danxbot/claude-auth/.claude.json "$DANXBOT_HOME/.claude.json"
+# Set up Claude Code auth for the danxbot user.
+# The compose mount is at /danxbot/app/claude-auth (matches
+# resolve(projectRoot, "claude-auth") in src/config.ts). Keep these paths in
+# sync with the compose mount — drift here silently skips the chown below and
+# leaves /home/danxbot/.claude root-owned, which breaks `mkdir session-env`
+# for every Bash/MCP call inside a dispatched agent session.
+CLAUDE_AUTH_DIR="/danxbot/app/claude-auth"
+if [ -f "$CLAUDE_AUTH_DIR/.claude.json" ]; then
+    cp "$CLAUDE_AUTH_DIR/.claude.json" "$DANXBOT_HOME/.claude.json"
     mkdir -p "$DANXBOT_HOME/.claude"
-    if [ -f "/danxbot/claude-auth/.credentials.json" ]; then
-        cp /danxbot/claude-auth/.credentials.json "$DANXBOT_HOME/.claude/.credentials.json"
+    if [ -f "$CLAUDE_AUTH_DIR/.credentials.json" ]; then
+        cp "$CLAUDE_AUTH_DIR/.credentials.json" "$DANXBOT_HOME/.claude/.credentials.json"
     fi
     chown -R danxbot:danxbot "$DANXBOT_HOME/.claude.json" "$DANXBOT_HOME/.claude"
     echo "Claude Code auth configured."
 else
-    echo "WARNING: No Claude auth found at /danxbot/claude-auth/ — agent will not work."
+    echo "WARNING: No Claude auth found at $CLAUDE_AUTH_DIR/ — agent will not work."
 fi
 
 # Fix ownership of runtime directories (volumes may have been created as root)

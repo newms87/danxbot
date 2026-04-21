@@ -33,6 +33,16 @@ RUN useradd -m -s /bin/bash danxbot
 RUN mkdir -p /danxbot/app /danxbot/repos /danxbot/threads /danxbot/data /danxbot/logs \
     && chown -R danxbot:danxbot /danxbot
 
+# Pre-create Claude Code runtime directories with correct ownership.
+# The compose.yml bind-mounts /home/danxbot/.claude/projects at startup; Docker
+# creates the .claude/ parent as root before the entrypoint runs, making it
+# unwritable by the danxbot user. Pre-creating these here ensures Claude Code
+# can create session-env/, settings.json, and other runtime state without
+# permission errors. The entrypoint re-chowns these if needed, but this
+# ensures the directories exist and are owned correctly from image build time.
+RUN mkdir -p /home/danxbot/.claude/session-env \
+    && chown -R danxbot:danxbot /home/danxbot/.claude
+
 WORKDIR /danxbot/app
 
 # Install backend dependencies (layer cached unless package.json changes)

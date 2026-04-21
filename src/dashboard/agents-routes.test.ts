@@ -23,6 +23,11 @@ vi.mock("./dispatches-db.js", () => ({
   countDispatchesByRepo: (...args: unknown[]) => mockCountDispatchesByRepo(...args),
 }));
 
+const mockEventBusPublish = vi.fn();
+vi.mock("./event-bus.js", () => ({
+  eventBus: { publish: (...args: unknown[]) => mockEventBusPublish(...args) },
+}));
+
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
@@ -269,6 +274,10 @@ describe("handlePatchToggle", () => {
    */
   const DEFAULT_TOKEN = "user-newms87";
 
+  beforeEach(() => {
+    mockEventBusPublish.mockReset();
+  });
+
   function authReq(body: Record<string, unknown>, token = DEFAULT_TOKEN): IncomingMessage {
     const req = createMockReqWithBody("PATCH", body);
     (req.headers as Record<string, string>)["authorization"] = `Bearer ${token}`;
@@ -356,6 +365,10 @@ describe("handlePatchToggle", () => {
     const body = JSON.parse(res._getBody());
     expect(body.name).toBe("danxbot");
     expect(body.settings.overrides.slack.enabled).toBe(false);
+    // Verify agent:updated is published so SSE clients see the toggle without polling.
+    expect(mockEventBusPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ topic: "agent:updated", data: expect.objectContaining({ name: "danxbot" }) }),
+    );
   });
 
   it("records the actual operator's username in writtenBy", async () => {

@@ -97,6 +97,18 @@ vi.mock("./dispatches-routes.js", () => ({
   handleFollowDispatch: (...args: unknown[]) => mockHandleFollowDispatch(...args),
 }));
 
+// Stub dispatch-stream so startDashboard() doesn't start a real DB poller.
+const mockStartDbChangeDetector = vi.fn();
+vi.mock("./dispatch-stream.js", () => ({
+  startDbChangeDetector: (...args: unknown[]) => mockStartDbChangeDetector(...args),
+}));
+
+// Stub stream-routes so the /api/stream handler is a no-op in server tests.
+const mockHandleStream = vi.fn();
+vi.mock("./stream-routes.js", () => ({
+  handleStream: (...args: unknown[]) => mockHandleStream(...args),
+}));
+
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),

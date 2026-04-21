@@ -24,6 +24,7 @@ import { parseReposEnv } from "../repos-env.js";
 
 export const OVERRIDE_FILENAME = "docker-compose.override.yml";
 const CONTAINER_REPOS_BASE = "/danxbot/app/repos";
+const CONTAINER_CLAUDE_PROJECTS_BASE = "/danxbot/app/claude-projects";
 
 export function buildOverride(repoNames: string[]): string {
   const header = [
@@ -37,8 +38,19 @@ export function buildOverride(repoNames: string[]): string {
     return [...header, "services: {}", ""].join("\n");
   }
 
-  const binds = repoNames.map(
+  // RW bind per repo: dashboard needs write access to each repo's .danxbot/
+  // so that Agents tab toggles can write settings.json.
+  const repoBinds = repoNames.map(
     (name) => `      - ./repos/${name}:${CONTAINER_REPOS_BASE}/${name}`,
+  );
+
+  // RO bind per repo: mount each repo's claude-projects dir so the dashboard
+  // can read JSONL session logs written by that repo's worker container.
+  // The path-resolver in src/dashboard/jsonl-path-resolver.ts translates the
+  // worker-internal path (/home/danxbot/.claude/projects/...) to this mount.
+  const projectsBinds = repoNames.map(
+    (name) =>
+      `      - ./repos/${name}/claude-projects:${CONTAINER_CLAUDE_PROJECTS_BASE}/${name}:ro`,
   );
 
   return [
@@ -46,7 +58,8 @@ export function buildOverride(repoNames: string[]): string {
     "services:",
     "  dashboard:",
     "    volumes:",
-    ...binds,
+    ...repoBinds,
+    ...projectsBinds,
     "",
   ].join("\n");
 }

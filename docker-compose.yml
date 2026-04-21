@@ -26,22 +26,24 @@ services:
       - ./package.json:/danxbot/app/package.json
       # Dashboard built assets (mount for dev rebuilds)
       - ./dashboard:/danxbot/app/dashboard
-      # Shared Claude Code JSONL — host and docker workers both write to
-      # CLAUDE_PROJECTS_DIR (default ./claude-projects). Two mounts so the
-      # dashboard can resolve both flavors of stored absolute path:
-      #   docker-worker stored path: /home/danxbot/.claude/projects/...
-      #   host-worker  stored path:  $CLAUDE_PROJECTS_DIR/...
-      # When CLAUDE_PROJECTS_DIR points at the host's real ~/.claude/projects,
-      # host-mode dispatch JSONLs are readable inside the container at the
-      # exact same absolute path the watcher recorded.
-      - ${CLAUDE_PROJECTS_DIR:-./claude-projects}:/home/danxbot/.claude/projects
+      # Host-mode JSONL compatibility: when CLAUDE_PROJECTS_DIR points at the
+      # host's real ~/.claude/projects, the dashboard can resolve host-mode
+      # dispatch JSONLs by their stored absolute path (path-resolver strategy 1).
+      # Both sides of the mount intentionally use the same variable so that when
+      # CLAUDE_PROJECTS_DIR is set, the container path === stored path, making
+      # strategy 1 (direct lookup by stored absolute path) work. When the
+      # variable is unset, the default RHS alias /danxbot/host-claude-projects is
+      # used as a safe placeholder that the path-resolver never looks up.
+      # Docker-worker JSONLs are resolved via per-repo mounts in the override
+      # (path-resolver strategy 2 — translateWorkerPath).
       - ${CLAUDE_PROJECTS_DIR:-./claude-projects}:${CLAUDE_PROJECTS_DIR:-/danxbot/host-claude-projects}:ro
-      # Per-repo RW binds live in `docker-compose.override.yml` (gitignored,
-      # auto-generated from REPOS by `make launch-infra`). The override
-      # mounts each `./repos/<name>` symlink at `/danxbot/app/repos/<name>`
-      # so the Agents tab can write each repo's `.danxbot/settings.json`.
-      # See src/dev-compose-override.ts for rationale.
-      # Prod compose handles this with /danxbot/repos:/danxbot/app/repos.
+      # Per-repo RW binds + per-repo RO claude-projects binds live in
+      # `docker-compose.override.yml` (gitignored, auto-generated from REPOS
+      # by `make launch-infra`). The override mounts:
+      #   ./repos/<name>          → /danxbot/app/repos/<name>      (RW, for settings.json)
+      #   ./repos/<name>/claude-projects → /danxbot/app/claude-projects/<name>  (RO, for JSONL)
+      # See src/cli/dev-compose-override.ts and src/dashboard/jsonl-path-resolver.ts.
+      # Prod compose handles these with static per-repo volume entries.
     networks:
       - danxbot-net
     depends_on:
