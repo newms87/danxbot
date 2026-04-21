@@ -153,6 +153,11 @@ export function setupProcessHandlers(
       options.cleanup?.();
       options.onComplete?.(job);
     } else {
+      // Status was set by cancelJob/job.stop/inactivity/max-runtime — those
+      // paths invoke cleanup directly. Calling it again here is intentional:
+      // observers (DispatchTracker.finalize, watcher.stop, temp-dir rm) are
+      // idempotent, and this branch ensures cleanup STILL runs if the
+      // pre-set path forgot to invoke it (defensive — fail loud, not silent).
       options.cleanup?.();
     }
   });
@@ -167,6 +172,7 @@ export function setupProcessHandlers(
       options.cleanup?.();
       options.onComplete?.(job);
     } else {
+      // See close-handler else branch above — same idempotency guarantee.
       options.cleanup?.();
     }
   });

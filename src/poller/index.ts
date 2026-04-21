@@ -6,6 +6,7 @@ import {
   mkdirSync,
   copyFileSync,
   chmodSync,
+  rmSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -461,10 +462,20 @@ function syncRepoFiles(repo: RepoContext): void {
     }
   }
 
-  // 5. Inject danx-* skills from inject/skills/
+  // 5. Inject danx-* skills from inject/skills/. Authoritative sync: any
+  // danx-* skill dir present in the destination but missing from the source
+  // is removed, so deletions in inject/skills/ propagate to consuming repos.
   const injectSkillsDir = resolve(injectDir, "skills");
   if (existsSync(injectSkillsDir)) {
-    for (const skillName of readdirSync(injectSkillsDir)) {
+    const sourceSkillNames = new Set(readdirSync(injectSkillsDir));
+    if (existsSync(repoSkillsDir)) {
+      for (const existing of readdirSync(repoSkillsDir)) {
+        if (existing.startsWith("danx-") && !sourceSkillNames.has(existing)) {
+          rmSync(resolve(repoSkillsDir, existing), { recursive: true, force: true });
+        }
+      }
+    }
+    for (const skillName of sourceSkillNames) {
       const srcSkillDir = resolve(injectSkillsDir, skillName);
       const destSkillDir = resolve(repoSkillsDir, skillName);
       mkdirSync(destSkillDir, { recursive: true });
@@ -474,10 +485,20 @@ function syncRepoFiles(repo: RepoContext): void {
     }
   }
 
-  // 6. Inject danx-* tools from inject/tools/
+  // 6. Inject danx-* tools from inject/tools/. Authoritative sync: any
+  // danx-* file present in the destination but missing from the source is
+  // removed, so deletions in inject/tools/ propagate to consuming repos.
   const injectToolsDir = resolve(injectDir, "tools");
   if (existsSync(injectToolsDir)) {
-    for (const file of readdirSync(injectToolsDir)) {
+    const sourceToolNames = new Set(readdirSync(injectToolsDir));
+    if (existsSync(repoToolsDir)) {
+      for (const existing of readdirSync(repoToolsDir)) {
+        if (existing.startsWith("danx-") && !sourceToolNames.has(existing)) {
+          rmSync(resolve(repoToolsDir, existing), { force: true });
+        }
+      }
+    }
+    for (const file of sourceToolNames) {
       const src = resolve(injectToolsDir, file);
       const dest = resolve(repoToolsDir, file);
       copyFileSync(src, dest);

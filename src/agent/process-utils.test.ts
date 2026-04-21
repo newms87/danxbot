@@ -402,4 +402,73 @@ describe("setupProcessHandlers", () => {
     expect(observedSummary).toBe("all done");
     expect(observedCompletedAt).toBeInstanceOf(Date);
   });
+
+  it("populates job.summary and job.completedAt BEFORE invoking cleanup on non-zero exit", () => {
+    const job = makeJob();
+    const child = makeChild();
+    let observedSummary: string | undefined;
+    let observedCompletedAt: Date | undefined;
+    const cleanup = vi.fn(() => {
+      observedSummary = job.summary;
+      observedCompletedAt = job.completedAt;
+    });
+
+    setupProcessHandlers(child as never, job, () => "", () => "boom", { cleanup });
+    child.emit("close", 1);
+
+    expect(observedSummary).toContain("boom");
+    expect(observedCompletedAt).toBeInstanceOf(Date);
+  });
+
+  it("populates job.summary and job.completedAt BEFORE invoking cleanup on spawn error", () => {
+    const job = makeJob();
+    const child = makeChild();
+    let observedSummary: string | undefined;
+    let observedCompletedAt: Date | undefined;
+    const cleanup = vi.fn(() => {
+      observedSummary = job.summary;
+      observedCompletedAt = job.completedAt;
+    });
+
+    setupProcessHandlers(child as never, job, () => "", () => "", { cleanup });
+    child.emit("error", new Error("spawn failed"));
+
+    expect(observedSummary).toContain("spawn failed");
+    expect(observedCompletedAt).toBeInstanceOf(Date);
+  });
+
+  it("invokes cleanup BEFORE onComplete on clean exit (Laravel forwarder + heartbeat consume onComplete)", () => {
+    const job = makeJob();
+    const child = makeChild();
+    const calls: string[] = [];
+    const cleanup = vi.fn(() => calls.push("cleanup"));
+    const onComplete = vi.fn(() => calls.push("onComplete"));
+
+    setupProcessHandlers(child as never, job, () => "ok", () => "", { cleanup, onComplete });
+    child.emit("close", 0);
+
+    expect(calls).toEqual(["cleanup", "onComplete"]);
+  });
+
+  it("preserves pre-set terminal status when error fires after cancelJob", () => {
+    const job = makeJob();
+    job.status = "canceled";
+    job.summary = "Agent was canceled by user request";
+    const child = makeChild();
+    const onComplete = vi.fn();
+    const cleanup = vi.fn();
+
+    setupProcessHandlers(child as never, job, () => "ignored", () => "ignored", {
+      onComplete,
+      cleanup,
+    });
+    child.emit("error", new Error("post-cancel spawn failure"));
+
+    expect(job.status).toBe("canceled");
+    expect(job.summary).toBe("Agent was canceled by user request");
+    expect(onComplete).not.toHaveBeenCalled();
+    // Cleanup still runs in the already-terminal branch so observers
+    // (watcher.stop, temp-dir rm) are torn down even when status was pre-set.
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
 });
