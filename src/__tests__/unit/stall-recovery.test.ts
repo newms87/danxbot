@@ -1,17 +1,11 @@
 /**
- * Unit tests for stall recovery in dispatch.ts.
- *
- * Tests that:
- * 1. onStall kills the stalled process and spawns a replacement
- * 2. The replacement gets the nudge prompt
- * 3. After MAX_RESUMES, the job is marked failed instead of respawned
- * 4. buildMcpSettings includes danxbot server when stop URL is provided
+ * Unit tests for completion-instruction plumbing. Historically this file also
+ * covered `buildMcpSettings` (now deleted in Phase 2 of card XCptaJ34 — the
+ * single `resolveDispatchTools` resolver in `src/agent/resolve-dispatch-tools.ts`
+ * is the new source of truth and has its own dedicated test file).
  */
 
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMcpSettings } from "../../agent/launcher.js";
-import { readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { describe, it, expect, vi } from "vitest";
 
 // Mock config to avoid DB connection requirement
 vi.mock("../../config.js", () => ({
@@ -44,53 +38,6 @@ vi.mock("../../terminal.js", () => ({
   getTerminalLogPath: vi.fn(),
   spawnInTerminal: vi.fn(),
 }));
-
-describe("buildMcpSettings with danxbot server", () => {
-  let settingsDirs: string[] = [];
-
-  afterEach(() => {
-    for (const dir of settingsDirs) {
-      try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-    }
-    settingsDirs = [];
-  });
-
-  it("does not include danxbot server when no stop URL", () => {
-    const dir = buildMcpSettings({ apiToken: "tok", apiUrl: "http://api" });
-    settingsDirs.push(dir);
-
-    const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf-8"));
-    expect(settings.mcpServers.schema).toBeDefined();
-    expect(settings.mcpServers.danxbot).toBeUndefined();
-  });
-
-  it("includes danxbot server when stop URL is provided", () => {
-    const dir = buildMcpSettings({
-      apiToken: "tok",
-      apiUrl: "http://api",
-      danxbotStopUrl: "http://localhost:5560/api/stop/test-job-id",
-    });
-    settingsDirs.push(dir);
-
-    const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf-8"));
-    expect(settings.mcpServers.schema).toBeDefined();
-    expect(settings.mcpServers.danxbot).toBeDefined();
-
-    const danxbotServer = settings.mcpServers.danxbot;
-    expect(danxbotServer.command).toBeDefined();
-    expect(Array.isArray(danxbotServer.args)).toBe(true);
-    expect(danxbotServer.env.DANXBOT_STOP_URL).toBe("http://localhost:5560/api/stop/test-job-id");
-  });
-
-  it("danxbot server env contains the exact stop URL", () => {
-    const stopUrl = "http://localhost:5560/api/stop/abc-123-def";
-    const dir = buildMcpSettings({ apiToken: "tok", apiUrl: "http://api", danxbotStopUrl: stopUrl });
-    settingsDirs.push(dir);
-
-    const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf-8"));
-    expect(settings.mcpServers.danxbot.env.DANXBOT_STOP_URL).toBe(stopUrl);
-  });
-});
 
 describe("buildCompletionInstruction", () => {
   it("returns instruction text referencing danxbot_complete with newline separator", async () => {

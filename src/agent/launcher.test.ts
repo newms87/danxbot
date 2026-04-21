@@ -1429,11 +1429,12 @@ describe("spawnAgent", () => {
     });
 
     it("cleans up the prompt temp directory on probe failure (no leak)", async () => {
-      // The outer runDispatchSlot catch handles `settingsDir` but has no
-      // awareness of `promptDir` — spawnAgent's internal cleanup closure
-      // isn't reachable yet. The probe-failure path must rmSync promptDir
-      // itself. This test guards against a regression where that inline
-      // cleanup gets accidentally deleted.
+      // The caller-side catch in `dispatch()` (src/dispatch/core.ts's
+      // `spawnForDispatch`) handles `settingsDir` but has no awareness of
+      // `promptDir` — spawnAgent's internal cleanup closure isn't reachable
+      // yet. The probe-failure path must rmSync promptDir itself. This test
+      // guards against a regression where that inline cleanup gets
+      // accidentally deleted.
       mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
 
       mockProbeAllMcpServers.mockResolvedValueOnce({

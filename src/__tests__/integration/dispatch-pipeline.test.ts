@@ -449,6 +449,7 @@ describe("Integration: dispatch pipeline", () => {
         const req = createMockReqWithBody("POST", {
           task: "Integration test via handleLaunch",
           api_token: "test-token",
+          allow_tools: [],
           status_url: captureServer.statusUrl,
         });
         const res = createMockRes();
@@ -488,6 +489,7 @@ describe("Integration: dispatch pipeline", () => {
         const launchReq = createMockReqWithBody("POST", {
           task: "Usage aggregation end-to-end",
           api_token: "test-token",
+          allow_tools: [],
           status_url: captureServer.statusUrl,
         });
         const launchRes = createMockRes();

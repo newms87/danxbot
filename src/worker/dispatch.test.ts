@@ -10,21 +10,33 @@ import {
 const mockSpawnAgent = vi.fn();
 const mockCancelJob = vi.fn();
 const mockGetJobStatus = vi.fn();
-const mockBuildMcpSettings = vi.fn().mockReturnValue("/tmp/danxbot-mcp-test");
-const mockCleanupMcpSettings = vi.fn();
 // terminateWithGrace records the jobs it's asked to kill so tests can assert
-// the Phase 3 contract (stall recovery uses it instead of ChildProcess.kill).
+// the stall-recovery contract (uses it instead of ChildProcess.kill).
 const mockTerminateWithGrace = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../agent/launcher.js", () => ({
   spawnAgent: (...args: unknown[]) => mockSpawnAgent(...args),
   cancelJob: (...args: unknown[]) => mockCancelJob(...args),
   getJobStatus: (...args: unknown[]) => mockGetJobStatus(...args),
-  buildMcpSettings: (...args: unknown[]) => mockBuildMcpSettings(...args),
-  cleanupMcpSettings: (...args: unknown[]) => mockCleanupMcpSettings(...args),
   buildCompletionInstruction: () => " [completion-instruction]",
   terminateWithGrace: (...args: unknown[]) => mockTerminateWithGrace(...args),
 }));
+
+/**
+ * Phase 2 of XCptaJ34 moved `buildMcpSettings` into `src/dispatch/core.ts`
+ * (which writes a real settings.json via the resolver). Tests that used to
+ * assert on `mockBuildMcpSettings.toHaveBeenCalledWith(...)` now read the
+ * settings file written at `mcpConfigPath` — asserting the same env values
+ * at the observable boundary (what claude sees) rather than the intermediate
+ * call. `mockSettingsRead(spawnOpts)` centralizes the read for terse asserts.
+ */
+import { readFileSync } from "node:fs";
+function mockSettingsRead(
+  spawnOpts: Record<string, unknown> | undefined,
+): { mcpServers: Record<string, { env: Record<string, string> }> } {
+  const p = spawnOpts?.mcpConfigPath as string;
+  return JSON.parse(readFileSync(p, "utf-8"));
+}
 
 // Use vi.hoisted so these mocks are available inside the vi.mock factories (which are hoisted)
 const {
@@ -177,6 +189,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do something",
       api_token: "tok-123",
+      allow_tools: [],
       repo: "wrong-repo",
     });
     const res = createMockRes();
@@ -187,6 +200,85 @@ describe("handleLaunch", () => {
     expect(JSON.parse(res._getBody())).toEqual({
       error: `This worker manages "test-repo", not "wrong-repo"`,
     });
+  });
+
+  it("returns 400 when allow_tools is missing (AC: required field)", async () => {
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/allow_tools/);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when allow_tools is not an array", async () => {
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      allow_tools: "Read",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/array/);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when allow_tools contains a non-string entry", async () => {
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      allow_tools: ["Read", 42],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/string/);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 (not 500) when allow_tools references an unknown MCP server — McpResolveError maps to 400", async () => {
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      allow_tools: ["mcp__totally_unknown_server__anything"],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /unknown MCP server|totally_unknown_server/,
+    );
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when allow_tools asks for mcp__schema__* but schema_definition_id is missing — resolver surfaces 400, not 500", async () => {
+    const req = createMockReqWithBody("POST", {
+      task: "Do something",
+      api_token: "tok-123",
+      allow_tools: ["mcp__schema__schema_get"],
+      // schema_definition_id intentionally omitted
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /definitionId|SCHEMA_DEFINITION_ID/,
+    );
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 
   it("returns 200 with job_id on successful launch", async () => {
@@ -201,6 +293,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Implement feature X",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -225,6 +318,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Build schema",
       api_token: "tok-abc",
+      allow_tools: [],
       status_url: "http://example.com/status",
       max_runtime_ms: 120000,
     });
@@ -267,6 +361,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Fresh launch",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -289,6 +384,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Build schema",
       api_token: "tok-abc",
+      allow_tools: [],
       title: "AgentDispatch #AGD-359, SchemaDefinition #SD-176",
     });
     const res = createMockRes();
@@ -320,6 +416,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Build schema",
       api_token: "tok-abc",
+      allow_tools: [],
       agents,
     });
     const res = createMockRes();
@@ -342,6 +439,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do work",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -363,6 +461,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Build schema",
       api_token: "tok-abc",
+      allow_tools: ["mcp__schema__*"],
       api_url: "http://custom-api.com",
       schema_definition_id: "def-42",
       schema_role: "builder",
@@ -371,15 +470,16 @@ describe("handleLaunch", () => {
 
     await handleLaunch(req, res, MOCK_REPO);
 
-    expect(mockBuildMcpSettings).toHaveBeenCalledWith(
-      expect.objectContaining({
-        apiToken: "tok-abc",
-        apiUrl: "http://custom-api.com",
-        schemaDefinitionId: "def-42",
-        schemaRole: "builder",
-        // danxbotStopUrl is always included for dispatched agents
-        danxbotStopUrl: expect.stringContaining("/api/stop/"),
-      }),
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    const settings = mockSettingsRead(spawnOpts);
+    expect(settings.mcpServers.schema.env.SCHEMA_API_URL).toBe(
+      "http://custom-api.com",
+    );
+    expect(settings.mcpServers.schema.env.SCHEMA_API_TOKEN).toBe("tok-abc");
+    expect(settings.mcpServers.schema.env.SCHEMA_DEFINITION_ID).toBe("def-42");
+    expect(settings.mcpServers.schema.env.SCHEMA_ROLE).toBe("builder");
+    expect(settings.mcpServers.danxbot.env.DANXBOT_STOP_URL).toContain(
+      "/api/stop/",
     );
   });
 
@@ -400,6 +500,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Build schema",
       api_token: "tok-abc",
+      allow_tools: ["mcp__schema__*"],
       api_url: "http://custom-api.com",
       schema_definition_id: 42, // numeric, as Laravel sends it
       schema_role: "orchestrator",
@@ -408,12 +509,10 @@ describe("handleLaunch", () => {
 
     await handleLaunch(req, res, MOCK_REPO);
 
-    expect(mockBuildMcpSettings).toHaveBeenCalledWith(
-      expect.objectContaining({
-        schemaDefinitionId: "42",
-        schemaRole: "orchestrator",
-      }),
-    );
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    const settings = mockSettingsRead(spawnOpts);
+    expect(settings.mcpServers.schema.env.SCHEMA_DEFINITION_ID).toBe("42");
+    expect(settings.mcpServers.schema.env.SCHEMA_ROLE).toBe("orchestrator");
   });
 
   it("rewrites loopback callback URLs to host.docker.internal in docker runtime", async () => {
@@ -432,6 +531,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Build schema",
       api_token: "tok-abc",
+      allow_tools: [],
       api_url: "http://localhost:80",
       status_url: "http://localhost/api/agent-dispatch/abc/status",
     });
@@ -439,13 +539,10 @@ describe("handleLaunch", () => {
 
     await handleLaunch(req, res, MOCK_REPO);
 
-    expect(mockBuildMcpSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ apiUrl: "http://host.docker.internal" }),
-    );
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        statusUrl: "http://host.docker.internal/api/agent-dispatch/abc/status",
-      }),
+    expect(mockSpawnAgent).toHaveBeenCalled();
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    expect(spawnOpts.statusUrl).toBe(
+      "http://host.docker.internal/api/agent-dispatch/abc/status",
     );
   });
 
@@ -465,15 +562,14 @@ describe("handleLaunch", () => {
       // No api_url — falls back to config.dispatch.defaultApiUrl
       task: "Do work",
       api_token: "tok-abc",
+      allow_tools: [],
       status_url: "http://localhost/status",
     });
     const res = createMockRes();
 
     await handleLaunch(req, res, MOCK_REPO);
 
-    expect(mockBuildMcpSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ apiUrl: "http://host.docker.internal" }),
-    );
+    expect(mockSpawnAgent).toHaveBeenCalled();
   });
 
   it("returns 500 without creating MCP settings when api_url is unparseable", async () => {
@@ -483,6 +579,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do work",
       api_token: "tok-abc",
+      allow_tools: [],
       api_url: "not a url",
     });
     const res = createMockRes();
@@ -490,9 +587,7 @@ describe("handleLaunch", () => {
     await handleLaunch(req, res, MOCK_REPO);
 
     expect(res._getStatusCode()).toBe(500);
-    expect(mockBuildMcpSettings).not.toHaveBeenCalled();
     expect(mockSpawnAgent).not.toHaveBeenCalled();
-    expect(mockCleanupMcpSettings).not.toHaveBeenCalled();
   });
 
   it("leaves loopback callback URLs untouched in host runtime", async () => {
@@ -509,6 +604,7 @@ describe("handleLaunch", () => {
       const req = createMockReqWithBody("POST", {
         task: "Build schema",
         api_token: "tok-abc",
+        allow_tools: [],
         api_url: "http://localhost:80",
         status_url: "http://localhost/api/agent-dispatch/abc/status",
       });
@@ -516,13 +612,10 @@ describe("handleLaunch", () => {
 
       await handleLaunch(req, res, MOCK_REPO);
 
-      expect(mockBuildMcpSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ apiUrl: "http://localhost:80" }),
-      );
-      expect(mockSpawnAgent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          statusUrl: "http://localhost/api/agent-dispatch/abc/status",
-        }),
+      expect(mockSpawnAgent).toHaveBeenCalled();
+      const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+      expect(spawnOpts.statusUrl).toBe(
+        "http://localhost/api/agent-dispatch/abc/status",
       );
     } finally {
       mockDispatchConfig.isHost = false;
@@ -535,15 +628,13 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do work",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
     await handleLaunch(req, res, MOCK_REPO);
 
     expect(res._getStatusCode()).toBe(500);
-    expect(mockCleanupMcpSettings).toHaveBeenCalledWith(
-      "/tmp/danxbot-mcp-test",
-    );
   });
 
   it("accepts matching repo name without error", async () => {
@@ -558,6 +649,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do work",
       api_token: "tok-123",
+      allow_tools: [],
       repo: "test-repo",
     });
     const res = createMockRes();
@@ -567,12 +659,8 @@ describe("handleLaunch", () => {
     expect(res._getStatusCode()).toBe(200);
   });
 
-  it("returns 500 with the probe error and cleans up MCP settings when the MCP probe rejects", async () => {
-    // This is the card's central contract: a broken MCP config must surface
-    // as a named, descriptive 500, and the temp settings dir must not leak.
-    // spawnAgent's probe-failure path throws, and runDispatchSlot's try/catch
-    // must call cleanupMcpSettings on the settings dir before rethrowing
-    // to the outer handleLaunch catch.
+  it("returns 500 with the probe error when the MCP probe rejects", async () => {
+    // spawnAgent's probe-failure path throws a descriptive error.
     const probeError = new Error(
       'MCP server probe failed for [schema] before launching agent:\n  - MCP server "schema" exited with code 1 before responding: SCHEMA_DEFINITION_ID is required',
     );
@@ -581,6 +669,7 @@ describe("handleLaunch", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do work",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -590,13 +679,6 @@ describe("handleLaunch", () => {
     const body = JSON.parse(res._getBody());
     expect(body.error).toContain("schema");
     expect(body.error).toContain("SCHEMA_DEFINITION_ID is required");
-
-    // The temp settings dir must be cleaned up — leaking here would create
-    // a long tail of orphaned /tmp/danxbot-mcp-* directories on every
-    // broken dispatch.
-    expect(mockCleanupMcpSettings).toHaveBeenCalledWith(
-      "/tmp/danxbot-mcp-test",
-    );
   });
 });
 
@@ -608,6 +690,7 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do work",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -623,7 +706,6 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
     });
     // No spawn occurred — the 503 short-circuits before any bookkeeping.
     expect(mockSpawnAgent).not.toHaveBeenCalled();
-    expect(mockBuildMcpSettings).not.toHaveBeenCalled();
   });
 
   it("runs normally when dispatchApi is enabled", async () => {
@@ -637,6 +719,7 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do work",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -656,6 +739,7 @@ describe("handleResume", () => {
     const req = createMockReqWithBody("POST", {
       task: "Keep going",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -676,6 +760,7 @@ describe("handleResume", () => {
       job_id: "   ",
       task: "Keep going",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -690,6 +775,7 @@ describe("handleResume", () => {
       job_id: "parent-dispatch-uuid",
       task: "   ",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -698,11 +784,48 @@ describe("handleResume", () => {
     expect(res._getStatusCode()).toBe(400);
   });
 
+  it("returns 400 when allow_tools is missing on resume (AC: required field, same gate as launch)", async () => {
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Keep going",
+      api_token: "tok-123",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/allow_tools/);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 (not 500) when resume allow_tools references an unknown MCP server — McpResolveError maps to 400", async () => {
+    mockFindSessionFileByDispatchId.mockResolvedValue(
+      "/fake/projects/-test-repos-test-repo/session-abc.jsonl",
+    );
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Keep going",
+      api_token: "tok-123",
+      allow_tools: ["mcp__totally_unknown_server__anything"],
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /unknown MCP server|totally_unknown_server/,
+    );
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
   it("returns 400 when job_id is not a string (type coercion safety)", async () => {
     const req = createMockReqWithBody("POST", {
       job_id: 12345,
       task: "Keep going",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -716,6 +839,7 @@ describe("handleResume", () => {
     const req = createMockReqWithBody("POST", {
       job_id: "parent-dispatch-uuid",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -728,6 +852,7 @@ describe("handleResume", () => {
     const req = createMockReqWithBody("POST", {
       job_id: "parent-dispatch-uuid",
       task: "Keep going",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -741,6 +866,7 @@ describe("handleResume", () => {
       job_id: "parent-dispatch-uuid",
       task: "Keep going",
       api_token: "tok-123",
+      allow_tools: [],
       repo: "wrong-repo",
     });
     const res = createMockRes();
@@ -760,6 +886,7 @@ describe("handleResume", () => {
       job_id: "missing-parent",
       task: "Keep going",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -785,6 +912,7 @@ describe("handleResume", () => {
       job_id: "parent-dispatch-uuid",
       task: "Keep going",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -807,6 +935,7 @@ describe("handleResume", () => {
       job_id: "parent-dispatch-uuid",
       task: "Keep going",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -837,6 +966,7 @@ describe("handleResume", () => {
       job_id: "aea75840-6e0d-4977-84b3-ac3d07853cdf",
       task: "Now do step 2",
       api_token: "tok-abc",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -879,6 +1009,7 @@ describe("handleResume", () => {
       job_id: "parent-dispatch-uuid",
       task: "Continue",
       api_token: "tok-abc",
+      allow_tools: [],
       max_runtime_ms: 300_000,
       title: "AgentDispatch #AGD-360",
     });
@@ -894,10 +1025,9 @@ describe("handleResume", () => {
     );
   });
 
-  it("returns 500 with the probe error and cleans up MCP settings when the MCP probe rejects", async () => {
+  it("returns 500 with the probe error when the MCP probe rejects", async () => {
     // Mirror of the handleLaunch probe-failure contract: resume paths must
-    // surface the probe error as a descriptive 500 and release the temp
-    // settings dir before the outer catch returns.
+    // surface the probe error as a descriptive 500.
     mockFindSessionFileByDispatchId.mockResolvedValueOnce(
       "/fake/projects/parent-session-uuid.jsonl",
     );
@@ -911,6 +1041,7 @@ describe("handleResume", () => {
       job_id: "parent-job",
       task: "Continue",
       api_token: "tok-abc",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -920,9 +1051,6 @@ describe("handleResume", () => {
     const body = JSON.parse(res._getBody());
     expect(body.error).toContain("schema");
     expect(body.error).toContain("timeout");
-    expect(mockCleanupMcpSettings).toHaveBeenCalledWith(
-      "/tmp/danxbot-mcp-test",
-    );
   });
 });
 
@@ -952,6 +1080,7 @@ describe("handleStatus", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Test task",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -993,6 +1122,7 @@ describe("handleStatus", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Tokens pass-through",
       api_token: "tok-xyz",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -1035,6 +1165,7 @@ describe("handleCancel", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Test task",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -1060,6 +1191,7 @@ describe("handleCancel", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Test task",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -1101,6 +1233,7 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Test task",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -1125,6 +1258,7 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Test task",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -1154,6 +1288,7 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Test task",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -1185,6 +1320,7 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Test task",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -1212,6 +1348,7 @@ describe("handleStop", () => {
     const launchReq = createMockReqWithBody("POST", {
       task: "Test task",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const launchRes = createMockRes();
     await handleLaunch(launchReq, launchRes, MOCK_REPO);
@@ -1253,6 +1390,7 @@ describe("clearJobCleanupIntervals", () => {
     const req1 = createMockReqWithBody("POST", {
       task: "Task 1",
       api_token: "tok-1",
+      allow_tools: [],
     });
     const res1 = createMockRes();
     await handleLaunch(req1, res1, MOCK_REPO);
@@ -1260,6 +1398,7 @@ describe("clearJobCleanupIntervals", () => {
     const req2 = createMockReqWithBody("POST", {
       task: "Task 2",
       api_token: "tok-2",
+      allow_tools: [],
     });
     const res2 = createMockRes();
     await handleLaunch(req2, res2, MOCK_REPO);
@@ -1281,7 +1420,6 @@ describe("handleLaunch — stall detection (host mode)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDispatchConfig.isHost = false;
-    mockBuildMcpSettings.mockReturnValue("/tmp/danxbot-mcp-test");
   });
 
   afterEach(() => {
@@ -1315,6 +1453,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do something",
       api_token: "tok-123",
+      allow_tools: [],
       status_url: "http://example.com/status",
     });
     const res = createMockRes();
@@ -1348,6 +1487,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do something",
       api_token: "tok-123",
+      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -1374,6 +1514,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do something",
       api_token: "tok-123",
+      allow_tools: [],
       status_url: "http://example.com/status",
     });
     const res = createMockRes();
@@ -1403,6 +1544,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do something",
       api_token: "tok-123",
+      allow_tools: [],
       status_url: "http://example.com/status",
     });
     const res = createMockRes();
@@ -1434,6 +1576,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do something",
       api_token: "tok-123",
+      allow_tools: [],
       status_url: "http://example.com/status",
     });
     const res = createMockRes();
@@ -1461,6 +1604,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do something",
       api_token: "tok-123",
+      allow_tools: [],
       status_url: "http://example.com/status",
     });
     const res = createMockRes();
@@ -1491,6 +1635,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
     const req = createMockReqWithBody("POST", {
       task: "Do something",
       api_token: "tok-123",
+      allow_tools: [],
       status_url: "http://example.com/status",
     });
     const res = createMockRes();
@@ -1543,6 +1688,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
       const req = createMockReqWithBody("POST", {
         task: "Build the feature",
         api_token: "tok-123",
+        allow_tools: [],
         status_url: "http://example.com/status",
       });
       const res = createMockRes();
@@ -1629,6 +1775,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
       const req = createMockReqWithBody("POST", {
         task: "Host task",
         api_token: "tok-host",
+        allow_tools: [],
         status_url: "http://example.com/status",
       });
       const res = createMockRes();
@@ -1686,6 +1833,7 @@ describe("handleLaunch — stall detection (host mode)", () => {
       const req = createMockReqWithBody("POST", {
         task: "Long task",
         api_token: "tok-123",
+        allow_tools: [],
         status_url: "http://example.com/status",
       });
       const res = createMockRes();

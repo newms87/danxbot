@@ -60,7 +60,7 @@ Response shape: `{job_id: <new dispatch id>, parent_job_id, status: "launched"}`
 2. `resolveParentSessionId(repoName, parentJobId)` scans the repo's session dir for the parent's dispatch tag via `findSessionFileByDispatchId`; returns the basename of the JSONL (= Claude session UUID) or null
 3. If null → `404`, no spawn
 4. New dispatchId, fresh MCP settings, fresh dispatch tag, `--resume <sessionId>` added to claude flags via `buildClaudeInvocation`
-5. `runDispatchSlot` — the SAME shared helper as `/api/launch`. Stall recovery, heartbeat, activeJobs registration, TTL eviction all identical
+5. `dispatch()` (in `src/dispatch/core.ts`) — the SAME shared helper as `/api/launch`. Stall recovery, heartbeat, activeJobs registration, TTL eviction all identical
 6. Dispatch row carries `parent_job_id` so the chain is queryable
 7. Response: `{job_id, parent_job_id, status: "launched"}`
 

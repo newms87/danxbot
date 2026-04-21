@@ -63,6 +63,12 @@ export function resolveDispatchTools(
 
   // Entry-shape validation. Non-strings are a programming error at the caller
   // (e.g. a body parser let a number through); fail loud.
+  //
+  // Commas are rejected so the downstream `--allowed-tools <csv>` serialization
+  // in `claude-invocation.ts` is unambiguous — a tool name containing a comma
+  // would silently split into two tool names at the claude boundary. MCP tool
+  // names are identifier-shaped by spec; this reject is a defense-in-depth
+  // guard rather than a blocker for any real tool.
   for (const t of opts.allowTools) {
     if (typeof t !== "string") {
       throw new McpResolveError(
@@ -72,6 +78,11 @@ export function resolveDispatchTools(
     if (t.trim() === "") {
       throw new McpResolveError(
         "allow_tools entries must be non-empty strings",
+      );
+    }
+    if (t.includes(",")) {
+      throw new McpResolveError(
+        `allow_tools entry "${t}" contains a comma; tool names must be comma-free (CSV-delimited in --allowed-tools)`,
       );
     }
   }

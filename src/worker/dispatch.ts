@@ -1,26 +1,18 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { config } from "../config.js";
 import { json, parseBody } from "../http/helpers.js";
 import {
-  spawnAgent,
   cancelJob,
   getJobStatus,
-  buildMcpSettings,
-  cleanupMcpSettings,
-  buildCompletionInstruction,
-  terminateWithGrace,
   type AgentJob,
-  type McpSettingsOptions,
 } from "../agent/launcher.js";
+import { McpResolveError } from "../agent/mcp-types.js";
+import { dispatch, getActiveJob } from "../dispatch/core.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
-import { updateDispatch } from "../dashboard/dispatches-db.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
-import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
-import { StallDetector } from "../agent/stall-detector.js";
 import {
   deriveSessionDir,
   findSessionFileByDispatchId,
@@ -29,240 +21,9 @@ import { getReposBase } from "../poller/constants.js";
 import { normalizeCallbackUrl } from "./url-normalizer.js";
 import { isFeatureEnabled } from "../settings-file.js";
 
-/** Maximum number of stall-recovery respawns before giving up and marking failed. */
-const MAX_STALL_RESUMES = 3;
-
 const log = createLogger("worker-dispatch");
 
-const activeJobs = new Map<string, AgentJob>();
-
-/** Set of per-job cleanup intervals — cleared on shutdown. */
-const jobCleanupIntervals = new Set<NodeJS.Timeout>();
-
-/** Clear all tracked job cleanup intervals. Call during shutdown. */
-export function clearJobCleanupIntervals(): void {
-  for (const interval of jobCleanupIntervals) {
-    clearInterval(interval);
-  }
-  jobCleanupIntervals.clear();
-}
-
-/**
- * Shared inputs parsed from `POST /api/launch` and `POST /api/resume`. Both
- * endpoints share the full dispatch-slot machinery (spawn, stall recovery,
- * heartbeat, activeJobs registration) — only the source of the prompt and
- * the presence of a parent session differ.
- */
-interface DispatchSlotInputs {
-  task: string;
-  apiToken: string;
-  apiUrl: string;
-  statusUrl?: string;
-  schemaDefinitionId?: string;
-  schemaRole?: string;
-  title?: string;
-  agents?: Record<string, Record<string, unknown>>;
-  maxRuntimeMs?: number;
-  /** Dispatch metadata persisted on the new row. */
-  apiDispatchMeta: DispatchTriggerMetadata;
-  /** Claude session UUID to resume. Undefined for fresh launches. */
-  resumeSessionId?: string;
-  /** Parent dispatch ID. Present when this slot is a resume child. */
-  parentJobId?: string;
-}
-
-/**
- * Owns the dispatch-slot lifecycle: initial spawn + stall-recovery respawns
- * under the same `dispatchId` + activeJobs registration + TTL-based eviction.
- *
- * Runs identically for launches and resumes — the only differences are
- * `inputs.resumeSessionId` (appended to the claude invocation via
- * `spawnAgent`) and `inputs.parentJobId` (persisted on the dispatch row).
- */
-async function runDispatchSlot(
-  repo: RepoContext,
-  inputs: DispatchSlotInputs,
-): Promise<{ dispatchId: string; job: AgentJob }> {
-  const dispatchId = randomUUID();
-  const workerStopUrl = `http://localhost:${repo.workerPort}/api/stop/${dispatchId}`;
-
-  const mcpOptions: McpSettingsOptions = {
-    apiToken: inputs.apiToken,
-    apiUrl: inputs.apiUrl,
-    schemaDefinitionId: inputs.schemaDefinitionId,
-    schemaRole: inputs.schemaRole,
-    // Always inject the danxbot_complete tool so agents can signal completion.
-    danxbotStopUrl: workerStopUrl,
-  };
-
-  // Append completion instruction to every dispatched task.
-  const taskWithInstruction = inputs.task + buildCompletionInstruction();
-
-  let resumeCount = 0;
-
-  /**
-   * Spawn a new agent for this dispatch slot.
-   * On initial spawn: uses the stable dispatchId.
-   * On respawn: generates a fresh internal UUID for JSONL disambiguation,
-   * but keeps dispatchId as the activeJobs key.
-   */
-  async function spawnForDispatch(
-    prompt: string,
-    isRespawn: boolean,
-  ): Promise<AgentJob> {
-    const jobId = isRespawn ? randomUUID() : dispatchId;
-    const settingsDir = buildMcpSettings(mcpOptions);
-
-    let job: AgentJob;
-    try {
-      job = await spawnAgent({
-        jobId,
-        prompt,
-        title: inputs.title,
-        repoName: repo.name,
-        timeoutMs: config.dispatch.agentTimeoutMs,
-        mcpConfigPath: join(settingsDir, "settings.json"),
-        agents: inputs.agents,
-        statusUrl: inputs.statusUrl,
-        apiToken: inputs.apiToken,
-        maxRuntimeMs: inputs.maxRuntimeMs,
-        eventForwarding: inputs.statusUrl
-          ? { statusUrl: inputs.statusUrl, apiToken: inputs.apiToken }
-          : undefined,
-        openTerminal: config.isHost,
-        // Only the initial spawn records the dispatch row — stall-recovery
-        // respawns reuse the same dispatchId in `activeJobs` and should
-        // NOT create a second row for the same conceptual run.
-        dispatch: isRespawn ? undefined : inputs.apiDispatchMeta,
-        resumeSessionId: inputs.resumeSessionId,
-        parentJobId: inputs.parentJobId,
-        onComplete: () => {
-          cleanupMcpSettings(settingsDir);
-        },
-      });
-    } catch (spawnErr) {
-      cleanupMcpSettings(settingsDir);
-      throw spawnErr;
-    }
-
-    // Always index under the stable dispatchId so callers can still poll.
-    activeJobs.set(dispatchId, job);
-    return job;
-  }
-
-  /**
-   * Wire stall detection for a job. When a stall fires:
-   * - If resumeCount < MAX_STALL_RESUMES: kill + respawn with nudge prompt.
-   * - Otherwise: mark job as failed.
-   */
-  function setupStallDetection(job: AgentJob): void {
-    if (
-      !config.isHost ||
-      !inputs.statusUrl ||
-      !job.watcher ||
-      !job.terminalLogPath
-    )
-      return;
-
-    const termWatcher = new TerminalOutputWatcher(job.terminalLogPath);
-    const stallDetector = new StallDetector({
-      watcher: job.watcher,
-      terminalWatcher: termWatcher,
-      maxNudges: 1, // Each detector fires once; resumeCount tracks the total.
-      onStall: async () => {
-        resumeCount++;
-        const currentJob = activeJobs.get(dispatchId);
-        if (!currentJob || currentJob.status !== "running") return;
-
-        termWatcher.stop();
-        stallDetector.stop();
-
-        if (resumeCount >= MAX_STALL_RESUMES) {
-          log.warn(
-            `[Dispatch ${dispatchId}] Max stall resumes (${MAX_STALL_RESUMES}) reached — marking job failed`,
-          );
-          await currentJob.stop?.(
-            "failed",
-            "Agent stalled repeatedly and did not recover",
-          );
-          return;
-        }
-
-        log.warn(
-          `[Dispatch ${dispatchId}] Stall detected (resume ${resumeCount}/${MAX_STALL_RESUMES}) — killing and resuming`,
-        );
-
-        // Reflect the nudge count on the dispatch row. The row was created
-        // by the initial spawn's tracker; later respawns reuse the same
-        // dispatchId, so we update by id directly rather than chasing the
-        // tracker reference through respawns.
-        updateDispatch(dispatchId, { nudgeCount: resumeCount }).catch((err) =>
-          log.error(
-            `[Dispatch ${dispatchId}] Failed to record nudge count`,
-            err,
-          ),
-        );
-
-        // Kill stalled process directly (no job.stop — we want to keep the
-        // slot "running" from the caller's perspective while we respawn, so
-        // we can't mark the job completed/failed here). `terminateWithGrace`
-        // is the shared SIGTERM/5s/SIGKILL helper; it routes through
-        // killAgentProcess so docker (ChildProcess) and host (tracked PID)
-        // both work — see `.claude/rules/agent-dispatch.md`.
-        await terminateWithGrace(currentJob, 5_000);
-
-        // Use the original task (not taskWithInstruction) as the base so the
-        // completion instruction appears exactly once, followed by the stall note.
-        const nudgePrompt =
-          inputs.task +
-          buildCompletionInstruction() +
-          `\n\n---\nNOTE: Your previous session appeared to stall after receiving ` +
-          `a tool result (resume ${resumeCount}/${MAX_STALL_RESUMES}). ` +
-          `Continue your work from where it was left off.`;
-
-        try {
-          const newJob = await spawnForDispatch(nudgePrompt, true);
-          setupStallDetection(newJob);
-        } catch (err) {
-          log.error(
-            `[Dispatch ${dispatchId}] Failed to respawn after stall:`,
-            err,
-          );
-        }
-      },
-    });
-
-    termWatcher.start();
-    stallDetector.start();
-
-    // Tear down when the job completes.
-    const originalCleanup = job._cleanup;
-    job._cleanup = () => {
-      termWatcher.stop();
-      stallDetector.stop();
-      originalCleanup?.();
-    };
-  }
-
-  const job = await spawnForDispatch(taskWithInstruction, false);
-  setupStallDetection(job);
-
-  const cleanupInterval = setInterval(() => {
-    const currentJob = activeJobs.get(dispatchId);
-    if (
-      currentJob &&
-      currentJob.status !== "running" &&
-      Date.now() - (currentJob.completedAt?.getTime() ?? 0) > 3_600_000
-    ) {
-      activeJobs.delete(dispatchId);
-      clearInterval(cleanupInterval);
-      jobCleanupIntervals.delete(cleanupInterval);
-    }
-  }, 60_000);
-  jobCleanupIntervals.add(cleanupInterval);
-
-  return { dispatchId, job };
-}
+export { clearJobCleanupIntervals } from "../dispatch/core.js";
 
 /**
  * Shared header parsing: derives the caller IP, normalized api/status URLs.
@@ -355,6 +116,7 @@ function requireString(value: unknown): string | null {
  */
 interface CommonRequestParams {
   apiToken: string;
+  allowTools: string[];
   agents: Record<string, Record<string, unknown>> | undefined;
   schemaDefinitionId: string | undefined;
   schemaRole: string | undefined;
@@ -381,6 +143,29 @@ function parseCommonRequestParams(
     return null;
   }
 
+  // allow_tools is required: deny-by-default is enforced at the API boundary.
+  // Missing field → 400; malformed array → 400. Unknown servers + missing
+  // env are surfaced from the resolver as McpResolveError (caught in handlers).
+  const rawAllow = body.allow_tools;
+  if (rawAllow === undefined || rawAllow === null) {
+    json(res, 400, { error: "Missing required field: allow_tools" });
+    return null;
+  }
+  if (!Array.isArray(rawAllow)) {
+    json(res, 400, {
+      error: "allow_tools must be an array of tool name strings",
+    });
+    return null;
+  }
+  for (const entry of rawAllow) {
+    if (typeof entry !== "string") {
+      json(res, 400, {
+        error: "allow_tools entries must be strings",
+      });
+      return null;
+    }
+  }
+
   const requestedRepo = typeof body.repo === "string" ? body.repo : undefined;
   if (requestedRepo && requestedRepo !== repo.name) {
     json(res, 400, {
@@ -392,14 +177,12 @@ function parseCommonRequestParams(
   return {
     task,
     apiToken,
+    allowTools: rawAllow as string[],
     // Object keyed by agent name — see `.claude/rules/agent-dispatch.md`.
     agents: body.agents as Record<string, Record<string, unknown>> | undefined,
     // Accept both string and number: Laravel serializes int IDs as JSON
-    // numbers. Coercing to string here matches what buildMcpSettings does
-    // downstream and keeps the MCP server's SCHEMA_DEFINITION_ID env as a
-    // string. A string-only check silently dropped the field for numeric
-    // payloads, which caused the schema MCP server to exit on startup
-    // with "SCHEMA_DEFINITION_ID is required".
+    // numbers. Coercing to string here matches what the schema MCP server
+    // env expects (SCHEMA_DEFINITION_ID is a string).
     schemaDefinitionId:
       typeof body.schema_definition_id === "string" ||
       typeof body.schema_definition_id === "number"
@@ -410,6 +193,38 @@ function parseCommonRequestParams(
     maxRuntimeMs:
       typeof body.max_runtime_ms === "number" ? body.max_runtime_ms : undefined,
     title: typeof body.title === "string" ? body.title : undefined,
+  };
+}
+
+/**
+ * Build the `DispatchInput` shape from the parsed HTTP body pieces. Shared by
+ * `handleLaunch` and `handleResume` — the only fields that differ between the
+ * two endpoints are `resumeSessionId` and `parentJobId`, which are passed as
+ * optional extras.
+ */
+function buildDispatchInput(
+  repo: RepoContext,
+  common: CommonRequestParams,
+  apiUrl: string,
+  statusUrl: string | undefined,
+  apiDispatchMeta: DispatchTriggerMetadata,
+  extras: { resumeSessionId?: string; parentJobId?: string } = {},
+): Parameters<typeof dispatch>[0] {
+  return {
+    repo,
+    task: common.task,
+    apiToken: common.apiToken,
+    apiUrl,
+    allowTools: common.allowTools,
+    statusUrl,
+    schemaDefinitionId: common.schemaDefinitionId,
+    schemaRole: common.schemaRole,
+    title: common.title,
+    agents: common.agents,
+    maxRuntimeMs: common.maxRuntimeMs,
+    apiDispatchMeta,
+    resumeSessionId: extras.resumeSessionId,
+    parentJobId: extras.parentJobId,
   };
 }
 
@@ -447,15 +262,16 @@ export async function handleLaunch(
       },
     };
 
-    const { dispatchId } = await runDispatchSlot(repo, {
-      ...common,
-      apiUrl,
-      statusUrl,
-      apiDispatchMeta,
-    });
+    const { dispatchId } = await dispatch(
+      buildDispatchInput(repo, common, apiUrl, statusUrl, apiDispatchMeta),
+    );
 
     json(res, 200, { job_id: dispatchId, status: "launched" });
   } catch (err) {
+    if (err instanceof McpResolveError) {
+      json(res, 400, { error: err.message });
+      return;
+    }
     log.error("Launch failed", err);
     json(res, 500, {
       error: err instanceof Error ? err.message : "Launch failed",
@@ -531,14 +347,12 @@ export async function handleResume(
       },
     };
 
-    const { dispatchId } = await runDispatchSlot(repo, {
-      ...common,
-      apiUrl,
-      statusUrl,
-      apiDispatchMeta,
-      resumeSessionId: resolved.sessionId,
-      parentJobId,
-    });
+    const { dispatchId } = await dispatch(
+      buildDispatchInput(repo, common, apiUrl, statusUrl, apiDispatchMeta, {
+        resumeSessionId: resolved.sessionId,
+        parentJobId,
+      }),
+    );
 
     json(res, 200, {
       job_id: dispatchId,
@@ -546,6 +360,10 @@ export async function handleResume(
       status: "launched",
     });
   } catch (err) {
+    if (err instanceof McpResolveError) {
+      json(res, 400, { error: err.message });
+      return;
+    }
     log.error("Resume failed", err);
     json(res, 500, {
       error: err instanceof Error ? err.message : "Resume failed",
@@ -558,7 +376,7 @@ export async function handleCancel(
   res: ServerResponse,
   jobId: string,
 ): Promise<void> {
-  const job = activeJobs.get(jobId);
+  const job = getActiveJob(jobId);
   if (!job) {
     json(res, 404, { error: "Job not found" });
     return;
@@ -573,7 +391,7 @@ export async function handleCancel(
 }
 
 export function handleStatus(res: ServerResponse, jobId: string): void {
-  const job = activeJobs.get(jobId);
+  const job = getActiveJob(jobId);
   if (!job) {
     json(res, 404, { error: "Job not found" });
     return;
@@ -587,7 +405,7 @@ export async function handleStop(
   jobId: string,
 ): Promise<void> {
   try {
-    const job = activeJobs.get(jobId);
+    const job: AgentJob | undefined = getActiveJob(jobId);
     if (!job) {
       json(res, 404, { error: "Job not found" });
       return;

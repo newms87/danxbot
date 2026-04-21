@@ -16,7 +16,7 @@
 
 import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
@@ -31,8 +31,6 @@ import {
 import { SessionLogWatcher } from "./session-log-watcher.js";
 import { buildClaudeInvocation } from "./claude-invocation.js";
 import { probeAllMcpServers } from "./mcp-server-probe.js";
-import { DANXBOT_MCP_SERVER_PATH } from "./mcp-registry.js";
-import type { McpServerConfig } from "./mcp-settings-shape.js";
 import {
   createLaravelForwarder,
   deriveQueuePath,
@@ -216,6 +214,14 @@ export interface SpawnAgentOptions {
   /** Path to MCP settings JSON. When set, adds --mcp-config to CLI args. */
   mcpConfigPath?: string;
   /**
+   * Explicit allowlist of built-in and `mcp__<server>__<tool>` tool names.
+   * When set, adds `--allowed-tools` so claude's deny-by-default gate limits
+   * the agent's tool surface. Produced by `resolveDispatchTools()` at every
+   * dispatch entry-point. Absent for legacy non-dispatch spawns (none left
+   * after Phase 2).
+   */
+  allowedTools?: readonly string[];
+  /**
    * Agent definitions forwarded to Claude CLI's `--agents <json>` flag.
    * Must be an object keyed by agent name (the shape Claude CLI requires) —
    * a list silently falls back to built-in agents and makes
@@ -256,19 +262,6 @@ export interface SpawnAgentOptions {
    * lineage, so spawnAgent throws when parentJobId is set without dispatch.
    */
   parentJobId?: string | null;
-}
-
-export interface McpSettingsOptions {
-  apiToken: string;
-  apiUrl: string;
-  schemaDefinitionId?: string;
-  schemaRole?: string;
-  /**
-   * When set, adds the danxbot MCP server to the settings, providing the
-   * danxbot_complete tool. The value is the full stop URL that the tool will POST to
-   * (e.g., "http://localhost:5560/api/stop/:jobId").
-   */
-  danxbotStopUrl?: string;
 }
 
 /**
@@ -382,46 +375,6 @@ function notifyTerminalStatus(
 }
 
 /**
- * Build the MCP settings JSON for a dispatch agent session.
- * Creates a temporary directory with settings.json that configures
- * the Schema MCP server and optionally the danxbot lifecycle tools.
- * Returns the temp directory path (caller must clean it up).
- */
-export function buildMcpSettings(options: McpSettingsOptions): string {
-  const tempDir = mkdtempSync(join(tmpdir(), "danxbot-mcp-"));
-
-  const mcpServers: Record<string, McpServerConfig> = {
-    schema: {
-      command: "npx",
-      args: ["@thehammer/schema-mcp-server"],
-      env: {
-        SCHEMA_API_URL: options.apiUrl,
-        SCHEMA_API_TOKEN: options.apiToken,
-        ...(options.schemaDefinitionId
-          ? { SCHEMA_DEFINITION_ID: String(options.schemaDefinitionId) }
-          : {}),
-        ...(options.schemaRole ? { SCHEMA_ROLE: options.schemaRole } : {}),
-      },
-    },
-  };
-
-  if (options.danxbotStopUrl) {
-    mcpServers["danxbot"] = {
-      command: "npx",
-      args: ["tsx", DANXBOT_MCP_SERVER_PATH],
-      env: {
-        DANXBOT_STOP_URL: options.danxbotStopUrl,
-      },
-    };
-  }
-
-  const settingsPath = join(tempDir, "settings.json");
-  writeFileSync(settingsPath, JSON.stringify({ mcpServers }, null, 2));
-
-  return tempDir;
-}
-
-/**
  * Returns the system instruction appended to dispatch agent prompts when the
  * danxbot_complete MCP tool is available. Tells the agent to call the tool
  * instead of silently stopping output.
@@ -484,6 +437,7 @@ export async function spawnAgent(
     jobId,
     title: options.title,
     mcpConfigPath: options.mcpConfigPath,
+    allowedTools: options.allowedTools,
     agents: options.agents,
     resumeSessionId: options.resumeSessionId,
   });
@@ -506,10 +460,10 @@ export async function spawnAgent(
   //
   // Cleanup on failure: we must rmSync `promptDir` ourselves because the
   // internal `cleanup()` closure (defined below, which would normally handle
-  // it) isn't in scope yet. The outer `runDispatchSlot` catch handles
-  // `cleanupMcpSettings(settingsDir)` but does NOT know about `promptDir`.
-  // Skipping this would leak a /tmp/danxbot-prompt-* dir on every broken
-  // dispatch.
+  // it) isn't in scope yet. The caller-side catch in `dispatch()` (see
+  // `src/dispatch/core.ts`'s `spawnForDispatch`) handles the MCP settings
+  // temp dir but does NOT know about `promptDir`. Skipping this would leak
+  // a /tmp/danxbot-prompt-* dir on every broken dispatch.
   if (options.mcpConfigPath) {
     const probeResult = await probeAllMcpServers(
       options.mcpConfigPath,
@@ -993,13 +947,3 @@ export function getJobStatus(job: AgentJob): Record<string, unknown> {
   };
 }
 
-/**
- * Clean up a temp directory created by buildMcpSettings.
- */
-export function cleanupMcpSettings(settingsDir: string): void {
-  try {
-    rmSync(settingsDir, { recursive: true, force: true });
-  } catch {
-    // Ignore cleanup errors
-  }
-}
