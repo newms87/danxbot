@@ -2,8 +2,8 @@
   "mcpServers": {
     "trello": {
       "type": "stdio",
-      "command": "node",
-      "args": ["${MCP_TRELLO_PATH}/build/index.js"],
+      "command": "npx",
+      "args": ["-y", "@thehammer/mcp-server-trello"],
       "env": {
         "TRELLO_API_KEY": "${TRELLO_API_KEY}",
         "TRELLO_TOKEN": "${TRELLO_API_TOKEN}",

@@ -36,8 +36,11 @@ services:
       # is /danxbot/app in the container (see Dockerfile WORKDIR). The mount
       # destination must match.
       - ${CLAUDE_AUTH_DIR:-../../claude-auth}:/danxbot/app/claude-auth:ro
-      # Shared Claude Code session logs — must match the dashboard's
-      # mount so the dashboard can read every worker's JSONL.
+      # Claude Code session logs — this worker writes JSONL here.
+      # Default resolves to repos/danxbot/claude-projects/ on the host.
+      # The dashboard reads these via the per-repo RO mount added by
+      # `make generate-dev-override` (docker-compose.override.yml) or the
+      # static prod compose entry — see .claude/rules/docker-runtime.md.
       - ${CLAUDE_PROJECTS_DIR:-../../claude-projects}:/home/danxbot/.claude/projects
     ports:
       - "${DANXBOT_WORKER_PORT}:${DANXBOT_WORKER_PORT}"
