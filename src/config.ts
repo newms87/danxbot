@@ -2,25 +2,14 @@ import { existsSync } from "node:fs";
 import type { RepoConfig } from "./types.js";
 import { getReposBase } from "./poller/constants.js";
 import { required, optional } from "./env.js";
+import { parseReposEnv } from "./repos-env.js";
 
 function parseRepos(envValue: string): RepoConfig[] {
-  if (!envValue.trim()) return [];
-  return envValue.split(",").map((entry) => {
-    const colonIndex = entry.indexOf(":");
-    if (colonIndex <= 0) {
-      throw new Error(
-        `Invalid REPOS entry "${entry}" — expected "name:url" format`,
-      );
-    }
-    const name = entry.slice(0, colonIndex).trim();
-    const url = entry.slice(colonIndex + 1).trim();
-    if (!name || !url) {
-      throw new Error(
-        `Invalid REPOS entry "${entry}" — name and url must not be empty`,
-      );
-    }
-    return { name, url, localPath: `${getReposBase()}/${name}` };
-  });
+  return parseReposEnv(envValue).map(({ name, url }) => ({
+    name,
+    url,
+    localPath: `${getReposBase()}/${name}`,
+  }));
 }
 
 /**

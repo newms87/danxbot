@@ -12,6 +12,7 @@ export
 REPOS_DIR := ./repos
 
 .PHONY: help launch-infra stop-infra launch-worker stop-worker launch-all-workers stop-all-workers build logs validate-repos \
+       generate-dev-override \
        test test-unit test-integration test-validate test-system \
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
        test-system-error test-system-stall test-system-poller test-system-cleanup \
@@ -25,7 +26,10 @@ build: ## Build the danxbot Docker image
 	docker compose build
 	docker tag danxbot-flytebot-dashboard:latest danxbot:latest
 
-launch-infra: ## Start shared infrastructure (MySQL + dashboard)
+generate-dev-override: ## Regenerate docker-compose.override.yml from REPOS (local dev only)
+	@npx tsx src/cli/dev-compose-override.ts
+
+launch-infra: generate-dev-override ## Start shared infrastructure (MySQL + dashboard)
 	docker compose up -d
 
 stop-infra: ## Stop shared infrastructure
