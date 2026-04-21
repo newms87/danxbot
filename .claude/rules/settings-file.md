@@ -16,12 +16,17 @@ via `fs.open("wx")` with stale-steal at 30s. Both files are gitignored.
 
 ## Ownership
 
-| Writer       | Touches                                | When                                               |
-|--------------|----------------------------------------|----------------------------------------------------|
-| `dashboard`  | `overrides.<feature>` + `meta`         | Operator clicks a toggle on the Agents tab        |
-| `worker`     | `display` + `meta`                     | `syncSettingsFileOnBoot` on every worker start    |
-| `deploy`     | `display` + `meta` (indirectly, via worker restart) | After secrets materialize + worker relaunch |
-| `setup`      | `display` + `meta` (seed) + `overrides` reset to null | Initial `setup` skill run                   |
+| Writer                  | Touches                                | When                                               |
+|-------------------------|----------------------------------------|----------------------------------------------------|
+| `dashboard:<username>`  | `overrides.<feature>` + `meta`         | Operator clicks a toggle on the Agents tab (Phase 4+ records the actual operator's username via `DASHBOARD_PREFIX`) |
+| `worker`                | `display` + `meta`                     | `syncSettingsFileOnBoot` on every worker start    |
+| `deploy`                | `display` + `meta` (indirectly, via worker restart) | After secrets materialize + worker relaunch |
+| `setup`                 | `display` + `meta` (seed) + `overrides` reset to null | Initial `setup` skill run                   |
+
+`SettingsWriter = \`dashboard:${string}\` | "deploy" | "setup" | "worker"` —
+bare `"dashboard"` is rejected by `normalizeUpdatedBy` and falls back to
+the default writer on read, so legacy Phase 2/3 files auto-heal on the
+next write.
 
 **Invariant:** a patch containing only `display` NEVER clobbers
 `overrides`, and vice versa. `writeSettings` enforces this by merging each
@@ -89,7 +94,7 @@ of the config, no duplicated display-building logic.
     "db":      { "host": "mysql", "database": "ssap_sail", "configured": true },
     "links":   { "trelloBoardUrl": "...", "slackChannelUrl": "", "githubUrl": "..." }
   },
-  "meta": { "updatedAt": "...", "updatedBy": "dashboard" | "deploy" | "setup" | "worker" }
+  "meta": { "updatedAt": "...", "updatedBy": "dashboard:<username>" | "deploy" | "setup" | "worker" }
 }
 ```
 
