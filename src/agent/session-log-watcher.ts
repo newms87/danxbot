@@ -536,9 +536,7 @@ export class SessionLogWatcher {
    * permission errors are logged at WARN and return undefined — the watcher
    * must not crash on bad sidecar files, but the failure is visible in logs.
    */
-  private async readAgentType(
-    subagentId: string,
-  ): Promise<string | undefined> {
+  private async readAgentType(subagentId: string): Promise<string | undefined> {
     if (!this.subagentsDir) return undefined;
     const metaPath = join(this.subagentsDir, `${subagentId}.meta.json`);
     try {
@@ -548,7 +546,9 @@ export class SessionLogWatcher {
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return undefined;
-      log.warn(`Failed to read sub-agent meta for ${subagentId}: ${String(err)}`);
+      log.warn(
+        `Failed to read sub-agent meta for ${subagentId}: ${String(err)}`,
+      );
       return undefined;
     }
   }
@@ -580,11 +580,16 @@ export class SessionLogWatcher {
    * system/init event, so we synthesize one from the first assistant message's
    * sessionId and model. Sub-agent streams never synthesize — their entries
    * flow under the parent dispatch's existing session.
+   *
+   * IMPORTANT: synthesized init events carry `tools: []` — interactive mode
+   * does not expose the MCP-registered tool list. Any consumer that wants to
+   * check whether MCP tools loaded correctly must only trust the tools field
+   * when a REAL init was emitted (piped/docker mode, `-p` flag). In host mode
+   * you cannot infer MCP health from this watcher's events — the pre-launch
+   * probe in `mcp-server-probe.ts` is the tool-registration check that works
+   * across both runtimes.
    */
-  private handleRawEntry(
-    raw: Record<string, unknown>,
-    state: TailState,
-  ): void {
+  private handleRawEntry(raw: Record<string, unknown>, state: TailState): void {
     const isSubagent = state.lineage !== undefined;
 
     if (!isSubagent && !this.initSynthesized && raw.type === "assistant") {
