@@ -32,4 +32,4 @@ The ideator defaults to exploring the current repo only.
    - ICE scores and top priorities
    - Trello cards created (with titles)
    - Knowledge docs updated (if any)
-4. **Self-terminate if ephemeral:** Run `.claude/tools/danx-self-terminate.sh $PPID` via Bash. The script checks `DANXBOT_EPHEMERAL` and handles lock file removal and process termination atomically. Never assume you know the session type — always run the script.
+4. **Signal completion (MANDATORY):** Call the `danxbot_complete` MCP tool with `status: "completed"` and a one-line `summary` of what the ideator produced (e.g. "Generated 4 cards in Review, refreshed features.md"). The worker uses this signal to finalize the dispatch row and SIGTERM the Claude process. Do not exit without calling it.

@@ -10,11 +10,11 @@ Process a SINGLE card from the ToDo list using the card processing workflow belo
 ## Steps
 
 1. Fetch cards from the ToDo list
-2. If the list is empty, report "No cards to process" — then run self-termination check
+2. If the list is empty, report "No cards to process" — then signal completion (Step 6)
 3. Take the top card (first in the list) and report which card is being processed
 4. Process the card using the Card Processing Workflow (below)
 5. **Stop after this single card.**
-6. **MANDATORY — Self-termination check (never skip):** Run `.claude/tools/danx-self-terminate.sh $PPID` via Bash. The script checks `DANXBOT_EPHEMERAL` and handles lock file removal and process termination atomically. Never assume you know the session type — always run the script.
+6. **MANDATORY — Signal completion (never skip):** Call the `danxbot_complete` MCP tool with `status: "completed"` (or `"failed"`) and a one-line `summary`. The worker uses this signal to finalize the dispatch row, terminate the Claude process, and resume polling. Do not exit without calling it.
 
 ## Report
 
@@ -111,8 +111,11 @@ Check off "Committed".
 
 4. **Create Action Item cards** (if action items not "Nothing"): One card per item in Action Items list. Update retro comment with links.
 
-### Step 9: Self-Termination (MANDATORY)
+### Step 9: Signal Completion (MANDATORY)
 
-After EVERY card completion or Needs Help move, run: `.claude/tools/danx-self-terminate.sh $PPID`
+After EVERY card completion or Needs Help move, call the `danxbot_complete` MCP tool:
 
-The script checks `DANXBOT_EPHEMERAL=1` and atomically removes the lock file and kills Claude Code if set. Never assume session type — always run the script. Poller spawns fresh Claude per card. One card per instance.
+- `status`: `"completed"` if the card was finished successfully or moved to Needs Help; `"failed"` if a fatal error stopped the work.
+- `summary`: one-line description of the outcome (e.g. card title + commit sha, or the reason the card was moved to Needs Help, or the failure cause).
+
+The worker uses this signal to finalize the dispatch row in MySQL, SIGTERM the Claude process, and resume polling. The poller spawns a fresh Claude per card — one card per instance. Do not exit without calling `danxbot_complete`; an agent that exits naturally still terminates, but the dispatch row is left without a proper summary/status.

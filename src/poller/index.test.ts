@@ -230,7 +230,6 @@ describe("poll", () => {
         openTerminal: true, // config.isHost is true in test
         env: expect.objectContaining({
           DANXBOT_REPO_NAME: "test-repo",
-          DANXBOT_EPHEMERAL: "1",
         }),
       }),
     );
@@ -660,7 +659,7 @@ describe("poll — Docker mode (headless agent)", () => {
     expect(mockFetchTodoCards).toHaveBeenCalled();
   });
 
-  it("passes DANXBOT_REPO_NAME and DANXBOT_EPHEMERAL env vars", async () => {
+  it("passes DANXBOT_REPO_NAME env var to dispatched agents", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -669,8 +668,6 @@ describe("poll — Docker mode (headless agent)", () => {
       expect.objectContaining({
         env: expect.objectContaining({
           DANXBOT_REPO_NAME: "test-repo",
-          DANXBOT_EPHEMERAL: "1",
-          DANXBOT_PROJECT_ROOT: expect.any(String),
         }),
       }),
     );

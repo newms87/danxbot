@@ -536,8 +536,6 @@ function spawnClaude(
     timeoutMs: config.pollerIntervalMs * 60, // generous timeout: 60x poll interval
     env: {
       DANXBOT_REPO_NAME: repo.name,
-      DANXBOT_EPHEMERAL: "1",
-      DANXBOT_PROJECT_ROOT: projectRoot,
     },
     openTerminal: config.isHost,
     dispatch,
