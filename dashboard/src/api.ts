@@ -144,7 +144,7 @@ export async function patchToggle(
  * into a single payload. Returns the leftover tail that hasn't finished
  * yet so the caller can prepend it to the next chunk.
  */
-function splitEvents(buffer: string): { events: string[]; tail: string } {
+export function splitEvents(buffer: string): { events: string[]; tail: string } {
   const parts = buffer.split("\n\n");
   const tail = parts.pop() ?? "";
   const events: string[] = [];
