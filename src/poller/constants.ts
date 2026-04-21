@@ -56,6 +56,8 @@ export function loadTrelloIds(repoPath: string): Omit<TrelloConfig, "apiKey" | "
     return value;
   }
 
+  const triaged = yaml["labels.triaged"];
+
   return {
     boardId: req("board_id"),
     reviewListId: req("lists.review"),
@@ -69,6 +71,7 @@ export function loadTrelloIds(repoPath: string): Omit<TrelloConfig, "apiKey" | "
     featureLabelId: req("labels.feature"),
     epicLabelId: req("labels.epic"),
     needsHelpLabelId: req("labels.needs_help"),
+    ...(triaged ? { triagedLabelId: triaged } : {}),
   };
 }
 

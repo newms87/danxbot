@@ -58,7 +58,7 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 
 **Expected lists:** Review, ToDo, In Progress, Needs Help, Done, Cancelled, Action Items
 
-**Expected labels:** Bug, Feature, Epic, Needs Help
+**Expected labels:** Bug, Feature, Epic, Needs Help, Triaged
 
 6. Fuzzy-match existing lists to expected names (case-insensitive, ignore spaces/hyphens — "To Do" matches "ToDo", "to-do" matches "ToDo", etc.)
 7. Present the mapping to the user:
@@ -72,7 +72,7 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 8. Ask: "Does this look right? (yes/no)" — if no, let user manually map each list
 9. Create any missing lists via: `curl -s -X POST "https://api.trello.com/1/boards/<BOARD_ID>/lists?name=<NAME>&key=<KEY>&token=<TOKEN>"`
 10. Create any missing labels via: `curl -s -X POST "https://api.trello.com/1/boards/<BOARD_ID>/labels?name=<NAME>&color=<COLOR>&key=<KEY>&token=<TOKEN>"`
-    - Bug: red, Feature: green, Epic: purple, Needs Help: orange
+    - Bug: red, Feature: green, Epic: purple, Needs Help: orange, Triaged: sky
 11. **Hold all IDs in memory** — they go to `.danxbot/config/trello.yml` in Step 8, NOT to `.env`
 
 ## Step 4b: Configure Trello MCP Server
@@ -218,6 +218,7 @@ labels:
   feature: <FEATURE_LABEL_ID>
   epic: <EPIC_LABEL_ID>
   needs_help: <NEEDS_HELP_LABEL_ID>
+  triaged: <TRIAGED_LABEL_ID>
 ```
 
 **These IDs are NOT secrets** — they're safe to commit to version control.

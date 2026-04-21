@@ -130,6 +130,7 @@ export interface TrelloConfig {
   featureLabelId: string;
   epicLabelId: string;
   needsHelpLabelId: string;
+  triagedLabelId?: string;
 }
 
 export interface SlackConfig {
