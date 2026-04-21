@@ -471,4 +471,18 @@ describe("setupProcessHandlers", () => {
     // (watcher.stop, temp-dir rm) are torn down even when status was pre-set.
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
+
+  it("only fires onComplete once when both error and close events arrive (Node can emit both on spawn failure)", () => {
+    const job = makeJob();
+    const child = makeChild();
+    const onComplete = vi.fn();
+
+    setupProcessHandlers(child as never, job, () => "", () => "", { onComplete });
+    child.emit("error", new Error("spawn failed"));
+    // After error, status is "failed" — the running guard short-circuits close.
+    child.emit("close", 1);
+
+    expect(job.status).toBe("failed");
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
 });
