@@ -99,9 +99,7 @@ vi.mock("../agent/session-log-watcher.js", () => ({
 // resolveParentSessionId proceeds to findSessionFileByDispatchId. Tests that
 // want to exercise the "no-session-dir" → 500 branch override this per-test.
 // Typed as accepting the path so TS doesn't complain about the forwarded arg.
-const mockStat = vi.fn(
-  async (_path: unknown) => ({ isDirectory: () => true }),
-);
+const mockStat = vi.fn(async (_path: unknown) => ({ isDirectory: () => true }));
 vi.mock("node:fs/promises", () => ({
   stat: (path: unknown) => mockStat(path),
 }));
@@ -381,6 +379,39 @@ describe("handleLaunch", () => {
         schemaRole: "builder",
         // danxbotStopUrl is always included for dispatched agents
         danxbotStopUrl: expect.stringContaining("/api/stop/"),
+      }),
+    );
+  });
+
+  it("accepts numeric schema_definition_id (Laravel sends int IDs as JSON numbers)", async () => {
+    // Regression: Laravel's `$schema->id` is an int and serializes as a JSON
+    // number, not a string. A string-only type-check silently drops the value,
+    // so `SCHEMA_DEFINITION_ID` never reaches the MCP server, which exits with
+    // "SCHEMA_DEFINITION_ID is required" — leaving the agent with no
+    // `mcp__schema__*` tools. The parser must coerce numeric IDs to strings.
+    const mockJob = {
+      id: "job-int-id",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Build schema",
+      api_token: "tok-abc",
+      api_url: "http://custom-api.com",
+      schema_definition_id: 42, // numeric, as Laravel sends it
+      schema_role: "orchestrator",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(mockBuildMcpSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schemaDefinitionId: "42",
+        schemaRole: "orchestrator",
       }),
     );
   });

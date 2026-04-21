@@ -381,8 +381,7 @@ function parseCommonRequestParams(
     return null;
   }
 
-  const requestedRepo =
-    typeof body.repo === "string" ? body.repo : undefined;
+  const requestedRepo = typeof body.repo === "string" ? body.repo : undefined;
   if (requestedRepo && requestedRepo !== repo.name) {
     json(res, 400, {
       error: `This worker manages "${repo.name}", not "${requestedRepo}"`,
@@ -394,12 +393,17 @@ function parseCommonRequestParams(
     task,
     apiToken,
     // Object keyed by agent name — see `.claude/rules/agent-dispatch.md`.
-    agents: body.agents as
-      | Record<string, Record<string, unknown>>
-      | undefined,
+    agents: body.agents as Record<string, Record<string, unknown>> | undefined,
+    // Accept both string and number: Laravel serializes int IDs as JSON
+    // numbers. Coercing to string here matches what buildMcpSettings does
+    // downstream and keeps the MCP server's SCHEMA_DEFINITION_ID env as a
+    // string. A string-only check silently dropped the field for numeric
+    // payloads, which caused the schema MCP server to exit on startup
+    // with "SCHEMA_DEFINITION_ID is required".
     schemaDefinitionId:
-      typeof body.schema_definition_id === "string"
-        ? body.schema_definition_id
+      typeof body.schema_definition_id === "string" ||
+      typeof body.schema_definition_id === "number"
+        ? String(body.schema_definition_id)
         : undefined,
     schemaRole:
       typeof body.schema_role === "string" ? body.schema_role : undefined,
