@@ -294,7 +294,8 @@ test_dispatch() {
   local launch_response
   launch_response=$(http_post "${WORKER_URL}/api/launch" "{
     \"task\": \"Read the file package.json and report the project name. Reply with just the name, nothing else.\",
-    \"api_token\": \"${API_TOKEN}\"
+    \"api_token\": \"${API_TOKEN}\",
+    \"allow_tools\": [\"Read\"]
   }")
 
   local job_id

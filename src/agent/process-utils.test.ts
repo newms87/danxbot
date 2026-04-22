@@ -66,6 +66,31 @@ describe("buildCleanEnv", () => {
     const result = buildCleanEnv({ ENABLE_TOOL_SEARCH: "1" });
     expect(result.ENABLE_TOOL_SEARCH).toBe("1");
   });
+
+  // CLAUDE_AUTH_MODE toggle — lets the spawned claude CLI authenticate via
+  // subscription OAuth (~/.claude/.credentials.json) instead of
+  // ANTHROPIC_API_KEY, while leaving ANTHROPIC_API_KEY available for the
+  // router + heartbeat which use the Anthropic SDK directly.
+  it("strips ANTHROPIC_API_KEY when CLAUDE_AUTH_MODE=subscription so claude CLI falls back to OAuth", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-api03-test";
+    process.env.CLAUDE_AUTH_MODE = "subscription";
+    const result = buildCleanEnv();
+    expect(result).not.toHaveProperty("ANTHROPIC_API_KEY");
+  });
+
+  it("preserves ANTHROPIC_API_KEY when CLAUDE_AUTH_MODE=api_key", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-api03-test";
+    process.env.CLAUDE_AUTH_MODE = "api_key";
+    const result = buildCleanEnv();
+    expect(result.ANTHROPIC_API_KEY).toBe("sk-ant-api03-test");
+  });
+
+  it("preserves ANTHROPIC_API_KEY when CLAUDE_AUTH_MODE is unset (default = api_key mode)", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-api03-test";
+    delete process.env.CLAUDE_AUTH_MODE;
+    const result = buildCleanEnv();
+    expect(result.ANTHROPIC_API_KEY).toBe("sk-ant-api03-test");
+  });
 });
 
 // ─── logPromptToDisk ──────────────────────────────────────────────────────────

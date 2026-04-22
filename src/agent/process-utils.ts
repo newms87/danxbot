@@ -41,6 +41,19 @@ export function buildCleanEnv(extra?: Record<string, string>): Record<string, st
     }
   }
   env.ENABLE_TOOL_SEARCH = "0";
+
+  // When CLAUDE_AUTH_MODE=subscription, the dispatched claude CLI
+  // authenticates via ~/.claude/.credentials.json OAuth. Claude Code's
+  // precedence is ANTHROPIC_API_KEY > OAuth, so we must strip the env var
+  // here — otherwise an invalid/stale key silently blocks the subscription
+  // fallback and every dispatch fails with "Invalid API key". The router
+  // and heartbeat still need ANTHROPIC_API_KEY (they use the Anthropic SDK
+  // via config.anthropic.apiKey); they read process.env directly and never
+  // go through buildCleanEnv, so they're unaffected.
+  if (process.env.CLAUDE_AUTH_MODE === "subscription") {
+    delete env.ANTHROPIC_API_KEY;
+  }
+
   if (extra) {
     Object.assign(env, extra);
   }
