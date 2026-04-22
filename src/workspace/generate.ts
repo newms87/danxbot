@@ -35,6 +35,7 @@
 
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { getReposBase } from "../poller/constants.js";
 import type { RepoContext } from "../types.js";
 
 /**
@@ -44,9 +45,50 @@ import type { RepoContext } from "../types.js";
  */
 export const WORKSPACE_SUBDIR = "workspace";
 
-/** Resolve the workspace root for a connected repo. */
-export function workspacePath(repo: RepoContext): string {
-  return resolve(repo.localPath, ".danxbot", WORKSPACE_SUBDIR);
+/**
+ * Resolve the workspace root for a connected repo. This is the ONE place
+ * the `<repo>/.danxbot/workspace/` literal lives — every caller that
+ * needs the dispatched-agent cwd goes through here.
+ *
+ * ## Load-bearing invariant
+ *
+ * Both overloads MUST resolve to the same absolute path for a given repo.
+ * When the input is a `RepoContext`, the result is `repo.localPath +
+ * .danxbot/workspace`. When the input is a bare `repoName`, the result
+ * is `getReposBase() + repoName + .danxbot/workspace`. Because
+ * `loadRepoContext` constructs `repo.localPath === join(getReposBase(),
+ * repo.name)` (see `src/config.ts:11` + `src/repo-context.ts:153`), the
+ * two forms converge by construction. The parity test in
+ * `src/workspace/generate.test.ts` guards this.
+ *
+ * If that parity ever breaks, three load-bearing consumers diverge:
+ *   1. `src/agent/launcher.ts` — spawn cwd of every dispatched claude
+ *   2. `src/worker/dispatch.ts` — resume-session directory lookup
+ *   3. `src/dashboard/jsonl-path-resolver.ts#encodeRepoCwd` — the
+ *      docker-runtime fallback that encodes this path as a dir name
+ *      by replacing `/` with `-`
+ *
+ * The launcher + resume paths call `workspacePath(repoName)` because
+ * they only have a string. The poller's `syncRepoFiles` calls
+ * `workspacePath(repo)` because it has a loaded `RepoContext`. One
+ * helper, two entry shapes, same output.
+ *
+ * ## Host-mode note
+ *
+ * `getReposBase()` checks `DANXBOT_REPOS_BASE` first and falls back to
+ * `<projectRoot>/repos`. The host-mode worker sets the env var to the
+ * real checkout parent, so the string-form helper still produces the
+ * correct on-disk path. If `getReposBase()` ever disagrees with how
+ * `loadRepoContext` sets `repo.localPath` on a given runtime, this
+ * helper becomes wrong for the string form only — a bug the parity
+ * test catches at startup.
+ */
+export function workspacePath(repo: RepoContext): string;
+export function workspacePath(repoName: string): string;
+export function workspacePath(input: RepoContext | string): string {
+  const base =
+    typeof input === "string" ? resolve(getReposBase(), input) : input.localPath;
+  return resolve(base, ".danxbot", WORKSPACE_SUBDIR);
 }
 
 /**

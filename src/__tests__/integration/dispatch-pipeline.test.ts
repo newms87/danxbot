@@ -239,9 +239,16 @@ beforeEach(async () => {
 
   testState.reposBase = join(tempDir, "repos");
   repoDir = join(testState.reposBase, "test-repo");
-  mkdirSync(repoDir, { recursive: true });
+  // Phase 3 of the agent-isolation epic (Trello `7ha2CSpc`) cwds every
+  // dispatched claude into `<repo>/.danxbot/workspace/`. fake-claude —
+  // spawned via the PATH wrapper from `launcher.ts` — inherits that cwd
+  // and writes its JSONL under the workspace-encoded projects dir. Create
+  // the workspace so the spawn doesn't fail with ENOENT, and derive the
+  // sessionDir the assertions watch from the same path.
+  const workspaceDir = join(repoDir, ".danxbot", "workspace");
+  mkdirSync(workspaceDir, { recursive: true });
 
-  sessionDir = deriveSessionDir(repoDir);
+  sessionDir = deriveSessionDir(workspaceDir);
 });
 
 afterEach(async () => {

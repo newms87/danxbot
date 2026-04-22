@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
-import { getReposBase } from "../poller/constants.js";
+import { workspacePath } from "../workspace/generate.js";
 import {
   buildCleanEnv,
   logPromptToDisk,
@@ -443,7 +443,17 @@ export async function spawnAgent(
   });
   const { flags, firstMessage, promptDir } = invocation;
 
-  const agentCwd = join(getReposBase(), options.repoName);
+  // Dispatched agents cwd into the generated workspace, NOT the repo root.
+  // The workspace (`<repo>/.danxbot/workspace/`) is owned entirely by
+  // danxbot and holds the `.mcp.json` stub, `.claude/settings.json`,
+  // `CLAUDE.md`, and the dual-written rules/skills/tools the poller
+  // injects. The repo root belongs to the developer's interactive claude
+  // session (use case #1). This isolation is the point of the
+  // agent-isolation epic — see Trello card `7ha2CSpc` and
+  // `.claude/rules/agent-dispatch.md`. Any future change to what
+  // dispatched agents see from their cwd lands inside `workspacePath` /
+  // `generateWorkspace`, NOT here.
+  const agentCwd = workspacePath(options.repoName);
 
   log.info(`[Job ${jobId}] Launching agent`);
   log.info(`[Job ${jobId}] Prompt: ${options.prompt.substring(0, 200)}`);

@@ -1,6 +1,22 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi, afterEach } from "vitest";
 import type { IncomingMessage, ServerResponse } from "http";
 import { EventEmitter } from "events";
+
+// `computeDashboardJsonlPath` (reached via the sessionUuid-fallback path)
+// now derives from `workspacePath` which reads `DANXBOT_REPOS_BASE`. Pin
+// the env so assertions about the encoded dir are deterministic regardless
+// of the test-runner cwd. See the agent-isolation epic (Trello `7ha2CSpc`).
+const PRIOR_REPOS_BASE = process.env.DANXBOT_REPOS_BASE;
+beforeAll(() => {
+  process.env.DANXBOT_REPOS_BASE = "/danxbot/app/repos";
+});
+afterAll(() => {
+  if (PRIOR_REPOS_BASE === undefined) {
+    delete process.env.DANXBOT_REPOS_BASE;
+  } else {
+    process.env.DANXBOT_REPOS_BASE = PRIOR_REPOS_BASE;
+  }
+});
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -157,7 +173,7 @@ describe("handleStream — dispatch:jsonl:<id> topic", () => {
     expect(res.statusCode).toBe(200);
     expect(mockStartJsonlWatcher).toHaveBeenCalledWith(
       "job-uuid",
-      "/danxbot/app/claude-projects/danxbot/-danxbot-app-repos-danxbot/abc123.jsonl",
+      "/danxbot/app/claude-projects/danxbot/-danxbot-app-repos-danxbot-.danxbot-workspace/abc123.jsonl",
     );
   });
 

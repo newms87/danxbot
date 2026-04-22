@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import {
   DASHBOARD_CLAUDE_PROJECTS_BASE,
   encodeRepoCwd,
@@ -28,21 +28,48 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Pick<
   };
 }
 
+// `encodeRepoCwd` now derives from `workspacePath(repoName)` which in turn
+// reads `getReposBase()`. In the real dashboard container that resolves to
+// `/danxbot/app/repos` (via the project-root fallback). In tests we pin the
+// env var so the encoded dir is deterministic regardless of where the
+// test runner is invoked from.
+const PRIOR_REPOS_BASE = process.env.DANXBOT_REPOS_BASE;
+beforeAll(() => {
+  process.env.DANXBOT_REPOS_BASE = "/danxbot/app/repos";
+});
+afterAll(() => {
+  if (PRIOR_REPOS_BASE === undefined) {
+    delete process.env.DANXBOT_REPOS_BASE;
+  } else {
+    process.env.DANXBOT_REPOS_BASE = PRIOR_REPOS_BASE;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // encodeRepoCwd
 // ---------------------------------------------------------------------------
 
 describe("encodeRepoCwd", () => {
+  // Phase 3 of the agent-isolation epic (Trello `7ha2CSpc`) moved every
+  // dispatched claude process into `<repo>/.danxbot/workspace/`. The
+  // encoded dir name must reflect the new cwd — otherwise the fallback
+  // strategy computes a directory that does not exist on disk.
   it("encodes danxbot CWD", () => {
-    expect(encodeRepoCwd("danxbot")).toBe("-danxbot-app-repos-danxbot");
+    expect(encodeRepoCwd("danxbot")).toBe(
+      "-danxbot-app-repos-danxbot-.danxbot-workspace",
+    );
   });
 
   it("encodes gpt-manager CWD", () => {
-    expect(encodeRepoCwd("gpt-manager")).toBe("-danxbot-app-repos-gpt-manager");
+    expect(encodeRepoCwd("gpt-manager")).toBe(
+      "-danxbot-app-repos-gpt-manager-.danxbot-workspace",
+    );
   });
 
   it("encodes platform CWD", () => {
-    expect(encodeRepoCwd("platform")).toBe("-danxbot-app-repos-platform");
+    expect(encodeRepoCwd("platform")).toBe(
+      "-danxbot-app-repos-platform-.danxbot-workspace",
+    );
   });
 });
 
@@ -54,7 +81,7 @@ describe("computeDashboardJsonlPath", () => {
   it("produces the expected deterministic path", () => {
     const path = computeDashboardJsonlPath("danxbot", "abc-123-session");
     expect(path).toBe(
-      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot/abc-123-session.jsonl`,
+      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot-.danxbot-workspace/abc-123-session.jsonl`,
     );
   });
 
@@ -130,7 +157,7 @@ describe("expectedJsonlPath", () => {
     const dispatch = makeDispatch({ sessionUuid: "my-session-uuid" });
     const result = expectedJsonlPath(dispatch);
     expect(result).toBe(
-      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot/my-session-uuid.jsonl`,
+      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot-.danxbot-workspace/my-session-uuid.jsonl`,
     );
   });
 

@@ -153,8 +153,18 @@ vi.mock("../settings-file.js", () => ({
 const mockGenerateWorkspace = vi
   .fn()
   .mockReturnValue({ path: "/mock/workspace", changedFiles: [] });
+// `workspacePath` is imported alongside `generateWorkspace` by `syncRepoFiles`
+// (Phase 3 dual-write target — see the agent-isolation epic `7ha2CSpc`).
+// Both must be mocked; omitting the second one surfaces as an
+// "[vitest] No X export" unhandled rejection during `start()`. The
+// overloaded helper accepts either a `RepoContext` or a bare repoName —
+// the mock handles both shapes to stay in sync with the real API.
 vi.mock("../workspace/generate.js", () => ({
   generateWorkspace: (...args: unknown[]) => mockGenerateWorkspace(...args),
+  workspacePath: (input: { localPath: string } | string) =>
+    typeof input === "string"
+      ? `/danxbot/repos/${input}/.danxbot/workspace`
+      : `${input.localPath}/.danxbot/workspace`,
 }));
 
 vi.mock("../logger.js", () => ({
@@ -307,6 +317,144 @@ describe("poll", () => {
     // Should not throw
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("syncRepoFiles dual-writes every danx-* artifact to BOTH repo-root and workspace (Phase 3 of agent-isolation epic)", async () => {
+    // The inject pipeline must mirror every rule/skill/tool write into
+    // `<repo>/.danxbot/workspace/.claude/` alongside `<repo>/.claude/`
+    // so dispatched agents — which cwd into the workspace — see the
+    // same injected content an interactive `claude` at the repo root
+    // does. Phase 5 deletes the repo-root half; until then dual-write
+    // is load-bearing. See Trello `7ha2CSpc`.
+    mockFetchTodoCards.mockResolvedValue([]);
+    // Return "exists" for inject dirs so the pipeline actually walks
+    // them; the base repo-config existsSync stub in setupRepoConfigMocks
+    // only covers `.danxbot/config/*`.
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes("inject")) return true;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.endsWith("tools.md")) return true;
+      return false;
+    });
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return ["danx-halt-flag.md"];
+      if (path.endsWith("/inject/tools")) return ["danx-helper.sh"];
+      if (path.endsWith("/inject/skills")) return ["danx-next"];
+      if (path.endsWith("/inject/skills/danx-next")) return ["SKILL.md"];
+      return [];
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    const copiedDests = mockCopyFileSync.mock.calls.map(
+      (c: unknown[]) => c[1] as string,
+    );
+
+    // 1. danx-repo-config.md is generated from config.yml — written to both.
+    expect(
+      writtenPaths.some((p) => p === "/test/repos/test-repo/.claude/rules/danx-repo-config.md"),
+    ).toBe(true);
+    expect(
+      writtenPaths.some(
+        (p) => p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-repo-config.md",
+      ),
+    ).toBe(true);
+
+    // 2. Injected danx-* rule files are copyFileSync'd to both.
+    expect(
+      copiedDests.some((p) => p === "/test/repos/test-repo/.claude/rules/danx-halt-flag.md"),
+    ).toBe(true);
+    expect(
+      copiedDests.some(
+        (p) => p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-halt-flag.md",
+      ),
+    ).toBe(true);
+
+    // 3. Injected danx-* tools are copied to both tools/ dirs.
+    expect(
+      copiedDests.some((p) => p === "/test/repos/test-repo/.claude/tools/danx-helper.sh"),
+    ).toBe(true);
+    expect(
+      copiedDests.some(
+        (p) => p === "/test/repos/test-repo/.danxbot/workspace/.claude/tools/danx-helper.sh",
+      ),
+    ).toBe(true);
+
+    // 4. Injected skill files are copied to both skills/ dirs.
+    expect(
+      copiedDests.some(
+        (p) => p === "/test/repos/test-repo/.claude/skills/danx-next/SKILL.md",
+      ),
+    ).toBe(true);
+    expect(
+      copiedDests.some(
+        (p) => p === "/test/repos/test-repo/.danxbot/workspace/.claude/skills/danx-next/SKILL.md",
+      ),
+    ).toBe(true);
+
+    // 5. Generated danx-repo-overview.md (from overview.md) is dual-written.
+    expect(
+      writtenPaths.some(
+        (p) => p === "/test/repos/test-repo/.claude/rules/danx-repo-overview.md",
+      ),
+    ).toBe(true);
+    expect(
+      writtenPaths.some(
+        (p) =>
+          p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-repo-overview.md",
+      ),
+    ).toBe(true);
+
+    // 6. Generated danx-repo-workflow.md (from workflow.md) is dual-written.
+    expect(
+      writtenPaths.some(
+        (p) => p === "/test/repos/test-repo/.claude/rules/danx-repo-workflow.md",
+      ),
+    ).toBe(true);
+    expect(
+      writtenPaths.some(
+        (p) =>
+          p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-repo-workflow.md",
+      ),
+    ).toBe(true);
+
+    // 7. Repo-specific danx-tools.md (from tools.md) is copy-dual-written.
+    expect(
+      copiedDests.some(
+        (p) => p === "/test/repos/test-repo/.claude/rules/danx-tools.md",
+      ),
+    ).toBe(true);
+    expect(
+      copiedDests.some(
+        (p) =>
+          p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-tools.md",
+      ),
+    ).toBe(true);
+
+    // 8. danx-trello-config.md (written by writeTrelloConfigRule in _poll,
+    // OUTSIDE syncRepoFiles) is dual-written too — verifying the _poll-
+    // level dual-write alongside the syncRepoFiles-level one.
+    expect(
+      writtenPaths.some(
+        (p) => p === "/test/repos/test-repo/.claude/rules/danx-trello-config.md",
+      ),
+    ).toBe(true);
+    expect(
+      writtenPaths.some(
+        (p) =>
+          p ===
+          "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-trello-config.md",
+      ),
+    ).toBe(true);
   });
 
 });

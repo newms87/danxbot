@@ -21,6 +21,7 @@
  */
 
 import { stat } from "node:fs/promises";
+import { workspacePath } from "../workspace/generate.js";
 import type { Dispatch } from "./dispatches.js";
 
 /**
@@ -34,19 +35,30 @@ export const DASHBOARD_CLAUDE_PROJECTS_BASE = "/danxbot/app/claude-projects";
 const WORKER_PROJECTS_PREFIX = "/home/danxbot/.claude/projects/";
 
 /**
- * Encode a repo's CWD to the directory-name form Claude Code uses.
- * Claude Code replaces every `/` with `-`, so `/danxbot/app/repos/<name>`
- * becomes `-danxbot-app-repos-<name>`.
+ * Encode a dispatched agent's CWD to the directory-name form Claude Code uses.
+ * Claude Code stores sessions at `~/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/`
+ * so this helper runs the same `/` → `-` transform on the output of
+ * `workspacePath(repoName)` — the single source of truth for the dispatched
+ * spawn cwd (see `src/workspace/generate.ts` and Trello epic `7ha2CSpc`).
  *
- * NOTE: This assumes the Docker-runtime worker CWD `/danxbot/app/repos/<name>`.
- * Host-mode workers run from the real checkout path (e.g. `/home/newms/web/...`),
- * so their encoded dir would differ. `resolveJsonlPath` strategies 1+2 handle
+ * Deriving from `workspacePath` rather than hardcoding the literal means a
+ * future change to `WORKSPACE_SUBDIR` or the `.danxbot/` segment updates
+ * every consumer (launcher spawn, resume lookup, this encoder) in lockstep.
+ *
+ * NOTE: In the dashboard container `getReposBase()` resolves to
+ * `/danxbot/app/repos` (either via `DANXBOT_REPOS_BASE` or the project-root
+ * fallback) so the encoded dir comes out as
+ * `-danxbot-app-repos-<name>-.danxbot-workspace` — the exact name claude
+ * writes to under `~/.claude/projects/` in the worker container.
+ *
+ * Host-mode workers dispatch from `<real-checkout>/.danxbot/workspace`, so
+ * their encoded dir differs. `resolveJsonlPath` strategies 1+2 handle
  * host-mode dispatches via the stored absolute path; strategy 3 (this path)
- * will compute an incorrect dir for host-mode and return null — that is
- * acceptable because strategy 3 is only a fallback when `jsonlPath` is absent.
+ * may compute a dir that doesn't exist on disk for host-mode and returns
+ * null — that is acceptable because strategy 3 is only a fallback.
  */
 export function encodeRepoCwd(repoName: string): string {
-  return `-danxbot-app-repos-${repoName}`;
+  return workspacePath(repoName).replace(/\//g, "-");
 }
 
 /**
@@ -76,8 +88,9 @@ export function translateWorkerPath(
 
 /**
  * Derive the expected JSONL path without checking filesystem existence.
- * Used by `handleFollowDispatch` which must start even before the agent
- * creates the file (tick-loop retries until the file appears).
+ * Used by `handleStream` in `stream-routes.ts` to pre-validate
+ * `dispatch:jsonl:<id>` topics even before the agent has created the file
+ * (the per-topic watcher retries until the file appears).
  *
  * Resolution order:
  *  1. If `jsonlPath` is a worker-internal path → translate it.

@@ -101,8 +101,18 @@ vi.mock("../poller/constants.js", () => ({
 }));
 
 const mockFindSessionFileByDispatchId = vi.fn();
+// Capture the cwd passed into deriveSessionDir so tests can verify that
+// `resolveParentSessionId` derives the projects directory from the
+// workspace path — not the bare repo root (the Phase 3 spawn-cwd switch;
+// see the agent-isolation epic Trello `7ha2CSpc`). Without this spy, a
+// regression that reverts the call to `repo.localPath` leaves every
+// resume test green because the fake session dir resolves identically
+// for both inputs.
+const mockDeriveSessionDir = vi.fn(
+  (cwd: string) => `/fake/projects${cwd.replace(/\//g, "-")}`,
+);
 vi.mock("../agent/session-log-watcher.js", () => ({
-  deriveSessionDir: (cwd: string) => `/fake/projects${cwd.replace(/\//g, "-")}`,
+  deriveSessionDir: (cwd: string) => mockDeriveSessionDir(cwd),
   findSessionFileByDispatchId: (...args: unknown[]) =>
     mockFindSessionFileByDispatchId(...args),
 }));
@@ -747,6 +757,32 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
 describe("handleResume", () => {
   beforeEach(() => {
     mockFindSessionFileByDispatchId.mockReset();
+    mockDeriveSessionDir.mockClear();
+  });
+
+  it("derives the parent session dir from the workspace cwd, not the repo root (Phase 3 spawn-cwd contract)", async () => {
+    // Regression guard: if `resolveParentSessionId` ever reverts to
+    // `deriveSessionDir(getReposBase() + repoName)`, every resume would
+    // look under an empty projects dir and silently return 404 on good
+    // parent IDs. Asserting the cwd string gets the `.danxbot/workspace`
+    // suffix locks the launcher + resume lookup in lockstep. See Trello
+    // `7ha2CSpc` and `src/workspace/generate.ts` `workspacePath`.
+    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
+      "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
+    );
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Keep going",
+      api_token: "tok-123",
+      allow_tools: [],
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    const cwds = mockDeriveSessionDir.mock.calls.map((c) => c[0] as string);
+    expect(cwds.length).toBeGreaterThan(0);
+    expect(cwds.some((cwd) => cwd.endsWith(".danxbot/workspace"))).toBe(true);
   });
 
   it("returns 400 when job_id is missing", async () => {

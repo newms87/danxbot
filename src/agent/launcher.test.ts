@@ -172,7 +172,7 @@ describe("spawnAgent", () => {
         expect.stringContaining("<!-- danxbot-dispatch:test-uuid-1234 -->"),
       ]),
       expect.objectContaining({
-        cwd: "/danxbot/repos/platform",
+        cwd: "/danxbot/repos/platform/.danxbot/workspace",
         stdio: ["ignore", "ignore", "pipe"],
       }),
     );
@@ -1564,7 +1564,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       expect.objectContaining({
         title: expect.stringContaining("platform"),
         script: "/tmp/danxbot-term-test/run-agent.sh",
-        cwd: "/danxbot/repos/platform",
+        cwd: "/danxbot/repos/platform/.danxbot/workspace",
       }),
     );
   });

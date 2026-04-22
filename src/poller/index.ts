@@ -21,7 +21,7 @@ import {
 import { resolveProfile } from "../dispatch/profiles.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
-import { generateWorkspace } from "../workspace/generate.js";
+import { generateWorkspace, workspacePath } from "../workspace/generate.js";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
 import {
@@ -174,20 +174,26 @@ export async function poll(repo: RepoContext): Promise<void> {
 }
 
 async function _poll(repo: RepoContext): Promise<void> {
-  // Regenerate the isolated workspace skeleton each tick. Idempotent —
-  // no-op when the owner-owned files (CLAUDE.md, .gitignore, .mcp.json,
-  // .claude/settings.json) already match. Lets operators drop new rules
-  // into `.danxbot/config/` and see them reflected without a restart.
-  // See `src/workspace/generate.ts` and the agent-isolation epic (7ha2CSpc).
+  // Re-run the workspace generator every tick (not just at worker boot)
+  // so changes inside `.danxbot/config/` propagate to dispatched agents
+  // without a restart. `generateWorkspace` is idempotent; its docstring
+  // owns the WHAT.
   generateWorkspace(repo);
 
-  // Sync danxbot config into target repo on every poll cycle
   syncRepoFiles(repo);
 
-  // Write Trello config into target repo's rules
+  // Write Trello config into BOTH the repo root `.claude/rules/` (legacy
+  // consumer: interactive `claude` sessions a developer runs at the repo
+  // root, plus any remaining pre-Phase-5 code that expects it there) AND
+  // the workspace `.claude/rules/` (dispatched agents — agent-isolation
+  // epic, Trello `7ha2CSpc`). Phase 5 deletes the repo-root write; until
+  // then the dual-write keeps both cwds functional during the transition.
   const repoRulesDir = resolve(repo.localPath, ".claude/rules");
+  const workspaceRulesDir = resolve(workspacePath(repo), ".claude/rules");
   mkdirSync(repoRulesDir, { recursive: true });
+  mkdirSync(workspaceRulesDir, { recursive: true });
   writeTrelloConfigRule(repo.trello, repoRulesDir);
+  writeTrelloConfigRule(repo.trello, workspaceRulesDir);
 
   log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
 
@@ -358,184 +364,243 @@ export function validateRepoConfig(repo: RepoContext): void {
 }
 
 /**
- * Sync danxbot config into the target repo's .claude/ directory. All injected
- * files use the `danx-` prefix so they're clearly identifiable and gitignore-able.
- * Called on every poll cycle to keep targets up to date.
+ * A `.claude/` directory the inject pipeline writes into. Since Phase 3
+ * of the agent-isolation epic (Trello `7ha2CSpc`) the pipeline writes
+ * into TWO locations on every sync: the repo root (legacy, for
+ * developer interactive sessions) AND the generated workspace (new, the
+ * cwd every dispatched agent uses). Phase 5 removes the repo-root half —
+ * at which point this list collapses to one entry and the per-target
+ * loops stop being loops.
  */
-function syncRepoFiles(repo: RepoContext): void {
-  const danxbotConfigDir = resolve(repo.localPath, ".danxbot/config");
-  if (!existsSync(danxbotConfigDir)) return;
+interface InjectTarget {
+  rulesDir: string;
+  skillsDir: string;
+  toolsDir: string;
+}
 
-  const repoDir = repo.localPath;
-  const repoClaudeDir = resolve(repoDir, ".claude");
-  const repoRulesDir = resolve(repoClaudeDir, "rules");
-  const repoSkillsDir = resolve(repoClaudeDir, "skills");
-  const repoToolsDir = resolve(repoClaudeDir, "tools");
-  const overridesDir = resolve(projectRoot, "repo-overrides");
+function buildInjectTargets(repo: RepoContext): InjectTarget[] {
+  const roots = [repo.localPath, workspacePath(repo)];
+  return roots.map((root) => ({
+    rulesDir: resolve(root, ".claude/rules"),
+    skillsDir: resolve(root, ".claude/skills"),
+    toolsDir: resolve(root, ".claude/tools"),
+  }));
+}
 
-  mkdirSync(repoRulesDir, { recursive: true });
-  mkdirSync(repoToolsDir, { recursive: true });
+/** Write `content` to the same filename in every target's rulesDir. */
+function writeRuleToAll(
+  targets: InjectTarget[],
+  filename: string,
+  content: string,
+): void {
+  for (const t of targets) {
+    writeFileSync(resolve(t.rulesDir, filename), content);
+  }
+}
 
-  // 1. Generate danx-repo-config.md from .danxbot/config/config.yml
-  const repoConfigYml = resolve(danxbotConfigDir, "config.yml");
-  const raw = readFileSync(repoConfigYml, "utf-8");
-  const cfg = parseSimpleYaml(raw);
+/** Copy one source file into every target's rulesDir under `filename`. */
+function copyRuleToAll(
+  targets: InjectTarget[],
+  srcPath: string,
+  filename: string,
+): void {
+  for (const t of targets) {
+    copyFileSync(srcPath, resolve(t.rulesDir, filename));
+  }
+}
 
-  const name = cfg.name || "unknown";
-  const url = cfg.url || "";
-  const runtime = cfg.runtime || "local";
-  const language = cfg.language || "";
-  const framework = cfg.framework || "";
-  const testCmd = cfg["commands.test"] || "";
-  const lintCmd = cfg["commands.lint"] || "";
-  const typeCheckCmd = cfg["commands.type_check"] || "";
-  const devCmd = cfg["commands.dev"] || "";
-  const composeFile = cfg["docker.compose_file"] || "";
-  const serviceName = cfg["docker.service_name"] || "";
-  const projectName = cfg["docker.project_name"] || "";
-  const sourcePath = cfg["paths.source"] || "";
-  const testsPath = cfg["paths.tests"] || "";
-  const gitMode = cfg.git_mode || "pr";
+/** Copy one source file into every target's toolsDir and chmod it +x. */
+function copyExecutableToolToAll(
+  targets: InjectTarget[],
+  srcPath: string,
+  filename: string,
+): void {
+  for (const t of targets) {
+    const dest = resolve(t.toolsDir, filename);
+    copyFileSync(srcPath, dest);
+    try {
+      chmodSync(dest, 0o755);
+    } catch (e) {
+      log.warn(`Failed to chmod ${dest}:`, e);
+    }
+  }
+}
 
-  let repoConfigContent = `# Repo Config (auto-generated by danxbot — do not edit)
+/**
+ * Remove `danx-*` entries in `dir` that don't appear in `sourceNames`.
+ * `recursive` mirrors the semantic of the removed entry (skills are
+ * directories, tools are files). No-op if `dir` doesn't exist. Used so
+ * deletions in `src/poller/inject/` propagate to every consuming target.
+ */
+function pruneDanxEntries(
+  dir: string,
+  sourceNames: Set<string>,
+  recursive: boolean,
+): void {
+  if (!existsSync(dir)) return;
+  for (const existing of readdirSync(dir)) {
+    if (existing.startsWith("danx-") && !sourceNames.has(existing)) {
+      rmSync(resolve(dir, existing), { recursive, force: true });
+    }
+  }
+}
+
+function renderRepoConfigMarkdown(cfg: Record<string, string>): string {
+  const field = (key: string, fallback = ""): string => cfg[key] || fallback;
+  const name = field("name", "unknown");
+  const runtime = field("runtime", "local");
+  const gitMode = field("git_mode", "pr");
+  const composeFile = field("docker.compose_file");
+
+  let out = `# Repo Config (auto-generated by danxbot — do not edit)
 
 ## Repo
 
 | Field | Value |
 |-------|-------|
 | Name | \`${name}\` |
-| URL | \`${url}\` |
+| URL | \`${field("url")}\` |
 | Runtime | \`${runtime}\` |
-| Language | \`${language}\` |
-| Framework | \`${framework}\` |
+| Language | \`${field("language")}\` |
+| Framework | \`${field("framework")}\` |
 | Git Mode | \`${gitMode}\` |
 
 ## Commands
 
 | Command | Value |
 |---------|-------|
-| Test | \`${testCmd}\` |
-| Lint | \`${lintCmd}\` |
-| Type Check | \`${typeCheckCmd}\` |
-| Dev | \`${devCmd}\` |
+| Test | \`${field("commands.test")}\` |
+| Lint | \`${field("commands.lint")}\` |
+| Type Check | \`${field("commands.type_check")}\` |
+| Dev | \`${field("commands.dev")}\` |
 
 ## Paths
 
 | Path | Value |
 |------|-------|
-| Source | \`${sourcePath}\` |
-| Tests | \`${testsPath}\` |
+| Source | \`${field("paths.source")}\` |
+| Tests | \`${field("paths.tests")}\` |
 `;
 
   if (runtime === "docker" && composeFile) {
-    repoConfigContent += `
+    out += `
 ## Docker
 
 | Field | Value |
 |-------|-------|
 | Compose File | \`${composeFile}\` |
-| Service Name | \`${serviceName}\` |
-| Project Name | \`${projectName}\` |
+| Service Name | \`${field("docker.service_name")}\` |
+| Project Name | \`${field("docker.project_name")}\` |
 `;
   }
+  return out;
+}
 
-  writeFileSync(resolve(repoRulesDir, "danx-repo-config.md"), repoConfigContent);
+/** Step 1: render danx-repo-config.md from config.yml to every target. */
+function writeRepoConfigRule(
+  cfg: Record<string, string>,
+  targets: InjectTarget[],
+): void {
+  writeRuleToAll(targets, "danx-repo-config.md", renderRepoConfigMarkdown(cfg));
+}
 
-  // 2. Copy overview.md and workflow.md → danx-repo-overview.md / danx-repo-workflow.md
-  for (const [src, dest] of [
+/** Step 2: overview.md + workflow.md -> danx-repo-{overview,workflow}.md. */
+function copyRepoConfigDocs(
+  danxbotConfigDir: string,
+  targets: InjectTarget[],
+): void {
+  const mappings: ReadonlyArray<readonly [string, string]> = [
     ["overview.md", "danx-repo-overview.md"],
     ["workflow.md", "danx-repo-workflow.md"],
-  ] as const) {
+  ];
+  for (const [src, dest] of mappings) {
     const srcPath = resolve(danxbotConfigDir, src);
-    if (existsSync(srcPath)) {
-      const header = `<!-- AUTO-GENERATED by danxbot from .danxbot/config/${src} — do not edit -->\n\n`;
-      const body = readFileSync(srcPath, "utf-8");
-      writeFileSync(resolve(repoRulesDir, dest), header + body);
-    }
+    if (!existsSync(srcPath)) continue;
+    const header = `<!-- AUTO-GENERATED by danxbot from .danxbot/config/${src} — do not edit -->\n\n`;
+    writeRuleToAll(targets, dest, header + readFileSync(srcPath, "utf-8"));
   }
+}
 
-  // 3. Copy repo-specific tools.md → .claude/rules/danx-tools.md
-  const toolsDocSource = resolve(danxbotConfigDir, "tools.md");
-  if (existsSync(toolsDocSource)) {
-    copyFileSync(toolsDocSource, resolve(repoRulesDir, "danx-tools.md"));
+/** Step 3: repo-specific tools.md -> danx-tools.md. */
+function copyRepoToolsDoc(
+  danxbotConfigDir: string,
+  targets: InjectTarget[],
+): void {
+  const src = resolve(danxbotConfigDir, "tools.md");
+  if (!existsSync(src)) return;
+  copyRuleToAll(targets, src, "danx-tools.md");
+}
+
+/** Step 4: repo-specific tool scripts -> .claude/tools/ (executable). */
+function copyRepoToolScripts(
+  danxbotConfigDir: string,
+  targets: InjectTarget[],
+): void {
+  const src = resolve(danxbotConfigDir, "tools");
+  if (!existsSync(src)) return;
+  for (const file of readdirSync(src)) {
+    copyExecutableToolToAll(targets, resolve(src, file), file);
   }
+}
 
-  // 4. Copy repo-specific tool scripts → .claude/tools/ (executable)
-  const toolsScriptsSource = resolve(danxbotConfigDir, "tools");
-  if (existsSync(toolsScriptsSource)) {
-    for (const file of readdirSync(toolsScriptsSource)) {
-      const src = resolve(toolsScriptsSource, file);
-      const dest = resolve(repoToolsDir, file);
-      copyFileSync(src, dest);
-      try {
-        chmodSync(dest, 0o755);
-      } catch (e) {
-        log.warn(`Failed to chmod ${dest}:`, e);
-      }
-    }
-  }
-
-  // 5. Inject danx-* skills from inject/skills/. Authoritative sync: any
-  // danx-* skill dir present in the destination but missing from the source
-  // is removed, so deletions in inject/skills/ propagate to consuming repos.
+/**
+ * Step 5: inject/skills/* -> every target's .claude/skills/. Authoritative
+ * sync — danx-* skills present in the target but missing from the source
+ * are removed so deletions propagate.
+ */
+function injectDanxSkills(targets: InjectTarget[]): void {
   const injectSkillsDir = resolve(injectDir, "skills");
-  if (existsSync(injectSkillsDir)) {
-    const sourceSkillNames = new Set(readdirSync(injectSkillsDir));
-    if (existsSync(repoSkillsDir)) {
-      for (const existing of readdirSync(repoSkillsDir)) {
-        if (existing.startsWith("danx-") && !sourceSkillNames.has(existing)) {
-          rmSync(resolve(repoSkillsDir, existing), { recursive: true, force: true });
-        }
-      }
-    }
+  if (!existsSync(injectSkillsDir)) return;
+  const sourceSkillNames = new Set(readdirSync(injectSkillsDir));
+  for (const t of targets) {
+    pruneDanxEntries(t.skillsDir, sourceSkillNames, true);
     for (const skillName of sourceSkillNames) {
       const srcSkillDir = resolve(injectSkillsDir, skillName);
-      const destSkillDir = resolve(repoSkillsDir, skillName);
+      const destSkillDir = resolve(t.skillsDir, skillName);
       mkdirSync(destSkillDir, { recursive: true });
       for (const file of readdirSync(srcSkillDir)) {
         copyFileSync(resolve(srcSkillDir, file), resolve(destSkillDir, file));
       }
     }
   }
+}
 
-  // 5b. Inject danx-* rule docs from inject/rules/ into the target repo's
-  // `.claude/rules/`. These rules are AUTHORED FOR DISPATCHED AGENTS —
-  // they're read at session start inside a connected repo's cwd and enforce
-  // behaviors like "signal danxbot_complete with critical_failure when the
-  // environment is broken". No pruning: other danx-* rule files in
-  // repoRulesDir are generated by steps 1-3 above (danx-repo-config.md,
-  // danx-repo-overview.md, danx-repo-workflow.md, danx-tools.md) and
-  // overlapping prune logic would nuke them. Overwrite-on-copy is
-  // idempotent enough — stale rule files don't break workflows the way
-  // stale skills/tools can.
+/**
+ * Step 5b: inject/rules/*.md -> every target's .claude/rules/. NO pruning:
+ * the other danx-* rule files in rulesDir are generated by steps 1-3
+ * (danx-repo-config.md, danx-repo-overview.md, danx-repo-workflow.md,
+ * danx-tools.md) and overlapping prune logic would nuke them.
+ * Overwrite-on-copy is idempotent enough for rule docs — stale rules
+ * don't break workflows the way stale skills/tools can.
+ */
+function injectDanxRules(targets: InjectTarget[]): void {
   const injectRulesDir = resolve(injectDir, "rules");
-  if (existsSync(injectRulesDir)) {
-    for (const file of readdirSync(injectRulesDir)) {
-      if (!file.endsWith(".md")) continue;
-      copyFileSync(
-        resolve(injectRulesDir, file),
-        resolve(repoRulesDir, file),
-      );
-    }
+  if (!existsSync(injectRulesDir)) return;
+  for (const file of readdirSync(injectRulesDir)) {
+    if (!file.endsWith(".md")) continue;
+    copyRuleToAll(targets, resolve(injectRulesDir, file), file);
   }
+}
 
-  // 6. Inject danx-* tools from inject/tools/. Authoritative sync: any
-  // danx-* file present in the destination but missing from the source is
-  // removed, so deletions in inject/tools/ propagate to consuming repos.
+/**
+ * Step 6: inject/tools/* -> every target's .claude/tools/ (executable).
+ * Authoritative sync — danx-* files present in the target but missing
+ * from the source are removed so deletions propagate.
+ */
+function injectDanxTools(targets: InjectTarget[]): void {
   const injectToolsDir = resolve(injectDir, "tools");
-  if (existsSync(injectToolsDir)) {
-    const sourceToolNames = new Set(readdirSync(injectToolsDir));
-    if (existsSync(repoToolsDir)) {
-      for (const existing of readdirSync(repoToolsDir)) {
-        if (existing.startsWith("danx-") && !sourceToolNames.has(existing)) {
-          rmSync(resolve(repoToolsDir, existing), { force: true });
-        }
-      }
-    }
+  if (!existsSync(injectToolsDir)) return;
+  const sourceToolNames = new Set(readdirSync(injectToolsDir));
+  // Prune-then-copy runs per-target (not via copyExecutableToolToAll in
+  // aggregate) because pruning must happen BEFORE the copy within the
+  // same target — otherwise a tool renamed in inject/tools/ would be
+  // copied fresh then pruned on the next tick's pre-pass, causing a
+  // missing file for one tick.
+  for (const t of targets) {
+    pruneDanxEntries(t.toolsDir, sourceToolNames, false);
     for (const file of sourceToolNames) {
-      const src = resolve(injectToolsDir, file);
-      const dest = resolve(repoToolsDir, file);
-      copyFileSync(src, dest);
+      const dest = resolve(t.toolsDir, file);
+      copyFileSync(resolve(injectToolsDir, file), dest);
       try {
         chmodSync(dest, 0o755);
       } catch (e) {
@@ -543,37 +608,87 @@ function syncRepoFiles(repo: RepoContext): void {
       }
     }
   }
+}
 
-  // 7. Copy compose override to repo-overrides/ (optional)
-  const composeSource = resolve(danxbotConfigDir, "compose.yml");
-  if (existsSync(composeSource)) {
-    mkdirSync(overridesDir, { recursive: true });
-    copyFileSync(composeSource, resolve(overridesDir, `${name}-compose.yml`));
-  }
+/** Step 7: optional compose override -> repo-overrides/<name>-compose.yml. */
+function copyComposeOverride(
+  danxbotConfigDir: string,
+  overridesDir: string,
+  cfgName: string,
+): void {
+  const src = resolve(danxbotConfigDir, "compose.yml");
+  if (!existsSync(src)) return;
+  mkdirSync(overridesDir, { recursive: true });
+  copyFileSync(src, resolve(overridesDir, `${cfgName}-compose.yml`));
+}
 
-  // 8. Copy docs/ → danxbot docs dir (domains and schema)
+/** Step 8: repo-side docs/{domains,schema}/* -> danxbot docs dir. */
+function copyRepoDocs(danxbotConfigDir: string): void {
   const repoDocsDir = resolve(danxbotConfigDir, "docs");
-  if (existsSync(repoDocsDir)) {
-    const docsDir = resolve(projectRoot, "docs");
-    for (const subdir of ["domains", "schema"]) {
-      const srcDir = resolve(repoDocsDir, subdir);
-      if (!existsSync(srcDir)) continue;
-      const destDir = resolve(docsDir, subdir);
-      mkdirSync(destDir, { recursive: true });
-      for (const file of readdirSync(srcDir)) {
-        copyFileSync(resolve(srcDir, file), resolve(destDir, file));
-      }
+  if (!existsSync(repoDocsDir)) return;
+  const docsDir = resolve(projectRoot, "docs");
+  for (const subdir of ["domains", "schema"]) {
+    const srcDir = resolve(repoDocsDir, subdir);
+    if (!existsSync(srcDir)) continue;
+    const destDir = resolve(docsDir, subdir);
+    mkdirSync(destDir, { recursive: true });
+    for (const file of readdirSync(srcDir)) {
+      copyFileSync(resolve(srcDir, file), resolve(destDir, file));
     }
   }
+}
 
-  // 9. Copy .danxbot/features.md → docs/features.md (only if not already present)
+/** Step 9: features.md is copied ONCE and left alone so ideator edits persist. */
+function copyFeaturesOnce(danxbotConfigDir: string): void {
   const danxbotDir = resolve(danxbotConfigDir, "..");
-  const featuresSource = resolve(danxbotDir, "features.md");
-  const featuresDest = resolve(projectRoot, "docs", "features.md");
-  if (existsSync(featuresSource) && !existsSync(featuresDest)) {
-    mkdirSync(resolve(projectRoot, "docs"), { recursive: true });
-    copyFileSync(featuresSource, featuresDest);
+  const src = resolve(danxbotDir, "features.md");
+  const dest = resolve(projectRoot, "docs", "features.md");
+  if (!existsSync(src) || existsSync(dest)) return;
+  mkdirSync(resolve(projectRoot, "docs"), { recursive: true });
+  copyFileSync(src, dest);
+}
+
+/**
+ * Sync danxbot config into the target repo's .claude/ directories. All
+ * injected files use the `danx-` prefix so they're clearly identifiable
+ * and gitignore-able. Writes to BOTH the repo-root `.claude/` (legacy,
+ * covers developer interactive sessions and any pre-Phase-5 consumers)
+ * AND the workspace `.claude/` (every dispatched agent's cwd — see the
+ * agent-isolation epic `7ha2CSpc`). Phase 5 removes the repo-root
+ * target; until then the dual-write is intentional and load-bearing
+ * during the transition. Called on every poll cycle to keep targets up
+ * to date. Each numbered step is its own helper — the function body is
+ * the table of contents.
+ */
+function syncRepoFiles(repo: RepoContext): void {
+  const danxbotConfigDir = resolve(repo.localPath, ".danxbot/config");
+  if (!existsSync(danxbotConfigDir)) return;
+
+  const targets = buildInjectTargets(repo);
+  for (const t of targets) {
+    mkdirSync(t.rulesDir, { recursive: true });
+    mkdirSync(t.toolsDir, { recursive: true });
   }
+
+  const cfg = parseSimpleYaml(
+    readFileSync(resolve(danxbotConfigDir, "config.yml"), "utf-8"),
+  );
+
+  writeRepoConfigRule(cfg, targets);
+  copyRepoConfigDocs(danxbotConfigDir, targets);
+  copyRepoToolsDoc(danxbotConfigDir, targets);
+  copyRepoToolScripts(danxbotConfigDir, targets);
+  injectDanxSkills(targets);
+  injectDanxRules(targets);
+  injectDanxTools(targets);
+
+  copyComposeOverride(
+    danxbotConfigDir,
+    resolve(projectRoot, "repo-overrides"),
+    cfg.name || "unknown",
+  );
+  copyRepoDocs(danxbotConfigDir);
+  copyFeaturesOnce(danxbotConfigDir);
 }
 
 function spawnClaude(

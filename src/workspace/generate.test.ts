@@ -67,6 +67,33 @@ describe("generateWorkspace", () => {
         resolve(repoDir, ".danxbot", "workspace"),
       );
     });
+
+    it("workspacePath(repoName) matches workspacePath(repo) for repos produced by loadRepoContext (spawn-cwd contract)", () => {
+      // Phase 3 of the agent-isolation epic routes every dispatched
+      // spawn through `workspacePath(repoName)` because the launcher
+      // only sees `repoName` in `SpawnAgentOptions`. `repo.localPath`
+      // is constructed from `getReposBase() + name` in `loadRepoContext`,
+      // so the two overload forms must resolve to the same absolute
+      // path — otherwise JSONL lookups (SessionLogWatcher,
+      // resumeParentSessionId, encodeRepoCwd) and the spawn cwd will
+      // diverge and break monitoring + resume. See Trello `7ha2CSpc`.
+      const reposBase = repoDir; // reuse the per-test tmpdir as the base
+      const prior = process.env.DANXBOT_REPOS_BASE;
+      process.env.DANXBOT_REPOS_BASE = reposBase;
+      try {
+        const repo = makeRepoContext({
+          name: "my-repo",
+          localPath: resolve(reposBase, "my-repo"),
+        });
+        expect(workspacePath(repo.name)).toBe(workspacePath(repo));
+      } finally {
+        if (prior === undefined) {
+          delete process.env.DANXBOT_REPOS_BASE;
+        } else {
+          process.env.DANXBOT_REPOS_BASE = prior;
+        }
+      }
+    });
   });
 
   describe("owner-owned files", () => {

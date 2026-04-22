@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "http";
 import { stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import { config } from "../config.js";
 import { json, parseBody } from "../http/helpers.js";
 import {
@@ -17,7 +17,7 @@ import {
   deriveSessionDir,
   findSessionFileByDispatchId,
 } from "../agent/session-log-watcher.js";
-import { getReposBase } from "../poller/constants.js";
+import { workspacePath } from "../workspace/generate.js";
 import { normalizeCallbackUrl } from "./url-normalizer.js";
 import { isFeatureEnabled } from "../settings-file.js";
 import { writeFlag } from "../critical-failure.js";
@@ -84,7 +84,13 @@ export async function resolveParentSessionId(
   repoName: string,
   parentJobId: string,
 ): Promise<ResolveParentResult> {
-  const sessionDir = deriveSessionDir(join(getReposBase(), repoName));
+  // Must match the spawn cwd used by `spawnAgent` — dispatched agents
+  // run from `<repo>/.danxbot/workspace/`, so claude writes its JSONL
+  // under the workspace-encoded projects dir. Using the bare repo root
+  // would look in an empty directory and return `no-session-dir` for
+  // every resume. See `src/agent/launcher.ts` and the agent-isolation
+  // epic (Trello `7ha2CSpc`).
+  const sessionDir = deriveSessionDir(workspacePath(repoName));
   try {
     const s = await stat(sessionDir);
     if (!s.isDirectory()) {
