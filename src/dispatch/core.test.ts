@@ -76,6 +76,12 @@ vi.mock("../agent/stall-detector.js", () => ({
 }));
 
 import { dispatch, getActiveJob } from "./core.js";
+// The mocked `../config.js` module exposes a plain mutable object. The cast
+// to `{ isHost: boolean }` defeats the readonly type from the real config
+// module — in the mocked factory, the object is a plain literal and writes
+// are safe. Used by the `openTerminal` mirror / default tests.
+import { config as realConfig } from "../config.js";
+const mockedConfig = realConfig as unknown as { isHost: boolean };
 
 const MOCK_REPO = makeRepoContext();
 const DEFAULT_DISPATCH_META: DispatchTriggerMetadata = {
@@ -325,6 +331,227 @@ describe("buildClaudeInvocation — --allowed-tools flag wiring", () => {
     expect(inv.flags).toContain("/tmp/test/settings.json");
     expect(inv.flags).toContain("--allowed-tools");
     expect(inv.flags).toContain("Read,mcp__trello__get_card");
+  });
+});
+
+describe("dispatch() — caller-supplied overrides (Phase 4 poller contract)", () => {
+  it("honors input.timeoutMs override instead of the default agentTimeoutMs", async () => {
+    // The poller supplies its own inactivity timeout (pollerIntervalMs * 60),
+    // which differs from the HTTP default. dispatch() must forward it to
+    // spawnAgent verbatim — if it hardcoded config.dispatch.agentTimeoutMs the
+    // poller would silently get the wrong value.
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      timeoutMs: 123_456,
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    expect(mockSpawnAgent.mock.calls[0][0].timeoutMs).toBe(123_456);
+  });
+
+  it("falls back to config.dispatch.agentTimeoutMs when timeoutMs is omitted", async () => {
+    // HTTP dispatch never sets timeoutMs — it relies on the global default.
+    // Regression guard for the previous shape where the default was inlined
+    // in dispatch() and a new input.timeoutMs would have been ignored.
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    expect(mockSpawnAgent.mock.calls[0][0].timeoutMs).toBe(3_600_000);
+  });
+
+  it("honors input.openTerminal=true override when config.isHost=false", async () => {
+    // Mocked `config.isHost=false` (see vi.mock above). Override to true.
+    // If the `??` default regressed to hardcoded `config.isHost`, spawnAgent
+    // would see `false` and the assertion would fail.
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      openTerminal: true,
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    expect(mockSpawnAgent.mock.calls[0][0].openTerminal).toBe(true);
+  });
+
+  it("honors input.openTerminal=false override when config.isHost=true (mirror direction)", async () => {
+    // Mirror of the previous test: flip config.isHost to true, then pass
+    // `openTerminal:false`. Locks out the regression where someone replaces
+    // `input.openTerminal ?? config.isHost` with `config.isHost` (ignoring
+    // the input) — that regression would make spawnAgent see `true` here
+    // and fail the assertion.
+    mockedConfig.isHost = true;
+    try {
+      await dispatch({
+        repo: MOCK_REPO,
+        task: "do work",
+        apiToken: "tok",
+        apiUrl: "http://api",
+        allowTools: [],
+        openTerminal: false,
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      });
+
+      expect(mockSpawnAgent.mock.calls[0][0].openTerminal).toBe(false);
+    } finally {
+      mockedConfig.isHost = false;
+    }
+  });
+
+  it("defaults openTerminal to config.isHost when the input omits it", async () => {
+    // With the input omitting `openTerminal`, spawnAgent should receive
+    // whatever config.isHost is set to. Flip isHost to true, omit the
+    // input, assert true. A regression that hardcoded `false` or dropped
+    // the fallback entirely would fail this.
+    mockedConfig.isHost = true;
+    try {
+      await dispatch({
+        repo: MOCK_REPO,
+        task: "do work",
+        apiToken: "tok",
+        apiUrl: "http://api",
+        allowTools: [],
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      });
+
+      expect(mockSpawnAgent.mock.calls[0][0].openTerminal).toBe(true);
+    } finally {
+      mockedConfig.isHost = false;
+    }
+  });
+
+  it("always injects DANXBOT_REPO_NAME from input.repo.name, even when input.env is omitted", async () => {
+    // Dispatch-level invariant: every spawned agent has DANXBOT_REPO_NAME
+    // set from `input.repo.name`. Callers (poller, HTTP, Slack) never need
+    // to restate the invariant. Locks out the regression where dispatch()
+    // passes env:undefined through verbatim.
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    expect(mockSpawnAgent.mock.calls[0][0].env).toEqual({
+      DANXBOT_REPO_NAME: MOCK_REPO.name,
+    });
+  });
+
+  it("merges caller-supplied input.env on top of the auto-injected DANXBOT_REPO_NAME", async () => {
+    // A caller that needs extra env vars (tests, future integrations) can
+    // pass them via input.env. They merge ON TOP of the injected invariants,
+    // so tests can override DANXBOT_REPO_NAME for isolation.
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      env: { DANXBOT_REPO_NAME: "override-repo", FOO: "bar" },
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    expect(mockSpawnAgent.mock.calls[0][0].env).toEqual({
+      DANXBOT_REPO_NAME: "override-repo", // input.env wins
+      FOO: "bar",
+    });
+  });
+
+  it("chains input.onComplete AFTER cleanupMcpSettings so callers observe a disposed slot", async () => {
+    // Poller's handleAgentCompletion runs card-progress checks on completion.
+    // If onComplete fired BEFORE the MCP settings dir was cleaned, a race
+    // could surface a half-torn-down dispatch to the next poll tick. The
+    // ordering contract: cleanup FIRST, caller onComplete SECOND.
+    const observedOrder: string[] = [];
+    let capturedSettingsPath: string | undefined;
+    let capturedInnerOnComplete:
+      | ((j: { id: string }) => void)
+      | undefined;
+    mockSpawnAgent.mockImplementation(async (options) => {
+      capturedSettingsPath = options.mcpConfigPath;
+      capturedInnerOnComplete = options.onComplete;
+      return makeRunningJob();
+    });
+
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      onComplete: () => {
+        observedOrder.push("caller-onComplete");
+        // At this point the settings dir must already be gone.
+        expect(existsSync(capturedSettingsPath!)).toBe(false);
+      },
+    });
+
+    // Sanity: settings file exists at this point (spawn happened, completion
+    // hasn't fired yet).
+    expect(existsSync(capturedSettingsPath!)).toBe(true);
+
+    // Now simulate the agent's terminal state firing onComplete. This is the
+    // chained lambda dispatch() wires around the caller's onComplete.
+    capturedInnerOnComplete!({ id: "fake-job" });
+
+    expect(observedOrder).toEqual(["caller-onComplete"]);
+    expect(existsSync(capturedSettingsPath!)).toBe(false);
+  });
+
+  it("onComplete is optional — dispatch() works without a caller callback", async () => {
+    // HTTP `/api/launch` never supplies onComplete (the stop endpoint
+    // finalizes the row instead). Regression guard: the chained lambda must
+    // not call `input.onComplete` when it's undefined.
+    mockSpawnAgent.mockImplementation(async (options) => {
+      // Fire the internal onComplete immediately; would throw on `input.onComplete(...)`
+      // if the ?. guard regressed.
+      options.onComplete?.({ id: "j" });
+      return makeRunningJob();
+    });
+
+    await expect(
+      dispatch({
+        repo: MOCK_REPO,
+        task: "do work",
+        apiToken: "tok",
+        apiUrl: "http://api",
+        allowTools: [],
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it("suppresses eventForwarding when statusUrl is set but apiToken is absent (no bearer → no PUTs)", async () => {
+    // Poller-style dispatches may eventually want to emit status events
+    // without talking to Laravel. Without an apiToken the Laravel PUT is
+    // guaranteed to 401, so dispatch() drops the forwarding rather than
+    // wiring a doomed loop.
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiUrl: "http://api",
+      allowTools: [],
+      statusUrl: "http://status",
+      // apiToken intentionally omitted
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    expect(mockSpawnAgent.mock.calls[0][0].eventForwarding).toBeUndefined();
   });
 });
 

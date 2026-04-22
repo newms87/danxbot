@@ -76,15 +76,26 @@ export function clearJobCleanupIntervals(): void {
 
 /**
  * Everything a dispatch needs. Caller-facing shape — HTTP handlers map their
- * body into this; the poller (Phase 4) will construct one from a Trello
- * trigger; Slack `runAgent` (Phase 5) will share the same `allowTools` input
- * via `resolveDispatchTools`.
+ * body into this; the poller constructs one from a Trello trigger (Phase 4);
+ * Slack `runAgent` (Phase 5) will share the same `allowTools` input via
+ * `resolveDispatchTools`.
  */
 export interface DispatchInput {
   repo: RepoContext;
   task: string;
-  apiToken: string;
-  apiUrl: string;
+  /**
+   * External API token for status/heartbeat PUTs and schema MCP calls.
+   * Required when `statusUrl` is set (heartbeat) or when the allowlist
+   * enables `mcp__schema__*` (schema MCP envs). Absent for the poller and
+   * any dispatch with no schema or status callback.
+   */
+  apiToken?: string;
+  /**
+   * External API URL for the schema MCP server env. Required only when the
+   * allowlist enables `mcp__schema__*`. Absent for the poller and any
+   * dispatch that doesn't touch schema tools.
+   */
+  apiUrl?: string;
   /**
    * Explicit tool allowlist — REQUIRED. Built-ins bare (`Read`, `Bash`), MCP
    * tools as `mcp__<server>__<tool>` with optional `mcp__<server>__*` wildcards.
@@ -97,6 +108,51 @@ export interface DispatchInput {
   title?: string;
   agents?: Record<string, Record<string, unknown>>;
   maxRuntimeMs?: number;
+  /**
+   * Inactivity timeout (ms) forwarded to spawnAgent. Defaults to
+   * `config.dispatch.agentTimeoutMs`. The poller overrides this with its
+   * own `pollerIntervalMs * 60` budget; HTTP handlers rely on the default.
+   */
+  timeoutMs?: number;
+  /**
+   * Open an interactive Windows Terminal tab alongside the headless claude.
+   * Defaults to `config.isHost`. Callers rarely override — only scenarios
+   * that need docker headless behavior inside host mode (tests) do.
+   */
+  openTerminal?: boolean;
+  /**
+   * Additional env overrides merged on top of the dispatch's base env.
+   *
+   * The dispatch always injects `DANXBOT_REPO_NAME=input.repo.name` into
+   * the spawned agent's environment — callers never need to supply that.
+   * This field is for everything else (test hooks, future integrations
+   * that need custom env), and most callers can leave it undefined.
+   *
+   * Precedence when both are set: `input.env` wins over the auto-injected
+   * invariants, which allows tests to override `DANXBOT_REPO_NAME` for
+   * isolation. Don't rely on that in production callers — the auto-inject
+   * is the contract.
+   */
+  env?: Record<string, string>;
+  /**
+   * Fired once the agent reaches a terminal state.
+   *
+   * Ordering guarantee (enforced inside `dispatch()`):
+   *   1. Internal MCP-settings cleanup runs FIRST so the callback observes
+   *      a fully disposed slot (no leftover temp dir).
+   *   2. `onComplete(job)` runs SECOND with the final `AgentJob`.
+   *   3. Any `statusUrl` PUT (fired by the Laravel forwarder and
+   *      `putStatus` inside the launcher) is independent and may land
+   *      before, during, or after this callback — they are NOT mutually
+   *      exclusive. A caller that wants both a local callback AND an
+   *      external PUT can set both fields.
+   *
+   * Today's consumer: the poller, for card-progress checks, stuck-card
+   * recovery, and consecutive-failure backoff. HTTP handlers typically
+   * omit this and rely on the dispatch-row stop endpoint instead — but
+   * that's a choice, not an exclusion.
+   */
+  onComplete?: (job: AgentJob) => void;
   /** Dispatch metadata persisted on the new row. */
   apiDispatchMeta: DispatchTriggerMetadata;
   /** Claude session UUID to resume. Undefined for fresh launches. */
@@ -150,9 +206,14 @@ function buildResolveOptions(
     danxbotStopUrl,
   };
   if (input.schemaDefinitionId || input.schemaRole) {
+    // Normalize missing fields to empty strings so the schema registry's
+    // explicit "missing apiUrl / apiToken / definitionId" `McpResolveError`
+    // fires at resolve time (a loud, specific failure) — not an ambiguous
+    // undefined read downstream. The `??` here is NOT a fallback; it's a
+    // channeling step that keeps the fail-loud invariant.
     opts.schema = {
-      apiUrl: input.apiUrl,
-      apiToken: input.apiToken,
+      apiUrl: input.apiUrl ?? "",
+      apiToken: input.apiToken ?? "",
       definitionId: input.schemaDefinitionId ?? "",
       role: input.schemaRole,
     };
@@ -208,30 +269,49 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
 
     let job: AgentJob;
     try {
+      // eventForwarding needs BOTH statusUrl and apiToken — skip the callback
+      // entirely when apiToken is absent (poller-style dispatches) even if
+      // statusUrl happens to be set, since Laravel PUTs require bearer auth.
+      // See `DispatchInput.apiToken` docstring for the required-when rules.
+      const eventForwarding =
+        input.statusUrl && input.apiToken
+          ? { statusUrl: input.statusUrl, apiToken: input.apiToken }
+          : undefined;
+      // Dispatch-level env invariants. Every dispatched agent ALWAYS gets
+      // `DANXBOT_REPO_NAME` set from `input.repo.name`; the caller never
+      // has to remember. Caller-supplied `input.env` merges on top, so
+      // tests can override for isolation without changing production
+      // callers. See the `DispatchInput.env` docstring for the contract.
+      const env: Record<string, string> = {
+        DANXBOT_REPO_NAME: input.repo.name,
+        ...input.env,
+      };
       job = await spawnAgent({
         jobId,
         prompt,
         title: input.title,
         repoName: input.repo.name,
-        timeoutMs: config.dispatch.agentTimeoutMs,
+        timeoutMs: input.timeoutMs ?? config.dispatch.agentTimeoutMs,
+        env,
         mcpConfigPath: settingsPath,
         allowedTools: resolved.allowedTools,
         agents: input.agents,
         statusUrl: input.statusUrl,
         apiToken: input.apiToken,
         maxRuntimeMs: input.maxRuntimeMs,
-        eventForwarding: input.statusUrl
-          ? { statusUrl: input.statusUrl, apiToken: input.apiToken }
-          : undefined,
-        openTerminal: config.isHost,
+        eventForwarding,
+        openTerminal: input.openTerminal ?? config.isHost,
         // Only the initial spawn records the dispatch row — stall-recovery
         // respawns reuse the same dispatchId in `activeJobs` and must NOT
         // create a second row for the same conceptual run.
         dispatch: isRespawn ? undefined : input.apiDispatchMeta,
         resumeSessionId: input.resumeSessionId,
         parentJobId: input.parentJobId,
-        onComplete: () => {
+        onComplete: (completedJob) => {
+          // See `DispatchInput.onComplete` — cleanup runs before the
+          // caller callback (the ordering guarantee is load-bearing).
           cleanupMcpSettings(settingsDir);
+          input.onComplete?.(completedJob);
         },
       });
     } catch (spawnErr) {

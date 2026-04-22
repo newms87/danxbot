@@ -86,3 +86,37 @@ export const DANXBOT_COMMENT_MARKER = "<!-- danxbot -->";
 /** Claude CLI prompts for the poller's agent modes. */
 export const TEAM_PROMPT = "/danx-next";
 export const IDEATOR_PROMPT = "/danx-ideate";
+
+/**
+ * Hardcoded tool allowlist for every poller-spawned dispatch.
+ *
+ * Covers the union of the `/danx-next` and `/danx-ideate` skill surfaces:
+ *   - Built-ins the orchestrator needs to read, implement, and commit code.
+ *   - `mcp__trello__*` so the orchestrator can pick up / move / comment on
+ *     cards (the canonical danx-next pickup sequence).
+ *   - The resolver auto-injects `mcp__danxbot__danxbot_complete` — don't list
+ *     it here (the resolver treats an explicit `mcp__danxbot__*` request as a
+ *     registry lookup, not infrastructure).
+ *
+ * Kept `Agent` + `Task` together because Claude Code currently accepts both
+ * as the subagent-dispatch built-in (see `.claude/rules/agent-dispatch.md`
+ * sub-agent layout). The resolver treats each entry as opaque and forwards
+ * it to `--allowed-tools`.
+ *
+ * Schema tools (`mcp__schema__*`) are deliberately NOT in the poller surface —
+ * the `/danx-next` and `/danx-ideate` skills don't use them. A connected repo
+ * that wants schema tools in its poller dispatches needs to opt in explicitly
+ * (future work; currently scoped to HTTP dispatch callers like gpt-manager).
+ */
+export const POLLER_ALLOW_TOOLS: readonly string[] = Object.freeze([
+  "Read",
+  "Glob",
+  "Grep",
+  "Edit",
+  "Write",
+  "Bash",
+  "TodoWrite",
+  "Agent",
+  "Task",
+  "mcp__trello__*",
+]);

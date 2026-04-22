@@ -12,11 +12,17 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { config } from "../config.js";
 import { repoContexts } from "../repo-context.js";
-import { getReposBase, REVIEW_MIN_CARDS, DANXBOT_COMMENT_MARKER, TEAM_PROMPT, IDEATOR_PROMPT } from "./constants.js";
+import {
+  REVIEW_MIN_CARDS,
+  DANXBOT_COMMENT_MARKER,
+  TEAM_PROMPT,
+  IDEATOR_PROMPT,
+  POLLER_ALLOW_TOOLS,
+} from "./constants.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
 import { createLogger } from "../logger.js";
-import { spawnAgent } from "../agent/launcher.js";
+import { dispatch } from "../dispatch/core.js";
 import {
   fetchTodoCards,
   fetchNeedsHelpCards,
@@ -544,7 +550,7 @@ function syncRepoFiles(repo: RepoContext): void {
 function spawnClaude(
   repo: RepoContext,
   prompt: string,
-  dispatch: DispatchTriggerMetadata,
+  apiDispatchMeta: DispatchTriggerMetadata,
 ): void {
   const state = getState(repo.name);
 
@@ -555,22 +561,46 @@ function spawnClaude(
   // reads this field to detect env-level blockers. Ideator/api
   // dispatches are not card-specific — null tracks "no card to check".
   state.trackedCardId =
-    dispatch.trigger === "trello" ? dispatch.metadata.cardId : null;
+    apiDispatchMeta.trigger === "trello"
+      ? apiDispatchMeta.metadata.cardId
+      : null;
 
-  spawnAgent({
-    prompt,
-    repoName: repo.name,
-    timeoutMs: config.pollerIntervalMs * 60, // generous timeout: 60x poll interval
-    env: {
-      DANXBOT_REPO_NAME: repo.name,
-    },
-    openTerminal: config.isHost,
-    dispatch,
+  // Unified dispatch path: the poller shares `dispatch()` with
+  // `/api/launch` and `/api/resume`. Same MCP resolver, same settings
+  // file, same danxbot-complete injection, same stall recovery. The
+  // poller supplies its own `timeoutMs` (60x poll interval), its own
+  // `allowTools` (the `/danx-next` skill surface — `POLLER_ALLOW_TOOLS`),
+  // and chains `handleAgentCompletion` through `onComplete`. `dispatch()`
+  // owns `DANXBOT_REPO_NAME` injection from `input.repo.name` and
+  // defaults `openTerminal` to `config.isHost`, so the poller doesn't
+  // restate either invariant. See `.claude/rules/agent-dispatch.md` and
+  // the XCptaJ34 Trello card (Phase 4) for the full contract.
+  //
+  // Fire-and-forget: dispatch() returns a promise that resolves once
+  // the agent is spawned (NOT when it completes). The poller already
+  // hands completion handling to `onComplete`, so awaiting here would
+  // only serialize the initial spawn with... nothing.
+  dispatch({
+    repo,
+    task: prompt,
+    allowTools: POLLER_ALLOW_TOOLS,
+    timeoutMs: config.pollerIntervalMs * 60,
+    apiDispatchMeta,
     onComplete: (job) => {
       handleAgentCompletion(repo, state, job).catch((err) =>
         log.error(`[${repo.name}] Error in post-completion handler`, err),
       );
     },
+  }).catch((err) => {
+    // Pre-spawn failures (bad `allowTools`, OS spawn error, MCP probe
+    // failure) deliberately skip the exponential-backoff escalator:
+    // these are configuration / infrastructure errors, not intermittent
+    // agent failures. We reset `teamRunning` so the next tick retries
+    // immediately and the problem shows up every minute until the
+    // operator fixes it. Runtime agent failures take the separate
+    // `handleAgentCompletion` path above, which DOES apply backoff.
+    log.error(`[${repo.name}] dispatch() failed before agent spawned`, err);
+    cleanupAfterAgent(state);
   });
 }
 

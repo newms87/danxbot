@@ -282,17 +282,26 @@ Dashboard mode never dispatches agents. Only worker mode spawns claude.
 ## Spawn Flow End-To-End
 
 1. Trigger fires: HTTP `POST /api/launch`, Trello poller finds a card, or Slack listener routes a message.
-2. Handler constructs a prompt string and calls `spawnAgent()` in `src/agent/launcher.ts`.
-3. `spawnAgent` generates a `jobId`, builds the MCP settings (always includes `danxbot_complete`), writes the prompt to disk, prepends the dispatch tag.
-4. Runtime fork:
+2. Handler constructs a `DispatchInput` and calls `dispatch()` in `src/dispatch/core.ts`. The poller's input carries the hardcoded `POLLER_ALLOW_TOOLS` allowlist (built-ins + `mcp__trello__*`) plus an `onComplete` hook for card-progress bookkeeping. HTTP handlers shape the request body into the same `DispatchInput`. Both paths hit the same resolver, the same settings file, the same `spawnAgent`.
+3. `dispatch()` resolves `{mcpServers, allowedTools}` via `resolveDispatchTools`, writes the per-dispatch MCP settings.json to a fresh temp dir, then calls `spawnAgent()` in `src/agent/launcher.ts`.
+4. `spawnAgent` generates a `jobId`, writes the prompt to disk, prepends the dispatch tag, and forks:
    - Docker: `spawn("claude", args)` with `-p taggedPrompt`, stdout `"ignore"` (stderr `"pipe"` for failure summaries — not for monitoring).
    - Host: `buildDispatchScript()` writes `run-agent.sh` which writes claude's PID to a file, then exec's `script -q -f -c "claude <positional-file-ref>"`. `spawnInTerminal()` launches that script via `wt.exe`. Launcher polls the PID file briefly to obtain the tracked PID.
 5. SessionLogWatcher starts polling `~/.claude/projects/` for a JSONL containing the dispatch tag. Attaches when found.
-6. Observers wire to the watcher: summary capture, stall detection, Laravel forwarding, heartbeat.
+6. Observers wire to the watcher: summary capture, stall detection, Laravel forwarding (only when both `statusUrl` + `apiToken` are present), heartbeat.
 7. Agent runs. Every assistant entry, tool call, tool result, and usage update lands in the JSONL and is emitted to subscribers.
-8. Agent calls `danxbot_complete`. Stop handler kills the tracked process. Cleanup runs. Final status PUT.
+8. Agent calls `danxbot_complete`. Stop handler kills the tracked process. Cleanup runs — the per-dispatch MCP settings dir is removed FIRST, then `input.onComplete?.(job)` fires (poller's card-progress check runs here). Final status PUT.
 
 This is the design. Any code touching dispatch must preserve this shape.
+
+### Poller path specifics
+
+The poller shares `dispatch()` with `/api/launch` as of Phase 4. Implications:
+
+- `src/poller/index.ts` never imports `spawnAgent` and never writes its own `settings.json`. If you find yourself adding either back, you are unwinding Phase 4.
+- Poller-triggered agents get `mcp__danxbot__danxbot_complete` automatically (infrastructure), so the poller retired inactivity-timeout-as-completion-signal in favor of the MCP callback. Inactivity timeout remains as a safety net.
+- The poller's `onComplete` callback is the hook for `handleAgentCompletion` — card-progress check, stuck-card recovery, consecutive-failure backoff. Ordering contract: MCP settings cleanup runs BEFORE the caller's onComplete so post-completion checks never observe a half-disposed dispatch.
+- The hardcoded allowlist lives at `src/poller/constants.ts#POLLER_ALLOW_TOOLS`. Change it only when the `/danx-next` or `/danx-ideate` skill surface changes.
 
 ## Key Files
 

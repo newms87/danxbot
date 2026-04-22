@@ -78,6 +78,21 @@ vi.mock("./constants.js", () => ({
   DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
   TEAM_PROMPT: "/danx-next",
   IDEATOR_PROMPT: "/danx-ideate",
+  // Phase 4: the poller hands this constant verbatim to dispatch(). Keeping
+  // the mock value identical to production so the "exact allowTools" test
+  // asserts against the real shape without pulling the real module.
+  POLLER_ALLOW_TOOLS: [
+    "Read",
+    "Glob",
+    "Grep",
+    "Edit",
+    "Write",
+    "Bash",
+    "TodoWrite",
+    "Agent",
+    "Task",
+    "mcp__trello__*",
+  ],
 }));
 
 const mockFetchTodoCards = vi.fn();
@@ -116,9 +131,33 @@ vi.mock("node:child_process", () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
-const mockSpawnAgent = vi.fn();
-vi.mock("../agent/launcher.js", () => ({
-  spawnAgent: (...args: unknown[]) => mockSpawnAgent(...args),
+/**
+ * The default `dispatch()` mock resolves to a shape mirroring the real
+ * `DispatchResult` (`{dispatchId, job}`). `.mockImplementation` survives
+ * `vi.clearAllMocks()` (only call history is cleared), so every test
+ * inherits this default unless it explicitly overrides via
+ * `.mockImplementation` / `.mockResolvedValue`. Tests that need to capture
+ * `onComplete` override the implementation to do so.
+ */
+const mockDispatch = vi.fn().mockImplementation(() =>
+  Promise.resolve({
+    dispatchId: "test-dispatch-id",
+    job: {
+      id: "test-job",
+      status: "running" as const,
+      summary: "",
+      startedAt: new Date(),
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    },
+  }),
+);
+vi.mock("../dispatch/core.js", () => ({
+  dispatch: (...args: unknown[]) => mockDispatch(...args),
 }));
 
 const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
@@ -230,19 +269,24 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("calls spawnAgent with correct options when cards exist", async () => {
+  it("calls dispatch() with the correct options when cards exist", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
+    expect(mockDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
-        prompt: expect.any(String),
-        repoName: "test-repo",
-        openTerminal: true, // config.isHost is true in test
-        env: expect.objectContaining({
-          DANXBOT_REPO_NAME: "test-repo",
-        }),
+        task: expect.any(String),
+        repo: expect.objectContaining({ name: "test-repo" }),
+        // Phase 4 invariant: the poller hands the `/danx-next` allowlist to
+        // dispatch() — same allowTools the resolver consumes for HTTP
+        // `/api/launch`. The presence of `mcp__trello__*` is load-bearing;
+        // without it every poller dispatch 400s at resolve time.
+        allowTools: expect.arrayContaining([
+          "Read",
+          "Bash",
+          "mcp__trello__*",
+        ]),
       }),
     );
   });
@@ -284,7 +328,7 @@ describe("poll — trelloPoller feature toggle", () => {
     );
     expect(mockFetchNeedsHelpCards).not.toHaveBeenCalled();
     expect(mockFetchTodoCards).not.toHaveBeenCalled();
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   it("runs normally when enabled", async () => {
@@ -428,7 +472,7 @@ describe("poll — Needs Help checking", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnAgent).toHaveBeenCalled();
+    expect(mockDispatch).toHaveBeenCalled();
   });
 });
 
@@ -566,7 +610,7 @@ describe("poll — critical-failure halt gate", () => {
     expect(mockReadFlag).toHaveBeenCalledWith(MOCK_REPO_CONTEXT.localPath);
     expect(mockFetchNeedsHelpCards).not.toHaveBeenCalled();
     expect(mockFetchTodoCards).not.toHaveBeenCalled();
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   it("also halts on the synthetic unparseable source (a corrupt flag file is fail-closed)", async () => {
@@ -581,7 +625,7 @@ describe("poll — critical-failure halt gate", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockFetchTodoCards).not.toHaveBeenCalled();
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   it("proceeds normally when the flag is absent", async () => {
@@ -627,7 +671,7 @@ describe("poll — post-dispatch card-progress check", () => {
     mockFetchReviewCards.mockResolvedValue(
       Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `Review ${i}` })),
     );
-    mockSpawnAgent.mockResolvedValue({ id: "test-job", status: "running" });
+    mockDispatch.mockResolvedValue({ id: "test-job", status: "running" });
   });
 
   afterEach(() => {
@@ -645,7 +689,7 @@ describe("poll — post-dispatch card-progress check", () => {
     },
   ): Promise<void> {
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation(
+    mockDispatch.mockImplementation(
       (opts: { onComplete?: (job: unknown) => void }) => {
         capturedOnComplete = opts.onComplete;
         return Promise.resolve({ id: "test-job", status: "running" });
@@ -784,7 +828,7 @@ describe("poll — post-dispatch card-progress check", () => {
     mockFetchReviewCards.mockResolvedValue([]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation(
+    mockDispatch.mockImplementation(
       (opts: { onComplete?: (job: unknown) => void }) => {
         capturedOnComplete = opts.onComplete;
         return Promise.resolve({ id: "ideator-job", status: "running" });
@@ -864,7 +908,7 @@ describe("poll — Docker mode (headless agent)", () => {
     _resetForTesting();
     mockConfig.isHost = false;
     mockSpawn.mockReturnValue(createFakeSpawnResult());
-    mockSpawnAgent.mockResolvedValue({ id: "test-job", status: "running" });
+    mockDispatch.mockResolvedValue({ id: "test-job", status: "running" });
     setupRepoConfigMocks();
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockFetchInProgressCards.mockResolvedValue([]);
@@ -876,44 +920,44 @@ describe("poll — Docker mode (headless agent)", () => {
     mockConfig.isHost = true;
   });
 
-  it("calls spawnAgent instead of spawnInTerminal when not host", async () => {
+  it("routes through dispatch() (not a direct terminal spawn) when not host", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    // Should NOT spawn wt.exe
+    // Should NOT spawn wt.exe — the poller no longer owns the terminal path
     expect(mockSpawn).not.toHaveBeenCalled();
-    // Should call spawnAgent
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
+    // Should call dispatch() with the dispatch input shape
+    expect(mockDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
-        prompt: expect.stringContaining("/danx-next"),
-        repoName: "test-repo",
+        task: expect.stringContaining("/danx-next"),
+        repo: expect.objectContaining({ name: "test-repo" }),
       }),
     );
   });
 
-  it("passes correct prompt for team (/danx-next)", async () => {
+  it("passes the /danx-next prompt as the dispatch task", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
+    expect(mockDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
-        prompt: expect.stringContaining("/danx-next"),
+        task: expect.stringContaining("/danx-next"),
       }),
     );
   });
 
-  it("passes correct prompt for ideator (/danx-ideate)", async () => {
+  it("passes the /danx-ideate prompt as the dispatch task when ToDo is empty", async () => {
     mockFetchTodoCards.mockResolvedValue([]);
     // Review list has fewer than REVIEW_MIN_CARDS (mocked to 10)
     mockFetchReviewCards.mockResolvedValue([]);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
+    expect(mockDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
-        prompt: expect.stringContaining("/danx-ideate"),
+        task: expect.stringContaining("/danx-ideate"),
       }),
     );
   });
@@ -923,7 +967,7 @@ describe("poll — Docker mode (headless agent)", () => {
 
     // Capture the onComplete callback
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "test-job", status: "running" });
     });
@@ -946,7 +990,7 @@ describe("poll — Docker mode (headless agent)", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "test-job", status: "running" });
     });
@@ -963,37 +1007,104 @@ describe("poll — Docker mode (headless agent)", () => {
     expect(mockFetchTodoCards).toHaveBeenCalled();
   });
 
-  it("passes DANXBOT_REPO_NAME env var to dispatched agents", async () => {
+  it("does NOT restate the DANXBOT_REPO_NAME / openTerminal invariants — dispatch() owns those defaults", async () => {
+    // Phase 4 invariant cleanup: dispatch() auto-injects DANXBOT_REPO_NAME
+    // from input.repo.name and defaults openTerminal to config.isHost, so
+    // the poller intentionally omits both to avoid restating invariants.
+    // If a future refactor adds these fields back, two things would be
+    // wrong: (a) DRY violation with dispatch(), and (b) the poller would
+    // shadow a dispatch-owned contract. This test locks the boundary.
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        env: expect.objectContaining({
-          DANXBOT_REPO_NAME: "test-repo",
-        }),
-      }),
-    );
+    const call = mockDispatch.mock.calls[0][0];
+    expect(call.env).toBeUndefined();
+    expect(call.openTerminal).toBeUndefined();
   });
 
-  it("passes correct timeout value (pollerIntervalMs * 60)", async () => {
+  it("passes its own timeoutMs (pollerIntervalMs * 60) to dispatch()", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
+    expect(mockDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         timeoutMs: 60000 * 60, // pollerIntervalMs (60000) * 60
       }),
     );
   });
 
+  it("hands the exact POLLER_ALLOW_TOOLS set to dispatch() — the /danx-next skill surface plus mcp__trello__*", async () => {
+    // This is the Phase 4 deliverable: the poller funnels through the same
+    // dispatch() that `/api/launch` uses, with a hardcoded allowlist covering
+    // exactly what the `/danx-next` + `/danx-ideate` orchestrator skills need.
+    // If this drifts, the poller either gets a tool it shouldn't (security
+    // regression) or loses a tool the skill needs (breaks pickup sequence).
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const call = mockDispatch.mock.calls[0][0];
+    expect(call.allowTools).toEqual([
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+      "Bash",
+      "TodoWrite",
+      "Agent",
+      "Task",
+      "mcp__trello__*",
+    ]);
+  });
+
+  it("tags the dispatch with trigger=trello + the tracked card metadata", async () => {
+    // The apiDispatchMeta lives on the new dispatch row so the dashboard can
+    // show which card kicked off the run. Without it every poller dispatch
+    // shows up as "unknown trigger" in the history.
+    mockFetchTodoCards.mockResolvedValue([
+      { id: "c1", name: "Card 1" },
+      { id: "c2", name: "Card 2" },
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const call = mockDispatch.mock.calls[0][0];
+    expect(call.apiDispatchMeta).toEqual({
+      trigger: "trello",
+      metadata: {
+        cardId: "c1",
+        cardName: "Card 1",
+        cardUrl: "https://trello.com/c/c1",
+        listId: MOCK_REPO_CONTEXT.trello.todoListId,
+        listName: "ToDo",
+      },
+    });
+  });
+
+  it("tags ideator runs with trigger=api (not card-specific)", async () => {
+    // Ideator runs when ToDo is empty + Review has < REVIEW_MIN_CARDS cards.
+    // These are not card-specific — tagging them as `api` keeps the Trello
+    // card-progress check from firing (no card to check).
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue([]); // below threshold → ideator
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const call = mockDispatch.mock.calls[0][0];
+    expect(call.apiDispatchMeta.trigger).toBe("api");
+    expect(call.apiDispatchMeta.metadata).toMatchObject({
+      endpoint: "poller/ideator",
+    });
+  });
+
   it("handles onComplete without throwing", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "test-job", status: "running" });
     });
@@ -1005,32 +1116,61 @@ describe("poll — Docker mode (headless agent)", () => {
     await flushAsync();
   });
 
-  it("onComplete re-poll chains into another spawnAgent if more cards", async () => {
+  it("onComplete re-poll chains into another dispatch() if more cards", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "test-job", status: "running" });
     });
 
     await poll(MOCK_REPO_CONTEXT);
-    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
 
-    // Reset for re-poll
-    mockSpawnAgent.mockClear();
-    mockSpawnAgent.mockResolvedValue({ id: "test-job-2", status: "running" });
+    // Reset for re-poll. `mockClear()` drops call history only; the
+    // mockImplementation above survives so onComplete still gets captured.
+    mockDispatch.mockClear();
+    mockDispatch.mockResolvedValue({ id: "test-job-2", status: "running" });
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockFetchTodoCards.mockResolvedValue([{ id: "c2", name: "Card 2" }]);
 
     // Simulate agent completion — onComplete fires poll() asynchronously.
     capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() });
 
-    // Flush microtasks to let the fire-and-forget poll() resolve
+    // Flush microtasks to let the fire-and-forget poll() resolve.
     await flushAsync();
     await flushAsync();
 
-    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    // Post-clear count of 1 proves the re-poll dispatched exactly once —
+    // the onComplete → poll() → dispatch() chain works end-to-end.
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets teamRunning when dispatch() rejects before agent spawns (fire-and-forget .catch)", async () => {
+    // Guards the pre-spawn failure path. If the .catch() is ever dropped,
+    // `teamRunning=true` sticks forever and the poller wedges. This is the
+    // only place in the system where a bad POLLER_ALLOW_TOOLS config would
+    // be observable — it MUST reset state on the next tick so the error is
+    // loud (every tick logs) instead of silent (poller just stops).
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+    mockDispatch.mockRejectedValueOnce(new Error("pre-spawn boom"));
+
+    await poll(MOCK_REPO_CONTEXT);
+    // Let the rejection + .catch() settle.
+    await flushAsync();
+    await flushAsync();
+
+    // Second tick: if teamRunning leaked, fetchTodoCards would be skipped.
+    mockFetchTodoCards.mockClear();
+    mockFetchNeedsHelpCards.mockClear();
+    mockDispatch.mockClear();
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockFetchTodoCards).toHaveBeenCalled();
   });
 });
 
@@ -1055,7 +1195,7 @@ describe("poll — exponential backoff on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1072,7 +1212,7 @@ describe("poll — exponential backoff on failure", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     // Should not spawn because we're in backoff
-    expect(mockSpawnAgent).toHaveBeenCalledTimes(1); // Only the first call
+    expect(mockDispatch).toHaveBeenCalledTimes(1); // Only the first call
   });
 
   it("resets failure counter on success — next failure gets first-tier backoff", async () => {
@@ -1083,7 +1223,7 @@ describe("poll — exponential backoff on failure", () => {
 
     // First: spawn and fail
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1112,7 +1252,7 @@ describe("poll — exponential backoff on failure", () => {
     // With schedule [1,1,1,1] and only 1 failure, it should just backoff, not halt.
     // The key assertion: after success + failure, the poller still re-polls
     // (i.e., spawnAgent is called again), proving the counter was reset.
-    const spawnCount = mockSpawnAgent.mock.calls.length;
+    const spawnCount = mockDispatch.mock.calls.length;
     expect(spawnCount).toBeGreaterThanOrEqual(2);
 
     mockConfig.pollerBackoffScheduleMs = originalSchedule;
@@ -1125,7 +1265,7 @@ describe("poll — exponential backoff on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     const onCompleteFns: Array<(job: unknown) => void> = [];
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       if (opts.onComplete) onCompleteFns.push(opts.onComplete);
       return Promise.resolve({ id: `j${onCompleteFns.length}`, status: "running" });
     });
@@ -1151,7 +1291,7 @@ describe("poll — exponential backoff on failure", () => {
 
     // Second failure — consecutiveFailures(2) > schedule.length(1) → halt
     if (onCompleteFns.length >= 2) {
-      mockSpawnAgent.mockClear();
+      mockDispatch.mockClear();
       mockFetchTodoCards.mockClear();
       onCompleteFns[1]({
         id: "j2", status: "failed", summary: "crash again",
@@ -1161,7 +1301,7 @@ describe("poll — exponential backoff on failure", () => {
       await flushAsync();
 
       // Should NOT spawn again — poller halted
-      expect(mockSpawnAgent).not.toHaveBeenCalled();
+      expect(mockDispatch).not.toHaveBeenCalled();
       expect(mockFetchTodoCards).not.toHaveBeenCalled();
     }
 
@@ -1172,7 +1312,7 @@ describe("poll — exponential backoff on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1184,12 +1324,12 @@ describe("poll — exponential backoff on failure", () => {
     await flushAsync();
 
     // Try to poll again — should skip because in backoff
-    mockSpawnAgent.mockClear();
+    mockDispatch.mockClear();
     mockFetchTodoCards.mockClear();
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockFetchTodoCards).not.toHaveBeenCalled();
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 });
 
@@ -1215,7 +1355,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([todoCard]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1266,7 +1406,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([todoCard]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1297,7 +1437,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1323,7 +1463,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue(todoCards);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1356,7 +1496,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([todoCard]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
@@ -1388,7 +1528,7 @@ describe("poll — stuck card recovery on failure", () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockSpawnAgent.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
+    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
       capturedOnComplete = opts.onComplete;
       return Promise.resolve({ id: "j1", status: "running" });
     });
