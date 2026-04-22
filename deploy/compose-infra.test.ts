@@ -28,13 +28,17 @@ describe("renderProdCompose", () => {
     expect(out).toContain("localhost:9000/health");
   });
 
-  it("mounts the shared Claude Code JSONL directory so dashboard can read worker session logs", () => {
+  it("mounts per-repo Claude Code JSONL directories under /danxbot/app/claude-projects so the dashboard jsonl-path-resolver can find them", () => {
     const out = renderProdCompose("img", 5555);
-    // Host dir → container path under the danxbot user's $HOME. Workers
-    // use the same target in repos/<name>/.danxbot/config/compose.yml so
-    // every container agrees on the storage location.
+    // Per-repo namespaced RO mounts — host shares one physical dir, each repo
+    // gets its own container alias so jsonl-path-resolver can resolve paths
+    // by repo name. Workers write via `.claude/projects` inside their own
+    // containers; dashboard reads via these namespaced aliases.
     expect(out).toContain(
-      "/danxbot/claude-projects:/home/danxbot/.claude/projects",
+      "/danxbot/claude-projects:/danxbot/app/claude-projects/danxbot:ro",
+    );
+    expect(out).toContain(
+      "/danxbot/claude-projects:/danxbot/app/claude-projects/gpt-manager:ro",
     );
   });
 });

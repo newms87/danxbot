@@ -5,8 +5,8 @@
       "command": "npx",
       "args": ["-y", "@thehammer/mcp-server-trello"],
       "env": {
-        "TRELLO_API_KEY": "${TRELLO_API_KEY}",
-        "TRELLO_TOKEN": "${TRELLO_API_TOKEN}",
+        "TRELLO_API_KEY": "${DANX_TRELLO_API_KEY}",
+        "TRELLO_TOKEN": "${DANX_TRELLO_API_TOKEN}",
         "TRELLO_BOARD_ID": "69ddc215fd43f1b7f1a710f2",
         "TRELLO_ENABLED_TOOLS": "get_lists,get_board_labels,create_label,update_label,delete_label,get_cards_by_list_id,get_card,get_my_cards,move_card,update_card_details,add_card_to_list,create_checklist,add_checklist_item,update_checklist_item,delete_checklist_item,get_checklist_items,get_checklist_by_name,get_acceptance_criteria,add_comment,get_card_comments,get_card_history"
       }

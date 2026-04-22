@@ -49,6 +49,10 @@ Runtime mode is auto-detected from `/.dockerenv` at startup — inside a contain
 
 `./install.sh` launches an interactive wizard (`/setup` skill). It collects Anthropic / GitHub / Trello / optional Slack credentials, clones + explores the repo, and generates `.danxbot/config/`, `.env`, and tailored rules. No manual `.env` editing required.
 
+## Running Claude Code Locally
+
+Use `./bin/claude-danx` instead of bare `claude` when working in this repo. The wrapper sources `.danxbot/.env` into the shell before execing `claude`, so `.mcp.json`'s `${DANX_*}` interpolation resolves — matching the prod worker container's `env_file: ../.env` mechanism. Bare `claude` will not populate MCP env and Trello tool calls will 401.
+
 ## Connected Repos (Multi-Repo)
 
 Danxbot manages multiple repos from one server. Each repo has independent state — its own poller, Slack connection, Trello board, and DB credentials.

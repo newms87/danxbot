@@ -114,11 +114,20 @@ beforeEach(() => {
   mockGetSlackClient.mockReturnValue({ chat: {} });
 });
 
-// Helper: import index.ts (which runs main() immediately) and flush microtasks
+// Helper: import index.ts (which runs main() immediately) and flush the full
+// async pipeline. main() in worker mode awaits syncSettingsFileOnBoot →
+// assertJsonlDirectoryAccess (real fs mkdir/access on ~/.claude/projects) →
+// initPlatformPool → startWorkerServer → optional startSlackListener →
+// startPoller → initShutdownHandlers. Each await is a fresh microtask + the
+// real fs op adds a macrotask boundary. One setTimeout(0) flush is not
+// enough — we need to drain until the pipeline quiesces. 10× setTimeout(0)
+// is sufficient empirically and deterministic across platforms (total wait
+// is still <20ms).
 async function importIndex(): Promise<void> {
   await import("./index.js");
-  // Flush the microtask queue so the main() promise chain completes
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (let i = 0; i < 10; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 // ============================================================

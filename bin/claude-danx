@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Launch Claude Code with .danxbot/.env exported into process env — so
+# .mcp.json's ${DANX_*} interpolation resolves locally the same way it
+# does in prod worker containers (env_file: ../.env). This is the
+# local analog of the prod container env. One source of truth:
+# .danxbot/.env. No secrets live anywhere else on disk.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$ROOT/.danxbot/.env"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "claude-danx: $ENV_FILE not found — run ./install.sh or populate .danxbot/.env" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+exec claude "$@"
