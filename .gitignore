@@ -14,6 +14,7 @@ dashboard/node_modules/
 .claude/clad.json
 .claude/agent-self-improvement.md
 .claude/projects/
+.claude/scheduled_tasks.lock
 agent-notes.md
 claude-auth/*
 !claude-auth/.gitkeep

@@ -1,6 +1,22 @@
 # Make Commands
 
-Canonical list of every `make` target in this repo. Source of truth: the `Makefile` itself (`make help` regenerates this table). When in doubt, prefer a Make target over an ad-hoc command.
+Canonical list of every `make` target in this repo. Source of truth: the `Makefile` itself (`make help` regenerates this table).
+
+## CRITICAL: Check Make First, Docker/Curl Last
+
+**Before running ANY of `docker restart`, `docker logs`, `docker exec`, `docker ps`, `docker inspect`, or a hand-rolled `curl` against a worker/dashboard endpoint, check the table below for an equivalent make target and use it.** Make targets are the documented, reproducible entry points — ad-hoc docker commands are a leak of implementation detail that other agents can't re-run and that drift as compose files evolve.
+
+Common substitutions you will be tempted to skip:
+
+| Tempting ad-hoc | Use instead |
+|---|---|
+| `docker restart danxbot-worker-<repo>` | `make launch-worker REPO=<repo>` |
+| `docker logs danxbot-worker-<repo>` | `make logs REPO=<repo>` |
+| `curl -X POST .../api/launch` to smoke-test dispatch | `make test-system-dispatch` |
+| `curl .../health` to check a worker | `make test-system-health` |
+| `docker compose up -d` (dev stack) | `make launch-infra` |
+
+**When NO make target covers your need** (e.g. inspecting `claude auth status` inside a worker, reading a specific file inside the container, comparing env vars host-vs-container): reaching for `docker exec` is legitimate, but call it out explicitly — "no make target covers per-user auth state inside the worker, dropping to `docker exec`" — so the escape is visible, intentional, and re-evaluable next time someone reads the session. Silent use of docker commands is how the rule rots.
 
 ## Build & Lifecycle
 
