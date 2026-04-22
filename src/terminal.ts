@@ -122,9 +122,23 @@ export function buildDispatchScript(
   // `printf '%q '` re-escapes each element for the nested `sh -c` that
   // `script -c` performs, so the claude invocation is a single word to
   // `script` regardless of what's inside the args.
+  //
+  // The `--` separator between flags and firstMessage is LOAD-BEARING.
+  // `claude --help` declares `--allowed-tools <tools...>` and `--mcp-config
+  // <configs...>` as variadic — commander.js absorbs every subsequent argv
+  // (until the next `--flag`) as additional values for the variadic option.
+  // Without the terminator, `claude --allowed-tools Bash "<firstMessage>"`
+  // parses as `allowedTools: ["Bash", "<firstMessage>"]` and the positional
+  // prompt is LOST — the interactive TUI boots with no user message, so
+  // the dispatch hangs forever on an empty `❯`. `--` is the POSIX-standard
+  // end-of-options marker and is the cleanest fix regardless of which
+  // variadic flag landed last in the argv. See Trello card `kwZOGOrQ` for
+  // the full bisection + repro. Docker mode uses `-p firstMessage` instead
+  // of a positional, so this separator is host-mode-only.
   const claudeArgvLiteral = [
     "claude",
     ...options.flags,
+    "--",
     options.firstMessage,
   ]
     .map(bashSingleQuote)

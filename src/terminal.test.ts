@@ -75,6 +75,27 @@ describe("buildDispatchScript", () => {
     );
   });
 
+  // Regression: claude's `--allowed-tools` and `--mcp-config` are variadic
+  // flags (see `claude --help`: `<tools...>`, `<configs...>`). Without a `--`
+  // separator, the positional firstMessage gets absorbed as an additional
+  // value for whichever variadic flag appears last, and claude's interactive
+  // TUI boots with no first message — it sits idle on `❯` forever.
+  // Inserting `--` before the positional is the POSIX convention that tells
+  // commander.js (claude's CLI parser) "no more flag values, what follows is
+  // positional." See Trello card `kwZOGOrQ` for the full investigation.
+  it("inserts a `--` separator before the firstMessage so variadic flags don't absorb the positional", () => {
+    const scriptPath = buildScript({
+      flags: ["--allowed-tools", "Bash,Read"],
+      firstMessage: "the user message",
+    });
+    const content = readFileSync(scriptPath, "utf-8");
+    // The CLAUDE_ARGV bash array must contain `'--'` immediately before the
+    // single-quoted firstMessage. A missing separator regresses host mode to
+    // the silent-hang state (card kwZOGOrQ) — the agent TUI boots but never
+    // processes the first turn.
+    expect(content).toMatch(/'--allowed-tools' 'Bash,Read' '--' 'the user message'/);
+  });
+
   it("does NOT write prompt.txt — firstMessage is delivered inline, not via a file", () => {
     // Host mode used to write the prompt to disk as prompt.txt and have claude
     // "Read $PROMPT_FILE and execute..." — that double-indirection hid the
