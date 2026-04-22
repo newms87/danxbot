@@ -85,6 +85,7 @@ const mockFetchNeedsHelpCards = vi.fn();
 const mockFetchReviewCards = vi.fn();
 const mockFetchInProgressCards = vi.fn();
 const mockFetchLatestComment = vi.fn();
+const mockFetchCard = vi.fn();
 const mockMoveCardToList = vi.fn();
 const mockAddComment = vi.fn();
 const mockIsUserResponse = vi.fn();
@@ -92,11 +93,22 @@ vi.mock("./trello-client.js", () => ({
   fetchTodoCards: (...args: unknown[]) => mockFetchTodoCards(...args),
   fetchNeedsHelpCards: (...args: unknown[]) => mockFetchNeedsHelpCards(...args),
   fetchReviewCards: (...args: unknown[]) => mockFetchReviewCards(...args),
-  fetchInProgressCards: (...args: unknown[]) => mockFetchInProgressCards(...args),
+  fetchInProgressCards: (...args: unknown[]) =>
+    mockFetchInProgressCards(...args),
   fetchLatestComment: (...args: unknown[]) => mockFetchLatestComment(...args),
+  fetchCard: (...args: unknown[]) => mockFetchCard(...args),
   moveCardToList: (...args: unknown[]) => mockMoveCardToList(...args),
   addComment: (...args: unknown[]) => mockAddComment(...args),
   isUserResponse: (...args: unknown[]) => mockIsUserResponse(...args),
+}));
+
+const mockReadFlag = vi.fn().mockReturnValue(null);
+const mockWriteFlag = vi.fn();
+vi.mock("../critical-failure.js", () => ({
+  readFlag: (...args: unknown[]) => mockReadFlag(...args),
+  writeFlag: (...args: unknown[]) => mockWriteFlag(...args),
+  clearFlag: vi.fn().mockReturnValue(false),
+  flagPath: (localPath: string) => `${localPath}/.danxbot/CRITICAL_FAILURE`,
 }));
 
 const mockSpawn = vi.fn();
@@ -524,6 +536,298 @@ describe("start", () => {
     mockRepoContexts.push({ ...enabledRepo, name: "test-repo", trelloEnabled: true });
     mockIsFeatureEnabled.mockReturnValue(true);
   });
+});
+
+describe("poll — critical-failure halt gate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockReadFlag.mockReturnValue(null);
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `Review ${i}` })),
+    );
+  });
+
+  it("does not fetch Trello or spawn when the flag is set — halt is terminal until cleared", async () => {
+    mockReadFlag.mockReturnValue({
+      timestamp: "2026-04-21T00:00:00.000Z",
+      source: "agent",
+      dispatchId: "dxy",
+      reason: "MCP Trello tools failed to load",
+    });
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockReadFlag).toHaveBeenCalledWith(MOCK_REPO_CONTEXT.localPath);
+    expect(mockFetchNeedsHelpCards).not.toHaveBeenCalled();
+    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("also halts on the synthetic unparseable source (a corrupt flag file is fail-closed)", async () => {
+    mockReadFlag.mockReturnValue({
+      timestamp: "2026-04-21T00:00:00.000Z",
+      source: "unparseable",
+      dispatchId: "unparseable",
+      reason: "Critical-failure flag file present but unparseable",
+    });
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("proceeds normally when the flag is absent", async () => {
+    mockReadFlag.mockReturnValue(null);
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockReadFlag).toHaveBeenCalled();
+    expect(mockFetchNeedsHelpCards).toHaveBeenCalled();
+    expect(mockFetchTodoCards).toHaveBeenCalled();
+  });
+
+  it("halt gate runs AFTER the feature toggle — disabled poller never checks the flag", async () => {
+    // If the poller is disabled, we don't need to read the flag at all —
+    // the whole tick is skipped before flag logic.
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "trelloPoller",
+    );
+    mockReadFlag.mockReturnValue(null);
+    mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockReadFlag).not.toHaveBeenCalled();
+    expect(mockFetchTodoCards).not.toHaveBeenCalled();
+  });
+});
+
+describe("poll — post-dispatch card-progress check", () => {
+  const TODO_LIST_ID = MOCK_REPO_CONTEXT.trello.todoListId;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    mockConfig.isHost = false;
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockReadFlag.mockReturnValue(null);
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchInProgressCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `Review ${i}` })),
+    );
+    mockSpawnAgent.mockResolvedValue({ id: "test-job", status: "running" });
+  });
+
+  afterEach(() => {
+    mockConfig.isHost = true;
+  });
+
+  async function runOneDispatch(
+    todoCards: Array<{ id: string; name: string }>,
+    completionJob: {
+      id: string;
+      status: string;
+      summary?: string;
+      startedAt: Date;
+      completedAt: Date;
+    },
+  ): Promise<void> {
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnAgent.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
+    mockFetchTodoCards.mockResolvedValue(todoCards);
+
+    await poll(MOCK_REPO_CONTEXT);
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!(completionJob);
+    await flushAsync();
+    await flushAsync();
+  }
+
+  it("writes the critical-failure flag when the tracked card is still in ToDo after the dispatch exits", async () => {
+    mockFetchCard.mockResolvedValue({
+      id: "c1",
+      name: "Card 1",
+      idList: TODO_LIST_ID,
+    });
+
+    await runOneDispatch(
+      [{ id: "c1", name: "Card 1" }],
+      {
+        id: "j1",
+        status: "failed",
+        summary: "MCP Trello unavailable",
+        startedAt: new Date(),
+        completedAt: new Date(),
+      },
+    );
+
+    expect(mockFetchCard).toHaveBeenCalledWith(MOCK_REPO_CONTEXT.trello, "c1");
+    expect(mockWriteFlag).toHaveBeenCalledTimes(1);
+    const [localPath, payload] = mockWriteFlag.mock.calls[0];
+    expect(localPath).toBe(MOCK_REPO_CONTEXT.localPath);
+    expect(payload).toMatchObject({
+      source: "post-dispatch-check",
+      dispatchId: "j1",
+      cardId: "c1",
+      cardUrl: "https://trello.com/c/c1", // reconstructed from cardId
+    });
+    expect(payload.reason).toMatch(/did not move out of ToDo/);
+  });
+
+  it("writes the flag even when the agent reported status=completed (silent env failure)", async () => {
+    // An agent that reports "completed" but didn't move the card is
+    // lying about success — still an env-level signal.
+    mockFetchCard.mockResolvedValue({
+      id: "c1",
+      name: "Card 1",
+      idList: TODO_LIST_ID,
+    });
+
+    await runOneDispatch(
+      [{ id: "c1", name: "Card 1" }],
+      {
+        id: "j1",
+        status: "completed",
+        summary: "done (but really wasn't)",
+        startedAt: new Date(),
+        completedAt: new Date(),
+      },
+    );
+
+    expect(mockWriteFlag).toHaveBeenCalled();
+  });
+
+  it("does NOT write the flag when the tracked card moved to In Progress", async () => {
+    mockFetchCard.mockResolvedValue({
+      id: "c1",
+      name: "Card 1",
+      idList: MOCK_REPO_CONTEXT.trello.inProgressListId,
+    });
+
+    await runOneDispatch(
+      [{ id: "c1", name: "Card 1" }],
+      {
+        id: "j1",
+        status: "failed",
+        summary: "mid-work crash",
+        startedAt: new Date(),
+        completedAt: new Date(),
+      },
+    );
+
+    expect(mockFetchCard).toHaveBeenCalled();
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("does NOT write the flag when the tracked card moved to Needs Help", async () => {
+    mockFetchCard.mockResolvedValue({
+      id: "c1",
+      name: "Card 1",
+      idList: MOCK_REPO_CONTEXT.trello.needsHelpListId,
+    });
+
+    await runOneDispatch(
+      [{ id: "c1", name: "Card 1" }],
+      {
+        id: "j1",
+        status: "completed",
+        summary: "moved to Needs Help",
+        startedAt: new Date(),
+        completedAt: new Date(),
+      },
+    );
+
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("does NOT write the flag when the tracked card moved to Done", async () => {
+    mockFetchCard.mockResolvedValue({
+      id: "c1",
+      name: "Card 1",
+      idList: MOCK_REPO_CONTEXT.trello.doneListId,
+    });
+
+    await runOneDispatch(
+      [{ id: "c1", name: "Card 1" }],
+      {
+        id: "j1",
+        status: "completed",
+        summary: "done",
+        startedAt: new Date(),
+        completedAt: new Date(),
+      },
+    );
+
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fetch the card or write a flag for ideator (api trigger) dispatches", async () => {
+    // Ideator runs when ToDo is empty + Review has < REVIEW_MIN_CARDS cards.
+    // They use trigger=api, not trigger=trello, so there's no card to track.
+    mockFetchReviewCards.mockResolvedValue([]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockSpawnAgent.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "ideator-job", status: "running" });
+      },
+    );
+    mockFetchTodoCards.mockResolvedValue([]); // empty ToDo → ideator path
+
+    await poll(MOCK_REPO_CONTEXT);
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!({
+      id: "ideator-job",
+      status: "completed",
+      summary: "generated cards",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+    await flushAsync();
+
+    expect(mockFetchCard).not.toHaveBeenCalled();
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("handles fetchCard failures gracefully without writing the flag", async () => {
+    // If Trello API fails mid-check we don't have positive evidence the
+    // card stayed in ToDo. Log and move on — the next tick will retry.
+    mockFetchCard.mockRejectedValue(new Error("Trello API 500"));
+
+    await runOneDispatch(
+      [{ id: "c1", name: "Card 1" }],
+      {
+        id: "j1",
+        status: "failed",
+        summary: "crash",
+        startedAt: new Date(),
+        completedAt: new Date(),
+      },
+    );
+
+    expect(mockFetchCard).toHaveBeenCalled();
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
 });
 
 describe("shutdown", () => {

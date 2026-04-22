@@ -23,6 +23,7 @@ import {
   fetchReviewCards,
   fetchInProgressCards,
   fetchLatestComment,
+  fetchCard,
   moveCardToList,
   addComment,
   isUserResponse,
@@ -30,6 +31,7 @@ import {
 import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext, TrelloConfig } from "../types.js";
 import { isFeatureEnabled } from "../settings-file.js";
+import { readFlag, writeFlag } from "../critical-failure.js";
 import type {
   DispatchTriggerMetadata,
   TrelloTriggerMetadata,
@@ -47,6 +49,16 @@ interface RepoPollerState {
   consecutiveFailures: number;
   backoffUntil: number;
   priorTodoCardIds: string[];
+  /**
+   * The Trello card the current dispatch targets. Set in `spawnClaude`
+   * when the trigger is "trello" (null for ideator/api dispatches); read
+   * by the post-dispatch "did the card move?" check in
+   * `handleAgentCompletion`. Cleared by `cleanupAfterAgent` so stale
+   * state from a prior run can't trip the check on the next dispatch.
+   * Card URL is reconstructed from cardId when the flag is written —
+   * don't duplicate it in state.
+   */
+  trackedCardId: string | null;
 }
 
 const repoState = new Map<string, RepoPollerState>();
@@ -61,6 +73,7 @@ function getState(repoName: string): RepoPollerState {
       consecutiveFailures: 0,
       backoffUntil: 0,
       priorTodoCardIds: [],
+      trackedCardId: null,
     };
     repoState.set(repoName, state);
   }
@@ -112,6 +125,30 @@ export async function poll(repo: RepoContext): Promise<void> {
   // `.claude/rules/settings-file.md`.
   if (!isFeatureEnabled(repo, "trelloPoller")) {
     log.info(`[${repo.name}] poller disabled via settings — skipping`);
+    return;
+  }
+
+  // Critical-failure halt gate. When the agent signaled
+  // `critical_failure` or the post-dispatch check caught a dispatch
+  // that didn't move its card out of ToDo, a flag file is written at
+  // `<repo>/.danxbot/CRITICAL_FAILURE`. The poller refuses to run
+  // while the flag is present — a human must clear it (via `rm` or the
+  // dashboard DELETE endpoint) after fixing the underlying env issue.
+  // Slack listener and /api/launch are unaffected by design — the
+  // halt is poller-only. See `.claude/rules/agent-dispatch.md`
+  // "Critical failure flag".
+  const flag = readFlag(repo.localPath);
+  if (flag) {
+    log.warn(
+      `[${repo.name}] poller halted — critical-failure flag present (source=${flag.source}, dispatch=${flag.dispatchId}): ${flag.reason}`,
+    );
+    // Halt is a stronger signal than backoff. If we're halted because
+    // of a run that also tripped backoff, clear that state so when the
+    // operator clears the flag the poller resumes on the very next
+    // tick — no leftover "In backoff" log from a dispatch whose real
+    // failure mode is now being tracked by the flag file.
+    state.consecutiveFailures = 0;
+    state.backoffUntil = 0;
     return;
   }
 
@@ -513,6 +550,13 @@ function spawnClaude(
 
   state.teamRunning = true;
 
+  // Track the Trello card this dispatch targets. The post-dispatch
+  // "card didn't move out of ToDo" check in `handleAgentCompletion`
+  // reads this field to detect env-level blockers. Ideator/api
+  // dispatches are not card-specific — null tracks "no card to check".
+  state.trackedCardId =
+    dispatch.trigger === "trello" ? dispatch.metadata.cardId : null;
+
   spawnAgent({
     prompt,
     repoName: repo.name,
@@ -571,6 +615,15 @@ async function handleAgentCompletion(
     state.backoffUntil = 0;
   }
 
+  // Post-dispatch card-progress check. Runs on both success and
+  // failure — a "completed" agent that never moved the card is as much
+  // of an env-level signal as a "failed" one. If the card still sits
+  // in ToDo, this writes the critical-failure flag; the next tick's
+  // halt gate will see it and refuse to dispatch.
+  if (state.trackedCardId) {
+    await checkCardProgressedOrHalt(repo, state, job);
+  }
+
   cleanupAfterAgent(state);
   log.info(`[${repo.name}] Headless agent finished — resuming polling`);
   poll(repo).catch((err) =>
@@ -581,6 +634,65 @@ async function handleAgentCompletion(
 function cleanupAfterAgent(state: RepoPollerState): void {
   state.teamRunning = false;
   state.priorTodoCardIds = [];
+  state.trackedCardId = null;
+}
+
+/**
+ * After a trello-triggered dispatch exits, fetch the tracked card's
+ * current list. If it's still in ToDo, the dispatch made zero
+ * progress — an env-level blocker the poller cannot recover from on
+ * its own. Write the critical-failure flag so the next tick halts.
+ *
+ * Complementary to `recoverStuckCards`, which handles the case where
+ * the agent moved a card to In Progress but failed mid-work (the
+ * recovery there moves it to Needs Help). This function handles the
+ * distinct case where the agent never moved the card at all — the
+ * classic signal that MCP or Bash failed to load.
+ *
+ * A fetch failure here does NOT trip the flag: we only halt when we
+ * have positive evidence the card stayed in ToDo. Swallowing the
+ * error and logging is intentional — the next tick will try again.
+ */
+async function checkCardProgressedOrHalt(
+  repo: RepoContext,
+  state: RepoPollerState,
+  job: AgentJob,
+): Promise<void> {
+  const cardId = state.trackedCardId;
+  if (!cardId) return;
+
+  let card;
+  try {
+    card = await fetchCard(repo.trello, cardId);
+  } catch (err) {
+    log.error(
+      `[${repo.name}] Failed to fetch tracked card ${cardId} after dispatch — skipping card-progress check`,
+      err,
+    );
+    return;
+  }
+
+  if (card.idList !== repo.trello.todoListId) {
+    // Card moved to In Progress / Needs Help / Done / Cancelled / Review.
+    // The dispatch made SOME progress even if it ultimately failed — not
+    // an env-level issue. Leave the flag untripped.
+    return;
+  }
+
+  log.error(
+    `[${repo.name}] Tracked card "${card.name}" (${cardId}) still in ToDo after dispatch ${job.id} — writing critical-failure flag`,
+  );
+  writeFlag(repo.localPath, {
+    source: "post-dispatch-check",
+    dispatchId: job.id,
+    cardId,
+    cardUrl: `https://trello.com/c/${cardId}`,
+    reason: `Tracked card "${card.name}" did not move out of ToDo after dispatch`,
+    detail:
+      `Card ${cardId} (${card.name}) stayed in the ToDo list across dispatch ${job.id} ` +
+      `(status=${job.status}, summary=${job.summary || "none"}). ` +
+      `Poller halts until this flag is cleared and the underlying environment blocker is fixed.`,
+  });
 }
 
 /**

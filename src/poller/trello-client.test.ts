@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { TrelloConfig } from "../types.js";
 
-import { fetchTodoCards, fetchNeedsHelpCards, fetchInProgressCards, fetchLatestComment, moveCardToList, addComment, isUserResponse } from "./trello-client.js";
+import { fetchTodoCards, fetchNeedsHelpCards, fetchInProgressCards, fetchCard, fetchLatestComment, moveCardToList, addComment, isUserResponse } from "./trello-client.js";
 
 const MOCK_TRELLO: TrelloConfig = {
   apiKey: "test-key",
@@ -257,6 +257,70 @@ describe("fetchInProgressCards", () => {
 
     const cards = await fetchInProgressCards(MOCK_TRELLO);
     expect(cards).toEqual([{ id: "c1", name: "In Progress card" }]);
+  });
+});
+
+describe("fetchCard", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("fetches the card by id and requests id, name, idList fields", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({ id: "c1", name: "My card", idList: "todo-list" }),
+        { status: 200 },
+      ),
+    );
+
+    const card = await fetchCard(MOCK_TRELLO, "c1");
+
+    expect(card).toEqual({ id: "c1", name: "My card", idList: "todo-list" });
+    const calledUrl = vi.mocked(fetch).mock.calls[0][0] as string;
+    expect(calledUrl).toContain("/1/cards/c1");
+    expect(calledUrl).toContain("fields=id,name,idList");
+    expect(calledUrl).toContain("key=test-key");
+    expect(calledUrl).toContain("token=test-token");
+  });
+
+  it("throws on non-ok response so the caller can log and skip", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response("Not found", { status: 404, statusText: "Not Found" }),
+    );
+
+    await expect(fetchCard(MOCK_TRELLO, "missing")).rejects.toThrow(
+      "Trello API error: 404 Not Found",
+    );
+  });
+
+  it("throws when the response body is missing idList (fail-loud on malformed shape)", async () => {
+    // A malformed Trello response with no idList would silently cause
+    // the post-dispatch halt check to treat the card as "moved" (since
+    // `undefined !== todoListId` is true). Throwing here forces the
+    // caller's try/catch to log and skip — no false-negative halts.
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ id: "c1", name: "Card" }), { status: 200 }),
+    );
+
+    await expect(fetchCard(MOCK_TRELLO, "c1")).rejects.toThrow(
+      /without idList/,
+    );
+  });
+
+  it("throws when the response body is missing id", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ name: "Card", idList: "l" }), {
+        status: 200,
+      }),
+    );
+
+    await expect(fetchCard(MOCK_TRELLO, "c1")).rejects.toThrow(/without id/);
   });
 });
 

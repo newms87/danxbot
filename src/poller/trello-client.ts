@@ -69,6 +69,55 @@ export async function fetchInProgressCards(trello: TrelloConfig): Promise<Trello
   return fetchCardsFromList(trello, trello.inProgressListId);
 }
 
+/**
+ * Card detail including its current `idList`. Used by the post-dispatch
+ * "did the card actually move?" check — see the halt-flag contract in
+ * `.claude/rules/agent-dispatch.md`.
+ */
+export interface TrelloCardDetail {
+  id: string;
+  name: string;
+  idList: string;
+}
+
+/**
+ * Fetch a single card by id, returning its current list. Lets the
+ * poller detect dispatches where the agent never moved the card out of
+ * ToDo — the signature of an env-level blocker.
+ */
+export async function fetchCard(
+  trello: TrelloConfig,
+  cardId: string,
+): Promise<TrelloCardDetail> {
+  const url = `https://api.trello.com/1/cards/${cardId}?${authParams(trello)}&fields=id,name,idList`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(
+      `Trello API error: ${response.status} ${response.statusText}`,
+    );
+  }
+  const card = (await response.json()) as Partial<TrelloCardDetail>;
+
+  // Fail loud on a malformed response shape. The caller is the
+  // post-dispatch halt check — if `idList` is missing/empty, the
+  // comparison `card.idList !== todoListId` would silently evaluate
+  // truthy and SUPPRESS the halt flag. Throwing here pushes the failure
+  // into the caller's try/catch, which logs and skips the check —
+  // preferable to falsely deciding "card moved" from garbage.
+  if (typeof card.id !== "string" || !card.id) {
+    throw new Error(`Trello API returned card without id (cardId=${cardId})`);
+  }
+  if (typeof card.name !== "string") {
+    throw new Error(`Trello API returned card without name (cardId=${cardId})`);
+  }
+  if (typeof card.idList !== "string" || !card.idList) {
+    throw new Error(
+      `Trello API returned card without idList (cardId=${cardId}) — cannot determine current list`,
+    );
+  }
+  return { id: card.id, name: card.name, idList: card.idList };
+}
+
 export async function addComment(trello: TrelloConfig, cardId: string, text: string): Promise<void> {
   const url = `https://api.trello.com/1/cards/${cardId}/actions/comments?${authParams(trello)}`;
   const response = await fetch(url, {
