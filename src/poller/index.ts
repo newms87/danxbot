@@ -17,8 +17,8 @@ import {
   DANXBOT_COMMENT_MARKER,
   TEAM_PROMPT,
   IDEATOR_PROMPT,
-  POLLER_ALLOW_TOOLS,
 } from "./constants.js";
+import { resolveProfile } from "../dispatch/profiles.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
 import { generateWorkspace } from "../workspace/generate.js";
@@ -609,10 +609,15 @@ function spawnClaude(
   // the agent is spawned (NOT when it completes). The poller already
   // hands completion handling to `onComplete`, so awaiting here would
   // only serialize the initial spawn with... nothing.
+  // The `poller` dispatch profile names the tool surface — see
+  // `src/dispatch/profiles.ts`. `resolveProfile` throws fail-loud on a
+  // typo'd profile name, so stale string literals from a future
+  // refactor surface at startup rather than at dispatch time.
+  const pollerProfile = resolveProfile("poller");
   dispatch({
     repo,
     task: prompt,
-    allowTools: POLLER_ALLOW_TOOLS,
+    allowTools: pollerProfile.allowTools,
     timeoutMs: config.pollerIntervalMs * 60,
     apiDispatchMeta,
     onComplete: (job) => {

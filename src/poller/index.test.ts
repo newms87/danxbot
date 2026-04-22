@@ -78,21 +78,6 @@ vi.mock("./constants.js", () => ({
   DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
   TEAM_PROMPT: "/danx-next",
   IDEATOR_PROMPT: "/danx-ideate",
-  // Phase 4: the poller hands this constant verbatim to dispatch(). Keeping
-  // the mock value identical to production so the "exact allowTools" test
-  // asserts against the real shape without pulling the real module.
-  POLLER_ALLOW_TOOLS: [
-    "Read",
-    "Glob",
-    "Grep",
-    "Edit",
-    "Write",
-    "Bash",
-    "TodoWrite",
-    "Agent",
-    "Task",
-    "mcp__trello__*",
-  ],
 }));
 
 const mockFetchTodoCards = vi.fn();
@@ -1060,29 +1045,22 @@ describe("poll — Docker mode (headless agent)", () => {
     );
   });
 
-  it("hands the exact POLLER_ALLOW_TOOLS set to dispatch() — the /danx-next skill surface plus mcp__trello__*", async () => {
-    // This is the Phase 4 deliverable: the poller funnels through the same
-    // dispatch() that `/api/launch` uses, with a hardcoded allowlist covering
-    // exactly what the `/danx-next` + `/danx-ideate` orchestrator skills need.
-    // If this drifts, the poller either gets a tool it shouldn't (security
-    // regression) or loses a tool the skill needs (breaks pickup sequence).
+  it("hands the poller profile's exact allowTools reference to dispatch()", async () => {
+    // Phase 2 invariant: the registry in `src/dispatch/profiles.ts` is the
+    // SINGLE source of truth for the poller's tool surface. This test
+    // asserts reference identity (not just content equality) so a future
+    // refactor that spreads / clones the array would break this test and
+    // force the author to confront the single-source-of-truth contract.
+    // A content-equality check would pass through a silent clone.
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     const call = mockDispatch.mock.calls[0][0];
-    expect(call.allowTools).toEqual([
-      "Read",
-      "Glob",
-      "Grep",
-      "Edit",
-      "Write",
-      "Bash",
-      "TodoWrite",
-      "Agent",
-      "Task",
-      "mcp__trello__*",
-    ]);
+    // Load the real profile (not mocked) — profiles.ts has no config
+    // chain so this is safe to import in this test file.
+    const { resolveProfile } = await import("../dispatch/profiles.js");
+    expect(call.allowTools).toBe(resolveProfile("poller").allowTools);
   });
 
   it("tags the dispatch with trigger=trello + the tracked card metadata", async () => {

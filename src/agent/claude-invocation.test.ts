@@ -86,6 +86,33 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(inv.flags).toContain("--verbose");
   });
 
+  it("flags always include --strict-mcp-config — agent-isolation invariant", () => {
+    // Phase 2 of the agent-isolation epic (Trello 7ha2CSpc). Without
+    // this flag, claude reads the workspace's project-scope `.mcp.json`
+    // AND any user-scope `.mcp.json`, re-introducing the cross-contamination
+    // bug that motivated the epic. The flag must be present on EVERY
+    // dispatched invocation — docker, host, resumes, fresh launches.
+    const inv = build();
+    expect(inv.flags).toContain("--strict-mcp-config");
+  });
+
+  it("flags include --strict-mcp-config even when mcpConfigPath is absent", () => {
+    // Defense-in-depth: if a caller ever forgets to wire an MCP config
+    // file, claude must STILL refuse to fall back to project/user-scope
+    // configs. Strictness is unconditional; --mcp-config is how you
+    // grant tools, not a gate for the strict flag.
+    const inv = build({ mcpConfigPath: undefined });
+    expect(inv.flags).toContain("--strict-mcp-config");
+  });
+
+  it("flags include --strict-mcp-config on the resume path", () => {
+    // The resume path is a historical source of flag-emission drift
+    // (the ordering test for `--resume` exists for that reason). Assert
+    // strictness survives resume.
+    const inv = build({ resumeSessionId: "abc-123" });
+    expect(inv.flags).toContain("--strict-mcp-config");
+  });
+
   it("flags include --mcp-config when mcpConfigPath is provided", () => {
     const inv = build({ mcpConfigPath: "/tmp/mcp/settings.json" });
     const idx = inv.flags.indexOf("--mcp-config");

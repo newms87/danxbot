@@ -88,7 +88,19 @@ export function buildClaudeInvocation(
     readDirective(promptFile) +
     tracking;
 
-  const flags: string[] = ["--dangerously-skip-permissions", "--verbose"];
+  // `--strict-mcp-config` is load-bearing for agent isolation. With this
+  // flag, claude IGNORES every project-scope and user-scope `.mcp.json` —
+  // only servers listed in `--mcp-config` are visible to the dispatched
+  // agent. This is the contract that lets use case #1 (the developer's
+  // interactive `claude` at the repo root) keep its own MCP config
+  // independently from every danxbot-dispatched agent. Changing or
+  // removing this flag re-introduces the cross-contamination bug that
+  // the agent-isolation epic (Trello 7ha2CSpc) was created to fix.
+  const flags: string[] = [
+    "--dangerously-skip-permissions",
+    "--strict-mcp-config",
+    "--verbose",
+  ];
 
   if (options.resumeSessionId) {
     flags.push("--resume", options.resumeSessionId);
