@@ -167,11 +167,12 @@ function writeIfChanged(path: string, content: string): boolean {
 
 /**
  * Build the settings.json contents. Includes only the env block that the
- * injected helper scripts rely on — same shape as
- * `<repo>/.claude/settings.local.json` produces today via
- * `make launch-worker`. Keeping the schema narrow and explicit means
- * drift between the two files is visible in diff review rather than
- * silently accumulating.
+ * injected helper scripts rely on — `DANXBOT_WORKER_PORT` for the MCP
+ * callback URL. The port itself comes from `repo.workerPort`, which
+ * `src/repo-context.ts#readWorkerPort` resolved from `<repo>/.danxbot/.env`
+ * (local dev) or `process.env.DANXBOT_WORKER_PORT` (production compose).
+ * Keeping the schema narrow and explicit means any drift is visible in
+ * diff review rather than silently accumulating.
  */
 function buildSettingsJson(repo: RepoContext): string {
   return (
