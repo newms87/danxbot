@@ -9,35 +9,28 @@ import type { RepoConfig, RepoContext } from "./types.js";
 import { getReposBase, loadTrelloIds } from "./poller/constants.js";
 import { parseEnvFile } from "./env-file.js";
 import { resolve } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { repos, isWorkerMode, workerRepoName, config } from "./config.js";
 
 /**
  * Resolve DANXBOT_WORKER_PORT. Production (deploy): compose injects it from
  * .danxbot/deployments/<target>.yml per-repo `worker_port`, so it arrives as
- * process.env.DANXBOT_WORKER_PORT and settings.local.json is never required.
- * Local dev: falls back to <repo>/.claude/settings.local.json env block so
- * host runtime and MCP tools continue to source it from one place.
+ * process.env.DANXBOT_WORKER_PORT. Local dev: falls back to the repo's
+ * .danxbot/.env — the one place danxbot-owned per-repo config lives. The
+ * repo-root `.claude/` is strictly developer territory and danxbot never
+ * reads from it (agent-isolation epic, Trello `7ha2CSpc`).
  */
-function readWorkerPort(repoLocalPath: string): number {
-  const envValue = process.env.DANXBOT_WORKER_PORT;
-  if (envValue) return validatePort(envValue, "process.env.DANXBOT_WORKER_PORT");
+function readWorkerPort(env: Record<string, string>, envPath: string): number {
+  const processValue = process.env.DANXBOT_WORKER_PORT;
+  if (processValue) return validatePort(processValue, "process.env.DANXBOT_WORKER_PORT");
 
-  const settingsPath = resolve(repoLocalPath, ".claude/settings.local.json");
-  if (!existsSync(settingsPath)) {
-    throw new Error(
-      `Missing ${settingsPath}. Add {"env": {"DANXBOT_WORKER_PORT": "<port>"}} to configure the worker port, or set DANXBOT_WORKER_PORT in the process env.`,
-    );
-  }
-  const raw = readFileSync(settingsPath, "utf-8");
-  const parsed = JSON.parse(raw) as { env?: Record<string, string> };
-  const value = parsed?.env?.DANXBOT_WORKER_PORT;
+  const value = env.DANXBOT_WORKER_PORT;
   if (!value) {
     throw new Error(
-      `Missing env.DANXBOT_WORKER_PORT in ${settingsPath}`,
+      `Missing DANXBOT_WORKER_PORT in ${envPath}. Add \`DANXBOT_WORKER_PORT=<port>\` or set it in the process env.`,
     );
   }
-  return validatePort(value, settingsPath);
+  return validatePort(value, envPath);
 }
 
 function validatePort(value: string, source: string): number {
@@ -136,7 +129,7 @@ export function loadRepoContext(repo: RepoConfig): RepoContext {
       enabled: dbEnabled,
     },
     githubToken: optEnv("DANX_GITHUB_TOKEN", ""),
-    workerPort: readWorkerPort(repo.localPath),
+    workerPort: readWorkerPort(env, envPath),
   };
 }
 

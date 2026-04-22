@@ -8,7 +8,8 @@ import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
 import { loadSystemPrompt, loadFastSystemPrompt } from "./system-prompt-loader.js";
 import { resolveDispatchTools } from "./resolve-dispatch-tools.js";
-import { SLACK_ALLOW_TOOLS } from "../slack/constants.js";
+import { dispatchAllowTools } from "../dispatch/profiles.js";
+import { workspacePath } from "../workspace/generate.js";
 import type { AgentLogEntry, AgentResponse, AgentUsageSummary, ComplexityLevel, ModelUsage, ThreadMessage } from "../types.js";
 import { buildAssistantSummary, buildToolResultSummary } from "./tool-summary.js";
 
@@ -288,23 +289,28 @@ export async function runAgent(
   // Slack runAgent shares `resolveDispatchTools` with every CLI dispatch path,
   // but opts out of danxbot infrastructure (`danxbotStopUrl: null`) — the SDK
   // iterator's `result` message is the in-process completion signal, so there
-  // is no worker port to call back to. With a static built-in-only allowlist
-  // and no MCP server requested, the resolver returns `mcpServers: {}` and
-  // `allowedTools: SLACK_ALLOW_TOOLS`; both are forwarded to the SDK below.
+  // is no worker port to call back to. The `slack` dispatch profile pins the
+  // static built-in-only allowlist; with no MCP server requested the resolver
+  // returns `mcpServers: {}` and forwards the allowlist to the SDK below.
   // Forwarding the resolver's empty `mcpServers` (instead of letting the SDK
-  // pick its own default) and OMITTING `settingSources` together mean the
-  // danxbot repo's own `.mcp.json` is NOT auto-loaded — that path used to
-  // spawn the trello MCP server's `npx` process on every Slack message
-  // before being denied by the tight allowlist (Phase 5 of XCptaJ34).
+  // pick its own default) and OMITTING `settingSources` together mean no
+  // `.mcp.json` is auto-loaded — that path used to spawn the trello MCP
+  // server's `npx` process on every Slack message before being denied by the
+  // tight allowlist.
+  //
+  // cwd is the workspace (`<repo>/.danxbot/workspace/`), not the repo root,
+  // so Slack's Claude Code SDK sees only danxbot-owned config — the same
+  // isolation boundary every dispatched CLI agent uses (agent-isolation
+  // epic, Trello `7ha2CSpc`, Phase 5).
   const { mcpServers, allowedTools } = resolveDispatchTools({
-    allowTools: SLACK_ALLOW_TOOLS,
+    allowTools: dispatchAllowTools("slack"),
     danxbotStopUrl: null,
   });
 
   const queryOptions = {
     model,
     systemPrompt: promptText,
-    cwd: repoContext.localPath,
+    cwd: workspacePath(repoContext),
     mcpServers,
     allowedTools,
     permissionMode: "bypassPermissions" as const,

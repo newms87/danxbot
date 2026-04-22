@@ -2,6 +2,21 @@
 
 How danxbot launches a Claude Code agent for a Trello card, Slack message, or HTTP dispatch. This file is the canonical reference. `CLAUDE.md` is the overview; this doc is the spec.
 
+## Workspace isolation — the cwd contract
+
+Every dispatched agent (poller, HTTP `/api/launch`, `/api/resume`, Slack) runs with `cwd = <repo>/.danxbot/workspace/`. The workspace is a fully generated directory (`src/workspace/generate.ts`) containing:
+
+- `.mcp.json` — empty stub; combined with `--strict-mcp-config` it ensures the per-dispatch `.mcp.json` written by `dispatch()` is the ONLY MCP config claude reads
+- `CLAUDE.md` — workspace marker
+- `.claude/settings.json` — `{"env": {"DANXBOT_WORKER_PORT": "<port>"}}`, used by MCP child processes
+- `.claude/rules/` + `.claude/skills/` + `.claude/tools/` + `.claude/agents/` — populated by `src/poller/index.ts#syncRepoFiles` on every poll tick (idempotent writes of every `danx-*` artifact from `.danxbot/config/` + `src/poller/inject/`)
+
+The **repo-root `.claude/`** is strictly developer territory. Danxbot never reads OR writes there. A test in `src/poller/index.test.ts` asserts zero writes outside `<repo>/.danxbot/workspace/.claude/` — reintroducing any repo-root write breaks the isolation boundary and fails CI.
+
+`DANXBOT_WORKER_PORT` lives in `<repo>/.danxbot/.env` (local dev) or `process.env` (production compose injection). `src/repo-context.ts#readWorkerPort` enforces this chain; it no longer reads `<repo>/.claude/settings.local.json`.
+
+See the agent-isolation epic (Trello `7ha2CSpc`) for the full 5-phase design.
+
 ## External Entry — Dashboard → Worker Proxy
 
 Workers bind only on `danxbot-net` and are not reachable from the public internet. Caddy reverse-proxies `localhost:<dashboard_port>` on port 443, so every external request hits the dashboard first. To give external dispatchers (e.g. the Laravel GPT-Manager app) a way to launch agents, the dashboard exposes an auth-gated proxy that forwards to the matching worker container.
@@ -189,7 +204,7 @@ worker restart.
 
 ## Runtime Modes At A Glance
 
-- **Worker mode** (`DANXBOT_REPO_NAME` set): one process per repo. Starts dispatch API (`/api/launch`, `/api/cancel`, `/api/stop`, `/api/status`), Slack listener (if configured), and poller (only if `DANX_TRELLO_ENABLED=true` in the repo's `.danxbot/.env`). Worker port is sourced from the repo's `.claude/settings.local.json` `env.DANXBOT_WORKER_PORT`. Spawned via `make launch-worker REPO=<name>` (docker) or `make launch-worker-host REPO=<name>` (host).
+- **Worker mode** (`DANXBOT_REPO_NAME` set): one process per repo. Starts dispatch API (`/api/launch`, `/api/cancel`, `/api/stop`, `/api/status`), Slack listener (if configured), and poller (only if `DANX_TRELLO_ENABLED=true` in the repo's `.danxbot/.env`). Worker port is sourced from `DANXBOT_WORKER_PORT` in `<repo>/.danxbot/.env` (local dev) or `process.env.DANXBOT_WORKER_PORT` injected by compose from `.danxbot/deployments/<target>.yml` (production). Spawned via `make launch-worker REPO=<name>` (docker) or `make launch-worker-host REPO=<name>` (host).
 - **Dashboard mode** (`DANXBOT_REPO_NAME` unset): one shared process. Runs migrations, dashboard HTTP server, SSE stream, analytics. No poller, no Slack, no claude spawning.
 
 Dashboard mode never dispatches agents. Only worker mode spawns claude.

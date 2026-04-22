@@ -58,10 +58,11 @@ Danxbot manages multiple repos from one server. Each repo has independent state 
 | Path | Purpose | Committed? |
 |---|---|---|
 | `<repo>/.danxbot/config/` | `config.yml`, `trello.yml`, `compose.yml`, `overview.md`, `workflow.md`, `tools.md`, `docs/` | yes |
-| `<repo>/.danxbot/.env` | Secrets + per-repo toggles (`DANX_*` prefix) | gitignored |
-| `<repo>/.claude/settings.local.json` | MCP env vars + `DANXBOT_WORKER_PORT` (Claude Code does not load `.env` for MCP) | gitignored |
+| `<repo>/.danxbot/.env` | Secrets + per-repo toggles (`DANX_*` prefix) + `DANXBOT_WORKER_PORT` | gitignored |
+| `<repo>/.danxbot/workspace/` | Generated dispatch cwd — danxbot-owned `.mcp.json`, `CLAUDE.md`, `.claude/` subtree | gitignored |
+| `<repo>/.claude/` | **Developer territory only** — danxbot never reads or writes here | dev-maintained |
 
-`<repo>/.danxbot/.env` standardized vars: `DANX_TRELLO_ENABLED` (default `false` — explicit opt-in), `DANX_SLACK_BOT_TOKEN`, `DANX_SLACK_APP_TOKEN`, `DANX_SLACK_CHANNEL_ID`, `DANX_DB_HOST/USER/PASSWORD/NAME`, `DANX_GITHUB_TOKEN`, `DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`.
+`<repo>/.danxbot/.env` standardized vars: `DANX_TRELLO_ENABLED` (default `false` — explicit opt-in), `DANX_SLACK_BOT_TOKEN`, `DANX_SLACK_APP_TOKEN`, `DANX_SLACK_CHANNEL_ID`, `DANX_DB_HOST/USER/PASSWORD/NAME`, `DANX_GITHUB_TOKEN`, `DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`, `DANXBOT_WORKER_PORT`.
 
 Danxbot's own root `.env` keeps only shared infrastructure: `ANTHROPIC_API_KEY`, `CLAUDE_AUTH_MODE`, `REPOS`, `DANXBOT_DB_*`, `DASHBOARD_PORT`, `DANXBOT_GIT_EMAIL`.
 
@@ -69,7 +70,7 @@ Connected repos live at `repos/<name>/` (symlinks to actual working copies). The
 
 ### Agent Tools
 
-Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller syncs it to the repo's `.claude/rules/tools.md`, which the Claude Code SDK auto-loads via `settingSources: ["project"]`. Tool definitions stay repo-specific; danxbot's system prompts reference them generically without hardcoding paths.
+Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller syncs it to `<repo>/.danxbot/workspace/.claude/rules/danx-tools.md`, which the Claude Code SDK auto-loads via `settingSources: ["project"]` because every dispatched agent's cwd is the workspace. Tool definitions stay repo-specific; danxbot's system prompts reference them generically without hardcoding paths.
 
 ### Per-Repo Feature Toggles
 

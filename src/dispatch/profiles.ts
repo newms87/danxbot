@@ -78,12 +78,37 @@ const POLLER_ALLOW_TOOLS = Object.freeze([
 ] as const);
 
 /**
+ * Hardcoded tool allowlist for the Slack `runAgent` in-process SDK
+ * dispatch. Slack runs the Claude Code SDK `query()` in-process to keep
+ * latency low — never spawns the CLI. The allowlist is therefore static
+ * (no per-message tool selection) and limited to read-only built-ins
+ * needed to answer a codebase question:
+ *
+ *   - Read / Glob / Grep — explore source files
+ *   - Bash — read-only inspection (`ls`, `cat`, `git log`); the system
+ *     prompt instructs the agent to avoid mutating commands
+ *
+ * Notably absent:
+ *   - Edit / Write — Slack agents never modify the codebase
+ *   - mcp__trello__* / mcp__schema__* — no MCP servers spawn for Slack
+ *   - mcp__danxbot__danxbot_complete — Slack uses the SDK iterator's
+ *     `result` message as the completion signal (`danxbotStopUrl: null`
+ *     in `src/agent/agent.ts`).
+ */
+const SLACK_ALLOW_TOOLS = Object.freeze([
+  "Read",
+  "Glob",
+  "Grep",
+  "Bash",
+] as const);
+
+/**
  * Names of every built-in dispatch profile. Additions require a
  * corresponding entry in `DISPATCH_PROFILES` below — the `satisfies`
  * clause enforces exhaustiveness at compile time, so forgetting either
  * side is a `tsc --noEmit` error.
  */
-export type DispatchProfileName = "poller" | "http-launch";
+export type DispatchProfileName = "poller" | "http-launch" | "slack";
 
 export interface DispatchProfile {
   /**
@@ -119,6 +144,9 @@ const DISPATCH_PROFILES_RAW = {
     // callers inherit the new entries automatically without a callsite
     // change. Frozen for symmetry with `POLLER_ALLOW_TOOLS`.
     allowTools: Object.freeze([] as readonly string[]),
+  },
+  slack: {
+    allowTools: SLACK_ALLOW_TOOLS,
   },
 } as const satisfies Record<DispatchProfileName, DispatchProfile>;
 

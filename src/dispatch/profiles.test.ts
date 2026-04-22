@@ -10,10 +10,11 @@ import {
 
 describe("dispatch profiles", () => {
   describe("registry", () => {
-    it("exposes the two canonical profile names", () => {
+    it("exposes the three canonical profile names", () => {
       expect(Object.keys(DISPATCH_PROFILES).sort()).toEqual([
         "http-launch",
         "poller",
+        "slack",
       ]);
     });
 
@@ -70,6 +71,30 @@ describe("dispatch profiles", () => {
       // Every HTTP dispatch supplies its own tool surface via the body.
       // The profile names the baseline; it does not grant tools by default.
       expect(DISPATCH_PROFILES["http-launch"].allowTools).toEqual([]);
+    });
+  });
+
+  describe("slack profile", () => {
+    it("is exactly the read-only built-ins (Read/Glob/Grep/Bash)", () => {
+      // Slack in-process SDK dispatch — the agent answers codebase
+      // questions without mutating, and no MCP servers spawn.
+      expect(DISPATCH_PROFILES.slack.allowTools).toEqual([
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+      ]);
+    });
+
+    it("does NOT include Edit, Write, or any mcp__* entry", () => {
+      // Mutating tools are forbidden for Slack; MCP servers would spawn
+      // npx subprocesses on every Slack message.
+      const tools = DISPATCH_PROFILES.slack.allowTools;
+      expect(tools).not.toContain("Edit");
+      expect(tools).not.toContain("Write");
+      for (const t of tools) {
+        expect(t.startsWith("mcp__")).toBe(false);
+      }
     });
   });
 

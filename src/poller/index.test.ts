@@ -319,17 +319,13 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("syncRepoFiles dual-writes every danx-* artifact to BOTH repo-root and workspace (Phase 3 of agent-isolation epic)", async () => {
-    // The inject pipeline must mirror every rule/skill/tool write into
-    // `<repo>/.danxbot/workspace/.claude/` alongside `<repo>/.claude/`
-    // so dispatched agents — which cwd into the workspace — see the
-    // same injected content an interactive `claude` at the repo root
-    // does. Phase 5 deletes the repo-root half; until then dual-write
-    // is load-bearing. See Trello `7ha2CSpc`.
+  it("syncRepoFiles writes every danx-* artifact ONLY into the workspace (Phase 5 of agent-isolation epic)", async () => {
+    // The inject pipeline writes EXCLUSIVELY into
+    // `<repo>/.danxbot/workspace/.claude/`. The repo-root `.claude/` is
+    // strictly developer-owned — danxbot never touches it. Every
+    // dispatched agent cwds into the workspace so no content is lost.
+    // See Trello `7ha2CSpc` (Phase 5).
     mockFetchTodoCards.mockResolvedValue([]);
-    // Return "exists" for inject dirs so the pipeline actually walks
-    // them; the base repo-config existsSync stub in setupRepoConfigMocks
-    // only covers `.danxbot/config/*`.
     mockExistsSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return false;
       if (path.includes("inject")) return true;
@@ -358,103 +354,38 @@ describe("poll", () => {
     const copiedDests = mockCopyFileSync.mock.calls.map(
       (c: unknown[]) => c[1] as string,
     );
+    const allTouched = [...writtenPaths, ...copiedDests];
 
-    // 1. danx-repo-config.md is generated from config.yml — written to both.
-    expect(
-      writtenPaths.some((p) => p === "/test/repos/test-repo/.claude/rules/danx-repo-config.md"),
-    ).toBe(true);
-    expect(
-      writtenPaths.some(
-        (p) => p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-repo-config.md",
-      ),
-    ).toBe(true);
+    const workspaceClaudePrefix =
+      "/test/repos/test-repo/.danxbot/workspace/.claude/";
+    const repoRootClaudePrefix = "/test/repos/test-repo/.claude/";
 
-    // 2. Injected danx-* rule files are copyFileSync'd to both.
-    expect(
-      copiedDests.some((p) => p === "/test/repos/test-repo/.claude/rules/danx-halt-flag.md"),
-    ).toBe(true);
-    expect(
-      copiedDests.some(
-        (p) => p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-halt-flag.md",
-      ),
-    ).toBe(true);
+    // Every artifact lands in the workspace.
+    const expectedWorkspaceArtifacts = [
+      `${workspaceClaudePrefix}rules/danx-repo-config.md`,
+      `${workspaceClaudePrefix}rules/danx-repo-overview.md`,
+      `${workspaceClaudePrefix}rules/danx-repo-workflow.md`,
+      `${workspaceClaudePrefix}rules/danx-tools.md`,
+      `${workspaceClaudePrefix}rules/danx-halt-flag.md`,
+      `${workspaceClaudePrefix}rules/danx-trello-config.md`,
+      `${workspaceClaudePrefix}skills/danx-next/SKILL.md`,
+      `${workspaceClaudePrefix}tools/danx-helper.sh`,
+    ];
+    for (const expected of expectedWorkspaceArtifacts) {
+      expect(allTouched).toContain(expected);
+    }
 
-    // 3. Injected danx-* tools are copied to both tools/ dirs.
-    expect(
-      copiedDests.some((p) => p === "/test/repos/test-repo/.claude/tools/danx-helper.sh"),
-    ).toBe(true);
-    expect(
-      copiedDests.some(
-        (p) => p === "/test/repos/test-repo/.danxbot/workspace/.claude/tools/danx-helper.sh",
-      ),
-    ).toBe(true);
-
-    // 4. Injected skill files are copied to both skills/ dirs.
-    expect(
-      copiedDests.some(
-        (p) => p === "/test/repos/test-repo/.claude/skills/danx-next/SKILL.md",
-      ),
-    ).toBe(true);
-    expect(
-      copiedDests.some(
-        (p) => p === "/test/repos/test-repo/.danxbot/workspace/.claude/skills/danx-next/SKILL.md",
-      ),
-    ).toBe(true);
-
-    // 5. Generated danx-repo-overview.md (from overview.md) is dual-written.
-    expect(
-      writtenPaths.some(
-        (p) => p === "/test/repos/test-repo/.claude/rules/danx-repo-overview.md",
-      ),
-    ).toBe(true);
-    expect(
-      writtenPaths.some(
-        (p) =>
-          p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-repo-overview.md",
-      ),
-    ).toBe(true);
-
-    // 6. Generated danx-repo-workflow.md (from workflow.md) is dual-written.
-    expect(
-      writtenPaths.some(
-        (p) => p === "/test/repos/test-repo/.claude/rules/danx-repo-workflow.md",
-      ),
-    ).toBe(true);
-    expect(
-      writtenPaths.some(
-        (p) =>
-          p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-repo-workflow.md",
-      ),
-    ).toBe(true);
-
-    // 7. Repo-specific danx-tools.md (from tools.md) is copy-dual-written.
-    expect(
-      copiedDests.some(
-        (p) => p === "/test/repos/test-repo/.claude/rules/danx-tools.md",
-      ),
-    ).toBe(true);
-    expect(
-      copiedDests.some(
-        (p) =>
-          p === "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-tools.md",
-      ),
-    ).toBe(true);
-
-    // 8. danx-trello-config.md (written by writeTrelloConfigRule in _poll,
-    // OUTSIDE syncRepoFiles) is dual-written too — verifying the _poll-
-    // level dual-write alongside the syncRepoFiles-level one.
-    expect(
-      writtenPaths.some(
-        (p) => p === "/test/repos/test-repo/.claude/rules/danx-trello-config.md",
-      ),
-    ).toBe(true);
-    expect(
-      writtenPaths.some(
-        (p) =>
-          p ===
-          "/test/repos/test-repo/.danxbot/workspace/.claude/rules/danx-trello-config.md",
-      ),
-    ).toBe(true);
+    // Isolation invariant: NOTHING is written to the developer's
+    // repo-root `.claude/`. A single stray write breaks the whole point
+    // of the agent-isolation epic, so the assertion is a strict match on
+    // the prefix — not a "none of the generated names" list — to catch
+    // any new file types an inject step might add.
+    const repoRootClaudeTouches = allTouched.filter(
+      (p) =>
+        p.startsWith(repoRootClaudePrefix) &&
+        !p.startsWith(workspaceClaudePrefix),
+    );
+    expect(repoRootClaudeTouches).toEqual([]);
   });
 
 });

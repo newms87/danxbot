@@ -38,11 +38,11 @@ stop-infra: ## Stop shared infrastructure
 launch-worker: ## Start a worker for a repo (usage: make launch-worker REPO=platform)
 	@if [ -z "$(REPO)" ]; then echo "Error: REPO is required. Usage: make launch-worker REPO=platform"; exit 1; fi
 	@COMPOSE_FILE="$(REPOS_DIR)/$(REPO)/.danxbot/config/compose.yml"; \
-	SETTINGS_FILE="$(REPOS_DIR)/$(REPO)/.claude/settings.local.json"; \
+	REPO_ENV="$(REPOS_DIR)/$(REPO)/.danxbot/.env"; \
 	if [ ! -f "$$COMPOSE_FILE" ]; then echo "Error: $$COMPOSE_FILE not found"; exit 1; fi; \
-	if [ ! -f "$$SETTINGS_FILE" ]; then echo "Error: $$SETTINGS_FILE not found — needs env.DANXBOT_WORKER_PORT"; exit 1; fi; \
-	PORT=$$(jq -r '.env.DANXBOT_WORKER_PORT // empty' "$$SETTINGS_FILE"); \
-	if [ -z "$$PORT" ]; then echo "Error: env.DANXBOT_WORKER_PORT missing in $$SETTINGS_FILE"; exit 1; fi; \
+	if [ ! -f "$$REPO_ENV" ]; then echo "Error: $$REPO_ENV not found — needs DANXBOT_WORKER_PORT"; exit 1; fi; \
+	PORT=$$(grep -E '^DANXBOT_WORKER_PORT=' "$$REPO_ENV" | tail -n1 | cut -d= -f2-); \
+	if [ -z "$$PORT" ]; then echo "Error: DANXBOT_WORKER_PORT missing in $$REPO_ENV"; exit 1; fi; \
 	export DANXBOT_WORKER_PORT="$$PORT"; \
 	docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$(REPO)" up -d
 
@@ -118,13 +118,9 @@ validate-repos: ## Check host prerequisites for all connected repos before launc
 launch-worker-host: ## Start a worker on the host (usage: make launch-worker-host REPO=platform)
 	@if [ -z "$(REPO)" ]; then echo "Error: REPO is required"; exit 1; fi
 	@REPO_ENV="$(REPOS_DIR)/$(REPO)/.danxbot/.env"; \
-	SETTINGS_FILE="$(REPOS_DIR)/$(REPO)/.claude/settings.local.json"; \
-	if [ ! -f "$$REPO_ENV" ]; then echo "Error: $$REPO_ENV not found"; exit 1; fi; \
-	if [ ! -f "$$SETTINGS_FILE" ]; then echo "Error: $$SETTINGS_FILE not found — needs env.DANXBOT_WORKER_PORT"; exit 1; fi; \
-	PORT=$$(jq -r '.env.DANXBOT_WORKER_PORT // empty' "$$SETTINGS_FILE"); \
-	if [ -z "$$PORT" ]; then echo "Error: env.DANXBOT_WORKER_PORT missing in $$SETTINGS_FILE"; exit 1; fi; \
+	if [ ! -f "$$REPO_ENV" ]; then echo "Error: $$REPO_ENV not found — needs DANXBOT_WORKER_PORT"; exit 1; fi; \
 	set -a && . ./.env && . "$$REPO_ENV" && set +a; \
-	export DANXBOT_WORKER_PORT="$$PORT"; \
+	if [ -z "$$DANXBOT_WORKER_PORT" ]; then echo "Error: DANXBOT_WORKER_PORT missing in $$REPO_ENV"; exit 1; fi; \
 	DANXBOT_REPO_NAME=$(REPO) npx tsx src/index.ts
 
 launch-dashboard-host: ## Start the dashboard on the host

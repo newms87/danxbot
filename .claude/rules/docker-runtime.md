@@ -111,21 +111,17 @@ The repo uses **direnv** for this:
 
 One-time dev setup: `sudo apt-get install -y direnv` + `echo 'eval "$(direnv hook bash)"' >> ~/.bashrc` + `direnv allow` once in the repo. Every `cd` into the repo after that auto-exports `.env.local` into the shell — bare `claude` Just Works.
 
-### `.claude/settings.local.json` — Worker Port Only
+### `.claude/settings.local.json` — Developer-Only
 
-`<repo>/.claude/settings.local.json` holds `DANXBOT_WORKER_PORT` (extracted via `jq` by `make launch-worker` / `make launch-worker-host` before starting the worker). **Do NOT put MCP env vars here** — they're silently ignored by Claude Code's MCP subprocess spawn.
-
-```json
-{
-  "env": {
-    "DANXBOT_WORKER_PORT": "5562"
-  }
-}
-```
+`<repo>/.claude/settings.local.json` is STRICTLY the developer's file (permissions, personal allowlists, local MCP toggles for their interactive `claude`). Danxbot does NOT read or write it. The worker port lives in `<repo>/.danxbot/.env` (`DANXBOT_WORKER_PORT=<port>`) alongside the rest of the bot-owned per-repo env; production gets it via `process.env.DANXBOT_WORKER_PORT` injected by compose from `.danxbot/deployments/<target>.yml`.
 
 ### Strict isolation from danxbot
 
 Use case #1's `.env.local` governs the DEVELOPER's interactive `claude` only. Danxbot-dispatched agents (poller, `/api/launch`, Slack) do NOT read it — they use their own per-dispatch MCP config and env from `<repo>/.danxbot/.env` delivered to the worker container via `env_file: ../.env` in `<repo>/.danxbot/config/compose.yml`. Zero overlap between dev env and bot env — by design. Dev creds and bot creds can (and usually should) differ.
+
+### The workspace: dispatched-agent cwd
+
+Every dispatched agent (poller, HTTP `/api/launch`, Slack) runs with `cwd = <repo>/.danxbot/workspace/`. The workspace is a fully generated directory (`src/workspace/generate.ts`) containing danxbot-owned `.mcp.json`, `CLAUDE.md`, `.claude/settings.json`, and a `.claude/` subtree populated by the poller inject pipeline (`src/poller/index.ts#syncRepoFiles`) — rules, skills, tools, agents. This is the ONE path through which danxbot hands configuration to its dispatched claude processes. The repo-root `.claude/` is strictly developer-owned; the inject pipeline NEVER writes there. See agent-isolation epic `7ha2CSpc`, Phase 5.
 
 ## Per-Repo Trello Toggle
 

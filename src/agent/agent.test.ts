@@ -498,7 +498,7 @@ describe("runAgent", () => {
     expect(result.sessionId).toBe("sess-4");
   });
 
-  it("sets cwd to repo path, omits settingSources, passes empty mcpServers, and allowlist=SLACK_ALLOW_TOOLS exactly", async () => {
+  it("sets cwd to the workspace, omits settingSources, passes empty mcpServers, and allowlist=slack profile", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
         { type: "system", subtype: "init", session_id: "sess-cwd" },
@@ -517,18 +517,24 @@ describe("runAgent", () => {
     await runAgent(MOCK_REPO_CONTEXT, "test", null);
 
     const callArgs = mockQuery.mock.calls[0][0];
-    expect(callArgs.options.cwd).toBe("/test/repos/test-repo");
-    // settingSources is intentionally absent — its presence (Phase 5 regression)
-    // would auto-load the danxbot repo's .mcp.json and spawn the trello MCP
-    // server's npx process on every Slack message before the tight allowlist
-    // denies it. Asserting "in" is the precise check; the SDK default IS to
-    // omit it, but tests must catch any future code that adds it back.
+    // cwd is the workspace (`<repo>/.danxbot/workspace/`), not the repo
+    // root — danxbot-owned isolation boundary every dispatched agent uses
+    // (agent-isolation epic, Trello `7ha2CSpc`, Phase 5). Using the repo
+    // root would expose the developer's own `.mcp.json` + `.claude/`.
+    expect(callArgs.options.cwd).toBe(
+      "/test/repos/test-repo/.danxbot/workspace",
+    );
+    // settingSources is intentionally absent — its presence would
+    // auto-load the workspace's `.mcp.json` stub through project scope.
+    // Asserting "in" is the precise check; the SDK default IS to omit
+    // it, but tests must catch any future code that adds it back.
     expect(callArgs.options).not.toHaveProperty("settingSources");
     // Empty MCP server map is passed explicitly so we don't rely on the SDK
     // default — protects against the SDK changing its default-on-omission.
     expect(callArgs.options.mcpServers).toEqual({});
-    // allowlist is exactly the 4 read-only built-ins from SLACK_ALLOW_TOOLS,
-    // with no danxbot_complete suffix (Slack uses the iterator's `result`
+    // allowlist is exactly the 4 read-only built-ins from the `slack`
+    // dispatch profile (`src/dispatch/profiles.ts`), with no
+    // `danxbot_complete` suffix (Slack uses the iterator's `result`
     // message as completion, no worker callback).
     expect(callArgs.options.allowedTools).toEqual([
       "Read",
@@ -536,9 +542,7 @@ describe("runAgent", () => {
       "Grep",
       "Bash",
     ]);
-    // No legacy `tools` field (the previous queryOptions duplicated the
-    // allowlist into both `tools` and `allowedTools`; Phase 5 collapses to
-    // the single SDK-recognized field).
+    // No legacy `tools` field.
     expect(callArgs.options).not.toHaveProperty("tools");
   });
 
@@ -770,7 +774,7 @@ describe("runAgent with complexity", () => {
   });
 
   it.each(["very_low", "low", "medium", "high", "very_high"] as const)(
-    "threads mcpServers={} + allowedTools=SLACK_ALLOW_TOOLS through every complexity profile (%s)",
+    "threads mcpServers={} + allowedTools=the slack dispatch profile through every complexity profile (%s)",
     async (complexity) => {
       mockQuery.mockReturnValueOnce(
         asyncIter([
@@ -801,7 +805,7 @@ describe("runAgent with complexity", () => {
     },
   );
 
-  it("threads mcpServers={} + allowedTools=SLACK_ALLOW_TOOLS through the resume path (sessionId !== null)", async () => {
+  it("threads mcpServers={} + allowedTools=the slack dispatch profile through the resume path (sessionId !== null)", async () => {
     // Resume historically diverges from fresh launches — the SDK gets `resume`
     // set, and the prompt collapses to bare messageText. The tool surface
     // must still match — claude validates allowedTools on every turn.
