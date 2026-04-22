@@ -193,7 +193,7 @@ describe("handleLaunch", () => {
 
     expect(res._getStatusCode()).toBe(400);
     expect(JSON.parse(res._getBody())).toEqual({
-      error: "Missing required fields: task, api_token",
+      error: "Missing or blank required fields: task, api_token",
     });
   });
 
@@ -205,7 +205,7 @@ describe("handleLaunch", () => {
 
     expect(res._getStatusCode()).toBe(400);
     expect(JSON.parse(res._getBody())).toEqual({
-      error: "Missing required fields: task, api_token",
+      error: "Missing or blank required fields: task, api_token",
     });
   });
 
@@ -706,6 +706,109 @@ describe("handleLaunch", () => {
   });
 });
 
+// Phase 4 of the agent-isolation epic (Trello 7ha2CSpc). `/api/launch` and
+// `/api/resume` now merge the `http-launch` dispatch profile's baseline
+// allowlist with the caller's `body.allow_tools`. The baseline is empty
+// today so the merge is structurally a no-op for http callers, but the
+// plumbing is exercised here so a future baseline change flows through
+// without rework — and so the two Phase 4 acceptance criteria (profile-
+// flag-always-present, danxbot-only-by-default + trello-opt-in-via-body)
+// are pinned by assertions.
+describe("handleLaunch — profile merge (Phase 4)", () => {
+  it("produces a danxbot-only allowlist when body.allow_tools is empty (Phase 4 AC: danxbot-only by default)", async () => {
+    const mockJob = {
+      id: "job-default",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Do work",
+      api_token: "tok-123",
+      allow_tools: [],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    // Only infrastructure — `mcp__danxbot__danxbot_complete` — reaches claude.
+    // Trello, schema, and every other MCP server stay inert until the caller
+    // opts in via body.allow_tools.
+    expect(spawnOpts.allowedTools).toEqual([
+      "mcp__danxbot__danxbot_complete",
+    ]);
+    const settings = mockSettingsRead(spawnOpts);
+    expect(Object.keys(settings.mcpServers).sort()).toEqual(["danxbot"]);
+  });
+
+  it("activates mcp__trello__* when the body opts in (Phase 4 AC: trello opt-in via body works)", async () => {
+    const mockJob = {
+      id: "job-trello-optin",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Move a card",
+      api_token: "tok-123",
+      allow_tools: ["mcp__trello__*"],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    // Resolver expands the wildcard via the registry; assert the presence of
+    // at least one concrete trello tool + the infra completion tool — without
+    // enumerating the registry (that belongs in the resolver tests).
+    expect(spawnOpts.allowedTools).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^mcp__trello__/),
+        "mcp__danxbot__danxbot_complete",
+      ]),
+    );
+    const settings = mockSettingsRead(spawnOpts);
+    expect(Object.keys(settings.mcpServers).sort()).toEqual([
+      "danxbot",
+      "trello",
+    ]);
+  });
+
+  it("forwards body.allow_tools entries in declared order (http-launch baseline is empty today)", async () => {
+    const mockJob = {
+      id: "job-builtin-merge",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Read some files",
+      api_token: "tok-123",
+      allow_tools: ["Read", "Grep"],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    // The empty http-launch baseline means the effective allowlist is just
+    // [built-ins..., danxbot_complete]. Built-ins appear in body-declared
+    // order (resolver contract) and the infra tool lands as a stable suffix.
+    expect(spawnOpts.allowedTools).toEqual([
+      "Read",
+      "Grep",
+      "mcp__danxbot__danxbot_complete",
+    ]);
+  });
+});
+
 describe("handleLaunch — dispatchApi feature toggle", () => {
   it("returns 503 with the documented body when dispatchApi is disabled", async () => {
     mockIsFeatureEnabled.mockImplementation(
@@ -797,7 +900,7 @@ describe("handleResume", () => {
 
     expect(res._getStatusCode()).toBe(400);
     expect(JSON.parse(res._getBody())).toEqual({
-      error: "Missing required fields: job_id, task, api_token",
+      error: "Missing or blank required fields: job_id, task, api_token",
     });
     expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
   });
@@ -1101,6 +1204,81 @@ describe("handleResume", () => {
     const body = JSON.parse(res._getBody());
     expect(body.error).toContain("schema");
     expect(body.error).toContain("timeout");
+  });
+
+  it("produces a danxbot-only allowlist when body.allow_tools is empty on resume (Phase 4 symmetry)", async () => {
+    // Resume-side mirror of the "danxbot-only by default" launch test.
+    // If a regression ever skipped the profile merge on resume but kept
+    // the trello-opt-in path working, the existing resume-trello test
+    // would still pass — only a default-case assertion catches it.
+    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
+      "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
+    );
+    const mockJob = {
+      id: "job-resume-default",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Continue with no extra tools",
+      api_token: "tok-123",
+      allow_tools: [],
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    expect(spawnOpts.allowedTools).toEqual([
+      "mcp__danxbot__danxbot_complete",
+    ]);
+  });
+
+  it("applies the same http-launch profile merge as handleLaunch (Phase 4)", async () => {
+    // Symmetry guard: resume must route `body.allow_tools` through the
+    // same `mergeProfileWithBody(http-launch, ...)` pipeline as launch
+    // so a resumed dispatch inherits the caller's requested tool surface
+    // without drift. Mirror of the handleLaunch trello-opt-in test.
+    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
+      "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
+    );
+    const mockJob = {
+      id: "job-resume-trello",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Continue trello work",
+      api_token: "tok-123",
+      allow_tools: ["Read", "mcp__trello__*"],
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    expect(spawnOpts.allowedTools).toEqual(
+      expect.arrayContaining([
+        "Read",
+        expect.stringMatching(/^mcp__trello__/),
+        "mcp__danxbot__danxbot_complete",
+      ]),
+    );
+    const settings = mockSettingsRead(spawnOpts);
+    expect(Object.keys(settings.mcpServers).sort()).toEqual([
+      "danxbot",
+      "trello",
+    ]);
   });
 });
 

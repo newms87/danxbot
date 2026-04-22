@@ -18,7 +18,7 @@ import {
   TEAM_PROMPT,
   IDEATOR_PROMPT,
 } from "./constants.js";
-import { resolveProfile } from "../dispatch/profiles.js";
+import { dispatchAllowTools } from "../dispatch/profiles.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
 import { generateWorkspace, workspacePath } from "../workspace/generate.js";
@@ -724,15 +724,17 @@ function spawnClaude(
   // the agent is spawned (NOT when it completes). The poller already
   // hands completion handling to `onComplete`, so awaiting here would
   // only serialize the initial spawn with... nothing.
-  // The `poller` dispatch profile names the tool surface — see
-  // `src/dispatch/profiles.ts`. `resolveProfile` throws fail-loud on a
-  // typo'd profile name, so stale string literals from a future
-  // refactor surface at startup rather than at dispatch time.
-  const pollerProfile = resolveProfile("poller");
+  // `dispatchAllowTools` is the ONE entry point every dispatch consumer
+  // goes through — resolves the named profile (fail-loud on typo'd literal)
+  // and merges overrides. The poller has no per-tick overrides today, so
+  // it passes nothing; HTTP launch passes `body.allow_tools`; Phase 5 Slack
+  // will also pass nothing. Identical call shape across consumers. See
+  // `src/dispatch/profiles.ts` and the agent-isolation epic (Trello
+  // `7ha2CSpc`).
   dispatch({
     repo,
     task: prompt,
-    allowTools: pollerProfile.allowTools,
+    allowTools: dispatchAllowTools("poller"),
     timeoutMs: config.pollerIntervalMs * 60,
     apiDispatchMeta,
     onComplete: (job) => {

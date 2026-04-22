@@ -1193,22 +1193,27 @@ describe("poll — Docker mode (headless agent)", () => {
     );
   });
 
-  it("hands the poller profile's exact allowTools reference to dispatch()", async () => {
-    // Phase 2 invariant: the registry in `src/dispatch/profiles.ts` is the
-    // SINGLE source of truth for the poller's tool surface. This test
-    // asserts reference identity (not just content equality) so a future
-    // refactor that spreads / clones the array would break this test and
-    // force the author to confront the single-source-of-truth contract.
-    // A content-equality check would pass through a silent clone.
+  it("routes the poller allowlist through dispatchAllowTools('poller')", async () => {
+    // Phase 4 invariant: every dispatch consumer (poller, HTTP handler,
+    // Phase 5 Slack) goes through the ONE entry point `dispatchAllowTools`.
+    // Content equality against `dispatchAllowTools("poller")` pins two
+    // things at once: (1) the poller's tool surface matches the helper's
+    // output, and (2) the registry is the single source of truth for
+    // that surface — because `dispatchAllowTools` has nowhere else to get
+    // it from (see `src/dispatch/profiles.ts`). Pre-refactor this test
+    // asserted reference identity to prevent silent clones; post-refactor
+    // the dedupe pipeline intentionally produces a new array, and silent
+    // clones are no longer possible — the only path to the allowlist is
+    // through the helper.
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     const call = mockDispatch.mock.calls[0][0];
-    // Load the real profile (not mocked) — profiles.ts has no config
-    // chain so this is safe to import in this test file.
-    const { resolveProfile } = await import("../dispatch/profiles.js");
-    expect(call.allowTools).toBe(resolveProfile("poller").allowTools);
+    // Load the real helper (not mocked) — profiles.ts has no config chain
+    // so this is safe to import in this test file.
+    const { dispatchAllowTools } = await import("../dispatch/profiles.js");
+    expect(call.allowTools).toEqual(dispatchAllowTools("poller"));
   });
 
   it("tags the dispatch with trigger=trello + the tracked card metadata", async () => {

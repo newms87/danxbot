@@ -19,11 +19,22 @@
  * `POLLER_ALLOW_TOOLS` anymore — callers that used to import it now
  * reach `DISPATCH_PROFILES.poller.allowTools` here.
  *
- * `/api/launch` continues to accept a body-level `allow_tools` during
- * the Phase 2→Phase 4 transition (Phase 4 formalizes the override
- * shape). The HTTP-launch profile starts empty by design: the request
- * body is the authoritative source for HTTP dispatch surfaces, and the
- * profile exists to name the baseline.
+ * Every dispatcher (Trello poller, HTTP `/api/launch` + `/api/resume`,
+ * Phase 5 Slack) derives its final allowlist via `dispatchAllowTools`,
+ * the single entry point exported below. Callers never import
+ * `resolveProfile` + `mergeProfileWithBody` directly in production —
+ * that path exists only for the helper's own tests. Routing every
+ * consumer through one function eliminates the drift risk of
+ * reinlining the "resolve profile, merge overrides" sequence at each
+ * callsite.
+ *
+ * `/api/launch` and `/api/resume` accept a body-level `allow_tools`
+ * that is merged with the `http-launch` profile baseline via
+ * `dispatchAllowTools("http-launch", body.allow_tools)`. There is no
+ * separate "override shape" — the body field IS the override. The
+ * `http-launch` baseline is empty today, so effective callers own
+ * their full surface; a future baseline addition propagates through
+ * the helper without any callsite changes.
  *
  * `--strict-mcp-config` is applied at the spawn layer
  * (`src/agent/claude-invocation.ts`), not here. Profiles are about the
@@ -75,8 +86,6 @@ const POLLER_ALLOW_TOOLS = Object.freeze([
 export type DispatchProfileName = "poller" | "http-launch";
 
 export interface DispatchProfile {
-  /** Profile name. Matches the `DispatchProfileName` union. */
-  readonly name: DispatchProfileName;
   /**
    * Baseline tool allowlist handed to `resolveDispatchTools`. Each
    * entry is a built-in name (`Read`, `Bash`) or an MCP tool spec
@@ -89,9 +98,9 @@ export interface DispatchProfile {
 
 /**
  * Authoritative profile registry. Order within `allowTools` is
- * significant: `resolveDispatchTools` preserves caller-declared order
- * when emitting the final `--allowed-tools` CSV, so pollers get Read
- * first / mcp__trello__* last, matching the pre-Phase-2 behavior.
+ * significant: `resolveDispatchTools` emits `--allowed-tools` entries
+ * in registry order, so changing the order changes the CSV claude
+ * sees. For the poller this means Read first, mcp__trello__* last.
  *
  * `as const` + `satisfies` gives readonly inference + exhaustiveness
  * without runtime casts. Object.freeze on the outer object is still
@@ -99,17 +108,17 @@ export interface DispatchProfile {
  */
 const DISPATCH_PROFILES_RAW = {
   poller: {
-    name: "poller",
     allowTools: POLLER_ALLOW_TOOLS,
   },
   "http-launch": {
-    name: "http-launch",
-    // Empty baseline — every HTTP dispatch supplies its own tool surface
-    // via the request body today. Phase 4 will introduce the explicit
-    // override shape; until then, the effective allowlist is
-    // `[...profile.allowTools, ...body.allow_tools]` computed at the
-    // worker boundary.
-    allowTools: [] as readonly string[],
+    // Empty baseline by design: every HTTP dispatch supplies its own
+    // tool surface via `body.allow_tools`. The effective allowlist
+    // equals `dispatchAllowTools("http-launch", body.allow_tools)` —
+    // profile entries first, body entries second, deduped by first
+    // appearance. When the baseline changes in the future, HTTP
+    // callers inherit the new entries automatically without a callsite
+    // change. Frozen for symmetry with `POLLER_ALLOW_TOOLS`.
+    allowTools: Object.freeze([] as readonly string[]),
   },
 } as const satisfies Record<DispatchProfileName, DispatchProfile>;
 
@@ -134,4 +143,69 @@ export function resolveProfile(name: DispatchProfileName): DispatchProfile {
     );
   }
   return profile;
+}
+
+/**
+ * Merge a profile's baseline allowlist with caller-supplied override entries
+ * into a single, order-preserving, deduplicated array. Profile entries come
+ * first; overrides are appended; first appearance wins on dedupe.
+ *
+ * The helper is total: empty profile → returns the (deduped) overrides; empty
+ * overrides → returns the (deduped) profile; both empty → empty array. Inputs
+ * are not mutated. Callers never need to pre-dedupe.
+ *
+ * Prefer `dispatchAllowTools(profileName, overrides)` at call sites — it
+ * resolves the profile by name AND applies this merge in one step. This
+ * helper is exported for direct use by tests that want to exercise merge
+ * semantics against synthetic profiles without going through the registry.
+ *
+ * Note that MCP server activation is driven by `mcp__<server>__*` entries
+ * appearing ANYWHERE in the merged list (profile or overrides) — the
+ * resolver looks them up against the registry. There is intentionally no
+ * separate `mcpOptIn` field on `DispatchProfile`: the allowlist is the
+ * single source of truth for both "what tools claude exposes" and "which
+ * servers the per-dispatch `.mcp.json` contains."
+ */
+export function mergeProfileWithBody(
+  profile: DispatchProfile,
+  overrideAllowTools: readonly string[],
+): readonly string[] {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of profile.allowTools) {
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    merged.push(entry);
+  }
+  for (const entry of overrideAllowTools) {
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+/**
+ * The one entry point every dispatcher calls to derive its final allowlist.
+ * Resolves the named profile from the registry (fail-loud on typos) and
+ * merges the caller's override entries via `mergeProfileWithBody`.
+ *
+ * Every consumer — the Trello poller (`src/poller/index.ts`), the HTTP
+ * launch/resume handlers (`src/worker/dispatch.ts`), and the Phase 5 Slack
+ * path (`src/agent/agent.ts`) — funnels through this function. Callers
+ * never import `resolveProfile` + `mergeProfileWithBody` directly except
+ * this helper's own tests; routing any new consumer through a different
+ * shape would re-introduce the drift risk this helper was built to
+ * eliminate. The poller has no overrides today and passes nothing; the
+ * HTTP handler passes the validated `body.allow_tools`; Phase 5 Slack
+ * will pass its profile's existing baseline (zero overrides — same shape
+ * as the poller).
+ *
+ * Part of the agent-isolation epic (Trello `7ha2CSpc`), Phase 4.
+ */
+export function dispatchAllowTools(
+  profileName: DispatchProfileName,
+  overrideAllowTools: readonly string[] = [],
+): readonly string[] {
+  return mergeProfileWithBody(resolveProfile(profileName), overrideAllowTools);
 }

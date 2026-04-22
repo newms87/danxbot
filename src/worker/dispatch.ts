@@ -10,6 +10,7 @@ import {
 } from "../agent/launcher.js";
 import { McpResolveError } from "../agent/mcp-types.js";
 import { dispatch, getActiveJob } from "../dispatch/core.js";
+import { dispatchAllowTools } from "../dispatch/profiles.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
@@ -113,11 +114,25 @@ export async function resolveParentSessionId(
  * Caller-supplied fields land in handleLaunch/handleResume as `unknown` and
  * must be type-checked before we trust them downstream — relying on
  * `if (!value)` truthiness lets `task: 123` or `task: "   "` through.
+ *
+ * Returns null on both "missing" and "present but blank" — the caller maps
+ * that to the 400 message below, which distinguishes the two cases in prose
+ * so an operator sending `task: "   "` doesn't read "Missing" and assume
+ * the field was dropped in transit.
  */
 function requireString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? value : null;
+}
+
+/**
+ * Type guard: narrows `unknown` to `string[]` when every entry is a string.
+ * Used by `validateAllowToolsBody` so the downstream `DispatchInput.allowTools`
+ * lands without an `as string[]` cast — the narrowing here is proof.
+ */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((e) => typeof e === "string");
 }
 
 /**
@@ -127,13 +142,61 @@ function requireString(value: unknown): string | null {
  */
 interface CommonRequestParams {
   apiToken: string;
-  allowTools: string[];
+  allowTools: readonly string[];
   agents: Record<string, Record<string, unknown>> | undefined;
   schemaDefinitionId: string | undefined;
   schemaRole: string | undefined;
   maxRuntimeMs: number | undefined;
   title: string | undefined;
   task: string;
+}
+
+/**
+ * Validate the `allow_tools` body field. Returns the narrowed `string[]` on
+ * success, or null after writing the appropriate 400 to `res`. Enforces
+ * deny-by-default at the API boundary: the field is required and must be an
+ * array of strings.
+ */
+function validateAllowToolsBody(
+  raw: unknown,
+  res: ServerResponse,
+): string[] | null {
+  if (raw === undefined || raw === null) {
+    json(res, 400, { error: "Missing required field: allow_tools" });
+    return null;
+  }
+  if (!Array.isArray(raw)) {
+    json(res, 400, {
+      error: "allow_tools must be an array of tool name strings",
+    });
+    return null;
+  }
+  if (!isStringArray(raw)) {
+    json(res, 400, { error: "allow_tools entries must be strings" });
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * Validate that the body's optional `repo` field matches this worker's repo.
+ * Returns true on match (or when the field is absent); writes a 400 and
+ * returns false on mismatch. Extracted from `parseCommonRequestParams` so
+ * that function stays purely about body-shape parsing rather than routing.
+ */
+function validateRepoMatch(
+  body: Record<string, unknown>,
+  res: ServerResponse,
+  repo: RepoContext,
+): boolean {
+  const requestedRepo = typeof body.repo === "string" ? body.repo : undefined;
+  if (requestedRepo && requestedRepo !== repo.name) {
+    json(res, 400, {
+      error: `This worker manages "${repo.name}", not "${requestedRepo}"`,
+    });
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -150,45 +213,34 @@ function parseCommonRequestParams(
   const task = requireString(body.task);
   const apiToken = requireString(body.api_token);
   if (!task || !apiToken) {
-    json(res, 400, { error: "Missing required fields: task, api_token" });
-    return null;
-  }
-
-  // allow_tools is required: deny-by-default is enforced at the API boundary.
-  // Missing field → 400; malformed array → 400. Unknown servers + missing
-  // env are surfaced from the resolver as McpResolveError (caught in handlers).
-  const rawAllow = body.allow_tools;
-  if (rawAllow === undefined || rawAllow === null) {
-    json(res, 400, { error: "Missing required field: allow_tools" });
-    return null;
-  }
-  if (!Array.isArray(rawAllow)) {
+    // `requireString` treats blank strings as missing — name both cases in
+    // the error so an operator who sent `task: "   "` doesn't read "Missing"
+    // and assume the field was dropped in transit.
     json(res, 400, {
-      error: "allow_tools must be an array of tool name strings",
+      error: "Missing or blank required fields: task, api_token",
     });
     return null;
   }
-  for (const entry of rawAllow) {
-    if (typeof entry !== "string") {
-      json(res, 400, {
-        error: "allow_tools entries must be strings",
-      });
-      return null;
-    }
-  }
 
-  const requestedRepo = typeof body.repo === "string" ? body.repo : undefined;
-  if (requestedRepo && requestedRepo !== repo.name) {
-    json(res, 400, {
-      error: `This worker manages "${repo.name}", not "${requestedRepo}"`,
-    });
-    return null;
-  }
+  const rawAllow = validateAllowToolsBody(body.allow_tools, res);
+  if (!rawAllow) return null;
+
+  if (!validateRepoMatch(body, res, repo)) return null;
+
+  // `dispatchAllowTools` is the ONE entry point every dispatch consumer goes
+  // through. It resolves the named profile (fail-loud on a typo'd literal)
+  // and merges the baseline with the caller's overrides. Today the
+  // `http-launch` baseline is empty so this is structurally a no-op, but the
+  // plumbing is the contract — any future baseline flows through unchanged.
+  // Identical shape to the poller callsite and to the Phase 5 Slack path.
+  // See `src/dispatch/profiles.ts` and the agent-isolation epic (Trello
+  // `7ha2CSpc`) Phase 4.
+  const allowTools = dispatchAllowTools("http-launch", rawAllow);
 
   return {
     task,
     apiToken,
-    allowTools: rawAllow as string[],
+    allowTools,
     // Object keyed by agent name — see `.claude/rules/agent-dispatch.md`.
     agents: body.agents as Record<string, Record<string, unknown>> | undefined,
     // Accept both string and number: Laravel serializes int IDs as JSON
@@ -320,7 +372,7 @@ export async function handleResume(
     const parentJobId = requireString(body.job_id);
     if (!parentJobId) {
       json(res, 400, {
-        error: "Missing required fields: job_id, task, api_token",
+        error: "Missing or blank required fields: job_id, task, api_token",
       });
       return;
     }
