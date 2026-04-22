@@ -20,6 +20,11 @@ import {
 import { getReposBase } from "../poller/constants.js";
 import { normalizeCallbackUrl } from "./url-normalizer.js";
 import { isFeatureEnabled } from "../settings-file.js";
+import { writeFlag } from "../critical-failure.js";
+import {
+  isCompleteStatus,
+  type CompleteStatus,
+} from "../mcp/danxbot-server.js";
 
 const log = createLogger("worker-dispatch");
 
@@ -399,10 +404,41 @@ export function handleStatus(res: ServerResponse, jobId: string): void {
   json(res, 200, getJobStatus(job));
 }
 
+/**
+ * Validate `status` on a `/api/stop/:jobId` body. Returns the parsed
+ * status, or `null` after writing a 4xx to `res` (so the caller returns
+ * without further work). Extracted from `handleStop` so the parsing
+ * contract is a single, testable function mirror of `requireString`.
+ */
+function parseStopStatus(
+  body: Record<string, unknown>,
+  res: ServerResponse,
+): CompleteStatus | null {
+  const rawStatus = body.status;
+  if (rawStatus === undefined || rawStatus === null) {
+    // Fail-loud: the MCP tool schema marks `status` as required, so a
+    // call without it is a caller bug. Silent defaulting to "completed"
+    // (the old behavior) hides integration bugs and could let a stuck
+    // agent's noise traffic finalize a job as success.
+    json(res, 400, { error: "Missing required field: status" });
+    return null;
+  }
+  if (!isCompleteStatus(rawStatus)) {
+    json(res, 400, {
+      error:
+        `Invalid status "${String(rawStatus)}" — must be one of ` +
+        `completed, failed, critical_failure`,
+    });
+    return null;
+  }
+  return rawStatus;
+}
+
 export async function handleStop(
   req: IncomingMessage,
   res: ServerResponse,
   jobId: string,
+  repo: RepoContext,
 ): Promise<void> {
   try {
     const job: AgentJob | undefined = getActiveJob(jobId);
@@ -420,9 +456,43 @@ export async function handleStop(
     }
 
     const body = await parseBody(req);
-    const status =
-      (body.status as string) === "failed" ? "failed" : "completed";
-    const summary = body.summary as string | undefined;
+    const status = parseStopStatus(body, res);
+    if (!status) return;
+
+    const summary =
+      typeof body.summary === "string" ? body.summary : undefined;
+
+    if (status === "critical_failure") {
+      // The flag file is the operator's sole source of truth for what
+      // environment blocker to investigate. Require a non-empty summary
+      // here so the banner has actionable content — the MCP tool schema
+      // already marks summary as required, and an empty string is a
+      // caller bug we'd rather surface than paper over.
+      if (!summary) {
+        json(res, 400, {
+          error:
+            'Missing required field: summary (required when status="critical_failure")',
+        });
+        return;
+      }
+
+      writeFlag(repo.localPath, {
+        source: "agent",
+        dispatchId: jobId,
+        reason: "Agent-signaled critical failure",
+        detail: summary,
+      });
+
+      // Deliberate asymmetry: the response advertises "critical_failure"
+      // so the MCP tool surfaces a distinct outcome to the agent, while
+      // `job.stop` runs the "failed" lifecycle (it only understands
+      // completed/failed). The flag file on disk — not `job.status` —
+      // is the authoritative halt signal for the poller. See
+      // `.claude/rules/agent-dispatch.md` "Critical failure flag".
+      await job.stop("failed", summary);
+      json(res, 200, { status });
+      return;
+    }
 
     await job.stop(status, summary);
     json(res, 200, { status });

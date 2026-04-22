@@ -59,7 +59,7 @@ export async function startWorkerServer(repo: RepoContext): Promise<void> {
 
     const stopMatch = url.pathname.match(/^\/api\/stop\/(.+)$/);
     if (method === "POST" && stopMatch) {
-      await handleStop(req, res, stopMatch[1]);
+      await handleStop(req, res, stopMatch[1], repo);
       return;
     }
 

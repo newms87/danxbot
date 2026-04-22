@@ -144,6 +144,20 @@ vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
 }));
 
+// Mock the critical-failure module so handleStop's writeFlag path doesn't
+// touch the real filesystem. Tests assert on the mock args to verify the
+// agent-signal payload shape.
+const mockWriteFlag = vi.fn().mockImplementation((_lp: string, payload: unknown) => ({
+  timestamp: "2026-04-21T00:00:00.000Z",
+  ...(payload as object),
+}));
+vi.mock("../critical-failure.js", () => ({
+  writeFlag: (...args: unknown[]) => mockWriteFlag(...args),
+  readFlag: vi.fn().mockReturnValue(null),
+  clearFlag: vi.fn().mockReturnValue(false),
+  flagPath: (localPath: string) => `${localPath}/.danxbot/CRITICAL_FAILURE`,
+}));
+
 import {
   handleLaunch,
   handleResume,
@@ -1214,7 +1228,7 @@ describe("handleStop", () => {
     const req = createMockReqWithBody("POST", {});
     const res = createMockRes();
 
-    await handleStop(req, res, "nonexistent-job");
+    await handleStop(req, res, "nonexistent-job", MOCK_REPO);
 
     expect(res._getStatusCode()).toBe(404);
     expect(JSON.parse(res._getBody())).toEqual({ error: "Job not found" });
@@ -1241,7 +1255,7 @@ describe("handleStop", () => {
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId);
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(409);
   });
@@ -1266,7 +1280,7 @@ describe("handleStop", () => {
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId);
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(500);
     expect(JSON.parse(stopRes._getBody())).toEqual({
@@ -1299,17 +1313,80 @@ describe("handleStop", () => {
       summary: "All done",
     });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId);
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(200);
     expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
     expect(mockStop).toHaveBeenCalledWith("completed", "All done");
   });
 
-  it("defaults to completed status when status not specified", async () => {
+  it("returns 400 when status is explicitly null — same fail-loud path as undefined", async () => {
     const mockStop = vi.fn().mockResolvedValue(undefined);
     const mockJob = {
-      id: "job-default-status",
+      id: "job-null-status",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", {
+      task: "Test task",
+      api_token: "tok-123",
+      allow_tools: [],
+    });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+
+    const stopReq = createMockReqWithBody("POST", { status: null });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(400);
+    expect(JSON.parse(stopRes._getBody()).error).toMatch(
+      /Missing required field: status/,
+    );
+    expect(mockStop).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when status is an empty string — explicit invalid-status path", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-empty-status",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", {
+      task: "Test task",
+      api_token: "tok-123",
+      allow_tools: [],
+    });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+
+    const stopReq = createMockReqWithBody("POST", { status: "" });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(400);
+    expect(JSON.parse(stopRes._getBody()).error).toMatch(/Invalid status/);
+    expect(mockStop).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when status is missing — fail-loud, no lenient default", async () => {
+    // The MCP tool schema marks `status` as required, so a call without
+    // it is a caller bug. Silent defaulting to "completed" (the old
+    // behavior) could let stuck agents finalize jobs as successes.
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-no-status",
       status: "running",
       summary: "",
       startedAt: new Date(),
@@ -1328,10 +1405,13 @@ describe("handleStop", () => {
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId);
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
 
-    expect(stopRes._getStatusCode()).toBe(200);
-    expect(mockStop).toHaveBeenCalledWith("completed", undefined);
+    expect(stopRes._getStatusCode()).toBe(400);
+    expect(JSON.parse(stopRes._getBody()).error).toMatch(
+      /Missing required field: status/,
+    );
+    expect(mockStop).not.toHaveBeenCalled();
   });
 
   it("passes failed status when specified", async () => {
@@ -1359,9 +1439,121 @@ describe("handleStop", () => {
       summary: "Something went wrong",
     });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId);
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
 
     expect(mockStop).toHaveBeenCalledWith("failed", "Something went wrong");
+  });
+
+  it("writes the critical-failure flag and finalizes as failed when status=critical_failure", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-critical",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", {
+      task: "Test task",
+      api_token: "tok-123",
+      allow_tools: [],
+    });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "critical_failure",
+      summary: "MCP server failed to load Trello tools",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(200);
+    expect(JSON.parse(stopRes._getBody())).toEqual({
+      status: "critical_failure",
+    });
+    expect(mockWriteFlag).toHaveBeenCalledWith(MOCK_REPO.localPath, {
+      source: "agent",
+      dispatchId,
+      reason: "Agent-signaled critical failure",
+      detail: "MCP server failed to load Trello tools",
+    });
+    // AgentJob.stop only knows about completed/failed — the halt behavior
+    // lives in the flag file, not the job status.
+    expect(mockStop).toHaveBeenCalledWith(
+      "failed",
+      "MCP server failed to load Trello tools",
+    );
+  });
+
+  it("returns 400 when status=critical_failure but summary is missing — operator needs actionable info", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-critical-no-summary",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", {
+      task: "Test task",
+      api_token: "tok-123",
+      allow_tools: [],
+    });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "critical_failure",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(400);
+    expect(JSON.parse(stopRes._getBody()).error).toMatch(
+      /Missing required field: summary/,
+    );
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+    expect(mockStop).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when the status field is present but not one of the three valid values", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-bad-status",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const launchReq = createMockReqWithBody("POST", {
+      task: "Test task",
+      api_token: "tok-123",
+      allow_tools: [],
+    });
+    const launchRes = createMockRes();
+    await handleLaunch(launchReq, launchRes, MOCK_REPO);
+    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "bogus",
+      summary: "whatever",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(400);
+    expect(JSON.parse(stopRes._getBody()).error).toMatch(/Invalid status/);
+    expect(mockStop).not.toHaveBeenCalled();
+    expect(mockWriteFlag).not.toHaveBeenCalled();
   });
 });
 

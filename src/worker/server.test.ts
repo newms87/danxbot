@@ -190,13 +190,13 @@ describe("worker server", () => {
   });
 
   describe("POST /api/stop/:jobId", () => {
-    it("delegates to handleStop with req, res, and jobId", async () => {
+    it("delegates to handleStop with req, res, jobId, and the worker's repo", async () => {
       mockHandleStop.mockResolvedValue(undefined);
 
       const { req, res } = createMockReqRes("POST", "/api/stop/job-789");
       await requestHandler(req, res);
 
-      expect(mockHandleStop).toHaveBeenCalledWith(req, res, "job-789");
+      expect(mockHandleStop).toHaveBeenCalledWith(req, res, "job-789", MOCK_REPO);
     });
 
     it("does not match GET /api/stop/:jobId", async () => {
