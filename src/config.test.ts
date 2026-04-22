@@ -524,9 +524,9 @@ describe("validateConfig", () => {
 });
 
 describe("dispatch config", () => {
-  it("defaults dispatch.mcpProbeTimeoutMs to 3000 when DISPATCH_MCP_PROBE_TIMEOUT_MS is unset", async () => {
+  it("defaults dispatch.mcpProbeTimeoutMs to 60000 when DISPATCH_MCP_PROBE_TIMEOUT_MS is unset (covers cold npx install)", async () => {
     const mod = await importConfig({}, ["DISPATCH_MCP_PROBE_TIMEOUT_MS"]);
-    expect(mod.config.dispatch.mcpProbeTimeoutMs).toBe(3_000);
+    expect(mod.config.dispatch.mcpProbeTimeoutMs).toBe(60_000);
   });
 
   it("reads DISPATCH_MCP_PROBE_TIMEOUT_MS as an integer override", async () => {

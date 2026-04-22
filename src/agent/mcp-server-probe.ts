@@ -30,9 +30,20 @@
 
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { createLogger } from "../logger.js";
 import type { McpServerConfig, McpSettingsFile } from "./mcp-settings-shape.js";
 
 export type { McpServerConfig } from "./mcp-settings-shape.js";
+
+const log = createLogger("mcp-probe");
+
+/**
+ * Threshold above which a probe is considered slow enough to warrant an
+ * explicit "still probing" progress log. Keeps routine probes quiet while
+ * making cold-install waits visible to operators tailing logs. See the
+ * `mcpProbeTimeoutMs` rationale in `src/config.ts`.
+ */
+const SLOW_PROBE_LOG_THRESHOLD_MS = 3_000;
 
 export interface ProbeSuccess {
   ok: true;
@@ -126,6 +137,7 @@ export async function probeMcpServer(
   timeoutMs: number,
 ): Promise<ProbeResult> {
   return new Promise<ProbeResult>((resolve) => {
+    const startedAt = Date.now();
     const child = spawn(cfg.command, cfg.args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...cfg.env },
@@ -135,11 +147,29 @@ export async function probeMcpServer(
     let stdoutBuffer = "";
     let settled = false;
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    // Fires once if the probe is still unresolved after the slow-log
+    // threshold — surfaces cold `npx -y` installs (and network stalls) to
+    // operators tailing logs instead of silently eating minutes.
+    const slowLogHandle: ReturnType<typeof setTimeout> = setTimeout(() => {
+      if (settled) return;
+      log.info(
+        `[${serverName}] still probing after ${SLOW_PROBE_LOG_THRESHOLD_MS}ms — likely installing package via npx`,
+      );
+    }, SLOW_PROBE_LOG_THRESHOLD_MS);
 
     const finish = (result: ProbeResult): void => {
       if (settled) return;
       settled = true;
       if (timeoutHandle) clearTimeout(timeoutHandle);
+      clearTimeout(slowLogHandle);
+      const elapsedMs = Date.now() - startedAt;
+      if (result.ok) {
+        log.info(`[${serverName}] probe OK in ${elapsedMs}ms`);
+      } else {
+        log.warn(
+          `[${serverName}] probe FAILED in ${elapsedMs}ms (reason=${result.reason})`,
+        );
+      }
       // SIGKILL because a stuck server may ignore SIGTERM and we've already
       // decided it failed — we don't care about graceful shutdown here.
       try {

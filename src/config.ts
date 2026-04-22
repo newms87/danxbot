@@ -133,11 +133,20 @@ export const config = {
       parseInt(optional("DISPATCH_AGENT_TIMEOUT", "3600"), 10) * 1000,
     // Per-server cap for the pre-launch MCP probe. All configured servers
     // are probed in parallel, so total added dispatch latency is bounded by
-    // this value regardless of how many servers the agent uses. Set to the
-    // worst-case healthy-server startup time — 3s covers `npx` cold-cache
-    // resolution for the schema MCP server.
+    // this value regardless of how many servers the agent uses.
+    //
+    // Dispatches declare their MCP servers per-request, and the registry
+    // spawns them via `npx -y <pkg>` — a cold npm cache means the first
+    // invocation pays download + install + node startup, typically 15–30s
+    // for a small MCP package (measured 19s for @thehammer/mcp-server-trello
+    // on a 1Gbps link). Warm-cache subsequent invocations probe in 1–2s.
+    // 60s is the worst-case healthy-cold ceiling with 2x safety margin;
+    // operators running from a warmed image can override with a lower value.
+    // A truly broken server (network down, package gone, hang) still fails
+    // loudly within 60s — the `exit` reason path catches fast-failing
+    // servers immediately (npm EACCES, 404, etc.), so only hangs hit this.
     mcpProbeTimeoutMs: parseInt(
-      optional("DISPATCH_MCP_PROBE_TIMEOUT_MS", "3000"),
+      optional("DISPATCH_MCP_PROBE_TIMEOUT_MS", "60000"),
       10,
     ),
   },
