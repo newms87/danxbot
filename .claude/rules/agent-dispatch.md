@@ -146,120 +146,35 @@ These are regressions the team has already fixed. Do not reintroduce any of them
 | Legacy single-process mode | Removed. Only worker and dashboard modes exist. |
 | Bypassing `isFeatureEnabled` in `handleLaunch` | `/api/launch` must 503 when `dispatchApi` is disabled in `.danxbot/settings.json` — the very first line inside the handler's try block. Skipping the check lets disabled repos still dispatch, which the Agents tab advertises as impossible. See `.claude/rules/settings-file.md`. |
 
-## Critical failure flag — poller halt contract
+## Critical failure flag — poller halt
 
-Environment-level blockers (MCP server failing to load, Bash unavailable,
-Claude auth missing) cannot be rescued by a card-specific failure path.
-The agent has no way to mark "this card isn't the problem — the box is."
-Without a tripwire, the poller keeps picking the same card up, spawning
-a broken session, observing failure, and re-dispatching. Production saw
-40 such dispatches against a single card in ~6 hours, burning ~350M
-cache tokens / ~$1K.
+A per-repo `<repo>/.danxbot/CRITICAL_FAILURE` file halts the poller when
+the environment is broken (MCP not loading, Bash unavailable, Claude auth
+missing). Written by the worker — either when the agent signals
+`danxbot_complete({status:"critical_failure", summary})` or when the
+worker's post-dispatch check sees the tracked card still in ToDo after a
+run. Poller reads it at the top of every tick and refuses to dispatch
+while present. Dashboard shows a red banner; operator clears via the
+dashboard button or `rm`. Slack + `/api/launch` are unaffected by design.
 
-The **critical-failure flag** (`<repo>/.danxbot/CRITICAL_FAILURE`) is the
-tripwire. Worker is the sole writer. Poller reads it on every tick and
-refuses to run while present. Operator clears it.
+Contract, invariants, and rationale live in code:
 
-### Write paths
+- `src/critical-failure.ts` header — format, ownership, invariants to
+  preserve when editing the read/write paths.
+- `src/poller/inject/rules/danx-halt-flag.md` — the rule that ships into
+  EVERY connected repo so dispatched agents know when to signal
+  `critical_failure` vs `failed`. This is the operator-facing half of the
+  contract and is the entry point most agents need.
+- In-situ comments in `src/worker/dispatch.ts` (handleStop branch),
+  `src/poller/index.ts` (halt gate + `checkCardProgressedOrHalt`),
+  `src/worker/health.ts` (halted status precedence), and
+  `src/worker/critical-failure-route.ts` (idempotent clear) document the
+  specific decisions at each call site.
 
-- **Agent-signaled** (preferred when MCP works). The agent calls
-  `danxbot_complete({status:"critical_failure", summary})` where
-  `summary` describes the specific env issue. Worker's `handleStop`
-  writes the flag with `source: "agent"` and finalizes the job as
-  `"failed"` (`AgentJob.stop` only knows completed/failed; the halt
-  signal lives in the flag file, not the job status). Summary is
-  REQUIRED non-empty here — operators read the flag to decide what to
-  fix.
-- **Post-dispatch "card didn't move" check** (worker-signaled backup
-  for total-tools-broken case). Poller tracks the dispatched cardId
-  before `spawnAgent`. In the spawn's `onComplete` callback — for
-  `trigger: "trello"` only — the worker fetches the card's current
-  list. If it's still in `trello.todoListId`, the dispatch made zero
-  progress; worker writes the flag with
-  `source: "post-dispatch-check"`. Runs on BOTH success and failure
-  paths: an agent reporting "completed" that didn't move the card is
-  lying, still an env signal.
-
-### Read path
-
-- **Poller halt gate** sits at the top of every `poll()` tick, right
-  after the `trelloPoller` feature toggle. `readFlag` non-null → log
-  reason once per tick (the tick interval itself provides the
-  once-per-tick throttle; no in-memory throttle needed) and return.
-  Also clears `consecutiveFailures` + `backoffUntil` inside the halt
-  branch so operator-clearing the flag resumes polling on the very
-  next tick — no stale "In backoff" noise.
-
-### Fail-closed on read
-
-`readFlag` returns a **synthetic `unparseable` payload** when the file
-exists but can't be parsed (corrupt JSON, invalid shape, non-object
-top-level, missing required fields). NEVER `null` on a present-but-bad
-file. A corrupt flag must keep the poller halted; silently re-enabling
-on garbage input would reintroduce the bug the feature exists to
-prevent.
-
-### Worker observability
-
-- `GET /health` adds a third status value — `halted` — that takes
-  precedence over `degraded`/`ok`. The `criticalFailure` field carries
-  the parsed payload (or null). HTTP **stays 200** in halted state so
-  Docker health checks don't restart-loop the container; only
-  `degraded` returns 503.
-- `DELETE /api/poller/critical-failure` clears the flag. Idempotent:
-  200 `{cleared:true}` if the file existed, 200 `{cleared:false}` if
-  already absent. No in-worker auth — workers sit on `danxbot-net`
-  only, and the dashboard auth gate in front of the proxy is the
-  operator check.
-
-### Dashboard surface
-
-- `/api/agents[/:repo]` snapshots gain
-  `criticalFailure: CriticalFailurePayload | null`, read via
-  `readFlag` in `buildSnapshot`.
-- `DELETE /api/agents/:repo/critical-failure` auth-gates on the
-  per-user bearer (same contract as PATCH toggles — NOT the dispatch
-  token) and forwards to the worker's DELETE endpoint. The
-  `CriticalFailureBanner.vue` component renders inside each
-  `RepoCard.vue` when `agent.criticalFailure !== null`.
-
-### Clearing the flag — two paths
-
-- **Dashboard button** (`Clear flag` in the per-repo banner) — the
-  operator UI. After DELETE success the composable re-fetches the
-  repo's snapshot and the banner unmounts because `criticalFailure`
-  flips to null.
-- **`rm <repo>/.danxbot/CRITICAL_FAILURE`** on the worker container /
-  repo bind mount. The poller resumes on its next tick automatically —
-  no worker restart required. Same idempotent semantics.
-
-### Deliberate non-features
-
-- **No auto-mitigation on trip.** The worker does NOT auto-label the
-  stuck card "Needs Help" or post a Trello comment when the flag is
-  written. The operator decides what to do with the card after reading
-  the flag.
-- **No automatic retry counter.** The post-dispatch check catches a
-  zero-progress dispatch on the first run — no "3 strikes" logic.
-- **No effect on Slack or /api/launch.** Halt is poller-only by design.
-  Slack's router (Haiku, not the local claude CLI) can still respond.
-  `/api/launch` keeps accepting work so an operator can test-dispatch a
-  diagnostic agent against the same env if they want.
-
-### Invariants to preserve when editing
-
-1. Worker is the sole writer. Dashboard NEVER writes the flag — it
-   only reads via snapshot and deletes via the worker's DELETE proxy.
-2. Halt gate runs BEFORE backoff check in `poll()`. Halt resets
-   backoff state; backoff should never suppress halt.
-3. Post-dispatch check must compare against `ctx.trello.todoListId`
-   specifically. A card moved to In Progress / Needs Help / Done /
-   Cancelled / Review is NOT a halt signal — only "still in ToDo" is.
-4. `fetchCard` must throw on missing `idList`. A malformed API
-   response that returns `undefined` for `idList` would silently
-   suppress the halt (`undefined !== todoListId` evaluates truthy).
-5. `readFlag` never returns `null` on a present-but-bad file. Fail
-   closed.
+When modifying any of those files, re-read the headers and preserve the
+invariants. The feature exists because production burned ~$1K in a day on
+40 re-dispatches against a single stuck card; silently re-enabling the
+poller on a broken box is the exact failure mode we're paid to prevent.
 
 ## Dispatch API disabled state
 

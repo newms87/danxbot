@@ -1,31 +1,88 @@
 /**
  * Per-repo critical-failure flag at `<repo>/.danxbot/CRITICAL_FAILURE`.
  *
- * The worker writes this file when an environment-level blocker makes
- * further poller dispatches pointless — either because the agent
- * explicitly signalled `danxbot_complete({status:"critical_failure"})` or
- * because the post-dispatch "card didn't move out of ToDo" check caught a
- * zero-progress dispatch. The poller reads it at the top of every tick
- * and refuses to dispatch while it's present. The dashboard surfaces the
- * contents as a banner on the Agents tab.
+ * WHY THIS FEATURE EXISTS
+ * -----------------------
+ * On 2026-04-21 production saw `danxbot-worker-danxbot` on gpt prod run 40
+ * Trello-triggered dispatches against a single stuck card in ~6 hours,
+ * burning ~350M cache tokens / ~$1K on the shared Anthropic key. Every
+ * dispatch failed the same way: MCP and Bash were broken inside the
+ * spawned Claude session, so the agent couldn't move the card, couldn't
+ * call `danxbot_complete`, and couldn't write any files. The poller had
+ * no way to tell "this card is stuck" (card-specific, → Needs Help) from
+ * "every card in this environment is doomed" (environment-specific, →
+ * halt everything). This flag IS that distinction.
  *
- * Ownership:
- * - Sole writer: the worker process (agent-signal path in
- *   `src/worker/dispatch.ts`, post-dispatch-check path in
- *   `src/poller/index.ts`).
- * - Readers: the poller's halt gate, `/health`, the dashboard's
- *   `/api/agents` surface, and the clear endpoint.
- * - Cleared by `rm` on disk or `DELETE /api/agents/:repo/critical-failure`
- *   from the dashboard — next poller tick resumes automatically.
+ * CONTRACT
+ * --------
+ * - **Sole writer**: the worker process. Two write paths:
+ *   1. Agent-signaled: `danxbot_complete({status:"critical_failure",
+ *      summary})` → `handleStop` in `src/worker/dispatch.ts` writes the
+ *      flag and finalizes the job as `"failed"` (AgentJob.stop only knows
+ *      completed/failed; the halt signal lives in the flag file, not the
+ *      job status).
+ *   2. Post-dispatch-check: for `trigger: "trello"` dispatches, the
+ *      poller's `onComplete` in `src/poller/index.ts` fetches the tracked
+ *      card's current list. If still in `todoListId`, writes the flag.
+ *      Runs on BOTH success and failure paths — an agent reporting
+ *      "completed" that didn't move the card is lying, still an env signal.
  *
- * Format: pretty-printed JSON at the path. JSON (vs `key: value` plaintext)
- * because the dashboard reads this file via an HTTP endpoint and surfaces
- * the structured fields in the banner UI. Humans can still `cat` the file.
+ * - **Readers**: the poller's halt gate in `src/poller/index.ts::poll`,
+ *   `/health` via `src/worker/health.ts`, the dashboard's `/api/agents`
+ *   snapshot via `src/dashboard/agents-routes.ts::buildSnapshot`, and the
+ *   clear endpoint.
  *
- * No lock file: only one worker per repo writes, and writes are rare. The
- * tmp+rename pattern keeps readers from ever observing a half-written
- * file. See `.claude/rules/agent-dispatch.md` "Critical failure flag" for
- * the contract.
+ * - **Clearing**: `rm` on disk OR `DELETE /api/agents/:repo/critical-failure`
+ *   via dashboard. Next poller tick resumes automatically — no restart
+ *   required.
+ *
+ * - **Format**: pretty-printed JSON. JSON because the dashboard reads and
+ *   surfaces structured fields; humans can still `cat` the file.
+ *
+ * - **No lock file**: only one worker per repo writes, and writes are
+ *   rare. The tmp+rename pattern keeps readers from observing a
+ *   half-written file.
+ *
+ * - **Fail-CLOSED on read**: `readFlag` returns the synthetic
+ *   `unparseable` payload (NOT `null`) when the file exists but can't be
+ *   parsed. A corrupt flag must keep the poller halted; silently
+ *   re-enabling on garbage input is the exact bug this feature exists to
+ *   prevent. The only `null` return is "file absent".
+ *
+ * INVARIANTS TO PRESERVE WHEN EDITING
+ * -----------------------------------
+ * 1. Worker is the sole writer. Dashboard NEVER writes the flag — it
+ *    reads via snapshot and deletes via the worker's DELETE proxy.
+ * 2. Halt gate runs BEFORE backoff check in `poll()`. Halt resets backoff
+ *    state; backoff must never suppress halt.
+ * 3. Post-dispatch check compares against `ctx.trello.todoListId`
+ *    specifically. A card moved to In Progress / Needs Help / Done /
+ *    Cancelled / Review is NOT a halt signal — only "still in ToDo" is.
+ * 4. `fetchCard` must throw on missing `idList`. A malformed API response
+ *    that returns `undefined` for `idList` would silently suppress the
+ *    halt (`undefined !== todoListId` evaluates truthy).
+ * 5. `readFlag` never returns `null` on a present-but-bad file. Fail
+ *    closed.
+ *
+ * DELIBERATE NON-FEATURES
+ * -----------------------
+ * - No auto-mitigation on trip: the worker does NOT auto-label the stuck
+ *   card "Needs Help" or post a Trello comment. Operator decides.
+ * - No automatic retry counter: the post-dispatch check catches a
+ *   zero-progress dispatch on the first run, no "3 strikes" logic.
+ * - No effect on Slack or `/api/launch`: halt is poller-only by design.
+ *   Slack's router (Haiku, not the local claude CLI) still responds;
+ *   `/api/launch` keeps accepting work so an operator can test-dispatch
+ *   a diagnostic agent against the broken env if they want.
+ *
+ * DISPATCHED-AGENT GUIDANCE
+ * -------------------------
+ * Agents running INSIDE a dispatched session (in a connected repo's cwd)
+ * read `src/poller/inject/rules/danx-halt-flag.md` — that's the rule
+ * written FOR them, injected into every connected repo by the poller's
+ * `syncRepoFiles`. It tells them when to signal `critical_failure` vs
+ * `failed`. Don't duplicate that guidance here — this header is for
+ * agents editing the HALT code itself, not for agents signaling into it.
  */
 
 import {
