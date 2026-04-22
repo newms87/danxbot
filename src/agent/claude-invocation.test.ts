@@ -159,6 +159,71 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(inv.firstMessage.startsWith(`${DISPATCH_TAG_PREFIX}resume-child-id -->`)).toBe(true);
   });
 
+  it("flags omit --allowed-tools when allowedTools is an empty array (no flag rather than empty CSV)", () => {
+    // Resolver legitimately returns `allowedTools: []` for the
+    // `danxbotStopUrl: null` + `allowTools: []` corner case. The CLI must
+    // omit the flag entirely — `--allowed-tools` (no value) would crash
+    // claude's flag parser, and `--allowed-tools ""` would be ambiguous.
+    const inv = build({ allowedTools: [] });
+    expect(inv.flags).not.toContain("--allowed-tools");
+  });
+
+  it("flags omit --allowed-tools when allowedTools is undefined (no flag rather than empty CSV)", () => {
+    const inv = build({ allowedTools: undefined });
+    expect(inv.flags).not.toContain("--allowed-tools");
+  });
+
+  it("--allowed-tools CSV preserves the resolver's input order verbatim across servers and built-ins", () => {
+    // The resolver's ordering contract is observable here: built-ins first,
+    // MCP tools next in caller order. The CLI must NOT reorder.
+    const ordered = [
+      "Bash",
+      "Read",
+      "mcp__trello__move_card",
+      "mcp__schema__schema_get",
+      "mcp__danxbot__danxbot_complete",
+    ];
+    const inv = build({ allowedTools: ordered });
+    const idx = inv.flags.indexOf("--allowed-tools");
+    expect(inv.flags[idx + 1]).toBe(ordered.join(","));
+  });
+
+  it("docker and host consumers receive IDENTICAL --mcp-config + --allowed-tools flags for the same allowedTools input", () => {
+    // AC item from XCptaJ34: both CLI runtime paths must produce identical
+    // tool-surface flags for the same `allow_tools` resolver output. Same
+    // allowedTools array → same `--allowed-tools <csv>` → same claude-facing
+    // tool surface, regardless of whether the spawn envelope is direct
+    // (docker) or bash + wt.exe (host).
+    const opts = {
+      prompt: "p",
+      jobId: "j",
+      mcpConfigPath: "/tmp/mcp/settings.json",
+      allowedTools: [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "mcp__trello__get_card",
+        "mcp__danxbot__danxbot_complete",
+      ],
+    };
+    const a = buildClaudeInvocation(opts);
+    const b = buildClaudeInvocation(opts);
+    cleanupDirs.push(a.promptDir, b.promptDir);
+
+    const mcpAIdx = a.flags.indexOf("--mcp-config");
+    const mcpBIdx = b.flags.indexOf("--mcp-config");
+    expect(mcpAIdx).toBeGreaterThanOrEqual(0);
+    expect(a.flags[mcpAIdx + 1]).toBe(b.flags[mcpBIdx + 1]);
+
+    const toolsAIdx = a.flags.indexOf("--allowed-tools");
+    const toolsBIdx = b.flags.indexOf("--allowed-tools");
+    expect(toolsAIdx).toBeGreaterThanOrEqual(0);
+    expect(a.flags[toolsAIdx + 1]).toBe(b.flags[toolsBIdx + 1]);
+    // Order is the resolver's contract — verify CSV matches input order.
+    expect(a.flags[toolsAIdx + 1]).toBe(opts.allowedTools.join(","));
+  });
+
   it("docker and host consumers receive IDENTICAL firstMessage and flags for the same input", () => {
     // Invariant: the same SpawnAgent inputs produce the same claude-facing
     // invocation. Runtime differs only in the spawn envelope (direct vs bash).

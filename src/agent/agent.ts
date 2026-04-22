@@ -7,6 +7,8 @@ import type { RepoContext } from "../types.js";
 import { createLogger } from "../logger.js";
 import { trimThreadMessages } from "../threads.js";
 import { loadSystemPrompt, loadFastSystemPrompt } from "./system-prompt-loader.js";
+import { resolveDispatchTools } from "./resolve-dispatch-tools.js";
+import { SLACK_ALLOW_TOOLS } from "../slack/constants.js";
 import type { AgentLogEntry, AgentResponse, AgentUsageSummary, ComplexityLevel, ModelUsage, ThreadMessage } from "../types.js";
 import { buildAssistantSummary, buildToolResultSummary } from "./tool-summary.js";
 
@@ -283,13 +285,28 @@ export async function runAgent(
     agentPrompt = `[Thread context]\n${history}\n\n[Current message]\n${messageText}`;
   }
 
+  // Slack runAgent shares `resolveDispatchTools` with every CLI dispatch path,
+  // but opts out of danxbot infrastructure (`danxbotStopUrl: null`) — the SDK
+  // iterator's `result` message is the in-process completion signal, so there
+  // is no worker port to call back to. With a static built-in-only allowlist
+  // and no MCP server requested, the resolver returns `mcpServers: {}` and
+  // `allowedTools: SLACK_ALLOW_TOOLS`; both are forwarded to the SDK below.
+  // Forwarding the resolver's empty `mcpServers` (instead of letting the SDK
+  // pick its own default) and OMITTING `settingSources` together mean the
+  // danxbot repo's own `.mcp.json` is NOT auto-loaded — that path used to
+  // spawn the trello MCP server's `npx` process on every Slack message
+  // before being denied by the tight allowlist (Phase 5 of XCptaJ34).
+  const { mcpServers, allowedTools } = resolveDispatchTools({
+    allowTools: SLACK_ALLOW_TOOLS,
+    danxbotStopUrl: null,
+  });
+
   const queryOptions = {
     model,
     systemPrompt: promptText,
     cwd: repoContext.localPath,
-    settingSources: ["project"],
-    tools: ["Read", "Glob", "Grep", "Bash"],
-    allowedTools: ["Read", "Glob", "Grep", "Bash"],
+    mcpServers,
+    allowedTools,
     permissionMode: "bypassPermissions" as const,
     allowDangerouslySkipPermissions: true,
     maxTurns: profile?.maxTurns ?? config.agent.maxTurns,

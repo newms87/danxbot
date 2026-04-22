@@ -61,6 +61,21 @@ export function resolveDispatchTools(
 ): ResolveDispatchToolsResult {
   const registry = opts.registry ?? defaultMcpRegistry;
 
+  // `danxbotStopUrl` is a two-state field: a non-empty URL string OR `null`
+  // (explicit Slack-style opt-out). Empty string would otherwise create a
+  // confusing third state — the resolver's `!== null` check would treat it
+  // as "include danxbot" but the registry factory's truthy check would
+  // throw inside `build()`. Reject it loud at the entry instead, with a
+  // message that points at the right sentinel for the use case.
+  if (
+    opts.danxbotStopUrl !== null &&
+    (typeof opts.danxbotStopUrl !== "string" || opts.danxbotStopUrl === "")
+  ) {
+    throw new McpResolveError(
+      "danxbotStopUrl must be a non-empty URL string or null (use null to opt out of danxbot injection — Slack runAgent path)",
+    );
+  }
+
   // Entry-shape validation. Non-strings are a programming error at the caller
   // (e.g. a body parser let a number through); fail loud.
   //
@@ -123,9 +138,14 @@ export function resolveDispatchTools(
     bucket.add(tool);
   }
 
-  // Infrastructure: always include danxbot, even if no caller mentioned it.
+  // Infrastructure: include danxbot when the caller has a worker port to call
+  // back to. Pass `danxbotStopUrl: null` (Slack `runAgent`) to opt out — the
+  // SDK iterator's `result` message is the completion signal in that path.
+  // The boolean is the single switch for both server injection and the
+  // `mcp__danxbot__danxbot_complete` allowlist suffix below.
+  const includeDanxbot = opts.danxbotStopUrl !== null;
   const requiredServers = new Set<string>([
-    DANXBOT_SERVER_NAME,
+    ...(includeDanxbot ? [DANXBOT_SERVER_NAME] : []),
     ...serverTools.keys(),
   ]);
 
@@ -173,10 +193,11 @@ export function resolveDispatchTools(
     }
   }
 
-  // Infrastructure tool — always available, even if the caller never
-  // mentioned danxbot. Ordering guarantees a stable suffix position when
-  // the caller didn't ask for it.
-  push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_COMPLETE_TOOL}`);
+  // Infrastructure tool — paired with the server: present iff danxbot was
+  // injected above. Stable suffix position when the caller didn't ask for it.
+  if (includeDanxbot) {
+    push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_COMPLETE_TOOL}`);
+  }
 
   return { mcpServers, allowedTools };
 }

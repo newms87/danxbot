@@ -37,9 +37,15 @@ export interface ResolveDispatchToolsOptions {
   allowTools: readonly string[];
   /**
    * Worker URL that the agent's `danxbot_complete` tool call will POST to.
-   * Required — danxbot is infrastructure.
+   * Pass a string for any spawned-CLI dispatch (the agent calls the tool to
+   * signal completion to its worker). Pass `null` for the in-process SDK
+   * `query()` path (Slack `runAgent`) where the async iterator's `result`
+   * message IS the completion signal — there is no worker port to call back.
+   *
+   * The field is required (not optional) so the choice is always explicit:
+   * forgetting to provide it is a compile-time error, never a silent skip.
    */
-  danxbotStopUrl: string;
+  danxbotStopUrl: string | null;
   /** Dependencies for the schema server. Required iff allowTools enables it. */
   schema?: {
     apiUrl: string;

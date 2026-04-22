@@ -60,13 +60,61 @@ describe("resolveDispatchTools", () => {
       expect(r.allowedTools.filter((t) => t === DANXBOT_TOOL)).toHaveLength(1);
     });
 
-    it("throws when danxbotStopUrl is missing — infrastructure, not optional", () => {
+    it("danxbotStopUrl: null opts out of danxbot injection entirely (Slack runAgent path)", () => {
+      const r = resolveDispatchTools({
+        allowTools: ["Read", "Glob", "Grep", "Bash"],
+        danxbotStopUrl: null,
+      });
+      expect(r.mcpServers).toEqual({});
+      expect(r.allowedTools).toEqual(["Read", "Glob", "Grep", "Bash"]);
+      expect(r.allowedTools).not.toContain(DANXBOT_TOOL);
+    });
+
+    it("danxbotStopUrl: null still rejects unknown servers (validation runs first)", () => {
       expect(() =>
         resolveDispatchTools({
-          allowTools: [],
-          // danxbotStopUrl intentionally omitted
-        } as unknown as ResolveDispatchToolsOptions),
-      ).toThrow(McpResolveError);
+          allowTools: ["mcp__nope__bar"],
+          danxbotStopUrl: null,
+        }),
+      ).toThrow(/nope/);
+    });
+
+    it("danxbotStopUrl: '' (empty string) is rejected at entry — collapses the would-be three-state field to two", () => {
+      // Without this guard, "" would slip past the resolver's `!== null` check
+      // (treated as "include danxbot") and only crash deeper inside the
+      // registry factory's `!opts.danxbotStopUrl` truthy check. Same loud
+      // failure either way, but the guard pins the error to the entry point
+      // and points the caller at the correct sentinel (`null`).
+      expect(() =>
+        resolveDispatchTools({
+          allowTools: ["Read"],
+          danxbotStopUrl: "" as unknown as string,
+        }),
+      ).toThrow(/non-empty|null/i);
+    });
+
+    it("danxbotStopUrl: null with mcp__trello__* still builds the trello server — null only suppresses danxbot", () => {
+      const r = resolveDispatchTools({
+        allowTools: ["Read", "mcp__trello__get_card"],
+        danxbotStopUrl: null,
+        trello: { apiKey: "k", apiToken: "t", boardId: "b" },
+      });
+      expect(Object.keys(r.mcpServers)).toEqual(["trello"]);
+      expect(r.mcpServers["trello"]).toBeDefined();
+      expect(r.allowedTools).toEqual(["Read", "mcp__trello__get_card"]);
+      expect(r.allowedTools).not.toContain(DANXBOT_TOOL);
+    });
+
+    it("danxbotStopUrl: null with mcp__danxbot__* still has no danxbot server (rejects the request loud)", () => {
+      // The caller asked for a danxbot tool but opted out of the server. The
+      // resolver doesn't second-guess: registry lookup runs and the danxbot
+      // factory throws because there's no stop URL.
+      expect(() =>
+        resolveDispatchTools({
+          allowTools: ["mcp__danxbot__danxbot_complete"],
+          danxbotStopUrl: null,
+        }),
+      ).toThrow(/danxbot/i);
     });
   });
 

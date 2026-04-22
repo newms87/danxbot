@@ -498,7 +498,7 @@ describe("runAgent", () => {
     expect(result.sessionId).toBe("sess-4");
   });
 
-  it("sets cwd to platform repo path and settingSources to project-only", async () => {
+  it("sets cwd to repo path, omits settingSources, passes empty mcpServers, and allowlist=SLACK_ALLOW_TOOLS exactly", async () => {
     mockQuery.mockReturnValueOnce(
       asyncIter([
         { type: "system", subtype: "init", session_id: "sess-cwd" },
@@ -518,7 +518,28 @@ describe("runAgent", () => {
 
     const callArgs = mockQuery.mock.calls[0][0];
     expect(callArgs.options.cwd).toBe("/test/repos/test-repo");
-    expect(callArgs.options.settingSources).toEqual(["project"]);
+    // settingSources is intentionally absent — its presence (Phase 5 regression)
+    // would auto-load the danxbot repo's .mcp.json and spawn the trello MCP
+    // server's npx process on every Slack message before the tight allowlist
+    // denies it. Asserting "in" is the precise check; the SDK default IS to
+    // omit it, but tests must catch any future code that adds it back.
+    expect(callArgs.options).not.toHaveProperty("settingSources");
+    // Empty MCP server map is passed explicitly so we don't rely on the SDK
+    // default — protects against the SDK changing its default-on-omission.
+    expect(callArgs.options.mcpServers).toEqual({});
+    // allowlist is exactly the 4 read-only built-ins from SLACK_ALLOW_TOOLS,
+    // with no danxbot_complete suffix (Slack uses the iterator's `result`
+    // message as completion, no worker callback).
+    expect(callArgs.options.allowedTools).toEqual([
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+    ]);
+    // No legacy `tools` field (the previous queryOptions duplicated the
+    // allowlist into both `tools` and `allowedTools`; Phase 5 collapses to
+    // the single SDK-recognized field).
+    expect(callArgs.options).not.toHaveProperty("tools");
   });
 
   it("returns error message on failure", async () => {
@@ -746,6 +767,71 @@ describe("runAgent with complexity", () => {
     expect(callArgs.options.maxTurns).toBe(5);
     expect(callArgs.options.maxBudgetUsd).toBe(1.0);
     expect(callArgs.options.maxThinkingTokens).toBe(8000);
+  });
+
+  it.each(["very_low", "low", "medium", "high", "very_high"] as const)(
+    "threads mcpServers={} + allowedTools=SLACK_ALLOW_TOOLS through every complexity profile (%s)",
+    async (complexity) => {
+      mockQuery.mockReturnValueOnce(
+        asyncIter([
+          { type: "system", subtype: "init", session_id: `cx-${complexity}` },
+          {
+            type: "result",
+            subtype: "success",
+            result: "ok",
+            total_cost_usd: 0.01,
+            num_turns: 1,
+            duration_ms: 100,
+            duration_api_ms: 80,
+          },
+        ]),
+      );
+
+      await runAgent(MOCK_REPO_CONTEXT, "test", null, undefined, undefined, [], complexity);
+
+      const callArgs = mockQuery.mock.calls[0][0];
+      expect(callArgs.options.mcpServers).toEqual({});
+      expect(callArgs.options.allowedTools).toEqual([
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+      ]);
+      expect(callArgs.options).not.toHaveProperty("settingSources");
+    },
+  );
+
+  it("threads mcpServers={} + allowedTools=SLACK_ALLOW_TOOLS through the resume path (sessionId !== null)", async () => {
+    // Resume historically diverges from fresh launches — the SDK gets `resume`
+    // set, and the prompt collapses to bare messageText. The tool surface
+    // must still match — claude validates allowedTools on every turn.
+    mockQuery.mockReturnValueOnce(
+      asyncIter([
+        { type: "system", subtype: "init", session_id: "resume-tools" },
+        {
+          type: "result",
+          subtype: "success",
+          result: "ok",
+          total_cost_usd: 0.01,
+          num_turns: 1,
+          duration_ms: 100,
+          duration_api_ms: 80,
+        },
+      ]),
+    );
+
+    await runAgent(MOCK_REPO_CONTEXT, "follow-up", "existing-session-uuid");
+
+    const callArgs = mockQuery.mock.calls[0][0];
+    expect(callArgs.options.resume).toBe("existing-session-uuid");
+    expect(callArgs.options.mcpServers).toEqual({});
+    expect(callArgs.options.allowedTools).toEqual([
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+    ]);
+    expect(callArgs.options).not.toHaveProperty("settingSources");
   });
 
   it("always persists sessions regardless of complexity", async () => {
