@@ -10,7 +10,6 @@ import {
   handleListDispatches,
   handleGetDispatch,
   handleRawJsonl,
-  handleFollowDispatch,
 } from "./dispatches-routes.js";
 import { handleStream } from "./stream-routes.js";
 import { startDbChangeDetector } from "./dispatch-stream.js";
@@ -265,14 +264,6 @@ async function route(
   const rawMatch = url.pathname.match(/^\/api\/dispatches\/([^/]+)\/raw$/);
   if (method === "GET" && rawMatch) {
     await handleRawJsonl(res, decodeURIComponent(rawMatch[1]));
-    return true;
-  }
-
-  const followMatch = url.pathname.match(
-    /^\/api\/dispatches\/([^/]+)\/follow$/,
-  );
-  if (method === "GET" && followMatch) {
-    await handleFollowDispatch(req, res, decodeURIComponent(followMatch[1]));
     return true;
   }
 

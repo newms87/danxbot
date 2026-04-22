@@ -1,3 +1,4 @@
+import { watch } from "vue";
 import type {
   AgentSnapshot,
   Dispatch,
@@ -7,6 +8,7 @@ import type {
   JsonlBlock,
 } from "./types";
 import { useAuth } from "./composables/useAuth";
+import { useStream } from "./composables/useStream";
 
 export interface RepoInfo {
   name: string;
@@ -175,77 +177,54 @@ export async function patchToggle(
 }
 
 /**
- * Parse one `text/event-stream` buffer slice into complete events. Each
- * event ends with a blank line; within an event, `data:` lines accumulate
- * into a single payload. Returns the leftover tail that hasn't finished
- * yet so the caller can prepend it to the next chunk.
- */
-export function splitEvents(buffer: string): { events: string[]; tail: string } {
-  const parts = buffer.split("\n\n");
-  const tail = parts.pop() ?? "";
-  const events: string[] = [];
-  for (const part of parts) {
-    const dataLines: string[] = [];
-    for (const line of part.split("\n")) {
-      if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trimStart());
-      }
-    }
-    if (dataLines.length) events.push(dataLines.join("\n"));
-  }
-  return { events, tail };
-}
-
-/**
- * Live-follow a dispatch. Uses `fetch` with a streaming response body so
- * we can send `Authorization: Bearer <token>` — `EventSource` can't set
- * headers, which would force the bearer into a query-string where server
- * access logs + Caddy logs would persist it.
+ * Live-follow a dispatch via the multiplexed SSE stream. Subscribes to the
+ * `dispatch:jsonl:<id>` topic and invokes `onBlock` once per parsed
+ * `JsonlBlock` in each batch the backend publishes.
  *
- * Callbacks: `onBlock` per parsed JSONL entry; `onError` once the stream
- * ends unexpectedly. The returned teardown aborts the in-flight fetch.
+ * Each call spawns its own `useStream()` instance — `disconnect()` on
+ * teardown affects only this follow, not any sibling composable (useAgents,
+ * useDispatches) that also talks to `/api/stream`.
+ *
+ * `onError` is invoked at most once, on the first transition from
+ * `connecting`/`connected` back to `disconnected`. `useStream` will then
+ * reconnect on its own with exponential backoff — this mirrors the original
+ * "called once when stream terminates" contract from the pre-Phase-6
+ * dedicated follow-route implementation so the existing `DispatchDetail.vue`
+ * caller (which passes a no-op `onError`) stays unchanged.
  */
 export function followDispatch(
   id: string,
   onBlock: (block: JsonlBlock) => void,
   onError: () => void,
 ): () => void {
-  const controller = new AbortController();
+  const stream = useStream();
+  let errored = false;
 
-  (async () => {
-    try {
-      const res = await fetchWithAuth(
-        `/api/dispatches/${encodeURIComponent(id)}/follow`,
-        { signal: controller.signal, headers: { Accept: "text/event-stream" } },
+  const unsub = stream.subscribe(`dispatch:jsonl:${id}`, (event) => {
+    if (!Array.isArray(event.data)) {
+      console.warn(
+        `followDispatch(${id}): expected JsonlBlock[] payload, got`,
+        event.data,
       );
-      if (!res.ok || !res.body) {
-        onError();
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let buffer = "";
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          onError();
-          return;
-        }
-        buffer += decoder.decode(value, { stream: true });
-        const { events, tail } = splitEvents(buffer);
-        buffer = tail;
-        for (const evt of events) {
-          try {
-            onBlock(JSON.parse(evt) as JsonlBlock);
-          } catch {
-            // Malformed payload: skip the event, keep streaming.
-          }
-        }
-      }
-    } catch (err) {
-      if ((err as { name?: string }).name !== "AbortError") onError();
+      return;
     }
-  })();
+    for (const block of event.data as JsonlBlock[]) onBlock(block);
+  });
 
-  return () => controller.abort();
+  const stopWatch = watch(stream.connectionState, (state, prev) => {
+    if (
+      !errored &&
+      state === "disconnected" &&
+      (prev === "connecting" || prev === "connected")
+    ) {
+      errored = true;
+      onError();
+    }
+  });
+
+  return () => {
+    stopWatch();
+    unsub();
+    stream.disconnect();
+  };
 }

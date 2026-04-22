@@ -89,12 +89,10 @@ vi.mock("./auth-routes.js", () => ({
 const mockHandleListDispatches = vi.fn();
 const mockHandleGetDispatch = vi.fn();
 const mockHandleRawJsonl = vi.fn();
-const mockHandleFollowDispatch = vi.fn();
 vi.mock("./dispatches-routes.js", () => ({
   handleListDispatches: (...args: unknown[]) => mockHandleListDispatches(...args),
   handleGetDispatch: (...args: unknown[]) => mockHandleGetDispatch(...args),
   handleRawJsonl: (...args: unknown[]) => mockHandleRawJsonl(...args),
-  handleFollowDispatch: (...args: unknown[]) => mockHandleFollowDispatch(...args),
 }));
 
 // Stub dispatch-stream so startDashboard() doesn't start a real DB poller.
@@ -176,7 +174,6 @@ describe("dashboard server", () => {
     mockHandleListDispatches.mockReset();
     mockHandleGetDispatch.mockReset();
     mockHandleRawJsonl.mockReset();
-    mockHandleFollowDispatch.mockReset();
     mockGetHealthStatus.mockReset();
     mockHandleGetAgent.mockReset();
     mockHandleListAgents.mockReset();
@@ -391,30 +388,6 @@ describe("dashboard server", () => {
       withAuth(req, "bogus-token");
       await requestHandler(req, res);
       expect(res._getStatusCode()).toBe(401);
-    });
-
-    it("GET /api/dispatches/:id/follow requires a header bearer (no query-token fallback)", async () => {
-      mockHandleFollowDispatch.mockImplementation(
-        async (_req: unknown, res: http.ServerResponse) => {
-          res.writeHead(200, { "Content-Type": "text/event-stream" });
-          res.end("");
-        },
-      );
-
-      // No Authorization header → 401 even when `?token=` is present.
-      const unauthed = createMockReqRes(
-        "GET",
-        "/api/dispatches/abc-123/follow?token=ok-token",
-      );
-      await requestHandler(unauthed.req, unauthed.res);
-      expect(unauthed.res._getStatusCode()).toBe(401);
-      expect(mockHandleFollowDispatch).not.toHaveBeenCalled();
-
-      // With the real bearer header → handler runs.
-      const authed = createMockReqRes("GET", "/api/dispatches/abc-123/follow");
-      withAuth(authed.req);
-      await requestHandler(authed.req, authed.res);
-      expect(mockHandleFollowDispatch).toHaveBeenCalledTimes(1);
     });
 
     it("array-form Authorization header is accepted", async () => {

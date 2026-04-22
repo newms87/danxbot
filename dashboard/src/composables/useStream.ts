@@ -1,6 +1,6 @@
 import { ref } from "vue";
 import type { Ref } from "vue";
-import { fetchWithAuth, splitEvents } from "../api";
+import { fetchWithAuth } from "../api";
 
 export type ConnectionState = "connecting" | "connected" | "disconnected";
 
@@ -22,6 +22,32 @@ export interface UseStreamReturn {
   subscribe(topic: string, handler: StreamEventHandler): () => void;
   /** Abort the current connection and cancel any pending reconnect. */
   disconnect(): void;
+}
+
+/**
+ * Parse one `text/event-stream` buffer slice into complete events. Each
+ * event ends with a blank line; within an event, `data:` lines accumulate
+ * into a single payload. Returns the leftover tail that hasn't finished
+ * yet so the caller can prepend it to the next chunk.
+ *
+ * Private to this module — `useStream()` is the only legitimate consumer
+ * of SSE frame parsing on the frontend. `followDispatch`, `useDispatches`,
+ * and `useAgents` all go through `useStream()`.
+ */
+function splitEvents(buffer: string): { events: string[]; tail: string } {
+  const parts = buffer.split("\n\n");
+  const tail = parts.pop() ?? "";
+  const events: string[] = [];
+  for (const part of parts) {
+    const dataLines: string[] = [];
+    for (const line of part.split("\n")) {
+      if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    if (dataLines.length) events.push(dataLines.join("\n"));
+  }
+  return { events, tail };
 }
 
 /**

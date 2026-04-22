@@ -5,7 +5,9 @@ import type { Ref } from "vue";
 
 const mockFetchWithAuth = vi.fn();
 
-// Keep real splitEvents (pure parser) — only stub the I/O boundary.
+// Stub fetchWithAuth (the I/O boundary). splitEvents used to be a shared
+// export on `../api` and was kept real via importActual; it now lives
+// privately inside useStream.ts so nothing extra needs preserving here.
 vi.mock("../api", async () => {
   const actual = await vi.importActual<typeof import("../api")>("../api");
   return {

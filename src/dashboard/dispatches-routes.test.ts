@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createMockReqRes } from "../__tests__/helpers/http-mocks.js";
 
 const mockGetDispatchById = vi.fn();
@@ -9,19 +9,13 @@ vi.mock("./dispatches-db.js", () => ({
 }));
 
 const mockParseJsonlFile = vi.fn();
-const mockParseJsonlContent = vi.fn();
 vi.mock("./jsonl-reader.js", () => ({
   parseJsonlFile: (...args: unknown[]) => mockParseJsonlFile(...args),
-  parseJsonlContent: (...args: unknown[]) => mockParseJsonlContent(...args),
 }));
 
 const mockStat = vi.fn();
-const mockOpen = vi.fn();
-const mockReadFile = vi.fn();
 vi.mock("node:fs/promises", () => ({
   stat: (...args: unknown[]) => mockStat(...args),
-  open: (...args: unknown[]) => mockOpen(...args),
-  readFile: (...args: unknown[]) => mockReadFile(...args),
 }));
 
 const mockCreateReadStream = vi.fn();
@@ -39,7 +33,6 @@ vi.mock("../logger.js", () => ({
 }));
 
 import {
-  handleFollowDispatch,
   handleGetDispatch,
   handleListDispatches,
   handleRawJsonl,
@@ -307,110 +300,3 @@ describe("handleRawJsonl", () => {
   });
 });
 
-describe("handleFollowDispatch", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("returns 404 when dispatch missing", async () => {
-    mockGetDispatchById.mockResolvedValueOnce(null);
-    const { req, res } = createMockReqRes("GET", "/api/dispatches/x/follow");
-    await handleFollowDispatch(req, res, "x");
-    expect(res._getStatusCode()).toBe(404);
-  });
-
-  it("returns 404 when no path info is available", async () => {
-    mockGetDispatchById.mockResolvedValueOnce(
-      makeDispatch({ jsonlPath: null, sessionUuid: null }),
-    );
-    const { req, res } = createMockReqRes("GET", "/api/dispatches/x/follow");
-    await handleFollowDispatch(req, res, "x");
-    expect(res._getStatusCode()).toBe(404);
-  });
-
-  it("writes SSE headers and primes the client with existing blocks", async () => {
-    vi.useFakeTimers();
-    mockGetDispatchById.mockResolvedValueOnce(makeDispatch());
-    mockReadFile.mockResolvedValueOnce('{"type":"text","text":"hello"}\n');
-    mockParseJsonlContent.mockReturnValueOnce({
-      blocks: [{ type: "assistant_text", text: "hello", timestampMs: 1 }],
-      totals: {
-        tokensIn: 0,
-        tokensOut: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        tokensTotal: 0,
-        toolCallCount: 0,
-        subagentCount: 0,
-      },
-      sessionId: "sess-1",
-    });
-
-    const { req, res } = createMockReqRes("GET", "/api/dispatches/job-1/follow");
-    await handleFollowDispatch(req, res, "job-1");
-
-    expect(res._getHeaders()["content-type"]).toBe("text/event-stream");
-    expect(res._getHeaders()["cache-control"]).toBe("no-cache");
-    expect(res._getHeaders()["x-accel-buffering"]).toBe("no");
-    expect(res.write).toHaveBeenCalledWith(
-      expect.stringContaining('"assistant_text"'),
-    );
-  });
-
-  it("writes SSE headers even when the initial file read fails", async () => {
-    vi.useFakeTimers();
-    mockGetDispatchById.mockResolvedValueOnce(makeDispatch({ status: "running" }));
-    mockReadFile.mockRejectedValueOnce(new Error("ENOENT"));
-    // Make tick's open() also reject so the tick loop stays clean with fake timers
-    mockOpen.mockRejectedValue(new Error("ENOENT"));
-
-    const { req, res } = createMockReqRes("GET", "/api/dispatches/job-1/follow");
-    await handleFollowDispatch(req, res, "job-1");
-
-    expect(res._getHeaders()["content-type"]).toBe("text/event-stream");
-    expect(res._getHeaders()["cache-control"]).toBe("no-cache");
-    expect(res._getHeaders()["x-accel-buffering"]).toBe("no");
-    // No blocks written since the file didn't exist
-    expect(res.write).not.toHaveBeenCalled();
-  });
-
-  it("stops writing after client disconnects", async () => {
-    vi.useFakeTimers();
-    mockGetDispatchById.mockResolvedValueOnce(makeDispatch({ status: "running" }));
-    mockReadFile.mockRejectedValueOnce(new Error("ENOENT")); // priming fails, no blocks written
-    mockOpen.mockRejectedValue(new Error("ENOENT")); // ticks also fail
-
-    const { req, res } = createMockReqRes("GET", "/api/dispatches/job-1/follow");
-    await handleFollowDispatch(req, res, "job-1");
-
-    // Simulate client closing the connection
-    req.emit("close");
-
-    // After close, the tick loop should bail immediately without writing
-    await vi.advanceTimersByTimeAsync(1000);
-
-    expect(res.write).not.toHaveBeenCalled();
-  });
-
-  it("closes the SSE stream when the dispatch reaches a terminal status", async () => {
-    const fakeFh = {
-      stat: vi.fn().mockResolvedValue({ size: 0 }),
-      read: vi.fn(),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-    mockOpen.mockResolvedValue(fakeFh);
-    // Priming fails (file not yet created) — tick will retry
-    mockReadFile.mockRejectedValueOnce(new Error("ENOENT"));
-    // Initial fetch → running; tick's re-fetch → completed
-    mockGetDispatchById
-      .mockResolvedValueOnce(makeDispatch({ status: "running" }))
-      .mockResolvedValueOnce(makeDispatch({ status: "completed" }));
-
-    const { req, res } = createMockReqRes("GET", "/api/dispatches/job-1/follow");
-    await handleFollowDispatch(req, res, "job-1");
-    // Allow tick()'s async chain (open → stat → close → getDispatchById → end) to complete
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    expect(res.end).toHaveBeenCalled();
-  });
-});
