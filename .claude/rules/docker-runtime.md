@@ -99,9 +99,21 @@ All repo config lives in `<repo>/.danxbot/config/` (version controlled). Secrets
 
 Per-repo secrets live in `<repo>/.danxbot/.env` (gitignored) using standardized DANX_* prefix: DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN. Danxbot's own `.env` keeps only shared infrastructure (ANTHROPIC_API_KEY, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL).
 
-## Per-Repo settings.local.json — Worker Port Only
+## Interactive CLI — MCP Env via direnv + `.env.local`
 
-`<repo>/.claude/settings.local.json` holds `DANXBOT_WORKER_PORT` so host and docker runtimes source the port identically. `make launch-worker` and `make launch-worker-host` both extract it via `jq` and export it before starting the process.
+Use case #1 (developer runs bare `claude` at repo root) resolves `.mcp.json`'s `${VAR}` placeholders ONLY from the shell process env of the `claude` command. Claude Code's `settings.json.env` is NOT exported to MCP subprocesses ([anthropics/claude-code#1254](https://github.com/anthropics/claude-code/issues/1254), closed "not planned"). There is no first-party `--env-file` or `mcpEnv` mechanism. The documented path is shell env.
+
+The repo uses **direnv** for this:
+
+- `/.envrc` (committed) contains `dotenv_if_exists .env.local`.
+- `/.env.local` (gitignored, dev-owned) holds the dev's MCP secrets, e.g. `TRELLO_API_KEY=...` / `TRELLO_TOKEN=...`.
+- `.mcp.json` interpolates `${TRELLO_API_KEY}` / `${TRELLO_TOKEN}` against the process env direnv exports.
+
+One-time dev setup: `sudo apt-get install -y direnv` + `echo 'eval "$(direnv hook bash)"' >> ~/.bashrc` + `direnv allow` once in the repo. Every `cd` into the repo after that auto-exports `.env.local` into the shell — bare `claude` Just Works.
+
+### `.claude/settings.local.json` — Worker Port Only
+
+`<repo>/.claude/settings.local.json` holds `DANXBOT_WORKER_PORT` (extracted via `jq` by `make launch-worker` / `make launch-worker-host` before starting the worker). **Do NOT put MCP env vars here** — they're silently ignored by Claude Code's MCP subprocess spawn.
 
 ```json
 {
@@ -111,10 +123,9 @@ Per-repo secrets live in `<repo>/.danxbot/.env` (gitignored) using standardized 
 }
 ```
 
-**MCP server env vars do NOT live here.** Claude Code's `${VAR}` interpolation in `.mcp.json` only reads the shell process environment of the `claude` command — it does NOT read `settings.local.json`'s `env` block (official Claude Code docs + Anthropic issue #11927). MCP creds come from `<repo>/.danxbot/.env` under the `DANX_*` prefix:
+### Strict isolation from danxbot
 
-- **Production** — the worker compose at `<repo>/.danxbot/config/compose.yml` uses `env_file: ../.env` which populates the container's process env with `DANX_*`. `.mcp.json` interpolates `${DANX_TRELLO_API_KEY}` etc. against those values.
-- **Local dev** — use the committed wrapper `./bin/claude-danx` at the repo root. It sources `.danxbot/.env` and execs `claude`, giving the spawned MCP servers the same process env prod has. Running bare `claude` locally will not populate MCP env and Trello tool calls will 401.
+Use case #1's `.env.local` governs the DEVELOPER's interactive `claude` only. Danxbot-dispatched agents (poller, `/api/launch`, Slack) do NOT read it — they use their own per-dispatch MCP config and env from `<repo>/.danxbot/.env` delivered to the worker container via `env_file: ../.env` in `<repo>/.danxbot/config/compose.yml`. Zero overlap between dev env and bot env — by design. Dev creds and bot creds can (and usually should) differ.
 
 ## Per-Repo Trello Toggle
 

@@ -2,6 +2,7 @@ node_modules/
 dist/
 docker-compose.override.yml
 .env
+.env.local
 threads/
 data/
 .poller-running
