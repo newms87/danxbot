@@ -23,6 +23,7 @@ import {
   type DispatchProxyDeps,
 } from "./dispatch-proxy.js";
 import {
+  handleClearAgentCriticalFailure,
   handleGetAgent,
   handleListAgents,
   handlePatchToggle,
@@ -190,6 +191,23 @@ async function route(
       req,
       res,
       decodeURIComponent(agentTogglesMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // DELETE /api/agents/:repo/critical-failure — user bearer required.
+  // Matched ahead of the blanket /api/* gate so the handler's own
+  // `requireUser` call produces the 401. Forwards to the worker's
+  // DELETE /api/poller/critical-failure which calls clearFlag.
+  const agentCriticalFailureMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/critical-failure$/,
+  );
+  if (method === "DELETE" && agentCriticalFailureMatch) {
+    await handleClearAgentCriticalFailure(
+      req,
+      res,
+      decodeURIComponent(agentCriticalFailureMatch[1]),
       dispatchDeps,
     );
     return true;

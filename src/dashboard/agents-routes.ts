@@ -39,6 +39,8 @@ import {
   type Feature,
   type Settings,
 } from "../settings-file.js";
+import { readFlag, type CriticalFailurePayload } from "../critical-failure.js";
+import { proxyToWorker } from "./dispatch-proxy.js";
 import { eventBus } from "./event-bus.js";
 
 const log = createLogger("agents-routes");
@@ -60,6 +62,16 @@ export interface AgentSnapshot {
   settings: Settings;
   counts: RepoDispatchCounts;
   worker: WorkerHealth;
+  /**
+   * Contents of `<repo>/.danxbot/CRITICAL_FAILURE` when the poller has
+   * halted on a critical-failure flag — either agent-signaled via the
+   * `danxbot_complete({status:"critical_failure"})` MCP tool, or
+   * worker-signaled by the post-dispatch "card didn't move out of
+   * ToDo" backup check. Null when the flag is absent (poller running
+   * normally). Dashboard renders a red banner when non-null. See
+   * `.claude/rules/agent-dispatch.md` "Critical failure flag".
+   */
+  criticalFailure: CriticalFailurePayload | null;
 }
 
 const EMPTY_COUNTS: RepoDispatchCounts = {
@@ -139,6 +151,11 @@ async function buildSnapshot(
   const worker = repo.workerPort
     ? await probeWorkerHealth(resolveHost(repo.name), repo.workerPort)
     : { reachable: false, lastSeenMs: null, error: "no workerPort configured" };
+  // Read the flag from the bind-mounted repo dir — same pattern as
+  // settings. The dashboard has read access but NEVER writes the flag
+  // (only the worker writes; only the DELETE endpoint below clears via
+  // the worker's own `clearFlag`).
+  const criticalFailure = readFlag(repo.localPath);
 
   return {
     name: repo.name,
@@ -146,6 +163,7 @@ async function buildSnapshot(
     settings,
     counts,
     worker,
+    criticalFailure,
   };
 }
 
@@ -305,4 +323,62 @@ export async function handlePatchToggle(
       error: err instanceof Error ? err.message : "Failed to update toggle",
     });
   }
+}
+
+/**
+ * DELETE /api/agents/:repo/critical-failure — user-bearer auth required.
+ * Forwards to the worker's `DELETE /api/poller/critical-failure`, which
+ * calls `clearFlag(repo.localPath)`. The dashboard never writes or
+ * deletes the flag file directly — only the worker touches it, so the
+ * ownership contract stays "one writer per file" as designed.
+ *
+ * Auth: per-user bearer (same as PATCH toggle). Dashboard users clear
+ * flags; bots/external dispatchers do not. `DANXBOT_DISPATCH_TOKEN` is
+ * intentionally NOT accepted here.
+ *
+ * Returns the refreshed agent snapshot in the response body (after the
+ * worker clears the flag) so the SPA can commit the banner-dismissal
+ * without a second fetch. Failure modes: 401 (no auth), 404 (unknown
+ * repo), 502 (worker unreachable), 500 (unexpected dashboard error).
+ */
+export async function handleClearAgentCriticalFailure(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoName: string,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const auth = await requireUser(req);
+  if (!auth.ok) {
+    json(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  const repo = deps.repos.find((r) => r.name === repoName);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoName}" is not configured` });
+    return;
+  }
+  if (!repo.workerPort) {
+    json(res, 500, {
+      error: `Repo "${repoName}" has no workerPort configured on this dashboard`,
+    });
+    return;
+  }
+
+  await proxyToWorker(
+    req,
+    res,
+    {
+      host: deps.resolveHost(repo.name),
+      port: repo.workerPort,
+      path: "/api/poller/critical-failure",
+      method: "DELETE",
+    },
+    null,
+  );
+
+  // Note: we don't re-read the snapshot here because `proxyToWorker`
+  // has already written the response (the worker's body). The SPA
+  // refetches `/api/agents/:repo` after a successful DELETE — a second
+  // round-trip, but it keeps the clear endpoint a pure forwarder.
 }

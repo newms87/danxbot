@@ -18,11 +18,17 @@ vi.mock("../db/health.js", () => ({
   checkDbConnection: (...args: unknown[]) => mockCheckDbConnection(...args),
 }));
 
+const mockReadFlag = vi.fn().mockReturnValue(null);
+vi.mock("../critical-failure.js", () => ({
+  readFlag: (...args: unknown[]) => mockReadFlag(...args),
+}));
+
 import { getHealthStatus } from "./health.js";
 
 describe("getHealthStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockReadFlag.mockReturnValue(null);
   });
 
   it("returns 'ok' when DB and Slack are connected", async () => {
@@ -95,5 +101,57 @@ describe("getHealthStatus", () => {
     expect(result.memory_usage_mb).toBeTypeOf("number");
     expect(result.queued_messages).toBe(3);
     expect(result.queue_by_thread).toEqual({ "t1": 2, "t2": 1 });
+  });
+
+  it("returns 'halted' when the critical-failure flag is set, regardless of DB/Slack health", async () => {
+    // Halt takes precedence over degraded/ok — operator must investigate.
+    // Everything else is intentionally healthy to prove halt wins.
+    mockCheckDbConnection.mockResolvedValue(true);
+    mockIsSlackConnected.mockReturnValue(true);
+    mockGetTotalQueuedCount.mockReturnValue(0);
+    mockGetQueueStats.mockReturnValue({});
+    const flag = {
+      timestamp: "2026-04-21T00:00:00.000Z",
+      source: "agent" as const,
+      dispatchId: "d-1",
+      reason: "MCP Trello unavailable",
+    };
+    mockReadFlag.mockReturnValue(flag);
+
+    const repo = makeRepoContext();
+    const result = await getHealthStatus(repo);
+
+    expect(result.status).toBe("halted");
+    expect(result.criticalFailure).toEqual(flag);
+  });
+
+  it("returns 'halted' even when DB is down — halted wins over degraded", async () => {
+    mockCheckDbConnection.mockResolvedValue(false);
+    mockIsSlackConnected.mockReturnValue(false);
+    mockGetTotalQueuedCount.mockReturnValue(0);
+    mockGetQueueStats.mockReturnValue({});
+    mockReadFlag.mockReturnValue({
+      timestamp: "2026-04-21T00:00:00.000Z",
+      source: "post-dispatch-check",
+      dispatchId: "d-2",
+      reason: "Card still in ToDo",
+    });
+
+    const repo = makeRepoContext();
+    const result = await getHealthStatus(repo);
+
+    expect(result.status).toBe("halted");
+  });
+
+  it("exposes criticalFailure:null when no flag is present", async () => {
+    mockCheckDbConnection.mockResolvedValue(true);
+    mockIsSlackConnected.mockReturnValue(true);
+    mockGetTotalQueuedCount.mockReturnValue(0);
+    mockGetQueueStats.mockReturnValue({});
+
+    const repo = makeRepoContext();
+    const result = await getHealthStatus(repo);
+
+    expect(result.criticalFailure).toBeNull();
   });
 });

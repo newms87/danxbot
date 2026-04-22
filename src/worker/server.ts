@@ -21,6 +21,7 @@ import {
   handleStatus,
   handleStop,
 } from "./dispatch.js";
+import { handleClearCriticalFailure } from "./critical-failure-route.js";
 import type { RepoContext } from "../types.js";
 
 const log = createLogger("worker-server");
@@ -36,7 +37,12 @@ export async function startWorkerServer(repo: RepoContext): Promise<void> {
 
     if (url.pathname === "/health") {
       const health = await getHealthStatus(repo);
-      const statusCode = health.status === "ok" ? 200 : 503;
+      // `halted` keeps HTTP 200 so Docker health checks stay green —
+      // operator-intent signal lives in the `status` field, not the
+      // status code. Only `degraded` returns 503 so external monitors
+      // page when the worker has infra problems, not when it's
+      // intentionally paused. See `.claude/rules/agent-dispatch.md`.
+      const statusCode = health.status === "degraded" ? 503 : 200;
       json(res, statusCode, health);
       return;
     }
@@ -66,6 +72,14 @@ export async function startWorkerServer(repo: RepoContext): Promise<void> {
     const statusMatch = url.pathname.match(/^\/api\/status\/(.+)$/);
     if (method === "GET" && statusMatch) {
       handleStatus(res, statusMatch[1]);
+      return;
+    }
+
+    if (
+      method === "DELETE" &&
+      url.pathname === "/api/poller/critical-failure"
+    ) {
+      await handleClearCriticalFailure(req, res, repo);
       return;
     }
 

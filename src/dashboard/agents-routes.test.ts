@@ -17,6 +17,16 @@ vi.mock("../settings-file.js", () => ({
   DASHBOARD_PREFIX: "dashboard:",
 }));
 
+const mockReadFlag = vi.fn().mockReturnValue(null);
+vi.mock("../critical-failure.js", () => ({
+  readFlag: (...args: unknown[]) => mockReadFlag(...args),
+}));
+
+const mockProxyToWorker = vi.fn();
+vi.mock("./dispatch-proxy.js", () => ({
+  proxyToWorker: (...args: unknown[]) => mockProxyToWorker(...args),
+}));
+
 const mockCountDispatchesByRepo = vi.fn();
 
 vi.mock("./dispatches-db.js", () => ({
@@ -56,11 +66,74 @@ vi.mock("./auth-middleware.js", () => ({
 }));
 
 import {
+  handleClearAgentCriticalFailure,
   handleGetAgent,
   handleListAgents,
   handlePatchToggle,
   probeWorkerHealth,
 } from "./agents-routes.js";
+
+// ============================================================
+// DELETE /api/agents/:repo/critical-failure — clear forwarder
+// ============================================================
+
+describe("handleClearAgentCriticalFailure", () => {
+  beforeEach(() => {
+    mockProxyToWorker.mockReset();
+    mockProxyToWorker.mockResolvedValue(undefined);
+  });
+
+  it("rejects requests without a user bearer with 401", async () => {
+    const req = createMockReqWithBody("DELETE", {});
+    const res = createMockRes();
+
+    await handleClearAgentCriticalFailure(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(401);
+    expect(mockProxyToWorker).not.toHaveBeenCalled();
+  });
+
+  it("rejects the dispatch token (dispatch token is NOT accepted here)", async () => {
+    // Mirror of handlePatchToggle's contract — only user bearers clear flags.
+    const req = createMockReqWithBody("DELETE", {});
+    req.headers = { authorization: "Bearer test-token" }; // dispatch token
+    const res = createMockRes();
+
+    await handleClearAgentCriticalFailure(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(401);
+    expect(mockProxyToWorker).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for an unknown repo", async () => {
+    const req = createMockReqWithBody("DELETE", {});
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+
+    await handleClearAgentCriticalFailure(req, res, "not-a-repo", deps());
+
+    expect(res._getStatusCode()).toBe(404);
+    expect(mockProxyToWorker).not.toHaveBeenCalled();
+  });
+
+  it("forwards the DELETE to the worker's /api/poller/critical-failure endpoint", async () => {
+    const req = createMockReqWithBody("DELETE", {});
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+
+    await handleClearAgentCriticalFailure(req, res, "danxbot", deps());
+
+    expect(mockProxyToWorker).toHaveBeenCalledTimes(1);
+    const [, , upstream, body] = mockProxyToWorker.mock.calls[0];
+    expect(upstream).toEqual({
+      host: "127.0.0.1",
+      port: 5562,
+      path: "/api/poller/critical-failure",
+      method: "DELETE",
+    });
+    expect(body).toBeNull();
+  });
+});
 
 // Helper settings structure matching the module's Settings shape.
 function settings(overrides?: Partial<{ slack: boolean | null; trelloPoller: boolean | null; dispatchApi: boolean | null }>) {
@@ -112,6 +185,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockReadSettings.mockReturnValue(settings());
   mockCountDispatchesByRepo.mockResolvedValue({});
+  mockReadFlag.mockReturnValue(null);
 });
 
 // ============================================================
@@ -211,6 +285,39 @@ describe("handleListAgents", () => {
     expect(body).toHaveLength(2);
     expect(body[0].counts).toEqual(EMPTY_REPO_COUNTS);
     expect(body[1].counts).toEqual(EMPTY_REPO_COUNTS);
+  });
+
+  it("includes criticalFailure:null on each snapshot when no flag is set", async () => {
+    mockReadFlag.mockReturnValue(null);
+
+    const res = createMockRes();
+    await handleListAgents(res, deps());
+
+    const body = JSON.parse(res._getBody());
+    expect(body[0].criticalFailure).toBeNull();
+    expect(body[1].criticalFailure).toBeNull();
+    expect(mockReadFlag).toHaveBeenCalledWith("/repos/danxbot");
+    expect(mockReadFlag).toHaveBeenCalledWith("/repos/platform");
+  });
+
+  it("surfaces the critical-failure payload on the snapshot when a repo's flag is set", async () => {
+    const flag = {
+      timestamp: "2026-04-21T00:00:00.000Z",
+      source: "agent" as const,
+      dispatchId: "d-1",
+      reason: "MCP Trello unavailable",
+    };
+    // First repo (danxbot) has a flag; second (platform) does not.
+    mockReadFlag.mockImplementation((path: string) =>
+      path === "/repos/danxbot" ? flag : null,
+    );
+
+    const res = createMockRes();
+    await handleListAgents(res, deps());
+
+    const body = JSON.parse(res._getBody());
+    expect(body[0].criticalFailure).toEqual(flag);
+    expect(body[1].criticalFailure).toBeNull();
   });
 
   it("marks workers with no workerPort as unreachable rather than probing", async () => {

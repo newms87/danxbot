@@ -14,11 +14,19 @@ const mockHandleLaunch = vi.fn();
 const mockHandleCancel = vi.fn();
 const mockHandleStatus = vi.fn();
 const mockHandleStop = vi.fn();
+const mockHandleResume = vi.fn();
 vi.mock("./dispatch.js", () => ({
   handleLaunch: (...args: unknown[]) => mockHandleLaunch(...args),
   handleCancel: (...args: unknown[]) => mockHandleCancel(...args),
   handleStatus: (...args: unknown[]) => mockHandleStatus(...args),
   handleStop: (...args: unknown[]) => mockHandleStop(...args),
+  handleResume: (...args: unknown[]) => mockHandleResume(...args),
+}));
+
+const mockHandleClearCriticalFailure = vi.fn();
+vi.mock("./critical-failure-route.js", () => ({
+  handleClearCriticalFailure: (...args: unknown[]) =>
+    mockHandleClearCriticalFailure(...args),
 }));
 
 vi.mock("../logger.js", () => ({
@@ -204,6 +212,35 @@ describe("worker server", () => {
       await requestHandler(req, res);
 
       expect(mockHandleStop).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("DELETE /api/poller/critical-failure", () => {
+    it("delegates to handleClearCriticalFailure with req, res, and the worker's repo", async () => {
+      mockHandleClearCriticalFailure.mockResolvedValue(undefined);
+
+      const { req, res } = createMockReqRes(
+        "DELETE",
+        "/api/poller/critical-failure",
+      );
+      await requestHandler(req, res);
+
+      expect(mockHandleClearCriticalFailure).toHaveBeenCalledWith(
+        req,
+        res,
+        MOCK_REPO,
+      );
+    });
+
+    it("does not match GET /api/poller/critical-failure", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/poller/critical-failure",
+      );
+      await requestHandler(req, res);
+
+      expect(mockHandleClearCriticalFailure).not.toHaveBeenCalled();
       expect(res._getStatusCode()).toBe(404);
     });
   });
