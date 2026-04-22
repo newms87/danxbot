@@ -165,6 +165,13 @@ vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
 }));
 
+const mockGenerateWorkspace = vi
+  .fn()
+  .mockReturnValue({ path: "/mock/workspace", changedFiles: [] });
+vi.mock("../workspace/generate.js", () => ({
+  generateWorkspace: (...args: unknown[]) => mockGenerateWorkspace(...args),
+}));
+
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
@@ -267,6 +274,24 @@ describe("poll", () => {
 
     expect(mockFetchTodoCards).toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it("regenerates the workspace on every tick before syncing repo files", async () => {
+    // Phase 1 contract: the workspace skeleton refreshes every tick so
+    // config-file updates inside `.danxbot/config/` flow to dispatched
+    // agents without a worker restart. Ordering matters once Phase 3
+    // switches spawn cwd to the workspace — if the rule/skill sync fires
+    // first, a dispatched agent could momentarily cd into a workspace
+    // whose `.claude/` subtree doesn't yet exist.
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockGenerateWorkspace).toHaveBeenCalledWith(MOCK_REPO_CONTEXT);
+    // The trello-client call happens inside syncRepoFiles' downstream
+    // cascade (poll → syncRepoFiles → fetchTodoCards). Asserting the
+    // workspace-generator runs before trello fetching covers the ordering.
+    expect(mockGenerateWorkspace).toHaveBeenCalledBefore(mockFetchTodoCards);
   });
 
   it("calls dispatch() with the correct options when cards exist", async () => {

@@ -21,6 +21,7 @@ import {
 } from "./constants.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
+import { generateWorkspace } from "../workspace/generate.js";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
 import {
@@ -173,6 +174,13 @@ export async function poll(repo: RepoContext): Promise<void> {
 }
 
 async function _poll(repo: RepoContext): Promise<void> {
+  // Regenerate the isolated workspace skeleton each tick. Idempotent —
+  // no-op when the owner-owned files (CLAUDE.md, .gitignore, .mcp.json,
+  // .claude/settings.json) already match. Lets operators drop new rules
+  // into `.danxbot/config/` and see them reflected without a restart.
+  // See `src/workspace/generate.ts` and the agent-isolation epic (7ha2CSpc).
+  generateWorkspace(repo);
+
   // Sync danxbot config into target repo on every poll cycle
   syncRepoFiles(repo);
 

@@ -15,6 +15,7 @@ import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
 import { start as startPoller } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
+import { generateWorkspace } from "./workspace/generate.js";
 
 const log = createLogger("startup");
 
@@ -90,6 +91,19 @@ async function startWorkerMode(): Promise<void> {
   // `overrides` are preserved across restarts. See
   // `.claude/rules/settings-file.md`.
   await syncSettingsFileOnBoot(repo, config.runtime);
+
+  // Ensure the isolated workspace directory exists for this repo. The
+  // workspace becomes the cwd for every dispatched agent (Phase 3 of the
+  // agent-isolation epic). Running it here guarantees the skeleton is in
+  // place before /api/launch accepts its first request — dispatch tests
+  // and production both rely on this ordering. See
+  // `src/workspace/generate.ts` for the contract.
+  const workspaceResult = generateWorkspace(repo);
+  if (workspaceResult.changedFiles.length > 0) {
+    log.info(
+      `[${repo.name}] Workspace updated at ${workspaceResult.path} — wrote ${workspaceResult.changedFiles.join(", ")}`,
+    );
+  }
 
   // Assert that the JSONL projects directory is accessible and writable.
   // Catches missing or misconfigured bind mounts early so operators see a
