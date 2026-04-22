@@ -14,6 +14,15 @@ This file is the single source of truth for:
 The lock file `<repo>/.danxbot/.settings.lock` serializes concurrent writes
 via `fs.open("wx")` with stale-steal at 30s. Both files are gitignored.
 
+> **Sibling tripwire — NOT this file:**
+> `<repo>/.danxbot/CRITICAL_FAILURE` is a separate poller-halt flag
+> with an unrelated schema, writer, and lifecycle. Operator toggles
+> here are three-valued runtime overrides; the flag is a
+> present-or-absent halt signal cleared by a human. Do not conflate
+> the two in code. Full contract:
+> `.claude/rules/agent-dispatch.md` "Critical failure flag — poller
+> halt contract".
+
 ## Ownership
 
 | Writer                  | Touches                                | When                                               |

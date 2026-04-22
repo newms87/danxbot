@@ -3,14 +3,17 @@ import { computed } from "vue";
 import type { AgentSnapshot, Feature } from "../../types";
 import FeatureToggle from "./FeatureToggle.vue";
 import ConfigTable from "./ConfigTable.vue";
+import CriticalFailureBanner from "./CriticalFailureBanner.vue";
 
 const props = defineProps<{
   agent: AgentSnapshot;
   busyFeature: Feature | null;
+  clearingCriticalFailure?: boolean;
 }>();
 
 defineEmits<{
   toggle: [repo: string, feature: Feature, enabled: boolean | null];
+  clearCriticalFailure: [repo: string];
 }>();
 
 // The env default each feature falls back to when the override is null.
@@ -104,6 +107,14 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         </a>
       </div>
     </header>
+
+    <CriticalFailureBanner
+      v-if="agent.criticalFailure"
+      :flag="agent.criticalFailure"
+      :repo-name="agent.name"
+      :busy="clearingCriticalFailure"
+      @clear="(r) => $emit('clearCriticalFailure', r)"
+    />
 
     <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
       <FeatureToggle

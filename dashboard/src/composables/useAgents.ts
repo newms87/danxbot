@@ -1,6 +1,12 @@
 import { ref, onMounted, onBeforeUnmount } from "vue";
 import type { Ref } from "vue";
-import { fetchAgents, patchToggle, type ToggleError } from "../api";
+import {
+  clearCriticalFailure as clearCriticalFailureApi,
+  fetchAgent,
+  fetchAgents,
+  patchToggle,
+  type ToggleError,
+} from "../api";
 import type { AgentSnapshot, Feature } from "../types";
 
 /**
@@ -15,6 +21,7 @@ export interface UseAgents {
   loading: Ref<boolean>;
   error: Ref<string | null>;
   toggle: (repo: string, feature: Feature, enabled: boolean | null) => Promise<void>;
+  clearCriticalFailure: (repo: string) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -170,5 +177,33 @@ export function useAgents(): UseAgents {
     ];
   }
 
-  return { agents, loading, error, toggle, refresh };
+  /**
+   * Clear the per-repo critical-failure flag via the dashboard's DELETE
+   * proxy. The DELETE response body is `{cleared: boolean}` — it does
+   * not carry the refreshed snapshot, so we re-fetch the repo's agent
+   * snapshot afterward to swap in the fresh state (banner should then
+   * disappear because `criticalFailure` flips to null). On failure the
+   * banner stays visible and the top-of-page error surfaces the reason.
+   */
+  async function clearCriticalFailure(repo: string): Promise<void> {
+    try {
+      await clearCriticalFailureApi(repo);
+      const refreshed = await fetchAgent(repo);
+      const idx = agents.value.findIndex((a) => a.name === repo);
+      if (idx !== -1) {
+        agents.value = [
+          ...agents.value.slice(0, idx),
+          refreshed,
+          ...agents.value.slice(idx + 1),
+        ];
+      }
+      error.value = null;
+    } catch (err) {
+      const te = err as ToggleError;
+      error.value =
+        te?.serverMessage ?? te?.message ?? "Clear critical failure failed.";
+    }
+  }
+
+  return { agents, loading, error, toggle, clearCriticalFailure, refresh };
 }

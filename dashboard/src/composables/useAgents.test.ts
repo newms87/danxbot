@@ -5,11 +5,16 @@ import type { AgentSnapshot } from "../types";
 
 // Mock the API layer so we drive fetch/patch behavior from tests.
 const mockFetchAgents = vi.fn();
+const mockFetchAgent = vi.fn();
 const mockPatchToggle = vi.fn();
+const mockClearCriticalFailure = vi.fn();
 
 vi.mock("../api", () => ({
   fetchAgents: (...args: unknown[]) => mockFetchAgents(...args),
+  fetchAgent: (...args: unknown[]) => mockFetchAgent(...args),
   patchToggle: (...args: unknown[]) => mockPatchToggle(...args),
+  clearCriticalFailure: (...args: unknown[]) =>
+    mockClearCriticalFailure(...args),
 }));
 
 // Import under test AFTER mock.
@@ -37,6 +42,7 @@ function snap(
       today: { total: 0, slack: 0, trello: 0, api: 0 },
     },
     worker: { reachable: true, lastSeenMs: Date.now() },
+    criticalFailure: null,
   } as AgentSnapshot;
 }
 
@@ -173,6 +179,63 @@ describe("useAgents — optimistic toggle", () => {
 
     expect(mockPatchToggle).not.toHaveBeenCalled();
     expect(ret.error.value).toContain("Unknown repo");
+
+    wrapper.unmount();
+  });
+});
+
+describe("useAgents — clearCriticalFailure", () => {
+  it("calls the clear API, fetches the fresh snapshot, and swaps it into agents", async () => {
+    const flaggedSnap = snap("danxbot");
+    (flaggedSnap as { criticalFailure: unknown }).criticalFailure = {
+      timestamp: "2026-04-21T00:00:00Z",
+      source: "agent",
+      dispatchId: "d-1",
+      reason: "MCP unavailable",
+    };
+    mockFetchAgents.mockResolvedValue([flaggedSnap, snap("platform")]);
+    mockClearCriticalFailure.mockResolvedValue({ cleared: true });
+    mockFetchAgent.mockResolvedValue(snap("danxbot")); // refreshed, flag=null
+
+    const { wrapper, ret } = mountWithAgents();
+    await flushPromises();
+
+    await ret.clearCriticalFailure("danxbot");
+
+    expect(mockClearCriticalFailure).toHaveBeenCalledWith("danxbot");
+    expect(mockFetchAgent).toHaveBeenCalledWith("danxbot");
+    expect(ret.agents.value[0].criticalFailure).toBeNull();
+    expect(ret.error.value).toBeNull();
+
+    wrapper.unmount();
+  });
+
+  it("surfaces an error and leaves the agents list untouched when the DELETE fails", async () => {
+    const flaggedSnap = snap("danxbot");
+    (flaggedSnap as { criticalFailure: unknown }).criticalFailure = {
+      timestamp: "2026-04-21T00:00:00Z",
+      source: "agent",
+      dispatchId: "d-1",
+      reason: "MCP unavailable",
+    };
+    mockFetchAgents.mockResolvedValue([flaggedSnap]);
+    mockClearCriticalFailure.mockRejectedValue(
+      Object.assign(new Error("502 upstream"), {
+        status: 502,
+        serverMessage: "Worker unreachable",
+      }),
+    );
+
+    const { wrapper, ret } = mountWithAgents();
+    await flushPromises();
+
+    await ret.clearCriticalFailure("danxbot");
+
+    expect(ret.error.value).toBe("Worker unreachable");
+    expect(mockFetchAgent).not.toHaveBeenCalled();
+    // The banner still shows (agents list is unchanged) so the operator
+    // can retry.
+    expect(ret.agents.value[0].criticalFailure).not.toBeNull();
 
     wrapper.unmount();
   });

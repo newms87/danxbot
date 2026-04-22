@@ -90,6 +90,42 @@ export async function fetchAgent(repo: string): Promise<AgentSnapshot> {
   return res.json();
 }
 
+export interface ClearCriticalFailureResult {
+  cleared: boolean;
+}
+
+/**
+ * Clear the per-repo critical-failure flag. Delegates via the dashboard's
+ * DELETE /api/agents/:repo/critical-failure proxy to the worker's
+ * DELETE /api/poller/critical-failure. Idempotent: returns
+ * `{cleared:true}` if the flag existed and was removed, `{cleared:false}`
+ * if it was already absent. Caller should re-fetch the snapshot (via
+ * `fetchAgent`) after a successful clear so the banner disappears.
+ *
+ * Auth: per-user bearer (NOT the dispatch token). Surfaces errors with
+ * the same shape as `patchToggle` so the page can render them the same
+ * way.
+ */
+export async function clearCriticalFailure(
+  repo: string,
+): Promise<ClearCriticalFailureResult> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/critical-failure`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    let message: string | undefined;
+    try {
+      const body = await res.json();
+      if (body && typeof body.error === "string") message = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw toggleError(res.status, message);
+  }
+  return res.json();
+}
+
 export interface ToggleError extends Error {
   status: number;
   serverMessage?: string;

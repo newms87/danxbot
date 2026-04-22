@@ -39,6 +39,10 @@ export interface DispatchDetail {
 
 export type { AgentSnapshot, WorkerHealth } from "@backend/dashboard/agents-routes.js";
 export type {
+  CriticalFailurePayload,
+  CriticalFailureSource,
+} from "@backend/critical-failure.js";
+export type {
   Feature,
   FeatureOverride,
   Settings,

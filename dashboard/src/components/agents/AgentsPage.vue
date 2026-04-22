@@ -4,12 +4,16 @@ import type { Feature } from "../../types";
 import { useAgents } from "../../composables/useAgents";
 import RepoCard from "./RepoCard.vue";
 
-const { agents, loading, error, toggle, refresh } = useAgents();
+const { agents, loading, error, toggle, clearCriticalFailure, refresh } =
+  useAgents();
 
 // Track which feature is currently mid-PATCH on each repo, so we can
 // disable that specific toggle while it's in flight without freezing the
 // rest of the card. Keyed by `<repo>:<feature>` for uniqueness.
 const busy = ref<Record<string, Feature | null>>({});
+// Per-repo "clearing flag" flag — disables the Clear button while the
+// DELETE round-trip is in flight so operators don't double-click.
+const clearing = ref<Record<string, boolean>>({});
 
 async function onToggle(
   repo: string,
@@ -21,6 +25,15 @@ async function onToggle(
     await toggle(repo, feature, enabled);
   } finally {
     busy.value = { ...busy.value, [repo]: null };
+  }
+}
+
+async function onClearCriticalFailure(repo: string): Promise<void> {
+  clearing.value = { ...clearing.value, [repo]: true };
+  try {
+    await clearCriticalFailure(repo);
+  } finally {
+    clearing.value = { ...clearing.value, [repo]: false };
   }
 }
 </script>
@@ -45,7 +58,9 @@ async function onToggle(
         :key="agent.name"
         :agent="agent"
         :busy-feature="busy[agent.name] ?? null"
+        :clearing-critical-failure="clearing[agent.name] ?? false"
         @toggle="onToggle"
+        @clear-critical-failure="onClearCriticalFailure"
       />
     </div>
   </section>
