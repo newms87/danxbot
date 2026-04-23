@@ -17,7 +17,7 @@ REPOS_DIR := ./repos
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
        test-system-error test-system-stall test-system-poller test-system-allow-tools test-system-cleanup \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
-       create-user
+       create-user reset-data
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -254,5 +254,21 @@ else
 	@echo "Usage:"
 	@echo "  make create-user LOCALHOST=1 USERNAME=<name>"
 	@echo "  make create-user TARGET=<gpt|...> USERNAME=<name>"
+	@exit 1
+endif
+
+# Wipe operational data tables (dispatches, threads, events, health_check).
+# Users + api_tokens are preserved so the dashboard login still works.
+# LOCAL ONLY — there is no TARGET=<remote> branch. Production data is not
+# something we want wiped by a one-liner. If prod ever needs a reset,
+# add an explicit deploy/cli.ts subcommand with its own guardrails.
+reset-data: ## Wipe local dispatches/threads/events (usage: make reset-data LOCALHOST=1)
+ifdef LOCALHOST
+	@docker exec -i danxbot-flytebot-dashboard-1 npx tsx src/cli/reset-data.ts
+else
+	@echo "Usage:"
+	@echo "  make reset-data LOCALHOST=1"
+	@echo ""
+	@echo "No TARGET=<remote> branch — production data is not resettable via this target."
 	@exit 1
 endif

@@ -127,6 +127,17 @@ export function stopDbChangeDetector(): void {
   knownDispatches.clear();
 }
 
+/**
+ * Drop every cached dispatch snapshot without touching the poll interval.
+ * Called by `reset-data.ts` after truncating the `dispatches` table so
+ * the next poll tick sees an empty DB as "no dispatches" rather than
+ * "all dispatches disappeared" (which would emit a useless flood of
+ * `dispatch:updated` events for ids that no longer exist).
+ */
+export function clearDispatchSnapshotCache(): void {
+  knownDispatches.clear();
+}
+
 // ─── Per-dispatch JSONL file poller ───────────────────────────────────────────
 
 interface JsonlWatcher {

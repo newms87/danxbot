@@ -95,6 +95,13 @@ vi.mock("./dispatches-routes.js", () => ({
   handleRawJsonl: (...args: unknown[]) => mockHandleRawJsonl(...args),
 }));
 
+// admin-routes imports reset-data which transitively loads db/connection.
+// Stub for the server test — admin-routes.test.ts owns handler coverage.
+const mockHandleAdminReset = vi.fn();
+vi.mock("./admin-routes.js", () => ({
+  handleAdminReset: (...args: unknown[]) => mockHandleAdminReset(...args),
+}));
+
 // Stub dispatch-stream so startDashboard() doesn't start a real DB poller.
 const mockStartDbChangeDetector = vi.fn();
 vi.mock("./dispatch-stream.js", () => ({
@@ -181,6 +188,7 @@ describe("dashboard server", () => {
     mockHandleLogin.mockReset();
     mockHandleLogout.mockReset();
     mockHandleMe.mockReset();
+    mockHandleAdminReset.mockReset();
     mockValidateToken.mockClear();
     // Re-install the default implementation (mockReset would wipe it).
     mockValidateToken.mockImplementation(async (t: string) =>
@@ -509,6 +517,58 @@ describe("dashboard server", () => {
       const [, , params] = mockHandleJobProxy.mock.calls[0];
       expect(params.pathTemplate).toBe("/api/stop/:jobId");
       expect(params.jobId).toBe("xyz");
+    });
+  });
+
+  // The admin reset endpoint is a destructive DB-wipe route. Its ONLY
+  // defense against unauth'd invocation is that `server.ts` registers it
+  // AFTER the blanket `/api/*` `requireUser` gate. These tests lock that
+  // invariant — a regression that moves the route above the gate (or
+  // forgets to register it at all) will trip one of these immediately.
+  describe("admin reset auth gating", () => {
+    it("POST /api/admin/reset without auth returns 401 and does NOT call the handler", async () => {
+      const { req, res } = createMockReqRes("POST", "/api/admin/reset");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+      expect(mockHandleAdminReset).not.toHaveBeenCalled();
+    });
+
+    it("POST /api/admin/reset with invalid bearer returns 401 and does NOT call the handler", async () => {
+      const { req, res } = createMockReqRes("POST", "/api/admin/reset");
+      withAuth(req, "not-a-real-token");
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+      expect(mockHandleAdminReset).not.toHaveBeenCalled();
+    });
+
+    it("POST /api/admin/reset with the dispatch token returns 401 (dispatch token is NOT accepted on admin routes)", async () => {
+      const { req, res } = createMockReqRes("POST", "/api/admin/reset");
+      withAuth(req, "test-token"); // the dispatch token — rejected by user gate
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+      expect(mockHandleAdminReset).not.toHaveBeenCalled();
+    });
+
+    it("POST /api/admin/reset with a valid user bearer forwards to handleAdminReset", async () => {
+      mockHandleAdminReset.mockImplementation(
+        async (_req: unknown, res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ rowsDeleted: 0 }));
+        },
+      );
+      const { req, res } = createMockReqRes("POST", "/api/admin/reset");
+      withAuth(req);
+      await requestHandler(req, res);
+      expect(mockHandleAdminReset).toHaveBeenCalledTimes(1);
+      expect(res._getStatusCode()).toBe(200);
+    });
+
+    it("GET /api/admin/reset returns 404 (route is POST-only)", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/admin/reset");
+      withAuth(req);
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(404);
+      expect(mockHandleAdminReset).not.toHaveBeenCalled();
     });
   });
 

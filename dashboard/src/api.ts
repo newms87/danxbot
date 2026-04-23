@@ -176,6 +176,38 @@ export async function patchToggle(
   return res.json();
 }
 
+export interface ResetAllDataResult {
+  tablesCleared: string[];
+  rowsDeleted: number;
+  perTable: Record<string, number>;
+}
+
+/**
+ * Wipe operational data (dispatches, threads, events, health_check).
+ * Users + api_tokens are preserved so the current session stays valid.
+ * POST body must include the sentinel `{confirm:"RESET"}` — this is a
+ * defense-in-depth guard against accidental POSTs. The dashboard's
+ * SettingsPage supplies the sentinel after a DanxDialog confirm flow.
+ */
+export async function resetAllData(): Promise<ResetAllDataResult> {
+  const res = await fetchWithAuth("/api/admin/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "RESET" }),
+  });
+  if (!res.ok) {
+    let message: string | undefined;
+    try {
+      const body = await res.json();
+      if (body && typeof body.error === "string") message = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message || `resetAllData failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 /**
  * Live-follow a dispatch via the multiplexed SSE stream. Subscribes to the
  * `dispatch:jsonl:<id>` topic and invokes `onBlock` once per parsed

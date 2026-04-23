@@ -32,6 +32,7 @@ import {
   handleLogout,
   handleMe,
 } from "./auth-routes.js";
+import { handleAdminReset } from "./admin-routes.js";
 import { requireUser } from "./auth-middleware.js";
 import { optional } from "../env.js";
 
@@ -279,6 +280,11 @@ async function route(
       decodeURIComponent(agentDetailMatch[1]),
       dispatchDeps,
     );
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/admin/reset") {
+    await handleAdminReset(req, res);
     return true;
   }
 

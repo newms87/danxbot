@@ -5,6 +5,7 @@ import DispatchList from "./components/DispatchList.vue";
 import DispatchFilters from "./components/DispatchFilters.vue";
 import DispatchDetail from "./components/DispatchDetail.vue";
 import AgentsPage from "./components/agents/AgentsPage.vue";
+import SettingsPage from "./components/SettingsPage.vue";
 import Login from "./components/auth/Login.vue";
 import { useDispatches } from "./composables/useDispatches";
 import { useAuth } from "./composables/useAuth";
@@ -124,6 +125,8 @@ function selectDispatch(d: Dispatch): void {
       </template>
 
       <AgentsPage v-else-if="activeTab === 'agents'" />
+
+      <SettingsPage v-else-if="activeTab === 'settings'" />
     </div>
   </template>
 </template>

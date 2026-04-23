@@ -52,7 +52,7 @@ vi.mock("./composables/useStream", async () => {
 });
 
 // Import AFTER the mock so api.ts picks up the stubbed useStream.
-import { fetchWithAuth, followDispatch } from "./api";
+import { fetchWithAuth, followDispatch, resetAllData } from "./api";
 
 const TOKEN_KEY = "danxbot.authToken";
 
@@ -161,6 +161,88 @@ describe("fetchWithAuth", () => {
     expect(headers.get("Authorization")).toBe("Bearer tok-abc");
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(headers.get("X-Custom")).toBe("yes");
+  });
+});
+
+describe("resetAllData", () => {
+  it("POSTs to /api/admin/reset with the RESET confirm sentinel and JSON content type", async () => {
+    seedToken("ok");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          tablesCleared: ["dispatches", "threads", "events", "health_check"],
+          rowsDeleted: 0,
+          perTable: { dispatches: 0, threads: 0, events: 0, health_check: 0 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await resetAllData();
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/admin/reset");
+    expect((init as RequestInit).method).toBe("POST");
+    const headers = new Headers((init as RequestInit).headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect((init as RequestInit).body).toBe(JSON.stringify({ confirm: "RESET" }));
+  });
+
+  it("returns the parsed JSON body on 2xx", async () => {
+    seedToken("ok");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          tablesCleared: ["dispatches"],
+          rowsDeleted: 5,
+          perTable: { dispatches: 5 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const result = await resetAllData();
+
+    expect(result).toEqual({
+      tablesCleared: ["dispatches"],
+      rowsDeleted: 5,
+      perTable: { dispatches: 5 },
+    });
+  });
+
+  it("throws with the server-supplied error message when response has an error field", async () => {
+    seedToken("ok");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "Reset failed" }), { status: 500 }),
+    );
+
+    await expect(resetAllData()).rejects.toThrow("Reset failed");
+  });
+
+  it("throws with the fallback message when response body has no error field", async () => {
+    seedToken("ok");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("", { status: 503 }),
+    );
+
+    await expect(resetAllData()).rejects.toThrow("resetAllData failed: 503");
+  });
+
+  it("triggers auth:expired on a 401 (delegated through fetchWithAuth)", async () => {
+    seedToken("expired");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 }),
+    );
+
+    const fired = vi.fn();
+    window.addEventListener("auth:expired", fired);
+
+    try {
+      await expect(resetAllData()).rejects.toThrow();
+      expect(fired).toHaveBeenCalledOnce();
+    } finally {
+      window.removeEventListener("auth:expired", fired);
+    }
   });
 });
 

@@ -3,7 +3,7 @@ import { useTheme } from "../composables/useTheme";
 import { useAuth } from "../composables/useAuth";
 import type { RepoInfo } from "../api";
 
-export type TabId = "dispatches" | "agents";
+export type TabId = "dispatches" | "agents" | "settings";
 
 defineProps<{
   connected: boolean;
@@ -105,6 +105,19 @@ async function onLogout(): Promise<void> {
         @click="emit('update:activeTab', 'agents')"
       >
         Agents
+      </button>
+      <button
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'settings'"
+        data-test="settings-tab"
+        class="px-4 py-2 text-sm font-medium border-b-2 transition-colors"
+        :class="activeTab === 'settings'
+          ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+          : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
+        @click="emit('update:activeTab', 'settings')"
+      >
+        Settings
       </button>
     </nav>
   </div>
