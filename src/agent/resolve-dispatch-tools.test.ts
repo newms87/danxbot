@@ -474,28 +474,51 @@ describe("resolveDispatchTools", () => {
     });
   });
 
-  describe("optional env propagation", () => {
-    it("trello.enabledTools populates TRELLO_ENABLED_TOOLS when provided", () => {
+  describe("MCP server-side tool gating — TRELLO_ENABLED_TOOLS derived from allow_tools", () => {
+    // The resolver is responsible for ensuring the spawned Trello MCP server
+    // exposes ONLY the tools the caller actually requested. The server's
+    // `TRELLO_ENABLED_TOOLS` env var patches its internal `registerTool` so
+    // unlisted tools are never registered — Claude literally cannot see them.
+    // This is the enforcement boundary; `--allowed-tools` on claude is
+    // defense-in-depth only and is known to be leaky when paired with
+    // `--dangerously-skip-permissions` for MCP calls.
+
+    it("names in allow_tools flow through as TRELLO_ENABLED_TOOLS (single tool)", () => {
       const r = resolveDispatchTools(
         baseOptions({
-          allowTools: ["mcp__trello__get_card"],
-          trello: {
-            apiKey: "k",
-            apiToken: "t",
-            boardId: "b",
-            enabledTools: "get_card,move_card",
-          },
+          allowTools: ["mcp__trello__get_lists"],
+          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
+        }),
+      );
+      expect(r.mcpServers["trello"].env.TRELLO_ENABLED_TOOLS).toBe("get_lists");
+    });
+
+    it("multiple tools join as a comma-separated list (caller-declared order)", () => {
+      const r = resolveDispatchTools(
+        baseOptions({
+          allowTools: ["mcp__trello__get_lists", "mcp__trello__get_card"],
+          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
         }),
       );
       expect(r.mcpServers["trello"].env.TRELLO_ENABLED_TOOLS).toBe(
-        "get_card,move_card",
+        "get_lists,get_card",
       );
     });
 
-    it("trello.enabledTools omitted leaves TRELLO_ENABLED_TOOLS absent from env (not set to empty string)", () => {
+    it("wildcard (mcp__trello__*) leaves TRELLO_ENABLED_TOOLS absent — all tools exposed", () => {
       const r = resolveDispatchTools(
         baseOptions({
-          allowTools: ["mcp__trello__get_card"],
+          allowTools: ["mcp__trello__*"],
+          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
+        }),
+      );
+      expect(r.mcpServers["trello"].env.TRELLO_ENABLED_TOOLS).toBeUndefined();
+    });
+
+    it("wildcard wins when mixed with specific tools (no narrower filter than the caller asked for)", () => {
+      const r = resolveDispatchTools(
+        baseOptions({
+          allowTools: ["mcp__trello__*", "mcp__trello__get_lists"],
           trello: { apiKey: "k", apiToken: "t", boardId: "b" },
         }),
       );

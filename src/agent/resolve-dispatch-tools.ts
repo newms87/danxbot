@@ -161,8 +161,37 @@ export function resolveDispatchTools(
   const mcpServers: Record<string, McpServerConfig> = {};
   for (const server of requiredServers) {
     const entry = registry[server];
+    // Compute the per-server tool allowlist the factory receives. The factory
+    // uses it (when the server's wire protocol supports per-tool gating) to
+    // register ONLY the tools the caller asked for — unlisted tools never
+    // appear in Claude's tool list. This is the real enforcement boundary;
+    // `--allowed-tools` on the claude CLI is known to be leaky for MCP calls
+    // when paired with `--dangerously-skip-permissions`, so we cannot rely on
+    // it alone.
+    //
+    // Semantics:
+    //   - Wildcard (caller asked for `mcp__<server>__*`)       → undefined
+    //   - Specific tools (caller listed them explicitly)       → readonly[]
+    //   - Server not mentioned in allow_tools (e.g. `danxbot`) → undefined
+    //     (infrastructure servers aren't narrowed by caller allowlists)
+    //
+    // Caller-declared order is preserved so the computed `TRELLO_ENABLED_TOOLS`
+    // (or equivalent) is deterministic — easier to diff in test expectations
+    // and easier to reason about at the wire level.
+    const bucket = serverTools.get(server);
+    let serverEnabledTools: string[] | undefined;
+    if (bucket && !bucket.has("*")) {
+      const orderedTools: string[] = [];
+      for (const entryStr of opts.allowTools) {
+        if (!entryStr.startsWith(`mcp__${server}__`)) continue;
+        const toolName = entryStr.slice(`mcp__${server}__`.length);
+        if (toolName === "*") continue;
+        if (!orderedTools.includes(toolName)) orderedTools.push(toolName);
+      }
+      serverEnabledTools = orderedTools;
+    }
     try {
-      mcpServers[server] = entry.build(opts);
+      mcpServers[server] = entry.build(opts, serverEnabledTools);
     } catch (err) {
       if (err instanceof McpResolveError) throw err;
       const reason = err instanceof Error ? err.message : String(err);

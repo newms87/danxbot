@@ -15,7 +15,7 @@ REPOS_DIR := ./repos
        generate-dev-override \
        test test-unit test-integration test-validate test-system \
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
-       test-system-error test-system-stall test-system-poller test-system-cleanup \
+       test-system-error test-system-stall test-system-poller test-system-allow-tools test-system-cleanup \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
        create-user
 
@@ -185,6 +185,9 @@ test-system-stall: ## Test stall detection (host mode only)
 
 test-system-poller: ## Test Trello poller flow (requires TRELLO_API_KEY/TOKEN)
 	@$(SYSTEM_TEST_SCRIPT) --test poller
+
+test-system-allow-tools: ## Test per-dispatch allow_tools gate via Trello MCP (requires TRELLO_API_KEY/TOKEN)
+	@$(SYSTEM_TEST_SCRIPT) --test allow-tools
 
 test-system-cleanup: ## Verify no orphaned temp dirs or zombie jobs
 	@$(SYSTEM_TEST_SCRIPT) --test cleanup

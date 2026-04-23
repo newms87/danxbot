@@ -58,7 +58,6 @@ export interface ResolveDispatchToolsOptions {
     apiKey: string;
     apiToken: string;
     boardId: string;
-    enabledTools?: string;
   };
   /** Test-only: override the registry. Defaults to `defaultMcpRegistry`. */
   registry?: McpRegistry;
@@ -73,11 +72,31 @@ export interface McpServerEntry {
   /** Tool short names exposed by this server (used for wildcard expansion). */
   readonly tools: readonly string[];
   /**
-   * Build the `McpServerConfig` for this server from dispatch options. Throws
-   * `McpResolveError` when required inputs are missing or malformed. Called
-   * only when the server is actually needed for a dispatch.
+   * Build the `McpServerConfig` for this server from dispatch options.
+   *
+   * `enabledTools` is the subset of this server's tools the caller requested
+   * via `allow_tools` (already stripped of the `mcp__<server>__` prefix).
+   * `undefined` means "wildcard" — the caller asked for `mcp__<server>__*`,
+   * so the server should expose its default tool surface. A concrete array
+   * means the server MUST register only those tools. This is the
+   * load-bearing enforcement boundary: `--allowed-tools` on claude is leaky
+   * for MCP calls under `--dangerously-skip-permissions`, so denial has to
+   * happen at the MCP server itself (tools that aren't registered cannot be
+   * called, regardless of what Claude's permission layer does).
+   *
+   * Servers whose wire protocol supports per-tool filtering (Trello via
+   * `TRELLO_ENABLED_TOOLS`) MUST honor `enabledTools`. Servers without that
+   * capability (schema) accept the arg and ignore it — the caller falls
+   * back to relying on `--allowed-tools` alone for those servers. Single-
+   * tool infrastructure servers (danxbot) also ignore the arg.
+   *
+   * Throws `McpResolveError` when required inputs are missing or malformed.
+   * Called only when the server is actually needed for a dispatch.
    */
-  build(opts: ResolveDispatchToolsOptions): McpServerConfig;
+  build(
+    opts: ResolveDispatchToolsOptions,
+    enabledTools?: readonly string[],
+  ): McpServerConfig;
 }
 
 export type McpRegistry = Readonly<Record<string, McpServerEntry>>;

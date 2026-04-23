@@ -148,7 +148,7 @@ const TRELLO_ENTRY: McpServerEntry = {
     "update_checklist_item",
     "update_label",
   ],
-  build(opts) {
+  build(opts, enabledTools) {
     const trello = opts.trello;
     if (!trello) {
       throw new McpResolveError(
@@ -173,7 +173,15 @@ const TRELLO_ENTRY: McpServerEntry = {
       TRELLO_TOKEN: trello.apiToken,
       TRELLO_BOARD_ID: trello.boardId,
     };
-    if (trello.enabledTools) env.TRELLO_ENABLED_TOOLS = trello.enabledTools;
+    // `enabledTools === undefined` = wildcard (`mcp__trello__*`). Leaving
+    // TRELLO_ENABLED_TOOLS absent makes the server register its full tool
+    // surface, matching the caller's request. An explicit array narrows the
+    // server's registerTool shim so unlisted tools never appear in the
+    // MCP tool list Claude sees — this is the enforcement boundary, not
+    // `--allowed-tools`. See @thehammer/mcp-server-trello#TrelloServer ctor.
+    if (enabledTools && enabledTools.length > 0) {
+      env.TRELLO_ENABLED_TOOLS = enabledTools.join(",");
+    }
     return {
       command: "npx",
       args: ["-y", "@thehammer/mcp-server-trello"],
