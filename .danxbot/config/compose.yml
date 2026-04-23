@@ -28,9 +28,14 @@ services:
       DANXBOT_GIT_EMAIL: ${DANXBOT_GIT_EMAIL:-danxbot@example.com}
       REPOS: ${REPOS}
     volumes:
-      # Repo bind: .. goes up to .danxbot/, ../.. is the repo root.
-      # Resolves to /home/newms/web/danxbot-flytebot (dev) or /danxbot/repos/danxbot (prod).
-      - ../..:/danxbot/app/repos/danxbot
+      # Repo bind: `../..` goes from .danxbot/config/ to the repo root.
+      # Self-hosting caveat: when `repos/danxbot` is a symlink that loops back
+      # into the same working tree, Docker Desktop's WSL2 path-cache can't
+      # follow the symlink cleanly and the container sees a stale
+      # snapshot. `DANXBOT_REPO_ROOT`, when set to an absolute host path
+      # (by `make launch-worker`), bypasses the symlink and makes the bind
+      # deterministic across every dev layout.
+      - ${DANXBOT_REPO_ROOT:-../..}:/danxbot/app/repos/danxbot
       # Claude auth: prod injects CLAUDE_AUTH_DIR=/danxbot/claude-auth; dev default is relative to danxbot-flytebot checkout.
       # Code reads auth from resolve(projectRoot, "claude-auth") — projectRoot
       # is /danxbot/app in the container (see Dockerfile WORKDIR). The mount
