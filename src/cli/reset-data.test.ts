@@ -25,12 +25,11 @@ describe("reset-data CLI", () => {
 
   it("prints a human summary and exits 0 on success", async () => {
     mockResetAllData.mockResolvedValueOnce({
-      tablesCleared: ["dispatches", "threads", "events", "health_check"],
-      rowsDeleted: 42,
+      tablesCleared: ["dispatches", "threads", "health_check"],
+      rowsDeleted: 17,
       perTable: {
         dispatches: 10,
         threads: 5,
-        events: 25,
         health_check: 2,
       },
     });
@@ -41,7 +40,7 @@ describe("reset-data CLI", () => {
 
     expect(code).toBe(0);
     const out = collect(stdout);
-    expect(out).toContain("42 row(s) deleted across 4 table(s)");
+    expect(out).toContain("17 row(s) deleted across 3 table(s)");
     expect(out).toContain("dispatches");
     expect(out).toContain("10");
     expect(out).toContain("health_check");

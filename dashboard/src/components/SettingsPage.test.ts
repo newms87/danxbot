@@ -33,9 +33,9 @@ describe("SettingsPage", () => {
 
   it("calls resetAllData when the dialog confirm fires and shows the success summary", async () => {
     mockResetAllData.mockResolvedValueOnce({
-      tablesCleared: ["dispatches", "threads", "events", "health_check"],
-      rowsDeleted: 42,
-      perTable: { dispatches: 10, threads: 5, events: 25, health_check: 2 },
+      tablesCleared: ["dispatches", "threads", "health_check"],
+      rowsDeleted: 17,
+      perTable: { dispatches: 10, threads: 5, health_check: 2 },
     });
 
     const w = mount(SettingsPage, { attachTo: document.body });
@@ -53,7 +53,7 @@ describe("SettingsPage", () => {
     expect(mockResetAllData).toHaveBeenCalledOnce();
     const success = w.find('[data-test="reset-data-success"]');
     expect(success.exists()).toBe(true);
-    expect(success.text()).toContain("42 row(s) deleted");
+    expect(success.text()).toContain("17 row(s) deleted");
     expect(success.text()).toContain("dispatches: 10");
     w.unmount();
   });

@@ -33,7 +33,6 @@ const log = createLogger("reset-data");
 export const TABLES_TO_WIPE = [
   "dispatches",
   "threads",
-  "events",
   "health_check",
 ] as const;
 

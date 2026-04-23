@@ -78,9 +78,9 @@ describe("handleAdminReset", () => {
 
   it("calls resetAllData and returns 200 with the result on valid confirm", async () => {
     mockResetAllData.mockResolvedValueOnce({
-      tablesCleared: ["dispatches", "threads", "events", "health_check"],
+      tablesCleared: ["dispatches", "threads", "health_check"],
       rowsDeleted: 42,
-      perTable: { dispatches: 10, threads: 5, events: 25, health_check: 2 },
+      perTable: { dispatches: 10, threads: 5, health_check: 2 },
     });
     const req = createMockReqWithBody("POST", { confirm: "RESET" });
     const res = createMockRes();
@@ -89,9 +89,9 @@ describe("handleAdminReset", () => {
 
     expect(res._getStatusCode()).toBe(200);
     expect(JSON.parse(res._getBody())).toEqual({
-      tablesCleared: ["dispatches", "threads", "events", "health_check"],
+      tablesCleared: ["dispatches", "threads", "health_check"],
       rowsDeleted: 42,
-      perTable: { dispatches: 10, threads: 5, events: 25, health_check: 2 },
+      perTable: { dispatches: 10, threads: 5, health_check: 2 },
     });
     expect(mockResetAllData).toHaveBeenCalledOnce();
   });

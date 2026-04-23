@@ -41,7 +41,7 @@ function dismissResult(): void {
         Danger zone
       </h3>
       <p class="mt-1 text-sm text-red-900 dark:text-red-200">
-        Wipe operational data (dispatches, threads, Slack events, heartbeats).
+        Wipe operational data (dispatches, Slack threads, health checks).
         Users and API tokens are preserved — you stay logged in.
       </p>
       <div class="mt-4">
@@ -99,7 +99,6 @@ function dismissResult(): void {
         <ul class="list-disc list-inside text-red-800 dark:text-red-300">
           <li><code>dispatches</code> — all job history</li>
           <li><code>threads</code> — Slack thread continuation state</li>
-          <li><code>events</code> — Slack router/agent traces</li>
           <li><code>health_check</code></li>
         </ul>
         <p>

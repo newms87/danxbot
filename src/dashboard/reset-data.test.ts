@@ -36,7 +36,6 @@ describe("resetAllData", () => {
     expect(TABLES_TO_WIPE).toEqual([
       "dispatches",
       "threads",
-      "events",
       "health_check",
     ]);
   });
@@ -52,7 +51,6 @@ describe("resetAllData", () => {
     expect(result.tablesCleared).toEqual([
       "dispatches",
       "threads",
-      "events",
       "health_check",
     ]);
     const truncateSqls = mockQuery.mock.calls
@@ -61,7 +59,6 @@ describe("resetAllData", () => {
     expect(truncateSqls).toEqual([
       "TRUNCATE TABLE dispatches",
       "TRUNCATE TABLE threads",
-      "TRUNCATE TABLE events",
       "TRUNCATE TABLE health_check",
     ]);
   });
@@ -85,7 +82,6 @@ describe("resetAllData", () => {
     const counts: Record<string, number> = {
       dispatches: 7,
       threads: 5,
-      events: 10,
       health_check: 2,
     };
     mockQuery.mockImplementation(async (sql: string) => {
@@ -99,7 +95,7 @@ describe("resetAllData", () => {
 
     const result = await resetAllData();
 
-    expect(result.rowsDeleted).toBe(24);
+    expect(result.rowsDeleted).toBe(14);
     expect(result.perTable).toEqual(counts);
   });
 
