@@ -50,7 +50,7 @@ Combined with `--strict-mcp-config` (always applied in `src/agent/claude-invocat
 | Profile | Allowlist |
 |---------|-----------|
 | `poller` | `Read / Glob / Grep / Edit / Write / Bash / TodoWrite / Agent / Task / mcp__trello__*` |
-| `http-launch` | `[]` — empty baseline; every request supplies its own surface via `body.allow_tools` |
+| `http-launch` | `Read / Glob / Grep / Edit / Write / Bash / TodoWrite` — standard built-ins always present; `body.allow_tools` adds MCP server opt-ins on top |
 | `slack` | `Read / Glob / Grep / Bash` — read-only for in-process SDK query |
 
 Every consumer routes through ONE entry point:

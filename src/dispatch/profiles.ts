@@ -32,9 +32,11 @@
  * that is merged with the `http-launch` profile baseline via
  * `dispatchAllowTools("http-launch", body.allow_tools)`. There is no
  * separate "override shape" — the body field IS the override. The
- * `http-launch` baseline is empty today, so effective callers own
- * their full surface; a future baseline addition propagates through
- * the helper without any callsite changes.
+ * `http-launch` baseline pins the standard built-in surface
+ * (`Read`/`Glob`/`Grep`/`Edit`/`Write`/`Bash`/`TodoWrite`) so every
+ * API-dispatched agent can do basic filesystem/shell work and follow
+ * through on MCP tool responses the harness spills to disk. The body
+ * supplies any MCP server opt-ins (schema, trello, …) on top.
  *
  * `--strict-mcp-config` is applied at the spawn layer
  * (`src/agent/claude-invocation.ts`), not here. Profiles are about the
@@ -75,6 +77,39 @@ const POLLER_ALLOW_TOOLS = Object.freeze([
   "Agent",
   "Task",
   "mcp__trello__*",
+] as const);
+
+/**
+ * Standard agent built-in baseline for HTTP-dispatched agents
+ * (`/api/launch`, `/api/resume`). Every API-dispatched claude process
+ * gets this set regardless of what the caller listed in
+ * `body.allow_tools` — which is what lets an agent follow through on
+ * large MCP tool responses the harness spills to disk (the preview-buffer
+ * truncation cutoff is ~2KB, so any non-trivial MCP payload lands as a
+ * file reference that the agent must `Read`) and do basic filesystem /
+ * shell work.
+ *
+ * Deliberately narrower than the poller baseline: no `Agent` / `Task`
+ * (sub-agent dispatch is opt-in per-call via `body.allow_tools`) and no
+ * `mcp__*` entries (API callers opt into every MCP server via the body —
+ * baking Trello or any other server in here would activate its
+ * subprocess on every API dispatch).
+ *
+ * Not shared with `POLLER_ALLOW_TOOLS` by design: the poller has an
+ * additional surface (`Agent`, `Task`, `mcp__trello__*`) that the
+ * `/danx-next` and `/danx-ideate` skills require. If a future change
+ * broadens the shared baseline, extract a common constant at that
+ * point — premature DRY here would obscure which profile owns which
+ * entry.
+ */
+const HTTP_LAUNCH_ALLOW_TOOLS = Object.freeze([
+  "Read",
+  "Glob",
+  "Grep",
+  "Edit",
+  "Write",
+  "Bash",
+  "TodoWrite",
 ] as const);
 
 /**
@@ -134,14 +169,14 @@ const DISPATCH_PROFILES_RAW = {
     allowTools: POLLER_ALLOW_TOOLS,
   },
   "http-launch": {
-    // Empty baseline by design: every HTTP dispatch supplies its own
-    // tool surface via `body.allow_tools`. The effective allowlist
-    // equals `dispatchAllowTools("http-launch", body.allow_tools)` —
-    // profile entries first, body entries second, deduped by first
-    // appearance. When the baseline changes in the future, HTTP
-    // callers inherit the new entries automatically without a callsite
-    // change. Frozen for symmetry with `POLLER_ALLOW_TOOLS`.
-    allowTools: Object.freeze([] as readonly string[]),
+    // Standard built-in baseline — callers ALWAYS get Read/Bash/etc.
+    // regardless of what their body.allow_tools contains. The effective
+    // allowlist equals `dispatchAllowTools("http-launch",
+    // body.allow_tools)` — profile entries first, body entries second,
+    // deduped by first appearance. Callers can add to the surface (e.g.
+    // `mcp__schema__*`, `mcp__trello__*`) but cannot remove the
+    // baseline. See `HTTP_LAUNCH_ALLOW_TOOLS` above for the rationale.
+    allowTools: HTTP_LAUNCH_ALLOW_TOOLS,
   },
   slack: {
     allowTools: SLACK_ALLOW_TOOLS,

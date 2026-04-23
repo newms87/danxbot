@@ -191,6 +191,17 @@ import {
   handleStop,
   clearJobCleanupIntervals,
 } from "./dispatch.js";
+import { DISPATCH_PROFILES } from "../dispatch/profiles.js";
+
+/**
+ * The standard HTTP-launch baseline (Read/Bash/etc.) that every API-
+ * dispatched agent gets unconditionally. Pulled from the profile registry
+ * so these tests stay in sync with the source of truth instead of
+ * hardcoding the tool list.
+ */
+const HTTP_LAUNCH_BASELINE = [
+  ...DISPATCH_PROFILES["http-launch"].allowTools,
+] as const;
 
 const MOCK_REPO = makeRepoContext();
 
@@ -722,15 +733,16 @@ describe("handleLaunch", () => {
 });
 
 // Phase 4 of the agent-isolation epic (Trello 7ha2CSpc). `/api/launch` and
-// `/api/resume` now merge the `http-launch` dispatch profile's baseline
-// allowlist with the caller's `body.allow_tools`. The baseline is empty
-// today so the merge is structurally a no-op for http callers, but the
-// plumbing is exercised here so a future baseline change flows through
-// without rework — and so the two Phase 4 acceptance criteria (profile-
-// flag-always-present, danxbot-only-by-default + trello-opt-in-via-body)
-// are pinned by assertions.
+// `/api/resume` merge the `http-launch` dispatch profile's baseline
+// allowlist with the caller's `body.allow_tools`. The baseline is the
+// standard built-in surface (Read/Glob/Grep/Edit/Write/Bash/TodoWrite),
+// so every API-dispatched claude process gets those tools unconditionally
+// and callers opt MCP servers in on top via `body.allow_tools`. These
+// tests pin both sides of the merge: default behavior (baseline reaches
+// claude), opt-ins activate their servers, and overlap dedupes
+// profile-first.
 describe("handleLaunch — profile merge (Phase 4)", () => {
-  it("produces a danxbot-only allowlist when body.allow_tools is empty (Phase 4 AC: danxbot-only by default)", async () => {
+  it("produces [baseline + danxbot_complete] when body.allow_tools is empty (MCP servers stay inert)", async () => {
     const mockJob = {
       id: "job-default",
       status: "running",
@@ -749,10 +761,12 @@ describe("handleLaunch — profile merge (Phase 4)", () => {
     await handleLaunch(req, res, MOCK_REPO);
 
     const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    // Only infrastructure — `mcp__danxbot__danxbot_complete` — reaches claude.
-    // Trello, schema, and every other MCP server stay inert until the caller
-    // opts in via body.allow_tools.
+    // Baseline built-ins flow through unconditionally; only
+    // `mcp__danxbot__danxbot_complete` is the MCP surface (infrastructure).
+    // Trello, schema, and every other MCP server stay inert until the
+    // caller opts in via body.allow_tools.
     expect(spawnOpts.allowedTools).toEqual([
+      ...HTTP_LAUNCH_BASELINE,
       "mcp__danxbot__danxbot_complete",
     ]);
     const settings = mockSettingsRead(spawnOpts);
@@ -794,7 +808,7 @@ describe("handleLaunch — profile merge (Phase 4)", () => {
     ]);
   });
 
-  it("forwards body.allow_tools entries in declared order (http-launch baseline is empty today)", async () => {
+  it("dedupes body entries that overlap the baseline (profile-first wins)", async () => {
     const mockJob = {
       id: "job-builtin-merge",
       status: "running",
@@ -806,6 +820,8 @@ describe("handleLaunch — profile merge (Phase 4)", () => {
     const req = createMockReqWithBody("POST", {
       task: "Read some files",
       api_token: "tok-123",
+      // Both entries are already in the baseline — the merge must drop
+      // the duplicates and keep the baseline's earlier position.
       allow_tools: ["Read", "Grep"],
     });
     const res = createMockRes();
@@ -813,14 +829,48 @@ describe("handleLaunch — profile merge (Phase 4)", () => {
     await handleLaunch(req, res, MOCK_REPO);
 
     const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    // The empty http-launch baseline means the effective allowlist is just
-    // [built-ins..., danxbot_complete]. Built-ins appear in body-declared
-    // order (resolver contract) and the infra tool lands as a stable suffix.
     expect(spawnOpts.allowedTools).toEqual([
-      "Read",
-      "Grep",
+      ...HTTP_LAUNCH_BASELINE,
       "mcp__danxbot__danxbot_complete",
     ]);
+  });
+
+  it("prepends the baseline when the body opts into an MCP server (gpt-manager Schema Builder shape)", async () => {
+    // Regression guard for the bug this baseline fixes: before the
+    // baseline existed, a caller passing only `["mcp__schema__*"]` ended
+    // up with an allowlist of [mcp__schema__..., danxbot_complete] and
+    // no Read/Bash — so the agent could not reach spill files the harness
+    // writes for >2KB MCP responses.
+    const mockJob = {
+      id: "job-schema-builder",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      task: "Build a schema",
+      api_token: "tok-123",
+      schema_definition_id: "def-1",
+      allow_tools: ["mcp__schema__*"],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    // Baseline reaches claude verbatim.
+    for (const t of HTTP_LAUNCH_BASELINE) {
+      expect(spawnOpts.allowedTools).toContain(t);
+    }
+    // Plus the caller's requested MCP surface.
+    expect(spawnOpts.allowedTools).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^mcp__schema__/),
+        "mcp__danxbot__danxbot_complete",
+      ]),
+    );
   });
 });
 
@@ -1221,11 +1271,11 @@ describe("handleResume", () => {
     expect(body.error).toContain("timeout");
   });
 
-  it("produces a danxbot-only allowlist when body.allow_tools is empty on resume (Phase 4 symmetry)", async () => {
-    // Resume-side mirror of the "danxbot-only by default" launch test.
-    // If a regression ever skipped the profile merge on resume but kept
-    // the trello-opt-in path working, the existing resume-trello test
-    // would still pass — only a default-case assertion catches it.
+  it("produces [baseline + danxbot_complete] when body.allow_tools is empty on resume (symmetry with launch)", async () => {
+    // Resume-side mirror of the "default allowlist" launch test. If a
+    // regression ever skipped the profile merge on resume but kept the
+    // trello-opt-in path working, the existing resume-trello test would
+    // still pass — only this default-case assertion catches it.
     mockFindSessionFileByDispatchId.mockResolvedValueOnce(
       "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
     );
@@ -1250,6 +1300,7 @@ describe("handleResume", () => {
     expect(res._getStatusCode()).toBe(200);
     const spawnOpts = mockSpawnAgent.mock.calls[0][0];
     expect(spawnOpts.allowedTools).toEqual([
+      ...HTTP_LAUNCH_BASELINE,
       "mcp__danxbot__danxbot_complete",
     ]);
   });
@@ -1293,6 +1344,42 @@ describe("handleResume", () => {
     expect(Object.keys(settings.mcpServers).sort()).toEqual([
       "danxbot",
       "trello",
+    ]);
+  });
+
+  it("dedupes body entries that overlap the baseline on resume (symmetry with launch)", async () => {
+    // Launch-side covers this; resume needs its own guard because a
+    // regression that reinlines the merge or skips dedupe in handleResume
+    // only — while leaving handleLaunch intact — would not be caught by
+    // any other test. Mirror of the handleLaunch dedup test.
+    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
+      "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
+    );
+    const mockJob = {
+      id: "job-resume-dedup",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValue(mockJob);
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-dispatch-uuid",
+      task: "Continue with overlapping tools",
+      api_token: "tok-123",
+      // Both entries are already in the baseline — the merge must drop
+      // the duplicates and keep the baseline's earlier position.
+      allow_tools: ["Read", "Grep"],
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
+    expect(spawnOpts.allowedTools).toEqual([
+      ...HTTP_LAUNCH_BASELINE,
+      "mcp__danxbot__danxbot_complete",
     ]);
   });
 });

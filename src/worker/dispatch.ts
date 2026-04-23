@@ -232,11 +232,13 @@ function parseCommonRequestParams(
 
   // `dispatchAllowTools` is the ONE entry point every dispatch consumer goes
   // through. It resolves the named profile (fail-loud on a typo'd literal)
-  // and merges the baseline with the caller's overrides. Today the
-  // `http-launch` baseline is empty so this is structurally a no-op, but the
-  // plumbing is the contract — any future baseline flows through unchanged.
-  // Identical shape to the poller callsite and to the Phase 5 Slack path.
-  // See `src/dispatch/profiles.ts` and the agent-isolation epic (Trello
+  // and merges the baseline with the caller's overrides. The `http-launch`
+  // baseline pins the standard built-ins (Read/Glob/Grep/Edit/Write/Bash/
+  // TodoWrite) so every API-dispatched agent has basic filesystem/shell
+  // tools regardless of `body.allow_tools` — the body supplies any MCP
+  // server opt-ins (schema, trello, …) on top. Identical shape to the
+  // poller callsite and to the Phase 5 Slack path. See
+  // `src/dispatch/profiles.ts` and the agent-isolation epic (Trello
   // `7ha2CSpc`) Phase 4.
   const allowTools = dispatchAllowTools("http-launch", rawAllow);
 

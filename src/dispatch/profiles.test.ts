@@ -67,10 +67,73 @@ describe("dispatch profiles", () => {
   });
 
   describe("http-launch profile", () => {
-    it("has an empty baseline allowlist", () => {
-      // Every HTTP dispatch supplies its own tool surface via the body.
-      // The profile names the baseline; it does not grant tools by default.
-      expect(DISPATCH_PROFILES["http-launch"].allowTools).toEqual([]);
+    it("includes the standard agent built-ins so API callers always get Read/Bash/etc.", () => {
+      // Any agent dispatched via /api/launch or /api/resume must have the
+      // standard built-in tool surface available regardless of what the
+      // caller listed in body.allow_tools. This is what lets the agent
+      // follow through on large MCP responses the harness spills to disk
+      // (>2KB preview truncation) — without Read/Bash the spill file is
+      // unreachable — and perform the basic filesystem/shell work every
+      // non-trivial agent needs.
+      for (const t of [
+        "Read",
+        "Glob",
+        "Grep",
+        "Edit",
+        "Write",
+        "Bash",
+        "TodoWrite",
+      ]) {
+        expect(DISPATCH_PROFILES["http-launch"].allowTools).toContain(t);
+      }
+    });
+
+    it("does NOT include mcp__danxbot__danxbot_complete", () => {
+      // Same invariant as the poller: danxbot_complete is auto-injected
+      // as infrastructure by the resolver. Listing it in the baseline
+      // would double-emit through the registry lookup path.
+      expect(DISPATCH_PROFILES["http-launch"].allowTools).not.toContain(
+        "mcp__danxbot__danxbot_complete",
+      );
+    });
+
+    it("does NOT include any mcp__* entry in the baseline", () => {
+      // API callers opt into MCP servers via body.allow_tools. Baking one
+      // in (say, mcp__trello__*) would activate that server on every API
+      // dispatch and spawn its subprocess unnecessarily.
+      for (const t of DISPATCH_PROFILES["http-launch"].allowTools) {
+        expect(t.startsWith("mcp__")).toBe(false);
+      }
+    });
+
+    it("does NOT include Agent or Task (sub-agent dispatch is opt-in per call)", () => {
+      // The http-launch baseline is narrower than the poller baseline by
+      // design: Agent/Task are sub-agent dispatch built-ins that callers
+      // must request explicitly via body.allow_tools. A future refactor
+      // that unifies the poller + http-launch baselines into one shared
+      // constant would silently add these; this test catches that.
+      expect(DISPATCH_PROFILES["http-launch"].allowTools).not.toContain(
+        "Agent",
+      );
+      expect(DISPATCH_PROFILES["http-launch"].allowTools).not.toContain(
+        "Task",
+      );
+    });
+
+    it("preserves this exact declared order — claude's --allowed-tools CSV is order-sensitive", () => {
+      // Pinned against literal list (NOT the profile itself) so a silent
+      // reorder of HTTP_LAUNCH_ALLOW_TOOLS fails this test. The other
+      // http-launch tests use the profile as both source and expectation,
+      // which cannot detect a reorder.
+      expect([...DISPATCH_PROFILES["http-launch"].allowTools]).toEqual([
+        "Read",
+        "Glob",
+        "Grep",
+        "Edit",
+        "Write",
+        "Bash",
+        "TodoWrite",
+      ]);
     });
   });
 
@@ -245,18 +308,36 @@ describe("dispatch profiles", () => {
       ]);
     });
 
-    it("returns the http-launch baseline (empty) when given no overrides", () => {
-      expect(dispatchAllowTools("http-launch")).toEqual([]);
+    it("returns the http-launch baseline (standard built-ins) when given no overrides", () => {
+      expect(dispatchAllowTools("http-launch")).toEqual([
+        ...DISPATCH_PROFILES["http-launch"].allowTools,
+      ]);
     });
 
-    it("merges http-launch baseline with overrides — trello opt-in shape", () => {
+    it("merges http-launch baseline with overrides — trello opt-in shape prepended with baseline", () => {
       // The canonical HTTP shape: body asks for mcp__trello__*, profile
-      // contributes the empty baseline. Merged output equals the override
-      // alone. When the baseline grows in future work the test will update
-      // to preserve the new prefix.
+      // contributes the standard built-in baseline. Merged output is
+      // [baseline..., override] in that order per the profile-first merge
+      // contract.
       expect(dispatchAllowTools("http-launch", ["mcp__trello__*"])).toEqual([
+        ...DISPATCH_PROFILES["http-launch"].allowTools,
         "mcp__trello__*",
       ]);
+    });
+
+    it("keeps the baseline even when the body lists only MCP tools — the gpt-manager Schema Builder shape", () => {
+      // Regression guard for the bug this change fixes. Before the
+      // baseline existed, a caller like gpt-manager passing
+      // ["mcp__schema__*"] would produce an effective allowlist of
+      // [mcp__schema__..., mcp__danxbot__danxbot_complete] — NO Read,
+      // NO Bash — so the agent could not access the spill files the
+      // harness writes for >2KB MCP responses. The baseline prevents
+      // that class of failure at the profile seam.
+      const merged = dispatchAllowTools("http-launch", ["mcp__schema__*"]);
+      for (const t of ["Read", "Glob", "Grep", "Edit", "Write", "Bash"]) {
+        expect(merged).toContain(t);
+      }
+      expect(merged).toContain("mcp__schema__*");
     });
 
     it("throws fail-loud on an unknown profile name (same gate as resolveProfile)", () => {
