@@ -99,6 +99,17 @@ vi.mock("../../agent/mcp-server-probe.js", () => ({
   probeAllMcpServers: vi.fn().mockResolvedValue({ ok: true, failures: [] }),
 }));
 
+// worker/dispatch.ts (Phase 1) imports `getSlackClientForRepo` from
+// `../../slack/listener.js`. The listener transitively pulls in the
+// heartbeat manager → `@anthropic-ai/sdk`, which reads
+// `config.anthropic.apiKey` at module load — absent from this test's
+// `mockConfig`. Mocking the listener decouples the pipeline integration
+// tests from the Slack surface, which has no business in this suite.
+vi.mock("../../slack/listener.js", () => ({
+  getSlackClientForRepo: vi.fn(),
+  getSlackClient: vi.fn(),
+}));
+
 // --- Real imports (the pipeline under test) ---
 
 import { spawnAgent, cancelJob, type AgentJob } from "../../agent/launcher.js";

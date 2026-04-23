@@ -60,6 +60,8 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
       statusUrl: null,
       initialPrompt: "test",
     },
+    slackThreadTs: null,
+    slackChannelId: null,
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: null,

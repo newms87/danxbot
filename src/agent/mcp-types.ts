@@ -59,6 +59,29 @@ export interface ResolveDispatchToolsOptions {
     apiToken: string;
     boardId: string;
   };
+  /**
+   * Slack callback URLs for Slack-triggered dispatches. When present,
+   * the danxbot MCP server exposes two additional tools
+   * (`danxbot_slack_reply`, `danxbot_slack_post_update`) that POST to
+   * these URLs, and the resolver adds the corresponding
+   * `mcp__danxbot__danxbot_slack_*` entries to `allowedTools`.
+   *
+   * Absent for every non-Slack dispatch (api, trello/poller). Non-slack
+   * agents never see these tools in their MCP tool list and never have
+   * them in their allowlist — the absence is the enforcement boundary.
+   *
+   * Both fields are required together — constructing a half-Slack
+   * dispatch would produce a partially-working tool surface and hide
+   * real bugs. The resolver validates this at the entry.
+   *
+   * Requires `danxbotStopUrl` to be a non-empty string (the Slack path
+   * uses spawned-CLI dispatch, which always has a worker stop URL).
+   * Combining `slack` with `danxbotStopUrl: null` is rejected.
+   */
+  slack?: {
+    replyUrl: string;
+    updateUrl: string;
+  };
   /** Test-only: override the registry. Defaults to `defaultMcpRegistry`. */
   registry?: McpRegistry;
 }

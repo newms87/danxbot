@@ -2,9 +2,22 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   COMPLETE_STATUSES,
   TOOLS,
+  buildActiveTools,
   callTool,
   isCompleteStatus,
 } from "./danxbot-server.js";
+import type { DanxbotToolUrls } from "./danxbot-server.js";
+
+const STOP_URL = "http://localhost:5562/api/stop/job-xyz";
+const SLACK_REPLY_URL = "http://localhost:5562/api/slack/reply/job-xyz";
+const SLACK_UPDATE_URL = "http://localhost:5562/api/slack/update/job-xyz";
+
+function urls(over: Partial<DanxbotToolUrls> = {}): DanxbotToolUrls {
+  return {
+    stop: STOP_URL,
+    ...over,
+  };
+}
 
 describe("danxbot_complete tool schema", () => {
   const tool = TOOLS.find((t) => t.name === "danxbot_complete");
@@ -34,6 +47,54 @@ describe("danxbot_complete tool schema", () => {
   });
 });
 
+describe("danxbot_slack_reply tool schema", () => {
+  const tool = TOOLS.find((t) => t.name === "danxbot_slack_reply");
+
+  it("is registered in TOOLS", () => {
+    expect(tool).toBeDefined();
+  });
+
+  it("requires a non-empty string text field", () => {
+    const schema = tool!.inputSchema as unknown as {
+      properties: { text: { type: string } };
+      required: string[];
+    };
+    expect(schema.properties.text.type).toBe("string");
+    expect(schema.required).toContain("text");
+  });
+
+  it("description tells the agent to call it once as the final reply", () => {
+    // The agent must understand: this tool posts the FINAL user-facing reply
+    // to the Slack thread. The failure mode we're hedging against is an
+    // agent that posts intermediate updates via this tool (noise in-thread)
+    // or never calls it (user sees silence).
+    expect(tool!.description).toMatch(/final|answer|reply/i);
+    expect(tool!.description).toMatch(/slack|thread/i);
+  });
+});
+
+describe("danxbot_slack_post_update tool schema", () => {
+  const tool = TOOLS.find((t) => t.name === "danxbot_slack_post_update");
+
+  it("is registered in TOOLS", () => {
+    expect(tool).toBeDefined();
+  });
+
+  it("requires a non-empty string text field", () => {
+    const schema = tool!.inputSchema as unknown as {
+      properties: { text: { type: string } };
+      required: string[];
+    };
+    expect(schema.properties.text.type).toBe("string");
+    expect(schema.required).toContain("text");
+  });
+
+  it("description tells the agent to use it sparingly for meaningful progress", () => {
+    // Hedges against the agent spamming the thread with every file read.
+    expect(tool!.description).toMatch(/progress|update|status/i);
+  });
+});
+
 describe("isCompleteStatus", () => {
   it("returns true for each accepted value", () => {
     for (const s of COMPLETE_STATUSES) {
@@ -57,19 +118,12 @@ describe("isCompleteStatus", () => {
 
 describe("entrypoint gating", () => {
   it("does NOT call main()/process.exit when imported from a test (regression lock)", () => {
-    // If the `import.meta.url === entryUrl` gate at the bottom of
-    // danxbot-server.ts was broken, importing this module with
-    // DANXBOT_STOP_URL unset would have hit `process.exit(1)` before
-    // this test could run. The fact that `callTool` is imported as a
-    // live function means module initialization completed cleanly
-    // without entering the bootstrap branch.
     expect(typeof callTool).toBe("function");
     expect(TOOLS.length).toBeGreaterThan(0);
   });
 });
 
-describe("callTool", () => {
-  const STOP_URL = "http://localhost:5562/api/stop/job-xyz";
+describe("callTool — danxbot_complete", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -85,17 +139,17 @@ describe("callTool", () => {
 
   it("throws on an unknown tool name", async () => {
     await expect(
-      callTool("not_a_real_tool", { status: "completed", summary: "x" }, STOP_URL),
+      callTool("not_a_real_tool", { status: "completed", summary: "x" }, urls()),
     ).rejects.toThrow(/Unknown tool/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("throws when args is not an object", async () => {
-    await expect(callTool("danxbot_complete", null, STOP_URL)).rejects.toThrow(
+    await expect(callTool("danxbot_complete", null, urls())).rejects.toThrow(
       /expected an object/,
     );
     await expect(
-      callTool("danxbot_complete", "not an object", STOP_URL),
+      callTool("danxbot_complete", "not an object", urls()),
     ).rejects.toThrow(/expected an object/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -105,7 +159,7 @@ describe("callTool", () => {
       callTool(
         "danxbot_complete",
         { status: "bogus", summary: "x" },
-        STOP_URL,
+        urls(),
       ),
     ).rejects.toThrow(/Invalid status "bogus"/);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -115,7 +169,7 @@ describe("callTool", () => {
     const result = await callTool(
       "danxbot_complete",
       { status: "critical_failure", summary: "MCP Trello tools failed" },
-      STOP_URL,
+      urls(),
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
@@ -134,7 +188,7 @@ describe("callTool", () => {
       callTool(
         "danxbot_complete",
         { status: "failed", summary: "x" },
-        STOP_URL,
+        urls(),
       ),
     ).rejects.toThrow(/HTTP 502/);
   });
@@ -143,11 +197,240 @@ describe("callTool", () => {
     await callTool(
       "danxbot_complete",
       { status: "completed" },
-      STOP_URL,
+      urls(),
     );
     const body = JSON.parse(
       fetchMock.mock.calls[0][1].body as string,
     );
     expect(body.summary).toBe("");
+  });
+});
+
+describe("callTool — danxbot_slack_reply", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs the text body to the slack reply URL when present", async () => {
+    const result = await callTool(
+      "danxbot_slack_reply",
+      { text: "Here's the answer: 42." },
+      urls({ slackReply: SLACK_REPLY_URL }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(SLACK_REPLY_URL);
+    expect((init as RequestInit).method).toBe("POST");
+    expect((init as RequestInit).headers).toEqual({
+      "Content-Type": "application/json",
+    });
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      text: "Here's the answer: 42.",
+    });
+    // The tool returns a short confirmation so the agent sees the call succeeded.
+    expect(result).toMatch(/reply|posted/i);
+  });
+
+  it("throws when slackReply URL is absent — fail loud, no silent no-op", async () => {
+    // Non-Slack dispatches don't inject DANXBOT_SLACK_REPLY_URL, so the
+    // env var is undefined and the URL bag's slackReply is undefined.
+    // Calling the tool anyway must throw — silent no-ops hide the bug that
+    // a non-Slack agent is trying to post to Slack.
+    await expect(
+      callTool(
+        "danxbot_slack_reply",
+        { text: "whatever" },
+        urls(), // No slackReply set
+      ),
+    ).rejects.toThrow(/slack.*reply|not configured|outside/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when text is missing", async () => {
+    await expect(
+      callTool(
+        "danxbot_slack_reply",
+        {},
+        urls({ slackReply: SLACK_REPLY_URL }),
+      ),
+    ).rejects.toThrow(/text/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when text is not a string", async () => {
+    await expect(
+      callTool(
+        "danxbot_slack_reply",
+        { text: 42 },
+        urls({ slackReply: SLACK_REPLY_URL }),
+      ),
+    ).rejects.toThrow(/text/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when args is not an object", async () => {
+    await expect(
+      callTool(
+        "danxbot_slack_reply",
+        null,
+        urls({ slackReply: SLACK_REPLY_URL }),
+      ),
+    ).rejects.toThrow(/expected an object/);
+  });
+
+  it("surfaces non-2xx responses from the reply URL", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 500 }));
+    await expect(
+      callTool(
+        "danxbot_slack_reply",
+        { text: "x" },
+        urls({ slackReply: SLACK_REPLY_URL }),
+      ),
+    ).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("callTool — danxbot_slack_post_update", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs the text body to the slack update URL when present", async () => {
+    const result = await callTool(
+      "danxbot_slack_post_update",
+      { text: "Reading the campaign schema now..." },
+      urls({ slackUpdate: SLACK_UPDATE_URL }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(SLACK_UPDATE_URL);
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      text: "Reading the campaign schema now...",
+    });
+    expect(result).toMatch(/update|posted/i);
+  });
+
+  it("throws when slackUpdate URL is absent — fail loud", async () => {
+    await expect(
+      callTool(
+        "danxbot_slack_post_update",
+        { text: "whatever" },
+        urls(),
+      ),
+    ).rejects.toThrow(/slack.*update|not configured|outside/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when text is missing", async () => {
+    await expect(
+      callTool(
+        "danxbot_slack_post_update",
+        {},
+        urls({ slackUpdate: SLACK_UPDATE_URL }),
+      ),
+    ).rejects.toThrow(/text/i);
+  });
+
+  it("surfaces non-2xx responses from the update URL", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 503 }));
+    await expect(
+      callTool(
+        "danxbot_slack_post_update",
+        { text: "x" },
+        urls({ slackUpdate: SLACK_UPDATE_URL }),
+      ),
+    ).rejects.toThrow(/HTTP 503/);
+  });
+});
+
+describe("buildActiveTools — advertise-filter", () => {
+  // The advertise-filter is the "suspenders" seam: even if the
+  // resolver regresses and includes Slack tool names in allowedTools,
+  // a non-Slack MCP process never advertises them in tools/list, so
+  // the agent has no path to try the call. A drift here silently
+  // collapses the enforcement the registry docstring promises.
+  it("advertises only danxbot_complete when no slack URLs are configured", () => {
+    const tools = buildActiveTools({ stop: STOP_URL });
+    expect(tools.map((t) => t.name)).toEqual(["danxbot_complete"]);
+  });
+
+  it("advertises danxbot_slack_reply alongside danxbot_complete when slackReply is set (but not slackUpdate)", () => {
+    const tools = buildActiveTools({
+      stop: STOP_URL,
+      slackReply: SLACK_REPLY_URL,
+    });
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("danxbot_complete");
+    expect(names).toContain("danxbot_slack_reply");
+    expect(names).not.toContain("danxbot_slack_post_update");
+  });
+
+  it("advertises both Slack tools alongside danxbot_complete when both URLs are set", () => {
+    const tools = buildActiveTools({
+      stop: STOP_URL,
+      slackReply: SLACK_REPLY_URL,
+      slackUpdate: SLACK_UPDATE_URL,
+    });
+    const names = tools.map((t) => t.name).sort();
+    expect(names).toEqual(
+      [
+        "danxbot_complete",
+        "danxbot_slack_post_update",
+        "danxbot_slack_reply",
+      ].sort(),
+    );
+  });
+
+  it("never advertises a tool whose URL env is an empty string (guards against env-vs-unset drift)", () => {
+    // Empty-string env vars are a realistic failure mode when the
+    // parent process exports `DANXBOT_SLACK_REPLY_URL=` (no value).
+    // The filter's `!!` check rejects empty strings the same as
+    // undefined — this test pins that invariant.
+    const tools = buildActiveTools({
+      stop: STOP_URL,
+      slackReply: "",
+      slackUpdate: "",
+    });
+    const names = tools.map((t) => t.name);
+    expect(names).toEqual(["danxbot_complete"]);
+  });
+});
+
+describe("tool isolation", () => {
+  // A Slack-URL bag MUST NOT let an agent call danxbot_slack_reply by pointing
+  // at the stop URL. Each tool resolves ONLY its own URL slot — no fallback
+  // from stop to slackReply or vice versa. Silent fallbacks between URL slots
+  // would make the system appear to work while routing messages to the wrong
+  // endpoint (e.g. posting a "completion" to the Slack thread).
+  it("danxbot_slack_reply does NOT fall back to the stop URL when slackReply is absent", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(
+        callTool("danxbot_slack_reply", { text: "x" }, { stop: STOP_URL }),
+      ).rejects.toThrow();
+      expect(fetchMock).not.toHaveBeenCalledWith(STOP_URL, expect.anything());
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

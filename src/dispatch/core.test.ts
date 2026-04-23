@@ -618,3 +618,154 @@ describe("dispatch() — per-dispatch settings-file lifecycle", () => {
     expect(existsSync(capturedPath!)).toBe(false);
   });
 });
+
+describe("dispatch() — slack trigger injects slack URLs into MCP settings (Phase 1)", () => {
+  // When the dispatch is slack-triggered, `dispatch()` derives the two
+  // per-dispatch Slack callback URLs (reply + post_update) from the
+  // worker port and dispatchId, and hands them to the resolver so the
+  // danxbot MCP server env includes DANXBOT_SLACK_REPLY_URL and
+  // DANXBOT_SLACK_UPDATE_URL alongside DANXBOT_STOP_URL.
+  //
+  // Non-slack dispatches must NOT carry these env vars — that is the
+  // enforcement seam that prevents a Trello or API agent from posting
+  // to Slack. See `.claude/rules/agent-dispatch.md` and the epic
+  // `kMQ170Ea` Phase 1 description.
+  const SLACK_META: DispatchTriggerMetadata = {
+    trigger: "slack",
+    metadata: {
+      channelId: "C0123456",
+      threadTs: "1700000000.000100",
+      messageTs: "1700000000.000200",
+      user: "U0123456",
+      userName: null,
+      messageText: "why is the deploy failing?",
+    },
+  };
+
+  it("injects DANXBOT_SLACK_REPLY_URL and DANXBOT_SLACK_UPDATE_URL pointing at the worker's /api/slack/*/<dispatchId> endpoints", async () => {
+    const result = await dispatch({
+      repo: MOCK_REPO,
+      task: "investigate the deploy",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: SLACK_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8"));
+    const env = settings.mcpServers.danxbot.env;
+    expect(env.DANXBOT_STOP_URL).toBe(
+      `http://localhost:${MOCK_REPO.workerPort}/api/stop/${result.dispatchId}`,
+    );
+    expect(env.DANXBOT_SLACK_REPLY_URL).toBe(
+      `http://localhost:${MOCK_REPO.workerPort}/api/slack/reply/${result.dispatchId}`,
+    );
+    expect(env.DANXBOT_SLACK_UPDATE_URL).toBe(
+      `http://localhost:${MOCK_REPO.workerPort}/api/slack/update/${result.dispatchId}`,
+    );
+  });
+
+  it("adds both Slack MCP tools to the spawnAgent allowedTools when trigger is slack", async () => {
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "investigate",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: SLACK_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.allowedTools).toContain(
+      "mcp__danxbot__danxbot_slack_reply",
+    );
+    expect(opts.allowedTools).toContain(
+      "mcp__danxbot__danxbot_slack_post_update",
+    );
+  });
+
+  it("does NOT set DANXBOT_SLACK_* env vars for an api-triggered dispatch (non-slack)", async () => {
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8"));
+    const env = settings.mcpServers.danxbot.env;
+    expect(env.DANXBOT_SLACK_REPLY_URL).toBeUndefined();
+    expect(env.DANXBOT_SLACK_UPDATE_URL).toBeUndefined();
+  });
+
+  it("does NOT add Slack tools to allowedTools for an api-triggered dispatch", async () => {
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.allowedTools).not.toContain(
+      "mcp__danxbot__danxbot_slack_reply",
+    );
+    expect(opts.allowedTools).not.toContain(
+      "mcp__danxbot__danxbot_slack_post_update",
+    );
+  });
+
+  it("does NOT set DANXBOT_SLACK_* env vars for a trello-triggered dispatch (poller)", async () => {
+    const TRELLO_META: DispatchTriggerMetadata = {
+      trigger: "trello",
+      metadata: {
+        cardId: "c1",
+        cardName: "Test",
+        cardUrl: "https://trello/c1",
+        listId: "l1",
+        listName: "ToDo",
+      },
+    };
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "do work",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: TRELLO_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8"));
+    expect(settings.mcpServers.danxbot.env.DANXBOT_SLACK_REPLY_URL).toBeUndefined();
+    expect(settings.mcpServers.danxbot.env.DANXBOT_SLACK_UPDATE_URL).toBeUndefined();
+  });
+
+  it("persists the Slack thread and channel metadata on the dispatch row (for Phase 2 thread lookups)", async () => {
+    const result = await dispatch({
+      repo: MOCK_REPO,
+      task: "investigate",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: SLACK_META,
+    });
+
+    // Inspect the `dispatch` field handed to spawnAgent for the initial
+    // (non-respawn) call — that's what persists into the DB via the
+    // dispatch-tracker. The SlackTriggerMetadata carries threadTs and
+    // channelId directly, so Phase 1 doesn't need to re-extract them here —
+    // but a regression that stripped the meta on the way through would
+    // break Phase 2's thread-continuity lookup, so this test pins the
+    // pass-through.
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.dispatch).toEqual(SLACK_META);
+    expect(result.dispatchId).toBeTruthy();
+  });
+});

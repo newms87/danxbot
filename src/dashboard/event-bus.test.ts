@@ -20,6 +20,8 @@ function createdEvent(id = "job-1"): BusEvent {
         statusUrl: null,
         initialPrompt: "test",
       },
+      slackThreadTs: null,
+      slackChannelId: null,
       sessionUuid: null,
       jsonlPath: null,
       parentJobId: null,

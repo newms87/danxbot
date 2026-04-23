@@ -99,11 +99,23 @@ export async function startDispatchTracking(
 ): Promise<DispatchTracker> {
   const startedAt = args.startedAtMs ?? Date.now();
 
+  // Denormalize slack thread + channel into dedicated indexable columns
+  // for Slack-triggered dispatches. JSON metadata stays the source of
+  // truth for audit; the columns exist so Phase 2's thread-continuity
+  // lookup (`findLatestDispatchBySlackThread`) hits an index. The
+  // `args.trigger.trigger === "slack"` check is the discriminator that
+  // TypeScript uses to narrow `args.trigger.metadata` to
+  // `SlackTriggerMetadata` — no cast needed.
+  const slackMeta =
+    args.trigger.trigger === "slack" ? args.trigger.metadata : null;
+
   const row: Dispatch = {
     id: args.jobId,
     repoName: args.repoName,
     trigger: args.trigger.trigger,
     triggerMetadata: args.trigger.metadata,
+    slackThreadTs: slackMeta?.threadTs ?? null,
+    slackChannelId: slackMeta?.channelId ?? null,
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: args.parentJobId ?? null,

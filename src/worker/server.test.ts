@@ -15,12 +15,16 @@ const mockHandleCancel = vi.fn();
 const mockHandleStatus = vi.fn();
 const mockHandleStop = vi.fn();
 const mockHandleResume = vi.fn();
+const mockHandleSlackReply = vi.fn();
+const mockHandleSlackUpdate = vi.fn();
 vi.mock("./dispatch.js", () => ({
   handleLaunch: (...args: unknown[]) => mockHandleLaunch(...args),
   handleCancel: (...args: unknown[]) => mockHandleCancel(...args),
   handleStatus: (...args: unknown[]) => mockHandleStatus(...args),
   handleStop: (...args: unknown[]) => mockHandleStop(...args),
   handleResume: (...args: unknown[]) => mockHandleResume(...args),
+  handleSlackReply: (...args: unknown[]) => mockHandleSlackReply(...args),
+  handleSlackUpdate: (...args: unknown[]) => mockHandleSlackUpdate(...args),
 }));
 
 const mockHandleClearCriticalFailure = vi.fn();
@@ -212,6 +216,66 @@ describe("worker server", () => {
       await requestHandler(req, res);
 
       expect(mockHandleStop).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("POST /api/slack/reply/:dispatchId", () => {
+    it("delegates to handleSlackReply with req, res, dispatchId, and the worker's repo", async () => {
+      mockHandleSlackReply.mockResolvedValue(undefined);
+
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/slack/reply/slack-job-xyz",
+      );
+      await requestHandler(req, res);
+
+      expect(mockHandleSlackReply).toHaveBeenCalledWith(
+        req,
+        res,
+        "slack-job-xyz",
+        MOCK_REPO,
+      );
+    });
+
+    it("does not match GET /api/slack/reply/:dispatchId", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/slack/reply/slack-job-xyz",
+      );
+      await requestHandler(req, res);
+
+      expect(mockHandleSlackReply).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("POST /api/slack/update/:dispatchId", () => {
+    it("delegates to handleSlackUpdate with req, res, dispatchId, and the worker's repo", async () => {
+      mockHandleSlackUpdate.mockResolvedValue(undefined);
+
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/slack/update/slack-job-xyz",
+      );
+      await requestHandler(req, res);
+
+      expect(mockHandleSlackUpdate).toHaveBeenCalledWith(
+        req,
+        res,
+        "slack-job-xyz",
+        MOCK_REPO,
+      );
+    });
+
+    it("does not match GET /api/slack/update/:dispatchId", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/slack/update/slack-job-xyz",
+      );
+      await requestHandler(req, res);
+
+      expect(mockHandleSlackUpdate).not.toHaveBeenCalled();
       expect(res._getStatusCode()).toBe(404);
     });
   });

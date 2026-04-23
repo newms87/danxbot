@@ -26,6 +26,9 @@ import {
   isCompleteStatus,
   type CompleteStatus,
 } from "../mcp/danxbot-server.js";
+import { getDispatchById } from "../dashboard/dispatches-db.js";
+import { getSlackClientForRepo } from "../slack/listener.js";
+import type { SlackTriggerMetadata } from "../dashboard/dispatches.js";
 
 const log = createLogger("worker-dispatch");
 
@@ -490,6 +493,149 @@ function parseStopStatus(
     return null;
   }
   return rawStatus;
+}
+
+/**
+ * Shared body shape for the two Slack side-channel endpoints. Kept as a
+ * single helper so the request-parsing contract is identical between
+ * `handleSlackReply` and `handleSlackUpdate` — the only difference
+ * between the two is which method on the bolt client they call and
+ * which dispatch is allowed to reach them (both: trigger === "slack").
+ */
+function parseSlackText(
+  body: Record<string, unknown>,
+  res: ServerResponse,
+): string | null {
+  const raw = body.text;
+  if (typeof raw !== "string" || raw.trim() === "") {
+    json(res, 400, {
+      error: "Missing or blank required field: text",
+    });
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * Shared handler body for the two Slack side-channel endpoints.
+ *
+ * The danxbot MCP server's `danxbot_slack_reply` and
+ * `danxbot_slack_post_update` tools each POST `{text}` to one of these
+ * endpoints with the dispatchId in the path. We look up the dispatch,
+ * confirm it originated from a Slack message (non-Slack dispatches must
+ * never route through here — silent fallback to the first Slack listener
+ * is exactly the bug the `getSlackClientForRepo` helper exists to
+ * prevent), and call `chat.postMessage` with the thread metadata from
+ * the dispatch row.
+ *
+ * The `tag` parameter is only used for diagnostic logging — both
+ * endpoints call the same `chat.postMessage` shape.
+ */
+async function handleSlackPost(
+  req: IncomingMessage,
+  res: ServerResponse,
+  dispatchId: string,
+  repo: RepoContext,
+  tag: "reply" | "update",
+): Promise<void> {
+  try {
+    const dispatch = await getDispatchById(dispatchId);
+    if (!dispatch) {
+      json(res, 404, { error: "Dispatch not found" });
+      return;
+    }
+    // Cross-worker guard: the `dispatches` table is shared across
+    // workers, so this handler can receive a dispatchId that belongs
+    // to a different repo's worker. Without this check the mismatch
+    // would surface as a confusing "Slack is not connected" 500 after
+    // `getSlackClientForRepo` returned undefined for the other repo —
+    // worse, it would leak the existence of other repos' dispatches
+    // via the 500 message. 404 here keeps the failure mode crisp and
+    // the info surface closed.
+    if (dispatch.repoName !== repo.name) {
+      json(res, 404, {
+        error: `Dispatch "${dispatchId}" is not owned by this worker`,
+      });
+      return;
+    }
+    if (dispatch.trigger !== "slack") {
+      // A non-Slack dispatch has no Slack thread to post into. Fail
+      // loud — a 404 here signals "no such Slack resource for this
+      // dispatch," not an auth error. Silent routing to some other
+      // thread (e.g. the first connected listener) would be the
+      // worst-case bug this check exists to prevent.
+      json(res, 404, {
+        error: `Dispatch "${dispatchId}" is not a Slack dispatch`,
+      });
+      return;
+    }
+
+    const body = await parseBody(req);
+    const text = parseSlackText(body, res);
+    if (text === null) return;
+
+    // The `trigger === "slack"` discriminator above guarantees the
+    // metadata shape. The cast is required because `Dispatch` stores
+    // `trigger` and `triggerMetadata` as independent fields — TS can't
+    // narrow the union across that boundary automatically.
+    const slackMeta = dispatch.triggerMetadata as SlackTriggerMetadata;
+    const client = getSlackClientForRepo(dispatch.repoName);
+    if (!client) {
+      json(res, 500, {
+        error: `Slack is not connected for repo "${dispatch.repoName}"`,
+      });
+      return;
+    }
+
+    try {
+      await client.chat.postMessage({
+        channel: slackMeta.channelId,
+        thread_ts: slackMeta.threadTs,
+        text,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(`[${tag}] chat.postMessage failed for ${dispatchId}`, err);
+      json(res, 500, { error: `Failed to post to Slack: ${msg}` });
+      return;
+    }
+
+    json(res, 200, { status: "posted" });
+  } catch (err) {
+    log.error(`[${tag}] Slack post failed`, err);
+    json(res, 500, {
+      error: err instanceof Error ? err.message : `Slack ${tag} failed`,
+    });
+  }
+}
+
+/**
+ * `POST /api/slack/reply/:dispatchId` — posts the agent's final reply
+ * back into the Slack thread that originated this dispatch. Called by
+ * the `danxbot_slack_reply` MCP tool from inside a Slack-triggered
+ * dispatched agent.
+ */
+export async function handleSlackReply(
+  req: IncomingMessage,
+  res: ServerResponse,
+  dispatchId: string,
+  repo: RepoContext,
+): Promise<void> {
+  await handleSlackPost(req, res, dispatchId, repo, "reply");
+}
+
+/**
+ * `POST /api/slack/update/:dispatchId` — posts an intermediate status
+ * update into the Slack thread. Called by the `danxbot_slack_post_update`
+ * MCP tool from inside a Slack-triggered dispatched agent.
+ */
+export async function handleSlackUpdate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  dispatchId: string,
+  repo: RepoContext,
+): Promise<void> {
+  await handleSlackPost(req, res, dispatchId, repo, "update");
 }
 
 export async function handleStop(

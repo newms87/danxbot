@@ -200,6 +200,7 @@ function cleanupMcpSettings(settingsDir: string): void {
 function buildResolveOptions(
   input: DispatchInput,
   danxbotStopUrl: string,
+  dispatchId: string,
 ): ResolveDispatchToolsOptions {
   const opts: ResolveDispatchToolsOptions = {
     allowTools: input.allowTools,
@@ -229,6 +230,18 @@ function buildResolveOptions(
       boardId: input.repo.trello.boardId,
     };
   }
+  // Slack-triggered dispatches get per-dispatch reply + update URLs that
+  // resolve back to the worker's `/api/slack/{reply,update}/:id`
+  // endpoints. The resolver injects these into the danxbot MCP server's
+  // env and adds the Slack tools to `allowedTools`; any other dispatch
+  // trigger gets neither — see `.claude/rules/agent-dispatch.md` and the
+  // Phase 1 card `cJahgqlF` for the full enforcement contract.
+  if (input.apiDispatchMeta.trigger === "slack") {
+    opts.slack = {
+      replyUrl: `http://localhost:${input.repo.workerPort}/api/slack/reply/${dispatchId}`,
+      updateUrl: `http://localhost:${input.repo.workerPort}/api/slack/update/${dispatchId}`,
+    };
+  }
   return opts;
 }
 
@@ -243,7 +256,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
 
   // Resolve ONCE; reused on every stall-recovery respawn so the tool surface
   // stays identical across the lifetime of the dispatch slot.
-  const resolveOptions = buildResolveOptions(input, workerStopUrl);
+  const resolveOptions = buildResolveOptions(input, workerStopUrl, dispatchId);
   const resolved = resolveDispatchTools(resolveOptions);
 
   // Append completion instruction to every dispatched task (keeps the agent

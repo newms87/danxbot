@@ -81,6 +81,8 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     repoName: "danxbot",
     trigger: "api",
     triggerMetadata: makeApiMeta(),
+    slackThreadTs: null,
+    slackChannelId: null,
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: null,
@@ -111,11 +113,55 @@ beforeEach(() => {
 
 describe("dispatchToInsertParams", () => {
   it("serializes trigger metadata as JSON", () => {
-    const d = makeDispatch({ trigger: "slack", triggerMetadata: makeSlackMeta() });
+    const d = makeDispatch({
+      trigger: "slack",
+      triggerMetadata: makeSlackMeta(),
+      slackThreadTs: "1234.5678",
+      slackChannelId: "C123",
+    });
     const params = dispatchToInsertParams(d);
     const meta = params[3] as string;
     expect(typeof meta).toBe("string");
     expect(JSON.parse(meta)).toEqual(makeSlackMeta());
+  });
+
+  it("writes slack_thread_ts + slack_channel_id at their declared positions for slack dispatches", () => {
+    // Mirror assertion for the new denormalized columns — same load-
+    // bearing positional binding as parentJobId. A re-order of
+    // COLUMN_MAP is caught here instead of silently misaligning Slack
+    // thread data with some unrelated column at write time.
+    const d = makeDispatch({
+      trigger: "slack",
+      triggerMetadata: makeSlackMeta(),
+      slackThreadTs: "1234.5678",
+      slackChannelId: "C123",
+    });
+    const params = dispatchToInsertParams(d);
+    const orderedKeys: Array<keyof typeof d> = [
+      "id", "repoName", "trigger", "triggerMetadata",
+      "slackThreadTs", "slackChannelId",
+      "sessionUuid", "jsonlPath", "parentJobId", "status",
+      "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
+      "toolCallCount", "subagentCount", "nudgeCount", "danxbotCommit",
+    ];
+    expect(params[orderedKeys.indexOf("slackThreadTs")]).toBe("1234.5678");
+    expect(params[orderedKeys.indexOf("slackChannelId")]).toBe("C123");
+  });
+
+  it("writes null in the slack columns for non-Slack dispatches", () => {
+    const d = makeDispatch(); // default trigger: api
+    const params = dispatchToInsertParams(d);
+    const orderedKeys: Array<keyof typeof d> = [
+      "id", "repoName", "trigger", "triggerMetadata",
+      "slackThreadTs", "slackChannelId",
+      "sessionUuid", "jsonlPath", "parentJobId", "status",
+      "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
+      "toolCallCount", "subagentCount", "nudgeCount", "danxbotCommit",
+    ];
+    expect(params[orderedKeys.indexOf("slackThreadTs")]).toBeNull();
+    expect(params[orderedKeys.indexOf("slackChannelId")]).toBeNull();
   });
 
   it("passes scalar fields straight through", () => {
@@ -140,6 +186,7 @@ describe("dispatchToInsertParams", () => {
     // ORDERED_KEYS in declaration order and find parentJobId.
     const orderedKeys: Array<keyof typeof d> = [
       "id", "repoName", "trigger", "triggerMetadata",
+      "slackThreadTs", "slackChannelId",
       "sessionUuid", "jsonlPath", "parentJobId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
       "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
@@ -154,6 +201,7 @@ describe("dispatchToInsertParams", () => {
     const params = dispatchToInsertParams(d);
     const orderedKeys: Array<keyof typeof d> = [
       "id", "repoName", "trigger", "triggerMetadata",
+      "slackThreadTs", "slackChannelId",
       "sessionUuid", "jsonlPath", "parentJobId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
       "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
@@ -171,6 +219,8 @@ describe("rowToDispatch", () => {
       repo_name: "danxbot",
       trigger: "trello",
       trigger_metadata: JSON.stringify(makeTrelloMeta()),
+      slack_thread_ts: null,
+      slack_channel_id: null,
       session_uuid: "sess-uuid",
       jsonl_path: "/tmp/session.jsonl",
       parent_job_id: "parent-aea75840",
@@ -208,6 +258,8 @@ describe("rowToDispatch", () => {
       repo_name: "danxbot",
       trigger: "slack",
       trigger_metadata: meta, // pre-parsed
+      slack_thread_ts: meta.threadTs,
+      slack_channel_id: meta.channelId,
       session_uuid: null,
       jsonl_path: null,
       parent_job_id: null,

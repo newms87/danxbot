@@ -1,19 +1,39 @@
 /**
- * Minimal stdio MCP server for danxbot agent lifecycle tools.
+ * Minimal stdio MCP server for danxbot agent lifecycle + side-channel tools.
  *
- * Provides the danxbot_complete tool that agents call when they finish work.
- * Reads DANXBOT_STOP_URL from env and POSTs to it when the tool is invoked.
+ * Provides three tools:
+ *
+ * - `danxbot_complete` — the agent calls this when it finishes work.
+ *   POSTs `{status, summary}` to `DANXBOT_STOP_URL` so the worker finalizes
+ *   the dispatch row. Always available on every dispatched agent.
+ *
+ * - `danxbot_slack_reply` — the agent calls this to post its final user-
+ *   facing answer into the originating Slack thread. POSTs `{text}` to
+ *   `DANXBOT_SLACK_REPLY_URL`. ONLY available when the env var is set
+ *   (i.e., when the dispatch is Slack-triggered — see Phase 1 of the
+ *   Slack unified-dispatch epic `kMQ170Ea`).
+ *
+ * - `danxbot_slack_post_update` — the agent calls this to post a
+ *   meaningful intermediate progress update into the originating Slack
+ *   thread. POSTs `{text}` to `DANXBOT_SLACK_UPDATE_URL`. ONLY available
+ *   when the env var is set.
  *
  * Protocol: JSON-RPC 2.0 over stdio (newline-delimited JSON).
  * Handles: initialize, notifications/initialized, tools/list, tools/call.
  *
- * The status enum carries three values:
+ * The `danxbot_complete` status enum carries three values:
  * - `completed` / `failed` — normal lifecycle. Job finalizes in that state.
  * - `critical_failure` — environment-level blocker (MCP not loading, Bash
  *   unavailable, Claude auth missing). The worker writes a per-repo
  *   critical-failure flag that halts the poller; a human must investigate
  *   and clear the flag. See `.claude/rules/agent-dispatch.md` "Critical
  *   failure flag" for the contract.
+ *
+ * Fail-loud contract for the Slack tools: if the corresponding URL env var
+ * is absent, `callTool` throws instead of silently no-op'ing. A non-Slack
+ * agent should never see these tools in its MCP list (the resolver only
+ * adds them to `allowedTools` when the dispatch is Slack-triggered), so a
+ * call that reaches `callTool` without a URL is a real bug to surface.
  */
 
 import { createInterface } from "node:readline";
@@ -32,6 +52,18 @@ export function isCompleteStatus(value: unknown): value is CompleteStatus {
     typeof value === "string" &&
     (COMPLETE_STATUSES as readonly string[]).includes(value)
   );
+}
+
+/**
+ * The set of per-dispatch callback URLs a danxbot MCP server process
+ * can reach. `stop` is always present. The two Slack fields are present
+ * only for Slack-triggered dispatches — the resolver injects their env
+ * vars then, and the server exposes the corresponding tools.
+ */
+export interface DanxbotToolUrls {
+  stop: string;
+  slackReply?: string;
+  slackUpdate?: string;
 }
 
 export const TOOLS = [
@@ -66,7 +98,146 @@ export const TOOLS = [
       required: ["status", "summary"],
     },
   },
+  {
+    name: "danxbot_slack_reply",
+    description:
+      "Post the FINAL user-facing reply to the originating Slack thread. " +
+      "Call this exactly once per dispatch, immediately before danxbot_complete. " +
+      "The text becomes the user's answer — keep it focused and well-formatted. " +
+      "For intermediate progress, use danxbot_slack_post_update instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: {
+          type: "string",
+          description: "The final reply text to post to the Slack thread.",
+        },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "danxbot_slack_post_update",
+    description:
+      "Post an intermediate progress update to the originating Slack thread. " +
+      "Use SPARINGLY — only for meaningful status the user cares about (e.g. " +
+      "'Reading the campaign schema now', 'Found the failing test'). Do NOT " +
+      "post for every file read or trivial step — noise erodes trust.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: {
+          type: "string",
+          description: "The intermediate status update text.",
+        },
+      },
+      required: ["text"],
+    },
+  },
 ];
+
+async function postJson(url: string, body: unknown): Promise<Response> {
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function requireObjectArgs(name: string, args: unknown): Record<string, unknown> {
+  if (!args || typeof args !== "object") {
+    throw new Error(`Invalid arguments: expected an object for ${name}`);
+  }
+  return args as Record<string, unknown>;
+}
+
+function requireNonBlankString(
+  toolName: string,
+  field: string,
+  value: unknown,
+): string {
+  if (typeof value !== "string") {
+    throw new Error(
+      `${toolName}: field "${field}" is required and must be a string (got ${typeof value})`,
+    );
+  }
+  if (value.trim() === "") {
+    throw new Error(
+      `${toolName}: field "${field}" must be a non-empty string`,
+    );
+  }
+  return value;
+}
+
+async function callDanxbotComplete(
+  args: Record<string, unknown>,
+  urls: DanxbotToolUrls,
+): Promise<string> {
+  const status = args.status;
+  const rawSummary = args.summary;
+
+  if (!isCompleteStatus(status)) {
+    throw new Error(
+      `Invalid status "${String(status)}" — must be one of ${COMPLETE_STATUSES.join(", ")}`,
+    );
+  }
+  const summary = typeof rawSummary === "string" ? rawSummary : "";
+
+  const response = await postJson(urls.stop, { status, summary });
+  if (!response.ok) {
+    throw new Error(`Stop API returned HTTP ${response.status}`);
+  }
+  return `Agent signaled ${status}: ${summary}`;
+}
+
+async function callDanxbotSlackReply(
+  args: Record<string, unknown>,
+  urls: DanxbotToolUrls,
+): Promise<string> {
+  // Fail loud when the Slack reply URL isn't configured. A non-Slack
+  // dispatch should never have this tool in its allowedTools list (the
+  // resolver only adds it when opts.slack is present), so reaching here
+  // without a URL means either: the resolver regressed, OR an agent is
+  // probing for tools. Either way, silent fallback to another URL
+  // (e.g. the stop URL) would hide a real bug AND misroute a message to
+  // an endpoint that's shaped for a different payload.
+  if (!urls.slackReply) {
+    throw new Error(
+      "danxbot_slack_reply called outside a Slack dispatch (DANXBOT_SLACK_REPLY_URL not configured)",
+    );
+  }
+  const text = requireNonBlankString(
+    "danxbot_slack_reply",
+    "text",
+    args.text,
+  );
+  const response = await postJson(urls.slackReply, { text });
+  if (!response.ok) {
+    throw new Error(`Slack reply API returned HTTP ${response.status}`);
+  }
+  return `Reply posted to Slack thread`;
+}
+
+async function callDanxbotSlackPostUpdate(
+  args: Record<string, unknown>,
+  urls: DanxbotToolUrls,
+): Promise<string> {
+  if (!urls.slackUpdate) {
+    throw new Error(
+      "danxbot_slack_post_update called outside a Slack dispatch (DANXBOT_SLACK_UPDATE_URL not configured)",
+    );
+  }
+  const text = requireNonBlankString(
+    "danxbot_slack_post_update",
+    "text",
+    args.text,
+  );
+  const response = await postJson(urls.slackUpdate, { text });
+  if (!response.ok) {
+    throw new Error(`Slack update API returned HTTP ${response.status}`);
+  }
+  return `Update posted to Slack thread`;
+}
 
 /**
  * Exported so unit tests can exercise the validation + fetch contract
@@ -76,37 +247,27 @@ export const TOOLS = [
 export async function callTool(
   name: string,
   args: unknown,
-  stopUrl: string,
+  urls: DanxbotToolUrls,
 ): Promise<string> {
-  if (name !== "danxbot_complete") {
-    throw new Error(`Unknown tool: ${name}`);
+  switch (name) {
+    case "danxbot_complete":
+      return callDanxbotComplete(
+        requireObjectArgs("danxbot_complete", args),
+        urls,
+      );
+    case "danxbot_slack_reply":
+      return callDanxbotSlackReply(
+        requireObjectArgs("danxbot_slack_reply", args),
+        urls,
+      );
+    case "danxbot_slack_post_update":
+      return callDanxbotSlackPostUpdate(
+        requireObjectArgs("danxbot_slack_post_update", args),
+        urls,
+      );
+    default:
+      throw new Error(`Unknown tool: ${name}`);
   }
-
-  if (!args || typeof args !== "object") {
-    throw new Error(`Invalid arguments: expected an object for danxbot_complete`);
-  }
-  const argObj = args as Record<string, unknown>;
-  const status = argObj.status;
-  const rawSummary = argObj.summary;
-
-  if (!isCompleteStatus(status)) {
-    throw new Error(
-      `Invalid status "${String(status)}" — must be one of ${COMPLETE_STATUSES.join(", ")}`,
-    );
-  }
-  const summary = typeof rawSummary === "string" ? rawSummary : "";
-
-  const response = await fetch(stopUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, summary }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Stop API returned HTTP ${response.status}`);
-  }
-
-  return `Agent signaled ${status}: ${summary}`;
 }
 
 function respond(id: number | string, result: unknown): void {
@@ -123,8 +284,28 @@ function respondError(
   );
 }
 
-function main(stopUrl: string): void {
+/**
+ * Return the subset of `TOOLS` this MCP server will advertise over
+ * JSON-RPC given the per-dispatch URL bag. Extracted (and exported) so
+ * tests can assert the advertise-filter contract directly — the
+ * resolver's `--allowed-tools` flag is the "belt" that tells claude
+ * which tools it may call; this filter is the "suspenders" that
+ * controls what the MCP server exposes at all. A drift between the two
+ * would leak Slack tools into a non-Slack agent's `tools/list` output
+ * even though `callTool` would still refuse, breaking the enforcement
+ * seam documented on the registry's DANXBOT_ENTRY.
+ */
+export function buildActiveTools(urls: DanxbotToolUrls) {
+  return TOOLS.filter((t) => {
+    if (t.name === "danxbot_slack_reply") return !!urls.slackReply;
+    if (t.name === "danxbot_slack_post_update") return !!urls.slackUpdate;
+    return true;
+  });
+}
+
+function main(urls: DanxbotToolUrls): void {
   const rl = createInterface({ input: process.stdin, terminal: false });
+  const activeTools = buildActiveTools(urls);
 
   rl.on("line", (line: string) => {
     let msg: Record<string, unknown>;
@@ -152,7 +333,7 @@ function main(stopUrl: string): void {
         } else if (method === "ping") {
           respond(id, {});
         } else if (method === "tools/list") {
-          respond(id, { tools: TOOLS });
+          respond(id, { tools: activeTools });
         } else if (method === "tools/call") {
           // params comes off the wire as `unknown`; callTool validates
           // the shape internally and throws on malformed input, which
@@ -161,7 +342,7 @@ function main(stopUrl: string): void {
           const text = await callTool(
             p.name as string,
             p.arguments,
-            stopUrl,
+            urls,
           );
           respond(id, { content: [{ type: "text", text }] });
         } else {
@@ -194,5 +375,10 @@ if (import.meta.url === entryUrl) {
     );
     process.exit(1);
   }
-  main(stopUrl);
+  const urls: DanxbotToolUrls = {
+    stop: stopUrl,
+    slackReply: process.env.DANXBOT_SLACK_REPLY_URL,
+    slackUpdate: process.env.DANXBOT_SLACK_UPDATE_URL,
+  };
+  main(urls);
 }

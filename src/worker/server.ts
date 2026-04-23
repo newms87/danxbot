@@ -20,6 +20,8 @@ import {
   handleCancel,
   handleStatus,
   handleStop,
+  handleSlackReply,
+  handleSlackUpdate,
 } from "./dispatch.js";
 import { handleClearCriticalFailure } from "./critical-failure-route.js";
 import type { RepoContext } from "../types.js";
@@ -66,6 +68,18 @@ export async function startWorkerServer(repo: RepoContext): Promise<void> {
     const stopMatch = url.pathname.match(/^\/api\/stop\/(.+)$/);
     if (method === "POST" && stopMatch) {
       await handleStop(req, res, stopMatch[1], repo);
+      return;
+    }
+
+    const slackReplyMatch = url.pathname.match(/^\/api\/slack\/reply\/(.+)$/);
+    if (method === "POST" && slackReplyMatch) {
+      await handleSlackReply(req, res, slackReplyMatch[1], repo);
+      return;
+    }
+
+    const slackUpdateMatch = url.pathname.match(/^\/api\/slack\/update\/(.+)$/);
+    if (method === "POST" && slackUpdateMatch) {
+      await handleSlackUpdate(req, res, slackUpdateMatch[1], repo);
       return;
     }
 

@@ -38,8 +38,20 @@ export const DANXBOT_MCP_SERVER_PATH = pathResolve(
   "../mcp/danxbot-server.ts",
 );
 
+/** Slack-only tools exposed on the danxbot server when opts.slack is present. */
+export const DANXBOT_SLACK_REPLY_TOOL = "danxbot_slack_reply";
+export const DANXBOT_SLACK_POST_UPDATE_TOOL = "danxbot_slack_post_update";
+
 /** Infrastructure server — always injected by the resolver. */
 const DANXBOT_ENTRY: McpServerEntry = {
+  // The `tools` list is the set of short names used for wildcard
+  // expansion. We intentionally DO NOT include the Slack tools here:
+  // wildcard expansion of `mcp__danxbot__*` must not silently enable
+  // Slack tools for a non-Slack dispatch. Slack tools are added to
+  // `allowedTools` only when `opts.slack` is present, via an explicit
+  // branch in the resolver — belt-and-suspenders with the server's
+  // own `tools/list` filtering (see `src/mcp/danxbot-server.ts`'s
+  // `activeTools` filter in `main`).
   tools: [DANXBOT_COMPLETE_TOOL],
   build(opts) {
     if (!opts.danxbotStopUrl) {
@@ -47,10 +59,23 @@ const DANXBOT_ENTRY: McpServerEntry = {
         "danxbot server requires danxbotStopUrl (infrastructure dep)",
       );
     }
+    const env: Record<string, string> = {
+      DANXBOT_STOP_URL: opts.danxbotStopUrl,
+    };
+    // Slack URL injection: when the caller (today: `dispatch()` for a
+    // Slack-triggered dispatch) supplies the Slack callback URLs, the
+    // danxbot MCP process gets them via env and the server advertises
+    // the Slack tools. Absent `opts.slack`, these env vars are NEVER
+    // set — a non-Slack agent can't resolve them via `${...}`
+    // interpolation and can't call the Slack tools even if it tries.
+    if (opts.slack) {
+      env.DANXBOT_SLACK_REPLY_URL = opts.slack.replyUrl;
+      env.DANXBOT_SLACK_UPDATE_URL = opts.slack.updateUrl;
+    }
     return {
       command: "npx",
       args: ["tsx", DANXBOT_MCP_SERVER_PATH],
-      env: { DANXBOT_STOP_URL: opts.danxbotStopUrl },
+      env,
     };
   },
 };

@@ -30,6 +30,8 @@ const COLUMN_MAP: Readonly<Record<keyof Dispatch, string>> = {
   repoName: "repo_name",
   trigger: "trigger",
   triggerMetadata: "trigger_metadata",
+  slackThreadTs: "slack_thread_ts",
+  slackChannelId: "slack_channel_id",
   sessionUuid: "session_uuid",
   jsonlPath: "jsonl_path",
   parentJobId: "parent_job_id",
@@ -68,6 +70,8 @@ export interface DispatchRow {
   repo_name: string;
   trigger: string;
   trigger_metadata: string | object;
+  slack_thread_ts: string | null;
+  slack_channel_id: string | null;
   session_uuid: string | null;
   jsonl_path: string | null;
   parent_job_id: string | null;
@@ -106,6 +110,8 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     repoName: row.repo_name,
     trigger: row.trigger as TriggerType,
     triggerMetadata: parseMetadata(row.trigger_metadata),
+    slackThreadTs: row.slack_thread_ts,
+    slackChannelId: row.slack_channel_id,
     sessionUuid: row.session_uuid,
     jsonlPath: row.jsonl_path,
     parentJobId: row.parent_job_id,

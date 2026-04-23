@@ -85,6 +85,24 @@ export function getSlackClient() {
 }
 
 /**
+ * Return the bolt client for a specific repo, or undefined when no
+ * listener is running for that repo or it has not yet connected.
+ *
+ * Used by the worker's `/api/slack/{reply,update}/:dispatchId` handlers
+ * to route the `danxbot_slack_*` MCP tool calls back to the originating
+ * repo's Slack workspace — a dispatched agent must never post into a
+ * different repo's channel because the in-process `getSlackClient()`
+ * happened to return another repo's client first.
+ */
+export function getSlackClientForRepo(
+  repoName: string,
+): ReturnType<typeof getSlackClient> {
+  const state = listeners.get(repoName);
+  if (!state || !state.connected) return undefined;
+  return state.app.client;
+}
+
+/**
  * Resets shutdown state for testing. Exported for test isolation only.
  */
 export function resetListenerState(): void {
@@ -197,6 +215,13 @@ function createSlackDispatch(
     repoName,
     trigger: "slack",
     triggerMetadata: meta,
+    // Mirror the slack thread + channel into the dedicated columns so
+    // queries (Phase 2) can use an index. The listener's SDK-based
+    // `runAgent` path is itself slated for migration in Phase 2, but
+    // keeping both paths consistent today means no backfill is
+    // required when that migration lands.
+    slackThreadTs: meta.threadTs,
+    slackChannelId: meta.channelId,
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: null,

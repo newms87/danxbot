@@ -23,7 +23,11 @@
  */
 
 import type { McpServerConfig } from "./mcp-settings-shape.js";
-import { defaultMcpRegistry } from "./mcp-registry.js";
+import {
+  defaultMcpRegistry,
+  DANXBOT_SLACK_POST_UPDATE_TOOL,
+  DANXBOT_SLACK_REPLY_TOOL,
+} from "./mcp-registry.js";
 import {
   DANXBOT_COMPLETE_TOOL,
   DANXBOT_SERVER_NAME,
@@ -74,6 +78,31 @@ export function resolveDispatchTools(
     throw new McpResolveError(
       "danxbotStopUrl must be a non-empty URL string or null (use null to opt out of danxbot injection — Slack runAgent path)",
     );
+  }
+
+  // Slack URLs are a matched pair: either both are present (genuine
+  // Slack-triggered dispatch) or `opts.slack` is absent entirely. A
+  // half-configured bag is a caller bug that would yield a MCP server
+  // advertising one Slack tool but not the other — fail loud at entry.
+  if (opts.slack !== undefined) {
+    if (opts.danxbotStopUrl === null) {
+      throw new McpResolveError(
+        "opts.slack is incompatible with danxbotStopUrl: null — Slack dispatches run through spawnAgent and always have a worker stop URL",
+      );
+    }
+    if (typeof opts.slack.replyUrl !== "string" || opts.slack.replyUrl === "") {
+      throw new McpResolveError(
+        "opts.slack.replyUrl is required when opts.slack is present (must be a non-empty URL string)",
+      );
+    }
+    if (
+      typeof opts.slack.updateUrl !== "string" ||
+      opts.slack.updateUrl === ""
+    ) {
+      throw new McpResolveError(
+        "opts.slack.updateUrl is required when opts.slack is present (must be a non-empty URL string)",
+      );
+    }
   }
 
   // Entry-shape validation. Non-strings are a programming error at the caller
@@ -226,6 +255,17 @@ export function resolveDispatchTools(
   // injected above. Stable suffix position when the caller didn't ask for it.
   if (includeDanxbot) {
     push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_COMPLETE_TOOL}`);
+  }
+
+  // Slack-only tools on the danxbot server. Added to `allowedTools` ONLY
+  // when opts.slack is present (Slack-triggered dispatch). For every
+  // other dispatch these names are absent — which means claude's
+  // `--allowed-tools` doesn't permit the call AND the MCP server
+  // (configured via env) doesn't advertise the tool. Two seams, same
+  // enforcement: a non-Slack agent genuinely cannot reach Slack.
+  if (includeDanxbot && opts.slack) {
+    push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_SLACK_REPLY_TOOL}`);
+    push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_SLACK_POST_UPDATE_TOOL}`);
   }
 
   return { mcpServers, allowedTools };

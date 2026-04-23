@@ -154,6 +154,22 @@ vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
 }));
 
+// handleSlackReply / handleSlackUpdate (Phase 1) import getSlackClientForRepo
+// from `../slack/listener.js`. That listener transitively imports the
+// heartbeat manager → `@anthropic-ai/sdk`, which reads `config.anthropic.apiKey`
+// at module load. This mock decouples the worker dispatch tests from the Slack
+// listener entirely — the slack-endpoints.test.ts file is the dedicated home
+// for those handlers.
+vi.mock("../slack/listener.js", () => ({
+  getSlackClientForRepo: vi.fn(),
+  getSlackClient: vi.fn(),
+}));
+vi.mock("../dashboard/dispatches-db.js", () => ({
+  getDispatchById: vi.fn(),
+  insertDispatch: vi.fn(),
+  updateDispatch: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Mock the critical-failure module so handleStop's writeFlag path doesn't
 // touch the real filesystem. Tests assert on the mock args to verify the
 // agent-signal payload shape.

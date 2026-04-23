@@ -656,4 +656,179 @@ describe("resolveDispatchTools", () => {
       }
     });
   });
+
+  describe("slack URL injection (Phase 1 of the Slack unified dispatch epic)", () => {
+    // The Slack-specific MCP tools (`danxbot_slack_reply`,
+    // `danxbot_slack_post_update`) live on the danxbot MCP server but are
+    // ONLY active when a Slack dispatch injects their callback URLs.
+    // Non-Slack dispatches produce no Slack env vars and no Slack tools
+    // in `allowedTools` — the agent doesn't even know the tools exist.
+    //
+    // This is the enforcement boundary for "don't let a Trello agent
+    // accidentally post to Slack." Belt (callTool throws if URL missing)
+    // and suspenders (resolver doesn't even advertise the tools).
+    const SLACK_REPLY_URL = "http://localhost:5562/api/slack/reply/job-1";
+    const SLACK_UPDATE_URL = "http://localhost:5562/api/slack/update/job-1";
+
+    it("injects DANXBOT_SLACK_REPLY_URL and DANXBOT_SLACK_UPDATE_URL into the danxbot server env when opts.slack is present", () => {
+      const r = resolveDispatchTools(
+        baseOptions({
+          slack: {
+            replyUrl: SLACK_REPLY_URL,
+            updateUrl: SLACK_UPDATE_URL,
+          },
+        }),
+      );
+      const env = r.mcpServers["danxbot"].env;
+      expect(env.DANXBOT_STOP_URL).toBe(STOP_URL);
+      expect(env.DANXBOT_SLACK_REPLY_URL).toBe(SLACK_REPLY_URL);
+      expect(env.DANXBOT_SLACK_UPDATE_URL).toBe(SLACK_UPDATE_URL);
+    });
+
+    it("adds mcp__danxbot__danxbot_slack_reply and mcp__danxbot__danxbot_slack_post_update to allowedTools when opts.slack is present", () => {
+      const r = resolveDispatchTools(
+        baseOptions({
+          slack: {
+            replyUrl: SLACK_REPLY_URL,
+            updateUrl: SLACK_UPDATE_URL,
+          },
+        }),
+      );
+      expect(r.allowedTools).toContain("mcp__danxbot__danxbot_slack_reply");
+      expect(r.allowedTools).toContain(
+        "mcp__danxbot__danxbot_slack_post_update",
+      );
+    });
+
+    it("does NOT set DANXBOT_SLACK_* env vars when opts.slack is absent (non-Slack dispatch)", () => {
+      const r = resolveDispatchTools(baseOptions());
+      const env = r.mcpServers["danxbot"].env;
+      expect(env.DANXBOT_SLACK_REPLY_URL).toBeUndefined();
+      expect(env.DANXBOT_SLACK_UPDATE_URL).toBeUndefined();
+    });
+
+    it("does NOT add Slack tools to allowedTools when opts.slack is absent", () => {
+      const r = resolveDispatchTools(baseOptions());
+      expect(r.allowedTools).not.toContain(
+        "mcp__danxbot__danxbot_slack_reply",
+      );
+      expect(r.allowedTools).not.toContain(
+        "mcp__danxbot__danxbot_slack_post_update",
+      );
+    });
+
+    it("opts.slack coexists with opts.trello — a Slack dispatch can still use trello tools", () => {
+      // Slack dispatches aren't tool-restricted away from trello or any
+      // other MCP server; the slack opt-in is additive. This guards
+      // against a regression where adding slack opts accidentally prunes
+      // or reorders the rest of the tool surface.
+      const r = resolveDispatchTools(
+        baseOptions({
+          allowTools: ["Read", "mcp__trello__get_card"],
+          slack: {
+            replyUrl: SLACK_REPLY_URL,
+            updateUrl: SLACK_UPDATE_URL,
+          },
+          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
+        }),
+      );
+      expect(r.allowedTools).toContain("Read");
+      expect(r.allowedTools).toContain("mcp__trello__get_card");
+      expect(r.allowedTools).toContain("mcp__danxbot__danxbot_slack_reply");
+      expect(r.allowedTools).toContain(DANXBOT_TOOL);
+      expect(Object.keys(r.mcpServers).sort()).toEqual(["danxbot", "trello"]);
+    });
+
+    it("slack tools each appear exactly once in allowedTools (no duplication)", () => {
+      const r = resolveDispatchTools(
+        baseOptions({
+          slack: {
+            replyUrl: SLACK_REPLY_URL,
+            updateUrl: SLACK_UPDATE_URL,
+          },
+        }),
+      );
+      const replyCount = r.allowedTools.filter(
+        (t) => t === "mcp__danxbot__danxbot_slack_reply",
+      ).length;
+      const updateCount = r.allowedTools.filter(
+        (t) => t === "mcp__danxbot__danxbot_slack_post_update",
+      ).length;
+      expect(replyCount).toBe(1);
+      expect(updateCount).toBe(1);
+    });
+
+    it("rejects opts.slack with danxbotStopUrl: null — Slack via in-process SDK is the DELETED legacy path, not an active use case", () => {
+      // Phase 1 primitives are for spawned-CLI Slack dispatch. The
+      // `danxbotStopUrl: null` branch exists for the OLD in-process SDK
+      // `runAgent` path, which is being retired in Phase 3. Combining
+      // both is nonsensical — Phase 2 will migrate the listener to
+      // `dispatch()` with a real stop URL. Fail loud if someone tries
+      // to combine the two.
+      expect(() =>
+        resolveDispatchTools({
+          allowTools: ["Read"],
+          danxbotStopUrl: null,
+          slack: {
+            replyUrl: SLACK_REPLY_URL,
+            updateUrl: SLACK_UPDATE_URL,
+          },
+        }),
+      ).toThrow(/slack/i);
+    });
+
+    it("rejects opts.slack missing replyUrl — both slack URLs are required together", () => {
+      expect(() =>
+        resolveDispatchTools(
+          baseOptions({
+            slack: {
+              updateUrl: SLACK_UPDATE_URL,
+            } as unknown as ResolveDispatchToolsOptions["slack"],
+          }),
+        ),
+      ).toThrow(/replyUrl|slack/i);
+    });
+
+    it("rejects opts.slack missing updateUrl", () => {
+      expect(() =>
+        resolveDispatchTools(
+          baseOptions({
+            slack: {
+              replyUrl: SLACK_REPLY_URL,
+            } as unknown as ResolveDispatchToolsOptions["slack"],
+          }),
+        ),
+      ).toThrow(/updateUrl|slack/i);
+    });
+
+    it("rejects opts.slack.replyUrl = '' (empty string, parity with danxbotStopUrl: '' guard)", () => {
+      // Mirrors the existing `danxbotStopUrl: ''` regression-lock at
+      // line ~82: without the explicit `=== ""` guard someone could
+      // delete the empty-string check and the suite would stay green
+      // even though an empty env var is a realistic failure mode.
+      expect(() =>
+        resolveDispatchTools(
+          baseOptions({
+            slack: {
+              replyUrl: "",
+              updateUrl: SLACK_UPDATE_URL,
+            },
+          }),
+        ),
+      ).toThrow(/replyUrl|non-empty|slack/i);
+    });
+
+    it("rejects opts.slack.updateUrl = '' (empty string)", () => {
+      expect(() =>
+        resolveDispatchTools(
+          baseOptions({
+            slack: {
+              replyUrl: SLACK_REPLY_URL,
+              updateUrl: "",
+            },
+          }),
+        ),
+      ).toThrow(/updateUrl|non-empty|slack/i);
+    });
+  });
 });

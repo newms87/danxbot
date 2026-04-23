@@ -56,6 +56,21 @@ export interface Dispatch {
     | SlackTriggerMetadata
     | TrelloTriggerMetadata
     | ApiTriggerMetadata;
+  /**
+   * Denormalized Slack thread timestamp + channel ID. Populated when
+   * `trigger === "slack"` (mirrored from `triggerMetadata.threadTs` /
+   * `.channelId`); null for every other trigger. Indexed on
+   * `slack_thread_ts` so Phase 2's `findLatestDispatchBySlackThread`
+   * lookup hits an index instead of scanning a JSON path.
+   *
+   * The JSON metadata remains the source of truth for the audit trail;
+   * these columns are a thin operational projection. Kept in sync at
+   * insert time by `startDispatchTracking` and by the Slack listener's
+   * `createSlackDispatch` — there is no drift path today because Slack
+   * thread/channel is immutable for a dispatch.
+   */
+  slackThreadTs: string | null;
+  slackChannelId: string | null;
   sessionUuid: string | null;
   jsonlPath: string | null;
   /**

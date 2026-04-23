@@ -124,6 +124,51 @@ describe("startDispatchTracking", () => {
     expect(inserted.parentJobId).toBeNull();
   });
 
+  it("denormalizes slack thread + channel into dedicated columns when trigger is slack (Phase 1 of kMQ170Ea)", async () => {
+    // Phase 2's thread-continuity lookup queries `slack_thread_ts` via
+    // a real index — it cannot afford a JSON path scan. Phase 1's job
+    // is to populate the dedicated columns on insert so Phase 2 starts
+    // with consistent data. Without this assertion a refactor that
+    // dropped the column mapping would silently pass every JSON-based
+    // test and quietly break thread continuity.
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "slack-job-id",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: "abc",
+      watcher: watcher as never,
+    });
+    const inserted = mockInsertDispatch.mock.calls[0][0];
+    expect(inserted.slackThreadTs).toBe(slackTrigger.metadata.threadTs);
+    expect(inserted.slackChannelId).toBe(slackTrigger.metadata.channelId);
+  });
+
+  it("leaves slack_thread_ts + slack_channel_id NULL on non-Slack dispatches", async () => {
+    const apiTrigger: DispatchTriggerMetadata = {
+      trigger: "api",
+      metadata: {
+        endpoint: "/api/launch",
+        callerIp: "127.0.0.1",
+        statusUrl: null,
+        initialPrompt: "task",
+      },
+    };
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "api-job-id",
+      repoName: "danxbot",
+      trigger: apiTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: "abc",
+      watcher: watcher as never,
+    });
+    const inserted = mockInsertDispatch.mock.calls[0][0];
+    expect(inserted.slackThreadTs).toBeNull();
+    expect(inserted.slackChannelId).toBeNull();
+  });
+
   it("persists parentJobId on the inserted row when the dispatch is a resume child", async () => {
     // The chain handleResume → spawnAgent → startDispatchTracking → insertDispatch
     // must preserve the parent lineage end-to-end. This is the single point of
