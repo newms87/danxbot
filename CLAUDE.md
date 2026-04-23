@@ -117,6 +117,8 @@ Steps 2 and 3 are mandatory quality gates. Applies to every phase in phased plan
 
 ## Testing
 
+**Before ANY test-related action — running, writing, fixing, inspecting, or reasoning about tests — invoke the `testing` skill.** This is mandatory on the FIRST test-related action per session and is the TodoWrite checklist for the entire testing discipline (run/write/fix procedure, output-to-file rule, `--filter` protocol, anti-patterns). The section below only documents danxbot-specific paths and layers; the HOW lives in the skill.
+
 Three layers; commands and cost are in `.claude/rules/make-commands.md`. Layer 1 (unit + integration) is free and Docker-free. Layer 2 (validation) hits the real Claude API. Layer 3 (system) needs running infra + worker + `ANTHROPIC_API_KEY`.
 
 Key test paths (project-specific, not duplicated elsewhere):
@@ -130,7 +132,7 @@ Key test paths (project-specific, not duplicated elsewhere):
 | `vitest.validation.config.ts` | Validation-specific vitest config |
 | `dashboard/vitest.config.ts` | Dashboard SFC tests (separate from backend `vitest.config.ts`) |
 
-Backend tests are at `src/**/*.test.ts`. Dashboard tests are at `dashboard/src/**/*.test.ts`. Running `npx vitest run` from the repo root only picks up backend — `cd dashboard && npx vitest run` for the SPA.
+Backend tests are at `src/**/*.test.ts`. Dashboard tests are at `dashboard/src/**/*.test.ts`. Running `npx vitest run` from the repo root only picks up backend — `cd dashboard && npx vitest run` for the SPA. (The `testing` skill's "Mandatory Setup" requires output-to-file; the danxbot convention is `> /tmp/vitest.log 2>&1`.)
 
 ## Agent Spawn Architecture (Summary)
 
