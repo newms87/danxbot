@@ -1,4 +1,5 @@
 import { App } from "@slack/bolt";
+import type { SlackBoltClient } from "./types.js";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import { swapReaction } from "./helpers.js";
@@ -55,57 +56,17 @@ export function stopSlackListener(): void {
 }
 
 /**
- * Phase 2 compatibility shim — returns an empty list.
- *
- * The old listener tracked per-thread placeholder messages so `shutdown.ts`
- * could edit them with a "bot is restarting" notice and wait for in-flight
- * agents to finish. Phase 2 removes the placeholder mechanism (the
- * dispatched agent posts its own replies via the
- * `danxbot_slack_*` MCP tools), so there is nothing to edit and nothing
- * thread-local to wait on.
- *
- * **Behavioral regression this stub introduces (until Phase 3):** the
- * wait loop in `shutdown.ts:61` (`while
- * (getInFlightPlaceholders().length > 0)`) immediately falls through,
- * so SIGTERM during an active Slack dispatch no longer drains the
- * in-flight claude process before the worker exits. The dispatched
- * claude is still reachable via `activeJobs` in
- * `src/dispatch/core.ts` — Phase 3 rewrites the shutdown path to
- * iterate over that map and call each job's `.stop()` before exiting.
- * Until then, host-process teardown relies on the OS's SIGTERM
- * cascade into child processes.
- *
- * See Trello card `7rKFYUsN` (epic `kMQ170Ea`) Phase 3 for the follow-up.
- */
-export function getInFlightPlaceholders(): Array<{
-  channel: string;
-  ts: string;
-  threadTs: string;
-}> {
-  return [];
-}
-
-export function getSlackClient() {
-  // Return the first connected listener's client (for shutdown cleanup)
-  for (const state of listeners.values()) {
-    if (state.connected) return state.app.client;
-  }
-  return undefined;
-}
-
-/**
  * Return the bolt client for a specific repo, or undefined when no
  * listener is running for that repo or it has not yet connected.
  *
  * Used by the worker's `/api/slack/{reply,update}/:dispatchId` handlers
  * to route the `danxbot_slack_*` MCP tool calls back to the originating
  * repo's Slack workspace — a dispatched agent must never post into a
- * different repo's channel because the in-process `getSlackClient()`
- * happened to return another repo's client first.
+ * different repo's channel.
  */
 export function getSlackClientForRepo(
   repoName: string,
-): ReturnType<typeof getSlackClient> {
+): SlackBoltClient | undefined {
   const state = listeners.get(repoName);
   if (!state || !state.connected) return undefined;
   return state.app.client;
@@ -129,7 +90,7 @@ export { getQueueStats, getTotalQueuedCount } from "./message-queue.js";
 function drainQueue(
   ls: ListenerState,
   threadTs: string,
-  client: ReturnType<typeof getSlackClient>,
+  client: SlackBoltClient | undefined,
 ): void {
   const next = dequeue(threadTs);
   if (!next || !client) return;
@@ -180,7 +141,7 @@ function buildSlackAgentPrompt(
 }
 
 async function postFailureIntoThread(
-  client: ReturnType<typeof getSlackClient>,
+  client: SlackBoltClient | undefined,
   channel: string,
   threadTs: string,
   text: string,
@@ -249,7 +210,7 @@ function failureLineForStatus(
  */
 async function launchSlackDispatch(
   ls: ListenerState,
-  client: NonNullable<ReturnType<typeof getSlackClient>>,
+  client: SlackBoltClient,
   slackMeta: SlackTriggerMetadata,
   threadMessages: ThreadMessage[],
 ): Promise<void> {
@@ -335,7 +296,7 @@ async function launchSlackDispatch(
 async function handleMessage(
   ls: ListenerState,
   message: SlackMessage,
-  client: ReturnType<typeof getSlackClient>,
+  client: SlackBoltClient | undefined,
 ): Promise<void> {
   if (!client) return;
   // Type guard: only handle regular messages

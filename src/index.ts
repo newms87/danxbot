@@ -2,7 +2,7 @@ import { access, mkdir } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { startSlackListener, getSlackClient } from "./slack/listener.js";
+import { startSlackListener } from "./slack/listener.js";
 import { startThreadCleanup } from "./threads.js";
 import { startDashboard } from "./dashboard/server.js";
 import { startWorkerServer } from "./worker/server.js";
@@ -131,10 +131,8 @@ async function startWorkerMode(): Promise<void> {
   await startWorkerServer(repo);
 
   // Start Slack listener for this repo (if configured)
-  let slackClient: ReturnType<typeof getSlackClient> | undefined;
   if (repo.slack.enabled) {
     await startSlackListener(repo);
-    slackClient = getSlackClient();
     log.info(`[${repo.name}] Slack integration enabled`);
   } else {
     log.info(`[${repo.name}] Slack not configured`);
@@ -144,7 +142,7 @@ async function startWorkerMode(): Promise<void> {
   startPoller();
   log.info(`[${repo.name}] Poller started`);
 
-  initShutdownHandlers({ slackClient });
+  initShutdownHandlers({});
 
   log.info(`Worker mode ready for repo: ${repo.name}`);
 }

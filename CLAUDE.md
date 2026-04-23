@@ -1,6 +1,6 @@
 # Danxbot
 
-Autonomous AI agent powered by the Claude Code SDK. Connects to one or more repos, processes Trello cards, and optionally answers questions in Slack. Run `./install.sh` for interactive setup.
+Autonomous AI agent that orchestrates Claude Code CLI dispatches. Connects to one or more repos, processes Trello cards, and optionally answers questions in Slack. Run `./install.sh` for interactive setup.
 
 ## CRITICAL Pointers Before Touching Sensitive Areas
 
@@ -20,19 +20,21 @@ These rule files are auto-loaded; the pointers below exist so a fresh agent know
 ```
 Slack message → Router (Haiku, ~300ms) → quick reply
                     ↓ (if needsAgent)
-                Agent (Claude Code SDK query) → detailed reply
+                dispatch() → spawnAgent (Claude CLI) → agent posts reply via danxbot_slack_reply
 
-Trello card    → Poller (per-repo)        → spawnAgent (Claude CLI)
-HTTP /launch   → Worker dispatch endpoint → spawnAgent
+Trello card    → Poller (per-repo)        → dispatch() → spawnAgent (Claude CLI)
+HTTP /launch   → Worker dispatch endpoint → dispatch() → spawnAgent (Claude CLI)
 ```
+
+Every dispatched agent (Slack deep-agent, Trello poller, `/api/launch`) takes the same spawned-CLI path. The Slack listener posts the initial "thinking" placeholder, then the dispatched agent itself writes the final reply by calling the `danxbot_slack_reply` MCP tool — a worker HTTP endpoint routes the payload back to the bolt client for the originating repo.
 
 | Component | Path | Role |
 |---|---|---|
 | Router | `src/agent/router.ts` | Anthropic SDK call to Haiku for instant Slack triage |
-| Agent (Slack) | `src/agent/agent.ts` (`runAgent`) | Claude Code SDK `query()` for deep Slack responses |
+| Dispatch core | `src/dispatch/core.ts` (`dispatch`) | Unified dispatch — MCP resolution, spawnAgent, stall recovery, activeJobs |
 | Launcher | `src/agent/launcher.ts` (`spawnAgent`) | Single entry point for every dispatched Claude CLI process |
 | Poller | `src/poller/index.ts` | Per-repo Trello tick loop. State is in-memory (`state.teamRunning`, `state.polling`) — no on-disk lock files. |
-| Slack listener | `src/slack/listener.ts` | One `@slack/bolt` App per Slack-enabled repo |
+| Slack listener | `src/slack/listener.ts` | One `@slack/bolt` App per Slack-enabled repo; calls `dispatch()` for deep-agent replies |
 | Dashboard API | `src/dashboard/server.ts` | REST + SSE on port 5555 |
 | Dashboard SPA | `dashboard/` | Vite + Vue 3 + Tailwind 4 |
 
@@ -41,7 +43,7 @@ Runtime mode is auto-detected from `/.dockerenv` at startup — inside a contain
 ## Tech Stack
 
 - **Runtime:** Node.js 20 + `tsx` (TypeScript executed directly, no build step)
-- **AI SDKs:** `@anthropic-ai/sdk` (router), `@anthropic-ai/claude-agent-sdk` (Slack agent)
+- **AI SDKs:** `@anthropic-ai/sdk` (router — Haiku triage only). Every dispatched agent runs as a spawned Claude Code CLI subprocess; there is no in-process SDK agent path.
 - **Slack:** `@slack/bolt` (Socket Mode)
 - **Dashboard:** Vite + Vue 3 SFCs + Tailwind 4
 

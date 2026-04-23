@@ -20,7 +20,7 @@
  * reach `DISPATCH_PROFILES.poller.allowTools` here.
  *
  * Every dispatcher (Trello poller, HTTP `/api/launch` + `/api/resume`,
- * Phase 5 Slack) derives its final allowlist via `dispatchAllowTools`,
+ * Slack listener) derives its final allowlist via `dispatchAllowTools`,
  * the single entry point exported below. Callers never import
  * `resolveProfile` + `mergeProfileWithBody` directly in production —
  * that path exists only for the helper's own tests. Routing every
@@ -78,11 +78,8 @@ const POLLER_ALLOW_TOOLS = Object.freeze([
 ] as const);
 
 /**
- * Hardcoded tool allowlist for the Slack `runAgent` in-process SDK
- * dispatch. Slack runs the Claude Code SDK `query()` in-process to keep
- * latency low — never spawns the CLI. The allowlist is therefore static
- * (no per-message tool selection) and limited to read-only built-ins
- * needed to answer a codebase question:
+ * Hardcoded tool allowlist for the Slack deep-agent dispatch. Limited to
+ * read-only built-ins needed to answer a codebase question:
  *
  *   - Read / Glob / Grep — explore source files
  *   - Bash — read-only inspection (`ls`, `cat`, `git log`); the system
@@ -90,10 +87,11 @@ const POLLER_ALLOW_TOOLS = Object.freeze([
  *
  * Notably absent:
  *   - Edit / Write — Slack agents never modify the codebase
- *   - mcp__trello__* / mcp__schema__* — no MCP servers spawn for Slack
- *   - mcp__danxbot__danxbot_complete — Slack uses the SDK iterator's
- *     `result` message as the completion signal (`danxbotStopUrl: null`
- *     in `src/agent/agent.ts`).
+ *   - mcp__trello__* / mcp__schema__* — not needed for Slack Q&A
+ *
+ * The Slack dispatch additionally gets the `danxbot_slack_reply` and
+ * `danxbot_slack_post_update` MCP tools injected by the resolver when the
+ * dispatch input carries `apiDispatchMeta.trigger === "slack"`.
  */
 const SLACK_ALLOW_TOOLS = Object.freeze([
   "Read",
@@ -219,15 +217,14 @@ export function mergeProfileWithBody(
  * merges the caller's override entries via `mergeProfileWithBody`.
  *
  * Every consumer — the Trello poller (`src/poller/index.ts`), the HTTP
- * launch/resume handlers (`src/worker/dispatch.ts`), and the Phase 5 Slack
- * path (`src/agent/agent.ts`) — funnels through this function. Callers
- * never import `resolveProfile` + `mergeProfileWithBody` directly except
- * this helper's own tests; routing any new consumer through a different
- * shape would re-introduce the drift risk this helper was built to
- * eliminate. The poller has no overrides today and passes nothing; the
- * HTTP handler passes the validated `body.allow_tools`; Phase 5 Slack
- * will pass its profile's existing baseline (zero overrides — same shape
- * as the poller).
+ * launch/resume handlers (`src/worker/dispatch.ts`), and the Slack
+ * listener (`src/slack/listener.ts`) — funnels through this function.
+ * Callers never import `resolveProfile` + `mergeProfileWithBody` directly
+ * except this helper's own tests; routing any new consumer through a
+ * different shape would re-introduce the drift risk this helper was built
+ * to eliminate. The poller has no overrides today and passes nothing; the
+ * HTTP handler passes the validated `body.allow_tools`; Slack passes its
+ * profile's existing baseline (zero overrides — same shape as the poller).
  *
  * Part of the agent-isolation epic (Trello `7ha2CSpc`), Phase 4.
  */

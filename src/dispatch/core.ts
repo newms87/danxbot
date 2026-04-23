@@ -66,6 +66,19 @@ export function getActiveJob(jobId: string): AgentJob | undefined {
   return activeJobs.get(jobId);
 }
 
+/**
+ * Snapshot of every job currently tracked — running and recently-finished
+ * (still within the TTL grace window). Returns a fresh array so callers can
+ * iterate safely without worrying about concurrent eviction.
+ *
+ * Used by `src/shutdown.ts` to drain in-flight dispatches on SIGTERM.
+ * Callers that only care about live work should filter by
+ * `job.status === "running"` themselves.
+ */
+export function listActiveJobs(): AgentJob[] {
+  return Array.from(activeJobs.values());
+}
+
 /** Drain all TTL eviction timers; call during worker shutdown. */
 export function clearJobCleanupIntervals(): void {
   for (const interval of jobCleanupIntervals) {
@@ -76,9 +89,9 @@ export function clearJobCleanupIntervals(): void {
 
 /**
  * Everything a dispatch needs. Caller-facing shape — HTTP handlers map their
- * body into this; the poller constructs one from a Trello trigger (Phase 4);
- * Slack `runAgent` (Phase 5) will share the same `allowTools` input via
- * `resolveDispatchTools`.
+ * body into this; the poller constructs one from a Trello trigger; the Slack
+ * listener constructs one for every deep-agent reply. All three paths share
+ * the same `allowTools` input via `resolveDispatchTools`.
  */
 export interface DispatchInput {
   repo: RepoContext;
@@ -368,7 +381,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
           log.warn(
             `[Dispatch ${dispatchId}] Max stall resumes (${MAX_STALL_RESUMES}) reached — marking job failed`,
           );
-          await currentJob.stop?.(
+          await currentJob.stop(
             "failed",
             "Agent stalled repeatedly and did not recover",
           );

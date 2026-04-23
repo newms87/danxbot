@@ -1,7 +1,7 @@
 /**
  * Validation tests for agent dispatch pipeline — real Claude API.
  *
- * Tests the three launch paths (dispatch, poller, SDK) against the real Claude CLI.
+ * Tests the dispatch + poller launch paths against the real Claude CLI.
  * Gated behind ANTHROPIC_API_KEY — excluded from `npx vitest run` by default.
  * Run with: `npm run test:validate`
  *
@@ -296,54 +296,4 @@ describe.skipIf(!hasApiKey())("validation: dispatch pipeline (real Claude API)",
     }, 120_000);
   });
 
-  // -------------------------
-  // SDK Path Tests
-  // -------------------------
-
-  describe("SDK path", () => {
-    it("watcher discovers SDK session JSONL and reads assistant entries with usage data", async () => {
-      const cwd = process.cwd();
-
-      const { runAgent } = await import("../../agent/agent.js");
-      const { makeRepoContext } = await import("../helpers/fixtures.js");
-
-      const repo = makeRepoContext({ localPath: cwd });
-
-      const result = await runAgent(
-        repo,
-        "Reply with exactly one word: WATCHER",
-        null,
-      );
-
-      expect(result.text).toBeTruthy();
-      expect(result.sessionId).toBeTruthy();
-
-      // The SDK writes JSONL — verify a watcher can find and read entries
-      const watcher = new SessionLogWatcher({
-        cwd,
-        sessionId: result.sessionId!,
-      });
-
-      const watcherEntries: AgentLogEntry[] = [];
-      watcher.onEntry((entry) => { watcherEntries.push(entry); });
-
-      await watcher.start();
-      await new Promise((r) => setTimeout(r, 6_000));
-      watcher.stop();
-
-      const sessionFilePath = watcher.getSessionFilePath();
-      if (sessionFilePath) jsonlFilesToTrack.push(sessionFilePath);
-
-      // Watcher found assistant entries from the SDK session
-      const assistantEntries = watcherEntries.filter((e) => e.type === "assistant");
-      expect(assistantEntries.length).toBeGreaterThanOrEqual(1);
-
-      // Verify entry shape includes content and usage data
-      const firstAssistant = assistantEntries[0];
-      expect(firstAssistant.data.content).toBeDefined();
-      expect(Array.isArray(firstAssistant.data.content)).toBe(true);
-
-      checkTokenBudget();
-    }, 120_000);
-  });
 });

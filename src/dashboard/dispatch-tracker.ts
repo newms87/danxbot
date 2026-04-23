@@ -22,36 +22,6 @@ export function extractSessionUuidFromPath(filepath: string): string | null {
   return match ? match[1] : null;
 }
 
-/**
- * Count `tool_use` blocks and `Task` sub-agent invocations across an
- * already-captured AgentLogEntry stream. Used by the Slack listener which
- * gets the full log from `runAgent`'s response rather than via watcher
- * streaming.
- */
-export function countToolCallsFromLog(
-  entries: Array<{
-    type: string;
-    data: { content?: unknown };
-  }>,
-): { toolCallCount: number; subagentCount: number } {
-  let toolCallCount = 0;
-  let subagentCount = 0;
-  for (const entry of entries) {
-    if (entry.type !== "assistant") continue;
-    const content = (entry.data.content ?? []) as Array<{
-      type?: string;
-      name?: string;
-    }>;
-    for (const block of content) {
-      if (block.type === "tool_use") {
-        toolCallCount++;
-        if (block.name === "Task") subagentCount++;
-      }
-    }
-  }
-  return { toolCallCount, subagentCount };
-}
-
 export interface FinalizeTokens {
   tokensIn: number;
   tokensOut: number;

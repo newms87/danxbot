@@ -233,7 +233,7 @@ describe("dispatch profiles", () => {
 
   describe("dispatchAllowTools", () => {
     // The single entry point every dispatcher (poller, HTTP handlers,
-    // Phase 5 Slack) goes through. Resolves the named profile + merges
+    // Slack listener) goes through. Resolves the named profile + merges
     // overrides in one call. These tests pin the contract against the
     // REAL registry entries (not ad-hoc profiles) so a registry-swap
     // regression can't pass the isolated mergeProfileWithBody tests

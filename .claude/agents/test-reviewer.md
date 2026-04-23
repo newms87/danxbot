@@ -36,10 +36,11 @@ You are a test coverage auditor for the Danxbot project. You do NOT write tests 
 
 ## Project Context
 
-Danxbot is a Claude Code-powered Slack bot (TypeScript, ESM, Vitest). Key modules:
+Danxbot orchestrates Claude Code CLI dispatches (TypeScript, ESM, Vitest). Key modules:
 
-- `src/agent/agent.ts` — Router + Claude Agent SDK integration
-- `src/slack/formatter.ts` — Markdown-to-Slack conversion
+- `src/agent/router.ts` — Haiku-based instant triage (Anthropic SDK)
+- `src/dispatch/core.ts` — Unified `dispatch()` for every deep-agent path
+- `src/agent/launcher.ts` — `spawnAgent()` (Claude Code CLI subprocess)
 - `src/slack/listener.ts` — Slack Socket Mode listener
 - `src/threads.ts` — Thread state persistence (filesystem)
 - `src/dashboard/events.ts` — In-memory event tracking + analytics
@@ -49,19 +50,20 @@ Danxbot is a Claude Code-powered Slack bot (TypeScript, ESM, Vitest). Key module
 
 ```
 src/
-├── agent/agent.test.ts        # Pure functions + SDK-mocked router/agent tests
-├── slack/formatter.test.ts    # Markdown conversion + message splitting
+├── agent/router.test.ts       # Router triage (Anthropic SDK mocked)
+├── agent/launcher.test.ts     # spawnAgent + monitoring
+├── dispatch/core.test.ts      # dispatch() end-to-end
 ├── dashboard/events.test.ts   # Event CRUD + analytics
 └── threads.test.ts            # FS-mocked thread management
 ```
 
 ## Test Patterns
 
-- **Pure functions**: No mocking needed (formatter, buildConversationMessages, truncStr)
+- **Pure functions**: No mocking needed (parse helpers, truncStr)
 - **Config-dependent modules**: Mock `../config.js` to avoid env var requirements
 - **FS-dependent modules**: Mock `fs/promises` (threads.ts)
-- **SDK-dependent modules**: Mock `@anthropic-ai/sdk` and `@anthropic-ai/claude-agent-sdk`
-- **Async iterables**: Use `async function*` generators to mock SDK `query()` streams
+- **SDK-dependent modules**: Mock `@anthropic-ai/sdk` (router only — the deep-agent path spawns a CLI subprocess, so no SDK `query()` mocking is needed)
+- **Spawn-dependent modules**: Mock `spawnAgent` or the `child_process.spawn` call in the unit test
 
 ## Output Format
 

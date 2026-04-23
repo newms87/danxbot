@@ -1,69 +1,42 @@
-import { stopSlackListener, getInFlightPlaceholders } from "./slack/listener.js";
+import { stopSlackListener } from "./slack/listener.js";
 import { stopThreadCleanup } from "./threads.js";
 import { stopRetentionCron } from "./dashboard/retention.js";
 import { clearJobCleanupIntervals } from "./worker/dispatch.js";
+import { listActiveJobs } from "./dispatch/core.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
-import type { WebClient } from "@slack/web-api";
 
 const log = createLogger("shutdown");
-
-const SHUTDOWN_TIMEOUT_MS = 30000; // 30 seconds
 
 interface ShutdownOptions {
   exitProcess?: boolean;
   threadCleanupInterval?: NodeJS.Timeout;
   retentionInterval?: NodeJS.Timeout;
-  slackClient?: WebClient;
 }
 
 export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
-  const {
-    exitProcess = true,
-    threadCleanupInterval,
-    retentionInterval,
-    slackClient,
-  } = options;
+  const { exitProcess = true, threadCleanupInterval, retentionInterval } = options;
 
   log.info("Shutdown signal received, stopping new message processing...");
 
   // Stop accepting new messages
   stopSlackListener();
 
-  // Get in-flight placeholders and update them with restart message
-  const placeholders = getInFlightPlaceholders();
-  if (placeholders.length > 0 && slackClient) {
-    log.info(`Updating ${placeholders.length} in-flight placeholder(s)...`);
-
-    // Update all placeholders
-    const results = await Promise.allSettled(
-      placeholders.map((ph) =>
-        slackClient.chat.update({
-          channel: ph.channel,
-          ts: ph.ts,
-          text: "Bot is restarting, I'll respond when I'm back.",
-          attachments: [],
-        }),
-      ),
+  // Drain in-flight dispatches. Every dispatched agent (Slack, Trello poller,
+  // /api/launch) is registered in `activeJobs` by `dispatch()` — SIGTERM the
+  // underlying claude process via `job.stop()` so the JSONL finalizes and the
+  // dispatch row records a terminal status. Stops are issued in parallel and
+  // we wait for all of them; `job.stop()` is already bounded (SIGTERM +
+  // 5s grace + SIGKILL) so the wall-clock ceiling is fixed.
+  const running = listActiveJobs().filter((job) => job.status === "running");
+  if (running.length > 0) {
+    log.info(`Draining ${running.length} in-flight dispatch(es)...`);
+    const stops = running.map((job) =>
+      job.stop("failed", "Worker shutdown").catch((err) => {
+        log.error(`Failed to stop job ${job.id}`, err);
+      }),
     );
-
-    // Log any errors
-    results.forEach((result, idx) => {
-      if (result.status === "rejected") {
-        log.error(`Failed to update placeholder ${placeholders[idx].ts}`, result.reason);
-      }
-    });
-  }
-
-  // Wait up to 30 seconds for in-flight agents to complete
-  log.info("Waiting for in-flight agents to complete (max 30s)...");
-  const startTime = Date.now();
-  while (getInFlightPlaceholders().length > 0) {
-    if (Date.now() - startTime > SHUTDOWN_TIMEOUT_MS) {
-      log.warn("Shutdown timeout reached, forcing shutdown...");
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await Promise.allSettled(stops);
   }
 
   // Stop thread cleanup interval
@@ -92,14 +65,12 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
 export function initShutdownHandlers(options: {
   threadCleanupInterval?: NodeJS.Timeout;
   retentionInterval?: NodeJS.Timeout;
-  slackClient?: WebClient;
 }): void {
   const handleShutdown = () => {
     shutdown({
       exitProcess: true,
       threadCleanupInterval: options.threadCleanupInterval,
       retentionInterval: options.retentionInterval,
-      slackClient: options.slackClient,
     }).catch((error) => {
       log.error("Error during shutdown", error);
       process.exit(1);

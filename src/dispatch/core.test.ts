@@ -75,7 +75,7 @@ vi.mock("../agent/stall-detector.js", () => ({
   DEFAULT_MAX_NUDGES: 3,
 }));
 
-import { dispatch, getActiveJob } from "./core.js";
+import { dispatch, getActiveJob, listActiveJobs } from "./core.js";
 // The mocked `../config.js` module exposes a plain mutable object. The cast
 // to `{ isHost: boolean }` defeats the readonly type from the real config
 // module — in the mocked factory, the object is a plain literal and writes
@@ -767,5 +767,46 @@ describe("dispatch() — slack trigger injects slack URLs into MCP settings (Pha
     const opts = mockSpawnAgent.mock.calls[0][0];
     expect(opts.dispatch).toEqual(SLACK_META);
     expect(result.dispatchId).toBeTruthy();
+  });
+});
+
+describe("listActiveJobs()", () => {
+  it("returns every job currently in the activeJobs map", async () => {
+    const { job: jobA } = await dispatch({
+      repo: MOCK_REPO,
+      task: "task A",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+    const { job: jobB } = await dispatch({
+      repo: MOCK_REPO,
+      task: "task B",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    const tracked = listActiveJobs();
+    expect(tracked).toContain(jobA);
+    expect(tracked).toContain(jobB);
+  });
+
+  it("returns an array snapshot — mutating it does not mutate internal state", async () => {
+    await dispatch({
+      repo: MOCK_REPO,
+      task: "task",
+      apiToken: "tok",
+      apiUrl: "http://api",
+      allowTools: [],
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    const first = listActiveJobs();
+    first.length = 0;
+    const second = listActiveJobs();
+    expect(second.length).toBeGreaterThan(0);
   });
 });

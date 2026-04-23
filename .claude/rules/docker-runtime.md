@@ -167,10 +167,10 @@ The Docker image includes dev tools beyond Node.js:
 | `src/index.ts` | Entrypoint: branches into worker or dashboard mode |
 | `src/worker/server.ts` | Worker HTTP server: /api/launch, /health, /api/status |
 | `src/dashboard/server.ts` | Dashboard HTTP server: API routes + static file serving |
-| `src/agent/launcher.ts` | Unified `spawnAgent()` entrypoint + AgentJob lifecycle |
+| `src/dispatch/core.ts` | Unified `dispatch()` — every deep-agent path funnels through here |
+| `src/agent/launcher.ts` | `spawnAgent()` — the one Claude Code CLI fork per dispatch |
 | `src/agent/router.ts` | Router (Haiku) — instant message triage |
-| `src/agent/agent.ts` | Agent (Claude Code SDK query) — deep Slack responses |
-| `src/slack/listener.ts` | Slack message handler, orchestrates router → agent flow |
+| `src/slack/listener.ts` | Slack message handler, orchestrates router → dispatch flow |
 | `src/dashboard/events.ts` | Event tracking, SSE broadcasting, analytics |
 | `src/config.ts` | Shared config + worker/dashboard mode detection |
 | `src/types.ts` | RepoContext, TrelloConfig, SlackConfig interfaces |

@@ -3,6 +3,8 @@
 **Trello:** https://trello.com/c/7ha2CSpc (Epic)
 **Shipped:** 2026-04-22 across 5 phases + a pre-Phase-5 dev-CLI commit.
 
+> **Update (Phase 3 of card `kMQ170Ea`, 2026-04-23):** the "Slack SDK path" referenced below (`src/agent/agent.ts`, in-process `query()`) was retired. The Slack deep-agent now funnels through the same `dispatch()` + `spawnAgent()` path as the poller and `/api/launch`. References to `src/agent/agent.ts` and "in-process SDK query" in the text below describe the state at the time Agent Isolation shipped; the current system has a single CLI-spawn path for every dispatch.
+
 ## Problem
 
 Before this epic, danxbot-dispatched claude agents (poller, HTTP `/api/launch`, Slack) shared configuration with the developer's interactive `claude` session:

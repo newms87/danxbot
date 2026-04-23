@@ -136,8 +136,11 @@ export interface AgentJob {
    * Agent-initiated stop — signals that the agent completed or failed gracefully.
    * Sends SIGTERM, waits 5s, then SIGKILL if needed, then fires onComplete.
    * Use for lifecycle tool callbacks (dispatch agents). For user cancellations, use cancelJob().
+   *
+   * Always set by `spawnAgent()` before the job is returned to the caller — required,
+   * not optional, so call sites don't have to silently no-op on a missing handler.
    */
-  stop?: (status: "completed" | "failed", summary?: string) => Promise<void>;
+  stop: (status: "completed" | "failed", summary?: string) => Promise<void>;
 }
 
 /**
@@ -412,12 +415,19 @@ export async function spawnAgent(
 
   const jobId = options.jobId ?? randomUUID();
 
+  // `stop` is assigned below (line ~661) once the cleanup closure is built. Use
+  // a throwing placeholder so the type contract stays non-optional — calling
+  // stop() before the real handler is wired would be a construction bug, not
+  // a legitimate race we need to tolerate.
   const job: AgentJob = {
     id: jobId,
     status: "running",
     summary: "",
     startedAt: new Date(),
     statusUrl: options.statusUrl,
+    stop: async () => {
+      throw new Error(`spawnAgent: job.stop called before initialization (jobId=${jobId})`);
+    },
     usage: {
       input_tokens: 0,
       output_tokens: 0,

@@ -17,7 +17,6 @@
     "dashboard:build": "cd dashboard && npm run build"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
     "@anthropic-ai/sdk": "^0.74.0",
     "@slack/bolt": "^4.1.0",
     "@thehammer/schema-mcp-server": "^1.0.3",

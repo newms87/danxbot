@@ -162,7 +162,6 @@ vi.mock("../settings-file.js", () => ({
 // for those handlers.
 vi.mock("../slack/listener.js", () => ({
   getSlackClientForRepo: vi.fn(),
-  getSlackClient: vi.fn(),
 }));
 vi.mock("../dashboard/dispatches-db.js", () => ({
   getDispatchById: vi.fn(),

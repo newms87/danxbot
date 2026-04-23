@@ -37,15 +37,11 @@ export interface ResolveDispatchToolsOptions {
   allowTools: readonly string[];
   /**
    * Worker URL that the agent's `danxbot_complete` tool call will POST to.
-   * Pass a string for any spawned-CLI dispatch (the agent calls the tool to
-   * signal completion to its worker). Pass `null` for the in-process SDK
-   * `query()` path (Slack `runAgent`) where the async iterator's `result`
-   * message IS the completion signal — there is no worker port to call back.
-   *
-   * The field is required (not optional) so the choice is always explicit:
-   * forgetting to provide it is a compile-time error, never a silent skip.
+   * Always required — every dispatched agent is a spawned CLI with a worker
+   * port to call back. Required (not optional) so forgetting to provide it
+   * is a compile-time error, never a silent skip.
    */
-  danxbotStopUrl: string | null;
+  danxbotStopUrl: string;
   /** Dependencies for the schema server. Required iff allowTools enables it. */
   schema?: {
     apiUrl: string;
@@ -74,9 +70,6 @@ export interface ResolveDispatchToolsOptions {
    * dispatch would produce a partially-working tool surface and hide
    * real bugs. The resolver validates this at the entry.
    *
-   * Requires `danxbotStopUrl` to be a non-empty string (the Slack path
-   * uses spawned-CLI dispatch, which always has a worker stop URL).
-   * Combining `slack` with `danxbotStopUrl: null` is rejected.
    */
   slack?: {
     replyUrl: string;

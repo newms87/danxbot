@@ -36,14 +36,6 @@ export interface AgentLineage {
 
 export type ComplexityLevel = "very_low" | "low" | "medium" | "high" | "very_high";
 
-export interface ComplexityProfile {
-  model: string;
-  maxTurns: number;
-  maxBudgetUsd: number;
-  maxThinkingTokens: number;
-  systemPrompt: "fast" | "full";
-}
-
 export interface RouterResult {
   quickResponse: string;
   needsAgent: boolean;
@@ -66,10 +58,6 @@ export interface HeartbeatUpdate {
 export interface HeartbeatSnapshot {
   activitySummary: string;
   update: HeartbeatUpdate;
-}
-
-export interface TimestampedHeartbeatSnapshot extends HeartbeatSnapshot {
-  timestamp: number;
 }
 
 export interface ApiCallUsage {

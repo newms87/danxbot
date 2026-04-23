@@ -3,13 +3,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // --- Mocks (top-level, before dynamic import) ---
 
 const mockStopSlackListener = vi.fn();
-const mockGetInFlightPlaceholders = vi.fn().mockReturnValue([]);
 
 vi.mock("./slack/listener.js", () => ({
   stopSlackListener: mockStopSlackListener,
-  getInFlightPlaceholders: mockGetInFlightPlaceholders,
-  startSlackListener: vi.fn(),
-  isSlackConnected: vi.fn().mockReturnValue(true),
 }));
 
 const mockStopThreadCleanup = vi.fn();
@@ -24,8 +20,10 @@ vi.mock("./threads.js", () => ({
   cleanupOldThreads: vi.fn(),
 }));
 
-vi.mock("./dashboard/server.js", () => ({
-  startDashboard: vi.fn(),
+const mockStopRetentionCron = vi.fn();
+vi.mock("./dashboard/retention.js", () => ({
+  stopRetentionCron: (...args: unknown[]) => mockStopRetentionCron(...args),
+  startRetentionCron: vi.fn().mockReturnValue("mock-retention-interval"),
 }));
 
 const mockClearJobCleanupIntervals = vi.fn();
@@ -34,6 +32,13 @@ vi.mock("./worker/dispatch.js", () => ({
   handleLaunch: vi.fn(),
   handleCancel: vi.fn(),
   handleStatus: vi.fn(),
+}));
+
+const mockListActiveJobs = vi.fn().mockReturnValue([]);
+vi.mock("./dispatch/core.js", () => ({
+  listActiveJobs: (...args: unknown[]) => mockListActiveJobs(...args),
+  getActiveJob: vi.fn(),
+  dispatch: vi.fn(),
 }));
 
 const mockClosePool = vi.fn();
@@ -57,28 +62,42 @@ vi.mock("./logger.js", () => ({
   }),
 }));
 
-const mockChatUpdate = vi.fn().mockResolvedValue({});
-
 // Dynamic import after mocks
 const { shutdown, initShutdownHandlers } = await import("./shutdown.js");
 
-// --- Test setup ---
+// --- Helpers ---
 
-// Create a mock Slack client
-const mockSlackClient = {
-  chat: {
-    update: mockChatUpdate,
-  },
-} as any;
+interface FakeJob {
+  id: string;
+  status: "running" | "completed" | "failed" | "canceled" | "timeout";
+  stop: ReturnType<typeof vi.fn>;
+}
+
+function makeRunningJob(id: string): FakeJob {
+  return {
+    id,
+    status: "running",
+    stop: vi.fn().mockImplementation(async function (this: FakeJob) {
+      this.status = "failed";
+    }),
+  };
+}
+
+function makeCompletedJob(id: string): FakeJob {
+  return {
+    id,
+    status: "completed",
+    stop: vi.fn(),
+  };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.useFakeTimers();
-  mockChatUpdate.mockResolvedValue({});
+  mockListActiveJobs.mockReturnValue([]);
 });
 
 afterEach(() => {
-  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 // ============================================================
@@ -87,107 +106,52 @@ afterEach(() => {
 
 describe("shutdown", () => {
   it("stops accepting new messages via stopSlackListener", async () => {
-    const shutdownPromise = shutdown({ exitProcess: false });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
+    await shutdown({ exitProcess: false });
 
     expect(mockStopSlackListener).toHaveBeenCalledOnce();
   });
 
-  it("updates in-flight placeholder messages with restart message", async () => {
-    mockGetInFlightPlaceholders.mockReturnValue([
-      { channel: "C-TEST1", ts: "1234.5678", threadTs: "1234.0000" },
-      { channel: "C-TEST2", ts: "5678.1234", threadTs: "5678.0000" },
-    ]);
+  it("calls job.stop() on every running active job before exiting", async () => {
+    const running1 = makeRunningJob("job-1");
+    const running2 = makeRunningJob("job-2");
+    mockListActiveJobs.mockReturnValue([running1, running2]);
 
-    const shutdownPromise = shutdown({
-      exitProcess: false,
-      slackClient: mockSlackClient,
-    });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
+    await shutdown({ exitProcess: false });
 
-    expect(mockChatUpdate).toHaveBeenCalledTimes(2);
-    expect(mockChatUpdate).toHaveBeenCalledWith({
-      channel: "C-TEST1",
-      ts: "1234.5678",
-      text: "Bot is restarting, I'll respond when I'm back.",
-      attachments: [],
-    });
-    expect(mockChatUpdate).toHaveBeenCalledWith({
-      channel: "C-TEST2",
-      ts: "5678.1234",
-      text: "Bot is restarting, I'll respond when I'm back.",
-      attachments: [],
-    });
+    expect(running1.stop).toHaveBeenCalledTimes(1);
+    expect(running1.stop).toHaveBeenCalledWith("failed", expect.stringContaining("shutdown"));
+    expect(running2.stop).toHaveBeenCalledTimes(1);
+    expect(running2.stop).toHaveBeenCalledWith("failed", expect.stringContaining("shutdown"));
   });
 
-  it("waits up to 30 seconds for in-flight agents to complete", async () => {
-    // Simulate in-flight agents that clear after a few iterations
-    let callCount = 0;
-    mockGetInFlightPlaceholders.mockImplementation(() => {
-      callCount++;
-      // Return empty after 3 calls (simulating agents completing)
-      if (callCount > 3) {
-        return [];
-      }
-      return [{ channel: "C-TEST", ts: "1234.5678", threadTs: "1234.0000" }];
-    });
+  it("does not call job.stop() on jobs that are no longer running", async () => {
+    const running = makeRunningJob("job-1");
+    const completed = makeCompletedJob("job-2");
+    mockListActiveJobs.mockReturnValue([running, completed]);
 
-    const shutdownPromise = shutdown({
-      exitProcess: false,
-      threadCleanupInterval: "test-interval" as unknown as NodeJS.Timeout,
-    });
+    await shutdown({ exitProcess: false });
 
-    // Advance timers to let the wait loop run
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
-
-    // Should have called stopThreadCleanup after agents completed
-    expect(mockStopThreadCleanup).toHaveBeenCalledWith("test-interval");
-  });
-
-  it("stops waiting after 30 seconds even if agents are still running", async () => {
-    // Simulate agents that never finish
-    mockGetInFlightPlaceholders.mockReturnValue([
-      { channel: "C-TEST", ts: "1234.5678", threadTs: "1234.0000" },
-    ]);
-
-    const shutdownPromise = shutdown({
-      exitProcess: false,
-      threadCleanupInterval: "test-interval" as unknown as NodeJS.Timeout,
-    });
-
-    // Fast-forward past 30 seconds + a bit more for the while loop
-    await vi.advanceTimersByTimeAsync(31000);
-    await shutdownPromise;
-
-    expect(mockStopThreadCleanup).toHaveBeenCalledWith("test-interval");
+    expect(running.stop).toHaveBeenCalledTimes(1);
+    expect(completed.stop).not.toHaveBeenCalled();
   });
 
   it("stops thread cleanup with the stored interval", async () => {
-    const shutdownPromise = shutdown({
+    await shutdown({
       exitProcess: false,
       threadCleanupInterval: "test-interval" as unknown as NodeJS.Timeout,
     });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
 
     expect(mockStopThreadCleanup).toHaveBeenCalledWith("test-interval");
   });
 
   it("closes database connection pool", async () => {
-    const shutdownPromise = shutdown({ exitProcess: false });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
+    await shutdown({ exitProcess: false });
 
     expect(mockClosePool).toHaveBeenCalledOnce();
   });
 
   it("closes platform database connection pool", async () => {
-    const shutdownPromise = shutdown({ exitProcess: false });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
+    await shutdown({ exitProcess: false });
 
     expect(mockClosePlatformPool).toHaveBeenCalledOnce();
   });
@@ -197,49 +161,76 @@ describe("shutdown", () => {
       // Do nothing - just capture the call
     }) as never);
 
-    const shutdownPromise = shutdown({ exitProcess: true });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
+    await shutdown({ exitProcess: true });
 
     expect(mockExit).toHaveBeenCalledWith(0);
-
-    mockExit.mockRestore();
   });
 
   it("does not exit when exitProcess is false", async () => {
     const mockExit = vi.spyOn(process, "exit");
 
-    const shutdownPromise = shutdown({ exitProcess: false });
-    await vi.runAllTimersAsync();
-    await shutdownPromise;
+    await shutdown({ exitProcess: false });
 
     expect(mockExit).not.toHaveBeenCalled();
-
-    mockExit.mockRestore();
   });
 
-  it("handles errors during placeholder updates gracefully", async () => {
-    // First call returns placeholders, subsequent calls return empty
-    let callCount = 0;
-    mockGetInFlightPlaceholders.mockImplementation(() => {
-      callCount++;
-      if (callCount === 1) {
-        return [{ channel: "C-TEST", ts: "1234.5678", threadTs: "1234.0000" }];
-      }
-      return [];
-    });
-    mockChatUpdate.mockRejectedValue(new Error("Slack API error"));
+  it("continues shutdown even when a job.stop() rejects", async () => {
+    const failing = makeRunningJob("job-1");
+    failing.stop.mockRejectedValue(new Error("boom"));
+    const ok = makeRunningJob("job-2");
+    mockListActiveJobs.mockReturnValue([failing, ok]);
 
-    const shutdownPromise = shutdown({
+    await shutdown({ exitProcess: false });
+
+    expect(ok.stop).toHaveBeenCalledTimes(1);
+    expect(mockClosePool).toHaveBeenCalledOnce();
+    expect(mockClosePlatformPool).toHaveBeenCalledOnce();
+  });
+
+  it("invokes clearJobCleanupIntervals so TTL timers do not leak", async () => {
+    await shutdown({ exitProcess: false });
+
+    expect(mockClearJobCleanupIntervals).toHaveBeenCalledOnce();
+  });
+
+  it("calls stopRetentionCron with the supplied retention interval", async () => {
+    await shutdown({
       exitProcess: false,
-      threadCleanupInterval: "test-interval" as unknown as NodeJS.Timeout,
-      slackClient: mockSlackClient,
+      retentionInterval: "test-retention" as unknown as NodeJS.Timeout,
     });
-    await vi.runAllTimersAsync();
+
+    expect(mockStopRetentionCron).toHaveBeenCalledWith("test-retention");
+  });
+
+  it("drains running jobs in parallel rather than sequentially", async () => {
+    // If this ever regresses to `for (const j of running) await j.stop(...)`,
+    // the second stop() would not start until the first resolves.
+    let jobAStarted = false;
+    let jobBStartedBeforeAResolved = false;
+    let releaseA: () => void = () => {};
+    const aStopPromise = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+
+    const jobA = makeRunningJob("job-a");
+    jobA.stop.mockImplementation(async () => {
+      jobAStarted = true;
+      await aStopPromise;
+    });
+    const jobB = makeRunningJob("job-b");
+    jobB.stop.mockImplementation(async () => {
+      jobBStartedBeforeAResolved = jobAStarted;
+    });
+
+    mockListActiveJobs.mockReturnValue([jobA, jobB]);
+
+    const shutdownPromise = shutdown({ exitProcess: false });
+    // Let the event loop schedule both stop() calls before releasing A.
+    await new Promise((r) => setTimeout(r, 0));
+    releaseA();
     await shutdownPromise;
 
-    // Should complete despite error
-    expect(mockStopThreadCleanup).toHaveBeenCalledWith("test-interval");
+    expect(jobBStartedBeforeAResolved).toBe(true);
   });
 });
 
@@ -256,8 +247,6 @@ describe("initShutdownHandlers", () => {
     });
 
     expect(mockOn).toHaveBeenCalledWith("SIGTERM", expect.any(Function));
-
-    mockOn.mockRestore();
   });
 
   it("registers SIGINT handler", () => {
@@ -268,7 +257,5 @@ describe("initShutdownHandlers", () => {
     });
 
     expect(mockOn).toHaveBeenCalledWith("SIGINT", expect.any(Function));
-
-    mockOn.mockRestore();
   });
 });

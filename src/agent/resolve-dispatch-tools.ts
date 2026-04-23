@@ -1,9 +1,9 @@
 /**
  * Resolve a dispatch's tool surface — the single function every dispatch
  * entry-point (internal `dispatch()`, `/api/launch`, `/api/resume`, Slack
- * `runAgent`) calls to turn an `allow_tools` allowlist into the concrete
- * `{mcpServers, allowedTools}` pair that ships to claude via `--mcp-config`
- * and `--allowed-tools`.
+ * via `src/slack/listener.ts`) calls to turn an `allow_tools` allowlist into
+ * the concrete `{mcpServers, allowedTools}` pair that ships to claude via
+ * `--mcp-config` and `--allowed-tools`.
  *
  * Design: deny-by-default. Built-in tools pass through; MCP tools activate
  * their server via the registry; wildcards expand from the registry's
@@ -65,18 +65,15 @@ export function resolveDispatchTools(
 ): ResolveDispatchToolsResult {
   const registry = opts.registry ?? defaultMcpRegistry;
 
-  // `danxbotStopUrl` is a two-state field: a non-empty URL string OR `null`
-  // (explicit Slack-style opt-out). Empty string would otherwise create a
-  // confusing third state — the resolver's `!== null` check would treat it
-  // as "include danxbot" but the registry factory's truthy check would
-  // throw inside `build()`. Reject it loud at the entry instead, with a
-  // message that points at the right sentinel for the use case.
+  // `danxbotStopUrl` must be a non-empty URL string. Empty / non-string
+  // inputs are a caller programming error — fail loud at the entry so
+  // `registry.danxbot.build()` never sees a bogus value.
   if (
-    opts.danxbotStopUrl !== null &&
-    (typeof opts.danxbotStopUrl !== "string" || opts.danxbotStopUrl === "")
+    typeof opts.danxbotStopUrl !== "string" ||
+    opts.danxbotStopUrl === ""
   ) {
     throw new McpResolveError(
-      "danxbotStopUrl must be a non-empty URL string or null (use null to opt out of danxbot injection — Slack runAgent path)",
+      "danxbotStopUrl must be a non-empty URL string",
     );
   }
 
@@ -85,11 +82,6 @@ export function resolveDispatchTools(
   // half-configured bag is a caller bug that would yield a MCP server
   // advertising one Slack tool but not the other — fail loud at entry.
   if (opts.slack !== undefined) {
-    if (opts.danxbotStopUrl === null) {
-      throw new McpResolveError(
-        "opts.slack is incompatible with danxbotStopUrl: null — Slack dispatches run through spawnAgent and always have a worker stop URL",
-      );
-    }
     if (typeof opts.slack.replyUrl !== "string" || opts.slack.replyUrl === "") {
       throw new McpResolveError(
         "opts.slack.replyUrl is required when opts.slack is present (must be a non-empty URL string)",
@@ -167,14 +159,11 @@ export function resolveDispatchTools(
     bucket.add(tool);
   }
 
-  // Infrastructure: include danxbot when the caller has a worker port to call
-  // back to. Pass `danxbotStopUrl: null` (Slack `runAgent`) to opt out — the
-  // SDK iterator's `result` message is the completion signal in that path.
-  // The boolean is the single switch for both server injection and the
-  // `mcp__danxbot__danxbot_complete` allowlist suffix below.
-  const includeDanxbot = opts.danxbotStopUrl !== null;
+  // Infrastructure: the danxbot server is ALWAYS injected so every dispatched
+  // agent can signal completion via `danxbot_complete`. Caller-requested
+  // servers are added on top.
   const requiredServers = new Set<string>([
-    ...(includeDanxbot ? [DANXBOT_SERVER_NAME] : []),
+    DANXBOT_SERVER_NAME,
     ...serverTools.keys(),
   ]);
 
@@ -251,11 +240,9 @@ export function resolveDispatchTools(
     }
   }
 
-  // Infrastructure tool — paired with the server: present iff danxbot was
-  // injected above. Stable suffix position when the caller didn't ask for it.
-  if (includeDanxbot) {
-    push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_COMPLETE_TOOL}`);
-  }
+  // Infrastructure tool — always present, stable suffix position when the
+  // caller didn't ask for it.
+  push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_COMPLETE_TOOL}`);
 
   // Slack-only tools on the danxbot server. Added to `allowedTools` ONLY
   // when opts.slack is present (Slack-triggered dispatch). For every
@@ -263,7 +250,7 @@ export function resolveDispatchTools(
   // `--allowed-tools` doesn't permit the call AND the MCP server
   // (configured via env) doesn't advertise the tool. Two seams, same
   // enforcement: a non-Slack agent genuinely cannot reach Slack.
-  if (includeDanxbot && opts.slack) {
+  if (opts.slack) {
     push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_SLACK_REPLY_TOOL}`);
     push(`mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_SLACK_POST_UPDATE_TOOL}`);
   }

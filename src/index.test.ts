@@ -11,7 +11,6 @@ const mockStartThreadCleanup = vi.fn().mockReturnValue("mock-thread-interval");
 const mockStartDashboard = vi.fn().mockResolvedValue(undefined);
 const mockStartWorkerServer = vi.fn().mockResolvedValue(undefined);
 const mockStartSlackListener = vi.fn().mockResolvedValue(undefined);
-const mockGetSlackClient = vi.fn().mockReturnValue({ chat: {} });
 const mockInitShutdownHandlers = vi.fn();
 const mockRunMigrations = vi.fn().mockResolvedValue(undefined);
 const mockStartPoller = vi.fn();
@@ -21,9 +20,7 @@ const MOCK_REPO = makeRepoContext();
 
 vi.mock("./slack/listener.js", () => ({
   startSlackListener: mockStartSlackListener,
-  getSlackClient: mockGetSlackClient,
   stopSlackListener: vi.fn(),
-  getInFlightPlaceholders: vi.fn().mockReturnValue([]),
   isSlackConnected: vi.fn().mockReturnValue(true),
 }));
 
@@ -119,7 +116,6 @@ beforeEach(() => {
   mockStartDashboard.mockResolvedValue(undefined);
   mockStartWorkerServer.mockResolvedValue(undefined);
   mockStartSlackListener.mockResolvedValue(undefined);
-  mockGetSlackClient.mockReturnValue({ chat: {} });
 });
 
 // Helper: import index.ts (which runs main() immediately) and flush the full
@@ -202,7 +198,6 @@ describe("worker mode startup flow", () => {
     await importIndex();
 
     expect(mockStartSlackListener).toHaveBeenCalledWith(MOCK_REPO);
-    expect(mockGetSlackClient).toHaveBeenCalledOnce();
   });
 
   it("skips Slack listener when repo has Slack disabled", async () => {
@@ -213,7 +208,6 @@ describe("worker mode startup flow", () => {
     await importIndex();
 
     expect(mockStartSlackListener).not.toHaveBeenCalled();
-    expect(mockGetSlackClient).not.toHaveBeenCalled();
   });
 
   it("does NOT start dashboard or run migrations", async () => {
@@ -229,27 +223,10 @@ describe("worker mode startup flow", () => {
     expect(mockStartThreadCleanup).not.toHaveBeenCalled();
   });
 
-  it("calls initShutdownHandlers with slackClient when Slack enabled", async () => {
-    const mockClient = { chat: { update: vi.fn() } };
-    mockGetSlackClient.mockReturnValue(mockClient);
-
+  it("registers shutdown handlers in worker mode", async () => {
     await importIndex();
 
-    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
-      slackClient: mockClient,
-    });
-  });
-
-  it("calls initShutdownHandlers without slackClient when Slack disabled", async () => {
-    mockRepoContexts = [makeRepoContext({
-      slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
-    })];
-
-    await importIndex();
-
-    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
-      slackClient: undefined,
-    });
+    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({});
   });
 
   it("throws when no repo context is loaded", async () => {

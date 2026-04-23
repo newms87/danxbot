@@ -1,21 +1,20 @@
 # Danxbot
 
-An autonomous AI agent powered by the Claude Code SDK. Connects to any repo, processes Trello cards, and optionally answers questions via Slack.
+An autonomous AI agent that orchestrates Claude Code CLI dispatches. Connects to any repo, processes Trello cards, and optionally answers questions via Slack.
 
 ## How It Works
 
 ```
 Slack message → Router (Haiku, ~300ms) → quick response to Slack
                     ↓ (if needsAgent)
-               Agent (Claude Code SDK) → detailed response to Slack
+               dispatch() → Claude Code CLI → agent posts reply via danxbot_slack_reply MCP tool
 ```
 
 1. A message arrives in the configured Slack channel (optional)
 2. The **Router** (a fast Haiku call) triages the message: sends an instant reply and decides whether the full agent is needed
-3. If needed, the **Agent** (Claude Code SDK) explores the connected repo, queries the database, and streams a detailed answer back to Slack
-4. A **Heartbeat Orchestrator** posts entertaining status updates while the agent works
-5. A **Dashboard** on port 5555 shows live event tracking and analytics
-6. A **Poller** watches a Trello board and autonomously processes cards (works without Slack)
+3. If needed, `dispatch()` spawns a Claude Code CLI subprocess; the dispatched agent explores the connected repo and writes its final reply back to the Slack thread via the `danxbot_slack_reply` MCP tool
+4. A **Dashboard** on port 5555 shows live event tracking and analytics
+5. A **Poller** watches a Trello board and autonomously processes cards (works without Slack)
 
 ## Quick Start
 
@@ -30,12 +29,11 @@ The interactive setup wizard guides you through credentials, Trello board setup,
 | Module | Purpose |
 |--------|---------|
 | `src/agent/router.ts` | Haiku-based instant triage and quick responses |
-| `src/agent/agent.ts` | Claude Code SDK agent for deep exploration |
-| `src/agent/heartbeat.ts` | Orchestrator-generated status messages |
+| `src/dispatch/core.ts` | Unified `dispatch()` — every deep-agent path (Slack, poller, `/api/launch`) funnels through here |
+| `src/agent/launcher.ts` | `spawnAgent()` — single Claude Code CLI fork per dispatch |
+| `src/agent/heartbeat.ts` | Token-usage heartbeat (liveness PUTs to `statusUrl`) |
 | `src/slack/listener.ts` | Slack Socket Mode message handler |
-| `src/slack/heartbeat-manager.ts` | Heartbeat lifecycle during agent runs |
-| `src/slack/helpers.ts` | Shared Slack API helpers (reactions, attachments) |
-| `src/slack/formatter.ts` | Markdown to Slack mrkdwn conversion |
+| `src/slack/helpers.ts` | Shared Slack API helpers (reactions) |
 | `src/dashboard/` | Vue 3 + Tailwind monitoring dashboard |
 | `src/poller/` | Trello card poller + autonomous agent launcher |
 | `src/threads.ts` | Thread state persistence |
@@ -74,7 +72,7 @@ docker compose logs danxbot -f
 
 - **Runtime**: Node.js 20 + tsx
 - **Slack**: @slack/bolt (Socket Mode) — optional
-- **AI**: @anthropic-ai/sdk (router), @anthropic-ai/claude-agent-sdk (agent)
+- **AI**: @anthropic-ai/sdk (router — Haiku triage). The dispatched agents run as Claude Code CLI subprocesses; there is no in-process SDK agent path.
 - **Dashboard**: Vite + Vue 3 + Tailwind CSS 4
 - **Testing**: Vitest
 - **Container**: Docker with Ubuntu 22.04

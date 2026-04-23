@@ -107,7 +107,6 @@ vi.mock("../../agent/mcp-server-probe.js", () => ({
 // tests from the Slack surface, which has no business in this suite.
 vi.mock("../../slack/listener.js", () => ({
   getSlackClientForRepo: vi.fn(),
-  getSlackClient: vi.fn(),
 }));
 
 // --- Real imports (the pipeline under test) ---

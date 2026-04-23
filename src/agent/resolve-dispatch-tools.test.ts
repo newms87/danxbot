@@ -60,61 +60,35 @@ describe("resolveDispatchTools", () => {
       expect(r.allowedTools.filter((t) => t === DANXBOT_TOOL)).toHaveLength(1);
     });
 
-    it("danxbotStopUrl: null opts out of danxbot injection entirely (Slack runAgent path)", () => {
-      const r = resolveDispatchTools({
-        allowTools: ["Read", "Glob", "Grep", "Bash"],
-        danxbotStopUrl: null,
-      });
-      expect(r.mcpServers).toEqual({});
-      expect(r.allowedTools).toEqual(["Read", "Glob", "Grep", "Bash"]);
-      expect(r.allowedTools).not.toContain(DANXBOT_TOOL);
-    });
-
-    it("danxbotStopUrl: null still rejects unknown servers (validation runs first)", () => {
-      expect(() =>
-        resolveDispatchTools({
-          allowTools: ["mcp__nope__bar"],
-          danxbotStopUrl: null,
-        }),
-      ).toThrow(/nope/);
-    });
-
-    it("danxbotStopUrl: '' (empty string) is rejected at entry — collapses the would-be three-state field to two", () => {
-      // Without this guard, "" would slip past the resolver's `!== null` check
-      // (treated as "include danxbot") and only crash deeper inside the
-      // registry factory's `!opts.danxbotStopUrl` truthy check. Same loud
-      // failure either way, but the guard pins the error to the entry point
-      // and points the caller at the correct sentinel (`null`).
+    it("danxbotStopUrl: '' (empty string) is rejected at entry", () => {
       expect(() =>
         resolveDispatchTools({
           allowTools: ["Read"],
-          danxbotStopUrl: "" as unknown as string,
+          danxbotStopUrl: "",
         }),
-      ).toThrow(/non-empty|null/i);
+      ).toThrow(/non-empty/i);
     });
 
-    it("danxbotStopUrl: null with mcp__trello__* still builds the trello server — null only suppresses danxbot", () => {
-      const r = resolveDispatchTools({
-        allowTools: ["Read", "mcp__trello__get_card"],
-        danxbotStopUrl: null,
-        trello: { apiKey: "k", apiToken: "t", boardId: "b" },
-      });
-      expect(Object.keys(r.mcpServers)).toEqual(["trello"]);
-      expect(r.mcpServers["trello"]).toBeDefined();
-      expect(r.allowedTools).toEqual(["Read", "mcp__trello__get_card"]);
-      expect(r.allowedTools).not.toContain(DANXBOT_TOOL);
-    });
-
-    it("danxbotStopUrl: null with mcp__danxbot__* still has no danxbot server (rejects the request loud)", () => {
-      // The caller asked for a danxbot tool but opted out of the server. The
-      // resolver doesn't second-guess: registry lookup runs and the danxbot
-      // factory throws because there's no stop URL.
+    // The static type is `string`, but the resolver is a boundary — HTTP
+    // callers can still pass JSON that resolves to null/undefined at runtime.
+    // The runtime guard at the entry keeps the failure shape consistent with
+    // the empty-string case above.
+    it("danxbotStopUrl: null is rejected at entry even though the type says string", () => {
       expect(() =>
         resolveDispatchTools({
-          allowTools: ["mcp__danxbot__danxbot_complete"],
-          danxbotStopUrl: null,
+          allowTools: ["Read"],
+          danxbotStopUrl: null as unknown as string,
         }),
-      ).toThrow(/danxbot/i);
+      ).toThrow(/non-empty/i);
+    });
+
+    it("danxbotStopUrl: undefined is rejected at entry even though the type says string", () => {
+      expect(() =>
+        resolveDispatchTools({
+          allowTools: ["Read"],
+          danxbotStopUrl: undefined as unknown as string,
+        }),
+      ).toThrow(/non-empty/i);
     });
   });
 
@@ -756,25 +730,6 @@ describe("resolveDispatchTools", () => {
       ).length;
       expect(replyCount).toBe(1);
       expect(updateCount).toBe(1);
-    });
-
-    it("rejects opts.slack with danxbotStopUrl: null — Slack via in-process SDK is the DELETED legacy path, not an active use case", () => {
-      // Phase 1 primitives are for spawned-CLI Slack dispatch. The
-      // `danxbotStopUrl: null` branch exists for the OLD in-process SDK
-      // `runAgent` path, which is being retired in Phase 3. Combining
-      // both is nonsensical — Phase 2 will migrate the listener to
-      // `dispatch()` with a real stop URL. Fail loud if someone tries
-      // to combine the two.
-      expect(() =>
-        resolveDispatchTools({
-          allowTools: ["Read"],
-          danxbotStopUrl: null,
-          slack: {
-            replyUrl: SLACK_REPLY_URL,
-            updateUrl: SLACK_UPDATE_URL,
-          },
-        }),
-      ).toThrow(/slack/i);
     });
 
     it("rejects opts.slack missing replyUrl — both slack URLs are required together", () => {

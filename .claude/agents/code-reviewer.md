@@ -42,14 +42,15 @@ Danxbot is a Claude Code-powered Slack bot. TypeScript, ESM modules, runs in Doc
 - `src/index.ts` — Entry point (starts listener, dashboard, cleanup)
 - `src/config.ts` — Environment variable config
 - `src/types.ts` — Shared interfaces
-- `src/agent/agent.ts` — Router (Anthropic API) + Agent (Claude Agent SDK)
-- `src/slack/formatter.ts` — Markdown-to-Slack mrkdwn conversion
+- `src/agent/router.ts` — Haiku-based instant triage (Anthropic SDK)
+- `src/dispatch/core.ts` — Unified `dispatch()` for every deep-agent path
+- `src/agent/launcher.ts` — `spawnAgent()` (Claude Code CLI subprocess)
 - `src/slack/listener.ts` — Slack Socket Mode message handler
 - `src/threads.ts` — Thread state persistence (JSON files on disk)
 - `src/dashboard/events.ts` — In-memory event tracking + analytics
 - `src/dashboard/server.ts` — HTTP server for dashboard + SSE
 
-**Key dependencies:** `@anthropic-ai/sdk`, `@anthropic-ai/claude-agent-sdk`, `@slack/bolt`
+**Key dependencies:** `@anthropic-ai/sdk`, `@slack/bolt`
 
 ## Mandatory Review Checklist
 

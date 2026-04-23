@@ -1,5 +1,3 @@
-import { vi } from "vitest";
-
 /**
  * Budget tracker for validation tests that use real Claude API calls.
  * Throws if cumulative cost exceeds the ceiling.
@@ -32,46 +30,4 @@ export class BudgetTracker {
  */
 export function hasApiKey(): boolean {
   return !!process.env.ANTHROPIC_API_KEY;
-}
-
-/**
- * Mocks only Slack and filesystem dependencies so that router/agent
- * code can run against real Claude APIs without side effects.
- */
-export function setupValidationMocks(): void {
-  // Mock filesystem operations (agent log writing)
-  vi.mock("fs/promises", () => ({
-    readFile: vi.fn().mockImplementation(async (path: string) => {
-      // Allow reading the real system prompt
-      if (typeof path === "string" && path.endsWith("system-prompt.md")) {
-        const { readFile } = await vi.importActual<typeof import("fs/promises")>("fs/promises");
-        return readFile(path, "utf-8");
-      }
-      return "mock file content";
-    }),
-    writeFile: vi.fn().mockResolvedValue(undefined),
-    mkdir: vi.fn().mockResolvedValue(undefined),
-  }));
-
-  // Mock thread persistence
-  vi.mock("../../threads.js", () => ({
-    getOrCreateThread: vi.fn().mockResolvedValue({
-      threadTs: "validation-thread",
-      channelId: "C-VALIDATION",
-      sessionId: null,
-      messages: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }),
-    addMessageToThread: vi.fn(),
-    updateSessionId: vi.fn(),
-    isBotParticipant: vi.fn().mockResolvedValue(false),
-    trimThreadMessages: vi.fn().mockImplementation(
-      (messages: unknown[], limit: number) => {
-        if (messages.length <= limit) return messages;
-        if (limit <= 1) return messages.length > 0 ? [messages[0]] : [];
-        return [messages[0], ...messages.slice(-(limit - 1))];
-      },
-    ),
-  }));
 }
