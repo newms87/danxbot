@@ -24,6 +24,7 @@ import {
   insertDispatch,
   updateDispatch,
   getDispatchById,
+  findLatestDispatchBySlackThread,
   listDispatches,
   deleteOldDispatches,
   rowToDispatch,
@@ -394,6 +395,66 @@ describe("getDispatchById", () => {
     expect(result!.id).toBe("job-xyz");
     expect(result!.trigger).toBe("api");
   });
+});
+
+describe("findLatestDispatchBySlackThread", () => {
+  function makeSlackRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "job-slack-abc",
+      repo_name: "danxbot",
+      trigger: "slack",
+      trigger_metadata: JSON.stringify(makeSlackMeta()),
+      slack_thread_ts: "1234.5678",
+      slack_channel_id: "C123",
+      session_uuid: "session-prior-1",
+      jsonl_path: null,
+      parent_job_id: null,
+      status: "completed",
+      started_at: 1_700_000_010_000,
+      completed_at: 1_700_000_020_000,
+      summary: "Answered the question",
+      error: null,
+      runtime_mode: "docker",
+      tokens_total: 100,
+      tokens_in: 50,
+      tokens_out: 50,
+      cache_read: 0,
+      cache_write: 0,
+      tool_call_count: 2,
+      subagent_count: 0,
+      nudge_count: 0,
+      danxbot_commit: "abc1234",
+      ...overrides,
+    };
+  }
+
+  it("returns null when no completed dispatch exists for the thread", async () => {
+    mockExecute.mockResolvedValueOnce([[], []]);
+    const result = await findLatestDispatchBySlackThread("nonexistent.thread");
+    expect(result).toBeNull();
+  });
+
+  it("returns the most recent completed dispatch for the thread", async () => {
+    mockExecute.mockResolvedValueOnce([[makeSlackRow()], []]);
+    const result = await findLatestDispatchBySlackThread("1234.5678");
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe("job-slack-abc");
+    expect(result!.sessionUuid).toBe("session-prior-1");
+    expect(result!.status).toBe("completed");
+  });
+
+  it("filters to status = 'completed' and orders by started_at DESC", async () => {
+    mockExecute.mockResolvedValueOnce([[], []]);
+    await findLatestDispatchBySlackThread("1234.5678");
+    const sql = mockExecute.mock.calls[0][0] as string;
+    expect(sql).toContain("WHERE slack_thread_ts = ?");
+    expect(sql).toContain("`status` = 'completed'");
+    expect(sql).toContain("ORDER BY started_at DESC");
+    expect(sql).toContain("LIMIT 1");
+    const params = mockExecute.mock.calls[0][1] as unknown[];
+    expect(params).toEqual(["1234.5678"]);
+  });
+
 });
 
 describe("listDispatches", () => {

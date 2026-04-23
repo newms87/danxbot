@@ -339,7 +339,8 @@ describe("poll", () => {
     });
     mockReaddirSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return [];
-      if (path.endsWith("/inject/rules")) return ["danx-halt-flag.md"];
+      if (path.endsWith("/inject/rules"))
+        return ["danx-halt-flag.md", "danx-slack-agent.md"];
       if (path.endsWith("/inject/tools")) return ["danx-helper.sh"];
       if (path.endsWith("/inject/skills")) return ["danx-next"];
       if (path.endsWith("/inject/skills/danx-next")) return ["SKILL.md"];
@@ -367,6 +368,7 @@ describe("poll", () => {
       `${workspaceClaudePrefix}rules/danx-repo-workflow.md`,
       `${workspaceClaudePrefix}rules/danx-tools.md`,
       `${workspaceClaudePrefix}rules/danx-halt-flag.md`,
+      `${workspaceClaudePrefix}rules/danx-slack-agent.md`,
       `${workspaceClaudePrefix}rules/danx-trello-config.md`,
       `${workspaceClaudePrefix}skills/danx-next/SKILL.md`,
       `${workspaceClaudePrefix}tools/danx-helper.sh`,

@@ -181,6 +181,34 @@ export async function getDispatchById(id: string): Promise<Dispatch | null> {
   return rowToDispatch(dbRows[0]);
 }
 
+/**
+ * Return the most recent successfully-completed dispatch for a Slack thread,
+ * or `null` if no such row exists. Used by the Slack listener to decide
+ * whether a follow-up message should resume the prior dispatch's Claude
+ * session via `resumeSessionId`.
+ *
+ * Filters to `status = 'completed'` deliberately. Running dispatches cannot
+ * be resumed (the session is still active) and failed/cancelled dispatches
+ * carry an incomplete or poisoned session that would surface the prior
+ * failure rather than a usable conversation — better to start a fresh
+ * session than to chain a broken one.
+ *
+ * Uses the indexed `slack_thread_ts` column so the lookup is O(log n)
+ * regardless of how many dispatches exist for the repo.
+ */
+export async function findLatestDispatchBySlackThread(
+  threadTs: string,
+): Promise<Dispatch | null> {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    "SELECT * FROM dispatches WHERE slack_thread_ts = ? AND `status` = 'completed' ORDER BY started_at DESC LIMIT 1",
+    [threadTs],
+  );
+  const dbRows = rows as DispatchRow[];
+  if (dbRows.length === 0) return null;
+  return rowToDispatch(dbRows[0]);
+}
+
 export async function listDispatches(
   filters: DispatchFilters,
   limit: number = DEFAULT_LIST_LIMIT,
