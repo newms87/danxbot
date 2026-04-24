@@ -1,0 +1,10 @@
+name: test-workspace
+description: Fixture exercised by workspace unit tests
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANXBOT_WORKER_PORT
+  - TEST_API_KEY
+optional-placeholders:
+  - TEST_OPTIONAL_FLAG
+required-gates:
+  - "repo.trelloEnabled = true"

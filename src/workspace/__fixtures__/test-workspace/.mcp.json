@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "test": {
+      "command": "node",
+      "args": ["test-server.js"],
+      "env": {
+        "TEST_API_KEY": "${TEST_API_KEY}",
+        "DANXBOT_STOP_URL": "${DANXBOT_STOP_URL}"
+      }
+    }
+  }
+}

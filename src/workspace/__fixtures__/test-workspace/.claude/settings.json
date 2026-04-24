@@ -1,0 +1,6 @@
+{
+  "env": {
+    "DANXBOT_WORKER_PORT": "${DANXBOT_WORKER_PORT}",
+    "TEST_OPTIONAL_FLAG": "${TEST_OPTIONAL_FLAG}"
+  }
+}
