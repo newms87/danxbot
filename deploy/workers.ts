@@ -43,7 +43,16 @@ export function buildLaunchCommand(
   // host paths like /home/dev/web/<name>). This ensures the agent spawn cwd
   // matches the path derived by SessionLogWatcher, so JSONL lands under the
   // correct encoded-cwd directory.
-  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_PROJECTS_DIR='/danxbot/claude-projects' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
+  // CLAUDE_CONFIG_FILE and CLAUDE_CREDS_FILE are the per-file absolute
+  // paths that file-level bind-mount compose recipes (the danxbot repo's
+  // own worker today) substitute into their volume specs. CLAUDE_AUTH_DIR
+  // continues to be injected for directory-mount compose recipes
+  // (platform, gpt-manager) — the two forms co-exist during the rollout
+  // and both derive from the same provisioned dir. See Trello 9ZurZCK2
+  // for why file-level binds are the canonical form going forward.
+  const claudeConfigFile = `${env.claudeAuthDir}/.claude.json`;
+  const claudeCredsFile = `${env.claudeAuthDir}/.credentials.json`;
+  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_CONFIG_FILE='${claudeConfigFile}' CLAUDE_CREDS_FILE='${claudeCredsFile}' CLAUDE_PROJECTS_DIR='/danxbot/claude-projects' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
   return `${prefix} docker compose --env-file /danxbot/.env -f ${CONTAINER_REPOS_BASE}/${repo.name}/.danxbot/config/compose.yml -p worker-${repo.name} up -d --remove-orphans`;
 }
 

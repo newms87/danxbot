@@ -21,6 +21,16 @@ describe("worker commands", () => {
     expect(cmd).toContain(`CLAUDE_AUTH_DIR='/danxbot/claude-auth'`);
   });
 
+  it("injects CLAUDE_CONFIG_FILE + CLAUDE_CREDS_FILE (derived from claudeAuthDir) so compose files using file-level binds find the right absolute paths", () => {
+    // The danxbot repo's own worker uses file-level binds so the
+    // container reads LIVE host bytes without a restart (Trello 9ZurZCK2).
+    // Deploy must set both vars so prod's `/danxbot/claude-auth/` files are
+    // bind-mounted correctly.
+    const cmd = buildLaunchCommand({ name: "app", url: "x", workerPort: 5561 }, ENV);
+    expect(cmd).toContain(`CLAUDE_CONFIG_FILE='/danxbot/claude-auth/.claude.json'`);
+    expect(cmd).toContain(`CLAUDE_CREDS_FILE='/danxbot/claude-auth/.credentials.json'`);
+  });
+
   it("uses --env-file /danxbot/.env so worker compose sees shared vars", () => {
     const cmd = buildLaunchCommand({ name: "app", url: "x", workerPort: 5561 }, ENV);
     expect(cmd).toContain("--env-file /danxbot/.env");

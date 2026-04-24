@@ -36,11 +36,24 @@ services:
       # (by `make launch-worker`), bypasses the symlink and makes the bind
       # deterministic across every dev layout.
       - ${DANXBOT_REPO_ROOT:-../..}:/danxbot/app/repos/danxbot
-      # Claude auth: prod injects CLAUDE_AUTH_DIR=/danxbot/claude-auth; dev default is relative to danxbot-flytebot checkout.
-      # Code reads auth from resolve(projectRoot, "claude-auth") — projectRoot
-      # is /danxbot/app in the container (see Dockerfile WORKDIR). The mount
-      # destination must match.
-      - ${CLAUDE_AUTH_DIR:-../../claude-auth}:/danxbot/app/claude-auth:ro
+      # Claude auth — two single-file binds pointing directly at the source
+      # of truth on the machine. Docker resolves symlinks at mount creation
+      # for FILE-level binds, so each read inside the container always sees
+      # the current host bytes; directory-level binds expose symlinks
+      # literally and cannot follow host paths that only exist outside the
+      # container, so the dir pattern forced us into snapshot-and-drift.
+      #
+      # Dev defaults: `../../claude-auth/*` — a flat snapshot dir installed
+      # by the setup skill. Works but goes stale whenever the host rotates
+      # tokens. Override in dev .env with the live host paths:
+      #   CLAUDE_CONFIG_FILE=/home/you/.claude.json
+      #   CLAUDE_CREDS_FILE=/home/you/.claude/.credentials.json
+      # Prod deploy injects the provisioned absolute paths (see
+      # deploy/workers.ts). Either way, entrypoint's claude-auth-setup.sh
+      # symlinks /home/danxbot/.claude/.credentials.json at the mounted
+      # file, so dispatched agents always read the live source.
+      - ${CLAUDE_CONFIG_FILE:-../../claude-auth/.claude.json}:/danxbot/app/claude-auth/.claude.json:ro
+      - ${CLAUDE_CREDS_FILE:-../../claude-auth/.credentials.json}:/danxbot/app/claude-auth/.credentials.json:ro
       # Claude Code session logs — this worker writes JSONL here.
       # Default resolves to repos/danxbot/claude-projects/ on the host.
       # The dashboard reads these via the per-repo RO mount added by

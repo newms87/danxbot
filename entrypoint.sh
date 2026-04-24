@@ -35,21 +35,18 @@ fi
 # Set up Claude Code auth for the danxbot user.
 # The compose mount is at /danxbot/app/claude-auth (matches
 # resolve(projectRoot, "claude-auth") in src/config.ts). Keep these paths in
-# sync with the compose mount — drift here silently skips the chown below and
-# leaves /home/danxbot/.claude root-owned, which breaks `mkdir session-env`
-# for every Bash/MCP call inside a dispatched agent session.
-CLAUDE_AUTH_DIR="/danxbot/app/claude-auth"
-if [ -f "$CLAUDE_AUTH_DIR/.claude.json" ]; then
-    cp "$CLAUDE_AUTH_DIR/.claude.json" "$DANXBOT_HOME/.claude.json"
-    mkdir -p "$DANXBOT_HOME/.claude"
-    if [ -f "$CLAUDE_AUTH_DIR/.credentials.json" ]; then
-        cp "$CLAUDE_AUTH_DIR/.credentials.json" "$DANXBOT_HOME/.claude/.credentials.json"
-    fi
-    chown -R danxbot:danxbot "$DANXBOT_HOME/.claude.json" "$DANXBOT_HOME/.claude"
-    echo "Claude Code auth configured."
-else
-    echo "WARNING: No Claude auth found at $CLAUDE_AUTH_DIR/ — agent will not work."
-fi
+# sync with the compose mount — drift here silently breaks
+# `mkdir session-env` for every Bash/MCP call inside a dispatched agent
+# session.
+#
+# Auth wiring is in scripts/claude-auth-setup.sh so its behavior can be
+# unit-tested without spinning up a container. DO NOT inline-revert to
+# `cp` — the script uses symlinks deliberately so host token refreshes
+# are visible inside the container with no restart. Stale snapshots
+# caused every dispatch to fail with a 401 (Trello 9ZurZCK2).
+CLAUDE_AUTH_DIR="/danxbot/app/claude-auth" \
+DANXBOT_HOME="$DANXBOT_HOME" \
+    bash "$APP_DIR/scripts/claude-auth-setup.sh"
 
 # Fix ownership of runtime directories (volumes may have been created as root)
 for dir in /danxbot/threads /danxbot/data /danxbot/logs; do
