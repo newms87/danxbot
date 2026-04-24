@@ -1,5 +1,5 @@
 name: danxbot
-url: https://github.com/newms/danxbot-flytebot.git
+url: git@github-newms87:newms87/danxbot.git
 runtime: local
 language: typescript
 framework: node

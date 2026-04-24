@@ -44,7 +44,7 @@ ssm_prefix: /danxbot-gpt
 claude_auth_dir: ../../claude-auth
 repos:
   - name: danxbot
-    url: https://github.com/newms87/danxbot-flytebot.git
+    url: git@github-newms87:newms87/danxbot.git
     worker_port: 5561
   - name: gpt-manager
     url: https://github.com/newms87/gpt-manager.git

@@ -93,7 +93,7 @@ Three layers — pick the one that matches your change.
 
 ## Conventions
 
-- **Always `cd` into `/home/newms/web/danxbot-flytebot` first** before running any `make` target — Make resolves the Makefile relative to the working directory.
+- **Always `cd` into `/home/newms/web/danxbot` first** before running any `make` target — Make resolves the Makefile relative to the working directory.
 - **Long-running commands** (`deploy`, `test-system*`, `test-validate`): use a generous timeout or `run_in_background`. Never poll in a sleep loop.
 - **Production-affecting targets** (`deploy`, `deploy-secrets-push`, `deploy-destroy`, `create-user TARGET=...`): require explicit user authorization before invoking — these are visible to others or destructive.
 - **Local-only targets** (`build`, `launch-*`, `stop-*`, `logs`, `test*` Layer 1, `validate-repos`): safe to run without prompting.

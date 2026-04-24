@@ -24,12 +24,37 @@ help: ## Show this help
 
 build: ## Build the danxbot Docker image
 	docker compose build
-	docker tag danxbot-flytebot-dashboard:latest danxbot:latest
+	docker tag danxbot-dashboard:latest danxbot:latest
 
 generate-dev-override: ## Regenerate docker-compose.override.yml from REPOS (local dev only)
 	@npx tsx src/cli/dev-compose-override.ts
 
 launch-infra: generate-dev-override ## Start shared infrastructure (MySQL + dashboard)
+	@# Per-repo realpath + env export mirrors `launch-worker`'s pattern
+	@# (Makefile line ~47). `./repos/<name>` is a symlink; binding it
+	@# directly on WSL2+Docker Desktop creates a container-local phantom
+	@# directory disconnected from the host target (observed empirically:
+	@# dashboard writes to `.danxbot/settings.json` never reached the host,
+	@# and the worker's `CRITICAL_FAILURE` file was invisible to the
+	@# dashboard). Exporting the resolved path bypasses the trap.
+	@# Var-name scheme must match `repoRootVarName()` in
+	@# src/cli/dev-compose-override.ts — uppercase + hyphens → underscores.
+	@set -e; \
+	if [ -z "$(REPOS)" ]; then \
+		echo "Warning: REPOS not set — dashboard starts with no repo binds; Agents tab will be empty"; \
+		docker compose up -d; \
+		exit 0; \
+	fi; \
+	IFS=',' read -ra ENTRIES <<< "$(REPOS)"; \
+	for entry in "$${ENTRIES[@]}"; do \
+		name="$${entry%%:*}"; \
+		var="DANXBOT_REPO_ROOT_$$(echo "$$name" | tr 'a-z-' 'A-Z_')"; \
+		path="$$(realpath "$(REPOS_DIR)/$$name" 2>/dev/null)"; \
+		if [ -z "$$path" ]; then \
+			echo "Error: $(REPOS_DIR)/$$name does not exist (REPOS entry: $$name)"; exit 1; \
+		fi; \
+		export "$$var=$$path"; \
+	done; \
 	docker compose up -d
 
 stop-infra: ## Stop shared infrastructure
@@ -244,9 +269,9 @@ create-user: ## Create / rotate a dashboard user (usage: make create-user LOCALH
 ifdef LOCALHOST
 	@if [ -z "$(USERNAME)" ]; then echo "Error: USERNAME is required"; exit 1; fi
 	@if [ -n "$$DANXBOT_CREATE_USER_PASSWORD" ]; then \
-		docker exec -i -e DANXBOT_CREATE_USER_PASSWORD danxbot-flytebot-dashboard-1 npx tsx src/cli/create-user.ts --username $(USERNAME); \
+		docker exec -i -e DANXBOT_CREATE_USER_PASSWORD danxbot-dashboard-1 npx tsx src/cli/create-user.ts --username $(USERNAME); \
 	else \
-		docker exec -it danxbot-flytebot-dashboard-1 npx tsx src/cli/create-user.ts --username $(USERNAME); \
+		docker exec -it danxbot-dashboard-1 npx tsx src/cli/create-user.ts --username $(USERNAME); \
 	fi
 else ifdef TARGET
 	@if [ -z "$(USERNAME)" ]; then echo "Error: USERNAME is required"; exit 1; fi
@@ -265,7 +290,7 @@ endif
 # add an explicit deploy/cli.ts subcommand with its own guardrails.
 reset-data: ## Wipe local dispatches/threads/events (usage: make reset-data LOCALHOST=1)
 ifdef LOCALHOST
-	@docker exec -i danxbot-flytebot-dashboard-1 npx tsx src/cli/reset-data.ts
+	@docker exec -i danxbot-dashboard-1 npx tsx src/cli/reset-data.ts
 else
 	@echo "Usage:"
 	@echo "  make reset-data LOCALHOST=1"

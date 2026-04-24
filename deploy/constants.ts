@@ -14,8 +14,9 @@ export const CONTAINER_REPOS_BASE = "/danxbot/repos";
  *
  * Compose builds container names as `<project>-<service>-<ordinal>`. On the
  * remote instance the compose project is `danxbot` (the dirname `/danxbot/`),
- * so the dashboard container is `danxbot-dashboard-1`. This is NOT the same
- * as the local-dev container name (`danxbot-flytebot-dashboard-1`, which the
- * Makefile's LOCALHOST branch hardcodes separately).
+ * so the dashboard container is `danxbot-dashboard-1`. This happens to match
+ * the local-dev container name now that the working tree is also named
+ * `danxbot/` — the Makefile's LOCALHOST branch hardcodes the same string.
+ * Kept as a constant so a future rename of either side fails loudly.
  */
 export const DASHBOARD_CONTAINER = "danxbot-dashboard-1";

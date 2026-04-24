@@ -43,4 +43,4 @@ dashboard:
 # .danxbot/scripts/bootstrap.sh committed in its repo.
 repos:
   - name: danxbot
-    url: https://github.com/newms87/danxbot-flytebot.git
+    url: git@github-newms87:newms87/danxbot.git

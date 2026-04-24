@@ -15,7 +15,7 @@ Read `.claude/rules/agent-dispatch.md` before modifying anything in the dispatch
 
 Danxbot uses a host-first model: the host environment is fully configured before containers start. Containers only run danxbot code (poller, Slack listener, dispatch API, dashboard). They read repo files via bind mounts and connect to pre-existing Docker networks — but never manage other containers.
 
-- **Shared infrastructure** (`danxbot-flytebot/docker-compose.yml`): MySQL + dashboard
+- **Shared infrastructure** (`danxbot/docker-compose.yml`): MySQL + dashboard
 - **Per-repo workers** (`<repo>/.danxbot/config/compose.yml`): One container per connected repo, handling poller + Slack + dispatch API
 
 All containers join the `danxbot-net` bridge network. Workers also join their repo's Docker network if needed (e.g., `ssap_sail` for platform).

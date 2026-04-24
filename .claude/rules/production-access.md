@@ -53,7 +53,7 @@ Use for timeout reasons, stall detection traces, HTTP request errors, any `[Job 
 
 ```bash
 # Get the real IP for a target by running the deploy CLI's init-then-output pipeline:
-cd /home/newms/web/danxbot-flytebot
+cd /home/newms/web/danxbot
 IP=$(timeout 30 npx tsx deploy/cli.ts status gpt 2>&1 | grep -oE 'public[_ ]ip[^0-9]*[0-9.]+' | grep -oE '[0-9.]+$')
 # Or parse from deploy-logs stdout (it prints the exact SSH command including the IP).
 

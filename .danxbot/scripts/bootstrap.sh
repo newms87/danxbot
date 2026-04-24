@@ -1,5 +1,5 @@
 #!/bin/bash
-# bootstrap.sh — idempotent setup for danxbot-flytebot.
+# bootstrap.sh — idempotent setup for danxbot.
 #
 # On a production instance (Ubuntu + docker installed, no host Node), this
 # installs npm dependencies via a docker one-shot so no host toolchain is

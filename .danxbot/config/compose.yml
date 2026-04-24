@@ -4,7 +4,7 @@
 # Worker port is sourced from <repo>/.claude/settings.local.json env.DANXBOT_WORKER_PORT
 # (same source used by host mode) — exported by make launch-worker before compose up.
 #
-# Usage: make launch-worker REPO=danxbot (from danxbot-flytebot/)
+# Usage: make launch-worker REPO=danxbot (from danxbot/)
 
 services:
   danxbot-worker:
