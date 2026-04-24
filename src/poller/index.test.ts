@@ -571,6 +571,100 @@ describe("poll", () => {
     expect(rmPaths).toContain(orphanWorkspaceTargetRoot);
   });
 
+  it("injectDanxWorkspaces ignores non-directory entries at the workspaces root (the .gitkeep tombstone)", async () => {
+    // Regression for a bug surfaced by `make test-system-poller` in P3:
+    // src/poller/inject/workspaces/.gitkeep is a tracked file P2 added so
+    // the directory survives clean checkouts. The iteration loop in
+    // injectDanxWorkspaces fed every readdirSync entry into
+    // mirrorWorkspaceTree without filtering, so it tried to readdirSync
+    // the .gitkeep file as a directory and crashed with ENOTDIR. The fix:
+    // statSync(srcPath).isDirectory() guard at the workspaces-root walk.
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    const workspacesSource = "src/poller/inject/workspaces";
+    const demoSource = `${workspacesSource}/demo`;
+    const gitkeepSource = `${workspacesSource}/.gitkeep`;
+    const workspacesTargetRoot =
+      "/test/repos/test-repo/.danxbot/workspaces";
+    const demoTargetRoot = `${workspacesTargetRoot}/demo`;
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.includes("inject/rules") || path.includes("inject/tools") ||
+          path.includes("inject/skills")) {
+        return true;
+      }
+      if (path.endsWith(workspacesSource) || path.includes(`${workspacesSource}/`)) {
+        return true;
+      }
+      if (path === workspacesTargetRoot || path.startsWith(`${workspacesTargetRoot}/`)) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      // The smoking gun: source root has both a workspace dir AND a
+      // .gitkeep file. Pre-fix the loop crashed; post-fix it skips
+      // .gitkeep entirely.
+      if (path.endsWith(workspacesSource)) return ["demo", ".gitkeep"];
+      if (path.endsWith(demoSource)) return ["workspace.yml"];
+      if (path === workspacesTargetRoot) return [];
+      if (path === demoTargetRoot) return [];
+      // Mirror Node's behavior on real disk: readdirSync against a file
+      // throws ENOTDIR. The pre-fix bug fed `.gitkeep` (a file) into the
+      // recursive walk which then hit this branch in production.
+      if (path.endsWith(gitkeepSource)) {
+        const err = new Error(`ENOTDIR: not a directory, scandir '${path}'`);
+        (err as NodeJS.ErrnoException).code = "ENOTDIR";
+        throw err;
+      }
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      // .gitkeep is the file; everything else under workspaces/ is a dir.
+      if (path.endsWith(gitkeepSource)) return { isDirectory: () => false };
+      const isDir =
+        path === workspacesTargetRoot ||
+        path === demoTargetRoot ||
+        path.endsWith(demoSource) ||
+        path.endsWith(workspacesSource);
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml")) return "name: demo\ndescription: demo\n";
+      return "";
+    });
+
+    // Pre-fix this throws ENOTDIR; post-fix it completes cleanly.
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+
+    // The demo workspace's contents still mirror to the target.
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(writtenPaths).toContain(`${demoTargetRoot}/workspace.yml`);
+    // No write attempts to a `.gitkeep` target — the file is silently skipped.
+    const gitkeepWrites = writtenPaths.filter((p) => p.endsWith(".gitkeep"));
+    expect(gitkeepWrites).toEqual([]);
+  });
+
 });
 
 describe("poll — trelloPoller feature toggle", () => {

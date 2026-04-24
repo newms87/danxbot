@@ -612,7 +612,16 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
   mkdirSync(workspacesTargetDir, { recursive: true });
   if (!existsSync(injectWorkspacesDir)) return;
 
-  const sourceNames = new Set(readdirSync(injectWorkspacesDir));
+  // Filter to directories only — the workspaces root may contain
+  // tombstone files (e.g. `.gitkeep`) that keep the dir tracked when no
+  // fixtures ship. Treating those as workspace names crashes the
+  // recursive walk (ENOTDIR on `readdirSync(<file>)`) and was the bug
+  // surfaced by `make test-system-poller` after P3.
+  const sourceNames = new Set(
+    readdirSync(injectWorkspacesDir).filter((entry) =>
+      statSync(resolve(injectWorkspacesDir, entry)).isDirectory(),
+    ),
+  );
   // Prune workspaces that no longer exist at source.
   if (existsSync(workspacesTargetDir)) {
     for (const existing of readdirSync(workspacesTargetDir)) {
