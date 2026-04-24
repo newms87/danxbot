@@ -7,6 +7,7 @@ import {
   copyFileSync,
   chmodSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -21,7 +22,11 @@ import {
 import { dispatchAllowTools } from "../dispatch/profiles.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
-import { generateWorkspace, workspacePath } from "../workspace/generate.js";
+import {
+  generateWorkspace,
+  workspacePath,
+  writeIfChanged,
+} from "../workspace/generate.js";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
 import {
@@ -565,6 +570,120 @@ function injectDanxTools(target: InjectTarget): void {
   }
 }
 
+/**
+ * Step 6b: inject/workspaces/<name>/ -> <repo>/.danxbot/workspaces/<name>/.
+ *
+ * Part of the workspace-dispatch epic (Trello `jAdeJgi5`, Phase 2). Every
+ * named workspace under `src/poller/inject/workspaces/` is mirrored in
+ * full into the connected repo so that — after Phases 3-5 wire the
+ * dispatch path to the resolver — every triggered agent can cwd into an
+ * isolated `<repo>/.danxbot/workspaces/<name>/` directory containing its
+ * own `workspace.yml`, `.mcp.json`, `allowed-tools.txt`, `.claude/`
+ * subtree, and `CLAUDE.md`.
+ *
+ * Contract:
+ *   - **Idempotent.** Uses `writeIfChanged` so unchanged files don't bump
+ *     inode timestamps. Repeated calls converge on identical disk state.
+ *   - **Recursive.** Workspaces have nested structure (`.claude/skills/
+ *     <skill>/SKILL.md`, `.claude/agents/*.md`, `tools/*.sh`). The walk
+ *     descends to arbitrary depth.
+ *   - **Pruning.** Files and directories removed at source are deleted
+ *     at target on the next tick. Run BEFORE the copy so a rename in
+ *     `inject/workspaces/<name>/` doesn't leave a stale file behind for
+ *     a tick. Workspaces removed entirely from `inject/workspaces/` are
+ *     deleted from the target root.
+ *   - **Executable bit.** `.sh` files nested under a `tools/` ancestor
+ *     (at any depth inside the workspace) get `chmod 0755`. Anything
+ *     else keeps default perms. The check is intentionally narrow — a
+ *     `.sh` file at the workspace root is NOT made executable; only
+ *     shell helpers the agent will invoke as commands via the injected
+ *     `tools/` PATH contract.
+ *   - **Empty source is a no-op.** In Phase 2 no fixtures ship — the
+ *     helper exists so Phases 3/4/5 can drop workspace subtrees in
+ *     place without touching the inject wiring. The function still
+ *     ensures the target root directory is created so the on-disk shape
+ *     `<repo>/.danxbot/workspaces/` is present after the first tick.
+ *
+ * See `.claude/rules/agent-dispatch.md` "Workspace isolation" and the
+ * Phase 1 resolver contract in `src/workspace/resolve.ts` for how the
+ * mirrored trees are consumed at dispatch time.
+ */
+function injectDanxWorkspaces(workspacesTargetDir: string): void {
+  const injectWorkspacesDir = resolve(injectDir, "workspaces");
+  mkdirSync(workspacesTargetDir, { recursive: true });
+  if (!existsSync(injectWorkspacesDir)) return;
+
+  const sourceNames = new Set(readdirSync(injectWorkspacesDir));
+  // Prune workspaces that no longer exist at source.
+  if (existsSync(workspacesTargetDir)) {
+    for (const existing of readdirSync(workspacesTargetDir)) {
+      if (!sourceNames.has(existing)) {
+        rmSync(resolve(workspacesTargetDir, existing), {
+          recursive: true,
+          force: true,
+        });
+      }
+    }
+  }
+
+  for (const name of sourceNames) {
+    mirrorWorkspaceTree(
+      resolve(injectWorkspacesDir, name),
+      resolve(workspacesTargetDir, name),
+      [],
+    );
+  }
+}
+
+/**
+ * Recursive helper for `injectDanxWorkspaces`. Mirrors `srcDir` into
+ * `destDir`, pruning orphans and stamping executable bits. `relSegments`
+ * tracks the path segments inside the workspace (NOT including the
+ * workspace name itself) so `chmod` decisions can inspect ancestors —
+ * `.sh` files nested under a `tools/` segment get `+x`.
+ *
+ * Prune-before-copy ordering matters: if a source rename changes a file
+ * from `tools/foo.sh` to `tools/bar.sh`, the stale `foo.sh` is deleted
+ * first so the target matches source at the end of this tick.
+ */
+function mirrorWorkspaceTree(
+  srcDir: string,
+  destDir: string,
+  relSegments: string[],
+): void {
+  mkdirSync(destDir, { recursive: true });
+  const sourceEntries = readdirSync(srcDir);
+  const sourceSet = new Set(sourceEntries);
+
+  if (existsSync(destDir)) {
+    for (const existing of readdirSync(destDir)) {
+      if (!sourceSet.has(existing)) {
+        rmSync(resolve(destDir, existing), { recursive: true, force: true });
+      }
+    }
+  }
+
+  for (const entry of sourceEntries) {
+    const srcPath = resolve(srcDir, entry);
+    const destPath = resolve(destDir, entry);
+    const childSegments = [...relSegments, entry];
+    if (statSync(srcPath).isDirectory()) {
+      mirrorWorkspaceTree(srcPath, destPath, childSegments);
+    } else {
+      writeIfChanged(destPath, readFileSync(srcPath, "utf-8"));
+      // Executable bit for .sh scripts nested under a tools/ ancestor.
+      // Checking ancestors (not just immediate parent) lets a workspace
+      // organize tools into subdirs like `tools/mcp/*.sh` without
+      // losing +x. Matching the literal `tools` segment keeps the
+      // check narrow — a `.sh` at the workspace root is intentionally
+      // not made executable.
+      if (entry.endsWith(".sh") && relSegments.includes("tools")) {
+        chmodExecutable(destPath);
+      }
+    }
+  }
+}
+
 /** Step 7: optional compose override -> repo-overrides/<name>-compose.yml. */
 function copyComposeOverride(
   danxbotConfigDir: string,
@@ -632,6 +751,16 @@ function syncRepoFiles(repo: RepoContext): void {
   injectDanxSkills(target);
   injectDanxRules(target);
   injectDanxTools(target);
+
+  // Workspace-dispatch epic, Phase 2 (Trello `VKJzZjk9`). Mirrors the
+  // full workspace tree from `src/poller/inject/workspaces/<name>/` to
+  // `<repo>/.danxbot/workspaces/<name>/` — note PLURAL, distinct from the
+  // legacy singular `<repo>/.danxbot/workspace/` the `generateWorkspace`
+  // helper owns. No workspace fixtures ship in Phase 2 (Phases 3-5 add
+  // trello-worker, slack-worker, http-launch-default), so on an empty
+  // source dir this is a no-op apart from ensuring the target directory
+  // exists on disk.
+  injectDanxWorkspaces(resolve(repo.localPath, ".danxbot/workspaces"));
 
   copyComposeOverride(
     danxbotConfigDir,

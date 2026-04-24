@@ -165,6 +165,15 @@ vi.mock("../workspace/generate.js", () => ({
     typeof input === "string"
       ? `/danxbot/repos/${input}/.danxbot/workspace`
       : `${input.localPath}/.danxbot/workspace`,
+  // Phase 2 of the workspace-dispatch epic (Trello `VKJzZjk9`) promoted
+  // `writeIfChanged` to a shared export so `injectDanxWorkspaces` can
+  // reuse the idempotent-write primitive. The mock forwards to the real
+  // `mockWriteFileSync` so tests assert on the same `.mock.calls`
+  // surface they already use for the rest of the inject pipeline.
+  writeIfChanged: (path: string, content: string): boolean => {
+    mockWriteFileSync(path, content);
+    return true;
+  },
 }));
 
 vi.mock("../logger.js", () => ({
@@ -183,6 +192,8 @@ const mockWriteFileSync = vi.fn();
 const mockMkdirSync = vi.fn();
 const mockCopyFileSync = vi.fn();
 const mockUnlinkSync = vi.fn();
+const mockRmSync = vi.fn();
+const mockStatSync = vi.fn();
 vi.mock("node:fs", () => ({
   existsSync: (...args: unknown[]) => mockExistsSync(...args),
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
@@ -191,6 +202,12 @@ vi.mock("node:fs", () => ({
   mkdirSync: (...args: unknown[]) => mockMkdirSync(...args),
   copyFileSync: (...args: unknown[]) => mockCopyFileSync(...args),
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
+  rmSync: (...args: unknown[]) => mockRmSync(...args),
+  // chmodSync is silently tolerated by `chmodExecutable` — no tracking
+  // mock needed, but the symbol MUST exist so `import { chmodSync }`
+  // from the module under test resolves. Returning `undefined` is fine.
+  chmodSync: vi.fn(),
+  statSync: (...args: unknown[]) => mockStatSync(...args),
 }));
 
 import { poll, shutdown, start, _resetForTesting } from "./index.js";
@@ -359,6 +376,8 @@ describe("poll", () => {
 
     const workspaceClaudePrefix =
       "/test/repos/test-repo/.danxbot/workspace/.claude/";
+    const workspacesPluralPrefix =
+      "/test/repos/test-repo/.danxbot/workspaces/";
     const repoRootClaudePrefix = "/test/repos/test-repo/.claude/";
 
     // Every artifact lands in the workspace.
@@ -382,12 +401,165 @@ describe("poll", () => {
     // of the agent-isolation epic, so the assertion is a strict match on
     // the prefix — not a "none of the generated names" list — to catch
     // any new file types an inject step might add.
+    //
+    // Workspace-dispatch epic, Phase 2: writes under
+    // `<repo>/.danxbot/workspaces/` (plural) are an explicitly permitted
+    // destination for `injectDanxWorkspaces`. No workspace fixtures
+    // ship in P2 so no writes land there yet; the allowance exists so
+    // P3/P4/P5 can add fixtures without this assertion flipping red.
     const repoRootClaudeTouches = allTouched.filter(
       (p) =>
         p.startsWith(repoRootClaudePrefix) &&
-        !p.startsWith(workspaceClaudePrefix),
+        !p.startsWith(workspaceClaudePrefix) &&
+        !p.startsWith(workspacesPluralPrefix),
     );
     expect(repoRootClaudeTouches).toEqual([]);
+  });
+
+  it("injectDanxWorkspaces ensures <repo>/.danxbot/workspaces/ exists (P2 contract — empty source dir is a no-op apart from mkdir)", async () => {
+    // Phase 2 of the workspace-dispatch epic (Trello `VKJzZjk9`) ships
+    // the inject pipeline but zero fixtures. The helper must still
+    // create the target root so the on-disk shape is stable for
+    // downstream phases and for the manual verification in the card
+    // description (`make launch-worker` produces an empty
+    // `.danxbot/workspaces/` dir after one tick).
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes("inject")) return true;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      return false;
+    });
+    // Default readdirSync returns [] for every path — the inject/workspaces
+    // source dir is empty in P2 so no fixtures to walk.
+    mockReaddirSync.mockReturnValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const mkdirPaths = mockMkdirSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(mkdirPaths).toContain(
+      "/test/repos/test-repo/.danxbot/workspaces",
+    );
+
+    // With an empty source, no file writes land under workspaces/.
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    const workspacesWrites = writtenPaths.filter((p) =>
+      p.startsWith("/test/repos/test-repo/.danxbot/workspaces/"),
+    );
+    expect(workspacesWrites).toEqual([]);
+  });
+
+  it("injectDanxWorkspaces mirrors a fixture tree, prunes orphans, and makes .sh helpers under tools/ executable", async () => {
+    // Phase 2 acceptance criteria #2-5: the helper recursively mirrors
+    // `src/poller/inject/workspaces/<name>/` into
+    // `<repo>/.danxbot/workspaces/<name>/` with writeIfChanged
+    // (idempotent), deletes target entries missing from source
+    // (pruning), and sets the executable bit on `.sh` files nested
+    // under a `tools/` ancestor. Validated here against a mocked fs
+    // tree so the contract is asserted without needing real disk I/O.
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    const workspacesSource = "src/poller/inject/workspaces";
+    const demoSource = `${workspacesSource}/demo`;
+    const demoToolsSource = `${demoSource}/tools`;
+    const workspacesTargetRoot =
+      "/test/repos/test-repo/.danxbot/workspaces";
+    const demoTargetRoot = `${workspacesTargetRoot}/demo`;
+    const demoToolsTarget = `${demoTargetRoot}/tools`;
+    // An old workspace that was removed from the source on a previous
+    // tick — must be pruned from the target on this tick.
+    const orphanWorkspaceTargetRoot = `${workspacesTargetRoot}/old-removed`;
+
+    // Source paths (`injectDir` is resolved to an absolute path at module
+    // load), so match by suffix. Target paths (`workspacesTargetRoot`) are
+    // already absolute from `MOCK_REPO_CONTEXT.localPath`, so match exactly.
+    const sourceDirSuffixes = [demoSource, demoToolsSource];
+    const targetDirExact = new Set<string>([
+      workspacesTargetRoot,
+      demoTargetRoot,
+      demoToolsTarget,
+      orphanWorkspaceTargetRoot,
+    ]);
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.includes("inject/rules") || path.includes("inject/tools") ||
+          path.includes("inject/skills")) {
+        return true;
+      }
+      if (path.endsWith(workspacesSource) || path.includes(`${workspacesSource}/`)) {
+        return true;
+      }
+      if (path === workspacesTargetRoot || path.startsWith(`${workspacesTargetRoot}/`)) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      // inject/* dirs unused in this test — keep empty to avoid inventing
+      // side effects outside workspaces/.
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return ["demo"];
+      if (path.endsWith(demoSource)) return ["workspace.yml", "tools"];
+      if (path.endsWith(demoToolsSource)) return ["helper.sh"];
+      if (path === workspacesTargetRoot) return ["demo", "old-removed"];
+      if (path === demoTargetRoot) return ["workspace.yml", "tools"];
+      if (path === demoToolsTarget) return ["helper.sh", "stale.sh"];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        targetDirExact.has(path) ||
+        sourceDirSuffixes.some((suffix) => path.endsWith(suffix));
+      return {
+        isDirectory: () => isDir,
+      };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml")) return "name: demo\ndescription: demo\n";
+      if (path.endsWith("helper.sh")) return "#!/bin/bash\necho ok\n";
+      return "";
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Idempotent mirror copied both source files to the correct targets.
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(writtenPaths).toContain(`${demoTargetRoot}/workspace.yml`);
+    expect(writtenPaths).toContain(`${demoToolsTarget}/helper.sh`);
+
+    // Pruning: stale tool file AND orphan workspace are removed.
+    const rmPaths = mockRmSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(rmPaths).toContain(`${demoToolsTarget}/stale.sh`);
+    expect(rmPaths).toContain(orphanWorkspaceTargetRoot);
   });
 
 });

@@ -155,8 +155,14 @@ every poller tick. Authoritative sources:
  * Returns `true` when a write actually happened. Used so worker-boot and
  * poller-tick calls stay idempotent on unchanged config without bumping
  * inode timestamps on every invocation (downstream watchers care).
+ *
+ * Exported so the poller's `injectDanxWorkspaces` helper (Phase 2 of the
+ * workspace-dispatch epic) can reuse the same idempotent-write primitive
+ * rather than duplicating it. The helper mirrors fixture trees into each
+ * repo's `.danxbot/workspaces/<name>/` on every poll tick — only content
+ * changes should bump inode timestamps.
  */
-function writeIfChanged(path: string, content: string): boolean {
+export function writeIfChanged(path: string, content: string): boolean {
   if (existsSync(path)) {
     const current = readFileSync(path, "utf-8");
     if (current === content) return false;

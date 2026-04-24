@@ -1,0 +1,16 @@
+# Inject source for workspace-dispatch epic (Trello `jAdeJgi5`).
+#
+# Phase 2 (Trello `VKJzZjk9`) creates this directory so the inject
+# pipeline has somewhere to mirror workspace trees FROM. Phase 3 adds
+# the first fixture (`trello-worker/`), Phase 4 adds `slack-worker/`,
+# Phase 5 adds `http-launch-default/`.
+#
+# Each subdirectory `<name>/` is a full workspace tree matching the
+# layout `src/workspace/resolve.ts` expects: `workspace.yml`,
+# `.mcp.json`, `allowed-tools.txt`, `.claude/settings.json`, plus any
+# `.claude/rules/*.md`, `.claude/skills/*/SKILL.md`, `.claude/tools/*`,
+# `.claude/agents/*.md`, and a project-root `CLAUDE.md`.
+#
+# `injectDanxWorkspaces` in `src/poller/index.ts` mirrors each subtree
+# into every connected repo's `.danxbot/workspaces/<name>/` on every
+# poll tick (idempotent + pruning).
