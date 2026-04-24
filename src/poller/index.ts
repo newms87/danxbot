@@ -19,7 +19,6 @@ import {
   TEAM_PROMPT,
   IDEATOR_PROMPT,
 } from "./constants.js";
-import { dispatchAllowTools } from "../dispatch/profiles.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
 import {
@@ -28,7 +27,7 @@ import {
   writeIfChanged,
 } from "../workspace/generate.js";
 import { createLogger } from "../logger.js";
-import { dispatch } from "../dispatch/core.js";
+import { dispatchWithWorkspace } from "../dispatch/core.js";
 import {
   fetchTodoCards,
   fetchNeedsHelpCards,
@@ -789,32 +788,43 @@ function spawnClaude(
       ? apiDispatchMeta.metadata.cardId
       : null;
 
-  // Unified dispatch path: the poller shares `dispatch()` with
-  // `/api/launch` and `/api/resume`. Same MCP resolver, same settings
-  // file, same danxbot-complete injection, same stall recovery. The
-  // poller supplies its own `timeoutMs` (60x poll interval), its own
-  // `allowTools` (the `/danx-next` skill surface — `POLLER_ALLOW_TOOLS`),
-  // and chains `handleAgentCompletion` through `onComplete`. `dispatch()`
-  // owns `DANXBOT_REPO_NAME` injection from `input.repo.name` and
-  // defaults `openTerminal` to `config.isHost`, so the poller doesn't
-  // restate either invariant. See `.claude/rules/agent-dispatch.md` and
-  // the XCptaJ34 Trello card (Phase 4) for the full contract.
+  // The poller only ever runs when trello credentials are loaded — they
+  // are the precondition for fetching cards. Fail loud here so a missing
+  // value surfaces as a clear configuration error rather than as an
+  // opaque `WorkspacePlaceholderMissingError` from the resolver.
+  const trello = repo.trello;
+  if (!trello?.apiKey || !trello?.apiToken || !trello?.boardId) {
+    throw new Error(
+      `[${repo.name}] poller dispatchCard called without complete trello credentials on RepoContext`,
+    );
+  }
+
+  // Workspace-shaped dispatch (Phase 3 of the workspace-dispatch epic,
+  // Trello `q5aFuINM`). The poller's allowed-tools, MCP server set, and
+  // skill surface live in `src/poller/inject/workspaces/trello-worker/`
+  // and are mirrored to `<repo>/.danxbot/workspaces/trello-worker/` by
+  // the inject pipeline on every poll tick. `dispatchWithWorkspace`
+  // resolves that fixture, merges the danxbot infrastructure server,
+  // and funnels through the same shared spawn loop as `dispatch()` —
+  // identical stall recovery, activeJobs registration, completion
+  // signalling. The poller still supplies its own `timeoutMs`
+  // (60x poll interval) and chains `handleAgentCompletion` through
+  // `onComplete`. See `.claude/rules/agent-dispatch.md`.
   //
-  // Fire-and-forget: dispatch() returns a promise that resolves once
-  // the agent is spawned (NOT when it completes). The poller already
-  // hands completion handling to `onComplete`, so awaiting here would
-  // only serialize the initial spawn with... nothing.
-  // `dispatchAllowTools` is the ONE entry point every dispatch consumer
-  // goes through — resolves the named profile (fail-loud on typo'd literal)
-  // and merges overrides. The poller has no per-tick overrides today, so
-  // it passes nothing; HTTP launch passes `body.allow_tools`; Phase 5 Slack
-  // will also pass nothing. Identical call shape across consumers. See
-  // `src/dispatch/profiles.ts` and the agent-isolation epic (Trello
-  // `7ha2CSpc`).
-  dispatch({
+  // Fire-and-forget: dispatchWithWorkspace returns once the agent is
+  // spawned (NOT when it completes). The poller already hands
+  // completion to `onComplete`, so awaiting here would only serialize
+  // the initial spawn with... nothing.
+  dispatchWithWorkspace({
     repo,
     task: prompt,
-    allowTools: dispatchAllowTools("poller"),
+    workspace: "trello-worker",
+    overlay: {
+      DANXBOT_WORKER_PORT: String(repo.workerPort),
+      TRELLO_API_KEY: trello.apiKey,
+      TRELLO_TOKEN: trello.apiToken,
+      TRELLO_BOARD_ID: trello.boardId,
+    },
     timeoutMs: config.pollerIntervalMs * 60,
     apiDispatchMeta,
     onComplete: (job) => {

@@ -773,15 +773,7 @@ describe("handleLaunch — profile merge (Phase 4)", () => {
     expect(Object.keys(settings.mcpServers).sort()).toEqual(["danxbot"]);
   });
 
-  it("activates mcp__trello__* when the body opts in (Phase 4 AC: trello opt-in via body works)", async () => {
-    const mockJob = {
-      id: "job-trello-optin",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
+  it("rejects mcp__trello__* via the legacy registry path — trello is workspace-only since P3 of the workspace-dispatch epic", async () => {
     const req = createMockReqWithBody("POST", {
       task: "Move a card",
       api_token: "tok-123",
@@ -791,21 +783,9 @@ describe("handleLaunch — profile merge (Phase 4)", () => {
 
     await handleLaunch(req, res, MOCK_REPO);
 
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    // Resolver expands the wildcard via the registry; assert the presence of
-    // at least one concrete trello tool + the infra completion tool — without
-    // enumerating the registry (that belongs in the resolver tests).
-    expect(spawnOpts.allowedTools).toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(/^mcp__trello__/),
-        "mcp__danxbot__danxbot_complete",
-      ]),
-    );
-    const settings = mockSettingsRead(spawnOpts);
-    expect(Object.keys(settings.mcpServers).sort()).toEqual([
-      "danxbot",
-      "trello",
-    ]);
+    expect(res._getStatusCode()).toBe(400);
+    expect(res._getBody()).toMatch(/unknown MCP server \\?"trello\\?"/);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 
   it("dedupes body entries that overlap the baseline (profile-first wins)", async () => {
@@ -1305,16 +1285,18 @@ describe("handleResume", () => {
     ]);
   });
 
-  it("applies the same http-launch profile merge as handleLaunch (Phase 4)", async () => {
+  it("applies the same http-launch profile merge as handleLaunch (Phase 4) — schema opt-in via body works", async () => {
     // Symmetry guard: resume must route `body.allow_tools` through the
     // same `mergeProfileWithBody(http-launch, ...)` pipeline as launch
     // so a resumed dispatch inherits the caller's requested tool surface
-    // without drift. Mirror of the handleLaunch trello-opt-in test.
+    // without drift. Trello is no longer reachable via the legacy registry
+    // path (workspace-only since P3); schema is the canonical opt-in MCP
+    // server for HTTP dispatches today.
     mockFindSessionFileByDispatchId.mockResolvedValueOnce(
       "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
     );
     const mockJob = {
-      id: "job-resume-trello",
+      id: "job-resume-schema",
       status: "running",
       summary: "",
       startedAt: new Date(),
@@ -1323,9 +1305,10 @@ describe("handleResume", () => {
 
     const req = createMockReqWithBody("POST", {
       job_id: "parent-dispatch-uuid",
-      task: "Continue trello work",
+      task: "Continue schema work",
       api_token: "tok-123",
-      allow_tools: ["Read", "mcp__trello__*"],
+      allow_tools: ["Read", "mcp__schema__*"],
+      schema_definition_id: "42",
     });
     const res = createMockRes();
 
@@ -1336,14 +1319,14 @@ describe("handleResume", () => {
     expect(spawnOpts.allowedTools).toEqual(
       expect.arrayContaining([
         "Read",
-        expect.stringMatching(/^mcp__trello__/),
+        expect.stringMatching(/^mcp__schema__/),
         "mcp__danxbot__danxbot_complete",
       ]),
     );
     const settings = mockSettingsRead(spawnOpts);
     expect(Object.keys(settings.mcpServers).sort()).toEqual([
       "danxbot",
-      "trello",
+      "schema",
     ]);
   });
 

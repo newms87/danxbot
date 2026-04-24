@@ -164,72 +164,6 @@ const SCHEMA_ENTRY: McpServerEntry = {
   },
 };
 
-const TRELLO_ENTRY: McpServerEntry = {
-  tools: [
-    "add_card_to_list",
-    "add_checklist_item",
-    "add_comment",
-    "create_checklist",
-    "create_label",
-    "delete_checklist_item",
-    "delete_label",
-    "get_acceptance_criteria",
-    "get_board_labels",
-    "get_card",
-    "get_card_comments",
-    "get_card_history",
-    "get_cards_by_list_id",
-    "get_checklist_by_name",
-    "get_checklist_items",
-    "get_lists",
-    "get_my_cards",
-    "move_card",
-    "update_card_details",
-    "update_checklist_item",
-    "update_label",
-  ],
-  build(opts, enabledTools) {
-    const trello = opts.trello;
-    if (!trello) {
-      throw new McpResolveError(
-        "mcp__trello__* requires a 'trello' options block with apiKey, apiToken, and boardId",
-      );
-    }
-    if (!trello.apiKey) {
-      throw new McpResolveError("trello server missing apiKey (TRELLO_API_KEY)");
-    }
-    if (!trello.apiToken) {
-      throw new McpResolveError(
-        "trello server missing apiToken (TRELLO_TOKEN)",
-      );
-    }
-    if (!trello.boardId) {
-      throw new McpResolveError(
-        "trello server missing boardId (TRELLO_BOARD_ID)",
-      );
-    }
-    const env: Record<string, string> = {
-      TRELLO_API_KEY: trello.apiKey,
-      TRELLO_TOKEN: trello.apiToken,
-      TRELLO_BOARD_ID: trello.boardId,
-    };
-    // `enabledTools === undefined` = wildcard (`mcp__trello__*`). Leaving
-    // TRELLO_ENABLED_TOOLS absent makes the server register its full tool
-    // surface, matching the caller's request. An explicit array narrows the
-    // server's registerTool shim so unlisted tools never appear in the
-    // MCP tool list Claude sees — this is the enforcement boundary, not
-    // `--allowed-tools`. See @thehammer/mcp-server-trello#TrelloServer ctor.
-    if (enabledTools && enabledTools.length > 0) {
-      env.TRELLO_ENABLED_TOOLS = enabledTools.join(",");
-    }
-    return {
-      command: "npx",
-      args: ["-y", "@thehammer/mcp-server-trello"],
-      env,
-    };
-  },
-};
-
 /**
  * Playwright server — wraps the `playwright` container on `danxbot-net`
  * as two tools (`playwright_screenshot`, `playwright_html`) the
@@ -277,6 +211,5 @@ const PLAYWRIGHT_ENTRY: McpServerEntry = {
 export const defaultMcpRegistry: McpRegistry = Object.freeze({
   [DANXBOT_SERVER_NAME]: DANXBOT_ENTRY,
   schema: SCHEMA_ENTRY,
-  trello: TRELLO_ENTRY,
   playwright: PLAYWRIGHT_ENTRY,
 });

@@ -1,0 +1,10 @@
+Read
+Glob
+Grep
+Edit
+Write
+Bash
+TodoWrite
+Agent
+Task
+mcp__trello__*

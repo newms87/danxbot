@@ -1,0 +1,13 @@
+name: trello-worker
+description: Poller dispatch — danx-next, danx-ideate, danx-start, danx-triage
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANXBOT_WORKER_PORT
+  - TRELLO_API_KEY
+  - TRELLO_TOKEN
+  - TRELLO_BOARD_ID
+optional-placeholders:
+  - TRELLO_ENABLED_TOOLS
+required-gates:
+  - "repo.trelloEnabled = true"
+  - "no CRITICAL_FAILURE flag"

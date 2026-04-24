@@ -49,12 +49,6 @@ export interface ResolveDispatchToolsOptions {
     definitionId: string;
     role?: string;
   };
-  /** Dependencies for the trello server. Required iff allowTools enables it. */
-  trello?: {
-    apiKey: string;
-    apiToken: string;
-    boardId: string;
-  };
   /**
    * Slack callback URLs for Slack-triggered dispatches. When present,
    * the danxbot MCP server exposes two additional tools
@@ -100,11 +94,11 @@ export interface McpServerEntry {
    * happen at the MCP server itself (tools that aren't registered cannot be
    * called, regardless of what Claude's permission layer does).
    *
-   * Servers whose wire protocol supports per-tool filtering (Trello via
-   * `TRELLO_ENABLED_TOOLS`) MUST honor `enabledTools`. Servers without that
-   * capability (schema) accept the arg and ignore it — the caller falls
-   * back to relying on `--allowed-tools` alone for those servers. Single-
-   * tool infrastructure servers (danxbot) also ignore the arg.
+   * Servers whose wire protocol supports per-tool filtering (when used)
+   * MUST honor `enabledTools`. Servers without that capability (schema)
+   * accept the arg and ignore it — the caller falls back to relying on
+   * `--allowed-tools` alone for those servers. Single-tool infrastructure
+   * servers (danxbot) also ignore the arg.
    *
    * Throws `McpResolveError` when required inputs are missing or malformed.
    * Called only when the server is actually needed for a dispatch.

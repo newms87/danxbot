@@ -78,11 +78,12 @@
  * DISPATCHED-AGENT GUIDANCE
  * -------------------------
  * Agents running INSIDE a dispatched session (in a connected repo's cwd)
- * read `src/poller/inject/rules/danx-halt-flag.md` — that's the rule
- * written FOR them, injected into every connected repo by the poller's
- * `syncRepoFiles`. It tells them when to signal `critical_failure` vs
- * `failed`. Don't duplicate that guidance here — this header is for
- * agents editing the HALT code itself, not for agents signaling into it.
+ * read `src/poller/inject/workspaces/trello-worker/.claude/rules/
+ * danx-halt-flag.md` — that's the rule written FOR them, mirrored into
+ * every connected repo's trello-worker workspace by the poller's inject
+ * pipeline. It tells them when to signal `critical_failure` vs `failed`.
+ * Don't duplicate that guidance here — this header is for agents editing
+ * the HALT code itself, not for agents signaling into it.
  */
 
 import {

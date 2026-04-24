@@ -142,7 +142,7 @@ const mockDispatch = vi.fn().mockImplementation(() =>
   }),
 );
 vi.mock("../dispatch/core.js", () => ({
-  dispatch: (...args: unknown[]) => mockDispatch(...args),
+  dispatchWithWorkspace: (...args: unknown[]) => mockDispatch(...args),
 }));
 
 const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
@@ -306,7 +306,7 @@ describe("poll", () => {
     expect(mockGenerateWorkspace).toHaveBeenCalledBefore(mockFetchTodoCards);
   });
 
-  it("calls dispatch() with the correct options when cards exist", async () => {
+  it("calls dispatchWithWorkspace() with the trello-worker workspace and trello overlay when cards exist", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -315,15 +315,19 @@ describe("poll", () => {
       expect.objectContaining({
         task: expect.any(String),
         repo: expect.objectContaining({ name: "test-repo" }),
-        // Phase 4 invariant: the poller hands the `/danx-next` allowlist to
-        // dispatch() — same allowTools the resolver consumes for HTTP
-        // `/api/launch`. The presence of `mcp__trello__*` is load-bearing;
-        // without it every poller dispatch 400s at resolve time.
-        allowTools: expect.arrayContaining([
-          "Read",
-          "Bash",
-          "mcp__trello__*",
-        ]),
+        // Phase 3 invariant (workspace-dispatch epic, Trello `q5aFuINM`):
+        // the poller dispatches via the named `trello-worker` workspace.
+        // The MCP server set + allowed-tools live in
+        // `src/poller/inject/workspaces/trello-worker/`; the overlay
+        // supplies the trello credentials the workspace's `.mcp.json`
+        // substitutes into its env block.
+        workspace: "trello-worker",
+        overlay: expect.objectContaining({
+          DANXBOT_WORKER_PORT: String(MOCK_REPO_CONTEXT.workerPort),
+          TRELLO_API_KEY: MOCK_REPO_CONTEXT.trello.apiKey,
+          TRELLO_TOKEN: MOCK_REPO_CONTEXT.trello.apiToken,
+          TRELLO_BOARD_ID: MOCK_REPO_CONTEXT.trello.boardId,
+        }),
       }),
     );
   });
@@ -356,11 +360,13 @@ describe("poll", () => {
     });
     mockReaddirSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return [];
-      if (path.endsWith("/inject/rules"))
-        return ["danx-halt-flag.md", "danx-slack-agent.md"];
+      if (path.endsWith("/inject/rules")) return ["danx-slack-agent.md"];
       if (path.endsWith("/inject/tools")) return ["danx-helper.sh"];
-      if (path.endsWith("/inject/skills")) return ["danx-next"];
-      if (path.endsWith("/inject/skills/danx-next")) return ["SKILL.md"];
+      // Workspace-dispatch P3 (Trello `q5aFuINM`): skills moved out of
+      // `inject/skills/` into `inject/workspaces/trello-worker/.claude/
+      // skills/`. The standalone `inject/skills/` tree is intentionally
+      // empty now; the workspace inject path mirrors the per-workspace
+      // skills instead.
       return [];
     });
 
@@ -380,16 +386,19 @@ describe("poll", () => {
       "/test/repos/test-repo/.danxbot/workspaces/";
     const repoRootClaudePrefix = "/test/repos/test-repo/.claude/";
 
-    // Every artifact lands in the workspace.
+    // Every artifact lands in the workspace. After P3 of the workspace-
+    // dispatch epic the danx-halt-flag.md rule and danx-{next,ideate,
+    // start,triage} skills moved out of the singular workspace into the
+    // trello-worker workspace fixture; the singular workspace keeps
+    // only the per-repo generated rules + the still-unmigrated
+    // danx-slack-agent.md and shared tools.
     const expectedWorkspaceArtifacts = [
       `${workspaceClaudePrefix}rules/danx-repo-config.md`,
       `${workspaceClaudePrefix}rules/danx-repo-overview.md`,
       `${workspaceClaudePrefix}rules/danx-repo-workflow.md`,
       `${workspaceClaudePrefix}rules/danx-tools.md`,
-      `${workspaceClaudePrefix}rules/danx-halt-flag.md`,
       `${workspaceClaudePrefix}rules/danx-slack-agent.md`,
       `${workspaceClaudePrefix}rules/danx-trello-config.md`,
-      `${workspaceClaudePrefix}skills/danx-next/SKILL.md`,
       `${workspaceClaudePrefix}tools/danx-helper.sh`,
     ];
     for (const expected of expectedWorkspaceArtifacts) {
@@ -1183,18 +1192,19 @@ describe("poll — Docker mode (headless agent)", () => {
     mockConfig.isHost = true;
   });
 
-  it("routes through dispatch() (not a direct terminal spawn) when not host", async () => {
+  it("routes through dispatchWithWorkspace() (not a direct terminal spawn)", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     // Should NOT spawn wt.exe — the poller no longer owns the terminal path
     expect(mockSpawn).not.toHaveBeenCalled();
-    // Should call dispatch() with the dispatch input shape
+    // Should call dispatchWithWorkspace() with the workspace dispatch input shape
     expect(mockDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         task: expect.stringContaining("/danx-next"),
         repo: expect.objectContaining({ name: "test-repo" }),
+        workspace: "trello-worker",
       }),
     );
   });
@@ -1298,27 +1308,22 @@ describe("poll — Docker mode (headless agent)", () => {
     );
   });
 
-  it("routes the poller allowlist through dispatchAllowTools('poller')", async () => {
-    // Phase 4 invariant: every dispatch consumer (poller, HTTP handler,
-    // Phase 5 Slack) goes through the ONE entry point `dispatchAllowTools`.
-    // Content equality against `dispatchAllowTools("poller")` pins two
-    // things at once: (1) the poller's tool surface matches the helper's
-    // output, and (2) the registry is the single source of truth for
-    // that surface — because `dispatchAllowTools` has nowhere else to get
-    // it from (see `src/dispatch/profiles.ts`). Pre-refactor this test
-    // asserted reference identity to prevent silent clones; post-refactor
-    // the dedupe pipeline intentionally produces a new array, and silent
-    // clones are no longer possible — the only path to the allowlist is
-    // through the helper.
+  it("does NOT pass allowTools — the workspace declares its own allowed-tools.txt (P3 invariant)", async () => {
+    // Phase 3 of the workspace-dispatch epic (Trello `q5aFuINM`): the
+    // poller's tool surface lives in
+    // `src/poller/inject/workspaces/trello-worker/allowed-tools.txt`,
+    // mirrored to `<repo>/.danxbot/workspaces/trello-worker/` by the
+    // inject pipeline, and resolved at dispatch time. The poller no
+    // longer hands an `allowTools` array to dispatch — `dispatchWith
+    // Workspace` reads the workspace fixture instead. Restating the
+    // allowlist here would shadow the workspace's source of truth.
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     const call = mockDispatch.mock.calls[0][0];
-    // Load the real helper (not mocked) — profiles.ts has no config chain
-    // so this is safe to import in this test file.
-    const { dispatchAllowTools } = await import("../dispatch/profiles.js");
-    expect(call.allowTools).toEqual(dispatchAllowTools("poller"));
+    expect(call.allowTools).toBeUndefined();
+    expect(call.workspace).toBe("trello-worker");
   });
 
   it("tags the dispatch with trigger=trello + the tracked card metadata", async () => {

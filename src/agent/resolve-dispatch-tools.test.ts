@@ -94,46 +94,12 @@ describe("resolveDispatchTools", () => {
   });
 
   describe("MCP server resolution from allowTools", () => {
-    it("enables the trello server when explicit trello tools are requested", () => {
-      const r = resolveDispatchTools(
-        baseOptions({
-          allowTools: [
-            "mcp__trello__get_card",
-            "mcp__trello__move_card",
-          ],
-          trello: {
-            apiKey: "k",
-            apiToken: "t",
-            boardId: "b",
-          },
-        }),
-      );
-      expect(Object.keys(r.mcpServers).sort()).toEqual(["danxbot", "trello"]);
-      expect(r.allowedTools).toContain("mcp__trello__get_card");
-      expect(r.allowedTools).toContain("mcp__trello__move_card");
-      expect(r.allowedTools).toContain(DANXBOT_TOOL);
-      // No extra trello tools leaked in.
-      const trelloCount = r.allowedTools.filter((t) =>
-        t.startsWith("mcp__trello__"),
-      ).length;
-      expect(trelloCount).toBe(2);
-    });
-
-    it("populates the trello server env from the trello options block", () => {
-      const r = resolveDispatchTools(
-        baseOptions({
-          allowTools: ["mcp__trello__get_card"],
-          trello: {
-            apiKey: "KEY",
-            apiToken: "TOK",
-            boardId: "BID",
-          },
-        }),
-      );
-      const env = r.mcpServers["trello"].env;
-      expect(env.TRELLO_API_KEY).toBe("KEY");
-      expect(env.TRELLO_TOKEN).toBe("TOK");
-      expect(env.TRELLO_BOARD_ID).toBe("BID");
+    it("rejects mcp__trello__* — the trello server is no longer in the registry (workspace-only since P3)", () => {
+      expect(() =>
+        resolveDispatchTools(
+          baseOptions({ allowTools: ["mcp__trello__get_card"] }),
+        ),
+      ).toThrow(/unknown MCP server "trello"/);
     });
 
     it("enables the schema server when mcp__schema__ tools are requested", () => {
@@ -185,29 +151,6 @@ describe("resolveDispatchTools", () => {
   });
 
   describe("wildcard expansion", () => {
-    it("mcp__trello__* expands to every tool the server declares; no leakage to other servers", () => {
-      const r = resolveDispatchTools(
-        baseOptions({
-          allowTools: ["mcp__trello__*"],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
-        }),
-      );
-      expect(r.mcpServers["trello"]).toBeDefined();
-      const trelloTools = r.allowedTools.filter((t) =>
-        t.startsWith("mcp__trello__"),
-      );
-      expect(trelloTools.length).toBe(
-        defaultMcpRegistry["trello"].tools.length,
-      );
-      for (const tool of defaultMcpRegistry["trello"].tools) {
-        expect(trelloTools).toContain(`mcp__trello__${tool}`);
-      }
-      // No schema tools should appear.
-      expect(
-        r.allowedTools.filter((t) => t.startsWith("mcp__schema__")),
-      ).toHaveLength(0);
-    });
-
     it("mcp__schema__* expands to every schema tool the registry declares", () => {
       const r = resolveDispatchTools(
         baseOptions({
@@ -285,56 +228,6 @@ describe("resolveDispatchTools", () => {
       ).toThrow(/apiToken|SCHEMA_API_TOKEN/);
     });
 
-    it("throws when mcp__trello__* is requested but trello options are missing", () => {
-      expect(() =>
-        resolveDispatchTools(
-          baseOptions({ allowTools: ["mcp__trello__get_card"] }),
-        ),
-      ).toThrow(/trello/i);
-    });
-
-    it("throws when trello.apiKey is missing; message mentions the missing field", () => {
-      expect(() =>
-        resolveDispatchTools(
-          baseOptions({
-            allowTools: ["mcp__trello__get_card"],
-            trello: {
-              apiToken: "t",
-              boardId: "b",
-            } as unknown as ResolveDispatchToolsOptions["trello"],
-          }),
-        ),
-      ).toThrow(/apiKey|TRELLO_API_KEY/);
-    });
-
-    it("throws when trello.apiToken is missing; message mentions the missing field", () => {
-      expect(() =>
-        resolveDispatchTools(
-          baseOptions({
-            allowTools: ["mcp__trello__get_card"],
-            trello: {
-              apiKey: "k",
-              boardId: "b",
-            } as unknown as ResolveDispatchToolsOptions["trello"],
-          }),
-        ),
-      ).toThrow(/apiToken|TRELLO_TOKEN/);
-    });
-
-    it("throws when trello.boardId is missing; message mentions the missing field", () => {
-      expect(() =>
-        resolveDispatchTools(
-          baseOptions({
-            allowTools: ["mcp__trello__get_card"],
-            trello: {
-              apiKey: "k",
-              apiToken: "t",
-            } as unknown as ResolveDispatchToolsOptions["trello"],
-          }),
-        ),
-      ).toThrow(/boardId|TRELLO_BOARD_ID/);
-    });
-
     it("throws when allowTools contains a non-string entry", () => {
       expect(() =>
         resolveDispatchTools(
@@ -371,17 +264,17 @@ describe("resolveDispatchTools", () => {
 
   describe("multi-server composition and overlap", () => {
     it("wildcard plus an explicit tool for the same server produces the server's full tool set with no duplicates and no extras", () => {
-      const trelloTools = defaultMcpRegistry["trello"].tools;
+      const schemaTools = defaultMcpRegistry["schema"].tools;
       const r = resolveDispatchTools(
         baseOptions({
-          allowTools: ["mcp__trello__*", "mcp__trello__get_card"],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
+          allowTools: ["mcp__schema__*", "mcp__schema__schema_get"],
+          schema: { apiUrl: "https://api", apiToken: "t", definitionId: "1" },
         }),
       );
       const emitted = r.allowedTools.filter((t) =>
-        t.startsWith("mcp__trello__"),
+        t.startsWith("mcp__schema__"),
       );
-      expect(emitted.length).toBe(trelloTools.length);
+      expect(emitted.length).toBe(schemaTools.length);
       // No duplicates even with the redundant explicit entry.
       expect(new Set(emitted).size).toBe(emitted.length);
     });
@@ -389,12 +282,7 @@ describe("resolveDispatchTools", () => {
     it("resolves multiple servers in one call; all declared servers appear with correct envs", () => {
       const r = resolveDispatchTools(
         baseOptions({
-          allowTools: [
-            "Read",
-            "mcp__trello__get_card",
-            "mcp__schema__schema_get",
-          ],
-          trello: { apiKey: "tk", apiToken: "tt", boardId: "tb" },
+          allowTools: ["Read", "mcp__schema__schema_get"],
           schema: {
             apiUrl: "https://api",
             apiToken: "sk",
@@ -402,15 +290,9 @@ describe("resolveDispatchTools", () => {
           },
         }),
       );
-      expect(Object.keys(r.mcpServers).sort()).toEqual([
-        "danxbot",
-        "schema",
-        "trello",
-      ]);
-      expect(r.mcpServers["trello"].env.TRELLO_BOARD_ID).toBe("tb");
+      expect(Object.keys(r.mcpServers).sort()).toEqual(["danxbot", "schema"]);
       expect(r.mcpServers["schema"].env.SCHEMA_DEFINITION_ID).toBe("42");
       expect(r.allowedTools).toContain("Read");
-      expect(r.allowedTools).toContain("mcp__trello__get_card");
       expect(r.allowedTools).toContain("mcp__schema__schema_get");
       expect(r.allowedTools).toContain(DANXBOT_TOOL);
     });
@@ -446,58 +328,6 @@ describe("resolveDispatchTools", () => {
         args: ["danxbot"],
         env: { CUSTOM: "1" },
       });
-    });
-  });
-
-  describe("MCP server-side tool gating — TRELLO_ENABLED_TOOLS derived from allow_tools", () => {
-    // The resolver is responsible for ensuring the spawned Trello MCP server
-    // exposes ONLY the tools the caller actually requested. The server's
-    // `TRELLO_ENABLED_TOOLS` env var patches its internal `registerTool` so
-    // unlisted tools are never registered — Claude literally cannot see them.
-    // This is the enforcement boundary; `--allowed-tools` on claude is
-    // defense-in-depth only and is known to be leaky when paired with
-    // `--dangerously-skip-permissions` for MCP calls.
-
-    it("names in allow_tools flow through as TRELLO_ENABLED_TOOLS (single tool)", () => {
-      const r = resolveDispatchTools(
-        baseOptions({
-          allowTools: ["mcp__trello__get_lists"],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
-        }),
-      );
-      expect(r.mcpServers["trello"].env.TRELLO_ENABLED_TOOLS).toBe("get_lists");
-    });
-
-    it("multiple tools join as a comma-separated list (caller-declared order)", () => {
-      const r = resolveDispatchTools(
-        baseOptions({
-          allowTools: ["mcp__trello__get_lists", "mcp__trello__get_card"],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
-        }),
-      );
-      expect(r.mcpServers["trello"].env.TRELLO_ENABLED_TOOLS).toBe(
-        "get_lists,get_card",
-      );
-    });
-
-    it("wildcard (mcp__trello__*) leaves TRELLO_ENABLED_TOOLS absent — all tools exposed", () => {
-      const r = resolveDispatchTools(
-        baseOptions({
-          allowTools: ["mcp__trello__*"],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
-        }),
-      );
-      expect(r.mcpServers["trello"].env.TRELLO_ENABLED_TOOLS).toBeUndefined();
-    });
-
-    it("wildcard wins when mixed with specific tools (no narrower filter than the caller asked for)", () => {
-      const r = resolveDispatchTools(
-        baseOptions({
-          allowTools: ["mcp__trello__*", "mcp__trello__get_lists"],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
-        }),
-      );
-      expect(r.mcpServers["trello"].env.TRELLO_ENABLED_TOOLS).toBeUndefined();
     });
   });
 
@@ -572,8 +402,8 @@ describe("resolveDispatchTools", () => {
     it("each mcpServers entry has command, args array, and env object — matching McpSettingsFile shape", () => {
       const r = resolveDispatchTools(
         baseOptions({
-          allowTools: ["mcp__trello__get_card"],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
+          allowTools: ["mcp__schema__schema_get"],
+          schema: { apiUrl: "https://api", apiToken: "t", definitionId: "1" },
         }),
       );
       for (const [, cfg] of Object.entries(r.mcpServers)) {
@@ -582,18 +412,6 @@ describe("resolveDispatchTools", () => {
         expect(typeof cfg.env).toBe("object");
         expect(cfg.env).not.toBeNull();
       }
-    });
-
-    it("trello server uses npx -y to bootstrap lazily", () => {
-      const r = resolveDispatchTools(
-        baseOptions({
-          allowTools: ["mcp__trello__get_card"],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
-        }),
-      );
-      const trello = r.mcpServers["trello"];
-      expect(trello.command).toBe("npx");
-      expect(trello.args[0]).toBe("-y");
     });
 
     it("schema server uses npx -y to bootstrap lazily", () => {
@@ -717,10 +535,10 @@ describe("resolveDispatchTools", () => {
           allowTools: [
             "Read",
             "Read",
-            "mcp__trello__get_card",
-            "mcp__trello__get_card",
+            "mcp__schema__schema_get",
+            "mcp__schema__schema_get",
           ],
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
+          schema: { apiUrl: "https://api", apiToken: "t", definitionId: "1" },
         }),
       );
       const seen = new Set<string>();
@@ -791,26 +609,26 @@ describe("resolveDispatchTools", () => {
       );
     });
 
-    it("opts.slack coexists with opts.trello — a Slack dispatch can still use trello tools", () => {
-      // Slack dispatches aren't tool-restricted away from trello or any
-      // other MCP server; the slack opt-in is additive. This guards
-      // against a regression where adding slack opts accidentally prunes
-      // or reorders the rest of the tool surface.
+    it("opts.slack is additive — coexists with other MCP servers (e.g. schema)", () => {
+      // Slack dispatches aren't tool-restricted away from any other MCP
+      // server; the slack opt-in is additive. This guards against a
+      // regression where adding slack opts accidentally prunes or
+      // reorders the rest of the tool surface.
       const r = resolveDispatchTools(
         baseOptions({
-          allowTools: ["Read", "mcp__trello__get_card"],
+          allowTools: ["Read", "mcp__schema__schema_get"],
           slack: {
             replyUrl: SLACK_REPLY_URL,
             updateUrl: SLACK_UPDATE_URL,
           },
-          trello: { apiKey: "k", apiToken: "t", boardId: "b" },
+          schema: { apiUrl: "https://api", apiToken: "t", definitionId: "1" },
         }),
       );
       expect(r.allowedTools).toContain("Read");
-      expect(r.allowedTools).toContain("mcp__trello__get_card");
+      expect(r.allowedTools).toContain("mcp__schema__schema_get");
       expect(r.allowedTools).toContain("mcp__danxbot__danxbot_slack_reply");
       expect(r.allowedTools).toContain(DANXBOT_TOOL);
-      expect(Object.keys(r.mcpServers).sort()).toEqual(["danxbot", "trello"]);
+      expect(Object.keys(r.mcpServers).sort()).toEqual(["danxbot", "schema"]);
     });
 
     it("slack tools each appear exactly once in allowedTools (no duplication)", () => {

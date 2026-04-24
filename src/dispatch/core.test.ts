@@ -15,7 +15,10 @@
  * Card ACs covered:
  *   - AC: INTEGRATION — fake-claude test that the exact --mcp-config file
  *     contents and --allowed-tools CLI args are asserted against a snapshot
- *     for 3 representative allow_tools inputs (empty, trello-only, schema+bash)
+ *     for representative allow_tools inputs (empty, schema+bash). Trello
+ *     allow-list entries are no longer honored by the legacy `dispatch()`
+ *     path — the trello server moved to the workspace path in P3 of the
+ *     workspace-dispatch epic. See `dispatchWithWorkspace`.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -131,34 +134,17 @@ describe("dispatch() — settings file + allowed-tools plumbing", () => {
     expect(opts.allowedTools).toEqual(["mcp__danxbot__danxbot_complete"]);
   });
 
-  it("writes a settings.json with trello server + built-ins pass through to --allowed-tools when allow_tools requests trello tools", async () => {
-    await dispatch({
-      repo: MOCK_REPO,
-      task: "do work",
-      apiToken: "tok",
-      apiUrl: "http://api",
-      allowTools: ["Read", "mcp__trello__get_card", "mcp__trello__move_card"],
-      apiDispatchMeta: DEFAULT_DISPATCH_META,
-    });
-
-    const opts = mockSpawnAgent.mock.calls[0][0];
-    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8"));
-    expect(Object.keys(settings.mcpServers).sort()).toEqual([
-      "danxbot",
-      "trello",
-    ]);
-    expect(settings.mcpServers.trello.env.TRELLO_API_KEY).toBe(
-      MOCK_REPO.trello.apiKey,
-    );
-    expect(settings.mcpServers.trello.env.TRELLO_BOARD_ID).toBe(
-      MOCK_REPO.trello.boardId,
-    );
-    expect(opts.allowedTools).toEqual([
-      "Read",
-      "mcp__trello__get_card",
-      "mcp__trello__move_card",
-      "mcp__danxbot__danxbot_complete",
-    ]);
+  it("rejects mcp__trello__* via the legacy registry path — trello is workspace-only since P3", async () => {
+    await expect(
+      dispatch({
+        repo: MOCK_REPO,
+        task: "do work",
+        apiToken: "tok",
+        apiUrl: "http://api",
+        allowTools: ["Read", "mcp__trello__get_card"],
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      }),
+    ).rejects.toThrow(/unknown MCP server "trello"/);
   });
 
   it("writes a settings.json with schema server when allow_tools requests schema tools + Bash built-in (third representative input)", async () => {

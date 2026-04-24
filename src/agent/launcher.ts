@@ -205,6 +205,15 @@ export interface SpawnAgentOptions {
   title?: string;
   /** Repo name — used to resolve cwd to repos/<name> */
   repoName: string;
+  /**
+   * Override the spawned agent's working directory. When set, replaces the
+   * default `workspacePath(options.repoName)` resolution. Used by the
+   * workspace-dispatch path (`dispatchWithWorkspace`) to point claude at the
+   * resolved `<repo>/.danxbot/workspaces/<name>/` workspace dir instead of
+   * the singular legacy `<repo>/.danxbot/workspace/`. Absent for legacy
+   * dispatches, which keep the singular path until P5 retires it.
+   */
+  cwd?: string;
   /** Optional pre-generated job ID. If not set, a UUID is generated. Used to keep
    *  the activeJobs key stable across stall-recovery respawns. */
   jobId?: string;
@@ -463,7 +472,7 @@ export async function spawnAgent(
   // `.claude/rules/agent-dispatch.md`. Any future change to what
   // dispatched agents see from their cwd lands inside `workspacePath` /
   // `generateWorkspace`, NOT here.
-  const agentCwd = workspacePath(options.repoName);
+  const agentCwd = options.cwd ?? workspacePath(options.repoName);
 
   log.info(`[Job ${jobId}] Launching agent`);
   log.info(`[Job ${jobId}] Prompt: ${options.prompt.substring(0, 200)}`);
