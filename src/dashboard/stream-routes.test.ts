@@ -173,7 +173,7 @@ describe("handleStream — dispatch:jsonl:<id> topic", () => {
     expect(res.statusCode).toBe(200);
     expect(mockStartJsonlWatcher).toHaveBeenCalledWith(
       "job-uuid",
-      "/danxbot/app/claude-projects/danxbot/-danxbot-app-repos-danxbot-.danxbot-workspace/abc123.jsonl",
+      "/danxbot/app/claude-projects/danxbot/-danxbot-app-repos-danxbot--danxbot-workspace/abc123.jsonl",
     );
   });
 

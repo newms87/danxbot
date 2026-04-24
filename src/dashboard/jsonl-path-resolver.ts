@@ -36,10 +36,12 @@ const WORKER_PROJECTS_PREFIX = "/home/danxbot/.claude/projects/";
 
 /**
  * Encode a dispatched agent's CWD to the directory-name form Claude Code uses.
- * Claude Code stores sessions at `~/.claude/projects/<cwd-with-slashes-replaced-by-dashes>/`
- * so this helper runs the same `/` → `-` transform on the output of
- * `workspacePath(repoName)` — the single source of truth for the dispatched
- * spawn cwd (see `src/workspace/generate.ts` and Trello epic `7ha2CSpc`).
+ * Claude Code stores sessions at `~/.claude/projects/<encoded-cwd>/`, where
+ * the encoded form replaces BOTH `/` and `.` with `-`. Verified empirically
+ * against on-disk entries like `-danxbot-app-repos-danxbot--danxbot-workspace`
+ * — the leading `.` of the `.danxbot` segment becomes the second dash of
+ * the `--danxbot` run. Must stay in lockstep with `deriveSessionDir` in
+ * `src/agent/session-log-watcher.ts`.
  *
  * Deriving from `workspacePath` rather than hardcoding the literal means a
  * future change to `WORKSPACE_SUBDIR` or the `.danxbot/` segment updates
@@ -48,7 +50,7 @@ const WORKER_PROJECTS_PREFIX = "/home/danxbot/.claude/projects/";
  * NOTE: In the dashboard container `getReposBase()` resolves to
  * `/danxbot/app/repos` (either via `DANXBOT_REPOS_BASE` or the project-root
  * fallback) so the encoded dir comes out as
- * `-danxbot-app-repos-<name>-.danxbot-workspace` — the exact name claude
+ * `-danxbot-app-repos-<name>--danxbot-workspace` — the exact name claude
  * writes to under `~/.claude/projects/` in the worker container.
  *
  * Host-mode workers dispatch from `<real-checkout>/.danxbot/workspace`, so
@@ -58,7 +60,7 @@ const WORKER_PROJECTS_PREFIX = "/home/danxbot/.claude/projects/";
  * null — that is acceptable because strategy 3 is only a fallback.
  */
 export function encodeRepoCwd(repoName: string): string {
-  return workspacePath(repoName).replace(/\//g, "-");
+  return workspacePath(repoName).replace(/[/.]/g, "-");
 }
 
 /**

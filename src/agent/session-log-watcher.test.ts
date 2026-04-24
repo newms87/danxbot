@@ -182,6 +182,27 @@ describe("deriveSessionDir", () => {
       rmSync(realDir, { recursive: true });
     }
   });
+
+  // Regression: dispatched-agent cwd lives under `.danxbot/workspace`, a
+  // hidden-directory segment. Claude Code encodes `.` the same way it encodes
+  // `/` — as `-` — so `.danxbot` becomes `--danxbot` in the projects dir name.
+  // The previous encoder only replaced `/`, leaving a stale dot that pointed
+  // the watcher at a nonexistent directory and silently dropped every JSONL
+  // event (dashboard showed sessionUuid=null, timeline=[], tokens=0). The
+  // fix must produce the same `--danxbot-workspace` form Claude actually uses
+  // on disk — verified against `~/.claude/projects/` entries like
+  // `-home-newms-web-gpt-manager--danxbot-workspace`.
+  it("encodes dots in path segments as dashes (dispatched-agent cwd case)", () => {
+    const result = deriveSessionDir("/home/dev/project/.danxbot/workspace");
+    expect(result).toMatch(
+      /\.claude\/projects\/-home-dev-project--danxbot-workspace$/,
+    );
+  });
+
+  it("encodes dots anywhere in the path as dashes", () => {
+    const result = deriveSessionDir("/tmp/a.b/c.d");
+    expect(result).toMatch(/\.claude\/projects\/-tmp-a-b-c-d$/);
+  });
 });
 
 describe("findNewestJsonlFile", () => {

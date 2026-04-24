@@ -56,19 +56,19 @@ describe("encodeRepoCwd", () => {
   // strategy computes a directory that does not exist on disk.
   it("encodes danxbot CWD", () => {
     expect(encodeRepoCwd("danxbot")).toBe(
-      "-danxbot-app-repos-danxbot-.danxbot-workspace",
+      "-danxbot-app-repos-danxbot--danxbot-workspace",
     );
   });
 
   it("encodes gpt-manager CWD", () => {
     expect(encodeRepoCwd("gpt-manager")).toBe(
-      "-danxbot-app-repos-gpt-manager-.danxbot-workspace",
+      "-danxbot-app-repos-gpt-manager--danxbot-workspace",
     );
   });
 
   it("encodes platform CWD", () => {
     expect(encodeRepoCwd("platform")).toBe(
-      "-danxbot-app-repos-platform-.danxbot-workspace",
+      "-danxbot-app-repos-platform--danxbot-workspace",
     );
   });
 });
@@ -81,7 +81,7 @@ describe("computeDashboardJsonlPath", () => {
   it("produces the expected deterministic path", () => {
     const path = computeDashboardJsonlPath("danxbot", "abc-123-session");
     expect(path).toBe(
-      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot-.danxbot-workspace/abc-123-session.jsonl`,
+      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot--danxbot-workspace/abc-123-session.jsonl`,
     );
   });
 
@@ -157,7 +157,7 @@ describe("expectedJsonlPath", () => {
     const dispatch = makeDispatch({ sessionUuid: "my-session-uuid" });
     const result = expectedJsonlPath(dispatch);
     expect(result).toBe(
-      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot-.danxbot-workspace/my-session-uuid.jsonl`,
+      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot--danxbot-workspace/my-session-uuid.jsonl`,
     );
   });
 

@@ -936,7 +936,7 @@ describe("handleResume", () => {
     // suffix locks the launcher + resume lookup in lockstep. See Trello
     // `7ha2CSpc` and `src/workspace/generate.ts` `workspacePath`.
     mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
+      "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
     );
     const req = createMockReqWithBody("POST", {
       job_id: "parent-dispatch-uuid",
@@ -1277,7 +1277,7 @@ describe("handleResume", () => {
     // trello-opt-in path working, the existing resume-trello test would
     // still pass — only this default-case assertion catches it.
     mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
+      "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
     );
     const mockJob = {
       id: "job-resume-default",
@@ -1311,7 +1311,7 @@ describe("handleResume", () => {
     // so a resumed dispatch inherits the caller's requested tool surface
     // without drift. Mirror of the handleLaunch trello-opt-in test.
     mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
+      "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
     );
     const mockJob = {
       id: "job-resume-trello",
@@ -1353,7 +1353,7 @@ describe("handleResume", () => {
     // only — while leaving handleLaunch intact — would not be caught by
     // any other test. Mirror of the handleLaunch dedup test.
     mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/-test-repos-test-repo-.danxbot-workspace/session-abc.jsonl",
+      "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
     );
     const mockJob = {
       id: "job-resume-dedup",
