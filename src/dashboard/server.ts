@@ -22,6 +22,11 @@ import {
   type DispatchProxyDeps,
 } from "./dispatch-proxy.js";
 import {
+  handlePlaywrightProxy,
+  loadPlaywrightUrl,
+  type PlaywrightProxyDeps,
+} from "./playwright-proxy.js";
+import {
   handleClearAgentCriticalFailure,
   handleGetAgent,
   handleListAgents,
@@ -84,6 +89,7 @@ async function route(
   res: ServerResponse,
   url: URL,
   dispatchDeps: DispatchProxyDeps,
+  playwrightDeps: PlaywrightProxyDeps,
 ): Promise<boolean> {
   const method = req.method?.toUpperCase() ?? "GET";
 
@@ -170,6 +176,21 @@ async function route(
       );
       return true;
     }
+  }
+
+  // ── Playwright proxy — same dispatch-token auth band as above.
+  // MUST match ahead of the blanket `/api/*` user-auth gate below so
+  // external callers (gpt-manager, curl) with only a bearer token aren't
+  // 401'd on the session check. Any method is accepted; the tail of the
+  // path (incl. query string) is forwarded to the Playwright service.
+  // See `playwright-proxy.ts` for the binary-safe forwarder — do NOT
+  // reroute this through `handleJobProxy` / `proxyToWorker`; those are
+  // JSON-only and corrupt PNG bytes.
+  if (url.pathname.startsWith("/api/playwright/")) {
+    const tailPath =
+      url.pathname.slice("/api/playwright".length) + url.search;
+    await handlePlaywrightProxy(req, res, tailPath, playwrightDeps);
+    return true;
   }
 
   // ── PATCH /api/agents/:repo/toggles — user bearer required.
@@ -337,6 +358,14 @@ export async function startDashboard(): Promise<void> {
     resolveHost: workerHost,
   };
 
+  // Playwright proxy shares the DANXBOT_DISPATCH_TOKEN with dispatchDeps —
+  // same bearer, different upstream. The upstream URL is resolved once at
+  // boot from env (default `http://playwright:3000` on danxbot-net).
+  const playwrightDeps: PlaywrightProxyDeps = {
+    token,
+    upstreamUrl: loadPlaywrightUrl(),
+  };
+
   await checkWorkerHostResolution(repos, workerHost);
 
   // Start the DB change detector that publishes dispatch:created and
@@ -348,7 +377,7 @@ export async function startDashboard(): Promise<void> {
     res.setHeader("Access-Control-Allow-Origin", "*");
 
     try {
-      const handled = await route(req, res, url, dispatchDeps);
+      const handled = await route(req, res, url, dispatchDeps, playwrightDeps);
       if (!handled) {
         json(res, 404, { error: "Not found" });
       }

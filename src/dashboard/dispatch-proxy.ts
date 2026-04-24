@@ -20,6 +20,15 @@
  * `http://${deps.resolveHost(name)}:${workerPort}/api/launch`. Status/cancel/stop
  * must include `?repo=<name>` since the dashboard does not persist the
  * jobId→worker mapping (workers do).
+ *
+ * **Binary-safe sibling:** `proxyToWorker` below is JSON-only — it hardcodes
+ * the request Content-Type to application/json and calls `.toString("utf-8")`
+ * on the response body, which silently corrupts non-UTF-8 bytes. Do NOT
+ * reuse it for any upstream that returns binary data (screenshots, PDFs,
+ * protobufs). The Playwright proxy (`/api/playwright/*`) lives in
+ * `./playwright-proxy.ts` and preserves request/response bytes verbatim.
+ * The auth helpers (`checkAuth`, `rejectUnauthorized`, `loadDispatchToken`)
+ * are shared — import them from here, don't copy-paste them.
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
@@ -86,7 +95,7 @@ export function checkAuth(
   return { ok: true };
 }
 
-function rejectUnauthorized(res: ServerResponse, result: AuthResult): void {
+export function rejectUnauthorized(res: ServerResponse, result: AuthResult): void {
   if (result.reason === "server_missing_token") {
     json(res, 500, {
       error:

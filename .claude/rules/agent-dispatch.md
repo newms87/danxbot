@@ -33,6 +33,18 @@ Every external proxy call requires `Authorization: Bearer $DANXBOT_DISPATCH_TOKE
 
 Worker hostname resolution: `workerHost(name)` returns `danxbot-worker-<name>` — the `container_name` set in each repo's compose file. Both the dashboard and workers live on the `danxbot-net` bridge so the hostname resolves via Docker DNS. The dashboard reads `workerPort` from the `REPO_WORKER_PORTS` env var (also SSM-materialized, synthesized per-target from the deployment YML).
 
+### Playwright proxy — binary-safe sibling of the worker proxy
+
+`/api/playwright/<tail>` forwards every method to the Playwright container on `danxbot-net` at `${DANXBOT_PLAYWRIGHT_URL}<tail>` (default `http://playwright:3000`). Same `DANXBOT_DISPATCH_TOKEN` bearer auth as the worker-proxy routes — external callers hit the same dashboard, so the same 401/500 semantics apply. Implemented in `src/dashboard/playwright-proxy.ts`; route registration lives in the dispatch-proxy band in `src/dashboard/server.ts`, BEFORE the blanket `/api/*` user-auth gate.
+
+**CRITICAL: do not reuse `proxyToWorker` here.** That helper hardcodes the outbound request Content-Type to `application/json` and calls `.toString("utf-8")` on the upstream body — both corrupt PNG screenshot bytes. `handlePlaywrightProxy` preserves request Content-Type, request body bytes, response Content-Type, response status, and response body bytes verbatim as `Buffer`s. If you add another binary upstream in the future, extend the Playwright forwarder pattern, not the JSON-only worker one.
+
+Error mapping:
+- `401` — bad/missing bearer
+- `500` — dashboard has no `DANXBOT_DISPATCH_TOKEN` configured
+- `502` — Playwright upstream unreachable / connect error
+- `504` — upstream exceeded the per-request timeout (default `PLAYWRIGHT_DEFAULT_TIMEOUT_MS` = 30s; configurable via `PlaywrightProxyDeps.timeoutMs`)
+
 ### Unknown paths and methods always 404
 
 The dashboard router is a strict allowlist. Any request outside the explicit route table — any method to any unknown path — returns `{"error":"Not found"}` with `404`. There is no SPA fallback: only a `GET` to a known SPA route (`/` today) serves `index.html`. This avoids the previous regression where `POST /api/launch` returned the SPA's HTML with `200`, silently passing smoke tests.
