@@ -298,3 +298,14 @@ else
 	@echo "No TARGET=<remote> branch — production data is not resettable via this target."
 	@exit 1
 endif
+
+# Publish the in-tree Playwright MCP server package to npm. The registry
+# (src/agent/mcp-registry.ts PLAYWRIGHT_ENTRY) currently invokes the
+# server via `npx tsx <abs-path>`, so a publish step is optional — the
+# capability ships with the repo source. Once published, flip the
+# registry args from `["tsx", PLAYWRIGHT_MCP_SERVER_PATH]` to
+# `["-y", "@thehammer/danxbot-playwright-mcp-server"]` to match the
+# schema / trello server pattern. Local-only target; requires `npm login`
+# to @thehammer credentials.
+publish-playwright-mcp: ## Publish @thehammer/danxbot-playwright-mcp-server to npm
+	@cd mcp-servers/playwright && npm install --no-save && npm run build && npm publish --access public

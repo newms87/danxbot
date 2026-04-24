@@ -38,6 +38,21 @@ export const DANXBOT_MCP_SERVER_PATH = pathResolve(
   "../mcp/danxbot-server.ts",
 );
 
+/**
+ * Absolute path to the in-tree Playwright MCP server. We spawn it via
+ * `npx tsx <path>` rather than `npx -y @thehammer/...` for the same
+ * reason the danxbot server uses that shape: the TypeScript source is
+ * authoritative, no npm publish step gates local development, and
+ * dispatched agents always have `tsx` in the worker image. If / when
+ * the package is published to npm, swap the `args` below to
+ * `["-y", "@thehammer/danxbot-playwright-mcp-server"]` and delete this
+ * constant.
+ */
+export const PLAYWRIGHT_MCP_SERVER_PATH = pathResolve(
+  __dirname,
+  "../../mcp-servers/playwright/src/index.ts",
+);
+
 /** Slack-only tools exposed on the danxbot server when opts.slack is present. */
 export const DANXBOT_SLACK_REPLY_TOOL = "danxbot_slack_reply";
 export const DANXBOT_SLACK_POST_UPDATE_TOOL = "danxbot_slack_post_update";
@@ -216,6 +231,44 @@ const TRELLO_ENTRY: McpServerEntry = {
 };
 
 /**
+ * Playwright server — wraps the `playwright` container on `danxbot-net`
+ * as two tools (`playwright_screenshot`, `playwright_html`) the
+ * dispatched agent can call directly. The factory defaults
+ * `PLAYWRIGHT_URL` to the danxbot-net container hostname so
+ * worker-local dispatches Just Work; an operator can override by
+ * setting `PLAYWRIGHT_URL` on the worker. The server itself fails loud
+ * on empty/unset PLAYWRIGHT_URL (double-guard), so passing an empty
+ * string env would surface at server startup rather than producing a
+ * silent fallback.
+ *
+ * No caller-supplied options are required on the factory — Playwright
+ * is stateless and same-network; there is no auth token to forward
+ * and no dispatch-specific configuration the factory needs to
+ * validate. This matches the zero-config ethos of the Playwright
+ * container itself.
+ */
+const PLAYWRIGHT_ENTRY: McpServerEntry = {
+  tools: ["playwright_screenshot", "playwright_html"],
+  build() {
+    const env: Record<string, string> = {
+      PLAYWRIGHT_URL: process.env.PLAYWRIGHT_URL || "http://playwright:3000",
+    };
+    // Forward PLAYWRIGHT_TIMEOUT_MS only when an operator explicitly
+    // set it. Leaving it unset lets the server fall back to its
+    // exported default (30s) — keeping the default value in one place
+    // rather than duplicating it across the registry and the server.
+    if (process.env.PLAYWRIGHT_TIMEOUT_MS) {
+      env.PLAYWRIGHT_TIMEOUT_MS = process.env.PLAYWRIGHT_TIMEOUT_MS;
+    }
+    return {
+      command: "npx",
+      args: ["tsx", PLAYWRIGHT_MCP_SERVER_PATH],
+      env,
+    };
+  },
+};
+
+/**
  * The production MCP server registry. Call sites that want the defaults pass
  * nothing (resolver uses this). Tests inject a custom registry via
  * `ResolveDispatchToolsOptions.registry` to exercise the lookup path without
@@ -225,4 +278,5 @@ export const defaultMcpRegistry: McpRegistry = Object.freeze({
   [DANXBOT_SERVER_NAME]: DANXBOT_ENTRY,
   schema: SCHEMA_ENTRY,
   trello: TRELLO_ENTRY,
+  playwright: PLAYWRIGHT_ENTRY,
 });

@@ -1,0 +1,22 @@
+{
+  "name": "@thehammer/danxbot-playwright-mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server exposing playwright_screenshot and playwright_html tools to Claude Code agents dispatched by danxbot.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "danxbot-playwright-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "prepare": "tsc -p ."
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

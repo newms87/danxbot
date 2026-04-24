@@ -36,7 +36,21 @@
  * (`Read`/`Glob`/`Grep`/`Edit`/`Write`/`Bash`/`TodoWrite`) so every
  * API-dispatched agent can do basic filesystem/shell work and follow
  * through on MCP tool responses the harness spills to disk. The body
- * supplies any MCP server opt-ins (schema, trello, …) on top.
+ * supplies any MCP server opt-ins (schema, trello, playwright, …) on
+ * top.
+ *
+ * **MCP servers are NEVER baked into any baseline.** The Playwright
+ * MCP server (`mcp__playwright__*`) is deliberately NOT in `poller`
+ * or `http-launch` even though every dispatcher could theoretically
+ * need it — MCP servers spawn at session init, so baking a server
+ * into a baseline would spin up its subprocess on every dispatch
+ * regardless of whether the agent calls it. Callers that need
+ * Playwright pass `mcp__playwright__*` in `body.allow_tools` for HTTP
+ * dispatches or add it to the skill prompt's allowlist for poller
+ * dispatches. See the wiring test in
+ * `src/agent/resolve-dispatch-tools.test.ts` named "playwright is NOT
+ * baked into any dispatch profile baseline" — a regression that
+ * reintroduces the wildcard into a baseline must fail that test.
  *
  * `--strict-mcp-config` is applied at the spawn layer
  * (`src/agent/claude-invocation.ts`), not here. Profiles are about the
