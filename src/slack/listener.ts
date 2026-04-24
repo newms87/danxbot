@@ -18,8 +18,7 @@ import { isFeatureEnabled } from "../settings-file.js";
 import { runRouter } from "../agent/router.js";
 import type { RepoContext, ThreadMessage } from "../types.js";
 import { notifyError } from "../errors/trello-notifier.js";
-import { dispatch } from "../dispatch/core.js";
-import { dispatchAllowTools } from "../dispatch/profiles.js";
+import { dispatchWithWorkspace } from "../dispatch/core.js";
 import { findLatestDispatchBySlackThread } from "../dashboard/dispatches-db.js";
 import type { SlackTriggerMetadata } from "../dashboard/dispatches.js";
 import type { AgentJob } from "../agent/launcher.js";
@@ -234,18 +233,34 @@ async function launchSlackDispatch(
     ? slackMeta.messageText
     : buildSlackAgentPrompt(slackMeta.messageText, threadMessages);
 
-  const allowTools = dispatchAllowTools("slack");
-
   // Await the agent's terminal state so we can swap the reaction on the
-  // user's message. `dispatch()` returns as soon as the claude process
-  // is spawned; `onComplete` fires when it reaches a terminal status.
-  // Errors thrown before spawn (e.g. MCP resolve failure) reject the
-  // outer promise and surface to the caller as an operational error.
+  // user's message. `dispatchWithWorkspace` returns as soon as the claude
+  // process is spawned; `onComplete` fires when it reaches a terminal
+  // status. Errors thrown before spawn (workspace resolve / MCP init)
+  // reject the outer promise and surface to the caller as operational
+  // errors. The slack-worker workspace declares its own allowed-tools
+  // (`Read`/`Glob`/`Grep`/`Bash` + the two `mcp__danxbot__danxbot_slack_*`
+  // tools) and gates on `settings.slack.enabled ≠ false`; the overlay
+  // below supplies the four per-dispatch placeholders the workspace
+  // requires. `apiDispatchMeta.trigger: "slack"` is still persisted on
+  // the dispatch row for dashboard analytics — it no longer drives tool
+  // resolution (`buildResolveOptions`'s slack branch is transitional /
+  // legacy-only, see `src/dispatch/core.ts`).
   const finalJob = await new Promise<AgentJob>((resolve, reject) => {
-    dispatch({
+    dispatchWithWorkspace({
       repo: ls.repo,
       task: prompt,
-      allowTools,
+      workspace: "slack-worker",
+      // `DANXBOT_STOP_URL` + `DANXBOT_SLACK_*_URL` are auto-injected by
+      // `dispatchWithWorkspace` from the dispatchId — the caller can't
+      // pre-compute them. `DANXBOT_WORKER_PORT` is the only caller-
+      // supplied placeholder the slack-worker workspace requires; the
+      // workspace references it from its `.claude/settings.json` env
+      // block so the dispatched agent's MCP subprocesses resolve
+      // `${DANXBOT_WORKER_PORT}` at startup.
+      overlay: {
+        DANXBOT_WORKER_PORT: String(ls.repo.workerPort),
+      },
       apiDispatchMeta: { trigger: "slack", metadata: slackMeta },
       resumeSessionId,
       parentJobId,

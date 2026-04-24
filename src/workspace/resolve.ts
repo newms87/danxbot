@@ -70,6 +70,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { readFlag } from "../critical-failure.js";
+import { isFeatureEnabled } from "../settings-file.js";
 import type { RepoContext } from "../types.js";
 import { parseManifest, type WorkspaceManifest } from "./manifest.js";
 import { buildSubstitutionMap, substitute, validateOverlay } from "./placeholders.js";
@@ -130,6 +131,13 @@ type GateEvaluator = (repo: RepoContext) => boolean;
 const GATE_REGISTRY: Readonly<Record<string, GateEvaluator>> = Object.freeze({
   "repo.trelloEnabled = true": (repo) => repo.trelloEnabled === true,
   "no CRITICAL_FAILURE flag": (repo) => readFlag(repo.localPath) === null,
+  // Three-valued settings toggle: `overrides.slack.enabled === false` FAILS
+  // the gate; `true` passes; `null` defers to the env default
+  // (`ctx.slack.enabled`). `isFeatureEnabled` implements exactly that
+  // evaluation — see `src/settings-file.ts`. The gate string uses `settings`
+  // (not `overrides`) because operators read this from the workspace manifest
+  // and the dashboard labels the toggle as a settings-file field.
+  "settings.slack.enabled ≠ false": (repo) => isFeatureEnabled(repo, "slack"),
 });
 
 function workspaceRoot(repo: RepoContext, name: string): string {

@@ -33,10 +33,12 @@ vi.mock("../agent/router.js", () => ({
   runRouter: mockRunRouter,
 }));
 
-// --- Dispatch core mock (the Phase 2 entry point) ---
+// --- Dispatch core mock (the Phase 4 workspace entry point) ---
 
-// A list of every `dispatch()` input observed in the test, plus the
-// resolver that fires the `onComplete` callback with a fake AgentJob.
+// A list of every `dispatchWithWorkspace()` input observed in the test,
+// plus the resolver that fires the `onComplete` callback with a fake
+// AgentJob. Retained as `dispatchCalls` (not renamed) since
+// orchestrating the call shape didn't change — only the callee name.
 interface DispatchCall {
   input: Record<string, unknown>;
   complete: (job: {
@@ -51,7 +53,7 @@ const dispatchCalls: DispatchCall[] = [];
 const mockDispatch = vi.fn();
 
 vi.mock("../dispatch/core.js", () => ({
-  dispatch: (...args: unknown[]) => mockDispatch(...args),
+  dispatchWithWorkspace: (...args: unknown[]) => mockDispatch(...args),
 }));
 
 // --- findLatestDispatchBySlackThread mock (thread continuity lookup) ---
@@ -270,7 +272,7 @@ describe("deep agent dispatch", () => {
     );
   });
 
-  it("calls dispatch() with profile=slack allowlist and apiDispatchMeta carrying slackThreadTs+slackChannelId", async () => {
+  it("calls dispatchWithWorkspace with workspace='slack-worker' and DANXBOT_WORKER_PORT in overlay; slack URLs auto-injected by the dispatch core", async () => {
     arrangeDispatchSuccess();
 
     await handler({ message: makeSlackMessage({ ts: "555.111" }), client });
@@ -278,10 +280,26 @@ describe("deep agent dispatch", () => {
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const input = mockDispatch.mock.calls[0][0] as Record<string, unknown>;
 
-    // Profile allowlist — slack profile = Read/Glob/Grep/Bash, frozen.
-    expect(input.allowTools).toEqual(["Read", "Glob", "Grep", "Bash"]);
+    // P4 contract: the slack listener names the workspace and supplies
+    // the port placeholder only. The dispatch core auto-injects
+    // `DANXBOT_STOP_URL` + `DANXBOT_SLACK_*_URL` from the dispatchId
+    // (callers can't pre-compute them). Tool allowlist is NOT a caller
+    // concern anymore — the workspace's `allowed-tools.txt` owns it, and
+    // the workspace gate controls whether this dispatch runs at all.
+    expect(input.workspace).toBe("slack-worker");
+    expect(input).not.toHaveProperty("allowTools");
+    const overlay = input.overlay as Record<string, string>;
+    expect(overlay.DANXBOT_WORKER_PORT).toBe(
+      String((input.repo as Record<string, unknown>).workerPort),
+    );
+    // The listener MUST NOT pre-inject slack URL placeholders — that is
+    // the dispatch core's responsibility (URLs are dispatchId-derived).
+    expect(overlay.DANXBOT_SLACK_REPLY_URL).toBeUndefined();
+    expect(overlay.DANXBOT_SLACK_UPDATE_URL).toBeUndefined();
 
-    // apiDispatchMeta carries the Slack trigger + full metadata.
+    // apiDispatchMeta carries the Slack trigger + full metadata. Still
+    // persisted on the dispatch row so the dashboard can filter by
+    // trigger; no longer drives tool resolution.
     const meta = input.apiDispatchMeta as {
       trigger: string;
       metadata: Record<string, unknown>;

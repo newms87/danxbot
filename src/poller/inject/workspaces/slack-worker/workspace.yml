@@ -1,0 +1,9 @@
+name: slack-worker
+description: Slack deep-agent dispatch — read-only codebase Q&A with replies via MCP
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANXBOT_WORKER_PORT
+  - DANXBOT_SLACK_REPLY_URL
+  - DANXBOT_SLACK_UPDATE_URL
+required-gates:
+  - "settings.slack.enabled ≠ false"

@@ -1,0 +1,5 @@
+{
+  "env": {
+    "DANXBOT_WORKER_PORT": "${DANXBOT_WORKER_PORT}"
+  }
+}

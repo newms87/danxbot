@@ -242,12 +242,16 @@ function buildResolveOptions(
       role: input.schemaRole,
     };
   }
-  // Slack-triggered dispatches get per-dispatch reply + update URLs that
-  // resolve back to the worker's `/api/slack/{reply,update}/:id`
-  // endpoints. The resolver injects these into the danxbot MCP server's
-  // env and adds the Slack tools to `allowedTools`; any other dispatch
-  // trigger gets neither — see `.claude/rules/agent-dispatch.md` and the
-  // Phase 1 card `cJahgqlF` for the full enforcement contract.
+  // TRANSITIONAL (workspace-dispatch epic P4): this branch is only exercised
+  // by LEGACY callers that still invoke `dispatch()` with
+  // `apiDispatchMeta.trigger === "slack"` and no workspace. Production Slack
+  // dispatches migrated to `dispatchWithWorkspace({workspace: "slack-worker",
+  // overlay: {...slack URLs}})` in P4 — the workspace declares the two
+  // placeholders, and `dispatchWithWorkspace` threads them into
+  // `DANXBOT_ENTRY.build({slack})` directly. The allowed-tools.txt in the
+  // slack-worker workspace lists `mcp__danxbot__danxbot_slack_*` explicitly
+  // (no runtime injection needed). Do not add new callers of the legacy
+  // trigger-based path; P7 removes it once no production caller remains.
   if (input.apiDispatchMeta.trigger === "slack") {
     opts.slack = {
       replyUrl: `http://localhost:${input.repo.workerPort}/api/slack/reply/${dispatchId}`,
@@ -536,11 +540,19 @@ export async function dispatchWithWorkspace(
   const workerStopUrl = `http://localhost:${input.repo.workerPort}/api/stop/${dispatchId}`;
 
   // Inject infrastructure placeholders the resolver expects but the caller
-  // can't pre-compute (DANXBOT_STOP_URL is dispatchId-derived). Caller
-  // overlay wins over auto-injected values — tests rely on that, see
-  // `WorkspaceDispatchInput.overlay`.
+  // can't pre-compute (every URL below is dispatchId-derived, and
+  // `dispatchId` is generated inside this function). Caller overlay wins
+  // over auto-injected values — tests rely on that, see
+  // `WorkspaceDispatchInput.overlay`. Non-Slack workspaces simply don't
+  // declare the DANXBOT_SLACK_* placeholders and the extra keys are
+  // ignored by the resolver; the slack-worker workspace declares both as
+  // `required-placeholders` so these auto-injected values satisfy its
+  // overlay contract without forcing the caller to compute per-dispatch
+  // URLs.
   const overlay: Record<string, string> = {
     DANXBOT_STOP_URL: workerStopUrl,
+    DANXBOT_SLACK_REPLY_URL: `http://localhost:${input.repo.workerPort}/api/slack/reply/${dispatchId}`,
+    DANXBOT_SLACK_UPDATE_URL: `http://localhost:${input.repo.workerPort}/api/slack/update/${dispatchId}`,
     ...input.overlay,
   };
 
@@ -560,9 +572,28 @@ export async function dispatchWithWorkspace(
   ) as { mcpServers: Record<string, unknown> };
   cleanupWorkspaceMcpSettings(workspace.mcpSettingsPath);
 
+  // Slack workspace integration: a workspace that declares both slack URL
+  // placeholders (slack-worker) uses overlay substitution to deliver per-
+  // dispatch reply/update endpoints. We thread those into the danxbot
+  // server factory's `opts.slack` so the server advertises
+  // `danxbot_slack_*` and receives the URLs via env. The check is on
+  // both keys together — a half-declared slack surface is a
+  // misconfiguration, not a partial feature, and would surface as a
+  // Slack call hitting an undefined URL at runtime. `DANXBOT_ENTRY.build`
+  // (`src/agent/mcp-registry.ts`) is the single place that turns opts.slack
+  // into the `DANXBOT_SLACK_*_URL` env block; this caller never writes
+  // those env vars directly.
+  const slackReplyUrl = overlay.DANXBOT_SLACK_REPLY_URL;
+  const slackUpdateUrl = overlay.DANXBOT_SLACK_UPDATE_URL;
+  const slack =
+    slackReplyUrl && slackUpdateUrl
+      ? { replyUrl: slackReplyUrl, updateUrl: slackUpdateUrl }
+      : undefined;
+
   const danxbotServer = defaultMcpRegistry[DANXBOT_SERVER_NAME].build({
     allowTools: [],
     danxbotStopUrl: workerStopUrl,
+    slack,
   });
   const mcpServers: Record<string, unknown> = {
     ...workspaceMcp.mcpServers,

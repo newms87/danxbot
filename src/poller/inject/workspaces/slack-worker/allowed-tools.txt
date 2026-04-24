@@ -1,0 +1,6 @@
+Read
+Glob
+Grep
+Bash
+mcp__danxbot__danxbot_slack_reply
+mcp__danxbot__danxbot_slack_post_update

@@ -360,7 +360,11 @@ describe("poll", () => {
     });
     mockReaddirSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return [];
-      if (path.endsWith("/inject/rules")) return ["danx-slack-agent.md"];
+      // Workspace-dispatch P4 (Trello `gAeJBEDr`): danx-slack-agent.md
+      // moved from `inject/rules/` into `inject/workspaces/slack-worker/
+      // .claude/rules/`. The standalone `inject/rules/` tree is empty now
+      // — rules are mirrored per-workspace instead.
+      if (path.endsWith("/inject/rules")) return [];
       if (path.endsWith("/inject/tools")) return ["danx-helper.sh"];
       // Workspace-dispatch P3 (Trello `q5aFuINM`): skills moved out of
       // `inject/skills/` into `inject/workspaces/trello-worker/.claude/
@@ -386,18 +390,17 @@ describe("poll", () => {
       "/test/repos/test-repo/.danxbot/workspaces/";
     const repoRootClaudePrefix = "/test/repos/test-repo/.claude/";
 
-    // Every artifact lands in the workspace. After P3 of the workspace-
-    // dispatch epic the danx-halt-flag.md rule and danx-{next,ideate,
-    // start,triage} skills moved out of the singular workspace into the
-    // trello-worker workspace fixture; the singular workspace keeps
-    // only the per-repo generated rules + the still-unmigrated
-    // danx-slack-agent.md and shared tools.
+    // Every artifact lands in the workspace. After P4 of the workspace-
+    // dispatch epic (Trello `gAeJBEDr`) danx-slack-agent.md joined
+    // danx-halt-flag.md and danx-{next,ideate,start,triage} in their
+    // respective workspace fixtures (slack-worker / trello-worker).
+    // The singular workspace now keeps only the per-repo generated
+    // rules + shared tools.
     const expectedWorkspaceArtifacts = [
       `${workspaceClaudePrefix}rules/danx-repo-config.md`,
       `${workspaceClaudePrefix}rules/danx-repo-overview.md`,
       `${workspaceClaudePrefix}rules/danx-repo-workflow.md`,
       `${workspaceClaudePrefix}rules/danx-tools.md`,
-      `${workspaceClaudePrefix}rules/danx-slack-agent.md`,
       `${workspaceClaudePrefix}rules/danx-trello-config.md`,
       `${workspaceClaudePrefix}tools/danx-helper.sh`,
     ];

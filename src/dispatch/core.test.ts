@@ -21,7 +21,7 @@
  *     workspace-dispatch epic. See `dispatchWithWorkspace`.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { buildClaudeInvocation } from "../agent/claude-invocation.js";
 import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
@@ -78,7 +78,15 @@ vi.mock("../agent/stall-detector.js", () => ({
   DEFAULT_MAX_NUDGES: 3,
 }));
 
-import { dispatch, getActiveJob, listActiveJobs } from "./core.js";
+import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import {
+  dispatch,
+  dispatchWithWorkspace,
+  getActiveJob,
+  listActiveJobs,
+} from "./core.js";
 // The mocked `../config.js` module exposes a plain mutable object. The cast
 // to `{ isHost: boolean }` defeats the readonly type from the real config
 // module — in the mocked factory, the object is a plain literal and writes
@@ -753,6 +761,163 @@ describe("dispatch() — slack trigger injects slack URLs into MCP settings (Pha
     const opts = mockSpawnAgent.mock.calls[0][0];
     expect(opts.dispatch).toEqual(SLACK_META);
     expect(result.dispatchId).toBeTruthy();
+  });
+});
+
+describe("dispatchWithWorkspace() — slack-worker integration (Phase 4)", () => {
+  // Copy the real `src/poller/inject/workspaces/slack-worker/` fixture
+  // into a per-test tmpdir so the resolver walks actual slack-worker
+  // files (workspace.yml + allowed-tools.txt + .mcp.json + CLAUDE.md +
+  // .claude/). This validates the published workspace contract end-to-
+  // end without needing to mock resolveWorkspace.
+  //
+  // The `makeRepoContext` default has `slack.enabled = true`, so the
+  // `settings.slack.enabled ≠ false` gate passes without a
+  // `.danxbot/settings.json` file.
+  const slackWorkerSrc = resolve(
+    __dirname,
+    "..",
+    "poller",
+    "inject",
+    "workspaces",
+    "slack-worker",
+  );
+
+  let tmpRepoDir: string;
+  let slackRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-slack-dispatch-"));
+    const dest = resolve(
+      tmpRepoDir,
+      ".danxbot",
+      "workspaces",
+      "slack-worker",
+    );
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(slackWorkerSrc, dest, { recursive: true });
+    slackRepo = makeRepoContext({ localPath: tmpRepoDir });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  const SLACK_META: DispatchTriggerMetadata = {
+    trigger: "slack",
+    metadata: {
+      channelId: "C123",
+      threadTs: "1700.001",
+      messageTs: "1700.002",
+      user: "U1",
+      userName: null,
+      messageText: "why the deploy is stuck?",
+    },
+  };
+
+  it("auto-injects DANXBOT_SLACK_REPLY_URL and DANXBOT_SLACK_UPDATE_URL into the overlay so callers never pre-compute dispatchId-derived URLs", async () => {
+    // The listener passes ONLY `DANXBOT_WORKER_PORT`; the dispatch core
+    // fills in the rest. Observable boundary: the danxbot MCP server's
+    // env in the written settings.json must contain both URLs pointing
+    // at the worker's per-dispatch endpoints.
+    const result = await dispatchWithWorkspace({
+      repo: slackRepo,
+      task: "investigate",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+      apiDispatchMeta: SLACK_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8"));
+    const env = settings.mcpServers.danxbot.env;
+    expect(env.DANXBOT_SLACK_REPLY_URL).toBe(
+      `http://localhost:${slackRepo.workerPort}/api/slack/reply/${result.dispatchId}`,
+    );
+    expect(env.DANXBOT_SLACK_UPDATE_URL).toBe(
+      `http://localhost:${slackRepo.workerPort}/api/slack/update/${result.dispatchId}`,
+    );
+    expect(env.DANXBOT_STOP_URL).toBe(
+      `http://localhost:${slackRepo.workerPort}/api/stop/${result.dispatchId}`,
+    );
+  });
+
+  it("exposes the slack-worker allowed tools including danxbot_slack_* without any runtime trigger-based injection", async () => {
+    await dispatchWithWorkspace({
+      repo: slackRepo,
+      task: "investigate",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+      apiDispatchMeta: SLACK_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    // P4 contract: the workspace's allowed-tools.txt is the source of
+    // truth. Tools appear in the allowlist because they're declared in
+    // the file, not because `apiDispatchMeta.trigger === "slack"` triggered
+    // a runtime injection. The danxbot_complete tool is still suffix-
+    // injected by dispatchWithWorkspace as infrastructure.
+    expect(opts.allowedTools).toEqual([
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash",
+      "mcp__danxbot__danxbot_slack_reply",
+      "mcp__danxbot__danxbot_slack_post_update",
+      "mcp__danxbot__danxbot_complete",
+    ]);
+  });
+
+  it("lands the agent's cwd in the slack-worker workspace directory", async () => {
+    await dispatchWithWorkspace({
+      repo: slackRepo,
+      task: "investigate",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+      apiDispatchMeta: SLACK_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.cwd).toBe(
+      resolve(tmpRepoDir, ".danxbot", "workspaces", "slack-worker"),
+    );
+  });
+
+  it("refuses to resolve when operator flipped overrides.slack.enabled to false — settings.slack.enabled ≠ false gate fails", async () => {
+    // Three-valued settings toggle: operator sets overrides.slack.enabled
+    // to false on the Agents tab, the gate fails, dispatchWithWorkspace
+    // rejects before spawnAgent is ever called. The poller-halt contract
+    // uses CRITICAL_FAILURE for env-level breakage; operator toggles are
+    // gated at the workspace entry.
+    const { writeFileSync } = await import("node:fs");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot"), { recursive: true });
+    writeFileSync(
+      resolve(tmpRepoDir, ".danxbot", "settings.json"),
+      JSON.stringify({
+        overrides: {
+          slack: { enabled: false },
+          trelloPoller: { enabled: null },
+          dispatchApi: { enabled: null },
+        },
+        display: {},
+        meta: { updatedAt: "2026-04-24T00:00:00Z", updatedBy: "setup" },
+      }),
+    );
+
+    await expect(
+      dispatchWithWorkspace({
+        repo: slackRepo,
+        task: "should not spawn",
+        workspace: "slack-worker",
+        overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+        apiDispatchMeta: SLACK_META,
+      }),
+    ).rejects.toThrow(/settings\.slack\.enabled/);
+
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 });
 

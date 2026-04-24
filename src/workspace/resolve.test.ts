@@ -418,6 +418,106 @@ required-gates:
       ).not.toThrow();
     });
 
+    it("passes the 'settings.slack.enabled ≠ false' gate when slack is enabled (env default true, no override)", () => {
+      // The slack-worker workspace (shipped in P4) gates on this string.
+      // Default `makeRepoContext` has `slack.enabled = true`; with no
+      // `<repo>/.danxbot/settings.json` present, `isFeatureEnabled` uses
+      // the env default (true) and the gate passes.
+      writeFileSync(
+        resolve(
+          repoDir,
+          ".danxbot",
+          "workspaces",
+          "test-workspace",
+          "workspace.yml",
+        ),
+        `name: test-workspace
+description: test
+required-placeholders: []
+required-gates:
+  - "settings.slack.enabled ≠ false"
+`,
+      );
+      writeFileSync(
+        resolve(
+          repoDir,
+          ".danxbot",
+          "workspaces",
+          "test-workspace",
+          ".mcp.json",
+        ),
+        JSON.stringify({ mcpServers: {} }),
+      );
+      writeFileSync(
+        resolve(
+          repoDir,
+          ".danxbot",
+          "workspaces",
+          "test-workspace",
+          ".claude",
+          "settings.json",
+        ),
+        JSON.stringify({ env: {} }),
+      );
+      expect(() =>
+        capture(
+          resolveWorkspace({
+            repo,
+            workspaceName: "test-workspace",
+            overlay: {},
+          }),
+        ),
+      ).not.toThrow();
+    });
+
+    it("fails the 'settings.slack.enabled ≠ false' gate when operator flipped overrides.slack.enabled to false", () => {
+      // Three-valued settings toggle: overrides.slack.enabled === false
+      // is the explicit "off" state. Any dispatch that requires slack must
+      // refuse to resolve; the poller-halt contract exists for env-level
+      // failures but operator overrides are gated at the workspace entry.
+      writeFileSync(
+        resolve(
+          repoDir,
+          ".danxbot",
+          "workspaces",
+          "test-workspace",
+          "workspace.yml",
+        ),
+        `name: test-workspace
+description: test
+required-placeholders: []
+required-gates:
+  - "settings.slack.enabled ≠ false"
+`,
+      );
+      writeFileSync(
+        resolve(repoDir, ".danxbot", "settings.json"),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: false },
+            trelloPoller: { enabled: null },
+            dispatchApi: { enabled: null },
+          },
+          display: {},
+          meta: { updatedAt: "2026-04-24T00:00:00Z", updatedBy: "setup" },
+        }),
+      );
+      expect(() =>
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: {},
+        }),
+      ).toThrow(WorkspaceGateError);
+      expect(() =>
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: {},
+        }),
+      ).toThrow(/settings\.slack\.enabled/);
+    });
+
     it("throws WorkspaceGateUnknownError for an unregistered gate string", () => {
       writeFileSync(
         resolve(
