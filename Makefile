@@ -70,6 +70,8 @@ launch-worker: ## Start a worker for a repo (usage: make launch-worker REPO=plat
 	if [ -z "$$PORT" ]; then echo "Error: DANXBOT_WORKER_PORT missing in $$REPO_ENV"; exit 1; fi; \
 	export DANXBOT_WORKER_PORT="$$PORT"; \
 	export DANXBOT_REPO_ROOT="$$(realpath "$(REPOS_DIR)/$(REPO)")"; \
+	export CLAUDE_AUTH_DIR="$$(realpath "$(REPOS_DIR)/danxbot/claude-auth")"; \
+	export CLAUDE_PROJECTS_DIR="$$(realpath "$(REPOS_DIR)/danxbot/claude-projects")"; \
 	docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$(REPO)" up -d
 
 stop-worker: ## Stop a worker (usage: make stop-worker REPO=platform)
