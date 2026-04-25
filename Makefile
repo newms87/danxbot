@@ -70,15 +70,8 @@ stop-infra: ## Stop shared infrastructure
 launch-worker: ## Start a worker for a repo (usage: make launch-worker REPO=platform)
 	@if [ -z "$(REPO)" ]; then echo "Error: REPO is required. Usage: make launch-worker REPO=platform"; exit 1; fi
 	@COMPOSE_FILE="$(REPOS_DIR)/$(REPO)/.danxbot/config/compose.yml"; \
-	REPO_ENV="$(REPOS_DIR)/$(REPO)/.danxbot/.env"; \
 	if [ ! -f "$$COMPOSE_FILE" ]; then echo "Error: $$COMPOSE_FILE not found"; exit 1; fi; \
-	if [ ! -f "$$REPO_ENV" ]; then echo "Error: $$REPO_ENV not found — needs DANXBOT_WORKER_PORT"; exit 1; fi; \
-	PORT=$$(grep -E '^DANXBOT_WORKER_PORT=' "$$REPO_ENV" | tail -n1 | cut -d= -f2-); \
-	if [ -z "$$PORT" ]; then echo "Error: DANXBOT_WORKER_PORT missing in $$REPO_ENV"; exit 1; fi; \
-	export DANXBOT_WORKER_PORT="$$PORT"; \
-	export DANXBOT_REPO_ROOT="$$(realpath "$(REPOS_DIR)/$(REPO)")"; \
-	export CLAUDE_AUTH_DIR="$$(realpath "$(REPOS_DIR)/danxbot/claude-auth")"; \
-	export CLAUDE_PROJECTS_DIR="$$(realpath "$(REPOS_DIR)/danxbot/claude-projects")"; \
+	REPOS_DIR="$(REPOS_DIR)" . ./scripts/worker-env.sh "$(REPO)" || exit 1; \
 	if [ "$(REPO)" = "danxbot" ]; then \
 		./scripts/check-claude-auth-env.sh || exit 1; \
 	fi; \
@@ -89,17 +82,28 @@ stop-worker: ## Stop a worker (usage: make stop-worker REPO=platform)
 	docker compose -p "danxbot-worker-$(REPO)" down
 
 launch-all-workers: ## Start workers for all configured repos
+	@# Each iteration runs in a `( ... )` subshell so the per-repo
+	@# exports from `scripts/worker-env.sh` (DANXBOT_WORKER_PORT etc.)
+	@# do not leak between iterations. Without the subshell, repo A's
+	@# port would still be exported when repo B sources the helper, and
+	@# any failure mode in the helper that left the variable unchanged
+	@# would silently reuse A's value for B (Trello oGbjLtjN).
 	@if [ -z "$(REPOS)" ]; then echo "Error: REPOS not set in .env"; exit 1; fi; \
 	IFS=',' read -ra ENTRIES <<< "$(REPOS)"; \
 	for entry in "$${ENTRIES[@]}"; do \
 		name="$${entry%%:*}"; \
 		COMPOSE_FILE="$(REPOS_DIR)/$$name/.danxbot/config/compose.yml"; \
-		if [ -f "$$COMPOSE_FILE" ]; then \
-			echo "Starting worker for $$name..."; \
-			docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$$name" up -d; \
-		else \
+		if [ ! -f "$$COMPOSE_FILE" ]; then \
 			echo "Warning: $$COMPOSE_FILE not found, skipping $$name"; \
+			continue; \
 		fi; \
+		echo "Starting worker for $$name..."; \
+		( set -e; \
+		  REPOS_DIR="$(REPOS_DIR)" . ./scripts/worker-env.sh "$$name"; \
+		  if [ "$$name" = "danxbot" ]; then \
+		      ./scripts/check-claude-auth-env.sh; \
+		  fi; \
+		  docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$$name" up -d ) || exit 1; \
 	done
 
 stop-all-workers: ## Stop all repo workers
