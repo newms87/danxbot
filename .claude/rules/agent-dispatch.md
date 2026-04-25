@@ -216,7 +216,9 @@ worker restart.
 
 ## Runtime Modes At A Glance
 
-- **Worker mode** (`DANXBOT_REPO_NAME` set): one process per repo. Starts dispatch API (`/api/launch`, `/api/cancel`, `/api/stop`, `/api/status`), Slack listener (if configured), and poller (only if `DANX_TRELLO_ENABLED=true` in the repo's `.danxbot/.env`). Worker port is sourced from `DANXBOT_WORKER_PORT` in `<repo>/.danxbot/.env` (local dev) or `process.env.DANXBOT_WORKER_PORT` injected by compose from `.danxbot/deployments/<target>.yml` (production). Spawned via `make launch-worker REPO=<name>` (docker) or `make launch-worker-host REPO=<name>` (host).
+- **Worker mode** (`DANXBOT_REPO_NAME` set): one process per repo. Starts dispatch API (`/api/launch`, `/api/cancel`, `/api/stop`, `/api/status`, `/api/jobs`), Slack listener (if configured), and poller (only if `DANX_TRELLO_ENABLED=true` in the repo's `.danxbot/.env`). Worker port is sourced from `DANXBOT_WORKER_PORT` in `<repo>/.danxbot/.env` (local dev) or `process.env.DANXBOT_WORKER_PORT` injected by compose from `.danxbot/deployments/<target>.yml` (production). Spawned via `make launch-worker REPO=<name>` (docker) or `make launch-worker-host REPO=<name>` (host).
+
+  **`GET /api/jobs`** returns `{jobs: getJobStatus[]}` — every job currently in `activeJobs`, both running and recently-finished within the TTL grace window. Primary consumer is the system-test isolation helper in `src/__tests__/system/run-system-tests.sh` (cancels in-flight dispatches before injecting its fixture card so `teamRunning` is free for the test). Not currently exposed via the dashboard proxy — local-worker only.
 - **Dashboard mode** (`DANXBOT_REPO_NAME` unset): one shared process. Runs migrations, dashboard HTTP server, SSE stream, analytics. No poller, no Slack, no claude spawning.
 
 Dashboard mode never dispatches agents. Only worker mode spawns claude.

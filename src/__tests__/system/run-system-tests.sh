@@ -608,6 +608,14 @@ test_poller() {
   # This test requires Trello API credentials and a running poller.
   # It creates a real card, waits for the poller to process it, and cleans up.
   # Skipped by default since it requires a full environment setup.
+  #
+  # Isolation: writes overrides.trelloPoller.pickupNamePrefix into the
+  # repo's settings.json BEFORE creating the card so the poller only
+  # picks up cards starting with the test prefix. Without this filter, a
+  # pre-existing real ToDo card (or a stuck in-flight dispatch) races the
+  # test card and the 120s pickup deadline expires while the worker is
+  # busy with unrelated work. Cleared on every exit path. See Trello
+  # `IleofrBj` and `getTrelloPollerPickupPrefix` in `src/settings-file.ts`.
 
   if [[ -z "${TRELLO_API_KEY:-}" || -z "${TRELLO_API_TOKEN:-}" ]]; then
     skip "Poller test requires TRELLO_API_KEY and TRELLO_API_TOKEN env vars"
@@ -621,8 +629,66 @@ test_poller() {
   local in_progress_list="${TRELLO_IN_PROGRESS_LIST_ID:-69ddc39f8208297c5bf74a32}"
   local feature_label="${TRELLO_FEATURE_LABEL_ID:-69ddc215fd43f1b7f1a7117d}"
 
+  local repo_dir="${PROJECT_ROOT}/repos/danxbot"
+  local settings_file="${repo_dir}/.danxbot/settings.json"
+  local pickup_prefix="[System Test]"
+
+  # Engage the poller filter before doing anything else. The repo's worker
+  # re-reads settings on every poll tick — no restart required.
+  if ! _poller_set_pickup_prefix "$settings_file" "$pickup_prefix"; then
+    fail "Failed to write pickupNamePrefix to $settings_file"
+    return
+  fi
+  log_info "Engaged poller pickupNamePrefix=\"${pickup_prefix}\""
+
+  # Clear any pre-existing CRITICAL_FAILURE flag from a prior test run.
+  # The flag halts the poller until cleared, so a leftover from yesterday
+  # would silently block today's run forever. Idempotent on no-flag.
+  curl -s --max-time 10 -X DELETE \
+    "${WORKER_URL}/api/poller/critical-failure" >/dev/null 2>&1 || true
+
+  # Cancel any in-flight dispatches so the worker's `teamRunning` slot is
+  # free for our test card. Without this step, a pre-existing dispatch
+  # (e.g. a stuck card with a 1-hour inactivity timeout that the poller
+  # already picked up before the filter was set) blocks every subsequent
+  # poll tick — the test waits forever even though the filter is correct.
+  # See Trello `IleofrBj` for the empirical reproduction. Best-effort: a
+  # 404 / 409 / network error here just means there was nothing to cancel,
+  # which is the steady-state happy path on a clean worker.
+  local jobs_response
+  jobs_response=$(http_get "${WORKER_URL}/api/jobs")
+  local jobs_to_cancel
+  jobs_to_cancel=$(node -e '
+    const data = JSON.parse(process.argv[1] || "{}");
+    const ids = (data.jobs || [])
+      .filter((j) => j.status === "running")
+      .map((j) => j.job_id);
+    process.stdout.write(ids.join("\n"));
+  ' "$jobs_response" 2>/dev/null)
+  if [[ -n "$jobs_to_cancel" ]]; then
+    while IFS= read -r jid; do
+      [[ -z "$jid" ]] && continue
+      log_info "Cancelling pre-existing in-flight job $jid"
+      http_post "${WORKER_URL}/api/cancel/${jid}" "{\"api_token\":\"${API_TOKEN}\"}" >/dev/null 2>&1 || true
+    done <<< "$jobs_to_cancel"
+    # Give the worker a beat to release `teamRunning` so the next poll
+    # tick (every 60s) finds it free. Cancel sends SIGTERM and waits up
+    # to 5s for graceful exit before SIGKILL — 8s covers both branches.
+    # Then clear any CRITICAL_FAILURE flag the post-dispatch check wrote
+    # in response to our cancellation: the canceled card stayed in ToDo
+    # because we killed it, not because of an env-level blocker — the
+    # halt-flag semantics don't apply to operator-initiated cancels.
+    # Without this clear, the poller halts and the test card never gets
+    # picked up. Endpoint is idempotent on a missing flag (DELETE /api/
+    # poller/critical-failure returns 200 either way).
+    sleep 8
+    curl -s --max-time 10 -X DELETE \
+      "${WORKER_URL}/api/poller/critical-failure" >/dev/null 2>&1 || true
+    log_info "Cleared CRITICAL_FAILURE flag (post-cancel housekeeping)"
+  fi
+
   # Create a test card in ToDo
-  local card_name="[System Test] Read package.json name — $(date +%s)"
+  local card_name="${pickup_prefix} Read package.json name — $(date +%s)"
   local card_desc="System test card. Read package.json and report the project name. Auto-created, safe to delete."
   local card_response
   card_response=$(curl -s --max-time 10 -X POST \
@@ -636,6 +702,7 @@ test_poller() {
 
   if [[ -z "$card_id" ]]; then
     fail "Failed to create test card: $card_response"
+    _poller_clear_pickup_prefix "$settings_file"
     return
   fi
   pass "Test card created (id: $card_id)"
@@ -646,9 +713,14 @@ test_poller() {
   local card_list=""
   while [[ $elapsed -lt 120 ]]; do
     local card_data
+    # `|| true` keeps a transient curl/DNS failure (exit 6 / 7) from
+    # tripping `set -e` mid-poll — `card_data` becomes empty, the
+    # next json_field returns "", and the loop just retries on the
+    # next sleep iteration. Without this, one DNS hiccup ends the
+    # whole test instead of being absorbed by the retry budget.
     card_data=$(curl -s --max-time 10 \
       "https://api.trello.com/1/cards/${card_id}?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" \
-      2>/dev/null)
+      2>/dev/null || true)
     card_list=$(json_field "$card_data" "idList")
     if [[ "$card_list" == "$in_progress_list" || "$card_list" == "$done_list" ]]; then
       break
@@ -660,9 +732,10 @@ test_poller() {
   if [[ "$card_list" == "$in_progress_list" || "$card_list" == "$done_list" ]]; then
     pass "Card moved to In Progress or Done"
   else
-    fail "Card still in original list after 120s"
+    fail "Card still in original list after 120s — pickupNamePrefix filter failed to deliver the card. Check worker logs for the filter line ('pickupNamePrefix=...') and confirm settings.json was written before the card was created."
     # Cleanup
     curl -s -X DELETE "https://api.trello.com/1/cards/${card_id}?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" >/dev/null 2>&1
+    _poller_clear_pickup_prefix "$settings_file"
     return
   fi
 
@@ -704,11 +777,77 @@ test_poller() {
     log_info "No comments found on card (retro comment may not have been added)"
   fi
 
-  # Cleanup: delete the test card
+  # Cleanup: delete the test card and clear the poller filter
   curl -s -X DELETE "https://api.trello.com/1/cards/${card_id}?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" >/dev/null 2>&1
   pass "Test card cleaned up"
+  _poller_clear_pickup_prefix "$settings_file"
+  log_info "Cleared poller pickupNamePrefix"
 
   log_info "Completed in $((SECONDS - start_time))s"
+}
+
+# Helper: write a `pickupNamePrefix` into the repo's settings.json so the
+# poller only dispatches matching cards. Merges into existing settings via
+# node so unrelated overrides / display sections survive. Stamps the
+# writer as `setup` (the closest existing SettingsWriter literal — the
+# system test runner is operator-driven, not the dashboard). Returns
+# non-zero on failure so the caller can `fail` cleanly.
+_poller_set_pickup_prefix() {
+  local settings_file="$1"
+  local prefix="$2"
+  mkdir -p "$(dirname "$settings_file")"
+  node -e '
+    const fs = require("fs");
+    const path = process.argv[1];
+    const prefix = process.argv[2];
+    let cur = {
+      overrides: {
+        slack: { enabled: null },
+        trelloPoller: { enabled: null, pickupNamePrefix: null },
+        dispatchApi: { enabled: null },
+      },
+      display: {},
+      meta: {},
+    };
+    if (fs.existsSync(path)) {
+      try { cur = JSON.parse(fs.readFileSync(path, "utf-8")); } catch {}
+    }
+    cur.overrides = cur.overrides || {};
+    cur.overrides.trelloPoller = {
+      ...(cur.overrides.trelloPoller || {}),
+      enabled: cur.overrides.trelloPoller?.enabled ?? null,
+      pickupNamePrefix: prefix,
+    };
+    cur.meta = { updatedAt: new Date().toISOString(), updatedBy: "setup" };
+    fs.writeFileSync(path, JSON.stringify(cur, null, 2) + "\n");
+  ' "$settings_file" "$prefix" 2>/dev/null
+}
+
+# Helper: clear `pickupNamePrefix` (set to null) and stamp meta. Always
+# safe to call — missing file becomes a no-op since there's nothing
+# to filter on. Used on every test_poller exit path so a failed test
+# never leaves the live worker filtered to a deleted test card.
+_poller_clear_pickup_prefix() {
+  local settings_file="$1"
+  if [[ ! -f "$settings_file" ]]; then return 0; fi
+  node -e '
+    const fs = require("fs");
+    const path = process.argv[1];
+    let cur;
+    try {
+      cur = JSON.parse(fs.readFileSync(path, "utf-8"));
+    } catch {
+      process.exit(0);
+    }
+    cur.overrides = cur.overrides || {};
+    cur.overrides.trelloPoller = {
+      ...(cur.overrides.trelloPoller || {}),
+      enabled: cur.overrides.trelloPoller?.enabled ?? null,
+      pickupNamePrefix: null,
+    };
+    cur.meta = { updatedAt: new Date().toISOString(), updatedBy: "setup" };
+    fs.writeFileSync(path, JSON.stringify(cur, null, 2) + "\n");
+  ' "$settings_file" 2>/dev/null || true
 }
 
 test_allow_tools() {

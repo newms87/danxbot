@@ -146,8 +146,11 @@ vi.mock("../dispatch/core.js", () => ({
 }));
 
 const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
+const mockGetTrelloPollerPickupPrefix = vi.fn().mockReturnValue(null);
 vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
+  getTrelloPollerPickupPrefix: (...args: unknown[]) =>
+    mockGetTrelloPollerPickupPrefix(...args),
 }));
 
 const mockGenerateWorkspace = vi
@@ -708,6 +711,147 @@ describe("poll — trelloPoller feature toggle", () => {
 
     expect(mockFetchNeedsHelpCards).toHaveBeenCalled();
     expect(mockFetchTodoCards).toHaveBeenCalled();
+  });
+});
+
+describe("poll — pickup-name-prefix filter", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({
+        id: `r${i}`,
+        name: `Review ${i}`,
+      })),
+    );
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+  });
+
+  afterEach(() => {
+    // `vi.clearAllMocks()` resets call history but NOT `.mockReturnValue`,
+    // so a prefix set inside one of the tests below would leak into the
+    // sibling describe blocks (Needs Help, post-dispatch check, Docker mode,
+    // stuck-card recovery) which share the same module-level mock and would
+    // then silently filter out their fixture cards. Restore the default
+    // here so this section's tests never bleed into the rest of the file.
+    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+  });
+
+  it("dispatches the matching test card when other ToDo cards are present (system-test isolation)", async () => {
+    // Reproduces the fix from Trello card IleofrBj: when the operator
+    // (or test harness) sets a `pickupNamePrefix`, the poller must dispatch
+    // ONLY cards whose name starts with that prefix. Without the filter, a
+    // pre-existing stuck card at the top of ToDo would be picked first and
+    // hold `teamRunning` for hours, blocking the test card indefinitely.
+    mockGetTrelloPollerPickupPrefix.mockReturnValue("[System Test]");
+    mockFetchTodoCards.mockResolvedValue([
+      { id: "stuck", name: "Fix: Dispatch token usage…" },
+      { id: "real", name: "Real ToDo card B" },
+      { id: "test", name: "[System Test] Read package.json — 1761000000" },
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // The dispatch was issued for the test card, NOT the stuck card at top.
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const dispatchCall = mockDispatch.mock.calls[0][0];
+    expect(dispatchCall.apiDispatchMeta).toEqual(
+      expect.objectContaining({
+        trigger: "trello",
+        metadata: expect.objectContaining({
+          cardId: "test",
+          cardName: "[System Test] Read package.json — 1761000000",
+        }),
+      }),
+    );
+  });
+
+  it("falls through to the no-cards branch when prefix is set but no card matches", async () => {
+    mockGetTrelloPollerPickupPrefix.mockReturnValue("[System Test]");
+    mockFetchTodoCards.mockResolvedValue([
+      { id: "a", name: "Real ToDo card A" },
+      { id: "b", name: "Real ToDo card B" },
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockFetchTodoCards).toHaveBeenCalled();
+    // Zero matching cards means no dispatch is issued — the prefix
+    // semantics are "ignore everything else", not "fail loud".
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches normally when prefix is null (filter disabled)", async () => {
+    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+    mockFetchTodoCards.mockResolvedValue([
+      { id: "any", name: "Some real card" },
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves stuck-card recovery scope: only matching cards are saved as priorTodoCardIds", async () => {
+    // The post-failure recovery path uses `priorTodoCardIds` to detect cards
+    // the agent moved into In Progress mid-failure. With a filter active,
+    // recovery must only consider the cards we actually dispatched against —
+    // tracking the unrelated real ToDo cards would falsely "recover" them.
+    mockGetTrelloPollerPickupPrefix.mockReturnValue("[X]");
+    mockFetchTodoCards.mockResolvedValue([
+      { id: "real-1", name: "Real card 1" },
+      { id: "x-1", name: "[X] test card" },
+    ]);
+    mockFetchInProgressCards.mockResolvedValue([
+      { id: "real-1", name: "Real card 1" },
+      { id: "x-1", name: "[X] test card" },
+    ]);
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockDispatch.mockImplementationOnce((input: { onComplete?: (j: unknown) => void }) => {
+      capturedOnComplete = input.onComplete;
+      return Promise.resolve({
+        dispatchId: "d",
+        job: {
+          id: "j",
+          status: "failed" as const,
+          summary: "boom",
+          startedAt: new Date(),
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      });
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!({
+      id: "j",
+      status: "failed",
+      summary: "boom",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+
+    // Wait a tick for the chained promise (handleAgentCompletion) to run.
+    await new Promise((r) => setImmediate(r));
+
+    // Only the matching card should be considered for recovery — the unrelated
+    // "Real card 1" must NOT be moved to Needs Help even though it's in
+    // In Progress, because it was never in this dispatch's scope.
+    const moves = mockMoveCardToList.mock.calls.filter(
+      (c: unknown[]) => c[2] === MOCK_REPO_CONTEXT.trello.needsHelpListId,
+    );
+    const movedIds = moves.map((c: unknown[]) => c[1]);
+    expect(movedIds).not.toContain("real-1");
   });
 });
 

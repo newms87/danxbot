@@ -92,7 +92,17 @@ of the config, no duplicated display-building logic.
 {
   "overrides": {
     "slack":        { "enabled": true | false | null },
-    "trelloPoller": { "enabled": true | false | null },
+    "trelloPoller": {
+      "enabled":          true | false | null,
+      // Optional. When set as a non-empty string, the poller only
+      // dispatches ToDo cards whose name starts with this prefix —
+      // pre-existing real ToDo cards are left untouched on every tick.
+      // Used by `make test-system-poller` for race-free isolation
+      // (Trello `IleofrBj`); operators can also set it to temporarily
+      // limit the poller to one card class without disabling it.
+      // null / missing / empty string → no filter (default behavior).
+      "pickupNamePrefix"?: string | null
+    },
     "dispatchApi":  { "enabled": true | false | null }
   },
   "display": {

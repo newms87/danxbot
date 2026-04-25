@@ -9,7 +9,7 @@ import {
   type AgentJob,
 } from "../agent/launcher.js";
 import { McpResolveError } from "../agent/mcp-types.js";
-import { dispatch, getActiveJob } from "../dispatch/core.js";
+import { dispatch, getActiveJob, listActiveJobs } from "../dispatch/core.js";
 import { dispatchAllowTools } from "../dispatch/profiles.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import { createLogger } from "../logger.js";
@@ -465,6 +465,26 @@ export function handleStatus(res: ServerResponse, jobId: string): void {
     return;
   }
   json(res, 200, getJobStatus(job));
+}
+
+/**
+ * `GET /api/jobs` — snapshot of every job currently in `activeJobs`,
+ * including running and recently-finished (within the TTL grace window).
+ *
+ * Primary consumer: the system test (`test_poller`) needs to know which
+ * dispatches are holding the worker's `teamRunning` slot so it can
+ * cancel them before injecting its fixture card. Without this surface
+ * the test relied on luck — a pre-existing in-flight dispatch (e.g. a
+ * stuck card with a 1-hour inactivity timeout) would block the test
+ * card forever and the 120s deadline would expire. See Trello
+ * `IleofrBj` for the empirical reproduction.
+ *
+ * Wire shape: `{jobs: getJobStatus[]}` — the same per-job fields
+ * `/api/status/:id` returns. A flat array under a `jobs` key keeps room
+ * to add metadata (counts, server time) without breaking callers.
+ */
+export function handleListJobs(res: ServerResponse): void {
+  json(res, 200, { jobs: listActiveJobs().map(getJobStatus) });
 }
 
 /**

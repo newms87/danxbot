@@ -15,6 +15,7 @@ import {
   _resetForTesting,
   buildDisplayFromContext,
   defaultSettings,
+  getTrelloPollerPickupPrefix,
   isFeatureEnabled,
   mask,
   readSettings,
@@ -540,7 +541,125 @@ describe("settings-file", () => {
   });
 
   // ============================================================
-  // JSON shape integrity
+  // getTrelloPollerPickupPrefix() — test isolation hook
+  // ============================================================
+
+  describe("getTrelloPollerPickupPrefix", () => {
+    it("returns null when settings file is missing", () => {
+      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+    });
+
+    it("returns null when prefix is unset", async () => {
+      await writeSettings(localPath, {
+        overrides: { trelloPoller: { enabled: true } },
+        writtenBy: "setup",
+      });
+      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+    });
+
+    it("returns the prefix when set as a non-empty string", async () => {
+      await writeSettings(localPath, {
+        overrides: {
+          trelloPoller: { enabled: null, pickupNamePrefix: "[System Test]" },
+        },
+        writtenBy: "setup",
+      });
+      expect(getTrelloPollerPickupPrefix(localPath)).toBe("[System Test]");
+    });
+
+    it("returns null when prefix is empty string", async () => {
+      await writeSettings(localPath, {
+        overrides: {
+          trelloPoller: { enabled: null, pickupNamePrefix: "" },
+        },
+        writtenBy: "setup",
+      });
+      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+    });
+
+    it("returns null on corrupt JSON without throwing", () => {
+      writeFileSync(settingsFilePath(localPath), "not json");
+      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+    });
+
+    it("preserves pickupNamePrefix across an unrelated override patch", async () => {
+      await writeSettings(localPath, {
+        overrides: {
+          trelloPoller: { enabled: null, pickupNamePrefix: "[X]" },
+        },
+        writtenBy: "setup",
+      });
+      // Operator toggles slack — must not clobber the trelloPoller prefix.
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+      expect(getTrelloPollerPickupPrefix(localPath)).toBe("[X]");
+    });
+
+    it("preserves pickupNamePrefix across a display-only patch", async () => {
+      await writeSettings(localPath, {
+        overrides: {
+          trelloPoller: { enabled: null, pickupNamePrefix: "[X]" },
+        },
+        writtenBy: "setup",
+      });
+      await writeSettings(localPath, {
+        display: { worker: { port: 1234, runtime: "host" } },
+        writtenBy: "deploy",
+      });
+      expect(getTrelloPollerPickupPrefix(localPath)).toBe("[X]");
+    });
+
+    it("normalizes non-string prefix to null without throwing", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            trelloPoller: { enabled: null, pickupNamePrefix: 42 },
+            dispatchApi: { enabled: null },
+          },
+        }),
+      );
+      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+    });
+
+    it("clears pickupNamePrefix when patch sets it to null", async () => {
+      await writeSettings(localPath, {
+        overrides: {
+          trelloPoller: { enabled: null, pickupNamePrefix: "[X]" },
+        },
+        writtenBy: "setup",
+      });
+      await writeSettings(localPath, {
+        overrides: {
+          trelloPoller: { enabled: null, pickupNamePrefix: null },
+        },
+        writtenBy: "setup",
+      });
+      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+    });
+
+    it("preserves the enabled toggle when only the prefix is patched", async () => {
+      await writeSettings(localPath, {
+        overrides: { trelloPoller: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+      await writeSettings(localPath, {
+        overrides: {
+          trelloPoller: { enabled: false, pickupNamePrefix: "[X]" },
+        },
+        writtenBy: "setup",
+      });
+      const s = readSettings(localPath);
+      expect(s.overrides.trelloPoller.enabled).toBe(false);
+      expect(getTrelloPollerPickupPrefix(localPath)).toBe("[X]");
+    });
+  });
+
+  // ============================================================
+  // JSON shape integrity (extended for trello-poller prefix)
   // ============================================================
 
   describe("file contents on disk", () => {

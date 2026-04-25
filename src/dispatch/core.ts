@@ -97,6 +97,18 @@ export function clearJobCleanupIntervals(): void {
 }
 
 /**
+ * Reset module state for tests. Drains both the activeJobs registry and
+ * any pending TTL eviction timers. Test-only — never call from
+ * production code paths. Used by handlers that need to assert on the
+ * full active-jobs map without inheriting jobs registered by sibling
+ * describe blocks earlier in the same vitest worker.
+ */
+export function _resetForTesting(): void {
+  activeJobs.clear();
+  clearJobCleanupIntervals();
+}
+
+/**
  * Everything a dispatch needs. Caller-facing shape — HTTP handlers map their
  * body into this; the poller constructs one from a Trello trigger; the Slack
  * listener constructs one for every deep-agent reply. All three paths share

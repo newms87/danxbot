@@ -18,6 +18,7 @@ import {
   handleLaunch,
   handleResume,
   handleCancel,
+  handleListJobs,
   handleStatus,
   handleStop,
   handleSlackReply,
@@ -56,6 +57,11 @@ export async function startWorkerServer(repo: RepoContext): Promise<void> {
 
     if (method === "POST" && url.pathname === "/api/resume") {
       await handleResume(req, res, repo);
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/api/jobs") {
+      handleListJobs(res);
       return;
     }
 

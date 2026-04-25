@@ -69,9 +69,24 @@ export interface FeatureOverride {
   enabled: boolean | null;
 }
 
+/**
+ * Trello-poller-specific override carrying both the standard `enabled`
+ * toggle and the optional `pickupNamePrefix` filter. When the prefix is
+ * a non-empty string, the poller only picks up ToDo cards whose name
+ * starts with it — used for system-test isolation so a fixture card
+ * doesn't race real ToDo cards. `null`/missing means "no filter".
+ *
+ * Lives on the `trelloPoller` slot of `SettingsOverrides` so the rest
+ * of the override surface stays a flat enabled-toggle. See
+ * `.claude/rules/settings-file.md` for the full schema contract.
+ */
+export interface TrelloPollerOverride extends FeatureOverride {
+  pickupNamePrefix?: string | null;
+}
+
 export interface SettingsOverrides {
   slack: FeatureOverride;
-  trelloPoller: FeatureOverride;
+  trelloPoller: TrelloPollerOverride;
   dispatchApi: FeatureOverride;
 }
 
@@ -105,8 +120,14 @@ export interface Settings {
   meta: SettingsMeta;
 }
 
+export interface WriteSettingsPatchOverrides {
+  slack?: FeatureOverride;
+  trelloPoller?: TrelloPollerOverride;
+  dispatchApi?: FeatureOverride;
+}
+
 export interface WriteSettingsPatch {
-  overrides?: Partial<SettingsOverrides>;
+  overrides?: WriteSettingsPatchOverrides;
   display?: SettingsDisplay;
   writtenBy: SettingsWriter;
 }
@@ -124,7 +145,7 @@ export function defaultSettings(): Settings {
   return {
     overrides: {
       slack: { enabled: null },
-      trelloPoller: { enabled: null },
+      trelloPoller: { enabled: null, pickupNamePrefix: null },
       dispatchApi: { enabled: null },
     },
     display: {},
@@ -179,6 +200,26 @@ function normalizeOverride(raw: unknown): FeatureOverride {
   return { enabled: null };
 }
 
+/** Validate a `pickupNamePrefix`. Anything that isn't a string normalizes
+ * to null; an empty string also normalizes to null so consumers can use
+ * `if (prefix)` as the "filter active" check without a separate
+ * length-zero special case. */
+function normalizePickupNamePrefix(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  return raw;
+}
+
+function normalizeTrelloPollerOverride(raw: unknown): TrelloPollerOverride {
+  const base = normalizeOverride(raw);
+  let pickupNamePrefix: string | null = null;
+  if (raw && typeof raw === "object" && "pickupNamePrefix" in raw) {
+    pickupNamePrefix = normalizePickupNamePrefix(
+      (raw as { pickupNamePrefix?: unknown }).pickupNamePrefix,
+    );
+  }
+  return { enabled: base.enabled, pickupNamePrefix };
+}
+
 function normalize(partial: Partial<Settings> | null | undefined): Settings {
   const d = defaultSettings();
   if (!partial || typeof partial !== "object") return d;
@@ -194,7 +235,9 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
   return {
     overrides: {
       slack: normalizeOverride(partial.overrides?.slack),
-      trelloPoller: normalizeOverride(partial.overrides?.trelloPoller),
+      trelloPoller: normalizeTrelloPollerOverride(
+        partial.overrides?.trelloPoller,
+      ),
       dispatchApi: normalizeOverride(partial.overrides?.dispatchApi),
     },
     display:
@@ -404,6 +447,38 @@ export function isFeatureEnabled(ctx: RepoContext, feature: Feature): boolean {
       err,
     );
     return envDefault(ctx, feature);
+  }
+}
+
+/**
+ * The optional "only pick up cards whose name starts with this prefix"
+ * filter for the Trello poller. Reads `overrides.trelloPoller.pickupNamePrefix`
+ * from the per-repo settings file. Returns the prefix when set as a
+ * non-empty string; returns `null` when the file is missing, the prefix
+ * is unset / null / empty / non-string, or any read error occurs.
+ *
+ * The poller calls this on every tick (`src/poller/index.ts#_poll`) so
+ * the test harness can write the prefix, run a fixture card through the
+ * dispatch path in isolation, and clear the prefix on cleanup — all
+ * without needing to drain or cancel pre-existing ToDo cards. Without
+ * this filter the system test races real cards and times out (Trello
+ * card `IleofrBj`).
+ *
+ * Never throws — on any failure returns `null` so the poller's
+ * "no filter" path runs instead of breaking the tick.
+ */
+export function getTrelloPollerPickupPrefix(
+  localPath: string,
+): string | null {
+  try {
+    const settings = readSettings(localPath);
+    return settings.overrides.trelloPoller.pickupNamePrefix ?? null;
+  } catch (err) {
+    log.error(
+      `getTrelloPollerPickupPrefix threw — returning null for ${localPath}`,
+      err,
+    );
+    return null;
   }
 }
 

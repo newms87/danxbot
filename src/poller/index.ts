@@ -41,7 +41,10 @@ import {
 } from "./trello-client.js";
 import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext, TrelloConfig } from "../types.js";
-import { isFeatureEnabled } from "../settings-file.js";
+import {
+  getTrelloPollerPickupPrefix,
+  isFeatureEnabled,
+} from "../settings-file.js";
 import { readFlag, writeFlag } from "../critical-failure.js";
 import type {
   DispatchTriggerMetadata,
@@ -210,6 +213,25 @@ async function _poll(repo: RepoContext): Promise<void> {
   } catch (error) {
     log.error(`[${repo.name}] Error fetching cards`, error);
     return;
+  }
+
+  // Optional pickup-name-prefix filter from per-repo settings. When set,
+  // ONLY cards whose name starts with the prefix are eligible for
+  // dispatch — pre-existing real ToDo cards are left untouched on this
+  // tick. Used by the system-test harness for race-free isolation
+  // (Trello `IleofrBj`); operators can also use it to temporarily limit
+  // the poller to one card class without disabling it entirely.
+  // Important: filter BEFORE the empty-cards branch so a board with
+  // only non-matching cards falls through to the ideator check rather
+  // than dispatching, AND before `priorTodoCardIds` is captured so
+  // stuck-card recovery only considers cards in this dispatch's scope.
+  const pickupPrefix = getTrelloPollerPickupPrefix(repo.localPath);
+  if (pickupPrefix) {
+    const before = cards.length;
+    cards = cards.filter((c) => c.name.startsWith(pickupPrefix));
+    log.info(
+      `[${repo.name}] pickupNamePrefix="${pickupPrefix}" filter: ${cards.length}/${before} cards match`,
+    );
   }
 
   if (cards.length === 0) {

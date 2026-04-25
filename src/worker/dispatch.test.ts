@@ -187,6 +187,7 @@ import {
   handleLaunch,
   handleResume,
   handleCancel,
+  handleListJobs,
   handleStatus,
   handleStop,
   clearJobCleanupIntervals,
@@ -1452,6 +1453,83 @@ describe("handleStatus", () => {
       cache_creation_input_tokens: 2048,
     });
   });
+});
+
+describe("handleListJobs", () => {
+  beforeEach(async () => {
+    // Sibling describes in this file launch real dispatches that land in
+    // the module-level `activeJobs` map. `vi.clearAllMocks()` only resets
+    // mock call history, not module state, so we explicitly drain the map
+    // before each list-jobs test to avoid asserting against unrelated
+    // leftover entries.
+    const core = await import("../dispatch/core.js");
+    core._resetForTesting();
+  });
+
+  it("returns an empty array when no dispatches are tracked", () => {
+    const res = createMockRes();
+    handleListJobs(res);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({ jobs: [] });
+  });
+
+  it("returns every active job in the activeJobs map", async () => {
+    // Stage two real launches so activeJobs has two entries; getJobStatus is
+    // mocked to project a small subset of fields per job so the assertion
+    // stays readable.
+    const mockJobA = {
+      id: "job-list-A",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    const mockJobB = {
+      id: "job-list-B",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+    };
+    mockSpawnAgent.mockResolvedValueOnce(mockJobA);
+    mockSpawnAgent.mockResolvedValueOnce(mockJobB);
+    let getCount = 0;
+    mockGetJobStatus.mockImplementation(() => {
+      getCount++;
+      return getCount === 1
+        ? { job_id: "dispatch-A", status: "running" }
+        : { job_id: "dispatch-B", status: "running" };
+    });
+
+    const launchA = await runLaunch("Task A");
+    const launchB = await runLaunch("Task B");
+    expect(launchA).toMatch(/.+/);
+    expect(launchB).toMatch(/.+/);
+
+    const res = createMockRes();
+    handleListJobs(res);
+
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.jobs).toHaveLength(2);
+    expect(body.jobs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "running" }),
+        expect.objectContaining({ status: "running" }),
+      ]),
+    );
+  });
+
+  /** Helper: launch a task and return the dispatchId from the response body. */
+  async function runLaunch(task: string): Promise<string> {
+    const req = createMockReqWithBody("POST", {
+      task,
+      api_token: "tok-jobs",
+      allow_tools: [],
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    return JSON.parse(res._getBody()).job_id;
+  }
 });
 
 describe("handleCancel", () => {
