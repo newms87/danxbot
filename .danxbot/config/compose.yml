@@ -37,7 +37,7 @@ services:
       # deterministic across every dev layout.
       - ${DANXBOT_REPO_ROOT:-../..}:/danxbot/app/repos/danxbot
       # Claude auth — split mount: file-bind for `.claude.json`,
-      # dir-bind for `.claude/`. Trello 0bjFD0a2.
+      # dir-bind for `.claude/`. Trello 0bjFD0a2 + PHevzRil.
       #
       # `.claude.json` is preferences/session metadata. Mounted as a
       # file-level bind: Docker pins the host inode at compose-up. Host
@@ -56,13 +56,25 @@ services:
       # inside that dir updates the table; the next open() resolves to
       # the NEW inode. Live, no restart required.
       #
-      # DO NOT collapse these back to two file-level binds. DO NOT
-      # convert this to `cp` in entrypoint. Both regressions
-      # silently break authentication for every dispatched agent.
+      # Both binds MUST be read-write (`:rw`, the default) — not `:ro`.
+      # Claude Code in `-p` headless mode rewrites `.claude.json` on
+      # most runs (session metadata, last-used model, etc.) and rotates
+      # `.credentials.json` periodically by atomic-write + rename().
+      # When the bind is read-only those writes fail and `claude -p`
+      # exits 0 with empty stdout (Trello PHevzRil). UIDs MUST align —
+      # the Dockerfile sets `danxbot` to UID 1000, which matches the
+      # host dev user and the prod deploy user.
+      #
+      # Forbidden regressions (any one silently breaks auth): collapsing
+      # back to two file-level binds; replacing with `cp` in entrypoint;
+      # re-adding `:ro`. The regression test at
+      # `src/__tests__/unit/worker-compose-mounts.test.ts` enforces all
+      # three invariants on this file.
       #
       # Dev defaults reference `../../claude-auth/{.claude.json,.claude}`
-      # — the snapshot dir installed by the setup skill. Override in
-      # dev .env with the live host paths:
+      # — the snapshot dir installed by the setup skill. PREFER overriding
+      # in `.env` with the live host paths so token rotation is visible
+      # without a worker restart:
       #   CLAUDE_CONFIG_FILE=/home/you/.claude.json
       #   CLAUDE_CREDS_DIR=/home/you/.claude
       # CLAUDE_CREDS_DIR points at the host directory that CONTAINS
@@ -73,8 +85,8 @@ services:
       # claude-auth-setup.sh then symlinks
       # /home/danxbot/.claude/.credentials.json at the dir-mount, so
       # dispatched agents always read the current rotation.
-      - ${CLAUDE_CONFIG_FILE:-../../claude-auth/.claude.json}:/danxbot/app/claude-auth/.claude.json:ro
-      - ${CLAUDE_CREDS_DIR:-../../claude-auth/.claude}:/danxbot/app/claude-auth/.claude:ro
+      - ${CLAUDE_CONFIG_FILE:-../../claude-auth/.claude.json}:/danxbot/app/claude-auth/.claude.json
+      - ${CLAUDE_CREDS_DIR:-../../claude-auth/.claude}:/danxbot/app/claude-auth/.claude
       # Claude Code session logs — this worker writes JSONL here.
       # Default resolves to repos/danxbot/claude-projects/ on the host.
       # The dashboard reads these via the per-repo RO mount added by

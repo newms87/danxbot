@@ -112,16 +112,21 @@ The Claude Code CLI uses an MCP (Model Context Protocol) server to interact with
 
 ## Step 6: Claude Code Auth
 
-The bot runs inside Docker and needs Claude Code CLI credentials to make agent calls (subscription-based, separate from the API key).
+The bot runs inside Docker and needs Claude Code CLI credentials to make agent calls (subscription-based, separate from the API key). The worker bind-mounts the host's `~/.claude.json` and `~/.claude/` directly so token rotation on the host is live inside the container — no snapshot, no copy. Full rationale lives next to the mounts in `.danxbot/config/compose.yml`.
 
 1. Ask: "Where is your Claude Code config? Typically `~/.claude.json` — enter the full path (or press enter for default):"
-2. Resolve the path. If default, use `~/.claude.json`.
-3. Verify the file exists. If not, tell the user to run `claude` on the host first to authenticate, then retry.
-4. Copy the file: `cp <path> claude-auth/.claude.json`
-5. Check if `~/.claude/.credentials.json` exists. If so, **migrate to the canonical subdir layout** required by the worker dir-bind (Trello 0bjFD0a2): `mkdir -p claude-auth/.claude && cp ~/.claude/.credentials.json claude-auth/.claude/.credentials.json`. Do NOT copy creds flat to `claude-auth/.credentials.json` — the worker compose dir-mounts `claude-auth/.claude/` so the credentials file MUST live one level down. Flat layout will produce a dangling symlink inside the container and every dispatch will fail with 401.
-6. Confirm: "Claude auth copied to `claude-auth/.claude.json` and `claude-auth/.claude/.credentials.json` — the container dir-mounts `.claude/` so host rotation is visible without restart."
+2. Resolve the path. If default, use `~/.claude.json`. Capture as `CLAUDE_CONFIG_FILE_PATH`.
+3. Resolve the credentials directory: the directory CONTAINING `.credentials.json`, typically `~/.claude`. Capture as `CLAUDE_CREDS_DIR_PATH`. Verify `<dir>/.credentials.json` exists. If not, tell the user to run `claude` on the host first to authenticate, then retry.
+4. Write to `.env`:
+   ```
+   CLAUDE_CONFIG_FILE=<absolute path from step 2>
+   CLAUDE_CREDS_DIR=<absolute path from step 3>
+   ```
+5. Confirm: "Worker container will bind-mount your live `~/.claude.json` and `~/.claude/` directly — no snapshot, no copy, host rotation visible immediately."
 
-**Note:** These are OAuth tokens, not API keys. They're gitignored and stay local. The split layout (root `.claude.json` + subdir `.claude/.credentials.json`) is canonical across dev snapshot, dev override-to-live-host, prod EC2 — keep it consistent.
+**Note:** These are OAuth tokens, not API keys. The container needs read-write access to both bind sources so claude can rotate the token and update session state — leaving them read-only causes `claude -p` to silently exit (Trello 0bjFD0a2, PHevzRil). UIDs are pre-aligned in the Dockerfile (`danxbot` = UID 1000) so writes propagate to the host file with the host user's ownership intact. Do NOT regress to a `cp` snapshot pattern; the snapshot goes stale within ~24 hours and every dispatch starts hanging or silently exiting.
+
+**Fallback (rare — ASK the user before using):** If `~/.claude/` cannot be bound directly (locked-down environments where the host home dir isn't accessible to Docker), ask: "Live host bind isn't possible here. Use a snapshot under `claude-auth/.claude/` instead? You'll need to re-run setup after every Claude token rotation." Only proceed with the snapshot pattern on explicit "yes" — this is the production-deploy shape; `deploy/workers.ts` injects absolute provisioned paths automatically.
 
 ## Step 7: Link and Explore Repo
 
