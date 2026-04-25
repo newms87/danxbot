@@ -10,8 +10,30 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
 import { parse as parseYaml } from "yaml";
+
+/**
+ * Expand a leading `~` to the operator's home directory. Mirrors POSIX
+ * shell behavior: `~` and `~/sub` are treated as `$HOME` / `$HOME/sub`,
+ * but a `~` anywhere else in the path is left literal (matches `bash`,
+ * `zsh`, and Python's `os.path.expanduser`). Letting `~` work in
+ * `claude_auth_dir` lets the deploy yml point at the live `claude` CLI's
+ * auth dir directly (`claude_auth_dir: "~"`) — no stamp-in-time snapshot,
+ * no manual refresh needed.
+ *
+ * YAML quirk: bare `~` is YAML's canonical representation of null.
+ * Configs MUST quote it as `"~"` for the value to survive parsing as a
+ * string. With unquoted `~`, the YAML parser yields null, the
+ * `optionalString` helper falls back to the default, and this function
+ * never gets a chance to see the tilde.
+ */
+function expandTilde(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
+  return path;
+}
 
 /**
  * One connected repo in a deployment. `appEnvSubpath`, when set, is the
@@ -207,7 +229,9 @@ export function loadConfig(configPath: string): DeployConfig {
     "../../claude-auth",
   );
   const configDir = dirname(configPath);
-  const claudeAuthDir = resolve(configDir, claudeAuthRaw);
+  // Tilde expansion happens BEFORE `resolve` — otherwise `resolve(configDir, "~")`
+  // produces `<configDir>/~` (literal), defeating the point.
+  const claudeAuthDir = resolve(configDir, expandTilde(claudeAuthRaw));
 
   const repos: DeployRepo[] = [];
   if (Array.isArray(yaml.repos)) {

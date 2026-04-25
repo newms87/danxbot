@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { loadConfig, findConfigPath } from "./config.js";
 
@@ -188,6 +189,77 @@ claude_auth_dir: ../../claude-auth
 
     const config = loadConfig(p);
     expect(config.claudeAuthDir).toBe(resolve(TEST_DIR, "claude-auth"));
+  });
+
+  it("expands a leading ~ in claude_auth_dir to the operator's home directory", () => {
+    // Lets gpt.yml say `claude_auth_dir: "~"` and have the deploy upload from
+    // the live `claude` CLI's auth dir directly — eliminating the stale-
+    // snapshot class of bug where a stamp-in-time copy of `.credentials.json`
+    // ages past `expiresAt` and every deploy uploads a token that's already
+    // dead on arrival.
+    //
+    // YAML quirk: bare `~` is the canonical representation of `null`, so
+    // the value MUST be quoted (`"~"`). expandTilde would otherwise never
+    // see the tilde — `optionalString` would return the default fallback.
+    const p = writeDeployment(
+      "tilde",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+claude_auth_dir: "~"
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.claudeAuthDir).toBe(homedir());
+  });
+
+  it("expands ~/<subpath> in claude_auth_dir", () => {
+    // Path forms starting with `~/` aren't ambiguous to YAML (only bare `~`
+    // is null), so quoting is optional here. Quote anyway for symmetry with
+    // the bare-tilde case so users don't have to remember the YAML rule.
+    const p = writeDeployment(
+      "tilde-sub",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+claude_auth_dir: "~/some/sub"
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.claudeAuthDir).toBe(resolve(homedir(), "some/sub"));
+  });
+
+  it("does NOT expand a tilde that appears later in the path (only leading ~ is special)", () => {
+    // `path/~/x` is a literal path containing a `~` segment — leave it alone.
+    // Operating systems don't treat embedded `~` as $HOME, so neither should we.
+    // The path resolves relative to the deployment yml's dir as usual.
+    const p = writeDeployment(
+      "tilde-mid",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+claude_auth_dir: ./path/~/x
+`,
+    );
+
+    const config = loadConfig(p);
+    // Must contain a literal `~` segment — proves no homedir substitution.
+    expect(config.claudeAuthDir).toContain("/path/~/x");
+    expect(config.claudeAuthDir).not.toContain(homedir());
   });
 
   it("parses multiple repos", () => {
