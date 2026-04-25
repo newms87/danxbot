@@ -52,9 +52,9 @@ If no, **your next tool call must be one of `mcp__trello__get_cards_by_list_id`,
 ## Steps (top-level orchestration)
 
 1. Execute Step 1 (Pick Up Card) below.
-2. If `get_cards_by_list_id` returned an empty list, report "No cards to process" and jump to Step 9 (signal completion).
+2. If `get_cards_by_list_id` returned an empty list, report "No cards to process" and jump to Step 11 (signal completion).
 3. Run the Card Processing Workflow steps 2–8 in order.
-4. Call `danxbot_complete` (Step 9) as the very last action.
+4. Call `danxbot_complete` (Step 11) as the very last action.
 
 ## Report (at the end)
 
@@ -74,14 +74,14 @@ The four MCP calls from HARD RULE 1. Nothing else happens before these succeed.
 
 **Failure handling for Step 1:**
 - If any Trello call fails, retry once with identical arguments.
-- If still failing, call `mcp__trello__update_card_details` to apply the `Needs Help` label, `mcp__trello__add_comment` to describe what went wrong, `mcp__trello__move_card` to move the card to the `Needs Help` list (position: `"top"`), then jump to Step 9 with `danxbot_complete` `status: "failed"`.
+- If still failing, call `mcp__trello__update_card_details` to apply the `Needs Help` label, `mcp__trello__add_comment` to describe what went wrong, `mcp__trello__move_card` to move the card to the `Needs Help` list (position: `"top"`), then jump to Step 11 with `danxbot_complete` `status: "failed"`.
 
 ### Step 2 — Plan
 
 1. `mcp__trello__get_card_comments` — read ALL comments on the card.
 2. `mcp__trello__get_acceptance_criteria` — read ALL acceptance criteria (save the checkItemIds).
 3. **Bug cards:** investigate root cause with `Read`/`Grep`/`Bash` before proposing a fix.
-4. **Needs Help short-circuit:** if the card requires human intervention (Slack / Trello settings / external config / credentials), apply `Needs Help` label, add a `<!-- danxbot -->` comment explaining what's needed, move to Needs Help list, jump to Step 9.
+4. **Needs Help short-circuit:** if the card requires human intervention (Slack / Trello settings / external config / credentials), apply `Needs Help` label, add a `<!-- danxbot -->` comment explaining what's needed, move to Needs Help list, jump to Step 11.
 5. Design the approach in your head; no code yet.
 6. Invoke the `/wow` skill to reload Ways of Working.
 7. `mcp__trello__update_checklist_item` — mark `Planning` complete in the Progress checklist (use the saved checkItemId).
@@ -131,7 +131,9 @@ Mark `Code Review` complete.
 
 ### Step 6 — Check Off Acceptance Criteria
 
-For each AC item, verify it holds (test evidence, command output, direct code read) then call `mcp__trello__update_checklist_item` with `state: "complete"`. All AC items MUST be checked before committing. **Never check off an unverified item** (see `trello.md`).
+For each AC item, verify it holds (test evidence, command output, direct code read) then call `mcp__trello__update_checklist_item` with `state: "complete"`. **Never check off an unverified item.** "By construction" and "obviously correct" are not evidence. The state of an AC item must reflect direct evidence — a passing test, a captured command output, a quoted line from code that demonstrably satisfies the criterion.
+
+If you cannot verify an AC item — because it requires changes to a repo this worker cannot commit to, because it requires a live deploy, because it depends on external state, because evidence is unobtainable in this dispatch — leave it INCOMPLETE. Do not check it off with an excuse. Do not paraphrase it as "done in spirit." The state of an AC item must reflect direct evidence.
 
 ### Step 7 — Commit
 
@@ -141,7 +143,27 @@ Consult `Git Mode` in `.claude/rules/danx-repo-config.md`:
 
 Mark `Committed` complete.
 
-### Step 8 — Complete
+### Step 8 — Definition-of-Done Gate (CRITICAL)
+
+**Before deciding whether to move to Done or Needs Help, you MUST inspect the actual state of every Acceptance Criteria item.**
+
+Mechanical procedure — no shortcuts:
+
+1. Call `mcp__trello__get_acceptance_criteria` (or re-fetch the card) and read the `state` of EVERY AC item.
+2. Count incomplete items (`state` !== `"complete"`).
+3. **If incomplete count is ZERO** → go to Step 9 (move to Done).
+4. **If incomplete count is ONE OR MORE** → go to Step 10 (move to Needs Help). Do NOT move to Done. Do NOT rationalize. Do NOT skip.
+
+Forbidden moves at this gate:
+- "All the important ACs are done, the rest are minor" — irrelevant. ACs aren't ranked.
+- "The remaining ACs require external work, so they don't count" — they count. They were defined as required.
+- "I'll move to Done and the retro will explain the gaps" — no. The card location is the canonical state. Retro narrative does not override list placement.
+- "The work is functionally complete, the AC wording is just strict" — if the wording is wrong, edit the AC item or file a separate card. Do not silently shift the card.
+- "I checked off the AC because the verification step ran, even though it failed" — `state: "complete"` means the criterion HOLDS, not that it was attempted.
+
+A card in Done means: every Acceptance Criteria item is verified complete, with direct evidence. There are no other definitions.
+
+### Step 9 — Move to Done (only if all ACs complete)
 
 1. `mcp__trello__move_card` — card to Done list, position `"top"`.
 2. **Bug cards:** `mcp__trello__add_comment` with a `## Bug Diagnosis` block (Problem / Root Cause / Solution).
@@ -156,7 +178,34 @@ Mark `Committed` complete.
    ```
 4. **Action item cards:** if action items aren't "Nothing", `mcp__trello__add_card_to_list` on the Action Items list (one per item, position `"top"`). Then `mcp__trello__add_comment` on the current card linking them.
 
-### Step 9 — Signal Completion (MANDATORY)
+Skip ahead to Step 11 (Signal Completion).
+
+### Step 10 — Move to Needs Help (if any AC is incomplete)
+
+Use this path when Step 8 found one or more incomplete AC items, when external repo changes are required that this worker cannot make, when verification depends on a deploy this worker cannot run, or when a human decision is needed before continuing.
+
+1. `mcp__trello__update_card_details` — add the `Needs Help` label (preserve any existing labels by passing the full updated array).
+2. `mcp__trello__move_card` — card to **Needs Help** list, position `"top"`.
+3. `mcp__trello__add_comment` with a Needs Help block:
+   ```
+   ## Needs Help — <one-line summary of what's blocked>
+
+   **What's done:** [bullet list of what landed, with commit shas if applicable]
+
+   **What's still needed:** [numbered list — be specific about file paths, repo names, exact edits, verification commands]
+
+   **Why this needs human/host-mode help:** [one paragraph — e.g. "requires commits to gpt-manager + platform repos which this docker worker can't reach", "requires a live deploy to verify AC4", "requires a human decision on tradeoff X"]
+
+   **Incomplete ACs:** [bullet list of every unchecked AC item, verbatim from the checklist]
+
+   **Final AC check:** Before this card moves to Done, every Acceptance Criteria item must be `state: "complete"`. If any AC remains unverifiable, leave the card in Needs Help — don't shortcut.
+   ```
+4. **Bug cards** that made partial progress: also post the `## Bug Diagnosis` block (Problem / Root Cause / Solution).
+5. **Retro is still required.** Post the standard `## Retro` block as in Step 9 — be honest about what went well, what went wrong (the AC gap is the primary "what went wrong"), and what action items remain. The retro narrative complements the Needs Help comment; it does not replace it.
+
+Skip ahead to Step 11 (Signal Completion).
+
+### Step 11 — Signal Completion (MANDATORY)
 
 Call the `danxbot_complete` MCP tool once, at the very end, with:
 - `status`: `"completed"` if the card finished or was moved to Needs Help; `"failed"` if a fatal error stopped the work.
