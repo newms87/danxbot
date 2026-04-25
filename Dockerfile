@@ -2,6 +2,15 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Short commit SHA of the danxbot repo at image-build time. Populated by
+# `make build` and `deploy/build.ts` from `git rev-parse --short HEAD`.
+# Read at runtime by `getDanxbotCommit()` so dispatched-agent rows record
+# the danxbot version that ran them — even when the container has no
+# `.git` dir. Empty in unparameterized builds; the runtime falls back to
+# `git rev-parse` against the source root in that case (dev shells).
+ARG DANXBOT_COMMIT=
+ENV DANXBOT_COMMIT=${DANXBOT_COMMIT}
+
 # System dependencies
 RUN apt-get update && apt-get install -y \
     curl \

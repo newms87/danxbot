@@ -164,3 +164,22 @@ describe("worker compose.yml claude-auth mounts", () => {
     ).toBeUndefined();
   });
 });
+
+// Regression test for Trello auX4nTRk — getDanxbotCommit() reads
+// `process.env.DANXBOT_COMMIT` baked into the image at build time
+// (Dockerfile ARG/ENV). A `DANXBOT_COMMIT: ${DANXBOT_COMMIT:-}` line in
+// the worker compose's `environment:` block looks helpful but is the
+// exact failure mode of the original bug: when the host shell hasn't
+// exported the var, compose interpolates the default empty string and
+// OVERRIDES the image-baked ENV inside the container, restoring the
+// `danxbot_commit = NULL` rows we just paid to fix. Keep the entry out.
+describe("worker compose.yml does not override the baked DANXBOT_COMMIT", () => {
+  const text = readFileSync(COMPOSE_PATH, "utf-8");
+
+  it("must NOT add DANXBOT_COMMIT to the container env — would override the image-baked ENV with empty when the host shell doesn't export it", () => {
+    expect(
+      /^\s*DANXBOT_COMMIT:\s/m.test(text),
+      "compose.yml `environment:` must NOT contain `DANXBOT_COMMIT: ...` — the SHA reaches the runtime via the image-baked ENV (Dockerfile ARG). See Trello auX4nTRk.",
+    ).toBe(false);
+  });
+});

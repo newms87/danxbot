@@ -27,6 +27,13 @@ services:
       TRELLO_REVIEW_MIN_CARDS: ${TRELLO_REVIEW_MIN_CARDS:-10}
       DANXBOT_GIT_EMAIL: ${DANXBOT_GIT_EMAIL:-danxbot@example.com}
       REPOS: ${REPOS}
+      # NOTE: do NOT add `DANXBOT_COMMIT: ${DANXBOT_COMMIT:-}` here — when
+      # the host shell hasn't exported the var, compose interpolates the
+      # default empty string and OVERRIDES the image-baked ENV inside the
+      # container, which would re-create the original NULL bug
+      # (Trello auX4nTRk). The SHA already reaches the runtime via the
+      # Dockerfile ARG/ENV bake driven by `make build` (local) and
+      # `deploy/build.ts` (prod). One source of truth, fail-loud upstream.
     volumes:
       # Repo bind: `../..` goes from .danxbot/config/ to the repo root.
       # Self-hosting caveat: when `repos/danxbot` is a symlink that loops back

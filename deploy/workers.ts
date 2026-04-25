@@ -55,6 +55,11 @@ export function buildLaunchCommand(
   // inside the container without a worker restart.
   const claudeConfigFile = `${env.claudeAuthDir}/.claude.json`;
   const claudeCredsDir = `${env.claudeAuthDir}/.claude`;
+  // The danxbot repo SHA is NOT propagated via this prefix on purpose —
+  // it lives in the image's ENV (baked via Dockerfile ARG by deploy/build.ts).
+  // Adding it here would require the worker compose to interpolate it back
+  // out, which silently overrides the image-baked value with empty when the
+  // host shell isn't exporting it. Trello auX4nTRk for the rationale.
   const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_CONFIG_FILE='${claudeConfigFile}' CLAUDE_CREDS_DIR='${claudeCredsDir}' CLAUDE_PROJECTS_DIR='/danxbot/claude-projects' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
   return `${prefix} docker compose --env-file /danxbot/.env -f ${CONTAINER_REPOS_BASE}/${repo.name}/.danxbot/config/compose.yml -p worker-${repo.name} up -d --remove-orphans`;
 }

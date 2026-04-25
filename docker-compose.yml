@@ -14,7 +14,15 @@
 
 services:
   dashboard:
-    build: .
+    build:
+      context: .
+      # Bake the danxbot repo SHA into the image so getDanxbotCommit()
+      # returns it at runtime without needing a .git dir inside the
+      # container. Makefile `build` target exports DANXBOT_COMMIT before
+      # calling `docker compose build`. Empty when unset — the runtime
+      # falls back to `git rev-parse` against the source root.
+      args:
+        DANXBOT_COMMIT: ${DANXBOT_COMMIT:-}
     restart: always
     stop_grace_period: 30s
     env_file: .env

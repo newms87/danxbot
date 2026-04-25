@@ -11,12 +11,22 @@ const DANXBOT_ROOT = resolve(dirname(__filename), "../..");
 let cachedCommit: string | null | undefined;
 
 /**
- * Return the short commit SHA of the danxbot repo at process start. Resolved
- * once and cached — the value does not change while the worker is running.
- * Returns null if git is unavailable or the call fails (dev shells, CI, etc.).
+ * Return the short commit SHA of the danxbot repo. Prefers a build-time
+ * `DANXBOT_COMMIT` env var (baked into the Dockerfile via `ARG/ENV` and
+ * also injected by `deploy/workers.ts`) so prod images carry the SHA they
+ * were built from without needing a `.git` dir. Falls back to
+ * `git rev-parse --short HEAD` against the source root for dev shells,
+ * where the process is run from a real git checkout. Resolved once and
+ * cached — the value does not change while the worker is running.
  */
 export function getDanxbotCommit(): string | null {
   if (cachedCommit !== undefined) return cachedCommit;
+
+  const fromEnv = process.env.DANXBOT_COMMIT?.trim();
+  if (fromEnv) {
+    cachedCommit = fromEnv;
+    return cachedCommit;
+  }
 
   try {
     const sha = execSync("git rev-parse --short HEAD", {

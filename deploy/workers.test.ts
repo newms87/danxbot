@@ -68,6 +68,20 @@ describe("worker commands", () => {
     expect(cmd).toContain("DANXBOT_REPOS_BASE='/danxbot/repos'");
   });
 
+  // Regression guard for the auX4nTRk fix: the prefix MUST NOT inject
+  // DANXBOT_COMMIT. The SHA reaches the runtime via the image-baked ENV
+  // (Dockerfile ARG, populated by deploy/build.ts --build-arg). Adding it
+  // to the prefix would require the worker compose to interpolate it
+  // back, which silently overrides the image-baked value with empty when
+  // the host shell doesn't export it.
+  it("does NOT inject DANXBOT_COMMIT — image-baked ENV is the single source of truth", () => {
+    const cmd = buildLaunchCommand(
+      { name: "app", url: "x", workerPort: 5561 },
+      ENV,
+    );
+    expect(cmd).not.toContain("DANXBOT_COMMIT=");
+  });
+
   it("builds a matching stop command", () => {
     expect(buildStopCommand({ name: "app", url: "x" })).toBe(
       "docker compose -p worker-app down",

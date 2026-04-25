@@ -191,6 +191,9 @@ async function deploy(config: DeployConfig): Promise<void> {
   // Launch per-repo workers. Worker compose files reference
   // ${DANXBOT_WORKER_IMAGE} + ${CLAUDE_AUTH_DIR} which only exist in prod —
   // inject them inline so the same compose works in dev without changes.
+  // The danxbot repo SHA is already baked into ecrImage via the Dockerfile
+  // ARG/ENV (driven by deploy/build.ts) — getDanxbotCommit() reads
+  // process.env.DANXBOT_COMMIT at runtime, no compose-side passthrough.
   launchWorkers(remote, config, {
     workerImage: ecrImage,
     claudeAuthDir: "/danxbot/claude-auth",

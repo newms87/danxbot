@@ -23,6 +23,13 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build the danxbot Docker image
+	@set -e; \
+	DANXBOT_COMMIT="$$(git rev-parse --short HEAD)"; \
+	if [ -z "$$DANXBOT_COMMIT" ]; then \
+		echo "Error: DANXBOT_COMMIT empty — run from a git checkout"; exit 1; \
+	fi; \
+	export DANXBOT_COMMIT; \
+	echo "  Baking DANXBOT_COMMIT=$$DANXBOT_COMMIT into image"; \
 	docker compose build
 	docker tag danxbot-dashboard:latest danxbot:latest
 

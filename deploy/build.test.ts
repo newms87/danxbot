@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildImageTags } from "./build.js";
+import { buildDockerBuildCommand, buildImageTags } from "./build.js";
 
 describe("buildImageTags", () => {
   it("emits latest + timestamp tags", () => {
@@ -24,5 +24,31 @@ describe("buildImageTags", () => {
   it("latest tag always pins to :latest", () => {
     const tags = buildImageTags("any-repo-url");
     expect(tags.latestTag).toBe("any-repo-url:latest");
+  });
+});
+
+describe("buildDockerBuildCommand", () => {
+  const TAGS = {
+    latestTag: "repo/img:latest",
+    timestampTag: "repo/img:2026-04-25T00-00-00",
+  };
+
+  it("injects --build-arg DANXBOT_COMMIT when a SHA is provided", () => {
+    const cmd = buildDockerBuildCommand(TAGS, "abc1234");
+    expect(cmd).toContain("--build-arg DANXBOT_COMMIT=abc1234");
+    expect(cmd).toContain("-t repo/img:latest");
+    expect(cmd).toContain("-t repo/img:2026-04-25T00-00-00");
+    expect(cmd.endsWith(" .")).toBe(true);
+  });
+
+  // Pure builder remains tolerant of empty input — `getDanxbotShaForBuild()`
+  // is the gate that throws upstream, not this builder. Test documents the
+  // builder's contract.
+  it("omits the build-arg when called with an empty SHA", () => {
+    const cmd = buildDockerBuildCommand(TAGS, "");
+    expect(cmd).not.toContain("--build-arg");
+    expect(cmd).toBe(
+      "docker build -t repo/img:latest -t repo/img:2026-04-25T00-00-00 .",
+    );
   });
 });
