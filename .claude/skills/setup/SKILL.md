@@ -118,10 +118,10 @@ The bot runs inside Docker and needs Claude Code CLI credentials to make agent c
 2. Resolve the path. If default, use `~/.claude.json`.
 3. Verify the file exists. If not, tell the user to run `claude` on the host first to authenticate, then retry.
 4. Copy the file: `cp <path> claude-auth/.claude.json`
-5. Check if `~/.claude/.credentials.json` exists (same parent directory as `.claude.json` but inside `.claude/`). If so, copy it: `cp ~/.claude/.credentials.json claude-auth/.credentials.json`
-6. Confirm: "Claude auth copied to claude-auth/ — the container will use these credentials."
+5. Check if `~/.claude/.credentials.json` exists. If so, **migrate to the canonical subdir layout** required by the worker dir-bind (Trello 0bjFD0a2): `mkdir -p claude-auth/.claude && cp ~/.claude/.credentials.json claude-auth/.claude/.credentials.json`. Do NOT copy creds flat to `claude-auth/.credentials.json` — the worker compose dir-mounts `claude-auth/.claude/` so the credentials file MUST live one level down. Flat layout will produce a dangling symlink inside the container and every dispatch will fail with 401.
+6. Confirm: "Claude auth copied to `claude-auth/.claude.json` and `claude-auth/.claude/.credentials.json` — the container dir-mounts `.claude/` so host rotation is visible without restart."
 
-**Note:** These are OAuth tokens, not API keys. They're gitignored and stay local.
+**Note:** These are OAuth tokens, not API keys. They're gitignored and stay local. The split layout (root `.claude.json` + subdir `.claude/.credentials.json`) is canonical across dev snapshot, dev override-to-live-host, prod EC2 — keep it consistent.
 
 ## Step 7: Link and Explore Repo
 

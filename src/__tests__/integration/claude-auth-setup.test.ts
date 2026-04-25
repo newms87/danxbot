@@ -8,13 +8,19 @@
  * if it silently falls back to copying, stale-token 401s return and every
  * dispatch breaks until someone notices.
  *
+ * Canonical mount layout (Trello 0bjFD0a2):
+ *   $CLAUDE_AUTH_DIR/.claude.json              — file-bind, rename-stale OK
+ *   $CLAUDE_AUTH_DIR/.claude/.credentials.json — under a dir-bind so host
+ *                                                rename rotation is visible
+ *                                                inside the container
+ *
  * Tests run the real shell script via child_process against per-test
  * temporary directories, then inspect the resulting filesystem. No mocks.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, symlinkSync, lstatSync, readlinkSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, symlinkSync, lstatSync, readlinkSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -22,16 +28,19 @@ const SCRIPT = join(process.cwd(), "scripts/claude-auth-setup.sh");
 
 let tmpRoot: string;
 let mountDir: string;
+let credsSubdir: string;
 let homeDir: string;
 
 beforeEach(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), "claude-auth-test-"));
   mountDir = join(tmpRoot, "mount");
+  // Mirrors the canonical container layout: `.claude.json` is at the root
+  // of $CLAUDE_AUTH_DIR; `.credentials.json` lives one level down in the
+  // `.claude/` subdir which (in real Docker) is a separate dir-bind.
+  credsSubdir = join(mountDir, ".claude");
   homeDir = join(tmpRoot, "home");
-  // Matches the compose layout: $CLAUDE_AUTH_DIR is the mounted dir, $DANXBOT_HOME
-  // is where the in-HOME symlinks should end up.
-  require("node:fs").mkdirSync(mountDir, { recursive: true });
-  require("node:fs").mkdirSync(homeDir, { recursive: true });
+  mkdirSync(credsSubdir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
 });
 
 afterEach(() => {
@@ -54,9 +63,9 @@ function runScript(env: Record<string, string> = {}): ReturnType<typeof spawnSyn
 }
 
 describe("claude-auth-setup.sh", () => {
-  it("symlinks .claude.json and .credentials.json into DANXBOT_HOME pointing at CLAUDE_AUTH_DIR", () => {
+  it("symlinks .claude.json and .credentials.json into DANXBOT_HOME pointing at the canonical CLAUDE_AUTH_DIR layout", () => {
     writeFileSync(join(mountDir, ".claude.json"), '{"hello":"world"}');
-    writeFileSync(join(mountDir, ".credentials.json"), '{"token":"abc"}');
+    writeFileSync(join(credsSubdir, ".credentials.json"), '{"token":"abc"}');
 
     const result = runScript();
     expect(result.status).toBe(0);
@@ -68,14 +77,14 @@ describe("claude-auth-setup.sh", () => {
     expect(lstatSync(claudeJsonPath).isSymbolicLink()).toBe(true);
     expect(lstatSync(credsPath).isSymbolicLink()).toBe(true);
 
-    // Symlinks must point at the mount, not a copy.
+    // Symlinks must point at the canonical mount layout.
     expect(readlinkSync(claudeJsonPath)).toBe(join(mountDir, ".claude.json"));
-    expect(readlinkSync(credsPath)).toBe(join(mountDir, ".credentials.json"));
+    expect(readlinkSync(credsPath)).toBe(join(credsSubdir, ".credentials.json"));
   });
 
   it("reading through the symlink returns whatever the mount source currently has — no stale snapshot", () => {
     writeFileSync(join(mountDir, ".claude.json"), '{"version":1}');
-    writeFileSync(join(mountDir, ".credentials.json"), '{"token":"original"}');
+    writeFileSync(join(credsSubdir, ".credentials.json"), '{"token":"original"}');
 
     const result = runScript();
     expect(result.status).toBe(0);
@@ -86,75 +95,66 @@ describe("claude-auth-setup.sh", () => {
     // Rotate the mount source via in-place rewrite (writeFileSync truncates
     // and overwrites the existing inode — matches how a simple text-editor
     // save works on the host).
-    writeFileSync(join(mountDir, ".credentials.json"), '{"token":"refreshed"}');
+    writeFileSync(join(credsSubdir, ".credentials.json"), '{"token":"refreshed"}');
 
     // The in-HOME read reflects the fresh value with no re-run of the script.
     // This proves the symlink path traversal is live for same-inode writes.
     expect(readFileSync(join(homeDir, ".claude/.credentials.json"), "utf-8")).toBe('{"token":"refreshed"}');
   });
 
-  it("documents the known rename-over-mount limitation — host atomic-write rotation needs a worker restart", () => {
-    // This test exists to pin down the LIMITATION, not to celebrate a
-    // success. Docker file-level bind mounts pin the host INODE, not the
-    // host path. When Claude Code rotates credentials on the host via the
-    // standard atomic-write pattern (write new file → rename() over the
-    // old one), the host path gets a new inode but the container's bind
-    // still points at the original (now unlinked) inode. Reads in the
-    // container keep returning the OLD bytes until the worker restarts
-    // and re-establishes the bind.
+  it("survives host atomic-write rotation (rename) — the dir-mount semantics this layout models", () => {
+    // Trello 0bjFD0a2: Claude Code on the host rotates credentials via the
+    // standard atomic-write pattern — write new file at temp path, then
+    // rename() over the target. rename() creates a NEW inode.
     //
-    // The bind-mount infrastructure is only invoked once, at compose-up
-    // time, so there's nothing claude-auth-setup.sh can do about this —
-    // it's a Docker-level constraint. The live-refresh guarantee this
-    // script currently provides is "in-place host writes are visible"
-    // (test above). The rename-rotation case is tracked as a follow-up
-    // Action Item; when the dir-mount enhancement lands, this test will
-    // be updated to assert rename tolerance instead of documenting the
-    // lack of it. See Trello 9ZurZCK2 retro.
+    // A file-level bind would pin the original inode at compose-up and
+    // serve stale bytes after rename. The fix mounts the PARENT DIRECTORY
+    // (`.claude/`) as a dir-bind: dir mounts expose the directory's
+    // current file table, so a rename() inside that directory updates
+    // the table and the next open() inside the container resolves to the
+    // NEW inode.
     //
-    // NOTE: we simulate the bind by NOT re-running the script. In the
-    // real prod container the bind is never torn down between dispatches
-    // either. This test is a filesystem-level analog.
-    writeFileSync(join(mountDir, ".credentials.json"), '{"token":"original"}');
+    // This test exercises the rename path at the filesystem level. The
+    // test rig uses symlink path resolution rather than a real Docker
+    // bind, but the symlink-through-dir semantics match what a real
+    // dir-bind produces: every read traverses `mountDir/.claude/` and
+    // sees the directory's CURRENT entry for `.credentials.json`. The
+    // rename-tolerance contract documented here is what claude-auth-
+    // setup.sh + the dir-bind in compose.yml deliver together.
+    writeFileSync(join(credsSubdir, ".credentials.json"), '{"token":"original"}');
     writeFileSync(join(mountDir, ".claude.json"), "{}");
     runScript();
 
     // Capture inode of the current mount-source file.
     const originalIno = require("node:fs").statSync(
-      join(mountDir, ".credentials.json"),
+      join(credsSubdir, ".credentials.json"),
     ).ino;
 
-    // Simulate the host atomic-write rotation: write the new content to a
-    // temp path, then rename() it onto the mount source. This creates a
-    // new inode at the path.
-    const tmpPath = join(mountDir, ".credentials.json.tmp");
+    // Simulate the host atomic-write rotation: write new content to a
+    // temp path inside the dir-mount source, then rename() over the
+    // creds file. rename() creates a NEW inode at the path.
+    const tmpPath = join(credsSubdir, ".credentials.json.tmp");
     writeFileSync(tmpPath, '{"token":"rotated via rename()"}');
     require("node:fs").renameSync(
       tmpPath,
-      join(mountDir, ".credentials.json"),
+      join(credsSubdir, ".credentials.json"),
     );
     const rotatedIno = require("node:fs").statSync(
-      join(mountDir, ".credentials.json"),
+      join(credsSubdir, ".credentials.json"),
     ).ino;
     expect(rotatedIno).not.toBe(originalIno); // sanity: rename DID change inode
 
-    // At the filesystem level — since we're going through a symlink, not
-    // an actual Docker bind — the test DOES see the rotated content:
+    // The in-HOME read sees the rotated content. Both this filesystem
+    // analog AND a real Docker dir-bind agree on this — the dir's
+    // current file-table entry for `.credentials.json` points at the
+    // new inode, so the symlink (or bind) traverses to fresh bytes.
     expect(readFileSync(join(homeDir, ".claude/.credentials.json"), "utf-8"))
       .toBe('{"token":"rotated via rename()"}');
-
-    // …but inside a real Docker file-level bind mount, the container would
-    // still see the original bytes because the bind is pinned to
-    // `originalIno` and the kernel keeps that inode alive via the bind
-    // reference even though no host path points at it anymore. Verifying
-    // that Docker-level behavior requires a live container and is covered
-    // in the system test suite, not here. This unit test's contract is
-    // limited to the symlink path resolution.
   });
 
   it("creates DANXBOT_HOME/.claude as a real directory — not a symlink — so claude can still write backups/", () => {
     writeFileSync(join(mountDir, ".claude.json"), "{}");
-    writeFileSync(join(mountDir, ".credentials.json"), "{}");
+    writeFileSync(join(credsSubdir, ".credentials.json"), "{}");
 
     runScript();
 
@@ -165,13 +165,13 @@ describe("claude-auth-setup.sh", () => {
     // Sanity check: the directory is writable — claude can drop its backups/
     // and session-state children here.
     const backups = join(claudeDir, "backups");
-    require("node:fs").mkdirSync(backups);
+    mkdirSync(backups);
     expect(existsSync(backups)).toBe(true);
   });
 
   it("is idempotent — running twice produces the same symlinks with no error", () => {
     writeFileSync(join(mountDir, ".claude.json"), "{}");
-    writeFileSync(join(mountDir, ".credentials.json"), "{}");
+    writeFileSync(join(credsSubdir, ".credentials.json"), "{}");
 
     const first = runScript();
     expect(first.status).toBe(0);
@@ -185,9 +185,9 @@ describe("claude-auth-setup.sh", () => {
 
   it("overwrites a pre-existing regular file at the symlink path (fixes a stale copy from an older entrypoint version)", () => {
     writeFileSync(join(mountDir, ".claude.json"), '{"from":"mount"}');
-    writeFileSync(join(mountDir, ".credentials.json"), '{"from":"mount"}');
+    writeFileSync(join(credsSubdir, ".credentials.json"), '{"from":"mount"}');
     // Pre-seed the HOME with stale copies as if an older entrypoint ran.
-    require("node:fs").mkdirSync(join(homeDir, ".claude"), { recursive: true });
+    mkdirSync(join(homeDir, ".claude"), { recursive: true });
     writeFileSync(join(homeDir, ".claude.json"), '{"from":"stale copy"}');
     writeFileSync(join(homeDir, ".claude/.credentials.json"), '{"from":"stale copy"}');
 
@@ -209,6 +209,29 @@ describe("claude-auth-setup.sh", () => {
     expect(existsSync(join(homeDir, ".claude.json"))).toBe(false);
   });
 
+  it("exits 0 with a warning when .claude/.credentials.json is missing (half-configured layout — fails closed instead of dangling symlink)", () => {
+    // Half-configured layout: `.claude.json` present at the root, but no
+    // `.claude/.credentials.json` in the subdir. This is the failure mode
+    // the parallel guard exists to prevent — without the guard, `ln -sfn`
+    // would happily create a dangling symlink at
+    // $DANXBOT_HOME/.claude/.credentials.json and the worker would report
+    // healthy until the first dispatch's auth attempt 401's.
+    writeFileSync(join(mountDir, ".claude.json"), "{}");
+    // Note: credsSubdir was created in beforeEach but is empty.
+
+    const result = runScript();
+    expect(result.status).toBe(0);
+    const out = String(result.stderr) + String(result.stdout);
+    expect(out).toMatch(/WARNING.*credentials/i);
+    expect(out).toMatch(/401/);
+    // No symlink should have been created — fail closed.
+    expect(existsSync(join(homeDir, ".claude/.credentials.json"))).toBe(false);
+    // The .claude.json symlink also should NOT exist — exit 0 happens
+    // before any ln -sfn runs, so the half-configured state is visibly
+    // unfinished.
+    expect(existsSync(join(homeDir, ".claude.json"))).toBe(false);
+  });
+
   it("fails loudly when CLAUDE_AUTH_DIR is not set (missing config is a bug, not a silent no-op)", () => {
     const result = spawnSync("bash", [SCRIPT], {
       env: {
@@ -223,6 +246,7 @@ describe("claude-auth-setup.sh", () => {
 
   it("fails loudly when DANXBOT_HOME is not set", () => {
     writeFileSync(join(mountDir, ".claude.json"), "{}");
+    writeFileSync(join(credsSubdir, ".credentials.json"), "{}");
     const result = spawnSync("bash", [SCRIPT], {
       env: {
         CLAUDE_AUTH_DIR: mountDir,

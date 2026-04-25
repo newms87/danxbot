@@ -21,14 +21,22 @@ describe("worker commands", () => {
     expect(cmd).toContain(`CLAUDE_AUTH_DIR='/danxbot/claude-auth'`);
   });
 
-  it("injects CLAUDE_CONFIG_FILE + CLAUDE_CREDS_FILE (derived from claudeAuthDir) so compose files using file-level binds find the right absolute paths", () => {
-    // The danxbot repo's own worker uses file-level binds so the
-    // container reads LIVE host bytes without a restart (Trello 9ZurZCK2).
-    // Deploy must set both vars so prod's `/danxbot/claude-auth/` files are
-    // bind-mounted correctly.
+  it("injects CLAUDE_CONFIG_FILE (file-bind) + CLAUDE_CREDS_DIR (dir-bind) so the danxbot self-ref compose substitutes the right absolute paths", () => {
+    // The danxbot repo's own worker uses a SPLIT mount: `.claude.json` is
+    // a file-bind (preferences/session metadata — rename staleness on
+    // host rotation is acceptable), while `.credentials.json` lives one
+    // level down in `.claude/` and is reached via a DIR-bind so host
+    // atomic-write rotation (`mv tmp .credentials.json`) is visible
+    // inside the container without a worker restart. Trello 0bjFD0a2.
+    // Deploy must inject both vars so prod's compose substitutes the
+    // canonical paths.
     const cmd = buildLaunchCommand({ name: "app", url: "x", workerPort: 5561 }, ENV);
     expect(cmd).toContain(`CLAUDE_CONFIG_FILE='/danxbot/claude-auth/.claude.json'`);
-    expect(cmd).toContain(`CLAUDE_CREDS_FILE='/danxbot/claude-auth/.credentials.json'`);
+    expect(cmd).toContain(`CLAUDE_CREDS_DIR='/danxbot/claude-auth/.claude'`);
+    // Legacy CLAUDE_CREDS_FILE was a file-bind that pinned the host
+    // inode at compose-up; rename-rotation went stale until restart.
+    // Replaced by CLAUDE_CREDS_DIR — must NOT regress.
+    expect(cmd).not.toContain("CLAUDE_CREDS_FILE");
   });
 
   it("uses --env-file /danxbot/.env so worker compose sees shared vars", () => {

@@ -43,16 +43,19 @@ export function buildLaunchCommand(
   // host paths like /home/dev/web/<name>). This ensures the agent spawn cwd
   // matches the path derived by SessionLogWatcher, so JSONL lands under the
   // correct encoded-cwd directory.
-  // CLAUDE_CONFIG_FILE and CLAUDE_CREDS_FILE are the per-file absolute
-  // paths that file-level bind-mount compose recipes (the danxbot repo's
-  // own worker today) substitute into their volume specs. CLAUDE_AUTH_DIR
-  // continues to be injected for directory-mount compose recipes
-  // (platform, gpt-manager) — the two forms co-exist during the rollout
-  // and both derive from the same provisioned dir. See Trello 9ZurZCK2
-  // for why file-level binds are the canonical form going forward.
+  // CLAUDE_CONFIG_FILE (file-bind for `.claude.json`) + CLAUDE_CREDS_DIR
+  // (dir-bind for `.claude/`) are the per-mount absolute paths that the
+  // danxbot self-referential worker compose substitutes into its volume
+  // specs. CLAUDE_AUTH_DIR continues to be injected for the single-dir-
+  // mount compose recipes (platform, gpt-manager). All three derive from
+  // the same provisioned auth dir — the canonical layout (Trello
+  // 0bjFD0a2) is `.claude.json` at the auth-dir root and
+  // `.credentials.json` one level down in `.claude/`. The dir-bind on
+  // `.claude/` is what makes host rename-over-mount rotation visible
+  // inside the container without a worker restart.
   const claudeConfigFile = `${env.claudeAuthDir}/.claude.json`;
-  const claudeCredsFile = `${env.claudeAuthDir}/.credentials.json`;
-  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_CONFIG_FILE='${claudeConfigFile}' CLAUDE_CREDS_FILE='${claudeCredsFile}' CLAUDE_PROJECTS_DIR='/danxbot/claude-projects' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
+  const claudeCredsDir = `${env.claudeAuthDir}/.claude`;
+  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_CONFIG_FILE='${claudeConfigFile}' CLAUDE_CREDS_DIR='${claudeCredsDir}' CLAUDE_PROJECTS_DIR='/danxbot/claude-projects' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
   return `${prefix} docker compose --env-file /danxbot/.env -f ${CONTAINER_REPOS_BASE}/${repo.name}/.danxbot/config/compose.yml -p worker-${repo.name} up -d --remove-orphans`;
 }
 

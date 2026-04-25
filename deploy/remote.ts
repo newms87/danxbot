@@ -86,6 +86,13 @@ export class RemoteHost {
    * Upload Claude Code auth files to the instance.
    * Throws if auth directory or either required file is missing — a deploy
    * without full auth produces a broken instance that cannot dispatch agents.
+   *
+   * Canonical layout (Trello 0bjFD0a2):
+   *   <claudeAuthDir>/.claude.json              ← root, file-bind
+   *   <claudeAuthDir>/.claude/.credentials.json ← subdir, dir-bind
+   * The remote layout under /danxbot/claude-auth/ mirrors the local
+   * snapshot dir layout exactly — the mount targets in compose then
+   * read the same shapes regardless of dev vs prod.
    */
   uploadClaudeAuth(): void {
     const authDir = this.config.claudeAuthDir;
@@ -96,16 +103,16 @@ export class RemoteHost {
     }
 
     const claudeJson = resolve(authDir, ".claude.json");
-    const credentialsJson = resolve(authDir, ".credentials.json");
+    const credentialsJson = resolve(authDir, ".claude", ".credentials.json");
 
     if (!existsSync(claudeJson)) {
       throw new Error(
-        `Claude auth file missing: ${claudeJson}. Both .claude.json and .credentials.json are required.`,
+        `Claude auth file missing: ${claudeJson}. Both .claude.json and .claude/.credentials.json are required.`,
       );
     }
     if (!existsSync(credentialsJson)) {
       throw new Error(
-        `Claude auth file missing: ${credentialsJson}. Both .claude.json and .credentials.json are required.`,
+        `Claude auth file missing: ${credentialsJson}. Both .claude.json and .claude/.credentials.json are required.`,
       );
     }
 
@@ -118,10 +125,13 @@ export class RemoteHost {
     console.log("  Uploaded .claude.json");
 
     this.scpUpload(credentialsJson, "/tmp/.credentials.json");
+    // mkdir + chown the .claude/ subdir under /danxbot/claude-auth/
+    // before mv — first deploy after the layout migration finds an empty
+    // or absent subdir; subsequent deploys are idempotent.
     this.sshRun(
-      "sudo mv /tmp/.credentials.json /danxbot/claude-auth/.credentials.json && sudo chown ubuntu:ubuntu /danxbot/claude-auth/.credentials.json",
+      "sudo mkdir -p /danxbot/claude-auth/.claude && sudo chown ubuntu:ubuntu /danxbot/claude-auth/.claude && sudo mv /tmp/.credentials.json /danxbot/claude-auth/.claude/.credentials.json && sudo chown ubuntu:ubuntu /danxbot/claude-auth/.claude/.credentials.json",
     );
-    console.log("  Uploaded .credentials.json");
+    console.log("  Uploaded .claude/.credentials.json");
   }
 
   openSshSession(): void {
