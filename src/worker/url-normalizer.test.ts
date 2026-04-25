@@ -92,8 +92,18 @@ describe("normalizeCallbackUrl", () => {
       expect(normalizeCallbackUrl(undefined, true)).toBeUndefined();
     });
 
-    it("throws on an unparseable URL so bad dispatch payloads fail loudly", () => {
-      expect(() => normalizeCallbackUrl("not a url", false)).toThrow();
+    it("returns non-URL strings unchanged so the helper is safe to apply to every overlay value", () => {
+      // Overlay values are unconstrained strings — tokens, numeric IDs,
+      // raw secrets — and the worker normalizes every one of them so
+      // localhost-bearing entries get rewritten. The helper MUST be a
+      // no-op for inputs that aren't parseable URLs, otherwise uniform
+      // application breaks on the first non-URL value.
+      expect(normalizeCallbackUrl("not a url", false)).toBe("not a url");
+      expect(normalizeCallbackUrl("25", false)).toBe("25");
+      expect(normalizeCallbackUrl("", false)).toBe("");
+      expect(normalizeCallbackUrl("secret-token-1234", false)).toBe(
+        "secret-token-1234",
+      );
     });
   });
 });

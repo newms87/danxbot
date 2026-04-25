@@ -947,3 +947,134 @@ describe("handleResume — P5 cutover (workspace required, legacy fields rejecte
     });
   });
 });
+
+/**
+ * Caller apps (gpt-manager) dispatch from the host's perspective and send
+ * `http://localhost:<port>` URLs in `body.overlay` (e.g. `SCHEMA_API_URL`).
+ * In docker runtime those resolve to the worker container itself, so every
+ * tool call from the dispatched agent that hits the overlay URL fails with
+ * `fetch failed`. Empirical reproducer: gpt-manager AgentDispatch row
+ * AGD-29 — every `mcp__schema__*` tool result was
+ * `{"content":"fetch failed","is_error":true}`.
+ *
+ * `body.status_url` was already rewritten via `normalizeCallbackUrl(...,
+ * config.isHost)` in `parseSharedRequestFields`. Overlay values were
+ * forwarded verbatim, which is the bug. The fix runs every overlay value
+ * through the SAME helper after `validateOverlayBody` accepts it. The
+ * helper is a no-op for non-localhost URLs and for non-URL strings (tokens,
+ * numeric IDs), so it is safe to apply uniformly.
+ */
+describe("handleLaunch — overlay localhost normalization", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "test-dispatch-1" });
+  });
+
+  it("rewrites localhost overlay URLs to host.docker.internal in docker runtime (isHost=false)", async () => {
+    mockDispatchConfig.isHost = false;
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do something",
+      overlay: {
+        SCHEMA_API_URL: "http://localhost:80",
+        SCHEMA_API_TOKEN: "secret-token-1234",
+        SCHEMA_DEFINITION_ID: "25",
+      },
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    const dispatchInput = mockDispatchFn.mock.calls[0][0] as {
+      overlay: Record<string, string>;
+    };
+    // Loopback URL rewritten to the docker-host alias.
+    expect(dispatchInput.overlay.SCHEMA_API_URL).toBe(
+      "http://host.docker.internal",
+    );
+    // Non-URL strings (tokens, numeric IDs) pass through untouched — the
+    // normalizer must not throw or mutate them.
+    expect(dispatchInput.overlay.SCHEMA_API_TOKEN).toBe("secret-token-1234");
+    expect(dispatchInput.overlay.SCHEMA_DEFINITION_ID).toBe("25");
+  });
+
+  it("rewrites 127.0.0.1 in overlay values (parity with status_url normalization)", async () => {
+    mockDispatchConfig.isHost = false;
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do something",
+      overlay: {
+        SCHEMA_API_URL: "http://127.0.0.1:8080/api",
+      },
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const dispatchInput = mockDispatchFn.mock.calls[0][0] as {
+      overlay: Record<string, string>;
+    };
+    expect(dispatchInput.overlay.SCHEMA_API_URL).toBe(
+      "http://host.docker.internal:8080/api",
+    );
+  });
+
+  it("preserves localhost overlay URLs in host runtime (isHost=true) so the host can reach its own services", async () => {
+    mockDispatchConfig.isHost = true;
+    try {
+      const req = createMockReqWithBody("POST", {
+        repo: MOCK_REPO.name,
+        workspace: "trello-worker",
+        task: "Do something",
+        overlay: {
+          SCHEMA_API_URL: "http://localhost:80",
+        },
+      });
+      const res = createMockRes();
+
+      await handleLaunch(req, res, MOCK_REPO);
+
+      expect(res._getStatusCode()).toBe(200);
+      const dispatchInput = mockDispatchFn.mock.calls[0][0] as {
+        overlay: Record<string, string>;
+      };
+      expect(dispatchInput.overlay.SCHEMA_API_URL).toBe("http://localhost:80");
+    } finally {
+      // Restore the shared module-level config flag so subsequent describes
+      // (which assume isHost=false) keep working.
+      mockDispatchConfig.isHost = false;
+    }
+  });
+
+  it("leaves non-loopback overlay URLs untouched in docker runtime", async () => {
+    mockDispatchConfig.isHost = false;
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do something",
+      overlay: {
+        SCHEMA_API_URL: "https://gpt-manager-laravel.test-1:80/api",
+      },
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const dispatchInput = mockDispatchFn.mock.calls[0][0] as {
+      overlay: Record<string, string>;
+    };
+    expect(dispatchInput.overlay.SCHEMA_API_URL).toBe(
+      "https://gpt-manager-laravel.test-1:80/api",
+    );
+  });
+});
