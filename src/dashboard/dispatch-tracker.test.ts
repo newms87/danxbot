@@ -318,6 +318,47 @@ describe("startDispatchTracking", () => {
     });
   });
 
+  it("counts both Agent and Task as sub-agent invocations", async () => {
+    // Current Claude Code emits `tool_use.name === "Agent"` for sub-agent
+    // launches; older captures used "Task". `.claude/rules/agent-dispatch.md`
+    // requires readers to accept both. Without this the dispatch row's
+    // `subagent_count` reads zero on every modern dispatch.
+    const watcher = makeMockWatcher();
+    const tracker = await startDispatchTracking({
+      jobId: "job-agent-task",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    await emitEntry(watcher, {
+      timestamp: 1,
+      type: "assistant",
+      summary: "",
+      data: {
+        content: [
+          { type: "tool_use", name: "Agent" },
+          { type: "tool_use", name: "Task" },
+          { type: "tool_use", name: "Read" },
+        ],
+      },
+    });
+
+    await tracker.finalize("completed", {
+      summary: "done",
+      tokens: noTokens,
+    });
+
+    const finalCall = mockUpdateDispatch.mock.calls.at(-1);
+    expect(finalCall![1]).toMatchObject({
+      status: "completed",
+      toolCallCount: 3,
+      subagentCount: 2,
+    });
+  });
+
   it("finalize computes tokensTotal from the four component counters", async () => {
     const watcher = makeMockWatcher();
     const tracker = await startDispatchTracking({

@@ -32,6 +32,10 @@ import { SessionLogWatcher } from "./session-log-watcher.js";
 import { buildClaudeInvocation } from "./claude-invocation.js";
 import { probeAllMcpServers } from "./mcp-server-probe.js";
 import {
+  preflightClaudeAuth,
+  ClaudeAuthError,
+} from "./claude-auth-preflight.js";
+import {
   createLaravelForwarder,
   deriveQueuePath,
 } from "./laravel-forwarder.js";
@@ -123,8 +127,17 @@ export interface AgentJob {
    * Used by TerminalOutputWatcher + StallDetector for thinking indicator detection.
    */
   terminalLogPath?: string;
-  /** Internal cleanup callback — tears down watcher, forwarder, timers. Set by spawnAgent. */
-  _cleanup?: () => void;
+  /**
+   * Internal cleanup callback — tears down watcher, forwarder, timers, and
+   * awaits `dispatchTracker.finalize` so the dispatches DB row reflects the
+   * full token + counter totals from the JSONL. Returns a promise so call
+   * sites that issue terminal-state HTTP PUTs (cancelJob, job.stop) can
+   * sequence the PUT after the final DB write. Fire-and-forget callers
+   * (inactivity / max-runtime timers, defensive re-runs from
+   * setupProcessHandlers) drop the promise — the launcher caches the
+   * in-flight cleanup promise so concurrent callers observe the same chain.
+   */
+  _cleanup?: () => Promise<void>;
   /**
    * Fires options.onComplete with the job when a terminal state is reached
    * outside of the close/exit handler flow (i.e. from cancelJob). Lets
@@ -422,6 +435,18 @@ export async function spawnAgent(
     );
   }
 
+  // Claude-auth preflight (Trello 3l2d7i46). RO bind / expired token / missing
+  // credentials all surface as silent dispatch timeouts — `claude -p` exits
+  // 0 with empty stdout, the watcher never attaches, and the worker reports
+  // "Agent timed out after N seconds of inactivity" pointing at network
+  // instead of at the actual broken auth chain. Run this BEFORE
+  // `buildClaudeInvocation` (which writes a prompt temp dir) so the early
+  // failure path needs no cleanup. Cheap — single stat + read on the bind.
+  const authPreflight = await preflightClaudeAuth();
+  if (!authPreflight.ok) {
+    throw new ClaudeAuthError(authPreflight);
+  }
+
   const jobId = options.jobId ?? randomUUID();
 
   // `stop` is assigned below (line ~661) once the cleanup closure is built. Use
@@ -589,7 +614,10 @@ export async function spawnAgent(
     (signal) => killAgentProcess(job, signal),
     options.timeoutMs,
     (j) => {
-      cleanup();
+      // Fire-and-forget: cleanup awaits drain + finalize internally so the
+      // dispatch row converges on its own. The external Laravel PUT is a
+      // separate store; a brief order skew vs. the local DB is acceptable.
+      void cleanup();
       // The docker close-handler wrapper only PUTs when job.status === "running"
       // at close time; by the time the child exits here it will not issue a
       // terminal PUT. notifyTerminalStatus is the only signal the dispatcher
@@ -616,7 +644,9 @@ export async function spawnAgent(
         job.status = "timeout";
         job.summary = `Agent exceeded max runtime of ${Math.round(options.maxRuntimeMs! / 1000 / 60)} minutes`;
         job.completedAt = new Date();
-        cleanup();
+        // See inactivity-timer comment — fire-and-forget; cleanup awaits
+        // drain + finalize internally.
+        void cleanup();
         // See the inactivity-timer comment above — docker close-handler will
         // not issue a terminal PUT once job.status !== "running".
         notifyTerminalStatus(job, options, "timeout", job.summary);
@@ -624,19 +654,60 @@ export async function spawnAgent(
     }, options.maxRuntimeMs);
   }
 
-  function cleanup(): void {
+  // Cache the in-flight cleanup promise so concurrent callers (e.g. the
+  // close handler's `void cleanup()` racing cancelJob's `await
+  // job._cleanup()`) all observe the SAME drain + finalize chain, instead of
+  // the second caller short-circuiting on a flag and resolving its await
+  // before the first chain has actually finished. A bare boolean flag would
+  // satisfy idempotency but defeat the only reason cancelJob and job.stop
+  // await the cleanup at all (sequencing the external `putStatus` PUT after
+  // the dispatch row's finalize commit).
+  let cleanupPromise: Promise<void> | undefined;
+
+  function cleanup(): Promise<void> {
+    if (cleanupPromise) return cleanupPromise;
+    // Catch so fire-and-forget callers (close handler, inactivity timer,
+    // host onExit) never raise an unhandled rejection if drain/finalize
+    // throw. Errors are logged via the inner try/catch around
+    // `dispatchTracker.finalize`; this outer .catch is a defense-in-depth
+    // net for everything else (drain itself, watcher.stop, forwarderFlush).
+    cleanupPromise = runCleanup().catch((err) => {
+      log.error(`[Job ${jobId}] Cleanup failed`, err);
+    });
+    return cleanupPromise;
+  }
+
+  async function runCleanup(): Promise<void> {
+    // Synchronous teardown FIRST — stops external observers (heartbeat
+    // PUTs, host exit watcher, inactivity + max-runtime timers) before the
+    // first await yields control. Callers that fire-and-forget cleanup and
+    // then immediately read job state (existing tests, the dispatch
+    // pipeline's onComplete) see a fully-quiesced job. Async work (drain,
+    // finalize, forwarder flush) runs afterward — those write to external
+    // stores (JSONL, dispatches DB, Laravel API) the synchronous reader
+    // doesn't depend on.
+    inactivityTimer.clear();
+    stopHeartbeat(job);
+    if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
+    if (job.hostExitWatcher) {
+      job.hostExitWatcher.stop();
+    }
+
     // Observer teardown is wrapped in try/finally so a synchronous throw from
     // any observer (watcher.stop, dispatchTracker.finalize, forwarder.flush)
     // cannot strand the temp dirs. Temp-dir cleanup MUST run.
     try {
+      // Drain any JSONL bytes written between the last scheduled poll and
+      // now BEFORE stopping the watcher. Without this, the agent's final
+      // assistant entry — which carries the closing `usage` block + the
+      // `tool_use` for `danxbot_complete` — lands in the JSONL after the
+      // last tick fired, the watcher halts before reading it, and
+      // `dispatchTracker.finalize` snapshots stale `job.usage`. Manifests
+      // as every token + counter field undercounting the on-disk JSONL by
+      // exactly what was appended in the trailing <pollIntervalMs window.
+      await watcher.drain();
       watcher.stop();
       void forwarderFlush?.();
-      inactivityTimer.clear();
-      stopHeartbeat(job);
-      if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
-      if (job.hostExitWatcher) {
-        job.hostExitWatcher.stop();
-      }
       if (dispatchTracker && job.status !== "running") {
         const dispatchStatus =
           job.status === "completed"
@@ -644,8 +715,8 @@ export async function spawnAgent(
             : job.status === "canceled"
               ? "cancelled"
               : "failed";
-        dispatchTracker
-          .finalize(dispatchStatus, {
+        try {
+          await dispatchTracker.finalize(dispatchStatus, {
             summary: job.summary || null,
             error: dispatchStatus === "failed" ? job.summary || null : null,
             tokens: {
@@ -654,10 +725,10 @@ export async function spawnAgent(
               cacheRead: job.usage.cache_read_input_tokens,
               cacheWrite: job.usage.cache_creation_input_tokens,
             },
-          })
-          .catch((err) =>
-            log.error(`[Job ${jobId}] Dispatch finalize failed`, err),
-          );
+          });
+        } catch (err) {
+          log.error(`[Job ${jobId}] Dispatch finalize failed`, err);
+        }
       }
     } finally {
       // rmSync with force:true is no-op on missing paths, so we don't need
@@ -715,7 +786,9 @@ export async function spawnAgent(
 
     // Use job._cleanup rather than the internal closure so any wrappers registered
     // after spawn (e.g. stall detection teardown from setupStallDetection) are honored.
-    (job._cleanup ?? cleanup)();
+    // Awaited so the dispatch row's final token totals land BEFORE the
+    // external putStatus PUT — see cleanup() comment for the race fix.
+    await (job._cleanup ?? cleanup)();
 
     if (options.statusUrl && options.apiToken) {
       await putStatus(job, options.apiToken, status, job.summary);
@@ -765,7 +838,7 @@ export async function spawnAgent(
             log.warn(`[Job ${jobId}] ${job.summary}`);
           }
           job.completedAt = new Date();
-          cleanup();
+          void cleanup();
           notifyTerminalStatus(job, options, job.status, job.summary);
         },
         registerTermDir: (dir) => {
@@ -782,7 +855,7 @@ export async function spawnAgent(
       job.status = "failed";
       job.summary = `Host-mode spawn failed: ${(err as Error).message}`;
       job.completedAt = new Date();
-      cleanup();
+      void cleanup();
       if (options.statusUrl && options.apiToken) {
         await putStatus(job, options.apiToken, "failed", job.summary);
       }
@@ -950,7 +1023,11 @@ export async function cancelJob(
 
   await terminateWithGrace(job, 5_000);
 
-  job._cleanup?.();
+  // Awaited so dispatchTracker.finalize commits the cancelled-state row with
+  // any drained JSONL totals BEFORE the external putStatus PUT. Without this
+  // the dispatch row is "running" when the PUT lands, then flips to
+  // "cancelled" later, racing any reader keying off the PUT.
+  await job._cleanup?.();
   await putStatus(job, apiToken, "canceled", job.summary);
   job._onComplete?.();
 }

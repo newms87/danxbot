@@ -14,6 +14,15 @@ import { eventBus } from "./event-bus.js";
 
 const log = createLogger("dispatch-tracker");
 
+/**
+ * Tool names Claude Code emits for sub-agent invocations. `Agent` is the
+ * current emit; `Task` is the legacy name still present in older captures.
+ * `.claude/rules/agent-dispatch.md` requires every sub-agent reader to
+ * accept BOTH — counting only one of them silently undercounts every
+ * dispatch row's `subagent_count`.
+ */
+const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set(["Agent", "Task"]);
+
 const UUID_REGEX =
   /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/;
 
@@ -150,7 +159,9 @@ export async function startDispatchTracking(
       for (const block of content) {
         if (block.type === "tool_use") {
           toolCallCount++;
-          if (block.name === "Task") subagentCount++;
+          if (block.name && SUBAGENT_TOOL_NAMES.has(block.name)) {
+            subagentCount++;
+          }
         }
       }
     }

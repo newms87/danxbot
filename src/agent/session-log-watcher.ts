@@ -366,6 +366,38 @@ export class SessionLogWatcher {
   }
 
   /**
+   * Read any JSONL bytes appended since the last scheduled poll tick. Used by
+   * the launcher's cleanup path to capture the agent's final assistant entry
+   * (the one carrying the closing `usage` block + the `tool_use` for
+   * `danxbot_complete`) before stop() halts polling. Without this, the row
+   * finalized by `DispatchTracker.finalize` snapshots stale `job.usage` and
+   * the dispatches table undercounts every token + counter field by exactly
+   * what the JSONL grew between ticks.
+   *
+   * Race contract: if a scheduled `poll()` is already in flight when drain
+   * is called, the first poll() invoked here would early-return at the
+   * `this.polling` guard and silently miss the tail. To avoid that silent
+   * skip we yield until the in-flight poll completes, then run our own
+   * poll. The combined effect is "every byte written before drain returns
+   * has been observed" — exactly the guarantee finalize depends on.
+   *
+   * No-op when the parent file has not been discovered (drain before
+   * start, or start aborted) — there is nothing to read. Safe to call
+   * after `stop()`; returns immediately.
+   */
+  async drain(): Promise<void> {
+    if (!this.running || !this.parentTail) return;
+    // Wait for any in-flight scheduled poll to finish so our subsequent
+    // poll() doesn't hit the `this.polling` guard. The await yields so
+    // setInterval-driven polls can complete; we only loop a few microtasks
+    // in the worst case (one scheduled poll cycle).
+    while (this.polling) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await this.poll();
+  }
+
+  /**
    * Discover the JSONL session file. Polls until found or max attempts reached.
    * For dispatched agents, the file appears shortly after the process starts.
    */
@@ -379,7 +411,8 @@ export class SessionLogWatcher {
 
       if (filePath) {
         this.setParentFile(filePath);
-        log.info(`Watching session file: ${filePath}`);
+        const tag = this.dispatchId ? `[Dispatch ${this.dispatchId}] ` : "";
+        log.info(`${tag}Watching session file: ${filePath}`);
         return;
       }
 

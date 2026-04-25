@@ -415,10 +415,10 @@ async function runResolved(
     stallDetector.start();
 
     const originalCleanup = job._cleanup;
-    job._cleanup = () => {
+    job._cleanup = async () => {
       termWatcher.stop();
       stallDetector.stop();
-      originalCleanup?.();
+      await originalCleanup?.();
     };
   }
 

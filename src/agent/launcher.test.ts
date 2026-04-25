@@ -37,15 +37,24 @@ vi.mock("node:crypto", () => ({
   randomUUID: () => "test-uuid-1234",
 }));
 
-// Mock SessionLogWatcher — capture onEntry callbacks so tests can emit entries
+// Mock SessionLogWatcher — capture onEntry callbacks so tests can emit entries.
+// `mockWatcherCallOrder` records drain/stop sequence so tests can assert
+// cleanup awaits drain BEFORE stop (the fix for the dispatch-token undercount race).
 const mockWatcherEntryCallbacks: Array<(entry: unknown) => void> = [];
+const mockWatcherCallOrder: string[] = [];
 vi.mock("./session-log-watcher.js", () => ({
   SessionLogWatcher: class {
     onEntry = vi.fn((cb: (entry: unknown) => void) => {
       mockWatcherEntryCallbacks.push(cb);
     });
     start = vi.fn().mockResolvedValue(undefined);
-    stop = vi.fn();
+    drain = vi.fn().mockImplementation(async () => {
+      mockWatcherCallOrder.push("drain");
+    });
+    stop = vi.fn().mockImplementation(() => {
+      mockWatcherCallOrder.push("stop");
+    });
+    getSessionFilePath = vi.fn().mockReturnValue(null);
   },
   DISPATCH_TAG_PREFIX: "<!-- danxbot-dispatch:",
 }));
@@ -59,6 +68,22 @@ const mockProbeAllMcpServers = vi.fn().mockResolvedValue({
 vi.mock("./mcp-server-probe.js", () => ({
   probeAllMcpServers: (...args: unknown[]) => mockProbeAllMcpServers(...args),
 }));
+
+// Mock the claude-auth preflight so launcher tests never touch ~/.claude/*.
+// Default to a healthy response; tests override per-call to assert the
+// failure path (Trello 3l2d7i46). The real ClaudeAuthError class is kept
+// so `instanceof` checks in spawnAgent still discriminate correctly.
+const mockPreflightClaudeAuth = vi.fn().mockResolvedValue({ ok: true });
+vi.mock("./claude-auth-preflight.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("./claude-auth-preflight.js")
+  >("./claude-auth-preflight.js");
+  return {
+    ...actual,
+    preflightClaudeAuth: (...args: unknown[]) =>
+      mockPreflightClaudeAuth(...args),
+  };
+});
 
 vi.mock("./laravel-forwarder.js", () => ({
   createLaravelForwarder: vi.fn().mockReturnValue({
@@ -147,6 +172,7 @@ describe("spawnAgent", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     mockWatcherEntryCallbacks.length = 0;
+    mockWatcherCallOrder.length = 0;
   });
 
   afterEach(() => {
@@ -394,6 +420,59 @@ describe("spawnAgent", () => {
 
     expect(job.status).toBe("completed");
     expect(job.completedAt).toBeInstanceOf(Date);
+  });
+
+  it("cleanup drains the watcher before stopping it (token undercount fix)", async () => {
+    // SessionLogWatcher polls every 5s. Without an explicit drain in cleanup,
+    // any JSONL bytes appended between the last scheduled poll and the agent's
+    // exit are dropped — DispatchTracker.finalize then snapshots stale
+    // job.usage and the dispatches row undercounts every token + counter
+    // field. This test asserts the full cleanup ordering: drain runs BEFORE
+    // stop, and exactly once.
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    child.emit("close", 0);
+
+    // Allow the close handler's microtask chain to flush.
+    await vi.runAllTimersAsync();
+
+    expect(job.status).toBe("completed");
+    // Strict equality on the call sequence — a regression where stop runs
+    // first or drain runs twice would slip past indexOf-based ordering checks.
+    expect(mockWatcherCallOrder).toEqual(["drain", "stop"]);
+  });
+
+  it("cleanup is idempotent — second invocation does not re-drain or re-stop", async () => {
+    // Two callers can race into cleanup (close handler's `void cleanup()`
+    // racing cancelJob's `await job._cleanup()`, or the close handler's
+    // defensive else-branch firing after job.stop ran cleanup directly).
+    // The second caller MUST NOT trigger a second finalize — that would
+    // overwrite the first finalize's correct totals with stale ones — and
+    // MUST NOT poll the JSONL twice. Both observable via the shared
+    // mockWatcherCallOrder array.
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    child.emit("close", 0);
+    await vi.runAllTimersAsync();
+    expect(mockWatcherCallOrder).toEqual(["drain", "stop"]);
+
+    // Second invocation — must short-circuit on the cached cleanupPromise.
+    await job._cleanup?.();
+    expect(mockWatcherCallOrder).toEqual(["drain", "stop"]);
   });
 
   it("sets job status to failed on non-zero exit", async () => {
@@ -1467,6 +1546,100 @@ describe("spawnAgent", () => {
           (c[0] as string) === "/tmp/danxbot-prompt-test",
       );
       expect(promptCleanup).toBeDefined();
+    });
+  });
+
+  describe("claude-auth preflight (Trello 3l2d7i46)", () => {
+    it("throws ClaudeAuthError when preflight fails — no MCP probe, no claude spawn", async () => {
+      mockPreflightClaudeAuth.mockResolvedValueOnce({
+        ok: false,
+        reason: "readonly",
+        summary:
+          "claude-auth file .claude.json at /home/danxbot/.claude.json is read-only — see compose.yml CLAUDE_CREDS_DIR mount; PHevzRil",
+      });
+
+      await expect(
+        spawnAgent({
+          prompt: "/danx-next",
+          repoName: "platform",
+          timeoutMs: 300_000,
+          mcpConfigPath: "/tmp/mcp/settings.json",
+        }),
+      ).rejects.toThrow(/read-only/);
+
+      // The preflight runs BEFORE buildClaudeInvocation, the MCP probe,
+      // and any spawn — burning zero downstream work when auth is broken.
+      expect(mockProbeAllMcpServers).not.toHaveBeenCalled();
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it("rejects with the typed ClaudeAuthError so dispatch can map to a 503", async () => {
+      // The dispatch handler discriminates with `instanceof ClaudeAuthError`
+      // (not by string-matching the message) — this test guards the type.
+      const { ClaudeAuthError } = await import("./claude-auth-preflight.js");
+
+      mockPreflightClaudeAuth.mockResolvedValueOnce({
+        ok: false,
+        reason: "expired",
+        summary:
+          "claude-auth OAuth token expired at 2026-01-01T00:00:00.000Z — host claude needs to refresh, or worker needs a redeploy",
+      });
+
+      await expect(
+        spawnAgent({
+          prompt: "/danx-next",
+          repoName: "platform",
+          timeoutMs: 300_000,
+        }),
+      ).rejects.toBeInstanceOf(ClaudeAuthError);
+    });
+
+    it("proceeds when preflight returns ok", async () => {
+      // Sanity-check the default path — if the preflight integration accidentally
+      // throws on healthy auth, every existing launcher test would fail with the
+      // same symptom. This test isolates "healthy preflight → proceed" from the
+      // 90+ existing assertions.
+      mockPreflightClaudeAuth.mockResolvedValueOnce({ ok: true });
+      const child = createMockChildProcess();
+      mockSpawn.mockReturnValue(child);
+
+      const job = await spawnAgent({
+        prompt: "/danx-next",
+        repoName: "platform",
+        timeoutMs: 300_000,
+      });
+
+      expect(job.status).toBe("running");
+      expect(mockSpawn).toHaveBeenCalled();
+    });
+
+    it("does not allocate a prompt temp dir when preflight fails (no leak on broken-auth worker)", async () => {
+      // The preflight runs BEFORE buildClaudeInvocation specifically so the
+      // early failure path needs no cleanup. A future refactor that moves
+      // mkdtempSync above the preflight would leak a /tmp/danxbot-prompt-*
+      // dir on EVERY dispatch from a broken-auth worker — this test locks
+      // the ordering invariant.
+      mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
+      mockPreflightClaudeAuth.mockResolvedValueOnce({
+        ok: false,
+        reason: "expired",
+        summary: "claude-auth OAuth token expired at 2026-01-01T00:00:00.000Z",
+      });
+
+      await expect(
+        spawnAgent({
+          prompt: "/danx-next",
+          repoName: "platform",
+          timeoutMs: 300_000,
+        }),
+      ).rejects.toThrow();
+
+      const promptTempCall = mockMkdtempSync.mock.calls.find(
+        (c: unknown[]) =>
+          typeof c[0] === "string" &&
+          (c[0] as string).includes("danxbot-prompt-"),
+      );
+      expect(promptTempCall).toBeUndefined();
     });
   });
 });

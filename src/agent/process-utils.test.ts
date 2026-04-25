@@ -345,7 +345,7 @@ describe("setupProcessHandlers", () => {
   });
 
   it("calls cleanup function on both close and error events", () => {
-    const cleanup = vi.fn();
+    const cleanup = vi.fn(async () => {});
 
     // close path
     const job1 = makeJob();
@@ -375,7 +375,7 @@ describe("setupProcessHandlers", () => {
     const job = makeJob();
     const child = makeChild();
     let observedStatusInsideCleanup: string | undefined;
-    const cleanup = vi.fn(() => {
+    const cleanup = vi.fn(async () => {
       observedStatusInsideCleanup = job.status;
     });
 
@@ -389,7 +389,7 @@ describe("setupProcessHandlers", () => {
     const job = makeJob();
     const child = makeChild();
     let observedStatusInsideCleanup: string | undefined;
-    const cleanup = vi.fn(() => {
+    const cleanup = vi.fn(async () => {
       observedStatusInsideCleanup = job.status;
     });
 
@@ -403,7 +403,7 @@ describe("setupProcessHandlers", () => {
     const job = makeJob();
     const child = makeChild();
     let observedStatusInsideCleanup: string | undefined;
-    const cleanup = vi.fn(() => {
+    const cleanup = vi.fn(async () => {
       observedStatusInsideCleanup = job.status;
     });
 
@@ -418,7 +418,7 @@ describe("setupProcessHandlers", () => {
     const child = makeChild();
     let observedSummary: string | undefined;
     let observedCompletedAt: Date | undefined;
-    const cleanup = vi.fn(() => {
+    const cleanup = vi.fn(async () => {
       observedSummary = job.summary;
       observedCompletedAt = job.completedAt;
     });
@@ -435,7 +435,7 @@ describe("setupProcessHandlers", () => {
     const child = makeChild();
     let observedSummary: string | undefined;
     let observedCompletedAt: Date | undefined;
-    const cleanup = vi.fn(() => {
+    const cleanup = vi.fn(async () => {
       observedSummary = job.summary;
       observedCompletedAt = job.completedAt;
     });
@@ -452,7 +452,7 @@ describe("setupProcessHandlers", () => {
     const child = makeChild();
     let observedSummary: string | undefined;
     let observedCompletedAt: Date | undefined;
-    const cleanup = vi.fn(() => {
+    const cleanup = vi.fn(async () => {
       observedSummary = job.summary;
       observedCompletedAt = job.completedAt;
     });
@@ -468,7 +468,7 @@ describe("setupProcessHandlers", () => {
     const job = makeJob();
     const child = makeChild();
     const calls: string[] = [];
-    const cleanup = vi.fn(() => calls.push("cleanup"));
+    const cleanup = vi.fn(async () => { calls.push("cleanup"); });
     const onComplete = vi.fn(() => calls.push("onComplete"));
 
     setupProcessHandlers(child as never, job, () => "ok", () => "", { cleanup, onComplete });
@@ -483,7 +483,7 @@ describe("setupProcessHandlers", () => {
     job.summary = "Agent was canceled by user request";
     const child = makeChild();
     const onComplete = vi.fn();
-    const cleanup = vi.fn();
+    const cleanup = vi.fn(async () => {});
 
     setupProcessHandlers(child as never, job, () => "ignored", () => "ignored", {
       onComplete,

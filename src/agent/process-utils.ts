@@ -128,8 +128,16 @@ export function createInactivityTimer(
 export interface ProcessHandlerOptions {
   /** Called after job transitions to a terminal state */
   onComplete?: (job: AgentJob) => void;
-  /** Additional cleanup to run on close/error (e.g. clear timers, remove temp dirs) */
-  cleanup?: () => void;
+  /**
+   * Additional cleanup to run on close/error. Returns a promise — the
+   * launcher's wrapper caches the in-flight promise and returns it on
+   * subsequent calls so concurrent invokers (close handler racing
+   * cancelJob, defensive re-runs, etc.) all observe the SAME drain +
+   * finalize chain. Fire-and-forget here is acceptable because onComplete
+   * callers depend on the in-memory `job` state, not on the DB row's
+   * eventual finalize commit.
+   */
+  cleanup?: () => Promise<void>;
 }
 
 /**
@@ -163,15 +171,21 @@ export function setupProcessHandlers(
       if (!isSuccess && job.summary) {
         log.error(`[Job ${job.id}] ${job.summary}`);
       }
-      options.cleanup?.();
+      // Fire-and-forget: cleanup awaits drain + finalize internally so the
+      // dispatch row converges to the right totals on its own. We do NOT
+      // await here — onComplete callers (poller card-progress check, etc.)
+      // depend on the in-memory `job` state which is set above, not on the
+      // DB row, so blocking onComplete on the DB write would only add
+      // latency without changing observable behavior.
+      void options.cleanup?.();
       options.onComplete?.(job);
     } else {
       // Status was set by cancelJob/job.stop/inactivity/max-runtime — those
       // paths invoke cleanup directly. Calling it again here is intentional:
-      // observers (DispatchTracker.finalize, watcher.stop, temp-dir rm) are
-      // idempotent, and this branch ensures cleanup STILL runs if the
-      // pre-set path forgot to invoke it (defensive — fail loud, not silent).
-      options.cleanup?.();
+      // the launcher's `cleanupRan` flag makes the redundant call a no-op,
+      // and this branch ensures cleanup STILL runs if the pre-set path
+      // forgot to invoke it (defensive — fail loud, not silent).
+      void options.cleanup?.();
     }
   });
 
@@ -182,11 +196,11 @@ export function setupProcessHandlers(
       job.completedAt = new Date();
 
       log.error(`[Job ${job.id}] Process error:`, err);
-      options.cleanup?.();
+      void options.cleanup?.();
       options.onComplete?.(job);
     } else {
       // See close-handler else branch above — same idempotency guarantee.
-      options.cleanup?.();
+      void options.cleanup?.();
     }
   });
 }

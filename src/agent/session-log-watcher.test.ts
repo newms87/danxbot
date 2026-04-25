@@ -1604,4 +1604,141 @@ describe("SessionLogWatcher with dispatchId", () => {
     );
     expect(entries.length).toBeGreaterThan(0);
   });
+
+  it("drain() reads bytes appended since the last poll tick", async () => {
+    // Production failure mode reproduced here: agent writes its final
+    // assistant entry (with `usage`) milliseconds before exit; cleanup runs
+    // BEFORE the next 5s poll fires; without drain the entry is lost and
+    // dispatches.tokens_total + tool_call_count undercount the JSONL.
+    const entries: AgentLogEntry[] = [];
+    const filePath = writeJsonlFile(tempDir, "session.jsonl", [
+      rawAssistantEntry(),
+    ]);
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      // High interval ensures the in-flight scheduled poll won't fire
+      // during this test — drain() must be the path that picks up the tail.
+      pollIntervalMs: 60_000,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+    // Initial discovery + first poll have run; capture baseline.
+    const baseline = entries.length;
+    expect(baseline).toBeGreaterThan(0);
+
+    // Append a final assistant entry after the timer is dormant.
+    appendJsonlEntry(
+      filePath,
+      rawAssistantEntry({
+        message: {
+          model: "claude-sonnet-4-5-20250929",
+          content: [{ type: "text", text: "Final summary." }],
+          usage: {
+            input_tokens: 99,
+            output_tokens: 11,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+        timestamp: "2026-04-12T10:00:99.000Z",
+      }),
+    );
+
+    // No poll has been scheduled in the 60s interval; the only path that can
+    // surface the appended entry before stop() is drain().
+    await watcher.drain();
+    watcher.stop();
+
+    expect(entries.length).toBe(baseline + 1);
+    const last = entries[entries.length - 1];
+    expect(last.type).toBe("assistant");
+    expect(last.data.usage).toEqual({
+      input_tokens: 99,
+      output_tokens: 11,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+  });
+
+  it("drain() is a no-op when start() has not run", async () => {
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+
+    await expect(watcher.drain()).resolves.toBeUndefined();
+    expect(watcher.getEntries()).toHaveLength(0);
+  });
+
+  it("drain() is a no-op after stop()", async () => {
+    // Symmetry guarantee for the cleanup contract: launcher.cleanup may run
+    // drain after stop has already raced (e.g. if a sibling code path called
+    // stop while cleanup awaited the drain promise). Drain must not throw
+    // and must not silently re-attach to a halted watcher.
+    writeJsonlFile(tempDir, "session.jsonl", [rawAssistantEntry()]);
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    await watcher.start();
+    watcher.stop();
+
+    await expect(watcher.drain()).resolves.toBeUndefined();
+  });
+
+  it("drain() waits for an in-flight poll instead of silently skipping", async () => {
+    // The internal `poll()` early-returns when `this.polling` is true. If
+    // drain is called while the scheduled timer's poll is mid-flight, drain
+    // would return immediately without reading the tail bytes — exactly the
+    // silent-undercount mode the fix is meant to prevent. drain awaits the
+    // in-flight poll, then runs its own. Forced here by appending bytes
+    // BEFORE the first scheduled poll completes its read pass.
+    const entries: AgentLogEntry[] = [];
+    const filePath = writeJsonlFile(tempDir, "session.jsonl", [
+      rawAssistantEntry(),
+    ]);
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      // Tight loop so polls overlap with drain in real time.
+      pollIntervalMs: 5,
+    });
+    watcher.onEntry((e) => entries.push(e));
+
+    await watcher.start();
+
+    // Append a final entry, then drain — under load the timer-driven
+    // poll() may be in flight when drain runs.
+    appendJsonlEntry(
+      filePath,
+      rawAssistantEntry({
+        message: {
+          model: "claude-sonnet-4-5-20250929",
+          content: [{ type: "text", text: "Final." }],
+          usage: {
+            input_tokens: 7,
+            output_tokens: 3,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+        timestamp: "2026-04-12T10:00:99.000Z",
+      }),
+    );
+
+    await watcher.drain();
+    watcher.stop();
+
+    // The appended entry MUST appear; under the bug it would be missing.
+    const finalUsages = entries
+      .filter((e) => e.type === "assistant")
+      .map((e) => e.data.usage as { input_tokens?: number } | undefined);
+    expect(finalUsages.some((u) => u?.input_tokens === 7)).toBe(true);
+  });
 });
