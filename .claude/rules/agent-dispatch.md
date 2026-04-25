@@ -158,6 +158,28 @@ Sub-agent JSONL entries carry `isSidechain: true` and an `agentId` field that ma
 
 When `StallDetector` determines an agent is stuck (no watcher activity + no ✻ indicator for threshold), it nudges up to `DEFAULT_MAX_NUDGES` times. If still stuck, it kills + resumes with a nudge prompt. After the max is exhausted, the job is marked failed. Stall recovery works identically in both runtime modes because it reads the watcher, not the process.
 
+### Silent dispatch failures usually mean broken claude-auth, not a stalled agent
+
+Three different claude-auth misconfigurations all surface as the SAME symptom — `/api/launch` returns a `job_id`, status sits at `running`, then eventually `failed` with `summary="Agent timed out after N seconds of inactivity"`. The watcher never attaches, no JSONL appears, no error is logged. Before chasing the StallDetector, check the auth chain first:
+
+1. **Read-only bind on `.claude.json` or `.claude/`** — claude rewrites `.claude.json` (session metadata) on most runs and rotates `.credentials.json` periodically; RO blocks the writes and `claude -p` exits 0 with empty stdout. From `/tmp` cwd it exits silently; from a workspace cwd with `.mcp.json` + `.claude/settings.json` it hangs because MCP startup interacts with the auth-refresh failure (Trello PHevzRil).
+2. **Expired OAuth token** — `claudeAiOauth.expiresAt` is in the past (snapshot dir that never rotated, prod redeploy needed). claude attempts a refresh, the refresh fails in `-p` mode, exits 0 silent.
+3. **Mismatched UID on the bind source** — host file owned by user A, container claude runs as `danxbot` (UID 1000); `chmod` on the symlink target succeeds but writes still fail.
+
+Diagnostic recipe (matches the verification block on PHevzRil):
+
+```
+# 1. Symlink chain reaches a fresh, writable file:
+docker exec -u danxbot danxbot-worker-<repo> readlink -f /home/danxbot/.claude/.credentials.json
+docker exec -u danxbot danxbot-worker-<repo> python3 -c "import json,time; d=json.load(open('/home/danxbot/.claude/.credentials.json')); print('expired=',d['claudeAiOauth']['expiresAt']<int(time.time()*1000))"
+docker exec -u danxbot danxbot-worker-<repo> touch /home/danxbot/.claude.json   # must succeed
+
+# 2. claude -p actually returns output:
+docker exec -u danxbot danxbot-worker-<repo> bash -c 'cd /tmp && unset ANTHROPIC_API_KEY && claude --dangerously-skip-permissions -p "Reply only PONG"'
+```
+
+Empty stdout + exit 0 = auth chain broken (one of the three above). PONG + exit 0 = auth is fine; the stall is something else (real model latency, infinite loop, etc.). The `worker-compose-mounts.test.ts` regression test guards #1 at the compose level; the spawn-time preflight in Trello [3l2d7i46](https://trello.com/c/3l2d7i46) (when shipped) will surface #1, #2, and #3 loudly before the worker ever starts a doomed dispatch.
+
 ## Forbidden Patterns
 
 These are regressions the team has already fixed. Do not reintroduce any of them.
