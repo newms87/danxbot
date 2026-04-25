@@ -194,6 +194,7 @@ These are regressions the team has already fixed. Do not reintroduce any of them
 | Custom log files written alongside the JSONL | `writeJobLogs` was deleted in Phase 2. Claude Code writes JSONL natively — do not write parallel logs for monitoring. `logs/<jobId>/` for debug artifacts (prompt.md, agents.json) is OK. |
 | Legacy single-process mode | Removed. Only worker and dashboard modes exist. |
 | Bypassing `isFeatureEnabled` in `handleLaunch` | `/api/launch` must 503 when `dispatchApi` is disabled in `.danxbot/settings.json` — the very first line inside the handler's try block. Skipping the check lets disabled repos still dispatch, which the Agents tab advertises as impossible. See `.claude/rules/settings-file.md`. |
+| Reintroducing an `allowed-tools.txt` / `--allowed-tools` flag / per-tool allowlist | The allow-tools concept was retired entirely (see `src/workspace/resolve.ts` header). claude's `--allowed-tools` is bypassed by `--dangerously-skip-permissions` (which every dispatched agent runs with), so the flag was never an enforceable gate for MCP tools. The workspace's `.mcp.json` (with `--strict-mcp-config`) is the agent's MCP surface; built-ins are all available by default. A stale `allowed-tools.txt` in any workspace dir throws `WorkspaceLegacyFileError` at resolve time. |
 
 ## Critical failure flag — poller halt
 
@@ -248,8 +249,8 @@ Dashboard mode never dispatches agents. Only worker mode spawns claude.
 ## Spawn Flow End-To-End
 
 1. Trigger fires: HTTP `POST /api/launch`, Trello poller finds a card, or Slack listener routes a message.
-2. Handler constructs a `DispatchInput` and calls `dispatch()` in `src/dispatch/core.ts`. The poller's input carries the hardcoded `POLLER_ALLOW_TOOLS` allowlist (built-ins + `mcp__trello__*`) plus an `onComplete` hook for card-progress bookkeeping. HTTP handlers shape the request body into the same `DispatchInput`. Both paths hit the same resolver, the same settings file, the same `spawnAgent`.
-3. `dispatch()` resolves `{mcpServers, allowedTools}` via `resolveDispatchTools`, writes the per-dispatch MCP settings.json to a fresh temp dir, then calls `spawnAgent()` in `src/agent/launcher.ts`.
+2. Handler constructs a `DispatchInput` and calls `dispatch()` in `src/dispatch/core.ts`. The poller adds an `onComplete` hook for card-progress bookkeeping; HTTP handlers shape the request body into the same `DispatchInput`. Both paths hit the same resolver, the same settings file, the same `spawnAgent`. There is no per-dispatch tool allowlist at any layer — the workspace's `.mcp.json` (with `--strict-mcp-config`) IS the agent's MCP surface; built-ins are all available by default.
+3. `dispatch()` calls `resolveWorkspace()` (`src/workspace/resolve.ts`) for the named workspace, merges the danxbot infrastructure MCP server into the workspace's `mcpServers`, writes the per-dispatch MCP settings.json to a fresh temp dir, then calls `spawnAgent()` in `src/agent/launcher.ts`.
 4. `spawnAgent` generates a `jobId`, calls `buildClaudeInvocation()` (`src/agent/claude-invocation.ts`) which writes the full prompt body verbatim to `prompt.md` in a fresh temp dir and builds a `firstMessage` of the form `<!-- danxbot-dispatch:<jobId> --> @<abs-path-to-prompt.md>[ Tracking: <title>]`. The `@<path>` is Claude Code's native file-attachment syntax (small files inline into the first user turn; large files fall back to a Read-tool call because `--dangerously-skip-permissions` is set). No meta-instruction, no `Read <path> and execute…` — Phase 6 of the workspace-dispatch epic (Trello WWYKnQhc) retired that. Then forks:
    - Docker: `spawn("claude", args)` with `-p firstMessage`, stdout `"ignore"` (stderr `"pipe"` for failure summaries — not for monitoring).
    - Host: `buildDispatchScript()` writes `run-agent.sh` which writes claude's PID to a file, then exec's `script -q -f -c "claude <flags> -- <firstMessage>"`. `spawnInTerminal()` launches that script via `wt.exe`. Launcher polls the PID file briefly to obtain the tracked PID.
@@ -267,7 +268,7 @@ The poller shares `dispatch()` with `/api/launch` as of Phase 4. Implications:
 - `src/poller/index.ts` never imports `spawnAgent` and never writes its own `settings.json`. If you find yourself adding either back, you are unwinding Phase 4.
 - Poller-triggered agents get `mcp__danxbot__danxbot_complete` automatically (infrastructure), so the poller retired inactivity-timeout-as-completion-signal in favor of the MCP callback. Inactivity timeout remains as a safety net.
 - The poller's `onComplete` callback is the hook for `handleAgentCompletion` — card-progress check, stuck-card recovery, consecutive-failure backoff. Ordering contract: MCP settings cleanup runs BEFORE the caller's onComplete so post-completion checks never observe a half-disposed dispatch.
-- The hardcoded allowlist lives at `src/poller/constants.ts#POLLER_ALLOW_TOOLS`. Change it only when the `/danx-next` or `/danx-ideate` skill surface changes.
+- The poller's MCP surface lives in `src/poller/inject/workspaces/trello-worker/.mcp.json`. Adding or removing a Trello tool is a one-line edit to that file — no callsite changes anywhere.
 
 ## Key Files
 

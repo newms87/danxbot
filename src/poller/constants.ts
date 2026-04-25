@@ -87,8 +87,3 @@ export const DANXBOT_COMMENT_MARKER = "<!-- danxbot -->";
 export const TEAM_PROMPT = "/danx-next";
 export const IDEATOR_PROMPT = "/danx-ideate";
 
-// Poller tool allowlist now lives in the workspace fixture
-// `src/poller/inject/workspaces/trello-worker/allowed-tools.txt` (Phase 3
-// of the workspace-dispatch epic, Trello `q5aFuINM`). The dispatch profile
-// registry was retired in P5 (`mGrHNHWM`). Workspaces are the single
-// source of truth for every named tool surface.

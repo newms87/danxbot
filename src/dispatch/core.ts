@@ -523,7 +523,6 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
       : undefined;
 
   const danxbotServer = defaultMcpRegistry[DANXBOT_SERVER_NAME].build({
-    allowTools: [],
     danxbotStopUrl: workerStopUrl,
     slack,
   });

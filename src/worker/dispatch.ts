@@ -49,9 +49,13 @@ export { clearJobCleanupIntervals } from "../dispatch/core.js";
  * Shared header parsing: derives the caller IP and the normalized status
  * callback URL (if any). Used by both launch and resume.
  *
- * `body.status_url` is the only callback URL danxbot understands. Caller-app
- * URLs (e.g. gpt-manager's schema MCP base) live in `body.overlay.<KEY>`
- * and are opaque to danxbot.
+ * Both `body.status_url` and every `body.overlay` value are run through
+ * `normalizeCallbackUrl(..., config.isHost)` so localhost-bearing entries
+ * (e.g. gpt-manager's `SCHEMA_API_URL: "http://localhost:80"`) get
+ * rewritten to `host.docker.internal` in docker runtime. Without this,
+ * every fetch the dispatched agent makes against an overlay URL inside a
+ * worker container resolves to the agent's own container and fails with
+ * `fetch failed`. Empirical reproducer: gpt-manager AGD-29.
  */
 interface ParsedRequestShared {
   statusUrl: string | undefined;
@@ -136,14 +140,17 @@ function requireString(value: unknown): string | null {
 /**
  * Body fields rejected at the boundary as part of the P5 cutover
  * (workspace-dispatch epic, card mGrHNHWM). Each field belonged to the
- * pre-workspace dispatch shape:
+ * pre-workspace dispatch shape and stays rejected so a caller who held an
+ * old client gets a loud 400 instead of a silently-ignored field:
  *
  *   - `schema_definition_id` / `schema_role` — gpt-manager-specific schema
  *     MCP knobs that now live in the caller's overlay (`SCHEMA_DEFINITION_ID`
  *     etc) and are declared by the caller's own workspace `.mcp.json`.
  *   - `api_url` — schema MCP base URL; same — moves to overlay.
- *   - `allow_tools` — caller-supplied tool allowlist; replaced by the
- *     workspace's `allowed-tools.txt`.
+ *   - `allow_tools` — caller-supplied tool allowlist; the allow-tools
+ *     concept was retired entirely (see `src/workspace/resolve.ts` header).
+ *     The workspace's `.mcp.json` (with `--strict-mcp-config`) is the
+ *     agent's MCP surface; built-ins are all available by default.
  *   - `agents` — inline sub-agent JSON; replaced by the workspace's
  *     `.claude/agents/*.md` files.
  *
@@ -182,8 +189,10 @@ function rejectLegacyShape(
     error: "Legacy dispatch body shape rejected",
     message:
       "This worker accepts only {repo, workspace, task, overlay?, ...}. " +
-      "The schema_*/allow_tools/agents fields are no longer supported. " +
-      "Migrate to {workspace: '<name>', overlay: {...}} — see " +
+      "The schema_*/allow_tools/agents fields are no longer supported " +
+      "(allow_tools in particular was retired entirely — the workspace's " +
+      "`.mcp.json` is now the agent's MCP surface). Migrate to " +
+      "{workspace: '<name>', overlay: {...}} — see " +
       "https://trello.com/c/s9XdRLcz for the gpt-manager migration and " +
       "`.claude/rules/agent-dispatch.md` for the API contract.",
     offendingFields,
@@ -306,6 +315,14 @@ function parseDispatchRequest(
   // 4. Optional fields.
   const overlay = validateOverlayBody(body.overlay, res);
   if (!overlay) return null;
+  // Same loopback rewrite as `status_url` — see `parseSharedRequestFields`
+  // for the rationale. Applied to every value (the helper is a no-op for
+  // non-localhost URLs and for non-URL strings, so tokens / numeric IDs
+  // pass through untouched).
+  const normalizedOverlay: Record<string, string> = {};
+  for (const [key, value] of Object.entries(overlay)) {
+    normalizedOverlay[key] = normalizeCallbackUrl(value, config.isHost) ?? value;
+  }
   const { statusUrl, callerIp } = parseSharedRequestFields(req, body);
   const apiToken =
     typeof body.api_token === "string" ? body.api_token : undefined;
@@ -313,7 +330,7 @@ function parseDispatchRequest(
   return {
     workspace,
     task,
-    overlay,
+    overlay: normalizedOverlay,
     apiToken,
     statusUrl,
     callerIp,

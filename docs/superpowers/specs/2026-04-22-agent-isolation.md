@@ -5,6 +5,8 @@
 
 > **Update (Phase 3 of card `kMQ170Ea`, 2026-04-23):** the "Slack SDK path" referenced below (`src/agent/agent.ts`, in-process `query()`) was retired. The Slack deep-agent now funnels through the same `dispatch()` + `spawnAgent()` path as the poller and `/api/launch`. References to `src/agent/agent.ts` and "in-process SDK query" in the text below describe the state at the time Agent Isolation shipped; the current system has a single CLI-spawn path for every dispatch.
 
+> **Update (card `7WV0rDAA`, 2026-04-25):** the per-tool allowlist mechanism described below (`body.allow_tools`, `--allowed-tools` flag, `dispatchAllowTools`, `POLLER_ALLOW_TOOLS`, the `allowed-tools.txt` workspace file) was RETIRED ENTIRELY. claude's `--allowed-tools` is bypassed by `--dangerously-skip-permissions` (which every dispatched agent runs with), so the flag was never an enforceable gate for MCP tools. Today the workspace's `.mcp.json` (with `--strict-mcp-config`, still load-bearing per Invariant #3) is the agent's MCP surface; built-ins are all available by default. Invariant #4 below ("--allowed-tools always present") no longer holds — the flag is never emitted.
+
 ## Problem
 
 Before this epic, danxbot-dispatched claude agents (poller, HTTP `/api/launch`, Slack) shared configuration with the developer's interactive `claude` session:

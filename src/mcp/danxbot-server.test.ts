@@ -363,11 +363,12 @@ describe("callTool — danxbot_slack_post_update", () => {
 });
 
 describe("buildActiveTools — advertise-filter", () => {
-  // The advertise-filter is the "suspenders" seam: even if the
-  // resolver regresses and includes Slack tool names in allowedTools,
-  // a non-Slack MCP process never advertises them in tools/list, so
-  // the agent has no path to try the call. A drift here silently
-  // collapses the enforcement the registry docstring promises.
+  // The advertise-filter is the SOLE enforcement seam for Slack-tool
+  // exposure (the CLI-side `--allowed-tools` belt was retired entirely
+  // — see `src/workspace/resolve.ts` header). A non-Slack MCP process
+  // must never advertise the Slack tools in tools/list. A drift here
+  // gives a non-Slack agent a callable Slack tool and `callTool` becomes
+  // the safety net.
   it("advertises only danxbot_complete when no slack URLs are configured", () => {
     const tools = buildActiveTools({ stop: STOP_URL });
     expect(tools.map((t) => t.name)).toEqual(["danxbot_complete"]);

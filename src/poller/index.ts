@@ -596,11 +596,9 @@ function injectDanxTools(target: InjectTarget): void {
  *
  * Part of the workspace-dispatch epic (Trello `jAdeJgi5`, Phase 2). Every
  * named workspace under `src/poller/inject/workspaces/` is mirrored in
- * full into the connected repo so that — after Phases 3-5 wire the
- * dispatch path to the resolver — every triggered agent can cwd into an
+ * full into the connected repo so every triggered agent can cwd into an
  * isolated `<repo>/.danxbot/workspaces/<name>/` directory containing its
- * own `workspace.yml`, `.mcp.json`, `allowed-tools.txt`, `.claude/`
- * subtree, and `CLAUDE.md`.
+ * own `workspace.yml`, `.mcp.json`, `.claude/` subtree, and `CLAUDE.md`.
  *
  * Contract:
  *   - **Idempotent.** Uses `writeIfChanged` so unchanged files don't bump
@@ -863,7 +861,7 @@ function spawnClaude(
       );
     },
   }).catch((err) => {
-    // Pre-spawn failures (bad `allowTools`, OS spawn error, MCP probe
+    // Pre-spawn failures (workspace resolution error, OS spawn error, MCP probe
     // failure) deliberately skip the exponential-backoff escalator:
     // these are configuration / infrastructure errors, not intermittent
     // agent failures. We reset `teamRunning` so the next tick retries

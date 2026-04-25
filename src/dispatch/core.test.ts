@@ -116,9 +116,9 @@ beforeEach(() => {
 describe("dispatch() — slack-worker integration", () => {
   // Copy the real `src/poller/inject/workspaces/slack-worker/` fixture
   // into a per-test tmpdir so the resolver walks actual slack-worker
-  // files (workspace.yml + allowed-tools.txt + .mcp.json + CLAUDE.md +
-  // .claude/). This validates the published workspace contract end-to-
-  // end without needing to mock resolveWorkspace.
+  // files (workspace.yml + .mcp.json + CLAUDE.md + .claude/). This
+  // validates the published workspace contract end-to-end without
+  // needing to mock resolveWorkspace.
   //
   // The `makeRepoContext` default has `slack.enabled = true`, so the
   // `settings.slack.enabled ≠ false` gate passes without a

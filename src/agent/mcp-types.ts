@@ -1,25 +1,22 @@
 /**
- * Shared leaf types for the MCP dispatch pipeline.
+ * Shared leaf types for the MCP factory pipeline.
  *
- * `mcp-registry.ts` and `resolve-dispatch-tools.ts` depend on these types and
- * on each other; putting the shared pieces in this leaf module breaks the
- * cycle (see `.claude/rules/tools.md#import-order`).
+ * `mcp-registry.ts` consumes these to declare the per-server `build()`
+ * factories that produce `McpServerConfig` entries for the dispatch
+ * core's `mcpServers` map.
  */
 
 import type { McpServerConfig } from "./mcp-settings-shape.js";
 
-/** Infrastructure server name — always present in resolver output. */
+/** Infrastructure server name — always present in the dispatch MCP set. */
 export const DANXBOT_SERVER_NAME = "danxbot";
 
-/** The one infrastructure tool danxbot exposes to every dispatched agent. */
-export const DANXBOT_COMPLETE_TOOL = "danxbot_complete";
-
 /**
- * Thrown when `allow_tools` references an unregistered server, a required
- * dependency is missing for a requested server, or the allowlist is
- * malformed. The caller (worker `handleLaunch` / `handleResume`) maps this to
- * a `400` HTTP response. Fails loud per
- * `.claude/rules/code-quality.md#fallbacks-are-bugs`.
+ * Thrown when an MCP server factory is invoked without the deps it needs
+ * (e.g. schema server without `apiUrl`/`apiToken`/`definitionId`, or the
+ * danxbot server without `danxbotStopUrl`). Caller (`worker/dispatch.ts`'s
+ * `handleLaunch` / `handleResume`) maps this to a `400` HTTP response —
+ * fail-loud per `.claude/rules/code-quality.md`.
  */
 export class McpResolveError extends Error {
   constructor(message: string) {
@@ -28,13 +25,15 @@ export class McpResolveError extends Error {
   }
 }
 
-export interface ResolveDispatchToolsOptions {
-  /**
-   * The caller's tool allowlist. Built-ins are named bare (`Read`, `Bash`);
-   * MCP tools use `mcp__<server>__<tool>` or `mcp__<server>__*`. Empty array
-   * is valid and means "only the infrastructure `danxbot_complete` tool."
-   */
-  allowTools: readonly string[];
+/**
+ * The options bag the danxbot infrastructure MCP factory receives.
+ * Caller-app servers (trello, schema, playwright) live in each
+ * workspace's `.mcp.json` and never see this options bag. Per-tool
+ * allowlisting is NOT a concept — the workspace's `.mcp.json` +
+ * `--strict-mcp-config` is the agent's MCP surface (see
+ * `src/workspace/resolve.ts` header for why).
+ */
+export interface McpFactoryOptions {
   /**
    * Worker URL that the agent's `danxbot_complete` tool call will POST to.
    * Always required — every dispatched agent is a spawned CLI with a worker
@@ -42,71 +41,32 @@ export interface ResolveDispatchToolsOptions {
    * is a compile-time error, never a silent skip.
    */
   danxbotStopUrl: string;
-  /** Dependencies for the schema server. Required iff allowTools enables it. */
-  schema?: {
-    apiUrl: string;
-    apiToken: string;
-    definitionId: string;
-    role?: string;
-  };
   /**
    * Slack callback URLs for Slack-triggered dispatches. When present,
-   * the danxbot MCP server exposes two additional tools
-   * (`danxbot_slack_reply`, `danxbot_slack_post_update`) that POST to
-   * these URLs, and the resolver adds the corresponding
-   * `mcp__danxbot__danxbot_slack_*` entries to `allowedTools`.
+   * the danxbot MCP server gets the URLs via env and exposes two
+   * additional tools (`danxbot_slack_reply`, `danxbot_slack_post_update`)
+   * that POST to them. Absent for every non-Slack dispatch.
    *
-   * Absent for every non-Slack dispatch (api, trello/poller). Non-slack
-   * agents never see these tools in their MCP tool list and never have
-   * them in their allowlist — the absence is the enforcement boundary.
-   *
-   * Both fields are required together — constructing a half-Slack
-   * dispatch would produce a partially-working tool surface and hide
-   * real bugs. The resolver validates this at the entry.
-   *
+   * The danxbot MCP server's `buildActiveTools` filter (the SOLE
+   * enforcement seam — see `src/mcp/danxbot-server.ts`) hides these
+   * tools from `tools/list` when the URLs aren't set. Both fields are
+   * required together; a half-Slack dispatch would produce a partially-
+   * working tool surface and hide real bugs.
    */
   slack?: {
     replyUrl: string;
     updateUrl: string;
   };
-  /** Test-only: override the registry. Defaults to `defaultMcpRegistry`. */
-  registry?: McpRegistry;
-}
-
-export interface ResolveDispatchToolsResult {
-  mcpServers: Record<string, McpServerConfig>;
-  allowedTools: string[];
 }
 
 export interface McpServerEntry {
-  /** Tool short names exposed by this server (used for wildcard expansion). */
-  readonly tools: readonly string[];
   /**
    * Build the `McpServerConfig` for this server from dispatch options.
-   *
-   * `enabledTools` is the subset of this server's tools the caller requested
-   * via `allow_tools` (already stripped of the `mcp__<server>__` prefix).
-   * `undefined` means "wildcard" — the caller asked for `mcp__<server>__*`,
-   * so the server should expose its default tool surface. A concrete array
-   * means the server MUST register only those tools. This is the
-   * load-bearing enforcement boundary: `--allowed-tools` on claude is leaky
-   * for MCP calls under `--dangerously-skip-permissions`, so denial has to
-   * happen at the MCP server itself (tools that aren't registered cannot be
-   * called, regardless of what Claude's permission layer does).
-   *
-   * Servers whose wire protocol supports per-tool filtering (when used)
-   * MUST honor `enabledTools`. Servers without that capability (schema)
-   * accept the arg and ignore it — the caller falls back to relying on
-   * `--allowed-tools` alone for those servers. Single-tool infrastructure
-   * servers (danxbot) also ignore the arg.
-   *
    * Throws `McpResolveError` when required inputs are missing or malformed.
-   * Called only when the server is actually needed for a dispatch.
+   * Called only when the workspace's `.mcp.json` (or the dispatch core's
+   * danxbot infrastructure merge) actually needs this server.
    */
-  build(
-    opts: ResolveDispatchToolsOptions,
-    enabledTools?: readonly string[],
-  ): McpServerConfig;
+  build(opts: McpFactoryOptions): McpServerConfig;
 }
 
 export type McpRegistry = Readonly<Record<string, McpServerEntry>>;

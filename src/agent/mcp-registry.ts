@@ -1,25 +1,20 @@
 /**
- * MCP server registry — the single declarative list of MCP servers danxbot
- * knows how to spawn for a dispatched agent.
+ * Danxbot infrastructure MCP server registry.
  *
- * Each registry entry declares:
- *   - `tools`   — short tool names the server exposes (without the
- *                 `mcp__<server>__` prefix). Used for wildcard expansion when
- *                 a caller passes `mcp__<server>__*` in `allow_tools`. Explicit
- *                 tool names in `allow_tools` pass through unconditionally —
- *                 claude is the authoritative gate at runtime.
- *   - `build`   — factory that produces the `McpServerConfig` for a dispatch.
- *                 Throws `McpResolveError` when required deps are missing.
- *
- * Adding a new MCP server is a single entry here plus a one-line doc update —
- * no changes at any call site. See `.claude/rules/agent-dispatch.md` for the
- * runbook.
+ * The dispatch core merges this server into every dispatch's MCP set so
+ * the agent can call `danxbot_complete`. `build(opts)` produces the
+ * `McpServerConfig`; it throws `McpResolveError` when a required dep is
+ * missing. Caller-app MCP servers (trello, schema, playwright, anything
+ * the workspace author wants) live in each workspace's `.mcp.json`
+ * directly — there is no registry lookup for them and no per-tool
+ * allowlist concept anywhere. The workspace's `.mcp.json` (combined
+ * with `--strict-mcp-config`) IS the agent's MCP surface; built-ins are
+ * all available by default.
  */
 
 import { resolve as pathResolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DANXBOT_COMPLETE_TOOL,
   DANXBOT_SERVER_NAME,
   McpResolveError,
   type McpRegistry,
@@ -27,7 +22,7 @@ import {
 } from "./mcp-types.js";
 
 export type { McpRegistry, McpServerEntry } from "./mcp-types.js";
-export { DANXBOT_COMPLETE_TOOL, DANXBOT_SERVER_NAME } from "./mcp-types.js";
+export { DANXBOT_SERVER_NAME } from "./mcp-types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -38,36 +33,8 @@ export const DANXBOT_MCP_SERVER_PATH = pathResolve(
   "../mcp/danxbot-server.ts",
 );
 
-/**
- * Absolute path to the in-tree Playwright MCP server. We spawn it via
- * `npx tsx <path>` rather than `npx -y @thehammer/...` for the same
- * reason the danxbot server uses that shape: the TypeScript source is
- * authoritative, no npm publish step gates local development, and
- * dispatched agents always have `tsx` in the worker image. If / when
- * the package is published to npm, swap the `args` below to
- * `["-y", "@thehammer/danxbot-playwright-mcp-server"]` and delete this
- * constant.
- */
-export const PLAYWRIGHT_MCP_SERVER_PATH = pathResolve(
-  __dirname,
-  "../../mcp-servers/playwright/src/index.ts",
-);
-
-/** Slack-only tools exposed on the danxbot server when opts.slack is present. */
-export const DANXBOT_SLACK_REPLY_TOOL = "danxbot_slack_reply";
-export const DANXBOT_SLACK_POST_UPDATE_TOOL = "danxbot_slack_post_update";
-
-/** Infrastructure server — always injected by the resolver. */
+/** Infrastructure server — always merged in by the dispatch core. */
 const DANXBOT_ENTRY: McpServerEntry = {
-  // The `tools` list is the set of short names used for wildcard
-  // expansion. We intentionally DO NOT include the Slack tools here:
-  // wildcard expansion of `mcp__danxbot__*` must not silently enable
-  // Slack tools for a non-Slack dispatch. Slack tools are added to
-  // `allowedTools` only when `opts.slack` is present, via an explicit
-  // branch in the resolver — belt-and-suspenders with the server's
-  // own `tools/list` filtering (see `src/mcp/danxbot-server.ts`'s
-  // `activeTools` filter in `main`).
-  tools: [DANXBOT_COMPLETE_TOOL],
   build(opts) {
     if (!opts.danxbotStopUrl) {
       throw new McpResolveError(
@@ -95,121 +62,13 @@ const DANXBOT_ENTRY: McpServerEntry = {
   },
 };
 
-const SCHEMA_ENTRY: McpServerEntry = {
-  tools: [
-    "annotation_convert_to_rule",
-    "annotation_create",
-    "annotation_delete",
-    "annotation_list",
-    "annotation_resolve",
-    "annotation_update",
-    "blueprint_list",
-    "context_chat_history",
-    "context_workflow_input_pages",
-    "context_workflow_inputs",
-    "directive_create",
-    "directive_delete",
-    "directive_list",
-    "directive_update",
-    "post_progress",
-    "quality_gate_list",
-    "quality_gate_submit_review",
-    "schema_get",
-    "schema_remove_model",
-    "schema_update_model",
-    "schema_update_root",
-    "style_list",
-    "template_create",
-    "template_get",
-    "template_get_example_pages",
-    "template_get_sample_data",
-    "template_list",
-    "template_patch",
-    "template_preview",
-    "template_preview_html",
-    "template_set_sample_data",
-    "template_update",
-  ],
-  build(opts) {
-    const schema = opts.schema;
-    if (!schema) {
-      throw new McpResolveError(
-        "mcp__schema__* requires a 'schema' options block with apiUrl, apiToken, and definitionId",
-      );
-    }
-    if (!schema.apiUrl) {
-      throw new McpResolveError("schema server missing apiUrl (SCHEMA_API_URL)");
-    }
-    if (!schema.apiToken) {
-      throw new McpResolveError(
-        "schema server missing apiToken (SCHEMA_API_TOKEN)",
-      );
-    }
-    if (!schema.definitionId) {
-      throw new McpResolveError(
-        "schema server missing definitionId (SCHEMA_DEFINITION_ID)",
-      );
-    }
-    const env: Record<string, string> = {
-      SCHEMA_API_URL: schema.apiUrl,
-      SCHEMA_API_TOKEN: schema.apiToken,
-      SCHEMA_DEFINITION_ID: schema.definitionId,
-    };
-    if (schema.role) env.SCHEMA_ROLE = schema.role;
-    return {
-      command: "npx",
-      args: ["-y", "@thehammer/schema-mcp-server"],
-      env,
-    };
-  },
-};
-
 /**
- * Playwright server — wraps the `playwright` container on `danxbot-net`
- * as two tools (`playwright_screenshot`, `playwright_html`) the
- * dispatched agent can call directly. The factory defaults
- * `PLAYWRIGHT_URL` to the danxbot-net container hostname so
- * worker-local dispatches Just Work; an operator can override by
- * setting `PLAYWRIGHT_URL` on the worker. The server itself fails loud
- * on empty/unset PLAYWRIGHT_URL (double-guard), so passing an empty
- * string env would surface at server startup rather than producing a
- * silent fallback.
- *
- * No caller-supplied options are required on the factory — Playwright
- * is stateless and same-network; there is no auth token to forward
- * and no dispatch-specific configuration the factory needs to
- * validate. This matches the zero-config ethos of the Playwright
- * container itself.
- */
-const PLAYWRIGHT_ENTRY: McpServerEntry = {
-  tools: ["playwright_screenshot", "playwright_html"],
-  build() {
-    const env: Record<string, string> = {
-      PLAYWRIGHT_URL: process.env.PLAYWRIGHT_URL || "http://playwright:3000",
-    };
-    // Forward PLAYWRIGHT_TIMEOUT_MS only when an operator explicitly
-    // set it. Leaving it unset lets the server fall back to its
-    // exported default (30s) — keeping the default value in one place
-    // rather than duplicating it across the registry and the server.
-    if (process.env.PLAYWRIGHT_TIMEOUT_MS) {
-      env.PLAYWRIGHT_TIMEOUT_MS = process.env.PLAYWRIGHT_TIMEOUT_MS;
-    }
-    return {
-      command: "npx",
-      args: ["tsx", PLAYWRIGHT_MCP_SERVER_PATH],
-      env,
-    };
-  },
-};
-
-/**
- * The production MCP server registry. Call sites that want the defaults pass
- * nothing (resolver uses this). Tests inject a custom registry via
- * `ResolveDispatchToolsOptions.registry` to exercise the lookup path without
- * touching production factories.
+ * The production MCP server registry. The dispatch core indexes into this
+ * to build the danxbot infrastructure server it merges into every
+ * dispatch's MCP set. Caller-app servers (trello, schema, playwright)
+ * are declared directly in each workspace's `.mcp.json` and never go
+ * through this registry.
  */
 export const defaultMcpRegistry: McpRegistry = Object.freeze({
   [DANXBOT_SERVER_NAME]: DANXBOT_ENTRY,
-  schema: SCHEMA_ENTRY,
-  playwright: PLAYWRIGHT_ENTRY,
 });

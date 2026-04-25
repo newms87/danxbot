@@ -280,12 +280,12 @@ describe("deep agent dispatch", () => {
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const input = mockDispatch.mock.calls[0][0] as Record<string, unknown>;
 
-    // P4 contract: the slack listener names the workspace and supplies
-    // the port placeholder only. The dispatch core auto-injects
-    // `DANXBOT_STOP_URL` + `DANXBOT_SLACK_*_URL` from the dispatchId
-    // (callers can't pre-compute them). Tool allowlist is NOT a caller
-    // concern anymore — the workspace's `allowed-tools.txt` owns it, and
-    // the workspace gate controls whether this dispatch runs at all.
+    // The slack listener names the workspace and supplies the port
+    // placeholder only. The dispatch core auto-injects `DANXBOT_STOP_URL`
+    // + `DANXBOT_SLACK_*_URL` from the dispatchId (callers can't pre-
+    // compute them). The workspace's `.mcp.json` (with --strict-mcp-config)
+    // is the agent's MCP surface; built-ins are all available by default —
+    // no per-dispatch allowlist exists.
     expect(input.workspace).toBe("slack-worker");
     expect(input).not.toHaveProperty("allowTools");
     const overlay = input.overlay as Record<string, string>;
@@ -432,7 +432,7 @@ describe("deep agent dispatch", () => {
 
   it("handles dispatch spawn errors (MCP resolve / infrastructure) with :x: + failure line + Trello notify", async () => {
     arrangeDispatchSpawnError(
-      new Error("unknown MCP server \"nope\" in allow_tools"),
+      new Error("schema server missing apiUrl (SCHEMA_API_URL)"),
     );
 
     await handler({ message: makeSlackMessage({ ts: "999.555" }), client });

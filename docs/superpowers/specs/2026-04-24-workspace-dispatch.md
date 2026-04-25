@@ -1,6 +1,6 @@
 # Workspace-Based Dispatch Configuration
 
-**Status:** Phase 0 (investigation + design) complete; Phases 1-7 in ToDo / In Progress
+**Status:** Phases 1-7 SHIPPED. **`allowed-tools.txt` was retired entirely (card 7WV0rDAA, 2026-04-25).** Every reference below to `allowed-tools.txt`, `--allowed-tools`, `POLLER_ALLOW_TOOLS`, or per-tool allowlists describes the as-shipped state of P3-P5; the post-7WV0rDAA system has no per-dispatch allowlist mechanism — the workspace's `.mcp.json` (with `--strict-mcp-config`) IS the agent's MCP surface, and built-ins are all available by default. See `src/workspace/resolve.ts` header for the rationale (claude's `--allowed-tools` is bypassed by `--dangerously-skip-permissions`).
 **Epic:** [jAdeJgi5](https://trello.com/c/jAdeJgi5)
 **External dependency:** [s9XdRLcz](https://trello.com/c/s9XdRLcz) (gpt-manager ships its workspace; blocks Phase 7)
 **Date:** 2026-04-24

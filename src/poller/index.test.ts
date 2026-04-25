@@ -1549,15 +1549,13 @@ describe("poll — Docker mode (headless agent)", () => {
     );
   });
 
-  it("does NOT pass allowTools — the workspace declares its own allowed-tools.txt (P3 invariant)", async () => {
-    // Phase 3 of the workspace-dispatch epic (Trello `q5aFuINM`): the
-    // poller's tool surface lives in
-    // `src/poller/inject/workspaces/trello-worker/allowed-tools.txt`,
-    // mirrored to `<repo>/.danxbot/workspaces/trello-worker/` by the
-    // inject pipeline, and resolved at dispatch time. The poller no
-    // longer hands an `allowTools` array to dispatch — `dispatchWith
-    // Workspace` reads the workspace fixture instead. Restating the
-    // allowlist here would shadow the workspace's source of truth.
+  it("does NOT pass allowTools — the allow-tools concept is gone from dispatch", async () => {
+    // The poller hands the workspace name to dispatch and nothing more
+    // about tool surface. The workspace's `.mcp.json` (with
+    // `--strict-mcp-config`) is the agent's MCP surface; built-ins are
+    // all available by default. No per-dispatch allowlist exists at any
+    // layer of the pipeline — see `src/workspace/resolve.ts` header for
+    // why claude's `--allowed-tools` was retired.
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -1656,9 +1654,9 @@ describe("poll — Docker mode (headless agent)", () => {
 
   it("resets teamRunning when dispatch() rejects before agent spawns (fire-and-forget .catch)", async () => {
     // Guards the pre-spawn failure path. If the .catch() is ever dropped,
-    // `teamRunning=true` sticks forever and the poller wedges. This is the
-    // only place in the system where a bad POLLER_ALLOW_TOOLS config would
-    // be observable — it MUST reset state on the next tick so the error is
+    // `teamRunning=true` sticks forever and the poller wedges. Any
+    // workspace-resolution failure (missing `.mcp.json`, gate trip, stale
+    // legacy file) MUST reset state on the next tick so the error is
     // loud (every tick logs) instead of silent (poller just stops).
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
     mockDispatch.mockRejectedValueOnce(new Error("pre-spawn boom"));

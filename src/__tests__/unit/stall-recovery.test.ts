@@ -1,8 +1,8 @@
 /**
- * Unit tests for completion-instruction plumbing. Historically this file also
- * covered `buildMcpSettings` (now deleted in Phase 2 of card XCptaJ34 — the
- * single `resolveDispatchTools` resolver in `src/agent/resolve-dispatch-tools.ts`
- * is the new source of truth and has its own dedicated test file).
+ * Unit tests for completion-instruction plumbing. The dispatch core
+ * (`src/dispatch/core.ts`) and the workspace resolver
+ * (`src/workspace/resolve.ts`) own MCP server materialization today;
+ * those modules have their own dedicated test files.
  */
 
 import { describe, it, expect, vi } from "vitest";
