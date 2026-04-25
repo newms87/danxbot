@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { renderProdCompose } from "./compose-infra.js";
+import {
+  PRUNE_COMMAND,
+  pruneStaleDockerImages,
+  renderProdCompose,
+} from "./compose-infra.js";
+import type { RemoteHost } from "./remote.js";
 
 describe("renderProdCompose", () => {
   it("substitutes ECR image and dashboard port", () => {
@@ -40,5 +45,33 @@ describe("renderProdCompose", () => {
     expect(out).toContain(
       "/danxbot/claude-projects:/danxbot/app/claude-projects/gpt-manager:ro",
     );
+  });
+});
+
+describe("pruneStaleDockerImages", () => {
+  it("PRUNE_COMMAND prunes ONLY unreferenced images — never volumes, networks, or system-wide", () => {
+    // The deploy host runs the dashboard, MySQL, two workers, and Playwright
+    // — `system prune` could remove the danxbot-net network mid-deploy and
+    // disconnect everything. `--volumes` could nuke the MySQL data volume.
+    // Lock the safety surface so a future "be more aggressive" tweak can't
+    // silently destroy state without flipping these assertions red.
+    expect(PRUNE_COMMAND).toBe("docker image prune -af");
+    expect(PRUNE_COMMAND).not.toContain("system");
+    expect(PRUNE_COMMAND).not.toContain("--volumes");
+    expect(PRUNE_COMMAND).not.toContain("volume");
+    expect(PRUNE_COMMAND).not.toContain("network");
+  });
+
+  it("issues exactly one sshRunStreaming call with PRUNE_COMMAND", () => {
+    // Stub RemoteHost: only the methods pruneStaleDockerImages touches need
+    // to be real. Keeps the test hermetic — no SSH process, no network.
+    const calls: string[] = [];
+    const remote = {
+      sshRunStreaming: (cmd: string) => calls.push(cmd),
+    } as unknown as RemoteHost;
+
+    pruneStaleDockerImages(remote);
+
+    expect(calls).toEqual([PRUNE_COMMAND]);
   });
 });

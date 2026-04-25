@@ -37,7 +37,10 @@ import { waitForHealthy } from "./health.js";
 import { pushSecrets } from "./secrets.js";
 import { syncRepos, runBootstrapScripts } from "./bootstrap-repos.js";
 import { launchWorkers } from "./workers.js";
-import { uploadAndRestartInfra } from "./compose-infra.js";
+import {
+  pruneStaleDockerImages,
+  uploadAndRestartInfra,
+} from "./compose-infra.js";
 import { awsCmd, run } from "./exec.js";
 import { createUser } from "./create-user.js";
 
@@ -155,6 +158,14 @@ async function deploy(config: DeployConfig): Promise<void> {
 
   console.log("\n── Waiting for instance SSH readiness ──");
   await remote.waitForSsh();
+
+  // Reclaim disk from prior deploys BEFORE any docker pull runs. Without
+  // this, weeks of deploys leave 20+GB of orphaned image layers and the
+  // EBS root volume fills up, breaking the next pull mid-deploy with "no
+  // space left on device". See `pruneStaleDockerImages` docstring for why
+  // this uses `image prune -af` instead of the more aggressive
+  // `system prune` (which would remove the danxbot-net bridge).
+  pruneStaleDockerImages(remote);
 
   const ecrImage = buildAndPush(config, outputs.ecrRepositoryUrl);
 
