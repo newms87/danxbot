@@ -1,6 +1,8 @@
 # Workspace-Based Dispatch Configuration
 
-**Status:** Phases 1-7 SHIPPED. **`allowed-tools.txt` was retired entirely (card 7WV0rDAA, 2026-04-25).** Every reference below to `allowed-tools.txt`, `--allowed-tools`, `POLLER_ALLOW_TOOLS`, or per-tool allowlists describes the as-shipped state of P3-P5; the post-7WV0rDAA system has no per-dispatch allowlist mechanism — the workspace's `.mcp.json` (with `--strict-mcp-config`) IS the agent's MCP surface, and built-ins are all available by default. See `src/workspace/resolve.ts` header for the rationale (claude's `--allowed-tools` is bypassed by `--dangerously-skip-permissions`).
+**Status:** Phases 1-7 SHIPPED.
+- **`allowed-tools.txt` was retired entirely (card 7WV0rDAA, 2026-04-25).** Every reference below to `allowed-tools.txt`, `--allowed-tools`, `POLLER_ALLOW_TOOLS`, or per-tool allowlists describes the as-shipped state of P3-P5; the post-7WV0rDAA system has no per-dispatch allowlist mechanism — the workspace's `.mcp.json` (with `--strict-mcp-config`) IS the agent's MCP surface, and built-ins are all available by default. See `src/workspace/resolve.ts` header for the rationale (claude's `--allowed-tools` is bypassed by `--dangerously-skip-permissions`).
+- **Phase 7 (card LWpUE0sk) shipped 2026-04-25.** `SCHEMA_ENTRY` was deleted from `src/agent/mcp-registry.ts`, the `schema?:` options block was removed from `McpFactoryOptions` (formerly `ResolveDispatchToolsOptions`), and `src/agent/resolve-dispatch-tools.ts` + its test were removed entirely. The MCP registry shrunk further than the original plan: from `{danxbot, playwright}` to `{danxbot}` only. Playwright moved into each consuming workspace's `.mcp.json` alongside trello and schema. The dispatch core now merges only the danxbot infrastructure server; everything else is workspace-declared. The legacy boundary check in `src/worker/dispatch.ts` retains `schema_definition_id`/`schema_role`/`api_url` in `LEGACY_BODY_FIELDS` — those strings exist solely to produce the canonical 400 for legacy callers and are not "live" schema knowledge.
 **Epic:** [jAdeJgi5](https://trello.com/c/jAdeJgi5)
 **External dependency:** [s9XdRLcz](https://trello.com/c/s9XdRLcz) (gpt-manager ships its workspace; blocks Phase 7)
 **Date:** 2026-04-24
@@ -10,7 +12,7 @@
 
 Replace today's four-mechanism dispatch configuration model with a single named-workspace abstraction. Every dispatched agent runs in a workspace at `<repo>/.danxbot/workspaces/<name>/` that declares (statically, Git-trackable) everything the agent needs: tools, MCP servers, rules, skills, sub-agents, gates. Dispatch API collapses to `{repo, workspace, task, status_url, api_token, overlay?: Record<string,string>}` where `overlay` is opaque to danxbot.
 
-The TypeScript MCP registry shrinks from four entries (`danxbot`, `schema`, `trello`, `playwright`) to two (`danxbot`, `playwright`) — schema and trello move into their respective workspaces' `.mcp.json` files. Danxbot ends up with **zero knowledge of any caller-specific concept** (no `schema_definition_id`, no `SCHEMA_API_TOKEN`, no `schema_role` in danxbot source).
+The TypeScript MCP registry shrinks from four entries (`danxbot`, `schema`, `trello`, `playwright`) to one (`danxbot`) — schema, trello, and playwright all move into their respective workspaces' `.mcp.json` files. Danxbot ends up with **zero knowledge of any caller-specific concept** (no `schema_definition_id`, no `SCHEMA_API_TOKEN`, no `schema_role` in active danxbot source — the only remaining strings are the rejection list in `src/worker/dispatch.ts#LEGACY_BODY_FIELDS`).
 
 ## Problem
 
@@ -165,11 +167,11 @@ Today's `src/agent/mcp-registry.ts` declares four entries. After this epic, two:
 | Server | Today | After | Why |
 |---|---|---|---|
 | `danxbot` | TypeScript factory | TypeScript factory (unchanged) | Infrastructure — calls back to danxbot worker endpoints (`/api/stop`, `/api/slack/reply`); dynamic per-trigger tool list |
-| `playwright` | TypeScript factory | TypeScript factory (unchanged) | Infrastructure — wraps the Playwright container danxbot deploys on `danxbot-net` |
+| `playwright` | TypeScript factory | Workspace `.mcp.json` | Workspace authors that need it declare it themselves; reachable by URL on `danxbot-net` |
 | `trello` | TypeScript factory | Workspace `.mcp.json` | Used only by danxbot's own `trello-worker` workspace; declared there |
 | `schema` | TypeScript factory | Workspace `.mcp.json` (in gpt-manager) | Caller-specific; danxbot has zero knowledge of schema concepts |
 
-The `ResolveDispatchToolsOptions` type loses its `schema: {...}` and `trello: {...}` typed blocks; gains a generic `overlay: Record<string, string>` for placeholder substitution.
+The `ResolveDispatchToolsOptions` type was renamed to `McpFactoryOptions` and lost its `schema: {...}` and `trello: {...}` typed blocks; the only remaining caller-specific block is `slack?: {...}` (still danxbot-internal, used by the slack-worker workspace).
 
 ## Prompt Delivery — `@file` Syntax (Phase 6)
 
@@ -237,7 +239,7 @@ The `prompt.md` temp file lifecycle is unchanged. The runtime-mode fork (docker 
 | **P4** | [gAeJBEDr](https://trello.com/c/gAeJBEDr) | slack-worker workspace + listener migration | P1, P2, P3 | — |
 | **P5** | [mGrHNHWM](https://trello.com/c/mGrHNHWM) | `{workspace, overlay}` API + legacy adapter + `http-launch-default` | P1-P4 | — |
 | **P6** | [WWYKnQhc](https://trello.com/c/WWYKnQhc) | Prompt delivery via `@file` syntax | (independent) | — |
-| **P7** | [LWpUE0sk](https://trello.com/c/LWpUE0sk) | Retire MCP registry + profiles + legacy adapter schema branch | P5 | [s9XdRLcz](https://trello.com/c/s9XdRLcz) (gpt-manager workspace shipped) |
+| **P7** | [LWpUE0sk](https://trello.com/c/LWpUE0sk) | Retire SCHEMA_ENTRY from MCP registry (SHIPPED 2026-04-25) | P5 | (was) [s9XdRLcz](https://trello.com/c/s9XdRLcz) — resolved when gpt-manager moved to the new dispatch shape and the legacy 400 rejection logged zero hits |
 
 ## Decisions Made
 

@@ -13,10 +13,10 @@ export const DANXBOT_SERVER_NAME = "danxbot";
 
 /**
  * Thrown when an MCP server factory is invoked without the deps it needs
- * (e.g. schema server without `apiUrl`/`apiToken`/`definitionId`, or the
- * danxbot server without `danxbotStopUrl`). Caller (`worker/dispatch.ts`'s
- * `handleLaunch` / `handleResume`) maps this to a `400` HTTP response —
- * fail-loud per `.claude/rules/code-quality.md`.
+ * (today, only the danxbot factory — when `danxbotStopUrl` is missing).
+ * Caller (`worker/dispatch.ts`'s `handleLaunch` / `handleResume`) maps
+ * this to a `400` HTTP response — fail-loud per
+ * `.claude/rules/code-quality.md`.
  */
 export class McpResolveError extends Error {
   constructor(message: string) {
