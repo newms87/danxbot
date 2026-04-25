@@ -32,6 +32,7 @@ const COMPOSE_PATH = join(process.cwd(), ".danxbot/config/compose.yml");
 const CLAUDE_JSON_DEST = "/danxbot/app/claude-auth/.claude.json";
 const CLAUDE_DIR_DEST = "/danxbot/app/claude-auth/.claude";
 const CREDENTIALS_FILE_DEST = "/danxbot/app/claude-auth/.claude/.credentials.json";
+const CLAUDE_PROJECTS_DEST = "/home/danxbot/.claude/projects";
 
 // Matches `:ro` as a standalone option (or first/middle/last entry in a
 // comma-separated option list). Catches `:ro`, `:ro,Z`, `:cached,ro`,
@@ -193,6 +194,31 @@ describe("worker compose.yml claude-auth mounts", () => {
     expect(
       v!.source.includes("${CLAUDE_CREDS_DIR:-"),
       `.claude/ source must NOT use :- fallback syntax — silently restores stale paths`,
+    ).toBe(false);
+  });
+
+  // Trello cjAyJpgr: each worker mounts its OWN <repo>/claude-projects/
+  // via a static relative path. Pre-fix, the danxbot self-host compose
+  // had `${CLAUDE_PROJECTS_DIR:-../../claude-projects}` and
+  // scripts/worker-env.sh exported CLAUDE_PROJECTS_DIR pointing at
+  // repos/danxbot/claude-projects/ for EVERY worker — so non-danxbot
+  // workers wrote JSONL into the danxbot repo's dir and the dashboard's
+  // per-repo path resolver returned empty timelines for non-danxbot
+  // dispatches. The static mount removes the env-var dependency and
+  // makes each worker's source dir a literal sibling of its compose file.
+  it("mounts ../../claude-projects (static) at /home/danxbot/.claude/projects — no CLAUDE_PROJECTS_DIR env var (Trello cjAyJpgr)", () => {
+    const v = findByDestination(volumes, CLAUDE_PROJECTS_DEST);
+    expect(
+      v,
+      "claude-projects bind not found in compose.yml",
+    ).toBeDefined();
+    expect(
+      v!.source,
+      `claude-projects source must be the static relative path ../../claude-projects: got ${v!.source}`,
+    ).toBe("../../claude-projects");
+    expect(
+      v!.source.includes("CLAUDE_PROJECTS_DIR"),
+      `claude-projects mount must NOT reference the legacy CLAUDE_PROJECTS_DIR env var`,
     ).toBe(false);
   });
 });

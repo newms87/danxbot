@@ -18,12 +18,12 @@ services:
       - /danxbot/logs:/danxbot/logs
       - /danxbot/claude-auth:/danxbot/claude-auth:ro
       # Per-repo Claude Code session logs — each repo's worker writes JSONL
-      # under /danxbot/claude-projects/ (the shared host dir); the dashboard
-      # reads via namespaced RO mounts so jsonl-path-resolver can find them.
-      # In prod all repos share one physical dir, so each mount below points
-      # to the same host path but with a repo-specific container alias.
-      - /danxbot/claude-projects:/danxbot/app/claude-projects/danxbot:ro
-      - /danxbot/claude-projects:/danxbot/app/claude-projects/gpt-manager:ro
+      # to its OWN /danxbot/repos/<name>/claude-projects/ host dir; the
+      # dashboard reads via namespaced RO mounts so jsonl-path-resolver
+      # finds JSONL under the matching namespace. Lines below are rendered
+      # by `renderProdCompose` from the deploy config's repo list — same
+      # layout as `docker-compose.override.yml` in dev.
+${CLAUDE_PROJECTS_MOUNTS}
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - danxbot-net

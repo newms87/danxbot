@@ -197,7 +197,13 @@ async function deploy(config: DeployConfig): Promise<void> {
   runBootstrapScripts(remote, config);
 
   // Launch shared-infra compose
-  uploadAndRestartInfra(remote, ecrImage, config.dashboard.port, config.region);
+  uploadAndRestartInfra(
+    remote,
+    ecrImage,
+    config.dashboard.port,
+    config.region,
+    config.repos.map((r) => r.name),
+  );
 
   // Launch per-repo workers. Worker compose files reference
   // ${DANXBOT_WORKER_IMAGE} + ${CLAUDE_AUTH_DIR} which only exist in prod —

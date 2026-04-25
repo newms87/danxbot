@@ -17,10 +17,27 @@ const TEMPLATE = resolve(__dirname, "templates/docker-compose.prod.yml");
 export function renderProdCompose(
   ecrImage: string,
   dashboardPort: number,
+  repoNames: string[],
 ): string {
+  // One claude-projects mount per connected repo, matching the dev override
+  // layout in `src/cli/dev-compose-override.ts`. Each repo's worker writes
+  // to its OWN host dir (via the worker compose's static `../../claude-projects`
+  // mount); the dashboard reads each via a namespaced RO mount so
+  // `jsonl-path-resolver.ts::expectedJsonlPath` finds the file under the
+  // correct repo namespace. Trello cjAyJpgr replaced a single shared
+  // `/danxbot/claude-projects` source under multiple namespaces with this
+  // per-repo layout — non-danxbot dispatches were rendering empty timelines
+  // because workers and resolver disagreed on the source dir.
+  const claudeProjectsMounts = repoNames
+    .map(
+      (name) =>
+        `      - /danxbot/repos/${name}/claude-projects:/danxbot/app/claude-projects/${name}:ro`,
+    )
+    .join("\n");
   return applyTemplateVars(readFileSync(TEMPLATE, "utf-8"), {
     "${ECR_IMAGE}": ecrImage,
     "${DASHBOARD_PORT}": String(dashboardPort),
+    "${CLAUDE_PROJECTS_MOUNTS}": claudeProjectsMounts,
   });
 }
 
@@ -65,9 +82,10 @@ export function uploadAndRestartInfra(
   ecrImage: string,
   dashboardPort: number,
   region: string,
+  repoNames: string[],
 ): void {
   console.log("\n── Uploading /danxbot/docker-compose.prod.yml ──");
-  const rendered = renderProdCompose(ecrImage, dashboardPort);
+  const rendered = renderProdCompose(ecrImage, dashboardPort, repoNames);
   // Unique tmp path so concurrent deploys from the same workstation don't stomp.
   const localTmpDir = mkdtempSync(resolve(tmpdir(), "danxbot-compose-"));
   const tmp = resolve(localTmpDir, "docker-compose.prod.yml");
@@ -77,15 +95,10 @@ export function uploadAndRestartInfra(
     "sudo mv /tmp/docker-compose.prod.yml /danxbot/docker-compose.prod.yml && sudo chown ubuntu:ubuntu /danxbot/docker-compose.prod.yml",
   );
 
-  // Ensure the shared Claude Code JSONL dir exists with ownership that
-  // matches the in-container danxbot user (uid 1000 — first non-system
-  // uid from `useradd -m danxbot` in the Dockerfile). On Ubuntu hosts
-  // uid 1000 is also `ubuntu`, so numeric ownership shows as ubuntu in
-  // `ls -la`. cloud-init handles fresh instances; this line handles
-  // existing instances and is idempotent (mkdir -p + chown).
-  remote.sshRun(
-    "sudo mkdir -p /danxbot/claude-projects && sudo chown 1000:1000 /danxbot/claude-projects",
-  );
+  // Per-repo claude-projects host dirs are pre-created in launchWorkers()
+  // — they're sibling concerns to the per-repo worker compose mount, so
+  // creation lives next to that. This function used to mkdir a shared
+  // `/danxbot/claude-projects` here; that single dir is gone (Trello cjAyJpgr).
 
   const registry = ecrImage.split("/")[0];
   remote.sshRun(

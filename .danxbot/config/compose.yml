@@ -101,12 +101,16 @@ services:
       # caller that bypasses make and runs `docker compose` directly.
       - ${CLAUDE_CONFIG_FILE:?CLAUDE_CONFIG_FILE must point at the live host .claude.json — see .env.example}:/danxbot/app/claude-auth/.claude.json
       - ${CLAUDE_CREDS_DIR:?CLAUDE_CREDS_DIR must point at the live host .claude/ dir containing .credentials.json — see .env.example}:/danxbot/app/claude-auth/.claude
-      # Claude Code session logs — this worker writes JSONL here.
-      # Default resolves to repos/danxbot/claude-projects/ on the host.
-      # The dashboard reads these via the per-repo RO mount added by
-      # `make generate-dev-override` (docker-compose.override.yml) or the
-      # static prod compose entry — see .claude/rules/docker-runtime.md.
-      - ${CLAUDE_PROJECTS_DIR:-../../claude-projects}:/home/danxbot/.claude/projects
+      # Claude Code session logs — this worker writes JSONL here. Static
+      # relative path resolves to <repo-root>/claude-projects on every
+      # host (compose resolves relative to the compose file's location at
+      # `<repo>/.danxbot/config/compose.yml`). Each connected repo has
+      # its OWN claude-projects/ dir so the dashboard's per-repo path
+      # resolver finds JSONL under the correct namespace. Pre-cjAyJpgr
+      # this used `${CLAUDE_PROJECTS_DIR:-../../claude-projects}` and a
+      # Makefile-level export pinned every worker at the danxbot repo's
+      # dir; non-danxbot dispatches got empty timelines as a result.
+      - ../../claude-projects:/home/danxbot/.claude/projects
     ports:
       - "${DANXBOT_WORKER_PORT}:${DANXBOT_WORKER_PORT}"
     # In docker runtime, src/worker/url-normalizer.ts rewrites dispatcher

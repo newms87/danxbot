@@ -75,6 +75,7 @@ launch-worker: ## Start a worker for a repo (usage: make launch-worker REPO=plat
 	if [ "$(REPO)" = "danxbot" ]; then \
 		./scripts/check-claude-auth-env.sh || exit 1; \
 	fi; \
+	mkdir -p "$(REPOS_DIR)/$(REPO)/claude-projects"; \
 	docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$(REPO)" up -d
 
 stop-worker: ## Stop a worker (usage: make stop-worker REPO=platform)
@@ -103,6 +104,7 @@ launch-all-workers: ## Start workers for all configured repos
 		  if [ "$$name" = "danxbot" ]; then \
 		      ./scripts/check-claude-auth-env.sh; \
 		  fi; \
+		  mkdir -p "$(REPOS_DIR)/$$name/claude-projects"; \
 		  docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$$name" up -d ) || exit 1; \
 	done
 

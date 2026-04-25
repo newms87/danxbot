@@ -34,17 +34,6 @@ services:
       - ./package.json:/danxbot/app/package.json
       # Dashboard built assets (mount for dev rebuilds)
       - ./dashboard:/danxbot/app/dashboard
-      # Host-mode JSONL compatibility: when CLAUDE_PROJECTS_DIR points at the
-      # host's real ~/.claude/projects, the dashboard can resolve host-mode
-      # dispatch JSONLs by their stored absolute path (path-resolver strategy 1).
-      # Both sides of the mount intentionally use the same variable so that when
-      # CLAUDE_PROJECTS_DIR is set, the container path === stored path, making
-      # strategy 1 (direct lookup by stored absolute path) work. When the
-      # variable is unset, the default RHS alias /danxbot/host-claude-projects is
-      # used as a safe placeholder that the path-resolver never looks up.
-      # Docker-worker JSONLs are resolved via per-repo mounts in the override
-      # (path-resolver strategy 2 — translateWorkerPath).
-      - ${CLAUDE_PROJECTS_DIR:-./claude-projects}:${CLAUDE_PROJECTS_DIR:-/danxbot/host-claude-projects}:ro
       # Per-repo RW binds + per-repo RO claude-projects binds live in
       # `docker-compose.override.yml` (gitignored, auto-generated from REPOS
       # by `make launch-infra`). The override mounts:
@@ -52,6 +41,11 @@ services:
       #   ./repos/<name>/claude-projects → /danxbot/app/claude-projects/<name>  (RO, for JSONL)
       # See src/cli/dev-compose-override.ts and src/dashboard/jsonl-path-resolver.ts.
       # Prod compose handles these with static per-repo volume entries.
+      # Trello cjAyJpgr: a previous host-mode `${CLAUDE_PROJECTS_DIR:-...}`
+      # compatibility line was retired. Host-mode dispatches store an
+      # absolute path that the path resolver looks up directly via the
+      # per-repo override mount above (strategy 2), so the legacy alias
+      # was redundant.
     networks:
       - danxbot-net
     depends_on:

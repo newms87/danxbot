@@ -11,9 +11,15 @@
  * This test source-executes the helper in a `bash -c` subshell with a
  * hostile parent env (`DANXBOT_WORKER_PORT=9999`) and asserts the
  * exported port matches the per-repo file, NOT the inherited shell
- * value. It also verifies the three sibling exports (DANXBOT_REPO_ROOT,
- * CLAUDE_AUTH_DIR, CLAUDE_PROJECTS_DIR) are populated so the two
- * targets cannot drift on those either.
+ * value. It also verifies the two sibling exports (DANXBOT_REPO_ROOT,
+ * CLAUDE_AUTH_DIR) are populated so the two targets cannot drift on
+ * those either.
+ *
+ * Trello cjAyJpgr: `CLAUDE_PROJECTS_DIR` was removed from the helper's
+ * export set. Workers now mount their own `<repo>/claude-projects/` via
+ * a static path in each worker's compose file — there is no shared dir
+ * to point at, so the env var has no purpose. The "must NOT export it"
+ * check below guards the rule.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -27,7 +33,7 @@ interface RunArgs {
   repo: string;
   envFiles: Record<string, string>;
   shellEnv?: Record<string, string>;
-  /** Skip creating the danxbot/claude-auth and claude-projects scaffolding */
+  /** Skip creating the danxbot/claude-auth scaffolding */
   skipDanxbotScaffold?: boolean;
 }
 
@@ -47,7 +53,6 @@ function setupRepoTree(args: RunArgs): string {
   }
   if (!args.skipDanxbotScaffold) {
     mkdirSync(join(dir, "repos", "danxbot", "claude-auth"), { recursive: true });
-    mkdirSync(join(dir, "repos", "danxbot", "claude-projects"), { recursive: true });
   }
   return dir;
 }
@@ -65,6 +70,11 @@ function runHelper(args: RunArgs): RunResult {
     `  printf 'DANXBOT_WORKER_PORT=%s\\n' "$DANXBOT_WORKER_PORT"`,
     `  printf 'DANXBOT_REPO_ROOT=%s\\n' "$DANXBOT_REPO_ROOT"`,
     `  printf 'CLAUDE_AUTH_DIR=%s\\n' "$CLAUDE_AUTH_DIR"`,
+    // Capture what the helper exported (or didn't) for CLAUDE_PROJECTS_DIR.
+    // The test below asserts the var is empty — i.e. NOT exported by the
+    // helper. We capture whatever the parent shell happened to inherit so
+    // the assertion can distinguish "helper exported it" from "shell had
+    // an inherited value". Trello cjAyJpgr.
     `  printf 'CLAUDE_PROJECTS_DIR=%s\\n' "$CLAUDE_PROJECTS_DIR"`,
     `else`,
     `  printf 'FAIL\\n' >&2`,
@@ -120,7 +130,7 @@ describe("scripts/worker-env.sh", () => {
     expect(result.vars.DANXBOT_WORKER_PORT).not.toBe("9999");
   });
 
-  it("exports DANXBOT_REPO_ROOT, CLAUDE_AUTH_DIR, CLAUDE_PROJECTS_DIR for parity with launch-worker", () => {
+  it("exports DANXBOT_REPO_ROOT, CLAUDE_AUTH_DIR for parity with launch-worker", () => {
     const result = runHelper({
       repo: "platform",
       envFiles: { platform: "DANXBOT_WORKER_PORT=5560\n" },
@@ -128,7 +138,26 @@ describe("scripts/worker-env.sh", () => {
     expect(result.exitCode).toBe(0);
     expect(result.vars.DANXBOT_REPO_ROOT).toMatch(/repos\/platform$/);
     expect(result.vars.CLAUDE_AUTH_DIR).toMatch(/repos\/danxbot\/claude-auth$/);
-    expect(result.vars.CLAUDE_PROJECTS_DIR).toMatch(/repos\/danxbot\/claude-projects$/);
+  });
+
+  it("does NOT export CLAUDE_PROJECTS_DIR — workers use a static per-repo mount in their compose.yml (Trello cjAyJpgr)", () => {
+    // The pre-cjAyJpgr helper realpath'd `repos/danxbot/claude-projects/`
+    // and exported CLAUDE_PROJECTS_DIR pointing at it for every worker.
+    // Result: every repo's worker wrote JSONL into the danxbot repo's
+    // dir regardless of which repo dispatched, breaking the dashboard's
+    // per-repo path resolver for non-danxbot dispatches. The fix is
+    // each worker's compose.yml uses a static `../../claude-projects`
+    // mount; this helper no longer needs to participate.
+    const result = runHelper({
+      repo: "platform",
+      envFiles: { platform: "DANXBOT_WORKER_PORT=5560\n" },
+    });
+    expect(result.exitCode).toBe(0);
+    // Empty string in the captured output = the helper did not export
+    // a value. (A fresh `bash -c` subshell never inherits parent env
+    // unless we explicitly threaded it via `shellEnv`; this run does
+    // not, so empty unambiguously means "not set by helper".)
+    expect(result.vars.CLAUDE_PROJECTS_DIR ?? "").toBe("");
   });
 
   it("each repo gets its own port — sequential sources do not leak between iterations", () => {
@@ -210,7 +239,7 @@ describe("scripts/worker-env.sh", () => {
     expect(result.stderr).toMatch(/not numeric/);
   });
 
-  it("fails loudly when the danxbot scaffold dirs (claude-auth/claude-projects) are missing rather than exporting empty paths", () => {
+  it("fails loudly when the danxbot/claude-auth scaffold dir is missing rather than exporting an empty CLAUDE_AUTH_DIR", () => {
     const result = runHelper({
       repo: "platform",
       envFiles: { platform: "DANXBOT_WORKER_PORT=5560\n" },

@@ -55,12 +55,25 @@ export function buildLaunchCommand(
   // inside the container without a worker restart.
   const claudeConfigFile = `${env.claudeAuthDir}/.claude.json`;
   const claudeCredsDir = `${env.claudeAuthDir}/.claude`;
+  // CLAUDE_PROJECTS_DIR is per-repo (Trello cjAyJpgr). Each worker writes
+  // JSONL into its OWN `<repo-checkout>/claude-projects/` so the dashboard's
+  // per-repo path resolver finds it under the matching namespace mount. The
+  // env var stays as a transitional bridge for connected-repo compose files
+  // that still use `${CLAUDE_PROJECTS_DIR:-...}` (e.g. gpt-manager); the
+  // danxbot self-host compose uses a static `../../claude-projects` mount
+  // and ignores this injection. Once every connected-repo compose switches
+  // to the static form, this var can be dropped from the prefix entirely.
+  // Note: a connected repo whose compose has NO `claude-projects` mount at
+  // all gets neither the bind nor the dashboard view; deploy still chowns
+  // the host dir but JSONL would land in the container layer. That's a
+  // pre-existing miswire on that repo's compose, not introduced here.
   // The danxbot repo SHA is NOT propagated via this prefix on purpose —
   // it lives in the image's ENV (baked via Dockerfile ARG by deploy/build.ts).
   // Adding it here would require the worker compose to interpolate it back
   // out, which silently overrides the image-baked value with empty when the
   // host shell isn't exporting it. Trello auX4nTRk for the rationale.
-  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_CONFIG_FILE='${claudeConfigFile}' CLAUDE_CREDS_DIR='${claudeCredsDir}' CLAUDE_PROJECTS_DIR='/danxbot/claude-projects' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
+  const claudeProjectsDir = `${CONTAINER_REPOS_BASE}/${repo.name}/claude-projects`;
+  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_CONFIG_FILE='${claudeConfigFile}' CLAUDE_CREDS_DIR='${claudeCredsDir}' CLAUDE_PROJECTS_DIR='${claudeProjectsDir}' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
   return `${prefix} docker compose --env-file /danxbot/.env -f ${CONTAINER_REPOS_BASE}/${repo.name}/.danxbot/config/compose.yml -p worker-${repo.name} up -d --remove-orphans`;
 }
 
@@ -83,6 +96,14 @@ export function launchWorkers(
     // idempotent with `|| true` so it's safe when the network already exists.
     remote.sshRun(
       `docker network inspect gpt-manager_sail >/dev/null 2>&1 || docker network create gpt-manager_sail`,
+    );
+    // Pre-create the per-repo `claude-projects/` host dir owned by UID 1000
+    // (the worker container's `danxbot` user). Without this step, Docker
+    // would auto-create the bind source as root-owned on first `compose
+    // up`, and the worker would silently fail to write JSONL — leaving
+    // the dashboard's per-repo timeline empty (Trello cjAyJpgr). Idempotent.
+    remote.sshRun(
+      `sudo mkdir -p ${CONTAINER_REPOS_BASE}/${repo.name}/claude-projects && sudo chown 1000:1000 ${CONTAINER_REPOS_BASE}/${repo.name}/claude-projects`,
     );
     remote.sshRunStreaming(buildLaunchCommand(repo, env));
   }

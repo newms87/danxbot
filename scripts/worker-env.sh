@@ -14,13 +14,21 @@
 #   DANXBOT_WORKER_PORT
 #   DANXBOT_REPO_ROOT
 #   CLAUDE_AUTH_DIR
-#   CLAUDE_PROJECTS_DIR
 #
 # Trello oGbjLtjN: `launch-all-workers` was leaking the parent shell's
 # DANXBOT_WORKER_PORT into every per-repo compose, so the first repo
 # won the host bind and the rest failed with "port is already
 # allocated". This helper unifies the env-prep both targets need so the
 # shadowing class of bug cannot recur from drift.
+#
+# Trello cjAyJpgr: CLAUDE_PROJECTS_DIR was removed from the export set.
+# Each worker's compose.yml now mounts its OWN <repo>/claude-projects/
+# via a static `../../claude-projects` path — no env-var indirection,
+# no shared danxbot dir, no cross-repo JSONL leakage. Worker compose
+# uses Docker's auto-create-on-first-up for the source dir; the
+# Makefile recipe explicitly mkdirs it (with the dev's UID, not root)
+# before `compose up` so the worker container's `danxbot` user (UID
+# 1000) can write to it.
 
 __worker_env_main() {
     local repo="${1:-}"
@@ -66,24 +74,20 @@ __worker_env_main() {
     fi
 
     # Capture realpath into locals first so a missing directory surfaces
-    # as an explicit error instead of an empty export. The
-    # `claude-auth`/`claude-projects` dirs are scaffolded by the setup
-    # skill on a fresh checkout — if they're absent, the worker would
-    # silently bind `:` (empty path) into the container and produce a
-    # confusing failure downstream.
-    local repo_root claude_auth_dir claude_projects_dir
+    # as an explicit error instead of an empty export. The `claude-auth`
+    # dir is scaffolded by the setup skill on a fresh checkout — if it's
+    # absent, the worker would silently bind `:` (empty path) into the
+    # container and produce a confusing failure downstream.
+    local repo_root claude_auth_dir
     repo_root="$(realpath "$repo_path" 2>/dev/null)" \
         || { echo "Error: realpath failed for $repo_path" >&2; return 1; }
     claude_auth_dir="$(realpath "$repos_dir/danxbot/claude-auth" 2>/dev/null)" \
         || { echo "Error: realpath failed for $repos_dir/danxbot/claude-auth" >&2; return 1; }
-    claude_projects_dir="$(realpath "$repos_dir/danxbot/claude-projects" 2>/dev/null)" \
-        || { echo "Error: realpath failed for $repos_dir/danxbot/claude-projects" >&2; return 1; }
 
     # Explicit overwrite — shadows any inherited shell value.
     export DANXBOT_WORKER_PORT="$port"
     export DANXBOT_REPO_ROOT="$repo_root"
     export CLAUDE_AUTH_DIR="$claude_auth_dir"
-    export CLAUDE_PROJECTS_DIR="$claude_projects_dir"
 
     return 0
 }
