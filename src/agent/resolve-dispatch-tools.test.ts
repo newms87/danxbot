@@ -5,7 +5,6 @@ import {
   type ResolveDispatchToolsOptions,
 } from "./resolve-dispatch-tools.js";
 import { defaultMcpRegistry, type McpRegistry } from "./mcp-registry.js";
-import { DISPATCH_PROFILES } from "../dispatch/profiles.js";
 
 const DANXBOT_TOOL = "mcp__danxbot__danxbot_complete";
 const STOP_URL = "http://localhost:5562/api/stop/job-1";
@@ -506,28 +505,14 @@ describe("resolveDispatchTools", () => {
       }
     });
 
-    it("playwright is NOT baked into any dispatch profile baseline — callers opt in explicitly", () => {
-      // This test is the counter-balance to the plan's original assumption
-      // that Playwright should ride along on every dispatch. MCP servers
-      // spawn subprocesses at session init, so baking the Playwright
-      // wildcard into POLLER or HTTP_LAUNCH baselines would spin up the
-      // server on every dispatch regardless of whether the agent calls
-      // it. Callers that need Playwright pass `mcp__playwright__*` in
-      // `body.allow_tools` (http-launch) or add it to their skill
-      // prompt (poller). A regression here would spawn hundreds of
-      // unused Playwright subprocesses in production.
-      //
-      // Relies on DISPATCH_PROFILES imported at the top of this file.
-      expect(DISPATCH_PROFILES.poller.allowTools).not.toContain(
-        "mcp__playwright__*",
-      );
-      expect(DISPATCH_PROFILES["http-launch"].allowTools).not.toContain(
-        "mcp__playwright__*",
-      );
-      expect(DISPATCH_PROFILES.slack.allowTools).not.toContain(
-        "mcp__playwright__*",
-      );
-    });
+    // The "playwright is NOT baked into any dispatch profile baseline"
+    // test was retired in P5 of the workspace-dispatch epic. Profiles
+    // (`src/dispatch/profiles.ts`) no longer exist — every dispatch's
+    // tool surface comes from a workspace's `allowed-tools.txt`. The
+    // structural protection now is: workspace fixtures are committed in
+    // source, so a regression that adds `mcp__playwright__*` to
+    // `trello-worker/allowed-tools.txt` or `slack-worker/allowed-tools.txt`
+    // shows up in the diff. No runtime test replaces the baseline check.
 
     it("allowedTools has no duplicates", () => {
       const r = resolveDispatchTools(

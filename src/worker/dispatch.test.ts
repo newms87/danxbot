@@ -154,6 +154,21 @@ vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
 }));
 
+const mockGetActiveJob = vi.fn();
+const mockListActiveJobs = vi.fn(() => [] as unknown[]);
+const mockDispatchFn = vi.fn();
+vi.mock("../dispatch/core.js", async () => {
+  const actual = await vi.importActual<typeof import("../dispatch/core.js")>(
+    "../dispatch/core.js",
+  );
+  return {
+    ...actual,
+    dispatch: (...args: unknown[]) => mockDispatchFn(...args),
+    getActiveJob: (id: string) => mockGetActiveJob(id),
+    listActiveJobs: () => mockListActiveJobs(),
+  };
+});
+
 // handleSlackReply / handleSlackUpdate (Phase 1) import getSlackClientForRepo
 // from `../slack/listener.js`. That listener transitively imports the
 // heartbeat manager → `@anthropic-ai/sdk`, which reads `config.anthropic.apiKey`
@@ -192,668 +207,17 @@ import {
   handleStop,
   clearJobCleanupIntervals,
 } from "./dispatch.js";
-import { DISPATCH_PROFILES } from "../dispatch/profiles.js";
-
-/**
- * The standard HTTP-launch baseline (Read/Bash/etc.) that every API-
- * dispatched agent gets unconditionally. Pulled from the profile registry
- * so these tests stay in sync with the source of truth instead of
- * hardcoding the tool list.
- */
-const HTTP_LAUNCH_BASELINE = [
-  ...DISPATCH_PROFILES["http-launch"].allowTools,
-] as const;
 
 const MOCK_REPO = makeRepoContext();
 
 beforeEach(() => {
   vi.clearAllMocks();
   mockIsFeatureEnabled.mockReturnValue(true);
+  mockGetActiveJob.mockReset();
+  mockListActiveJobs.mockReset().mockReturnValue([]);
+  mockDispatchFn.mockReset();
 });
 
-describe("handleLaunch", () => {
-  it("returns 400 when task is missing", async () => {
-    const req = createMockReqWithBody("POST", { api_token: "tok-123" });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody())).toEqual({
-      error: "Missing or blank required fields: task, api_token",
-    });
-  });
-
-  it("returns 400 when api_token is missing", async () => {
-    const req = createMockReqWithBody("POST", { task: "Do something" });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody())).toEqual({
-      error: "Missing or blank required fields: task, api_token",
-    });
-  });
-
-  it("returns 400 when repo name does not match", async () => {
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: [],
-      repo: "wrong-repo",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody())).toEqual({
-      error: `This worker manages "test-repo", not "wrong-repo"`,
-    });
-  });
-
-  it("returns 400 when allow_tools is missing (AC: required field)", async () => {
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(/allow_tools/);
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 when allow_tools is not an array", async () => {
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: "Read",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(/array/);
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 when allow_tools contains a non-string entry", async () => {
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: ["Read", 42],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(/string/);
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 (not 500) when allow_tools references an unknown MCP server — McpResolveError maps to 400", async () => {
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: ["mcp__totally_unknown_server__anything"],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(
-      /unknown MCP server|totally_unknown_server/,
-    );
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 when allow_tools asks for mcp__schema__* but schema_definition_id is missing — resolver surfaces 400, not 500", async () => {
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: ["mcp__schema__schema_get"],
-      // schema_definition_id intentionally omitted
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(
-      /definitionId|SCHEMA_DEFINITION_ID/,
-    );
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 200 with job_id on successful launch", async () => {
-    const mockJob = {
-      id: "job-abc-123",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Implement feature X",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(200);
-    const body = JSON.parse(res._getBody());
-    // job_id is the stable dispatchId (UUID), not the internal job id
-    expect(body.job_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
-    expect(body.status).toBe("launched");
-  });
-
-  it("passes correct options to spawnAgent", async () => {
-    const mockJob = {
-      id: "job-1",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Build schema",
-      api_token: "tok-abc",
-      allow_tools: [],
-      status_url: "http://example.com/status",
-      max_runtime_ms: 120000,
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        // Prompt includes the completion instruction appended by handleLaunch
-        prompt: expect.stringContaining("Build schema"),
-        repoName: "test-repo",
-        timeoutMs: 3600000,
-        mcpConfigPath: expect.stringContaining("settings.json"),
-        statusUrl: "http://example.com/status",
-        apiToken: "tok-abc",
-        maxRuntimeMs: 120000,
-        eventForwarding: {
-          statusUrl: "http://example.com/status",
-          apiToken: "tok-abc",
-        },
-        openTerminal: false, // config.isHost is false in test
-      }),
-    );
-  });
-
-  it("does NOT forward resume fields (resumeSessionId, parentJobId) on a fresh launch", async () => {
-    // Regression guard: the `expect.objectContaining` in the "passes correct
-    // options" test tolerates extra keys. A refactor that accidentally leaks
-    // resumeSessionId/parentJobId into handleLaunch would silently turn every
-    // fresh launch into a resume. This test locks their absence explicitly.
-    const mockJob = {
-      id: "job-no-leak",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Fresh launch",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.resumeSessionId).toBeUndefined();
-    expect(spawnOpts.parentJobId).toBeUndefined();
-  });
-
-  it("passes title to spawnAgent when provided", async () => {
-    const mockJob = {
-      id: "job-1",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Build schema",
-      api_token: "tok-abc",
-      allow_tools: [],
-      title: "AgentDispatch #AGD-359, SchemaDefinition #SD-176",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.title).toBe(
-      "AgentDispatch #AGD-359, SchemaDefinition #SD-176",
-    );
-  });
-
-  // Regression: the agents object on the request body must reach spawnAgent
-  // intact. See `.claude/rules/agent-dispatch.md`.
-  it("forwards the agents object from the request body to spawnAgent intact", async () => {
-    const mockJob = {
-      id: "job-agents",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const agents = {
-      "template-builder": { description: "Builds templates", prompt: "..." },
-      "schema-builder": { description: "Builds schemas", prompt: "..." },
-    };
-
-    const req = createMockReqWithBody("POST", {
-      task: "Build schema",
-      api_token: "tok-abc",
-      allow_tools: [],
-      agents,
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.agents).toEqual(agents);
-  });
-
-  it("does not set eventForwarding when statusUrl is absent", async () => {
-    const mockJob = {
-      id: "job-2",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do work",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.eventForwarding).toBeUndefined();
-  });
-
-  it("calls buildMcpSettings with correct options", async () => {
-    const mockJob = {
-      id: "job-3",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Build schema",
-      api_token: "tok-abc",
-      allow_tools: ["mcp__schema__*"],
-      api_url: "http://custom-api.com",
-      schema_definition_id: "def-42",
-      schema_role: "builder",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    const settings = mockSettingsRead(spawnOpts);
-    expect(settings.mcpServers.schema.env.SCHEMA_API_URL).toBe(
-      "http://custom-api.com",
-    );
-    expect(settings.mcpServers.schema.env.SCHEMA_API_TOKEN).toBe("tok-abc");
-    expect(settings.mcpServers.schema.env.SCHEMA_DEFINITION_ID).toBe("def-42");
-    expect(settings.mcpServers.schema.env.SCHEMA_ROLE).toBe("builder");
-    expect(settings.mcpServers.danxbot.env.DANXBOT_STOP_URL).toContain(
-      "/api/stop/",
-    );
-  });
-
-  it("accepts numeric schema_definition_id (Laravel sends int IDs as JSON numbers)", async () => {
-    // Regression: Laravel's `$schema->id` is an int and serializes as a JSON
-    // number, not a string. A string-only type-check silently drops the value,
-    // so `SCHEMA_DEFINITION_ID` never reaches the MCP server, which exits with
-    // "SCHEMA_DEFINITION_ID is required" — leaving the agent with no
-    // `mcp__schema__*` tools. The parser must coerce numeric IDs to strings.
-    const mockJob = {
-      id: "job-int-id",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Build schema",
-      api_token: "tok-abc",
-      allow_tools: ["mcp__schema__*"],
-      api_url: "http://custom-api.com",
-      schema_definition_id: 42, // numeric, as Laravel sends it
-      schema_role: "orchestrator",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    const settings = mockSettingsRead(spawnOpts);
-    expect(settings.mcpServers.schema.env.SCHEMA_DEFINITION_ID).toBe("42");
-    expect(settings.mcpServers.schema.env.SCHEMA_ROLE).toBe("orchestrator");
-  });
-
-  it("rewrites loopback callback URLs to host.docker.internal in docker runtime", async () => {
-    // mockDispatchConfig.isHost = false (docker runtime). Callbacks sent as
-    // localhost URLs would fail from inside a container; handleLaunch must
-    // rewrite both api_url and status_url before passing them downstream.
-    mockDispatchConfig.isHost = false;
-    const mockJob = {
-      id: "job-rw",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Build schema",
-      api_token: "tok-abc",
-      allow_tools: [],
-      api_url: "http://localhost:80",
-      status_url: "http://localhost/api/agent-dispatch/abc/status",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(mockSpawnAgent).toHaveBeenCalled();
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.statusUrl).toBe(
-      "http://host.docker.internal/api/agent-dispatch/abc/status",
-    );
-  });
-
-  it("normalizes the defaultApiUrl fallback when api_url is omitted", async () => {
-    // Regression: `defaultApiUrl` is itself a loopback URL (http://localhost:80)
-    // and must be rewritten in docker runtime when the dispatcher omits api_url.
-    mockDispatchConfig.isHost = false;
-    const mockJob = {
-      id: "job-fb",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      // No api_url — falls back to config.dispatch.defaultApiUrl
-      task: "Do work",
-      api_token: "tok-abc",
-      allow_tools: [],
-      status_url: "http://localhost/status",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(mockSpawnAgent).toHaveBeenCalled();
-  });
-
-  it("returns 500 without creating MCP settings when api_url is unparseable", async () => {
-    // Guard: a bad URL must not leak a settings dir — normalization runs before
-    // buildMcpSettings, so an early throw leaves nothing to clean up.
-    mockDispatchConfig.isHost = false;
-    const req = createMockReqWithBody("POST", {
-      task: "Do work",
-      api_token: "tok-abc",
-      allow_tools: [],
-      api_url: "not a url",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(500);
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("leaves loopback callback URLs untouched in host runtime", async () => {
-    mockDispatchConfig.isHost = true;
-    try {
-      const mockJob = {
-        id: "job-host",
-        status: "running",
-        summary: "",
-        startedAt: new Date(),
-      };
-      mockSpawnAgent.mockResolvedValue(mockJob);
-
-      const req = createMockReqWithBody("POST", {
-        task: "Build schema",
-        api_token: "tok-abc",
-        allow_tools: [],
-        api_url: "http://localhost:80",
-        status_url: "http://localhost/api/agent-dispatch/abc/status",
-      });
-      const res = createMockRes();
-
-      await handleLaunch(req, res, MOCK_REPO);
-
-      expect(mockSpawnAgent).toHaveBeenCalled();
-      const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-      expect(spawnOpts.statusUrl).toBe(
-        "http://localhost/api/agent-dispatch/abc/status",
-      );
-    } finally {
-      mockDispatchConfig.isHost = false;
-    }
-  });
-
-  it("cleans up MCP settings on spawn failure", async () => {
-    mockSpawnAgent.mockRejectedValue(new Error("Spawn failed"));
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do work",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(500);
-  });
-
-  it("accepts matching repo name without error", async () => {
-    const mockJob = {
-      id: "job-match",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do work",
-      api_token: "tok-123",
-      allow_tools: [],
-      repo: "test-repo",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(200);
-  });
-
-  it("returns 500 with the probe error when the MCP probe rejects", async () => {
-    // spawnAgent's probe-failure path throws a descriptive error.
-    const probeError = new Error(
-      'MCP server probe failed for [schema] before launching agent:\n  - MCP server "schema" exited with code 1 before responding: SCHEMA_DEFINITION_ID is required',
-    );
-    mockSpawnAgent.mockRejectedValueOnce(probeError);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do work",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(500);
-    const body = JSON.parse(res._getBody());
-    expect(body.error).toContain("schema");
-    expect(body.error).toContain("SCHEMA_DEFINITION_ID is required");
-  });
-});
-
-// Phase 4 of the agent-isolation epic (Trello 7ha2CSpc). `/api/launch` and
-// `/api/resume` merge the `http-launch` dispatch profile's baseline
-// allowlist with the caller's `body.allow_tools`. The baseline is the
-// standard built-in surface (Read/Glob/Grep/Edit/Write/Bash/TodoWrite),
-// so every API-dispatched claude process gets those tools unconditionally
-// and callers opt MCP servers in on top via `body.allow_tools`. These
-// tests pin both sides of the merge: default behavior (baseline reaches
-// claude), opt-ins activate their servers, and overlap dedupes
-// profile-first.
-describe("handleLaunch — profile merge (Phase 4)", () => {
-  it("produces [baseline + danxbot_complete] when body.allow_tools is empty (MCP servers stay inert)", async () => {
-    const mockJob = {
-      id: "job-default",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do work",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    // Baseline built-ins flow through unconditionally; only
-    // `mcp__danxbot__danxbot_complete` is the MCP surface (infrastructure).
-    // Trello, schema, and every other MCP server stay inert until the
-    // caller opts in via body.allow_tools.
-    expect(spawnOpts.allowedTools).toEqual([
-      ...HTTP_LAUNCH_BASELINE,
-      "mcp__danxbot__danxbot_complete",
-    ]);
-    const settings = mockSettingsRead(spawnOpts);
-    expect(Object.keys(settings.mcpServers).sort()).toEqual(["danxbot"]);
-  });
-
-  it("rejects mcp__trello__* via the legacy registry path — trello is workspace-only since P3 of the workspace-dispatch epic", async () => {
-    const req = createMockReqWithBody("POST", {
-      task: "Move a card",
-      api_token: "tok-123",
-      allow_tools: ["mcp__trello__*"],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(res._getBody()).toMatch(/unknown MCP server \\?"trello\\?"/);
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("dedupes body entries that overlap the baseline (profile-first wins)", async () => {
-    const mockJob = {
-      id: "job-builtin-merge",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Read some files",
-      api_token: "tok-123",
-      // Both entries are already in the baseline — the merge must drop
-      // the duplicates and keep the baseline's earlier position.
-      allow_tools: ["Read", "Grep"],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.allowedTools).toEqual([
-      ...HTTP_LAUNCH_BASELINE,
-      "mcp__danxbot__danxbot_complete",
-    ]);
-  });
-
-  it("prepends the baseline when the body opts into an MCP server (gpt-manager Schema Builder shape)", async () => {
-    // Regression guard for the bug this baseline fixes: before the
-    // baseline existed, a caller passing only `["mcp__schema__*"]` ended
-    // up with an allowlist of [mcp__schema__..., danxbot_complete] and
-    // no Read/Bash — so the agent could not reach spill files the harness
-    // writes for >2KB MCP responses.
-    const mockJob = {
-      id: "job-schema-builder",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Build a schema",
-      api_token: "tok-123",
-      schema_definition_id: "def-1",
-      allow_tools: ["mcp__schema__*"],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    // Baseline reaches claude verbatim.
-    for (const t of HTTP_LAUNCH_BASELINE) {
-      expect(spawnOpts.allowedTools).toContain(t);
-    }
-    // Plus the caller's requested MCP surface.
-    expect(spawnOpts.allowedTools).toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(/^mcp__schema__/),
-        "mcp__danxbot__danxbot_complete",
-      ]),
-    );
-  });
-});
 
 describe("handleLaunch — dispatchApi feature toggle", () => {
   it("returns 503 with the documented body when dispatchApi is disabled", async () => {
@@ -861,9 +225,8 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
       (_ctx: unknown, feature: string) => feature !== "dispatchApi",
     );
     const req = createMockReqWithBody("POST", {
+      workspace: "any",
       task: "Do work",
-      api_token: "tok-123",
-      allow_tools: [],
     });
     const res = createMockRes();
 
@@ -880,493 +243,8 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
     // No spawn occurred — the 503 short-circuits before any bookkeeping.
     expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
-
-  it("runs normally when dispatchApi is enabled", async () => {
-    mockIsFeatureEnabled.mockReturnValue(true);
-    mockSpawnAgent.mockResolvedValue({
-      id: "job-enabled",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    });
-    const req = createMockReqWithBody("POST", {
-      task: "Do work",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(200);
-    expect(mockSpawnAgent).toHaveBeenCalled();
-  });
 });
 
-describe("handleResume", () => {
-  beforeEach(() => {
-    mockFindSessionFileByDispatchId.mockReset();
-    mockDeriveSessionDir.mockClear();
-  });
-
-  it("derives the parent session dir from the workspace cwd, not the repo root (Phase 3 spawn-cwd contract)", async () => {
-    // Regression guard: if `resolveParentSessionId` ever reverts to
-    // `deriveSessionDir(getReposBase() + repoName)`, every resume would
-    // look under an empty projects dir and silently return 404 on good
-    // parent IDs. Asserting the cwd string gets the `.danxbot/workspace`
-    // suffix locks the launcher + resume lookup in lockstep. See Trello
-    // `7ha2CSpc` and `src/workspace/generate.ts` `workspacePath`.
-    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
-    );
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    const cwds = mockDeriveSessionDir.mock.calls.map((c) => c[0] as string);
-    expect(cwds.length).toBeGreaterThan(0);
-    expect(cwds.some((cwd) => cwd.endsWith(".danxbot/workspace"))).toBe(true);
-  });
-
-  it("returns 400 when job_id is missing", async () => {
-    const req = createMockReqWithBody("POST", {
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody())).toEqual({
-      error: "Missing or blank required fields: job_id, task, api_token",
-    });
-    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 when job_id is only whitespace (rejects non-empty but blank strings)", async () => {
-    // Truthiness lets `"   "` through; typeof+trim checks don't. Regression
-    // guard for code-quality.md "fail loud" — a whitespace id would have
-    // scanned every JSONL for a bogus tag and returned a misleading 404.
-    const req = createMockReqWithBody("POST", {
-      job_id: "   ",
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 when task is only whitespace", async () => {
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "   ",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-  });
-
-  it("returns 400 when allow_tools is missing on resume (AC: required field, same gate as launch)", async () => {
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Keep going",
-      api_token: "tok-123",
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(/allow_tools/);
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 (not 500) when resume allow_tools references an unknown MCP server — McpResolveError maps to 400", async () => {
-    mockFindSessionFileByDispatchId.mockResolvedValue(
-      "/fake/projects/-test-repos-test-repo/session-abc.jsonl",
-    );
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: ["mcp__totally_unknown_server__anything"],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(
-      /unknown MCP server|totally_unknown_server/,
-    );
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 when job_id is not a string (type coercion safety)", async () => {
-    const req = createMockReqWithBody("POST", {
-      job_id: 12345,
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
-  });
-
-  it("returns 400 when task is missing", async () => {
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-  });
-
-  it("returns 400 when api_token is missing", async () => {
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Keep going",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-  });
-
-  it("returns 400 when repo name does not match", async () => {
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: [],
-      repo: "wrong-repo",
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody())).toEqual({
-      error: `This worker manages "test-repo", not "wrong-repo"`,
-    });
-  });
-
-  it("returns 404 when parent session file is not found on disk (tag not in any jsonl)", async () => {
-    mockFindSessionFileByDispatchId.mockResolvedValue(null);
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "missing-parent",
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(404);
-    expect(JSON.parse(res._getBody())).toEqual({
-      error: `Parent job "missing-parent" session file not found — cannot resume`,
-    });
-    // spawnAgent must not be called when parent resolution fails.
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 500 (not 404) when the Claude session directory does not exist at all", async () => {
-    // Distinct failure mode from "parent tag not found": the directory
-    // `~/.claude/projects/<cwd>/` itself is missing, meaning claude has never
-    // run in this repo's cwd. That's infrastructure, not a stale parent id —
-    // mapping it to 404 hides a real bug (wrong cwd, missing deploy, etc).
-    const enoent = Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-    mockStat.mockRejectedValueOnce(enoent);
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(500);
-    expect(JSON.parse(res._getBody()).error).toMatch(
-      /Claude session directory .* does not exist/,
-    );
-    // Must NOT fall through to the tag scan — the dir doesn't exist.
-    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 503 with the documented body when dispatchApi is disabled", async () => {
-    mockIsFeatureEnabled.mockImplementation(
-      (_ctx: unknown, feature: string) => feature !== "dispatchApi",
-    );
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Keep going",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(503);
-    expect(JSON.parse(res._getBody())).toEqual({
-      error: `Dispatch API is disabled for repo ${MOCK_REPO.name}`,
-    });
-    expect(mockFindSessionFileByDispatchId).not.toHaveBeenCalled();
-    expect(mockSpawnAgent).not.toHaveBeenCalled();
-  });
-
-  it("returns 200 with {job_id, parent_job_id, status} and passes resumeSessionId + parentJobId to spawnAgent", async () => {
-    // Session file lives at /some/dir/<sessionId>.jsonl — extracted via basename.
-    mockFindSessionFileByDispatchId.mockResolvedValue(
-      "/home/claude/.claude/projects/-repos-test/566c1776-4c8b-43ef-b1c2-76f262450c4a.jsonl",
-    );
-    const mockJob = {
-      id: "resume-child",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "aea75840-6e0d-4977-84b3-ac3d07853cdf",
-      task: "Now do step 2",
-      api_token: "tok-abc",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(200);
-    const body = JSON.parse(res._getBody());
-    expect(body).toMatchObject({
-      parent_job_id: "aea75840-6e0d-4977-84b3-ac3d07853cdf",
-      status: "launched",
-    });
-    // The new dispatch id is a fresh UUID — distinct from the parent.
-    expect(body.job_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
-    expect(body.job_id).not.toBe("aea75840-6e0d-4977-84b3-ac3d07853cdf");
-
-    // resumeSessionId is the basename of the parent's JSONL, passed through
-    // to spawnAgent so buildClaudeInvocation can emit `--resume <sessionId>`.
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        resumeSessionId: "566c1776-4c8b-43ef-b1c2-76f262450c4a",
-        parentJobId: "aea75840-6e0d-4977-84b3-ac3d07853cdf",
-        repoName: "test-repo",
-        prompt: expect.stringContaining("Now do step 2"),
-      }),
-    );
-  });
-
-  it("passes max_runtime_ms and title to spawnAgent when provided", async () => {
-    mockFindSessionFileByDispatchId.mockResolvedValue(
-      "/home/claude/.claude/projects/-repos-test/parent-session.jsonl",
-    );
-    mockSpawnAgent.mockResolvedValue({
-      id: "resume-child",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    });
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Continue",
-      api_token: "tok-abc",
-      allow_tools: [],
-      max_runtime_ms: 300_000,
-      title: "AgentDispatch #AGD-360",
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(mockSpawnAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        maxRuntimeMs: 300_000,
-        title: "AgentDispatch #AGD-360",
-      }),
-    );
-  });
-
-  it("returns 500 with the probe error when the MCP probe rejects", async () => {
-    // Mirror of the handleLaunch probe-failure contract: resume paths must
-    // surface the probe error as a descriptive 500.
-    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/parent-session-uuid.jsonl",
-    );
-
-    const probeError = new Error(
-      'MCP server probe failed for [schema] before launching agent:\n  - MCP server "schema" timeout: no response to initialize',
-    );
-    mockSpawnAgent.mockRejectedValueOnce(probeError);
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-job",
-      task: "Continue",
-      api_token: "tok-abc",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(500);
-    const body = JSON.parse(res._getBody());
-    expect(body.error).toContain("schema");
-    expect(body.error).toContain("timeout");
-  });
-
-  it("produces [baseline + danxbot_complete] when body.allow_tools is empty on resume (symmetry with launch)", async () => {
-    // Resume-side mirror of the "default allowlist" launch test. If a
-    // regression ever skipped the profile merge on resume but kept the
-    // trello-opt-in path working, the existing resume-trello test would
-    // still pass — only this default-case assertion catches it.
-    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
-    );
-    const mockJob = {
-      id: "job-resume-default",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Continue with no extra tools",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(200);
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.allowedTools).toEqual([
-      ...HTTP_LAUNCH_BASELINE,
-      "mcp__danxbot__danxbot_complete",
-    ]);
-  });
-
-  it("applies the same http-launch profile merge as handleLaunch (Phase 4) — schema opt-in via body works", async () => {
-    // Symmetry guard: resume must route `body.allow_tools` through the
-    // same `mergeProfileWithBody(http-launch, ...)` pipeline as launch
-    // so a resumed dispatch inherits the caller's requested tool surface
-    // without drift. Trello is no longer reachable via the legacy registry
-    // path (workspace-only since P3); schema is the canonical opt-in MCP
-    // server for HTTP dispatches today.
-    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
-    );
-    const mockJob = {
-      id: "job-resume-schema",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Continue schema work",
-      api_token: "tok-123",
-      allow_tools: ["Read", "mcp__schema__*"],
-      schema_definition_id: "42",
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(200);
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.allowedTools).toEqual(
-      expect.arrayContaining([
-        "Read",
-        expect.stringMatching(/^mcp__schema__/),
-        "mcp__danxbot__danxbot_complete",
-      ]),
-    );
-    const settings = mockSettingsRead(spawnOpts);
-    expect(Object.keys(settings.mcpServers).sort()).toEqual([
-      "danxbot",
-      "schema",
-    ]);
-  });
-
-  it("dedupes body entries that overlap the baseline on resume (symmetry with launch)", async () => {
-    // Launch-side covers this; resume needs its own guard because a
-    // regression that reinlines the merge or skips dedupe in handleResume
-    // only — while leaving handleLaunch intact — would not be caught by
-    // any other test. Mirror of the handleLaunch dedup test.
-    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/-test-repos-test-repo--danxbot-workspace/session-abc.jsonl",
-    );
-    const mockJob = {
-      id: "job-resume-dedup",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-dispatch-uuid",
-      task: "Continue with overlapping tools",
-      api_token: "tok-123",
-      // Both entries are already in the baseline — the merge must drop
-      // the duplicates and keep the baseline's earlier position.
-      allow_tools: ["Read", "Grep"],
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(200);
-    const spawnOpts = mockSpawnAgent.mock.calls[0][0];
-    expect(spawnOpts.allowedTools).toEqual([
-      ...HTTP_LAUNCH_BASELINE,
-      "mcp__danxbot__danxbot_complete",
-    ]);
-  });
-});
 
 describe("handleStatus", () => {
   it("returns 404 for unknown job", () => {
@@ -1378,32 +256,21 @@ describe("handleStatus", () => {
     expect(JSON.parse(res._getBody())).toEqual({ error: "Job not found" });
   });
 
-  it("returns job status for active job", async () => {
+  it("returns job status for active job", () => {
     const mockJob = {
       id: "job-status-test",
       status: "running",
       summary: "",
       startedAt: new Date(),
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
+    mockGetActiveJob.mockReturnValue(mockJob);
     mockGetJobStatus.mockReturnValue({
       id: "job-status-test",
       status: "running",
     });
 
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-
-    // Use the stable dispatchId returned from launch, not the internal job id
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
-
     const res = createMockRes();
-    handleStatus(res, dispatchId);
+    handleStatus(res, "test-dispatch-id");
 
     expect(res._getStatusCode()).toBe(200);
     expect(JSON.parse(res._getBody())).toEqual({
@@ -1412,14 +279,14 @@ describe("handleStatus", () => {
     });
   });
 
-  it("passes token usage fields from getJobStatus straight through to the HTTP body", async () => {
+  it("passes token usage fields from getJobStatus straight through to the HTTP body", () => {
     const mockJob = {
       id: "job-tokens",
       status: "completed",
       summary: "done",
       startedAt: new Date(),
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
+    mockGetActiveJob.mockReturnValue(mockJob);
     mockGetJobStatus.mockReturnValue({
       job_id: "job-tokens",
       status: "completed",
@@ -1433,17 +300,8 @@ describe("handleStatus", () => {
       cache_creation_input_tokens: 2048,
     });
 
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Tokens pass-through",
-      api_token: "tok-xyz",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
-
     const res = createMockRes();
-    handleStatus(res, dispatchId);
+    handleStatus(res, "test-dispatch-id");
 
     const body = JSON.parse(res._getBody());
     expect(body).toMatchObject({
@@ -1474,10 +332,7 @@ describe("handleListJobs", () => {
     expect(JSON.parse(res._getBody())).toEqual({ jobs: [] });
   });
 
-  it("returns every active job in the activeJobs map", async () => {
-    // Stage two real launches so activeJobs has two entries; getJobStatus is
-    // mocked to project a small subset of fields per job so the assertion
-    // stays readable.
+  it("returns every active job in the activeJobs map", () => {
     const mockJobA = {
       id: "job-list-A",
       status: "running",
@@ -1490,8 +345,6 @@ describe("handleListJobs", () => {
       summary: "",
       startedAt: new Date(),
     };
-    mockSpawnAgent.mockResolvedValueOnce(mockJobA);
-    mockSpawnAgent.mockResolvedValueOnce(mockJobB);
     let getCount = 0;
     mockGetJobStatus.mockImplementation(() => {
       getCount++;
@@ -1499,11 +352,7 @@ describe("handleListJobs", () => {
         ? { job_id: "dispatch-A", status: "running" }
         : { job_id: "dispatch-B", status: "running" };
     });
-
-    const launchA = await runLaunch("Task A");
-    const launchB = await runLaunch("Task B");
-    expect(launchA).toMatch(/.+/);
-    expect(launchB).toMatch(/.+/);
+    mockListActiveJobs.mockReturnValue([mockJobA, mockJobB]);
 
     const res = createMockRes();
     handleListJobs(res);
@@ -1518,18 +367,6 @@ describe("handleListJobs", () => {
       ]),
     );
   });
-
-  /** Helper: launch a task and return the dispatchId from the response body. */
-  async function runLaunch(task: string): Promise<string> {
-    const req = createMockReqWithBody("POST", {
-      task,
-      api_token: "tok-jobs",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-    await handleLaunch(req, res, MOCK_REPO);
-    return JSON.parse(res._getBody()).job_id;
-  }
 });
 
 describe("handleCancel", () => {
@@ -1551,20 +388,11 @@ describe("handleCancel", () => {
       startedAt: new Date(),
       completedAt: new Date(),
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const cancelReq = createMockReqWithBody("POST", { api_token: "tok-123" });
     const cancelRes = createMockRes();
-    await handleCancel(cancelReq, cancelRes, dispatchId);
+    await handleCancel(cancelReq, cancelRes, "test-dispatch-id");
 
     expect(cancelRes._getStatusCode()).toBe(409);
   });
@@ -1576,23 +404,14 @@ describe("handleCancel", () => {
       summary: "",
       startedAt: new Date(),
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
+    mockGetActiveJob.mockReturnValue(mockJob);
     mockCancelJob.mockResolvedValue(undefined);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
 
     const cancelReq = createMockReqWithBody("POST", {
       api_token: "tok-cancel",
     });
     const cancelRes = createMockRes();
-    await handleCancel(cancelReq, cancelRes, dispatchId);
+    await handleCancel(cancelReq, cancelRes, "test-dispatch-id");
 
     expect(cancelRes._getStatusCode()).toBe(200);
     expect(JSON.parse(cancelRes._getBody())).toEqual({ status: "canceled" });
@@ -1619,20 +438,11 @@ describe("handleStop", () => {
       startedAt: new Date(),
       completedAt: new Date(),
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(409);
   });
@@ -1644,20 +454,11 @@ describe("handleStop", () => {
       summary: "",
       startedAt: new Date(),
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(500);
     expect(JSON.parse(stopRes._getBody())).toEqual({
@@ -1674,23 +475,14 @@ describe("handleStop", () => {
       startedAt: new Date(),
       stop: mockStop,
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", {
       status: "completed",
       summary: "All done",
     });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(200);
     expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
@@ -1706,20 +498,11 @@ describe("handleStop", () => {
       startedAt: new Date(),
       stop: mockStop,
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", { status: null });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(400);
     expect(JSON.parse(stopRes._getBody()).error).toMatch(
@@ -1737,20 +520,11 @@ describe("handleStop", () => {
       startedAt: new Date(),
       stop: mockStop,
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", { status: "" });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(400);
     expect(JSON.parse(stopRes._getBody()).error).toMatch(/Invalid status/);
@@ -1769,20 +543,11 @@ describe("handleStop", () => {
       startedAt: new Date(),
       stop: mockStop,
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", {});
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(400);
     expect(JSON.parse(stopRes._getBody()).error).toMatch(
@@ -1800,23 +565,14 @@ describe("handleStop", () => {
       startedAt: new Date(),
       stop: mockStop,
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", {
       status: "failed",
       summary: "Something went wrong",
     });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(mockStop).toHaveBeenCalledWith("failed", "Something went wrong");
   });
@@ -1830,22 +586,14 @@ describe("handleStop", () => {
       startedAt: new Date(),
       stop: mockStop,
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", {
       status: "critical_failure",
       summary: "MCP server failed to load Trello tools",
     });
     const stopRes = createMockRes();
+    const dispatchId = "test-dispatch-id";
     await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(200);
@@ -1875,22 +623,13 @@ describe("handleStop", () => {
       startedAt: new Date(),
       stop: mockStop,
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", {
       status: "critical_failure",
     });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(400);
     expect(JSON.parse(stopRes._getBody()).error).toMatch(
@@ -1909,23 +648,14 @@ describe("handleStop", () => {
       startedAt: new Date(),
       stop: mockStop,
     };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const launchReq = createMockReqWithBody("POST", {
-      task: "Test task",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const launchRes = createMockRes();
-    await handleLaunch(launchReq, launchRes, MOCK_REPO);
-    const dispatchId = JSON.parse(launchRes._getBody()).job_id;
+    mockGetActiveJob.mockReturnValue(mockJob);
 
     const stopReq = createMockReqWithBody("POST", {
       status: "bogus",
       summary: "whatever",
     });
     const stopRes = createMockRes();
-    await handleStop(stopReq, stopRes, dispatchId, MOCK_REPO);
+    await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(stopRes._getStatusCode()).toBe(400);
     expect(JSON.parse(stopRes._getBody()).error).toMatch(/Invalid status/);
@@ -1938,503 +668,196 @@ describe("clearJobCleanupIntervals", () => {
   it("is safe to call when no intervals are tracked", () => {
     expect(() => clearJobCleanupIntervals()).not.toThrow();
   });
+});
 
-  it("calls clearInterval for each interval registered by handleLaunch", async () => {
-    const clearIntervalSpy = vi.spyOn(global, "clearInterval");
+/**
+ * P5 cutover (workspace-dispatch epic, card mGrHNHWM).
+ *
+ * The new contract: `/api/launch` and `/api/resume` accept ONLY
+ * `{repo, workspace, task, overlay?, ...}`. Legacy body fields
+ * (`schema_*`, `allow_tools`, `agents`, `api_url`) are rejected at the
+ * boundary with `400 { error: "Legacy dispatch body shape rejected",
+ * offendingFields: [...] }`. Missing `workspace` returns a separate
+ * `400 { error: "Missing workspace" }`. There is no adapter, no
+ * deprecation header, no fallback — see the operator directives on the
+ * P5 card.
+ *
+ * These tests exercise the rejection branches at the handler boundary;
+ * they don't reach `dispatch()` and don't need a workspace fixture on
+ * disk. The new-shape happy path is covered in `core.test.ts` (the
+ * collapsed `dispatch()` integration tests).
+ */
+describe("handleLaunch — P5 cutover (workspace required, legacy fields rejected)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+  });
 
-    const job1 = {
-      id: "job-ci-1",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    const job2 = {
-      id: "job-ci-2",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-    };
-    mockSpawnAgent.mockResolvedValueOnce(job1).mockResolvedValueOnce(job2);
+  it.each([
+    ["schema_definition_id", { schema_definition_id: "abc" }],
+    ["schema_role", { schema_role: "reviewer" }],
+    ["api_url", { api_url: "https://example.com/api" }],
+    ["allow_tools", { allow_tools: ["Read"] }],
+    ["agents", { agents: { foo: { description: "x" } } }],
+  ])(
+    "returns 400 with offendingFields=[%s] when body carries that legacy field",
+    async (fieldName, legacyField) => {
+      const req = createMockReqWithBody("POST", {
+        repo: MOCK_REPO.name,
+        workspace: "trello-worker",
+        task: "Do something",
+        ...legacyField,
+      });
+      const res = createMockRes();
 
-    const req1 = createMockReqWithBody("POST", {
-      task: "Task 1",
-      api_token: "tok-1",
-      allow_tools: [],
+      await handleLaunch(req, res, MOCK_REPO);
+
+      expect(res._getStatusCode()).toBe(400);
+      const body = JSON.parse(res._getBody());
+      expect(body.error).toBe("Legacy dispatch body shape rejected");
+      expect(body.offendingFields).toEqual([fieldName]);
+      expect(typeof body.message).toBe("string");
+      expect(mockSpawnAgent).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns 400 listing every offending field when multiple legacy fields are present", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do something",
+      schema_definition_id: "abc",
+      allow_tools: ["Read"],
+      agents: { foo: { description: "x" } },
     });
-    const res1 = createMockRes();
-    await handleLaunch(req1, res1, MOCK_REPO);
+    const res = createMockRes();
 
-    const req2 = createMockReqWithBody("POST", {
-      task: "Task 2",
-      api_token: "tok-2",
-      allow_tools: [],
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    const body = JSON.parse(res._getBody());
+    expect(body.error).toBe("Legacy dispatch body shape rejected");
+    // Order is the canonical detection order on the handler — schema first,
+    // then allow_tools, then agents. Lock the order so the surface is
+    // deterministic for callers grepping the response.
+    expect(body.offendingFields).toEqual([
+      "schema_definition_id",
+      "allow_tools",
+      "agents",
+    ]);
+  });
+
+  it("returns 400 'Missing workspace' when body has no legacy fields and no workspace", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      task: "Do something",
     });
-    const res2 = createMockRes();
-    await handleLaunch(req2, res2, MOCK_REPO);
+    const res = createMockRes();
 
-    clearIntervalSpy.mockClear();
-    clearJobCleanupIntervals();
+    await handleLaunch(req, res, MOCK_REPO);
 
-    expect(clearIntervalSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing workspace",
+    });
+  });
 
-    clearIntervalSpy.mockClear();
-    clearJobCleanupIntervals();
-    expect(clearIntervalSpy).not.toHaveBeenCalled();
+  it("returns 400 'Missing workspace' when workspace is a whitespace-only string", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "   ",
+      task: "Do something",
+    });
+    const res = createMockRes();
 
-    clearIntervalSpy.mockRestore();
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing workspace",
+    });
+  });
+
+  it("returns 400 'Missing workspace' when workspace is not a string", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: 42,
+      task: "Do something",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing workspace",
+    });
+  });
+
+  it("legacy-field rejection precedes missing-workspace check (legacy body without workspace produces the legacy error, not Missing workspace)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      task: "Do something",
+      allow_tools: ["Read"],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    const body = JSON.parse(res._getBody());
+    expect(body.error).toBe("Legacy dispatch body shape rejected");
+    expect(body.offendingFields).toEqual(["allow_tools"]);
   });
 });
 
-describe("handleLaunch — stall detection (host mode)", () => {
+describe("handleResume — P5 cutover (workspace required, legacy fields rejected)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockDispatchConfig.isHost = false;
+    mockIsFeatureEnabled.mockReturnValue(true);
   });
 
-  afterEach(() => {
-    mockDispatchConfig.isHost = false;
-  });
-
-  function makeMockWatcher() {
-    return {
-      getEntries: vi.fn().mockReturnValue([]),
-      onEntry: vi.fn(),
-      start: vi.fn(),
-      stop: vi.fn(),
-    };
-  }
-
-  it("starts TerminalOutputWatcher and StallDetector when isHost + statusUrl + watcher present", async () => {
-    mockDispatchConfig.isHost = true;
-
-    const mockWatcher = makeMockWatcher();
-    const mockJob = {
-      id: "job-stall-test",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-      watcher: mockWatcher,
-      terminalLogPath: "/tmp/danxbot-terminal-job-stall-test.log",
-      _cleanup: vi.fn(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: [],
-      status_url: "http://example.com/status",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(200);
-    expect(mockTerminalOutputWatcherCtor).toHaveBeenCalledWith(
-      "/tmp/danxbot-terminal-job-stall-test.log",
-    );
-    expect(mockTerminalWatcherStart).toHaveBeenCalled();
-    expect(mockStallDetectorCtor).toHaveBeenCalled();
-    expect(mockStallDetectorStart).toHaveBeenCalled();
-  });
-
-  it("does not start stall detection when statusUrl is absent", async () => {
-    mockDispatchConfig.isHost = true;
-
-    const mockWatcher = makeMockWatcher();
-    const mockJob = {
-      id: "job-no-stall",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-      watcher: mockWatcher,
-      terminalLogPath: "/tmp/danxbot-terminal-job-no-stall.log",
-      _cleanup: vi.fn(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: [],
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
-    expect(mockStallDetectorCtor).not.toHaveBeenCalled();
-  });
-
-  it("does not start stall detection when job.terminalLogPath is absent", async () => {
-    mockDispatchConfig.isHost = true;
-
-    const mockJob = {
-      id: "job-no-log",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-      watcher: makeMockWatcher(),
-      terminalLogPath: undefined,
-      _cleanup: vi.fn(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: [],
-      status_url: "http://example.com/status",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
-    expect(mockStallDetectorCtor).not.toHaveBeenCalled();
-  });
-
-  it("stall detection cleanup is wired into job._cleanup", async () => {
-    mockDispatchConfig.isHost = true;
-
-    const originalCleanup = vi.fn();
-    const mockWatcher = makeMockWatcher();
-    const mockJob = {
-      id: "job-cleanup-test",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-      watcher: mockWatcher,
-      terminalLogPath: "/tmp/danxbot-terminal-job-cleanup-test.log",
-      _cleanup: originalCleanup,
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: [],
-      status_url: "http://example.com/status",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    // Trigger the wrapped cleanup
-    mockJob._cleanup();
-
-    expect(mockTerminalWatcherStop).toHaveBeenCalled();
-    expect(mockStallDetectorStop).toHaveBeenCalled();
-    expect(originalCleanup).toHaveBeenCalled();
-  });
-
-  it("does not start stall detection when isHost is false (even with statusUrl + watcher + terminalLogPath)", async () => {
-    // isHost is false (set in beforeEach) — stall detection must not activate
-    const mockWatcher = makeMockWatcher();
-    const mockJob = {
-      id: "job-docker-mode",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-      watcher: mockWatcher,
-      terminalLogPath: "/tmp/danxbot-terminal-job-docker-mode.log",
-      _cleanup: vi.fn(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: [],
-      status_url: "http://example.com/status",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
-    expect(mockStallDetectorCtor).not.toHaveBeenCalled();
-  });
-
-  it("does not start stall detection when job.watcher is absent", async () => {
-    mockDispatchConfig.isHost = true;
-
-    const mockJob = {
-      id: "job-no-watcher",
-      status: "running",
-      summary: "",
-      startedAt: new Date(),
-      watcher: undefined, // no watcher
-      terminalLogPath: "/tmp/danxbot-terminal-job-no-watcher.log",
-      _cleanup: vi.fn(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: [],
-      status_url: "http://example.com/status",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(mockTerminalOutputWatcherCtor).not.toHaveBeenCalled();
-    expect(mockStallDetectorCtor).not.toHaveBeenCalled();
-  });
-
-  it("onStall callback: skips when the current job is no longer running", async () => {
-    mockDispatchConfig.isHost = true;
-
-    const mockWatcher = makeMockWatcher();
-    const mockJob = {
-      id: "job-already-done",
-      status: "completed" as const, // already done when onStall fires
-      summary: "Done",
-      startedAt: new Date(),
-      completedAt: new Date(),
-      watcher: mockWatcher,
-      terminalLogPath: "/tmp/danxbot-terminal-job-already-done.log",
-      _cleanup: vi.fn(),
-      stop: vi.fn(),
-    };
-    mockSpawnAgent.mockResolvedValue(mockJob);
-
-    const req = createMockReqWithBody("POST", {
-      task: "Do something",
-      api_token: "tok-123",
-      allow_tools: [],
-      status_url: "http://example.com/status",
-    });
-    const res = createMockRes();
-    await handleLaunch(req, res, MOCK_REPO);
-
-    // Extract the onStall callback from the StallDetector constructor args
-    const stallDetectorArgs = mockStallDetectorCtor.mock.calls[0][0] as {
-      onStall: () => Promise<void>;
-    };
-    const onStall = stallDetectorArgs.onStall;
-
-    await onStall();
-
-    // Since the job is not running, no stop and no respawn should occur
-    expect(mockJob.stop).not.toHaveBeenCalled();
-    // spawnAgent was called once initially; should not be called again
-    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
-  });
-
-  it("onStall callback: kills and respawns with nudge prompt on first stall", async () => {
-    mockDispatchConfig.isHost = true;
-    vi.useFakeTimers();
-
-    try {
-      const mockKill = vi.fn();
-      const mockWatcher = makeMockWatcher();
-      const mockJob = {
-        id: "job-stall-respawn",
-        status: "running" as string,
-        summary: "",
-        startedAt: new Date(),
-        watcher: mockWatcher,
-        terminalLogPath: "/tmp/danxbot-terminal-job-stall-respawn.log",
-        _cleanup: vi.fn(),
-        process: { kill: mockKill },
-      };
-      const mockRespawnJob = {
-        id: "job-respawn-new",
-        status: "running" as string,
-        summary: "",
-        startedAt: new Date(),
-        watcher: makeMockWatcher(),
-        terminalLogPath: "/tmp/danxbot-terminal-job-respawn-new.log",
-        _cleanup: vi.fn(),
-      };
-      mockSpawnAgent
-        .mockResolvedValueOnce(mockJob)
-        .mockResolvedValueOnce(mockRespawnJob);
-
+  it.each([
+    ["schema_definition_id", { schema_definition_id: "abc" }],
+    ["schema_role", { schema_role: "reviewer" }],
+    ["api_url", { api_url: "https://example.com/api" }],
+    ["allow_tools", { allow_tools: ["Read"] }],
+    ["agents", { agents: { foo: { description: "x" } } }],
+  ])(
+    "returns 400 with offendingFields=[%s] when body carries that legacy field on resume",
+    async (fieldName, legacyField) => {
       const req = createMockReqWithBody("POST", {
-        task: "Build the feature",
-        api_token: "tok-123",
-        allow_tools: [],
-        status_url: "http://example.com/status",
+        repo: MOCK_REPO.name,
+        workspace: "trello-worker",
+        job_id: "parent-123",
+        task: "Continue",
+        ...legacyField,
       });
       const res = createMockRes();
-      await handleLaunch(req, res, MOCK_REPO);
-      const dispatchId = JSON.parse(res._getBody()).job_id;
 
-      const stallDetectorArgs = mockStallDetectorCtor.mock.calls[0][0] as {
-        onStall: () => Promise<void>;
-      };
-      const onStall = stallDetectorArgs.onStall;
+      await handleResume(req, res, MOCK_REPO);
 
-      // Start onStall (it awaits a 5s timer inside)
-      const onStallPromise = onStall();
-      // Advance past the 5-second kill wait
-      await vi.advanceTimersByTimeAsync(6_000);
-      await onStallPromise;
+      expect(res._getStatusCode()).toBe(400);
+      const body = JSON.parse(res._getBody());
+      expect(body.error).toBe("Legacy dispatch body shape rejected");
+      expect(body.offendingFields).toEqual([fieldName]);
+      expect(mockSpawnAgent).not.toHaveBeenCalled();
+    },
+  );
 
-      // spawnAgent should have been called twice: initial + respawn
-      expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
+  it("returns 400 'Missing workspace' on resume when workspace is absent", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      job_id: "parent-123",
+      task: "Continue",
+    });
+    const res = createMockRes();
 
-      // Respawn prompt should contain the original task
-      const respawnOpts = mockSpawnAgent.mock.calls[1][0] as {
-        prompt: string;
-        jobId: string;
-      };
-      expect(respawnOpts.prompt).toContain("Build the feature");
-      expect(respawnOpts.prompt).toContain("stall");
+    await handleResume(req, res, MOCK_REPO);
 
-      // Respawn uses a DIFFERENT jobId from the dispatchId
-      expect(respawnOpts.jobId).not.toBe(dispatchId);
-
-      // Active job under dispatchId is now the respawned job
-      const statusRes = createMockRes();
-      mockGetJobStatus.mockReturnValue({ status: "running" });
-      handleStatus(statusRes, dispatchId);
-      expect(statusRes._getStatusCode()).toBe(200);
-
-      // Phase 3 contract: stall recovery routes through terminateWithGrace —
-      // regression-proof against anyone re-inlining `job.process.kill(...)`,
-      // which would silently break host mode (no ChildProcess handle).
-      expect(mockTerminateWithGrace).toHaveBeenCalledWith(
-        expect.objectContaining({ id: "job-stall-respawn" }),
-        5_000,
-      );
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("onStall callback: kills via killAgentProcess when job has no ChildProcess (host mode)", async () => {
-    // Simulates a host-mode job: process is undefined, claudePid is set.
-    // Before Phase 3, stall recovery directly accessed job.process.kill,
-    // which was a no-op for host jobs — this test locks that contract.
-    mockDispatchConfig.isHost = true;
-    vi.useFakeTimers();
-
-    try {
-      const mockWatcher = makeMockWatcher();
-      const hostJob = {
-        id: "host-stall-job",
-        status: "running" as string,
-        summary: "",
-        startedAt: new Date(),
-        watcher: mockWatcher,
-        terminalLogPath: "/tmp/danxbot-terminal-host-stall-job.log",
-        _cleanup: vi.fn(),
-        // No `process` — host mode runs claude in a detached wt.exe tab.
-        claudePid: 424_242,
-      };
-      const respawnJob = {
-        id: "host-respawn",
-        status: "running" as string,
-        summary: "",
-        startedAt: new Date(),
-        watcher: makeMockWatcher(),
-        terminalLogPath: "/tmp/danxbot-terminal-host-respawn.log",
-        _cleanup: vi.fn(),
-        claudePid: 424_243,
-      };
-      mockSpawnAgent
-        .mockResolvedValueOnce(hostJob)
-        .mockResolvedValueOnce(respawnJob);
-
-      const req = createMockReqWithBody("POST", {
-        task: "Host task",
-        api_token: "tok-host",
-        allow_tools: [],
-        status_url: "http://example.com/status",
-      });
-      const res = createMockRes();
-      await handleLaunch(req, res, MOCK_REPO);
-
-      const stallArgs = mockStallDetectorCtor.mock.calls[0][0] as {
-        onStall: () => Promise<void>;
-      };
-      const p = stallArgs.onStall();
-      await vi.advanceTimersByTimeAsync(6_000);
-      await p;
-
-      // Host-mode stall recovery passes the host job (no .process handle)
-      // through terminateWithGrace, which must be signature-agnostic.
-      expect(mockTerminateWithGrace).toHaveBeenCalledWith(
-        expect.objectContaining({ id: "host-stall-job", claudePid: 424_242 }),
-        5_000,
-      );
-      expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("onStall callback: marks job failed when MAX_STALL_RESUMES exhausted", async () => {
-    mockDispatchConfig.isHost = true;
-    vi.useFakeTimers();
-
-    try {
-      const mockStop = vi.fn().mockResolvedValue(undefined);
-
-      function makeStallJob(id: string) {
-        return {
-          id,
-          status: "running" as string,
-          summary: "",
-          startedAt: new Date(),
-          watcher: makeMockWatcher(),
-          terminalLogPath: `/tmp/danxbot-terminal-${id}.log`,
-          _cleanup: vi.fn(),
-          process: { kill: vi.fn() },
-          stop: mockStop,
-        };
-      }
-
-      const job0 = makeStallJob("job-max-0");
-      const job1 = makeStallJob("job-max-1");
-      const job2 = makeStallJob("job-max-2");
-      // Only 3 total spawns: initial + 2 respawns (3rd stall → mark failed, no respawn)
-      mockSpawnAgent
-        .mockResolvedValueOnce(job0)
-        .mockResolvedValueOnce(job1)
-        .mockResolvedValueOnce(job2);
-
-      const req = createMockReqWithBody("POST", {
-        task: "Long task",
-        api_token: "tok-123",
-        allow_tools: [],
-        status_url: "http://example.com/status",
-      });
-      const res = createMockRes();
-      await handleLaunch(req, res, MOCK_REPO);
-
-      // Helper: fire onStall from the nth StallDetector (0-indexed) and advance past kill wait
-      async function fireStall(detectorIndex: number): Promise<void> {
-        const args = mockStallDetectorCtor.mock.calls[detectorIndex][0] as {
-          onStall: () => Promise<void>;
-        };
-        const promise = args.onStall();
-        await vi.advanceTimersByTimeAsync(6_000);
-        await promise;
-      }
-
-      // Resume 1 (resumeCount 0→1, < 3): kill + respawn
-      await fireStall(0);
-      expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
-
-      // Resume 2 (resumeCount 1→2, < 3): kill + respawn
-      await fireStall(1);
-      expect(mockSpawnAgent).toHaveBeenCalledTimes(3);
-
-      // Resume 3 (resumeCount 2→3, >= 3): mark failed, NO respawn
-      await fireStall(2);
-      expect(mockSpawnAgent).toHaveBeenCalledTimes(3); // still 3 — no 4th spawn
-      expect(mockStop).toHaveBeenCalledWith(
-        "failed",
-        expect.stringContaining("stall"),
-      );
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing workspace",
+    });
   });
 });

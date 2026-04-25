@@ -142,7 +142,7 @@ const mockDispatch = vi.fn().mockImplementation(() =>
   }),
 );
 vi.mock("../dispatch/core.js", () => ({
-  dispatchWithWorkspace: (...args: unknown[]) => mockDispatch(...args),
+  dispatch: (...args: unknown[]) => mockDispatch(...args),
 }));
 
 const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
@@ -309,7 +309,7 @@ describe("poll", () => {
     expect(mockGenerateWorkspace).toHaveBeenCalledBefore(mockFetchTodoCards);
   });
 
-  it("calls dispatchWithWorkspace() with the trello-worker workspace and trello overlay when cards exist", async () => {
+  it("calls dispatch() with the trello-worker workspace and trello overlay when cards exist", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -1433,14 +1433,14 @@ describe("poll — Docker mode (headless agent)", () => {
     mockConfig.isHost = true;
   });
 
-  it("routes through dispatchWithWorkspace() (not a direct terminal spawn)", async () => {
+  it("routes through dispatch() (not a direct terminal spawn)", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     // Should NOT spawn wt.exe — the poller no longer owns the terminal path
     expect(mockSpawn).not.toHaveBeenCalled();
-    // Should call dispatchWithWorkspace() with the workspace dispatch input shape
+    // Should call dispatch() with the workspace dispatch input shape
     expect(mockDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         task: expect.stringContaining("/danx-next"),

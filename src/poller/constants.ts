@@ -87,9 +87,8 @@ export const DANXBOT_COMMENT_MARKER = "<!-- danxbot -->";
 export const TEAM_PROMPT = "/danx-next";
 export const IDEATOR_PROMPT = "/danx-ideate";
 
-// POLLER_ALLOW_TOOLS moved to `src/dispatch/profiles.ts` as part of Phase 2
-// of the agent-isolation epic (Trello 7ha2CSpc). The dispatch profile
-// registry is now the authoritative home for every named tool surface —
-// keeping the array here and in the registry would split the single
-// source of truth in two. Import `DISPATCH_PROFILES.poller.allowTools`
-// (or `resolveProfile("poller").allowTools`) from that module instead.
+// Poller tool allowlist now lives in the workspace fixture
+// `src/poller/inject/workspaces/trello-worker/allowed-tools.txt` (Phase 3
+// of the workspace-dispatch epic, Trello `q5aFuINM`). The dispatch profile
+// registry was retired in P5 (`mGrHNHWM`). Workspaces are the single
+// source of truth for every named tool surface.

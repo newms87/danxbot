@@ -1,24 +1,33 @@
 /**
  * Unified dispatch core — the one `dispatch()` function every dispatch
- * entry-point calls. Owns MCP resolution, the per-dispatch settings.json
- * file, the single spawnAgent call, dispatch row creation, stall recovery,
- * activeJobs registration, and TTL-based eviction.
+ * entry-point calls. Owns workspace resolution, MCP server materialization
+ * (workspace's `.mcp.json` + danxbot infrastructure server), the per-dispatch
+ * settings.json file, the single spawnAgent call, dispatch row creation,
+ * stall recovery, activeJobs registration, and TTL-based eviction.
  *
- * Today's callers:
- *   - `handleLaunch` / `handleResume` in `src/worker/dispatch.ts`
+ * Callers:
+ *   - HTTP `handleLaunch` / `handleResume` in `src/worker/dispatch.ts`
+ *   - Trello poller (`src/poller/index.ts`)
+ *   - Slack listener (`src/slack/listener.ts`)
  *
- * Later callers (planned in the XCptaJ34 card):
- *   - Poller `spawnClaude` (Phase 4) — migrates off direct `spawnAgent`
+ * Every dispatch lands in a workspace — a directory at
+ * `<repo>/.danxbot/workspaces/<name>/` declaring the MCP servers,
+ * allowed tools, and `.claude/settings.json` env block. Callers pass
+ * the workspace name + an overlay (placeholder substitutions). Danxbot
+ * does NOT ship a default workspace; callers without one (e.g. external
+ * HTTP callers) MUST provide one in their target repo or be rejected
+ * upstream by the API handler.
  *
  * Runs identically for launches and resumes — the only differences are
- * `input.resumeSessionId` (appended to the claude invocation via `spawnAgent`)
+ * `input.resumeSessionId` (appended to the claude invocation via spawnAgent)
  * and `input.parentJobId` (persisted on the dispatch row).
  *
  * See `.claude/rules/agent-dispatch.md` for the full contract.
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
@@ -32,13 +41,11 @@ import {
 } from "../agent/launcher.js";
 import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
 import { StallDetector } from "../agent/stall-detector.js";
-import { resolveDispatchTools } from "../agent/resolve-dispatch-tools.js";
 import {
   defaultMcpRegistry,
   DANXBOT_COMPLETE_TOOL,
   DANXBOT_SERVER_NAME,
 } from "../agent/mcp-registry.js";
-import type { ResolveDispatchToolsOptions } from "../agent/mcp-types.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import { updateDispatch } from "../dashboard/dispatches-db.js";
 import {
@@ -111,36 +118,43 @@ export function _resetForTesting(): void {
 /**
  * Everything a dispatch needs. Caller-facing shape — HTTP handlers map their
  * body into this; the poller constructs one from a Trello trigger; the Slack
- * listener constructs one for every deep-agent reply. All three paths share
- * the same `allowTools` input via `resolveDispatchTools`.
+ * listener constructs one for every deep-agent reply.
+ *
+ * Every dispatch names a `workspace` (resolves to
+ * `<repo>/.danxbot/workspaces/<workspace>/` on disk) and supplies an `overlay`
+ * — a string-map substituted into the workspace's `.mcp.json` and
+ * `.claude/settings.json` placeholders. Tool surface, MCP servers, and rules
+ * all flow from the workspace fixture; danxbot never knows what they mean.
  */
 export interface DispatchInput {
   repo: RepoContext;
   task: string;
   /**
-   * External API token for status/heartbeat PUTs and schema MCP calls.
-   * Required when `statusUrl` is set (heartbeat) or when the allowlist
-   * enables `mcp__schema__*` (schema MCP envs). Absent for the poller and
-   * any dispatch with no schema or status callback.
+   * Workspace name — resolves to `<repo>/.danxbot/workspaces/<workspace>/`.
+   * Required. Missing or empty workspace MUST be rejected at the entry-point
+   * boundary (HTTP handler, poller skill loader, Slack listener) BEFORE
+   * reaching this struct — `dispatch()` does not validate it itself.
+   */
+  workspace: string;
+  /**
+   * Placeholder substitution map. Every `${KEY}` in the workspace's
+   * `.mcp.json` and `.claude/settings.json` is replaced from this map.
+   * `DANXBOT_STOP_URL` and the Slack URL placeholders are auto-injected
+   * from the dispatchId so callers don't have to pre-compute them;
+   * everything else (TRELLO_*, SCHEMA_*, etc.) is caller-supplied.
+   */
+  overlay: Readonly<Record<string, string>>;
+  /**
+   * Bearer token for danxbot's `statusUrl` callbacks (Laravel forwarder
+   * PUTs). Required when `statusUrl` is set; otherwise unused.
+   *
+   * NOTE: this is NOT a caller-app credential. Per-app secrets (e.g.
+   * gpt-manager's schema MCP token) live in `overlay.SCHEMA_API_TOKEN`
+   * or similar — danxbot never inspects them.
    */
   apiToken?: string;
-  /**
-   * External API URL for the schema MCP server env. Required only when the
-   * allowlist enables `mcp__schema__*`. Absent for the poller and any
-   * dispatch that doesn't touch schema tools.
-   */
-  apiUrl?: string;
-  /**
-   * Explicit tool allowlist — REQUIRED. Built-ins bare (`Read`, `Bash`), MCP
-   * tools as `mcp__<server>__<tool>` with optional `mcp__<server>__*` wildcards.
-   * Empty array is valid and means "only `mcp__danxbot__danxbot_complete`."
-   */
-  allowTools: readonly string[];
   statusUrl?: string;
-  schemaDefinitionId?: string;
-  schemaRole?: string;
   title?: string;
-  agents?: Record<string, Record<string, unknown>>;
   maxRuntimeMs?: number;
   /**
    * Inactivity timeout (ms) forwarded to spawnAgent. Defaults to
@@ -227,56 +241,8 @@ function cleanupMcpSettings(settingsDir: string): void {
 }
 
 /**
- * Build the `ResolveDispatchToolsOptions` from a `DispatchInput`. Trello
- * credentials are NOT sourced here — the trello MCP server is declared by
- * the `trello-worker` workspace's `.mcp.json` and resolved through
- * `dispatchWithWorkspace`, not the legacy registry path.
- */
-function buildResolveOptions(
-  input: DispatchInput,
-  danxbotStopUrl: string,
-  dispatchId: string,
-): ResolveDispatchToolsOptions {
-  const opts: ResolveDispatchToolsOptions = {
-    allowTools: input.allowTools,
-    danxbotStopUrl,
-  };
-  if (input.schemaDefinitionId || input.schemaRole) {
-    // Normalize missing fields to empty strings so the schema registry's
-    // explicit "missing apiUrl / apiToken / definitionId" `McpResolveError`
-    // fires at resolve time (a loud, specific failure) — not an ambiguous
-    // undefined read downstream. The `??` here is NOT a fallback; it's a
-    // channeling step that keeps the fail-loud invariant.
-    opts.schema = {
-      apiUrl: input.apiUrl ?? "",
-      apiToken: input.apiToken ?? "",
-      definitionId: input.schemaDefinitionId ?? "",
-      role: input.schemaRole,
-    };
-  }
-  // TRANSITIONAL (workspace-dispatch epic P4): this branch is only exercised
-  // by LEGACY callers that still invoke `dispatch()` with
-  // `apiDispatchMeta.trigger === "slack"` and no workspace. Production Slack
-  // dispatches migrated to `dispatchWithWorkspace({workspace: "slack-worker",
-  // overlay: {...slack URLs}})` in P4 — the workspace declares the two
-  // placeholders, and `dispatchWithWorkspace` threads them into
-  // `DANXBOT_ENTRY.build({slack})` directly. The allowed-tools.txt in the
-  // slack-worker workspace lists `mcp__danxbot__danxbot_slack_*` explicitly
-  // (no runtime injection needed). Do not add new callers of the legacy
-  // trigger-based path; P7 removes it once no production caller remains.
-  if (input.apiDispatchMeta.trigger === "slack") {
-    opts.slack = {
-      replyUrl: `http://localhost:${input.repo.workerPort}/api/slack/reply/${dispatchId}`,
-      updateUrl: `http://localhost:${input.repo.workerPort}/api/slack/update/${dispatchId}`,
-    };
-  }
-  return opts;
-}
-
-/**
- * Resolved tool surface — the resolver-agnostic shape the spawn loop reads.
- * Both legacy `resolveDispatchTools` (today's `dispatch()`) and the new
- * `resolveWorkspace` path (`dispatchWithWorkspace()`) produce one of these.
+ * Resolved tool surface — the shape the spawn loop reads. Produced inside
+ * `dispatch()` from `resolveWorkspace` + the danxbot infrastructure server.
  */
 interface ResolvedSurface {
   /** MCP server configs to write into the per-dispatch settings.json. */
@@ -297,15 +263,13 @@ interface ResolvedSurface {
 }
 
 /**
- * Internal — the resolver-agnostic spawn loop. Both `dispatch()` and
- * `dispatchWithWorkspace()` produce a `ResolvedSurface` and funnel through
- * this. P5 collapses both callers into one entry point on top of the same
- * helper. Owns: per-dispatch settings file write, agent spawn, stall
- * recovery, completion callback chaining, activeJobs registration, TTL
- * eviction.
+ * Internal — the spawn loop. Owns: per-dispatch settings file write,
+ * agent spawn, stall recovery, completion callback chaining, activeJobs
+ * registration, TTL eviction. The `dispatch()` entry-point produces a
+ * `ResolvedSurface` and funnels through this.
  */
 async function runResolved(
-  input: Omit<DispatchInput, "allowTools">,
+  input: Omit<DispatchInput, "workspace" | "overlay">,
   dispatchId: string,
   resolved: ResolvedSurface,
 ): Promise<DispatchResult> {
@@ -352,7 +316,6 @@ async function runResolved(
         env,
         mcpConfigPath: settingsPath,
         allowedTools: resolved.allowedTools,
-        agents: input.agents,
         statusUrl: input.statusUrl,
         apiToken: input.apiToken,
         maxRuntimeMs: input.maxRuntimeMs,
@@ -483,71 +446,24 @@ async function runResolved(
 }
 
 /**
- * The one function every dispatch path calls. Owns the full per-dispatch
- * lifecycle (settings-file write, MCP resolution, agent spawn, stall
- * recovery, completion callback, activeJobs registration, TTL eviction).
+ * The one entry point every dispatch path calls. Resolves the named
+ * workspace under `<repo>/.danxbot/workspaces/<input.workspace>/`,
+ * substitutes overlay placeholders into its `.mcp.json` +
+ * `.claude/settings.json`, merges the danxbot infrastructure MCP server,
+ * and hands control to the spawn loop.
+ *
+ * Owns the full per-dispatch lifecycle: workspace resolution, settings-file
+ * write, agent spawn, stall recovery, completion callback chaining,
+ * activeJobs registration, TTL eviction.
+ *
+ * The danxbot infrastructure MCP server (with `danxbot_complete` and the
+ * Slack tools when applicable) is merged HERE, not declared in the
+ * workspace's `.mcp.json`. Its `command` is an absolute filesystem path
+ * that depends on where danxbot is installed (`DANXBOT_MCP_SERVER_PATH`),
+ * which can't be encoded statically in committed source — the registry's
+ * `build()` produces it dynamically.
  */
 export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
-  const dispatchId = randomUUID();
-  const workerStopUrl = `http://localhost:${input.repo.workerPort}/api/stop/${dispatchId}`;
-
-  // Resolve ONCE; reused on every stall-recovery respawn so the tool surface
-  // stays identical across the lifetime of the dispatch slot.
-  const resolveOptions = buildResolveOptions(input, workerStopUrl, dispatchId);
-  const resolved = resolveDispatchTools(resolveOptions);
-
-  return runResolved(input, dispatchId, {
-    mcpServers: resolved.mcpServers,
-    allowedTools: resolved.allowedTools,
-  });
-}
-
-/**
- * Caller shape for `dispatchWithWorkspace`. Same as `DispatchInput` minus
- * `allowTools` (the workspace declares its own allowed-tools.txt) plus
- * `workspace` (the named workspace under `<repo>/.danxbot/workspaces/`)
- * and `overlay` (placeholder substitution map).
- */
-export interface WorkspaceDispatchInput
-  extends Omit<DispatchInput, "allowTools"> {
-  /** Workspace name — resolves to `<repo>/.danxbot/workspaces/<workspace>/`. */
-  workspace: string;
-  /**
-   * Placeholder substitution map. Every `${KEY}` in the workspace's
-   * `.mcp.json` and `.claude/settings.json` is replaced from this map.
-   * `DANXBOT_STOP_URL` is auto-injected from the dispatchId so callers
-   * don't have to pre-compute it; everything else (TRELLO_*, etc.) is
-   * caller-supplied.
-   */
-  overlay: Readonly<Record<string, string>>;
-}
-
-/**
- * Workspace-shaped dispatch — the new path that reads MCP servers and
- * allowed-tools declaratively from `<repo>/.danxbot/workspaces/<name>/`
- * instead of the TS `MCP_REGISTRY` factories. Phase 3 of the workspace-
- * dispatch epic (Trello `jAdeJgi5` / `q5aFuINM`).
- *
- * TEMPORARY: this is an adjacent helper to `dispatch()` until P5 collapses
- * both into one entry point. The shared `runResolved()` already does the
- * heavy lifting; the only differences are:
- *
- *   1. `resolveWorkspace` (vs `resolveDispatchTools`) reads the static
- *      workspace fixture and substitutes overlay placeholders.
- *   2. The danxbot infrastructure MCP server (with the `danxbot_complete`
- *      tool) is injected here, NOT by the workspace's `.mcp.json`. The
- *      server's command is an absolute filesystem path that depends on
- *      where danxbot is installed (`DANXBOT_MCP_SERVER_PATH`), which
- *      can't be encoded as a static value in committed source. The
- *      registry's `build()` produces it dynamically — same approach as
- *      the legacy resolver.
- *
- * Don't add new dispatch entry points here. P5 makes the legacy path
- * the deprecated branch; this becomes the only shape.
- */
-export async function dispatchWithWorkspace(
-  input: WorkspaceDispatchInput,
-): Promise<DispatchResult> {
   const dispatchId = randomUUID();
   const workerStopUrl = `http://localhost:${input.repo.workerPort}/api/stop/${dispatchId}`;
 
@@ -555,9 +471,9 @@ export async function dispatchWithWorkspace(
   // can't pre-compute (every URL below is dispatchId-derived, and
   // `dispatchId` is generated inside this function). Caller overlay wins
   // over auto-injected values — tests rely on that, see
-  // `WorkspaceDispatchInput.overlay`. Non-Slack workspaces simply don't
-  // declare the DANXBOT_SLACK_* placeholders and the extra keys are
-  // ignored by the resolver; the slack-worker workspace declares both as
+  // `DispatchInput.overlay`. Non-Slack workspaces simply don't declare
+  // the DANXBOT_SLACK_* placeholders and the extra keys are ignored by
+  // the resolver; the slack-worker workspace declares both as
   // `required-placeholders` so these auto-injected values satisfy its
   // overlay contract without forcing the caller to compute per-dispatch
   // URLs.
@@ -575,7 +491,7 @@ export async function dispatchWithWorkspace(
   });
 
   // Merge the danxbot infrastructure server. The workspace's `.mcp.json`
-  // intentionally does NOT declare it — see header comment for the full
+  // intentionally does NOT declare it — see function header for the full
   // rationale. We read back the resolver's substituted file, merge, then
   // immediately free the resolver's temp dir (we'll write our own per-
   // dispatch settings via writeMcpSettingsFile inside runResolved).
@@ -612,9 +528,8 @@ export async function dispatchWithWorkspace(
     [DANXBOT_SERVER_NAME]: danxbotServer,
   };
 
-  // Always-present infrastructure tool. Stable suffix position matches
-  // the legacy resolver (`resolveDispatchTools`) so claude's `--allowed-
-  // tools` argv ordering is consistent across the two dispatch paths.
+  // Always-present infrastructure tool, appended after the workspace's
+  // declared tools.
   const allowedTools: readonly string[] = [
     ...workspace.allowedTools,
     `mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_COMPLETE_TOOL}`,

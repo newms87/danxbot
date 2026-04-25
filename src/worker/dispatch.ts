@@ -10,7 +10,17 @@ import {
 } from "../agent/launcher.js";
 import { McpResolveError } from "../agent/mcp-types.js";
 import { dispatch, getActiveJob, listActiveJobs } from "../dispatch/core.js";
-import { dispatchAllowTools } from "../dispatch/profiles.js";
+import {
+  WorkspaceNotFoundError,
+  WorkspaceFileMissingError,
+  WorkspaceSettingsError,
+  WorkspaceGateError,
+  WorkspaceGateUnknownError,
+} from "../workspace/resolve.js";
+import {
+  PlaceholderError,
+} from "../workspace/placeholders.js";
+import { WorkspaceManifestError } from "../workspace/manifest.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
@@ -35,11 +45,14 @@ const log = createLogger("worker-dispatch");
 export { clearJobCleanupIntervals } from "../dispatch/core.js";
 
 /**
- * Shared header parsing: derives the caller IP, normalized api/status URLs.
- * Used by both launch and resume.
+ * Shared header parsing: derives the caller IP and the normalized status
+ * callback URL (if any). Used by both launch and resume.
+ *
+ * `body.status_url` is the only callback URL danxbot understands. Caller-app
+ * URLs (e.g. gpt-manager's schema MCP base) live in `body.overlay.<KEY>`
+ * and are opaque to danxbot.
  */
 interface ParsedRequestShared {
-  apiUrl: string;
   statusUrl: string | undefined;
   callerIp: string | null;
 }
@@ -52,11 +65,6 @@ function parseSharedRequestFields(
   // perspective — `http://localhost:80/...`. In docker runtime those resolve
   // to the worker container itself and the callback fails. Rewrite to the
   // docker-host alias here so the rest of the pipeline is runtime-agnostic.
-  // Normalize AFTER the defaultApiUrl fallback so the default (also a
-  // loopback URL) gets rewritten in docker runtime too.
-  const rawApiUrl =
-    (body.api_url as string | undefined) ?? config.dispatch.defaultApiUrl;
-  const apiUrl = normalizeCallbackUrl(rawApiUrl, config.isHost) as string;
   const statusUrl = normalizeCallbackUrl(
     body.status_url as string | undefined,
     config.isHost,
@@ -64,7 +72,7 @@ function parseSharedRequestFields(
   const callerIp =
     (req.socket?.remoteAddress ?? req.headers["x-forwarded-for"])?.toString() ??
     null;
-  return { apiUrl, statusUrl, callerIp };
+  return { statusUrl, callerIp };
 }
 
 /** Result of resolving a parent dispatch's Claude session UUID on disk. */
@@ -117,11 +125,6 @@ export async function resolveParentSessionId(
  * Caller-supplied fields land in handleLaunch/handleResume as `unknown` and
  * must be type-checked before we trust them downstream — relying on
  * `if (!value)` truthiness lets `task: 123` or `task: "   "` through.
- *
- * Returns null on both "missing" and "present but blank" — the caller maps
- * that to the 400 message below, which distinguishes the two cases in prose
- * so an operator sending `task: "   "` doesn't read "Missing" and assume
- * the field was dropped in transit.
  */
 function requireString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -130,62 +133,66 @@ function requireString(value: unknown): string | null {
 }
 
 /**
- * Type guard: narrows `unknown` to `string[]` when every entry is a string.
- * Used by `validateAllowToolsBody` so the downstream `DispatchInput.allowTools`
- * lands without an `as string[]` cast — the narrowing here is proof.
+ * Body fields rejected at the boundary as part of the P5 cutover
+ * (workspace-dispatch epic, card mGrHNHWM). Each field belonged to the
+ * pre-workspace dispatch shape:
+ *
+ *   - `schema_definition_id` / `schema_role` — gpt-manager-specific schema
+ *     MCP knobs that now live in the caller's overlay (`SCHEMA_DEFINITION_ID`
+ *     etc) and are declared by the caller's own workspace `.mcp.json`.
+ *   - `api_url` — schema MCP base URL; same — moves to overlay.
+ *   - `allow_tools` — caller-supplied tool allowlist; replaced by the
+ *     workspace's `allowed-tools.txt`.
+ *   - `agents` — inline sub-agent JSON; replaced by the workspace's
+ *     `.claude/agents/*.md` files.
+ *
+ * Order is the canonical detection / response order — locked so a caller
+ * who grep's `offendingFields` sees a deterministic surface.
  */
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((e) => typeof e === "string");
+const LEGACY_BODY_FIELDS = Object.freeze([
+  "schema_definition_id",
+  "schema_role",
+  "api_url",
+  "allow_tools",
+  "agents",
+] as const);
+
+/**
+ * Detect any legacy body fields. Returns the offending list in canonical
+ * order (subset of `LEGACY_BODY_FIELDS`). Empty array means "clean — proceed
+ * to workspace validation."
+ */
+function detectLegacyFields(body: Record<string, unknown>): string[] {
+  return LEGACY_BODY_FIELDS.filter((f) => f in body);
 }
 
 /**
- * Shared fields both `/api/launch` and `/api/resume` consume. Keeps the
- * handler bodies focused on endpoint-specific concerns (launch: fresh task;
- * resume: parent jobId + session resolution).
+ * Write the canonical 400 for a legacy-shape body. The message points the
+ * caller at the new API and the gpt-manager migration card so external
+ * dispatchers can self-serve their migration without reading danxbot
+ * source. `offendingFields` is the structured surface tests + dashboards
+ * can rely on; `message` is for humans tailing logs.
  */
-interface CommonRequestParams {
-  apiToken: string;
-  allowTools: readonly string[];
-  agents: Record<string, Record<string, unknown>> | undefined;
-  schemaDefinitionId: string | undefined;
-  schemaRole: string | undefined;
-  maxRuntimeMs: number | undefined;
-  title: string | undefined;
-  task: string;
-}
-
-/**
- * Validate the `allow_tools` body field. Returns the narrowed `string[]` on
- * success, or null after writing the appropriate 400 to `res`. Enforces
- * deny-by-default at the API boundary: the field is required and must be an
- * array of strings.
- */
-function validateAllowToolsBody(
-  raw: unknown,
+function rejectLegacyShape(
   res: ServerResponse,
-): string[] | null {
-  if (raw === undefined || raw === null) {
-    json(res, 400, { error: "Missing required field: allow_tools" });
-    return null;
-  }
-  if (!Array.isArray(raw)) {
-    json(res, 400, {
-      error: "allow_tools must be an array of tool name strings",
-    });
-    return null;
-  }
-  if (!isStringArray(raw)) {
-    json(res, 400, { error: "allow_tools entries must be strings" });
-    return null;
-  }
-  return raw;
+  offendingFields: string[],
+): void {
+  json(res, 400, {
+    error: "Legacy dispatch body shape rejected",
+    message:
+      "This worker accepts only {repo, workspace, task, overlay?, ...}. " +
+      "The schema_*/allow_tools/agents fields are no longer supported. " +
+      "Migrate to {workspace: '<name>', overlay: {...}} — see " +
+      "https://trello.com/c/s9XdRLcz for the gpt-manager migration and " +
+      "`.claude/rules/agent-dispatch.md` for the API contract.",
+    offendingFields,
+  });
 }
 
 /**
  * Validate that the body's optional `repo` field matches this worker's repo.
  * Returns true on match (or when the field is absent); writes a 400 and
- * returns false on mismatch. Extracted from `parseCommonRequestParams` so
- * that function stays purely about body-shape parsing rather than routing.
+ * returns false on mismatch.
  */
 function validateRepoMatch(
   body: Record<string, unknown>,
@@ -203,64 +210,115 @@ function validateRepoMatch(
 }
 
 /**
- * Parse + validate the shared fields from a launch/resume body. Writes the
- * appropriate 400 to `res` and returns null on failure; returns the parsed
- * params on success. The endpoint-specific fields (`job_id` for resume) are
- * validated separately by each handler.
+ * Shape the parsed `/api/launch` or `/api/resume` body produces. The HTTP
+ * handler validates the inbound JSON and either writes a 4xx + returns null,
+ * or returns this struct.
  */
-function parseCommonRequestParams(
-  body: Record<string, unknown>,
+interface ParsedDispatchRequest {
+  workspace: string;
+  task: string;
+  overlay: Record<string, string>;
+  apiToken: string | undefined;
+  statusUrl: string | undefined;
+  callerIp: string | null;
+  title: string | undefined;
+  maxRuntimeMs: number | undefined;
+}
+
+/**
+ * Validate the body's `overlay` field. Caller is opaque to danxbot — every
+ * value MUST be a string (the resolver substitutes literally). A non-object
+ * overlay or a non-string value is a caller bug; reject with 400 rather than
+ * coercing.
+ */
+function validateOverlayBody(
+  raw: unknown,
   res: ServerResponse,
-  repo: RepoContext,
-): CommonRequestParams | null {
-  const task = requireString(body.task);
-  const apiToken = requireString(body.api_token);
-  if (!task || !apiToken) {
-    // `requireString` treats blank strings as missing — name both cases in
-    // the error so an operator who sent `task: "   "` doesn't read "Missing"
-    // and assume the field was dropped in transit.
+): Record<string, string> | null {
+  if (raw === undefined) return {};
+  if (
+    raw === null ||
+    typeof raw !== "object" ||
+    Array.isArray(raw)
+  ) {
     json(res, 400, {
-      error: "Missing or blank required fields: task, api_token",
+      error: "overlay must be an object mapping string → string",
     });
     return null;
   }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof value !== "string") {
+      json(res, 400, {
+        error: `overlay.${key} must be a string (got ${typeof value})`,
+      });
+      return null;
+    }
+    out[key] = value;
+  }
+  return out;
+}
 
-  const rawAllow = validateAllowToolsBody(body.allow_tools, res);
-  if (!rawAllow) return null;
+/**
+ * Parse + validate a `/api/launch` or `/api/resume` body for the new
+ * `{repo, workspace, task, overlay?, ...}` shape. Writes the appropriate
+ * 4xx to `res` and returns null on failure; returns a `ParsedDispatchRequest`
+ * on success.
+ *
+ * Validation order is meaningful: legacy-field rejection FIRST so a caller
+ * still on the old shape always sees the migration message (and never the
+ * generic "Missing workspace"). This keeps the cutover signal loud and
+ * specific.
+ */
+function parseDispatchRequest(
+  req: IncomingMessage,
+  body: Record<string, unknown>,
+  res: ServerResponse,
+  repo: RepoContext,
+): ParsedDispatchRequest | null {
+  // 1. Legacy-field rejection — fires BEFORE any other validation so a
+  //    caller still on the pre-P5 shape always sees the migration message.
+  const legacy = detectLegacyFields(body);
+  if (legacy.length > 0) {
+    rejectLegacyShape(res, legacy);
+    return null;
+  }
 
+  // 2. Workspace required. No fallback / default workspace — danxbot ships
+  //    only its own dispatch surfaces (`trello-worker`, `slack-worker`).
+  //    External callers must declare a workspace in their target repo's
+  //    `.danxbot/workspaces/`.
+  const workspace = requireString(body.workspace);
+  if (!workspace) {
+    json(res, 400, { error: "Missing workspace" });
+    return null;
+  }
+
+  // 3. Repo gate (cross-worker safety) and task non-empty.
   if (!validateRepoMatch(body, res, repo)) return null;
+  const task = requireString(body.task);
+  if (!task) {
+    json(res, 400, { error: "Missing or blank required field: task" });
+    return null;
+  }
 
-  // `dispatchAllowTools` is the ONE entry point every dispatch consumer goes
-  // through. It resolves the named profile (fail-loud on a typo'd literal)
-  // and merges the baseline with the caller's overrides. The `http-launch`
-  // baseline pins the standard built-ins (Read/Glob/Grep/Edit/Write/Bash/
-  // TodoWrite) so every API-dispatched agent has basic filesystem/shell
-  // tools regardless of `body.allow_tools` — the body supplies any MCP
-  // server opt-ins (schema, trello, …) on top. Identical shape to the
-  // poller callsite and to the Phase 5 Slack path. See
-  // `src/dispatch/profiles.ts` and the agent-isolation epic (Trello
-  // `7ha2CSpc`) Phase 4.
-  const allowTools = dispatchAllowTools("http-launch", rawAllow);
+  // 4. Optional fields.
+  const overlay = validateOverlayBody(body.overlay, res);
+  if (!overlay) return null;
+  const { statusUrl, callerIp } = parseSharedRequestFields(req, body);
+  const apiToken =
+    typeof body.api_token === "string" ? body.api_token : undefined;
 
   return {
+    workspace,
     task,
+    overlay,
     apiToken,
-    allowTools,
-    // Object keyed by agent name — see `.claude/rules/agent-dispatch.md`.
-    agents: body.agents as Record<string, Record<string, unknown>> | undefined,
-    // Accept both string and number: Laravel serializes int IDs as JSON
-    // numbers. Coercing to string here matches what the schema MCP server
-    // env expects (SCHEMA_DEFINITION_ID is a string).
-    schemaDefinitionId:
-      typeof body.schema_definition_id === "string" ||
-      typeof body.schema_definition_id === "number"
-        ? String(body.schema_definition_id)
-        : undefined,
-    schemaRole:
-      typeof body.schema_role === "string" ? body.schema_role : undefined,
+    statusUrl,
+    callerIp,
+    title: typeof body.title === "string" ? body.title : undefined,
     maxRuntimeMs:
       typeof body.max_runtime_ms === "number" ? body.max_runtime_ms : undefined,
-    title: typeof body.title === "string" ? body.title : undefined,
   };
 }
 
@@ -272,28 +330,41 @@ function parseCommonRequestParams(
  */
 function buildDispatchInput(
   repo: RepoContext,
-  common: CommonRequestParams,
-  apiUrl: string,
-  statusUrl: string | undefined,
+  parsed: ParsedDispatchRequest,
   apiDispatchMeta: DispatchTriggerMetadata,
   extras: { resumeSessionId?: string; parentJobId?: string } = {},
 ): Parameters<typeof dispatch>[0] {
   return {
     repo,
-    task: common.task,
-    apiToken: common.apiToken,
-    apiUrl,
-    allowTools: common.allowTools,
-    statusUrl,
-    schemaDefinitionId: common.schemaDefinitionId,
-    schemaRole: common.schemaRole,
-    title: common.title,
-    agents: common.agents,
-    maxRuntimeMs: common.maxRuntimeMs,
+    workspace: parsed.workspace,
+    overlay: parsed.overlay,
+    task: parsed.task,
+    apiToken: parsed.apiToken,
+    statusUrl: parsed.statusUrl,
+    title: parsed.title,
+    maxRuntimeMs: parsed.maxRuntimeMs,
     apiDispatchMeta,
     resumeSessionId: extras.resumeSessionId,
     parentJobId: extras.parentJobId,
   };
+}
+
+/**
+ * Map a workspace-resolution failure to a 400 with the resolver's own
+ * message. These all signal "workspace declared by the caller does not exist
+ * / is malformed / failed a gate" — caller-fixable. `WorkspaceGateUnknownError`
+ * is the one outlier (the workspace itself declares an unknown gate, which
+ * is a server-side bug); we 500 that one.
+ */
+function isWorkspaceCallerError(err: unknown): boolean {
+  return (
+    err instanceof WorkspaceNotFoundError ||
+    err instanceof WorkspaceFileMissingError ||
+    err instanceof WorkspaceManifestError ||
+    err instanceof WorkspaceSettingsError ||
+    err instanceof WorkspaceGateError ||
+    err instanceof PlaceholderError
+  );
 }
 
 export async function handleLaunch(
@@ -315,29 +386,41 @@ export async function handleLaunch(
     }
 
     const body = await parseBody(req);
-    const common = parseCommonRequestParams(body, res, repo);
-    if (!common) return;
-
-    const { apiUrl, statusUrl, callerIp } = parseSharedRequestFields(req, body);
+    const parsed = parseDispatchRequest(req, body, res, repo);
+    if (!parsed) return;
 
     const apiDispatchMeta: DispatchTriggerMetadata = {
       trigger: "api",
       metadata: {
         endpoint: "/api/launch",
-        callerIp,
-        statusUrl: statusUrl ?? null,
-        initialPrompt: common.task,
+        callerIp: parsed.callerIp,
+        statusUrl: parsed.statusUrl ?? null,
+        initialPrompt: parsed.task,
       },
     };
 
     const { dispatchId } = await dispatch(
-      buildDispatchInput(repo, common, apiUrl, statusUrl, apiDispatchMeta),
+      buildDispatchInput(repo, parsed, apiDispatchMeta),
     );
 
     json(res, 200, { job_id: dispatchId, status: "launched" });
   } catch (err) {
     if (err instanceof McpResolveError) {
       json(res, 400, { error: err.message });
+      return;
+    }
+    if (err instanceof WorkspaceGateUnknownError) {
+      // Server-side bug: a workspace shipped on disk declares a gate the
+      // resolver doesn't know about. 500 (not 400) — fixing requires a
+      // danxbot code change, not a caller change.
+      log.error("Launch failed: workspace gate unknown", err);
+      json(res, 500, { error: err.message });
+      return;
+    }
+    if (isWorkspaceCallerError(err)) {
+      json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
       return;
     }
     log.error("Launch failed", err);
@@ -373,17 +456,20 @@ export async function handleResume(
 
     const body = await parseBody(req);
 
-    // Endpoint-specific required field (whitespace + non-string rejected).
+    // Endpoint-specific required field. Validated BEFORE legacy/workspace
+    // checks so a resume body missing job_id always sees the focused error
+    // (otherwise a body that's also missing workspace would surface
+    // "Missing workspace" first and bury the real issue).
     const parentJobId = requireString(body.job_id);
     if (!parentJobId) {
       json(res, 400, {
-        error: "Missing or blank required fields: job_id, task, api_token",
+        error: "Missing or blank required field: job_id",
       });
       return;
     }
 
-    const common = parseCommonRequestParams(body, res, repo);
-    if (!common) return;
+    const parsed = parseDispatchRequest(req, body, res, repo);
+    if (!parsed) return;
 
     const resolved = await resolveParentSessionId(repo.name, parentJobId);
     switch (resolved.kind) {
@@ -403,20 +489,18 @@ export async function handleResume(
         return;
     }
 
-    const { apiUrl, statusUrl, callerIp } = parseSharedRequestFields(req, body);
-
     const apiDispatchMeta: DispatchTriggerMetadata = {
       trigger: "api",
       metadata: {
         endpoint: "/api/resume",
-        callerIp,
-        statusUrl: statusUrl ?? null,
-        initialPrompt: common.task,
+        callerIp: parsed.callerIp,
+        statusUrl: parsed.statusUrl ?? null,
+        initialPrompt: parsed.task,
       },
     };
 
     const { dispatchId } = await dispatch(
-      buildDispatchInput(repo, common, apiUrl, statusUrl, apiDispatchMeta, {
+      buildDispatchInput(repo, parsed, apiDispatchMeta, {
         resumeSessionId: resolved.sessionId,
         parentJobId,
       }),
@@ -430,6 +514,17 @@ export async function handleResume(
   } catch (err) {
     if (err instanceof McpResolveError) {
       json(res, 400, { error: err.message });
+      return;
+    }
+    if (err instanceof WorkspaceGateUnknownError) {
+      log.error("Resume failed: workspace gate unknown", err);
+      json(res, 500, { error: err.message });
+      return;
+    }
+    if (isWorkspaceCallerError(err)) {
+      json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
       return;
     }
     log.error("Resume failed", err);

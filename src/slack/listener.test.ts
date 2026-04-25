@@ -35,7 +35,7 @@ vi.mock("../agent/router.js", () => ({
 
 // --- Dispatch core mock (the Phase 4 workspace entry point) ---
 
-// A list of every `dispatchWithWorkspace()` input observed in the test,
+// A list of every `dispatch()` input observed in the test,
 // plus the resolver that fires the `onComplete` callback with a fake
 // AgentJob. Retained as `dispatchCalls` (not renamed) since
 // orchestrating the call shape didn't change — only the callee name.
@@ -53,7 +53,7 @@ const dispatchCalls: DispatchCall[] = [];
 const mockDispatch = vi.fn();
 
 vi.mock("../dispatch/core.js", () => ({
-  dispatchWithWorkspace: (...args: unknown[]) => mockDispatch(...args),
+  dispatch: (...args: unknown[]) => mockDispatch(...args),
 }));
 
 // --- findLatestDispatchBySlackThread mock (thread continuity lookup) ---
@@ -272,7 +272,7 @@ describe("deep agent dispatch", () => {
     );
   });
 
-  it("calls dispatchWithWorkspace with workspace='slack-worker' and DANXBOT_WORKER_PORT in overlay; slack URLs auto-injected by the dispatch core", async () => {
+  it("calls dispatch with workspace='slack-worker' and DANXBOT_WORKER_PORT in overlay; slack URLs auto-injected by the dispatch core", async () => {
     arrangeDispatchSuccess();
 
     await handler({ message: makeSlackMessage({ ts: "555.111" }), client });

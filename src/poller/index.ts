@@ -27,7 +27,7 @@ import {
   writeIfChanged,
 } from "../workspace/generate.js";
 import { createLogger } from "../logger.js";
-import { dispatchWithWorkspace } from "../dispatch/core.js";
+import { dispatch } from "../dispatch/core.js";
 import {
   fetchTodoCards,
   fetchNeedsHelpCards,
@@ -834,19 +834,18 @@ function spawnClaude(
   // Trello `q5aFuINM`). The poller's allowed-tools, MCP server set, and
   // skill surface live in `src/poller/inject/workspaces/trello-worker/`
   // and are mirrored to `<repo>/.danxbot/workspaces/trello-worker/` by
-  // the inject pipeline on every poll tick. `dispatchWithWorkspace`
-  // resolves that fixture, merges the danxbot infrastructure server,
-  // and funnels through the same shared spawn loop as `dispatch()` —
-  // identical stall recovery, activeJobs registration, completion
-  // signalling. The poller still supplies its own `timeoutMs`
-  // (60x poll interval) and chains `handleAgentCompletion` through
-  // `onComplete`. See `.claude/rules/agent-dispatch.md`.
+  // the inject pipeline on every poll tick. `dispatch` resolves that
+  // fixture, merges the danxbot infrastructure server, and runs the
+  // shared spawn loop — stall recovery, activeJobs registration,
+  // completion signalling. The poller still supplies its own
+  // `timeoutMs` (60x poll interval) and chains `handleAgentCompletion`
+  // through `onComplete`. See `.claude/rules/agent-dispatch.md`.
   //
-  // Fire-and-forget: dispatchWithWorkspace returns once the agent is
-  // spawned (NOT when it completes). The poller already hands
-  // completion to `onComplete`, so awaiting here would only serialize
-  // the initial spawn with... nothing.
-  dispatchWithWorkspace({
+  // Fire-and-forget: `dispatch` returns once the agent is spawned (NOT
+  // when it completes). The poller already hands completion to
+  // `onComplete`, so awaiting here would only serialize the initial
+  // spawn with... nothing.
+  dispatch({
     repo,
     task: prompt,
     workspace: "trello-worker",

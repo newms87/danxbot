@@ -249,15 +249,67 @@ beforeEach(async () => {
 
   testState.reposBase = join(tempDir, "repos");
   repoDir = join(testState.reposBase, "test-repo");
-  // Phase 3 of the agent-isolation epic (Trello `7ha2CSpc`) cwds every
-  // dispatched claude into `<repo>/.danxbot/workspace/`. fake-claude —
-  // spawned via the PATH wrapper from `launcher.ts` — inherits that cwd
-  // and writes its JSONL under the workspace-encoded projects dir. Create
-  // the workspace so the spawn doesn't fail with ENOENT, and derive the
-  // sessionDir the assertions watch from the same path.
+  // Two cwd shapes co-exist in this suite:
+  //
+  //   1. Tests that drive `spawnAgent` directly (`runToCompletion`)
+  //      inherit the launcher's default cwd of `<repo>/.danxbot/workspace/`
+  //      (Phase 3 of the agent-isolation epic, Trello `7ha2CSpc`).
+  //   2. Tests that drive `handleLaunch` post `{workspace:
+  //      "integration-test", ...}`, which the dispatch core resolves to
+  //      `<repo>/.danxbot/workspaces/integration-test/` (P5 of the
+  //      workspace-dispatch epic, Trello `mGrHNHWM`).
+  //
+  // fake-claude (spawned via the PATH wrapper) inherits whichever cwd
+  // the launcher chose and writes its JSONL under the corresponding
+  // session dir. The legacy directory is created here for #1; the named
+  // workspace directory is created below for #2; `sessionDir` tracks #2
+  // because the only test that queries the JSONL by path is the
+  // workspace-shape `GET /api/status` test.
   const workspaceDir = join(repoDir, ".danxbot", "workspace");
   mkdirSync(workspaceDir, { recursive: true });
 
+  // P5 of the workspace-dispatch epic (mGrHNHWM): every dispatch lands
+  // in a named workspace at `<repo>/.danxbot/workspaces/<name>/`. The
+  // `handleLaunch` integration tests below post `{workspace:
+  // "integration-test", ...}`, so write a minimal fixture workspace
+  // here. No gates, no MCP servers, no required placeholders — the
+  // dispatch core merges in the danxbot infrastructure server itself
+  // and the tests don't exercise any caller-supplied tooling.
+  const integrationWs = join(
+    repoDir,
+    ".danxbot",
+    "workspaces",
+    "integration-test",
+  );
+  mkdirSync(join(integrationWs, ".claude"), { recursive: true });
+  writeFileSync(
+    join(integrationWs, "workspace.yml"),
+    "name: integration-test\n" +
+      "description: integration-test workspace fixture\n" +
+      "required-placeholders: []\n" +
+      "optional-placeholders: []\n" +
+      "required-gates: []\n",
+  );
+  writeFileSync(join(integrationWs, "allowed-tools.txt"), "Read\n");
+  writeFileSync(
+    join(integrationWs, ".mcp.json"),
+    JSON.stringify({ mcpServers: {} }),
+  );
+  writeFileSync(
+    join(integrationWs, ".claude", "settings.json"),
+    JSON.stringify({ env: {} }),
+  );
+  writeFileSync(
+    join(integrationWs, "CLAUDE.md"),
+    "# integration-test workspace\n",
+  );
+
+  // sessionDir tracks the LEGACY workspace path because the bulk of this
+  // suite drives `spawnAgent` directly (`runToCompletion`) and inherits
+  // the launcher default cwd of `<repo>/.danxbot/workspace/`. The two
+  // `handleLaunch` integration tests below resolve a different cwd
+  // (`<repo>/.danxbot/workspaces/integration-test/`) and override
+  // `FAKE_CLAUDE_SESSION_DIR` themselves.
   sessionDir = deriveSessionDir(workspaceDir);
 });
 
@@ -456,17 +508,26 @@ describe("Integration: dispatch pipeline", () => {
 
       const repo = makeRepoContext({ name: "test-repo", localPath: repoDir });
 
-      // Set fake-claude env vars in process.env (buildCleanEnv copies from process.env)
+      // P5 cwd: dispatched agent lands in <repo>/.danxbot/workspaces/<name>/
+      // — point fake-claude at the matching session dir so the launcher's
+      // SessionLogWatcher (scanning that cwd) finds the JSONL.
+      const wsSessionDir = deriveSessionDir(
+        join(repoDir, ".danxbot", "workspaces", "integration-test"),
+      );
       const originalPath = process.env.PATH;
-      const envKeys = Object.keys(fakeClasudeEnv());
-      const envSnapshot = fakeClasudeEnv();
+      const baseEnv = fakeClasudeEnv();
+      const envSnapshot = {
+        ...baseEnv,
+        FAKE_CLAUDE_SESSION_DIR: wsSessionDir,
+      };
+      const envKeys = Object.keys(envSnapshot);
       Object.assign(process.env, envSnapshot);
 
       try {
         const req = createMockReqWithBody("POST", {
+          workspace: "integration-test",
           task: "Integration test via handleLaunch",
           api_token: "test-token",
-          allow_tools: [],
           status_url: captureServer.statusUrl,
         });
         const res = createMockRes();
@@ -498,15 +559,23 @@ describe("Integration: dispatch pipeline", () => {
 
       const repo = makeRepoContext({ name: "test-repo", localPath: repoDir });
 
+      const wsSessionDir = deriveSessionDir(
+        join(repoDir, ".danxbot", "workspaces", "integration-test"),
+      );
       const originalPath = process.env.PATH;
-      const envKeys = Object.keys(fakeClasudeEnv());
-      Object.assign(process.env, fakeClasudeEnv());
+      const baseEnv = fakeClasudeEnv();
+      const envSnapshot = {
+        ...baseEnv,
+        FAKE_CLAUDE_SESSION_DIR: wsSessionDir,
+      };
+      const envKeys = Object.keys(envSnapshot);
+      Object.assign(process.env, envSnapshot);
 
       try {
         const launchReq = createMockReqWithBody("POST", {
+          workspace: "integration-test",
           task: "Usage aggregation end-to-end",
           api_token: "test-token",
-          allow_tools: [],
           status_url: captureServer.statusUrl,
         });
         const launchRes = createMockRes();
