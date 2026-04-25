@@ -239,14 +239,6 @@ export interface SpawnAgentOptions {
   /** Path to MCP settings JSON. When set, adds --mcp-config to CLI args. */
   mcpConfigPath?: string;
   /**
-   * Explicit allowlist of built-in and `mcp__<server>__<tool>` tool names.
-   * When set, adds `--allowed-tools` so claude's deny-by-default gate limits
-   * the agent's tool surface. Produced by `resolveDispatchTools()` at every
-   * dispatch entry-point. Absent for legacy non-dispatch spawns (none left
-   * after Phase 2).
-   */
-  allowedTools?: readonly string[];
-  /**
    * Agent definitions forwarded to Claude CLI's `--agents <json>` flag.
    * Must be an object keyed by agent name (the shape Claude CLI requires) —
    * a list silently falls back to built-in agents and makes
@@ -481,7 +473,6 @@ export async function spawnAgent(
     jobId,
     title: options.title,
     mcpConfigPath: options.mcpConfigPath,
-    allowedTools: options.allowedTools,
     agents: options.agents,
     resumeSessionId: options.resumeSessionId,
   });

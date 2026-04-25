@@ -11,12 +11,14 @@
  *   - Slack listener (`src/slack/listener.ts`)
  *
  * Every dispatch lands in a workspace — a directory at
- * `<repo>/.danxbot/workspaces/<name>/` declaring the MCP servers,
- * allowed tools, and `.claude/settings.json` env block. Callers pass
- * the workspace name + an overlay (placeholder substitutions). Danxbot
- * does NOT ship a default workspace; callers without one (e.g. external
- * HTTP callers) MUST provide one in their target repo or be rejected
- * upstream by the API handler.
+ * `<repo>/.danxbot/workspaces/<name>/` declaring the MCP servers (in
+ * `.mcp.json`) and the `.claude/settings.json` env block. The MCP set
+ * (combined with `--strict-mcp-config`) IS the agent's tool surface;
+ * built-ins are all available by default. Callers pass the workspace name
+ * + an overlay (placeholder substitutions). Danxbot does NOT ship a
+ * default workspace; callers without one (e.g. external HTTP callers)
+ * MUST provide one in their target repo or be rejected upstream by the
+ * API handler.
  *
  * Runs identically for launches and resumes — the only differences are
  * `input.resumeSessionId` (appended to the claude invocation via spawnAgent)
@@ -43,7 +45,6 @@ import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
 import { StallDetector } from "../agent/stall-detector.js";
 import {
   defaultMcpRegistry,
-  DANXBOT_COMPLETE_TOOL,
   DANXBOT_SERVER_NAME,
 } from "../agent/mcp-registry.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
@@ -217,7 +218,7 @@ export interface DispatchResult {
 /**
  * Write the per-dispatch MCP settings file to a fresh temp directory and
  * return its absolute path. Called by `dispatch()` after the resolver has
- * produced `{mcpServers, allowedTools}`. Caller is responsible for the
+ * produced the `mcpServers` map. Caller is responsible for the
  * temp-dir cleanup (wired through `onComplete` below).
  */
 function writeMcpSettingsFile(
@@ -241,14 +242,18 @@ function cleanupMcpSettings(settingsDir: string): void {
 }
 
 /**
- * Resolved tool surface — the shape the spawn loop reads. Produced inside
+ * Resolved MCP surface — the shape the spawn loop reads. Produced inside
  * `dispatch()` from `resolveWorkspace` + the danxbot infrastructure server.
+ *
+ * Per the agent-dispatch contract, the workspace's `.mcp.json` (combined
+ * with `--strict-mcp-config`) is the SINGLE source of truth for the
+ * agent's MCP surface. There is no per-tool allowlist — claude built-ins
+ * are all available by default; MCP tools are everything declared by
+ * `mcpServers`.
  */
 interface ResolvedSurface {
   /** MCP server configs to write into the per-dispatch settings.json. */
   readonly mcpServers: Record<string, unknown>;
-  /** Allowlist passed to claude's `--allowed-tools`. */
-  readonly allowedTools: readonly string[];
   /**
    * Optional cwd override for the spawned agent. When set, replaces the
    * launcher's default `workspacePath(repoName)`. Used by the workspace
@@ -315,7 +320,6 @@ async function runResolved(
         timeoutMs: input.timeoutMs ?? config.dispatch.agentTimeoutMs,
         env,
         mcpConfigPath: settingsPath,
-        allowedTools: resolved.allowedTools,
         statusUrl: input.statusUrl,
         apiToken: input.apiToken,
         maxRuntimeMs: input.maxRuntimeMs,
@@ -528,16 +532,14 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     [DANXBOT_SERVER_NAME]: danxbotServer,
   };
 
-  // Always-present infrastructure tool, appended after the workspace's
-  // declared tools.
-  const allowedTools: readonly string[] = [
-    ...workspace.allowedTools,
-    `mcp__${DANXBOT_SERVER_NAME}__${DANXBOT_COMPLETE_TOOL}`,
-  ];
-
+  // No allowlist: the workspace's `.mcp.json` (with the danxbot
+  // infrastructure server merged in here) IS the agent's MCP surface.
+  // `--strict-mcp-config` keeps the agent confined to those servers, and
+  // claude built-ins are all available by default. `danxbot_complete` is
+  // reachable because the danxbot server registers it, not because it's
+  // listed anywhere.
   return runResolved(input, dispatchId, {
     mcpServers,
-    allowedTools,
     cwd: workspace.cwd,
     envOverrides: workspace.env,
   });

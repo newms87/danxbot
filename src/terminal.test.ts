@@ -75,17 +75,17 @@ describe("buildDispatchScript", () => {
     );
   });
 
-  // Regression: claude's `--allowed-tools` and `--mcp-config` are variadic
-  // flags (see `claude --help`: `<tools...>`, `<configs...>`). Without a `--`
-  // separator, the positional firstMessage gets absorbed as an additional
-  // value for whichever variadic flag appears last, and claude's interactive
-  // TUI boots with no first message — it sits idle on `❯` forever.
-  // Inserting `--` before the positional is the POSIX convention that tells
-  // commander.js (claude's CLI parser) "no more flag values, what follows is
-  // positional." See Trello card `kwZOGOrQ` for the full investigation.
+  // Regression: claude's `--mcp-config` is a variadic flag (see `claude
+  // --help`: `<configs...>`). Without a `--` separator, the positional
+  // firstMessage gets absorbed as an additional value for whichever variadic
+  // flag appears last, and claude's interactive TUI boots with no first
+  // message — it sits idle on `❯` forever. Inserting `--` before the
+  // positional is the POSIX convention that tells commander.js (claude's
+  // CLI parser) "no more flag values, what follows is positional." See
+  // Trello card `kwZOGOrQ` for the full investigation.
   it("inserts a `--` separator before the firstMessage so variadic flags don't absorb the positional", () => {
     const scriptPath = buildScript({
-      flags: ["--allowed-tools", "Bash,Read"],
+      flags: ["--mcp-config", "/tmp/mcp/settings.json"],
       firstMessage: "the user message",
     });
     const content = readFileSync(scriptPath, "utf-8");
@@ -93,7 +93,7 @@ describe("buildDispatchScript", () => {
     // single-quoted firstMessage. A missing separator regresses host mode to
     // the silent-hang state (card kwZOGOrQ) — the agent TUI boots but never
     // processes the first turn.
-    expect(content).toMatch(/'--allowed-tools' 'Bash,Read' '--' 'the user message'/);
+    expect(content).toMatch(/'--mcp-config' '\/tmp\/mcp\/settings\.json' '--' 'the user message'/);
   });
 
   it("does NOT write prompt.txt — firstMessage is delivered inline, not via a file", () => {

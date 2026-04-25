@@ -19,6 +19,7 @@ import {
   WorkspaceSettingsError,
   WorkspaceGateError,
   WorkspaceGateUnknownError,
+  WorkspaceLegacyFileError,
 } from "./resolve.js";
 import { PlaceholderError } from "./placeholders.js";
 import { WorkspaceManifestError } from "./manifest.js";
@@ -109,23 +110,6 @@ describe("resolveWorkspace", () => {
         }),
       );
       expect(result.promptDelivery).toBe("at-file");
-    });
-
-    it("parses allowed-tools.txt, one entry per non-empty line", () => {
-      const result = capture(
-        resolveWorkspace({
-          repo,
-          workspaceName: "test-workspace",
-          overlay: goodOverlay(),
-        }),
-      );
-      expect(result.allowedTools).toEqual([
-        "Read",
-        "Glob",
-        "Grep",
-        "Bash",
-        "mcp__trello__*",
-      ]);
     });
 
     it("substitutes placeholders into .mcp.json at mcpSettingsPath", () => {
@@ -242,47 +226,6 @@ describe("resolveWorkspace", () => {
       expect(result.env.TEST_OPTIONAL_FLAG).toBe("");
     });
 
-    it("returns empty allowedTools when allowed-tools.txt is empty", () => {
-      writeFileSync(
-        resolve(
-          repoDir,
-          ".danxbot",
-          "workspaces",
-          "test-workspace",
-          "allowed-tools.txt",
-        ),
-        "",
-      );
-      const result = capture(
-        resolveWorkspace({
-          repo,
-          workspaceName: "test-workspace",
-          overlay: goodOverlay(),
-        }),
-      );
-      expect(result.allowedTools).toEqual([]);
-    });
-
-    it("ignores blank and comment lines in allowed-tools.txt", () => {
-      writeFileSync(
-        resolve(
-          repoDir,
-          ".danxbot",
-          "workspaces",
-          "test-workspace",
-          "allowed-tools.txt",
-        ),
-        "# a comment\nRead\n\nBash\n# trailing\n",
-      );
-      const result = capture(
-        resolveWorkspace({
-          repo,
-          workspaceName: "test-workspace",
-          overlay: goodOverlay(),
-        }),
-      );
-      expect(result.allowedTools).toEqual(["Read", "Bash"]);
-    });
   });
 
   describe("missing workspace", () => {
@@ -667,25 +610,6 @@ description: "unterminated
       ).toThrow(WorkspaceFileMissingError);
     });
 
-    it("throws WorkspaceFileMissingError when allowed-tools.txt is absent", () => {
-      rmSync(
-        resolve(
-          repoDir,
-          ".danxbot",
-          "workspaces",
-          "test-workspace",
-          "allowed-tools.txt",
-        ),
-      );
-      expect(() =>
-        resolveWorkspace({
-          repo,
-          workspaceName: "test-workspace",
-          overlay: goodOverlay(),
-        }),
-      ).toThrow(WorkspaceFileMissingError);
-    });
-
     it("throws WorkspaceFileMissingError when .claude/settings.json is absent", () => {
       rmSync(
         resolve(
@@ -704,6 +628,60 @@ description: "unterminated
           overlay: goodOverlay(),
         }),
       ).toThrow(WorkspaceFileMissingError);
+    });
+  });
+
+  describe("legacy allowed-tools.txt rejection", () => {
+    it("throws WorkspaceLegacyFileError when a workspace dir contains an allowed-tools.txt file", () => {
+      // The allow-tools concept was retired entirely (this card). A stale
+      // `allowed-tools.txt` left in a workspace dir MUST fail loudly so an
+      // operator notices the migration miss instead of silently losing the
+      // (already-broken) gate. No legacy / no backwards compat — the file
+      // either doesn't exist or the resolve fails.
+      writeFileSync(
+        resolve(
+          repoDir,
+          ".danxbot",
+          "workspaces",
+          "test-workspace",
+          "allowed-tools.txt",
+        ),
+        "Read\n",
+      );
+      expect(() =>
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      ).toThrow(WorkspaceLegacyFileError);
+    });
+
+    it("includes the workspace path AND the offending filename in the WorkspaceLegacyFileError message so the operator can find and delete it", () => {
+      const workspaceDir = resolve(
+        repoDir,
+        ".danxbot",
+        "workspaces",
+        "test-workspace",
+      );
+      writeFileSync(resolve(workspaceDir, "allowed-tools.txt"), "");
+      // Run once and inspect the actual message — asserts BOTH the
+      // workspace dir path AND the legacy file name appear, which is
+      // what an operator needs to fix the failure without running grep.
+      let caught: unknown;
+      try {
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(WorkspaceLegacyFileError);
+      const message = (caught as Error).message;
+      expect(message).toContain(workspaceDir);
+      expect(message).toContain("allowed-tools.txt");
     });
   });
 

@@ -1,25 +1,29 @@
 /**
  * Workspace resolver — the single entry point every dispatched agent's
- * configuration flows through (from Phase 5 onward; Phase 1 lands the
- * module, no callsites wire it yet).
+ * configuration flows through.
  *
  * Given `{repo, workspaceName, overlay}`, produce everything the spawner
  * needs to launch a claude process in this workspace:
  *
  *   - `cwd`              — absolute path to the workspace dir (agent's cwd)
  *   - `env`              — env map declared by the workspace's `.claude/settings.json`
- *   - `allowedTools`     — parsed entries from `allowed-tools.txt`
  *   - `mcpSettingsPath`  — absolute path to a freshly-written, placeholder-substituted `.mcp.json`
  *   - `promptDelivery`   — literal `"at-file"` — every dispatched agent receives
  *                          its task via `@path/to/prompt.md` on the first message.
- *                          Phase 6 of the epic implements the producer; the field
- *                          is in the resolver return so Phase 6 is an additive
- *                          consumer change, not a resolver-signature change.
+ *
+ * The workspace's `.mcp.json` is the SINGLE source of truth for the agent's
+ * MCP surface. Combined with claude's `--strict-mcp-config`, only servers
+ * listed there are visible. There is no per-tool allowlist mechanism — the
+ * old `allowed-tools.txt` was retired because claude's `--allowed-tools`
+ * is bypassed by `--dangerously-skip-permissions` (which every dispatched
+ * agent runs with). For genuine per-tool MCP subsetting (rare), declare a
+ * wrapper MCP server that exposes only the desired tools.
  *
  * The resolver throws loud on every failure mode:
  *
  *   - `WorkspaceNotFoundError`       — workspace dir missing
  *   - `WorkspaceFileMissingError`    — a required file inside the workspace dir is absent
+ *   - `WorkspaceLegacyFileError`     — a retired file (e.g. `allowed-tools.txt`) is still present
  *   - `WorkspaceManifestError`       — workspace.yml malformed or missing required fields
  *   - `WorkspaceSettingsError`       — .claude/settings.json shape invalid (non-string env value)
  *   - `WorkspaceGateError`           — a known gate failed for the repo
@@ -31,8 +35,7 @@
  * A typo'd filename (`.mcp.jsn` instead of `.mcp.json`, or `settings.jsn`)
  * must produce a loud error at resolve time, not a zero-tool agent at
  * dispatch time. An empty surface is represented by explicitly-empty
- * files: `allowed-tools.txt` may be zero-bytes, `.claude/settings.json`
- * may be `{"env":{}}`.
+ * files: `.claude/settings.json` may be `{"env":{}}`.
  *
  * Caller (`src/dispatch/core.ts` in Phase 5) is responsible for cleaning
  * up the `mcpSettingsPath` temp dir once the dispatch ends — the
@@ -89,6 +92,25 @@ export class WorkspaceFileMissingError extends Error {
   }
 }
 
+/**
+ * Thrown when a workspace directory contains a file that was retired by a
+ * deliberate architecture change. The resolver refuses to proceed so an
+ * operator notices the migration miss instead of silently losing whatever
+ * the file used to enforce.
+ *
+ * Today's only member: `allowed-tools.txt`. The allow-tools concept was
+ * dropped entirely (the file's claimed gate was never enforceable for MCP
+ * tools under `--dangerously-skip-permissions`). A stale file in a
+ * workspace dir means somebody copied an old fixture forward — fail loud,
+ * make them delete it.
+ */
+export class WorkspaceLegacyFileError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceLegacyFileError";
+  }
+}
+
 export class WorkspaceSettingsError extends Error {
   constructor(message: string) {
     super(message);
@@ -121,10 +143,12 @@ export interface ResolveWorkspaceOptions {
 export interface ResolvedWorkspace {
   cwd: string;
   env: Record<string, string>;
-  allowedTools: readonly string[];
   mcpSettingsPath: string;
   promptDelivery: PromptDelivery;
 }
+
+/** Files whose presence in a workspace dir is a hard error — see WorkspaceLegacyFileError. */
+const LEGACY_WORKSPACE_FILES: readonly string[] = ["allowed-tools.txt"];
 
 type GateEvaluator = (repo: RepoContext) => boolean;
 
@@ -172,16 +196,15 @@ function requireWorkspaceFile(path: string, label: string): string {
   return readFileSync(path, "utf-8");
 }
 
-function parseAllowedTools(workspaceDir: string): readonly string[] {
-  const path = resolve(workspaceDir, "allowed-tools.txt");
-  const raw = requireWorkspaceFile(path, "allowed-tools.txt");
-  const entries: string[] = [];
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    entries.push(trimmed);
+function rejectLegacyFiles(workspaceDir: string): void {
+  for (const name of LEGACY_WORKSPACE_FILES) {
+    const path = resolve(workspaceDir, name);
+    if (existsSync(path)) {
+      throw new WorkspaceLegacyFileError(
+        `workspace at ${workspaceDir} contains retired file "${name}" — delete it (see the workspace resolver header in src/workspace/resolve.ts for why allow-tools was dropped: claude's --allowed-tools is bypassed by --dangerously-skip-permissions)`,
+      );
+    }
   }
-  return entries;
 }
 
 function resolveEnv(
@@ -276,14 +299,14 @@ export function resolveWorkspace(
   // their own overlay contents.
   const subs = buildSubstitutionMap(manifest, overlay);
 
+  rejectLegacyFiles(cwd);
+
   const mcpSettingsPath = writeMcpSettings(cwd, subs);
-  const allowedTools = parseAllowedTools(cwd);
   const env = resolveEnv(cwd, subs);
 
   return {
     cwd,
     env,
-    allowedTools,
     mcpSettingsPath,
     promptDelivery: "at-file",
   };

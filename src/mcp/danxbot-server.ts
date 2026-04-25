@@ -31,9 +31,10 @@
  *
  * Fail-loud contract for the Slack tools: if the corresponding URL env var
  * is absent, `callTool` throws instead of silently no-op'ing. A non-Slack
- * agent should never see these tools in its MCP list (the resolver only
- * adds them to `allowedTools` when the dispatch is Slack-triggered), so a
- * call that reaches `callTool` without a URL is a real bug to surface.
+ * agent should never see these tools in its MCP list — `buildActiveTools`
+ * filters the server's advertised tools/list based on URL presence, so the
+ * tools simply do not exist for a non-Slack dispatch. A call that reaches
+ * `callTool` without a URL is a real bug to surface.
  */
 
 import { createInterface } from "node:readline";
@@ -195,12 +196,13 @@ async function callDanxbotSlackReply(
   urls: DanxbotToolUrls,
 ): Promise<string> {
   // Fail loud when the Slack reply URL isn't configured. A non-Slack
-  // dispatch should never have this tool in its allowedTools list (the
-  // resolver only adds it when opts.slack is present), so reaching here
-  // without a URL means either: the resolver regressed, OR an agent is
-  // probing for tools. Either way, silent fallback to another URL
-  // (e.g. the stop URL) would hide a real bug AND misroute a message to
-  // an endpoint that's shaped for a different payload.
+  // dispatch should never see this tool at all — `buildActiveTools`
+  // filters it out of the advertised tools/list when `urls.slackReply`
+  // is absent. So reaching here without a URL means either: the
+  // advertise-filter regressed, OR an agent is probing for tools.
+  // Either way, silent fallback to another URL (e.g. the stop URL)
+  // would hide a real bug AND misroute a message to an endpoint that's
+  // shaped for a different payload.
   if (!urls.slackReply) {
     throw new Error(
       "danxbot_slack_reply called outside a Slack dispatch (DANXBOT_SLACK_REPLY_URL not configured)",
@@ -287,13 +289,13 @@ function respondError(
 /**
  * Return the subset of `TOOLS` this MCP server will advertise over
  * JSON-RPC given the per-dispatch URL bag. Extracted (and exported) so
- * tests can assert the advertise-filter contract directly — the
- * resolver's `--allowed-tools` flag is the "belt" that tells claude
- * which tools it may call; this filter is the "suspenders" that
- * controls what the MCP server exposes at all. A drift between the two
- * would leak Slack tools into a non-Slack agent's `tools/list` output
- * even though `callTool` would still refuse, breaking the enforcement
- * seam documented on the registry's DANXBOT_ENTRY.
+ * tests can assert the advertise-filter contract directly. This is the
+ * SOLE enforcement seam for Slack-tool exposure — claude's
+ * `--allowed-tools` flag was retired (see workspace resolver header at
+ * `src/workspace/resolve.ts`), so there is no longer a CLI-side
+ * allowlist to back this up. The advertise-filter must be correct on
+ * its own: a Slack tool that escapes here becomes callable for a
+ * non-Slack agent, and `callTool` would have to be the safety net.
  */
 export function buildActiveTools(urls: DanxbotToolUrls) {
   return TOOLS.filter((t) => {

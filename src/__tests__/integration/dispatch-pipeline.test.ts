@@ -290,7 +290,6 @@ beforeEach(async () => {
       "optional-placeholders: []\n" +
       "required-gates: []\n",
   );
-  writeFileSync(join(integrationWs, "allowed-tools.txt"), "Read\n");
   writeFileSync(
     join(integrationWs, ".mcp.json"),
     JSON.stringify({ mcpServers: {} }),

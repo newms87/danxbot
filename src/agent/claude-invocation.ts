@@ -33,18 +33,6 @@ export interface BuildClaudeInvocationOptions {
   title?: string;
   /** Optional path to MCP settings JSON. Adds `--mcp-config <path>` to flags. */
   mcpConfigPath?: string;
-  /**
-   * Optional explicit allowlist for the dispatched agent's tool surface. When
-   * provided, emits `--allowed-tools <t1>,<t2>,...` so claude's deny-by-default
-   * gate limits the agent to exactly these names. Produced by
-   * `resolveDispatchTools()`; includes built-ins (`Read`, `Bash`, ...) and
-   * MCP tools in the claude-surfaced `mcp__<server>__<tool>` form.
-   *
-   * Contract: each entry MUST NOT contain a comma — the CSV serialization
-   * below has no escape form. `resolveDispatchTools` enforces this on its
-   * inputs, so production callers are safe by construction.
-   */
-  allowedTools?: readonly string[];
   /** Optional agents map forwarded via `--agents <json>`. Empty object = no flag. */
   agents?: Record<string, Record<string, unknown>>;
   /**
@@ -106,10 +94,6 @@ export function buildClaudeInvocation(
 
   if (options.mcpConfigPath) {
     flags.push("--mcp-config", options.mcpConfigPath);
-  }
-
-  if (options.allowedTools && options.allowedTools.length > 0) {
-    flags.push("--allowed-tools", options.allowedTools.join(","));
   }
 
   if (options.agents && Object.keys(options.agents).length > 0) {

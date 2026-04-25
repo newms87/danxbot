@@ -1,5 +1,0 @@
-Read
-Glob
-Grep
-Bash
-LS

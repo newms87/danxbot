@@ -14,8 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
-import { buildClaudeInvocation } from "../agent/claude-invocation.js";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 
@@ -114,54 +113,6 @@ beforeEach(() => {
 
 
 
-describe("buildClaudeInvocation — --allowed-tools flag wiring", () => {
-  it("does NOT emit --allowed-tools when allowedTools is undefined (legacy path)", () => {
-    const inv = buildClaudeInvocation({
-      prompt: "p",
-      jobId: "j",
-    });
-    expect(inv.flags).not.toContain("--allowed-tools");
-  });
-
-  it("does NOT emit --allowed-tools when allowedTools is an empty array", () => {
-    const inv = buildClaudeInvocation({
-      prompt: "p",
-      jobId: "j",
-      allowedTools: [],
-    });
-    expect(inv.flags).not.toContain("--allowed-tools");
-  });
-
-  it("emits --allowed-tools=<comma-joined> when allowedTools is non-empty", () => {
-    const inv = buildClaudeInvocation({
-      prompt: "p",
-      jobId: "j",
-      allowedTools: ["Read", "Bash", "mcp__danxbot__danxbot_complete"],
-    });
-    const idx = inv.flags.indexOf("--allowed-tools");
-    expect(idx).toBeGreaterThanOrEqual(0);
-    expect(inv.flags[idx + 1]).toBe(
-      "Read,Bash,mcp__danxbot__danxbot_complete",
-    );
-  });
-
-  it("emits --mcp-config and --allowed-tools together in the flag list when both are set (the unified dispatch shape)", () => {
-    const inv = buildClaudeInvocation({
-      prompt: "p",
-      jobId: "j",
-      mcpConfigPath: "/tmp/test/settings.json",
-      allowedTools: ["Read", "mcp__trello__get_card"],
-    });
-    expect(inv.flags).toContain("--mcp-config");
-    expect(inv.flags).toContain("/tmp/test/settings.json");
-    expect(inv.flags).toContain("--allowed-tools");
-    expect(inv.flags).toContain("Read,mcp__trello__get_card");
-  });
-});
-
-
-
-
 describe("dispatch() — slack-worker integration", () => {
   // Copy the real `src/poller/inject/workspaces/slack-worker/` fixture
   // into a per-test tmpdir so the resolver walks actual slack-worker
@@ -242,7 +193,7 @@ describe("dispatch() — slack-worker integration", () => {
     );
   });
 
-  it("exposes the slack-worker allowed tools including danxbot_slack_* without any runtime trigger-based injection", async () => {
+  it("never passes an allowedTools field to spawnAgent — the allowlist concept is gone", async () => {
     await dispatch({
       repo: slackRepo,
       task: "investigate",
@@ -252,20 +203,39 @@ describe("dispatch() — slack-worker integration", () => {
     });
 
     const opts = mockSpawnAgent.mock.calls[0][0];
-    // P4 contract: the workspace's allowed-tools.txt is the source of
-    // truth. Tools appear in the allowlist because they're declared in
-    // the file, not because `apiDispatchMeta.trigger === "slack"` triggered
-    // a runtime injection. The danxbot_complete tool is still suffix-
-    // injected by dispatch as infrastructure.
-    expect(opts.allowedTools).toEqual([
-      "Read",
-      "Glob",
-      "Grep",
-      "Bash",
-      "mcp__danxbot__danxbot_slack_reply",
-      "mcp__danxbot__danxbot_slack_post_update",
-      "mcp__danxbot__danxbot_complete",
-    ]);
+    // The workspace's `.mcp.json` (combined with `--strict-mcp-config`)
+    // is the single source of truth for the agent's MCP surface.
+    // `allowedTools` no longer exists on SpawnAgentOptions; danxbot_complete
+    // is reachable because the danxbot MCP server registers it, not because
+    // it's listed in any allowlist.
+    expect(opts.allowedTools).toBeUndefined();
+  });
+
+  it("rejects the dispatch BEFORE spawnAgent when the workspace contains a stale allowed-tools.txt (loud-fail end-to-end)", async () => {
+    // Closes the loop with the resolver-level WorkspaceLegacyFileError test.
+    // Drops `allowed-tools.txt` into the slack-worker fixture and asserts
+    // `dispatch()` rejects without ever reaching the spawn boundary —
+    // proves the resolver's loud-fail actually halts the dispatch path,
+    // not just the resolver in isolation.
+    const slackWorkerDest = resolve(
+      tmpRepoDir,
+      ".danxbot",
+      "workspaces",
+      "slack-worker",
+    );
+    writeFileSync(resolve(slackWorkerDest, "allowed-tools.txt"), "Read\n");
+
+    await expect(
+      dispatch({
+        repo: slackRepo,
+        task: "investigate",
+        workspace: "slack-worker",
+        overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+        apiDispatchMeta: SLACK_META,
+      }),
+    ).rejects.toThrow(/allowed-tools\.txt/);
+
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 
   it("lands the agent's cwd in the slack-worker workspace directory", async () => {

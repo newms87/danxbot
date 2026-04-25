@@ -124,11 +124,11 @@ export function buildDispatchScript(
   // `script` regardless of what's inside the args.
   //
   // The `--` separator between flags and firstMessage is LOAD-BEARING.
-  // `claude --help` declares `--allowed-tools <tools...>` and `--mcp-config
-  // <configs...>` as variadic — commander.js absorbs every subsequent argv
-  // (until the next `--flag`) as additional values for the variadic option.
-  // Without the terminator, `claude --allowed-tools Bash "<firstMessage>"`
-  // parses as `allowedTools: ["Bash", "<firstMessage>"]` and the positional
+  // `claude --help` declares `--mcp-config <configs...>` as variadic —
+  // commander.js absorbs every subsequent argv (until the next `--flag`)
+  // as additional values for the variadic option. Without the terminator,
+  // `claude --mcp-config /path/a.json "<firstMessage>"` parses as
+  // `mcpConfig: ["/path/a.json", "<firstMessage>"]` and the positional
   // prompt is LOST — the interactive TUI boots with no user message, so
   // the dispatch hangs forever on an empty `❯`. `--` is the POSIX-standard
   // end-of-options marker and is the cleanest fix regardless of which
