@@ -1,7 +1,0 @@
-name: system-test-restricted
-description: Dispatch target for `test-system-allow-tools` — single-tool allowlist (mcp__trello__get_lists only) so a non-allowed write is provably blocked
-required-placeholders:
-  - DANXBOT_STOP_URL
-  - TRELLO_API_KEY
-  - TRELLO_TOKEN
-  - TRELLO_BOARD_ID

@@ -10,7 +10,7 @@
 #
 # Options:
 #   --worker-port PORT   Worker port (default: 5561)
-#   --test NAME          Run a single test (health, dispatch, heartbeat, cancel, error, poller, allow-tools, cleanup)
+#   --test NAME          Run a single test (health, dispatch, heartbeat, cancel, error, poller, cleanup)
 #   --host-mode          Include host-mode-only tests (stall detection)
 #   --api-token TOKEN    API token for dispatch requests (default: "system-test-token")
 
@@ -290,12 +290,13 @@ test_dispatch() {
   log_header "test-system-dispatch"
   local start_time=$SECONDS
 
-  # Launch a simple read-only task. Post-P5 the API accepts only
-  # `{repo, workspace, task, overlay?}`; `allow_tools` was retired in favor
-  # of each workspace's `allowed-tools.txt`. The `system-test` workspace
-  # ships Read/Glob/Grep/Bash/LS + auto-appended `danxbot_complete` —
-  # exactly what this and the other happy-path tests (heartbeat, cancel,
-  # error) need.
+  # Launch a simple read-only task. The API accepts only
+  # `{repo, workspace, task, overlay?}` — no per-tool allowlist exists
+  # anywhere in the dispatch pipeline. The `system-test` workspace
+  # declares no MCP servers; the danxbot infrastructure server (with
+  # `danxbot_complete`) is merged in by the dispatch core, and claude
+  # built-ins are all available by default — exactly what this and the
+  # other happy-path tests (heartbeat, cancel, error) need.
   local launch_response
   launch_response=$(http_post "${WORKER_URL}/api/launch" "{
     \"workspace\": \"system-test\",
@@ -859,204 +860,6 @@ _poller_clear_pickup_prefix() {
   ' "$settings_file" 2>/dev/null || true
 }
 
-test_allow_tools() {
-  log_header "test-system-allow-tools"
-  # Verifies the workspace-declared tool allowlist end-to-end:
-  #
-  #   1. Allowed read tool (mcp__trello__get_lists, declared in
-  #      `system-test-restricted/allowed-tools.txt`) works — agent retrieves
-  #      list count.
-  #   2. Non-allowed write tool (mcp__trello__add_comment, NOT in that file)
-  #      cannot land a write — verified empirically by scanning the target
-  #      card's comments AFTER the dispatch for a test marker. A marker
-  #      present = allowlist leaked. A marker absent = allowlist held. This
-  #      is the load-bearing assertion — the agent's subjective report about
-  #      which tools are "visible" is meta-observable and doesn't prove
-  #      call-time enforcement.
-  #   3. Agent signals danxbot_complete with status=critical_failure, causing
-  #      handleStop to write the CRITICAL_FAILURE flag.
-  #   4. Cleanup removes the flag (so the poller resumes) AND any leaked
-  #      marker comment (so retrying the test is idempotent).
-  #
-  # Post-P5 design (Trello WWYKnQhc + s9XdRLcz): the per-dispatch
-  # caller-supplied `allow_tools` field was retired; the workspace's
-  # `allowed-tools.txt` is now the single source of truth. The
-  # `system-test-restricted` workspace exists ONLY for this test and
-  # declares exactly one tool so the gate is provably tested.
-  #
-  # Depends on TRELLO_API_KEY/TRELLO_API_TOKEN for both (a) the dispatched
-  # agent's Trello MCP server and (b) the host-side before/after verification.
-
-  if [[ -z "${TRELLO_API_KEY:-}" || -z "${TRELLO_API_TOKEN:-}" ]]; then
-    skip "Allow-tools test requires TRELLO_API_KEY and TRELLO_API_TOKEN (for both the dispatched agent and the host-side write verification)"
-    return
-  fi
-
-  local start_time=$SECONDS
-  local repo_dir="${PROJECT_ROOT}/repos/danxbot"
-  local flag_file="${repo_dir}/.danxbot/CRITICAL_FAILURE"
-  local board_id="${TRELLO_BOARD_ID:-69ddc215fd43f1b7f1a710f2}"
-  local done_list="${TRELLO_DONE_LIST_ID:-69ddc38c53a99eda3c237f2b}"
-  local feature_label="${TRELLO_FEATURE_LABEL_ID:-69ddc215fd43f1b7f1a7117d}"
-
-  # Pre-condition: no pre-existing flag.
-  if [[ -f "$flag_file" ]]; then
-    log_info "Pre-existing $flag_file — removing before test starts"
-    rm -f "$flag_file"
-  fi
-
-  # Create a throwaway target card in Done with a deterministic name. Using
-  # Done keeps it out of the poller's ToDo sweep, so even if some other agent
-  # picks it up it won't run against a half-instrumented probe. Deleted in
-  # cleanup below.
-  local probe_name="[System Test] allow-tools probe — $(date +%s)"
-  local probe_desc="Throwaway target for the test-system-allow-tools system test. The agent will be allowed ONLY mcp__trello__get_lists and will attempt mcp__trello__add_comment against this card — any comment that lands here means the allowlist leaked."
-  local probe_response
-  probe_response=$(curl -s --max-time 10 -X POST \
-    "https://api.trello.com/1/cards?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "{\"name\":\"${probe_name}\",\"desc\":\"${probe_desc}\",\"idList\":\"${done_list}\",\"idLabels\":[\"${feature_label}\"],\"pos\":\"top\"}" \
-    2>/dev/null)
-  local probe_card_id
-  probe_card_id=$(json_field "$probe_response" "id")
-  if [[ -z "$probe_card_id" ]]; then
-    fail "Failed to create probe card: $probe_response"
-    return
-  fi
-  log_info "Probe card: $probe_card_id (in Done)"
-
-  # Unique marker the agent will use in its write attempt. We scan the card
-  # for it afterwards to prove the allowlist either blocked or leaked.
-  local marker
-  marker="allowlist-leak-$(date +%s)-$$"
-
-  local task="You are a system test. Follow every step and do not skip.
-
-Step 1. Call mcp__trello__get_lists with boardId=${board_id}. Note the number of lists (N).
-
-Step 2. Attempt to call mcp__trello__add_comment with cardId=\\\"${probe_card_id}\\\" and text=\\\"${marker}\\\". This tool is NOT in the workspace's allowed-tools.txt, so the call must be blocked by the dispatch harness. Attempt it exactly once. Record whether (a) you could not find the tool in your tools list at all, (b) you called it and got a permission/not-allowed error, or (c) it succeeded (which would mean the allowlist leaked).
-
-Step 3. Call mcp__danxbot__danxbot_complete exactly once with:
-  status: \\\"critical_failure\\\"
-  summary: MUST start with \\\"allowlist-test:\\\" and contain one of the literal phrases \\\"write-blocked\\\" (if the write could not land) or \\\"write-leaked\\\" (if the write succeeded). Include N and the marker for traceability. Example: \\\"allowlist-test: got 7 lists; write-blocked (tool not callable); marker=${marker}\\\".
-
-Rules: do not Read, Edit, Write, Bash, or call any tool other than mcp__trello__get_lists, mcp__trello__add_comment (for the probe only), and mcp__danxbot__danxbot_complete. Do not chain multiple add_comment attempts. Do not move the card. Do not modify any other card."
-
-  # The workspace's `.mcp.json` declares the trello server with
-  # `${TRELLO_API_KEY}/${TRELLO_TOKEN}/${TRELLO_BOARD_ID}` placeholders;
-  # we satisfy them via overlay. `allowed-tools.txt` declares the single
-  # tool the agent is permitted; the worker materializes that into
-  # `--allowed-tools mcp__trello__get_lists,mcp__danxbot__danxbot_complete`
-  # at spawn time (the danxbot tool is auto-appended by dispatch core).
-  local body
-  body=$(node -e '
-    const task = process.argv[1];
-    const tok = process.argv[2];
-    const apiKey = process.argv[3];
-    const apiToken = process.argv[4];
-    const boardId = process.argv[5];
-    process.stdout.write(JSON.stringify({
-      workspace: "system-test-restricted",
-      task,
-      api_token: tok,
-      overlay: {
-        TRELLO_API_KEY: apiKey,
-        TRELLO_TOKEN: apiToken,
-        TRELLO_BOARD_ID: boardId,
-      },
-      title: "allow-tools-smoke",
-      max_runtime_ms: 180000,
-    }));
-  ' "$task" "$API_TOKEN" "$TRELLO_API_KEY" "$TRELLO_API_TOKEN" "$board_id")
-
-  local launch_response
-  launch_response=$(http_post "${WORKER_URL}/api/launch" "$body")
-  local job_id
-  job_id=$(json_field "$launch_response" "job_id")
-  local launch_status
-  launch_status=$(json_field "$launch_response" "status")
-  if [[ "$launch_status" == "launched" && -n "$job_id" ]]; then
-    pass "Job launched (id: $job_id)"
-  else
-    fail "Launch failed: $launch_response"
-    _allow_tools_cleanup "$flag_file" "$probe_card_id"
-    return
-  fi
-
-  log_info "Polling status (timeout: 180s)..."
-  local final_response
-  if ! final_response=$(poll_status "$job_id" 180 3); then
-    fail "Job did not reach terminal state within 180s"
-    _allow_tools_cleanup "$flag_file" "$probe_card_id"
-    return
-  fi
-
-  local final_status summary
-  final_status=$(json_field "$final_response" "status")
-  summary=$(json_field "$final_response" "summary")
-
-  # The MCP danxbot tool accepts 3 statuses: completed, failed, critical_failure.
-  # `handleStop` maps critical_failure → job status "failed" (the halt signal
-  # lives in the flag file, not the job row). See src/critical-failure.ts.
-  if [[ "$final_status" == "failed" ]]; then
-    pass "Dispatch status is 'failed' (critical_failure maps to failed)"
-  else
-    fail "Dispatch status is '$final_status' (expected 'failed')"
-  fi
-
-  # THE load-bearing assertion: did the non-allowed write actually land on
-  # Trello? Scan the probe card's comments for the marker we told the agent
-  # to use. If the marker is there, --allowed-tools did not gate the call
-  # and the allowlist is broken.
-  local comments
-  comments=$(curl -s --max-time 10 \
-    "https://api.trello.com/1/cards/${probe_card_id}/actions?filter=commentCard&key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" \
-    2>/dev/null)
-  if echo "$comments" | grep -Fq "$marker"; then
-    fail "ALLOWLIST LEAKED — probe card has a comment containing the marker '$marker'. The --allowed-tools filter did not block mcp__trello__add_comment at call time."
-  else
-    pass "Allowlist held — no comment with marker '$marker' reached Trello"
-  fi
-
-  # Summary sanity: the agent should have self-reported write-blocked. Log
-  # the summary either way; the Trello check above is what decides pass/fail.
-  if echo "$summary" | grep -q "allowlist-test"; then
-    pass "Summary starts with the expected marker"
-    log_info "  summary: $summary"
-  else
-    fail "Summary missing 'allowlist-test' prefix"
-    log_info "  got: $summary"
-  fi
-
-  # Critical failure flag evidence.
-  if [[ -f "$flag_file" ]]; then
-    pass "CRITICAL_FAILURE flag written at $flag_file"
-  else
-    fail "CRITICAL_FAILURE flag was NOT written (handleStop's critical_failure path is broken)"
-  fi
-
-  _allow_tools_cleanup "$flag_file" "$probe_card_id"
-  log_info "Completed in $((SECONDS - start_time))s"
-}
-
-# Helper: remove the critical-failure flag and delete the probe card. Always
-# safe to call — missing files / cards are a no-op. Separated so every early
-# `return` path in test_allow_tools can call it.
-_allow_tools_cleanup() {
-  local flag_file="$1"
-  local probe_card_id="$2"
-  if [[ -f "$flag_file" ]]; then
-    rm -f "$flag_file"
-    log_info "Removed CRITICAL_FAILURE flag to resume poller"
-  fi
-  if [[ -n "$probe_card_id" ]]; then
-    curl -s --max-time 10 -X DELETE \
-      "https://api.trello.com/1/cards/${probe_card_id}?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" \
-      >/dev/null 2>&1 || true
-    log_info "Deleted probe card $probe_card_id"
-  fi
-}
-
 test_cleanup() {
   log_header "test-system-cleanup"
 
@@ -1121,7 +924,6 @@ main() {
       error)     test_error ;;
       stall)     test_stall ;;
       poller)    test_poller ;;
-      allow-tools) test_allow_tools ;;
       cleanup)   test_cleanup ;;
       *) log "${RED}Unknown test: $SINGLE_TEST${NC}"; exit 1 ;;
     esac
@@ -1133,7 +935,6 @@ main() {
     test_error
     test_stall
     test_poller
-    test_allow_tools
     test_cleanup
   fi
 
