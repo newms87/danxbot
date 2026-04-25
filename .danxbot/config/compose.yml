@@ -92,8 +92,15 @@ services:
       # claude-auth-setup.sh then symlinks
       # /home/danxbot/.claude/.credentials.json at the dir-mount, so
       # dispatched agents always read the current rotation.
-      - ${CLAUDE_CONFIG_FILE:-../../claude-auth/.claude.json}:/danxbot/app/claude-auth/.claude.json
-      - ${CLAUDE_CREDS_DIR:-../../claude-auth/.claude}:/danxbot/app/claude-auth/.claude
+      # `:?` (required-var) syntax — compose refuses to start if either
+      # is unset, instead of silently falling back to a stale snapshot
+      # dir that broke dispatches within ~24h of setup (Trello th8GCprR).
+      # `make launch-worker REPO=danxbot` pre-checks the same two vars
+      # via scripts/check-claude-auth-env.sh and fails earlier with a
+      # clearer message; this `:?` is the second line of defense for any
+      # caller that bypasses make and runs `docker compose` directly.
+      - ${CLAUDE_CONFIG_FILE:?CLAUDE_CONFIG_FILE must point at the live host .claude.json — see .env.example}:/danxbot/app/claude-auth/.claude.json
+      - ${CLAUDE_CREDS_DIR:?CLAUDE_CREDS_DIR must point at the live host .claude/ dir containing .credentials.json — see .env.example}:/danxbot/app/claude-auth/.claude
       # Claude Code session logs — this worker writes JSONL here.
       # Default resolves to repos/danxbot/claude-projects/ on the host.
       # The dashboard reads these via the per-repo RO mount added by

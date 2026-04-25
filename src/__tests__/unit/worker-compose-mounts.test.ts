@@ -163,6 +163,38 @@ describe("worker compose.yml claude-auth mounts", () => {
       `compose.yml must NOT bind .credentials.json directly — use the parent .claude/ dir-bind. Found: ${fileBind?.raw}`,
     ).toBeUndefined();
   });
+
+  // Trello th8GCprR: the previous `${CLAUDE_CONFIG_FILE:-../../claude-auth/.claude.json}`
+  // fallback silently restored the legacy snapshot path when operators
+  // forgot to set the var, breaking dispatches within ~24h of setup. The
+  // `:?<msg>` syntax tells docker compose to fail loudly with `required
+  // variable CLAUDE_CONFIG_FILE is missing` instead of substituting the
+  // stale default.
+  it("uses :? required-var syntax on CLAUDE_CONFIG_FILE — never falls back silently to a stale snapshot (Trello th8GCprR)", () => {
+    const v = findByDestination(volumes, CLAUDE_JSON_DEST);
+    expect(v, ".claude.json bind not found").toBeDefined();
+    expect(
+      v!.source.includes("${CLAUDE_CONFIG_FILE:?"),
+      `.claude.json source must use :? required-var syntax: got ${v!.source}`,
+    ).toBe(true);
+    expect(
+      v!.source.includes("${CLAUDE_CONFIG_FILE:-"),
+      `.claude.json source must NOT use :- fallback syntax — silently restores stale paths`,
+    ).toBe(false);
+  });
+
+  it("uses :? required-var syntax on CLAUDE_CREDS_DIR — never falls back silently to a stale snapshot (Trello th8GCprR)", () => {
+    const v = findByDestination(volumes, CLAUDE_DIR_DEST);
+    expect(v, ".claude/ bind not found").toBeDefined();
+    expect(
+      v!.source.includes("${CLAUDE_CREDS_DIR:?"),
+      `.claude/ source must use :? required-var syntax: got ${v!.source}`,
+    ).toBe(true);
+    expect(
+      v!.source.includes("${CLAUDE_CREDS_DIR:-"),
+      `.claude/ source must NOT use :- fallback syntax — silently restores stale paths`,
+    ).toBe(false);
+  });
 });
 
 // Regression test for Trello auX4nTRk — getDanxbotCommit() reads
