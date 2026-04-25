@@ -290,12 +290,17 @@ test_dispatch() {
   log_header "test-system-dispatch"
   local start_time=$SECONDS
 
-  # Launch a simple read-only task
+  # Launch a simple read-only task. Post-P5 the API accepts only
+  # `{repo, workspace, task, overlay?}`; `allow_tools` was retired in favor
+  # of each workspace's `allowed-tools.txt`. The `system-test` workspace
+  # ships Read/Glob/Grep/Bash/LS + auto-appended `danxbot_complete` —
+  # exactly what this and the other happy-path tests (heartbeat, cancel,
+  # error) need.
   local launch_response
   launch_response=$(http_post "${WORKER_URL}/api/launch" "{
+    \"workspace\": \"system-test\",
     \"task\": \"Read the file package.json and report the project name. Reply with just the name, nothing else.\",
-    \"api_token\": \"${API_TOKEN}\",
-    \"allow_tools\": [\"Read\"]
+    \"api_token\": \"${API_TOKEN}\"
   }")
 
   local job_id
@@ -355,6 +360,7 @@ test_heartbeat() {
     # Docker mode: verify via status API only
     local launch_response
     launch_response=$(http_post "${WORKER_URL}/api/launch" "{
+      \"workspace\": \"system-test\",
       \"task\": \"Read every TypeScript file in src/ and list the filename of each one. Just filenames, one per line.\",
       \"api_token\": \"${API_TOKEN}\"
     }")
@@ -422,6 +428,7 @@ test_heartbeat() {
 
   local launch_response
   launch_response=$(http_post "${WORKER_URL}/api/launch" "{
+    \"workspace\": \"system-test\",
     \"task\": \"Read every TypeScript file in src/ and list the filename of each one. Just filenames, one per line.\",
     \"api_token\": \"${API_TOKEN}\",
     \"status_url\": \"${capture_base}/status\"
@@ -485,6 +492,7 @@ test_cancel() {
   # Launch a long-running task (no status_url needed — verify via status API)
   local launch_response
   launch_response=$(http_post "${WORKER_URL}/api/launch" "{
+    \"workspace\": \"system-test\",
     \"task\": \"Read every file in src/ and write a detailed analysis of each file. Include line counts, function names, and complexity analysis for every file.\",
     \"api_token\": \"${API_TOKEN}\"
   }")
@@ -550,6 +558,7 @@ test_error() {
   # Launch a task designed to fail — use an invalid MCP tool reference
   local launch_response
   launch_response=$(http_post "${WORKER_URL}/api/launch" "{
+    \"workspace\": \"system-test\",
     \"task\": \"This is a system test. Use the mcp__nonexistent__tool tool to do something impossible.\",
     \"api_token\": \"${API_TOKEN}\"
   }")
@@ -852,19 +861,28 @@ _poller_clear_pickup_prefix() {
 
 test_allow_tools() {
   log_header "test-system-allow-tools"
-  # Verifies the per-dispatch allow_tools gate end-to-end:
+  # Verifies the workspace-declared tool allowlist end-to-end:
   #
-  #   1. Allowed read tool (mcp__trello__get_lists) works — agent retrieves list count.
-  #   2. Non-allowed write tool (mcp__trello__add_comment) cannot land a write —
-  #      verified empirically by scanning the target card's comments AFTER the
-  #      dispatch for a test marker. A marker present = allowlist leaked. A
-  #      marker absent = allowlist held. This is the load-bearing assertion —
-  #      the agent's subjective report about which tools are "visible" is
-  #      meta-observable and doesn't prove call-time enforcement.
+  #   1. Allowed read tool (mcp__trello__get_lists, declared in
+  #      `system-test-restricted/allowed-tools.txt`) works — agent retrieves
+  #      list count.
+  #   2. Non-allowed write tool (mcp__trello__add_comment, NOT in that file)
+  #      cannot land a write — verified empirically by scanning the target
+  #      card's comments AFTER the dispatch for a test marker. A marker
+  #      present = allowlist leaked. A marker absent = allowlist held. This
+  #      is the load-bearing assertion — the agent's subjective report about
+  #      which tools are "visible" is meta-observable and doesn't prove
+  #      call-time enforcement.
   #   3. Agent signals danxbot_complete with status=critical_failure, causing
   #      handleStop to write the CRITICAL_FAILURE flag.
   #   4. Cleanup removes the flag (so the poller resumes) AND any leaked
   #      marker comment (so retrying the test is idempotent).
+  #
+  # Post-P5 design (Trello WWYKnQhc + s9XdRLcz): the per-dispatch
+  # caller-supplied `allow_tools` field was retired; the workspace's
+  # `allowed-tools.txt` is now the single source of truth. The
+  # `system-test-restricted` workspace exists ONLY for this test and
+  # declares exactly one tool so the gate is provably tested.
   #
   # Depends on TRELLO_API_KEY/TRELLO_API_TOKEN for both (a) the dispatched
   # agent's Trello MCP server and (b) the host-side before/after verification.
@@ -916,7 +934,7 @@ test_allow_tools() {
 
 Step 1. Call mcp__trello__get_lists with boardId=${board_id}. Note the number of lists (N).
 
-Step 2. Attempt to call mcp__trello__add_comment with cardId=\\\"${probe_card_id}\\\" and text=\\\"${marker}\\\". This tool is NOT in your --allowed-tools list, so the call must be blocked by the dispatch harness. Attempt it exactly once. Record whether (a) you could not find the tool in your tools list at all, (b) you called it and got a permission/not-allowed error, or (c) it succeeded (which would mean the allowlist leaked).
+Step 2. Attempt to call mcp__trello__add_comment with cardId=\\\"${probe_card_id}\\\" and text=\\\"${marker}\\\". This tool is NOT in the workspace's allowed-tools.txt, so the call must be blocked by the dispatch harness. Attempt it exactly once. Record whether (a) you could not find the tool in your tools list at all, (b) you called it and got a permission/not-allowed error, or (c) it succeeded (which would mean the allowlist leaked).
 
 Step 3. Call mcp__danxbot__danxbot_complete exactly once with:
   status: \\\"critical_failure\\\"
@@ -924,18 +942,32 @@ Step 3. Call mcp__danxbot__danxbot_complete exactly once with:
 
 Rules: do not Read, Edit, Write, Bash, or call any tool other than mcp__trello__get_lists, mcp__trello__add_comment (for the probe only), and mcp__danxbot__danxbot_complete. Do not chain multiple add_comment attempts. Do not move the card. Do not modify any other card."
 
+  # The workspace's `.mcp.json` declares the trello server with
+  # `${TRELLO_API_KEY}/${TRELLO_TOKEN}/${TRELLO_BOARD_ID}` placeholders;
+  # we satisfy them via overlay. `allowed-tools.txt` declares the single
+  # tool the agent is permitted; the worker materializes that into
+  # `--allowed-tools mcp__trello__get_lists,mcp__danxbot__danxbot_complete`
+  # at spawn time (the danxbot tool is auto-appended by dispatch core).
   local body
   body=$(node -e '
     const task = process.argv[1];
     const tok = process.argv[2];
+    const apiKey = process.argv[3];
+    const apiToken = process.argv[4];
+    const boardId = process.argv[5];
     process.stdout.write(JSON.stringify({
+      workspace: "system-test-restricted",
       task,
       api_token: tok,
-      allow_tools: ["mcp__trello__get_lists"],
+      overlay: {
+        TRELLO_API_KEY: apiKey,
+        TRELLO_TOKEN: apiToken,
+        TRELLO_BOARD_ID: boardId,
+      },
       title: "allow-tools-smoke",
       max_runtime_ms: 180000,
     }));
-  ' "$task" "$API_TOKEN")
+  ' "$task" "$API_TOKEN" "$TRELLO_API_KEY" "$TRELLO_API_TOKEN" "$board_id")
 
   local launch_response
   launch_response=$(http_post "${WORKER_URL}/api/launch" "$body")

@@ -21,13 +21,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DISPATCH_TAG_PREFIX } from "./session-log-watcher.js";
 
-/** Shape of the Read directive claude sees as its first user turn.
- *  `${path}` is the absolute path to prompt.md. Any change to this template
- *  is observable in every dispatched session's JSONL — keep it stable. */
-function readDirective(promptFile: string): string {
-  return `Read ${promptFile} and execute the task described in it.`;
-}
-
 export interface BuildClaudeInvocationOptions {
   /** Full original prompt body. Written verbatim to prompt.md — never inlined
    *  on the command line, so no shell quoting concerns apply. */
@@ -68,7 +61,7 @@ export interface ClaudeInvocation {
    *  Caller is responsible for rmSync-ing this directory once the agent exits. */
   promptDir: string;
   /** First user turn for the dispatched claude — contains the dispatch tag,
-   *  the Read directive pointing at prompt.md, and the optional tracking line. */
+   *  the `@<path-to-prompt.md>` file attachment, and the optional tracking line. */
   firstMessage: string;
   /** Shared CLI flags. Docker appends `-p firstMessage`; host passes
    *  firstMessage as a positional argument inside the bash script. */
@@ -83,10 +76,15 @@ export function buildClaudeInvocation(
   writeFileSync(promptFile, options.prompt, "utf-8");
 
   const tracking = options.title ? ` Tracking: ${options.title}` : "";
+  // Claude Code's native `@<path>` positional syntax attaches the file to the
+  // first user turn. Small files inline into the turn as text; large files
+  // (>128KB MAX_ARG_STRLEN territory — though firstMessage is never that big
+  // since the body lives in prompt.md, not argv) fall back to a Read-tool call
+  // when `--dangerously-skip-permissions` is set (which it always is for
+  // dispatched agents — see the flags block below). Keep a space before `@`
+  // so tokenizers treat `@<path>` as a standalone file reference.
   const firstMessage =
-    `${DISPATCH_TAG_PREFIX}${options.jobId} --> ` +
-    readDirective(promptFile) +
-    tracking;
+    `${DISPATCH_TAG_PREFIX}${options.jobId} --> @${promptFile}${tracking}`;
 
   // `--strict-mcp-config` is load-bearing for agent isolation. With this
   // flag, claude IGNORES every project-scope and user-scope `.mcp.json` —

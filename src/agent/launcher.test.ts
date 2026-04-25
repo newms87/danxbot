@@ -177,15 +177,15 @@ describe("spawnAgent", () => {
       }),
     );
 
-    // firstMessage (the -p value) is the Read directive, NOT the original
-    // prompt text. The original prompt is written verbatim to prompt.md.
+    // firstMessage (the -p value) is the @file attachment, NOT the original
+    // prompt text. The original prompt is written verbatim to prompt.md and
+    // attached via Claude Code's native `@<path>` syntax (Phase 6 of the
+    // workspace-dispatch epic, Trello WWYKnQhc).
     const args = mockSpawn.mock.calls[0][1] as string[];
     const promptArg = args[args.indexOf("-p") + 1];
     expect(promptArg).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
-    expect(promptArg).toContain("Read ");
-    expect(promptArg).toContain(
-      "/prompt.md and execute the task described in it.",
-    );
+    expect(promptArg).toMatch(/@\S+\/prompt\.md/);
+    expect(promptArg).not.toContain("execute the task described in it");
     expect(promptArg).not.toContain("/danx-next");
 
     // Original prompt body lands in prompt.md — writeFileSync receives it.
@@ -1733,7 +1733,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     expect(job.terminalLogPath).toBeUndefined();
   });
 
-  it("passes the shared firstMessage (tag + Read directive) to buildDispatchScript", async () => {
+  it("passes the shared firstMessage (tag + @file attachment) to buildDispatchScript", async () => {
     await spawnAgent({
       prompt: "do the work",
       repoName: "platform",
@@ -1744,10 +1744,8 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     const buildCall = mockBuildDispatchScript.mock.calls[0];
     const firstMessage = buildCall[1].firstMessage as string;
     expect(firstMessage).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
-    expect(firstMessage).toContain("Read ");
-    expect(firstMessage).toContain(
-      "/prompt.md and execute the task described in it.",
-    );
+    expect(firstMessage).toMatch(/@\S+\/prompt\.md/);
+    expect(firstMessage).not.toContain("execute the task described in it");
     // Original prompt body stays in the file — it is NEVER inlined on the
     // command line in either runtime.
     expect(firstMessage).not.toContain("do the work");

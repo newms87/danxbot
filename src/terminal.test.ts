@@ -45,7 +45,7 @@ describe("buildDispatchScript", () => {
     return buildDispatchScript(dir, {
       flags: ["--dangerously-skip-permissions", "--verbose"],
       firstMessage:
-        "<!-- danxbot-dispatch:test-job-id --> Read /tmp/p/prompt.md and execute the task described in it.",
+        "<!-- danxbot-dispatch:test-job-id --> @/tmp/p/prompt.md",
       jobId: "test-job-id",
       terminalLogPath: "/tmp/danxbot-terminal-test-job-id.log",
       apiToken: "test-token",
@@ -67,11 +67,11 @@ describe("buildDispatchScript", () => {
   it("passes the firstMessage verbatim as claude's positional argument", () => {
     const scriptPath = buildScript({
       firstMessage:
-        "<!-- danxbot-dispatch:id --> Read /tmp/X/prompt.md and execute the task described in it. Tracking: Card #42",
+        "<!-- danxbot-dispatch:id --> @/tmp/X/prompt.md Tracking: Card #42",
     });
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain(
-      "'<!-- danxbot-dispatch:id --> Read /tmp/X/prompt.md and execute the task described in it. Tracking: Card #42'",
+      "'<!-- danxbot-dispatch:id --> @/tmp/X/prompt.md Tracking: Card #42'",
     );
   });
 
@@ -183,7 +183,7 @@ describe("buildDispatchScript", () => {
         agentsJson,
       ],
       firstMessage:
-        "<!-- danxbot-dispatch:test --> Read /tmp/p/prompt.md and execute the task described in it. Tracking: AgentDispatch #AGD-99",
+        "<!-- danxbot-dispatch:test --> @/tmp/p/prompt.md Tracking: AgentDispatch #AGD-99",
     });
 
     const result = spawnSync("bash", ["-n", scriptPath], {

@@ -58,11 +58,28 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(inv.firstMessage.startsWith(`${DISPATCH_TAG_PREFIX}watch-me -->`)).toBe(true);
   });
 
-  it("firstMessage references the prompt.md file path as the Read target", () => {
+  it("firstMessage delivers the prompt via Claude's native @file syntax pointing at prompt.md", () => {
+    // Phase 6 of the workspace-dispatch epic (Trello WWYKnQhc). The `@file`
+    // positional syntax is Claude Code's native file-attachment mechanism —
+    // small files inline into the first user message; large files fall back
+    // to a Read-tool call automatically when `--dangerously-skip-permissions`
+    // is set (which it always is). The previous `Read $PATH and execute...`
+    // meta-instruction is retired — it was functionally equivalent but
+    // semantically weaker (described the mechanism instead of attaching the
+    // file). Keep the space between the dispatch tag `-->` delimiter and the
+    // `@` so tokenizers treat `@path` as a standalone file reference.
     const inv = build();
-    expect(inv.firstMessage).toContain(
-      `Read ${inv.promptDir}/prompt.md and execute the task described in it.`,
-    );
+    expect(inv.firstMessage).toContain(`@${inv.promptDir}/prompt.md`);
+  });
+
+  it("firstMessage does NOT contain the retired Read-directive text", () => {
+    // Regression guard for the P6 cutover. The old meta-instruction
+    // (`Read <path> and execute the task described in it.`) is gone. If a
+    // future refactor reintroduces it, this assertion fails loudly instead
+    // of letting the drift slip into a deployed session.
+    const inv = build();
+    expect(inv.firstMessage).not.toMatch(/Read .*\/prompt\.md/);
+    expect(inv.firstMessage).not.toContain("execute the task described in it");
   });
 
   it("firstMessage includes the Tracking suffix when title is provided", () => {

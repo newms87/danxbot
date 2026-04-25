@@ -23,7 +23,7 @@ Workers bind only on `danxbot-net` and are not reachable from the public interne
 
 | Route | Method | Notes |
 |-------|--------|-------|
-| `/api/launch` | POST | Body `{repo, task, api_token, ...}` — forwarded verbatim to `http://danxbot-worker-<repo>:<workerPort>/api/launch` |
+| `/api/launch` | POST | Body `{repo, workspace, task, api_token, overlay?, ...}` — forwarded verbatim to `http://danxbot-worker-<repo>:<workerPort>/api/launch`. Legacy fields (`allow_tools`/`agents`/`schema_*`) 400 with `Legacy dispatch body shape rejected` since P5 (commit `9baf431`) |
 | `/api/resume` | POST | Body `{repo, job_id, task, api_token, ...}` — resumes the Claude session from a prior dispatch. See "Resume" below |
 | `/api/status/:jobId?repo=<name>` | GET | Forwards to the named worker's status endpoint |
 | `/api/cancel/:jobId?repo=<name>` | POST | Forwards to the named worker's cancel endpoint |
@@ -228,9 +228,9 @@ Dashboard mode never dispatches agents. Only worker mode spawns claude.
 1. Trigger fires: HTTP `POST /api/launch`, Trello poller finds a card, or Slack listener routes a message.
 2. Handler constructs a `DispatchInput` and calls `dispatch()` in `src/dispatch/core.ts`. The poller's input carries the hardcoded `POLLER_ALLOW_TOOLS` allowlist (built-ins + `mcp__trello__*`) plus an `onComplete` hook for card-progress bookkeeping. HTTP handlers shape the request body into the same `DispatchInput`. Both paths hit the same resolver, the same settings file, the same `spawnAgent`.
 3. `dispatch()` resolves `{mcpServers, allowedTools}` via `resolveDispatchTools`, writes the per-dispatch MCP settings.json to a fresh temp dir, then calls `spawnAgent()` in `src/agent/launcher.ts`.
-4. `spawnAgent` generates a `jobId`, writes the prompt to disk, prepends the dispatch tag, and forks:
-   - Docker: `spawn("claude", args)` with `-p taggedPrompt`, stdout `"ignore"` (stderr `"pipe"` for failure summaries — not for monitoring).
-   - Host: `buildDispatchScript()` writes `run-agent.sh` which writes claude's PID to a file, then exec's `script -q -f -c "claude <positional-file-ref>"`. `spawnInTerminal()` launches that script via `wt.exe`. Launcher polls the PID file briefly to obtain the tracked PID.
+4. `spawnAgent` generates a `jobId`, calls `buildClaudeInvocation()` (`src/agent/claude-invocation.ts`) which writes the full prompt body verbatim to `prompt.md` in a fresh temp dir and builds a `firstMessage` of the form `<!-- danxbot-dispatch:<jobId> --> @<abs-path-to-prompt.md>[ Tracking: <title>]`. The `@<path>` is Claude Code's native file-attachment syntax (small files inline into the first user turn; large files fall back to a Read-tool call because `--dangerously-skip-permissions` is set). No meta-instruction, no `Read <path> and execute…` — Phase 6 of the workspace-dispatch epic (Trello WWYKnQhc) retired that. Then forks:
+   - Docker: `spawn("claude", args)` with `-p firstMessage`, stdout `"ignore"` (stderr `"pipe"` for failure summaries — not for monitoring).
+   - Host: `buildDispatchScript()` writes `run-agent.sh` which writes claude's PID to a file, then exec's `script -q -f -c "claude <flags> -- <firstMessage>"`. `spawnInTerminal()` launches that script via `wt.exe`. Launcher polls the PID file briefly to obtain the tracked PID.
 5. SessionLogWatcher starts polling `~/.claude/projects/` for a JSONL containing the dispatch tag. Attaches when found.
 6. Observers wire to the watcher: summary capture, stall detection, Laravel forwarding (only when both `statusUrl` + `apiToken` are present), heartbeat.
 7. Agent runs. Every assistant entry, tool call, tool result, and usage update lands in the JSONL and is emitted to subscribers.

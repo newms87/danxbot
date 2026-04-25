@@ -88,8 +88,10 @@ Quickstart:
 curl -sS -X POST https://danxbot.sageus.ai/api/launch \
   -H "Authorization: Bearer $DANXBOT_DISPATCH_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "gpt-manager", "task": "Reply OK and call danxbot_complete.", "api_token": "'"$DANXBOT_DISPATCH_TOKEN"'"}'
+  -d '{"repo": "gpt-manager", "workspace": "system-test", "task": "Reply OK and call danxbot_complete.", "api_token": "'"$DANXBOT_DISPATCH_TOKEN"'"}'
 ```
+
+`workspace` is required since the P5 cutover (commit `9baf431`) — the worker rejects any body that uses the legacy caller-supplied `allow_tools`/`agents`/`schema_*` fields. Substitute the workspace name your deployment ships under `<repo>/.danxbot/workspaces/`. The danxbot-shipped `system-test` workspace works for connectivity smoke against any deployed target.
 
 Full route table (`/api/launch`, `/api/resume`, `/api/status/:id`, `/api/cancel/:id`, `/api/stop/:id`), the resume protocol, the disabled-state semantics, and the proxy 404 invariant: `.claude/rules/agent-dispatch.md#external-entry`.
 

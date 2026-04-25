@@ -20,12 +20,20 @@ Docker runtime is the headless path (`claude -p` is acceptable there — no TTY,
 
 ## How to Pass the Prompt Without `-p`
 
-Options to launch interactive `claude` with an initial prompt:
-- Pipe prompt via stdin: `claude < prompt.txt` (keeps TUI, seeds initial input)
-- Use `claude "<prompt>"` as a positional argument if the CLI supports it
-- Boot claude, then use `--resume` to attach to a pre-seeded session
+Both runtime modes (docker headless + host interactive) share a single invocation builder (`src/agent/claude-invocation.ts#buildClaudeInvocation`) that produces a `firstMessage` of the form:
 
-Never fall back to `-p` "because it's simpler." The simplicity is the bug.
+```
+<!-- danxbot-dispatch:<jobId> --> @<abs-path-to-prompt.md>[ Tracking: <title>]
+```
+
+That string is how every dispatched agent's prompt reaches claude:
+
+- **Docker headless** — the worker appends `-p "<firstMessage>"` to the claude argv. The `-p` flag is acceptable here: no TTY, no user.
+- **Host interactive** — `src/terminal.ts#buildDispatchScript` emits the same `firstMessage` as a **positional argument** to `claude` inside the bash dispatch script (preceded by `--` so variadic flags don't absorb it). No `-p`. Claude boots into its interactive TUI with the positional as the first user turn.
+
+The `@<path>` is Claude Code's native **file attachment** syntax. Small files inline into the turn; large files (>MAX_ARG_STRLEN territory, though `firstMessage` never gets that big — the body lives in `prompt.md`, not on argv) fall back to a Read-tool call automatically, because dispatched agents always run with `--dangerously-skip-permissions`. **Do not reintroduce a meta-instruction** like `Read <path> and execute the task described in it` — Phase 6 of the workspace-dispatch epic (Trello WWYKnQhc) retired that pattern. The `@<path>` form is semantically stronger: it attaches the file instead of asking the agent to read it.
+
+Never fall back to `-p` "because it's simpler" in host mode. The simplicity is the bug.
 
 ## Code Locations
 

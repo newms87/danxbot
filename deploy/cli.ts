@@ -295,6 +295,14 @@ async function smoke(config: DeployConfig): Promise<void> {
   // callback is exercised, and we pass a placeholder api_token to keep the
   // dispatch-auth credential (the bearer we sent above) separate from the
   // worker-to-callback credential they represent at the semantic level.
+  //
+  // `workspace: "system-test"` references the danxbot-shipped workspace
+  // (`src/poller/inject/workspaces/system-test/`) that every connected
+  // repo's poller injects into `<repo>/.danxbot/workspaces/system-test/`
+  // on every tick — so the workspace is available on every deployed
+  // target by construction. Required since the P5 cutover (commit 9baf431)
+  // retired the legacy `{repo, task, api_token}` shape; the worker now
+  // 400s every body without an explicit workspace.
   const response = await fetch(`https://${config.domain}/api/launch`, {
     method: "POST",
     headers: {
@@ -303,6 +311,7 @@ async function smoke(config: DeployConfig): Promise<void> {
     },
     body: JSON.stringify({
       repo,
+      workspace: "system-test",
       task:
         "Connectivity smoke test. Reply with the word OK and immediately call danxbot_complete with status=completed and summary=\"smoke ok\". Do nothing else.",
       api_token: "smoke-test-no-callback",

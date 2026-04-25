@@ -1,0 +1,4 @@
+name: system-test
+description: Dispatch target for `make test-system-*` — read-only file access + danxbot_complete
+required-placeholders:
+  - DANXBOT_STOP_URL

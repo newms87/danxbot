@@ -214,7 +214,7 @@ test-system-stall: ## Test stall detection (host mode only)
 test-system-poller: ## Test Trello poller flow (requires TRELLO_API_KEY/TOKEN)
 	@$(SYSTEM_TEST_SCRIPT) --test poller
 
-test-system-allow-tools: ## Test per-dispatch allow_tools gate via Trello MCP (requires TRELLO_API_KEY/TOKEN)
+test-system-allow-tools: ## Test workspace-declared tool allowlist via system-test-restricted workspace + Trello MCP (requires TRELLO_API_KEY/TOKEN)
 	@$(SYSTEM_TEST_SCRIPT) --test allow-tools
 
 test-system-cleanup: ## Verify no orphaned temp dirs or zombie jobs
