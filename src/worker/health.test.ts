@@ -23,12 +23,18 @@ vi.mock("../critical-failure.js", () => ({
   readFlag: (...args: unknown[]) => mockReadFlag(...args),
 }));
 
+const mockPreflightClaudeAuth = vi.fn().mockResolvedValue({ ok: true });
+vi.mock("../agent/claude-auth-preflight.js", () => ({
+  preflightClaudeAuth: (...args: unknown[]) => mockPreflightClaudeAuth(...args),
+}));
+
 import { getHealthStatus } from "./health.js";
 
 describe("getHealthStatus", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockReadFlag.mockReturnValue(null);
+    mockPreflightClaudeAuth.mockResolvedValue({ ok: true });
   });
 
   it("returns 'ok' when DB and Slack are connected", async () => {
@@ -153,5 +159,113 @@ describe("getHealthStatus", () => {
     const result = await getHealthStatus(repo);
 
     expect(result.criticalFailure).toBeNull();
+  });
+
+  describe("claude_auth field (Trello 3l2d7i46)", () => {
+    it("exposes claude_auth.ok=true when preflight passes", async () => {
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockPreflightClaudeAuth.mockResolvedValue({ ok: true });
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.claude_auth).toEqual({ ok: true });
+      expect(result.status).toBe("ok");
+    });
+
+    it("returns 'degraded' with reason+summary when claude-auth preflight fails", async () => {
+      // DB and Slack both healthy — proves auth-broken alone is enough to
+      // demote the worker out of "ok" without conflating signals.
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockPreflightClaudeAuth.mockResolvedValue({
+        ok: false,
+        reason: "expired",
+        summary:
+          "claude-auth OAuth token expired at 2026-01-01T00:00:00.000Z — host claude needs to refresh, or worker needs a redeploy",
+      });
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.status).toBe("degraded");
+      expect(result.claude_auth.ok).toBe(false);
+      expect(result.claude_auth.reason).toBe("expired");
+      expect(result.claude_auth.summary).toMatch(/expired/);
+    });
+
+    it("returns 'degraded' when DB is down AND auth is broken — both signals surface, status not double-counted", async () => {
+      mockCheckDbConnection.mockResolvedValue(false);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockPreflightClaudeAuth.mockResolvedValue({
+        ok: false,
+        reason: "missing",
+        summary: "claude-auth file .credentials.json is missing",
+      });
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.status).toBe("degraded");
+      expect(result.db_connected).toBe(false);
+      expect(result.claude_auth.ok).toBe(false);
+      expect(result.claude_auth.reason).toBe("missing");
+    });
+
+    it("returns 'degraded' when Slack is down AND auth is broken — independent signals", async () => {
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(false);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockPreflightClaudeAuth.mockResolvedValue({
+        ok: false,
+        reason: "readonly",
+        summary: "claude-auth file .claude.json is read-only",
+      });
+
+      const repo = makeRepoContext({
+        slack: { enabled: true, botToken: "x", appToken: "x", channelId: "C" },
+      });
+      const result = await getHealthStatus(repo);
+
+      expect(result.status).toBe("degraded");
+      expect(result.slack_connected).toBe(false);
+      expect(result.claude_auth.ok).toBe(false);
+    });
+
+    it("'halted' still wins over auth-broken — halt takes precedence", async () => {
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockReadFlag.mockReturnValue({
+        timestamp: "2026-04-21T00:00:00.000Z",
+        source: "agent" as const,
+        dispatchId: "d-1",
+        reason: "MCP Trello unavailable",
+      });
+      mockPreflightClaudeAuth.mockResolvedValue({
+        ok: false,
+        reason: "readonly",
+        summary:
+          "claude-auth file .claude.json at /home/danxbot/.claude.json is read-only — see compose.yml CLAUDE_CREDS_DIR mount; PHevzRil",
+      });
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.status).toBe("halted");
+      // Both signals are still surfaced even though only halt sets the
+      // top-level status — the operator sees the full picture.
+      expect(result.claude_auth.ok).toBe(false);
+      expect(result.criticalFailure).not.toBeNull();
+    });
   });
 });

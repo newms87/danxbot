@@ -246,6 +246,92 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
 });
 
 
+describe("handleLaunch / handleResume — claude-auth preflight (Trello 3l2d7i46)", () => {
+  // Hoisted lazily so the import doesn't pay the cost on every test file load.
+  let ClaudeAuthError: typeof import("../agent/claude-auth-preflight.js").ClaudeAuthError;
+
+  beforeEach(async () => {
+    ({ ClaudeAuthError } = await import("../agent/claude-auth-preflight.js"));
+  });
+
+  it("handleLaunch maps ClaudeAuthError to 503 with the preflight summary as the error string", async () => {
+    // Worker-config issue, not a caller bug — same shape as the dispatchApi-
+    // disabled branch so external dispatchers (gpt-manager) handle both with
+    // identical "back off and retry later" logic.
+    const summary =
+      "claude-auth file .claude.json at /home/danxbot/.claude.json is read-only — fix the bind mount in compose.yml";
+    mockDispatchFn.mockRejectedValueOnce(
+      new ClaudeAuthError({ ok: false, reason: "readonly", summary }),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      workspace: "system-test",
+      task: "do thing",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({ error: summary });
+  });
+
+  it("handleResume maps ClaudeAuthError to 503 with the preflight summary", async () => {
+    // Twin coverage of the dispatch.ts catch arm — without it, a future
+    // refactor that DRYs the two handlers can drop one branch and only the
+    // launch test fails, hiding the resume regression.
+    const summary =
+      "claude-auth OAuth token expired at 2026-01-01T00:00:00.000Z — host claude needs to refresh, or worker needs a redeploy";
+    mockDispatchFn.mockRejectedValueOnce(
+      new ClaudeAuthError({ ok: false, reason: "expired", summary }),
+    );
+
+    // Set up the resume parent-session lookup to succeed so the failure path
+    // we exercise is the dispatch() call, not a missing-parent 404.
+    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
+      "/fake/projects/parent.jsonl",
+    );
+
+    const req = createMockReqWithBody("POST", {
+      job_id: "parent-job-123",
+      workspace: "system-test",
+      task: "continue",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({ error: summary });
+  });
+
+  it("ClaudeAuthError 503 takes precedence over the catch-all 500 in handleLaunch", async () => {
+    // The instanceof chain in handleLaunch is order-sensitive. If a future
+    // refactor swaps the order or replaces it with a switch on err.name,
+    // ClaudeAuthError (a subclass of Error) would silently fall through to
+    // the generic 500 branch and external callers would lose the worker-
+    // config signal.
+    const authErr = new ClaudeAuthError({
+      ok: false,
+      reason: "missing",
+      summary: "claude-auth file .credentials.json is missing",
+    });
+    mockDispatchFn.mockRejectedValueOnce(authErr);
+
+    const req = createMockReqWithBody("POST", {
+      workspace: "system-test",
+      task: "do thing",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(res._getStatusCode()).not.toBe(500);
+  });
+});
+
+
 describe("handleStatus", () => {
   it("returns 404 for unknown job", () => {
     const res = createMockRes();

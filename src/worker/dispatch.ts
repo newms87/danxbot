@@ -9,6 +9,7 @@ import {
   type AgentJob,
 } from "../agent/launcher.js";
 import { McpResolveError } from "../agent/mcp-types.js";
+import { ClaudeAuthError } from "../agent/claude-auth-preflight.js";
 import { dispatch, getActiveJob, listActiveJobs } from "../dispatch/core.js";
 import {
   WorkspaceNotFoundError,
@@ -405,6 +406,13 @@ export async function handleLaunch(
 
     json(res, 200, { job_id: dispatchId, status: "launched" });
   } catch (err) {
+    if (err instanceof ClaudeAuthError) {
+      // Worker-config issue, not a caller bug. 503 mirrors the
+      // dispatch-disabled branch — same shape for external dispatchers.
+      log.error(`Launch failed: claude-auth preflight (${err.reason})`, err);
+      json(res, 503, { error: err.message });
+      return;
+    }
     if (err instanceof McpResolveError) {
       json(res, 400, { error: err.message });
       return;
@@ -512,6 +520,11 @@ export async function handleResume(
       status: "launched",
     });
   } catch (err) {
+    if (err instanceof ClaudeAuthError) {
+      log.error(`Resume failed: claude-auth preflight (${err.reason})`, err);
+      json(res, 503, { error: err.message });
+      return;
+    }
     if (err instanceof McpResolveError) {
       json(res, 400, { error: err.message });
       return;
