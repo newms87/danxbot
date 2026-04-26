@@ -40,6 +40,10 @@ import {
 import { getDispatchById } from "../dashboard/dispatches-db.js";
 import { getSlackClientForRepo } from "../slack/listener.js";
 import type { SlackTriggerMetadata } from "../dashboard/dispatches.js";
+import {
+  processResponseWithAttachments,
+  type SqlAttachment,
+} from "./sql-executor.js";
 
 const log = createLogger("worker-dispatch");
 
@@ -734,17 +738,52 @@ async function handleSlackPost(
       return;
     }
 
+    // Substitute ` ```sql:execute ``` ` blocks with formatted query
+    // results + CSV attachments before posting. Skip the substitution
+    // entirely when the worker has no platform DB configured —
+    // calling `getPlatformPool()` in that mode would throw, and the
+    // agent in a no-DB worker should not be emitting the blocks
+    // anyway. Posting verbatim makes the misuse visible to the user
+    // rather than masking it with a generic 500.
+    let postText = text;
+    let attachments: SqlAttachment[] = [];
+    if (repo.db.enabled) {
+      const processed = await processResponseWithAttachments(text);
+      postText = processed.text;
+      attachments = processed.attachments;
+    }
+
     try {
       await client.chat.postMessage({
         channel: slackMeta.channelId,
         thread_ts: slackMeta.threadTs,
-        text,
+        text: postText,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`[${tag}] chat.postMessage failed for ${dispatchId}`, err);
       json(res, 500, { error: `Failed to post to Slack: ${msg}` });
       return;
+    }
+
+    // Upload each CSV in the same thread. Failures are logged but do
+    // not fail the reply — the substituted text is already posted, and
+    // a stuck attachment must not silence the agent's answer.
+    for (const attachment of attachments) {
+      try {
+        await client.filesUploadV2({
+          channel_id: slackMeta.channelId,
+          thread_ts: slackMeta.threadTs,
+          filename: attachment.filename,
+          content: attachment.csv,
+          title: attachment.filename,
+        });
+      } catch (err) {
+        log.warn(
+          `[${tag}] filesUploadV2 failed for ${attachment.filename} on ${dispatchId}`,
+          err,
+        );
+      }
     }
 
     json(res, 200, { status: "posted" });

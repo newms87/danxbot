@@ -65,6 +65,18 @@ vi.mock("../critical-failure.js", () => ({
   flagPath: (localPath: string) => `${localPath}/.danxbot/CRITICAL_FAILURE`,
 }));
 
+// The sql:execute substitution layer. Default: passthrough (text
+// unchanged, no attachments) — matches the no-block case so existing
+// tests don't see any new behavior. Tests that exercise substitution
+// override this implementation per-test.
+const mockProcessResponseWithAttachments = vi.fn(
+  async (text: string) => ({ text, attachments: [] as unknown[] }),
+);
+vi.mock("./sql-executor.js", () => ({
+  processResponseWithAttachments: (...args: unknown[]) =>
+    mockProcessResponseWithAttachments(...(args as [string])),
+}));
+
 import { handleSlackReply, handleSlackUpdate } from "./dispatch.js";
 
 const MOCK_REPO = makeRepoContext();
@@ -424,5 +436,276 @@ describe("cross-worker guard", () => {
     expect(JSON.parse(res._getBody())).toMatchObject({
       error: expect.stringMatching(/not owned by this worker/i),
     });
+  });
+});
+
+// -------------------------------------------------------------------------
+// sql:execute substitution — the agent emits ` ```sql:execute ... ``` `
+// blocks in its reply text; the worker MUST execute them via the
+// platform DB pool, replace each block with a CSV-attachment reference,
+// upload one CSV per result set in the same Slack thread, and post the
+// substituted text. This is the contract retired in commit f2eeaba and
+// re-introduced here.
+// -------------------------------------------------------------------------
+
+describe("sql:execute substitution in handleSlackReply", () => {
+  const SQL_TEXT =
+    "Counting suppliers:\n```sql:execute\nSELECT COUNT(*) FROM suppliers\n```\nDone.";
+
+  it("substitutes the agent's reply text via processResponseWithAttachments before posting", async () => {
+    mockProcessResponseWithAttachments.mockResolvedValueOnce({
+      text: "Counting suppliers:\n_Query returned 1 row — see attached CSV._\nDone.",
+      attachments: [
+        {
+          csv: "count\n42",
+          filename: "query-result-1.csv",
+          query: "SELECT COUNT(*) FROM suppliers",
+        },
+      ],
+    });
+    const client = createMockWebClient();
+    mockGetDispatchById.mockResolvedValue(makeSlackDispatch());
+    mockGetSlackClientForRepo.mockReturnValue(client);
+    const req = createMockReqWithBody("POST", { text: SQL_TEXT });
+    const res = createMockRes();
+
+    await handleSlackReply(req, res, DISPATCH_ID, MOCK_REPO);
+
+    expect(mockProcessResponseWithAttachments).toHaveBeenCalledWith(SQL_TEXT);
+    expect(client.chat.postMessage).toHaveBeenCalledTimes(1);
+    expect(client.chat.postMessage).toHaveBeenCalledWith({
+      channel: CHANNEL,
+      thread_ts: THREAD_TS,
+      text: "Counting suppliers:\n_Query returned 1 row — see attached CSV._\nDone.",
+    });
+    expect(res._getStatusCode()).toBe(200);
+  });
+
+  it("uploads each CSV attachment via filesUploadV2 in the same Slack thread, AFTER the substituted text is posted", async () => {
+    mockProcessResponseWithAttachments.mockResolvedValueOnce({
+      text: "substituted",
+      attachments: [
+        {
+          csv: "count\n42",
+          filename: "query-result-1.csv",
+          query: "SELECT COUNT(*) FROM suppliers",
+        },
+        {
+          csv: "name\nAlice",
+          filename: "query-result-2.csv",
+          query: "SELECT name FROM users LIMIT 1",
+        },
+      ],
+    });
+    const client = createMockWebClient();
+    mockGetDispatchById.mockResolvedValue(makeSlackDispatch());
+    mockGetSlackClientForRepo.mockReturnValue(client);
+    const req = createMockReqWithBody("POST", { text: SQL_TEXT });
+    const res = createMockRes();
+
+    await handleSlackReply(req, res, DISPATCH_ID, MOCK_REPO);
+
+    expect(client.filesUploadV2).toHaveBeenCalledTimes(2);
+    expect(client.filesUploadV2).toHaveBeenNthCalledWith(1, {
+      channel_id: CHANNEL,
+      thread_ts: THREAD_TS,
+      filename: "query-result-1.csv",
+      content: "count\n42",
+      title: "query-result-1.csv",
+    });
+    expect(client.filesUploadV2).toHaveBeenNthCalledWith(2, {
+      channel_id: CHANNEL,
+      thread_ts: THREAD_TS,
+      filename: "query-result-2.csv",
+      content: "name\nAlice",
+      title: "query-result-2.csv",
+    });
+    // Text MUST be posted before the attachments. If a future refactor
+    // inverts the order and `chat.postMessage` then fails, the
+    // attachments would orphan in-thread with no parent message.
+    const postOrder = client.chat.postMessage.mock.invocationCallOrder[0];
+    const upload1Order = client.filesUploadV2.mock.invocationCallOrder[0];
+    const upload2Order = client.filesUploadV2.mock.invocationCallOrder[1];
+    expect(postOrder).toBeLessThan(upload1Order);
+    expect(upload1Order).toBeLessThan(upload2Order);
+    expect(res._getStatusCode()).toBe(200);
+  });
+
+  it("continues uploading subsequent attachments after one upload fails — no early break on rejection", async () => {
+    mockProcessResponseWithAttachments.mockResolvedValueOnce({
+      text: "substituted",
+      attachments: [
+        {
+          csv: "first\n1",
+          filename: "query-result-1.csv",
+          query: "SELECT 1",
+        },
+        {
+          csv: "second\n2",
+          filename: "query-result-2.csv",
+          query: "SELECT 2",
+        },
+      ],
+    });
+    const client = createMockWebClient();
+    client.filesUploadV2
+      .mockRejectedValueOnce(new Error("slack 503"))
+      .mockResolvedValueOnce({});
+    mockGetDispatchById.mockResolvedValue(makeSlackDispatch());
+    mockGetSlackClientForRepo.mockReturnValue(client);
+    const req = createMockReqWithBody("POST", { text: SQL_TEXT });
+    const res = createMockRes();
+
+    await handleSlackReply(req, res, DISPATCH_ID, MOCK_REPO);
+
+    // Both attempts must be made — the loop does not short-circuit on
+    // the first rejection. Substituting an outer try/catch for the
+    // per-attachment one would silently regress this guarantee.
+    expect(client.filesUploadV2).toHaveBeenCalledTimes(2);
+    expect(client.filesUploadV2).toHaveBeenNthCalledWith(2, {
+      channel_id: CHANNEL,
+      thread_ts: THREAD_TS,
+      filename: "query-result-2.csv",
+      content: "second\n2",
+      title: "query-result-2.csv",
+    });
+    expect(res._getStatusCode()).toBe(200);
+  });
+
+  it("does not upload attachments when the substitution returns none (e.g. unsafe-query rejection)", async () => {
+    mockProcessResponseWithAttachments.mockResolvedValueOnce({
+      text: "_Only SELECT queries are allowed._",
+      attachments: [],
+    });
+    const client = createMockWebClient();
+    mockGetDispatchById.mockResolvedValue(makeSlackDispatch());
+    mockGetSlackClientForRepo.mockReturnValue(client);
+    const req = createMockReqWithBody("POST", {
+      text: "```sql:execute\nDELETE FROM users\n```",
+    });
+    const res = createMockRes();
+
+    await handleSlackReply(req, res, DISPATCH_ID, MOCK_REPO);
+
+    expect(client.chat.postMessage).toHaveBeenCalledWith({
+      channel: CHANNEL,
+      thread_ts: THREAD_TS,
+      text: "_Only SELECT queries are allowed._",
+    });
+    expect(client.filesUploadV2).not.toHaveBeenCalled();
+    expect(res._getStatusCode()).toBe(200);
+  });
+
+  it("posts text verbatim and does NOT call the substitution layer when repo.db.enabled is false", async () => {
+    // Repos like danxbot/gpt-manager have no platform DB. The agent
+    // shouldn't emit sql:execute in those workers, but if it does the
+    // worker must NOT call getPlatformPool() (which would throw) — it
+    // posts the raw text and lets the failure surface to the user.
+    const repoNoDb = makeRepoContext({
+      db: { ...MOCK_REPO.db, enabled: false },
+    });
+    const client = createMockWebClient();
+    mockGetDispatchById.mockResolvedValue(makeSlackDispatch());
+    mockGetSlackClientForRepo.mockReturnValue(client);
+    const req = createMockReqWithBody("POST", { text: SQL_TEXT });
+    const res = createMockRes();
+
+    await handleSlackReply(req, res, DISPATCH_ID, repoNoDb);
+
+    expect(mockProcessResponseWithAttachments).not.toHaveBeenCalled();
+    expect(client.chat.postMessage).toHaveBeenCalledWith({
+      channel: CHANNEL,
+      thread_ts: THREAD_TS,
+      text: SQL_TEXT,
+    });
+    expect(client.filesUploadV2).not.toHaveBeenCalled();
+    expect(res._getStatusCode()).toBe(200);
+  });
+
+  it("still posts the substituted text with status 200 when a CSV upload fails (Slack file-upload errors must not block the reply)", async () => {
+    mockProcessResponseWithAttachments.mockResolvedValueOnce({
+      text: "substituted",
+      attachments: [
+        {
+          csv: "id\n1",
+          filename: "query-result-1.csv",
+          query: "SELECT id FROM x",
+        },
+      ],
+    });
+    const client = createMockWebClient();
+    client.filesUploadV2.mockRejectedValueOnce(new Error("slack 500"));
+    mockGetDispatchById.mockResolvedValue(makeSlackDispatch());
+    mockGetSlackClientForRepo.mockReturnValue(client);
+    const req = createMockReqWithBody("POST", { text: SQL_TEXT });
+    const res = createMockRes();
+
+    await handleSlackReply(req, res, DISPATCH_ID, MOCK_REPO);
+
+    expect(client.chat.postMessage).toHaveBeenCalledTimes(1);
+    expect(res._getStatusCode()).toBe(200);
+  });
+});
+
+// -------------------------------------------------------------------------
+// Substitution applies to update-style replies as well — the agent uses
+// `danxbot_slack_post_update` to stream interim findings ("Reading the
+// schema…", "Found 42 suppliers"); those updates can also contain
+// sql:execute blocks and must be substituted the same way.
+// -------------------------------------------------------------------------
+
+describe("sql:execute substitution in handleSlackUpdate", () => {
+  it("posts text verbatim and does NOT call the substitution layer when repo.db.enabled is false (parity with reply-side passthrough)", async () => {
+    const repoNoDb = makeRepoContext({
+      db: { ...MOCK_REPO.db, enabled: false },
+    });
+    const client = createMockWebClient();
+    mockGetDispatchById.mockResolvedValue(makeSlackDispatch());
+    mockGetSlackClientForRepo.mockReturnValue(client);
+    const req = createMockReqWithBody("POST", {
+      text: "update with sql:\n```sql:execute\nSELECT 1\n```",
+    });
+    const res = createMockRes();
+
+    await handleSlackUpdate(req, res, DISPATCH_ID, repoNoDb);
+
+    expect(mockProcessResponseWithAttachments).not.toHaveBeenCalled();
+    expect(client.chat.postMessage).toHaveBeenCalledWith({
+      channel: CHANNEL,
+      thread_ts: THREAD_TS,
+      text: "update with sql:\n```sql:execute\nSELECT 1\n```",
+    });
+    expect(client.filesUploadV2).not.toHaveBeenCalled();
+    expect(res._getStatusCode()).toBe(200);
+  });
+
+  it("substitutes update-style replies through the same processResponseWithAttachments path", async () => {
+    mockProcessResponseWithAttachments.mockResolvedValueOnce({
+      text: "Found 42 suppliers.",
+      attachments: [
+        {
+          csv: "count\n42",
+          filename: "query-result-1.csv",
+          query: "SELECT COUNT(*) FROM suppliers",
+        },
+      ],
+    });
+    const client = createMockWebClient();
+    mockGetDispatchById.mockResolvedValue(makeSlackDispatch());
+    mockGetSlackClientForRepo.mockReturnValue(client);
+    const req = createMockReqWithBody("POST", {
+      text: "Counting...\n```sql:execute\nSELECT COUNT(*) FROM suppliers\n```",
+    });
+    const res = createMockRes();
+
+    await handleSlackUpdate(req, res, DISPATCH_ID, MOCK_REPO);
+
+    expect(client.chat.postMessage).toHaveBeenCalledWith({
+      channel: CHANNEL,
+      thread_ts: THREAD_TS,
+      text: "Found 42 suppliers.",
+    });
+    expect(client.filesUploadV2).toHaveBeenCalledTimes(1);
+    expect(res._getStatusCode()).toBe(200);
   });
 });
