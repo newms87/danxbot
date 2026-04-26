@@ -60,12 +60,13 @@ function setupFakeProject(repoPorts: [string, string][]): FakeProject {
     writeFileSync(join(danxbotDir, "config/compose.yml"), "services: {}\n");
   }
 
-  // Scaffold the danxbot self-host bits the helper realpath's into.
-  // Skip when no `danxbot` repo is in the test mix.
-  if (repoPorts.some(([name]) => name === "danxbot")) {
-    mkdirSync(join(dir, "repos/danxbot/claude-auth"), { recursive: true });
-    mkdirSync(join(dir, "repos/danxbot/claude-projects"), { recursive: true });
-  }
+  // EVERY worker (not just the danxbot one) bind-mounts the danxbot
+  // self-host `claude-auth` dir for Claude credentials in local dev,
+  // so `scripts/worker-env.sh` realpaths it on every launch — even
+  // when invoked as `make launch-worker REPO=platform`. Create it
+  // unconditionally so single-repo test scenarios don't trip the
+  // helper's realpath check.
+  mkdirSync(join(dir, "repos/danxbot/claude-auth"), { recursive: true });
 
   // Real helper scripts — symlink so a future edit is automatically
   // reflected here.

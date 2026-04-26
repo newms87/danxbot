@@ -89,6 +89,15 @@ launch-all-workers: ## Start workers for all configured repos
 	@# port would still be exported when repo B sources the helper, and
 	@# any failure mode in the helper that left the variable unchanged
 	@# would silently reuse A's value for B (Trello oGbjLtjN).
+	@#
+	@# CRITICAL: do NOT chain the subshell with `( ... ) || exit 1`.
+	@# Bash's `set -e` exemption applies to the entire left operand of
+	@# a `||` list — including commands inside that operand's subshell.
+	@# `( set -e; ... ) || exit 1` therefore silently disables `set -e`
+	@# inside the subshell: a failing helper does NOT abort, the loop
+	@# continues to the next repo, and make exits 0. Capture the
+	@# subshell's `$$?` separately and check it. Verified empirically
+	@# (Trello K2zQYIdX retro).
 	@if [ -z "$(REPOS)" ]; then echo "Error: REPOS not set in .env"; exit 1; fi; \
 	IFS=',' read -ra ENTRIES <<< "$(REPOS)"; \
 	for entry in "$${ENTRIES[@]}"; do \
@@ -105,7 +114,9 @@ launch-all-workers: ## Start workers for all configured repos
 		      ./scripts/check-claude-auth-env.sh; \
 		  fi; \
 		  mkdir -p "$(REPOS_DIR)/$$name/claude-projects"; \
-		  docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$$name" up -d ) || exit 1; \
+		  docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$$name" up -d ); \
+		rc=$$?; \
+		if [ $$rc -ne 0 ]; then exit $$rc; fi; \
 	done
 
 stop-all-workers: ## Stop all repo workers
