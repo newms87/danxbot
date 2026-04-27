@@ -713,7 +713,7 @@ describe("spawnAgent", () => {
     expect(job.summary).toBe("Task completed successfully");
   });
 
-  it("accumulates usage tokens across every assistant entry", async () => {
+  it("accumulates usage tokens across distinct API responses (different message.id)", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -723,14 +723,14 @@ describe("spawnAgent", () => {
       timeoutMs: 300_000,
     });
 
-    // Claude Code writes one assistant entry per model turn; each carries its
-    // own per-turn usage. Total = sum across entries — verified empirically
-    // against a real JSONL during card #57 validation.
+    // Two distinct API responses — each carries a unique `message.id` and its
+    // own per-response `usage` block. Totals = sum across responses.
     emitWatcherEntry({
       type: "assistant",
       timestamp: Date.now(),
       summary: "",
       data: {
+        messageId: "msg_TURN1",
         content: [],
         usage: {
           input_tokens: 6,
@@ -745,6 +745,7 @@ describe("spawnAgent", () => {
       timestamp: Date.now(),
       summary: "",
       data: {
+        messageId: "msg_TURN2",
         content: [],
         usage: {
           input_tokens: 1,
@@ -760,6 +761,109 @@ describe("spawnAgent", () => {
       output_tokens: 305,
       cache_read_input_tokens: 82380,
       cache_creation_input_tokens: 45627,
+    });
+  });
+
+  it("counts a single API response exactly once when Claude Code emits multiple JSONL entries with the same message.id", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Claude Code writes one JSONL entry per content block in an assistant
+    // turn (text block, tool_use block, etc.). EACH entry carries the SAME
+    // response-level `message.usage` stamp because the API returned a single
+    // `usage` object. Without msg_id dedup, danxbot's accumulator and the
+    // dashboard's tokens panel BOTH double-count — verified in production
+    // (job 830cbd99): real usage in=6/out=110/cache_creation=100,362, dashboard
+    // showed in=12/out=220/cache_creation=200,724.
+    const sharedUsage = {
+      input_tokens: 6,
+      output_tokens: 110,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 100_362,
+    };
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        messageId: "msg_DUP",
+        content: [{ type: "text", text: "PONG" }],
+        usage: sharedUsage,
+      },
+    });
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        messageId: "msg_DUP",
+        content: [{ type: "tool_use", name: "danxbot_complete", input: {} }],
+        usage: sharedUsage,
+      },
+    });
+
+    expect(job.usage).toEqual({
+      input_tokens: 6,
+      output_tokens: 110,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 100_362,
+    });
+  });
+
+  it("still accumulates usage when the entry is missing a messageId (defensive — never silently drops billable usage)", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+    });
+
+    // Real Claude Code JSONL always carries `message.id` on assistant
+    // entries; an entry without one is malformed. We accumulate anyway so
+    // a malformed entry doesn't silently zero out billable usage — better
+    // to over-count a malformed line than under-count a real one.
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        content: [],
+        usage: {
+          input_tokens: 5,
+          output_tokens: 7,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      },
+    });
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "",
+      data: {
+        content: [],
+        usage: {
+          input_tokens: 5,
+          output_tokens: 7,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      },
+    });
+
+    expect(job.usage).toEqual({
+      input_tokens: 10,
+      output_tokens: 14,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
     });
   });
 

@@ -555,6 +555,19 @@ export async function spawnAgent(
 
   // Track last assistant text for job summary + accumulate per-turn usage
   // totals + reset inactivity timeout.
+  //
+  // Usage dedup: Claude Code writes one JSONL entry per content block in a
+  // multi-block assistant turn (text + tool_use, thinking + text + tool_use,
+  // etc.) but stamps the IDENTICAL response-level `message.usage` on every
+  // entry. Without dedup the accumulator counted that single API response
+  // 2-5× — verified in production (gpt-manager job 830cbd99: real usage
+  // in=6/out=110/cache_creation=100,362, accumulator reported double).
+  // Track seen `message.id`s in this closure and accumulate at most once
+  // per id. Entries without an id (malformed; never seen in real Claude
+  // Code output) still accumulate so a single bad line never silently
+  // zeroes billable usage.
+  const seenUsageMessageIds = new Set<string>();
+  let warnedMissingMessageId = false;
   watcher.onEntry((entry) => {
     inactivityTimer.reset();
 
@@ -568,6 +581,16 @@ export async function spawnAgent(
 
       const usage = entry.data.usage as Partial<AgentUsage> | undefined;
       if (usage) {
+        const messageId = entry.data.messageId as string | undefined;
+        if (messageId) {
+          if (seenUsageMessageIds.has(messageId)) return;
+          seenUsageMessageIds.add(messageId);
+        } else if (!warnedMissingMessageId) {
+          warnedMissingMessageId = true;
+          log.warn(
+            `[Job ${jobId}] Assistant entry has usage but no message.id — accumulating defensively. If this is a new Claude Code release, the dedup contract may need updating.`,
+          );
+        }
         job.usage.input_tokens += usage.input_tokens ?? 0;
         job.usage.output_tokens += usage.output_tokens ?? 0;
         job.usage.cache_read_input_tokens += usage.cache_read_input_tokens ?? 0;

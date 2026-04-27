@@ -281,6 +281,51 @@ describe("convertJsonlEntry", () => {
     expect(result!.entry.data.raw).toBe(raw);
   });
 
+  // The single contract pin between the watcher and every downstream
+  // usage-accumulating consumer (launcher.ts `job.usage`,
+  // jsonl-reader.ts totals, gpt-manager Laravel app). A future refactor
+  // that drops `messageId` from the entry's `data` would silently revive
+  // the multi-block-turn over-counting bug while every accumulator unit
+  // test (which feeds `data.messageId` directly) keeps passing. Lock the
+  // upstream propagation here.
+  it("surfaces message.id as data.messageId on assistant entries", () => {
+    const raw = rawAssistantEntry({
+      message: {
+        id: "msg_018gee6QUUd7HAcWhENVKgzV",
+        model: "claude-opus-4-7",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+    const result = convertJsonlEntry(raw, 0);
+    expect(result!.entry.data.messageId).toBe("msg_018gee6QUUd7HAcWhENVKgzV");
+  });
+
+  it("sets data.messageId to undefined when message.id is absent", () => {
+    const raw = rawAssistantEntry({
+      message: {
+        model: "claude-opus-4-7",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+    const result = convertJsonlEntry(raw, 0);
+    expect(result!.entry.data.messageId).toBeUndefined();
+  });
+
+  it("normalizes empty-string message.id to undefined (so dedup never collapses ids that were never set)", () => {
+    const raw = rawAssistantEntry({
+      message: {
+        id: "",
+        model: "claude-opus-4-7",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+    const result = convertJsonlEntry(raw, 0);
+    expect(result!.entry.data.messageId).toBeUndefined();
+  });
+
   it("computes delta_ms from previous timestamp", () => {
     const prevTs = new Date("2026-04-12T10:00:00.000Z").getTime();
     const result = convertJsonlEntry(rawAssistantEntry(), prevTs);

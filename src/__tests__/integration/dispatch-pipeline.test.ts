@@ -552,6 +552,71 @@ describe("Integration: dispatch pipeline", () => {
       }
     }, 30_000);
 
+    it("GET /api/status counts a duplicated msg_id JSONL pair exactly once (multi-block-turn dedup)", async () => {
+      // End-to-end pin for the msg_id usage dedup contract: fake-claude
+      // writes TWO assistant entries sharing the same `message.id` (text +
+      // tool_use), the watcher feeds both into the launcher's accumulator,
+      // DispatchTracker.finalize writes job.usage to the dispatches row,
+      // /api/status renders it. Without dedup every field doubles —
+      // production reproduction (gpt-manager job 830cbd99) showed
+      // in=12/out=220/cache_creation=200,724 against real charge of
+      // in=6/out=110/cache_creation=100,362.
+      const { handleLaunch, handleStatus, clearJobCleanupIntervals } =
+        await import("../../worker/dispatch.js");
+
+      const repo = makeRepoContext({ name: "test-repo", localPath: repoDir });
+
+      const wsSessionDir = deriveSessionDir(
+        join(repoDir, ".danxbot", "workspaces", "integration-test"),
+      );
+      const originalPath = process.env.PATH;
+      const baseEnv = fakeClasudeEnv({ scenario: "dup-msg-id" });
+      const envSnapshot = {
+        ...baseEnv,
+        FAKE_CLAUDE_SESSION_DIR: wsSessionDir,
+      };
+      const envKeys = Object.keys(envSnapshot);
+      Object.assign(process.env, envSnapshot);
+
+      try {
+        const launchReq = createMockReqWithBody("POST", {
+          workspace: "integration-test",
+          task: "msg_id dedup end-to-end",
+          api_token: "test-token",
+          status_url: captureServer.statusUrl,
+        });
+        const launchRes = createMockRes();
+
+        await handleLaunch(launchReq, launchRes, repo);
+        const { job_id } = JSON.parse(launchRes._getBody());
+
+        await waitForRequests(isStatusPut("completed"), 1, 15_000);
+
+        const statusRes = createMockRes();
+        handleStatus(statusRes, job_id);
+        const status = JSON.parse(statusRes._getBody());
+
+        // The "dup-msg-id" scenario writes two assistant entries with the
+        // SAME message.id and the SAME usage block; the deduped job.usage
+        // must reflect the response ONCE.
+        expect(status).toMatchObject({
+          job_id,
+          status: "completed",
+          input_tokens: 6,
+          output_tokens: 110,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 100_362,
+        });
+
+        clearJobCleanupIntervals();
+      } finally {
+        process.env.PATH = originalPath;
+        for (const key of envKeys) {
+          if (key !== "PATH") delete process.env[key];
+        }
+      }
+    }, 30_000);
+
     it("GET /api/status returns summed token usage from the dispatch JSONL", async () => {
       const { handleLaunch, handleStatus, clearJobCleanupIntervals } =
         await import("../../worker/dispatch.js");

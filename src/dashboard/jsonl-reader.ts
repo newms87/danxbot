@@ -57,6 +57,15 @@ export interface UsageBlock {
   type: "usage";
   usage: UsageTotals;
   timestampMs: number;
+  /**
+   * The owning API response's `message.id`. Claude Code writes one JSONL
+   * entry per content block in a multi-block assistant turn (text +
+   * tool_use, thinking + text + tool_use, etc.) and stamps the IDENTICAL
+   * response-level `message.usage` on every entry — so the same
+   * `message.id` can produce multiple `UsageBlock`s. Aggregators dedupe
+   * by this field. Absent if the JSONL line had no `message.id`.
+   */
+  messageId?: string;
 }
 
 export type JsonlBlock =
@@ -206,7 +215,11 @@ export function parseJsonlLine(raw: Record<string, unknown>): JsonlBlock[] {
       usage.cacheRead ||
       usage.cacheWrite
     ) {
-      blocks.push({ type: "usage", usage, timestampMs });
+      const messageId =
+        typeof message.id === "string" && message.id.length > 0
+          ? message.id
+          : undefined;
+      blocks.push({ type: "usage", usage, timestampMs, messageId });
     }
     return blocks;
   }
@@ -257,6 +270,24 @@ function isSubagentTool(name: string): boolean {
 export function parseJsonlContent(text: string): JsonlReadResult {
   const blocks: JsonlBlock[] = [];
   let sessionId: string | null = null;
+  // Dedup usage blocks by `message.id` — Claude Code stamps the same
+  // response-level `message.usage` on every JSONL line that holds a
+  // content block from the same API response. Without this dedup the
+  // dashboard's tokens panel and the per-block timeline both
+  // double-count multi-block turns (2-5× the real number, severity
+  // confirmed in production: see launcher.ts accumulator + the
+  // gpt-manager smoke test 830cbd99). Entries without `message.id`
+  // (malformed; never seen in real Claude Code output) are kept so a
+  // bad line never silently zeroes billable usage.
+  //
+  // The Set is per-call by design — `parseJsonlFile` calls
+  // `parseJsonlContent` separately for the parent JSONL and each
+  // sub-agent JSONL, which are independent response streams with
+  // unrelated `message.id` namespaces. Hoisting the Set to module
+  // scope would silently cross-contaminate dedup state and drop
+  // legitimate sub-agent usage.
+  const seenUsageMessageIds = new Set<string>();
+  let warnedMissingMessageId = false;
 
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -271,7 +302,20 @@ export function parseJsonlContent(text: string): JsonlReadResult {
       sessionId = raw.sessionId;
     }
 
-    for (const block of parseJsonlLine(raw)) blocks.push(block);
+    for (const block of parseJsonlLine(raw)) {
+      if (block.type === "usage") {
+        if (block.messageId) {
+          if (seenUsageMessageIds.has(block.messageId)) continue;
+          seenUsageMessageIds.add(block.messageId);
+        } else if (!warnedMissingMessageId) {
+          warnedMissingMessageId = true;
+          log.warn(
+            "Assistant entry has usage but no message.id — accumulating defensively. If this is a new Claude Code release, the dedup contract may need updating.",
+          );
+        }
+      }
+      blocks.push(block);
+    }
   }
 
   return { blocks, totals: aggregateTotals(blocks), sessionId };

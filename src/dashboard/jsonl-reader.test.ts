@@ -128,6 +128,46 @@ describe("parseJsonlLine", () => {
     });
   });
 
+  // Contract pin for the dashboard side of the dedup chain. The dedup in
+  // `parseJsonlContent` keys off `block.messageId`; if `parseJsonlLine`
+  // ever stops populating it from `message.id`, the dedup silently fails
+  // open and per-turn usage doubles again.
+  it("populates UsageBlock.messageId from message.id when present", () => {
+    const blocks = parseJsonlLine({
+      type: "assistant",
+      message: {
+        id: "msg_018gee6QUUd7HAcWhENVKgzV",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+    const usage = blocks.find((b) => b.type === "usage");
+    expect(usage).toMatchObject({ messageId: "msg_018gee6QUUd7HAcWhENVKgzV" });
+  });
+
+  it("leaves UsageBlock.messageId undefined when message.id is missing or empty", () => {
+    const noId = parseJsonlLine({
+      type: "assistant",
+      message: {
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+    const empty = parseJsonlLine({
+      type: "assistant",
+      message: {
+        id: "",
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+    const noIdUsage = noId.find((b) => b.type === "usage");
+    const emptyUsage = empty.find((b) => b.type === "usage");
+    expect(noIdUsage).toMatchObject({ type: "usage" });
+    expect((noIdUsage as { messageId?: string }).messageId).toBeUndefined();
+    expect((emptyUsage as { messageId?: string }).messageId).toBeUndefined();
+  });
+
   it("skips the usage block when all counters are zero", () => {
     const blocks = parseJsonlLine({
       type: "assistant",
@@ -185,11 +225,12 @@ describe("parseJsonlContent", () => {
     expect(parseJsonlContent(text).sessionId).toBe("sess-xyz");
   });
 
-  it("aggregates tokens across assistant turns", () => {
+  it("aggregates tokens across distinct API responses (different message.id)", () => {
     const text = [
       line({
         type: "assistant",
         message: {
+          id: "msg_A",
           content: [{ type: "text", text: "a" }],
           usage: {
             input_tokens: 10,
@@ -202,6 +243,7 @@ describe("parseJsonlContent", () => {
       line({
         type: "assistant",
         message: {
+          id: "msg_B",
           content: [{ type: "text", text: "b" }],
           usage: {
             input_tokens: 5,
@@ -219,6 +261,117 @@ describe("parseJsonlContent", () => {
     expect(totals.cacheRead).toBe(100);
     expect(totals.cacheWrite).toBe(50);
     expect(totals.tokensTotal).toBe(200);
+  });
+
+  it("counts a single API response exactly once when its message.usage is stamped on multiple JSONL lines (Claude Code splits content blocks into separate entries)", () => {
+    // Production reproduction (gpt-manager job 830cbd99): the API returned
+    // ONE message with in=6, out=110, cache_creation=100,362. Claude Code
+    // wrote it as TWO assistant lines (one per content block) — each line
+    // carrying the IDENTICAL response-level `message.usage`. Totals must
+    // count the response once, not twice.
+    const sharedUsage = {
+      input_tokens: 6,
+      output_tokens: 110,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 100_362,
+    };
+    const text = [
+      line({
+        type: "assistant",
+        message: {
+          id: "msg_018gee6QUUd7HAcWhENVKgzV",
+          content: [{ type: "text", text: "PONG" }],
+          usage: sharedUsage,
+        },
+      }),
+      line({
+        type: "assistant",
+        message: {
+          id: "msg_018gee6QUUd7HAcWhENVKgzV",
+          content: [
+            { type: "tool_use", id: "t1", name: "danxbot_complete", input: {} },
+          ],
+          usage: sharedUsage,
+        },
+      }),
+    ].join("\n");
+
+    const { blocks, totals } = parseJsonlContent(text);
+    expect(totals.tokensIn).toBe(6);
+    expect(totals.tokensOut).toBe(110);
+    expect(totals.cacheRead).toBe(0);
+    expect(totals.cacheWrite).toBe(100_362);
+    expect(totals.tokensTotal).toBe(100_478);
+
+    const usageBlocks = blocks.filter((b) => b.type === "usage");
+    expect(usageBlocks).toHaveLength(1);
+  });
+
+  it("scopes the dedup Set per parseJsonlContent call so subagent files (separate streams) keep their own usage", () => {
+    // parseJsonlFile calls parseJsonlContent separately for the parent
+    // JSONL and each sub-agent JSONL. They are independent response
+    // streams with unrelated `message.id` namespaces. If the dedup Set
+    // were ever hoisted to module scope, the same msg_id appearing in
+    // a parent and a subagent would silently drop the second one.
+    // Calling parseJsonlContent twice with the SAME id must produce the
+    // same result both times — proving the Set is per-call.
+    const sharedId = "msg_PARENT_OR_SUB";
+    const text = line({
+      type: "assistant",
+      message: {
+        id: sharedId,
+        content: [{ type: "text", text: "hi" }],
+        usage: {
+          input_tokens: 9,
+          output_tokens: 17,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      },
+    });
+
+    const first = parseJsonlContent(text);
+    const second = parseJsonlContent(text);
+
+    expect(first.totals).toMatchObject(second.totals);
+    expect(first.totals.tokensIn).toBe(9);
+    expect(second.totals.tokensIn).toBe(9);
+  });
+
+  it("counts each API response when messageId is missing on assistant entries (defensive — never silently drops billable usage)", () => {
+    // Real Claude Code always stamps `message.id`. If a malformed entry
+    // arrives without one, treat it as its own response — over-count a
+    // malformed line rather than under-count a real one.
+    const text = [
+      line({
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "a" }],
+          usage: {
+            input_tokens: 4,
+            output_tokens: 8,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }),
+      line({
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "b" }],
+          usage: {
+            input_tokens: 4,
+            output_tokens: 8,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }),
+    ].join("\n");
+
+    const { totals } = parseJsonlContent(text);
+    expect(totals.tokensIn).toBe(8);
+    expect(totals.tokensOut).toBe(16);
   });
 
   it("counts tool_use calls and Agent/Task sub-agent calls", () => {

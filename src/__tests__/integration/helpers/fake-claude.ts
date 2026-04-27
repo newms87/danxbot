@@ -17,6 +17,10 @@
  *     - "error": Writes an error result entry, exits with non-zero.
  *     - "slow": One message then goes silent (parent kills via SIGTERM).
  *     - "empty": No assistant messages at all.
+ *     - "dup-msg-id": Two assistant entries sharing the SAME `message.id`
+ *                  (one text, one tool_use) — reproduces Claude Code's
+ *                  multi-block-per-turn JSONL split. Used to verify the
+ *                  msg_id usage dedup contract end-to-end.
  *     - "slack": Drives the Slack agent flow without spending API tokens —
  *                POSTs progress updates to DANXBOT_SLACK_UPDATE_URL,
  *                final reply to DANXBOT_SLACK_REPLY_URL, then completion
@@ -257,6 +261,61 @@ async function runScenario(): Promise<void> {
 
   if (scenario === "slack") {
     await runSlackScenario();
+    return;
+  }
+
+  if (scenario === "dup-msg-id") {
+    // Reproduces Claude Code's multi-block-per-turn JSONL split: ONE API
+    // response carrying both a text block and a tool_use block is written
+    // as TWO assistant entries sharing the SAME `message.id`, each with
+    // the IDENTICAL response-level `usage`. Without dedup the accumulator
+    // and dashboard total this turn 2×.
+    const sharedMsgId = "msg_FAKE_DUP_TURN";
+    const sharedUsage = {
+      input_tokens: 6,
+      output_tokens: 110,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 100_362,
+    };
+    writeEntry({
+      type: "assistant",
+      message: {
+        id: sharedMsgId,
+        model: "claude-opus-4-7",
+        content: [{ type: "text", text: "PONG" }],
+        usage: sharedUsage,
+      },
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    await sleep(writeDelayMs);
+    writeEntry({
+      type: "assistant",
+      message: {
+        id: sharedMsgId,
+        model: "claude-opus-4-7",
+        content: [
+          { type: "tool_use", id: "tool_dup_1", name: "Read", input: {} },
+        ],
+        usage: sharedUsage,
+      },
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    await sleep(writeDelayMs);
+    writeEntry({
+      type: "result",
+      subtype: "success",
+      cost_usd: 0,
+      num_turns: 1,
+      duration_ms: 100,
+      duration_api_ms: 80,
+      is_error: false,
+      result: "PONG",
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    await sleep(lingerMs);
     return;
   }
 

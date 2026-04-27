@@ -193,6 +193,16 @@ export function convertJsonlEntry(
       if (!message) return null;
       const content = (message.content ?? []) as Record<string, unknown>[];
       const usage = message.usage as Record<string, number> | undefined;
+      // Claude Code splits multi-block assistant turns (text + tool_use,
+      // thinking + text + tool_use, etc.) into one JSONL line per content
+      // block, but stamps the SAME response-level `message.usage` on every
+      // line. Surface `messageId` so downstream usage accumulators can dedupe
+      // — without it, every multi-block turn over-counts tokens 2-5×. See
+      // `.claude/rules/agent-dispatch.md`.
+      const messageId =
+        typeof message.id === "string" && message.id.length > 0
+          ? message.id
+          : undefined;
 
       return {
         entry: {
@@ -200,6 +210,7 @@ export function convertJsonlEntry(
           type: "assistant",
           summary: buildAssistantSummary(content),
           data: {
+            messageId,
             content,
             usage,
             delta_ms: deltaMs,
