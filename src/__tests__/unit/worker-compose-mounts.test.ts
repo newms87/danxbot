@@ -24,10 +24,38 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const COMPOSE_PATH = join(process.cwd(), ".danxbot/config/compose.yml");
+
+// Discover every connected-repo worker compose: `repos/<name>/.danxbot/config/compose.yml`.
+// Connected repos are git-tracked symlinks under `repos/`, so the cjAyJpgr
+// static-mount invariant must be asserted on each one — not just the
+// danxbot self-host compose. Empty list is acceptable (vacuous): if no
+// connected repos are checked out, there is nothing to regress.
+function discoverConnectedRepoComposes(): { name: string; path: string }[] {
+  const reposDir = join(process.cwd(), "repos");
+  let names: string[];
+  try {
+    names = readdirSync(reposDir);
+  } catch {
+    return [];
+  }
+  return names
+    .map((name) => ({
+      name,
+      path: join(reposDir, name, ".danxbot/config/compose.yml"),
+    }))
+    .filter(({ path }) => {
+      try {
+        readFileSync(path, "utf-8");
+        return true;
+      } catch {
+        return false;
+      }
+    });
+}
 
 const CLAUDE_JSON_DEST = "/danxbot/app/claude-auth/.claude.json";
 const CLAUDE_DIR_DEST = "/danxbot/app/claude-auth/.claude";
@@ -80,8 +108,8 @@ function parseVolume(line: string): Volume | null {
   };
 }
 
-function readComposeVolumes(): Volume[] {
-  const text = readFileSync(COMPOSE_PATH, "utf-8");
+function readComposeVolumes(path: string = COMPOSE_PATH): Volume[] {
+  const text = readFileSync(path, "utf-8");
   const lines = text.split(/\r?\n/);
   const volumes: Volume[] = [];
   let inVolumesBlock = false;
@@ -197,31 +225,38 @@ describe("worker compose.yml claude-auth mounts", () => {
     ).toBe(false);
   });
 
-  // Trello cjAyJpgr: each worker mounts its OWN <repo>/claude-projects/
-  // via a static relative path. Pre-fix, the danxbot self-host compose
-  // had `${CLAUDE_PROJECTS_DIR:-../../claude-projects}` and
-  // scripts/worker-env.sh exported CLAUDE_PROJECTS_DIR pointing at
-  // repos/danxbot/claude-projects/ for EVERY worker — so non-danxbot
-  // workers wrote JSONL into the danxbot repo's dir and the dashboard's
-  // per-repo path resolver returned empty timelines for non-danxbot
-  // dispatches. The static mount removes the env-var dependency and
-  // makes each worker's source dir a literal sibling of its compose file.
-  it("mounts ../../claude-projects (static) at /home/danxbot/.claude/projects — no CLAUDE_PROJECTS_DIR env var (Trello cjAyJpgr)", () => {
-    const v = findByDestination(volumes, CLAUDE_PROJECTS_DEST);
-    expect(
-      v,
-      "claude-projects bind not found in compose.yml",
-    ).toBeDefined();
-    expect(
-      v!.source,
-      `claude-projects source must be the static relative path ../../claude-projects: got ${v!.source}`,
-    ).toBe("../../claude-projects");
-    expect(
-      v!.source.includes("CLAUDE_PROJECTS_DIR"),
-      `claude-projects mount must NOT reference the legacy CLAUDE_PROJECTS_DIR env var`,
-    ).toBe(false);
-  });
 });
+
+// Trello cjAyJpgr: each connected-repo worker mounts its OWN
+// `<repo>/claude-projects/` via a static relative path so the dashboard's
+// per-repo path resolver finds JSONL under the correct namespace. The
+// invariant must hold across ALL connected-repo composes, not just the
+// danxbot self-host one — a regression to `${CLAUDE_PROJECTS_DIR:-...}`
+// in any of `repos/<name>/.danxbot/config/compose.yml` would silently
+// re-enable the pre-fix shared-dir layout once the deploy injection is
+// removed (which it now is, see deploy/workers.ts).
+describe.each(discoverConnectedRepoComposes())(
+  "$name worker compose.yml mounts ../../claude-projects statically (Trello cjAyJpgr)",
+  ({ path }) => {
+    const volumes = readComposeVolumes(path);
+
+    it("binds ../../claude-projects (static) at /home/danxbot/.claude/projects — no CLAUDE_PROJECTS_DIR env var", () => {
+      const v = findByDestination(volumes, CLAUDE_PROJECTS_DEST);
+      expect(
+        v,
+        `claude-projects bind not found in ${path}`,
+      ).toBeDefined();
+      expect(
+        v!.source,
+        `claude-projects source must be the static relative path ../../claude-projects: got ${v!.source}`,
+      ).toBe("../../claude-projects");
+      expect(
+        v!.source.includes("CLAUDE_PROJECTS_DIR"),
+        `claude-projects mount must NOT reference the legacy CLAUDE_PROJECTS_DIR env var`,
+      ).toBe(false);
+    });
+  },
+);
 
 // Regression test for Trello auX4nTRk — getDanxbotCommit() reads
 // `process.env.DANXBOT_COMMIT` baked into the image at build time

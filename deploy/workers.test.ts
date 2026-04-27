@@ -46,21 +46,14 @@ describe("worker commands", () => {
     expect(cmd).toContain("--env-file /danxbot/.env");
   });
 
-  it("injects CLAUDE_PROJECTS_DIR pointing at the per-repo host dir so each worker writes JSONL under its OWN repo's claude-projects/ — the dashboard mounts each repo's dir under a namespaced alias for path-resolver lookups (Trello cjAyJpgr)", () => {
-    // Pre-cjAyJpgr: every worker had `CLAUDE_PROJECTS_DIR=/danxbot/claude-projects` (one shared host dir).
-    // The dashboard mounted that single source under multiple per-repo namespaces, but workers
-    // landing in the same encoded-cwd subdir created cross-repo state visibility and complicated
-    // dev parity (where workers wrote to repos/danxbot/claude-projects/ regardless of repo).
-    // Per-repo paths fix both. The env var stays as a transitional bridge until every connected
-    // repo's worker compose file switches to a static `../../claude-projects` mount; once that
-    // ships, the var can be removed from this prefix entirely.
+  it("does NOT inject CLAUDE_PROJECTS_DIR — workers use a static `../../claude-projects` mount in every worker compose (Trello cjAyJpgr)", () => {
+    // The env var is dead. Re-introducing it would silently re-enable the
+    // pre-cjAyJpgr shared-dir layout on any compose that regresses to
+    // `${CLAUDE_PROJECTS_DIR:-...}` — that's the regression this guards.
     const a = buildLaunchCommand({ name: "app", url: "x", workerPort: 5561 }, ENV);
-    expect(a).toContain("CLAUDE_PROJECTS_DIR='/danxbot/repos/app/claude-projects'");
     const gpt = buildLaunchCommand({ name: "gpt-manager", url: "x", workerPort: 5562 }, ENV);
-    expect(gpt).toContain("CLAUDE_PROJECTS_DIR='/danxbot/repos/gpt-manager/claude-projects'");
-    // Regression guard: the old shared path must NOT appear.
-    expect(a).not.toContain("CLAUDE_PROJECTS_DIR='/danxbot/claude-projects'");
-    expect(gpt).not.toContain("CLAUDE_PROJECTS_DIR='/danxbot/claude-projects'");
+    expect(a).not.toContain("CLAUDE_PROJECTS_DIR");
+    expect(gpt).not.toContain("CLAUDE_PROJECTS_DIR");
   });
 
   it("injects DANXBOT_WORKER_PORT from deploy config (idempotent, no settings.local.json needed)", () => {
@@ -123,14 +116,33 @@ describe("launchWorkers", () => {
     } as unknown as DeployConfig;
   }
 
-  function captureRemote(): { calls: string[]; streamingCalls: string[]; remote: RemoteHost } {
+  // The `ordered` log captures both channels in invocation order with a
+  // channel tag so cross-channel ordering invariants (e.g. mkdir on `sshRun`
+  // BEFORE compose-up on `sshRunStreaming`) can be asserted directly.
+  // Without this, sshRun/sshRunStreaming land in two separate arrays and
+  // a refactor that swapped them would still produce the same per-array
+  // contents — making ordering bugs invisible to tests.
+  type OrderedCall = { channel: "run" | "streaming"; cmd: string };
+  function captureRemote(): {
+    calls: string[];
+    streamingCalls: string[];
+    ordered: OrderedCall[];
+    remote: RemoteHost;
+  } {
     const calls: string[] = [];
     const streamingCalls: string[] = [];
+    const ordered: OrderedCall[] = [];
     const remote = {
-      sshRun: (cmd: string) => calls.push(cmd),
-      sshRunStreaming: (cmd: string) => streamingCalls.push(cmd),
+      sshRun: (cmd: string) => {
+        calls.push(cmd);
+        ordered.push({ channel: "run", cmd });
+      },
+      sshRunStreaming: (cmd: string) => {
+        streamingCalls.push(cmd);
+        ordered.push({ channel: "streaming", cmd });
+      },
     } as unknown as RemoteHost;
-    return { calls, streamingCalls, remote };
+    return { calls, streamingCalls, ordered, remote };
   }
 
   // Regression guard for Trello cjAyJpgr — silent prod failure mode.
@@ -143,7 +155,7 @@ describe("launchWorkers", () => {
   // dashboard timelines for every non-danxbot dispatch) would only
   // surface in production.
   it("creates each repo's claude-projects host dir owned by UID 1000 BEFORE the per-repo compose up (Trello cjAyJpgr)", () => {
-    const { calls, streamingCalls, remote } = captureRemote();
+    const { calls, ordered, remote } = captureRemote();
     launchWorkers(remote, makeConfig(["danxbot", "gpt-manager"]), {
       workerImage: "img",
       claudeAuthDir: "/danxbot/claude-auth",
@@ -160,14 +172,33 @@ describe("launchWorkers", () => {
       "sudo mkdir -p /danxbot/repos/gpt-manager/claude-projects && sudo chown 1000:1000 /danxbot/repos/gpt-manager/claude-projects",
     );
 
-    // Order matters — chown must run BEFORE the worker compose `up`, otherwise
-    // Docker auto-creates the bind source as root-owned and chown can't catch
-    // up before the first JSONL write fails. We assert each repo's mkdir/chown
-    // appears in `sshRun` AND its corresponding compose-up appears later in
-    // `sshRunStreaming` (the two channels are separate; the cross-channel
-    // sequence is implicit in the loop body).
-    expect(streamingCalls.some((c) => c.includes("worker-danxbot up -d"))).toBe(true);
-    expect(streamingCalls.some((c) => c.includes("worker-gpt-manager up -d"))).toBe(true);
+    // Cross-channel ordering: chown MUST run before compose-up. If compose
+    // runs first, Docker auto-creates the bind source as root-owned and the
+    // chown can't catch up before the first JSONL write fails. We assert
+    // the mkdir's index in the unified log is strictly less than its
+    // corresponding compose-up's index, per repo. A swap of the two
+    // `remote.*` calls in launchWorkers would flip the indices and fail
+    // this assertion — the previous shape (separate `calls`/`streamingCalls`
+    // arrays) couldn't catch that swap because each call still landed in
+    // its own array.
+    for (const repoName of ["danxbot", "gpt-manager"]) {
+      const mkdirIdx = ordered.findIndex(
+        (c) =>
+          c.channel === "run" &&
+          c.cmd.includes(`mkdir -p /danxbot/repos/${repoName}/claude-projects`),
+      );
+      const composeIdx = ordered.findIndex(
+        (c) =>
+          c.channel === "streaming" &&
+          c.cmd.includes(`worker-${repoName} up -d`),
+      );
+      expect(mkdirIdx, `mkdir for ${repoName} not found in ordered log`).toBeGreaterThanOrEqual(0);
+      expect(composeIdx, `compose-up for ${repoName} not found in ordered log`).toBeGreaterThanOrEqual(0);
+      expect(
+        mkdirIdx < composeIdx,
+        `mkdir for ${repoName} (index ${mkdirIdx}) must precede its compose-up (index ${composeIdx})`,
+      ).toBe(true);
+    }
   });
 
   it("never creates the legacy shared /danxbot/claude-projects dir — that path is gone (Trello cjAyJpgr)", () => {
