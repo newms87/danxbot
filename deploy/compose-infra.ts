@@ -9,10 +9,13 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 import { applyTemplateVars, type RemoteHost } from "./remote.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE = resolve(__dirname, "templates/docker-compose.prod.yml");
+const REPO_ROOT = resolve(__dirname, "..");
+const PLAYWRIGHT_SOURCE_DIR = "playwright-screenshot";
 
 export function renderProdCompose(
   ecrImage: string,
@@ -77,6 +80,37 @@ export function pruneStaleDockerImages(remote: RemoteHost): void {
   remote.sshRunStreaming(PRUNE_COMMAND);
 }
 
+/**
+ * Ship the playwright-screenshot/ source tree to the EC2 instance so the
+ * prod compose file's `build: ./playwright-screenshot` step has a Dockerfile
+ * + server.ts to build from. Mirrors the local docker-compose.yml shape
+ * verbatim — same Dockerfile, same source, same build context — instead of
+ * pushing a custom image to ECR or trying to run the base playwright image
+ * directly (which has no HTTP server inside, see Trello 4u13Qe8r).
+ *
+ * Implementation: tar the source dir locally, scp the tarball, extract on
+ * the instance under /danxbot/playwright-screenshot/. Idempotent — wipes
+ * the remote dir before extract so removed files don't linger across
+ * deploys. tar pipe is used instead of `scp -r` for cross-version
+ * reliability (some scp builds reject directory uploads without -r, and
+ * -r itself has surprising symlink behavior).
+ */
+export function uploadPlaywrightSource(remote: RemoteHost): void {
+  console.log("\n── Uploading /danxbot/playwright-screenshot/ source ──");
+  const localTmpDir = mkdtempSync(resolve(tmpdir(), "danxbot-pw-"));
+  const tarball = resolve(localTmpDir, `${PLAYWRIGHT_SOURCE_DIR}.tar`);
+  execSync(`tar -cf ${tarball} -C ${REPO_ROOT} ${PLAYWRIGHT_SOURCE_DIR}`);
+  remote.scpUpload(tarball, `/tmp/${PLAYWRIGHT_SOURCE_DIR}.tar`);
+  remote.sshRun(
+    [
+      `sudo rm -rf /danxbot/${PLAYWRIGHT_SOURCE_DIR}`,
+      `sudo tar -xf /tmp/${PLAYWRIGHT_SOURCE_DIR}.tar -C /danxbot`,
+      `sudo chown -R ubuntu:ubuntu /danxbot/${PLAYWRIGHT_SOURCE_DIR}`,
+      `sudo rm /tmp/${PLAYWRIGHT_SOURCE_DIR}.tar`,
+    ].join(" && "),
+  );
+}
+
 export function uploadAndRestartInfra(
   remote: RemoteHost,
   ecrImage: string,
@@ -95,6 +129,10 @@ export function uploadAndRestartInfra(
     "sudo mv /tmp/docker-compose.prod.yml /danxbot/docker-compose.prod.yml && sudo chown ubuntu:ubuntu /danxbot/docker-compose.prod.yml",
   );
 
+  // Ship the playwright build context — the compose file's
+  // `build: ./playwright-screenshot` requires source on the instance.
+  uploadPlaywrightSource(remote);
+
   // Per-repo claude-projects host dirs are pre-created in launchWorkers()
   // — they're sibling concerns to the per-repo worker compose mount, so
   // creation lives next to that. This function used to mkdir a shared
@@ -105,7 +143,10 @@ export function uploadAndRestartInfra(
     `aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${registry}`,
   );
   remote.sshRunStreaming(`docker pull ${ecrImage}`);
+  // `--build` triggers `docker compose build` for any service with a
+  // `build:` block — i.e. playwright. Builds are layer-cached, so steady-
+  // state deploys with no playwright-source change are near-instant.
   remote.sshRunStreaming(
-    "cd /danxbot && docker compose -f docker-compose.prod.yml up -d --remove-orphans --force-recreate",
+    "cd /danxbot && docker compose -f docker-compose.prod.yml up -d --build --remove-orphans --force-recreate",
   );
 }

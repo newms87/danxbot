@@ -43,7 +43,7 @@ ${CLAUDE_PROJECTS_MOUNTS}
         max-file: "3"
 
   playwright:
-    image: mcr.microsoft.com/playwright:v1.40.0-jammy
+    build: ./playwright-screenshot
     restart: always
     extra_hosts:
       - "host.docker.internal:host-gateway"

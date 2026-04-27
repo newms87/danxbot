@@ -142,9 +142,13 @@ describe("uploadAndRestartInfra", () => {
     const remote = {
       sshRun: () => {},
       sshRunStreaming: () => {},
-      scpUpload: (src: string) => {
-        // src is the locally-rendered compose file; read its bytes back.
-        uploadedYaml = readFileSync(src, "utf-8");
+      scpUpload: (src: string, dst: string) => {
+        // uploadAndRestartInfra now ships two artifacts: the rendered
+        // compose file and the playwright-screenshot/ tarball. Filter on
+        // the destination so this test stays focused on the compose yaml.
+        if (dst.endsWith("docker-compose.prod.yml")) {
+          uploadedYaml = readFileSync(src, "utf-8");
+        }
       },
     } as unknown as RemoteHost;
 
@@ -161,6 +165,62 @@ describe("uploadAndRestartInfra", () => {
     );
     // Negative guard — the legacy shared-source line must not be in the rendered yaml.
     expect(uploadedYaml).not.toMatch(/^\s*-\s*\/danxbot\/claude-projects:/m);
+  });
+
+  it("ships the playwright-screenshot/ build context so prod compose's `build: ./playwright-screenshot` resolves on the instance (Trello 4u13Qe8r)", () => {
+    // The prod compose template uses `build: ./playwright-screenshot`
+    // identically to local. Without the source on the instance, docker
+    // compose up fails with "no such file or directory" instead of building.
+    // The legacy shape (`image: mcr.microsoft.com/playwright:...`) ran a
+    // base image with no HTTP server inside — restart loop forever.
+    const { scpUploads, calls, remote } = captureRemote();
+    uploadAndRestartInfra(remote, "img", 5555, "us-east-1", ["danxbot"]);
+
+    // tarball uploaded to /tmp on the instance
+    const tarUploads = scpUploads.filter(([, dst]) =>
+      dst.endsWith("playwright-screenshot.tar"),
+    );
+    expect(tarUploads.length).toBe(1);
+
+    // extracted under /danxbot with ubuntu ownership; remote tar removed
+    const extractCmd = calls.find((c) => c.includes("tar -xf"));
+    expect(extractCmd).toBeDefined();
+    expect(extractCmd).toContain(
+      "/tmp/playwright-screenshot.tar -C /danxbot",
+    );
+    expect(extractCmd).toContain(
+      "sudo rm -rf /danxbot/playwright-screenshot",
+    );
+    expect(extractCmd).toContain(
+      "sudo chown -R ubuntu:ubuntu /danxbot/playwright-screenshot",
+    );
+  });
+
+  it("invokes `docker compose up -d --build` so the playwright service is rebuilt from source on every deploy", () => {
+    // Without --build, compose reuses whatever cached image is tagged for
+    // the service — which on the FIRST deploy after this card lands does
+    // not exist (the legacy base-image entry was deleted). --build also
+    // ensures a server.ts edit on the next deploy actually ships.
+    const { streamingCalls, remote } = captureRemote();
+    uploadAndRestartInfra(remote, "img", 5555, "us-east-1", ["danxbot"]);
+
+    const upCmd = streamingCalls.find((c) => c.includes("compose"));
+    expect(upCmd).toContain("--build");
+    expect(upCmd).toContain("up -d");
+  });
+});
+
+describe("prod compose template", () => {
+  it("uses `build: ./playwright-screenshot` matching local docker-compose.yml — Trello 4u13Qe8r", () => {
+    // Local builds from source; prod must too. The legacy shape
+    // (`image: mcr.microsoft.com/playwright:v1.40.0-jammy`) shipped a base
+    // image with no HTTP server and stuck in a restart loop on prod.
+    // Locking the build-context shape prevents a future agent from
+    // "simplifying" back to an off-the-shelf image without checking that
+    // the image actually serves /screenshot, /html, /health.
+    const out = renderProdCompose("img", 5555, ["danxbot"]);
+    expect(out).toContain("build: ./playwright-screenshot");
+    expect(out).not.toMatch(/image:\s+mcr\.microsoft\.com\/playwright/);
   });
 });
 
