@@ -8,6 +8,13 @@
         "TRELLO_TOKEN": "${TRELLO_TOKEN}",
         "TRELLO_BOARD_ID": "${TRELLO_BOARD_ID}"
       }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["tsx", "/danxbot/app/mcp-servers/playwright/src/index.ts"],
+      "env": {
+        "PLAYWRIGHT_URL": "http://playwright:3000"
+      }
     }
   }
 }
