@@ -1154,12 +1154,12 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
-      env: { DANXBOT_REPO_NAME: "platform", DANXBOT_EPHEMERAL: "1" },
+      env: { DANXBOT_REPO_NAME: "platform", DANXBOT_TEST_EXTRA: "1" },
     });
 
     const spawnEnv = mockSpawn.mock.calls[0][2].env;
     expect(spawnEnv.DANXBOT_REPO_NAME).toBe("platform");
-    expect(spawnEnv.DANXBOT_EPHEMERAL).toBe("1");
+    expect(spawnEnv.DANXBOT_TEST_EXTRA).toBe("1");
   });
 
   it("logs prompt to disk with dispatch tag", async () => {
