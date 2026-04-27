@@ -28,6 +28,11 @@ vi.mock("../agent/claude-auth-preflight.js", () => ({
   preflightClaudeAuth: (...args: unknown[]) => mockPreflightClaudeAuth(...args),
 }));
 
+const mockPreflightProjectsDir = vi.fn().mockResolvedValue({ ok: true });
+vi.mock("../agent/projects-dir-preflight.js", () => ({
+  preflightProjectsDir: (...args: unknown[]) => mockPreflightProjectsDir(...args),
+}));
+
 import { getHealthStatus } from "./health.js";
 
 describe("getHealthStatus", () => {
@@ -35,6 +40,7 @@ describe("getHealthStatus", () => {
     vi.clearAllMocks();
     mockReadFlag.mockReturnValue(null);
     mockPreflightClaudeAuth.mockResolvedValue({ ok: true });
+    mockPreflightProjectsDir.mockResolvedValue({ ok: true });
   });
 
   it("returns 'ok' when DB and Slack are connected", async () => {
@@ -265,6 +271,124 @@ describe("getHealthStatus", () => {
       // Both signals are still surfaced even though only halt sets the
       // top-level status — the operator sees the full picture.
       expect(result.claude_auth.ok).toBe(false);
+      expect(result.criticalFailure).not.toBeNull();
+    });
+  });
+
+  describe("projects_dir field (Trello cjAyJpgr-followup)", () => {
+    it("exposes projects_dir.ok=true when preflight passes", async () => {
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.projects_dir).toEqual({ ok: true });
+      expect(result.status).toBe("ok");
+    });
+
+    it("returns 'degraded' with reason+summary when projects-dir preflight fails — readonly (the verified bug class)", async () => {
+      // The exact runtime shape we reproduced on 2026-04-26: dir exists
+      // but is owned by root, container UID 1000 can't write, claude
+      // silently fails to produce JSONL. /health surfaces this without
+      // waiting for the next dispatch to time out.
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockPreflightProjectsDir.mockResolvedValue({
+        ok: false,
+        reason: "readonly",
+        summary:
+          "Projects dir /home/danxbot/.claude/projects is not writable by the worker — chown the bind source on the host to UID 1000",
+      });
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.status).toBe("degraded");
+      expect(result.projects_dir.ok).toBe(false);
+      expect(result.projects_dir.reason).toBe("readonly");
+      // Contract: the summary names the chown remediation. Drop or
+      // rephrase only with a real reason — the dashboard renders this
+      // verbatim on the Agents tab.
+      expect(result.projects_dir.summary).toMatch(/chown/);
+    });
+
+    it("returns 'degraded' when only projects_dir is broken — independent of auth, db, slack", async () => {
+      // Auth + db + slack all healthy. projects_dir alone demoting the
+      // worker out of "ok" proves the field has its own seat in the
+      // status calculation, not folded into auth.
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockPreflightProjectsDir.mockResolvedValue({
+        ok: false,
+        reason: "missing",
+        summary: "Projects dir does not exist",
+      });
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.status).toBe("degraded");
+      expect(result.claude_auth.ok).toBe(true);
+      expect(result.projects_dir.ok).toBe(false);
+      expect(result.projects_dir.reason).toBe("missing");
+    });
+
+    it("surfaces both signals when auth AND projects_dir are broken — neither field hides the other", async () => {
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockPreflightClaudeAuth.mockResolvedValue({
+        ok: false,
+        reason: "expired",
+        summary: "claude-auth OAuth token expired",
+      });
+      mockPreflightProjectsDir.mockResolvedValue({
+        ok: false,
+        reason: "readonly",
+        summary: "Projects dir is not writable",
+      });
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.status).toBe("degraded");
+      expect(result.claude_auth.ok).toBe(false);
+      expect(result.claude_auth.reason).toBe("expired");
+      expect(result.projects_dir.ok).toBe(false);
+      expect(result.projects_dir.reason).toBe("readonly");
+    });
+
+    it("'halted' still wins over projects-dir-broken — halt takes precedence", async () => {
+      mockCheckDbConnection.mockResolvedValue(true);
+      mockIsSlackConnected.mockReturnValue(true);
+      mockGetTotalQueuedCount.mockReturnValue(0);
+      mockGetQueueStats.mockReturnValue({});
+      mockReadFlag.mockReturnValue({
+        timestamp: "2026-04-21T00:00:00.000Z",
+        source: "agent" as const,
+        dispatchId: "d-1",
+        reason: "MCP Trello unavailable",
+      });
+      mockPreflightProjectsDir.mockResolvedValue({
+        ok: false,
+        reason: "readonly",
+        summary: "Projects dir is not writable",
+      });
+
+      const repo = makeRepoContext();
+      const result = await getHealthStatus(repo);
+
+      expect(result.status).toBe("halted");
+      // Both signals still surfaced — operator sees the full picture.
+      expect(result.projects_dir.ok).toBe(false);
       expect(result.criticalFailure).not.toBeNull();
     });
   });

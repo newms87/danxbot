@@ -9,6 +9,10 @@ import {
   preflightClaudeAuth,
   type PreflightFailureReason,
 } from "../agent/claude-auth-preflight.js";
+import {
+  preflightProjectsDir,
+  type ProjectsDirFailureReason,
+} from "../agent/projects-dir-preflight.js";
 
 /**
  * Status is three-valued:
@@ -45,6 +49,24 @@ export interface ClaudeAuthHealth {
   summary?: string;
 }
 
+export interface ProjectsDirHealth {
+  ok: boolean;
+  /**
+   * Failure category from `preflightProjectsDir`. Omitted when `ok` is true.
+   * Trello cjAyJpgr-followup: `missing` (dir doesn't exist), `readonly`
+   * (root-owned bind source — UID 1000 can't write), or `unreachable`
+   * (other IO error).
+   */
+  reason?: ProjectsDirFailureReason;
+  /**
+   * Human-readable message — same string spawnAgent throws as the dispatch
+   * launch error. Carries the chown remediation in the body so the
+   * operator sees the exact fix command without leaving the dashboard.
+   * Omitted when `ok` is true.
+   */
+  summary?: string;
+}
+
 export interface WorkerHealthResponse {
   status: WorkerHealthStatus;
   repo: string;
@@ -64,6 +86,14 @@ export interface WorkerHealthResponse {
    */
   claude_auth: ClaudeAuthHealth;
   /**
+   * Result of the projects-dir preflight (Trello cjAyJpgr-followup). Same
+   * dispatch-gating contract as claude_auth: when `ok` is false the
+   * worker WILL reject `/api/launch` with a 503, and the dashboard's
+   * Agents tab can surface the chown remediation so the operator
+   * doesn't waste a dispatch discovering the broken bind.
+   */
+  projects_dir: ProjectsDirHealth;
+  /**
    * When the poller's critical-failure flag is present, this carries the
    * parsed payload so the dashboard can render the banner without a
    * second read from disk. Null when the flag is absent.
@@ -78,21 +108,35 @@ export async function getHealthStatus(
   const dbConnected = await checkDbConnection();
   const slackExpected = repo.slack.enabled;
   const criticalFailure = readFlag(repo.localPath);
-  const authResult = await preflightClaudeAuth();
+  // Run both preflights in parallel — they're independent file-system
+  // probes, no need to serialize.
+  const [authResult, projectsResult] = await Promise.all([
+    preflightClaudeAuth(),
+    preflightProjectsDir(),
+  ]);
   const claude_auth: ClaudeAuthHealth = authResult.ok
     ? { ok: true }
     : { ok: false, reason: authResult.reason, summary: authResult.summary };
+  const projects_dir: ProjectsDirHealth = projectsResult.ok
+    ? { ok: true }
+    : {
+        ok: false,
+        reason: projectsResult.reason,
+        summary: projectsResult.summary,
+      };
 
   // Halt takes precedence over degraded/ok — operator must investigate
-  // before anything else matters. Auth-broken folds into degraded with
-  // db/slack: same severity tier, different field tells the story.
+  // before anything else matters. Auth-broken and projects-dir-broken
+  // both fold into degraded with db/slack: same severity tier, the
+  // per-field detail tells the operator which one fired.
   let status: WorkerHealthStatus;
   if (criticalFailure) {
     status = "halted";
   } else if (
     dbConnected &&
     (!slackExpected || slackConnected) &&
-    claude_auth.ok
+    claude_auth.ok &&
+    projects_dir.ok
   ) {
     status = "ok";
   } else {
@@ -110,6 +154,7 @@ export async function getHealthStatus(
     queued_messages: getTotalQueuedCount(),
     queue_by_thread: getQueueStats(),
     claude_auth,
+    projects_dir,
     criticalFailure,
   };
 }
