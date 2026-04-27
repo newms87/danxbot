@@ -3,6 +3,11 @@ dist/
 docker-compose.override.yml
 .env
 .env.local
+# Per-target overlays consumed by deploy/secrets.ts (e.g. .env.platform,
+# .env.gpt) — same secret content as .env, so always gitignored.
+# Allow .env.example so the convention can be committed.
+.env.*
+!.env.example
 threads/
 data/
 .poller-running
@@ -28,7 +33,7 @@ claude-auth/*
 .claude/rules/danx-repo-overview.md
 .claude/rules/danx-repo-workflow.md
 .claude/rules/danx-trello-config.md
-.claude/skills/danx-*/
+.claude/skills/danx-*
 repo-overrides/*
 !repo-overrides/.gitkeep
 docs/domains/

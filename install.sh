@@ -91,3 +91,49 @@ if [ -f .env ]; then
     fi
   fi
 fi
+
+# Wire /danx-* skills as symlinks at repo-root .claude/skills/ so the
+# developer's interactive `claude` (run from any of these repos) can
+# invoke /danx-next, /danx-start, /danx-ideate, /danx-triage. Source
+# of truth is danxbot's inject pipeline at
+# src/poller/inject/workspaces/trello-worker/.claude/skills/.
+#
+# - For danxbot itself: symlink → ../../src/poller/inject/.../skills/<n>
+#   (resolves immediately; no poller tick required).
+# - For each connected repo in REPOS: symlink → ../../.danxbot/
+#   workspaces/trello-worker/.claude/skills/<n> (resolves once the
+#   danxbot poller has run injectDanxSkills() for that repo).
+#
+# Idempotent: `ln -sfn` overwrites stale symlinks without prompting.
+# Gitignored on both sides via `.claude/skills/danx-*` patterns —
+# this script is the only authorized writer.
+DANX_SKILLS=(danx-ideate danx-next danx-start danx-triage)
+
+echo ""
+echo "Wiring /danx-* skill symlinks..."
+
+# danxbot itself
+mkdir -p .claude/skills
+for s in "${DANX_SKILLS[@]}"; do
+  ln -sfn "../../src/poller/inject/workspaces/trello-worker/.claude/skills/$s" ".claude/skills/$s"
+done
+echo "  danxbot: ${DANX_SKILLS[*]}"
+
+# Connected repos (REPOS env var was sourced from .env above)
+if [ -n "${REPOS:-}" ]; then
+  IFS=',' read -ra SKILL_ENTRIES <<< "$REPOS"
+  for entry in "${SKILL_ENTRIES[@]}"; do
+    name="${entry%%:*}"
+    [ -z "${name}" ] && continue
+    if [ ! -d "repos/${name}" ]; then
+      echo "  WARN: repos/${name} not present — skipping skill symlinks"
+      continue
+    fi
+    repo_skills_dir="repos/${name}/.claude/skills"
+    mkdir -p "$repo_skills_dir"
+    for s in "${DANX_SKILLS[@]}"; do
+      ln -sfn "../../.danxbot/workspaces/trello-worker/.claude/skills/$s" "$repo_skills_dir/$s"
+    done
+    echo "  ${name}: ${DANX_SKILLS[*]} (resolves after first poller tick)"
+  done
+fi

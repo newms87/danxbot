@@ -450,6 +450,9 @@ Present the results clearly:
    - `/danx-next` — Process the top ToDo card
    - `/danx-start` — Process all ToDo cards
    - `/danx-ideate` — Explore the repo and generate feature cards
+   - `/danx-triage` — Audit + classify + reorder Trello cards by priority
+
+   These are wired by `install.sh` as gitignored symlinks at `<repo>/.claude/skills/danx-*` pointing into the danxbot inject pipeline. Connected-repo symlinks resolve once the poller has ticked at least once for that repo.
 
 4. **Adding work:**
    - Add cards to the Trello board's **ToDo** list with descriptions
