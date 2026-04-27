@@ -141,6 +141,19 @@ Flow:
 
 Agents always have `danxbot_complete` available — even when the dispatch did not pass MCP config for any other reason. The launcher always injects it.
 
+## Multi-block assistant turns — one API response, multiple JSONL lines, ONE usage block
+
+Empirically verified against real Claude Code captures (gpt-manager job `830cbd99`, danxbot smoke `2e60f7ce`): when an assistant turn returns more than one content block (text + tool_use, thinking + text + tool_use, etc.), Claude Code writes ONE JSONL entry per content block, but stamps the IDENTICAL response-level `message.usage` on every entry. All entries share the same `message.id`. The API charged the response ONCE; the JSONL just splits the rendering.
+
+Any code that accumulates `usage` across JSONL entries MUST dedupe by `message.id` — without it, multi-block turns count 2-5× their real cost. This bit production once (commit `d11b63d`): the dashboard reported `200,956` total tokens against a real API charge of `100,478`. The producers in this codebase that sum usage across entries are:
+
+- `src/agent/launcher.ts` — `job.usage` accumulator in the watcher subscriber. Closure-local `seenUsageMessageIds: Set<string>`; skips entries whose `messageId` was already accumulated.
+- `src/dashboard/jsonl-reader.ts` — `parseJsonlContent` aggregates `usage` blocks. Same per-call Set, applied BEFORE pushing blocks so timeline display + totals both stay consistent.
+
+The dedup key flows from `convertJsonlEntry` (in `session-log-watcher.ts`) which surfaces `data.messageId` for assistant entries. Both producers consume that field. A new consumer that accumulates usage from watcher entries (e.g., a Laravel forwarder, a metrics emitter) MUST dedupe by `messageId` or it will inherit the bug — see Trello `uPDpsqhe` for the ongoing `LaravelForwarder` instance of this same trap.
+
+Defensive: if `messageId` is missing on an entry that has `usage` (never seen in real Claude Code output), accumulate anyway and `log.warn` once-per-dispatch. Better to over-count a malformed line than to silently zero out billable usage.
+
 ## JSONL File Layout — Parents and Sub-Agents
 
 Empirically verified against real Claude Code captures:
