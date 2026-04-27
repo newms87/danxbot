@@ -8,6 +8,11 @@ import {
   makeRouterResult,
 } from "../__tests__/helpers/fixtures.js";
 import { createMockWebClient } from "../__tests__/helpers/slack-mock.js";
+import {
+  installSlackBoltMock,
+  getLatestFakeApp,
+  resetFakeAppRegistry,
+} from "../__tests__/integration/helpers/fake-slack-app.js";
 
 // --- Config mock (required before any src/slack/listener.js import chain) ---
 
@@ -122,24 +127,9 @@ vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
 }));
 
-// `@slack/bolt` — App must be a real class so `new App()` works.
-let capturedMessageHandler: Function;
-
-vi.mock("@slack/bolt", () => {
-  return {
-    App: class MockApp {
-      client = {
-        auth: {
-          test: vi.fn().mockResolvedValue({ user_id: "BOT_USER_ID" }),
-        },
-      };
-      message(handler: Function) {
-        capturedMessageHandler = handler;
-      }
-      async start() {}
-    },
-  };
-});
+// `@slack/bolt` — backed by the canonical `FakeSlackApp` so tests can
+// retrieve the captured handler via `getLatestFakeApp()`.
+vi.mock("@slack/bolt", () => installSlackBoltMock());
 
 // Mock the slack allowlist profile via the real module (it's a pure
 // data structure — no need to mock).
@@ -201,10 +191,19 @@ beforeEach(async () => {
 
   // Reset listener state (shutdown flag and in-flight tracking)
   resetListenerState();
+  // Reset the fake-bolt registry so the previous test's App instance
+  // doesn't leak into `getLatestFakeApp()` for this one.
+  resetFakeAppRegistry();
 
   // Re-register handler each test (startSlackListener calls app.message(handler))
   await startSlackListener(makeRepoContext());
-  handler = capturedMessageHandler as typeof handler;
+  const fakeApp = getLatestFakeApp();
+  if (!fakeApp) {
+    throw new Error(
+      "startSlackListener did not construct a FakeSlackApp — vi.mock(\"@slack/bolt\") wiring is broken",
+    );
+  }
+  handler = fakeApp.getMessageHandler() as typeof handler;
   client = createMockWebClient();
 
   // Default: thread setup returns a basic thread state

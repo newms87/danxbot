@@ -16,6 +16,7 @@ REPOS_DIR := ./repos
        test test-unit test-integration test-validate test-system \
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
        test-system-error test-system-stall test-system-poller test-system-cleanup \
+       test-system-slack \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
        create-user reset-data
 
@@ -243,6 +244,19 @@ test-system-poller: ## Test Trello poller flow (requires TRELLO_API_KEY/TOKEN)
 
 test-system-cleanup: ## Verify no orphaned temp dirs or zombie jobs
 	@$(SYSTEM_TEST_SCRIPT) --test cleanup
+
+# Slack agent E2E test (Trello CudG7AJy). Default = free mode (vitest +
+# fake bolt + fake pool + mocked dispatch — no Anthropic spend, no
+# external infrastructure). REAL_CLAUDE=1 is reserved for the real
+# Haiku + real Opus harness (case #11), tracked in Trello Oos7TCZD —
+# fail loud until that lands so an operator passing the flag never
+# silently downgrades to free mode.
+test-system-slack: ## Run Slack agent E2E scenarios (free mode by default; REAL_CLAUDE=1 fails loud until Trello Oos7TCZD lands)
+ifeq ($(REAL_CLAUDE),1)
+	@echo "ERROR: REAL_CLAUDE=1 mode is not yet wired — see Trello Oos7TCZD." >&2; exit 1
+else
+	@npx vitest run src/__tests__/system/slack-agent-e2e.test.ts
+endif
 
 # --- Deploy ---
 #

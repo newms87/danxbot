@@ -90,6 +90,7 @@ Three layers — pick the one that matches your change.
 | `make test-system-stall` | 3 | varies | Stall detection (host-mode only) |
 | `make test-system-poller` | 3 | low | Trello poller card lifecycle (needs TRELLO_API_KEY/TOKEN) |
 | `make test-system-cleanup` | 3 | low | Orphaned temp dirs + zombie jobs |
+| `make test-system-slack` | 3 | free | Slack agent E2E — 10 scenarios (fake bolt + fake pool + mocked dispatch). Verifies router→dispatch→reply→reactions→sql substitution chain. `REAL_CLAUDE=1` reserved for real Haiku+Opus case #11 (not yet wired; see Trello CudG7AJy). |
 
 ## Conventions
 

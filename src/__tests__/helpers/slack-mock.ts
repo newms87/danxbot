@@ -1,36 +1,15 @@
-import { vi } from "vitest";
-
 /**
- * Creates a mock WebClient matching the subset of @slack/web-api
- * used by listener.ts and helpers.ts.
- */
-export function createMockWebClient() {
-  return {
-    chat: {
-      postMessage: vi.fn().mockResolvedValue({ ts: "mock-ts" }),
-      update: vi.fn().mockResolvedValue({}),
-    },
-    reactions: {
-      add: vi.fn().mockResolvedValue({}),
-      remove: vi.fn().mockResolvedValue({}),
-    },
-    conversations: {
-      replies: vi.fn().mockResolvedValue({ messages: [] }),
-    },
-    filesUploadV2: vi.fn().mockResolvedValue({}),
-  };
-}
-
-/**
- * Creates a mock App class that captures the message handler
- * registered via app.message(handler).
+ * Re-export the canonical bolt-WebClient double under its legacy name.
  *
- * After calling startSlackListener(), retrieve the handler:
- *   const handler = mockApp.message.mock.calls[0][0]
+ * The implementation moved to
+ * `src/__tests__/integration/helpers/fake-slack-app.ts` so a single source
+ * of truth covers BOTH unit tests (this re-export path) and the
+ * `slack-agent-e2e` system test (direct import). Anything new should
+ * import `createFakeWebClient` from `fake-slack-app.js` directly; this
+ * shim exists so the existing `createMockWebClient` call sites in
+ * `src/slack/helpers.test.ts` and `src/worker/slack-endpoints.test.ts`
+ * keep working without churn. The previous `createMockApp` export was
+ * dead code (zero callers) and was dropped.
  */
-export function createMockApp() {
-  return {
-    message: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-  };
-}
+
+export { createFakeWebClient as createMockWebClient } from "../integration/helpers/fake-slack-app.js";

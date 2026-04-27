@@ -12,11 +12,33 @@
  *
  * Environment variables:
  *   FAKE_CLAUDE_SESSION_DIR — Override the session directory (required for test isolation)
- *   FAKE_CLAUDE_SCENARIO — Controls behavior: "happy" (default), "error", "slow", "empty"
+ *   FAKE_CLAUDE_SCENARIO — Controls behavior:
+ *     - "happy" (default): Two assistant messages, exits clean.
+ *     - "error": Writes an error result entry, exits with non-zero.
+ *     - "slow": One message then goes silent (parent kills via SIGTERM).
+ *     - "empty": No assistant messages at all.
+ *     - "slack": Drives the Slack agent flow without spending API tokens —
+ *                POSTs progress updates to DANXBOT_SLACK_UPDATE_URL,
+ *                final reply to DANXBOT_SLACK_REPLY_URL, then completion
+ *                via DANXBOT_STOP_URL. See the "slack scenario" section
+ *                below for env-var contract.
  *   FAKE_CLAUDE_WRITE_DELAY_MS — Delay between JSONL entries (default: 50)
  *   FAKE_CLAUDE_EXIT_CODE — Exit code (default: 0, set to non-zero for error scenarios)
  *   FAKE_CLAUDE_LINGER_MS — Time to wait after writing entries before exiting (default: 3000).
  *                           Gives SessionLogWatcher time to discover the file (~1s) and poll.
+ *
+ * Slack scenario env (only consulted when FAKE_CLAUDE_SCENARIO=slack):
+ *   DANXBOT_SLACK_UPDATE_URL — Worker route for `danxbot_slack_post_update` POSTs
+ *   DANXBOT_SLACK_REPLY_URL  — Worker route for `danxbot_slack_reply` POSTs
+ *   DANXBOT_STOP_URL         — Worker route for `danxbot_complete` POSTs
+ *   FAKE_CLAUDE_SLACK_UPDATES — Newline-delimited progress messages (default: none)
+ *   FAKE_CLAUDE_SLACK_REPLY  — Final reply text (default: "Done.")
+ *   FAKE_CLAUDE_SLACK_SQL_BLOCK — Optional SQL string to inject as a
+ *       ```sql:execute …``` block into the final reply (covers the
+ *       K2zQYIdX substitution-path regression).
+ *   FAKE_CLAUDE_SLACK_STATUS — Final status sent to DANXBOT_STOP_URL
+ *                              (default: "completed"; "failed" + summary
+ *                              is the failure-injection path).
  */
 
 import { mkdirSync, appendFileSync } from "node:fs";
@@ -58,6 +80,163 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * POST a JSON body to the given URL. Resolves on any 2xx; rejects on
+ * network failure. Tests assert on the capture-server's recorded
+ * payload, not on this function's return value.
+ */
+async function postJson(url: string, body: Record<string, unknown>): Promise<void> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`fake-claude slack POST ${url} -> ${res.status}`);
+  }
+}
+
+/**
+ * Drive the Slack agent flow without spending API tokens.
+ *
+ * Sequence:
+ *   1. POST each line of FAKE_CLAUDE_SLACK_UPDATES to DANXBOT_SLACK_UPDATE_URL
+ *   2. Optionally splice FAKE_CLAUDE_SLACK_SQL_BLOCK into the final reply
+ *      as a ```sql:execute …``` block — this is the K2zQYIdX substitution
+ *      regression coverage path.
+ *   3. POST the final reply text to DANXBOT_SLACK_REPLY_URL.
+ *   4. POST {status, summary} to DANXBOT_STOP_URL via the
+ *      `danxbot_complete` MCP shape so the worker finalizes the dispatch
+ *      row.
+ *
+ * Each POST is also written to JSONL as an assistant tool_use + tool_result
+ * pair so the SessionLogWatcher sees activity (the heartbeat lifecycle test
+ * relies on this — a slack scenario with no JSONL writes between
+ * dispatch start and completion looks like an inactivity stall).
+ */
+async function runSlackScenario(): Promise<void> {
+  // All three URLs are required — the slack scenario emulates the full
+  // dispatch lifecycle (update + reply + complete) and a missing URL is
+  // a misconfiguration in production every bit as bad as a broken MCP
+  // server. Empty string explicitly fails the same as undefined so a
+  // future caller that passes `DANXBOT_STOP_URL=""` (e.g. shell-quoted
+  // expansion of an unset var) gets the same loud error as "undefined".
+  const required = ["DANXBOT_SLACK_UPDATE_URL", "DANXBOT_SLACK_REPLY_URL", "DANXBOT_STOP_URL"] as const;
+  const missing = required.filter(
+    (key) => !process.env[key] || process.env[key] === "",
+  );
+  if (missing.length > 0) {
+    process.stderr.write(
+      `fake-claude slack scenario requires ${missing.join(", ")}\n`,
+    );
+    process.exit(1);
+  }
+  // Non-null assertions safe — the missing-vars guard above exited the
+  // process if any of these were undefined or "".
+  const updateUrl = process.env.DANXBOT_SLACK_UPDATE_URL!;
+  const replyUrl = process.env.DANXBOT_SLACK_REPLY_URL!;
+  const stopUrl = process.env.DANXBOT_STOP_URL!;
+
+  const updatesEnv = process.env.FAKE_CLAUDE_SLACK_UPDATES ?? "";
+  const updates = updatesEnv ? updatesEnv.split("\n").filter((s) => s.length > 0) : [];
+  const replyText = process.env.FAKE_CLAUDE_SLACK_REPLY ?? "Done.";
+  const sqlBlock = process.env.FAKE_CLAUDE_SLACK_SQL_BLOCK;
+  const finalStatus = process.env.FAKE_CLAUDE_SLACK_STATUS ?? "completed";
+
+  // Each `post_update` corresponds to one assistant tool_use call in the
+  // JSONL — keep the watcher seeing activity.
+  for (let i = 0; i < updates.length; i++) {
+    const text = updates[i];
+    writeEntry({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4-7",
+        content: [
+          {
+            type: "tool_use",
+            id: `tool_update_${i + 1}`,
+            name: "mcp__danxbot__danxbot_slack_post_update",
+            input: { text },
+          },
+        ],
+        usage: { input_tokens: 50, output_tokens: 10 },
+      },
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    await postJson(updateUrl, { text });
+    writeEntry({
+      type: "user",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: `tool_update_${i + 1}`, content: "ok", is_error: false },
+        ],
+      },
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    await sleep(writeDelayMs);
+  }
+
+  const finalText = sqlBlock
+    ? `${replyText}\n\n\`\`\`sql:execute\n${sqlBlock}\n\`\`\``
+    : replyText;
+
+  // Final reply tool_use → POST → tool_result.
+  writeEntry({
+    type: "assistant",
+    message: {
+      model: "claude-opus-4-7",
+      content: [
+        {
+          type: "tool_use",
+          id: "tool_reply",
+          name: "mcp__danxbot__danxbot_slack_reply",
+          input: { text: finalText },
+        },
+      ],
+      usage: { input_tokens: 200, output_tokens: 80 },
+    },
+    timestamp: new Date().toISOString(),
+    sessionId,
+  });
+  await postJson(replyUrl, { text: finalText });
+  writeEntry({
+    type: "user",
+    message: {
+      content: [
+        { type: "tool_result", tool_use_id: "tool_reply", content: "ok", is_error: false },
+      ],
+    },
+    timestamp: new Date().toISOString(),
+    sessionId,
+  });
+
+  await sleep(writeDelayMs);
+
+  // Final completion signal. `danxbot_complete` is what the worker uses
+  // to know the dispatch is done — without it the worker would wait for
+  // inactivity timeout, which makes free-mode tests slow and brittle.
+  const summary = process.env.FAKE_CLAUDE_SLACK_SUMMARY ?? finalText;
+  await postJson(stopUrl, { status: finalStatus, summary });
+
+  // Result entry — session complete.
+  writeEntry({
+    type: "result",
+    subtype: finalStatus === "completed" ? "success" : "error",
+    cost_usd: 0.0,
+    num_turns: updates.length + 1,
+    duration_ms: 200,
+    duration_api_ms: 100,
+    is_error: finalStatus !== "completed",
+    result: finalText,
+    timestamp: new Date().toISOString(),
+    sessionId,
+  });
+
+  await sleep(lingerMs);
+}
+
 async function runScenario(): Promise<void> {
   const now = new Date().toISOString();
 
@@ -73,6 +252,11 @@ async function runScenario(): Promise<void> {
 
   if (scenario === "empty") {
     // No assistant messages — just exit
+    return;
+  }
+
+  if (scenario === "slack") {
+    await runSlackScenario();
     return;
   }
 
