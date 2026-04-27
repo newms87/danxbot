@@ -127,7 +127,7 @@ describe("callTool — playwright_screenshot", () => {
     vi.unstubAllGlobals();
   });
 
-  it("returns an MCP image content block with base64 PNG bytes", async () => {
+  it("returns a text summary block followed by an MCP image content block with base64 PNG bytes", async () => {
     // Non-UTF-8 bytes in the PNG to ensure the base64 path isn't
     // accidentally coerced through a UTF-8 string — same regression
     // guard as the dashboard proxy's binary-passthrough test.
@@ -147,12 +147,19 @@ describe("callTool — playwright_screenshot", () => {
       deps(),
     );
 
-    expect(content).toHaveLength(1);
-    expect(content[0].type).toBe("image");
-    if (content[0].type !== "image") throw new Error("type narrow");
-    expect(content[0].mimeType).toBe("image/png");
-    // base64-decode and compare bytes.
-    const decoded = Buffer.from(content[0].data, "base64");
+    expect(content).toHaveLength(2);
+    // Text summary block — gives the agent a textual hook for byte
+    // count + mime that the image content block does not surface.
+    expect(content[0].type).toBe("text");
+    if (content[0].type !== "text") throw new Error("type narrow");
+    expect(content[0].text).toBe(
+      `playwright_screenshot OK: ${pngBytes.length} bytes, mimeType=image/png`,
+    );
+    // Image block — base64 PNG bytes.
+    expect(content[1].type).toBe("image");
+    if (content[1].type !== "image") throw new Error("type narrow");
+    expect(content[1].mimeType).toBe("image/png");
+    const decoded = Buffer.from(content[1].data, "base64");
     expect(decoded.equals(Buffer.from(pngBytes))).toBe(true);
   });
 
@@ -219,8 +226,13 @@ describe("callTool — playwright_screenshot", () => {
       { url: "https://example.com", type: "jpeg" },
       deps(),
     );
-    if (content[0].type !== "image") throw new Error("type narrow");
-    expect(content[0].mimeType).toBe("image/jpeg");
+    expect(content).toHaveLength(2);
+    if (content[0].type !== "text") throw new Error("type narrow");
+    expect(content[0].text).toBe(
+      `playwright_screenshot OK: 4 bytes, mimeType=image/jpeg`,
+    );
+    if (content[1].type !== "image") throw new Error("type narrow");
+    expect(content[1].mimeType).toBe("image/jpeg");
   });
 
   it("defaults to image/png when the upstream omits Content-Type or returns a non-image type", async () => {
@@ -233,8 +245,13 @@ describe("callTool — playwright_screenshot", () => {
       { url: "https://example.com" },
       deps(),
     );
-    if (content[0].type !== "image") throw new Error("type narrow");
-    expect(content[0].mimeType).toBe("image/png");
+    expect(content).toHaveLength(2);
+    if (content[0].type !== "text") throw new Error("type narrow");
+    expect(content[0].text).toBe(
+      `playwright_screenshot OK: 2 bytes, mimeType=image/png`,
+    );
+    if (content[1].type !== "image") throw new Error("type narrow");
+    expect(content[1].mimeType).toBe("image/png");
   });
 
   it("surfaces upstream 5xx as a tool error whose message includes the status", async () => {

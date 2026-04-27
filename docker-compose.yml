@@ -99,6 +99,14 @@ services:
   playwright:
     build: ./playwright-screenshot
     restart: always
+    # WSL2 Docker Desktop's embedded resolver (127.0.0.11) intermittently
+    # fails to forward to upstream → ENOTFOUND for public hostnames inside
+    # this container. Pin public DNS so chromium can resolve target URLs.
+    # Local dev only — prod (deploy/templates/docker-compose.prod.yml) uses
+    # the EC2 host's working egress and does NOT need this.
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     environment:

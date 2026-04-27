@@ -201,6 +201,7 @@ async function callPlaywrightScreenshot(
   }
 
   const arrayBuf = await response.arrayBuffer();
+  const bytes = arrayBuf.byteLength;
   const base64 = Buffer.from(arrayBuf).toString("base64");
   // Read the upstream's declared Content-Type. Playwright currently
   // always returns PNG, but the forward-verbatim contract on
@@ -212,7 +213,20 @@ async function callPlaywrightScreenshot(
   const mimeType = upstreamCt.toLowerCase().startsWith("image/")
     ? upstreamCt.split(";")[0].trim()
     : "image/png";
-  return [{ type: "image", data: base64, mimeType }];
+  // Two-block response: a text summary the model can quote back
+  // verbatim (byte count, mime type) and the image bytes themselves.
+  // The image content block is rendered visually by Claude Code but
+  // its `data` field is NOT surfaced to the model's text context, so
+  // an agent that only sees the image cannot report the size. The
+  // text block closes that gap so callers can verify the round-trip
+  // and operators can audit screenshot sizes from session logs.
+  return [
+    {
+      type: "text",
+      text: `playwright_screenshot OK: ${bytes} bytes, mimeType=${mimeType}`,
+    },
+    { type: "image", data: base64, mimeType },
+  ];
 }
 
 async function callPlaywrightHtml(
