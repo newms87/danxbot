@@ -36,6 +36,10 @@ import {
   ClaudeAuthError,
 } from "./claude-auth-preflight.js";
 import {
+  preflightProjectsDir,
+  ProjectsDirError,
+} from "./projects-dir-preflight.js";
+import {
   createLaravelForwarder,
   deriveQueuePath,
 } from "./laravel-forwarder.js";
@@ -437,6 +441,18 @@ export async function spawnAgent(
   const authPreflight = await preflightClaudeAuth();
   if (!authPreflight.ok) {
     throw new ClaudeAuthError(authPreflight);
+  }
+
+  // Trello cjAyJpgr-followup: parallel silent-failure mode on the projects
+  // dir bind. If `~/.claude/projects/` is owned by root (Docker auto-create
+  // when the OLD `${CLAUDE_PROJECTS_DIR:?...}` mount resolved to a
+  // non-existent path on first compose-up), claude `-p` silently fails
+  // to write JSONL, the watcher never attaches, and the dispatch times
+  // out with no useful summary. Same pattern as auth-preflight: fail
+  // loud at spawn so the operator sees the actionable chown command.
+  const projectsPreflight = await preflightProjectsDir();
+  if (!projectsPreflight.ok) {
+    throw new ProjectsDirError(projectsPreflight);
   }
 
   const jobId = options.jobId ?? randomUUID();

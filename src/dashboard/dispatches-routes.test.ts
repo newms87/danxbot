@@ -300,3 +300,105 @@ describe("handleRawJsonl", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Per-repo dispatch timeline endpoint — Trello cjAyJpgr regression guard.
+//
+// The dashboard's per-repo path resolver translates a worker-internal
+// jsonlPath (`/home/danxbot/.claude/projects/...`) into a per-repo dashboard
+// mount (`/danxbot/app/claude-projects/<repo>/...`). The encoded session-dir
+// segment is identical across repos (it encodes the workspace cwd, which is
+// `/danxbot/app/repos/<repo>/.danxbot/workspace`), but the namespace segment
+// MUST be the repo's own name — never danxbot's, never the dev's home.
+//
+// Pre-fix, only danxbot dispatches showed timelines: the worker compose
+// files for connected repos still resolved CLAUDE_PROJECTS_DIR to a path
+// that didn't match the dashboard's per-repo mount, so workers wrote JSONL
+// in one place and the dashboard read from another. This test exercises
+// `handleGetDispatch` end-to-end for every target repo and asserts each
+// one's timeline reaches the response with the correct per-repo translated
+// path. Adding a new connected repo? Add it to TARGET_REPOS.
+// ---------------------------------------------------------------------------
+describe("handleGetDispatch — per-repo timeline resolution", () => {
+  const TARGET_REPOS = ["danxbot", "gpt-manager", "platform"] as const;
+
+  it.each(TARGET_REPOS)(
+    "returns the timeline for a %s dispatch via the per-repo translated path",
+    async (repoName) => {
+      // Arrange — encoded cwd matches the runtime convention
+      // (`/danxbot/app/repos/<repo>/.danxbot/workspace` → all `/` and `.`
+      // become `-`). Same shape as `encodeRepoCwd` in jsonl-path-resolver.ts.
+      const encodedCwd = `-danxbot-app-repos-${repoName}--danxbot-workspace`;
+      const sessionUuid = `sess-${repoName}`;
+      const workerPath = `/home/danxbot/.claude/projects/${encodedCwd}/${sessionUuid}.jsonl`;
+      const expectedTranslatedPath = `/danxbot/app/claude-projects/${repoName}/${encodedCwd}/${sessionUuid}.jsonl`;
+
+      mockGetDispatchById.mockResolvedValueOnce(
+        makeDispatch({ id: `job-${repoName}`, repoName, jsonlPath: workerPath }),
+      );
+      mockParseJsonlFile.mockResolvedValueOnce({
+        blocks: [
+          { type: "assistant_text", text: `hello from ${repoName}`, timestampMs: 1 },
+        ],
+        totals: {
+          tokensIn: 1,
+          tokensOut: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          tokensTotal: 2,
+          toolCallCount: 0,
+          subagentCount: 0,
+        },
+        sessionId: sessionUuid,
+      });
+      // Strategy 1 (stored worker path) misses; Strategy 2 (per-repo
+      // translated path) succeeds. If translation produced a wrong
+      // namespace (e.g. always `danxbot/`), this stat would reject and
+      // the test would fail.
+      mockStat.mockImplementation((p: string) =>
+        p === expectedTranslatedPath
+          ? Promise.resolve({ size: 100 })
+          : Promise.reject(new Error("ENOENT")),
+      );
+
+      // Act
+      const { res } = createMockReqRes("GET", `/api/dispatches/job-${repoName}`);
+      await handleGetDispatch(res, `job-${repoName}`);
+
+      // Assert
+      expect(res._getStatusCode()).toBe(200);
+      const body = JSON.parse(res._getBody());
+      expect(body.dispatch.repoName).toBe(repoName);
+      expect(body.timeline).toHaveLength(1);
+      expect(body.timeline[0].text).toBe(`hello from ${repoName}`);
+      expect(mockParseJsonlFile).toHaveBeenCalledWith(expectedTranslatedPath);
+    },
+  );
+
+  it.each(TARGET_REPOS)(
+    "returns an empty timeline for a %s dispatch when the per-repo JSONL is missing on disk",
+    async (repoName) => {
+      // The endpoint must not 500 when JSONL is genuinely absent — it returns
+      // an empty timeline. This guards the dispatched-but-not-yet-written
+      // window AND the case where a worker is mounting a stale CLAUDE_PROJECTS_DIR
+      // outside the dashboard's per-repo namespace (the original cjAyJpgr bug
+      // surface — empty timeline, not error).
+      const encodedCwd = `-danxbot-app-repos-${repoName}--danxbot-workspace`;
+      const workerPath = `/home/danxbot/.claude/projects/${encodedCwd}/sess-missing.jsonl`;
+
+      mockGetDispatchById.mockResolvedValueOnce(
+        makeDispatch({ id: `job-${repoName}`, repoName, jsonlPath: workerPath }),
+      );
+      mockStat.mockRejectedValue(new Error("ENOENT"));
+
+      const { res } = createMockReqRes("GET", `/api/dispatches/job-${repoName}`);
+      await handleGetDispatch(res, `job-${repoName}`);
+
+      expect(res._getStatusCode()).toBe(200);
+      const body = JSON.parse(res._getBody());
+      expect(body.timeline).toEqual([]);
+      expect(body.totals).toBeNull();
+      expect(mockParseJsonlFile).not.toHaveBeenCalled();
+    },
+  );
+});
+

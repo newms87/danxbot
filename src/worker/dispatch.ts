@@ -10,6 +10,7 @@ import {
 } from "../agent/launcher.js";
 import { McpResolveError } from "../agent/mcp-types.js";
 import { ClaudeAuthError } from "../agent/claude-auth-preflight.js";
+import { ProjectsDirError } from "../agent/projects-dir-preflight.js";
 import { dispatch, getActiveJob, listActiveJobs } from "../dispatch/core.js";
 import {
   WorkspaceNotFoundError,
@@ -434,6 +435,14 @@ export async function handleLaunch(
       json(res, 503, { error: err.message });
       return;
     }
+    if (err instanceof ProjectsDirError) {
+      // Same severity tier as auth — worker-config issue, 503. Trello
+      // cjAyJpgr-followup: the dir-perms class of broken bind that
+      // produces silent dispatch timeouts.
+      log.error(`Launch failed: projects-dir preflight (${err.reason})`, err);
+      json(res, 503, { error: err.message });
+      return;
+    }
     if (err instanceof McpResolveError) {
       json(res, 400, { error: err.message });
       return;
@@ -543,6 +552,11 @@ export async function handleResume(
   } catch (err) {
     if (err instanceof ClaudeAuthError) {
       log.error(`Resume failed: claude-auth preflight (${err.reason})`, err);
+      json(res, 503, { error: err.message });
+      return;
+    }
+    if (err instanceof ProjectsDirError) {
+      log.error(`Resume failed: projects-dir preflight (${err.reason})`, err);
       json(res, 503, { error: err.message });
       return;
     }

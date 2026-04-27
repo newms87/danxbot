@@ -85,6 +85,21 @@ vi.mock("./claude-auth-preflight.js", async () => {
   };
 });
 
+// Same shape for the projects-dir preflight (Trello cjAyJpgr-followup).
+// Default healthy; tests override per-call to assert the silent-failure
+// path. ProjectsDirError is kept real so `instanceof` checks still work.
+const mockPreflightProjectsDir = vi.fn().mockResolvedValue({ ok: true });
+vi.mock("./projects-dir-preflight.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("./projects-dir-preflight.js")
+  >("./projects-dir-preflight.js");
+  return {
+    ...actual,
+    preflightProjectsDir: (...args: unknown[]) =>
+      mockPreflightProjectsDir(...args),
+  };
+});
+
 vi.mock("./laravel-forwarder.js", () => ({
   createLaravelForwarder: vi.fn().mockReturnValue({
     consume: vi.fn(),
