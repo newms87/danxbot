@@ -92,21 +92,35 @@ if [ -f .env ]; then
   fi
 fi
 
+# Run the poller's inject pipeline once for every connected repo so
+# `<repo>/.danxbot/workspaces/trello-worker/.claude/skills/` (and
+# rules/tools/workspaces) is populated before the workers boot. Without
+# this step, the symlinks created below would dangle until the
+# corresponding worker had ticked at least once. Idempotent — the
+# poller runs the same `syncRepoFiles` on every tick.
+if [ -n "${REPOS:-}" ]; then
+  echo ""
+  echo "Pre-populating per-repo inject pipeline..."
+  npx tsx scripts/sync-repos.ts
+fi
+
 # Wire /danx-* skills as symlinks at repo-root .claude/skills/ so the
 # developer's interactive `claude` (run from any of these repos) can
 # invoke /danx-next, /danx-start, /danx-ideate, /danx-triage. Source
 # of truth is danxbot's inject pipeline at
 # src/poller/inject/workspaces/trello-worker/.claude/skills/.
 #
-# - For danxbot itself: symlink → ../../src/poller/inject/.../skills/<n>
-#   (resolves immediately; no poller tick required).
+# - For danxbot itself: symlink → ../../src/poller/inject/.../skills/<n>.
 # - For each connected repo in REPOS: symlink → ../../.danxbot/
-#   workspaces/trello-worker/.claude/skills/<n> (resolves once the
-#   danxbot poller has run injectDanxSkills() for that repo).
+#   workspaces/trello-worker/.claude/skills/<n>. Targets exist because
+#   the inject step above ran first.
 #
 # Idempotent: `ln -sfn` overwrites stale symlinks without prompting.
-# Gitignored on both sides via `.claude/skills/danx-*` patterns —
-# this script is the only authorized writer.
+# Note: `ln -sfn` does NOT replace pre-existing real directories at
+# the link path — those have to be removed manually before re-running
+# this section. (Only an issue for repos with a stale danx-* dir from
+# a prior copy-based install.) Gitignored on both sides via
+# `.claude/skills/danx-*` patterns; this script is the only writer.
 DANX_SKILLS=(danx-ideate danx-next danx-start danx-triage)
 
 echo ""
@@ -134,6 +148,6 @@ if [ -n "${REPOS:-}" ]; then
     for s in "${DANX_SKILLS[@]}"; do
       ln -sfn "../../.danxbot/workspaces/trello-worker/.claude/skills/$s" "$repo_skills_dir/$s"
     done
-    echo "  ${name}: ${DANX_SKILLS[*]} (resolves after first poller tick)"
+    echo "  ${name}: ${DANX_SKILLS[*]}"
   done
 fi

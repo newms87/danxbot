@@ -760,7 +760,7 @@ function copyFeaturesOnce(danxbotConfigDir: string): void {
  * workspace up to date. Each numbered step is its own helper — the
  * function body is the table of contents.
  */
-function syncRepoFiles(repo: RepoContext): void {
+export function syncRepoFiles(repo: RepoContext): void {
   const danxbotConfigDir = resolve(repo.localPath, ".danxbot/config");
   if (!existsSync(danxbotConfigDir)) return;
 
