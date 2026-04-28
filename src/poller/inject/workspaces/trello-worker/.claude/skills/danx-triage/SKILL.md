@@ -68,9 +68,68 @@ When the prompt is ambiguous, pick the more conservative scope and state it in t
 
 ---
 
-## Step 4 — Per-Card Audit (serial loop)
+## Step 4 — Per-Card Audit (parallel subagents)
 
-For each card in the filtered set, in whatever order the API returned them, run this full sequence before moving to the next card.
+**Dispatch one subagent per card via the `Agent` tool with `subagent_type: "general-purpose"`. Send all subagent calls in a single message so they run in parallel — this is the entire point of the parallel design and is what keeps the orchestrator's context small and the run fast.**
+
+The orchestrator does NOT read full card context, run git, or read code. It only:
+
+1. Builds the per-card subagent prompt from the card stub fetched in Step 3.
+2. Dispatches all subagents in parallel.
+3. Collects each subagent's structured return value.
+4. Hands the aggregated results to Step 5+.
+
+### Batching for rate limits
+
+Cap concurrency at **3 subagents per batch**. If the in-scope set exceeds 3, dispatch in waves of 3, awaiting each wave before starting the next. Within a wave, all dispatches go in one message (true parallel). Trello's ~300 req / 10s budget is never the bottleneck — subagent token cost and orchestrator output channel are. Three keeps each wave's aggregated tool-result payload bounded and lets the operator inspect early waves before committing to the rest.
+
+### Subagent contract
+
+Each subagent gets this prompt (substitute `<...>` placeholders):
+
+```
+You are a Triage subagent for ONE Trello card. Audit it and return a compact JSON result.
+
+Card:
+  id: <cardId>
+  shortLink: <shortLink>
+  shortUrl: <shortUrl>
+  name: <name>
+  idList: <idList>
+  idLabels: <idLabels-array>
+  dateCreated: <iso>
+
+Repo: <repoName>
+Triaged label ID: <triagedLabelId>
+Needs Help label ID: <needsHelpLabelId>
+
+Run steps 4a–4h exactly as defined in the danx-triage SKILL.md (read full card context, find evidence, classify, ICE-score keepers, detect deps, post the triage comment with the `<!-- danxbot-triage -->` marker, apply the Triaged label — and Needs Help if Ambiguous — and MOVE the card to its terminal list when state is Complete/Obsolete/Duplicate/Ambiguous).
+
+The orchestrator passes you the target list IDs for terminal moves:
+  Done list ID: <doneListId>
+  Cancelled list ID: <cancelledListId>
+  Needs Help list ID: <needsHelpListId>
+
+Do NOT reorder Keep/Partial cards (the orchestrator owns the topo + ICE sort across the full set — your card stays in its source list, position untouched). Return ONLY this JSON object on your final message, nothing else:
+
+{
+  "cardId": "<id>",
+  "shortLink": "<shortLink>",
+  "shortUrl": "<shortUrl>",
+  "name": "<name>",
+  "idList": "<idList>",
+  "state": "Keep|Partial|Complete|Obsolete|Duplicate|Ambiguous",
+  "ice": { "total": <int|null>, "I": <int|null>, "C": <int|null>, "E": <int|null> },
+  "deps": { "explicit": ["<shortLink>", ...], "inferred": ["<shortLink>", ...] },
+  "epic": { "isParent": <bool>, "parentShortLink": "<shortLink>|null", "phaseNumber": <int|null> },
+  "evidence": { "git": ["<sha>", ...], "code": ["<file:line>", ...] },
+  "error": "<string|null>"
+}
+
+If anything fails for THIS card, return the JSON with state="Ambiguous" and error="<message>" — do NOT throw. The orchestrator counts errors from this field.
+```
+
+### Subagent must do (steps run inside the subagent, not the orchestrator)
 
 ### 4a. Read Full Card Context
 
@@ -169,18 +228,24 @@ The `<!-- danxbot-triage -->` marker is how future triage runs recognize prior o
 
 De-duplicate if the label is already present. For **Ambiguous** cards, also add the `Needs Help` label ID.
 
-### 4h. Queue Trello Move (don't apply yet)
+### 4h. Apply terminal move (subagent, inline)
 
-Record the intended destination in memory:
+After steps 4a–4g succeed, the subagent moves the card itself based on classification:
 
-- `Keep` / `Partial` → stay in source list, position TBD (resolved by the reorder pass)
-- `Complete` → Done, position `top`
-- `Obsolete` / `Duplicate` → Cancelled, position `top`
-- `Ambiguous` → Needs Help, position `top`
+| State | Move via `mcp__trello__move_card` |
+|---|---|
+| `Keep` / `Partial` | NO MOVE — leave in source list (orchestrator's reorder pass handles position) |
+| `Complete` | `move_card(cardId, listId=<doneListId>, position="top")` |
+| `Obsolete` / `Duplicate` | `move_card(cardId, listId=<cancelledListId>, position="top")` |
+| `Ambiguous` | `move_card(cardId, listId=<needsHelpListId>, position="top")` |
 
-### 4i. Rate Limit Pause
+`position: "top"` is mandatory on every move (per the global Trello rule). Always include `boardId` if the move-tool supports it.
 
-Sleep 100ms before proceeding to the next card. Trello allows 300 req / 10s; 100ms between per-card operations (each card issues several reads + writes) keeps us well under the limit.
+If the move call fails, do NOT retry silently — set `error` in the returned JSON to `move_failed: <reason>` and keep the rest of the result intact. The orchestrator counts it in the `Errors` section of the report.
+
+### 4i. Wave gating
+
+Within a wave (≤3 parallel subagents), no per-card sleep. Between waves, no sleep needed either — three concurrent subagents issuing ~10 Trello calls each over ~30-60s wall is well below rate limits.
 
 ---
 
@@ -212,15 +277,13 @@ Per list (Review, Action Items, or whatever's in scope):
 
 ---
 
-## Step 7 — Apply Terminal Moves (Complete / Obsolete / Duplicate / Ambiguous)
+## Step 7 — Verify Terminal Moves
 
-Before touching list order, move these cards to their terminal lists:
+Terminal moves (Complete → Done, Obsolete/Duplicate → Cancelled, Ambiguous → Needs Help) are applied INLINE by each subagent in step 4h, so by the time the orchestrator reaches Step 7 the source lists already contain only Keep/Partial cards.
 
-For each queued terminal move:
-1. `mcp__trello__move_card(cardId, boardId, listId=<target>, position="top")`
-2. Sleep 100ms
-
-This keeps the source list clean of non-kept cards before the reorder pass runs.
+Verification only:
+1. For each subagent result with state in `{Complete, Obsolete, Duplicate, Ambiguous}`, ensure `error` is not `move_failed: ...`. Any move-failed result is surfaced in the report's `### Errors` section and skipped from the reorder pass.
+2. No re-issue of moves here — that would double-move cards already at the top of their terminal lists.
 
 ---
 
@@ -279,15 +342,17 @@ If the `<!-- danxbot-triage -->` marker exists in prior comments but the `Triage
 
 A single card failure (API error, unreadable commit, missing file) does NOT abort the run. Record the error in the report's `Errors:` count and list it in the `### Errors` section at the end. Continue with remaining cards.
 
-### Interactive Approval Gate
+### Interactive Approval Gate (reorder only)
 
-If the session is interactive (human is watching) — detected by running before step 7 — print the full Triage Report table as a preview and ask:
+Terminal moves (Complete/Obsolete/Duplicate/Ambiguous) are committed by subagents in step 4h and CANNOT be gated — by design, the subagent owns its full lifecycle. The approval gate now exists only for **Step 8 reorder writes**, which can shuffle the priority order of every Keep/Partial card in the source list.
+
+If the session is interactive — detected before Step 8 — print the full Triage Report table as a preview and ask:
 
 ```
-Proceed with these moves? (yes to apply, anything else aborts)
+Apply the reorder writes? (yes to apply, anything else leaves Keep/Partial in their current order)
 ```
 
-Only apply steps 7 + 8 after explicit `yes` / `go` / `do it` / `approved`. Any other response aborts without writing further.
+Only run Step 8 after explicit `yes` / `go` / `do it` / `approved`. Any other response keeps the source list in its existing order — terminal moves already committed by subagents are NOT undone.
 
 When invoked non-interactively (by another agent, `/loop`, or a scheduled run), skip the approval gate. Detect via `$DANXBOT_NONINTERACTIVE=1` or the absence of a TTY on stdin — fall back to "interactive" if detection is ambiguous.
 

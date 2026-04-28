@@ -472,14 +472,15 @@ describe("poll", () => {
     expect(workspacesWrites).toEqual([]);
   });
 
-  it("injectDanxWorkspaces mirrors a fixture tree, prunes orphans, and makes .sh helpers under tools/ executable", async () => {
-    // Phase 2 acceptance criteria #2-5: the helper recursively mirrors
-    // `src/poller/inject/workspaces/<name>/` into
-    // `<repo>/.danxbot/workspaces/<name>/` with writeIfChanged
-    // (idempotent), deletes target entries missing from source
-    // (pruning), and sets the executable bit on `.sh` files nested
-    // under a `tools/` ancestor. Validated here against a mocked fs
-    // tree so the contract is asserted without needing real disk I/O.
+  it("injectDanxWorkspaces mirrors a fixture tree, leaves orphans alone, and makes .sh helpers under tools/ executable", async () => {
+    // Helper recursively mirrors `src/poller/inject/workspaces/<name>/`
+    // into `<repo>/.danxbot/workspaces/<name>/` via writeIfChanged
+    // (idempotent), and sets the executable bit on `.sh` files nested
+    // under a `tools/` ancestor. Write-only contract: target entries
+    // missing from source are LEFT IN PLACE — the poller never deletes
+    // anything in a connected repo (incident retro: nuking a
+    // gpt-manager-authored `schema-builder/` workspace tracked in
+    // gpt-manager's git).
     mockFetchTodoCards.mockResolvedValue([]);
 
     const workspacesSource = "src/poller/inject/workspaces";
@@ -490,7 +491,7 @@ describe("poll", () => {
     const demoTargetRoot = `${workspacesTargetRoot}/demo`;
     const demoToolsTarget = `${demoTargetRoot}/tools`;
     // An old workspace that was removed from the source on a previous
-    // tick — must be pruned from the target on this tick.
+    // tick — must SURVIVE on the target after this tick (write-only).
     const orphanWorkspaceTargetRoot = `${workspacesTargetRoot}/old-removed`;
 
     // Source paths (`injectDir` is resolved to an absolute path at module
@@ -569,12 +570,12 @@ describe("poll", () => {
     expect(writtenPaths).toContain(`${demoTargetRoot}/workspace.yml`);
     expect(writtenPaths).toContain(`${demoToolsTarget}/helper.sh`);
 
-    // Pruning: stale tool file AND orphan workspace are removed.
+    // Write-only contract: stale tool file AND orphan workspace SURVIVE.
     const rmPaths = mockRmSync.mock.calls.map(
       (c: unknown[]) => c[0] as string,
     );
-    expect(rmPaths).toContain(`${demoToolsTarget}/stale.sh`);
-    expect(rmPaths).toContain(orphanWorkspaceTargetRoot);
+    expect(rmPaths).not.toContain(`${demoToolsTarget}/stale.sh`);
+    expect(rmPaths).not.toContain(orphanWorkspaceTargetRoot);
   });
 
   it("injectDanxWorkspaces ignores non-directory entries at the workspaces root (the .gitkeep tombstone)", async () => {
