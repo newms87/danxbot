@@ -1,4 +1,6 @@
 features.md
 .env
+.env.*
+!.env.example
 settings.json
 .settings.lock

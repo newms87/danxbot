@@ -94,10 +94,32 @@ All repo config lives in `<repo>/.danxbot/config/` (version controlled). Secrets
       domains/*.md   # domain knowledge
       schema/*.md    # DB relationships
   .env               # Per-repo secrets (gitignored, DANX_* prefix)
+  .env.<target>      # Per-deploy-target overlay (gitignored, optional)
   features.md        # ideator's persistent memory (gitignored)
 ```
 
 Per-repo secrets live in `<repo>/.danxbot/.env` (gitignored) using standardized DANX_* prefix: DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN. Danxbot's own `.env` keeps only shared infrastructure (ANTHROPIC_API_KEY, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL).
+
+### Per-target env overlays — `.env.<target>`
+
+When values must differ between local dev and a specific deploy target (prod Slack channel ID, prod-only DB host, prod URLs), put the override in a sibling `.env.<target>` file at the SAME directory as the `.env` it overrides. `<target>` matches the deploy target name (`make deploy TARGET=<target>`), e.g. `.env.platform` or `.env.gpt`.
+
+Three overlay locations (the deploy collector reads all three):
+
+| Base file | Overlay | Resulting SSM path |
+|---|---|---|
+| `<root>/.env` | `<root>/.env.<target>` | `/<ssm_prefix>/shared/*` |
+| `<repo>/.danxbot/.env` | `<repo>/.danxbot/.env.<target>` | `/<ssm_prefix>/repos/<name>/*` |
+| `<repo>/<app_env_subpath>/.env` | `<repo>/<app_env_subpath>/.env.<target>` | `/<ssm_prefix>/repos/<name>/REPO_ENV_*` |
+
+Merge contract (`deploy/secrets.ts#collectDeploymentSecrets`):
+- Override keys win; base-only keys preserved; override-only keys added.
+- Missing overlay file is a no-op (returns the base map unchanged).
+- The merge is in-memory at deploy time only — local files are never modified.
+- Local dev (any consumer that reads `.env` without going through deploy) NEVER sees overlay values; the worker container only ever reads what `materialize-secrets.sh` writes from SSM after the deploy push.
+- Per-target scope: an overlay named `.env.platform` is read ONLY when `make deploy TARGET=platform` runs. `.env.gpt` does not bleed into a platform deploy.
+
+Files are gitignored by default — `.env.*` with `!.env.example` exception so any `.env.example` you commit for documentation stays trackable.
 
 ## Interactive CLI — MCP Env via direnv + `.danxbot/mcp.env`
 

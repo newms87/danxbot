@@ -7,6 +7,15 @@
  *   ./repos/<name>/.env                 → <ssm_prefix>/repos/<name>/REPO_ENV_<KEY>
  *
  * The instance-side materializer (templates/materialize-secrets.sh) reverses this.
+ *
+ * Per-target overrides: when collectDeploymentSecrets is called with a target
+ * name (e.g. "platform"), each .env file is layered with a sibling .env.<target>
+ * file at the SAME directory. Override keys win; base-only keys are preserved;
+ * override-only keys are added; a missing override file is a no-op. Local files
+ * are never modified — the merge is in-memory only, applied before SSM push.
+ * This keeps prod-only values (Slack channel ID, prod-specific endpoints) out
+ * of the dev .env without forcing every operator to share one .env between
+ * deployments. Override files are gitignored.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -45,11 +54,27 @@ export function parseEnvFile(path: string): Record<string, string> {
   return result;
 }
 
+/**
+ * Read `<basePath>` and, when `target` is provided, layer the sibling
+ * `<basePath>.<target>` file on top with override semantics. Missing files
+ * (base or override) are treated as empty maps.
+ */
+function readEnvWithOverride(
+  basePath: string,
+  target: string | undefined,
+): Record<string, string> {
+  const base = parseEnvFile(basePath);
+  if (!target) return base;
+  const override = parseEnvFile(`${basePath}.${target}`);
+  return { ...base, ...override };
+}
+
 export function collectDeploymentSecrets(
   config: DeployConfig,
   cwd: string = process.cwd(),
+  target?: string,
 ): CollectedSecrets {
-  const shared = parseEnvFile(resolve(cwd, ".env"));
+  const shared = readEnvWithOverride(resolve(cwd, ".env"), target);
   const perRepo: CollectedSecrets["perRepo"] = {};
   for (const repo of config.repos) {
     // When app_env_subpath is set the app .env lives under the subpath
@@ -59,8 +84,11 @@ export function collectDeploymentSecrets(
       ? resolve(cwd, "repos", repo.name, repo.appEnvSubpath, ".env")
       : resolve(cwd, "repos", repo.name, ".env");
     perRepo[repo.name] = {
-      danxbot: parseEnvFile(resolve(cwd, "repos", repo.name, ".danxbot/.env")),
-      app: parseEnvFile(appEnvPath),
+      danxbot: readEnvWithOverride(
+        resolve(cwd, "repos", repo.name, ".danxbot/.env"),
+        target,
+      ),
+      app: readEnvWithOverride(appEnvPath, target),
     };
   }
   return { shared, perRepo };
@@ -198,8 +226,9 @@ function defaultTokenFetch(cmd: string): string {
 export function pushSecrets(
   config: DeployConfig,
   cwd: string = process.cwd(),
+  target?: string,
 ): void {
-  const collected = collectDeploymentSecrets(config, cwd);
+  const collected = collectDeploymentSecrets(config, cwd, target);
   const overrides = buildTargetOverrides(config);
   const token = getOrCreateDispatchToken(config);
   // Target overrides win over local .env — prevents an operator's local

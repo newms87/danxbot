@@ -198,6 +198,188 @@ describe("collectDeploymentSecrets", () => {
     expect(result.shared).toEqual({});
     expect(result.perRepo.ghost).toEqual({ danxbot: {}, app: {} });
   });
+
+  it("layers <root>/.env.<target> on top of <root>/.env when target is provided", () => {
+    // Shared root .env carries dev-default ANTHROPIC_API_KEY; the per-target
+    // override file points the production deployment at a different key
+    // without mutating the dev file or requiring a second commit cycle.
+    const cwd6 = resolve(TMP, "cwd-shared-override");
+    mkdirSync(cwd6, { recursive: true });
+    writeFileSync(
+      resolve(cwd6, ".env"),
+      "ANTHROPIC_API_KEY=sk-dev\nDANXBOT_GIT_EMAIL=dev@example.com\n",
+    );
+    writeFileSync(
+      resolve(cwd6, ".env.platform"),
+      "ANTHROPIC_API_KEY=sk-prod\n",
+    );
+
+    const result = collectDeploymentSecrets(
+      makeConfig({ repos: [] }),
+      cwd6,
+      "platform",
+    );
+
+    expect(result.shared).toEqual({
+      ANTHROPIC_API_KEY: "sk-prod",
+      DANXBOT_GIT_EMAIL: "dev@example.com",
+    });
+  });
+
+  it("layers <repo>/.danxbot/.env.<target> on top of <repo>/.danxbot/.env", () => {
+    // Per-repo example: production deployment needs a different Slack
+    // channel than local dev; the override file is the single source of
+    // truth for the prod-only value.
+    const cwd7 = resolve(TMP, "cwd-perrepo-override");
+    mkdirSync(resolve(cwd7, "repos/platform/.danxbot"), { recursive: true });
+    writeFileSync(
+      resolve(cwd7, "repos/platform/.danxbot/.env"),
+      "DANX_SLACK_CHANNEL_ID=C_LOCAL\nDANX_SLACK_BOT_TOKEN=xoxb-dev\n",
+    );
+    writeFileSync(
+      resolve(cwd7, "repos/platform/.danxbot/.env.platform"),
+      "DANX_SLACK_CHANNEL_ID=C_PROD\n",
+    );
+
+    const result = collectDeploymentSecrets(
+      makeConfig({
+        repos: [
+          { name: "platform", url: "https://github.com/x/p.git", workerPort: 5561 },
+        ],
+      }),
+      cwd7,
+      "platform",
+    );
+
+    expect(result.perRepo.platform.danxbot).toEqual({
+      DANX_SLACK_CHANNEL_ID: "C_PROD",
+      DANX_SLACK_BOT_TOKEN: "xoxb-dev",
+    });
+  });
+
+  it("layers <repo>/<app_env_subpath>/.env.<target> on top of the app .env", () => {
+    // Symmetry guard: the app-subpath layout (Laravel sail at platform/ssap/.env)
+    // must support per-target overrides exactly like the danxbot layer does.
+    const cwd8 = resolve(TMP, "cwd-app-override");
+    mkdirSync(resolve(cwd8, "repos/platform/ssap"), { recursive: true });
+    mkdirSync(resolve(cwd8, "repos/platform/.danxbot"), { recursive: true });
+    writeFileSync(
+      resolve(cwd8, "repos/platform/ssap/.env"),
+      "APP_KEY=base64:dev\nDB_HOST=localhost\n",
+    );
+    writeFileSync(
+      resolve(cwd8, "repos/platform/ssap/.env.platform"),
+      "APP_KEY=base64:prod\nAPP_URL=https://prod.example\n",
+    );
+
+    const result = collectDeploymentSecrets(
+      makeConfig({
+        repos: [
+          {
+            name: "platform",
+            url: "https://github.com/x/p.git",
+            appEnvSubpath: "ssap",
+            workerPort: 5561,
+          },
+        ],
+      }),
+      cwd8,
+      "platform",
+    );
+
+    expect(result.perRepo.platform.app).toEqual({
+      APP_KEY: "base64:prod",
+      DB_HOST: "localhost",
+      APP_URL: "https://prod.example",
+    });
+  });
+
+  it("ignores .env.<target> files when target is not provided (local dev path)", () => {
+    // Pre-existing callers (none today, but guard against future) that omit
+    // target must see the local-dev values only — never the prod overrides.
+    const cwd9 = resolve(TMP, "cwd-no-target");
+    mkdirSync(resolve(cwd9, "repos/platform/.danxbot"), { recursive: true });
+    writeFileSync(resolve(cwd9, ".env"), "ANTHROPIC_API_KEY=sk-dev\n");
+    writeFileSync(
+      resolve(cwd9, ".env.platform"),
+      "ANTHROPIC_API_KEY=sk-prod\n",
+    );
+    writeFileSync(
+      resolve(cwd9, "repos/platform/.danxbot/.env"),
+      "DANX_SLACK_CHANNEL_ID=C_LOCAL\n",
+    );
+    writeFileSync(
+      resolve(cwd9, "repos/platform/.danxbot/.env.platform"),
+      "DANX_SLACK_CHANNEL_ID=C_PROD\n",
+    );
+
+    const result = collectDeploymentSecrets(
+      makeConfig({
+        repos: [
+          { name: "platform", url: "https://github.com/x/p.git", workerPort: 5561 },
+        ],
+      }),
+      cwd9,
+      // no target argument
+    );
+
+    expect(result.shared).toEqual({ ANTHROPIC_API_KEY: "sk-dev" });
+    expect(result.perRepo.platform.danxbot).toEqual({
+      DANX_SLACK_CHANNEL_ID: "C_LOCAL",
+    });
+  });
+
+  it("treats a missing .env.<target> as a no-op when target is provided", () => {
+    // Missing override file must NOT erase base values — the merge is
+    // strictly additive.
+    const cwd10 = resolve(TMP, "cwd-missing-override");
+    mkdirSync(resolve(cwd10, "repos/platform/.danxbot"), { recursive: true });
+    writeFileSync(resolve(cwd10, ".env"), "ANTHROPIC_API_KEY=sk-dev\n");
+    writeFileSync(
+      resolve(cwd10, "repos/platform/.danxbot/.env"),
+      "DANX_SLACK_CHANNEL_ID=C_LOCAL\n",
+    );
+
+    const result = collectDeploymentSecrets(
+      makeConfig({
+        repos: [
+          { name: "platform", url: "https://github.com/x/p.git", workerPort: 5561 },
+        ],
+      }),
+      cwd10,
+      "platform",
+    );
+
+    expect(result.shared).toEqual({ ANTHROPIC_API_KEY: "sk-dev" });
+    expect(result.perRepo.platform.danxbot).toEqual({
+      DANX_SLACK_CHANNEL_ID: "C_LOCAL",
+    });
+  });
+
+  it("scopes overrides per target name (different .env.<target> files do not bleed)", () => {
+    // Same cwd serves multiple deploy targets; each target must read only
+    // its own override file. Reading .env.gpt must not leak into a deploy
+    // of TARGET=platform.
+    const cwd11 = resolve(TMP, "cwd-multi-target");
+    mkdirSync(cwd11, { recursive: true });
+    writeFileSync(resolve(cwd11, ".env"), "SHARED=base\n");
+    writeFileSync(resolve(cwd11, ".env.platform"), "SHARED=plat\n");
+    writeFileSync(resolve(cwd11, ".env.gpt"), "SHARED=gpt\n");
+
+    const platformResult = collectDeploymentSecrets(
+      makeConfig({ repos: [] }),
+      cwd11,
+      "platform",
+    );
+    const gptResult = collectDeploymentSecrets(
+      makeConfig({ repos: [] }),
+      cwd11,
+      "gpt",
+    );
+
+    expect(platformResult.shared).toEqual({ SHARED: "plat" });
+    expect(gptResult.shared).toEqual({ SHARED: "gpt" });
+  });
 });
 
 describe("buildSsmPutCommands", () => {
