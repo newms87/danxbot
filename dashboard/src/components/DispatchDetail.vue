@@ -94,7 +94,7 @@ const topTools = computed(() => {
 </script>
 
 <template>
-  <div class="fixed inset-0 bg-slate-950/70 z-40" @click="$emit('close')"></div>
+  <div data-test="backdrop" class="fixed inset-0 bg-slate-950/70 z-40" @click="$emit('close')"></div>
   <div
     class="fixed right-0 top-0 h-full w-[min(1100px,95vw)] bg-slate-950 border-l border-slate-800 shadow-2xl overflow-hidden z-50 flex flex-col"
   >
