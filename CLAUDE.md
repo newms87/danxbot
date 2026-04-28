@@ -61,12 +61,23 @@ Danxbot manages multiple repos from one server. Each repo has independent state 
 |---|---|---|
 | `<repo>/.danxbot/config/` | `config.yml`, `trello.yml`, `compose.yml`, `overview.md`, `workflow.md`, `tools.md`, `docs/` | yes |
 | `<repo>/.danxbot/.env` | Secrets + per-repo toggles (`DANX_*` prefix) + `DANXBOT_WORKER_PORT` | gitignored |
+| `<repo>/.danxbot/.env.<target>` | **Per-deploy-target overlay** — overrides keys in `.env` at deploy time only | gitignored |
 | `<repo>/.danxbot/workspace/` | Generated dispatch cwd — danxbot-owned `.mcp.json`, `CLAUDE.md`, `.claude/` subtree | gitignored |
 | `<repo>/.claude/` | **Developer territory only** — danxbot never reads or writes here | dev-maintained |
 
 `<repo>/.danxbot/.env` standardized vars: `DANX_TRELLO_ENABLED` (default `false` — explicit opt-in), `DANX_SLACK_BOT_TOKEN`, `DANX_SLACK_APP_TOKEN`, `DANX_SLACK_CHANNEL_ID`, `DANX_DB_HOST/USER/PASSWORD/NAME`, `DANX_GITHUB_TOKEN`, `DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`, `DANXBOT_WORKER_PORT`.
 
 Danxbot's own root `.env` keeps only shared infrastructure: `ANTHROPIC_API_KEY`, `CLAUDE_AUTH_MODE`, `REPOS`, `DANXBOT_DB_*`, `DASHBOARD_PORT`, `DANXBOT_GIT_EMAIL`.
+
+### Per-target env overlays
+
+`.env.<target>` files (e.g. `.env.platform`, `.env.gpt`) supply prod-only values without polluting the dev `.env`. They live alongside the `.env` they override — same directory, same key/value format — and are layered on top by `deploy/secrets.ts#collectDeploymentSecrets` ONLY when `make deploy TARGET=<target>` runs. The merge is in-memory: override keys win, base-only keys preserved, override-only keys added; missing override file is a no-op. Local dev never reads them. Three locations support overlays:
+
+- `<root>/.env.<target>` → shared SSM keys (`/<ssm_prefix>/shared/*`)
+- `<repo>/.danxbot/.env.<target>` → per-repo danxbot keys (`/<ssm_prefix>/repos/<name>/*`)
+- `<repo>/<app_env_subpath>/.env.<target>` → per-repo app keys (`/<ssm_prefix>/repos/<name>/REPO_ENV_*`)
+
+Use this for prod Slack channel IDs, prod-specific DB hosts, prod URLs — anything that diverges between local and a specific deploy target. Files are gitignored by default (`.env.*` with `!.env.example` exception).
 
 Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists them: `platform:url,danxbot:url`. `loadRepoContext()` in worker mode builds the single active `RepoContext` from the named repo.
 
@@ -137,6 +148,18 @@ Key test paths (project-specific, not duplicated elsewhere):
 | `dashboard/vitest.config.ts` | Dashboard SFC tests (separate from backend `vitest.config.ts`) |
 
 Backend tests are at `src/**/*.test.ts`. Dashboard tests are at `dashboard/src/**/*.test.ts`. Running `npx vitest run` from the repo root only picks up backend — `cd dashboard && npx vitest run` for the SPA. (The `testing` skill's "Mandatory Setup" requires output-to-file; the danxbot convention is `> /tmp/vitest.log 2>&1`.)
+
+### UI Frontend Test Exemption
+
+**The Vue UI layer under `dashboard/src/` does NOT require tests.** This includes Vue SFCs (`*.vue`), composables (`dashboard/src/composables/**`), UI-only utilities, and `api.ts` typed fetch wrappers. Writing tests for them is optional; the `test-reviewer` subagent and pipeline step 2 (Test coverage) MUST NOT flag missing coverage in these paths, and a >10-line change confined to `dashboard/src/` does NOT trigger the mandatory test-coverage gate.
+
+**Still required** (no exemption):
+
+- Backend API + SSE + auth + analytics under `src/dashboard/**` (`server.ts`, `events.ts`, `auth-db.ts`, `jsonl-reader.ts`, `dispatch-proxy.ts`, `playwright-proxy.ts`, etc.) — unit + integration tests mandatory
+- Everything else under `src/**` (agent, poller, slack, worker, dispatch, mcp, deploy)
+- Type checking: `cd dashboard && npx vue-tsc --noEmit` still required (type-check ≠ test)
+
+Existing dashboard tests under `dashboard/src/**/*.test.ts` are kept as-is — exemption means "not required going forward," not "delete what's there."
 
 ## Agent Spawn Architecture (Summary)
 
