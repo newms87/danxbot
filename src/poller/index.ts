@@ -632,6 +632,16 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
       workspaceDir,
       [],
     );
+  }
+
+  // Symlink mcp-servers/ into EVERY workspace present at target, including
+  // repo-authored workspaces (e.g. gpt-manager's schema-builder) that
+  // didn't come through our inject source. Every dispatched agent expects
+  // to find the danxbot mcp-servers tree at `<workspace>/mcp-servers`
+  // regardless of who authored the workspace.
+  for (const entry of readdirSync(workspacesTargetDir)) {
+    const workspaceDir = resolve(workspacesTargetDir, entry);
+    if (!statSync(workspaceDir).isDirectory()) continue;
     injectMcpServers(workspaceDir);
   }
 }

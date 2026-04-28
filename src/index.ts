@@ -13,7 +13,7 @@ import { runMigrations } from "./db/migrate.js";
 import { initPlatformPool } from "./db/connection.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
-import { start as startPoller } from "./poller/index.js";
+import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
 import { generateWorkspace } from "./workspace/generate.js";
 
@@ -104,6 +104,15 @@ async function startWorkerMode(): Promise<void> {
       `[${repo.name}] Workspace updated at ${workspaceResult.path} — wrote ${workspaceResult.changedFiles.join(", ")}`,
     );
   }
+
+  // Run the inject pipeline once at boot regardless of poller toggle.
+  // Workspace fixtures, danx-* rules, skills, tools, and the mcp-servers/
+  // symlink must exist for every dispatched agent — including agents from
+  // /api/launch and Slack — even when the Trello poller is disabled. The
+  // poll loop re-runs this on every tick when the poller is enabled, but
+  // it never runs at all when the poller is disabled, which is why this
+  // boot-time call is required.
+  syncRepoFiles(repo);
 
   // Assert that the JSONL projects directory is accessible and writable.
   // Catches missing or misconfigured bind mounts early so operators see a
