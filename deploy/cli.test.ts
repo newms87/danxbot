@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parseCliArgs, buildMaterializeRepoArgs } from "./cli.js";
+import {
+  parseCliArgs,
+  buildMaterializeRepoArgs,
+  fetchRepoTokens,
+} from "./cli.js";
+import { makeConfig } from "./test-helpers.js";
 
 describe("parseCliArgs", () => {
   it("parses `deploy gpt`", () => {
@@ -145,5 +150,66 @@ describe("buildMaterializeRepoArgs", () => {
 
   it("returns empty string for zero repos (no deploy-without-repos ever needed it, but keep it safe)", () => {
     expect(buildMaterializeRepoArgs([])).toBe("");
+  });
+});
+
+describe("fetchRepoTokens", () => {
+  it("queries SSM at <prefix>/repos/<name>/DANX_GITHUB_TOKEN per repo", () => {
+    const calls: string[] = [];
+    const cfg = makeConfig({
+      ssmPrefix: "/danxbot-gpt",
+      region: "us-east-1",
+      aws: { profile: "gpt" },
+      repos: [
+        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
+        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562 },
+      ],
+    });
+    const tokens = fetchRepoTokens(cfg, (cmd: string) => {
+      calls.push(cmd);
+      // Match against the per-repo segment of the SSM path so the test
+      // doesn't trip on the prefix-also-containing-"danxbot".
+      return cmd.includes("/repos/danxbot/")
+        ? "ghp_danxbot"
+        : "ghp_gpt";
+    });
+
+    expect(tokens).toEqual({
+      danxbot: "ghp_danxbot",
+      "gpt-manager": "ghp_gpt",
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toContain(
+      `--name "/danxbot-gpt/repos/danxbot/DANX_GITHUB_TOKEN"`,
+    );
+    expect(calls[1]).toContain(
+      `--name "/danxbot-gpt/repos/gpt-manager/DANX_GITHUB_TOKEN"`,
+    );
+    expect(calls[0]).toContain("--with-decryption");
+    expect(calls[0]).toContain("--region us-east-1");
+    expect(calls[0]).toContain("aws --profile gpt");
+  });
+
+  it("returns an empty object when the deployment has no repos", () => {
+    const calls: string[] = [];
+    const cfg = makeConfig({ repos: [] });
+    expect(
+      fetchRepoTokens(cfg, (cmd: string) => {
+        calls.push(cmd);
+        return "";
+      }),
+    ).toEqual({});
+    expect(calls).toEqual([]);
+  });
+
+  it("propagates non-zero exit from runCmd (no swallowing — broken token must abort deploy)", () => {
+    const cfg = makeConfig({
+      repos: [{ name: "x", url: "https://github.com/x/x.git", workerPort: 5561 }],
+    });
+    expect(() =>
+      fetchRepoTokens(cfg, () => {
+        throw new Error("ParameterNotFound");
+      }),
+    ).toThrow(/ParameterNotFound/);
   });
 });

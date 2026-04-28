@@ -13,6 +13,28 @@
 #
 # DANXBOT_ROOT defaults to /danxbot when unset (production); tests can
 # override it to point at a temp directory.
+#
+# ── SSM path layout (must match deploy/ssm-paths.ts) ─────────────────────
+#
+# This script is the READ side of the layout written by the TS deploy
+# helpers in deploy/ssm-paths.ts. Bash can't import TS, so the layout is
+# duplicated here. If you change one side, change the other.
+#
+#   <prefix>/shared/<KEY>                  ← sharedKeyPath()
+#       Materializes to $DANXBOT_ROOT/.env
+#
+#   <prefix>/repos/<repo>/<KEY>            ← repoKeyPath()
+#       Materializes to <repo>/.danxbot/.env (only when KEY does NOT
+#       start with REPO_ENV_)
+#
+#   <prefix>/repos/<repo>/REPO_ENV_<KEY>   ← repoAppKeyPath()
+#       Materializes to <repo>[/<subpath>]/.env with the REPO_ENV_
+#       prefix stripped from the resulting key name.
+#
+# The REPO_ENV_ prefix is the load-bearing split signal — it's how a
+# single SSM subtree per repo serves both the danxbot agent .env and the
+# app .env without colliding. A typo on either side (e.g. dropping the
+# underscore) silently routes keys to the wrong file.
 
 set -euo pipefail
 

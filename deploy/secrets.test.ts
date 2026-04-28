@@ -7,6 +7,7 @@ import {
   buildSsmPutCommands,
   buildTargetOverrides,
   getOrCreateDispatchToken,
+  buildPushSecretsCommands,
 } from "./secrets.js";
 import { makeConfig } from "./test-helpers.js";
 
@@ -479,6 +480,43 @@ describe("buildSsmPutCommands", () => {
     expect(cmds).toEqual([]);
   });
 
+  it("collides REPO_ENV_FOO (danxbot key literal) with FOO (app key) onto the same SSM path", () => {
+    // Documented hazard from the card: a danxbot-side key literally named
+    // `REPO_ENV_FOO` and an app-side key `FOO` both produce the SSM path
+    // `<prefix>/repos/<name>/REPO_ENV_FOO`. The materializer's split rule
+    // (REPO_ENV_* → app .env, others → danxbot .env) would route the danxbot
+    // key into the app .env. There is no upstream validation forbidding the
+    // collision, so the LAST value written to that path wins, and which one
+    // wins depends on JS object insertion order — which is collected.danxbot
+    // first then collected.app within a repo. This test pins that behavior:
+    // we DO emit both put-parameter commands at the same path, and the LATER
+    // one (the app key) overwrites the earlier one when applied. If a future
+    // change adds collision detection, this test should be updated to
+    // expect the new behavior (e.g. throw at build time).
+    const cfg = makeConfig({
+      ssmPrefix: "/danxbot-test",
+      aws: { profile: "p" },
+      repos: [{ name: "app", url: "https://github.com/x/a.git", workerPort: 5561 }],
+    });
+    const cmds = buildSsmPutCommands(cfg, {
+      shared: {},
+      perRepo: {
+        app: {
+          danxbot: { REPO_ENV_FOO: "danxbot-side-value" },
+          app: { FOO: "app-side-value" },
+        },
+      },
+    });
+    // Both writes target the same SSM path:
+    const targetingCollidedPath = cmds.filter((c) =>
+      c.includes(`--name "/danxbot-test/repos/app/REPO_ENV_FOO"`),
+    );
+    expect(targetingCollidedPath).toHaveLength(2);
+    // Order matches collection order: danxbot side first, app side last.
+    expect(targetingCollidedPath[0]).toContain(`--value 'danxbot-side-value'`);
+    expect(targetingCollidedPath[1]).toContain(`--value 'app-side-value'`);
+  });
+
   it("skips empty-string values (SSM rejects them)", () => {
     const cfg = makeConfig({
       ssmPrefix: "/danxbot-test",
@@ -607,5 +645,139 @@ describe("getOrCreateDispatchToken", () => {
     const a = getOrCreateDispatchToken(cfg, exec);
     const b = getOrCreateDispatchToken(cfg, exec);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("buildPushSecretsCommands", () => {
+  // The orchestrator concern: how `pushSecrets` merges the three input streams
+  // (collected .env values, per-target overrides, dispatch token) before
+  // emitting put-parameter commands. The merge order is load-bearing —
+  // operator-local REPOS / REPO_WORKER_PORTS must NOT leak into a target
+  // that should only see its own repos. These tests verify the merge
+  // without exercising `runStreaming` or SSM.
+  const cfg = makeConfig({
+    ssmPrefix: "/danxbot-test",
+    aws: { profile: "p" },
+    repos: [
+      { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
+    ],
+  });
+
+  it("target overrides win over conflicting keys in collected.shared", () => {
+    // Operator's local .env has REPOS=foo:url,bar:url (every repo they
+    // touch). Deploying the gpt target must push gpt's repo list, not the
+    // operator's union. buildTargetOverrides supplies the gpt-only value
+    // and it must overwrite the local one.
+    const collected = {
+      shared: { REPOS: "operator-local-junk", ANTHROPIC_API_KEY: "sk-x" },
+      perRepo: {},
+    };
+    const overrides = { REPOS: "danxbot:https://github.com/x/d.git" };
+    const cmds = buildPushSecretsCommands(cfg, collected, overrides, "tok");
+    const reposCmd = cmds.find((c) =>
+      c.includes(`--name "/danxbot-test/shared/REPOS"`),
+    );
+    expect(reposCmd).toBeDefined();
+    expect(reposCmd).toContain("--value 'danxbot:https://github.com/x/d.git'");
+    expect(reposCmd).not.toContain("operator-local-junk");
+  });
+
+  it("DANXBOT_DISPATCH_TOKEN always lands in shared", () => {
+    const cmds = buildPushSecretsCommands(
+      cfg,
+      { shared: {}, perRepo: {} },
+      {},
+      "the-token-value",
+    );
+    const tokenCmd = cmds.find((c) =>
+      c.includes(`--name "/danxbot-test/shared/DANXBOT_DISPATCH_TOKEN"`),
+    );
+    expect(tokenCmd).toBeDefined();
+    expect(tokenCmd).toContain("--value 'the-token-value'");
+  });
+
+  it("does NOT mutate the caller's collected object (pure function)", () => {
+    // pushSecrets passes its own `collected` and reuses it elsewhere — if
+    // buildPushSecretsCommands mutates it in place, surprises happen.
+    const collected = {
+      shared: { ANTHROPIC_API_KEY: "sk-x" } as Record<string, string>,
+      perRepo: {} as Record<
+        string,
+        { danxbot: Record<string, string>; app: Record<string, string> }
+      >,
+    };
+    const before = JSON.stringify(collected);
+    buildPushSecretsCommands(cfg, collected, { REPOS: "x" }, "tok");
+    expect(JSON.stringify(collected)).toBe(before);
+  });
+
+  it("preserves per-repo entries from collected (not just shared)", () => {
+    // The merge only touches `shared`; `perRepo` must pass through
+    // untouched. Otherwise per-repo Slack tokens / DB creds would silently
+    // disappear from the SSM push.
+    const collected = {
+      shared: {},
+      perRepo: {
+        danxbot: {
+          danxbot: { DANX_SLACK_BOT_TOKEN: "xoxb-yyy" },
+          app: { APP_KEY: "k" },
+        },
+      },
+    };
+    const cmds = buildPushSecretsCommands(cfg, collected, {}, "tok");
+    const joined = cmds.join("\n");
+    expect(joined).toContain("/danxbot-test/repos/danxbot/DANX_SLACK_BOT_TOKEN");
+    expect(joined).toContain("/danxbot-test/repos/danxbot/REPO_ENV_APP_KEY");
+  });
+
+  it("emits one command per expected SSM path (shared + per-repo + overrides + token)", () => {
+    // Verify by SET MEMBERSHIP rather than exact count — a future legitimate
+    // override addition (e.g. a 4th synthesized key) shouldn't false-positive
+    // this test, but a missing OR an unexpected SSM path should.
+    const collected = {
+      shared: { ANTHROPIC_API_KEY: "sk-x" },
+      perRepo: {
+        danxbot: {
+          danxbot: { DANX_TRELLO_API_KEY: "tr" },
+          app: { APP_KEY: "k" },
+        },
+      },
+    };
+    const overrides = {
+      REPOS: "danxbot:url",
+      REPO_WORKER_PORTS: "danxbot:5561",
+    };
+    const cmds = buildPushSecretsCommands(cfg, collected, overrides, "tok");
+    const paths = new Set(
+      cmds.map((c) => c.match(/--name "([^"]+)"/)?.[1]).filter(Boolean),
+    );
+    expect(paths).toEqual(
+      new Set([
+        "/danxbot-test/shared/ANTHROPIC_API_KEY",
+        "/danxbot-test/shared/REPOS",
+        "/danxbot-test/shared/REPO_WORKER_PORTS",
+        "/danxbot-test/shared/DANXBOT_DISPATCH_TOKEN",
+        "/danxbot-test/repos/danxbot/DANX_TRELLO_API_KEY",
+        "/danxbot-test/repos/danxbot/REPO_ENV_APP_KEY",
+      ]),
+    );
+  });
+
+  it("dispatch token wins over an override-supplied DANXBOT_DISPATCH_TOKEN (precedence guard)", () => {
+    // Belt-and-suspenders for the spread order. Today, no caller puts
+    // DANXBOT_DISPATCH_TOKEN in `overrides` — but the function's contract is
+    // "the explicit dispatchToken arg is the source of truth." A refactor
+    // that swapped the spread order would silently break that.
+    const cmds = buildPushSecretsCommands(
+      cfg,
+      { shared: {}, perRepo: {} },
+      { DANXBOT_DISPATCH_TOKEN: "from-overrides-should-lose" },
+      "the-real-token",
+    );
+    const tokenCmd = cmds.find((c) =>
+      c.includes("/danxbot-test/shared/DANXBOT_DISPATCH_TOKEN"),
+    );
+    expect(tokenCmd).toContain("--value 'the-real-token'");
+    expect(tokenCmd).not.toContain("from-overrides-should-lose");
   });
 });

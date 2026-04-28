@@ -24,6 +24,11 @@ import { randomBytes } from "node:crypto";
 import { execSync } from "node:child_process";
 import type { DeployConfig } from "./config.js";
 import { awsCmd, runStreaming } from "./exec.js";
+import {
+  sharedKeyPath,
+  repoKeyPath,
+  repoAppKeyPath,
+} from "./ssm-paths.js";
 
 export interface CollectedSecrets {
   shared: Record<string, string>;
@@ -119,14 +124,14 @@ export function buildSsmPutCommands(
   };
 
   for (const [k, v] of Object.entries(collected.shared)) {
-    pushIfSet(`${config.ssmPrefix}/shared/${k}`, v);
+    pushIfSet(sharedKeyPath(config.ssmPrefix, k), v);
   }
   for (const [repoName, groups] of Object.entries(collected.perRepo)) {
     for (const [k, v] of Object.entries(groups.danxbot)) {
-      pushIfSet(`${config.ssmPrefix}/repos/${repoName}/${k}`, v);
+      pushIfSet(repoKeyPath(config.ssmPrefix, repoName, k), v);
     }
     for (const [k, v] of Object.entries(groups.app)) {
-      pushIfSet(`${config.ssmPrefix}/repos/${repoName}/REPO_ENV_${k}`, v);
+      pushIfSet(repoAppKeyPath(config.ssmPrefix, repoName, k), v);
     }
   }
   return cmds;
@@ -170,7 +175,7 @@ export function getOrCreateDispatchToken(
   config: DeployConfig,
   exec: (cmd: string) => string = defaultTokenFetch,
 ): string {
-  const paramName = `${config.ssmPrefix}/shared/DANXBOT_DISPATCH_TOKEN`;
+  const paramName = sharedKeyPath(config.ssmPrefix, "DANXBOT_DISPATCH_TOKEN");
   try {
     const raw = exec(
       awsCmd(
@@ -223,6 +228,34 @@ function defaultTokenFetch(cmd: string): string {
   }
 }
 
+/**
+ * Pure orchestrator-of-pure-helpers: collect + layer overrides + merge token,
+ * return the full SSM put-parameter command list. Side-effect-free so tests
+ * can verify the merge order (overrides win over local .env, dispatch token
+ * always lands in shared) without mocking the runner.
+ *
+ * `pushSecrets` calls this and then runs each command through `runStreaming`.
+ */
+export function buildPushSecretsCommands(
+  config: DeployConfig,
+  collected: CollectedSecrets,
+  overrides: Record<string, string>,
+  dispatchToken: string,
+): string[] {
+  // Target overrides win over local .env — prevents an operator's local
+  // REPOS (which lists every repo they work with) from leaking into a
+  // target that should only see its own repos.
+  const merged: CollectedSecrets = {
+    ...collected,
+    shared: {
+      ...collected.shared,
+      ...overrides,
+      DANXBOT_DISPATCH_TOKEN: dispatchToken,
+    },
+  };
+  return buildSsmPutCommands(config, merged);
+}
+
 export function pushSecrets(
   config: DeployConfig,
   cwd: string = process.cwd(),
@@ -231,16 +264,7 @@ export function pushSecrets(
   const collected = collectDeploymentSecrets(config, cwd, target);
   const overrides = buildTargetOverrides(config);
   const token = getOrCreateDispatchToken(config);
-  // Target overrides win over local .env — prevents an operator's local
-  // REPOS (which lists every repo they work with) from leaking into a
-  // target that should only see its own repos.
-  collected.shared = {
-    ...collected.shared,
-    ...overrides,
-    DANXBOT_DISPATCH_TOKEN: token,
-  };
-
-  const cmds = buildSsmPutCommands(config, collected);
+  const cmds = buildPushSecretsCommands(config, collected, overrides, token);
 
   console.log(`\n── Pushing ${cmds.length} secret(s) to SSM ──`);
   for (const cmd of cmds) {

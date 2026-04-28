@@ -99,6 +99,42 @@ describe("worker commands", () => {
     expect(b).toContain("-p worker-repo-b");
     expect(a).not.toContain("worker-repo-b");
   });
+
+  // Repo-name regex (config.ts) currently allows letters/digits/hyphens
+  // /underscores/dots. The launch command embeds the name into both a
+  // filesystem path (compose -f .../<name>/...) and a docker compose
+  // project name (-p worker-<name>). Both surfaces must echo the name
+  // verbatim — no normalization, no escaping that drops characters,
+  // no truncation. A regression here would silently misroute the worker
+  // to a different repo's compose project.
+  it("preserves hyphens in repo names verbatim in compose path + project name", () => {
+    const cmd = buildLaunchCommand(
+      { name: "gpt-manager", url: "x", workerPort: 5562 },
+      ENV,
+    );
+    expect(cmd).toContain("/danxbot/repos/gpt-manager/.danxbot/config/compose.yml");
+    expect(cmd).toContain("-p worker-gpt-manager");
+  });
+
+  it("preserves underscores in repo names verbatim", () => {
+    const cmd = buildLaunchCommand(
+      { name: "my_repo", url: "x", workerPort: 5563 },
+      ENV,
+    );
+    expect(cmd).toContain("/danxbot/repos/my_repo/.danxbot/config/compose.yml");
+    expect(cmd).toContain("-p worker-my_repo");
+  });
+
+  it("preserves dots in repo names verbatim", () => {
+    // Names like `v8.3.app` are legal under the config regex; the dots
+    // must not be interpreted as path separators or stripped.
+    const cmd = buildLaunchCommand(
+      { name: "v8.3.app", url: "x", workerPort: 5564 },
+      ENV,
+    );
+    expect(cmd).toContain("/danxbot/repos/v8.3.app/.danxbot/config/compose.yml");
+    expect(cmd).toContain("-p worker-v8.3.app");
+  });
 });
 
 describe("launchWorkers", () => {

@@ -289,6 +289,40 @@ describe("materialize-secrets.sh", () => {
     ).toContain("K=v");
   });
 
+  it("preserves tab characters embedded in values (awk reassembles fields with \\t separators)", () => {
+    // The fake-aws emits Name\tValue per line; if Value itself contains a
+    // tab, the awk script sees NF >= 3 and reassembles columns 2..NF with
+    // a tab between them. A regression that just took $2 would silently
+    // truncate at the first embedded tab. Real cause: a multi-line PEM
+    // formatted with tabs would lose every byte after the first tab.
+    const root = resolve(WORK, "danxbot");
+    mkdirSync(root, { recursive: true });
+
+    const bin = fakeAwsDir({
+      "/danxbot-test/shared/": [
+        // Embedded tab inside the value — verifies awk reassembly.
+        { Name: "/danxbot-test/shared/TAB_VALUE", Value: "before\tafter" },
+        // Plain alphanumeric value to confirm normal path still works.
+        { Name: "/danxbot-test/shared/PLAIN", Value: "ok" },
+      ],
+    });
+
+    execSync(`bash ${SCRIPT} /danxbot-test us-east-1`, {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        DANXBOT_ROOT: root,
+      },
+    });
+
+    const env = readFileSync(resolve(root, ".env"), "utf-8");
+    // The awk emit function quotes values that contain whitespace (tab is
+    // matched by the [ \t#$"\\] character class), so the line is double-
+    // quoted and the literal tab is inside the quotes.
+    expect(env).toContain('TAB_VALUE="before\tafter"');
+    expect(env).toContain("PLAIN=ok");
+  });
+
   it("handles multiple repos", () => {
     mkdirSync(resolve(WORK, "danxbot/repos/a/.danxbot"), { recursive: true });
     mkdirSync(resolve(WORK, "danxbot/repos/b/.danxbot"), { recursive: true });

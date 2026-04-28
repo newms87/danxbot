@@ -42,6 +42,7 @@ import {
   uploadAndRestartInfra,
 } from "./compose-infra.js";
 import { awsCmd, run } from "./exec.js";
+import { sharedKeyPath, repoKeyPath } from "./ssm-paths.js";
 import { createUser } from "./create-user.js";
 import { ensureRootUser } from "./ensure-root-user.js";
 
@@ -121,15 +122,21 @@ function ensureBackend(config: DeployConfig): void {
 
 /**
  * Fetch each repo's DANX_GITHUB_TOKEN from SSM so we can clone private repos.
+ *
+ * Exported so it's testable; the optional `runCmd` injection lets tests
+ * supply a fake aws-cli without a real ssm round-trip.
  */
-function fetchRepoTokens(config: DeployConfig): Record<string, string> {
+export function fetchRepoTokens(
+  config: DeployConfig,
+  runCmd: (cmd: string) => string = run,
+): Record<string, string> {
   const tokens: Record<string, string> = {};
   for (const repo of config.repos) {
     const cmd = awsCmd(
       config.aws.profile,
-      `ssm get-parameter --name "${config.ssmPrefix}/repos/${repo.name}/DANX_GITHUB_TOKEN" --with-decryption --region ${config.region} --query Parameter.Value --output text`,
+      `ssm get-parameter --name "${repoKeyPath(config.ssmPrefix, repo.name, "DANX_GITHUB_TOKEN")}" --with-decryption --region ${config.region} --query Parameter.Value --output text`,
     );
-    tokens[repo.name] = run(cmd);
+    tokens[repo.name] = runCmd(cmd);
   }
   return tokens;
 }
@@ -314,7 +321,7 @@ async function smoke(config: DeployConfig): Promise<void> {
   const token = run(
     awsCmd(
       config.aws.profile,
-      `ssm get-parameter --name "${config.ssmPrefix}/shared/DANXBOT_DISPATCH_TOKEN" --with-decryption --region ${config.region} --query Parameter.Value --output text`,
+      `ssm get-parameter --name "${sharedKeyPath(config.ssmPrefix, "DANXBOT_DISPATCH_TOKEN")}" --with-decryption --region ${config.region} --query Parameter.Value --output text`,
     ),
   );
   if (!token || token === "None") {
