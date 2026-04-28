@@ -50,8 +50,20 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
+// Hoisted shared state so tests can read what core.ts handed to its
+// collaborators. `capturedStallOpts` lets stall-recovery tests trigger the
+// onStall callback directly without faking JSONL contents; `mockUpdateDispatch`
+// lets the nudge-count test assert on the exact (dispatchId, patch) pair the
+// stall callback writes to the dispatches DB.
+const { capturedStallOpts, mockUpdateDispatch } = vi.hoisted(() => ({
+  capturedStallOpts: [] as Array<{
+    onStall: () => void | Promise<void>;
+  }>,
+  mockUpdateDispatch: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("../dashboard/dispatches-db.js", () => ({
-  updateDispatch: vi.fn().mockResolvedValue(undefined),
+  updateDispatch: (...args: unknown[]) => mockUpdateDispatch(...args),
 }));
 
 vi.mock("../agent/terminal-output-watcher.js", () => ({
@@ -65,6 +77,9 @@ vi.mock("../agent/stall-detector.js", () => ({
   StallDetector: class {
     start = vi.fn();
     stop = vi.fn();
+    constructor(opts: { onStall: () => void | Promise<void> }) {
+      capturedStallOpts.push(opts);
+    }
   },
   DEFAULT_MAX_NUDGES: 3,
 }));
@@ -108,7 +123,12 @@ function makeRunningJob() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // capturedStallOpts is a plain array (vi.clearAllMocks resets vi.fn()
+  // call history but does NOT touch arrays), so reset it explicitly so a
+  // prior test's StallDetector instance doesn't leak into the next.
+  capturedStallOpts.length = 0;
   mockSpawnAgent.mockResolvedValue(makeRunningJob());
+  mockUpdateDispatch.mockResolvedValue(undefined);
 });
 
 
@@ -374,5 +394,182 @@ describe("listActiveJobs()", () => {
     } finally {
       rmSync(tmpRepoDir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Tests for the `apiDispatchMeta` plumbing inside `dispatch()`. The HTTP
+ * handlers (in `src/worker/dispatch.ts`) build the meta from the request body
+ * and hand it to dispatch(); these tests assert that dispatch() forwards it
+ * verbatim to the initial spawn and explicitly drops it on stall-recovery
+ * respawns. The respawn path also writes `nudgeCount` to the dispatches DB —
+ * verified at the same boundary so the column the dashboard reads can never
+ * silently regress to zero.
+ */
+describe("dispatch() — apiDispatchMeta wiring", () => {
+  // Fixture and helpers shared across every test in this describe. The
+  // workspace is the real on-disk slack-worker (so resolveWorkspace runs
+  // for real); the per-test mkdtemp gives each `dispatch()` call its own
+  // ~/.danxbot/workspaces/slack-worker tree without leaking between tests.
+  const slackWorkerSrc = resolve(
+    __dirname,
+    "..",
+    "poller",
+    "inject",
+    "workspaces",
+    "slack-worker",
+  );
+
+  let tmpRepoDir: string;
+  let testRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-test-meta-"));
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "slack-worker");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(slackWorkerSrc, dest, { recursive: true });
+    testRepo = makeRepoContext({ localPath: tmpRepoDir });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+    mockedConfig.isHost = false;
+  });
+
+  // setupStallDetection short-circuits unless watcher + terminalLogPath are
+  // both present on the spawned job AND statusUrl is on the input. Wrapping
+  // the production conditions in a factory keeps the tests focused on the
+  // behavior under test, not the harness shape.
+  function makeStallReadyJob(suffix: string) {
+    return {
+      ...makeRunningJob(),
+      watcher: { subscribe: vi.fn() },
+      terminalLogPath: `/fake/log-${suffix}.txt`,
+      stop: vi.fn().mockResolvedValue(undefined),
+      _cleanup: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  // The minimal `DispatchInput` for triggering stall detection — both
+  // statusUrl AND apiToken must be set, isHost must be true, and the
+  // returned job must have watcher+terminalLogPath. The two stall tests
+  // share this exact configuration.
+  async function dispatchWithStallEnabled(
+    meta: DispatchTriggerMetadata,
+  ): Promise<{ dispatchId: string }> {
+    return dispatch({
+      repo: testRepo,
+      task: "task",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      apiDispatchMeta: meta,
+      statusUrl: "https://forwarder.example/status",
+      apiToken: "tok-stall",
+    });
+  }
+
+  it("apiDispatchMeta is forwarded verbatim to spawnAgent on the initial spawn", async () => {
+    // The dispatch row's `trigger` and `triggerMetadata` columns are
+    // populated from this struct via spawnAgent → DispatchTracker. Forwarding
+    // it verbatim (not reshaping it inside dispatch()) is the contract — the
+    // worker handler is responsible for the build, dispatch() just plumbs it.
+    const meta: DispatchTriggerMetadata = {
+      trigger: "api",
+      metadata: {
+        endpoint: "/api/launch",
+        callerIp: "10.0.0.42",
+        statusUrl: null,
+        initialPrompt: "investigate failure",
+      },
+    };
+
+    await dispatch({
+      repo: testRepo,
+      task: "investigate failure",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      apiDispatchMeta: meta,
+    });
+
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    const opts = mockSpawnAgent.mock.calls[0][0] as {
+      dispatch: DispatchTriggerMetadata | undefined;
+    };
+    expect(opts.dispatch).toEqual(meta);
+  });
+
+  it("does NOT pass dispatch on stall-recovery respawn — only the initial spawn records the dispatch row", async () => {
+    // Stall-recovery respawns reuse the same dispatchId in `activeJobs`
+    // and must NOT create a second row for the same conceptual run. Forgetting
+    // this would surface as duplicate dispatch rows in the dashboard, with
+    // the second one stamped as a fresh "api" trigger and orphaned from the
+    // original caller's correlation ID.
+    mockedConfig.isHost = true;
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("initial"));
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("respawn"));
+
+    const meta: DispatchTriggerMetadata = {
+      trigger: "api",
+      metadata: {
+        endpoint: "/api/launch",
+        callerIp: null,
+        statusUrl: "https://forwarder.example/status",
+        initialPrompt: "do thing",
+      },
+    };
+
+    await dispatchWithStallEnabled(meta);
+
+    // setupStallDetection ran → exactly one StallDetector was
+    // constructed and we captured its onStall callback.
+    expect(capturedStallOpts).toHaveLength(1);
+    await capturedStallOpts[0].onStall();
+
+    // Two spawnAgent calls now: initial + respawn. Initial carries
+    // the meta; respawn must have `dispatch: undefined`.
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
+    const initialOpts = mockSpawnAgent.mock.calls[0][0] as {
+      dispatch: DispatchTriggerMetadata | undefined;
+    };
+    const respawnOpts = mockSpawnAgent.mock.calls[1][0] as {
+      dispatch: DispatchTriggerMetadata | undefined;
+    };
+    expect(initialOpts.dispatch).toEqual(meta);
+    expect(respawnOpts.dispatch).toBeUndefined();
+  });
+
+  it("stall callback records nudgeCount on the dispatch row via updateDispatch — increments across multiple stalls", async () => {
+    // The stall detector tracks nudge attempts in-memory via `resumeCount`,
+    // but the dashboard reads `nudgeCount` off the dispatches table. Without
+    // this updateDispatch call the dashboard would silently report zero
+    // nudges for every dispatch that recovered via stall — and the cost-
+    // attribution ("how often does the stall recovery actually save a run?")
+    // would be invisible in production. Asserting both the first and second
+    // calls also catches an off-by-one or accidental reset on respawn.
+    mockedConfig.isHost = true;
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("initial"));
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("respawn-1"));
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("respawn-2"));
+
+    const result = await dispatchWithStallEnabled(DEFAULT_DISPATCH_META);
+
+    // First stall → resumeCount becomes 1, fresh StallDetector wired up
+    // for the respawned job.
+    await capturedStallOpts[0].onStall();
+    expect(mockUpdateDispatch).toHaveBeenNthCalledWith(1, result.dispatchId, {
+      nudgeCount: 1,
+    });
+
+    // Second stall on the respawned job → resumeCount becomes 2. The
+    // dispatchId on the patch must remain the original — the column is
+    // keyed by dispatchId, not by the launcher's internal jobId (which
+    // changes on every respawn). And the count must increment, not reset.
+    expect(capturedStallOpts).toHaveLength(2);
+    await capturedStallOpts[1].onStall();
+    expect(mockUpdateDispatch).toHaveBeenNthCalledWith(2, result.dispatchId, {
+      nudgeCount: 2,
+    });
   });
 });

@@ -1078,3 +1078,257 @@ describe("handleLaunch — overlay localhost normalization", () => {
     );
   });
 });
+
+/**
+ * `apiDispatchMeta` is the dispatch-row trigger payload — built inside
+ * handleLaunch / handleResume from the parsed body and passed verbatim to
+ * `dispatch()` via `buildDispatchInput`. The dispatch row's `trigger` and
+ * `triggerMetadata` columns are populated from this struct, so the contract
+ * is what the dashboard, the Laravel forwarder, and the resume protocol all
+ * read back. Without unit coverage at this boundary, a refactor that drops
+ * `endpoint` or `initialPrompt` would only surface as a missing column in a
+ * production dispatch row — silent until someone clicks the dispatch in the
+ * dashboard.
+ */
+
+// Shared shape narrowing. The handlers pass the body verbatim to
+// `dispatch()` (mocked here as `mockDispatchFn`); each test reads the
+// captured arg through this type so the inline `as { ... }` casts don't
+// rot when fields are added or removed from `DispatchInput`.
+type CapturedDispatchInput = {
+  apiDispatchMeta: {
+    trigger: "api";
+    metadata: {
+      endpoint: string;
+      callerIp: string | null;
+      statusUrl: string | null;
+      initialPrompt: string;
+    };
+  };
+  parentJobId?: string;
+  resumeSessionId?: string;
+};
+
+function capturedInput(callIdx = 0): CapturedDispatchInput {
+  return mockDispatchFn.mock.calls[callIdx][0] as CapturedDispatchInput;
+}
+
+describe("handleLaunch — apiDispatchMeta build", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "test-dispatch-1" });
+  });
+
+  it("builds the FULL apiDispatchMeta.metadata object on /api/launch — every key (endpoint, initialPrompt, statusUrl, callerIp) is recorded", async () => {
+    // `toEqual` on the whole metadata block (not `toMatchObject`) means a
+    // future refactor that drops a key on the new dispatch row gets caught
+    // right here rather than at the dashboard render step.
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Investigate the deploy failure",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    const meta = capturedInput().apiDispatchMeta;
+    expect(meta.trigger).toBe("api");
+    expect(meta.metadata).toEqual({
+      endpoint: "/api/launch",
+      initialPrompt: "Investigate the deploy failure",
+      // No status_url in body → null. No socket / X-Forwarded-For on the
+      // mock req → null.
+      statusUrl: null,
+      callerIp: null,
+    });
+  });
+
+  it("propagates the normalized status_url into apiDispatchMeta.metadata.statusUrl (not the raw body value)", async () => {
+    // Loopback rewrite happens in `parseSharedRequestFields` and the
+    // resulting URL must be the one persisted on the dispatch row — a row
+    // that records the raw `localhost` URL would mislead anyone reading the
+    // audit trail.
+    mockDispatchConfig.isHost = false;
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do work",
+      status_url: "http://localhost:8080/agent/status",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(capturedInput().apiDispatchMeta.metadata.statusUrl).toBe(
+      "http://host.docker.internal:8080/agent/status",
+    );
+  });
+
+  it("records initialPrompt as the raw `task` body field — NOT the spawn prompt with the completion instruction appended", async () => {
+    // The completion instruction is appended inside `dispatch()` via
+    // `buildCompletionInstruction()`. The dispatch row should record what
+    // the caller asked for, not the runtime augmentation, so audit logs +
+    // the resume protocol's "what did the human originally request" view
+    // stay clean. A refactor that builds the meta from
+    // `taskWithInstruction` would silently pollute every dispatch row
+    // with the boilerplate suffix.
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Investigate the deploy failure",
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    const meta = capturedInput().apiDispatchMeta;
+    expect(meta.metadata.initialPrompt).toBe("Investigate the deploy failure");
+    expect(meta.metadata.initialPrompt).not.toMatch(/completion-instruction/);
+    expect(meta.metadata.initialPrompt).not.toMatch(/danxbot_complete/);
+  });
+});
+
+describe("handleResume — apiDispatchMeta build", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "test-resume-1" });
+    // Parent-session lookup must succeed so the dispatch path is reached.
+    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
+      "/fake/projects/parent.jsonl",
+    );
+  });
+
+  it("builds apiDispatchMeta with endpoint=/api/resume so the dispatch row distinguishes resumes from launches", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      job_id: "parent-job-abc",
+      task: "Continue from prior turn",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    const input = capturedInput();
+    expect(input.apiDispatchMeta.trigger).toBe("api");
+    expect(input.apiDispatchMeta.metadata.endpoint).toBe("/api/resume");
+    expect(input.apiDispatchMeta.metadata.initialPrompt).toBe(
+      "Continue from prior turn",
+    );
+    // Resume-specific extras flow alongside the meta — without them the
+    // dispatch is indistinguishable from a fresh launch downstream.
+    expect(input.parentJobId).toBe("parent-job-abc");
+    expect(input.resumeSessionId).toBe("parent");
+  });
+});
+
+/**
+ * `parseSharedRequestFields` derives `callerIp` from a 2-step fallback:
+ * `req.socket.remoteAddress` first, then `req.headers["x-forwarded-for"]`,
+ * then `null`. Each rung is a different production scenario:
+ *   - direct connection from a worker on `danxbot-net` → `socket.remoteAddress`
+ *   - dashboard proxy forwarded request → `X-Forwarded-For`
+ *   - synthetic / test request without either → `null`
+ * The fallback chain is what populates `apiDispatchMeta.metadata.callerIp`,
+ * which the dashboard renders in the dispatch detail header. A refactor that
+ * collapses to one source would break the production scenario that doesn't
+ * use it.
+ */
+describe("handleLaunch — callerIp extraction", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "test-callerip" });
+  });
+
+  it("uses req.socket.remoteAddress when present", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do work",
+    });
+    // The default mock has socket=null. Setting a real-ish socket
+    // exercises the first rung of the fallback. Cast via `unknown` because
+    // IncomingMessage.socket is typed as the real `Socket` and we only
+    // need the one field the parser reads.
+    (req as unknown as { socket: { remoteAddress: string } }).socket = {
+      remoteAddress: "10.0.0.42",
+    };
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(capturedInput().apiDispatchMeta.metadata.callerIp).toBe("10.0.0.42");
+  });
+
+  it("falls back to X-Forwarded-For when req.socket.remoteAddress is missing", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do work",
+    });
+    // socket present, remoteAddress undefined — exercises ?. on the
+    // first rung specifically (not the absence of socket entirely).
+    (req as unknown as { socket: object }).socket = {};
+    req.headers["x-forwarded-for"] = "203.0.113.7";
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(capturedInput().apiDispatchMeta.metadata.callerIp).toBe(
+      "203.0.113.7",
+    );
+  });
+
+  it("joins X-Forwarded-For with commas when Node parses it as a string array (multi-proxy chain)", async () => {
+    // Node types `headers["x-forwarded-for"]` as `string | string[]`.
+    // Multi-hop reverse proxies can produce the array form. The current
+    // code calls `.toString()` which joins arrays with commas — locking
+    // that behavior here means a refactor that picks just the first
+    // element (often the right call for trust-boundary reasons) is a
+    // visible decision, not a silent change.
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do work",
+    });
+    (req as unknown as { socket: object }).socket = {};
+    // Node's IncomingHttpHeaders types this as string|string[]; assigning
+    // an array directly is well-supported at runtime even though the
+    // typings prefer string.
+    (req.headers as Record<string, unknown>)["x-forwarded-for"] = [
+      "203.0.113.7",
+      "10.0.0.1",
+    ];
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(capturedInput().apiDispatchMeta.metadata.callerIp).toBe(
+      "203.0.113.7,10.0.0.1",
+    );
+  });
+
+  it("returns null when neither socket.remoteAddress nor X-Forwarded-For is present", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "trello-worker",
+      task: "Do work",
+    });
+    // Default mock socket is null and headers has no x-forwarded-for —
+    // exercises the `?? null` terminal of the chain.
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(capturedInput().apiDispatchMeta.metadata.callerIp).toBeNull();
+  });
+});
