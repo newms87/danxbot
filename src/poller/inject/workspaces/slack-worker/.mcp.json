@@ -2,7 +2,7 @@
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["tsx", "/danxbot/app/mcp-servers/playwright/src/index.ts"],
+      "args": ["tsx", "mcp-servers/playwright/src/index.ts"],
       "env": {
         "PLAYWRIGHT_URL": "http://playwright:3000"
       }
