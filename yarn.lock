@@ -136,10 +136,10 @@
   resolved "https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz"
   integrity sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==
 
-"@thehammer/schema-mcp-server@^1.0.3":
-  version "1.0.3"
-  resolved "https://registry.npmjs.org/@thehammer/schema-mcp-server/-/schema-mcp-server-1.0.3.tgz"
-  integrity sha512-qVLVbTOtIPk+VHeGzwjJRcTvw97SlaIGCh9VbFJpPb4yZbiptVqgiM8nRfMXfgGzipRPHyswFahRHcwJZtlYAg==
+"@thehammer/schema-mcp-server@^1.0.35":
+  version "1.0.35"
+  resolved "https://registry.npmjs.org/@thehammer/schema-mcp-server/-/schema-mcp-server-1.0.35.tgz"
+  integrity sha512-ISwh5PXzwXFTh5fBDLrR1oUd3jLWK2xJCznbqNsALz0d2hua23Iun0A1aSlhy6VA7RFEfuKZgadHGURSn7XlIw==
   dependencies:
     "@modelcontextprotocol/sdk" "^1.12.1"
     zod "^4.0.0"
