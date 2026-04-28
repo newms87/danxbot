@@ -19,7 +19,6 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
     "@slack/bolt": "^4.1.0",
-    "@thehammer/schema-mcp-server": "^1.0.35",
     "bcrypt": "^6.0.0",
     "mysql2": "^3.17.1",
     "yaml": "^2.3.4"
