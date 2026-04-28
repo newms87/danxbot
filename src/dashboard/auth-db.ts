@@ -75,6 +75,43 @@ export async function upsertDashboardUser(
   return { userId, rawToken };
 }
 
+export type EnsureUserAction = "created" | "rotated" | "unchanged";
+
+export interface EnsureUserResult {
+  userId: number;
+  action: EnsureUserAction;
+  rawToken?: string;
+}
+
+export async function ensureDashboardUser(
+  username: string,
+  plainPassword: string,
+): Promise<EnsureUserResult> {
+  const pool = getPool();
+  const [rows] = await pool.query<RowDataPacket[]>(
+    "SELECT id, password_hash FROM users WHERE username = ?",
+    [username],
+  );
+  const existing = rows[0] as
+    | { id: number; password_hash: string | null }
+    | undefined;
+
+  if (existing && existing.password_hash) {
+    const ok = await verifyPassword(plainPassword, existing.password_hash);
+    if (ok) {
+      log.info(`Dashboard user "${username}" already up-to-date — no change`);
+      return { userId: existing.id, action: "unchanged" };
+    }
+  }
+
+  const { userId, rawToken } = await upsertDashboardUser(username, plainPassword);
+  return {
+    userId,
+    rawToken,
+    action: existing ? "rotated" : "created",
+  };
+}
+
 export async function loginDashboardUser(
   username: string,
   plainPassword: string,

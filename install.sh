@@ -151,3 +151,21 @@ if [ -n "${REPOS:-}" ]; then
     echo "  ${name}: ${DANX_SKILLS[*]}"
   done
 fi
+
+# Provision / refresh the dashboard root user when DANX_DASHBOARD_ROOT_USER
+# is set + the dashboard container is already running. Idempotent — a no-op
+# when the password already matches. Skipped silently when infra isn't up
+# (operator runs `make launch-infra && make ensure-root-user LOCALHOST=1`
+# afterwards). The CLI itself also no-ops when the env var is unset.
+if [ -n "${DANX_DASHBOARD_ROOT_USER:-}" ]; then
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^danxbot-dashboard-1$'; then
+    echo ""
+    echo "Ensuring dashboard root user..."
+    make ensure-root-user LOCALHOST=1 || echo "  WARN: ensure-root-user failed — run manually after fixing"
+  else
+    echo ""
+    echo "NOTE: DANX_DASHBOARD_ROOT_USER is set but the dashboard container is"
+    echo "      not running. After 'make launch-infra', run:"
+    echo "        make ensure-root-user LOCALHOST=1"
+  fi
+fi

@@ -93,6 +93,7 @@ describe("parseCliArgs", () => {
       "logs",
       "secrets-push",
       "smoke",
+      "ensure-root-user",
     ]) {
       expect(parseCliArgs([cmd, "gpt"]).command).toBe(cmd);
     }

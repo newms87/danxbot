@@ -18,7 +18,7 @@ REPOS_DIR := ./repos
        test-system-error test-system-stall test-system-poller test-system-cleanup \
        test-system-slack \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
-       create-user reset-data
+       create-user ensure-root-user reset-data
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -320,6 +320,29 @@ else
 	@echo "Usage:"
 	@echo "  make create-user LOCALHOST=1 USERNAME=<name>"
 	@echo "  make create-user TARGET=<gpt|...> USERNAME=<name>"
+	@exit 1
+endif
+
+# --- Operator: provision / refresh the dashboard root user ---
+#
+# Reads DANX_DASHBOARD_ROOT_USER from the dashboard container's env
+# (sourced from .env via env_file in dev, from SSM-materialized .env
+# in prod). Format: "username//password". Idempotent — no DB write
+# and no token rotation when the password already matches.
+#
+# Wired into the deploy pipeline (after worker launch) so prod stays
+# in sync without an extra step. For local dev, run manually after
+# `make launch-infra`.
+
+ensure-root-user: ## Ensure DANX_DASHBOARD_ROOT_USER exists / refreshed (usage: make ensure-root-user LOCALHOST=1 OR TARGET=gpt)
+ifdef LOCALHOST
+	@docker exec -i danxbot-dashboard-1 npx tsx src/cli/ensure-root-user.ts
+else ifdef TARGET
+	@npx tsx deploy/cli.ts ensure-root-user $(TARGET)
+else
+	@echo "Usage:"
+	@echo "  make ensure-root-user LOCALHOST=1"
+	@echo "  make ensure-root-user TARGET=<gpt|...>"
 	@exit 1
 endif
 

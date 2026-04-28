@@ -43,6 +43,7 @@ import {
 } from "./compose-infra.js";
 import { awsCmd, run } from "./exec.js";
 import { createUser } from "./create-user.js";
+import { ensureRootUser } from "./ensure-root-user.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -68,6 +69,7 @@ const COMMANDS = [
   "secrets-push",
   "smoke",
   "create-user",
+  "ensure-root-user",
 ] as const;
 type Command = (typeof COMMANDS)[number];
 
@@ -132,7 +134,7 @@ function fetchRepoTokens(config: DeployConfig): Record<string, string> {
   return tokens;
 }
 
-async function deploy(config: DeployConfig): Promise<void> {
+async function deploy(config: DeployConfig, target: string): Promise<void> {
   console.log("\n═══════════════════════════════════════");
   console.log(`  DEPLOYING ${config.name}`);
   console.log("═══════════════════════════════════════");
@@ -142,8 +144,10 @@ async function deploy(config: DeployConfig): Promise<void> {
   // Idempotent — put-parameter uses --overwrite; unchanged values are a no-op
   // from the instance's perspective. Secrets are redacted from stdout (see
   // pushSecrets + runStreaming logLabel).
+  // Per-target .env.<target> overlays are layered over .env at this step —
+  // see deploy/secrets.ts header for the override contract.
   console.log("\n── Syncing local .env → SSM ──");
-  pushSecrets(config);
+  pushSecrets(config, process.cwd(), target);
 
   ensureBackend(config);
   const outputs = terraformApply(config);
@@ -219,6 +223,19 @@ async function deploy(config: DeployConfig): Promise<void> {
   // Health
   const health = await waitForHealthy(`https://${config.domain}`);
 
+  // Provision / refresh the dashboard root user from the materialized
+  // DANX_DASHBOARD_ROOT_USER env. Idempotent — silent no-op when the
+  // password already matches, so safe to run on every deploy.
+  if (health.healthy) {
+    try {
+      await ensureRootUser(config);
+    } catch (err) {
+      console.log(
+        `  WARN: ensure-root-user failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   console.log("\n═══════════════════════════════════════");
   if (health.healthy) {
     console.log("  DEPLOY SUCCESSFUL");
@@ -284,8 +301,8 @@ async function logs(config: DeployConfig): Promise<void> {
   new RemoteHost(config, outputs.publicIp).tailLogs();
 }
 
-async function secretsPush(config: DeployConfig): Promise<void> {
-  pushSecrets(config);
+async function secretsPush(config: DeployConfig, target: string): Promise<void> {
+  pushSecrets(config, process.cwd(), target);
 }
 
 async function smoke(config: DeployConfig): Promise<void> {
@@ -365,7 +382,7 @@ async function main(): Promise<void> {
 
   switch (args.command) {
     case "deploy":
-      await deploy(config);
+      await deploy(config, args.target);
       break;
     case "status":
       await status(config);
@@ -380,7 +397,7 @@ async function main(): Promise<void> {
       await logs(config);
       break;
     case "secrets-push":
-      await secretsPush(config);
+      await secretsPush(config, args.target);
       break;
     case "smoke":
       await smoke(config);
@@ -389,6 +406,10 @@ async function main(): Promise<void> {
       // parseCliArgs guarantees args.username is set for this command.
       ensureBackend(config);
       await createUser(config, args.username!);
+      break;
+    case "ensure-root-user":
+      ensureBackend(config);
+      await ensureRootUser(config);
       break;
     default: {
       const _exhaustive: never = args.command;
