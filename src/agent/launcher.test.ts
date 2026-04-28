@@ -159,8 +159,10 @@ import {
   spawnAgent,
   cancelJob,
   getJobStatus,
+  terminateWithGrace,
   type AgentJob,
 } from "./launcher.js";
+import type { AgentHandle } from "./agent-handle.js";
 
 function createMockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -418,7 +420,10 @@ describe("spawnAgent", () => {
 
     expect(job.id).toBe("test-uuid-1234");
     expect(job.status).toBe("running");
-    expect(job.process).toBe(child);
+    // Docker runtime: handle is wired and forwards kill to the spawned child.
+    expect(job.handle).toBeDefined();
+    job.handle!.kill("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
   it("sets job status to completed on clean exit", async () => {
@@ -1878,7 +1883,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     expect(claudeSpawns).toHaveLength(0);
   });
 
-  it("reads the host-mode PID file and stores job.claudePid", async () => {
+  it("reads the host-mode PID file and wires the host handle to the tracked PID", async () => {
     mockReadPidFileWithTimeout.mockResolvedValue(987654);
     mockTempDirs({ term: "/tmp/danxbot-term-pid" });
 
@@ -1898,8 +1903,12 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       // the captured wt.exe output + interop-stall hint in the error.
       "/tmp/danxbot-term-pid/wt-stderr.log",
     );
-    expect(job.claudePid).toBe(987654);
-    expect(job.process).toBeUndefined();
+    expect(job.handle).toBeDefined();
+    // Behaviorally pin the PID — handle.kill should reach the host PID, not
+    // a ChildProcess. mockSpawn must not have been called for "claude" in
+    // host mode (single-fork invariant; verified separately above).
+    job.handle!.kill("SIGTERM");
+    expect(mockKillHostPid).toHaveBeenCalledWith(987654, "SIGTERM");
   });
 
   it("attaches a host exit watcher to the tracked PID", async () => {
@@ -1913,7 +1922,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     });
 
     expect(mockCreateHostExitWatcher).toHaveBeenCalledWith(111222, 500);
-    expect(job.hostExitWatcher).toBeDefined();
+    expect(job.handle).toBeDefined();
   });
 
   it("transitions the job to completed when the host-mode PID exits WITH assistant output", async () => {
@@ -2448,7 +2457,7 @@ describe("cancelJob", () => {
     expect(rmPaths).toContain("/tmp/danxbot-prompt-maxruntime");
   });
 
-  it("is a no-op when job.process is undefined", async () => {
+  it("is a no-op when job.handle is undefined", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -2458,7 +2467,7 @@ describe("cancelJob", () => {
       timeoutMs: 300_000,
     });
 
-    job.process = undefined;
+    job.handle = undefined;
     job.status = "running";
 
     await cancelJob(job, "test-token");
@@ -2685,5 +2694,93 @@ describe("cancelJob", () => {
     expect(mockKillHostPid).toHaveBeenCalledWith(424_242, "SIGTERM");
     expect(job.status).toBe("completed");
     expect(job.summary).toBe("Host agent done");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// terminateWithGrace is the exported lifecycle helper used by both
+// `cancelJob` (in this file) and stall recovery (`dispatch/core.ts:395`).
+// Direct unit tests pin the three behaviors so a future refactor can't
+// silently regress the contract.
+// ─────────────────────────────────────────────────────────────────────────
+describe("terminateWithGrace", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeJobWithHandle(
+    overrides: Partial<AgentHandle> = {},
+  ): { job: AgentJob; handle: AgentHandle } {
+    const handle: AgentHandle = {
+      kill: vi.fn(),
+      isAlive: vi.fn().mockReturnValue(false),
+      onExit: vi.fn(),
+      dispose: vi.fn(),
+      ...overrides,
+    };
+    // Minimal AgentJob — only the fields terminateWithGrace touches.
+    const job = {
+      id: "tg-test",
+      status: "running" as const,
+      summary: "",
+      startedAt: new Date(),
+      handle,
+      stop: async () => {},
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    } as AgentJob;
+    return { job, handle };
+  }
+
+  it("is a no-op when job.handle is undefined (post-cleanup race safety)", async () => {
+    const { job, handle } = makeJobWithHandle();
+    job.handle = undefined;
+
+    await terminateWithGrace(job, 5_000);
+
+    expect(handle.kill).not.toHaveBeenCalled();
+    expect(handle.isAlive).not.toHaveBeenCalled();
+  });
+
+  it("sends SIGTERM, waits graceMs, then SIGKILL when isAlive() is still true", async () => {
+    const isAlive = vi.fn().mockReturnValue(true);
+    const { job, handle } = makeJobWithHandle({ isAlive });
+
+    const promise = terminateWithGrace(job, 5_000);
+    expect(handle.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(handle.kill).toHaveBeenCalledTimes(1);
+
+    // Before the grace expires, no SIGKILL.
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(handle.kill).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2);
+    await promise;
+
+    expect(handle.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+    expect(isAlive).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips SIGKILL when isAlive() returns false after the grace window", async () => {
+    const isAlive = vi.fn().mockReturnValue(false);
+    const { job, handle } = makeJobWithHandle({ isAlive });
+
+    const promise = terminateWithGrace(job, 5_000);
+    await vi.advanceTimersByTimeAsync(5_001);
+    await promise;
+
+    expect(handle.kill).toHaveBeenCalledTimes(1);
+    expect(handle.kill).toHaveBeenCalledWith("SIGTERM");
+    // Process exited cleanly during the grace — no SIGKILL needed.
+    expect(handle.kill).not.toHaveBeenCalledWith("SIGKILL");
   });
 });

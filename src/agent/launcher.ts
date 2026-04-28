@@ -14,7 +14,7 @@
  * - maxRuntimeMs: hard runtime cap
  */
 
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,13 +55,12 @@ import {
   getTerminalLogPath,
   spawnInTerminal,
 } from "../terminal.js";
+import { readPidFileWithTimeout, createHostExitWatcher } from "./host-pid.js";
 import {
-  readPidFileWithTimeout,
-  createHostExitWatcher,
-  killHostPid,
-  isPidAlive,
-  type HostExitWatcher,
-} from "./host-pid.js";
+  createDockerHandle,
+  createHostHandle,
+  type AgentHandle,
+} from "./agent-handle.js";
 
 const log = createLogger("launcher");
 
@@ -98,26 +97,14 @@ export interface AgentJob {
    */
   usage: AgentUsage;
   /**
-   * Docker runtime: the headless claude ChildProcess. Undefined in host runtime —
-   * host mode does not spawn claude as a direct child of this node process
-   * (it runs inside a detached Windows Terminal tab). Use `claudePid` instead.
+   * Runtime handle for the spawned claude process. Set during the runtime
+   * fork inside `spawnAgent`. Docker mode wraps a ChildProcess; host mode
+   * wraps a tracked PID + its liveness-poll watcher. Every lifecycle site
+   * (kill, isAlive, onExit, dispose) goes through this single interface;
+   * the runtime branch is decided once at fork time, not at every callsite.
+   * See `src/agent/agent-handle.ts` for the contract.
    */
-  process?: ChildProcess;
-  /**
-   * Host runtime: PID of the `script -q -f` process wrapping the claude TUI.
-   * The bash dispatch script writes `$$` to a file and immediately `exec`s
-   * `script`, which preserves the PID — so this value IS the `script` PID,
-   * and its direct child is claude. SIGTERM to this PID propagates through
-   * `script` to claude's pty and the terminal tab closes on exit. See
-   * `.claude/rules/agent-dispatch.md` and `src/terminal.ts` for the cascade.
-   */
-  claudePid?: number;
-  /**
-   * Host runtime: watcher that polls `process.kill(pid, 0)` to detect when
-   * the dispatched claude has exited, so the launcher can transition the job
-   * to a terminal state. Not set in docker runtime.
-   */
-  hostExitWatcher?: HostExitWatcher;
+  handle?: AgentHandle;
   heartbeatInterval?: ReturnType<typeof setInterval>;
   /** The SessionLogWatcher monitoring this job's JSONL session file. */
   watcher?: SessionLogWatcher;
@@ -161,55 +148,26 @@ export interface AgentJob {
 }
 
 /**
- * Send `signal` to the agent process using whichever handle the runtime gave
- * us — the ChildProcess in docker mode or the tracked PID in host mode.
- * Safe to call when no handle is attached (e.g. after cleanup).
- *
- * Exported so callers outside the launcher (dispatch stall recovery, future
- * lifecycle tools) can drive cancellation without duplicating the runtime
- * fork — see `.claude/rules/agent-dispatch.md`, "Single Fork Principle".
- */
-export function killAgentProcess(job: AgentJob, signal: NodeJS.Signals): void {
-  if (job.process) {
-    job.process.kill(signal);
-    return;
-  }
-  if (job.claudePid !== undefined) {
-    killHostPid(job.claudePid, signal);
-  }
-}
-
-/**
- * Returns true when the runtime handle indicates the process is still running.
- * Docker: the ChildProcess `exitCode` is nullish (per Node docs, exitCode is
- * null for a running process). Host: the tracked PID still exists.
- * `.killed` is intentionally NOT checked — it flips true as soon as `.kill()`
- * dispatches a signal, even if the process hasn't yet exited.
- */
-export function isAgentProcessAlive(job: AgentJob): boolean {
-  if (job.process) {
-    return job.process.exitCode == null;
-  }
-  if (job.claudePid !== undefined) {
-    return isPidAlive(job.claudePid);
-  }
-  return false;
-}
-
-/**
  * Send SIGTERM, wait `graceMs`, then SIGKILL if the process is still alive.
  * The two-phase pattern gives the agent a chance to flush state (final
  * assistant message, usage totals) before forceful termination. Works
- * identically in docker and host mode via the runtime-aware helpers.
+ * identically in docker and host mode via `job.handle` — the runtime
+ * branch was decided once at spawn time. No-op when no handle is attached
+ * (e.g. after cleanup).
+ *
+ * Exported so callers outside the launcher (dispatch stall recovery, future
+ * lifecycle tools) can drive termination without duplicating the runtime
+ * fork — see `.claude/rules/agent-dispatch.md`, "Single Fork Principle".
  */
 export async function terminateWithGrace(
   job: AgentJob,
   graceMs: number,
 ): Promise<void> {
-  killAgentProcess(job, "SIGTERM");
+  if (!job.handle) return;
+  job.handle.kill("SIGTERM");
   await new Promise((resolve) => setTimeout(resolve, graceMs));
-  if (isAgentProcessAlive(job)) {
-    killAgentProcess(job, "SIGKILL");
+  if (job.handle.isAlive()) {
+    job.handle.kill("SIGKILL");
   }
 }
 
@@ -641,7 +599,7 @@ export async function spawnAgent(
   // --- Inactivity timer: resets on watcher entries, kills via the runtime-
   //     aware handle (docker: child.kill; host: process.kill(pid, sig)). ---
   const inactivityTimer = createInactivityTimer(
-    (signal) => killAgentProcess(job, signal),
+    (signal) => job.handle?.kill(signal),
     options.timeoutMs,
     (j) => {
       // Fire-and-forget: cleanup awaits drain + finalize internally so the
@@ -670,7 +628,7 @@ export async function spawnAgent(
         log.info(
           `[Job ${jobId}] Max runtime exceeded — ${options.maxRuntimeMs! / 1000}s — killing process`,
         );
-        killAgentProcess(job, "SIGTERM");
+        job.handle?.kill("SIGTERM");
         job.status = "timeout";
         job.summary = `Agent exceeded max runtime of ${Math.round(options.maxRuntimeMs! / 1000 / 60)} minutes`;
         job.completedAt = new Date();
@@ -719,9 +677,9 @@ export async function spawnAgent(
     inactivityTimer.clear();
     stopHeartbeat(job);
     if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
-    if (job.hostExitWatcher) {
-      job.hostExitWatcher.stop();
-    }
+    // Idempotent + safe after exit. Docker handles no-op; host handles
+    // stop the liveness-poll interval.
+    job.handle?.dispose();
 
     // Observer teardown is wrapped in try/finally so a synchronous throw from
     // any observer (watcher.stop, dispatchTracker.finalize, forwarder.flush)
@@ -783,7 +741,7 @@ export async function spawnAgent(
     summary?: string,
   ): Promise<void> => {
     if (job.status !== "running") return;
-    if (!job.process && job.claudePid === undefined) return;
+    if (!job.handle) return;
 
     log.info(`[Job ${jobId}] Agent self-stop (${status}) — sending SIGTERM`);
 
@@ -792,26 +750,28 @@ export async function spawnAgent(
     if (summary) job.summary = summary;
     job.completedAt = new Date();
 
-    // Register exit listener BEFORE kill to avoid missing a fast exit. Docker
-    // uses the ChildProcess close event; host uses the liveness-poll watcher.
+    // Register exit listener BEFORE kill to avoid missing a fast exit. Both
+    // runtimes converge on the handle's onExit — docker delegates to
+    // ChildProcess.once("close"), host delegates to the PID watcher.
+    //
+    // Note: the SIGTERM → 5s wait → SIGKILL pattern below mirrors
+    // `terminateWithGrace` but is intentionally open-coded here — only this
+    // call site cares about whether exit fired during the grace window
+    // (`processExited`), so we can skip the SIGKILL when the kernel already
+    // reaped the process. `terminateWithGrace` operates on `isAlive()` only
+    // and is correct for `cancelJob` + stall recovery, which don't need
+    // that signal.
     let processExited = false;
-    if (job.process) {
-      job.process.once("close", () => {
-        processExited = true;
-      });
-    } else if (job.hostExitWatcher) {
-      job.hostExitWatcher.onExit(() => {
-        processExited = true;
-      });
-    }
+    job.handle.onExit(() => {
+      processExited = true;
+    });
 
-    killAgentProcess(job, "SIGTERM");
+    job.handle.kill("SIGTERM");
 
-    // Wait 5s for graceful shutdown, then SIGKILL if still alive
     await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
-    if (!processExited && isAgentProcessAlive(job)) {
+    if (!processExited && job.handle.isAlive()) {
       log.info(`[Job ${jobId}] Still alive after 5s — sending SIGKILL`);
-      killAgentProcess(job, "SIGKILL");
+      job.handle.kill("SIGKILL");
     }
 
     // Use job._cleanup rather than the internal closure so any wrappers registered
@@ -903,7 +863,7 @@ export async function spawnAgent(
       cwd: agentCwd,
     });
 
-    job.process = child;
+    job.handle = createDockerHandle(child);
 
     child.stderr?.on("data", (data: Buffer) => {
       stderr += data.toString();
@@ -1019,12 +979,11 @@ async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
     HOST_PID_FILE_POLL_MS,
     wtLogPath,
   );
-  job.claudePid = pid;
   log.info(`[Job ${jobId}] Host-mode dispatch PID: ${pid}`);
 
   const hostExitWatcher = createHostExitWatcher(pid, HOST_EXIT_POLL_MS);
-  job.hostExitWatcher = hostExitWatcher;
-  hostExitWatcher.onExit(onExit);
+  job.handle = createHostHandle(pid, hostExitWatcher);
+  job.handle.onExit(onExit);
 }
 
 /**
@@ -1043,7 +1002,7 @@ export async function cancelJob(
   apiToken: string,
 ): Promise<void> {
   if (job.status !== "running") return;
-  if (!job.process && job.claudePid === undefined) return;
+  if (!job.handle) return;
 
   log.info(`[Job ${job.id}] Cancel requested — sending SIGTERM`);
 
