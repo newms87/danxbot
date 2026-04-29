@@ -477,6 +477,17 @@ export class SessionLogWatcher {
   /** Read any new bytes from `state.filePath` and emit resulting entries. */
   private async pollFile(state: TailState): Promise<void> {
     const isSubagent = state.lineage !== undefined;
+
+    // Refresh lineage inline before reading new bytes so emissions reflect
+    // the latest meta.json + parent session id even if the central refresh
+    // missed this cycle. Closes the race in production where claude writes
+    // `.jsonl` then `.meta.json` and a poll catches the new bytes between
+    // those writes — without this, the entry would emit permanently stamped
+    // with agent_type=undefined. Trello I2xS1Sec.
+    if (isSubagent) {
+      await this.refreshLineage(state);
+    }
+
     try {
       const fileStats = await stat(state.filePath);
       if (!this.running) return;
@@ -560,29 +571,35 @@ export class SessionLogWatcher {
     }
   }
 
-  /**
-   * For sub-agent tails whose `agent_type` is still undefined (meta.json had
-   * not been written yet when the jsonl was first discovered), retry reading
-   * the sidecar on each poll. Claude Code writes .jsonl and .meta.json
-   * separately, so the meta can appear one or more ticks after the jsonl.
-   * Also back-fills parent_session_id once the parent init has emitted.
-   */
+  /** Centralized lineage refresh — see `refreshLineage` for the per-state body. */
   private async refreshPendingAgentTypes(): Promise<void> {
     for (const state of this.subagentTails.values()) {
-      if (!state.lineage) continue;
-      let { agent_type, parent_session_id } = state.lineage;
-      if (agent_type === undefined) {
-        agent_type = await this.readAgentType(state.lineage.subagent_id);
-      }
-      if (parent_session_id === null && this.parentSessionId !== null) {
-        parent_session_id = this.parentSessionId;
-      }
-      state.lineage = {
-        subagent_id: state.lineage.subagent_id,
-        parent_session_id,
-        agent_type,
-      };
+      await this.refreshLineage(state);
     }
+  }
+
+  /**
+   * Refresh `state.lineage` by re-reading the meta sidecar and back-filling
+   * parent_session_id from the most recent parent observation. Idempotent:
+   * once `agent_type` is set it stays set (never read meta twice). Used by
+   * both the centralized `refreshPendingAgentTypes` and the inline call from
+   * `pollFile` — the inline call is the defense-in-depth that closes the race
+   * where bytes appear before `refreshPendingAgentTypes` has a chance to run.
+   */
+  private async refreshLineage(state: TailState): Promise<void> {
+    if (!state.lineage) return;
+    let { agent_type, parent_session_id } = state.lineage;
+    if (agent_type === undefined) {
+      agent_type = await this.readAgentType(state.lineage.subagent_id);
+    }
+    if (parent_session_id === null && this.parentSessionId !== null) {
+      parent_session_id = this.parentSessionId;
+    }
+    state.lineage = {
+      subagent_id: state.lineage.subagent_id,
+      parent_session_id,
+      agent_type,
+    };
   }
 
   /**

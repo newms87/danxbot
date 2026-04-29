@@ -1159,6 +1159,129 @@ describe("SessionLogWatcher — sub-agent coverage", () => {
     expect(later.data.agent_type).toBe("Explore");
   });
 
+  // Regression for Trello I2xS1Sec: even if the central refresh
+  // (`refreshPendingAgentTypes`) is somehow skipped or runs before claude
+  // writes `.meta.json`, `pollFile` must refresh lineage inline before
+  // emitting any new sub-agent bytes. Without that defense-in-depth, the
+  // `.jsonl-then-.meta.json` write order in real dispatches could leave a
+  // sub-agent's first entries permanently stamped with `agent_type=undefined`.
+  it("pollFile inline-refreshes lineage when the central refresh missed it", async () => {
+    const entries: AgentLogEntry[] = [];
+    const parentStem = "parent-inline";
+    writeJsonlFile(tempDir, `${parentStem}.jsonl`, [
+      rawSystemInit(),
+      rawAssistantEntry(),
+    ]);
+    const subagentDir = join(tempDir, parentStem, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    writeJsonlFile(subagentDir, "agent-inline.jsonl", [
+      rawAssistantEntry({ sessionId: "sub-inline" }),
+    ]);
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+
+    await watcher.start();
+
+    // First emission — meta absent, agent_type undefined.
+    const firstEmit = entries.find(
+      (e) => e.data.subagent_id === "agent-inline",
+    );
+    expect(firstEmit).toBeDefined();
+    expect(firstEmit!.data.agent_type).toBeUndefined();
+
+    // Stub the central refresh to a no-op so the only path by which
+    // agent_type can update is pollFile's inline refresh.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (watcher as any).refreshPendingAgentTypes = async () => {};
+
+    writeFileSync(
+      join(subagentDir, "agent-inline.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "inline" }),
+    );
+    appendJsonlEntry(
+      join(subagentDir, "agent-inline.jsonl"),
+      rawAssistantEntry({
+        sessionId: "sub-inline",
+        timestamp: "2026-04-12T10:00:30.000Z",
+      }),
+    );
+
+    await watcher.drain();
+    watcher.stop();
+
+    const later = entries
+      .filter((e) => e.data.subagent_id === "agent-inline")
+      .slice(-1)[0];
+    expect(later.data.agent_type).toBe("Explore");
+  });
+
+  // Companion to the previous test for the second branch of `refreshLineage`:
+  // back-filling `parent_session_id` once the parent's init has emitted.
+  it("pollFile inline-refreshes parent_session_id when the central refresh missed it", async () => {
+    const entries: AgentLogEntry[] = [];
+    const parentStem = "parent-late-init";
+    // Parent .jsonl starts with only a user-text entry — it does not emit
+    // (convertJsonlEntry returns null for string-content user entries) and
+    // therefore does not advance parentSessionId. Sub-agent discovery
+    // captures parent_session_id=null in its lineage.
+    writeJsonlFile(tempDir, `${parentStem}.jsonl`, [rawUserTextEntry()]);
+    const subagentDir = join(tempDir, parentStem, "subagents");
+    mkdirSync(subagentDir, { recursive: true });
+    writeJsonlFile(subagentDir, "agent-late.jsonl", [
+      rawAssistantEntry({ sessionId: "sub-late" }),
+    ]);
+    // Meta present at discovery, so `agent_type` is already resolved — the
+    // test focuses on the parent_session_id back-fill branch alone.
+    writeFileSync(
+      join(subagentDir, "agent-late.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "late init" }),
+    );
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+    });
+    watcher.onEntry((entry) => entries.push(entry));
+    await watcher.start();
+
+    const firstEmit = entries.find((e) => e.data.subagent_id === "agent-late");
+    expect(firstEmit).toBeDefined();
+    expect(firstEmit!.data.parent_session_id).toBeNull();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (watcher as any).refreshPendingAgentTypes = async () => {};
+
+    // Parent's first assistant entry — synthesizes init and sets
+    // parentSessionId during the next pollFile(parent).
+    appendJsonlEntry(
+      join(tempDir, `${parentStem}.jsonl`),
+      rawAssistantEntry({ timestamp: "2026-04-12T10:00:25.000Z" }),
+    );
+    // Append sub-agent bytes so pollFile(state) actually emits something
+    // after its inline refresh picks up the now-set parentSessionId.
+    appendJsonlEntry(
+      join(subagentDir, "agent-late.jsonl"),
+      rawAssistantEntry({
+        sessionId: "sub-late",
+        timestamp: "2026-04-12T10:00:30.000Z",
+      }),
+    );
+
+    await watcher.drain();
+    watcher.stop();
+
+    const later = entries
+      .filter((e) => e.data.subagent_id === "agent-late")
+      .slice(-1)[0];
+    expect(later.data.parent_session_id).toBe("sess-abc-123");
+  });
+
   it("tolerates malformed meta.json without crashing the watcher", async () => {
     const entries: AgentLogEntry[] = [];
     const parentStem = "parent-bad-meta";
