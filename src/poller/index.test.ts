@@ -213,7 +213,7 @@ vi.mock("node:fs", () => ({
   statSync: (...args: unknown[]) => mockStatSync(...args),
 }));
 
-import { poll, shutdown, start, _resetForTesting } from "./index.js";
+import { poll, shutdown, start, syncRepoFiles, _resetForTesting } from "./index.js";
 
 function createFakeSpawnResult() {
   return { unref: vi.fn(), on: vi.fn() };
@@ -429,6 +429,50 @@ describe("poll", () => {
         !p.startsWith(workspacesPluralPrefix),
     );
     expect(repoRootClaudeTouches).toEqual([]);
+  });
+
+  it("syncRepoFiles throws and writes nothing when a required config.yml field is missing (fail-loud — Trello `C7W1cEhh`)", () => {
+    // Required-field guarantees in `validateRepoConfig` are belt-and-
+    // suspenders; if anything ever calls `syncRepoFiles` without prior
+    // boot validation (or `validateRepoConfig` regresses), the rule-file
+    // renderer throws rather than silently emitting `| Name | \`unknown\` |`
+    // and `unknown-compose.yml`. This test pins the contract at the
+    // integration level: a missing `name` aborts the sync, leaving the
+    // workspace untouched.
+    const brokenConfig = `url: https://github.com/org/repo.git
+runtime: local
+language: node
+`; // missing `name`
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (typeof path === "string" && path.endsWith("config.yml")) return brokenConfig;
+      if (typeof path === "string" && path.endsWith("trello.yml")) return "board_id: mock-board-id\n";
+      if (typeof path === "string" && path.endsWith(".md")) return "# placeholder";
+      return "";
+    });
+
+    expect(() => syncRepoFiles(MOCK_REPO_CONTEXT)).toThrow(
+      /'name'.*missing/,
+    );
+
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    const copiedDests = mockCopyFileSync.mock.calls.map(
+      (c: unknown[]) => c[1] as string,
+    );
+
+    // The rendered rule must NOT land — that was the whole point of the
+    // silent `|| "unknown"` fallback existing in the first place (mask the
+    // bug). With fail-loud, the file is never produced.
+    expect(
+      writtenPaths.find((p) => p.endsWith("danx-repo-config.md")),
+    ).toBeUndefined();
+
+    // And the line-815 callsite (`copyComposeOverride` writing
+    // `<cfg.name>-compose.yml`) must never produce an `unknown-compose.yml`.
+    expect(
+      copiedDests.find((p) => p.includes("unknown-compose.yml")),
+    ).toBeUndefined();
   });
 
   it("injectDanxWorkspaces ensures <repo>/.danxbot/workspaces/ exists (P2 contract — empty source dir is a no-op apart from mkdir)", async () => {
