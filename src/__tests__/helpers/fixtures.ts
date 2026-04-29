@@ -4,7 +4,6 @@ import type {
   RouterResult,
   AgentResponse,
   AgentLogEntry,
-  ComplexityLevel,
   RepoContext,
 } from "../../types.js";
 
@@ -115,7 +114,6 @@ export function makeRouterResult(
   return {
     quickResponse: "Hello!",
     needsAgent: false,
-    complexity: "high" as ComplexityLevel,
     reason: "greeting",
     error: null,
     request: {},

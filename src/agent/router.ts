@@ -5,7 +5,7 @@ import { isOperationalError } from "../errors/patterns.js";
 import { parseJsonResponse } from "./parse-json-response.js";
 import { trimThreadMessages } from "../threads.js";
 import { FEATURE_LIST, FEATURE_EXAMPLES } from "./features.js";
-import type { ApiCallUsage, ComplexityLevel, RouterResult, ThreadMessage } from "../types.js";
+import type { RouterResult, ThreadMessage } from "../types.js";
 import { buildApiCallUsage } from "./pricing.js";
 
 const log = createLogger("router");
@@ -18,7 +18,7 @@ const ROUTER_SYSTEM_PROMPT = [
   "You receive the full conversation thread, so you can reference earlier messages.",
   "",
   "Respond with JSON only (no markdown, no code fences):",
-  '{"quickResponse": "...", "needsAgent": true/false, "complexity": "very_low"|"low"|"medium"|"high"|"very_high", "reason": "..."}',
+  '{"quickResponse": "...", "needsAgent": true/false, "reason": "..."}',
   "",
   "quickResponse: A short, friendly reply to the user. For greetings, greet them back.",
   "For questions, acknowledge the question and say you're looking into it.",
@@ -30,14 +30,6 @@ const ROUTER_SYSTEM_PROMPT = [
   "codebase, querying the database, or deep domain knowledge. false if your",
   "quickResponse fully handles it (greetings, small talk, simple acknowledgments).",
   "",
-  "complexity: Determines the agent tier. Pick the LOWEST level that can handle the question.",
-  '- very_low: Single direct lookup, 1 tool call. "How many active records?", "Show me user X", "What\'s the schema for orders?"',
-  '- low: 1-3 tool calls, straightforward. "Show recent records with related names", "What columns does the users table have?"',
-  '- medium: Moderate exploration, 3-6 tool calls. "How does filtering work?", "What triggers a status change?"',
-  '- high: Multi-step investigation, cross-referencing. "Why might a record show wrong status?", "Walk me through the approval flow"',
-  '- very_high: Deep exploration across multiple domains. "Explain the entire billing lifecycle end-to-end", "Compare the two workflows"',
-  'When needsAgent is false, set complexity to "very_low".',
-  "",
   "reason: Brief explanation of your routing decision.",
   "",
   'When the user seems unsure, asks "what can you do?", sends a vague or exploratory',
@@ -45,7 +37,6 @@ const ROUTER_SYSTEM_PROMPT = [
   "- Set quickResponse to a friendly message that picks 2-3 relevant features from the list below",
   "- Include 1-2 example questions they could try",
   "- Set needsAgent to false",
-  '- Set complexity to "very_low"',
   "- Keep it concise — 2-3 bullet points max, not the full feature list",
   "",
   "## Available Features",
@@ -59,7 +50,6 @@ const ROUTER_SYSTEM_PROMPT = [
   "When the user asks you to do something you can't, asks for a new feature or capability,",
   'or says something like "can you add that?", "can you do X?", "feature request":',
   '- Set needsAgent to true (the agent can create Trello cards for feature requests)',
-  '- Set complexity to "very_low"',
   '- Set quickResponse to acknowledge the request and say you\'re looking into it',
 ].join("\n");
 
@@ -135,16 +125,9 @@ export async function runRouter(
       const usage = buildApiCallUsage(response.usage, routerModel, "router");
       const parsed = parseJsonResponse(response);
 
-      const VALID_LEVELS = new Set<ComplexityLevel>(["very_low", "low", "medium", "high", "very_high"]);
-      const rawComplexity = String(parsed.complexity || "");
-      const complexity: ComplexityLevel = VALID_LEVELS.has(rawComplexity as ComplexityLevel)
-        ? (rawComplexity as ComplexityLevel)
-        : "high";
-
       return {
         quickResponse: String(parsed.quickResponse || ""),
         needsAgent: parsed.needsAgent === true,
-        complexity,
         reason: String(parsed.reason || ""),
         error: null,
         request: request as unknown as Record<string, unknown>,
@@ -175,7 +158,6 @@ export async function runRouter(
       ? "I'm temporarily unavailable due to a service configuration issue. The team has been notified."
       : "I'm having a moment — give me a sec and try again.",
     needsAgent: false,
-    complexity: "very_low",
     reason: "router error",
     error: errorMessage,
     isOperational,

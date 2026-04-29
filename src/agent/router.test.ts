@@ -287,106 +287,7 @@ describe("runRouter", () => {
 
     expect(result.quickResponse).toBe("");
     expect(result.needsAgent).toBe(false);
-    expect(result.complexity).toBe("high");
     expect(result.reason).toBe("");
-  });
-
-  it("parses very_low complexity", async () => {
-    mockRouterResponse({
-      quickResponse: "Looking into it...",
-      needsAgent: true,
-      complexity: "very_low",
-      reason: "data lookup",
-    });
-
-    const result = await runRouter("how many campaigns?");
-
-    expect(result.complexity).toBe("very_low");
-  });
-
-  it("parses low complexity", async () => {
-    mockRouterResponse({
-      quickResponse: "Looking into it...",
-      needsAgent: true,
-      complexity: "low",
-      reason: "simple query",
-    });
-
-    const result = await runRouter("show recent campaigns");
-
-    expect(result.complexity).toBe("low");
-  });
-
-  it("parses medium complexity", async () => {
-    mockRouterResponse({
-      quickResponse: "Let me check...",
-      needsAgent: true,
-      complexity: "medium",
-      reason: "moderate exploration",
-    });
-
-    const result = await runRouter("how does filtering work?");
-
-    expect(result.complexity).toBe("medium");
-  });
-
-  it("parses high complexity", async () => {
-    mockRouterResponse({
-      quickResponse: "Let me investigate...",
-      needsAgent: true,
-      complexity: "high",
-      reason: "multi-step reasoning",
-    });
-
-    const result = await runRouter("how does campaign status lifecycle work?");
-
-    expect(result.complexity).toBe("high");
-  });
-
-  it("parses very_high complexity", async () => {
-    mockRouterResponse({
-      quickResponse: "This will take a moment...",
-      needsAgent: true,
-      complexity: "very_high",
-      reason: "deep exploration",
-    });
-
-    const result = await runRouter("explain billing lifecycle end-to-end");
-
-    expect(result.complexity).toBe("very_high");
-  });
-
-  it("defaults unknown complexity to high", async () => {
-    mockRouterResponse({
-      quickResponse: "hi",
-      needsAgent: true,
-      complexity: "simple",
-      reason: "old format",
-    });
-
-    const result = await runRouter("test");
-
-    expect(result.complexity).toBe("high");
-  });
-
-  it("defaults missing complexity to high", async () => {
-    mockRouterResponse({
-      quickResponse: "hi",
-      needsAgent: false,
-      reason: "greeting",
-    });
-
-    const result = await runRouter("hi");
-
-    expect(result.complexity).toBe("high");
-  });
-
-  it("defaults complexity to very_low on router error", async () => {
-    mockCreate.mockRejectedValueOnce(new Error("API error"));
-
-    const result = await runRouter("hello");
-
-    expect(result.complexity).toBe("very_low");
   });
 
   it("only sets needsAgent true when value is strictly true", async () => {
@@ -497,6 +398,20 @@ describe("runRouter", () => {
     const callArgs = mockCreate.mock.calls[0][0];
     expect(callArgs.system).toContain("Feature Requests");
     expect(callArgs.system).toContain("needsAgent to true");
+  });
+
+  it("does not include complexity instructions or field in router output", async () => {
+    mockRouterResponse({
+      quickResponse: "hi",
+      needsAgent: false,
+      reason: "test",
+    });
+
+    const result = await runRouter("hi");
+
+    const callArgs = mockCreate.mock.calls[0][0];
+    expect(callArgs.system).not.toMatch(/complexity/i);
+    expect(result).not.toHaveProperty("complexity");
   });
 
   it("populates usage on successful response", async () => {

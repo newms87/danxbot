@@ -34,12 +34,9 @@ export interface AgentLineage {
   agent_type: string | undefined;
 }
 
-export type ComplexityLevel = "very_low" | "low" | "medium" | "high" | "very_high";
-
 export interface RouterResult {
   quickResponse: string;
   needsAgent: boolean;
-  complexity: ComplexityLevel;
   reason: string;
   error: string | null;
   isOperational?: boolean;
