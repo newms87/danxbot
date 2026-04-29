@@ -1,5 +1,7 @@
 # Production Deploy Port Implementation Plan
 
+> **Note (2026-04-28):** This plan was authored when `@thehammer/schema-mcp-server` was a direct danxbot dependency. That contract has since been removed (gpt-manager card #529). The dispatched-agent flow now resolves the schema MCP server via `npx -y` from the workspace `.mcp.json` at dispatch time — no install in danxbot. When porting, omit `@thehammer/schema-mcp-server` from any new `package.json` block; the alphabetical insertion of `yaml` is now between `@slack/bolt` and `mysql2`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Port the AWS deployment system from `danxbot-gpt-manager` into `danxbot-flytebot`, adapted for multi-repo workers, extended for multi-deployment (per-AWS-account), with a secrets push helper and a per-repo bootstrap step so each prod box runs every worker's full dev stack.

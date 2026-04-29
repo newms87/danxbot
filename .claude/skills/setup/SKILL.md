@@ -387,7 +387,7 @@ Check if the connected repo has an MCP server by looking for `mcp-server/` direc
 **If an MCP server exists:**
 
 1. Tell the user: "This repo has an MCP server published as an npm package. This enables remote agent dispatch — the repo can launch Claude agents via danxbot's HTTP API."
-2. Ensure the MCP server npm package is installed: `npm install @thehammer/schema-mcp-server`
+2. The MCP server is resolved at dispatch time by the workspace `.mcp.json` via `npx -y <package-name>` from the workspace cwd. No `npm install` step is required in danxbot — the npm registry is the single source of truth.
 3. Set these in `.env`:
    ```
    # Dispatch — remote agent launch via HTTP
