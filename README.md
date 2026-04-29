@@ -31,7 +31,6 @@ The interactive setup wizard guides you through credentials, Trello board setup,
 | `src/agent/router.ts` | Haiku-based instant triage and quick responses |
 | `src/dispatch/core.ts` | Unified `dispatch()` — every deep-agent path (Slack, poller, `/api/launch`) funnels through here |
 | `src/agent/launcher.ts` | `spawnAgent()` — single Claude Code CLI fork per dispatch |
-| `src/agent/heartbeat.ts` | Token-usage heartbeat (liveness PUTs to `statusUrl`) |
 | `src/slack/listener.ts` | Slack Socket Mode message handler |
 | `src/slack/helpers.ts` | Shared Slack API helpers (reactions) |
 | `src/dashboard/` | Vue 3 + Tailwind monitoring dashboard |

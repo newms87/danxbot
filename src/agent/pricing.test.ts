@@ -109,12 +109,12 @@ describe("buildApiCallUsage", () => {
     const usage = buildApiCallUsage(
       { input_tokens: 100, output_tokens: 50 },
       "claude-haiku-4-5-20251001",
-      "heartbeat",
+      "router",
     );
 
     expect(usage.cacheCreationInputTokens).toBe(0);
     expect(usage.cacheReadInputTokens).toBe(0);
-    expect(usage.source).toBe("heartbeat");
+    expect(usage.source).toBe("router");
   });
 
   it("handles completely empty usage object", () => {

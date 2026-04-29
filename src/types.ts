@@ -48,20 +48,8 @@ export interface RouterResult {
   usage: ApiCallUsage | null;
 }
 
-export interface HeartbeatUpdate {
-  emoji: string;
-  color: string;
-  text: string;
-  stop: boolean;
-}
-
-export interface HeartbeatSnapshot {
-  activitySummary: string;
-  update: HeartbeatUpdate;
-}
-
 export interface ApiCallUsage {
-  source: "router" | "heartbeat";
+  source: "router";
   model: string;
   inputTokens: number;
   outputTokens: number;
