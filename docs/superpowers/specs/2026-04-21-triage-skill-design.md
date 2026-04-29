@@ -350,15 +350,11 @@ Approval phrases: `go`, `do it`, `approved`, `yes`, `proceed`. Any other respons
 
 When invoked by another agent or a scheduled `/loop` (non-interactive), this approval step is skipped — the agent writes mutations immediately after classification. Detection: check whether STDIN is a TTY (`process.stdin.isTTY`) at skill start. Fall back to "interactive" if detection is ambiguous.
 
-### Self-Termination
+### Completion Signal
 
-Same pattern as `/danx-next` and `/danx-ideate`. After the report is printed, run:
+After the report is printed, if dispatched by danxbot (the `danxbot_complete` MCP tool is available), call it once with `status: "completed"` and a one-line summary. The worker handles process lifecycle.
 
-```
-.claude/tools/danx-self-terminate.sh $PPID
-```
-
-The script checks `DANXBOT_EPHEMERAL` and handles lock file removal and process termination atomically. Always run the script — never assume session type.
+If invoked interactively (no `danxbot_complete` tool present), print "Triage complete." and stop. There is no external termination script — that pattern was retired.
 
 ## Open Knobs (Defaulted)
 

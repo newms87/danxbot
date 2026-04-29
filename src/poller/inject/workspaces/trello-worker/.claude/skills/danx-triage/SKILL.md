@@ -362,8 +362,8 @@ Only cards in the resolved scope (plus epic parents pulled in for grouping) may 
 
 ---
 
-## Step 10 — Self-Terminate
+## Step 10 — Signal Completion
 
-Run via Bash: `.claude/tools/danx-self-terminate.sh $PPID`.
+If dispatched by danxbot (the `danxbot_complete` MCP tool is available), call it once with `status: "completed"` and `summary: "Triaged N cards — top X promoted to ToDo"`. The worker handles process lifecycle.
 
-The script checks `DANXBOT_EPHEMERAL` and handles lock file removal and process termination atomically. Never assume session type — always run the script.
+If invoked interactively (no `danxbot_complete` tool present), print "Triage complete." and stop. Do not invoke any external termination script.

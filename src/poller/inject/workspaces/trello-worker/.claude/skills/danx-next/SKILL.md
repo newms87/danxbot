@@ -217,4 +217,4 @@ The worker uses this signal to finalize the MySQL row, SIGTERM the Claude proces
 
 ## If the ToDo list was empty (from Step 1 of top-level Steps)
 
-Run `.claude/tools/danx-self-terminate.sh $PPID` via `Bash` after `danxbot_complete`. The script checks `DANXBOT_EPHEMERAL` and handles lock file removal + process termination atomically.
+Call `danxbot_complete` with `status: "completed"` and `summary: "ToDo list empty — no work to pick up"`. Worker handles lifecycle. Do not invoke any external termination script.
