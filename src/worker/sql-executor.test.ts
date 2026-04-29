@@ -1,23 +1,33 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Hoist mock pool and logger so they're available in vi.mock factory
-const { mockPool, mockLogger } = vi.hoisted(() => {
-  const mockPool = {
-    query: vi.fn(),
-    end: vi.fn().mockResolvedValue(undefined),
-    getConnection: vi.fn(),
-  };
+// Hoist mock pool, getPlatformPool spy, the typed error sentinel, and
+// logger so they're available in vi.mock factory closures.
+// `getPlatformPool` is exposed as a `vi.fn()` so individual tests can
+// override it to throw the pool-unavailable error and exercise the
+// error classifier. `FakePlatformPoolUnavailableError` is defined
+// inside `vi.hoisted` so the class binding exists when the hoisted
+// `vi.mock("../db/connection.js")` factory runs.
+const { mockPool, mockGetPlatformPool, mockLogger, FakePlatformPoolUnavailableError } = vi.hoisted(() => {
+  const mockPool = { query: vi.fn() };
+  const mockGetPlatformPool = vi.fn();
   const mockLogger = {
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
   };
-  return { mockPool, mockLogger };
+  class FakePlatformPoolUnavailableError extends Error {
+    constructor() {
+      super("Platform DB pool not available — repo has db.enabled=false");
+      this.name = "PlatformPoolUnavailableError";
+    }
+  }
+  return { mockPool, mockGetPlatformPool, mockLogger, FakePlatformPoolUnavailableError };
 });
 
 vi.mock("../db/connection.js", () => ({
-  getPlatformPool: () => mockPool,
+  getPlatformPool: mockGetPlatformPool,
+  PlatformPoolUnavailableError: FakePlatformPoolUnavailableError,
 }));
 
 vi.mock("../logger.js", () => ({
@@ -31,10 +41,12 @@ import {
   formatResultsAsCsv,
   executeQuery,
   processResponseWithAttachments,
+  sanitizeErrorHint,
 } from "./sql-executor.js";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockGetPlatformPool.mockReturnValue(mockPool);
 });
 
 describe("extractSqlBlocks", () => {
@@ -259,6 +271,83 @@ describe("executeQuery", () => {
     expect(result.columns).toEqual([]);
     expect(result.rows).toEqual([]);
     expect(result.error).toBe("Table not found");
+    expect(result.errorKind).toBe("generic");
+  });
+
+  it("classifies pool-unavailable errors via the typed sentinel", async () => {
+    mockGetPlatformPool.mockImplementation(() => {
+      throw new FakePlatformPoolUnavailableError();
+    });
+
+    const result = await executeQuery("SELECT 1");
+
+    expect(result.errorKind).toBe("pool_unavailable");
+    expect(result.error).toContain("Platform DB pool not available");
+  });
+
+  it("classifies pool-unavailable even when the error also carries a timeout code", async () => {
+    // Defensive: PlatformPoolUnavailableError takes precedence over
+    // any timeout-flavored code on the same error.
+    mockGetPlatformPool.mockImplementation(() => {
+      const err = new FakePlatformPoolUnavailableError();
+      (err as Error & { code?: string }).code = "ETIMEDOUT";
+      throw err;
+    });
+
+    const result = await executeQuery("SELECT 1");
+
+    expect(result.errorKind).toBe("pool_unavailable");
+  });
+
+  it("classifies non-Error throws as generic without crashing", async () => {
+    // mysql2 always throws Error instances, but a buggy driver could
+    // throw a string or plain object — the classifier must survive it.
+    mockPool.query.mockImplementation(async () => {
+      throw "boom";
+    });
+
+    const result = await executeQuery("SELECT 1");
+
+    expect(result.errorKind).toBe("generic");
+    expect(result.error).toBe("boom");
+  });
+
+  it("classifies timeout errors by mysql2 error code", async () => {
+    const timeoutErr = Object.assign(new Error("Query inactivity timeout"), {
+      code: "PROTOCOL_SEQUENCE_TIMEOUT",
+    });
+    mockPool.query.mockRejectedValue(timeoutErr);
+
+    const result = await executeQuery("SELECT SLEEP(20)");
+
+    expect(result.errorKind).toBe("timeout");
+  });
+
+  it("classifies timeout errors by ETIMEDOUT code", async () => {
+    const timeoutErr = Object.assign(new Error("connect ETIMEDOUT"), {
+      code: "ETIMEDOUT",
+    });
+    mockPool.query.mockRejectedValue(timeoutErr);
+
+    const result = await executeQuery("SELECT 1");
+
+    expect(result.errorKind).toBe("timeout");
+  });
+
+  it("classifies timeout errors by message text when no code is set", async () => {
+    mockPool.query.mockRejectedValue(new Error("Query timed out after 10000ms"));
+
+    const result = await executeQuery("SELECT 1");
+
+    expect(result.errorKind).toBe("timeout");
+  });
+
+  it("defaults to generic for unrecognized errors", async () => {
+    mockPool.query.mockRejectedValue(new Error("ER_BAD_FIELD_ERROR: Unknown column 'foo'"));
+
+    const result = await executeQuery("SELECT foo FROM users");
+
+    expect(result.errorKind).toBe("generic");
   });
 
   it("truncates results over 50 rows", async () => {
@@ -344,14 +433,17 @@ describe("processResponseWithAttachments — text contract", () => {
     expect(result).not.toContain("sql:execute");
   });
 
-  it("shows generic error for failed queries", async () => {
-    mockPool.query.mockRejectedValue(new Error("Unknown column"));
+  it("shows generic error with sanitized hint for failed queries", async () => {
+    mockPool.query.mockRejectedValue(new Error("ER_BAD_FIELD_ERROR: Unknown column"));
 
     const text = "```sql:execute\nSELECT bad_col FROM users\n```";
     const result = (await processResponseWithAttachments(text)).text;
 
     expect(result).toContain("Query execution failed");
-    expect(result).not.toContain("Unknown column");
+    // The sanitized hint preserves the generic MySQL error class so
+    // ops can debug — no schema, path, or IP details would survive
+    // sanitizeErrorHint, but plain words like "Unknown column" do.
+    expect(result).toContain("Unknown column");
   });
 
   it("handles multiple blocks in one response", async () => {
@@ -400,9 +492,11 @@ describe("processResponseWithAttachments — text contract", () => {
     expect(result).toContain("Second:");
   });
 
-  it("does not leak error details to user", async () => {
+  it("does not leak quoted identifiers, paths, or IPs to user", async () => {
     mockPool.query.mockRejectedValue(
-      new Error("Table 'platform.secret_table' doesn't exist at /var/lib/mysql/data"),
+      new Error(
+        "Table 'platform.secret_table' doesn't exist at /var/lib/mysql/data on host 10.0.0.42:3306",
+      ),
     );
 
     const text = "```sql:execute\nSELECT * FROM secret_table\n```";
@@ -411,6 +505,45 @@ describe("processResponseWithAttachments — text contract", () => {
     expect(result).toContain("Query execution failed");
     expect(result).not.toContain("secret_table");
     expect(result).not.toContain("/var/lib/mysql");
+    expect(result).not.toContain("10.0.0.42");
+  });
+
+  it("renders pool-unavailable failures with a configuration message", async () => {
+    mockGetPlatformPool.mockImplementation(() => {
+      throw new FakePlatformPoolUnavailableError();
+    });
+
+    const text = "```sql:execute\nSELECT 1\n```";
+    const result = (await processResponseWithAttachments(text)).text;
+
+    expect(result).toContain("SQL execution is not available for this repo");
+    expect(result).toContain("no platform DB configured");
+    expect(result).not.toContain("Query execution failed");
+    expect(result).not.toContain("Query timed out");
+  });
+
+  it("renders timeout failures with the 10s limit message", async () => {
+    const timeoutErr = Object.assign(new Error("Query inactivity timeout"), {
+      code: "PROTOCOL_SEQUENCE_TIMEOUT",
+    });
+    mockPool.query.mockRejectedValue(timeoutErr);
+
+    const text = "```sql:execute\nSELECT SLEEP(20)\n```";
+    const result = (await processResponseWithAttachments(text)).text;
+
+    expect(result).toContain("Query timed out");
+    expect(result).toContain("10s limit");
+    expect(result).not.toContain("Query execution failed");
+  });
+
+  it("falls back to bare 'Query execution failed' when sanitization empties the hint", async () => {
+    mockPool.query.mockRejectedValue(new Error("'a' '/var/log/x' 1.2.3.4"));
+
+    const text = "```sql:execute\nSELECT 1\n```";
+    const result = (await processResponseWithAttachments(text)).text;
+
+    expect(result).toContain("_Query execution failed._");
+    expect(result).not.toContain(":");
   });
 
   it("logs rejected unsafe queries", async () => {
@@ -528,5 +661,45 @@ describe("processResponseWithAttachments", () => {
     expect(result.attachments).toHaveLength(2);
     expect(result.attachments[0].csv).toBe("count\n42");
     expect(result.attachments[1].csv).toBe("name\nAlice");
+  });
+});
+
+describe("sanitizeErrorHint", () => {
+  it("strips quoted identifiers", () => {
+    expect(sanitizeErrorHint("Table 'platform.suppliers' doesn't exist")).toBe(
+      "Table doesn't exist",
+    );
+  });
+
+  it("strips backtick-quoted identifiers", () => {
+    expect(sanitizeErrorHint("Unknown column `users.email`")).toBe("Unknown column");
+  });
+
+  it("strips double-quoted strings", () => {
+    expect(sanitizeErrorHint('Bad value "secret"')).toBe("Bad value");
+  });
+
+  it("strips absolute filesystem paths", () => {
+    expect(sanitizeErrorHint("Cannot open at /var/lib/mysql/data/foo")).toBe("Cannot open at");
+  });
+
+  it("strips IPv4 addresses with optional port", () => {
+    expect(sanitizeErrorHint("Connect refused at 10.0.0.42:3306")).toBe("Connect refused at");
+    expect(sanitizeErrorHint("Connect refused at 10.0.0.42")).toBe("Connect refused at");
+  });
+
+  it("collapses runs of whitespace produced by stripping", () => {
+    expect(sanitizeErrorHint("a  'b'   c")).toBe("a c");
+  });
+
+  it("returns empty string when only sensitive content was present", () => {
+    expect(sanitizeErrorHint("'x' /tmp/y 1.2.3.4")).toBe("");
+  });
+
+  it("truncates long messages with ellipsis", () => {
+    const longMessage = "x".repeat(200);
+    const result = sanitizeErrorHint(longMessage);
+    expect(result.length).toBeLessThanOrEqual(80);
+    expect(result.endsWith("…")).toBe(true);
   });
 });

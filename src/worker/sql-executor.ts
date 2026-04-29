@@ -1,4 +1,4 @@
-import { getPlatformPool } from "../db/connection.js";
+import { getPlatformPool, PlatformPoolUnavailableError } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 import type { FieldPacket } from "mysql2/promise";
 
@@ -20,11 +20,52 @@ export interface SqlBlock {
   end: number;
 }
 
+export type QueryErrorKind = "pool_unavailable" | "timeout" | "generic";
+
 export interface QueryResult {
   columns: string[];
   rows: string[][];
   totalRows?: number;
   error?: string;
+  errorKind?: QueryErrorKind;
+}
+
+const TIMEOUT_CODE_PATTERN = /^(PROTOCOL_SEQUENCE_TIMEOUT|ER_QUERY_TIMEOUT|ETIMEDOUT)$/;
+const TIMEOUT_MESSAGE_PATTERN = /\btimed?\s*out\b/i;
+
+function classifyError(error: unknown): QueryErrorKind {
+  // Pool unavailability is signalled by a typed sentinel rather than
+  // regex-matching error prose — see PlatformPoolUnavailableError in
+  // src/db/connection.ts. Pool kind takes precedence over timeout.
+  if (error instanceof PlatformPoolUnavailableError) return "pool_unavailable";
+  const message = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && TIMEOUT_CODE_PATTERN.test(code)) return "timeout";
+  if (TIMEOUT_MESSAGE_PATTERN.test(message)) return "timeout";
+  return "generic";
+}
+
+const PATH_PATTERN = /\/(?:[A-Za-z0-9_.\-]+\/)*[A-Za-z0-9_.\-]+/g;
+const IP_PATTERN = /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g;
+const QUOTED_PATTERN = /['"`][^'"`]*['"`]/g;
+const HINT_MAX_LENGTH = 80;
+
+/**
+ * Strip schema/path/IP details from a MySQL error before showing it to
+ * users. Removes anything quoted (table/column/value identifiers),
+ * anything that looks like a filesystem path, and IPv4 + port pairs.
+ * Truncates to HINT_MAX_LENGTH so a runaway error message can't fill
+ * the chat reply.
+ */
+export function sanitizeErrorHint(message: string): string {
+  const cleaned = message
+    .replace(QUOTED_PATTERN, " ")
+    .replace(PATH_PATTERN, " ")
+    .replace(IP_PATTERN, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length <= HINT_MAX_LENGTH) return cleaned;
+  return `${cleaned.slice(0, HINT_MAX_LENGTH - 1).trimEnd()}…`;
 }
 
 /**
@@ -140,7 +181,10 @@ export function formatResultsAsTable(
 }
 
 /**
- * Execute a SELECT query against the platform database.
+ * Execute a SELECT query against the platform database. The returned
+ * `errorKind` lets callers render distinct user-facing messages for
+ * pool-unavailable / timeout / generic failures instead of a single
+ * opaque string.
  */
 export async function executeQuery(query: string): Promise<QueryResult> {
   try {
@@ -167,11 +211,13 @@ export async function executeQuery(query: string): Promise<QueryResult> {
       ...(totalRows > MAX_ROWS ? { totalRows } : {}),
     };
   } catch (error) {
-    log.error("Query execution failed", error);
+    const errorKind = classifyError(error);
+    log.error(`Query execution failed (${errorKind})`, error);
     return {
       columns: [],
       rows: [],
       error: error instanceof Error ? error.message : String(error),
+      errorKind,
     };
   }
 }
@@ -185,6 +231,24 @@ export interface SqlAttachment {
 export interface ProcessedResponse {
   text: string;
   attachments: SqlAttachment[];
+}
+
+/**
+ * Render the user-facing replacement string for a failed query. Each
+ * errorKind gets a distinct message so users can tell "this repo has
+ * no SQL access" from "your query timed out" from "something else
+ * broke." For the generic case the sanitized hint gives ops a debug
+ * signal without leaking schema or filesystem details.
+ */
+function renderQueryError(result: QueryResult): string {
+  if (result.errorKind === "pool_unavailable") {
+    return "_SQL execution is not available for this repo (no platform DB configured)._";
+  }
+  if (result.errorKind === "timeout") {
+    return "_Query timed out (10s limit)._";
+  }
+  const hint = sanitizeErrorHint(result.error ?? "");
+  return hint ? `_Query execution failed: ${hint}._` : "_Query execution failed._";
 }
 
 /**
@@ -209,8 +273,7 @@ export async function processResponseWithAttachments(text: string): Promise<Proc
     } else {
       const queryResult = await executeQuery(block.query);
       if (queryResult.error) {
-        log.warn("Query execution failed", queryResult.error);
-        replacement = "_Query execution failed._";
+        replacement = renderQueryError(queryResult);
       } else if (queryResult.rows.length === 0) {
         replacement = "*No results found.*";
       } else {

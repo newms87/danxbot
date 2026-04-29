@@ -108,15 +108,28 @@ export function initPlatformPool(repoDb: RepoDatabaseConfig): void {
 }
 
 /**
- * Get the initialized platform pool. Throws when the pool is unavailable —
- * either initPlatformPool was never called (a wiring bug) or the repo's
- * db.enabled is false (the repo has no platform DB configured).
+ * Thrown by getPlatformPool when the pool is unavailable. Callers
+ * classify failures with `instanceof` instead of regex-matching the
+ * error message — see src/worker/sql-executor.ts#classifyError.
+ */
+export class PlatformPoolUnavailableError extends Error {
+  constructor() {
+    super(
+      "Platform DB pool not available — repo has db.enabled=false (no DANX_DB_HOST/DANX_DB_USER in .danxbot/.env) or initPlatformPool was not called at worker startup",
+    );
+    this.name = "PlatformPoolUnavailableError";
+  }
+}
+
+/**
+ * Get the initialized platform pool. Throws PlatformPoolUnavailableError
+ * when the pool is unavailable — either initPlatformPool was never called
+ * (a wiring bug) or the repo's db.enabled is false (the repo has no
+ * platform DB configured).
  */
 export function getPlatformPool(): Pool {
   if (!platformPool) {
-    throw new Error(
-      "Platform DB pool not available — repo has db.enabled=false (no DANX_DB_HOST/DANX_DB_USER in .danxbot/.env) or initPlatformPool was not called at worker startup",
-    );
+    throw new PlatformPoolUnavailableError();
   }
   return platformPool;
 }
