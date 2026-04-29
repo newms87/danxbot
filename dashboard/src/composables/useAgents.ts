@@ -7,7 +7,13 @@ import {
   patchToggle,
   type ToggleError,
 } from "../api";
-import { useStream, type UseStreamReturn } from "./useStream";
+import {
+  createHydrationBuffer,
+  useStream,
+  type HydrationBuffer,
+  type StreamEvent,
+  type UseStreamReturn,
+} from "./useStream";
 import type { AgentSnapshot, Feature } from "../types";
 
 export interface UseAgents {
@@ -78,17 +84,18 @@ export function applyAgentEvent(
  *
  * ### Hydrate-then-patch race
  *
- * Events that arrive during the REST fetch land in `pendingUpdates` and
- * replay on top of the REST snapshot when it resolves. Single subscription
- * for the composable lifetime — no handoff gap like `createHydrationBuffer`
- * would introduce (see `useDispatches.ts` docstring for the full rationale).
+ * Handled by `createHydrationBuffer` — the same physical subscription
+ * stays open across the buffered→live boundary, so events arriving during
+ * the REST fetch are replayed via applyEvent and post-hydrate events flow
+ * to the live handler with no microtask gap. See `useStream.ts` for the
+ * full helper contract.
  *
  * ### Preserved behavior
  *
  * Optimistic toggle + rollback and `clearCriticalFailure` are unchanged —
- * Phase 5 replaces ONLY the 10s polling with a push subscription. The
- * `agent:updated` event delivered by the server after PATCH succeeds
- * reconciles any local state with server truth.
+ * Phase 5 replaced the 10s polling with a push subscription, Phase 7
+ * deletes the manual hydrating/pendingUpdates state in favor of the
+ * shared buffer helper. Wire contract is identical.
  */
 export function useAgents(): UseAgents {
   const agents = ref<AgentSnapshot[]>([]);
@@ -96,53 +103,51 @@ export function useAgents(): UseAgents {
   const error = ref<string | null>(null);
 
   let stream: UseStreamReturn | null = null;
-  let unsubUpdated: (() => void) | null = null;
+  let buffer: HydrationBuffer<AgentSnapshot[]> | null = null;
   let visibilityHandler: (() => void) | null = null;
-  let hydrating = false;
-  const pendingUpdates: AgentSnapshot[] = [];
+
+  function applyOne(
+    state: AgentSnapshot[],
+    event: StreamEvent,
+  ): AgentSnapshot[] {
+    if (!isAgentSnapshot(event.data)) {
+      // eslint-disable-next-line no-console
+      console.warn("useAgents: malformed agent:updated event", event);
+      return state;
+    }
+    return applyAgentEvent(state, event.data);
+  }
 
   async function hydrate(): Promise<void> {
-    hydrating = true;
-    pendingUpdates.length = 0;
+    if (!buffer) return;
     loading.value = true;
     try {
-      let next = await fetchAgents();
-      for (const s of pendingUpdates) next = applyAgentEvent(next, s);
-      agents.value = next;
+      agents.value = await buffer.hydrate(() => fetchAgents(), applyOne);
       error.value = null;
     } catch (err) {
       error.value = err instanceof Error ? err.message : String(err);
     } finally {
-      hydrating = false;
-      pendingUpdates.length = 0;
       loading.value = false;
     }
   }
 
-  function handleEvent(event: { data: unknown }): void {
-    if (!isAgentSnapshot(event.data)) {
-      // eslint-disable-next-line no-console
-      console.warn("useAgents: malformed agent:updated event", event);
-      return;
-    }
-    const snapshot = event.data;
-    if (hydrating) {
-      pendingUpdates.push(snapshot);
-      return;
-    }
-    agents.value = applyAgentEvent(agents.value, snapshot);
-  }
-
   function startStream(): void {
-    if (unsubUpdated) return; // idempotent
+    if (buffer) return; // idempotent
     if (!stream) stream = useStream();
-    unsubUpdated = stream.subscribe("agent:updated", handleEvent);
+    buffer = createHydrationBuffer<AgentSnapshot[]>(stream, "agent:updated");
+    buffer.onLiveEvent((event) => {
+      agents.value = applyOne(agents.value, event);
+    });
   }
 
   function stopStream(): void {
-    unsubUpdated?.();
-    unsubUpdated = null;
+    buffer?.close();
+    buffer = null;
     stream?.disconnect();
+    // Null the stream too so the next startStream() builds a fresh
+    // useStream — symmetric with onBeforeUnmount and avoids relying on
+    // useStream.disconnect leaving the instance reusable.
+    stream = null;
   }
 
   /**
@@ -172,13 +177,10 @@ export function useAgents(): UseAgents {
 
   onBeforeUnmount(() => {
     stopStream();
-    stream = null;
     if (visibilityHandler && typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", visibilityHandler);
       visibilityHandler = null;
     }
-    hydrating = false;
-    pendingUpdates.length = 0;
   });
 
   /**

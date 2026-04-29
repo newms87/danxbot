@@ -403,4 +403,45 @@ describe("useDispatches — stream integration", () => {
 
     destroy();
   });
+
+  it("replays events that arrive during the filter-change refetch (re-hydrate race)", async () => {
+    // Phase 7 regression guard: when a filter change triggers a re-hydrate,
+    // events firing DURING the second fetch must be applied via applyEvent
+    // on top of the new snapshot — they must NOT leak into live handlers
+    // (which would double-apply against the soon-to-be-overwritten ref).
+    const { useDispatches } = await importFresh();
+
+    // First hydrate resolves immediately with a seed row.
+    mockFetchDispatches.mockResolvedValueOnce([makeDispatch("seed")]);
+
+    const { init, selectedRepo, dispatches, destroy } = useDispatches();
+    init();
+    await flushPromises();
+    expect(dispatches.value.map((d) => d.id)).toEqual(["seed"]);
+
+    // Second fetch (triggered by filter change) hangs so we can inject an event mid-flight.
+    let resolveSecond!: (v: Dispatch[]) => void;
+    mockFetchDispatches.mockReturnValueOnce(
+      new Promise<Dispatch[]>((r) => {
+        resolveSecond = r;
+      }),
+    );
+
+    selectedRepo.value = "platform";
+    await Promise.resolve(); // watcher fires, hydrate begins
+
+    // Event arrives while the second fetch is still in flight.
+    currentStream.emit("dispatch:created", makeDispatch("mid-refetch"));
+
+    resolveSecond([makeDispatch("after-filter")]);
+    await flushPromises();
+
+    // Both rows present — the in-flight event was applied on top of the
+    // new filter's snapshot, not lost in the handoff.
+    const ids = dispatches.value.map((d) => d.id).sort();
+    expect(ids).toContain("after-filter");
+    expect(ids).toContain("mid-refetch");
+
+    destroy();
+  });
 });

@@ -1,6 +1,12 @@
 import { ref, computed, watch } from "vue";
 import { fetchDispatches } from "../api";
-import { useStream, type UseStreamReturn } from "./useStream";
+import {
+  createHydrationBuffer,
+  useStream,
+  type HydrationBuffer,
+  type StreamEvent,
+  type UseStreamReturn,
+} from "./useStream";
 import type {
   Dispatch,
   DispatchFilters,
@@ -110,129 +116,93 @@ function isDispatchPatch(
 }
 
 /**
- * Stream lifecycle + hydrate-then-patch state.
+ * Stream lifecycle. Module-scoped singletons — `App.vue::useDispatches()`
+ * is the only caller, and its mount/unmount owns `init()`/`destroy()`.
+ * Tests reset via `vi.resetModules` + re-import.
  *
- * Module-scoped singletons — `App.vue::useDispatches()` is the only caller,
- * and its mount/unmount owns `init()`/`destroy()`. Tests reset via
- * `vi.resetModules` + re-import.
- *
- * `pendingCreated` / `pendingUpdated` implement the hydrate race: events
- * fired while a REST fetch is in flight are queued, replayed on top of the
- * REST snapshot, then drained. `hydrating` gates the live-vs-buffered path
- * inside the subscription handlers.
- *
- * Why this and NOT `createHydrationBuffer` from `useStream.ts`: that helper
- * is a one-shot (subscribe → hydrate → unsub) primitive. To go from
- * hydration to continuous live events, the caller must unsub the buffer
- * and subscribe a live handler — across the `await hydrate()` boundary a
- * stream event can dispatch into the gap and be lost. The single-handler
- * + `hydrating` flag approach below has one subscription per topic for
- * the lifetime of the composable, so there is no handoff gap.
+ * One `HydrationBuffer` covers BOTH topics. The buffer keeps a single
+ * subscription per topic across the buffered→live transition, so there
+ * is no microtask gap where events can be lost (the bug Phase 4
+ * hand-rolled around with `hydrating` + `pendingCreated`/`pendingUpdated`,
+ * deleted in Phase 7).
  */
 let stream: UseStreamReturn | null = null;
+let buffer: HydrationBuffer<Dispatch[]> | null = null;
 let stopWatch: (() => void) | null = null;
-let unsubCreated: (() => void) | null = null;
-let unsubUpdated: (() => void) | null = null;
-let hydrating = false;
-const pendingCreated: Dispatch[] = [];
-const pendingUpdated: Array<Partial<Dispatch> & { id: string }> = [];
+
+/**
+ * Apply one StreamEvent to a Dispatch[] snapshot. Used for BOTH the
+ * pre-hydrate queue drain (inside buffer.hydrate) and live events (via
+ * buffer.onLiveEvent). Single source of truth for topic→reducer dispatch
+ * + payload validation.
+ */
+function applyOne(state: Dispatch[], event: StreamEvent): Dispatch[] {
+  if (event.topic === "dispatch:created") {
+    if (!isDispatchCreated(event.data)) {
+      // eslint-disable-next-line no-console
+      console.warn("useDispatches: malformed dispatch:created event", event);
+      return state;
+    }
+    return applyDispatchEvent(state, {
+      type: "created",
+      dispatch: event.data,
+    });
+  }
+  if (event.topic === "dispatch:updated") {
+    if (!isDispatchPatch(event.data)) {
+      // eslint-disable-next-line no-console
+      console.warn("useDispatches: malformed dispatch:updated event", event);
+      return state;
+    }
+    return applyDispatchEvent(state, { type: "updated", patch: event.data });
+  }
+  return state;
+}
 
 async function hydrate(): Promise<void> {
-  hydrating = true;
-  pendingCreated.length = 0;
-  pendingUpdated.length = 0;
+  if (!buffer) return;
   loading.value = true;
   error.value = null;
   try {
-    let next = await fetchDispatches(filters.value);
-    // Replay events that arrived mid-fetch on top of the REST snapshot.
-    for (const d of pendingCreated) {
-      next = applyDispatchEvent(next, { type: "created", dispatch: d });
-    }
-    for (const p of pendingUpdated) {
-      next = applyDispatchEvent(next, { type: "updated", patch: p });
-    }
-    dispatches.value = next;
+    dispatches.value = await buffer.hydrate(
+      () => fetchDispatches(filters.value),
+      applyOne,
+    );
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
-    hydrating = false;
-    pendingCreated.length = 0;
-    pendingUpdated.length = 0;
     loading.value = false;
   }
-}
-
-/**
- * Re-fetch via the stream lifecycle. Kept as a thin alias over `hydrate()`
- * so the DashboardHeader's `@refresh` manual-reload button shares the
- * exact same code path as mount-time hydration — one way to get fresh
- * data, not two.
- */
-async function refresh(): Promise<void> {
-  await hydrate();
 }
 
 function init(): void {
   if (stream) return; // idempotent — App.vue may call init() more than once
   stream = useStream();
-
-  unsubCreated = stream.subscribe("dispatch:created", (event) => {
-    if (!isDispatchCreated(event.data)) {
-      // eslint-disable-next-line no-console
-      console.warn("useDispatches: malformed dispatch:created event", event);
-      return;
-    }
-    const d = event.data;
-    if (hydrating) {
-      pendingCreated.push(d);
-      return;
-    }
-    dispatches.value = applyDispatchEvent(dispatches.value, {
-      type: "created",
-      dispatch: d,
-    });
-  });
-
-  unsubUpdated = stream.subscribe("dispatch:updated", (event) => {
-    if (!isDispatchPatch(event.data)) {
-      // eslint-disable-next-line no-console
-      console.warn("useDispatches: malformed dispatch:updated event", event);
-      return;
-    }
-    const p = event.data;
-    if (hydrating) {
-      pendingUpdated.push(p);
-      return;
-    }
-    dispatches.value = applyDispatchEvent(dispatches.value, {
-      type: "updated",
-      patch: p,
-    });
+  buffer = createHydrationBuffer<Dispatch[]>(stream, [
+    "dispatch:created",
+    "dispatch:updated",
+  ]);
+  buffer.onLiveEvent((event) => {
+    dispatches.value = applyOne(dispatches.value, event);
   });
 
   void hydrate();
 
-  // Filter changes drop stale rows via a fresh REST fetch. The watcher also
-  // re-arms the hydration buffer so events that fire while the refetch is
-  // in flight don't get lost under the new filter.
+  // Filter changes drop stale rows via a fresh REST fetch. The buffer
+  // re-buffers events that fire mid-refetch and replays them on top of
+  // the new snapshot via applyOne (no events lost under the new filter).
   stopWatch = watch(filters, () => {
     void hydrate();
   });
 }
 
 function destroy(): void {
-  unsubCreated?.();
-  unsubUpdated?.();
-  unsubCreated = null;
-  unsubUpdated = null;
+  buffer?.close();
+  buffer = null;
   stream?.disconnect();
   stream = null;
   stopWatch?.();
   stopWatch = null;
-  hydrating = false;
-  pendingCreated.length = 0;
-  pendingUpdated.length = 0;
 }
 
 export function useDispatches() {
@@ -244,7 +214,9 @@ export function useDispatches() {
     selectedTrigger,
     selectedStatus,
     searchQuery,
-    refresh,
+    // The DashboardHeader's @refresh manual-reload button shares the
+    // mount-time hydrate code path — one way to get fresh data, not two.
+    refresh: hydrate,
     init,
     destroy,
   };

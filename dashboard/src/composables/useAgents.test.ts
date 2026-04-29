@@ -354,6 +354,35 @@ describe("useAgents — visibility-pause", () => {
 
     wrapper.unmount();
   });
+
+  it("buffer is torn down on hidden — events emitted during hidden are NOT delivered", async () => {
+    // Phase 7 regression guard: stopStream now closes the buffer (was just an
+    // unsub before). Events emitted during the hidden window must not surface
+    // when the tab returns — the resume-time hydrate() reconciles state.
+    const { wrapper, ret } = mountWithAgents();
+    await flushPromises();
+    expect(ret.agents.value[0].settings.overrides.slack.enabled).toBeNull();
+
+    setVisibility("hidden");
+    await nextTick();
+
+    // No subscription on the topic — emit goes nowhere because handlerCount = 0.
+    currentStream.emit("agent:updated", snap("danxbot", { slack: false }));
+    // Visible state is unchanged (no live handler took the event).
+    expect(ret.agents.value[0].settings.overrides.slack.enabled).toBeNull();
+
+    // On resume, the freshly-mounted buffer has zero queued events from the
+    // hidden window; only the new REST hydrate populates state.
+    mockFetchAgents.mockResolvedValueOnce([
+      snap("danxbot", { slack: false }),
+      snap("platform"),
+    ]);
+    setVisibility("visible");
+    await flushPromises();
+    expect(ret.agents.value[0].settings.overrides.slack.enabled).toBe(false);
+
+    wrapper.unmount();
+  });
 });
 
 describe("useAgents — teardown", () => {
