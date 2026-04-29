@@ -1080,7 +1080,6 @@ describe("SessionLogWatcher — sub-agent coverage", () => {
     watcher.onEntry((entry) => entries.push(entry));
 
     await watcher.start();
-    await new Promise((r) => setTimeout(r, 150));
 
     // Append a tool_result (user entry) to the sub-agent file — lineage must stamp.
     appendJsonlEntry(subagentPath, rawToolResultEntry({
@@ -1092,7 +1091,7 @@ describe("SessionLogWatcher — sub-agent coverage", () => {
       },
       timestamp: "2026-04-12T10:00:11.000Z",
     }));
-    await new Promise((r) => setTimeout(r, 150));
+    await watcher.drain();
     watcher.stop();
 
     const toolResult = entries.find(
@@ -1124,8 +1123,9 @@ describe("SessionLogWatcher — sub-agent coverage", () => {
     });
     watcher.onEntry((entry) => entries.push(entry));
 
+    // start() awaits the initial poll, which discovers the sub-agent file
+    // and emits its existing entry with agent_type undefined (meta absent).
     await watcher.start();
-    await new Promise((r) => setTimeout(r, 100));
 
     // No meta yet — first entry emitted with agent_type undefined.
     const firstEmit = entries.find((e) => e.data.subagent_id === "agent-slow");
@@ -1145,7 +1145,11 @@ describe("SessionLogWatcher — sub-agent coverage", () => {
       }),
     );
 
-    await new Promise((r) => setTimeout(r, 200));
+    // Deterministic: drain() awaits any in-flight scheduled poll, then runs
+    // one full poll synchronously — so the meta refresh + new-entry read both
+    // observe the writes above before this line resolves. Replaces a brittle
+    // setTimeout that flaked under full-suite event-loop load (Trello H4JrjJrn).
+    await watcher.drain();
     watcher.stop();
 
     // The SECOND emission picks up the now-present agent_type.
