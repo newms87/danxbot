@@ -26,6 +26,20 @@
  *                final reply to DANXBOT_SLACK_REPLY_URL, then completion
  *                via DANXBOT_STOP_URL. See the "slack scenario" section
  *                below for env-var contract.
+ *     - "critical-failure": Writes one assistant entry, then POSTs
+ *                {status:"critical_failure", summary} to DANXBOT_STOP_URL.
+ *                Models the env-blocker code path the halt flag exists to
+ *                catch (Trello 6AjSUCUQ — AC12 of EK8oSsWn). Reads the
+ *                stop URL from `--mcp-config <path>` (mcpServers.danxbot.env)
+ *                so the test does not have to learn the per-dispatch URL up
+ *                front. Summary text comes from FAKE_CLAUDE_CRITICAL_SUMMARY
+ *                (default: "MCP Trello tools failed to load").
+ *     - "complete-only": Like "happy" but POSTs {status, summary} to
+ *                DANXBOT_STOP_URL via the danxbot_complete shape (FROM
+ *                --mcp-config) instead of just exiting. Used by the
+ *                post-dispatch-check variant where the agent legitimately
+ *                "completes" but never moves the tracked card. Status
+ *                defaults to "completed"; summary to "ok".
  *   FAKE_CLAUDE_WRITE_DELAY_MS — Delay between JSONL entries (default: 50)
  *   FAKE_CLAUDE_EXIT_CODE — Exit code (default: 0, set to non-zero for error scenarios)
  *   FAKE_CLAUDE_LINGER_MS — Time to wait after writing entries before exiting (default: 3000).
@@ -45,7 +59,7 @@
  *                              is the failure-injection path).
  */
 
-import { mkdirSync, appendFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -54,6 +68,38 @@ const args = process.argv.slice(2);
 // Extract prompt from -p argument (last two args: "-p" "<prompt>")
 const promptIdx = args.lastIndexOf("-p");
 const prompt = promptIdx >= 0 && promptIdx + 1 < args.length ? args[promptIdx + 1] : "";
+
+/**
+ * Read DANXBOT_STOP_URL the way real claude effectively delivers it: from
+ * the `mcpServers.danxbot.env.DANXBOT_STOP_URL` field of the per-dispatch
+ * MCP settings file passed via `--mcp-config <path>`. Returns undefined
+ * when the flag is absent, the file is unreadable, or the field is
+ * missing — the caller decides whether that's fatal for the scenario.
+ *
+ * Why parse the file instead of reading process.env: the dispatch core
+ * writes DANXBOT_STOP_URL into the MCP settings (so the spawned MCP
+ * server inherits it) but does NOT export it into the claude process
+ * environment. Real claude is similarly blind to the URL — only the MCP
+ * subprocess sees it. Tests that want fake-claude to call back into the
+ * worker must use this path (or pass DANXBOT_STOP_URL directly via env,
+ * which is how the slack scenario does it for tests that don't go
+ * through the dispatch core at all).
+ */
+function readStopUrlFromMcpConfig(): string | undefined {
+  const cfgIdx = args.indexOf("--mcp-config");
+  if (cfgIdx < 0 || cfgIdx + 1 >= args.length) return undefined;
+  const cfgPath = args[cfgIdx + 1];
+  try {
+    const raw = readFileSync(cfgPath, "utf-8");
+    const parsed = JSON.parse(raw) as {
+      mcpServers?: { danxbot?: { env?: Record<string, string> } };
+    };
+    const url = parsed.mcpServers?.danxbot?.env?.DANXBOT_STOP_URL;
+    return typeof url === "string" && url ? url : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // Extract dispatch ID from the prompt tag
 const dispatchMatch = prompt.match(/<!-- danxbot-dispatch:([^\s]+) -->/);
@@ -98,6 +144,116 @@ async function postJson(url: string, body: Record<string, unknown>): Promise<voi
   if (!res.ok) {
     throw new Error(`fake-claude slack POST ${url} -> ${res.status}`);
   }
+}
+
+/**
+ * Drive the agent-signaled critical-failure path end-to-end.
+ *
+ * Writes a minimal assistant entry so the SessionLogWatcher attaches
+ * (the launcher needs activity to confirm the spawn worked), then POSTs
+ * `{status:"critical_failure", summary}` to DANXBOT_STOP_URL. The worker's
+ * handleStop in src/worker/dispatch.ts receives the POST and writes the
+ * `<repo>/.danxbot/CRITICAL_FAILURE` flag. fake-claude exits soon after.
+ *
+ * Reads DANXBOT_STOP_URL from the MCP settings file passed via
+ * `--mcp-config <path>` because that mirrors how the URL reaches a real
+ * dispatch — see `readStopUrlFromMcpConfig` for the rationale. Tests
+ * that don't go through the dispatch core can pass DANXBOT_STOP_URL via
+ * env instead; the env value wins when both are present.
+ */
+async function runCriticalFailureScenario(): Promise<void> {
+  const stopUrl =
+    process.env.DANXBOT_STOP_URL || readStopUrlFromMcpConfig();
+  if (!stopUrl) {
+    process.stderr.write(
+      "fake-claude critical-failure scenario requires DANXBOT_STOP_URL " +
+        "(env or mcpServers.danxbot.env via --mcp-config)\n",
+    );
+    process.exit(1);
+  }
+
+  const summary =
+    process.env.FAKE_CLAUDE_CRITICAL_SUMMARY ??
+    "MCP Trello tools failed to load";
+
+  // Minimal assistant entry — the launcher's watcher needs at least one
+  // entry to confirm the session attached. Without this the inactivity
+  // timer would race the danxbot_complete callback in slow CI.
+  writeEntry({
+    type: "assistant",
+    message: {
+      model: "claude-opus-4-7",
+      content: [
+        {
+          type: "text",
+          text:
+            "MCP Trello tools failed to load — signaling critical_failure",
+        },
+      ],
+      usage: { input_tokens: 50, output_tokens: 20 },
+    },
+    timestamp: new Date().toISOString(),
+    sessionId,
+  });
+
+  await sleep(writeDelayMs);
+
+  await postJson(stopUrl, { status: "critical_failure", summary });
+
+  // Linger so the worker's handleStop has time to write the flag and
+  // the watcher's last poll captures the post completion entries
+  // before fake-claude exits.
+  await sleep(lingerMs);
+}
+
+/**
+ * "complete-only" scenario: write a couple of assistant entries, then
+ * POST `{status, summary}` to DANXBOT_STOP_URL via the danxbot_complete
+ * shape. Used by the post-dispatch-check variant where the agent
+ * legitimately reports completion but never moves the tracked Trello
+ * card — the poller's onComplete check then trips the flag with
+ * source="post-dispatch-check".
+ */
+async function runCompleteOnlyScenario(): Promise<void> {
+  const stopUrl =
+    process.env.DANXBOT_STOP_URL || readStopUrlFromMcpConfig();
+  if (!stopUrl) {
+    process.stderr.write(
+      "fake-claude complete-only scenario requires DANXBOT_STOP_URL " +
+        "(env or mcpServers.danxbot.env via --mcp-config)\n",
+    );
+    process.exit(1);
+  }
+  const status = process.env.FAKE_CLAUDE_COMPLETE_STATUS ?? "completed";
+  const summary = process.env.FAKE_CLAUDE_COMPLETE_SUMMARY ?? "ok";
+
+  writeEntry({
+    type: "assistant",
+    message: {
+      model: "claude-opus-4-7",
+      content: [{ type: "text", text: "Working on it." }],
+      usage: { input_tokens: 50, output_tokens: 10 },
+    },
+    timestamp: new Date().toISOString(),
+    sessionId,
+  });
+  await sleep(writeDelayMs);
+  writeEntry({
+    type: "assistant",
+    message: {
+      model: "claude-opus-4-7",
+      content: [{ type: "text", text: summary }],
+      usage: { input_tokens: 60, output_tokens: 15 },
+    },
+    timestamp: new Date().toISOString(),
+    sessionId,
+  });
+
+  await sleep(writeDelayMs);
+
+  await postJson(stopUrl, { status, summary });
+
+  await sleep(lingerMs);
 }
 
 /**
@@ -261,6 +417,16 @@ async function runScenario(): Promise<void> {
 
   if (scenario === "slack") {
     await runSlackScenario();
+    return;
+  }
+
+  if (scenario === "critical-failure") {
+    await runCriticalFailureScenario();
+    return;
+  }
+
+  if (scenario === "complete-only") {
+    await runCompleteOnlyScenario();
     return;
   }
 

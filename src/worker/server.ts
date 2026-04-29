@@ -10,7 +10,7 @@
  * - POST /api/stop/:jobId — agent self-stop (lifecycle tool callback)
  */
 
-import { createServer } from "http";
+import { createServer, type Server } from "http";
 import { createLogger } from "../logger.js";
 import { json } from "../http/helpers.js";
 import { getHealthStatus } from "./health.js";
@@ -29,7 +29,7 @@ import type { RepoContext } from "../types.js";
 
 const log = createLogger("worker-server");
 
-export async function startWorkerServer(repo: RepoContext): Promise<void> {
+export async function startWorkerServer(repo: RepoContext): Promise<Server> {
   const PORT = repo.workerPort;
 
   const server = createServer(async (req, res) => {
@@ -106,7 +106,13 @@ export async function startWorkerServer(repo: RepoContext): Promise<void> {
     json(res, 404, { error: "Not found" });
   });
 
-  server.listen(PORT, () => {
-    log.info(`Worker server for "${repo.name}" running at http://localhost:${PORT}`);
+  await new Promise<void>((resolve) => {
+    server.listen(PORT, () => {
+      log.info(
+        `Worker server for "${repo.name}" running at http://localhost:${PORT}`,
+      );
+      resolve();
+    });
   });
+  return server;
 }
