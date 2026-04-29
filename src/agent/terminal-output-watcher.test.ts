@@ -1,4 +1,40 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+/**
+ * # Why this file avoids comparing two `processChunk`-captured timestamps to each other
+ *
+ * `processChunk` records the wall clock for `lastActivityAt`, `lastTextAt`,
+ * and `lastThinkingAt`. `Date.now()` is NOT guaranteed monotonic — NTP
+ * corrections, VM clock fixups, container time-source jitter, and GC/IO
+ * stalls can move it backward between adjacent calls by hundreds of ms.
+ *
+ * The earlier version of `"only reads new bytes added since last poll
+ * (incremental)"` asserted `lastThinkingAt > firstActivityAt`, i.e. that the
+ * timestamp captured for the appended `✻` chunk was strictly later than the
+ * one captured for the initial `first line\n` chunk. Under a backward wall-
+ * clock jump (~250ms apart in real time), that assertion fails even though
+ * the watcher behaved correctly.
+ *
+ * Two flake fixes on this file/test pair are NOT the same class:
+ * - `956b8dc` ("[Danxbot] Fix flaky TerminalOutputWatcher stop() test") was
+ *   a real source bug — `poll()` didn't recheck `this.running` after each
+ *   `await`, so I/O completing post-`stop()` could mutate state. Source fix.
+ * - This card (`Ajf79Lfp`) fixed both (a) a brittle test assertion and (b)
+ *   the latent stall-detector exposure to non-monotonic `Date.now()`. The
+ *   source change here is a defensive `Math.max` clamp in `processChunk`
+ *   that makes activity timestamps strictly non-decreasing.
+ *
+ * The clamp solves the StallDetector exposure too: `Date.now() -
+ * tw.lastActivityAt < stallThresholdMs` would compute a negative duration on
+ * a backward jump (false negative — fine) and a spuriously large duration
+ * across a forward jump if `lastActivityAt` was set right before the jump
+ * (false positive — would falsely declare a healthy agent stalled). With
+ * the clamp, both anomalies are bounded.
+ *
+ * Don't reach for a third "fix flaky" patch on this file. If you need to
+ * assert ordering across chunks, spy on `processChunk` and inspect call
+ * arguments / `mock.calls` — don't lean on wall-clock comparisons.
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { writeFileSync, mkdtempSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -87,6 +123,59 @@ describe("TerminalOutputWatcher.processChunk", () => {
     expect(watcher.lastThinkingAt).not.toBeNull();
     expect(watcher.lastActivityAt).toBe(watcher.lastThinkingAt);
   });
+
+  it("clamps activity timestamps monotonically when Date.now() jumps backward (text→thinking)", () => {
+    // Replicates the exact failure shape from Trello Ajf79Lfp:
+    // `lastThinkingAt = 1777089404405` was 566ms before
+    // `firstActivityAt = 1777089404971`. The clamp in processChunk holds
+    // activity timestamps non-decreasing across a backward wall-clock jump.
+    const callsBefore = (Date.now as { mock?: { calls: unknown[] } }).mock?.calls.length ?? 0;
+    const dateNowSpy = vi.spyOn(Date, "now");
+    // Tripwire: any unexpected Date.now() call beyond the two we plan throws,
+    // catching future maintainers who add a third processChunk to this test
+    // without realizing the chained mocks would silently fall through.
+    dateNowSpy
+      .mockReturnValueOnce(1_000_000)
+      .mockReturnValueOnce(999_434)
+      .mockImplementationOnce(() => {
+        throw new Error("unexpected third Date.now() call — adjust the mock chain");
+      });
+
+    watcher.processChunk("first line\n");
+    watcher.processChunk(THINKING_CHAR);
+
+    expect(watcher.lastTextAt).toBe(1_000_000);
+    // The thinking call captured `Date.now() = 999_434` but was clamped to
+    // the prior `lastActivityAt` (1_000_000) — strictly non-decreasing.
+    expect(watcher.lastThinkingAt).toBe(1_000_000);
+    expect(watcher.lastActivityAt).toBe(1_000_000);
+    // Belt and suspenders: ensure exactly two Date.now() reads occurred.
+    expect(dateNowSpy.mock.calls.length - callsBefore).toBe(2);
+  });
+
+  it("clamps activity timestamps monotonically when Date.now() jumps backward (thinking→text)", () => {
+    // Symmetric inverse of the case above — covers the path where
+    // `lastThinkingAt` is set first (later wall-clock) and a follow-up text
+    // chunk arrives with an EARLIER wall-clock value. The clamp must hold
+    // for both branches of `processChunk`.
+    const callsBefore = (Date.now as { mock?: { calls: unknown[] } }).mock?.calls.length ?? 0;
+    const dateNowSpy = vi.spyOn(Date, "now");
+    dateNowSpy
+      .mockReturnValueOnce(2_000_000)
+      .mockReturnValueOnce(1_999_000)
+      .mockImplementationOnce(() => {
+        throw new Error("unexpected third Date.now() call — adjust the mock chain");
+      });
+
+    watcher.processChunk(THINKING_CHAR);
+    watcher.processChunk("regular line\n");
+
+    expect(watcher.lastThinkingAt).toBe(2_000_000);
+    // Text chunk's wall-clock was 1_999_000 (backward jump) — clamped.
+    expect(watcher.lastTextAt).toBe(2_000_000);
+    expect(watcher.lastActivityAt).toBe(2_000_000);
+    expect(dateNowSpy.mock.calls.length - callsBefore).toBe(2);
+  });
 });
 
 describe("TerminalOutputWatcher file polling", () => {
@@ -151,24 +240,50 @@ describe("TerminalOutputWatcher file polling", () => {
   });
 
   it("only reads new bytes added since last poll (incremental)", async () => {
+    // Verifies the watcher reads ONLY the appended bytes on each poll — i.e.
+    // `byteOffset` is tracked correctly and the second poll doesn't re-read
+    // "first line\n". The verification is by inspecting the chunks passed to
+    // `processChunk`, NOT by comparing wall-clock timestamps. See the
+    // file-level docblock for why timestamp ordering is fragile here.
     const logPath = join(dir, "terminal.log");
     writeFileSync(logPath, "first line\n");
 
     const watcher = new TerminalOutputWatcher(logPath, 50);
+    const processChunkSpy = vi.spyOn(watcher, "processChunk");
     watcher.start();
 
     try {
+      // Wait for the initial poll to read "first line\n".
       await new Promise((resolve) => setTimeout(resolve, 150));
-      const firstActivityAt = watcher.lastActivityAt;
-      expect(firstActivityAt).not.toBeNull();
+      expect(processChunkSpy).toHaveBeenCalled();
+      expect(watcher.lastTextAt).not.toBeNull();
+      expect(watcher.lastThinkingAt).toBeNull();
 
-      // Append thinking char — should be detected as new content
+      const callsBeforeAppend = processChunkSpy.mock.calls.length;
+      const chunksBeforeAppend = processChunkSpy.mock.calls.map((c) => c[0] as string);
+      // Pre-append, every chunk must be a slice of "first line\n" — no ✻ yet.
+      expect(chunksBeforeAppend.every((c) => !c.includes(THINKING_CHAR))).toBe(true);
+
+      // Append the thinking char — this should be detected as new content.
       await new Promise((resolve) => setTimeout(resolve, 100));
       appendFileSync(logPath, `${THINKING_CHAR}\n`);
       await new Promise((resolve) => setTimeout(resolve, 150));
 
+      // A new processChunk call must have happened after the append.
+      expect(processChunkSpy.mock.calls.length).toBeGreaterThan(callsBeforeAppend);
+      const newChunks = processChunkSpy.mock.calls
+        .slice(callsBeforeAppend)
+        .map((c) => c[0] as string);
+
+      // At least one new chunk must contain the thinking char.
+      expect(newChunks.some((c) => c.includes(THINKING_CHAR))).toBe(true);
+      // Crucially, no new chunk re-reads the existing "first line" content —
+      // that's the "incremental" property under test. If `byteOffset` were
+      // not tracked, processChunk would receive "first line\n✻\n" instead
+      // of just "✻\n".
+      expect(newChunks.every((c) => !c.includes("first line"))).toBe(true);
+
       expect(watcher.lastThinkingAt).not.toBeNull();
-      expect(watcher.lastThinkingAt).toBeGreaterThan(firstActivityAt!);
     } finally {
       watcher.stop();
     }

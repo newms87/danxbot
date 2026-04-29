@@ -59,10 +59,25 @@ export class TerminalOutputWatcher {
     }
   }
 
-  /** Process a raw text chunk, updating activity timestamps. Exposed for testing. */
+  /**
+   * Process a raw text chunk, updating activity timestamps. Exposed for testing.
+   *
+   * The captured `now` is clamped to be monotonically non-decreasing relative
+   * to `lastActivityAt`. `Date.now()` is wall-clock and not guaranteed to
+   * advance — NTP corrections, container clock resyncs, and VM time fixups
+   * can move it backward by hundreds of ms. Without the clamp, `StallDetector`
+   * (which computes `Date.now() - tw.lastActivityAt` against `stallThresholdMs`)
+   * could read a negative duration on backward jumps (false negative — fails
+   * open) OR a spuriously large duration if a forward jump landed between two
+   * polls (false positive — would falsely declare a healthy agent stalled and
+   * trigger an unwanted nudge). Clamping makes activity timestamps strictly
+   * non-decreasing, so the only observable effect of a backward jump is a
+   * brief "freeze" of `lastActivityAt` until the wall clock catches up — a
+   * bounded, acceptable false negative window. See Trello `Ajf79Lfp`.
+   */
   processChunk(raw: string): void {
     const cleaned = raw.replace(ANSI_ESCAPE_RE, "");
-    const now = Date.now();
+    const now = Math.max(Date.now(), this.lastActivityAt ?? 0);
 
     if (cleaned.includes(THINKING_CHAR)) {
       this.lastThinkingAt = now;
