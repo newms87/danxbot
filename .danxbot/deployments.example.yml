@@ -46,8 +46,14 @@ dashboard:
 # docker hostname the dashboard uses to proxy to this worker. Set it
 # only when the repo's compose `container_name` deviates from the
 # default — without it, dispatches to that repo silently 502.
+#
+# Optional `branch:` selects the default branch for clone-or-pull
+# (`fetch origin <branch>` + `reset --hard origin/<branch>`). Defaults
+# to `main` when omitted. Set this for repos whose default branch is
+# `master`, `develop`, etc.
 repos:
   - name: danxbot
     url: git@github-newms87:newms87/danxbot.git
     worker_port: 5561
     # worker_host: custom-container-name  # uncomment + set when compose container_name is non-default
+    # branch: master                      # uncomment + set when default branch is not "main"

@@ -12,7 +12,7 @@ import type { RemoteHost } from "./remote.js";
 import { CONTAINER_REPOS_BASE } from "./constants.js";
 
 export function buildCloneOrPullCommand(
-  repo: Pick<DeployRepo, "name" | "url">,
+  repo: Pick<DeployRepo, "name" | "url" | "branch">,
   githubToken: string,
 ): string {
   const m = repo.url.match(/^https:\/\/github\.com\/(.+\.git)$/);
@@ -29,12 +29,21 @@ export function buildCloneOrPullCommand(
       `GitHub token for repo "${repo.name}" contains unsupported characters`,
     );
   }
+  // The branch is interpolated into the same single-quoted SSH wrapper as
+  // the token, so apply the same vetted-character rule. Real git refs are
+  // a strict subset of `A-Za-z0-9._/-`; anything else here is a config bug
+  // or an injection attempt.
+  if (!/^[A-Za-z0-9._/-]+$/.test(repo.branch)) {
+    throw new Error(
+      `Branch for repo "${repo.name}" contains unsupported characters: "${repo.branch}"`,
+    );
+  }
   const authedUrl = `https://x-access-token:${githubToken}@github.com/${m[1]}`;
   const repoDir = `${CONTAINER_REPOS_BASE}/${repo.name}`;
 
   return [
     `if [ -d ${repoDir} ]; then`,
-    `  git -C ${repoDir} fetch origin main && git -C ${repoDir} reset --hard origin/main;`,
+    `  git -C ${repoDir} fetch origin ${repo.branch} && git -C ${repoDir} reset --hard origin/${repo.branch};`,
     `else`,
     `  git clone ${authedUrl} ${repoDir};`,
     `fi`,

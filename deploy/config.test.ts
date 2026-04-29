@@ -671,6 +671,168 @@ repos:
     expect(config.repos[0].appEnvSubpath).toBe("ssap");
   });
 
+  it("defaults repo branch to main when absent", () => {
+    const p = writeDeployment(
+      "default-branch",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: r
+    url: https://github.com/user/r.git
+    worker_port: 5561
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].branch).toBe("main");
+  });
+
+  it("defaults branch to main when explicitly set to YAML null (~)", () => {
+    // Symmetric with how worker_host / app_env_subpath treat explicit null:
+    // the parser short-circuits the type/empty/whitespace checks and falls
+    // through to the default. Pinned so future refactors don't accidentally
+    // treat null as "empty string" and throw.
+    const p = writeDeployment(
+      "null-branch",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: r
+    url: https://github.com/user/r.git
+    worker_port: 5561
+    branch: ~
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].branch).toBe("main");
+  });
+
+  it("parses optional branch on a repo (e.g. master)", () => {
+    // Repos whose default branch isn't `main` (legacy repos still on
+    // `master`, projects on `develop`, etc.) need to declare the branch
+    // explicitly so deploy syncs the right ref. Without this field the
+    // hardcoded `origin/main` silently failed against a non-existent ref.
+    const p = writeDeployment(
+      "with-branch",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: legacy
+    url: https://github.com/user/legacy.git
+    worker_port: 5561
+    branch: master
+  - name: modern
+    url: https://github.com/user/modern.git
+    worker_port: 5562
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].branch).toBe("master");
+    expect(config.repos[1].branch).toBe("main");
+  });
+
+  it("rejects empty branch (no silent fallback on config keys)", () => {
+    const p = writeDeployment(
+      "empty-branch",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    worker_port: 5561
+    branch: ""
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/branch.*empty/i);
+  });
+
+  it("rejects branch that is not a string", () => {
+    const p = writeDeployment(
+      "bad-branch-type",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    worker_port: 5561
+    branch: 42
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/branch.*string/i);
+  });
+
+  it("rejects branch with whitespace (refs can't contain spaces)", () => {
+    const p = writeDeployment(
+      "whitespace-branch",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    worker_port: 5561
+    branch: not a ref
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/branch.*whitespace/i);
+  });
+
+  it("trims surrounding whitespace from branch", () => {
+    const p = writeDeployment(
+      "trim-branch",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: r
+    url: https://github.com/user/r.git
+    worker_port: 5561
+    branch: "  master  "
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].branch).toBe("master");
+  });
+
   it("throws when a repo entry is missing name or url", () => {
     const p = writeDeployment(
       "bad-repo",

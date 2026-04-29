@@ -112,8 +112,8 @@ describe("buildMaterializeRepoArgs", () => {
   it("emits bare name for repos without app_env_subpath", () => {
     expect(
       buildMaterializeRepoArgs([
-        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
-        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562 },
+        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561, branch: "main" },
+        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562, branch: "main" },
       ]),
     ).toBe("danxbot gpt-manager");
   });
@@ -126,6 +126,7 @@ describe("buildMaterializeRepoArgs", () => {
           url: "https://github.com/x/p.git",
           appEnvSubpath: "ssap",
           workerPort: 5563,
+          branch: "main",
         },
       ]),
     ).toBe("platform:ssap");
@@ -142,8 +143,9 @@ describe("buildMaterializeRepoArgs", () => {
           url: "https://github.com/x/p.git",
           appEnvSubpath: "ssap",
           workerPort: 5563,
+          branch: "main",
         },
-        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
+        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561, branch: "main" },
       ]),
     ).toBe("platform:ssap danxbot");
   });
@@ -161,8 +163,8 @@ describe("fetchRepoTokens", () => {
       region: "us-east-1",
       aws: { profile: "gpt" },
       repos: [
-        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561 },
-        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562 },
+        { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561, branch: "main" },
+        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562, branch: "main" },
       ],
     });
     const tokens = fetchRepoTokens(cfg, (cmd: string) => {
@@ -204,7 +206,7 @@ describe("fetchRepoTokens", () => {
 
   it("propagates non-zero exit from runCmd (no swallowing — broken token must abort deploy)", () => {
     const cfg = makeConfig({
-      repos: [{ name: "x", url: "https://github.com/x/x.git", workerPort: 5561 }],
+      repos: [{ name: "x", url: "https://github.com/x/x.git", workerPort: 5561, branch: "main" }],
     });
     expect(() =>
       fetchRepoTokens(cfg, () => {

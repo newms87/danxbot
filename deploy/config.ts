@@ -56,6 +56,14 @@ export interface DeployRepo {
    * from the default — without it the dashboard silently 502s on dispatch.
    */
   workerHost?: string;
+  /**
+   * Default branch to fetch + reset to during clone-or-pull. Defaults to
+   * `"main"` when omitted in the deployment yml. Set explicitly for repos
+   * that track a different default (e.g. `master`, `develop`) — without it
+   * the deploy syncs against `origin/main` which doesn't exist on those
+   * repos and dies with a confusing git error.
+   */
+  branch: string;
 }
 
 export interface DeployConfig {
@@ -335,8 +343,37 @@ export function loadConfig(configPath: string): DeployConfig {
           }
         }
 
+        // branch — optional override for the default branch (`main`).
+        // Trimmed and validated like worker_host: empty / non-string /
+        // whitespace-containing values are loud config errors. The default
+        // is applied here so the runtime DeployRepo always carries a
+        // concrete branch — consumers (buildCloneOrPullCommand) never
+        // need to fallback.
+        let branch = "main";
+        const rawBranch = r["branch"];
+        if (rawBranch !== undefined && rawBranch !== null) {
+          if (typeof rawBranch !== "string") {
+            errors.push(
+              `repos[].branch must be a string (got ${typeof rawBranch})`,
+            );
+          } else {
+            const trimmed = rawBranch.trim();
+            if (trimmed === "") {
+              errors.push(
+                `repos[].branch must not be empty — omit the key to use the default "main"`,
+              );
+            } else if (/\s/.test(trimmed)) {
+              errors.push(
+                `repos[].branch must not contain whitespace: "${rawBranch}"`,
+              );
+            } else {
+              branch = trimmed;
+            }
+          }
+        }
+
         if (rName && rUrl && workerPort) {
-          const base: DeployRepo = { name: rName, url: rUrl, workerPort };
+          const base: DeployRepo = { name: rName, url: rUrl, workerPort, branch };
           if (appEnvSubpath !== undefined) base.appEnvSubpath = appEnvSubpath;
           if (workerHost !== undefined) base.workerHost = workerHost;
           repos.push(base);
