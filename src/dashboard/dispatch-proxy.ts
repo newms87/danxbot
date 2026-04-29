@@ -44,12 +44,32 @@ const log = createLogger("dispatch-proxy");
 const UPSTREAM_TIMEOUT_MS = 10_000;
 
 /**
- * Docker hostname for a worker container. Matches `container_name` in the
- * per-repo compose file: `danxbot-worker-<name>`. All workers sit on
+ * Default docker hostname for a worker container. Matches `container_name`
+ * in the per-repo compose file: `danxbot-worker-<name>`. All workers sit on
  * `danxbot-net` alongside the dashboard.
+ *
+ * For per-repo overrides — when a connected repo's compose file uses a
+ * different `container_name` — declare `worker_host:` on the repo in the
+ * deployment yml and use `makeResolveWorkerHost` below to build a resolver
+ * that consults the override first and falls back to this default.
  */
 export function workerHost(repoName: string): string {
   return `danxbot-worker-${repoName}`;
+}
+
+/**
+ * Build the resolver consulted by `DispatchProxyDeps.resolveHost`. Returns
+ * each repo's `workerHost` override when set, falling back to the default
+ * `danxbot-worker-<name>`. Unknown names also fall back — `authAndResolveRepo`
+ * 404s on unconfigured repos before resolveHost is reached for proxied
+ * traffic, so the unknown-name path here is defense-in-depth (boot-time DNS
+ * check, future callers, etc.), not a real lookup miss in the proxy hot path.
+ */
+export function makeResolveWorkerHost(
+  repos: RepoConfig[],
+): (repoName: string) => string {
+  const byName = new Map(repos.map((r) => [r.name, r]));
+  return (repoName) => byName.get(repoName)?.workerHost ?? workerHost(repoName);
 }
 
 /** Strip the `Bearer ` prefix. Returns null when header is missing/malformed. */

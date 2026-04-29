@@ -101,6 +101,14 @@ export interface RepoConfig {
    * worker mode (workerPort lives on RepoContext there).
    */
   workerPort?: number;
+  /**
+   * Dashboard-mode only: docker hostname override used by the proxy.
+   * Populated from REPO_WORKER_HOSTS env var. When undefined the dashboard
+   * falls back to `danxbot-worker-<name>` (the per-repo compose default).
+   * Set this when the connected repo's compose `container_name` deviates
+   * from the default — without it, dispatches to that repo silently 502.
+   */
+  workerHost?: string;
 }
 
 export interface TrelloConfig {

@@ -144,6 +144,12 @@ export function buildSsmPutCommands(
  * repos. Returns:
  *   REPOS — "<name>:<url>,..." for each repo in this deployment
  *   REPO_WORKER_PORTS — "<name>:<port>,..." matching REPOS entries
+ *   REPO_WORKER_HOSTS — "<name>:<host>,..." for repos that declare a
+ *     worker_host override; empty when none do (the dashboard then falls
+ *     back to the default `danxbot-worker-<name>` for every repo). The key
+ *     is always present in the override map so it overwrites any
+ *     operator-local REPO_WORKER_HOSTS that might leak via .env, even
+ *     though `pushIfSet` skips the SSM put when the value is empty.
  */
 export function buildTargetOverrides(
   config: DeployConfig,
@@ -154,9 +160,14 @@ export function buildTargetOverrides(
   const portsValue = config.repos
     .map((r) => `${r.name}:${r.workerPort}`)
     .join(",");
+  const hostsValue = config.repos
+    .filter((r) => r.workerHost)
+    .map((r) => `${r.name}:${r.workerHost}`)
+    .join(",");
   return {
     REPOS: reposValue,
     REPO_WORKER_PORTS: portsValue,
+    REPO_WORKER_HOSTS: hostsValue,
   };
 }
 

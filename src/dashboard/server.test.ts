@@ -43,8 +43,10 @@ vi.mock("../config.js", () => ({
 // Stub only the per-request handlers so the router tests don't hit the
 // real dispatch upstream. `extractBearer` + `checkAuth` are the real
 // implementations — stubbing them would hide drift if either signature
-// changes. `loadDispatchToken` + `workerHost` are trivial pure fns we
-// override for deterministic expectations.
+// changes. `loadDispatchToken` is a trivial pure fn we override for
+// deterministic expectations. `makeResolveWorkerHost` is overridden so
+// the wiring assertion below can pin a recognizable hostname without
+// caring about the default `danxbot-worker-<name>` shape.
 const mockHandleLaunchProxy = vi.fn();
 const mockHandleResumeProxy = vi.fn();
 const mockHandleJobProxy = vi.fn();
@@ -59,7 +61,7 @@ vi.mock("./dispatch-proxy.js", async () => {
     handleResumeProxy: (...args: unknown[]) => mockHandleResumeProxy(...args),
     handleJobProxy: (...args: unknown[]) => mockHandleJobProxy(...args),
     loadDispatchToken: () => "test-token",
-    workerHost: (name: string) => `test-worker-${name}`,
+    makeResolveWorkerHost: () => (name: string) => `test-worker-${name}`,
   };
 });
 

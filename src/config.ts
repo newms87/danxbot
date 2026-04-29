@@ -65,9 +65,68 @@ function attachWorkerPorts(
   );
 }
 
-export const repos: RepoConfig[] = attachWorkerPorts(
-  parseRepos(optional("REPOS", "")),
-  parseWorkerPorts(optional("REPO_WORKER_PORTS", "")),
+/**
+ * Parse REPO_WORKER_HOSTS — optional per-repo docker hostname override that
+ * winds through `<repo>/.danxbot/config/compose.yml` `container_name`. Format:
+ * "name:host,name:host". Repos absent from this map fall back to the
+ * default `danxbot-worker-<name>` in `src/dashboard/dispatch-proxy.ts`.
+ *
+ * Whitespace inside a hostname (DNS labels can't contain spaces) and an
+ * empty value after the colon are rejected loudly — both are config
+ * mistakes that would silently skew proxy behavior.
+ */
+function parseWorkerHosts(envValue: string): Record<string, string> {
+  if (!envValue.trim()) return {};
+  const result: Record<string, string> = {};
+  for (const entry of envValue.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const colonIndex = trimmed.indexOf(":");
+    if (colonIndex <= 0) {
+      throw new Error(
+        `Invalid REPO_WORKER_HOSTS entry "${entry}" — expected "name:host" format`,
+      );
+    }
+    const name = trimmed.slice(0, colonIndex).trim();
+    const host = trimmed.slice(colonIndex + 1).trim();
+    if (!name || !host || /\s/.test(host)) {
+      throw new Error(
+        `Invalid REPO_WORKER_HOSTS entry "${entry}" — name required, host must be a non-empty whitespace-free string`,
+      );
+    }
+    result[name] = host;
+  }
+  return result;
+}
+
+/**
+ * Attach workerHost entries from REPO_WORKER_HOSTS onto matching REPOS
+ * entries. Same fail-loud contract as `attachWorkerPorts` — typos surface at
+ * boot, not as silent 502s under load.
+ */
+function attachWorkerHosts(
+  parsedRepos: RepoConfig[],
+  hosts: Record<string, string>,
+): RepoConfig[] {
+  const repoNames = new Set(parsedRepos.map((r) => r.name));
+  for (const name of Object.keys(hosts)) {
+    if (!repoNames.has(name)) {
+      throw new Error(
+        `REPO_WORKER_HOSTS references unknown repo "${name}" — each name must match an entry in REPOS`,
+      );
+    }
+  }
+  return parsedRepos.map((r) =>
+    hosts[r.name] !== undefined ? { ...r, workerHost: hosts[r.name] } : r,
+  );
+}
+
+export const repos: RepoConfig[] = attachWorkerHosts(
+  attachWorkerPorts(
+    parseRepos(optional("REPOS", "")),
+    parseWorkerPorts(optional("REPO_WORKER_PORTS", "")),
+  ),
+  parseWorkerHosts(optional("REPO_WORKER_HOSTS", "")),
 );
 
 /**

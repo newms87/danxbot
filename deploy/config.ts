@@ -38,7 +38,10 @@ function expandTilde(path: string): string {
 /**
  * One connected repo in a deployment. `appEnvSubpath`, when set, is the
  * relative subdirectory (e.g. "ssap") where the app's .env lives for repos
- * whose application does not sit at the repo root.
+ * whose application does not sit at the repo root. `workerHost`, when set,
+ * overrides the default `danxbot-worker-<name>` docker hostname the
+ * dashboard uses to proxy to this worker — required for repos whose compose
+ * file renames the container.
  */
 export interface DeployRepo {
   name: string;
@@ -46,6 +49,13 @@ export interface DeployRepo {
   appEnvSubpath?: string;
   /** Host port the worker's dispatch API binds to (must be unique per repo on an instance). */
   workerPort: number;
+  /**
+   * Docker hostname the dashboard uses to proxy to this worker. Defaults to
+   * `danxbot-worker-<name>` (see `workerHost` in `src/dashboard/dispatch-proxy.ts`)
+   * when omitted. Set this when the repo's compose `container_name` deviates
+   * from the default — without it the dashboard silently 502s on dispatch.
+   */
+  workerHost?: string;
 }
 
 export interface DeployConfig {
@@ -295,13 +305,41 @@ export function loadConfig(configPath: string): DeployConfig {
           workerPort = rawPort;
         }
 
+        // worker_host — optional override for the default
+        // `danxbot-worker-<name>` docker hostname. Validated as a non-empty
+        // whitespace-free string; whitespace inside a hostname is never
+        // legal (Docker DNS labels can't contain spaces) and an empty
+        // string would silently revert to the default — both are config
+        // mistakes the loader rejects loudly per the no-silent-fallback
+        // rule on config keys.
+        let workerHost: string | undefined;
+        const rawHost = r["worker_host"];
+        if (rawHost !== undefined && rawHost !== null) {
+          if (typeof rawHost !== "string") {
+            errors.push(
+              `repos[].worker_host must be a string (got ${typeof rawHost})`,
+            );
+          } else {
+            const trimmed = rawHost.trim();
+            if (trimmed === "") {
+              errors.push(
+                `repos[].worker_host must not be empty — omit the key to use the default danxbot-worker-<name>`,
+              );
+            } else if (/\s/.test(trimmed)) {
+              errors.push(
+                `repos[].worker_host must not contain whitespace: "${rawHost}"`,
+              );
+            } else {
+              workerHost = trimmed;
+            }
+          }
+        }
+
         if (rName && rUrl && workerPort) {
-          const base = { name: rName, url: rUrl, workerPort };
-          repos.push(
-            appEnvSubpath === undefined
-              ? base
-              : { ...base, appEnvSubpath },
-          );
+          const base: DeployRepo = { name: rName, url: rUrl, workerPort };
+          if (appEnvSubpath !== undefined) base.appEnvSubpath = appEnvSubpath;
+          if (workerHost !== undefined) base.workerHost = workerHost;
+          repos.push(base);
         }
       }
     }

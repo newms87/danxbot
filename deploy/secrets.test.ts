@@ -572,7 +572,67 @@ describe("buildTargetOverrides", () => {
     expect(buildTargetOverrides(cfg)).toEqual({
       REPOS: "",
       REPO_WORKER_PORTS: "",
+      REPO_WORKER_HOSTS: "",
     });
+  });
+
+  it("synthesizes REPO_WORKER_HOSTS only for repos that declare worker_host", () => {
+    // Per-repo worker_host overrides the default `danxbot-worker-<name>`
+    // hostname for repos whose compose file renames the container. Only
+    // repos that explicitly declare it appear in the env var; the rest
+    // fall back to the default in src/config.ts at parse time.
+    const cfg = makeConfig({
+      repos: [
+        {
+          name: "custom",
+          url: "https://github.com/x/c.git",
+          workerPort: 5561,
+          workerHost: "container-alias",
+        },
+        { name: "defaulted", url: "https://github.com/x/d.git", workerPort: 5562 },
+      ],
+    });
+    expect(buildTargetOverrides(cfg).REPO_WORKER_HOSTS).toBe(
+      "custom:container-alias",
+    );
+  });
+
+  it("REPO_WORKER_HOSTS preserves config.repos order with multiple overrides", () => {
+    // Order matters because the same comma-separated form is the round-trip
+    // key/value layout the dashboard parses back. A reordering bug would
+    // not break parsing but would shuffle which name owns which host.
+    const cfg = makeConfig({
+      repos: [
+        {
+          name: "alpha",
+          url: "https://github.com/x/a.git",
+          workerPort: 5561,
+          workerHost: "alpha-host",
+        },
+        {
+          name: "beta",
+          url: "https://github.com/x/b.git",
+          workerPort: 5562,
+          workerHost: "beta-host",
+        },
+      ],
+    });
+    expect(buildTargetOverrides(cfg).REPO_WORKER_HOSTS).toBe(
+      "alpha:alpha-host,beta:beta-host",
+    );
+  });
+
+  it("emits an empty REPO_WORKER_HOSTS when no repo declares worker_host", () => {
+    // Empty SSM values are skipped by buildSsmPutCommands, so nothing lands
+    // in production — but the override map ALWAYS carries the key so it
+    // overwrites any operator-local REPO_WORKER_HOSTS leaking via .env.
+    const cfg = makeConfig({
+      repos: [
+        { name: "a", url: "https://github.com/x/a.git", workerPort: 5561 },
+        { name: "b", url: "https://github.com/x/b.git", workerPort: 5562 },
+      ],
+    });
+    expect(buildTargetOverrides(cfg).REPO_WORKER_HOSTS).toBe("");
   });
 
   it("emits SSM put commands for the override values when merged into shared", () => {
@@ -596,6 +656,29 @@ describe("buildTargetOverrides", () => {
     expect(joined).toContain("/danxbot-gpt/shared/REPO_WORKER_PORTS");
     expect(joined).toContain("--value 'danxbot:5561'");
     expect(joined).toContain("/danxbot-gpt/shared/DANXBOT_DISPATCH_TOKEN");
+  });
+
+  it("pushes REPO_WORKER_HOSTS to SSM when at least one repo declares worker_host", () => {
+    const cfg = makeConfig({
+      ssmPrefix: "/danxbot-gpt",
+      aws: { profile: "gpt" },
+      repos: [
+        {
+          name: "danxbot",
+          url: "https://github.com/x/d.git",
+          workerPort: 5561,
+          workerHost: "renamed-container",
+        },
+      ],
+    });
+    const overrides = buildTargetOverrides(cfg);
+    const cmds = buildSsmPutCommands(cfg, {
+      shared: { ...overrides, DANXBOT_DISPATCH_TOKEN: "tok" },
+      perRepo: {},
+    });
+    const joined = cmds.join("\n");
+    expect(joined).toContain("/danxbot-gpt/shared/REPO_WORKER_HOSTS");
+    expect(joined).toContain("--value 'danxbot:renamed-container'");
   });
 });
 
@@ -680,6 +763,29 @@ describe("buildPushSecretsCommands", () => {
     expect(reposCmd).toBeDefined();
     expect(reposCmd).toContain("--value 'danxbot:https://github.com/x/d.git'");
     expect(reposCmd).not.toContain("operator-local-junk");
+  });
+
+  it("target overrides win over conflicting REPO_WORKER_HOSTS in collected.shared", () => {
+    // Same precedence guard as the REPOS test above — an operator's local
+    // REPO_WORKER_HOSTS (e.g. dev container aliases for a repo not in this
+    // deployment) must NEVER leak into the target's SSM. The override key
+    // is always present in buildTargetOverrides, even when empty, so it
+    // overwrites the local value unconditionally.
+    const collected = {
+      shared: {
+        REPO_WORKER_HOSTS: "operator-junk:bad-host",
+        ANTHROPIC_API_KEY: "sk-x",
+      },
+      perRepo: {},
+    };
+    const overrides = { REPO_WORKER_HOSTS: "danxbot:correct-host" };
+    const cmds = buildPushSecretsCommands(cfg, collected, overrides, "tok");
+    const hostsCmd = cmds.find((c) =>
+      c.includes(`--name "/danxbot-test/shared/REPO_WORKER_HOSTS"`),
+    );
+    expect(hostsCmd).toBeDefined();
+    expect(hostsCmd).toContain("--value 'danxbot:correct-host'");
+    expect(hostsCmd).not.toContain("operator-junk");
   });
 
   it("DANXBOT_DISPATCH_TOKEN always lands in shared", () => {

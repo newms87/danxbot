@@ -4,6 +4,7 @@ import { AddressInfo } from "node:net";
 import {
   checkAuth,
   workerHost,
+  makeResolveWorkerHost,
   handleLaunchProxy,
   handleResumeProxy,
   handleJobProxy,
@@ -22,6 +23,68 @@ describe("workerHost", () => {
   it("returns the docker container hostname for a repo", () => {
     expect(workerHost("platform")).toBe("danxbot-worker-platform");
     expect(workerHost("gpt-manager")).toBe("danxbot-worker-gpt-manager");
+  });
+});
+
+describe("makeResolveWorkerHost", () => {
+  // The resolver consulted by dispatchDeps.resolveHost in production. Repos
+  // that declare workerHost get returned verbatim; the rest fall back to the
+  // default `danxbot-worker-<name>` so existing setups keep working unchanged.
+  it("returns the per-repo workerHost when set", () => {
+    const repos: RepoConfig[] = [
+      {
+        name: "custom",
+        url: "https://x/c.git",
+        localPath: "/danxbot/repos/custom",
+        workerPort: 5561,
+        workerHost: "renamed-container",
+      },
+    ];
+    expect(makeResolveWorkerHost(repos)("custom")).toBe("renamed-container");
+  });
+
+  it("falls back to `danxbot-worker-<name>` when workerHost is unset", () => {
+    const repos: RepoConfig[] = [
+      {
+        name: "platform",
+        url: "https://x/p.git",
+        localPath: "/danxbot/repos/platform",
+        workerPort: 5561,
+      },
+    ];
+    expect(makeResolveWorkerHost(repos)("platform")).toBe(
+      "danxbot-worker-platform",
+    );
+  });
+
+  it("falls back to the default when the name is unknown (defense in depth)", () => {
+    // The proxy already 404s on unknown repos before resolveHost is called,
+    // but the resolver itself stays defensive — never returns undefined.
+    expect(makeResolveWorkerHost([])("missing")).toBe("danxbot-worker-missing");
+  });
+
+  it("returns the right hostname for each repo in a mixed list (one override + one default)", () => {
+    // Confirms the closure-built Map is keyed correctly when called twice
+    // for different names — guards against a copy-paste bug where the Map
+    // is built outside the closure or keyed by the wrong field.
+    const repos: RepoConfig[] = [
+      {
+        name: "alpha",
+        url: "https://x/a.git",
+        localPath: "/danxbot/repos/alpha",
+        workerPort: 5561,
+        workerHost: "alpha-alias",
+      },
+      {
+        name: "beta",
+        url: "https://x/b.git",
+        localPath: "/danxbot/repos/beta",
+        workerPort: 5562,
+      },
+    ];
+    const resolve = makeResolveWorkerHost(repos);
+    expect(resolve("alpha")).toBe("alpha-alias");
+    expect(resolve("beta")).toBe("danxbot-worker-beta");
   });
 });
 

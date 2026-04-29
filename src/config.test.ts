@@ -257,6 +257,95 @@ describe("REPO_WORKER_PORTS", () => {
   });
 });
 
+describe("REPO_WORKER_HOSTS", () => {
+  it("attaches workerHost to the matching repo", async () => {
+    // The dashboard's worker-host resolver consults workerHost first, so any
+    // repo that declares one in its deployment yml ends up reachable at the
+    // declared docker hostname instead of the default `danxbot-worker-<name>`.
+    const mod = await importConfig({
+      REPOS:
+        "platform:https://example.com/p.git,custom:https://example.com/c.git",
+      REPO_WORKER_PORTS: "platform:5561,custom:5562",
+      REPO_WORKER_HOSTS: "custom:renamed-container",
+    });
+    expect(mod.repos[0].name).toBe("platform");
+    expect(mod.repos[0].workerHost).toBeUndefined();
+    expect(mod.repos[1].name).toBe("custom");
+    expect(mod.repos[1].workerHost).toBe("renamed-container");
+  });
+
+  it("leaves workerHost undefined on repos with no host entry", async () => {
+    const mod = await importConfig({
+      REPOS:
+        "platform:https://example.com/p.git,custom:https://example.com/c.git",
+      REPO_WORKER_PORTS: "platform:5561,custom:5562",
+      REPO_WORKER_HOSTS: "custom:c-host",
+    });
+    expect(mod.repos[0].workerHost).toBeUndefined();
+    expect(mod.repos[1].workerHost).toBe("c-host");
+  });
+
+  it("returns no overrides when REPO_WORKER_HOSTS is unset", async () => {
+    const mod = await importConfig(
+      {
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform:5561",
+      },
+      ["REPO_WORKER_HOSTS"],
+    );
+    expect(mod.repos[0].workerHost).toBeUndefined();
+  });
+
+  it("throws on malformed entry (missing colon)", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform:5561",
+        REPO_WORKER_HOSTS: "platform",
+      }),
+    ).rejects.toThrow("Invalid REPO_WORKER_HOSTS entry");
+  });
+
+  it("throws on empty hostname after colon", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform:5561",
+        REPO_WORKER_HOSTS: "platform:",
+      }),
+    ).rejects.toThrow("Invalid REPO_WORKER_HOSTS entry");
+  });
+
+  it("throws when a host references an unknown repo (fails loud on typos)", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform:5561",
+        REPO_WORKER_HOSTS: "typod-repo:custom-host",
+      }),
+    ).rejects.toThrow(/unknown repo "typod-repo"/);
+  });
+
+  it("rejects whitespace inside a hostname (DNS labels can't contain spaces)", async () => {
+    await expect(
+      importConfig({
+        REPOS: "platform:https://example.com/p.git",
+        REPO_WORKER_PORTS: "platform:5561",
+        REPO_WORKER_HOSTS: "platform:has space",
+      }),
+    ).rejects.toThrow("Invalid REPO_WORKER_HOSTS entry");
+  });
+
+  it("trims whitespace around entries", async () => {
+    const mod = await importConfig({
+      REPOS: "platform:https://example.com/p.git",
+      REPO_WORKER_PORTS: "platform:5561",
+      REPO_WORKER_HOSTS: " platform : custom-host ",
+    });
+    expect(mod.repos[0].workerHost).toBe("custom-host");
+  });
+});
+
 describe("getRepoPath", () => {
   it("returns localPath for configured repo", async () => {
     const mod = await importConfig({

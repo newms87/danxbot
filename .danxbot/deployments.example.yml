@@ -41,6 +41,13 @@ dashboard:
 # Git repos that get cloned and run as workers on the instance.
 # Each listed repo MUST have .danxbot/config/compose.yml and
 # .danxbot/scripts/bootstrap.sh committed in its repo.
+#
+# Optional `worker_host:` overrides the default `danxbot-worker-<name>`
+# docker hostname the dashboard uses to proxy to this worker. Set it
+# only when the repo's compose `container_name` deviates from the
+# default — without it, dispatches to that repo silently 502.
 repos:
   - name: danxbot
     url: git@github-newms87:newms87/danxbot.git
+    worker_port: 5561
+    # worker_host: custom-container-name  # uncomment + set when compose container_name is non-default

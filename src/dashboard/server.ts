@@ -18,7 +18,7 @@ import {
   handleResumeProxy,
   handleJobProxy,
   loadDispatchToken,
-  workerHost,
+  makeResolveWorkerHost,
   type DispatchProxyDeps,
 } from "./dispatch-proxy.js";
 import {
@@ -352,10 +352,14 @@ export async function startDashboard(): Promise<void> {
   // Build proxy deps once per dashboard process — token, repos, and the
   // worker-host resolver are all constant across requests. The handler below
   // closes over this object instead of allocating a new one per request.
+  // The resolver consults each repo's `workerHost` override (set via
+  // REPO_WORKER_HOSTS / deployment yml `worker_host:`) and falls back to
+  // the default `danxbot-worker-<name>` for repos without one.
+  const resolveHost = makeResolveWorkerHost(repos);
   const dispatchDeps: DispatchProxyDeps = {
     token,
     repos,
-    resolveHost: workerHost,
+    resolveHost,
   };
 
   // Playwright proxy shares the DANXBOT_DISPATCH_TOKEN with dispatchDeps —
@@ -366,7 +370,7 @@ export async function startDashboard(): Promise<void> {
     upstreamUrl: loadPlaywrightUrl(),
   };
 
-  await checkWorkerHostResolution(repos, workerHost);
+  await checkWorkerHostResolution(repos, resolveHost);
 
   // Start the DB change detector that publishes dispatch:created and
   // dispatch:updated events to the EventBus for SSE subscribers.

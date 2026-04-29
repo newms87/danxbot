@@ -366,6 +366,127 @@ instance:
     expect(() => loadConfig(p)).toThrow("instance.ssh_allowed_cidrs must be an array");
   });
 
+  it("parses optional worker_host on a repo", () => {
+    // worker_host overrides the default `danxbot-worker-<name>` docker hostname
+    // the dashboard uses to proxy to a worker container. Repos that rename their
+    // container (legitimate per-repo concern) declare it here so the dashboard
+    // sees the right hostname instead of silently 502'ing.
+    const p = writeDeployment(
+      "with-worker-host",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: custom
+    url: https://github.com/user/custom.git
+    worker_port: 5561
+    worker_host: custom-container-name
+  - name: defaulted
+    url: https://github.com/user/defaulted.git
+    worker_port: 5562
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].name).toBe("custom");
+    expect(config.repos[0].workerHost).toBe("custom-container-name");
+    expect(config.repos[1].name).toBe("defaulted");
+    // Unset must remain undefined so default `danxbot-worker-<name>` applies.
+    expect(config.repos[1].workerHost).toBeUndefined();
+  });
+
+  it("rejects worker_host that is not a string", () => {
+    const p = writeDeployment(
+      "bad-host-type",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    worker_port: 5561
+    worker_host: 42
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/worker_host.*string/i);
+  });
+
+  it("rejects empty worker_host (no silent fallback on config keys)", () => {
+    const p = writeDeployment(
+      "empty-host",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    worker_port: 5561
+    worker_host: ""
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/worker_host.*empty/i);
+  });
+
+  it("trims surrounding whitespace from a worker_host value", () => {
+    // Test files outside this repo can quote-wrap the value with leading
+    // padding for readability; the loader should trim it before storing
+    // (mirrors the trim done in src/config.ts:parseWorkerHosts).
+    const p = writeDeployment(
+      "trim-host",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: r
+    url: https://github.com/user/r.git
+    worker_port: 5561
+    worker_host: "  custom-name  "
+`,
+    );
+
+    const config = loadConfig(p);
+    expect(config.repos[0].workerHost).toBe("custom-name");
+  });
+
+  it("rejects worker_host with whitespace (DNS labels can't contain spaces)", () => {
+    const p = writeDeployment(
+      "whitespace-host",
+      `
+name: test-bot
+region: us-east-1
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+repos:
+  - name: bad
+    url: https://github.com/user/bad.git
+    worker_port: 5561
+    worker_host: has space
+`,
+    );
+
+    expect(() => loadConfig(p)).toThrow(/worker_host.*whitespace/i);
+  });
+
   it("parses optional app_env_subpath on a repo", () => {
     const p = writeDeployment(
       "with-subpath",
