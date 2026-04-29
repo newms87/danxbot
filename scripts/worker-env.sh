@@ -8,12 +8,23 @@
 #   . ./scripts/worker-env.sh <repo-name>
 #
 # Reads:
-#   $REPOS_DIR/<repo>/.danxbot/.env  — DANXBOT_WORKER_PORT (per-repo)
+#   ./.env                            — root-level shared vars (optional)
+#   $REPOS_DIR/<repo>/.danxbot/.env   — per-repo vars incl. DANXBOT_WORKER_PORT
 #
-# Exports (always overwrites — never inherits from parent shell):
-#   DANXBOT_WORKER_PORT
-#   DANXBOT_REPO_ROOT
-#   CLAUDE_AUTH_DIR
+# Exports:
+#   - Every var defined in either .env file (per-repo wins over root —
+#     per-repo is sourced last). Trello XTyPLay0: docker compose's
+#     ${CLAUDE_CONFIG_FILE:?...} / ${CLAUDE_CREDS_DIR:?...} interpolation
+#     in `.danxbot/config/compose.yml` reads only the shell env at
+#     compose-up time, so the documented `.env.example` override block
+#     was previously a no-op for `make launch-worker` (only
+#     `launch-worker-host` sourced `.env` files). This helper now does
+#     it for both targets.
+#   - DANXBOT_WORKER_PORT, DANXBOT_REPO_ROOT, CLAUDE_AUTH_DIR are
+#     ALWAYS overwritten with values resolved from disk paths and the
+#     awk pipeline below — never inherited from parent shell. The
+#     overwrite happens AFTER the file-source so a stale shell value
+#     (or even a wrong value in either .env) is shadowed.
 #
 # Trello oGbjLtjN: `launch-all-workers` was leaking the parent shell's
 # DANXBOT_WORKER_PORT into every per-repo compose, so the first repo
@@ -45,6 +56,18 @@ __worker_env_main() {
         echo "Error: $repo_env not found — needs DANXBOT_WORKER_PORT" >&2
         return 1
     fi
+
+    # Source root + per-repo .env so any var defined in either flows out
+    # as an export (per-repo last → wins for shared keys). The awk
+    # extraction below shadows DANXBOT_WORKER_PORT regardless, preserving
+    # oGbjLtjN race protection. Mirrors `launch-worker-host`'s pattern;
+    # lifted here so docker + host runtime modes stay in sync (Trello
+    # XTyPLay0). Root `.env` is guarded because tests run from tmpdirs;
+    # in real use Make is invoked from the repo root where `.env` exists.
+    set -a
+    [ -f ./.env ] && . ./.env
+    . "$repo_env"
+    set +a
 
     # CRITICAL: read the port from the per-repo .env, NEVER inherit from
     # the parent shell. A leftover DANXBOT_WORKER_PORT (from a prior

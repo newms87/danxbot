@@ -35,6 +35,10 @@ interface RunArgs {
   shellEnv?: Record<string, string>;
   /** Skip creating the danxbot/claude-auth scaffolding */
   skipDanxbotScaffold?: boolean;
+  /** Optional root `./.env` file written at the temp-dir root. */
+  rootEnvContent?: string;
+  /** Extra env-var names to capture from the post-source environment. */
+  extraVars?: string[];
 }
 
 interface RunResult {
@@ -51,6 +55,9 @@ function setupRepoTree(args: RunArgs): string {
     mkdirSync(repoPath, { recursive: true });
     writeFileSync(join(repoPath, ".env"), content);
   }
+  if (args.rootEnvContent !== undefined) {
+    writeFileSync(join(dir, ".env"), args.rootEnvContent);
+  }
   if (!args.skipDanxbotScaffold) {
     mkdirSync(join(dir, "repos", "danxbot", "claude-auth"), { recursive: true });
   }
@@ -62,6 +69,9 @@ function runHelper(args: RunArgs): RunResult {
   // Source the helper, then dump exported vars one-per-line so the
   // test can parse them deterministically. `printf` (not echo) avoids
   // any shell variant differences in newline handling.
+  const printExtraVars = (args.extraVars ?? []).map(
+    (name) => `  printf '${name}=%s\\n' "$${name}"`,
+  );
   const script = [
     `cd ${dir}`,
     `export REPOS_DIR=./repos`,
@@ -76,6 +86,7 @@ function runHelper(args: RunArgs): RunResult {
     // the assertion can distinguish "helper exported it" from "shell had
     // an inherited value". Trello cjAyJpgr.
     `  printf 'CLAUDE_PROJECTS_DIR=%s\\n' "$CLAUDE_PROJECTS_DIR"`,
+    ...printExtraVars,
     `else`,
     `  printf 'FAIL\\n' >&2`,
     `  exit 1`,
@@ -265,6 +276,107 @@ describe("scripts/worker-env.sh", () => {
     });
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toMatch(/DANXBOT_WORKER_PORT/);
+  });
+
+  it("flows CLAUDE_CREDS_DIR from per-repo .env into the exported env (Trello XTyPLay0)", () => {
+    // The headline case: dev sets CLAUDE_CREDS_DIR in their .danxbot/.env
+    // per .env.example. Pre-fix, the helper exported only its hand-picked
+    // 3-var subset and docker compose's ${CLAUDE_CREDS_DIR:?...}
+    // interpolation failed. Post-fix the helper sources the per-repo
+    // .env so any var defined there flows out as an export.
+    const result = runHelper({
+      repo: "platform",
+      envFiles: {
+        platform:
+          "DANXBOT_WORKER_PORT=5560\nCLAUDE_CREDS_DIR=/home/me/.claude\nCLAUDE_CONFIG_FILE=/home/me/.claude.json\n",
+      },
+      extraVars: ["CLAUDE_CREDS_DIR", "CLAUDE_CONFIG_FILE"],
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.vars.CLAUDE_CREDS_DIR).toBe("/home/me/.claude");
+    expect(result.vars.CLAUDE_CONFIG_FILE).toBe("/home/me/.claude.json");
+  });
+
+  it("sources root ./.env when present and exports its vars", () => {
+    const result = runHelper({
+      repo: "platform",
+      envFiles: { platform: "DANXBOT_WORKER_PORT=5560\n" },
+      rootEnvContent: "ROOT_ONLY_VAR=root-wins\n",
+      extraVars: ["ROOT_ONLY_VAR"],
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.vars.ROOT_ONLY_VAR).toBe("root-wins");
+  });
+
+  it("per-repo .env overrides root ./.env for shared keys (per-repo sourced last)", () => {
+    const result = runHelper({
+      repo: "platform",
+      envFiles: {
+        platform: "DANXBOT_WORKER_PORT=5560\nCLAUDE_CREDS_DIR=/per-repo/.claude\n",
+      },
+      rootEnvContent: "CLAUDE_CREDS_DIR=/root/.claude\n",
+      extraVars: ["CLAUDE_CREDS_DIR"],
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.vars.CLAUDE_CREDS_DIR).toBe("/per-repo/.claude");
+  });
+
+  it("does NOT leak `set -a` (allexport) after returning to caller", () => {
+    // The helper toggles `set -a` to auto-export every var it sources
+    // from the .env files, then restores it with `set +a`. If a future
+    // refactor drops the restore, every `FOO=bar` assignment after the
+    // source point in the caller's Make recipe would silently auto-
+    // export — observable as Docker Compose receiving env vars it never
+    // asked for, and as a stale `DANXBOT_WORKER_PORT` (or anything else)
+    // smuggled into the next `launch-all-workers` loop iteration.
+    const dir = setupRepoTree({
+      repo: "platform",
+      envFiles: { platform: "DANXBOT_WORKER_PORT=5560\n" },
+    });
+    try {
+      const script = [
+        `cd ${dir}`,
+        `export REPOS_DIR=./repos`,
+        `. ${HELPER} platform`,
+        // After the helper returns, the `a` flag must NOT be in $-.
+        `case "$-" in *a*) printf 'ALLEXPORT_LEAKED\\n'; exit 1 ;; esac`,
+        // Behavioral sanity: a fresh var assignment in the caller's
+        // shell must not auto-export to a child process.
+        `LOCAL_FRESH_VAR=auto-export-canary`,
+        `bash -c 'printf "child=%s\\n" "$LOCAL_FRESH_VAR"'`,
+      ].join("\n");
+      const out = execFileSync("bash", ["-c", script], {
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          HOME: process.env.HOME ?? "/tmp",
+        },
+        encoding: "utf8",
+      }).toString();
+      expect(out).not.toContain("ALLEXPORT_LEAKED");
+      // child=<empty> if `set -a` was restored; child=auto-export-canary
+      // if it leaked.
+      expect(out).toContain("child=\n");
+      expect(out).not.toContain("child=auto-export-canary");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("DANXBOT_WORKER_PORT awk extraction still wins over env-file sourcing (oGbjLtjN race protection preserved)", () => {
+    // Both files set DANXBOT_WORKER_PORT to different values, AND the
+    // parent shell has yet a third value. The awk-from-per-repo-file
+    // value MUST win — that's the contract from Trello oGbjLtjN. This
+    // test guards against a future refactor that drops the explicit
+    // export at the bottom of the helper and lets the file-source
+    // value through unchecked.
+    const result = runHelper({
+      repo: "platform",
+      envFiles: { platform: "DANXBOT_WORKER_PORT=5560\n" },
+      rootEnvContent: "DANXBOT_WORKER_PORT=7777\n",
+      shellEnv: { DANXBOT_WORKER_PORT: "9999" },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.vars.DANXBOT_WORKER_PORT).toBe("5560");
   });
 
   it("requires a repo name argument", () => {
