@@ -23,7 +23,8 @@ import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { execSync } from "node:child_process";
 import type { DeployConfig } from "./config.js";
-import { awsCmd, runStreaming } from "./exec.js";
+import { awsCmd, isDryRun, runStreaming } from "./exec.js";
+import { DRY_RUN_DISPATCH_TOKEN } from "./dry-run-placeholders.js";
 import {
   sharedKeyPath,
   repoKeyPath,
@@ -181,11 +182,17 @@ export function buildTargetOverrides(
  * other AWS error (expired auth, throttling, network) re-throws and aborts
  * the deploy — forcing the operator to fix the underlying problem instead of
  * rotating every external caller's credentials.
+ *
+ * Defense-in-depth dry-run guard: the function returns the placeholder
+ * unconditionally when `isDryRun()` is set, so a future caller that bypasses
+ * `pushSecrets` (which already substitutes the placeholder) cannot leak a
+ * real token to stdout via the generation path's printed banner.
  */
 export function getOrCreateDispatchToken(
   config: DeployConfig,
   exec: (cmd: string) => string = defaultTokenFetch,
 ): string {
+  if (isDryRun()) return DRY_RUN_DISPATCH_TOKEN;
   const paramName = sharedKeyPath(config.ssmPrefix, "DANXBOT_DISPATCH_TOKEN");
   try {
     const raw = exec(
@@ -274,6 +281,11 @@ export function pushSecrets(
 ): void {
   const collected = collectDeploymentSecrets(config, cwd, target);
   const overrides = buildTargetOverrides(config);
+  // `getOrCreateDispatchToken` returns DRY_RUN_DISPATCH_TOKEN when isDryRun()
+  // is set (defense-in-depth), so this call is dry-run-safe even though the
+  // production path hits SSM. Keeping the call here rather than gating with
+  // a second isDryRun() check avoids drift between this caller's notion of
+  // "what's a dry-run-safe token source" and the function's internal guard.
   const token = getOrCreateDispatchToken(config);
   const cmds = buildPushSecretsCommands(config, collected, overrides, token);
 

@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
   parseEnvFile,
@@ -9,6 +10,8 @@ import {
   getOrCreateDispatchToken,
   buildPushSecretsCommands,
 } from "./secrets.js";
+import { setDryRun } from "./exec.js";
+import { DRY_RUN_DISPATCH_TOKEN } from "./dry-run-placeholders.js";
 import { makeConfig } from "./test-helpers.js";
 
 const TMP = resolve("/tmp/danxbot-secrets-test");
@@ -885,5 +888,86 @@ describe("buildPushSecretsCommands", () => {
     );
     expect(tokenCmd).toContain("--value 'the-real-token'");
     expect(tokenCmd).not.toContain("from-overrides-should-lose");
+  });
+});
+
+describe("getOrCreateDispatchToken dry-run", () => {
+  afterEach(() => {
+    setDryRun(false);
+  });
+
+  it("returns the placeholder unconditionally in dry-run (defense-in-depth — never invokes the SSM exec)", () => {
+    // The dry-run guard inside getOrCreateDispatchToken protects future
+    // callers (rotate-token, etc.) from leaking a real token via the
+    // generation banner. The exec callback being NOT invoked is the
+    // load-bearing assertion: any code that wires getOrCreateDispatchToken
+    // to a real SSM put MUST stay behind the dry-run gate.
+    setDryRun(true);
+    let invoked = false;
+    const exec = (_cmd: string): string => {
+      invoked = true;
+      return "real-token-leaked";
+    };
+    expect(getOrCreateDispatchToken(makeConfig(), exec)).toBe(
+      DRY_RUN_DISPATCH_TOKEN,
+    );
+    expect(invoked).toBe(false);
+  });
+});
+
+describe("pushSecrets dry-run", () => {
+  // Validates the dry-run integration end-to-end: in dry-run, the SSM
+  // put-parameter command for DANXBOT_DISPATCH_TOKEN must carry the
+  // placeholder value (never a real token), and the runStreaming wrapper
+  // must short-circuit on each command (no real SSM put). Without these
+  // guards a future refactor that re-wires the token resolution could
+  // silently push a fresh real token to SSM every time a dry-run is
+  // requested — defeating the entire feature.
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.doUnmock("./exec.js");
+  });
+
+  it("renders DANXBOT_DISPATCH_TOKEN with the placeholder when isDryRun() is true", async () => {
+    const streamCalls: string[] = [];
+    vi.doMock("./exec.js", () => ({
+      awsCmd: (profile: string, cmd: string) =>
+        `aws --profile ${profile} ${cmd}`.replace(/\s+/g, " ").trim(),
+      isDryRun: () => true,
+      runStreaming: (cmd: string) => {
+        streamCalls.push(cmd);
+      },
+    }));
+    const mod = await import("./secrets.js?t=" + Date.now());
+
+    const cwd = mkdtempSync(resolve(tmpdir(), "danxbot-pushsecrets-dryrun-"));
+    try {
+      // Provide a non-empty .env so at least one shared put-parameter command
+      // is built — otherwise the test would pass trivially with zero output.
+      writeFileSync(resolve(cwd, ".env"), "ANTHROPIC_API_KEY=sk-fake\n");
+
+      mod.pushSecrets(
+        makeConfig({
+          ssmPrefix: "/danxbot-test",
+          aws: { profile: "test-profile" },
+        }),
+        cwd,
+      );
+
+      const tokenCmd = streamCalls.find((c) =>
+        c.includes("DANXBOT_DISPATCH_TOKEN"),
+      );
+      expect(tokenCmd).toBeDefined();
+      expect(tokenCmd).toContain(`--value '${DRY_RUN_DISPATCH_TOKEN}'`);
+      expect(tokenCmd).toContain(
+        "/danxbot-test/shared/DANXBOT_DISPATCH_TOKEN",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });

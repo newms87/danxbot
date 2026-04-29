@@ -12,7 +12,7 @@
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import type { DeployConfig } from "./config.js";
-import { run, runStreaming, tryRun } from "./exec.js";
+import { isDryRun, run, runStreaming, tryRun } from "./exec.js";
 
 /**
  * Resolve the SSH private key path from config. Exported for use outside the class.
@@ -96,6 +96,19 @@ export class RemoteHost {
    */
   uploadClaudeAuth(): void {
     const authDir = this.config.claudeAuthDir;
+    // In dry-run, skip the existsSync precondition checks. A fresh operator
+    // host (or CI runner) testing pipeline shape with `--dry-run` may not
+    // have claude-auth staged locally — failing loudly at this gate would
+    // defeat the dry-run's purpose ("preview the pipeline, no side effects,
+    // no local prerequisites"). The downstream scp/ssh calls flow through
+    // `runStreaming` and just print their commands.
+    if (isDryRun()) {
+      console.log("\n── Uploading Claude Code auth ──");
+      console.log(
+        `  [dry-run] would scp ${authDir}/.claude.json + ${authDir}/.claude/.credentials.json to /danxbot/claude-auth/`,
+      );
+      return;
+    }
     if (!existsSync(authDir)) {
       throw new Error(
         `Claude auth directory not found at ${authDir}. Deploy cannot proceed without it.`,
@@ -148,6 +161,10 @@ export class RemoteHost {
     maxAttempts: number = 40,
     intervalMs: number = 5000,
   ): Promise<void> {
+    if (isDryRun()) {
+      console.log(`  [dry-run] would probe SSH: ssh ubuntu@${this.ip} echo ok`);
+      return;
+    }
     const probeCmd = `ssh ${this.baseFlags} -o ConnectTimeout=5 ubuntu@${this.ip} echo ok`;
 
     for (let attempt = 1; attempt < maxAttempts; attempt++) {

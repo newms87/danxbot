@@ -1,12 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   PRUNE_COMMAND,
   pruneStaleDockerImages,
   renderProdCompose,
   uploadAndRestartInfra,
+  uploadPlaywrightSource,
 } from "./compose-infra.js";
 import type { RemoteHost } from "./remote.js";
+import { setDryRun } from "./exec.js";
 
 describe("renderProdCompose", () => {
   it("substitutes ECR image and dashboard port", () => {
@@ -221,6 +223,52 @@ describe("prod compose template", () => {
     const out = renderProdCompose("img", 5555, ["danxbot"]);
     expect(out).toContain("build: ./playwright-screenshot");
     expect(out).not.toMatch(/image:\s+mcr\.microsoft\.com\/playwright/);
+  });
+});
+
+describe("dry-run", () => {
+  // Both `uploadPlaywrightSource` and `uploadAndRestartInfra` perform local
+  // filesystem writes (mkdtempSync, writeFileSync, execSync(tar -cf)) before
+  // any SSH call. The dry-run contract forbids local mutations, so these
+  // tests pin that the local prep AND the remote SCP/SSH calls are both
+  // suppressed when isDryRun() is true. Without these guards a `--dry-run`
+  // deploy would leave a tarball under /tmp and a rendered compose file on
+  // the operator's host.
+  afterEach(() => {
+    setDryRun(false);
+  });
+
+  it("uploadPlaywrightSource skips both local tar and remote SCP/SSH in dry-run", () => {
+    setDryRun(true);
+    const calls: string[] = [];
+    const scpUploads: Array<[string, string]> = [];
+    const remote = {
+      sshRun: (cmd: string) => calls.push(cmd),
+      scpUpload: (src: string, dst: string) => scpUploads.push([src, dst]),
+    } as unknown as RemoteHost;
+
+    uploadPlaywrightSource(remote);
+
+    expect(calls).toEqual([]);
+    expect(scpUploads).toEqual([]);
+  });
+
+  it("uploadAndRestartInfra skips local mkdtemp/writeFileSync and remote calls in dry-run", () => {
+    setDryRun(true);
+    const calls: string[] = [];
+    const streamingCalls: string[] = [];
+    const scpUploads: Array<[string, string]> = [];
+    const remote = {
+      sshRun: (cmd: string) => calls.push(cmd),
+      sshRunStreaming: (cmd: string) => streamingCalls.push(cmd),
+      scpUpload: (src: string, dst: string) => scpUploads.push([src, dst]),
+    } as unknown as RemoteHost;
+
+    uploadAndRestartInfra(remote, "img", 5555, "us-east-1", ["danxbot"]);
+
+    expect(calls).toEqual([]);
+    expect(streamingCalls).toEqual([]);
+    expect(scpUploads).toEqual([]);
   });
 });
 

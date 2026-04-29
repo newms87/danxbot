@@ -1,5 +1,11 @@
-import { describe, it, expect } from "vitest";
-import { buildDockerBuildCommand, buildImageTags } from "./build.js";
+import { describe, it, expect, afterEach } from "vitest";
+import {
+  buildDockerBuildCommand,
+  buildImageTags,
+  getDanxbotShaForBuild,
+} from "./build.js";
+import { setDryRun } from "./exec.js";
+import { DRY_RUN_SHA } from "./dry-run-placeholders.js";
 
 describe("buildImageTags", () => {
   it("emits latest + timestamp tags", () => {
@@ -50,5 +56,19 @@ describe("buildDockerBuildCommand", () => {
     expect(cmd).toBe(
       "docker build -t repo/img:latest -t repo/img:2026-04-25T00-00-00 .",
     );
+  });
+});
+
+describe("getDanxbotShaForBuild dry-run", () => {
+  afterEach(() => {
+    setDryRun(false);
+  });
+
+  it("returns the placeholder SHA in dry-run without invoking git", () => {
+    // In dry-run, `tryRun` itself short-circuits and returns null — without
+    // the early return, this function would throw "cannot resolve danxbot
+    // commit SHA" and refuse to walk the rest of the dry-run pipeline.
+    setDryRun(true);
+    expect(getDanxbotShaForBuild()).toBe(DRY_RUN_SHA);
   });
 });

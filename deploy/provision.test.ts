@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
@@ -7,7 +7,10 @@ import {
   writeTfVars,
   getTerraformOutputs,
   saveGeneratedSshKey,
+  terraformApply,
+  DRY_RUN_TERRAFORM_OUTPUTS,
 } from "./provision.js";
+import { setDryRun } from "./exec.js";
 import { makeConfig } from "./test-helpers.js";
 
 describe("provision backend flags", () => {
@@ -184,5 +187,62 @@ describe("saveGeneratedSshKey", () => {
 
     const result = saveGeneratedSshKey(config);
     expect(result).toBeNull();
+  });
+
+  it("returns null in dry-run without invoking terraform output or writing a key file", () => {
+    // saveGeneratedSshKey uses execSync directly (run() trims newlines, which
+    // would corrupt the key). In dry-run we'd otherwise actually call
+    // terraform output -raw (real subprocess) and persist whatever it returns
+    // as a real key file under $HOME — both unwanted side effects.
+    setDryRun(true);
+    try {
+      const config = makeConfig({
+        name: "dry-run-bot",
+        instance: {
+          type: "t3.small",
+          volumeSize: 30,
+          dataVolumeSize: 100,
+          sshKey: "",
+          sshAllowedCidrs: ["0.0.0.0/0"],
+        },
+      });
+      expect(saveGeneratedSshKey(config)).toBeNull();
+      expect(existsSync(resolve(tmpHome, ".ssh", "dry-run-bot-key.pem"))).toBe(
+        false,
+      );
+    } finally {
+      setDryRun(false);
+    }
+  });
+});
+
+describe("dry-run", () => {
+  const TFVARS = resolve(
+    new URL(".", import.meta.url).pathname,
+    "terraform",
+    "terraform.tfvars.json",
+  );
+
+  afterEach(() => {
+    setDryRun(false);
+  });
+
+  it("writeTfVars in dry-run does not touch terraform.tfvars.json", () => {
+    if (existsSync(TFVARS)) unlinkSync(TFVARS);
+    setDryRun(true);
+    writeTfVars(makeConfig());
+    expect(existsSync(TFVARS)).toBe(false);
+  });
+
+  it("terraformApply returns synthetic outputs without invoking terraform", () => {
+    setDryRun(true);
+    // terraformApply would normally call writeTfVars (skipped in dry-run),
+    // runStreaming("terraform apply", ...) (printed in dry-run), and then
+    // getTerraformOutputs (would throw on JSON.parse("")). The early return
+    // path returns DRY_RUN_TERRAFORM_OUTPUTS instead.
+    const outputs = terraformApply(makeConfig());
+    expect(outputs).toEqual(DRY_RUN_TERRAFORM_OUTPUTS);
+    expect(outputs.publicIp).toBe("<INSTANCE_IP>");
+    expect(outputs.ecrRepositoryUrl).toBe("<ECR_REPOSITORY_URL>");
   });
 });

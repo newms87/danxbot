@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { waitForHealthy } from "./health.js";
+import { setDryRun } from "./exec.js";
 
 describe("waitForHealthy", () => {
   beforeEach(() => {
@@ -75,5 +76,24 @@ describe("waitForHealthy", () => {
       "https://example.com/health",
       expect.any(Object),
     );
+  });
+
+  it("returns synthetic healthy without polling in dry-run", async () => {
+    // The placeholder URL passed in dry-run (`https://<DOMAIN>`) would never
+    // resolve. Without short-circuiting we'd waste maxAttempts * intervalMs
+    // on DNS failures and then mark the deploy as unhealthy — exactly the
+    // outcome dry-run is supposed to skip.
+    const mockFetch = vi.fn();
+    vi.stubGlobal("fetch", mockFetch);
+    setDryRun(true);
+    try {
+      const result = await waitForHealthy("https://<DOMAIN>", 30, 5000);
+      expect(result.healthy).toBe(true);
+      expect(result.statusCode).toBe(200);
+      expect(result.attempts).toBe(0);
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      setDryRun(false);
+    }
   });
 });

@@ -14,7 +14,17 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import type { DeployConfig } from "./config.js";
 import { getBackendConfig } from "./bootstrap.js";
-import { run, runStreaming } from "./exec.js";
+import { isDryRun, run, runStreaming } from "./exec.js";
+import {
+  DRY_RUN_DATA_VOLUME_ID,
+  DRY_RUN_DOMAIN,
+  DRY_RUN_ECR_REPOSITORY_URL,
+  DRY_RUN_IAM_ROLE_ARN,
+  DRY_RUN_INSTANCE_ID,
+  DRY_RUN_INSTANCE_IP,
+  DRY_RUN_SECURITY_GROUP_ID,
+  DRY_RUN_SSH_COMMAND,
+} from "./dry-run-placeholders.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TERRAFORM_DIR = resolve(__dirname, "terraform");
@@ -41,6 +51,11 @@ export function backendConfigFlags(config: DeployConfig): string {
  * Bridges YAML config to Terraform variables. aws.profile is always present.
  * Exported for test-coverage of the field mapping — production callers should
  * go through terraformApply/terraformDestroy which invoke this internally.
+ *
+ * In dry-run, prints the path that would be written and the rendered JSON
+ * instead of touching the filesystem. Skipping the write keeps a `--dry-run`
+ * deploy from quietly mutating local state — operators expect "no side effects"
+ * to mean both no SSH and no local writes.
  */
 export function writeTfVars(config: DeployConfig): void {
   const vars = {
@@ -59,6 +74,10 @@ export function writeTfVars(config: DeployConfig): void {
   };
 
   const path = resolve(TERRAFORM_DIR, "terraform.tfvars.json");
+  if (isDryRun()) {
+    console.log(`  [dry-run] would write ${path}`);
+    return;
+  }
   writeFileSync(path, JSON.stringify(vars, null, 2));
   console.log(`  Wrote terraform.tfvars.json`);
 }
@@ -76,6 +95,12 @@ export function terraformApply(config: DeployConfig): TerraformOutputs {
   console.log("\n── Terraform apply ──");
   runStreaming("terraform apply -auto-approve", { cwd: TERRAFORM_DIR });
 
+  // In dry-run, `runStreaming` printed the apply command and returned.
+  // `getTerraformOutputs` would now run `terraform output -json`, which under
+  // dry-run prints + returns "" (`run` short-circuits) — `JSON.parse("")`
+  // throws and bubbles up as a useless deploy error. Substitute synthetic
+  // outputs so the rest of the pipeline can render its commands as templates.
+  if (isDryRun()) return DRY_RUN_TERRAFORM_OUTPUTS;
   return getTerraformOutputs();
 }
 
@@ -106,6 +131,27 @@ export interface TerraformOutputs {
   iamRoleArn: string;
 }
 
+/**
+ * Synthetic Terraform outputs returned by `terraformApply` in dry-run mode.
+ * The placeholder strings are clearly non-real (`<INSTANCE_IP>`, etc. — see
+ * `dry-run-placeholders.ts`) so downstream commands rendered with these
+ * values are recognizable as templates and would never accidentally run
+ * against a real instance: every IP-bearing command lands in dry-run output
+ * via `runStreaming`, which prints rather than executes. Operators reading
+ * the dry-run log see exactly which placeholder landed in which command
+ * position.
+ */
+export const DRY_RUN_TERRAFORM_OUTPUTS: TerraformOutputs = {
+  instanceId: DRY_RUN_INSTANCE_ID,
+  publicIp: DRY_RUN_INSTANCE_IP,
+  domain: DRY_RUN_DOMAIN,
+  ecrRepositoryUrl: DRY_RUN_ECR_REPOSITORY_URL,
+  sshCommand: DRY_RUN_SSH_COMMAND,
+  securityGroupId: DRY_RUN_SECURITY_GROUP_ID,
+  dataVolumeId: DRY_RUN_DATA_VOLUME_ID,
+  iamRoleArn: DRY_RUN_IAM_ROLE_ARN,
+};
+
 export function terraformDestroy(config: DeployConfig): void {
   writeTfVars(config);
 
@@ -115,9 +161,20 @@ export function terraformDestroy(config: DeployConfig): void {
 
 /**
  * Save the generated SSH private key to disk (only when auto-generated).
+ *
+ * In dry-run, prints what would happen and returns null without touching
+ * Terraform state or the local filesystem — `terraform output -raw` would
+ * fail under dry-run (no real outputs) and the writeFileSync would persist
+ * synthetic key material, which we never want.
  */
 export function saveGeneratedSshKey(config: DeployConfig): string | null {
   if (config.instance.sshKey) return null;
+  if (isDryRun()) {
+    console.log(
+      `  [dry-run] would save generated SSH private key to ~/.ssh/${config.name}-key.pem`,
+    );
+    return null;
+  }
 
   // execSync directly — run() trims stdout which corrupts the key's trailing newline
   const raw = execSync(

@@ -1,6 +1,15 @@
 /**
  * Shell execution helpers for the deploy CLI.
  * Wraps child_process with consistent error handling and output capture.
+ *
+ * Dry-run mode: when `setDryRun(true)` is in effect, run/runStreaming/tryRun
+ * print the command they would have executed and return a placeholder result
+ * (empty string for run, null for tryRun, void for runStreaming) instead of
+ * shelling out. Callers that need different behavior in dry-run (e.g. return
+ * synthetic Terraform outputs, skip a writeFileSync, swap a real GitHub token
+ * for a placeholder) consult `isDryRun()` directly. The module-level flag is
+ * scoped to `cli.ts main()` for the deploy command — tests must reset it via
+ * `setDryRun(false)` in afterEach to avoid leaking state across cases.
  */
 
 import { execSync, type ExecSyncOptions } from "node:child_process";
@@ -10,10 +19,29 @@ export interface ExecResult {
   exitCode: number;
 }
 
+let dryRunEnabled = false;
+
+export function setDryRun(value: boolean): void {
+  dryRunEnabled = value;
+}
+
+export function isDryRun(): boolean {
+  return dryRunEnabled;
+}
+
 /**
  * Run a shell command and return stdout. Throws on non-zero exit.
+ *
+ * In dry-run, prints `[dry-run] $ <cmd>` and returns "" without executing.
+ * Returning empty matches the contract of "command produced no output" —
+ * callers that parse stdout (e.g. terraform output -json) MUST consult
+ * `isDryRun()` and short-circuit before this point, since "" won't parse.
  */
 export function run(cmd: string, options?: ExecSyncOptions): string {
+  if (dryRunEnabled) {
+    console.log(`  [dry-run] $ ${cmd}`);
+    return "";
+  }
   console.log(`  $ ${cmd}`);
   const result = execSync(cmd, {
     encoding: "utf-8",
@@ -30,12 +58,20 @@ export function run(cmd: string, options?: ExecSyncOptions): string {
  * `logLabel`, when provided, replaces the echoed command in the log line so
  * callers invoking commands with secrets in argv (e.g. `aws ssm put-parameter
  * --value '<SECRET>'`) can show a non-sensitive label instead.
+ *
+ * In dry-run, prints `[dry-run] $ <logLabel ?? cmd>` and returns without
+ * executing. The same `logLabel` redaction applies — secrets in argv are
+ * never echoed even in dry-run output.
  */
 export function runStreaming(
   cmd: string,
   options?: ExecSyncOptions & { logLabel?: string },
 ): void {
   const { logLabel, ...execOptions } = options ?? {};
+  if (dryRunEnabled) {
+    console.log(`  [dry-run] $ ${logLabel ?? cmd}`);
+    return;
+  }
   console.log(`  $ ${logLabel ?? cmd}`);
   execSync(cmd, {
     encoding: "utf-8",
@@ -47,8 +83,19 @@ export function runStreaming(
 /**
  * Run a shell command, returning stdout without throwing on failure.
  * Returns null if the command fails.
+ *
+ * In dry-run, prints `[dry-run] $ <cmd>` and returns null without executing.
+ * Returning null mirrors "command failed" — useful for `bootstrapBackend`'s
+ * head-bucket / describe-table probes, where null fall-through into the
+ * create-bucket / create-table branch lets dry-run print the full would-run
+ * pipeline (head-bucket then create-bucket then put-versioning, etc.) instead
+ * of stopping at the first probe.
  */
 export function tryRun(cmd: string, options?: ExecSyncOptions): string | null {
+  if (dryRunEnabled) {
+    console.log(`  [dry-run] $ ${cmd}`);
+    return null;
+  }
   try {
     return run(cmd, options);
   } catch {

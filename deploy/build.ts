@@ -7,7 +7,8 @@
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DeployConfig } from "./config.js";
-import { awsCmd, runStreaming, tryRun } from "./exec.js";
+import { awsCmd, isDryRun, runStreaming, tryRun } from "./exec.js";
+import { DRY_RUN_SHA } from "./dry-run-placeholders.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -23,8 +24,14 @@ export interface ImageTags {
  * would re-create the original bug this card fixed (every dispatch row
  * landing with `danxbot_commit = NULL`). Fail loud per
  * `.claude/rules/code-quality.md` (Fallbacks Are Bugs).
+ *
+ * In dry-run, returns DRY_RUN_SHA instead of running `git rev-parse`.
+ * `tryRun` itself returns null in dry-run, which would re-trigger the throw —
+ * dry-run is meant to emit the would-run docker build command, not refuse to
+ * proceed when run outside a git checkout (e.g. in CI of a downstream repo).
  */
 export function getDanxbotShaForBuild(): string {
+  if (isDryRun()) return DRY_RUN_SHA;
   const sha = tryRun("git rev-parse --short HEAD", { cwd: REPO_ROOT })?.trim();
   if (!sha) {
     throw new Error(

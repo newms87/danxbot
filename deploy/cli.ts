@@ -41,7 +41,8 @@ import {
   pruneStaleDockerImages,
   uploadAndRestartInfra,
 } from "./compose-infra.js";
-import { awsCmd, run } from "./exec.js";
+import { awsCmd, isDryRun, run, setDryRun } from "./exec.js";
+import { DRY_RUN_GITHUB_TOKEN } from "./dry-run-placeholders.js";
 import { sharedKeyPath, repoKeyPath } from "./ssm-paths.js";
 import { createUser } from "./create-user.js";
 import { ensureRootUser } from "./ensure-root-user.js";
@@ -186,7 +187,17 @@ async function deploy(config: DeployConfig, target: string): Promise<void> {
   // git checkouts (not into empty dirs that would block a later clone).
   // Tokens come from SSM directly via aws get-parameter, not via materialize,
   // so there is no chicken-and-egg here.
-  const tokens = fetchRepoTokens(config);
+  //
+  // In dry-run, `fetchRepoTokens` would return empty strings (`run` short-
+  // circuits), and `buildCloneOrPullCommand`'s regex rejects empty tokens —
+  // the deploy would error out before printing the would-clone command. Worse,
+  // a real fetched token would land verbatim in dry-run stdout via the
+  // `https://x-access-token:<TOKEN>@github.com/...` URL inside `runStreaming`.
+  // Substitute a placeholder so the dry-run output shows the URL shape
+  // without leaking secrets.
+  const tokens = isDryRun()
+    ? Object.fromEntries(config.repos.map((r) => [r.name, DRY_RUN_GITHUB_TOKEN]))
+    : fetchRepoTokens(config);
   syncRepos(remote, config, tokens);
 
   // Materialize secrets: /danxbot/.env (shared) + per-repo .env into the
@@ -233,6 +244,9 @@ async function deploy(config: DeployConfig, target: string): Promise<void> {
   // Provision / refresh the dashboard root user from the materialized
   // DANX_DASHBOARD_ROOT_USER env. Idempotent — silent no-op when the
   // password already matches, so safe to run on every deploy.
+  // `ensureRootUser` handles its own dry-run check internally (it uses
+  // `execSync` directly, not `runStreaming`, so it can't lean on the
+  // exec.ts gate).
   if (health.healthy) {
     try {
       await ensureRootUser(config);
@@ -382,9 +396,22 @@ async function main(): Promise<void> {
   console.log(`  Region: ${config.region}`);
   console.log(`  Domain: ${config.domain}`);
 
+  // Dry-run is currently scoped to `deploy` — it's the only multi-step
+  // pipeline where "what would this do" has actionable value. Other commands
+  // are either read-only (status), single-shot (smoke), or destructive
+  // (destroy — guarded by --confirm instead). Honoring --dry-run only for
+  // deploy avoids implementing dry-run handling in every command path.
   if (args.dryRun) {
-    console.log("  DRY RUN — no commands will be executed (not yet implemented)");
-    process.exit(0);
+    if (args.command !== "deploy") {
+      console.log(
+        `  --dry-run is only implemented for the deploy command (got: ${args.command})`,
+      );
+      process.exit(0);
+    }
+    setDryRun(true);
+    console.log(
+      "  DRY RUN — commands will be printed instead of executed; no AWS or remote state will change",
+    );
   }
 
   switch (args.command) {

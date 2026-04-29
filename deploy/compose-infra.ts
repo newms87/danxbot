@@ -11,6 +11,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { applyTemplateVars, type RemoteHost } from "./remote.js";
+import { isDryRun } from "./exec.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE = resolve(__dirname, "templates/docker-compose.prod.yml");
@@ -97,6 +98,19 @@ export function pruneStaleDockerImages(remote: RemoteHost): void {
  */
 export function uploadPlaywrightSource(remote: RemoteHost): void {
   console.log("\n── Uploading /danxbot/playwright-screenshot/ source ──");
+  // In dry-run, the local `mkdtempSync` + `execSync(tar -cf ...)` would
+  // actually create a tmp dir and produce a real tarball on the operator's
+  // host. The deploy contract is "no real local writes during dry-run" — so
+  // print the would-run shape and skip both the local prep and the remote
+  // SCP/SSH steps. The SSH commands ARE dry-run-aware via `runStreaming`,
+  // but skipping them keeps the dry-run output shorter and doesn't reference
+  // a tarball that was never created.
+  if (isDryRun()) {
+    console.log(
+      `  [dry-run] would tar ${PLAYWRIGHT_SOURCE_DIR}/ from ${REPO_ROOT}, scp to instance, extract to /danxbot/${PLAYWRIGHT_SOURCE_DIR}`,
+    );
+    return;
+  }
   const localTmpDir = mkdtempSync(resolve(tmpdir(), "danxbot-pw-"));
   const tarball = resolve(localTmpDir, `${PLAYWRIGHT_SOURCE_DIR}.tar`);
   execSync(`tar -cf ${tarball} -C ${REPO_ROOT} ${PLAYWRIGHT_SOURCE_DIR}`);
@@ -120,6 +134,18 @@ export function uploadAndRestartInfra(
 ): void {
   console.log("\n── Uploading /danxbot/docker-compose.prod.yml ──");
   const rendered = renderProdCompose(ecrImage, dashboardPort, repoNames);
+  // In dry-run, skip the local mkdtemp + writeFileSync + scp + ssh sequence
+  // entirely. Like `uploadPlaywrightSource`, the local prep work is real-fs
+  // mutation that the dry-run contract forbids. Render the prod compose
+  // (pure, no I/O) so any operator-facing summary line still has the
+  // ecrImage substitution, then print the would-run shape and skip the
+  // SCP / docker pull / docker compose up steps.
+  if (isDryRun()) {
+    console.log(
+      `  [dry-run] would render docker-compose.prod.yml (${rendered.split("\n").length} lines), scp to instance, ecr-login + docker pull ${ecrImage}, then docker compose up -d --build --force-recreate`,
+    );
+    return;
+  }
   // Unique tmp path so concurrent deploys from the same workstation don't stomp.
   const localTmpDir = mkdtempSync(resolve(tmpdir(), "danxbot-compose-"));
   const tmp = resolve(localTmpDir, "docker-compose.prod.yml");

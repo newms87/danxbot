@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { resolve } from "node:path";
-import { applyTemplateVars, resolveKeyPath } from "./remote.js";
+import { applyTemplateVars, resolveKeyPath, RemoteHost } from "./remote.js";
+import { setDryRun } from "./exec.js";
 import { makeConfig } from "./test-helpers.js";
 
 describe("applyTemplateVars", () => {
@@ -71,5 +72,58 @@ describe("resolveKeyPath", () => {
     } finally {
       if (saved !== undefined) process.env.HOME = saved;
     }
+  });
+});
+
+describe("RemoteHost.waitForSsh dry-run", () => {
+  afterEach(() => {
+    setDryRun(false);
+  });
+
+  it("returns immediately without spawning ssh probe attempts in dry-run", async () => {
+    // Without the short-circuit, waitForSsh would call run/tryRun against the
+    // dry-run instance IP placeholder and loop maxAttempts times waiting for
+    // the unreachable host. setDryRun(true) must collapse this into one log
+    // line and return.
+    setDryRun(true);
+    const config = makeConfig({
+      instance: {
+        type: "t3.small",
+        volumeSize: 30,
+        dataVolumeSize: 100,
+        sshKey: "/tmp/fake-key.pem",
+        sshAllowedCidrs: ["0.0.0.0/0"],
+      },
+    });
+    const remote = new RemoteHost(config, "<INSTANCE_IP>");
+    const start = Date.now();
+    await remote.waitForSsh(40, 5000);
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+});
+
+describe("RemoteHost.uploadClaudeAuth dry-run", () => {
+  afterEach(() => {
+    setDryRun(false);
+  });
+
+  it("skips local existsSync prerequisites and remote SCP/SSH in dry-run", () => {
+    // The non-dry-run path throws when claude-auth files are missing locally
+    // — fine for real deploys, but a fresh operator workstation testing
+    // pipeline shape with `--dry-run` won't have them staged. The dry-run
+    // gate must skip the existsSync wall AND avoid touching the remote.
+    setDryRun(true);
+    const config = makeConfig({
+      claudeAuthDir: "/nonexistent/path/that/does/not/exist",
+      instance: {
+        type: "t3.small",
+        volumeSize: 30,
+        dataVolumeSize: 100,
+        sshKey: "/tmp/fake-key.pem",
+        sshAllowedCidrs: ["0.0.0.0/0"],
+      },
+    });
+    const remote = new RemoteHost(config, "<INSTANCE_IP>");
+    expect(() => remote.uploadClaudeAuth()).not.toThrow();
   });
 });

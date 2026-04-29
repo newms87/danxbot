@@ -3,6 +3,8 @@
  * Polls the HTTPS endpoint until it responds or times out.
  */
 
+import { isDryRun } from "./exec.js";
+
 export interface HealthResult {
   healthy: boolean;
   statusCode: number | null;
@@ -13,6 +15,13 @@ export interface HealthResult {
 /**
  * Poll the health endpoint until it responds 200 or we hit maxAttempts.
  * Waits intervalMs between attempts.
+ *
+ * In dry-run, prints the URL that would be polled and returns a synthetic
+ * healthy result. Without this short-circuit, a dry-run deploy would actually
+ * fetch `https://<DOMAIN>/health` (the placeholder string from
+ * DRY_RUN_TERRAFORM_OUTPUTS), wait through `maxAttempts * intervalMs` of DNS
+ * failures, then mark the deploy as unhealthy — wasting two minutes on
+ * something dry-run is meant to avoid.
  */
 export async function waitForHealthy(
   url: string,
@@ -20,6 +29,11 @@ export async function waitForHealthy(
   intervalMs: number = 5000,
 ): Promise<HealthResult> {
   console.log(`\n── Health check: ${url} ──`);
+
+  if (isDryRun()) {
+    console.log(`  [dry-run] would poll ${url}/health`);
+    return { healthy: true, statusCode: 200, error: null, attempts: 0 };
+  }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
