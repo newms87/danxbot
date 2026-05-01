@@ -8,7 +8,14 @@ import {
   buildTargetOverrides,
   getOrCreateDispatchToken,
   buildPushSecretsCommands,
+  parsePutParameterCommand,
+  filterUnchangedPuts,
+  buildGetParametersCommands,
+  parseGetParametersOutput,
+  fetchExistingSsmValues,
+  pushSecrets,
 } from "./secrets.js";
+import { setDryRun } from "./exec.js";
 import { makeConfig } from "./test-helpers.js";
 
 const TMP = resolve("/tmp/danxbot-secrets-test");
@@ -893,5 +900,382 @@ describe("buildPushSecretsCommands", () => {
     );
     expect(tokenCmd).toContain("--value 'the-real-token'");
     expect(tokenCmd).not.toContain("from-overrides-should-lose");
+  });
+});
+
+describe("parsePutParameterCommand", () => {
+  it("extracts path and unescaped value from a built put-parameter command", () => {
+    const cfg = makeConfig({ ssmPrefix: "/d", aws: { profile: "p" } });
+    const [cmd] = buildSsmPutCommands(cfg, {
+      shared: { FOO: "bar baz" },
+      perRepo: {},
+    });
+    expect(parsePutParameterCommand(cmd)).toEqual({
+      path: "/d/shared/FOO",
+      value: "bar baz",
+    });
+  });
+
+  it("reverses the shell single-quote escape so `'\\''` becomes `'`", () => {
+    // Roundtrip guarantee: buildSsmPutCommands escapes single quotes via
+    // `'\\''`. The parser must invert that exactly so the diff filter compares
+    // raw secret values, not shell-quoted forms — otherwise a value that
+    // contains a real single quote would always look "changed" and never
+    // skip the put.
+    const cfg = makeConfig({ ssmPrefix: "/d", aws: { profile: "p" } });
+    const [cmd] = buildSsmPutCommands(cfg, {
+      shared: { SQ: "it's fine" },
+      perRepo: {},
+    });
+    expect(parsePutParameterCommand(cmd)).toEqual({
+      path: "/d/shared/SQ",
+      value: "it's fine",
+    });
+  });
+
+  it("returns null on an unparseable command (defensive — caller must keep it)", () => {
+    expect(parsePutParameterCommand("aws ssm describe-parameters")).toBeNull();
+    expect(parsePutParameterCommand("")).toBeNull();
+  });
+
+  it("handles values containing literal `${VAR}` and backticks (no shell expansion)", () => {
+    const cfg = makeConfig({ ssmPrefix: "/d", aws: { profile: "p" } });
+    const [cmd] = buildSsmPutCommands(cfg, {
+      shared: { LIT: "${APP_NAME}-`cmd`" },
+      perRepo: {},
+    });
+    expect(parsePutParameterCommand(cmd)).toEqual({
+      path: "/d/shared/LIT",
+      value: "${APP_NAME}-`cmd`",
+    });
+  });
+});
+
+describe("filterUnchangedPuts", () => {
+  const cfg = makeConfig({ ssmPrefix: "/d", aws: { profile: "p" } });
+  const cmds = buildSsmPutCommands(cfg, {
+    shared: { A: "1", B: "2", C: "3" },
+    perRepo: {},
+  });
+
+  it("keeps puts whose value differs from existing SSM", () => {
+    const existing = new Map<string, string>([
+      ["/d/shared/A", "1"], // unchanged
+      ["/d/shared/B", "old"], // changed
+      // C absent — must push
+    ]);
+    const { toPush, skipped } = filterUnchangedPuts(cmds, existing);
+    expect(skipped).toEqual(["/d/shared/A"]);
+    expect(toPush).toHaveLength(2);
+    expect(toPush.find((c) => c.includes("/d/shared/B"))).toBeDefined();
+    expect(toPush.find((c) => c.includes("/d/shared/C"))).toBeDefined();
+  });
+
+  it("skips ALL puts when every value matches existing SSM", () => {
+    const existing = new Map<string, string>([
+      ["/d/shared/A", "1"],
+      ["/d/shared/B", "2"],
+      ["/d/shared/C", "3"],
+    ]);
+    const { toPush, skipped } = filterUnchangedPuts(cmds, existing);
+    expect(toPush).toEqual([]);
+    expect(skipped).toHaveLength(3);
+  });
+
+  it("pushes ALL puts when SSM has no matching parameters (first-time deploy)", () => {
+    const { toPush, skipped } = filterUnchangedPuts(cmds, new Map());
+    expect(toPush).toEqual(cmds);
+    expect(skipped).toEqual([]);
+  });
+
+  it("keeps unparseable commands defensively (never silently drops a put)", () => {
+    const weird = ["totally not a put-parameter command"];
+    const { toPush, skipped } = filterUnchangedPuts(weird, new Map());
+    expect(toPush).toEqual(weird);
+    expect(skipped).toEqual([]);
+  });
+});
+
+describe("buildGetParametersCommands", () => {
+  const cfg = makeConfig({
+    ssmPrefix: "/d",
+    region: "us-west-2",
+    aws: { profile: "p" },
+  });
+
+  it("emits one batched aws ssm get-parameters command per 10 paths (AWS limit)", () => {
+    // AWS SSM `get-parameters` accepts max 10 names per call. Going over
+    // produces a 400 ValidationException, so the batcher MUST slice at 10.
+    const paths = Array.from({ length: 25 }, (_, i) => `/d/shared/K${i}`);
+    const cmds = buildGetParametersCommands(cfg, paths);
+    expect(cmds).toHaveLength(3); // 10 + 10 + 5
+  });
+
+  it("emits zero commands when given no paths", () => {
+    expect(buildGetParametersCommands(cfg, [])).toEqual([]);
+  });
+
+  it("emits one command for fewer than 10 paths", () => {
+    expect(
+      buildGetParametersCommands(cfg, ["/d/shared/A", "/d/shared/B"]),
+    ).toHaveLength(1);
+  });
+
+  it("includes profile, region, --with-decryption, and --output json", () => {
+    const [cmd] = buildGetParametersCommands(cfg, ["/d/shared/A"]);
+    expect(cmd).toContain("aws --profile p");
+    expect(cmd).toContain("ssm get-parameters");
+    expect(cmd).toContain("--with-decryption");
+    expect(cmd).toContain("--region us-west-2");
+    expect(cmd).toContain("--output json");
+    expect(cmd).toContain('"/d/shared/A"');
+  });
+
+  it("quotes each path so spaces or unusual chars don't break the shell split", () => {
+    const [cmd] = buildGetParametersCommands(cfg, [
+      "/d/shared/A",
+      "/d/shared/B",
+    ]);
+    expect(cmd).toMatch(/"\/d\/shared\/A"\s+"\/d\/shared\/B"/);
+  });
+});
+
+describe("parseGetParametersOutput", () => {
+  it("returns a Map of Name → Value for AWS get-parameters JSON", () => {
+    const json = JSON.stringify([
+      { Name: "/d/shared/A", Value: "1" },
+      { Name: "/d/shared/B", Value: "two words" },
+    ]);
+    const result = parseGetParametersOutput(json);
+    expect(result.get("/d/shared/A")).toBe("1");
+    expect(result.get("/d/shared/B")).toBe("two words");
+    expect(result.size).toBe(2);
+  });
+
+  it("returns an empty Map for an empty array (all paths were missing)", () => {
+    expect(parseGetParametersOutput("[]").size).toBe(0);
+  });
+
+  it("returns an empty Map for empty input string (skipped batch)", () => {
+    expect(parseGetParametersOutput("").size).toBe(0);
+  });
+});
+
+describe("fetchExistingSsmValues", () => {
+  const cfg = makeConfig({
+    ssmPrefix: "/d",
+    region: "us-west-2",
+    aws: { profile: "p" },
+  });
+
+  it("merges results from multiple batches into a single Map", () => {
+    // Forces two get-parameters calls (>10 paths).
+    const paths = Array.from({ length: 12 }, (_, i) => `/d/shared/K${i}`);
+    let calls = 0;
+    const exec = (cmd: string): string => {
+      calls++;
+      // Return a different value per batch to prove both are merged.
+      if (cmd.includes('"/d/shared/K0"')) {
+        return JSON.stringify([
+          { Name: "/d/shared/K0", Value: "v0" },
+          { Name: "/d/shared/K9", Value: "v9" },
+        ]);
+      }
+      return JSON.stringify([{ Name: "/d/shared/K10", Value: "v10" }]);
+    };
+    const result = fetchExistingSsmValues(cfg, paths, exec);
+    expect(calls).toBe(2);
+    expect(result.get("/d/shared/K0")).toBe("v0");
+    expect(result.get("/d/shared/K9")).toBe("v9");
+    expect(result.get("/d/shared/K10")).toBe("v10");
+  });
+
+  it("returns an empty Map when no paths are provided (no exec calls)", () => {
+    let calls = 0;
+    const exec = (_: string): string => {
+      calls++;
+      return "[]";
+    };
+    expect(fetchExistingSsmValues(cfg, [], exec).size).toBe(0);
+    expect(calls).toBe(0);
+  });
+
+  it("treats a thrown exec (auth error, etc.) as empty existing → first-time-deploy semantics", () => {
+    // Network or auth failures during the diff phase must NOT abort the
+    // deploy — they degrade gracefully to "push everything," same as a
+    // fresh SSM. The push step itself surfaces real auth failures loudly.
+    const exec = (_: string): string => {
+      throw new Error("ExpiredTokenException");
+    };
+    const result = fetchExistingSsmValues(cfg, ["/d/shared/A"], exec);
+    expect(result.size).toBe(0);
+  });
+});
+
+describe("pushSecrets — diff + parallel", () => {
+  const CWD2 = resolve("/tmp/danxbot-pushsecrets-test");
+  const cfg = makeConfig({
+    ssmPrefix: "/d",
+    region: "us-west-2",
+    aws: { profile: "p" },
+    repos: [
+      {
+        name: "app",
+        url: "https://github.com/x/app.git",
+        workerPort: 5561,
+        branch: "main",
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    rmSync(CWD2, { recursive: true, force: true });
+    mkdirSync(resolve(CWD2, "repos/app/.danxbot"), { recursive: true });
+    writeFileSync(resolve(CWD2, ".env"), "ANTHROPIC_API_KEY=sk-shared\n");
+    writeFileSync(
+      resolve(CWD2, "repos/app/.danxbot/.env"),
+      "DANX_SLACK_BOT_TOKEN=xoxb-token\nDANX_TRELLO_API_KEY=tr-key\n",
+    );
+    writeFileSync(
+      resolve(CWD2, "repos/app/.env"),
+      "APP_KEY=base64:zz\nDB_PASSWORD=secret\n",
+    );
+  });
+
+  afterEach(() => {
+    rmSync(CWD2, { recursive: true, force: true });
+    setDryRun(false);
+  });
+
+  it("skips puts for paths whose SSM value already matches the local value", async () => {
+    const ranCmds: string[] = [];
+    const ssmReader = (
+      _cfg: typeof cfg,
+      _paths: string[],
+    ): Map<string, string> =>
+      new Map([
+        // Pretend these two are already up to date — they MUST be skipped.
+        ["/d/shared/ANTHROPIC_API_KEY", "sk-shared"],
+        ["/d/repos/app/DANX_SLACK_BOT_TOKEN", "xoxb-token"],
+        // Stale value — MUST be re-pushed.
+        ["/d/repos/app/DANX_TRELLO_API_KEY", "old-stale-key"],
+      ]);
+    const runner = async (
+      cmds: { cmd: string; logLabel?: string }[],
+      _concurrency: number,
+    ): Promise<void> => {
+      for (const { cmd } of cmds) ranCmds.push(cmd);
+    };
+
+    await pushSecrets(cfg, CWD2, undefined, {
+      ssmReader,
+      runner,
+      // Force a fixed dispatch token so we don't hit the SSM-read for it
+      // (already covered by getOrCreateDispatchToken's own tests).
+      dispatchToken: "fixed-token",
+    });
+
+    const pushedPaths = new Set(
+      ranCmds
+        .map((c) => parsePutParameterCommand(c)?.path)
+        .filter(Boolean) as string[],
+    );
+    // Skipped (unchanged):
+    expect(pushedPaths.has("/d/shared/ANTHROPIC_API_KEY")).toBe(false);
+    expect(pushedPaths.has("/d/repos/app/DANX_SLACK_BOT_TOKEN")).toBe(false);
+    // Pushed (changed or first-time):
+    expect(pushedPaths.has("/d/repos/app/DANX_TRELLO_API_KEY")).toBe(true);
+    expect(pushedPaths.has("/d/repos/app/REPO_ENV_APP_KEY")).toBe(true);
+    expect(pushedPaths.has("/d/repos/app/REPO_ENV_DB_PASSWORD")).toBe(true);
+    expect(pushedPaths.has("/d/shared/DANXBOT_DISPATCH_TOKEN")).toBe(true);
+  });
+
+  it("forwards the concurrency option to the runner", async () => {
+    let observedConcurrency = -1;
+    const ssmReader = (): Map<string, string> => new Map();
+    const runner = async (
+      _cmds: { cmd: string; logLabel?: string }[],
+      concurrency: number,
+    ): Promise<void> => {
+      observedConcurrency = concurrency;
+    };
+
+    await pushSecrets(cfg, CWD2, undefined, {
+      ssmReader,
+      runner,
+      concurrency: 25,
+      dispatchToken: "tok",
+    });
+
+    expect(observedConcurrency).toBe(25);
+  });
+
+  it("uses a default concurrency of at least 5 when none is supplied", async () => {
+    // Lower bound only — exact value can change with throttle observations,
+    // but it MUST be >1 (otherwise the parallelization is dead code) and
+    // SHOULD stay well below the default 40 TPS PutParameter throttle.
+    let observedConcurrency = -1;
+    const ssmReader = (): Map<string, string> => new Map();
+    const runner = async (
+      _cmds: { cmd: string; logLabel?: string }[],
+      concurrency: number,
+    ): Promise<void> => {
+      observedConcurrency = concurrency;
+    };
+
+    await pushSecrets(cfg, CWD2, undefined, {
+      ssmReader,
+      runner,
+      dispatchToken: "tok",
+    });
+
+    expect(observedConcurrency).toBeGreaterThanOrEqual(5);
+    expect(observedConcurrency).toBeLessThanOrEqual(40);
+  });
+
+  it("still pushes everything when ssmReader returns an empty Map (first-time deploy)", async () => {
+    const ranCmds: string[] = [];
+    const ssmReader = (): Map<string, string> => new Map();
+    const runner = async (
+      cmds: { cmd: string; logLabel?: string }[],
+    ): Promise<void> => {
+      for (const { cmd } of cmds) ranCmds.push(cmd);
+    };
+    await pushSecrets(cfg, CWD2, undefined, {
+      ssmReader,
+      runner,
+      dispatchToken: "tok",
+    });
+    expect(ranCmds.length).toBeGreaterThan(0);
+    const pushedPaths = new Set(
+      ranCmds
+        .map((c) => parsePutParameterCommand(c)?.path)
+        .filter(Boolean) as string[],
+    );
+    expect(pushedPaths.has("/d/shared/ANTHROPIC_API_KEY")).toBe(true);
+    expect(pushedPaths.has("/d/repos/app/DANX_SLACK_BOT_TOKEN")).toBe(true);
+  });
+
+  it("dry-run path skips the diff read AND emits dry-run lines for all puts (unchanged behavior)", async () => {
+    setDryRun(true);
+    let readerCalled = false;
+    let runnerCalled = false;
+    const ssmReader = (): Map<string, string> => {
+      readerCalled = true;
+      return new Map();
+    };
+    const runner = async (): Promise<void> => {
+      runnerCalled = true;
+    };
+    await pushSecrets(cfg, CWD2, undefined, {
+      ssmReader,
+      runner,
+      dispatchToken: "tok",
+    });
+    // In dry-run, we never hit SSM (no auth available, no real param write):
+    expect(readerCalled).toBe(false);
+    // The runner is still called so dry-run logs print every put — the
+    // runner itself short-circuits on dryRunEnabled.
+    expect(runnerCalled).toBe(true);
   });
 });

@@ -23,7 +23,7 @@ import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { execSync } from "node:child_process";
 import type { DeployConfig } from "./config.js";
-import { awsCmd, isDryRun, runStreaming } from "./exec.js";
+import { awsCmd, isDryRun, runStreaming, runStreamingParallel } from "./exec.js";
 import { DRY_RUN_DISPATCH_TOKEN } from "./dry-run-placeholders.js";
 import {
   sharedKeyPath,
@@ -274,11 +274,168 @@ export function buildPushSecretsCommands(
   return buildSsmPutCommands(config, merged);
 }
 
-export function pushSecrets(
+/**
+ * Reverse `buildSsmPutCommands`'s output: pull the SSM path and the raw
+ * (unescaped) secret value back out of a built `aws ssm put-parameter` command.
+ *
+ * The diff filter (`filterUnchangedPuts`) compares values byte-for-byte
+ * against what SSM already holds, so the parser MUST exactly invert the
+ * shell-escape that `buildSsmPutCommands` applies — otherwise a value
+ * containing a literal single quote would always look "changed" and never
+ * skip the put.
+ *
+ * Returns null for unparseable input so the caller can pass the command
+ * through verbatim instead of silently dropping it. We never want a parse
+ * mistake to translate into a missing SSM update.
+ */
+export function parsePutParameterCommand(
+  cmd: string,
+): { path: string; value: string } | null {
+  const nameMatch = cmd.match(/--name "([^"]+)"/);
+  if (!nameMatch) return null;
+  // The value is single-quoted; embedded single quotes are escaped as
+  // `'\''` (close-quote, escaped quote, reopen). Match the entire content
+  // between the outer single quotes — the alternation `(?:[^']|'\\'')*` is
+  // greedy on non-quotes and on the literal `'\''` escape sequence.
+  const valueMatch = cmd.match(/--value '((?:[^']|'\\'')*)'/);
+  if (!valueMatch) return null;
+  const value = valueMatch[1].replace(/'\\''/g, "'");
+  return { path: nameMatch[1], value };
+}
+
+/**
+ * Drop puts whose value already matches what SSM holds. Returns the puts
+ * still worth running plus the list of paths skipped (for log output).
+ *
+ * Unparseable commands fall through to `toPush` defensively — better to
+ * re-push a command we couldn't introspect than to silently skip it.
+ */
+export function filterUnchangedPuts(
+  cmds: string[],
+  existing: Map<string, string>,
+): { toPush: string[]; skipped: string[] } {
+  const toPush: string[] = [];
+  const skipped: string[] = [];
+  for (const cmd of cmds) {
+    const parsed = parsePutParameterCommand(cmd);
+    if (!parsed) {
+      toPush.push(cmd);
+      continue;
+    }
+    if (existing.get(parsed.path) === parsed.value) {
+      skipped.push(parsed.path);
+    } else {
+      toPush.push(cmd);
+    }
+  }
+  return { toPush, skipped };
+}
+
+/**
+ * Build `aws ssm get-parameters` commands batched at the AWS limit of 10
+ * names per call. Going over emits a 400 ValidationException, so the slice
+ * is load-bearing.
+ *
+ * Each batch reads SecureStrings (`--with-decryption`) and emits JSON the
+ * caller feeds to `parseGetParametersOutput`.
+ */
+export function buildGetParametersCommands(
+  config: DeployConfig,
+  paths: string[],
+): string[] {
+  const BATCH = 10;
+  const cmds: string[] = [];
+  for (let i = 0; i < paths.length; i += BATCH) {
+    const batch = paths.slice(i, i + BATCH);
+    const names = batch.map((p) => `"${p}"`).join(" ");
+    cmds.push(
+      awsCmd(
+        config.aws.profile,
+        `ssm get-parameters --names ${names} --with-decryption --region ${config.region} --query "Parameters[*].{Name:Name,Value:Value}" --output json`,
+      ),
+    );
+  }
+  return cmds;
+}
+
+/**
+ * Parse the JSON shape produced by `buildGetParametersCommands`. Empty
+ * input (skipped batch, no paths) yields an empty Map. Missing parameters
+ * are absent from the array — they'll naturally fall through to "must push"
+ * in `filterUnchangedPuts`.
+ */
+export function parseGetParametersOutput(json: string): Map<string, string> {
+  if (!json.trim()) return new Map();
+  const arr = JSON.parse(json) as Array<{ Name: string; Value: string }>;
+  return new Map(arr.map((p) => [p.Name, p.Value]));
+}
+
+/**
+ * Read the current SSM values for the given paths in batches of 10.
+ * Errors degrade gracefully to "no existing values known" so a transient
+ * AWS issue during the diff phase doesn't abort the deploy — the put
+ * step still runs and surfaces real auth failures loudly.
+ */
+export function fetchExistingSsmValues(
+  config: DeployConfig,
+  paths: string[],
+  exec: (cmd: string) => string = defaultGetParametersExec,
+): Map<string, string> {
+  if (paths.length === 0) return new Map();
+  const result = new Map<string, string>();
+  for (const cmd of buildGetParametersCommands(config, paths)) {
+    let out: string;
+    try {
+      out = exec(cmd);
+    } catch {
+      // Treat the whole diff phase as best-effort. Skip this batch.
+      continue;
+    }
+    for (const [k, v] of parseGetParametersOutput(out)) {
+      result.set(k, v);
+    }
+  }
+  return result;
+}
+
+function defaultGetParametersExec(cmd: string): string {
+  return execSync(cmd, {
+    encoding: "utf-8",
+    stdio: ["pipe", "pipe", "pipe"],
+  }).toString();
+}
+
+/**
+ * Default concurrency for parallel SSM put-parameter calls. AWS PutParameter
+ * has a default soft throttle of ~40 TPS per account; 10 concurrent fits
+ * well below that with headroom for retries and stays kind to other
+ * SSM consumers.
+ */
+const DEFAULT_PUSH_CONCURRENCY = 10;
+
+export interface PushSecretsOptions {
+  /** Override the default concurrency for parallel `put-parameter` calls. */
+  concurrency?: number;
+  /** Inject a custom SSM reader (tests / dry-run; defaults to fetchExistingSsmValues). */
+  ssmReader?: (
+    config: DeployConfig,
+    paths: string[],
+  ) => Map<string, string>;
+  /** Inject a custom command runner (tests; defaults to runStreamingParallel). */
+  runner?: (
+    cmds: { cmd: string; logLabel?: string }[],
+    concurrency: number,
+  ) => Promise<void>;
+  /** Inject the dispatch token instead of reading from SSM (tests). */
+  dispatchToken?: string;
+}
+
+export async function pushSecrets(
   config: DeployConfig,
   cwd: string = process.cwd(),
   target?: string,
-): void {
+  options: PushSecretsOptions = {},
+): Promise<void> {
   const collected = collectDeploymentSecrets(config, cwd, target);
   const overrides = buildTargetOverrides(config);
   // `getOrCreateDispatchToken` returns DRY_RUN_DISPATCH_TOKEN when isDryRun()
@@ -286,16 +443,43 @@ export function pushSecrets(
   // production path hits SSM. Keeping the call here rather than gating with
   // a second isDryRun() check avoids drift between this caller's notion of
   // "what's a dry-run-safe token source" and the function's internal guard.
-  const token = getOrCreateDispatchToken(config);
+  const token = options.dispatchToken ?? getOrCreateDispatchToken(config);
   const cmds = buildPushSecretsCommands(config, collected, overrides, token);
 
-  console.log(`\n── Pushing ${cmds.length} secret(s) to SSM ──`);
-  for (const cmd of cmds) {
-    // `aws ssm put-parameter --name "<path>" ... --value '<SECRET>'` — strip
-    // to the --name path for log output so secret values never hit stdout.
-    // Idempotent: put-parameter uses --overwrite in buildSsmPutCommands.
+  // Diff phase — skipped in dry-run (no real SSM read available, and the
+  // intent of dry-run is to show the full would-run pipeline, not a
+  // simulated incremental one). In production, fetch existing values and
+  // drop puts whose value matches; first-time deploys see an empty Map and
+  // push everything.
+  const { toPush, skipped } = isDryRun()
+    ? { toPush: cmds, skipped: [] as string[] }
+    : ((): { toPush: string[]; skipped: string[] } => {
+        const paths = cmds
+          .map((c) => parsePutParameterCommand(c)?.path)
+          .filter((p): p is string => Boolean(p));
+        const reader = options.ssmReader ?? fetchExistingSsmValues;
+        const existing = reader(config, paths);
+        return filterUnchangedPuts(cmds, existing);
+      })();
+
+  console.log(
+    `\n── Pushing ${toPush.length} secret(s) to SSM (${skipped.length} unchanged, skipped) ──`,
+  );
+
+  // `aws ssm put-parameter --name "<path>" ... --value '<SECRET>'` — strip to
+  // the --name path for log output so secret values never hit stdout.
+  // Idempotent: put-parameter uses --overwrite in buildSsmPutCommands.
+  const labeled = toPush.map((cmd) => {
     const nameMatch = cmd.match(/--name "([^"]+)"/);
-    const label = nameMatch ? `aws ssm put-parameter ${nameMatch[1]}` : "aws ssm put-parameter";
-    runStreaming(cmd, { logLabel: label });
-  }
+    return {
+      cmd,
+      logLabel: nameMatch
+        ? `aws ssm put-parameter ${nameMatch[1]}`
+        : "aws ssm put-parameter",
+    };
+  });
+
+  const concurrency = options.concurrency ?? DEFAULT_PUSH_CONCURRENCY;
+  const runner = options.runner ?? runStreamingParallel;
+  await runner(labeled, concurrency);
 }

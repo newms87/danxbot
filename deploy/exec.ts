@@ -12,7 +12,14 @@
  * `setDryRun(false)` in afterEach to avoid leaking state across cases.
  */
 
-import { execSync, type ExecSyncOptions } from "node:child_process";
+import {
+  exec as execCb,
+  execSync,
+  type ExecSyncOptions,
+} from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(execCb);
 
 export interface ExecResult {
   stdout: string;
@@ -78,6 +85,63 @@ export function runStreaming(
     stdio: "inherit",
     ...execOptions,
   });
+}
+
+/**
+ * Run multiple shell commands concurrently, capturing their output.
+ * Throws if ANY command fails (after all in-flight commands settle).
+ *
+ * Used for parallel `aws ssm put-parameter` calls during deploy. Each
+ * command runs in its own subprocess; concurrency is capped by `limit` so
+ * we don't overrun AWS's PutParameter throttle (~40 TPS default) or the
+ * local fork limit. Output is captured (not streamed) so the per-command
+ * log line stays on its own row instead of interleaving with other
+ * commands' stdout.
+ *
+ * In dry-run, prints `[dry-run] $ <logLabel ?? cmd>` for each command and
+ * returns without executing.
+ */
+export async function runStreamingParallel(
+  cmds: { cmd: string; logLabel?: string }[],
+  limit: number,
+): Promise<void> {
+  if (dryRunEnabled) {
+    for (const { cmd, logLabel } of cmds) {
+      console.log(`  [dry-run] $ ${logLabel ?? cmd}`);
+    }
+    return;
+  }
+  if (cmds.length === 0) return;
+
+  let nextIndex = 0;
+  const failures: Error[] = [];
+  const workerCount = Math.max(1, Math.min(limit, cmds.length));
+
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= cmds.length) return;
+      const { cmd, logLabel } = cmds[i];
+      console.log(`  $ ${logLabel ?? cmd}`);
+      try {
+        await execAsync(cmd, {
+          encoding: "utf-8",
+          maxBuffer: 1024 * 1024,
+        });
+      } catch (err) {
+        failures.push(err as Error);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  if (failures.length > 0) {
+    const first = failures[0];
+    throw new Error(
+      `${failures.length}/${cmds.length} command(s) failed during parallel run. First error: ${first.message}`,
+    );
+  }
 }
 
 /**

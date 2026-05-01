@@ -60,8 +60,15 @@ vi.mock("./db/connection.js", () => ({
   closeAdminPool: vi.fn(),
 }));
 
+const mockSyncRepoFiles = vi.fn();
 vi.mock("./poller/index.js", () => ({
   start: mockStartPoller,
+  syncRepoFiles: mockSyncRepoFiles,
+}));
+
+const mockStartRetentionCron = vi.fn().mockReturnValue("mock-retention-interval");
+vi.mock("./dashboard/retention.js", () => ({
+  startRetentionCron: mockStartRetentionCron,
 }));
 
 const mockSyncSettingsFileOnBoot = vi.fn().mockResolvedValue(undefined);
