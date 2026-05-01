@@ -21,7 +21,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import { execSync } from "node:child_process";
+import { execSync, exec as execCb } from "node:child_process";
+import { promisify } from "node:util";
+
+const execAsync = promisify(execCb);
 import type { DeployConfig } from "./config.js";
 import { awsCmd, isDryRun, runStreaming, runStreamingParallel } from "./exec.js";
 import { DRY_RUN_DISPATCH_TOKEN } from "./dry-run-placeholders.js";
@@ -372,38 +375,63 @@ export function parseGetParametersOutput(json: string): Map<string, string> {
 
 /**
  * Read the current SSM values for the given paths in batches of 10.
- * Errors degrade gracefully to "no existing values known" so a transient
- * AWS issue during the diff phase doesn't abort the deploy — the put
- * step still runs and surfaces real auth failures loudly.
+ * Batches run in parallel up to `DEFAULT_DIFF_CONCURRENCY` since each
+ * `aws ssm get-parameters` call costs ~1.5s of aws-cli boot overhead and
+ * a serial loop quickly dominates the deploy. AWS's GetParameters
+ * throttle is generous (~40 TPS), so 10 in flight stays well within budget.
+ *
+ * Errors per batch degrade gracefully — a transient AWS issue on one
+ * batch never poisons the whole diff phase. The put step still runs and
+ * surfaces real auth failures loudly.
  */
-export function fetchExistingSsmValues(
+export async function fetchExistingSsmValues(
   config: DeployConfig,
   paths: string[],
-  exec: (cmd: string) => string = defaultGetParametersExec,
-): Map<string, string> {
+  exec: (cmd: string) => Promise<string> = defaultGetParametersExec,
+): Promise<Map<string, string>> {
   if (paths.length === 0) return new Map();
+  const cmds = buildGetParametersCommands(config, paths);
   const result = new Map<string, string>();
-  for (const cmd of buildGetParametersCommands(config, paths)) {
-    let out: string;
-    try {
-      out = exec(cmd);
-    } catch {
-      // Treat the whole diff phase as best-effort. Skip this batch.
-      continue;
+
+  // Bounded-concurrency worker pool. Same shape as `runStreamingParallel`
+  // in exec.ts but with stdout capture (the put-parameter version is
+  // fire-and-forget, so it can't be reused here).
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= cmds.length) return;
+      let out: string;
+      try {
+        out = await exec(cmds[i]);
+      } catch {
+        // Best-effort: skip this batch. Other batches' results still merge.
+        continue;
+      }
+      // Map writes are synchronous + atomic per call — safe under
+      // single-threaded JS even with multiple workers in flight.
+      for (const [k, v] of parseGetParametersOutput(out)) {
+        result.set(k, v);
+      }
     }
-    for (const [k, v] of parseGetParametersOutput(out)) {
-      result.set(k, v);
-    }
-  }
+  };
+  const workerCount = Math.max(1, Math.min(DEFAULT_DIFF_CONCURRENCY, cmds.length));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return result;
 }
 
-function defaultGetParametersExec(cmd: string): string {
-  return execSync(cmd, {
-    encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
-  }).toString();
+function defaultGetParametersExec(cmd: string): Promise<string> {
+  return execAsync(cmd, { encoding: "utf-8", maxBuffer: 1024 * 1024 }).then(
+    (r) => r.stdout.toString(),
+  );
 }
+
+/**
+ * Default concurrency for parallel `get-parameters` diff calls. Same
+ * rationale as `DEFAULT_PUSH_CONCURRENCY` — comfortably under AWS's
+ * throttle, big enough that the aws-cli boot overhead is fully hidden.
+ */
+const DEFAULT_DIFF_CONCURRENCY = 10;
 
 /**
  * Default concurrency for parallel SSM put-parameter calls. AWS PutParameter
@@ -420,7 +448,7 @@ export interface PushSecretsOptions {
   ssmReader?: (
     config: DeployConfig,
     paths: string[],
-  ) => Map<string, string>;
+  ) => Promise<Map<string, string>>;
   /** Inject a custom command runner (tests; defaults to runStreamingParallel). */
   runner?: (
     cmds: { cmd: string; logLabel?: string }[],
@@ -451,16 +479,19 @@ export async function pushSecrets(
   // simulated incremental one). In production, fetch existing values and
   // drop puts whose value matches; first-time deploys see an empty Map and
   // push everything.
-  const { toPush, skipped } = isDryRun()
-    ? { toPush: cmds, skipped: [] as string[] }
-    : ((): { toPush: string[]; skipped: string[] } => {
-        const paths = cmds
-          .map((c) => parsePutParameterCommand(c)?.path)
-          .filter((p): p is string => Boolean(p));
-        const reader = options.ssmReader ?? fetchExistingSsmValues;
-        const existing = reader(config, paths);
-        return filterUnchangedPuts(cmds, existing);
-      })();
+  let toPush: string[];
+  let skipped: string[];
+  if (isDryRun()) {
+    toPush = cmds;
+    skipped = [];
+  } else {
+    const paths = cmds
+      .map((c) => parsePutParameterCommand(c)?.path)
+      .filter((p): p is string => Boolean(p));
+    const reader = options.ssmReader ?? fetchExistingSsmValues;
+    const existing = await reader(config, paths);
+    ({ toPush, skipped } = filterUnchangedPuts(cmds, existing));
+  }
 
   console.log(
     `\n── Pushing ${toPush.length} secret(s) to SSM (${skipped.length} unchanged, skipped) ──`,

@@ -1068,11 +1068,11 @@ describe("fetchExistingSsmValues", () => {
     aws: { profile: "p" },
   });
 
-  it("merges results from multiple batches into a single Map", () => {
+  it("merges results from multiple batches into a single Map", async () => {
     // Forces two get-parameters calls (>10 paths).
     const paths = Array.from({ length: 12 }, (_, i) => `/d/shared/K${i}`);
     let calls = 0;
-    const exec = (cmd: string): string => {
+    const exec = async (cmd: string): Promise<string> => {
       calls++;
       // Return a different value per batch to prove both are merged.
       if (cmd.includes('"/d/shared/K0"')) {
@@ -1083,32 +1083,69 @@ describe("fetchExistingSsmValues", () => {
       }
       return JSON.stringify([{ Name: "/d/shared/K10", Value: "v10" }]);
     };
-    const result = fetchExistingSsmValues(cfg, paths, exec);
+    const result = await fetchExistingSsmValues(cfg, paths, exec);
     expect(calls).toBe(2);
     expect(result.get("/d/shared/K0")).toBe("v0");
     expect(result.get("/d/shared/K9")).toBe("v9");
     expect(result.get("/d/shared/K10")).toBe("v10");
   });
 
-  it("returns an empty Map when no paths are provided (no exec calls)", () => {
+  it("returns an empty Map when no paths are provided (no exec calls)", async () => {
     let calls = 0;
-    const exec = (_: string): string => {
+    const exec = async (_: string): Promise<string> => {
       calls++;
       return "[]";
     };
-    expect(fetchExistingSsmValues(cfg, [], exec).size).toBe(0);
+    expect((await fetchExistingSsmValues(cfg, [], exec)).size).toBe(0);
     expect(calls).toBe(0);
   });
 
-  it("treats a thrown exec (auth error, etc.) as empty existing → first-time-deploy semantics", () => {
+  it("treats a thrown exec (auth error, etc.) as empty existing → first-time-deploy semantics", async () => {
     // Network or auth failures during the diff phase must NOT abort the
     // deploy — they degrade gracefully to "push everything," same as a
     // fresh SSM. The push step itself surfaces real auth failures loudly.
-    const exec = (_: string): string => {
+    const exec = async (_: string): Promise<string> => {
       throw new Error("ExpiredTokenException");
     };
-    const result = fetchExistingSsmValues(cfg, ["/d/shared/A"], exec);
+    const result = await fetchExistingSsmValues(cfg, ["/d/shared/A"], exec);
     expect(result.size).toBe(0);
+  });
+
+  it("runs multiple batches in parallel (concurrent get-parameters calls)", async () => {
+    // Force 50 paths → 5 batches. Track max in-flight to prove the diff
+    // phase doesn't run serially. With concurrency >= 2 the max in-flight
+    // count must exceed 1.
+    const paths = Array.from({ length: 50 }, (_, i) => `/d/shared/K${i}`);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const exec = async (_: string): Promise<string> => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Yield to the event loop a few times so other workers can claim
+      // their batches and bump inFlight before this one resolves.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      inFlight--;
+      return "[]";
+    };
+    await fetchExistingSsmValues(cfg, paths, exec);
+    expect(maxInFlight).toBeGreaterThan(1);
+  });
+
+  it("partial batch failure does NOT poison the whole diff (other batches still merge)", async () => {
+    // Batch 1 throws (transient error), batch 2 returns a value. The
+    // result must include batch 2's value — one bad batch should never
+    // erase the whole diff phase.
+    const paths = Array.from({ length: 12 }, (_, i) => `/d/shared/K${i}`);
+    const exec = async (cmd: string): Promise<string> => {
+      if (cmd.includes('"/d/shared/K0"')) {
+        throw new Error("transient");
+      }
+      return JSON.stringify([{ Name: "/d/shared/K10", Value: "v10" }]);
+    };
+    const result = await fetchExistingSsmValues(cfg, paths, exec);
+    expect(result.get("/d/shared/K10")).toBe("v10");
+    expect(result.has("/d/shared/K0")).toBe(false);
   });
 });
 
@@ -1149,10 +1186,10 @@ describe("pushSecrets — diff + parallel", () => {
 
   it("skips puts for paths whose SSM value already matches the local value", async () => {
     const ranCmds: string[] = [];
-    const ssmReader = (
+    const ssmReader = async (
       _cfg: typeof cfg,
       _paths: string[],
-    ): Map<string, string> =>
+    ): Promise<Map<string, string>> =>
       new Map([
         // Pretend these two are already up to date — they MUST be skipped.
         ["/d/shared/ANTHROPIC_API_KEY", "sk-shared"],
@@ -1192,7 +1229,7 @@ describe("pushSecrets — diff + parallel", () => {
 
   it("forwards the concurrency option to the runner", async () => {
     let observedConcurrency = -1;
-    const ssmReader = (): Map<string, string> => new Map();
+    const ssmReader = async (): Promise<Map<string, string>> => new Map();
     const runner = async (
       _cmds: { cmd: string; logLabel?: string }[],
       concurrency: number,
@@ -1215,7 +1252,7 @@ describe("pushSecrets — diff + parallel", () => {
     // but it MUST be >1 (otherwise the parallelization is dead code) and
     // SHOULD stay well below the default 40 TPS PutParameter throttle.
     let observedConcurrency = -1;
-    const ssmReader = (): Map<string, string> => new Map();
+    const ssmReader = async (): Promise<Map<string, string>> => new Map();
     const runner = async (
       _cmds: { cmd: string; logLabel?: string }[],
       concurrency: number,
@@ -1235,7 +1272,7 @@ describe("pushSecrets — diff + parallel", () => {
 
   it("still pushes everything when ssmReader returns an empty Map (first-time deploy)", async () => {
     const ranCmds: string[] = [];
-    const ssmReader = (): Map<string, string> => new Map();
+    const ssmReader = async (): Promise<Map<string, string>> => new Map();
     const runner = async (
       cmds: { cmd: string; logLabel?: string }[],
     ): Promise<void> => {
@@ -1260,7 +1297,7 @@ describe("pushSecrets — diff + parallel", () => {
     setDryRun(true);
     let readerCalled = false;
     let runnerCalled = false;
-    const ssmReader = (): Map<string, string> => {
+    const ssmReader = async (): Promise<Map<string, string>> => {
       readerCalled = true;
       return new Map();
     };
