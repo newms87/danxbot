@@ -78,9 +78,11 @@ export function readPasswordEchoOff(
   stderr: NodeJS.WritableStream,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const tty = stdin as NodeJS.ReadStream & {
-      setRawMode?: (mode: boolean) => void;
-    };
+    // NodeJS.ReadStream (which is what process.stdin actually IS at runtime
+    // when attached to a TTY) declares setRawMode, resume, pause, setEncoding,
+    // on, and removeListener — everything below is a direct method call, no
+    // optional-chaining or defensive casts needed.
+    const tty = stdin as NodeJS.ReadStream;
     if (typeof tty.setRawMode !== "function") {
       reject(new Error("stdin is a TTY but setRawMode is unavailable"));
       return;
@@ -92,8 +94,14 @@ export function readPasswordEchoOff(
 
     let buf = "";
     const finish = (action: "resolve" | "reject"): void => {
-      tty.setRawMode!(false);
+      tty.setRawMode(false);
       tty.removeListener("data", onData);
+      // Pair the `tty.resume()` above with `tty.pause()` here. Without it,
+      // the resumed TTY keeps the Node event loop alive — the deploy CLI
+      // hangs after `spawnSync` returns instead of exiting cleanly. Surfaced
+      // by `make create-user TARGET=platform USERNAME=...` once the Terraform
+      // pre-flight cache shaved enough time off that the hang became visible.
+      tty.pause();
       stderr.write("\n");
       if (action === "resolve") resolve(buf);
       else reject(new Error("Cancelled"));

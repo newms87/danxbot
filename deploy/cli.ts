@@ -80,14 +80,20 @@ const COMMANDS = [
 ] as const;
 type Command = (typeof COMMANDS)[number];
 
-export interface CliArgs {
-  command: Command;
+interface CliArgsBase {
   target: string;
   dryRun: boolean;
   confirm: boolean;
-  /** Third positional arg — required only by `create-user`. */
-  username?: string;
 }
+
+/**
+ * Discriminated union: `username` is structurally present iff `command` is
+ * "create-user". Lets callers access `args.username` without a non-null
+ * assertion — the type narrows once the switch arm is matched.
+ */
+export type CliArgs =
+  | (CliArgsBase & { command: Exclude<Command, "create-user"> })
+  | (CliArgsBase & { command: "create-user"; username: string });
 
 export function parseCliArgs(argv: string[]): CliArgs {
   const rawCommand = argv[0];
@@ -101,24 +107,23 @@ export function parseCliArgs(argv: string[]): CliArgs {
     throw new Error("TARGET is required (e.g., deploy gpt)");
   }
 
-  let username: string | undefined;
-  if (rawCommand === "create-user") {
+  const command = rawCommand as Command;
+  const base: CliArgsBase = {
+    target,
+    dryRun: argv.includes("--dry-run"),
+    confirm: argv.includes("--confirm"),
+  };
+
+  if (command === "create-user") {
     const third = argv[2];
     if (!third || third.startsWith("--")) {
       throw new Error(
         "USERNAME is required for create-user (e.g., create-user gpt alice)",
       );
     }
-    username = third;
+    return { ...base, command, username: third };
   }
-
-  return {
-    command: rawCommand as Command,
-    target,
-    dryRun: argv.includes("--dry-run"),
-    confirm: argv.includes("--confirm"),
-    ...(username ? { username } : {}),
-  };
+  return { ...base, command };
 }
 
 function ensureBackend(config: DeployConfig): void {
@@ -470,9 +475,8 @@ async function main(): Promise<void> {
       await smoke(config);
       break;
     case "create-user": {
-      // parseCliArgs guarantees args.username is set for this command.
       const outputs = resolveOutputs(args.target, config);
-      await createUser(config, args.username!, outputs.publicIp);
+      await createUser(config, args.username, outputs.publicIp);
       break;
     }
     case "ensure-root-user": {
@@ -481,8 +485,10 @@ async function main(): Promise<void> {
       break;
     }
     default: {
-      const _exhaustive: never = args.command;
-      throw new Error(`Unhandled command: ${_exhaustive as string}`);
+      const _exhaustive: never = args;
+      throw new Error(
+        `Unhandled command: ${(_exhaustive as { command: string }).command}`,
+      );
     }
   }
 }

@@ -105,12 +105,10 @@ describe("createUser orchestration", () => {
   it("passes password+newline via stdin and invokes SSH with correct argv", async () => {
     const config = makeConfig();
     const execSsh = vi.fn().mockReturnValue(okSpawnResult());
-    const resolveIp = vi.fn().mockReturnValue("1.2.3.4");
     const readPassword = vi.fn().mockResolvedValue("a-strong-password");
 
-    await createUser(config, "alice", { resolveIp, readPassword, execSsh });
+    await createUser(config, "alice", "1.2.3.4", { readPassword, execSsh });
 
-    expect(resolveIp).toHaveBeenCalledOnce();
     expect(readPassword).toHaveBeenCalledOnce();
     expect(execSsh).toHaveBeenCalledOnce();
 
@@ -128,10 +126,9 @@ describe("createUser orchestration", () => {
   it("never embeds the password in the SSH argv (security regression guard)", async () => {
     const config = makeConfig();
     const execSsh = vi.fn().mockReturnValue(okSpawnResult());
-    const resolveIp = vi.fn().mockReturnValue("1.2.3.4");
     const readPassword = vi.fn().mockResolvedValue("super-secret-pw-12345");
 
-    await createUser(config, "alice", { resolveIp, readPassword, execSsh });
+    await createUser(config, "alice", "1.2.3.4", { readPassword, execSsh });
 
     const [inv] = execSsh.mock.calls[0] as [SshInvocation, string];
     for (const a of inv.args) {
@@ -139,13 +136,9 @@ describe("createUser orchestration", () => {
     }
   });
 
-  it("calls resolveIp BEFORE readPassword (don't make the operator type a password if the box is unreachable)", async () => {
+  it("validates the username BEFORE prompting for a password (don't make the operator type a password the system will then reject)", async () => {
     const config = makeConfig();
     const order: string[] = [];
-    const resolveIp = vi.fn(() => {
-      order.push("resolveIp");
-      return "1.2.3.4";
-    });
     const readPassword = vi.fn(async () => {
       order.push("readPassword");
       return "a-strong-password";
@@ -155,9 +148,9 @@ describe("createUser orchestration", () => {
       return okSpawnResult();
     });
 
-    await createUser(config, "alice", { resolveIp, readPassword, execSsh });
+    await createUser(config, "alice", "1.2.3.4", { readPassword, execSsh });
 
-    expect(order).toEqual(["resolveIp", "readPassword", "execSsh"]);
+    expect(order).toEqual(["readPassword", "execSsh"]);
   });
 
   it("throws when the remote command exits non-zero", async () => {
@@ -168,8 +161,7 @@ describe("createUser orchestration", () => {
     });
 
     await expect(
-      createUser(config, "alice", {
-        resolveIp: () => "1.2.3.4",
+      createUser(config, "alice", "1.2.3.4", {
         readPassword: async () => "a-strong-password",
         execSsh,
       }),
@@ -180,17 +172,14 @@ describe("createUser orchestration", () => {
     const config = makeConfig();
     const execSsh = vi.fn();
     const readPassword = vi.fn();
-    const resolveIp = vi.fn();
 
     await expect(
-      createUser(config, "bad user!", {
-        resolveIp,
+      createUser(config, "bad user!", "1.2.3.4", {
         readPassword,
         execSsh,
       }),
     ).rejects.toThrow();
 
-    expect(resolveIp).not.toHaveBeenCalled();
     expect(readPassword).not.toHaveBeenCalled();
     expect(execSsh).not.toHaveBeenCalled();
   });
@@ -200,8 +189,7 @@ describe("createUser orchestration", () => {
     const execSsh = vi.fn();
 
     await expect(
-      createUser(config, "alice", {
-        resolveIp: () => "1.2.3.4",
+      createUser(config, "alice", "1.2.3.4", {
         readPassword: async () => "short",
         execSsh,
       }),

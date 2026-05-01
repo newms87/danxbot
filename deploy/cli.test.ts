@@ -63,7 +63,7 @@ describe("parseCliArgs", () => {
 
   it("does NOT set username for non-create-user commands", () => {
     const parsed = parseCliArgs(["deploy", "gpt", "extra-positional"]);
-    expect(parsed.username).toBeUndefined();
+    expect(parsed).not.toHaveProperty("username");
   });
 
   it("throws on unknown command", () => {

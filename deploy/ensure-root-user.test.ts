@@ -21,7 +21,7 @@ describe("ensureRootUser dry-run", () => {
     setDryRun(false);
   });
 
-  it("does not invoke the exec callback or resolveIp in dry-run (defense-in-depth — execSync bypasses the exec.ts gate)", async () => {
+  it("does not invoke the exec callback in dry-run (defense-in-depth — execSync bypasses the exec.ts gate)", async () => {
     // ensureRootUser uses execSync directly, NOT the dry-run-aware
     // runStreaming. The internal isDryRun() guard is the only thing
     // preventing a real SSH attempt against the placeholder IP. Removing
@@ -29,17 +29,11 @@ describe("ensureRootUser dry-run", () => {
     // re-enable real-instance SSH on every dry-run.
     setDryRun(true);
     let execCalled = false;
-    let ipResolved = false;
-    await ensureRootUser(makeConfig({ name: "dry-run-target" }), {
-      resolveIp: () => {
-        ipResolved = true;
-        return "1.2.3.4";
-      },
+    await ensureRootUser(makeConfig({ name: "dry-run-target" }), "1.2.3.4", {
       exec: () => {
         execCalled = true;
       },
     });
     expect(execCalled).toBe(false);
-    expect(ipResolved).toBe(false);
   });
 });

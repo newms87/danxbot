@@ -12,7 +12,6 @@ import { execSync } from "node:child_process";
 import type { DeployConfig } from "./config.js";
 import { resolveKeyPath } from "./remote.js";
 import { isDryRun } from "./exec.js";
-import { getTerraformOutputs } from "./provision.js";
 import { DASHBOARD_CONTAINER } from "./constants.js";
 
 export function buildSshCommand(
@@ -41,13 +40,11 @@ export function buildSshCommand(
 }
 
 export interface EnsureRootUserDeps {
-  resolveIp(): string;
   exec(cmd: string): void;
 }
 
 export function defaultEnsureRootUserDeps(): EnsureRootUserDeps {
   return {
-    resolveIp: () => getTerraformOutputs().publicIp,
     exec: (cmd) => {
       execSync(cmd, { stdio: "inherit" });
     },
@@ -56,6 +53,7 @@ export function defaultEnsureRootUserDeps(): EnsureRootUserDeps {
 
 export async function ensureRootUser(
   config: DeployConfig,
+  ip: string,
   deps: EnsureRootUserDeps = defaultEnsureRootUserDeps(),
 ): Promise<void> {
   // The default deps use `execSync` directly (not `runStreaming`), so this
@@ -71,7 +69,6 @@ export async function ensureRootUser(
     );
     return;
   }
-  const ip = deps.resolveIp();
   const keyPath = resolveKeyPath(config);
   console.log(
     `\n── Ensuring dashboard root user on ${config.name} (${ip}) ──`,

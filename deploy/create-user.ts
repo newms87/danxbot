@@ -15,13 +15,16 @@
  * shared rules in src/lib/auth-rules.ts — no drift):
  *   - Local: rejects bad usernames before any SSH/spawn happens.
  *   - Remote: the worker CLI re-validates inside the dashboard container.
+ *
+ * IP resolution is the caller's responsibility — pass `ip` explicitly. The
+ * caller (cli.ts) goes through `resolveOutputs(target, config)` which owns
+ * the cache-vs-Terraform decision; this module never sees a target name.
  */
 
 import type { SpawnSyncReturns } from "node:child_process";
 import { spawnSync } from "node:child_process";
 import type { DeployConfig } from "./config.js";
 import { resolveKeyPath } from "./remote.js";
-import { getTerraformOutputs } from "./provision.js";
 import { DASHBOARD_CONTAINER } from "./constants.js";
 import {
   validatePassword,
@@ -82,8 +85,6 @@ export function buildSshInvocation(
 }
 
 export interface CreateUserDeps {
-  /** Resolve EC2 IP (defaults to reading terraform output). */
-  resolveIp(): string;
   /** Read password locally (defaults to env/TTY prompt). */
   readPassword(): Promise<string>;
   /** Execute SSH with stdin+stdout inherit — defaults to spawnSync. */
@@ -92,10 +93,6 @@ export interface CreateUserDeps {
 
 export function defaultCreateUserDeps(): CreateUserDeps {
   return {
-    resolveIp: () => {
-      const outputs = getTerraformOutputs();
-      return outputs.publicIp;
-    },
     readPassword: () => resolvePassword(process.env, process.stdin, process.stderr),
     execSsh: (inv, password) =>
       spawnSync(inv.cmd, inv.args, {
@@ -106,19 +103,22 @@ export function defaultCreateUserDeps(): CreateUserDeps {
 }
 
 /**
- * Orchestrate: validate username → resolve IP → read password → validate
- * password → SSH + docker exec with password piped on stdin. Validation runs
- * BEFORE the password prompt so an interactive operator isn't typing a
- * password the system already knows it will reject.
+ * Orchestrate: validate username → read password → validate password → SSH
+ * + docker exec with password piped on stdin. Validation runs BEFORE the
+ * password prompt so an interactive operator isn't typing a password the
+ * system already knows it will reject.
+ *
+ * `ip` is supplied by the caller (cli.ts goes through `resolveOutputs`). This
+ * function never reaches into Terraform or the output cache — pure SSH.
  */
 export async function createUser(
   config: DeployConfig,
   username: string,
+  ip: string,
   deps: CreateUserDeps = defaultCreateUserDeps(),
 ): Promise<void> {
   validateUsername(username);
 
-  const ip = deps.resolveIp();
   const keyPath = resolveKeyPath(config);
   const inv = buildSshInvocation(keyPath, ip, username);
 

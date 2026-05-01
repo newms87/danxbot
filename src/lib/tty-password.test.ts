@@ -1,8 +1,10 @@
+import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 import { describe, it, expect } from "vitest";
 import {
   PASSWORD_ENV_VAR,
   readFirstLine,
+  readPasswordEchoOff,
   resolvePassword,
 } from "./tty-password.js";
 
@@ -115,5 +117,126 @@ describe("resolvePassword precedence", () => {
     await expect(resolvePassword({}, stdin, stderr.stream)).rejects.toThrow(
       /setRawMode is unavailable/,
     );
+  });
+});
+
+interface FakeTty extends EventEmitter {
+  isTTY: boolean;
+  setRawMode: (mode: boolean) => void;
+  resume: () => void;
+  pause: () => void;
+  setEncoding: (enc: string) => void;
+  rawModeCalls: boolean[];
+  resumeCalls: number;
+  pauseCalls: number;
+}
+
+function makeFakeTty(): FakeTty {
+  const ee = new EventEmitter() as FakeTty;
+  ee.isTTY = true;
+  ee.rawModeCalls = [];
+  ee.resumeCalls = 0;
+  ee.pauseCalls = 0;
+  ee.setRawMode = (mode: boolean) => {
+    ee.rawModeCalls.push(mode);
+  };
+  ee.resume = () => {
+    ee.resumeCalls++;
+  };
+  ee.pause = () => {
+    ee.pauseCalls++;
+  };
+  ee.setEncoding = () => {};
+  return ee;
+}
+
+describe("readPasswordEchoOff — TTY lifecycle", () => {
+  it("pauses stdin after a successful password read so the event loop can exit", async () => {
+    const tty = makeFakeTty();
+    const stderr = makeWritable();
+    const promise = readPasswordEchoOff(
+      tty as unknown as NodeJS.ReadableStream,
+      stderr.stream,
+    );
+    // Process event loop tick so the listener attaches.
+    await new Promise((r) => setImmediate(r));
+    tty.emit("data", "hunter2\n");
+    await expect(promise).resolves.toBe("hunter2");
+    expect(tty.pauseCalls).toBeGreaterThanOrEqual(1);
+    expect(tty.rawModeCalls).toEqual([true, false]);
+  });
+
+  it("pauses stdin after a cancelled password read (Ctrl-C)", async () => {
+    const tty = makeFakeTty();
+    const stderr = makeWritable();
+    const promise = readPasswordEchoOff(
+      tty as unknown as NodeJS.ReadableStream,
+      stderr.stream,
+    );
+    await new Promise((r) => setImmediate(r));
+    tty.emit("data", "");
+    await expect(promise).rejects.toThrow(/Cancelled/);
+    expect(tty.pauseCalls).toBeGreaterThanOrEqual(1);
+    expect(tty.rawModeCalls).toEqual([true, false]);
+  });
+
+  it("removes the data listener after finishing (no leaked listeners)", async () => {
+    const tty = makeFakeTty();
+    const stderr = makeWritable();
+    const promise = readPasswordEchoOff(
+      tty as unknown as NodeJS.ReadableStream,
+      stderr.stream,
+    );
+    await new Promise((r) => setImmediate(r));
+    expect(tty.listenerCount("data")).toBe(1);
+    tty.emit("data", "ok\n");
+    await promise;
+    expect(tty.listenerCount("data")).toBe(0);
+  });
+
+  it("treats CR (\\r) as a terminator the same as LF", async () => {
+    const tty = makeFakeTty();
+    const promise = readPasswordEchoOff(
+      tty as unknown as NodeJS.ReadableStream,
+      makeWritable().stream,
+    );
+    await new Promise((r) => setImmediate(r));
+    tty.emit("data", "carriage\r");
+    await expect(promise).resolves.toBe("carriage");
+    expect(tty.pauseCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it("treats EOT (\\u0004 / Ctrl-D) as a terminator", async () => {
+    const tty = makeFakeTty();
+    const promise = readPasswordEchoOff(
+      tty as unknown as NodeJS.ReadableStream,
+      makeWritable().stream,
+    );
+    await new Promise((r) => setImmediate(r));
+    tty.emit("data", "eofpw");
+    await expect(promise).resolves.toBe("eofpw");
+    expect(tty.pauseCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it("backspace (\\u007f) deletes the last buffered character", async () => {
+    const tty = makeFakeTty();
+    const promise = readPasswordEchoOff(
+      tty as unknown as NodeJS.ReadableStream,
+      makeWritable().stream,
+    );
+    await new Promise((r) => setImmediate(r));
+    tty.emit("data", "abcd\n");
+    await expect(promise).resolves.toBe("abc");
+  });
+
+  it("Ctrl-H (\\b) also deletes the last buffered character", async () => {
+    const tty = makeFakeTty();
+    const promise = readPasswordEchoOff(
+      tty as unknown as NodeJS.ReadableStream,
+      makeWritable().stream,
+    );
+    await new Promise((r) => setImmediate(r));
+    tty.emit("data", "abcd\b\n");
+    await expect(promise).resolves.toBe("abc");
   });
 });
