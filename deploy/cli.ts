@@ -28,7 +28,6 @@ import {
   terraformInit,
   terraformApply,
   terraformDestroy,
-  getTerraformOutputs,
   saveGeneratedSshKey,
 } from "./provision.js";
 import { buildAndPush } from "./build.js";
@@ -36,6 +35,8 @@ import { RemoteHost } from "./remote.js";
 import { waitForHealthy } from "./health.js";
 import { pushSecrets } from "./secrets.js";
 import { syncRepos, runBootstrapScripts } from "./bootstrap-repos.js";
+import { clearCachedOutputs, writeCachedOutputs } from "./output-cache.js";
+import { resolveOutputs } from "./outputs-resolver.js";
 import { launchWorkers } from "./workers.js";
 import {
   pruneStaleDockerImages,
@@ -46,6 +47,10 @@ import { DRY_RUN_GITHUB_TOKEN } from "./dry-run-placeholders.js";
 import { sharedKeyPath, repoKeyPath } from "./ssm-paths.js";
 import { createUser } from "./create-user.js";
 import { ensureRootUser } from "./ensure-root-user.js";
+import {
+  preflightClaudeAuth,
+  buildRealDeps as buildClaudeAuthDeps,
+} from "./preflight-claude-auth.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -147,6 +152,28 @@ async function deploy(config: DeployConfig, target: string): Promise<void> {
   console.log(`  DEPLOYING ${config.name}`);
   console.log("═══════════════════════════════════════");
 
+  // Preflight: validate / refresh / reauth claude-auth BEFORE any
+  // destructive deploy step (SSM push, Terraform apply, ECR build, scp).
+  // Catches the case where `claude_auth_dir` points at a snapshot dir
+  // (e.g. platform's `../../claude-auth/`) whose token expired since
+  // the last login, and either silently refreshes via the OAuth refresh
+  // grant or interactively launches `claude auth login` against the
+  // snapshot dir so the operator can re-auth in their browser. Skipped
+  // in dry-run because writing fresh creds + spawning interactive
+  // claude both qualify as side effects. See preflight-claude-auth.ts.
+  if (!isDryRun()) {
+    console.log("\n── Validating claude-auth ──");
+    const result = await preflightClaudeAuth(
+      config.claudeAuthDir,
+      buildClaudeAuthDeps(),
+    );
+    if (!result.ok) {
+      console.error(`\n✗ claude-auth preflight failed: ${result.summary}`);
+      process.exit(1);
+    }
+    console.log(`  claude-auth ${result.action}`);
+  }
+
   // Step 0: push local .env files to SSM. Runs every deploy so local secret
   // changes reach the instance on the next deploy without a separate command.
   // Idempotent — put-parameter uses --overwrite; unchanged values are a no-op
@@ -155,10 +182,15 @@ async function deploy(config: DeployConfig, target: string): Promise<void> {
   // Per-target .env.<target> overlays are layered over .env at this step —
   // see deploy/secrets.ts header for the override contract.
   console.log("\n── Syncing local .env → SSM ──");
-  pushSecrets(config, process.cwd(), target);
+  await pushSecrets(config, process.cwd(), target);
 
   ensureBackend(config);
   const outputs = terraformApply(config);
+
+  // Cache outputs so read-only commands (create-user, ssh, smoke) skip the
+  // ~10s bootstrap+init+output Terraform pre-flight on subsequent runs. See
+  // output-cache.ts header for the full rationale.
+  writeCachedOutputs(target, outputs);
 
   console.log(`\n  Instance: ${outputs.instanceId}`);
   console.log(`  IP: ${outputs.publicIp}`);
@@ -249,7 +281,7 @@ async function deploy(config: DeployConfig, target: string): Promise<void> {
   // exec.ts gate).
   if (health.healthy) {
     try {
-      await ensureRootUser(config);
+      await ensureRootUser(config, outputs.publicIp);
     } catch (err) {
       console.log(
         `  WARN: ensure-root-user failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -270,11 +302,10 @@ async function deploy(config: DeployConfig, target: string): Promise<void> {
   console.log("═══════════════════════════════════════\n");
 }
 
-async function status(config: DeployConfig): Promise<void> {
+async function status(config: DeployConfig, target: string): Promise<void> {
   console.log("\n── Infrastructure Status ──");
   try {
-    ensureBackend(config);
-    const outputs = getTerraformOutputs();
+    const outputs = resolveOutputs(target, config);
     console.log(`  Instance: ${outputs.instanceId}`);
     console.log(`  IP: ${outputs.publicIp}`);
     console.log(`  Domain: ${outputs.domain}`);
@@ -295,6 +326,7 @@ async function status(config: DeployConfig): Promise<void> {
 
 async function destroy(
   config: DeployConfig,
+  target: string,
   confirm: boolean,
 ): Promise<void> {
   console.log("\n── DESTROYING INFRASTRUCTURE ──");
@@ -307,23 +339,24 @@ async function destroy(
   }
   ensureBackend(config);
   terraformDestroy(config);
+  // Drop the IP cache — instance is gone; a stale IP would mislead the next
+  // read-only command into SSHing to a dead host instead of failing fast.
+  clearCachedOutputs(target);
   console.log("\n  All infrastructure destroyed.");
 }
 
-async function ssh(config: DeployConfig): Promise<void> {
-  ensureBackend(config);
-  const outputs = getTerraformOutputs();
+async function ssh(config: DeployConfig, target: string): Promise<void> {
+  const outputs = resolveOutputs(target, config);
   new RemoteHost(config, outputs.publicIp).openSshSession();
 }
 
-async function logs(config: DeployConfig): Promise<void> {
-  ensureBackend(config);
-  const outputs = getTerraformOutputs();
+async function logs(config: DeployConfig, target: string): Promise<void> {
+  const outputs = resolveOutputs(target, config);
   new RemoteHost(config, outputs.publicIp).tailLogs();
 }
 
 async function secretsPush(config: DeployConfig, target: string): Promise<void> {
-  pushSecrets(config, process.cwd(), target);
+  await pushSecrets(config, process.cwd(), target);
 }
 
 async function smoke(config: DeployConfig): Promise<void> {
@@ -419,16 +452,16 @@ async function main(): Promise<void> {
       await deploy(config, args.target);
       break;
     case "status":
-      await status(config);
+      await status(config, args.target);
       break;
     case "destroy":
-      await destroy(config, args.confirm);
+      await destroy(config, args.target, args.confirm);
       break;
     case "ssh":
-      await ssh(config);
+      await ssh(config, args.target);
       break;
     case "logs":
-      await logs(config);
+      await logs(config, args.target);
       break;
     case "secrets-push":
       await secretsPush(config, args.target);
@@ -436,15 +469,17 @@ async function main(): Promise<void> {
     case "smoke":
       await smoke(config);
       break;
-    case "create-user":
+    case "create-user": {
       // parseCliArgs guarantees args.username is set for this command.
-      ensureBackend(config);
-      await createUser(config, args.username!);
+      const outputs = resolveOutputs(args.target, config);
+      await createUser(config, args.username!, outputs.publicIp);
       break;
-    case "ensure-root-user":
-      ensureBackend(config);
-      await ensureRootUser(config);
+    }
+    case "ensure-root-user": {
+      const outputs = resolveOutputs(args.target, config);
+      await ensureRootUser(config, outputs.publicIp);
       break;
+    }
     default: {
       const _exhaustive: never = args.command;
       throw new Error(`Unhandled command: ${_exhaustive as string}`);
