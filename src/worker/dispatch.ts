@@ -30,7 +30,9 @@ import {
   deriveSessionDir,
   findSessionFileByDispatchId,
 } from "../agent/session-log-watcher.js";
-import { workspacePath } from "../workspace/generate.js";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import { getReposBase } from "../poller/constants.js";
 import { normalizeCallbackUrl } from "./url-normalizer.js";
 import { isFeatureEnabled } from "../settings-file.js";
 import { writeFlag } from "../critical-failure.js";
@@ -106,28 +108,46 @@ export async function resolveParentSessionId(
   repoName: string,
   parentJobId: string,
 ): Promise<ResolveParentResult> {
-  // Must match the spawn cwd used by `spawnAgent` — dispatched agents
-  // run from `<repo>/.danxbot/workspace/`, so claude writes its JSONL
-  // under the workspace-encoded projects dir. Using the bare repo root
-  // would look in an empty directory and return `no-session-dir` for
-  // every resume. See `src/agent/launcher.ts` and the agent-isolation
-  // epic (Trello `7ha2CSpc`).
-  const sessionDir = deriveSessionDir(workspacePath(repoName));
-  try {
-    const s = await stat(sessionDir);
-    if (!s.isDirectory()) {
-      return { kind: "no-session-dir" };
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return { kind: "no-session-dir" };
-    }
-    throw err;
+  // Dispatched agents cwd into `<repo>/.danxbot/workspaces/<name>/` (the
+  // resolved plural workspace), so claude writes JSONL under the
+  // workspace-encoded projects dir. The parent dispatch could have used
+  // any of the workspaces under `<repo>/.danxbot/workspaces/` — we
+  // don't know which without scanning. Enumerate every workspace and
+  // search each session dir for the parent's dispatch tag.
+  const workspacesDir = resolvePath(
+    getReposBase(),
+    repoName,
+    ".danxbot",
+    "workspaces",
+  );
+  if (!existsSync(workspacesDir)) {
+    return { kind: "no-session-dir" };
   }
+  const workspaceNames = readdirSync(workspacesDir).filter((entry) => {
+    try {
+      return statSync(resolvePath(workspacesDir, entry)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
 
-  const filePath = await findSessionFileByDispatchId(sessionDir, parentJobId);
-  if (!filePath) return { kind: "not-found" };
-  return { kind: "found", sessionId: basename(filePath, ".jsonl") };
+  let anySessionDirFound = false;
+  for (const name of workspaceNames) {
+    const sessionDir = deriveSessionDir(resolvePath(workspacesDir, name));
+    try {
+      const s = await stat(sessionDir);
+      if (!s.isDirectory()) continue;
+      anySessionDirFound = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    const filePath = await findSessionFileByDispatchId(sessionDir, parentJobId);
+    if (filePath) {
+      return { kind: "found", sessionId: basename(filePath, ".jsonl") };
+    }
+  }
+  return anySessionDirFound ? { kind: "not-found" } : { kind: "no-session-dir" };
 }
 
 /**

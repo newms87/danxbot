@@ -126,6 +126,26 @@ vi.mock("node:fs/promises", () => ({
   stat: (path: unknown) => mockStat(path),
 }));
 
+// Plural-workspace dispatch (workspace-dispatch cleanup): resolveParentSessionId
+// enumerates `<repo>/.danxbot/workspaces/<name>/` to find the parent's
+// session JSONL across every workspace cwd. Stub the sync fs helpers so
+// the lookup finds at least one workspace ("system-test") that the test
+// fixtures use as the parent dispatch's workspace.
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  return {
+    ...actual,
+    existsSync: (path: unknown) =>
+      typeof path === "string" && path.includes("/.danxbot/workspaces"),
+    readdirSync: (path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/.danxbot/workspaces")) return ["system-test"];
+      return [];
+    },
+    statSync: () => ({ isDirectory: () => true }),
+  };
+});
+
 const { mockDispatchConfig } = vi.hoisted(() => {
   const mockDispatchConfig = {
     isHost: false,

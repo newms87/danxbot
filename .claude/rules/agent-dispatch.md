@@ -4,14 +4,17 @@ How danxbot launches a Claude Code agent for a Trello card, Slack message, or HT
 
 ## Workspace isolation — the cwd contract
 
-Every dispatched agent (poller, HTTP `/api/launch`, `/api/resume`, Slack) runs with `cwd = <repo>/.danxbot/workspace/`. The workspace is a fully generated directory (`src/workspace/generate.ts`) containing:
+Every dispatched agent (poller, HTTP `/api/launch`, `/api/resume`, Slack) runs with `cwd = <repo>/.danxbot/workspaces/<name>/`. Each plural workspace is a fully self-contained directory containing:
 
-- `.mcp.json` — empty stub; combined with `--strict-mcp-config` it ensures the per-dispatch `.mcp.json` written by `dispatch()` is the ONLY MCP config claude reads
-- `CLAUDE.md` — workspace marker
-- `.claude/settings.json` — `{"env": {"DANXBOT_WORKER_PORT": "<port>"}}`, used by MCP child processes
-- `.claude/rules/` + `.claude/skills/` + `.claude/tools/` + `.claude/agents/` — populated by `src/poller/index.ts#syncRepoFiles` on every poll tick (idempotent writes of every `danx-*` artifact from `.danxbot/config/` + `src/poller/inject/`)
+- `.mcp.json` — per-workspace MCP config; combined with `--strict-mcp-config` ensures claude only sees the resolved workspace's MCP servers (merged with the danxbot infrastructure server by `dispatch()` at spawn time)
+- `CLAUDE.md` — workspace-scoped marker doc
+- `workspace.yml` — workspace manifest (resolved by `src/workspace/resolve.ts`)
+- `.claude/settings.json` — workspace-specific settings
+- `.claude/skills/` + `.claude/rules/` — static skills and rules shipped from `src/poller/inject/workspaces/<name>/.claude/` (mirrored verbatim every tick by `injectDanxWorkspaces`)
+- `.claude/rules/danx-repo-config.md`, `danx-repo-overview.md`, `danx-repo-workflow.md`, `danx-tools.md`, `danx-trello-config.md` — per-repo rendered files written into every plural workspace by `renderPerRepoFilesIntoWorkspaces` in `src/poller/index.ts`. Rendered fresh from `RepoContext` every tick; duplicated across every workspace dir so cwd-relative skill references like `Read .claude/rules/danx-trello-config.md` resolve LOCALLY without claude walking ancestor `.claude/` dirs.
+- `.claude/tools/` — repo-specific helper scripts copied from `<repo>/.danxbot/config/tools/`
 
-The **repo-root `.claude/`** is strictly developer territory. Danxbot never reads OR writes there. A test in `src/poller/index.test.ts` asserts zero writes outside `<repo>/.danxbot/workspace/.claude/` — reintroducing any repo-root write breaks the isolation boundary and fails CI.
+The **repo-root `.claude/`** is strictly developer territory. Danxbot never reads there and actively scrubs any `danx-*` artifacts that land in `<repo>/.claude/{rules,skills,tools}/` on every poll tick (`scrubRepoRootDanxArtifacts`). The legacy singular `<repo>/.danxbot/workspace/` directory the retired `generateWorkspace` helper produced is also scrubbed every tick (`scrubLegacySingularWorkspace`). A test in `src/poller/index.test.ts` asserts zero writes outside `<repo>/.danxbot/workspaces/` — reintroducing any repo-root or singular-workspace write breaks the isolation boundary and fails CI.
 
 `DANXBOT_WORKER_PORT` lives in `<repo>/.danxbot/.env` (local dev) or `process.env` (production compose injection). `src/repo-context.ts#readWorkerPort` enforces this chain; it no longer reads `<repo>/.claude/settings.local.json`.
 

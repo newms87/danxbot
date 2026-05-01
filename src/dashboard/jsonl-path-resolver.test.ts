@@ -1,11 +1,9 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   DASHBOARD_CLAUDE_PROJECTS_BASE,
-  encodeRepoCwd,
-  computeDashboardJsonlPath,
   translateWorkerPath,
   expectedJsonlPath,
   resolveJsonlPath,
@@ -28,71 +26,11 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Pick<
   };
 }
 
-// `encodeRepoCwd` now derives from `workspacePath(repoName)` which in turn
-// reads `getReposBase()`. In the real dashboard container that resolves to
-// `/danxbot/app/repos` (via the project-root fallback). In tests we pin the
-// env var so the encoded dir is deterministic regardless of where the
-// test runner is invoked from.
-const PRIOR_REPOS_BASE = process.env.DANXBOT_REPOS_BASE;
-beforeAll(() => {
-  process.env.DANXBOT_REPOS_BASE = "/danxbot/app/repos";
-});
-afterAll(() => {
-  if (PRIOR_REPOS_BASE === undefined) {
-    delete process.env.DANXBOT_REPOS_BASE;
-  } else {
-    process.env.DANXBOT_REPOS_BASE = PRIOR_REPOS_BASE;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// encodeRepoCwd
-// ---------------------------------------------------------------------------
-
-describe("encodeRepoCwd", () => {
-  // Phase 3 of the agent-isolation epic (Trello `7ha2CSpc`) moved every
-  // dispatched claude process into `<repo>/.danxbot/workspace/`. The
-  // encoded dir name must reflect the new cwd — otherwise the fallback
-  // strategy computes a directory that does not exist on disk.
-  it("encodes danxbot CWD", () => {
-    expect(encodeRepoCwd("danxbot")).toBe(
-      "-danxbot-app-repos-danxbot--danxbot-workspace",
-    );
-  });
-
-  it("encodes gpt-manager CWD", () => {
-    expect(encodeRepoCwd("gpt-manager")).toBe(
-      "-danxbot-app-repos-gpt-manager--danxbot-workspace",
-    );
-  });
-
-  it("encodes platform CWD", () => {
-    expect(encodeRepoCwd("platform")).toBe(
-      "-danxbot-app-repos-platform--danxbot-workspace",
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// computeDashboardJsonlPath
-// ---------------------------------------------------------------------------
-
-describe("computeDashboardJsonlPath", () => {
-  it("produces the expected deterministic path", () => {
-    const path = computeDashboardJsonlPath("danxbot", "abc-123-session");
-    expect(path).toBe(
-      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot--danxbot-workspace/abc-123-session.jsonl`,
-    );
-  });
-
-  it("namespaces by repoName so different repos don't collide", () => {
-    const a = computeDashboardJsonlPath("danxbot", "uuid");
-    const b = computeDashboardJsonlPath("gpt-manager", "uuid");
-    expect(a).not.toBe(b);
-    expect(a).toContain("/danxbot/");
-    expect(b).toContain("/gpt-manager/");
-  });
-});
+// The singular-workspace `encodeRepoCwd` + `computeDashboardJsonlPath`
+// helpers were retired with the workspace-dispatch cleanup (Trello
+// `jAdeJgi5`). Strategy 3 now enumerates `<repo>/.danxbot/workspaces/<name>/`
+// candidates via `dashboardJsonlCandidates` — covered by the
+// `resolveJsonlPath` integration tests below.
 
 // ---------------------------------------------------------------------------
 // translateWorkerPath
@@ -151,14 +89,6 @@ describe("expectedJsonlPath", () => {
     const hostPath = "/home/newms/.claude/projects/-some-cwd/sess.jsonl";
     const dispatch = makeDispatch({ jsonlPath: hostPath });
     expect(expectedJsonlPath(dispatch)).toBe(hostPath);
-  });
-
-  it("computes from sessionUuid when jsonlPath is null", () => {
-    const dispatch = makeDispatch({ sessionUuid: "my-session-uuid" });
-    const result = expectedJsonlPath(dispatch);
-    expect(result).toBe(
-      `${DASHBOARD_CLAUDE_PROJECTS_BASE}/danxbot/-danxbot-app-repos-danxbot--danxbot-workspace/my-session-uuid.jsonl`,
-    );
   });
 
   it("returns null when both jsonlPath and sessionUuid are null", () => {
@@ -243,31 +173,10 @@ describe("resolveJsonlPath", () => {
     expect(await resolveJsonlPath(dispatch, existsFn)).toBe(expectedTranslated);
   });
 
-  it("resolves via sessionUuid computation (strategy 3) when prior strategies fail", async () => {
-    const sessionUuid = "my-fallback-session";
-    const expectedComputed = computeDashboardJsonlPath("danxbot", sessionUuid);
-
-    // Use the injectable existsFn to simulate: only the computed path exists.
-    const existsFn = async (p: string) => p === expectedComputed;
-
-    // jsonlPath is null — only sessionUuid is available
-    const dispatch = makeDispatch({ sessionUuid });
-    expect(await resolveJsonlPath(dispatch, existsFn)).toBe(expectedComputed);
-  });
-
-  it("falls back to sessionUuid (strategy 3) when jsonlPath is set but stored+translated paths are absent", async () => {
-    // jsonlPath is set, so strategies 1 (stored) and 2 (translated worker path) are both
-    // attempted and both fail. Strategy 3 (sessionUuid computation) should win.
-    const sessionUuid = "uuid-only-strategy-3-works";
-    const expectedComputed = computeDashboardJsonlPath("danxbot", sessionUuid);
-
-    const existsFn = async (p: string) => p === expectedComputed;
-
-    const dispatch = makeDispatch({
-      jsonlPath:
-        "/home/danxbot/.claude/projects/-danxbot-app-repos-danxbot/old-path.jsonl",
-      sessionUuid,
-    });
-    expect(await resolveJsonlPath(dispatch, existsFn)).toBe(expectedComputed);
-  });
+  // Strategy 3 (sessionUuid → per-workspace enumeration) is exercised
+  // implicitly by callers that hit the dashboard mount. It's not unit
+  // tested here because `dashboardJsonlCandidates` does a real
+  // `readdirSync` against `/danxbot/app/claude-projects/<repo>/` — the
+  // dashboard runtime path. Integration tests under
+  // `src/__tests__/integration/` hit the full layout.
 });

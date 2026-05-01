@@ -161,6 +161,7 @@ function spawnAndAwait(opts: Partial<SpawnAgentOptions> & { prompt: string }): P
       repoName: ".",
       timeoutMs: 60_000,
       maxRuntimeMs: 90_000,
+      cwd: "/tmp/test-workspace",
       ...opts,
       onComplete: resolve,
     }).catch(reject);

@@ -20,8 +20,9 @@
  * null or unreachable.
  */
 
+import { readdirSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { workspacePath } from "../workspace/generate.js";
+import { resolve as resolvePath } from "node:path";
 import type { Dispatch } from "./dispatches.js";
 
 /**
@@ -35,43 +36,33 @@ export const DASHBOARD_CLAUDE_PROJECTS_BASE = "/danxbot/app/claude-projects";
 const WORKER_PROJECTS_PREFIX = "/home/danxbot/.claude/projects/";
 
 /**
- * Encode a dispatched agent's CWD to the directory-name form Claude Code uses.
- * Claude Code stores sessions at `~/.claude/projects/<encoded-cwd>/`, where
- * the encoded form replaces BOTH `/` and `.` with `-`. Verified empirically
- * against on-disk entries like `-danxbot-app-repos-danxbot--danxbot-workspace`
- * — the leading `.` of the `.danxbot` segment becomes the second dash of
- * the `--danxbot` run. Must stay in lockstep with `deriveSessionDir` in
- * `src/agent/session-log-watcher.ts`.
+ * Enumerate plausible dashboard JSONL paths for a dispatch by scanning
+ * the per-repo claude-projects mount. Each dispatched agent cwds into
+ * `<repo>/.danxbot/workspaces/<name>/`, so claude writes JSONL under
+ * `~/.claude/projects/<encoded-workspace-cwd>/<sessionUuid>.jsonl` —
+ * with one subdirectory per distinct cwd. Strategy 3 used to compute
+ * a single deterministic path from the singular workspace literal;
+ * post-workspace-dispatch there is no longer a single canonical
+ * encoded dir per repo, so we walk the per-repo mount and return one
+ * candidate per subdirectory.
  *
- * Deriving from `workspacePath` rather than hardcoding the literal means a
- * future change to `WORKSPACE_SUBDIR` or the `.danxbot/` segment updates
- * every consumer (launcher spawn, resume lookup, this encoder) in lockstep.
- *
- * NOTE: In the dashboard container `getReposBase()` resolves to
- * `/danxbot/app/repos` (either via `DANXBOT_REPOS_BASE` or the project-root
- * fallback) so the encoded dir comes out as
- * `-danxbot-app-repos-<name>--danxbot-workspace` — the exact name claude
- * writes to under `~/.claude/projects/` in the worker container.
- *
- * Host-mode workers dispatch from `<real-checkout>/.danxbot/workspace`, so
- * their encoded dir differs. `resolveJsonlPath` strategies 1+2 handle
- * host-mode dispatches via the stored absolute path; strategy 3 (this path)
- * may compute a dir that doesn't exist on disk for host-mode and returns
- * null — that is acceptable because strategy 3 is only a fallback.
+ * Only used as a fallback when the stored `jsonlPath` is null/stale —
+ * normal hits go through strategies 1 + 2 in `resolveJsonlPath`.
  */
-export function encodeRepoCwd(repoName: string): string {
-  return workspacePath(repoName).replace(/[/.]/g, "-");
-}
-
-/**
- * Compute the deterministic dashboard path for a JSONL file given the repo
- * name and the Claude session UUID (the JSONL filename stem).
- */
-export function computeDashboardJsonlPath(
+export function dashboardJsonlCandidates(
   repoName: string,
   sessionUuid: string,
-): string {
-  return `${DASHBOARD_CLAUDE_PROJECTS_BASE}/${repoName}/${encodeRepoCwd(repoName)}/${sessionUuid}.jsonl`;
+): string[] {
+  const repoBase = `${DASHBOARD_CLAUDE_PROJECTS_BASE}/${repoName}`;
+  let entries: string[];
+  try {
+    entries = readdirSync(repoBase);
+  } catch {
+    return [];
+  }
+  return entries.map((entry) =>
+    resolvePath(repoBase, entry, `${sessionUuid}.jsonl`),
+  );
 }
 
 /**
@@ -108,7 +99,11 @@ export function expectedJsonlPath(
     return translated ?? dispatch.jsonlPath;
   }
   if (dispatch.sessionUuid) {
-    return computeDashboardJsonlPath(dispatch.repoName, dispatch.sessionUuid);
+    const [first] = dashboardJsonlCandidates(
+      dispatch.repoName,
+      dispatch.sessionUuid,
+    );
+    return first ?? null;
   }
   return null;
 }
@@ -153,10 +148,14 @@ export async function resolveJsonlPath(
     if (translated && (await existsFn(translated))) return translated;
   }
 
-  // Strategy 3: deterministic computation from sessionUuid
+  // Strategy 3: enumerate plausible per-workspace paths from sessionUuid
   if (dispatch.sessionUuid) {
-    const computed = computeDashboardJsonlPath(dispatch.repoName, dispatch.sessionUuid);
-    if (await existsFn(computed)) return computed;
+    for (const candidate of dashboardJsonlCandidates(
+      dispatch.repoName,
+      dispatch.sessionUuid,
+    )) {
+      if (await existsFn(candidate)) return candidate;
+    }
   }
 
   return null;

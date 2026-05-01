@@ -204,6 +204,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     expect(mockSpawn).toHaveBeenCalledWith(
@@ -215,7 +216,7 @@ describe("spawnAgent", () => {
         expect.stringContaining("<!-- danxbot-dispatch:test-uuid-1234 -->"),
       ]),
       expect.objectContaining({
-        cwd: "/danxbot/repos/platform/.danxbot/workspace",
+        cwd: "/tmp/test-workspace",
         stdio: ["ignore", "ignore", "pipe"],
       }),
     );
@@ -248,6 +249,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const args = mockSpawn.mock.calls[0][1] as string[];
@@ -263,6 +265,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const spawnOpts = mockSpawn.mock.calls[0][2] as { stdio: unknown[] };
@@ -279,6 +282,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // The mock child still has a stdout EventEmitter, but the launcher must
@@ -294,6 +298,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Pump stdout data continuously — if any vestigial listener existed, the
@@ -315,6 +320,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const args = mockSpawn.mock.calls[0][1] as string[];
@@ -329,6 +335,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       mcpConfigPath: "/tmp/mcp/settings.json",
     });
 
@@ -353,6 +360,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       agents,
     });
 
@@ -370,6 +378,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       agents: {},
     });
 
@@ -385,6 +394,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const args = mockSpawn.mock.calls[0][1] as string[];
@@ -400,6 +410,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const spawnEnv = mockSpawn.mock.calls[0][2].env;
@@ -416,6 +427,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     expect(job.id).toBe("test-uuid-1234");
@@ -434,6 +446,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.emit("close", 0);
@@ -456,6 +469,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.emit("close", 0);
@@ -484,6 +498,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.emit("close", 0);
@@ -503,6 +518,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.emit("close", 1);
@@ -519,6 +535,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.emit("error", new Error("ENOENT"));
@@ -535,6 +552,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
     });
 
     await vi.advanceTimersByTimeAsync(61_000);
@@ -552,6 +570,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
       statusUrl: "http://example.com/status",
       apiToken: "tok-inactivity",
     });
@@ -583,6 +602,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
       statusUrl: "http://example.com/status",
       // apiToken intentionally omitted — guard must keep us from PUT'ing
       // with a missing Bearer token
@@ -621,6 +641,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
       statusUrl: "http://example.com/status",
       apiToken: "tok-retry",
     });
@@ -647,6 +668,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
       statusUrl: "http://example.com/status",
       apiToken: "tok-heartbeat",
     });
@@ -671,6 +693,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Advance 50s (not past timeout)
@@ -700,6 +723,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Emit watcher entries with assistant text
@@ -726,6 +750,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Two distinct API responses — each carries a unique `message.id` and its
@@ -777,6 +802,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Claude Code writes one JSONL entry per content block in an assistant
@@ -829,6 +855,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Real Claude Code JSONL always carries `message.id` on assistant
@@ -880,6 +907,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Assistant entry with no usage at all (e.g. partial / malformed)
@@ -923,6 +951,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     emitWatcherEntry({
@@ -959,6 +988,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     expect(getJobStatus(job)).toMatchObject({
@@ -977,6 +1007,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     emitWatcherEntry({
@@ -1016,6 +1047,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     emitWatcherEntry({
@@ -1059,6 +1091,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Three entries, each missing a different subset of fields. If the
@@ -1109,6 +1142,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       onComplete,
     });
 
@@ -1126,6 +1160,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       onComplete,
     });
 
@@ -1143,6 +1178,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
       onComplete,
     });
 
@@ -1159,6 +1195,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       env: { DANXBOT_REPO_NAME: "platform", DANXBOT_TEST_EXTRA: "1" },
     });
 
@@ -1175,6 +1212,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     expect(mockMkdirSync).toHaveBeenCalledWith(
@@ -1195,6 +1233,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.stderr.emit("data", Buffer.from("Error: permission denied"));
@@ -1212,6 +1251,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
     });
 
     await vi.advanceTimersByTimeAsync(61_000);
@@ -1229,6 +1269,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.emit("close", 0);
@@ -1247,6 +1288,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       maxRuntimeMs: 120_000,
     });
 
@@ -1274,6 +1316,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       maxRuntimeMs: 120_000,
       statusUrl: "http://example.com/status",
       apiToken: "tok-max-runtime",
@@ -1312,6 +1355,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     expect(job.stop).toBeDefined();
@@ -1325,6 +1369,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const stopPromise = job.stop!("completed", "All tasks done");
@@ -1346,6 +1391,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const stopPromise = job.stop!("failed", "Agent encountered an error");
@@ -1365,6 +1411,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const stopPromise = job.stop!("completed");
@@ -1387,6 +1434,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.emit("close", 0);
@@ -1407,6 +1455,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       onComplete,
     });
 
@@ -1427,6 +1476,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       onComplete,
     });
 
@@ -1448,6 +1498,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const stopPromise = job.stop!("completed");
@@ -1471,6 +1522,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Start stop (sets status to "completed" before kill)
@@ -1496,6 +1548,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       statusUrl: "http://example.com/status",
       apiToken: "tok-abc",
     });
@@ -1524,6 +1577,7 @@ describe("spawnAgent", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const stopPromise = job.stop!("completed", "Done");
@@ -1542,6 +1596,7 @@ describe("spawnAgent", () => {
         prompt: "/danx-next",
         repoName: "platform",
         timeoutMs: 300_000,
+        cwd: "/tmp/test-workspace",
       });
 
       expect(mockProbeAllMcpServers).not.toHaveBeenCalled();
@@ -1555,6 +1610,7 @@ describe("spawnAgent", () => {
         prompt: "/danx-next",
         repoName: "platform",
         timeoutMs: 300_000,
+        cwd: "/tmp/test-workspace",
         mcpConfigPath: "/tmp/mcp/settings.json",
       });
 
@@ -1590,6 +1646,7 @@ describe("spawnAgent", () => {
           prompt: "/danx-next",
           repoName: "platform",
           timeoutMs: 300_000,
+          cwd: "/tmp/test-workspace",
           mcpConfigPath: "/tmp/mcp/settings.json",
         }),
       ).rejects.toThrow(/schema/);
@@ -1626,6 +1683,7 @@ describe("spawnAgent", () => {
           prompt: "/danx-next",
           repoName: "platform",
           timeoutMs: 300_000,
+          cwd: "/tmp/test-workspace",
           mcpConfigPath: "/tmp/mcp/settings.json",
         }),
       ).rejects.toThrow(/schema.*danxbot|danxbot.*schema/s);
@@ -1660,6 +1718,7 @@ describe("spawnAgent", () => {
           prompt: "/danx-next",
           repoName: "platform",
           timeoutMs: 300_000,
+          cwd: "/tmp/test-workspace",
           mcpConfigPath: "/tmp/mcp/settings.json",
         }),
       ).rejects.toThrow();
@@ -1687,6 +1746,7 @@ describe("spawnAgent", () => {
           prompt: "/danx-next",
           repoName: "platform",
           timeoutMs: 300_000,
+          cwd: "/tmp/test-workspace",
           mcpConfigPath: "/tmp/mcp/settings.json",
         }),
       ).rejects.toThrow(/read-only/);
@@ -1714,6 +1774,7 @@ describe("spawnAgent", () => {
           prompt: "/danx-next",
           repoName: "platform",
           timeoutMs: 300_000,
+          cwd: "/tmp/test-workspace",
         }),
       ).rejects.toBeInstanceOf(ClaudeAuthError);
     });
@@ -1731,6 +1792,7 @@ describe("spawnAgent", () => {
         prompt: "/danx-next",
         repoName: "platform",
         timeoutMs: 300_000,
+        cwd: "/tmp/test-workspace",
       });
 
       expect(job.status).toBe("running");
@@ -1755,6 +1817,7 @@ describe("spawnAgent", () => {
           prompt: "/danx-next",
           repoName: "platform",
           timeoutMs: 300_000,
+          cwd: "/tmp/test-workspace",
         }),
       ).rejects.toThrow();
 
@@ -1817,6 +1880,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     expect(job.watcher).toBeDefined();
@@ -1830,6 +1894,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     expect(mockSpawnInTerminal).not.toHaveBeenCalled();
@@ -1843,6 +1908,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       apiToken: "test-token",
     });
@@ -1861,7 +1927,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       expect.objectContaining({
         title: expect.stringContaining("platform"),
         script: "/tmp/danxbot-term-test/run-agent.sh",
-        cwd: "/danxbot/repos/platform/.danxbot/workspace",
+        cwd: "/tmp/test-workspace",
       }),
     );
   });
@@ -1871,6 +1937,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -1891,6 +1958,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -1918,6 +1986,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -1933,6 +2002,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       onComplete,
     });
@@ -1964,6 +2034,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       onComplete,
     });
@@ -1986,6 +2057,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       onComplete,
     });
@@ -2012,6 +2084,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -2028,6 +2101,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: false,
     });
 
@@ -2039,6 +2113,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "do the work",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -2062,6 +2137,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       agents,
     });
@@ -2078,6 +2154,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       agents: {},
     });
@@ -2092,6 +2169,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -2110,6 +2188,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -2140,6 +2219,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
         prompt: "/danx-next",
         repoName: "platform",
         timeoutMs: 300_000,
+        cwd: "/tmp/test-workspace",
         openTerminal: true,
         onComplete,
       }),
@@ -2169,6 +2249,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
       prompt: "/danx-next",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: false,
     });
 
@@ -2215,7 +2296,7 @@ describe("spawnAgent — docker/host invocation equivalence", () => {
     // Docker invocation
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
-    await spawnAgent(sharedOpts);
+    await spawnAgent({ ...sharedOpts, cwd: "/tmp/test-workspace" });
     const dockerArgs = mockSpawn.mock.calls[0][1] as string[];
     const dockerDashP = dockerArgs.indexOf("-p");
     const dockerFlags = dockerArgs.slice(0, dockerDashP);
@@ -2226,7 +2307,7 @@ describe("spawnAgent — docker/host invocation equivalence", () => {
     mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
     mockReadPidFileWithTimeout.mockResolvedValue(123456);
     mockIsPidAlive.mockReturnValue(true);
-    await spawnAgent({ ...sharedOpts, openTerminal: true });
+    await spawnAgent({ ...sharedOpts, cwd: "/tmp/test-workspace", openTerminal: true });
     const hostBuild = mockBuildDispatchScript.mock.calls[0][1] as {
       flags: string[];
       firstMessage: string;
@@ -2260,6 +2341,7 @@ describe("cancelJob", () => {
       prompt: "long task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     let statusAtKillTime: string | undefined;
@@ -2282,6 +2364,7 @@ describe("cancelJob", () => {
       prompt: "long task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Simulate fast process exit triggered by SIGTERM (before 5s wait)
@@ -2312,6 +2395,7 @@ describe("cancelJob", () => {
       prompt: "long task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       statusUrl: "http://example.com/status",
       apiToken: "tok-cancel",
     });
@@ -2337,6 +2421,7 @@ describe("cancelJob", () => {
       prompt: "test",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     child.emit("close", 0);
@@ -2356,6 +2441,7 @@ describe("cancelJob", () => {
       prompt: "long task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     // Don't emit "close" — process never exits naturally
@@ -2377,6 +2463,7 @@ describe("cancelJob", () => {
       prompt: "long task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     const cancelPromise = cancelJob(job, "test-token");
@@ -2400,6 +2487,7 @@ describe("cancelJob", () => {
       prompt: "host task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -2421,6 +2509,7 @@ describe("cancelJob", () => {
       prompt: "task",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
     });
 
     await vi.advanceTimersByTimeAsync(61_000);
@@ -2440,6 +2529,7 @@ describe("cancelJob", () => {
       prompt: "task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       maxRuntimeMs: 120_000,
     });
 
@@ -2465,6 +2555,7 @@ describe("cancelJob", () => {
       prompt: "test",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
     });
 
     job.handle = undefined;
@@ -2488,6 +2579,7 @@ describe("cancelJob", () => {
       prompt: "host task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -2524,6 +2616,7 @@ describe("cancelJob", () => {
       prompt: "long task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       onComplete,
     });
 
@@ -2546,6 +2639,7 @@ describe("cancelJob", () => {
       prompt: "host task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       onComplete,
     });
@@ -2567,6 +2661,7 @@ describe("cancelJob", () => {
       prompt: "host task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       statusUrl: "http://example.com/status",
       apiToken: "tok",
@@ -2599,6 +2694,7 @@ describe("cancelJob", () => {
       prompt: "host task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 
@@ -2620,6 +2716,7 @@ describe("cancelJob", () => {
       prompt: "host task",
       repoName: "platform",
       timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
       statusUrl: "http://example.com/status",
       apiToken: "tok-host-inactivity",
@@ -2646,6 +2743,7 @@ describe("cancelJob", () => {
       prompt: "host task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       maxRuntimeMs: 120_000,
       openTerminal: true,
       statusUrl: "http://example.com/status",
@@ -2684,6 +2782,7 @@ describe("cancelJob", () => {
       prompt: "host task",
       repoName: "platform",
       timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
       openTerminal: true,
     });
 

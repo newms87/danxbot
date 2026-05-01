@@ -155,7 +155,7 @@ Use case #1's `.danxbot/mcp.env` governs the DEVELOPER's interactive `claude` on
 
 ### The workspace: dispatched-agent cwd
 
-Every dispatched agent (poller, HTTP `/api/launch`, Slack) runs with `cwd = <repo>/.danxbot/workspace/`. The workspace is a fully generated directory (`src/workspace/generate.ts`) containing danxbot-owned `.mcp.json`, `CLAUDE.md`, `.claude/settings.json`, and a `.claude/` subtree populated by the poller inject pipeline (`src/poller/index.ts#syncRepoFiles`) — rules, skills, tools, agents. This is the ONE path through which danxbot hands configuration to its dispatched claude processes. The repo-root `.claude/` is strictly developer-owned; the inject pipeline NEVER writes there. See agent-isolation epic `7ha2CSpc`, Phase 5.
+Every dispatched agent (poller, HTTP `/api/launch`, Slack) runs with `cwd = <repo>/.danxbot/workspaces/<name>/` — one resolved workspace per dispatch. Each plural workspace is fully self-contained: `workspace.yml`, `.mcp.json`, `CLAUDE.md`, `.claude/skills/`, `.claude/rules/` (static + per-repo rendered), `.claude/tools/`. The poller inject pipeline (`src/poller/index.ts#syncRepoFiles`) mirrors static workspace fixtures from `src/poller/inject/workspaces/<name>/` and writes per-repo rendered files into each plural workspace's `.claude/` on every tick. The repo-root `.claude/` is strictly developer-owned; the inject pipeline actively scrubs any leftover `danx-*` artifacts there. See agent-dispatch.md "Workspace isolation" + the workspace-dispatch epic.
 
 ## Per-Repo Trello Toggle
 

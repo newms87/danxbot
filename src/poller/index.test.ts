@@ -153,26 +153,12 @@ vi.mock("../settings-file.js", () => ({
     mockGetTrelloPollerPickupPrefix(...args),
 }));
 
-const mockGenerateWorkspace = vi
-  .fn()
-  .mockReturnValue({ path: "/mock/workspace", changedFiles: [] });
-// `workspacePath` is imported alongside `generateWorkspace` by `syncRepoFiles`
-// (Phase 3 dual-write target — see the agent-isolation epic `7ha2CSpc`).
-// Both must be mocked; omitting the second one surfaces as an
-// "[vitest] No X export" unhandled rejection during `start()`. The
-// overloaded helper accepts either a `RepoContext` or a bare repoName —
-// the mock handles both shapes to stay in sync with the real API.
-vi.mock("../workspace/generate.js", () => ({
-  generateWorkspace: (...args: unknown[]) => mockGenerateWorkspace(...args),
-  workspacePath: (input: { localPath: string } | string) =>
-    typeof input === "string"
-      ? `/danxbot/repos/${input}/.danxbot/workspace`
-      : `${input.localPath}/.danxbot/workspace`,
-  // Phase 2 of the workspace-dispatch epic (Trello `VKJzZjk9`) promoted
-  // `writeIfChanged` to a shared export so `injectDanxWorkspaces` can
-  // reuse the idempotent-write primitive. The mock forwards to the real
-  // `mockWriteFileSync` so tests assert on the same `.mock.calls`
-  // surface they already use for the rest of the inject pipeline.
+// `writeIfChanged` lives in its own module post-workspace-dispatch
+// cleanup (the singular workspace generator was retired). The mock
+// forwards to `mockWriteFileSync` so tests assert on the same
+// `.mock.calls` surface they already use for the rest of the inject
+// pipeline.
+vi.mock("../workspace/write-if-changed.js", () => ({
   writeIfChanged: (path: string, content: string): boolean => {
     mockWriteFileSync(path, content);
     return true;
@@ -291,24 +277,6 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("regenerates the workspace on every tick before syncing repo files", async () => {
-    // Phase 1 contract: the workspace skeleton refreshes every tick so
-    // config-file updates inside `.danxbot/config/` flow to dispatched
-    // agents without a worker restart. Ordering matters once Phase 3
-    // switches spawn cwd to the workspace — if the rule/skill sync fires
-    // first, a dispatched agent could momentarily cd into a workspace
-    // whose `.claude/` subtree doesn't yet exist.
-    mockFetchTodoCards.mockResolvedValue([]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockGenerateWorkspace).toHaveBeenCalledWith(MOCK_REPO_CONTEXT);
-    // The trello-client call happens inside syncRepoFiles' downstream
-    // cascade (poll → syncRepoFiles → fetchTodoCards). Asserting the
-    // workspace-generator runs before trello fetching covers the ordering.
-    expect(mockGenerateWorkspace).toHaveBeenCalledBefore(mockFetchTodoCards);
-  });
-
   it("calls dispatch() with the trello-worker workspace and trello overlay when cards exist", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
@@ -343,12 +311,14 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("syncRepoFiles writes every danx-* artifact ONLY into the workspace (Phase 5 of agent-isolation epic)", async () => {
-    // The inject pipeline writes EXCLUSIVELY into
-    // `<repo>/.danxbot/workspace/.claude/`. The repo-root `.claude/` is
-    // strictly developer-owned — danxbot never touches it. Every
-    // dispatched agent cwds into the workspace so no content is lost.
-    // See Trello `7ha2CSpc` (Phase 5).
+  it("syncRepoFiles renders per-repo files into every plural workspace and writes nothing to repo-root", async () => {
+    // The inject pipeline writes per-repo rendered files into EVERY
+    // plural workspace at `<repo>/.danxbot/workspaces/<name>/.claude/`.
+    // The repo-root `.claude/` is strictly developer-owned and is
+    // actively scrubbed of `danx-*` artifacts on every tick. The
+    // singular legacy `<repo>/.danxbot/workspace/` was retired with the
+    // workspace-dispatch cleanup. Every dispatched agent cwds into one
+    // of the plural workspaces.
     mockFetchTodoCards.mockResolvedValue([]);
     mockExistsSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return false;
@@ -359,23 +329,21 @@ describe("poll", () => {
       if (path.endsWith("workflow.md")) return true;
       if (path.endsWith("trello.yml")) return true;
       if (path.endsWith("tools.md")) return true;
+      // The poller iterates `.danxbot/workspaces/<name>/` to know which
+      // workspaces need per-repo files — the test fixture exposes a
+      // single `trello-worker` workspace.
+      if (path.endsWith("/.danxbot/workspaces")) return true;
+      if (path.endsWith("/.danxbot/workspaces/trello-worker")) return true;
       return false;
     });
     mockReaddirSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return [];
-      // Workspace-dispatch P4 (Trello `gAeJBEDr`): danx-slack-agent.md
-      // moved from `inject/rules/` into `inject/workspaces/slack-worker/
-      // .claude/rules/`. The standalone `inject/rules/` tree is empty now
-      // — rules are mirrored per-workspace instead.
       if (path.endsWith("/inject/rules")) return [];
       if (path.endsWith("/inject/tools")) return ["danx-helper.sh"];
-      // Workspace-dispatch P3 (Trello `q5aFuINM`): skills moved out of
-      // `inject/skills/` into `inject/workspaces/trello-worker/.claude/
-      // skills/`. The standalone `inject/skills/` tree is intentionally
-      // empty now; the workspace inject path mirrors the per-workspace
-      // skills instead.
+      if (path.endsWith("/.danxbot/workspaces")) return ["trello-worker"];
       return [];
     });
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -388,47 +356,39 @@ describe("poll", () => {
     const allTouched = [...writtenPaths, ...copiedDests];
 
     const workspaceClaudePrefix =
-      "/test/repos/test-repo/.danxbot/workspace/.claude/";
-    const workspacesPluralPrefix =
-      "/test/repos/test-repo/.danxbot/workspaces/";
+      "/test/repos/test-repo/.danxbot/workspaces/trello-worker/.claude/";
     const repoRootClaudePrefix = "/test/repos/test-repo/.claude/";
+    const singularWorkspacePrefix =
+      "/test/repos/test-repo/.danxbot/workspace/";
 
-    // Every artifact lands in the workspace. After P4 of the workspace-
-    // dispatch epic (Trello `gAeJBEDr`) danx-slack-agent.md joined
-    // danx-halt-flag.md and danx-{next,ideate,start,triage} in their
-    // respective workspace fixtures (slack-worker / trello-worker).
-    // The singular workspace now keeps only the per-repo generated
-    // rules + shared tools.
+    // Per-repo rendered files land in EACH plural workspace's `.claude/`.
     const expectedWorkspaceArtifacts = [
       `${workspaceClaudePrefix}rules/danx-repo-config.md`,
       `${workspaceClaudePrefix}rules/danx-repo-overview.md`,
       `${workspaceClaudePrefix}rules/danx-repo-workflow.md`,
       `${workspaceClaudePrefix}rules/danx-tools.md`,
       `${workspaceClaudePrefix}rules/danx-trello-config.md`,
-      `${workspaceClaudePrefix}tools/danx-helper.sh`,
     ];
     for (const expected of expectedWorkspaceArtifacts) {
       expect(allTouched).toContain(expected);
     }
 
-    // Isolation invariant: NOTHING is written to the developer's
-    // repo-root `.claude/`. A single stray write breaks the whole point
-    // of the agent-isolation epic, so the assertion is a strict match on
-    // the prefix — not a "none of the generated names" list — to catch
-    // any new file types an inject step might add.
-    //
-    // Workspace-dispatch epic, Phase 2: writes under
-    // `<repo>/.danxbot/workspaces/` (plural) are an explicitly permitted
-    // destination for `injectDanxWorkspaces`. No workspace fixtures
-    // ship in P2 so no writes land there yet; the allowance exists so
-    // P3/P4/P5 can add fixtures without this assertion flipping red.
+    // Isolation invariants: nothing under repo-root `.claude/`, nothing
+    // under the retired singular `<repo>/.danxbot/workspace/`. A single
+    // stray write breaks the whole point of the workspace-dispatch
+    // cleanup.
     const repoRootClaudeTouches = allTouched.filter(
       (p) =>
         p.startsWith(repoRootClaudePrefix) &&
-        !p.startsWith(workspaceClaudePrefix) &&
-        !p.startsWith(workspacesPluralPrefix),
+        !p.startsWith(`${repoRootClaudePrefix}rules/danx-`) &&
+        !p.startsWith(`${repoRootClaudePrefix}skills/danx-`) &&
+        !p.startsWith(`${repoRootClaudePrefix}tools/danx-`),
     );
     expect(repoRootClaudeTouches).toEqual([]);
+    const singularTouches = allTouched.filter((p) =>
+      p.startsWith(singularWorkspacePrefix),
+    );
+    expect(singularTouches).toEqual([]);
   });
 
   it("syncRepoFiles throws and writes nothing when a required config.yml field is missing (fail-loud — Trello `C7W1cEhh`)", () => {

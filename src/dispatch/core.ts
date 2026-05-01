@@ -255,11 +255,12 @@ interface ResolvedSurface {
   /** MCP server configs to write into the per-dispatch settings.json. */
   readonly mcpServers: Record<string, unknown>;
   /**
-   * Optional cwd override for the spawned agent. When set, replaces the
-   * launcher's default `workspacePath(repoName)`. Used by the workspace
-   * path so claude lands in `<repo>/.danxbot/workspaces/<name>/`.
+   * Spawned agent's cwd — the resolved
+   * `<repo>/.danxbot/workspaces/<name>/` workspace dir. Required: there
+   * is no longer a singular-workspace fallback in the launcher
+   * (workspace-dispatch epic, Trello `jAdeJgi5`).
    */
-  readonly cwd?: string;
+  readonly cwd: string;
   /**
    * Env vars produced by the resolver (e.g. workspace `.claude/settings.json`
    * env block). Merged after the dispatch invariants and before `input.env`.

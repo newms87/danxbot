@@ -220,6 +220,7 @@ function runToCompletion(overrides?: {
       prompt: "Integration test task",
       repoName: "test-repo",
       timeoutMs: overrides?.timeoutMs ?? 10_000,
+      cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
       statusUrl,
       apiToken,
       eventForwarding: overrides?.eventForwarding ?? { statusUrl, apiToken },
@@ -249,32 +250,13 @@ beforeEach(async () => {
 
   testState.reposBase = join(tempDir, "repos");
   repoDir = join(testState.reposBase, "test-repo");
-  // Two cwd shapes co-exist in this suite:
-  //
-  //   1. Tests that drive `spawnAgent` directly (`runToCompletion`)
-  //      inherit the launcher's default cwd of `<repo>/.danxbot/workspace/`
-  //      (Phase 3 of the agent-isolation epic, Trello `7ha2CSpc`).
-  //   2. Tests that drive `handleLaunch` post `{workspace:
-  //      "integration-test", ...}`, which the dispatch core resolves to
-  //      `<repo>/.danxbot/workspaces/integration-test/` (P5 of the
-  //      workspace-dispatch epic, Trello `mGrHNHWM`).
-  //
-  // fake-claude (spawned via the PATH wrapper) inherits whichever cwd
-  // the launcher chose and writes its JSONL under the corresponding
-  // session dir. The legacy directory is created here for #1; the named
-  // workspace directory is created below for #2; `sessionDir` tracks #2
-  // because the only test that queries the JSONL by path is the
-  // workspace-shape `GET /api/status` test.
-  const workspaceDir = join(repoDir, ".danxbot", "workspace");
-  mkdirSync(workspaceDir, { recursive: true });
 
-  // P5 of the workspace-dispatch epic (mGrHNHWM): every dispatch lands
-  // in a named workspace at `<repo>/.danxbot/workspaces/<name>/`. The
-  // `handleLaunch` integration tests below post `{workspace:
-  // "integration-test", ...}`, so write a minimal fixture workspace
-  // here. No gates, no MCP servers, no required placeholders — the
-  // dispatch core merges in the danxbot infrastructure server itself
-  // and the tests don't exercise any caller-supplied tooling.
+  // Every dispatch (both `runToCompletion` driving `spawnAgent`
+  // directly AND `handleLaunch` integration tests) cwds into the
+  // plural workspace at `<repo>/.danxbot/workspaces/integration-test/`.
+  // The singular legacy `<repo>/.danxbot/workspace/` was retired with
+  // the workspace-dispatch cleanup. Create the workspace fixture once;
+  // every test in this suite uses it.
   const integrationWs = join(
     repoDir,
     ".danxbot",
@@ -303,13 +285,9 @@ beforeEach(async () => {
     "# integration-test workspace\n",
   );
 
-  // sessionDir tracks the LEGACY workspace path because the bulk of this
-  // suite drives `spawnAgent` directly (`runToCompletion`) and inherits
-  // the launcher default cwd of `<repo>/.danxbot/workspace/`. The two
-  // `handleLaunch` integration tests below resolve a different cwd
-  // (`<repo>/.danxbot/workspaces/integration-test/`) and override
-  // `FAKE_CLAUDE_SESSION_DIR` themselves.
-  sessionDir = deriveSessionDir(workspaceDir);
+  // sessionDir derives from the integration-test workspace cwd —
+  // every dispatch in this suite lands there.
+  sessionDir = deriveSessionDir(integrationWs);
 });
 
 afterEach(async () => {
@@ -431,6 +409,7 @@ describe("Integration: dispatch pipeline", () => {
         prompt: "Integration test task",
         repoName: "test-repo",
         timeoutMs: 30_000,
+        cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
         statusUrl: captureServer.statusUrl,
         apiToken: "test-token",
         env: fakeClasudeEnv({ scenario: "slow" }),
@@ -484,6 +463,7 @@ describe("Integration: dispatch pipeline", () => {
           prompt: "Integration test task",
           repoName: "test-repo",
           timeoutMs: 10_000,
+          cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
           onComplete: resolve,
           env: fakeClasudeEnv(),
         }).catch(reject);

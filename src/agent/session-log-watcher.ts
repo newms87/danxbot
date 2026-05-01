@@ -62,15 +62,17 @@ export interface SessionLogWatcherOptions {
  * Derives the Claude Code session directory from a working directory path.
  * Claude Code stores sessions at ~/.claude/projects/<encoded-cwd>/, where
  * the encoded form replaces BOTH `/` and `.` with `-`. Verified empirically
- * against on-disk entries like `-home-newms-web-gpt-manager--danxbot-workspace`
- * (from `/home/newms/web/gpt-manager/.danxbot/workspace`) — the leading `.`
- * of `.danxbot` becomes the second dash in the `--danxbot` run.
+ * against on-disk entries like `-home-newms-web-gpt-manager--danxbot-workspaces-trello-worker`
+ * (from `/home/newms/web/gpt-manager/.danxbot/workspaces/trello-worker`) —
+ * the leading `.` of `.danxbot` becomes the second dash in the
+ * `--danxbot` run.
  *
- * The dot-encoding only matters for dispatched-agent cwds, which live under
- * `.danxbot/workspace` (a hidden-directory segment). Previously the encoder
- * only replaced `/`, producing `-.danxbot-workspace` — a directory Claude
- * Code never writes to — which silently broke SessionLogWatcher attachment
- * for every host-mode dispatch. See Trello `9ZurZCK2`-adjacent failure
+ * The dot-encoding only matters for dispatched-agent cwds, which live
+ * under `.danxbot/workspaces/<name>` (a hidden-directory segment).
+ * Previously the encoder only replaced `/`, producing
+ * `-.danxbot-workspaces-...` — a directory Claude Code never writes to
+ * — which silently broke SessionLogWatcher attachment for every
+ * host-mode dispatch. See Trello `9ZurZCK2`-adjacent failure
  * investigation and the `.danxbot`-path regression tests below.
  */
 export function deriveSessionDir(cwd: string): string {

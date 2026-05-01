@@ -62,7 +62,7 @@ Danxbot manages multiple repos from one server. Each repo has independent state 
 | `<repo>/.danxbot/config/` | `config.yml`, `trello.yml`, `compose.yml`, `overview.md`, `workflow.md`, `tools.md`, `docs/` | yes |
 | `<repo>/.danxbot/.env` | Secrets + per-repo toggles (`DANX_*` prefix) + `DANXBOT_WORKER_PORT` | gitignored |
 | `<repo>/.danxbot/.env.<target>` | **Per-deploy-target overlay** — overrides keys in `.env` at deploy time only | gitignored |
-| `<repo>/.danxbot/workspace/` | Generated dispatch cwd — danxbot-owned `.mcp.json`, `CLAUDE.md`, `.claude/` subtree | gitignored |
+| `<repo>/.danxbot/workspaces/<name>/` | Generated dispatch cwds — one dir per workspace (e.g. `trello-worker`), each with its own danxbot-owned `.mcp.json`, `CLAUDE.md`, `.claude/` subtree | gitignored |
 | `<repo>/.claude/` | **Developer territory only** — danxbot never reads or writes here | dev-maintained |
 
 `<repo>/.danxbot/.env` standardized vars: `DANX_TRELLO_ENABLED` (default `false` — explicit opt-in), `DANX_SLACK_BOT_TOKEN`, `DANX_SLACK_APP_TOKEN`, `DANX_SLACK_CHANNEL_ID`, `DANX_DB_HOST/USER/PASSWORD/NAME`, `DANX_GITHUB_TOKEN`, `DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`, `DANXBOT_WORKER_PORT`.
@@ -83,7 +83,7 @@ Connected repos live at `repos/<name>/` (symlinks to actual working copies). The
 
 ### Agent Tools
 
-Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller syncs it to `<repo>/.danxbot/workspace/.claude/rules/danx-tools.md`, which the Claude Code SDK auto-loads via `settingSources: ["project"]` because every dispatched agent's cwd is the workspace. Tool definitions stay repo-specific; danxbot's system prompts reference them generically without hardcoding paths.
+Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller syncs it into every plural workspace's `.claude/rules/danx-tools.md` (e.g. `<repo>/.danxbot/workspaces/trello-worker/.claude/rules/danx-tools.md`). Each dispatched agent cwds into its workspace dir so the file resolves cwd-relative — claude never path-walks to the developer's repo-root `.claude/`. Tool definitions stay repo-specific; danxbot's system prompts reference them generically without hardcoding paths.
 
 ### Per-Repo Feature Toggles
 

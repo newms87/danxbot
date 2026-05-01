@@ -25,11 +25,7 @@ import {
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
-import {
-  generateWorkspace,
-  workspacePath,
-  writeIfChanged,
-} from "../workspace/generate.js";
+import { writeIfChanged } from "../workspace/write-if-changed.js";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
 import {
@@ -185,21 +181,11 @@ export async function poll(repo: RepoContext): Promise<void> {
 }
 
 async function _poll(repo: RepoContext): Promise<void> {
-  // Re-run the workspace generator every tick (not just at worker boot)
-  // so changes inside `.danxbot/config/` propagate to dispatched agents
-  // without a restart. `generateWorkspace` is idempotent; its docstring
-  // owns the WHAT.
-  generateWorkspace(repo);
-
+  // Re-run the inject pipeline every tick (not just at worker boot) so
+  // changes inside `.danxbot/config/` propagate to dispatched agents
+  // without a restart. `syncRepoFiles` is idempotent — see its
+  // docstring + the per-workspace render loop inside.
   syncRepoFiles(repo);
-
-  // Trello config lives ONLY in the workspace. Dispatched agents cwd into
-  // the workspace (agent-isolation epic, Trello `7ha2CSpc`) so that is the
-  // single source of truth. The developer's repo-root `.claude/` is
-  // strictly dev-owned — danxbot neither reads nor writes there.
-  const workspaceRulesDir = resolve(workspacePath(repo), ".claude/rules");
-  mkdirSync(workspaceRulesDir, { recursive: true });
-  writeTrelloConfigRule(repo.trello, workspaceRulesDir);
 
   log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
 
@@ -389,11 +375,20 @@ export function validateRepoConfig(repo: RepoContext): void {
 }
 
 /**
- * The `.claude/` subtree the inject pipeline writes into — always the
- * generated workspace (`<repo>/.danxbot/workspace/.claude/`), which is
- * the cwd of every dispatched agent (agent-isolation epic, Trello
- * `7ha2CSpc`). The repo-root `.claude/` is strictly developer-owned;
- * danxbot never reads or writes there.
+ * The `.claude/` subtree the inject pipeline writes per-repo files
+ * into. Every dispatched agent cwds into one of the plural workspaces
+ * at `<repo>/.danxbot/workspaces/<name>/` (agent-isolation +
+ * workspace-dispatch epics, Trello `7ha2CSpc`/`jAdeJgi5`), so that's
+ * where per-repo rendered rules + tools must land — duplicated into
+ * each workspace dir so cwd-relative skill references like
+ * `.claude/rules/danx-trello-config.md` resolve LOCALLY without claude
+ * having to walk ancestor `.claude/` dirs (which would land on the
+ * developer's repo-root `.claude/`, an isolation contract violation
+ * that produced the Phase 6 stale-board-IDs incident).
+ *
+ * The repo-root `.claude/` is strictly developer-owned. Danxbot neither
+ * reads nor writes there; `scrubRepoRootDanxArtifacts` actively removes
+ * any leftover `danx-*` files at repo-root on every tick.
  */
 interface InjectTarget {
   rulesDir: string;
@@ -401,12 +396,11 @@ interface InjectTarget {
   toolsDir: string;
 }
 
-function buildInjectTarget(repo: RepoContext): InjectTarget {
-  const root = workspacePath(repo);
+function buildInjectTarget(workspaceRoot: string): InjectTarget {
   return {
-    rulesDir: resolve(root, ".claude/rules"),
-    skillsDir: resolve(root, ".claude/skills"),
-    toolsDir: resolve(root, ".claude/tools"),
+    rulesDir: resolve(workspaceRoot, ".claude/rules"),
+    skillsDir: resolve(workspaceRoot, ".claude/skills"),
+    toolsDir: resolve(workspaceRoot, ".claude/tools"),
   };
 }
 
@@ -466,58 +460,6 @@ function copyRepoToolScripts(
   for (const file of readdirSync(src)) {
     const dest = resolve(target.toolsDir, file);
     copyFileSync(resolve(src, file), dest);
-    chmodExecutable(dest);
-  }
-}
-
-/**
- * Step 5: inject/skills/* -> workspace .claude/skills/. Write-only — never
- * deletes. Stale `danx-*` skill dirs left behind after a rename in
- * `src/poller/inject/skills/` survive on disk; operator clears via
- * `git clean -fdX` if/when needed. We previously pruned target entries
- * missing from source, but the same prune helper recursively rmSync'd
- * user-authored sibling files when scoped wider — the safety cost of
- * "automatic delete on a poll tick" is never worth the convenience of
- * not having a stale gitignored file. See incident retro: pruning a
- * gpt-manager-authored workspace because it wasn't in our inject pipeline.
- */
-function injectDanxSkills(target: InjectTarget): void {
-  const injectSkillsDir = resolve(injectDir, "skills");
-  if (!existsSync(injectSkillsDir)) return;
-  const sourceSkillNames = readdirSync(injectSkillsDir);
-  for (const skillName of sourceSkillNames) {
-    const srcSkillDir = resolve(injectSkillsDir, skillName);
-    const destSkillDir = resolve(target.skillsDir, skillName);
-    mkdirSync(destSkillDir, { recursive: true });
-    for (const file of readdirSync(srcSkillDir)) {
-      copyFileSync(resolve(srcSkillDir, file), resolve(destSkillDir, file));
-    }
-  }
-}
-
-/**
- * Step 5b: inject/rules/*.md -> workspace .claude/rules/. Write-only.
- */
-function injectDanxRules(target: InjectTarget): void {
-  const injectRulesDir = resolve(injectDir, "rules");
-  if (!existsSync(injectRulesDir)) return;
-  for (const file of readdirSync(injectRulesDir)) {
-    if (!file.endsWith(".md")) continue;
-    copyFileSync(resolve(injectRulesDir, file), resolve(target.rulesDir, file));
-  }
-}
-
-/**
- * Step 6: inject/tools/* -> workspace .claude/tools/ (executable).
- * Write-only — same prune-free contract as `injectDanxSkills`.
- */
-function injectDanxTools(target: InjectTarget): void {
-  const injectToolsDir = resolve(injectDir, "tools");
-  if (!existsSync(injectToolsDir)) return;
-  const sourceToolNames = readdirSync(injectToolsDir);
-  for (const file of sourceToolNames) {
-    const dest = resolve(target.toolsDir, file);
-    copyFileSync(resolve(injectToolsDir, file), dest);
     chmodExecutable(dest);
   }
 }
@@ -720,49 +662,68 @@ function copyFeaturesOnce(danxbotConfigDir: string): void {
 }
 
 /**
- * Sync danxbot config into the workspace `.claude/` subtree. All injected
- * files use the `danx-` prefix so they're clearly identifiable and
- * gitignore-able. The workspace (`<repo>/.danxbot/workspace/`) is the
- * cwd of every dispatched agent (agent-isolation epic, Trello
- * `7ha2CSpc`); the repo-root `.claude/` is strictly developer-owned and
- * danxbot never touches it. Called on every poll cycle to keep the
- * workspace up to date. Each numbered step is its own helper — the
- * function body is the table of contents.
+ * Sync danxbot config into every plural workspace's `.claude/` subtree.
+ * All injected files use the `danx-` prefix so they're clearly
+ * identifiable and gitignore-able.
+ *
+ * Two-stage pipeline:
+ *
+ *   1. **Static mirror** (`injectDanxWorkspaces`). Copies
+ *      `src/poller/inject/workspaces/<name>/` → `<repo>/.danxbot/workspaces/<name>/`
+ *      verbatim. Each workspace ships its own static skills, rules,
+ *      `.mcp.json`, `CLAUDE.md`, etc. — all generic, identical for
+ *      every connected repo.
+ *
+ *   2. **Per-repo render** (`renderPerRepoFilesIntoWorkspaces`). For
+ *      each workspace, writes the per-repo rendered files into its
+ *      `.claude/`: `danx-repo-config.md`, `danx-repo-overview.md`,
+ *      `danx-repo-workflow.md`, `danx-tools.md`, repo-specific tool
+ *      scripts, and `danx-trello-config.md`. These differ per repo
+ *      (board IDs, repo name, etc.) so they cannot live in the static
+ *      inject tree — they are rendered fresh every tick from the
+ *      `RepoContext`. Duplicated across every workspace dir so
+ *      cwd-relative skill references resolve locally.
+ *
+ *   3. **Scrubs** enforce the agent-isolation contract: stale `danx-*`
+ *      files at `<repo>/.claude/{rules,skills,tools}/` and the legacy
+ *      singular `<repo>/.danxbot/workspace/` directory are removed.
+ *      Without these scrubs claude's ancestor walk for `.claude/` dirs
+ *      finds the repo-root copies and loads stale config (the Phase 6
+ *      "agent reads Flytebot Chat board IDs after we switched to
+ *      Platform V3" incident).
+ *
+ * Called on every poll tick to keep workspaces up to date. Each
+ * numbered step is its own helper — the function body is the table
+ * of contents.
  */
 export function syncRepoFiles(repo: RepoContext): void {
   const danxbotConfigDir = resolve(repo.localPath, ".danxbot/config");
   if (!existsSync(danxbotConfigDir)) return;
 
-  const target = buildInjectTarget(repo);
-  mkdirSync(target.rulesDir, { recursive: true });
-  mkdirSync(target.toolsDir, { recursive: true });
-
   const cfg = parseSimpleYaml(
     readFileSync(resolve(danxbotConfigDir, "config.yml"), "utf-8"),
   );
 
-  writeRepoConfigRule(cfg, target);
-  copyRepoConfigDocs(danxbotConfigDir, target);
-  copyRepoToolsDoc(danxbotConfigDir, target);
-  copyRepoToolScripts(danxbotConfigDir, target);
-  injectDanxSkills(target);
-  injectDanxRules(target);
-  injectDanxTools(target);
+  // Validate the config upfront — `renderRepoConfigMarkdown` throws
+  // fail-loud on a missing required field. Doing this BEFORE any disk
+  // writes so a broken config aborts the sync without leaving the
+  // workspace half-populated. The rendered markdown is discarded; the
+  // actual write happens per-workspace in stage 2.
+  renderRepoConfigMarkdown(cfg);
 
-  // Workspace-dispatch epic, Phase 2 (Trello `VKJzZjk9`). Mirrors the
-  // full workspace tree from `src/poller/inject/workspaces/<name>/` to
-  // `<repo>/.danxbot/workspaces/<name>/` — note PLURAL, distinct from the
-  // legacy singular `<repo>/.danxbot/workspace/` the `generateWorkspace`
-  // helper owns. No workspace fixtures ship in Phase 2 (Phases 3-5 add
-  // trello-worker, slack-worker, http-launch-default), so on an empty
-  // source dir this is a no-op apart from ensuring the target directory
-  // exists on disk.
-  injectDanxWorkspaces(resolve(repo.localPath, ".danxbot/workspaces"));
+  // Stage 1: static workspace mirror.
+  const workspacesDir = resolve(repo.localPath, ".danxbot/workspaces");
+  injectDanxWorkspaces(workspacesDir);
 
-  // `cfg.name` is guaranteed non-empty here: `writeRepoConfigRule` (called
-  // above) routes through `renderRepoConfigMarkdown`, which throws on a
-  // missing `name`. No silent fallback at this callsite — a broken config
-  // surfaces upstream rather than producing an `unknown-compose.yml` file.
+  // Stage 2: per-repo render into every plural workspace.
+  renderPerRepoFilesIntoWorkspaces(repo, danxbotConfigDir, cfg, workspacesDir);
+
+  // Stage 3: scrubs. Remove the legacy singular `<repo>/.danxbot/workspace/`
+  // (workspace-dispatch epic retired it) and any `danx-*` artifacts at
+  // repo-root `.claude/` (dev-territory contract).
+  scrubLegacySingularWorkspace(repo.localPath);
+  scrubRepoRootDanxArtifacts(repo.localPath);
+
   copyComposeOverride(
     danxbotConfigDir,
     resolve(projectRoot, "repo-overrides"),
@@ -770,6 +731,95 @@ export function syncRepoFiles(repo: RepoContext): void {
   );
   copyRepoDocs(danxbotConfigDir);
   copyFeaturesOnce(danxbotConfigDir);
+}
+
+/**
+ * For each plural workspace under `<repo>/.danxbot/workspaces/`, render
+ * the per-repo files into its `.claude/`. The static mirror created
+ * the workspace dirs in stage 1; this stage just adds the per-repo
+ * data layer on top. Workspaces from the static inject tree that have
+ * never received a tick yet still get the per-repo files written —
+ * `injectDanxWorkspaces` ran first, so the dirs exist.
+ *
+ * Workspaces are discovered from the on-disk `<repo>/.danxbot/workspaces/`
+ * directory, not from `inject/workspaces/`. This way an operator-authored
+ * workspace tracked in the connected repo's git (the
+ * `gpt-manager-authored schema-builder/` precedent that produced the
+ * never-prune contract) also gets the per-repo files — the inject
+ * pipeline doesn't gate on whether danxbot ships the workspace itself.
+ */
+function renderPerRepoFilesIntoWorkspaces(
+  repo: RepoContext,
+  danxbotConfigDir: string,
+  cfg: Record<string, string>,
+  workspacesDir: string,
+): void {
+  if (!existsSync(workspacesDir)) return;
+  const names = readdirSync(workspacesDir).filter((entry) => {
+    try {
+      return statSync(resolve(workspacesDir, entry)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+
+  for (const name of names) {
+    const workspaceRoot = resolve(workspacesDir, name);
+    const target = buildInjectTarget(workspaceRoot);
+    mkdirSync(target.rulesDir, { recursive: true });
+    mkdirSync(target.toolsDir, { recursive: true });
+
+    writeRepoConfigRule(cfg, target);
+    copyRepoConfigDocs(danxbotConfigDir, target);
+    copyRepoToolsDoc(danxbotConfigDir, target);
+    copyRepoToolScripts(danxbotConfigDir, target);
+    writeTrelloConfigRule(repo.trello, target.rulesDir);
+  }
+}
+
+/**
+ * Remove the legacy singular `<repo>/.danxbot/workspace/` dir created
+ * by the retired `generateWorkspace` helper. Pre-refactor this dir was
+ * the dispatched-agent cwd; post-refactor every dispatch resolves a
+ * plural workspace under `<repo>/.danxbot/workspaces/<name>/` and the
+ * singular dir is dead weight that shadows nothing but still confuses
+ * humans grepping the tree. Idempotent — absent dir is a no-op.
+ */
+function scrubLegacySingularWorkspace(repoLocalPath: string): void {
+  const dir = resolve(repoLocalPath, ".danxbot/workspace");
+  if (!existsSync(dir)) return;
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/**
+ * Remove any `danx-*` files at `<repo>/.claude/{rules,skills,tools}/`.
+ * The repo-root `.claude/` is strictly developer-owned per the
+ * agent-isolation contract; any `danx-*` file there is either (a) a
+ * leftover from a pre-isolation poller version, or (b) someone's
+ * misguided attempt to override workspace config. Both cause the
+ * exact bug this scrub exists to prevent: claude's ancestor walk
+ * finds the repo-root copy, loads stale data, and the agent dispatches
+ * with wrong board IDs / repo config.
+ *
+ * Scope is intentionally narrow — only the `danx-*` prefix, only the
+ * three subdirs (`rules/`, `skills/`, `tools/`). Nothing else under
+ * `<repo>/.claude/` is touched.
+ */
+function scrubRepoRootDanxArtifacts(repoLocalPath: string): void {
+  const subdirs = ["rules", "skills", "tools"];
+  for (const sub of subdirs) {
+    const dir = resolve(repoLocalPath, ".claude", sub);
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir)) {
+      if (!entry.startsWith("danx-")) continue;
+      const path = resolve(dir, entry);
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch (err) {
+        log.warn(`Failed to scrub ${path}:`, err);
+      }
+    }
+  }
 }
 
 function spawnClaude(

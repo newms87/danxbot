@@ -21,7 +21,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
-import { workspacePath } from "../workspace/generate.js";
 import {
   buildCleanEnv,
   logPromptToDisk,
@@ -181,14 +180,14 @@ export interface SpawnAgentOptions {
   /** Repo name — used to resolve cwd to repos/<name> */
   repoName: string;
   /**
-   * Override the spawned agent's working directory. When set, replaces the
-   * default `workspacePath(options.repoName)` resolution. Used by the
-   * workspace-dispatch path (`dispatchWithWorkspace`) to point claude at the
-   * resolved `<repo>/.danxbot/workspaces/<name>/` workspace dir instead of
-   * the singular legacy `<repo>/.danxbot/workspace/`. Absent for legacy
-   * dispatches, which keep the singular path until P5 retires it.
+   * Spawned agent's working directory — the resolved
+   * `<repo>/.danxbot/workspaces/<name>/` workspace dir from
+   * `resolveWorkspace`. Required: every dispatch goes through the
+   * workspace resolver, no caller spawns without an explicit cwd. The
+   * legacy singular `<repo>/.danxbot/workspace/` fallback was retired
+   * with the workspace-dispatch epic (Trello `jAdeJgi5`).
    */
-  cwd?: string;
+  cwd: string;
   /** Optional pre-generated job ID. If not set, a UUID is generated. Used to keep
    *  the activeJobs key stable across stall-recovery respawns. */
   jobId?: string;
@@ -452,17 +451,12 @@ export async function spawnAgent(
   });
   const { flags, firstMessage, promptDir } = invocation;
 
-  // Dispatched agents cwd into the generated workspace, NOT the repo root.
-  // The workspace (`<repo>/.danxbot/workspace/`) is owned entirely by
-  // danxbot and holds the `.mcp.json` stub, `.claude/settings.json`,
-  // `CLAUDE.md`, and the dual-written rules/skills/tools the poller
-  // injects. The repo root belongs to the developer's interactive claude
-  // session (use case #1). This isolation is the point of the
-  // agent-isolation epic — see Trello card `7ha2CSpc` and
-  // `.claude/rules/agent-dispatch.md`. Any future change to what
-  // dispatched agents see from their cwd lands inside `workspacePath` /
-  // `generateWorkspace`, NOT here.
-  const agentCwd = options.cwd ?? workspacePath(options.repoName);
+  // Dispatched agents cwd into the resolved plural workspace at
+  // `<repo>/.danxbot/workspaces/<name>/`. The repo root belongs to the
+  // developer's interactive claude session (use case #1) — the
+  // agent-isolation contract forbids dispatched cwd at the repo root.
+  // See Trello card `7ha2CSpc` and `.claude/rules/agent-dispatch.md`.
+  const agentCwd = options.cwd;
 
   log.info(`[Job ${jobId}] Launching agent`);
   log.info(`[Job ${jobId}] Prompt: ${options.prompt.substring(0, 200)}`);

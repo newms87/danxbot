@@ -160,7 +160,14 @@ describe("handleStream — dispatch:jsonl:<id> topic", () => {
     expect(res.ended).toBe(true);
   });
 
-  it("starts a JSONL watcher using sessionUuid fallback when jsonlPath is null", async () => {
+  it("returns 404 when jsonlPath is null and no plural workspace dir exists on disk for the strategy-3 fallback", async () => {
+    // Workspace-dispatch cleanup retired the deterministic singular-
+    // workspace path computation. Strategy 3 now enumerates
+    // `<DASHBOARD_CLAUDE_PROJECTS_BASE>/<repo>/<encoded-workspace>/`
+    // subdirs at runtime — under vitest there are none, so the
+    // fallback yields no candidates and the route 404s. Real prod
+    // hits work because the dashboard mounts the per-repo
+    // claude-projects dir read-only.
     mockGetDispatchById.mockResolvedValue({
       id: "job-uuid",
       repoName: "danxbot",
@@ -170,11 +177,8 @@ describe("handleStream — dispatch:jsonl:<id> topic", () => {
     const req = makeReq("topics=dispatch:jsonl:job-uuid");
     const res = makeRes();
     await handleStream(req, res, new URLSearchParams("topics=dispatch:jsonl:job-uuid"));
-    expect(res.statusCode).toBe(200);
-    expect(mockStartJsonlWatcher).toHaveBeenCalledWith(
-      "job-uuid",
-      "/danxbot/app/claude-projects/danxbot/-danxbot-app-repos-danxbot--danxbot-workspace/abc123.jsonl",
-    );
+    expect(res.statusCode).toBe(404);
+    expect(mockStartJsonlWatcher).not.toHaveBeenCalled();
   });
 
   it("starts a JSONL watcher for a valid dispatch:jsonl topic", async () => {

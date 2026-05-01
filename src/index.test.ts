@@ -76,14 +76,6 @@ vi.mock("./settings-file.js", () => ({
   syncSettingsFileOnBoot: mockSyncSettingsFileOnBoot,
 }));
 
-const mockGenerateWorkspace = vi.fn().mockReturnValue({
-  path: "/mock/workspace",
-  changedFiles: [],
-});
-vi.mock("./workspace/generate.js", () => ({
-  generateWorkspace: mockGenerateWorkspace,
-}));
-
 // Default: dashboard mode (no DANXBOT_REPO_NAME, no repo contexts)
 // These mocks are overridden in worker describe blocks via vi.doMock
 let mockIsWorkerMode = false;
@@ -180,19 +172,6 @@ describe("worker mode startup flow", () => {
     expect(mockSyncSettingsFileOnBoot).toHaveBeenCalledWith(MOCK_REPO, "host");
     expect(mockSyncSettingsFileOnBoot).toHaveBeenCalledBefore(mockInitPlatformPool);
     expect(mockSyncSettingsFileOnBoot).toHaveBeenCalledBefore(mockStartWorkerServer);
-  });
-
-  it("generates the isolated workspace dir before starting the worker server", async () => {
-    await importIndex();
-
-    // The workspace must exist before /api/launch can accept requests —
-    // dispatched agents will cd into it (Phase 3 of the isolation epic).
-    // Must run AFTER syncSettingsFileOnBoot (the workspace reads
-    // `repo.workerPort` into `.claude/settings.json`) and BEFORE
-    // startWorkerServer (or the first dispatch would see no workspace).
-    expect(mockGenerateWorkspace).toHaveBeenCalledWith(MOCK_REPO);
-    expect(mockGenerateWorkspace).toHaveBeenCalledAfter(mockSyncSettingsFileOnBoot);
-    expect(mockGenerateWorkspace).toHaveBeenCalledBefore(mockStartWorkerServer);
   });
 
   it("starts poller", async () => {
@@ -362,12 +341,6 @@ describe("dashboard mode startup flow", () => {
     await importIndex();
 
     expect(mockSyncSettingsFileOnBoot).not.toHaveBeenCalled();
-  });
-
-  it("does NOT generate the workspace (workers do that, not dashboards)", async () => {
-    await importIndex();
-
-    expect(mockGenerateWorkspace).not.toHaveBeenCalled();
   });
 
   it("calls initShutdownHandlers with thread cleanup + retention interval", async () => {
