@@ -98,6 +98,7 @@ describe("settings-file", () => {
           slack: { enabled: false },
           trelloPoller: { enabled: true },
           dispatchApi: { enabled: null },
+          ideator: { enabled: null },
         },
         display: { worker: { port: 1234, runtime: "host" } },
         meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:alice" },
@@ -415,8 +416,36 @@ describe("settings-file", () => {
       expect(isFeatureEnabled(ctx, "trelloPoller")).toBe(true);
     });
 
-    it("covers all three features via the FEATURES constant", () => {
-      expect(FEATURES).toEqual(["slack", "trelloPoller", "dispatchApi"]);
+    it("covers all four features via the FEATURES constant", () => {
+      expect(FEATURES).toEqual([
+        "slack",
+        "trelloPoller",
+        "dispatchApi",
+        "ideator",
+      ]);
+    });
+
+    it("ideator env default is false (explicit opt-in)", () => {
+      const ctx = makeRepoContext({ localPath });
+      expect(isFeatureEnabled(ctx, "ideator")).toBe(false);
+    });
+
+    it("ideator returns true when override is true", async () => {
+      await writeSettings(localPath, {
+        overrides: { ideator: { enabled: true } },
+        writtenBy: "dashboard:test",
+      });
+      const ctx = makeRepoContext({ localPath });
+      expect(isFeatureEnabled(ctx, "ideator")).toBe(true);
+    });
+
+    it("ideator returns false when override explicitly false", async () => {
+      await writeSettings(localPath, {
+        overrides: { ideator: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+      const ctx = makeRepoContext({ localPath });
+      expect(isFeatureEnabled(ctx, "ideator")).toBe(false);
     });
   });
 

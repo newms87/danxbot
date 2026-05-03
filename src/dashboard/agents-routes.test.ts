@@ -13,7 +13,7 @@ const mockWriteSettings = vi.fn();
 vi.mock("../settings-file.js", () => ({
   readSettings: (...args: unknown[]) => mockReadSettings(...args),
   writeSettings: (...args: unknown[]) => mockWriteSettings(...args),
-  FEATURES: ["slack", "trelloPoller", "dispatchApi"],
+  FEATURES: ["slack", "trelloPoller", "dispatchApi", "ideator"],
   DASHBOARD_PREFIX: "dashboard:",
 }));
 
@@ -136,12 +136,13 @@ describe("handleClearAgentCriticalFailure", () => {
 });
 
 // Helper settings structure matching the module's Settings shape.
-function settings(overrides?: Partial<{ slack: boolean | null; trelloPoller: boolean | null; dispatchApi: boolean | null }>) {
+function settings(overrides?: Partial<{ slack: boolean | null; trelloPoller: boolean | null; dispatchApi: boolean | null; ideator: boolean | null }>) {
   return {
     overrides: {
       slack: { enabled: overrides?.slack ?? null },
       trelloPoller: { enabled: overrides?.trelloPoller ?? null },
       dispatchApi: { enabled: overrides?.dispatchApi ?? null },
+      ideator: { enabled: overrides?.ideator ?? null },
     },
     display: {},
     meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:test" },

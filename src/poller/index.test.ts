@@ -145,7 +145,14 @@ vi.mock("../dispatch/core.js", () => ({
   dispatch: (...args: unknown[]) => mockDispatch(...args),
 }));
 
-const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
+// Feature-aware default: ideator's env default is `false` (explicit
+// opt-in via `<repo>/.danxbot/settings.json` overrides). Every other
+// feature defaults to `true` so existing tests that don't care about
+// the toggle continue to dispatch. Typed `(...args: unknown[])` so tests
+// can override with narrower argument types via `mockImplementation`.
+const mockIsFeatureEnabled = vi.fn(
+  (...args: unknown[]) => (args[1] as string) !== "ideator",
+);
 const mockGetTrelloPollerPickupPrefix = vi.fn().mockReturnValue(null);
 vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
@@ -251,6 +258,16 @@ describe("poll", () => {
     mockFetchNeedsHelpCards.mockResolvedValue([]);
     mockFetchReviewCards.mockResolvedValue(Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `Review ${i}` })));
     mockMoveCardToList.mockResolvedValue(undefined);
+    // `vi.clearAllMocks()` does NOT reset implementations — `mockReset()`
+    // does. Reset then re-set the feature-aware default so prior
+    // `mockImplementation` calls in earlier tests don't leak (ideator's
+    // env default is false; everything else is true).
+    mockIsFeatureEnabled.mockReset();
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockGetTrelloPollerPickupPrefix.mockReset();
+    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
   });
 
   it("skips when teamRunning is true", async () => {
@@ -693,7 +710,7 @@ describe("poll — trelloPoller feature toggle", () => {
 
   it("skips the tick and does not fetch cards when disabled", async () => {
     mockIsFeatureEnabled.mockImplementation(
-      (_ctx: unknown, feature: string) => feature !== "trelloPoller",
+      (...args: unknown[]) => (args[1] as string) !== "trelloPoller",
     );
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card" }]);
 
@@ -1053,7 +1070,7 @@ describe("start", () => {
     // `poll()` when `isFeatureEnabled(repo, "trelloPoller")` is false.
     mockRepoContexts[0].trelloEnabled = false;
     mockIsFeatureEnabled.mockImplementation(
-      (_ctx: unknown, feature: string) => feature !== "trelloPoller",
+      (...args: unknown[]) => (args[1] as string) !== "trelloPoller",
     );
     mockFetchTodoCards.mockResolvedValue([]);
     mockFetchReviewCards.mockResolvedValue([]);
@@ -1079,7 +1096,9 @@ describe("start", () => {
     const disabledRepo = { ...mockRepoContexts[0], name: "disabled", trelloEnabled: false };
     mockRepoContexts.length = 0;
     mockRepoContexts.push(enabledRepo, disabledRepo);
-    mockIsFeatureEnabled.mockImplementation((ctx: { name: string }, feature: string) => {
+    mockIsFeatureEnabled.mockImplementation((...args: unknown[]) => {
+      const ctx = args[0] as { name: string };
+      const feature = args[1] as string;
       if (feature !== "trelloPoller") return true;
       return ctx.name === "enabled";
     });
@@ -1161,7 +1180,7 @@ describe("poll — critical-failure halt gate", () => {
     // If the poller is disabled, we don't need to read the flag at all —
     // the whole tick is skipped before flag logic.
     mockIsFeatureEnabled.mockImplementation(
-      (_ctx: unknown, feature: string) => feature !== "trelloPoller",
+      (...args: unknown[]) => (args[1] as string) !== "trelloPoller",
     );
     mockReadFlag.mockReturnValue(null);
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card" }]);
@@ -1432,6 +1451,15 @@ describe("poll — Docker mode (headless agent)", () => {
     mockFetchInProgressCards.mockResolvedValue([]);
     mockAddComment.mockResolvedValue(undefined);
     mockMoveCardToList.mockResolvedValue(undefined);
+    // Restore feature-aware default so prior describe blocks' calls to
+    // `mockReturnValue(true)` don't leak in (clearAllMocks doesn't reset
+    // implementations or return values).
+    mockIsFeatureEnabled.mockReset();
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockGetTrelloPollerPickupPrefix.mockReset();
+    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -1467,10 +1495,12 @@ describe("poll — Docker mode (headless agent)", () => {
     );
   });
 
-  it("passes the /danx-ideate prompt as the dispatch task when ToDo is empty", async () => {
+  it("passes the /danx-ideate prompt as the dispatch task when ToDo is empty AND ideator enabled", async () => {
     mockFetchTodoCards.mockResolvedValue([]);
     // Review list has fewer than REVIEW_MIN_CARDS (mocked to 10)
     mockFetchReviewCards.mockResolvedValue([]);
+    // Ideator default is OFF — operator must explicitly enable.
+    mockIsFeatureEnabled.mockImplementation(() => true);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1479,6 +1509,28 @@ describe("poll — Docker mode (headless agent)", () => {
         task: expect.stringContaining("/danx-ideate"),
       }),
     );
+  });
+
+  it("does NOT spawn ideator when feature is disabled (env default)", async () => {
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue([]);
+    // Default mock returns false for `ideator` — no override needed.
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("does NOT spawn ideator when override explicitly disables it even though Review is empty", async () => {
+    mockFetchTodoCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue([]);
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   it("resets teamRunning via onComplete callback", async () => {
@@ -1600,6 +1652,8 @@ describe("poll — Docker mode (headless agent)", () => {
     // card-progress check from firing (no card to check).
     mockFetchTodoCards.mockResolvedValue([]);
     mockFetchReviewCards.mockResolvedValue([]); // below threshold → ideator
+    // Ideator default is OFF (env default) — operator opt-in.
+    mockIsFeatureEnabled.mockImplementation(() => true);
 
     await poll(MOCK_REPO_CONTEXT);
 

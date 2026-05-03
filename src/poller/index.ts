@@ -1064,6 +1064,17 @@ function formatElapsed(job: AgentJob): string {
 }
 
 async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {
+  // Per-repo runtime toggle. Env default is `false` — operators opt in
+  // via the dashboard Agents tab. Checked BEFORE the Review-list fetch
+  // so a disabled repo doesn't pay the Trello round-trip on every
+  // empty-ToDo tick. See `.claude/rules/settings-file.md`.
+  if (!isFeatureEnabled(repo, "ideator")) {
+    log.info(
+      `[${repo.name}] Ideator disabled (settings.json override or env default) — skipping`,
+    );
+    return;
+  }
+
   let reviewCards;
   try {
     reviewCards = await fetchReviewCards(repo.trello);

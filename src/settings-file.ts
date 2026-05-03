@@ -42,12 +42,13 @@ import type { RepoContext } from "./types.js";
 
 const log = createLogger("settings-file");
 
-export type Feature = "slack" | "trelloPoller" | "dispatchApi";
+export type Feature = "slack" | "trelloPoller" | "dispatchApi" | "ideator";
 
 export const FEATURES: readonly Feature[] = [
   "slack",
   "trelloPoller",
   "dispatchApi",
+  "ideator",
 ] as const;
 
 /**
@@ -88,6 +89,7 @@ export interface SettingsOverrides {
   slack: FeatureOverride;
   trelloPoller: TrelloPollerOverride;
   dispatchApi: FeatureOverride;
+  ideator: FeatureOverride;
 }
 
 export interface SettingsDisplayWorker {
@@ -124,6 +126,7 @@ export interface WriteSettingsPatchOverrides {
   slack?: FeatureOverride;
   trelloPoller?: TrelloPollerOverride;
   dispatchApi?: FeatureOverride;
+  ideator?: FeatureOverride;
 }
 
 export interface WriteSettingsPatch {
@@ -147,6 +150,7 @@ export function defaultSettings(): Settings {
       slack: { enabled: null },
       trelloPoller: { enabled: null, pickupNamePrefix: null },
       dispatchApi: { enabled: null },
+      ideator: { enabled: null },
     },
     display: {},
     meta: { updatedAt: new Date(0).toISOString(), updatedBy: "worker" },
@@ -239,6 +243,7 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
         partial.overrides?.trelloPoller,
       ),
       dispatchApi: normalizeOverride(partial.overrides?.dispatchApi),
+      ideator: normalizeOverride(partial.overrides?.ideator),
     },
     display:
       partial.display && typeof partial.display === "object"
@@ -327,6 +332,7 @@ async function runWrite(
           patch.overrides?.trelloPoller ?? existing.overrides.trelloPoller,
         dispatchApi:
           patch.overrides?.dispatchApi ?? existing.overrides.dispatchApi,
+        ideator: patch.overrides?.ideator ?? existing.overrides.ideator,
       },
       display: patch.display
         ? { ...existing.display, ...patch.display }
@@ -427,6 +433,12 @@ function envDefault(ctx: RepoContext, feature: Feature): boolean {
       return ctx.trelloEnabled;
     case "dispatchApi":
       return true;
+    case "ideator":
+      // Explicit opt-in: the ideator dispatches `/danx-ideate` whenever
+      // the Review list runs short and is therefore the most expensive
+      // recurring spawn the poller can produce. Operators turn it on
+      // per-repo from the Agents tab when they want feature generation.
+      return false;
   }
 }
 

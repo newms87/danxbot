@@ -815,6 +815,7 @@ _poller_set_pickup_prefix() {
         slack: { enabled: null },
         trelloPoller: { enabled: null, pickupNamePrefix: null },
         dispatchApi: { enabled: null },
+        ideator: { enabled: null },
       },
       display: {},
       meta: {},
