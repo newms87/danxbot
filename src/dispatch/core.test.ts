@@ -573,3 +573,95 @@ describe("dispatch() — apiDispatchMeta wiring", () => {
     });
   });
 });
+
+describe("dispatch() — dispatchId override", () => {
+  // Phase 2 of the tracker-agnostic-agents epic (Trello ZDb7FOGO) needs the
+  // poller to pre-generate the dispatchId so it can stamp it into the YAML
+  // file BEFORE the spawn happens. The optional `dispatchId` override is the
+  // mechanism: callers that don't pass one keep getting `randomUUID()`
+  // generated inside `dispatch()`; callers that do pass one see it threaded
+  // through to `result.dispatchId`, the spawn's `jobId`, and every
+  // dispatchId-derived URL in the danxbot MCP server's env block.
+  const slackWorkerSrc = resolve(
+    __dirname,
+    "..",
+    "poller",
+    "inject",
+    "workspaces",
+    "slack-worker",
+  );
+
+  let tmpRepoDir: string;
+  let testRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-test-dispatchid-"));
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "slack-worker");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(slackWorkerSrc, dest, { recursive: true });
+    testRepo = makeRepoContext({ localPath: tmpRepoDir });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  it("uses the caller-supplied dispatchId verbatim when provided", async () => {
+    const explicitId = "11111111-2222-3333-4444-555555555555";
+    const result = await dispatch({
+      repo: testRepo,
+      task: "task",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      dispatchId: explicitId,
+    });
+
+    expect(result.dispatchId).toBe(explicitId);
+
+    const opts = mockSpawnAgent.mock.calls[0][0] as { jobId: string };
+    expect(opts.jobId).toBe(explicitId);
+  });
+
+  it("propagates the override into every dispatchId-derived URL in the MCP env", async () => {
+    const explicitId = "deadbeef-1234-5678-9abc-deadbeef0000";
+    await dispatch({
+      repo: testRepo,
+      task: "task",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      dispatchId: explicitId,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0] as { mcpConfigPath: string };
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8"));
+    const env = settings.mcpServers.danxbot.env;
+    expect(env.DANXBOT_STOP_URL).toBe(
+      `http://localhost:${testRepo.workerPort}/api/stop/${explicitId}`,
+    );
+    expect(env.DANXBOT_SLACK_REPLY_URL).toBe(
+      `http://localhost:${testRepo.workerPort}/api/slack/reply/${explicitId}`,
+    );
+    expect(env.DANXBOT_SLACK_UPDATE_URL).toBe(
+      `http://localhost:${testRepo.workerPort}/api/slack/update/${explicitId}`,
+    );
+  });
+
+  it("falls back to randomUUID when no dispatchId is provided (existing callers unchanged)", async () => {
+    const result = await dispatch({
+      repo: testRepo,
+      task: "task",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    // RFC 4122 UUID v4 shape — 8-4-4-4-12 hex.
+    expect(result.dispatchId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+  });
+});

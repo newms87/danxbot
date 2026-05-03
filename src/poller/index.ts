@@ -12,6 +12,7 @@ import {
   symlinkSync,
   rmSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { config } from "../config.js";
@@ -22,6 +23,16 @@ import {
   TEAM_PROMPT,
   IDEATOR_PROMPT,
 } from "./constants.js";
+import {
+  ensureGitignoreEntry,
+  ensureIssuesDirs,
+  hydrateFromRemote,
+  issuePath,
+  loadLocal,
+  stampDispatchAndWrite,
+  writeIssue,
+} from "./yaml-lifecycle.js";
+import { createIssueTracker } from "../issue-tracker/index.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeTrelloConfigRule } from "./trello-config-rule.js";
@@ -251,7 +262,39 @@ async function _poll(repo: RepoContext): Promise<void> {
     listId: repo.trello.todoListId,
     listName: "ToDo",
   };
-  spawnClaude(repo, TEAM_PROMPT, { trigger: "trello", metadata: trelloMeta });
+
+  // Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO):
+  //   1. Pre-generate the dispatch UUID so the same value lands in BOTH the
+  //      dispatch row AND the YAML's `dispatch_id` field — one identity
+  //      end-to-end, surfaced as `job_id` in the dashboard.
+  //   2. Hydrate-or-load the per-issue YAML at
+  //      `<repo>/.danxbot/issues/open/<external_id>.yml`. Brand-new card on
+  //      remote → one-time full hydration; existing local file →
+  //      authoritative, only `dispatch_id` is overwritten. NO refetch.
+  //   3. Compose the dispatch task with the YAML directive. The
+  //      `danx_issue_save` MCP tool ships in Phase 3 (Trello wsb4TVNT) —
+  //      until then the directive is informational text and agents still
+  //      call Trello MCP directly for save behavior.
+  const dispatchId = randomUUID();
+  const localIssue = loadLocal(repo.localPath, primary.id);
+  if (localIssue) {
+    stampDispatchAndWrite(repo.localPath, localIssue, dispatchId);
+  } else {
+    // Constructed only when hydration is actually needed — the existing-
+    // file path is the steady-state hot path, and skipping the factory
+    // call there avoids allocating a TrelloTracker (which opens an HTTP
+    // client on construction) on every tick where the YAML already exists.
+    const tracker = createIssueTracker(repo);
+    const hydrated = await hydrateFromRemote(tracker, primary.id, dispatchId);
+    writeIssue(repo.localPath, hydrated);
+  }
+
+  const yamlPath = issuePath(repo.localPath, primary.id, "open");
+  const task =
+    `${TEAM_PROMPT}\n\nEdit ${yamlPath}. ` +
+    `Call danx_issue_save({external_id: "${primary.id}"}) when done.`;
+
+  spawnClaude(repo, task, { trigger: "trello", metadata: trelloMeta }, dispatchId);
 }
 
 /** Directory containing files to inject into target repos. */
@@ -724,6 +767,15 @@ export function syncRepoFiles(repo: RepoContext): void {
   scrubLegacySingularWorkspace(repo.localPath);
   scrubRepoRootDanxArtifacts(repo.localPath);
 
+  // Stage 4: per-issue YAML on-disk skeleton (Phase 2 of
+  // tracker-agnostic-agents, Trello ZDb7FOGO). Idempotent — both helpers
+  // converge on identical disk state across repeated ticks. The setup
+  // skill writes the gitignore once at install, but pre-existing connected
+  // repos that don't have the `issues/` line need it appended without a
+  // re-install.
+  ensureIssuesDirs(repo.localPath);
+  ensureGitignoreEntry(repo.localPath, "issues/");
+
   copyComposeOverride(
     danxbotConfigDir,
     resolve(projectRoot, "repo-overrides"),
@@ -826,6 +878,7 @@ function spawnClaude(
   repo: RepoContext,
   prompt: string,
   apiDispatchMeta: DispatchTriggerMetadata,
+  dispatchId?: string,
 ): void {
   const state = getState(repo.name);
 
@@ -878,6 +931,12 @@ function spawnClaude(
     },
     timeoutMs: config.pollerIntervalMs * 60,
     apiDispatchMeta,
+    // Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO): when the trello
+    // trigger pre-stamped a UUID into the YAML, thread it through so the
+    // dispatch row's id matches the YAML's `dispatch_id`. Ideator and other
+    // non-trello dispatches omit this and inherit the auto-generated UUID
+    // inside `dispatch()`.
+    dispatchId,
     onComplete: (job) => {
       handleAgentCompletion(repo, state, job).catch((err) =>
         log.error(`[${repo.name}] Error in post-completion handler`, err),

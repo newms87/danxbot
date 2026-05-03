@@ -208,6 +208,21 @@ export interface DispatchInput {
   resumeSessionId?: string;
   /** Parent dispatch ID. Present when this slot is a resume child. */
   parentJobId?: string;
+  /**
+   * Optional caller-supplied dispatchId. When provided, `dispatch()` uses
+   * this value verbatim for the dispatch row, the spawned agent's `jobId`,
+   * and every dispatchId-derived URL in the danxbot MCP server's env block.
+   * When omitted, `dispatch()` generates one via `randomUUID()`.
+   *
+   * Use case: the Trello poller (Phase 2 of the tracker-agnostic-agents
+   * epic) pre-generates the UUID so it can stamp the same value into the
+   * per-issue YAML at `<repo>/.danxbot/issues/open/<external_id>.yml`
+   * BEFORE the spawn happens. The dashboard's job_id then matches the
+   * `dispatch_id` field on disk — one identity end-to-end. External
+   * callers (HTTP `/api/launch`, Slack listener) keep omitting this and
+   * inherit the auto-generated UUID.
+   */
+  dispatchId?: string;
 }
 
 export interface DispatchResult {
@@ -469,7 +484,7 @@ async function runResolved(
  * `build()` produces it dynamically.
  */
 export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
-  const dispatchId = randomUUID();
+  const dispatchId = input.dispatchId ?? randomUUID();
   const workerStopUrl = `http://localhost:${input.repo.workerPort}/api/stop/${dispatchId}`;
 
   // Inject infrastructure placeholders the resolver expects but the caller

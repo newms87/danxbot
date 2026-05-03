@@ -160,6 +160,79 @@ const trelloMocks = vi.hoisted(() => ({
 
 vi.mock("../../poller/trello-client.js", () => trelloMocks);
 
+// Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO): the poller now
+// calls `createIssueTracker(repo)` to hydrate the per-issue YAML before
+// dispatch. The integration test fixture uses fake trello creds, so the
+// real TrelloTracker would 401 on the first hydration. Replace the
+// factory with one that returns a `MemoryTracker` seeded just-in-time
+// with whatever card the test about to fire — keeps the legacy
+// trello-client mocks driving the test surface, while satisfying the
+// new IssueTracker call site without a real network.
+import { MemoryTracker } from "../../issue-tracker/memory.js";
+const issueTrackerMock = vi.hoisted(() => ({
+  tracker: null as MemoryTracker | null,
+}));
+function setIssueTracker(seedCardId: string, seedTitle: string): void {
+  issueTrackerMock.tracker = new MemoryTracker();
+  // Seed via createCard so the MemoryTracker keeps a complete StoredCard.
+  // The hydrate path just needs getCard + getComments to succeed; field
+  // contents are not asserted by the critical-failure scenarios.
+  issueTrackerMock.tracker.createCard({
+    schema_version: 1,
+    tracker: "memory",
+    parent_id: null,
+    status: "ToDo",
+    type: "Feature",
+    title: seedTitle,
+    description: "",
+    triaged: { timestamp: "", status: "", explain: "" },
+    ac: [],
+    phases: [],
+    comments: [],
+    retro: { good: "", bad: "", action_items: [], commits: [] },
+  });
+  // MemoryTracker.createCard mints its own external_id (mem-N). The
+  // poller will hydrate by the trello-card id, so we manually re-seed
+  // under that id to match.
+  // The simplest way: register a fresh tracker and stub getCard /
+  // getComments to ignore the external_id mismatch — the test never
+  // asserts on hydrated YAML contents.
+  const stub = issueTrackerMock.tracker;
+  stub.getCard = async (_id: string) => ({
+    schema_version: 1 as const,
+    tracker: "memory",
+    external_id: seedCardId,
+    parent_id: null,
+    dispatch_id: null,
+    status: "ToDo" as const,
+    type: "Feature" as const,
+    title: seedTitle,
+    description: "",
+    triaged: { timestamp: "", status: "", explain: "" },
+    ac: [],
+    phases: [],
+    comments: [],
+    retro: { good: "", bad: "", action_items: [], commits: [] },
+  });
+  stub.getComments = async (_id: string) => [];
+}
+vi.mock("../../issue-tracker/index.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../issue-tracker/index.js")
+  >("../../issue-tracker/index.js");
+  return {
+    ...actual,
+    createIssueTracker: () => {
+      if (!issueTrackerMock.tracker) {
+        throw new Error(
+          "Test setup: setIssueTracker(cardId, title) must be called before poll()",
+        );
+      }
+      return issueTrackerMock.tracker;
+    },
+  };
+});
+
 // Dispatches DB writes go through `dashboard/dispatches-db.js`. Stub so the
 // integration test does not require a live MySQL connection — the launcher's
 // dispatch tracker calls these helpers on every spawn/finalize. Real failures
@@ -520,6 +593,11 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
     // the signal `checkCardProgressedOrHalt` uses to decide the agent
     // never moved the card.
     trelloMocks.fetchCard.mockResolvedValue(STUCK_CARD);
+    // Phase 2 of tracker-agnostic-agents: hydrate-or-load runs BEFORE the
+    // dispatch. Seed the IssueTracker mock so the brand-new-card hydration
+    // path returns synthetic data instead of trying to hit the real Trello
+    // API with the test fixture's fake credentials.
+    setIssueTracker(STUCK_CARD_ID, STUCK_CARD.name);
 
     expect(existsSync(flagPath(repoDir))).toBe(false);
 

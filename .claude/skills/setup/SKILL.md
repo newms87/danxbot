@@ -264,14 +264,20 @@ This keeps repo-specific secrets separate from both danxbot's `.env` and the ver
 Write `repos/<name>/.danxbot/.gitignore` to exclude generated and
 runtime files — `features.md` (ideator memory), `.env` (secrets),
 `settings.json` (operational state — feature toggles + masked config),
-and `.settings.lock` (per-file lock):
+`.settings.lock` (per-file lock), and `issues/` (per-issue YAML
+lifecycle dir, Phase 2 of tracker-agnostic-agents):
 
 ```
 features.md
 .env
 settings.json
 .settings.lock
+issues/
 ```
+
+The poller idempotently re-adds the `issues/` line on every tick
+(`ensureGitignoreEntry`) so connected repos that pre-date this line pick
+it up without a re-install.
 
 ## Step 9: Generate Rules (in `.danxbot/config/`)
 

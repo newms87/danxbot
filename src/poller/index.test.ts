@@ -145,6 +145,78 @@ vi.mock("../dispatch/core.js", () => ({
   dispatch: (...args: unknown[]) => mockDispatch(...args),
 }));
 
+/**
+ * Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO). The poller now
+ * loads / hydrates / stamps a per-issue YAML before dispatch and ensures
+ * `<repo>/.danxbot/issues/` is gitignored on every tick. The unit-level
+ * coverage for those helpers lives in `yaml-lifecycle.test.ts`; here we
+ * mock the module so we can assert WHICH helpers the poller calls in
+ * which order, with which arguments — i.e. the integration contract
+ * between the poller hot path and the lifecycle module.
+ */
+// Default fakes return a minimal valid Issue shape so existing
+// `describe("poll", ...)` tests (which were written before this lifecycle
+// integration existed) keep dispatching without crashing on a `undefined`
+// from a missing default.
+const FAKE_ISSUE_FOR_TESTS = {
+  schema_version: 1 as const,
+  tracker: "trello",
+  external_id: "fake",
+  parent_id: null,
+  dispatch_id: null,
+  status: "ToDo" as const,
+  type: "Feature" as const,
+  title: "fake",
+  description: "",
+  triaged: { timestamp: "", status: "", explain: "" },
+  ac: [],
+  phases: [],
+  comments: [],
+  retro: { good: "", bad: "", action_items: [], commits: [] },
+};
+const mockHydrateFromRemote = vi
+  .fn()
+  .mockImplementation(async (_t: unknown, externalId: string, dispatchId: string) => ({
+    ...FAKE_ISSUE_FOR_TESTS,
+    external_id: externalId,
+    dispatch_id: dispatchId,
+  }));
+const mockLoadLocal = vi.fn().mockReturnValue(null);
+const mockWriteIssueFn = vi.fn();
+const mockStampDispatchAndWrite = vi
+  .fn()
+  .mockImplementation(
+    (_repo: string, issue: Record<string, unknown>, dispatchId: string) => ({
+      ...issue,
+      dispatch_id: dispatchId,
+    }),
+  );
+const mockEnsureIssuesDirs = vi.fn();
+const mockEnsureGitignoreEntry = vi.fn();
+vi.mock("./yaml-lifecycle.js", () => ({
+  hydrateFromRemote: (...args: unknown[]) => mockHydrateFromRemote(...args),
+  loadLocal: (...args: unknown[]) => mockLoadLocal(...args),
+  writeIssue: (...args: unknown[]) => mockWriteIssueFn(...args),
+  stampDispatchAndWrite: (...args: unknown[]) =>
+    mockStampDispatchAndWrite(...args),
+  ensureIssuesDirs: (...args: unknown[]) => mockEnsureIssuesDirs(...args),
+  ensureGitignoreEntry: (...args: unknown[]) =>
+    mockEnsureGitignoreEntry(...args),
+  issuePath: (repo: string, id: string, state: string) =>
+    `${repo}/.danxbot/issues/${state}/${id}.yml`,
+}));
+
+const mockCreateIssueTracker = vi.fn().mockReturnValue({});
+vi.mock("../issue-tracker/index.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../issue-tracker/index.js")
+  >("../issue-tracker/index.js");
+  return {
+    ...actual,
+    createIssueTracker: (...args: unknown[]) => mockCreateIssueTracker(...args),
+  };
+});
+
 // Feature-aware default: ideator's env default is `false` (explicit
 // opt-in via `<repo>/.danxbot/settings.json` overrides). Every other
 // feature defaults to `true` so existing tests that don't care about
@@ -2112,5 +2184,239 @@ describe("poll — stuck card recovery on failure", () => {
 
     // Lock should still be cleaned up even if recovery failed
     // (teamRunning should be false so next poll can proceed)
+  });
+});
+
+describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agents)", () => {
+  // The poller pre-generates a dispatchId, hydrates-or-loads the per-issue
+  // YAML, stamps the dispatchId, then composes the dispatch task with the
+  // YAML directive. These tests verify that contract between the poller's
+  // _poll() function and the yaml-lifecycle module / dispatch core. The
+  // helpers themselves are unit-tested in `yaml-lifecycle.test.ts`.
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockFetchNeedsHelpCards.mockResolvedValue([]);
+    mockFetchReviewCards.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({ id: `r${i}`, name: `R${i}` })),
+    );
+    mockMoveCardToList.mockResolvedValue(undefined);
+    mockIsFeatureEnabled.mockReset();
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockGetTrelloPollerPickupPrefix.mockReset();
+    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+    // Default to the brand-new-card hydration path; tests that need the
+    // existing-file path override mockLoadLocal to return an Issue.
+    mockLoadLocal.mockReturnValue(null);
+    // Implementation (not return value) so the hydrated Issue's
+    // external_id + dispatch_id reflect the actual call args. Tests
+    // assert on the writeIssue payload, so a static return value would
+    // mask call-arg propagation regressions.
+    mockHydrateFromRemote.mockReset();
+    mockHydrateFromRemote.mockImplementation(
+      async (
+        _t: unknown,
+        externalId: string,
+        dispatchId: string,
+      ) => ({
+        ...FAKE_ISSUE_FOR_TESTS,
+        external_id: externalId,
+        dispatch_id: dispatchId,
+      }),
+    );
+    mockStampDispatchAndWrite.mockImplementation(
+      (_repo: string, issue: Record<string, unknown>, dispatchId: string) => ({
+        ...issue,
+        dispatch_id: dispatchId,
+      }),
+    );
+    mockCreateIssueTracker.mockReturnValue({});
+  });
+
+  it("composes the dispatch task with TEAM_PROMPT prefix + the YAML directive substring", async () => {
+    mockFetchTodoCards.mockResolvedValue([{ id: "card-uuid-1", name: "Card 1" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const dispatchArg = mockDispatch.mock.calls[0][0] as { task: string };
+    expect(dispatchArg.task).toContain("/danx-next");
+    expect(dispatchArg.task).toContain(
+      "Edit /test/repos/test-repo/.danxbot/issues/open/card-uuid-1.yml",
+    );
+    expect(dispatchArg.task).toContain(
+      'Call danx_issue_save({external_id: "card-uuid-1"}) when done.',
+    );
+  });
+
+  it("threads the same dispatchId into both the YAML stamp and the dispatch() call", async () => {
+    mockFetchTodoCards.mockResolvedValue([{ id: "card-uuid-2", name: "Card 2" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Whatever dispatchId the poller generated must appear in BOTH places:
+    // - the dispatch_id stamped into the YAML (via stampDispatchAndWrite or
+    //   via the hydrate path's writeIssue)
+    // - the DispatchInput.dispatchId field passed to dispatch()
+    const dispatchArg = mockDispatch.mock.calls[0][0] as { dispatchId: string };
+    expect(dispatchArg.dispatchId).toBeDefined();
+    expect(dispatchArg.dispatchId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+
+    // Hydration path (loadLocal returned null) → hydrateFromRemote receives
+    // the dispatchId so the brand-new YAML is written with it stamped in.
+    expect(mockHydrateFromRemote).toHaveBeenCalledWith(
+      expect.anything(),
+      "card-uuid-2",
+      dispatchArg.dispatchId,
+    );
+  });
+
+  it("calls writeIssue with the hydrated Issue after the brand-new-card hydration path runs", async () => {
+    // Phase 2 AC2: the brand-new card hydration produces a complete local
+    // YAML on the next poll tick. The unit test in yaml-lifecycle.test.ts
+    // verifies hydrateFromRemote returns a stamped Issue; this asserts the
+    // poller follows up with `writeIssue` so the file actually lands on
+    // disk. Without this, dropping the writeIssue call after hydrate
+    // would silently break AC2 with every other test still green.
+    mockFetchTodoCards.mockResolvedValue([{ id: "card-uuid-w", name: "Card W" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockWriteIssueFn).toHaveBeenCalledTimes(1);
+    const writeArgs = mockWriteIssueFn.mock.calls[0];
+    expect(writeArgs[0]).toBe(MOCK_REPO_CONTEXT.localPath);
+    const writtenIssue = writeArgs[1] as { external_id: string; dispatch_id: string };
+    expect(writtenIssue.external_id).toBe("card-uuid-w");
+    const dispatchArg = mockDispatch.mock.calls[0][0] as { dispatchId: string };
+    expect(writtenIssue.dispatch_id).toBe(dispatchArg.dispatchId);
+  });
+
+  it("stamps + writes YAML BEFORE dispatch() spawns the agent — ordering invariant", async () => {
+    // The contract is "YAML on disk before the spawn so the agent can
+    // read it on the first turn." A regression that called dispatch()
+    // first and then stamped the YAML would still pass the dispatch-arg
+    // assertions above. This test pins the ordering directly via vitest's
+    // `mock.invocationCallOrder`.
+    mockFetchTodoCards.mockResolvedValue([{ id: "card-order-1", name: "Order 1" }]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const writeOrder = mockWriteIssueFn.mock.invocationCallOrder[0];
+    const dispatchOrder = mockDispatch.mock.invocationCallOrder[0];
+    expect(writeOrder).toBeDefined();
+    expect(dispatchOrder).toBeDefined();
+    expect(writeOrder).toBeLessThan(dispatchOrder);
+  });
+
+  it("does not construct an IssueTracker when the local YAML already exists (steady-state hot path)", async () => {
+    // The factory call opens an HTTP client on the Trello path, which is
+    // wasted work on every tick where the existing local file is
+    // authoritative. Pin: hydration-path NOT taken AND tracker factory
+    // NOT invoked.
+    mockFetchTodoCards.mockResolvedValue([{ id: "card-cached", name: "Cached" }]);
+    mockLoadLocal.mockReturnValue({
+      schema_version: 1,
+      tracker: "trello",
+      external_id: "card-cached",
+      parent_id: null,
+      dispatch_id: "old",
+      status: "ToDo",
+      type: "Feature",
+      title: "Cached",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockCreateIssueTracker).not.toHaveBeenCalled();
+    expect(mockHydrateFromRemote).not.toHaveBeenCalled();
+  });
+
+  it("propagates a corrupt-YAML error from loadLocal — the poller does not silently fall back to hydration", async () => {
+    // `loadLocal` throws IssueParseError on corrupt YAML (per the strict
+    // validator contract). The poller must NOT catch + retry-as-hydrate,
+    // because that would silently overwrite operator-edited YAML on the
+    // first parse error. Failing loud is the correct response — the
+    // operator gets a visible error and fixes the file by hand.
+    mockFetchTodoCards.mockResolvedValue([{ id: "card-bad", name: "Bad YAML" }]);
+    const parseError = new Error("Invalid Issue YAML: missing required field: tracker");
+    mockLoadLocal.mockImplementation(() => {
+      throw parseError;
+    });
+
+    await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/Invalid Issue YAML/);
+    expect(mockHydrateFromRemote).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("propagates a tracker getCard failure — hydration crashes loud, no dispatch", async () => {
+    // Network / auth failure during hydrate must NOT silently dispatch
+    // an agent against a missing YAML. The error should bubble up to the
+    // poll loop's caller; the next tick re-attempts.
+    mockFetchTodoCards.mockResolvedValue([{ id: "card-net-fail", name: "Net fail" }]);
+    mockLoadLocal.mockReturnValue(null);
+    mockHydrateFromRemote.mockRejectedValueOnce(
+      new Error("Trello API error: 401 Unauthorized"),
+    );
+
+    await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/401 Unauthorized/);
+    expect(mockWriteIssueFn).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("skips hydration when a local YAML already exists and uses stampDispatchAndWrite to overwrite the dispatch_id only", async () => {
+    mockFetchTodoCards.mockResolvedValue([{ id: "card-uuid-3", name: "Card 3" }]);
+    const existingIssue = {
+      schema_version: 1,
+      tracker: "trello",
+      external_id: "card-uuid-3",
+      parent_id: null,
+      dispatch_id: "old-dispatch",
+      status: "ToDo",
+      type: "Feature",
+      title: "Card 3",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    };
+    mockLoadLocal.mockReturnValue(existingIssue);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockHydrateFromRemote).not.toHaveBeenCalled();
+    expect(mockStampDispatchAndWrite).toHaveBeenCalledTimes(1);
+    const stampArgs = mockStampDispatchAndWrite.mock.calls[0];
+    expect(stampArgs[1]).toBe(existingIssue);
+    // The third arg is the new dispatchId — must equal the one passed
+    // to dispatch().
+    const dispatchArg = mockDispatch.mock.calls[0][0] as { dispatchId: string };
+    expect(stampArgs[2]).toBe(dispatchArg.dispatchId);
+  });
+
+  it("ensures issues/ dirs and gitignore entry on every tick (idempotency lives in the helpers)", async () => {
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockEnsureIssuesDirs).toHaveBeenCalledWith("/test/repos/test-repo");
+    expect(mockEnsureGitignoreEntry).toHaveBeenCalledWith(
+      "/test/repos/test-repo",
+      "issues/",
+    );
   });
 });
