@@ -35,7 +35,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `ac` | `[{check_item_id, title, checked}]` | Acceptance Criteria. Empty `check_item_id` on new items — tracker assigns. |
 | `phases` | `[{check_item_id, title, status, notes}]` | `status`: `Pending` \| `Complete` \| `Blocked`. |
 | `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
-| `retro` | `{good, bad, action_items[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save AND spawns one tracker card per `action_items[]` entry. Do NOT also append a `## Retro` comment to `comments[]`, and do NOT call `danx_issue_create` for follow-ups — list them in `action_items[]` instead. `action_items[]` strings cannot contain `→` (reserved bookkeeping separator). |
+| `retro` | `{good, bad, action_items[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save AND spawns one tracker card per `action_items[]` entry. **`action_items[]` is a LAST RESORT** — see Step 1.5. Only file an action item when the work is BOTH unrelated to this card's ACs AND too large to reasonably finish in this session (multi-phase refactor, redesign, cross-cutting work needing its own scoping). Small in-scope or small unrelated fixes you spotted → DO THEM NOW, don't defer. Do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for follow-ups — list them in `action_items[]` instead. `action_items[]` strings cannot contain `→` (reserved bookkeeping separator). |
 
 **Save semantics:** `danx_issue_save({external_id})` validates the YAML synchronously and returns `{saved: true}` or `{saved: false, errors}`. Tracker push runs detached — tracker errors NEVER appear in the tool result. When `status` is `Done` or `Cancelled`, the worker moves the file `open/` → `closed/` as part of save. Save after every meaningful edit.
 
@@ -46,6 +46,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 ## Top-Level Flow
 
 1. Read the YAML the dispatch prompt named.
+1.5. Internalize the **You Fix What You Find** rule (Step 1.5) before doing anything else.
 2. Plan (Step 2).
 3. Evaluate scope; epic-split if needed (Step 3).
 4. Implement TDD (Step 4).
@@ -73,11 +74,50 @@ If the YAML doesn't exist or fails to parse, signal `danxbot_complete({status: "
 
 ---
 
+## Step 1.5 — You Fix What You Find (CRITICAL)
+
+This card is yours. Action items, follow-up cards, hotfix cards, and Needs
+Help moves are a **LAST RESORT**, not a workflow convenience. Default
+behaviour for ANY defect, stale config, broken test, or cleanup you discover
+during this dispatch — in-scope or not — is to fix it in this session.
+
+Apply this filter, in order, every time you're tempted to defer work:
+
+1. **Required for THIS card's ACs?** → Mandatory. Fix in this dispatch.
+   Filing a "hotfix card" / "follow-up card" / "separate bug" for work that
+   is required to satisfy this card's ACs is a **rule violation**. The card
+   stays In Progress until ITS ACs pass — the fix lives in this session.
+2. **Unrelated but small** (a few file edits, no big refactor, fits this
+   session)? → Fix in this dispatch. Action items defer work, create tech
+   debt, and incur re-dispatch cost. Prefer fixing every time.
+3. **Unrelated AND large** (multi-phase refactor, cross-cutting redesign,
+   needs its own scoping, would derail this card)? → Action item is OK.
+4. **Needs human decision or external access** (credentials, deploy, repo
+   you can't write to, ambiguous spec)? → Step 10 / action item.
+
+Mechanical check before writing any action item or going to Needs Help:
+**"Could I just do this in the next 10–30 minutes?"** Yes → do it. Drop the
+action item / cancel the Needs Help.
+
+Examples of work that MUST be done in-session, not deferred:
+
+- Verification card whose verification fails because of a small in-scope
+  bug → fix the bug, re-verify. Do NOT file a hotfix card and Needs Help.
+- Stale config in a file you can edit (placeholder list, env var, alias).
+- Broken test pointing at a defect in a function you can read + edit.
+- Missing file you can write.
+- Doc / comment that contradicts current behaviour and confused you.
+
+Only after exhausting in-session fixes do you reach for action items or
+Needs Help.
+
+---
+
 ## Step 2 — Plan
 
 1. Read the full `description`, all `comments[]`, all `ac[]` titles, and any existing `phases[]`.
 2. **Bug cards (`type: Bug`):** investigate root cause via `Read` / `Grep` / `Bash` before designing the fix.
-3. **Needs Help short-circuit:** if completing the card requires human intervention (Slack / Trello settings / external config / credentials), jump to Step 10.
+3. **Needs Help short-circuit:** only if the card matches Step 10's narrowed trigger list (true human / external blocker — credentials, deploy, repo you cannot write to, ambiguous spec needing human decision). Otherwise apply Step 1.5 — fix it yourself in this dispatch.
 4. Design the approach in your head. No code yet.
 5. Invoke the `/wow` skill to reload Ways of Working.
 
@@ -170,13 +210,26 @@ Mechanical procedure:
 1. Re-read `<repo>/.danxbot/issues/open/<external_id>.yml`.
 2. Count `ac` entries where `checked === false`.
 3. **Zero unchecked** → Step 9 (Done).
-4. **One or more unchecked** → Step 10 (Needs Help). Do NOT move to Done. Do NOT rationalize.
+4. **One or more unchecked** → run the **Step 1.5 fix-it-yourself check**
+   FIRST. Can you fix the underlying defect in this dispatch? YES → fix it,
+   re-verify, re-check the AC, then re-run this gate. Only after exhausting
+   in-session fixes do you proceed to Step 10. Do NOT move to Done. Do NOT
+   rationalize.
 
 Forbidden moves:
+- "I'll file a hotfix card / follow-up card and Needs Help this one" — if
+  the hotfix is what unblocks THIS card's AC, the hotfix IS this card's
+  work. Do it now (Step 1.5).
+- "The verification revealed defects, so this is a verdict-handoff card" —
+  no. A verification card whose verification fails because of small
+  in-scope bugs is a card to FIX those bugs, then verify.
 - "All the important ACs are done, the rest are minor" — irrelevant. ACs aren't ranked.
-- "Remaining ACs require external work, so they don't count" — they count. They were defined as required.
+- "Remaining ACs require external work, so they don't count" — they count.
+  They were defined as required. Step 1.5 → can you do the "external" work
+  yourself? If yes, do it. Only escalate when truly external.
 - "I'll move to Done; the retro will explain the gaps" — no. The card location is the canonical state.
-- "Wording is too strict" — edit the AC item or file a separate card. Don't silently shift status.
+- "Wording is too strict" — edit the AC item with justification, or fix the
+  underlying issue. Filing a separate card to dodge the AC is forbidden.
 - "I checked off the AC because the verification ran, even though it failed" — `checked: true` means the criterion HOLDS, not that it was attempted.
 
 A card in Done means: every AC item is `checked: true` with direct evidence. No other definition.
@@ -195,7 +248,7 @@ Edit YAML:
    **Root Cause:** ...
    **Solution:** ...
    ```
-3. Fill `retro.good`, `retro.bad`, `retro.action_items[]`, `retro.commits[]`. The worker renders the `## Retro` comment automatically on save and spawns one tracker card per `action_items[]` entry — do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for action items. `action_items[]` strings must not contain `→`.
+3. Fill `retro.good`, `retro.bad`, `retro.action_items[]`, `retro.commits[]`. The worker renders the `## Retro` comment automatically on save and spawns one tracker card per `action_items[]` entry — do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for action items. `action_items[]` strings must not contain `→`. **Action items are a LAST RESORT** — re-apply the Step 1.5 filter to every candidate. If it's required for THIS card's ACs (already done, since you're at Done) it's not an action item. If it's small + you could do it now, do it now and re-commit instead of filing. Only large, separate, scoped follow-ups belong here. Empty `action_items[]` is the right answer most of the time.
 
 Save: `danx_issue_save({external_id})`. The worker validates, posts the rendered retro comment, spawns Action Items cards, then moves the file `open/` → `closed/` and pushes the tracker move to Done.
 
@@ -205,7 +258,31 @@ Skip to Step 11.
 
 ## Step 10 — Move to Needs Help
 
-Use this when Step 8 found unchecked ACs, when external repo changes are required this worker cannot make, when verification depends on a deploy this worker cannot run, or when a human decision is required.
+Needs Help is a **LAST RESORT**. Step 1.5 + Step 8's fix-it-yourself check
+must have already failed. Use Step 10 ONLY when the blocker is genuinely
+one of:
+
+- External repo / file your worker has no write access to.
+- Credentials, deploy, secrets rotation, or production action a human must
+  perform.
+- Genuine human design decision (ambiguous spec, missing requirement,
+  conflicting stakeholder direction).
+- Tool / environment failure that is card-specific (use `critical_failure`
+  for environment-wide failure — see `.claude/rules/danx-halt-flag.md`).
+
+**NOT Step 10 cases — fix in-session instead:**
+
+- Stale config in a file you can edit.
+- Bug in a function you can read + edit (in any repo bind-mounted to this
+  worker).
+- Test failure pointing at a defect in the same workspace / repo.
+- Missing file you can write.
+- Anything where the next agent would just open the same files you have
+  open and make the same edits you could make now.
+
+If you're about to move to Needs Help, ask one more time: **"Could I do
+this myself in the next 10–30 minutes?"** Yes → do it. Cancel the Needs
+Help.
 
 Edit YAML:
 
@@ -222,7 +299,7 @@ Edit YAML:
      - `**Final AC check:** Before Done, every AC must be checked: true.`
    - No `id` field
 3. **Bug cards** with partial progress: also append the `## Bug Diagnosis` block.
-4. Fill `retro.{good, bad, action_items, commits}` honestly — the AC gap is the primary "what went wrong." The worker auto-renders the `## Retro` comment and spawns Action Items cards on save (Needs Help is a non-terminal status, so the retro / action-items WILL not be auto-rendered yet — they render when the next pickup eventually moves the card to Done or Cancelled). Filling `retro` now still helps: the next agent inherits it through the YAML.
+4. Fill `retro.{good, bad, action_items, commits}` honestly — the AC gap is the primary "what went wrong." The worker auto-renders the `## Retro` comment and spawns Action Items cards on save (Needs Help is a non-terminal status, so the retro / action-items WILL not be auto-rendered yet — they render when the next pickup eventually moves the card to Done or Cancelled). Filling `retro` now still helps: the next agent inherits it through the YAML. **Re-apply the Step 1.5 filter to every action item candidate.** The fix the next agent will need to make → describe in the Needs Help comment, not as an action item card. Only large, unrelated, separately-scopeable follow-ups belong in `action_items[]`. Empty `action_items[]` is the right answer most of the time.
 
 Save: `danx_issue_save({external_id})`.
 

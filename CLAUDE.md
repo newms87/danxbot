@@ -222,5 +222,5 @@ Board / list / label IDs live in each connected repo's `<repo>/.danxbot/config/t
 7. Quality gates: launch Test Reviewer + Code Reviewer subagents in parallel; post results as Trello comments; fix critical findings
 8. Validator subagent only for agent / SDK changes
 9. Commit, move card to Done (`position: "top"`), add retro comment (What went well / What went wrong / Action items / Commits)
-10. Action items → linked cards in the Action Items list
+10. Action items → linked cards in the Action Items list. **Action items are a LAST RESORT** — see `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` Step 1.5. Anything required for the current card's ACs is the current card's work, not an action item. Anything small + unrelated should also be done in this session, not deferred. Action items only for large, unrelated, separately-scopeable work that genuinely needs its own card. Same rule applies to Needs Help — last resort, only for true human / external blockers, never as a deferral mechanism for in-scope or small fixes.
 11. Signal completion via the `danxbot_complete` MCP tool — never exit silently. The worker uses the signal to finalize the dispatch row in MySQL.
