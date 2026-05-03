@@ -13,6 +13,7 @@ import {
   type IssueType,
   type PhaseStatus,
 } from "./interface.js";
+import { BOOKKEEPING_SEP } from "./sync.js";
 
 /**
  * Build a fully-populated minimal Issue from a small seed. Every required
@@ -479,13 +480,17 @@ function validateRetro(value: unknown): IssueRetro | string {
       if (typeof v.action_items[i] !== "string") {
         return `retro.action_items[${i}] must be a string`;
       }
-      // The worker's action-items bookkeeping comment uses `<title> → <id>`
-      // as its line format. Allowing `→` in titles would break the parser
-      // and silently lose track of which items have been spawned, so we
-      // reject the character at validate time instead of escaping. Pick
-      // a different separator in titles (e.g. `->` or `:`).
-      if ((v.action_items[i] as string).includes("→")) {
-        return `retro.action_items[${i}] must not contain '→' (reserved separator in the worker's bookkeeping comment)`;
+      // The worker's action-items bookkeeping comment uses
+      // `BOOKKEEPING_SEP` (U+0009 TAB) as its `<title><sep><external_id>`
+      // separator (see `src/issue-tracker/sync.ts`). Allowing the
+      // separator in a title would break the parser and silently
+      // misattribute spawned-card ids on reread, so we reject it at
+      // validate time instead of escaping. Use a space or `:` for
+      // separators in titles. Arrow lookalikes (`->`, `=>`, `→`, `⟶`,
+      // `➔`, etc.) are inert under the tab-separator design and are
+      // accepted as ordinary title text.
+      if ((v.action_items[i] as string).includes(BOOKKEEPING_SEP)) {
+        return `retro.action_items[${i}] must not contain a tab character (reserved separator in the worker's bookkeeping comment)`;
       }
     }
     actionItems = v.action_items as string[];

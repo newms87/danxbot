@@ -611,8 +611,8 @@ describe("syncIssue", () => {
     const ids = spawnEntries.map(
       (e) => (e.details as { external_id: string }).external_id,
     );
-    expect(bookkeepingComments[0].text).toContain(`Fix X → ${ids[0]}`);
-    expect(bookkeepingComments[0].text).toContain(`Document Y → ${ids[1]}`);
+    expect(bookkeepingComments[0].text).toContain(`Fix X\t${ids[0]}`);
+    expect(bookkeepingComments[0].text).toContain(`Document Y\t${ids[1]}`);
   });
 
   it("idempotent: re-sync with same action_items spawns no new cards and edits no comment", async () => {
@@ -669,7 +669,7 @@ describe("syncIssue", () => {
     expect(spawns).toHaveLength(1);
     expect((spawns[0].details as { title: string }).title).toBe("B");
     // Two editComment calls land here: one for the bookkeeping comment
-    // (new B → external_id row) and one for the retro comment itself
+    // (new B\t<external_id> row) and one for the retro comment itself
     // (its **Action items:** bullet list now includes B).
     const editCount = log.filter((l) => l.method === "editComment").length;
     expect(editCount).toBe(2);
@@ -739,20 +739,20 @@ describe("syncIssue", () => {
       ["C", "mem-3"],
     ]);
     const text = renderActionItemsBookkeeping(titles, partialSpawn);
-    expect(text).toContain("- A → mem-1");
-    expect(text).toContain("- C → mem-3");
+    expect(text).toContain("- A\tmem-1");
+    expect(text).toContain("- C\tmem-3");
     expect(text).not.toMatch(/- B\b/);
   });
 
-  it("parseActionItemsBookkeeping throws on a bullet line missing the '→' separator", () => {
+  it("parseActionItemsBookkeeping throws on a bullet line missing the tab separator", () => {
     const text = `<!-- danxbot -->
 <!-- danxbot-action-items -->
 
-## Action Items spawned by Phase 5 retro
+## Action Items spawned by retro
 
-- A → mem-1
-- malformed line without separator
-- C → mem-3`;
+- A\tmem-1
+- malformed line without a tab
+- C\tmem-3`;
     expect(() => parseActionItemsBookkeeping(text)).toThrow(
       /Malformed action-items bookkeeping line/,
     );
@@ -761,14 +761,47 @@ describe("syncIssue", () => {
   it("parseActionItemsBookkeeping throws on a bullet line with empty title or empty external_id", () => {
     expect(() =>
       parseActionItemsBookkeeping(
-        "<!-- danxbot-action-items -->\n\n-  → mem-1",
+        "<!-- danxbot-action-items -->\n\n-  \tmem-1",
       ),
     ).toThrow(/Malformed/);
     expect(() =>
       parseActionItemsBookkeeping(
-        "<!-- danxbot-action-items -->\n\n- A → ",
+        "<!-- danxbot-action-items -->\n\n- A\t",
       ),
     ).toThrow(/Malformed/);
+  });
+
+  it("attributes external_id correctly when titles contain arrow lookalikes", () => {
+    // Regression test for card 69f771d6cbd1ada690743c73. Pre-hardening, the
+    // separator was U+2192 '→' and a title carrying '->' or '⟶' or any other
+    // arrow lookalike risked silent misattribution. Post-hardening the
+    // separator is a tab — arrows in titles are inert.
+    const titles = [
+      "Fix: A -> B already-spawned",
+      "Migrate ⟶ new shape",
+      "Document → flow",
+    ];
+    const spawned = new Map([
+      ["Fix: A -> B already-spawned", "mem-1"],
+      ["Migrate ⟶ new shape", "mem-2"],
+      ["Document → flow", "mem-3"],
+    ]);
+    const text = renderActionItemsBookkeeping(titles, spawned);
+    const parsed = parseActionItemsBookkeeping(text);
+    expect(parsed.get("Fix: A -> B already-spawned")).toBe("mem-1");
+    expect(parsed.get("Migrate ⟶ new shape")).toBe("mem-2");
+    expect(parsed.get("Document → flow")).toBe("mem-3");
+  });
+
+  it("parseActionItemsBookkeeping throws on a bullet line carrying multiple tabs", () => {
+    // The validator forbids tab in titles and tracker external_ids never
+    // contain tab, so a multi-tab bullet is corrupt input. Loud throw
+    // beats silent misattribution.
+    expect(() =>
+      parseActionItemsBookkeeping(
+        "<!-- danxbot-action-items -->\n\n- title\textra\tmem-1",
+      ),
+    ).toThrow(/multiple tab separators/);
   });
 
   it("renderActionItemsBookkeeping is byte-stable for the same inputs", () => {

@@ -303,7 +303,9 @@ describe("validateIssue", () => {
     }
   });
 
-  it("parseIssue throws IssueParseError when YAML source carries '→' in retro.action_items", () => {
+  it("parseIssue throws IssueParseError when YAML source carries a tab in retro.action_items", () => {
+    // The bookkeeping comment uses a tab as its line separator, so titles
+    // carrying an embedded tab would corrupt the parser. Validate-time reject.
     const yaml = `schema_version: 1
 tracker: trello
 external_id: x1
@@ -324,19 +326,19 @@ retro:
   good: ""
   bad: ""
   action_items:
-    - "broken → already-spawned"
+    - "broken\\talready-spawned"
   commits: []
 `;
-    expect(() => parseIssue(yaml)).toThrow(/'→'/);
+    expect(() => parseIssue(yaml)).toThrow(/tab/);
   });
 
-  it("rejects retro.action_items entries containing the '→' separator", () => {
+  it("rejects retro.action_items entries containing a tab character", () => {
     const result = validateIssue(
       valid({
         retro: {
           good: "",
           bad: "",
-          action_items: ["legit", "broken → already-spawned"],
+          action_items: ["legit", "broken\talready-spawned"],
           commits: [],
         },
       }),
@@ -344,12 +346,53 @@ retro:
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
-        result.errors.some((e) =>
-          e.includes("retro.action_items[1]") && e.includes("→"),
+        result.errors.some(
+          (e) => e.includes("retro.action_items[1]") && e.includes("tab"),
         ),
-        `expected '→' rejection error; got ${JSON.stringify(result.errors)}`,
+        `expected tab rejection error; got ${JSON.stringify(result.errors)}`,
       ).toBe(true);
     }
+  });
+
+  it("rejects retro.action_items entries with leading or trailing tab", () => {
+    for (const offending of ["\tleading-tab", "trailing-tab\t"]) {
+      const result = validateIssue(
+        valid({
+          retro: {
+            good: "",
+            bad: "",
+            action_items: [offending],
+            commits: [],
+          },
+        }),
+      );
+      expect(
+        result.ok,
+        `expected rejection for ${JSON.stringify(offending)}`,
+      ).toBe(false);
+    }
+  });
+
+  it("accepts retro.action_items entries containing arrow lookalikes (no longer the separator)", () => {
+    // Post-hardening: the separator is a tab. Arrow lookalikes ('->', '=>',
+    // U+2192 '→', and Unicode arrow variants) are normal title text and
+    // must round-trip cleanly. See card 69f771d6cbd1ada690743c73.
+    const titles = [
+      "Fix: A -> B already-spawned",
+      "Refactor: X => Y",
+      "Migrate → new format",
+      "Replace ⟶ glyph",
+      "Document ➔ flow",
+    ];
+    const result = validateIssue(
+      valid({
+        retro: { good: "", bad: "", action_items: titles, commits: [] },
+      }),
+    );
+    expect(
+      result.ok,
+      result.ok ? "" : `unexpected rejection: ${JSON.stringify(result.errors)}`,
+    ).toBe(true);
   });
 });
 

@@ -20,10 +20,32 @@ export const RETRO_COMMENT_MARKER = "<!-- danxbot-retro -->";
 
 /**
  * Idempotency marker for the worker-managed action-items bookkeeping
- * comment. Tracks `<title> → <external_id>` for every retro action_item
- * already spawned to a tracker card, so re-syncs are no-ops.
+ * comment. Tracks `<title>\t<external_id>` (TAB-separated) for every retro
+ * action_item already spawned to a tracker card, so re-syncs are no-ops.
+ *
+ * The separator is U+0009 HORIZONTAL TAB rather than a glyph (the original
+ * design used U+2192 '→'). Glyphs and ASCII bigrams that visually render as
+ * arrows (`->`, `=>`, `⟶`, `➔`, `➡`, `⇒`) are easy for an agent or human
+ * to type into an action_item title; with the arrow as separator a title
+ * carrying one risked silent misattribution on reread. Tab is invisible in
+ * the tracker UI, never appears in human prose, and is rejected by
+ * `validateRetro` in `src/issue-tracker/yaml.ts` so a title cannot collide
+ * with the separator. See card 69f771d6cbd1ada690743c73 for the design
+ * discussion.
  */
 export const ACTION_ITEMS_COMMENT_MARKER = "<!-- danxbot-action-items -->";
+
+/**
+ * The bookkeeping line separator between `<title>` and `<external_id>`.
+ * U+0009 HORIZONTAL TAB. `validateRetro` in `src/issue-tracker/yaml.ts`
+ * rejects tab in `retro.action_items[i]`, so a bullet line contains
+ * exactly one tab and `indexOf` recovers the title/id split unambiguously.
+ *
+ * Exported so the validator imports the same constant rather than
+ * hardcoding `"\t"` independently — a future separator change touches
+ * one site, not two.
+ */
+export const BOOKKEEPING_SEP = "\t";
 
 /**
  * Deterministic, idempotent worker-side sync.
@@ -260,7 +282,7 @@ export async function syncIssue(
   // When the saved status is Done or Cancelled and the local retro carries
   // action_items, ensure each title has a corresponding card on the
   // tracker's Action Items list. A single bookkeeping comment with the
-  // `<!-- danxbot-action-items -->` marker tracks `<title> → <external_id>`
+  // `<!-- danxbot-action-items -->` marker tracks `<title>\t<external_id>`
   // for every spawned card; on every sync we parse it to compute the
   // delta and edit-in-place rather than POST a new bookkeeping comment.
   //
@@ -273,7 +295,7 @@ export async function syncIssue(
   // from the same `local.retro.action_items` field that drives the
   // spawn-and-edit logic here. This is intentional — the retro is the
   // human-readable summary, the bookkeeping is the machine-readable spawn
-  // ledger keyed by `<title> → <external_id>`. Verified by the
+  // ledger keyed by `<title>\t<external_id>`. Verified by the
   // "incremental: appending an action_item" test in `sync.test.ts`, which
   // expects 3 writes per delta (1 spawn + 2 edits).
   let actionItemsAppendedComment: IssueComment | null = null;
@@ -501,14 +523,18 @@ function findManagedRetroComment(
  *   <!-- danxbot -->
  *   <!-- danxbot-action-items -->
  *
- *   ## Action Items spawned by Phase 5 retro
+ *   ## Action Items spawned by retro
  *
- *   - <title> → <external_id>
- *   - <title> → <external_id>
+ *   - <title>\t<external_id>
+ *   - <title>\t<external_id>
  *
- * The order of bullets follows the YAML's `retro.action_items[]` order so
- * appending a new title moves only the trailing bullet, never reorders
- * existing ones (which would invert the byte-identity check).
+ * The bullet separator is U+0009 HORIZONTAL TAB (`BOOKKEEPING_SEP`). Tab
+ * is invisible in the tracker UI but never appears in human prose, and
+ * `validateRetro` rejects tab in `retro.action_items[i]` so a title can
+ * never collide with the separator. The order of bullets follows the
+ * YAML's `retro.action_items[]` order so appending a new title moves only
+ * the trailing bullet, never reorders existing ones (which would invert
+ * the byte-identity check).
  */
 export function renderActionItemsBookkeeping(
   orderedTitles: readonly string[],
@@ -518,42 +544,65 @@ export function renderActionItemsBookkeeping(
   for (const title of orderedTitles) {
     const externalId = spawned.get(title);
     if (!externalId) continue;
-    lines.push(`- ${title} → ${externalId}`);
+    lines.push(`- ${title}${BOOKKEEPING_SEP}${externalId}`);
   }
-  const body = `## Action Items spawned by Phase 5 retro
+  const body = `## Action Items spawned by retro
 
 ${lines.join("\n")}`;
   return `${DANXBOT_COMMENT_MARKER}\n${ACTION_ITEMS_COMMENT_MARKER}\n\n${body}`;
 }
 
 /**
- * Parse the bookkeeping comment back into a `title → external_id` map.
+ * Parse the bookkeeping comment back into a title-to-external_id map.
  *
  * Non-bullet lines are skipped — the format reserves room for a future
  * footer (e.g. "spawned at <timestamp>") to be appended without
  * confusing the parser. Bullet lines (`^- `) MUST conform to the
- * `<title> → <external_id>` shape; any malformed bullet throws so a
+ * `<title>\t<external_id>` shape; any malformed bullet throws so a
  * silently-truncated or hand-edited bookkeeping comment surfaces the
  * corruption immediately rather than re-spawning duplicate Action Items
  * cards on every subsequent sync (the failure mode the throw exists
  * to prevent).
+ *
+ * No legacy-format fallback and no whitespace tolerance: the prior
+ * arrow-glyph shape is NOT accepted, and CRLF or trailing-space variants
+ * throw the same Malformed error. Pre-hardening bookkeeping comments
+ * surface as a loud parse failure; the operator deletes the offending
+ * comment from the tracker and the next sync re-renders in the new
+ * format. Per CLAUDE.md zero-tech-debt rule, loud failure beats silent
+ * dual-format compatibility.
  */
 export function parseActionItemsBookkeeping(
   text: string,
 ): Map<string, string> {
   const out = new Map<string, string>();
   for (const rawLine of text.split("\n")) {
-    const line = rawLine.trim();
-    if (!line.startsWith("- ")) continue;
-    const arrow = line.lastIndexOf("→");
-    if (arrow === -1) {
+    if (!rawLine.startsWith("- ")) continue;
+    const sepIdx = rawLine.indexOf(BOOKKEEPING_SEP);
+    if (sepIdx === -1) {
       throw new Error(
-        `Malformed action-items bookkeeping line (missing '→' separator): ${JSON.stringify(rawLine)}`,
+        `Malformed action-items bookkeeping line (missing tab separator): ${JSON.stringify(rawLine)}`,
       );
     }
-    const title = line.slice(2, arrow).trim();
-    const externalId = line.slice(arrow + 1).trim();
-    if (title === "" || externalId === "") {
+    if (rawLine.indexOf(BOOKKEEPING_SEP, sepIdx + 1) !== -1) {
+      // The validator guarantees titles cannot contain tab and
+      // tracker-assigned external_ids never do. A line carrying a second
+      // tab is corrupt input (hand-edited or wrong format); accepting it
+      // would let one of the two halves carry an embedded tab and silently
+      // misattribute a spawn id.
+      throw new Error(
+        `Malformed action-items bookkeeping line (multiple tab separators): ${JSON.stringify(rawLine)}`,
+      );
+    }
+    const title = rawLine.slice(2, sepIdx);
+    const externalId = rawLine.slice(sepIdx + 1);
+    // Trim only for the empty-side check, not for the stored value:
+    // the YAML round-trip key must equal the raw title bytes so a
+    // hypothetical title like " foo " (validator allows non-tab
+    // whitespace) still matches `local.retro.action_items[i]` in the
+    // already-spawned lookup. Whitespace-only halves are still corrupt
+    // input and throw loud.
+    if (title.trim() === "" || externalId.trim() === "") {
       throw new Error(
         `Malformed action-items bookkeeping line (empty title or external_id): ${JSON.stringify(rawLine)}`,
       );
