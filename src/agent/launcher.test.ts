@@ -196,7 +196,7 @@ describe("spawnAgent", () => {
     vi.useRealTimers();
   });
 
-  it("spawns claude CLI with shared flags and firstMessage referencing prompt.md", async () => {
+  it("spawns claude CLI with shared flags and inlines short prompts directly into firstMessage", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -221,24 +221,55 @@ describe("spawnAgent", () => {
       }),
     );
 
-    // firstMessage (the -p value) is the @file attachment, NOT the original
-    // prompt text. The original prompt is written verbatim to prompt.md and
-    // attached via Claude Code's native `@<path>` syntax (Phase 6 of the
-    // workspace-dispatch epic, Trello WWYKnQhc).
+    // Short prompts are inlined directly — no @file attachment, no temp dir.
+    // The body appears verbatim in the -p arg.
     const args = mockSpawn.mock.calls[0][1] as string[];
     const promptArg = args[args.indexOf("-p") + 1];
     expect(promptArg).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
-    expect(promptArg).toMatch(/@\S+\/prompt\.md/);
-    expect(promptArg).not.toContain("execute the task described in it");
-    expect(promptArg).not.toContain("/danx-next");
+    expect(promptArg).toContain("/danx-next");
+    expect(promptArg).not.toMatch(/@\S+\/prompt\.md/);
 
-    // Original prompt body lands in prompt.md — writeFileSync receives it.
-    const promptWrite = mockWriteFileSync.mock.calls.find(
+    // No prompt-temp-dir allocated for the inline path. (logPromptToDisk
+    // still writes a debug copy under logsDir/<jobId>/prompt.md — that is
+    // unrelated and uses mkdirSync, not mkdtempSync.)
+    const promptTempCall = mockMkdtempSync.mock.calls.find(
       (c: unknown[]) =>
-        typeof c[0] === "string" && (c[0] as string).endsWith("prompt.md"),
+        typeof c[0] === "string" &&
+        (c[0] as string).includes("danxbot-prompt-"),
     );
-    expect(promptWrite).toBeDefined();
-    expect(promptWrite![1]).toBe("/danx-next");
+    expect(promptTempCall).toBeUndefined();
+  });
+
+  it("uses @file attachment when prompt exceeds the inline threshold", async () => {
+    // Route mkdtempSync by prefix so the prompt-temp-dir write lands at a
+    // path containing "danxbot-prompt-" and is distinguishable from any
+    // unrelated mkdtemp calls in the same dispatch.
+    mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const longPrompt = "x".repeat(3000);
+    await spawnAgent({
+      prompt: longPrompt,
+      repoName: "platform",
+      timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
+    });
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    const promptArg = args[args.indexOf("-p") + 1];
+    expect(promptArg).toMatch(/@\S+\/prompt\.md/);
+    expect(promptArg).not.toContain(longPrompt);
+
+    // Body lands in a danxbot-prompt-* temp dir under tmpdir.
+    const tmpPromptWrite = mockWriteFileSync.mock.calls.find(
+      (c: unknown[]) =>
+        typeof c[0] === "string" &&
+        (c[0] as string).includes("danxbot-prompt-") &&
+        (c[0] as string).endsWith("prompt.md"),
+    );
+    expect(tmpPromptWrite).toBeDefined();
+    expect(tmpPromptWrite![1]).toBe(longPrompt);
   });
 
   it("does NOT pass --output-format stream-json — watcher is the monitoring source", async () => {
@@ -1713,9 +1744,12 @@ describe("spawnAgent", () => {
         ],
       });
 
+      // Use a prompt over the inline threshold so buildClaudeInvocation
+      // actually allocates a temp dir — that's the only condition under
+      // which a leak could occur.
       await expect(
         spawnAgent({
-          prompt: "/danx-next",
+          prompt: "x".repeat(3000),
           repoName: "platform",
           timeoutMs: 300_000,
           cwd: "/tmp/test-workspace",
@@ -1812,9 +1846,12 @@ describe("spawnAgent", () => {
         summary: "claude-auth OAuth token expired at 2026-01-01T00:00:00.000Z",
       });
 
+      // Use a prompt that exceeds the inline threshold so buildClaudeInvocation
+      // would normally allocate a temp dir — that's the only condition under
+      // which the leak this test guards against could happen.
       await expect(
         spawnAgent({
-          prompt: "/danx-next",
+          prompt: "x".repeat(3000),
           repoName: "platform",
           timeoutMs: 300_000,
           cwd: "/tmp/test-workspace",
@@ -2108,9 +2145,10 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     expect(job.terminalLogPath).toBeUndefined();
   });
 
-  it("passes the shared firstMessage (tag + @file attachment) to buildDispatchScript", async () => {
+  it("passes the shared firstMessage (tag + @file attachment) to buildDispatchScript when prompt exceeds inline threshold", async () => {
+    const longBody = "do the work\n" + "x".repeat(3000);
     await spawnAgent({
-      prompt: "do the work",
+      prompt: longBody,
       repoName: "platform",
       timeoutMs: 300_000,
       cwd: "/tmp/test-workspace",
@@ -2122,9 +2160,25 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     expect(firstMessage).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
     expect(firstMessage).toMatch(/@\S+\/prompt\.md/);
     expect(firstMessage).not.toContain("execute the task described in it");
-    // Original prompt body stays in the file — it is NEVER inlined on the
-    // command line in either runtime.
-    expect(firstMessage).not.toContain("do the work");
+    // Long prompt body stays in the file — it is NEVER inlined on the
+    // command line when above INLINE_PROMPT_THRESHOLD.
+    expect(firstMessage).not.toContain(longBody);
+  });
+
+  it("inlines the firstMessage body when prompt is at or below inline threshold (host mode)", async () => {
+    await spawnAgent({
+      prompt: "do the work",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
+      openTerminal: true,
+    });
+
+    const buildCall = mockBuildDispatchScript.mock.calls[0];
+    const firstMessage = buildCall[1].firstMessage as string;
+    expect(firstMessage).toContain("<!-- danxbot-dispatch:test-uuid-1234 -->");
+    expect(firstMessage).toContain("do the work");
+    expect(firstMessage).not.toMatch(/@\S+\/prompt\.md/);
   });
 
   it("includes --agents <json> in the shared flags when agents is non-empty", async () => {
@@ -2185,7 +2239,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     });
 
     await spawnAgent({
-      prompt: "/danx-next",
+      prompt: "x".repeat(3000),
       repoName: "platform",
       timeoutMs: 300_000,
       cwd: "/tmp/test-workspace",
@@ -2216,7 +2270,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
 
     await expect(
       spawnAgent({
-        prompt: "/danx-next",
+        prompt: "x".repeat(3000),
         repoName: "platform",
         timeoutMs: 300_000,
         cwd: "/tmp/test-workspace",
@@ -2246,7 +2300,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     mockSpawn.mockReturnValue(child);
 
     await spawnAgent({
-      prompt: "/danx-next",
+      prompt: "x".repeat(3000),
       repoName: "platform",
       timeoutMs: 300_000,
       cwd: "/tmp/test-workspace",
@@ -2460,7 +2514,7 @@ describe("cancelJob", () => {
     mockSpawn.mockReturnValue(child);
 
     const job = await spawnAgent({
-      prompt: "long task",
+      prompt: "x".repeat(3000),
       repoName: "platform",
       timeoutMs: 300_000,
       cwd: "/tmp/test-workspace",
@@ -2484,7 +2538,7 @@ describe("cancelJob", () => {
     mockIsPidAlive.mockReturnValue(false);
 
     const job = await spawnAgent({
-      prompt: "host task",
+      prompt: "x".repeat(3000),
       repoName: "platform",
       timeoutMs: 300_000,
       cwd: "/tmp/test-workspace",
@@ -2506,7 +2560,7 @@ describe("cancelJob", () => {
     mockSpawn.mockReturnValue(child);
 
     await spawnAgent({
-      prompt: "task",
+      prompt: "x".repeat(3000),
       repoName: "platform",
       timeoutMs: 60_000,
       cwd: "/tmp/test-workspace",
@@ -2526,7 +2580,7 @@ describe("cancelJob", () => {
     mockSpawn.mockReturnValue(child);
 
     await spawnAgent({
-      prompt: "task",
+      prompt: "x".repeat(3000),
       repoName: "platform",
       timeoutMs: 300_000,
       cwd: "/tmp/test-workspace",

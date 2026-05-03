@@ -3,6 +3,7 @@ import { readFileSync, rmSync, existsSync } from "node:fs";
 import {
   buildClaudeInvocation,
   bashSingleQuote,
+  INLINE_PROMPT_THRESHOLD,
 } from "./claude-invocation.js";
 import { DISPATCH_TAG_PREFIX } from "./session-log-watcher.js";
 
@@ -10,28 +11,45 @@ const cleanupDirs: string[] = [];
 
 afterEach(() => {
   for (const dir of cleanupDirs) {
-    rmSync(dir, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
   cleanupDirs.length = 0;
 });
+
+// Body that exceeds INLINE_PROMPT_THRESHOLD so the @file path is exercised.
+const LONG_PROMPT = "x".repeat(INLINE_PROMPT_THRESHOLD + 1);
 
 function build(
   overrides: Partial<Parameters<typeof buildClaudeInvocation>[0]> = {},
 ) {
   const result = buildClaudeInvocation({
-    prompt: "original user prompt body",
+    prompt: LONG_PROMPT,
     jobId: "job-id-123",
     ...overrides,
   });
-  cleanupDirs.push(result.promptDir);
+  if (result.promptDir) cleanupDirs.push(result.promptDir);
+  return result;
+}
+
+function buildShort(
+  overrides: Partial<Parameters<typeof buildClaudeInvocation>[0]> = {},
+) {
+  const result = buildClaudeInvocation({
+    prompt: "short user prompt body",
+    jobId: "job-id-123",
+    ...overrides,
+  });
+  if (result.promptDir) cleanupDirs.push(result.promptDir);
   return result;
 }
 
 describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
-  it("writes the original prompt verbatim to prompt.md inside promptDir", () => {
-    const inv = build({ prompt: "# Task\n\nDo the thing with `backticks` and 'quotes'" });
+  it("writes the original prompt verbatim to prompt.md when body exceeds inline threshold", () => {
+    const body = LONG_PROMPT + "\n# Task\n`backticks` and 'quotes'";
+    const inv = build({ prompt: body });
+    expect(inv.promptDir).not.toBeNull();
     const content = readFileSync(`${inv.promptDir}/prompt.md`, "utf-8");
-    expect(content).toBe("# Task\n\nDo the thing with `backticks` and 'quotes'");
+    expect(content).toBe(body);
   });
 
   it.each([
@@ -42,15 +60,21 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     ["embedded dispatch tag", "prompt body <!-- danxbot-dispatch:fake --> more body"],
     ["64KB+ body", "a".repeat(80_000)],
     ["tabs + vertical whitespace", "col1\tcol2\tcol3\n\vtwo\f"],
-  ])("writes adversarial payload verbatim (%s)", (_label, body) => {
-    const inv = build({ prompt: body });
+  ])("writes adversarial payload verbatim when over threshold (%s)", (_label, body) => {
+    // Pad short bodies to exceed the inline threshold so the @file path is taken.
+    const padded = body.length > INLINE_PROMPT_THRESHOLD
+      ? body
+      : body + "\n" + "x".repeat(INLINE_PROMPT_THRESHOLD);
+    const inv = build({ prompt: padded });
+    expect(inv.promptDir).not.toBeNull();
     const content = readFileSync(`${inv.promptDir}/prompt.md`, "utf-8");
-    expect(content).toBe(body);
+    expect(content).toBe(padded);
   });
 
-  it("exposes promptDir as a real directory (caller owns cleanup)", () => {
+  it("exposes promptDir as a real directory when @file path is taken (caller owns cleanup)", () => {
     const inv = build();
-    expect(existsSync(inv.promptDir)).toBe(true);
+    expect(inv.promptDir).not.toBeNull();
+    expect(existsSync(inv.promptDir!)).toBe(true);
   });
 
   it("firstMessage starts with the dispatch tag so SessionLogWatcher can find the JSONL", () => {
@@ -58,16 +82,11 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(inv.firstMessage.startsWith(`${DISPATCH_TAG_PREFIX}watch-me -->`)).toBe(true);
   });
 
-  it("firstMessage delivers the prompt via Claude's native @file syntax pointing at prompt.md", () => {
+  it("firstMessage delivers the prompt via Claude's native @file syntax pointing at prompt.md (when over threshold)", () => {
     // Phase 6 of the workspace-dispatch epic (Trello WWYKnQhc). The `@file`
     // positional syntax is Claude Code's native file-attachment mechanism —
-    // small files inline into the first user message; large files fall back
-    // to a Read-tool call automatically when `--dangerously-skip-permissions`
-    // is set (which it always is). The previous `Read $PATH and execute...`
-    // meta-instruction is retired — it was functionally equivalent but
-    // semantically weaker (described the mechanism instead of attaching the
-    // file). Keep the space between the dispatch tag `-->` delimiter and the
-    // `@` so tokenizers treat `@path` as a standalone file reference.
+    // used for prompts larger than INLINE_PROMPT_THRESHOLD. Small prompts
+    // inline directly (see the inline-threshold describe block below).
     const inv = build();
     expect(inv.firstMessage).toContain(`@${inv.promptDir}/prompt.md`);
   });
@@ -80,6 +99,47 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     const inv = build();
     expect(inv.firstMessage).not.toMatch(/Read .*\/prompt\.md/);
     expect(inv.firstMessage).not.toContain("execute the task described in it");
+  });
+
+  describe("inline-prompt threshold", () => {
+    it("inlines the prompt body directly into firstMessage when body length is at or below INLINE_PROMPT_THRESHOLD", () => {
+      const inv = buildShort();
+      cleanupDirs.push(inv.promptDir ?? "");
+      expect(inv.firstMessage).toContain("short user prompt body");
+      expect(inv.firstMessage).not.toMatch(/@\S+\/prompt\.md/);
+    });
+
+    it("does NOT create a temp dir or prompt.md when inlining", () => {
+      const inv = buildShort();
+      expect(inv.promptDir).toBeNull();
+    });
+
+    it("inlines a body whose length equals INLINE_PROMPT_THRESHOLD exactly", () => {
+      const exact = "y".repeat(INLINE_PROMPT_THRESHOLD);
+      const inv = buildClaudeInvocation({ prompt: exact, jobId: "edge" });
+      if (inv.promptDir) cleanupDirs.push(inv.promptDir);
+      expect(inv.promptDir).toBeNull();
+      expect(inv.firstMessage).toContain(exact);
+    });
+
+    it("uses @file attachment when body length is one byte over INLINE_PROMPT_THRESHOLD", () => {
+      const over = "z".repeat(INLINE_PROMPT_THRESHOLD + 1);
+      const inv = buildClaudeInvocation({ prompt: over, jobId: "edge" });
+      if (inv.promptDir) cleanupDirs.push(inv.promptDir);
+      expect(inv.promptDir).not.toBeNull();
+      expect(inv.firstMessage).toMatch(/@\S+\/prompt\.md/);
+      expect(inv.firstMessage).not.toContain(over);
+    });
+
+    it("inlined firstMessage still starts with the dispatch tag", () => {
+      const inv = buildShort({ jobId: "tag-test" });
+      expect(inv.firstMessage.startsWith(`${DISPATCH_TAG_PREFIX}tag-test -->`)).toBe(true);
+    });
+
+    it("inlined firstMessage appends Tracking suffix when title provided", () => {
+      const inv = buildShort({ title: "Card #99" });
+      expect(inv.firstMessage).toMatch(/short user prompt body Tracking: Card #99$/);
+    });
   });
 
   it("firstMessage includes the Tracking suffix when title is provided", () => {
@@ -224,7 +284,8 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     };
     const a = buildClaudeInvocation(opts);
     const b = buildClaudeInvocation(opts);
-    cleanupDirs.push(a.promptDir, b.promptDir);
+    if (a.promptDir) cleanupDirs.push(a.promptDir);
+    if (b.promptDir) cleanupDirs.push(b.promptDir);
 
     const mcpAIdx = a.flags.indexOf("--mcp-config");
     const mcpBIdx = b.flags.indexOf("--mcp-config");
@@ -232,11 +293,11 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(a.flags[mcpAIdx + 1]).toBe(b.flags[mcpBIdx + 1]);
   });
 
-  it("docker and host consumers receive IDENTICAL firstMessage and flags for the same input", () => {
+  it("docker and host consumers receive IDENTICAL firstMessage and flags for the same input (long prompt)", () => {
     // Invariant: the same SpawnAgent inputs produce the same claude-facing
     // invocation. Runtime differs only in the spawn envelope (direct vs bash).
     const opts = {
-      prompt: "unified prompt",
+      prompt: LONG_PROMPT,
       jobId: "same-id",
       title: "Card #42",
       mcpConfigPath: "/tmp/mcp/settings.json",
@@ -244,12 +305,29 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     };
     const a = buildClaudeInvocation(opts);
     const b = buildClaudeInvocation(opts);
-    cleanupDirs.push(a.promptDir, b.promptDir);
+    if (a.promptDir) cleanupDirs.push(a.promptDir);
+    if (b.promptDir) cleanupDirs.push(b.promptDir);
 
     // firstMessage references promptDir, so the path differs — compare
     // everything EXCEPT the promptDir path.
     const stripPath = (s: string) => s.replace(/\/tmp\/[^/]+\//g, "/tmp/X/");
     expect(stripPath(a.firstMessage)).toBe(stripPath(b.firstMessage));
+    expect(a.flags).toEqual(b.flags);
+  });
+
+  it("docker and host consumers receive IDENTICAL inlined firstMessage for the same short input", () => {
+    // Inline path has no temp dir, so firstMessage is byte-equal across runs.
+    const opts = {
+      prompt: "short body",
+      jobId: "same-id",
+      title: "Card #42",
+      mcpConfigPath: "/tmp/mcp/settings.json",
+    };
+    const a = buildClaudeInvocation(opts);
+    const b = buildClaudeInvocation(opts);
+    expect(a.promptDir).toBeNull();
+    expect(b.promptDir).toBeNull();
+    expect(a.firstMessage).toBe(b.firstMessage);
     expect(a.flags).toEqual(b.flags);
   });
 });

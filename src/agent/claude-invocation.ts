@@ -44,12 +44,36 @@ export interface BuildClaudeInvocationOptions {
   resumeSessionId?: string;
 }
 
+/**
+ * Prompt bodies at or below this length are inlined directly into the
+ * firstMessage instead of being written to a temp prompt.md and attached via
+ * `@<path>`. Most poller dispatches are tiny (`/danx-next` + a one-line YAML
+ * pointer + the danxbot_complete reminder fits comfortably here) and don't
+ * need the file-attachment ceremony — the `@<path>` form forces claude to
+ * make an extra Read tool call for content that could have been in the first
+ * user turn directly. Larger prompts (epic handoffs, multi-section design
+ * dumps) still go through the temp file because argv has a 128KB cap and
+ * because at that size the file is more readable in debug artifacts than a
+ * giant inline blob.
+ *
+ * The threshold is bytes, not chars — `Buffer.byteLength` would be the strict
+ * argv-size measure, but for ASCII-heavy prompts `String#length` is close
+ * enough and avoids importing `Buffer`. Keep this conservative.
+ */
+export const INLINE_PROMPT_THRESHOLD = 2000;
+
 export interface ClaudeInvocation {
-  /** Absolute path to the freshly-created temp dir containing prompt.md.
-   *  Caller is responsible for rmSync-ing this directory once the agent exits. */
-  promptDir: string;
+  /**
+   * Absolute path to the freshly-created temp dir containing prompt.md when
+   * the prompt was over `INLINE_PROMPT_THRESHOLD`. `null` when the prompt was
+   * inlined directly into firstMessage (no temp dir was created).
+   *
+   * Callers must guard cleanup: `if (promptDir) rmSync(promptDir, …)`.
+   */
+  promptDir: string | null;
   /** First user turn for the dispatched claude — contains the dispatch tag,
-   *  the `@<path-to-prompt.md>` file attachment, and the optional tracking line. */
+   *  either the inlined prompt body OR the `@<path-to-prompt.md>` file
+   *  attachment, and the optional tracking line. */
   firstMessage: string;
   /** Shared CLI flags. Docker appends `-p firstMessage`; host passes
    *  firstMessage as a positional argument inside the bash script. */
@@ -59,20 +83,30 @@ export interface ClaudeInvocation {
 export function buildClaudeInvocation(
   options: BuildClaudeInvocationOptions,
 ): ClaudeInvocation {
-  const promptDir = mkdtempSync(join(tmpdir(), "danxbot-prompt-"));
-  const promptFile = join(promptDir, "prompt.md");
-  writeFileSync(promptFile, options.prompt, "utf-8");
-
   const tracking = options.title ? ` Tracking: ${options.title}` : "";
-  // Claude Code's native `@<path>` positional syntax attaches the file to the
-  // first user turn. Small files inline into the turn as text; large files
-  // (>128KB MAX_ARG_STRLEN territory — though firstMessage is never that big
-  // since the body lives in prompt.md, not argv) fall back to a Read-tool call
-  // when `--dangerously-skip-permissions` is set (which it always is for
-  // dispatched agents — see the flags block below). Keep a space before `@`
-  // so tokenizers treat `@<path>` as a standalone file reference.
+
+  // Short prompts inline directly into the first user turn — no temp file,
+  // no `@<path>` attachment, one fewer claude tool round-trip.
+  let promptDir: string | null = null;
+  let body: string;
+  if (options.prompt.length <= INLINE_PROMPT_THRESHOLD) {
+    body = options.prompt;
+  } else {
+    // Larger prompts: write to a temp prompt.md and attach via Claude Code's
+    // native `@<path>` positional syntax. Small files inline into the turn as
+    // text; very large files (>128KB MAX_ARG_STRLEN territory) fall back to a
+    // Read-tool call when `--dangerously-skip-permissions` is set (which it
+    // always is for dispatched agents — see the flags block below). Keep a
+    // space before `@` so tokenizers treat `@<path>` as a standalone file
+    // reference.
+    promptDir = mkdtempSync(join(tmpdir(), "danxbot-prompt-"));
+    const promptFile = join(promptDir, "prompt.md");
+    writeFileSync(promptFile, options.prompt, "utf-8");
+    body = `@${promptFile}`;
+  }
+
   const firstMessage =
-    `${DISPATCH_TAG_PREFIX}${options.jobId} --> @${promptFile}${tracking}`;
+    `${DISPATCH_TAG_PREFIX}${options.jobId} --> ${body}${tracking}`;
 
   // `--strict-mcp-config` is load-bearing for agent isolation. With this
   // flag, claude IGNORES every project-scope and user-scope `.mcp.json` —

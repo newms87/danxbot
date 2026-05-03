@@ -483,7 +483,7 @@ export async function spawnAgent(
       config.dispatch.mcpProbeTimeoutMs,
     );
     if (!probeResult.ok) {
-      rmSync(promptDir, { recursive: true, force: true });
+      if (promptDir) rmSync(promptDir, { recursive: true, force: true });
       const names = probeResult.failures.map((f) => f.serverName).join(", ");
       const details = probeResult.failures
         .map((f) => `  - ${f.message}`)
@@ -714,10 +714,10 @@ export async function spawnAgent(
       }
     } finally {
       // rmSync with force:true is no-op on missing paths, so we don't need
-      // existence guards — only a promptDir sentinel for docker mode before
-      // buildClaudeInvocation ran would warrant one, and that cannot happen:
-      // `promptDir` is assigned before any spawn work.
-      rmSync(promptDir, { recursive: true, force: true });
+      // existence guards. `promptDir` is null when the prompt was short
+      // enough to inline directly into firstMessage (see INLINE_PROMPT_THRESHOLD
+      // in claude-invocation.ts) — nothing to clean up in that case.
+      if (promptDir) rmSync(promptDir, { recursive: true, force: true });
       if (termSettingsDirToClean) {
         rmSync(termSettingsDirToClean, { recursive: true, force: true });
       }
