@@ -41,6 +41,7 @@ import {
   type CompleteStatus,
 } from "../mcp/danxbot-server.js";
 import { getDispatchById } from "../dashboard/dispatches-db.js";
+import { autoSyncTrackedIssue } from "./auto-sync.js";
 import { getSlackClientForRepo } from "../slack/listener.js";
 import type { SlackTriggerMetadata } from "../dashboard/dispatches.js";
 import {
@@ -918,6 +919,21 @@ export async function handleStop(
       return;
     }
 
+    // Phase 3 of tracker-agnostic-agents (Trello wsb4TVNT): auto-sync
+    // the dispatch's tracked issue YAML before tearing the agent down.
+    // The agent may have edited the local YAML and called
+    // `danxbot_complete` directly without `danx_issue_save`; the auto-
+    // sync ensures the tracker reflects the final state regardless.
+    //
+    // Only fires for tracker-backed triggers (Trello today). Slack and
+    // API dispatches have no tracked issue and skip the sync. Validation
+    // failures are recorded against the dispatch row's `error` column
+    // by `syncTrackedIssueOnComplete` itself; we deliberately do NOT
+    // surface them to the stop handler's response — the agent is already
+    // done, so the failure is informational and must not block process
+    // termination (per AC #4 + the in-card gotchas).
+    await autoSyncTrackedIssue(jobId, repo);
+
     await job.stop(status, summary);
     json(res, 200, { status });
   } catch (err) {
@@ -927,3 +943,4 @@ export async function handleStop(
     });
   }
 }
+

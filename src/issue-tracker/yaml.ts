@@ -123,6 +123,37 @@ export function serializeIssue(issue: Issue): string {
  * message on either malformed YAML or schema violations.
  */
 export function parseIssue(text: string): Issue {
+  return parseWithOptions(text, {});
+}
+
+/**
+ * Like `parseIssue`, but tolerant of an empty `external_id`. Used by the
+ * `danx_issue_create` MCP flow — the agent writes a draft YAML at
+ * `<repo>/.danxbot/issues/open/<filename>.yml` BEFORE the tracker has
+ * assigned an id, so the file's `external_id` is necessarily empty until
+ * the worker stamps it post-create.
+ *
+ * Draft-time field expectations (NOT enforced by the option flag — the
+ * primitive validators already accept empty strings here, so existing
+ * `validateAcList` / `validatePhasesList` accept them as-is):
+ *
+ *   - `ac[i].check_item_id` — empty until the tracker assigns it.
+ *   - `phases[i].check_item_id` — empty until the tracker assigns it.
+ *
+ * Every other field still validates strictly. The asymmetry between the
+ * `external_id` flag and the unflagged check_item_id leniency is
+ * intentional: external_id absence is a structural contract (rejected
+ * by default for sync flow); check_item_id absence is data shape
+ * already permitted by the primitive validators.
+ */
+export function parseDraftIssue(text: string): Issue {
+  return parseWithOptions(text, { allowEmptyExternalId: true });
+}
+
+function parseWithOptions(
+  text: string,
+  opts: { allowEmptyExternalId?: boolean },
+): Issue {
   let raw: unknown;
   try {
     raw = parseYamlText(text);
@@ -132,7 +163,7 @@ export function parseIssue(text: string): Issue {
     }
     throw new IssueParseError(`Malformed YAML: ${String(err)}`);
   }
-  const result = validateIssue(raw);
+  const result = validateIssue(raw, opts);
   if (!result.ok) {
     throw new IssueParseError(
       `Invalid Issue YAML:\n  - ${result.errors.join("\n  - ")}`,
@@ -152,8 +183,15 @@ type ValidateResult =
  * Validates: required fields present, enum values match, primitive types
  * match. Does NOT validate: ISO 8601 timestamp shape, UUID format, etc.;
  * those are caller responsibilities.
+ *
+ * `opts.allowEmptyExternalId` permits `external_id: ""` for the
+ * `danx_issue_create` draft flow, where the tracker has not yet assigned
+ * an id. Default is strict (empty `external_id` is an error).
  */
-export function validateIssue(value: unknown): ValidateResult {
+export function validateIssue(
+  value: unknown,
+  opts: { allowEmptyExternalId?: boolean } = {},
+): ValidateResult {
   const errors: string[] = [];
 
   if (!isPlainObject(value)) {
@@ -178,7 +216,9 @@ export function validateIssue(value: unknown): ValidateResult {
   // external_id
   if (!("external_id" in v)) {
     errors.push("missing required field: external_id");
-  } else if (typeof v.external_id !== "string" || v.external_id.length === 0) {
+  } else if (typeof v.external_id !== "string") {
+    errors.push("external_id must be a string");
+  } else if (v.external_id.length === 0 && !opts.allowEmptyExternalId) {
     errors.push("external_id must be a non-empty string");
   }
 

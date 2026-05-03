@@ -54,6 +54,15 @@ const DANXBOT_ENTRY: McpServerEntry = {
       env.DANXBOT_SLACK_REPLY_URL = opts.slack.replyUrl;
       env.DANXBOT_SLACK_UPDATE_URL = opts.slack.updateUrl;
     }
+    // Issue-tracker URL injection: parallel to the Slack pair. The
+    // danxbot MCP process gets the URLs via env and `buildActiveTools`
+    // exposes `danx_issue_save` + `danx_issue_create` only when both
+    // env vars are set. Absent here, the tools don't appear in
+    // `tools/list` and an agent can't accidentally call them.
+    if (opts.issue) {
+      env.DANXBOT_ISSUE_SAVE_URL = opts.issue.saveUrl;
+      env.DANXBOT_ISSUE_CREATE_URL = opts.issue.createUrl;
+    }
     return {
       command: "npx",
       args: ["tsx", DANXBOT_MCP_SERVER_PATH],

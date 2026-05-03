@@ -18,7 +18,7 @@ export type {
   CreateCardInput,
 } from "./interface.js";
 export { ISSUE_STATUSES, ISSUE_TYPES, PHASE_STATUSES } from "./interface.js";
-export { IssueParseError, createEmptyIssue, parseIssue, serializeIssue, validateIssue } from "./yaml.js";
+export { IssueParseError, createEmptyIssue, parseIssue, parseDraftIssue, serializeIssue, validateIssue } from "./yaml.js";
 export { syncIssue } from "./sync.js";
 export { MemoryTracker } from "./memory.js";
 export type { RequestLogEntry } from "./memory.js";

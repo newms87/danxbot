@@ -25,6 +25,10 @@ import {
   handleSlackUpdate,
 } from "./dispatch.js";
 import { handleClearCriticalFailure } from "./critical-failure-route.js";
+import {
+  handleIssueCreate,
+  handleIssueSave,
+} from "./issue-route.js";
 import type { RepoContext } from "../types.js";
 
 const log = createLogger("worker-server");
@@ -86,6 +90,18 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
     const slackUpdateMatch = url.pathname.match(/^\/api\/slack\/update\/(.+)$/);
     if (method === "POST" && slackUpdateMatch) {
       await handleSlackUpdate(req, res, slackUpdateMatch[1], repo);
+      return;
+    }
+
+    const issueSaveMatch = url.pathname.match(/^\/api\/issue-save\/(.+)$/);
+    if (method === "POST" && issueSaveMatch) {
+      await handleIssueSave(req, res, issueSaveMatch[1], repo);
+      return;
+    }
+
+    const issueCreateMatch = url.pathname.match(/^\/api\/issue-create\/(.+)$/);
+    if (method === "POST" && issueCreateMatch) {
+      await handleIssueCreate(req, res, issueCreateMatch[1], repo);
       return;
     }
 

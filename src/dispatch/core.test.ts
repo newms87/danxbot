@@ -211,6 +211,17 @@ describe("dispatch() — slack-worker integration", () => {
     expect(env.DANXBOT_STOP_URL).toBe(
       `http://localhost:${slackRepo.workerPort}/api/stop/${result.dispatchId}`,
     );
+    // Phase 3 (tracker-agnostic-agents): the issue-tracker URLs are
+    // auto-injected the same way the Slack URLs are. Both land in the
+    // danxbot MCP server's env so `danx_issue_save` / `danx_issue_create`
+    // can POST back to the worker. A regression that drops these would
+    // silently disable the entire issue-tool surface.
+    expect(env.DANXBOT_ISSUE_SAVE_URL).toBe(
+      `http://localhost:${slackRepo.workerPort}/api/issue-save/${result.dispatchId}`,
+    );
+    expect(env.DANXBOT_ISSUE_CREATE_URL).toBe(
+      `http://localhost:${slackRepo.workerPort}/api/issue-create/${result.dispatchId}`,
+    );
   });
 
   it("never passes an allowedTools field to spawnAgent — the allowlist concept is gone", async () => {
@@ -647,6 +658,12 @@ describe("dispatch() — dispatchId override", () => {
     );
     expect(env.DANXBOT_SLACK_UPDATE_URL).toBe(
       `http://localhost:${testRepo.workerPort}/api/slack/update/${explicitId}`,
+    );
+    expect(env.DANXBOT_ISSUE_SAVE_URL).toBe(
+      `http://localhost:${testRepo.workerPort}/api/issue-save/${explicitId}`,
+    );
+    expect(env.DANXBOT_ISSUE_CREATE_URL).toBe(
+      `http://localhost:${testRepo.workerPort}/api/issue-create/${explicitId}`,
     );
   });
 

@@ -57,6 +57,22 @@ export interface McpFactoryOptions {
     replyUrl: string;
     updateUrl: string;
   };
+  /**
+   * Issue-tracker callback URLs for the `danx_issue_save` and
+   * `danx_issue_create` MCP tools. When present, the danxbot MCP server
+   * exposes both tools and POSTs to these URLs from inside the agent
+   * subprocess. Both fields are required together; a half-defined issue
+   * surface would produce a partially-working tool set and hide bugs.
+   *
+   * Auto-injected by `dispatch()` for every dispatched agent in worker
+   * mode (the worker URL is `http://localhost:<workerPort>/api/issue-…/
+   * <dispatchId>`). Absent on dispatches that don't have access to a
+   * worker — the tools simply don't appear in `tools/list` then.
+   */
+  issue?: {
+    saveUrl: string;
+    createUrl: string;
+  };
 }
 
 export interface McpServerEntry {

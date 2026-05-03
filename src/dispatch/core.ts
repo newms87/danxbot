@@ -497,10 +497,14 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // `required-placeholders` so these auto-injected values satisfy its
   // overlay contract without forcing the caller to compute per-dispatch
   // URLs.
+  const issueSaveUrl = `http://localhost:${input.repo.workerPort}/api/issue-save/${dispatchId}`;
+  const issueCreateUrl = `http://localhost:${input.repo.workerPort}/api/issue-create/${dispatchId}`;
   const overlay: Record<string, string> = {
     DANXBOT_STOP_URL: workerStopUrl,
     DANXBOT_SLACK_REPLY_URL: `http://localhost:${input.repo.workerPort}/api/slack/reply/${dispatchId}`,
     DANXBOT_SLACK_UPDATE_URL: `http://localhost:${input.repo.workerPort}/api/slack/update/${dispatchId}`,
+    DANXBOT_ISSUE_SAVE_URL: issueSaveUrl,
+    DANXBOT_ISSUE_CREATE_URL: issueCreateUrl,
     ...input.overlay,
   };
 
@@ -538,9 +542,19 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
       ? { replyUrl: slackReplyUrl, updateUrl: slackUpdateUrl }
       : undefined;
 
+  // Issue-tracker MCP tools (`danx_issue_save`, `danx_issue_create`) are
+  // exposed for every worker-mode dispatch — the URLs always resolve to
+  // the same worker process this dispatch runs in. Absent the worker
+  // port (e.g. dashboard-mode tests that bypass the worker server), we
+  // simply omit the field and the tools don't appear.
+  const issue = input.repo.workerPort
+    ? { saveUrl: issueSaveUrl, createUrl: issueCreateUrl }
+    : undefined;
+
   const danxbotServer = defaultMcpRegistry[DANXBOT_SERVER_NAME].build({
     danxbotStopUrl: workerStopUrl,
     slack,
+    issue,
   });
   const mcpServers: Record<string, unknown> = {
     ...workspaceMcp.mcpServers,

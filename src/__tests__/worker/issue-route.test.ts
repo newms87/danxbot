@@ -1,0 +1,836 @@
+/**
+ * Unit + integration tests for the danx_issue_save / danx_issue_create
+ * worker handlers (Phase 3 of tracker-agnostic-agents — Trello wsb4TVNT).
+ *
+ * Spins up a real `node:http` server bound to a random port for each
+ * test, registers `/api/issue-save/:id` + `/api/issue-create/:id`, then
+ * issues real `fetch` calls against the loopback address. The MemoryTracker
+ * stands in for a real IssueTracker — it implements the full interface
+ * deterministically and supports `failNextWrite` for the
+ * tracker-error-isolation tests that AC #2 requires.
+ *
+ * Each test gets a fresh tmpdir for `repo.localPath`, so YAML writes do
+ * not collide across tests and `_drainAsyncWorkForTesting` reliably
+ * settles the per-issue mutex map between cases.
+ */
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+  type Server,
+} from "node:http";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import type { AddressInfo } from "node:net";
+import {
+  _drainAsyncWorkForTesting,
+  _resetForTesting,
+  handleIssueCreate,
+  handleIssueSave,
+  syncTrackedIssueOnComplete,
+  type IssueRouteDeps,
+} from "../../worker/issue-route.js";
+import { MemoryTracker } from "../../issue-tracker/memory.js";
+import {
+  ensureIssuesDirs,
+  issuePath,
+} from "../../poller/yaml-lifecycle.js";
+import {
+  createEmptyIssue,
+  serializeIssue,
+} from "../../issue-tracker/yaml.js";
+import type { Issue } from "../../issue-tracker/interface.js";
+import type { RepoContext } from "../../types.js";
+
+interface TestHarness {
+  url: string;
+  tracker: MemoryTracker;
+  repo: RepoContext;
+  recordedErrors: Array<{ dispatchId: string; message: string }>;
+  close: () => Promise<void>;
+}
+
+async function startTestServer(): Promise<TestHarness> {
+  const tracker = new MemoryTracker();
+  const repoLocalPath = mkdtempSync(join(tmpdir(), "danxbot-issue-route-"));
+  ensureIssuesDirs(repoLocalPath);
+  const recordedErrors: Array<{ dispatchId: string; message: string }> = [];
+  const deps: IssueRouteDeps = {
+    tracker,
+    recordError: async (dispatchId, message) => {
+      recordedErrors.push({ dispatchId, message });
+    },
+  };
+
+  const repo: RepoContext = {
+    name: `test-${Math.random().toString(36).slice(2, 10)}`,
+    url: "https://example.invalid/repo",
+    localPath: repoLocalPath,
+    workerPort: 0,
+    githubToken: "",
+    trello: {
+      apiKey: "",
+      apiToken: "",
+      boardId: "",
+      reviewListId: "",
+      todoListId: "",
+      inProgressListId: "",
+      needsHelpListId: "",
+      doneListId: "",
+      cancelledListId: "",
+      actionItemsListId: "",
+      bugLabelId: "",
+      featureLabelId: "",
+      epicLabelId: "",
+      needsHelpLabelId: "",
+    },
+    trelloEnabled: false,
+    slack: {
+      enabled: false,
+      botToken: "",
+      appToken: "",
+      channelId: "",
+    },
+    db: {
+      host: "",
+      port: 0,
+      user: "",
+      password: "",
+      database: "",
+      enabled: false,
+    },
+  };
+
+  const server = createServer(
+    async (req: IncomingMessage, res: ServerResponse) => {
+      const url = req.url ?? "/";
+      const saveMatch = url.match(/^\/api\/issue-save\/([^/?]+)/);
+      const createMatch = url.match(/^\/api\/issue-create\/([^/?]+)/);
+      if (req.method === "POST" && saveMatch) {
+        await handleIssueSave(req, res, saveMatch[1], repo, deps);
+        return;
+      }
+      if (req.method === "POST" && createMatch) {
+        await handleIssueCreate(req, res, createMatch[1], repo, deps);
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    },
+  );
+
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const { port } = server.address() as AddressInfo;
+  const url = `http://127.0.0.1:${port}`;
+
+  return {
+    url,
+    tracker,
+    repo,
+    recordedErrors,
+    close: async () => {
+      await new Promise<void>((resolveClose) =>
+        server.close(() => resolveClose()),
+      );
+      rmSync(repoLocalPath, { recursive: true, force: true });
+    },
+  };
+}
+
+function writeYaml(repoLocalPath: string, issue: Issue, state: "open" | "closed" = "open"): string {
+  const path = issuePath(repoLocalPath, issue.external_id, state);
+  ensureIssuesDirs(repoLocalPath);
+  writeFileSync(path, serializeIssue(issue));
+  return path;
+}
+
+function readYaml(repoLocalPath: string, externalId: string, state: "open" | "closed" = "open"): string {
+  return readFileSync(issuePath(repoLocalPath, externalId, state), "utf-8");
+}
+
+describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
+  let h: TestHarness;
+
+  beforeEach(async () => {
+    _resetForTesting();
+    h = await startTestServer();
+  });
+
+  afterEach(async () => {
+    await _drainAsyncWorkForTesting();
+    await h.close();
+  });
+
+  it("returns saved:true synchronously and runs sync in the background", async () => {
+    const issue: Issue = {
+      ...createEmptyIssue({
+        external_id: "card-1",
+        title: "T",
+      }),
+      tracker: "memory",
+    };
+    // Seed the tracker so syncIssue has something to read.
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "stale-remote",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+    // The seeded card has external_id = "mem-1"; rename our local issue to match.
+    issue.external_id = "mem-1";
+    issue.title = "fresh-local";
+    writeYaml(h.repo.localPath, issue);
+
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ saved: true });
+
+    await _drainAsyncWorkForTesting();
+    // syncIssue should have called updateCard with the fresh title.
+    const updates = h.tracker.getRequestLog().filter((l) => l.method === "updateCard");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].details).toEqual({ patch: { title: "fresh-local" } });
+  });
+
+  it("returns saved:false with errors on schema-validation failure", async () => {
+    const path = issuePath(h.repo.localPath, "bad-card", "open");
+    ensureIssuesDirs(h.repo.localPath);
+    writeFileSync(path, "schema_version: 1\nbroken: true\n");
+
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "bad-card" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.saved).toBe(false);
+    expect(Array.isArray(body.errors)).toBe(true);
+    expect(body.errors.length).toBeGreaterThan(0);
+    expect(body.errors[0]).toContain("missing required field");
+  });
+
+  it("returns saved:false when the YAML file is missing", async () => {
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-3`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "ghost-card" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.saved).toBe(false);
+    expect(body.errors[0]).toMatch(/No YAML file found/);
+  });
+
+  it("returns saved:false (HTTP 200) when external_id is missing — agent-recoverable failure", async () => {
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-x`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.saved).toBe(false);
+    expect(body.errors[0]).toContain("external_id");
+  });
+
+  it("returns HTTP 400 only for malformed JSON body (network-level failure)", async () => {
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-x`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json {",
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.saved).toBe(false);
+  });
+
+  it("AC #2: tracker errors NEVER surface to the agent — saved:true returned regardless", async () => {
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "remote-title",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({ external_id: "mem-1", title: "local-title" }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    h.tracker.failNextWrite(new Error("simulated 503 from tracker"));
+
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-fail`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ saved: true });
+
+    await _drainAsyncWorkForTesting();
+
+    expect(h.recordedErrors).toHaveLength(1);
+    expect(h.recordedErrors[0].dispatchId).toBe("dispatch-fail");
+    expect(h.recordedErrors[0].message).toContain("simulated 503 from tracker");
+    expect(h.recordedErrors[0].message).toContain("mem-1");
+  });
+
+  it("AC #5: serializes concurrent saves on the same external_id", async () => {
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "remote",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+
+    // Mutex is observable when:
+    //   1. Save #1 reads file ("first"), returns saved:true, kicks off sync #1.
+    //   2. Save #2 reads file ("second"), returns saved:true, kicks off sync #2.
+    //   3. Both syncs queue on the same `issueLocks` entry; sync #2 waits.
+    //   4. Drain → tracker sees updateCard("first") then updateCard("second").
+    //
+    // To make step 1/2 deterministic, await each fetch (the handler has
+    // returned by then so the in-handler file read already captured the
+    // current title) BEFORE mutating the file for the next save. The two
+    // sync tasks are still racing once both are queued — the mutex is
+    // what guarantees their ORDER in the request log.
+    const issue: Issue = {
+      ...createEmptyIssue({ external_id: "mem-1", title: "first" }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+    const r1 = await fetch(`${h.url}/api/issue-save/dispatch-c1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+    expect(await r1.json()).toEqual({ saved: true });
+
+    issue.title = "second";
+    writeYaml(h.repo.localPath, issue);
+    const r2 = await fetch(`${h.url}/api/issue-save/dispatch-c2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+    expect(await r2.json()).toEqual({ saved: true });
+
+    await _drainAsyncWorkForTesting();
+
+    const updates = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "updateCard");
+    // Two saves, two updateCard calls. Order matters: serialized.
+    expect(updates.map((u) => u.details)).toEqual([
+      { patch: { title: "first" } },
+      { patch: { title: "second" } },
+    ]);
+  });
+
+  it("AC #7: saved status Done moves YAML from open/ to closed/ — idempotent", async () => {
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "Done",
+      type: "Feature",
+      title: "done-card",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({
+        external_id: "mem-1",
+        status: "Done",
+        title: "done-card",
+      }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+    expect(await res.json()).toEqual({ saved: true });
+    await _drainAsyncWorkForTesting();
+
+    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "open"))).toBe(false);
+    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "closed"))).toBe(true);
+
+    // Idempotent re-save: load from closed, no further open-side artifacts.
+    const res2 = await fetch(`${h.url}/api/issue-save/dispatch-done-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+    expect(await res2.json()).toEqual({ saved: true });
+    await _drainAsyncWorkForTesting();
+    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "open"))).toBe(false);
+    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "closed"))).toBe(true);
+  });
+
+  it("Cancelled status also triggers open→closed move", async () => {
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "Cancelled",
+      type: "Feature",
+      title: "cancelled-card",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({
+        external_id: "mem-1",
+        status: "Cancelled",
+        title: "cancelled-card",
+      }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-x`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+    expect(await res.json()).toEqual({ saved: true });
+    await _drainAsyncWorkForTesting();
+    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "open"))).toBe(false);
+    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "closed"))).toBe(true);
+  });
+
+  it("AC #5: queue is NOT poisoned when the FIRST sync fails — second still runs", async () => {
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "remote",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({ external_id: "mem-1", title: "first" }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+    h.tracker.failNextWrite(new Error("first sync explodes"));
+    await fetch(`${h.url}/api/issue-save/dispatch-fail-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+
+    issue.title = "second";
+    writeYaml(h.repo.localPath, issue);
+    await fetch(`${h.url}/api/issue-save/dispatch-fail-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+
+    await _drainAsyncWorkForTesting();
+
+    // First failure recorded against dispatch-fail-1 only.
+    expect(h.recordedErrors).toHaveLength(1);
+    expect(h.recordedErrors[0].dispatchId).toBe("dispatch-fail-1");
+    // Second sync still ran — exactly one updateCard for "second".
+    const updates = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "updateCard");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].details).toEqual({ patch: { title: "second" } });
+  });
+
+  it("AC #5: true-concurrency Promise.all with same content — both saves complete, no drops", async () => {
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "remote",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({ external_id: "mem-1", title: "concurrent" }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    const [r1, r2] = await Promise.all([
+      fetch(`${h.url}/api/issue-save/dispatch-pa-1`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ external_id: "mem-1" }),
+      }),
+      fetch(`${h.url}/api/issue-save/dispatch-pa-2`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ external_id: "mem-1" }),
+      }),
+    ]);
+    expect(await r1.json()).toEqual({ saved: true });
+    expect(await r2.json()).toEqual({ saved: true });
+
+    await _drainAsyncWorkForTesting();
+
+    // Both reads saw the same content; the second save is idempotent
+    // (no diff vs tracker after the first ran). Important guarantee:
+    // exactly one updateCard, and the request log contains exactly two
+    // mutex-serialized syncs (each producing their own getCard +
+    // getComments pair).
+    const updates = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "updateCard");
+    expect(updates).toHaveLength(1);
+  });
+
+  it("returns 400 on malformed JSON body (network-level failure)", async () => {
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-malformed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not valid json {",
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.saved).toBe(false);
+  });
+
+  it("non-terminal status keeps file in open/", async () => {
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "In Progress",
+      type: "Feature",
+      title: "wip",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({
+        external_id: "mem-1",
+        status: "In Progress",
+        title: "wip",
+      }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-y`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: "mem-1" }),
+    });
+    await _drainAsyncWorkForTesting();
+    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "open"))).toBe(true);
+    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "closed"))).toBe(false);
+  });
+});
+
+describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
+  let h: TestHarness;
+
+  beforeEach(async () => {
+    _resetForTesting();
+    h = await startTestServer();
+  });
+
+  afterEach(async () => {
+    await _drainAsyncWorkForTesting();
+    await h.close();
+  });
+
+  it("AC #3: creates remote card, stamps ids, renames file to <external_id>.yml", async () => {
+    const draft: Issue = {
+      ...createEmptyIssue({ external_id: "", title: "new feature" }),
+      tracker: "memory",
+      ac: [{ check_item_id: "", title: "AC1", checked: false }],
+      phases: [
+        { check_item_id: "", title: "Phase 1", status: "Pending", notes: "" },
+      ],
+    };
+    const draftPath = issuePath(h.repo.localPath, "new-feature", "open");
+    ensureIssuesDirs(h.repo.localPath);
+    writeFileSync(draftPath, serializeIssue(draft));
+
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "new-feature" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(true);
+    expect(body.external_id).toBe("mem-1");
+
+    expect(existsSync(draftPath)).toBe(false);
+    const stampedPath = issuePath(h.repo.localPath, "mem-1", "open");
+    expect(existsSync(stampedPath)).toBe(true);
+    const stamped = readYaml(h.repo.localPath, "mem-1");
+    expect(stamped).toContain("external_id: mem-1");
+    expect(stamped).toContain("check_item_id: chk-");
+  });
+
+  it("strips a trailing .yml suffix on filename", async () => {
+    const draft: Issue = {
+      ...createEmptyIssue({ external_id: "", title: "with-suffix" }),
+      tracker: "memory",
+    };
+    writeFileSync(
+      issuePath(h.repo.localPath, "with-suffix", "open"),
+      serializeIssue(draft),
+    );
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "with-suffix.yml" }),
+    });
+    expect((await res.json()).created).toBe(true);
+  });
+
+  it("returns created:false when the file is missing", async () => {
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "no-such" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(false);
+    expect(body.errors[0]).toMatch(/File not found/);
+  });
+
+  it("returns created:false on schema-validation failure", async () => {
+    const path = issuePath(h.repo.localPath, "broken", "open");
+    writeFileSync(path, "schema_version: 1\nstatus: ToDo\n");
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "broken" }),
+    });
+    const body = await res.json();
+    expect(body.created).toBe(false);
+    expect(body.errors[0]).toContain("missing required field");
+  });
+
+  it("rejects drafts that already carry a non-empty external_id (use save, not create)", async () => {
+    const draft: Issue = {
+      ...createEmptyIssue({
+        external_id: "card-already-exists",
+        title: "double-create",
+      }),
+      tracker: "memory",
+    };
+    writeFileSync(
+      issuePath(h.repo.localPath, "card-already-exists", "open"),
+      serializeIssue(draft),
+    );
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "card-already-exists" }),
+    });
+    const body = await res.json();
+    expect(body.created).toBe(false);
+    expect(body.errors[0]).toMatch(/external_id .* danx_issue_save/);
+    // Tracker MUST NOT have been called — preventing duplicate cards.
+    const creates = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "createCard");
+    expect(creates).toHaveLength(0);
+  });
+
+  it("returns created:false (HTTP 200) when filename is missing — agent-recoverable", async () => {
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(false);
+    expect(body.errors[0]).toContain("filename");
+  });
+
+  it("returns 400 on malformed JSON body (network-level failure, distinct from agent-recoverable)", async () => {
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{not-json",
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.created).toBe(false);
+  });
+
+  it("strips only ONE trailing .yml suffix — foo.yml.yml resolves to foo.yml on disk", async () => {
+    // Whoever passes `foo.yml.yml` gets the suffix stripped once; the
+    // resulting filename `foo.yml` is then looked up, NOT found, and
+    // returns the standard not-found shape. Pins current behavior so a
+    // future strip-loop change is intentional.
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "foo.yml.yml" }),
+    });
+    const body = await res.json();
+    expect(body.created).toBe(false);
+    expect(body.errors[0]).toMatch(/File not found.*foo\.yml\.yml/);
+  });
+
+  it("returns created:false when the tracker rejects the create", async () => {
+    const draft: Issue = {
+      ...createEmptyIssue({ external_id: "", title: "tracker-fails" }),
+      tracker: "memory",
+    };
+    writeFileSync(
+      issuePath(h.repo.localPath, "tracker-fails", "open"),
+      serializeIssue(draft),
+    );
+    h.tracker.failNextWrite(new Error("503 from tracker"));
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "tracker-fails" }),
+    });
+    const body = await res.json();
+    expect(body.created).toBe(false);
+    expect(body.errors[0]).toContain("503 from tracker");
+  });
+});
+
+describe("syncTrackedIssueOnComplete", () => {
+  let h: TestHarness;
+
+  beforeEach(async () => {
+    _resetForTesting();
+    h = await startTestServer();
+  });
+
+  afterEach(async () => {
+    await _drainAsyncWorkForTesting();
+    await h.close();
+  });
+
+  it("AC #4: calls syncIssue synchronously for the tracked external_id", async () => {
+    await h.tracker.createCard({
+      schema_version: 1,
+      tracker: "memory",
+      parent_id: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "stale",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({
+        external_id: "mem-1",
+        title: "fresh-via-complete",
+      }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    const result = await syncTrackedIssueOnComplete(
+      "dispatch-complete",
+      h.repo,
+      "mem-1",
+      { tracker: h.tracker, recordError: async () => {} },
+    );
+    expect(result.ok).toBe(true);
+    const updates = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "updateCard");
+    expect(updates).toHaveLength(1);
+  });
+
+  it("returns errors:[...] when YAML is missing without throwing", async () => {
+    const result = await syncTrackedIssueOnComplete(
+      "dispatch-complete",
+      h.repo,
+      "ghost",
+      { tracker: h.tracker, recordError: async () => {} },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.errors[0]).toMatch(/No YAML file found/);
+  });
+});

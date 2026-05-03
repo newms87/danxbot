@@ -218,6 +218,19 @@ vi.mock("../critical-failure.js", () => ({
   flagPath: (localPath: string) => `${localPath}/.danxbot/CRITICAL_FAILURE`,
 }));
 
+// Phase 3 of tracker-agnostic-agents (Trello wsb4TVNT): handleStop calls
+// `autoSyncTrackedIssue(jobId, repo)` BEFORE `job.stop` for the
+// completed/failed path so an agent that called `danxbot_complete`
+// without an explicit `danx_issue_save` still gets its YAML pushed to
+// the tracker. Critical-failure short-circuits BEFORE this call. Mock
+// records call order against `mockStop` so assertions pin the
+// before-stop sequence.
+const mockAutoSyncTrackedIssue = vi.fn().mockResolvedValue(undefined);
+vi.mock("./auto-sync.js", () => ({
+  autoSyncTrackedIssue: (...args: unknown[]) =>
+    mockAutoSyncTrackedIssue(...args),
+}));
+
 import {
   handleLaunch,
   handleResume,
@@ -681,6 +694,74 @@ describe("handleStop", () => {
     await handleStop(stopReq, stopRes, "test-dispatch-id", MOCK_REPO);
 
     expect(mockStop).toHaveBeenCalledWith("failed", "Something went wrong");
+  });
+
+  it("Phase 3 AC #4: calls autoSyncTrackedIssue BEFORE job.stop for status=completed", async () => {
+    mockAutoSyncTrackedIssue.mockClear();
+    const callOrder: string[] = [];
+    const mockStop = vi.fn().mockImplementation(async () => {
+      callOrder.push("stop");
+    });
+    mockAutoSyncTrackedIssue.mockImplementation(async () => {
+      callOrder.push("autoSync");
+    });
+    mockGetActiveJob.mockReturnValue({
+      id: "job-1",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    });
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "completed",
+      summary: "ok",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-1", MOCK_REPO);
+
+    expect(mockAutoSyncTrackedIssue).toHaveBeenCalledTimes(1);
+    expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith("job-1", MOCK_REPO);
+    expect(callOrder).toEqual(["autoSync", "stop"]);
+  });
+
+  it("Phase 3 AC #4: calls autoSyncTrackedIssue for status=failed (same path as completed)", async () => {
+    mockAutoSyncTrackedIssue.mockClear();
+    mockAutoSyncTrackedIssue.mockResolvedValue(undefined);
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    mockGetActiveJob.mockReturnValue({
+      id: "job-2",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    });
+    const stopReq = createMockReqWithBody("POST", {
+      status: "failed",
+      summary: "broke",
+    });
+    await handleStop(stopReq, createMockRes(), "job-2", MOCK_REPO);
+    expect(mockAutoSyncTrackedIssue).toHaveBeenCalledTimes(1);
+    expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith("job-2", MOCK_REPO);
+  });
+
+  it("Phase 3 AC #4: SKIPS autoSyncTrackedIssue for status=critical_failure (env blocker, agent did no real work)", async () => {
+    mockAutoSyncTrackedIssue.mockClear();
+    mockAutoSyncTrackedIssue.mockResolvedValue(undefined);
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    mockGetActiveJob.mockReturnValue({
+      id: "job-cf",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    });
+    const stopReq = createMockReqWithBody("POST", {
+      status: "critical_failure",
+      summary: "MCP failed to load",
+    });
+    await handleStop(stopReq, createMockRes(), "job-cf", MOCK_REPO);
+    expect(mockAutoSyncTrackedIssue).not.toHaveBeenCalled();
   });
 
   it("writes the critical-failure flag and finalizes as failed when status=critical_failure", async () => {

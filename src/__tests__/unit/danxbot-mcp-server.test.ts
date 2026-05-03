@@ -249,6 +249,393 @@ describe("danxbot MCP server", () => {
   }, 10_000);
 });
 
+describe("danxbot MCP server — issue tools", () => {
+  /**
+   * Capture server that records every issue-save / issue-create POST so
+   * tests can assert the body the agent sent and respond with a custom
+   * status + JSON. Keyed by URL path so a single server can route both
+   * tools.
+   */
+  function createIssueServer(): Promise<{
+    saveUrl: string;
+    createUrl: string;
+    saveRequests: Array<{ body: Record<string, unknown> }>;
+    createRequests: Array<{ body: Record<string, unknown> }>;
+    setNextSaveResponse: (status: number, body: unknown) => void;
+    setNextCreateResponse: (status: number, body: unknown) => void;
+    close: () => Promise<void>;
+  }> {
+    return new Promise((resolveOuter) => {
+      const saveRequests: Array<{ body: Record<string, unknown> }> = [];
+      const createRequests: Array<{ body: Record<string, unknown> }> = [];
+      let nextSave = { status: 200, body: { saved: true } as unknown };
+      let nextCreate = {
+        status: 200,
+        body: { created: true, external_id: "mem-1" } as unknown,
+      };
+      const server = http.createServer((req, res) => {
+        let raw = "";
+        req.on("data", (chunk) => {
+          raw += chunk;
+        });
+        req.on("end", () => {
+          const body = raw ? JSON.parse(raw) : {};
+          const path = req.url ?? "/";
+          if (path.includes("/api/issue-save/")) {
+            saveRequests.push({ body });
+            res.writeHead(nextSave.status, {
+              "Content-Type": "application/json",
+            });
+            res.end(JSON.stringify(nextSave.body));
+            return;
+          }
+          if (path.includes("/api/issue-create/")) {
+            createRequests.push({ body });
+            res.writeHead(nextCreate.status, {
+              "Content-Type": "application/json",
+            });
+            res.end(JSON.stringify(nextCreate.body));
+            return;
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        });
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const { port } = server.address() as AddressInfo;
+        const base = `http://127.0.0.1:${port}`;
+        resolveOuter({
+          saveUrl: `${base}/api/issue-save/test-job`,
+          createUrl: `${base}/api/issue-create/test-job`,
+          saveRequests,
+          createRequests,
+          setNextSaveResponse: (status, body) => {
+            nextSave = { status, body };
+          },
+          setNextCreateResponse: (status, body) => {
+            nextCreate = { status, body };
+          },
+          close: () => new Promise((r) => server.close(() => r())),
+        });
+      });
+    });
+  }
+
+  function spawnIssueServer(
+    stopUrl: string,
+    issueSaveUrl: string | undefined,
+    issueCreateUrl: string | undefined,
+  ): ChildProcess {
+    return spawn(tsxBin, [serverScript], {
+      env: {
+        ...process.env,
+        DANXBOT_STOP_URL: stopUrl,
+        DANXBOT_ISSUE_SAVE_URL: issueSaveUrl,
+        DANXBOT_ISSUE_CREATE_URL: issueCreateUrl,
+      } as NodeJS.ProcessEnv,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  }
+
+  let stopServer: Awaited<ReturnType<typeof createStopServer>>;
+  let issueServer: Awaited<ReturnType<typeof createIssueServer>>;
+  let proc: ChildProcess;
+
+  beforeEach(async () => {
+    stopServer = await createStopServer();
+    issueServer = await createIssueServer();
+  });
+
+  afterEach(async () => {
+    proc?.kill("SIGTERM");
+    await stopServer.close();
+    await issueServer.close();
+  });
+
+  it("advertises danx_issue_save + danx_issue_create when both URLs are set", async () => {
+    proc = spawnIssueServer(
+      stopServer.url,
+      issueServer.saveUrl,
+      issueServer.createUrl,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+
+    await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    const response = await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    });
+    const result = response.result as {
+      tools: Array<{ name: string }>;
+    };
+    const names = result.tools.map((t) => t.name);
+    expect(names).toContain("danx_issue_save");
+    expect(names).toContain("danx_issue_create");
+  }, 10_000);
+
+  it("hides danx_issue_create when only DANXBOT_ISSUE_SAVE_URL is set (AND-semantics on filter)", async () => {
+    // Pins the filter contract: each tool's URL is its OWN gate.
+    // A regression to OR-semantics ("any issue URL set → expose both")
+    // would let a partially-configured dispatch advertise a tool whose
+    // env var is undefined and the agent would crash on first call.
+    proc = spawnIssueServer(stopServer.url, issueServer.saveUrl, undefined);
+    await new Promise((r) => setTimeout(r, 500));
+
+    await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    const response = await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    });
+    const result = response.result as {
+      tools: Array<{ name: string }>;
+    };
+    const names = result.tools.map((t) => t.name);
+    expect(names).toContain("danx_issue_save");
+    expect(names).not.toContain("danx_issue_create");
+  }, 10_000);
+
+  it("hides danx_issue_* tools when URLs are absent", async () => {
+    proc = spawnIssueServer(stopServer.url, undefined, undefined);
+    await new Promise((r) => setTimeout(r, 500));
+
+    await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    const response = await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    });
+    const result = response.result as {
+      tools: Array<{ name: string }>;
+    };
+    const names = result.tools.map((t) => t.name);
+    expect(names).not.toContain("danx_issue_save");
+    expect(names).not.toContain("danx_issue_create");
+  }, 10_000);
+
+  it("calls danx_issue_save → POSTs to save URL → returns worker JSON verbatim", async () => {
+    proc = spawnIssueServer(
+      stopServer.url,
+      issueServer.saveUrl,
+      issueServer.createUrl,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+
+    await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    issueServer.setNextSaveResponse(200, { saved: true });
+    const response = await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "danx_issue_save",
+        arguments: { external_id: "card-1" },
+      },
+    });
+
+    expect(response.error).toBeUndefined();
+    const result = response.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(JSON.parse(result.content[0].text)).toEqual({ saved: true });
+    expect(issueServer.saveRequests).toHaveLength(1);
+    expect(issueServer.saveRequests[0].body).toEqual({ external_id: "card-1" });
+  }, 10_000);
+
+  it("calls danx_issue_create → POSTs to create URL → forwards worker JSON", async () => {
+    proc = spawnIssueServer(
+      stopServer.url,
+      issueServer.saveUrl,
+      issueServer.createUrl,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+
+    await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    issueServer.setNextCreateResponse(200, {
+      created: true,
+      external_id: "mem-42",
+    });
+    const response = await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "danx_issue_create",
+        arguments: { filename: "draft" },
+      },
+    });
+    const result = response.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      created: true,
+      external_id: "mem-42",
+    });
+    expect(issueServer.createRequests[0].body).toEqual({ filename: "draft" });
+  }, 10_000);
+
+  it("forwards a worker non-2xx as a JSON-RPC error", async () => {
+    proc = spawnIssueServer(
+      stopServer.url,
+      issueServer.saveUrl,
+      issueServer.createUrl,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+
+    await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    issueServer.setNextSaveResponse(500, { error: "boom" });
+    const response = await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "danx_issue_save",
+        arguments: { external_id: "card" },
+      },
+    });
+    expect(response.error).toBeDefined();
+    expect((response.error as { message: string }).message).toContain("500");
+  }, 10_000);
+
+  it("returns saved:false body verbatim on 200 response (validation failure)", async () => {
+    proc = spawnIssueServer(
+      stopServer.url,
+      issueServer.saveUrl,
+      issueServer.createUrl,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+
+    await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    issueServer.setNextSaveResponse(200, {
+      saved: false,
+      errors: ["missing required field: title"],
+    });
+    const response = await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "danx_issue_save",
+        arguments: { external_id: "broken" },
+      },
+    });
+    const result = response.result as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      saved: false,
+      errors: ["missing required field: title"],
+    });
+  }, 10_000);
+
+  it("rejects danx_issue_save when called without DANXBOT_ISSUE_SAVE_URL", async () => {
+    proc = spawnIssueServer(stopServer.url, undefined, undefined);
+    await new Promise((r) => setTimeout(r, 500));
+
+    await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" },
+      },
+    });
+
+    // Tool is hidden from tools/list, but `tools/call` reaches the
+    // dispatcher anyway — the dispatcher's fail-loud guard is the
+    // safety net.
+    const response = await sendMessage(proc, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "danx_issue_save",
+        arguments: { external_id: "x" },
+      },
+    });
+    expect(response.error).toBeDefined();
+    expect((response.error as { message: string }).message).toContain(
+      "DANXBOT_ISSUE_SAVE_URL",
+    );
+  }, 10_000);
+});
+
 describe("danxbot MCP server — startup error", () => {
   it("exits with code 1 when DANXBOT_STOP_URL is not set", async () => {
     const proc = spawn(tsxBin, [serverScript], {
