@@ -142,6 +142,18 @@ Flow:
    - PUTs final status to `statusUrl` if configured
 5. In host mode, killing claude causes the bash script to exit, which closes the Windows Terminal tab.
 
+### Per-dispatch callback URLs (auto-injected by `dispatch()`)
+
+`dispatch()` in `src/dispatch/core.ts` auto-injects every dispatchId-derived URL into the per-dispatch overlay so callers don't pre-compute them. Five URLs total today, all of shape `http://localhost:<worker_port>/api/<route>/<dispatchId>`:
+
+- `DANXBOT_STOP_URL` → `/api/stop/<id>` (`danxbot_complete` callback)
+- `DANXBOT_SLACK_REPLY_URL` → `/api/slack/reply/<id>` (Slack-only, `danxbot_slack_reply`)
+- `DANXBOT_SLACK_UPDATE_URL` → `/api/slack/update/<id>` (Slack-only, `danxbot_slack_post_update`)
+- `DANXBOT_ISSUE_SAVE_URL` → `/api/issue-save/<id>` (`danx_issue_save`)
+- `DANXBOT_ISSUE_CREATE_URL` → `/api/issue-create/<id>` (`danx_issue_create`)
+
+`buildActiveTools` in `src/mcp/danxbot-server.ts` is the SOLE filter that hides each MCP tool when its URL is absent from `DanxbotToolUrls`. The danxbot MCP server also fail-loud-throws inside `callTool` when the URL is missing — defense in depth so a regression in the advertise filter can't silently misroute a tool call. Adding a new tool that follows this pattern: extend `DanxbotToolUrls`, extend `McpFactoryOptions` (`src/agent/mcp-types.ts`), inject in `mcp-registry.ts`, auto-inject in `dispatch/core.ts` overlay, register the tool def + dispatcher case + advertise-filter case in `danxbot-server.ts`, register the worker-side route in `src/worker/server.ts`, write the handler.
+
 Agents always have `danxbot_complete` available — even when the dispatch did not pass MCP config for any other reason. The launcher always injects it.
 
 ## Multi-block assistant turns — one API response, multiple JSONL lines, ONE usage block
