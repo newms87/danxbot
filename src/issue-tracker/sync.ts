@@ -246,6 +246,15 @@ export async function syncIssue(
     });
   }
 
+  // Collects in-place comment edits issued below (action-items bookkeeping
+  // and retro renderer) keyed by tracker comment id, so the `finalComments`
+  // mapping at the end can reflect new bodies in the local snapshot. The
+  // next sync's identity check then sees matching text and short-circuits
+  // to zero writes. Adding a third edit-source (e.g. a future structured-
+  // status comment) is one `editedCommentTexts.set(id, text)` line — no
+  // new variable pair, no extra branch in the finalize block.
+  const editedCommentTexts = new Map<string, string>();
+
   // --- Step 5: terminal-status action-items spawning. ---
   //
   // When the saved status is Done or Cancelled and the local retro carries
@@ -257,9 +266,17 @@ export async function syncIssue(
   //
   // Idempotent by construction: re-syncing the same retro produces zero
   // tracker writes; appending a new title spawns ONLY that new title.
+  //
+  // Coupling note: when `retro.action_items[]` changes, BOTH this
+  // bookkeeping comment AND the retro comment (rendered in Step 6) get
+  // edited. The retro body's `**Action items:**` bullet list is rendered
+  // from the same `local.retro.action_items` field that drives the
+  // spawn-and-edit logic here. This is intentional — the retro is the
+  // human-readable summary, the bookkeeping is the machine-readable spawn
+  // ledger keyed by `<title> → <external_id>`. Verified by the
+  // "incremental: appending an action_item" test in `sync.test.ts`, which
+  // expects 3 writes per delta (1 spawn + 2 edits).
   let actionItemsAppendedComment: IssueComment | null = null;
-  let actionItemsEditedCommentId: string | null = null;
-  let actionItemsEditedNewText: string | null = null;
   const isTerminalForActionItems =
     local.status === "Done" || local.status === "Cancelled";
   if (
@@ -300,8 +317,7 @@ export async function syncIssue(
             desiredText,
           );
           writes++;
-          actionItemsEditedCommentId = existing.id;
-          actionItemsEditedNewText = desiredText;
+          editedCommentTexts.set(existing.id, desiredText);
         }
       } else {
         const result = await tracker.addComment(
@@ -342,8 +358,6 @@ export async function syncIssue(
   });
 
   let retroAppendedComment: IssueComment | null = null;
-  let retroEditedCommentId: string | null = null;
-  let retroEditedNewText: string | null = null;
   if (isTerminal && retroNonEmpty) {
     const desiredText = renderRetroComment(local.retro);
     const managed = findManagedRetroComment(knownCommentsForRetro);
@@ -352,8 +366,7 @@ export async function syncIssue(
       if (managed.text !== desiredText) {
         await tracker.editComment(local.external_id, managed.id, desiredText);
         writes++;
-        retroEditedCommentId = managed.id;
-        retroEditedNewText = desiredText;
+        editedCommentTexts.set(managed.id, desiredText);
       }
     } else if (hasLegacyRetroComment(knownCommentsForRetro)) {
       // Mid-flight Phase 4 dispatch already appended a manual `## Retro`
@@ -386,23 +399,16 @@ export async function syncIssue(
   const finalComments = updatedComments.map((c, idx) => {
     const stamped = stampedCommentsByOriginalIndex.get(idx);
     const base = stamped ?? { ...c };
-    // If the retro renderer or action-items bookkeeping edited this exact
-    // comment in-place, reflect the new body in the local snapshot so the
-    // next sync's identity check sees matching text and short-circuits to
-    // zero writes.
-    if (
-      retroEditedCommentId !== null &&
-      retroEditedNewText !== null &&
-      base.id === retroEditedCommentId
-    ) {
-      return { ...base, text: retroEditedNewText };
-    }
-    if (
-      actionItemsEditedCommentId !== null &&
-      actionItemsEditedNewText !== null &&
-      base.id === actionItemsEditedCommentId
-    ) {
-      return { ...base, text: actionItemsEditedNewText };
+    // If any in-place comment edit issued above (retro renderer, action-
+    // items bookkeeping, or any future edit-source) targeted this exact
+    // comment id, reflect the new body in the local snapshot so the next
+    // sync's identity check sees matching text and short-circuits to zero
+    // writes.
+    if (base.id) {
+      const editedText = editedCommentTexts.get(base.id);
+      if (editedText !== undefined) {
+        return { ...base, text: editedText };
+      }
     }
     return base;
   });
@@ -484,12 +490,6 @@ function findManagedRetroComment(
   return findCommentByMarker(comments, RETRO_COMMENT_MARKER);
 }
 
-/**
- * Detect a Phase-4-shape manually-appended retro comment — has the
- * `## Retro` heading but lacks our `RETRO_COMMENT_MARKER`. Such comments
- * were written by mid-flight dispatches before Phase 5 shipped; the worker
- * leaves them in place rather than posting a duplicate.
- */
 // ---------- action-items bookkeeping helpers (exported for tests) ----------
 
 /**
