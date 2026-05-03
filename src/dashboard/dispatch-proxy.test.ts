@@ -1,5 +1,18 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from "http";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  vi,
+} from "vitest";
+import {
+  createServer,
+  type Server,
+  type IncomingMessage,
+  type ServerResponse,
+} from "http";
 import { AddressInfo } from "node:net";
 import {
   checkAuth,
@@ -9,13 +22,20 @@ import {
   handleResumeProxy,
   handleJobProxy,
   loadDispatchToken,
+  clearCachedWorkerHost,
+  probeReachable,
+  proxyToWorkerWithFallback,
+  _setProbeForTesting,
 } from "./dispatch-proxy.js";
 import { createMockReqRes } from "../__tests__/helpers/http-mocks.js";
 import type { RepoConfig } from "../types.js";
 
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
-    debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
   }),
 }));
 
@@ -166,7 +186,9 @@ async function startFakeWorker(): Promise<FakeWorker> {
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     let raw = "";
-    req.on("data", (chunk: Buffer) => { raw += chunk.toString(); });
+    req.on("data", (chunk: Buffer) => {
+      raw += chunk.toString();
+    });
     req.on("end", () => {
       requests.push({
         method: req.method ?? "?",
@@ -211,8 +233,18 @@ describe("handleLaunchProxy", () => {
   beforeAll(async () => {
     worker = await startFakeWorker();
     repos = [
-      { name: "platform", url: "", localPath: "/tmp/platform", workerPort: worker.port },
-      { name: "gpt-manager", url: "", localPath: "/tmp/gpt-manager", workerPort: worker.port },
+      {
+        name: "platform",
+        url: "",
+        localPath: "/tmp/platform",
+        workerPort: worker.port,
+      },
+      {
+        name: "gpt-manager",
+        url: "",
+        localPath: "/tmp/gpt-manager",
+        workerPort: worker.port,
+      },
     ];
   });
 
@@ -223,6 +255,10 @@ describe("handleLaunchProxy", () => {
   beforeEach(() => {
     worker.requests.length = 0;
     worker.respondWith(200, { job_id: "job-123", status: "launched" });
+    // Clear the worker-host cache between tests so each one drives the
+    // probe loop fresh — otherwise a successful probe in test N caches
+    // 127.0.0.1 and skews the unreachable-fallback expectations in test N+1.
+    clearCachedWorkerHost();
   });
 
   async function runRequest(
@@ -242,7 +278,9 @@ describe("handleLaunchProxy", () => {
       resolveHost: testHostResolver,
     });
     return {
-      status: (res as unknown as { _getStatusCode: () => number })._getStatusCode(),
+      status: (
+        res as unknown as { _getStatusCode: () => number }
+      )._getStatusCode(),
       body: (res as unknown as { _getBody: () => string })._getBody(),
     };
   }
@@ -313,7 +351,9 @@ describe("handleLaunchProxy", () => {
   });
 
   it("propagates upstream 4xx verbatim", async () => {
-    worker.respondWith(400, { error: "Missing required fields: task, api_token" });
+    worker.respondWith(400, {
+      error: "Missing required fields: task, api_token",
+    });
     const { status, body } = await runRequest(
       { repo: "platform" },
       { auth: "Bearer tok" },
@@ -342,11 +382,18 @@ describe("handleLaunchProxy", () => {
     await handleLaunchProxy(req, res, {
       token: "tok",
       repos: [
-        { name: "platform", url: "", localPath: "/tmp/platform", workerPort: worker.port },
+        {
+          name: "platform",
+          url: "",
+          localPath: "/tmp/platform",
+          workerPort: worker.port,
+        },
       ],
       resolveHost: testHostResolver,
     });
-    const status = (res as unknown as { _getStatusCode: () => number })._getStatusCode();
+    const status = (
+      res as unknown as { _getStatusCode: () => number }
+    )._getStatusCode();
     const body = (res as unknown as { _getBody: () => string })._getBody();
     expect(status).toBe(400);
     expect(JSON.parse(body).error).toMatch(/Invalid JSON/);
@@ -357,16 +404,27 @@ describe("handleLaunchProxy", () => {
     // Start a server just to reserve a port, then close it so the bound port
     // is guaranteed unavailable. Connecting now gives ECONNREFUSED immediately.
     const tmp = createServer(() => {});
-    await new Promise<void>((resolve) => tmp.listen(0, "127.0.0.1", () => resolve()));
+    await new Promise<void>((resolve) =>
+      tmp.listen(0, "127.0.0.1", () => resolve()),
+    );
     const closedPort = (tmp.address() as AddressInfo).port;
     await new Promise<void>((resolve) => tmp.close(() => resolve()));
 
     const unreachable: RepoConfig[] = [
-      { name: "platform", url: "", localPath: "/tmp/platform", workerPort: closedPort },
+      {
+        name: "platform",
+        url: "",
+        localPath: "/tmp/platform",
+        workerPort: closedPort,
+      },
     ];
     const { req, res } = createMockReqRes("POST", "/api/launch");
     req.headers.authorization = "Bearer tok";
-    const bodyJson = JSON.stringify({ repo: "platform", task: "x", api_token: "t" });
+    const bodyJson = JSON.stringify({
+      repo: "platform",
+      task: "x",
+      api_token: "t",
+    });
     process.nextTick(() => {
       req.emit("data", Buffer.from(bodyJson));
       req.emit("end");
@@ -376,7 +434,9 @@ describe("handleLaunchProxy", () => {
       repos: unreachable,
       resolveHost: testHostResolver,
     });
-    expect((res as unknown as { _getStatusCode: () => number })._getStatusCode()).toBe(502);
+    expect(
+      (res as unknown as { _getStatusCode: () => number })._getStatusCode(),
+    ).toBe(502);
   });
 });
 
@@ -430,7 +490,9 @@ describe("handleResumeProxy", () => {
       resolveHost: testHostResolver,
     });
     return {
-      status: (res as unknown as { _getStatusCode: () => number })._getStatusCode(),
+      status: (
+        res as unknown as { _getStatusCode: () => number }
+      )._getStatusCode(),
       body: (res as unknown as { _getBody: () => string })._getBody(),
     };
   }
@@ -502,7 +564,12 @@ describe("handleJobProxy", () => {
   beforeAll(async () => {
     worker = await startFakeWorker();
     repos = [
-      { name: "platform", url: "", localPath: "/tmp/platform", workerPort: worker.port },
+      {
+        name: "platform",
+        url: "",
+        localPath: "/tmp/platform",
+        workerPort: worker.port,
+      },
     ];
   });
 
@@ -538,7 +605,9 @@ describe("handleJobProxy", () => {
       { token: opts.token ?? "tok", repos, resolveHost: testHostResolver },
     );
     return {
-      status: (res as unknown as { _getStatusCode: () => number })._getStatusCode(),
+      status: (
+        res as unknown as { _getStatusCode: () => number }
+      )._getStatusCode(),
       body: (res as unknown as { _getBody: () => string })._getBody(),
     };
   }
@@ -626,10 +695,194 @@ describe("handleJobProxy", () => {
       },
       { token: "tok", repos, resolveHost: testHostResolver },
     );
-    const status = (res as unknown as { _getStatusCode: () => number })._getStatusCode();
+    const status = (
+      res as unknown as { _getStatusCode: () => number }
+    )._getStatusCode();
     const body = (res as unknown as { _getBody: () => string })._getBody();
     expect(status).toBe(400);
     expect(JSON.parse(body).error).toMatch(/Invalid JSON/);
     expect(worker.requests).toHaveLength(0);
+  });
+});
+
+describe("probeReachable", () => {
+  // Real TCP probe — confirms the underlying socket logic. The fallback
+  // tests below mock the probe so they don't depend on network conditions
+  // (host.docker.internal isn't resolvable on every CI runner), but here
+  // we keep one true-positive + one true-negative against real sockets.
+
+  it("resolves true when the target is listening", async () => {
+    const server = createServer(() => {});
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      expect(await probeReachable("127.0.0.1", port, 500)).toBe(true);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it("resolves false when the target refuses connections", async () => {
+    // Reserve+release a port to guarantee no listener.
+    const tmp = createServer(() => {});
+    await new Promise<void>((r) => tmp.listen(0, "127.0.0.1", () => r()));
+    const closedPort = (tmp.address() as AddressInfo).port;
+    await new Promise<void>((r) => tmp.close(() => r()));
+    expect(await probeReachable("127.0.0.1", closedPort, 500)).toBe(false);
+  });
+
+  it("resolves false when the target hostname does not resolve", async () => {
+    expect(
+      await probeReachable("nonexistent-host-for-test-only.invalid", 1, 500),
+    ).toBe(false);
+  });
+});
+
+describe("clearCachedWorkerHost", () => {
+  it("is callable with and without a repo name and never throws", () => {
+    expect(() => clearCachedWorkerHost("nonexistent")).not.toThrow();
+    expect(() => clearCachedWorkerHost()).not.toThrow();
+  });
+});
+
+describe("proxyToWorkerWithFallback", () => {
+  // Container-or-host fallback wrapper. We mock the probe via _setProbeForTesting
+  // so the candidate-list logic is tested without depending on
+  // host.docker.internal being resolvable from the CI runner.
+  let worker: FakeWorker;
+  let originalProbe: typeof probeReachable;
+  let probeCalls: Array<{ host: string; port: number }>;
+  let probeImpl: (host: string, port: number) => Promise<boolean>;
+
+  beforeAll(async () => {
+    worker = await startFakeWorker();
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((r) => worker.server.close(() => r()));
+  });
+
+  beforeEach(() => {
+    worker.requests.length = 0;
+    worker.respondWith(200, { ok: true });
+    clearCachedWorkerHost();
+    probeCalls = [];
+    probeImpl = async () => true;
+    originalProbe = _setProbeForTesting(async (host, port) => {
+      probeCalls.push({ host, port });
+      return probeImpl(host, port);
+    });
+  });
+
+  afterAll(() => {
+    _setProbeForTesting(originalProbe);
+  });
+
+  async function run(
+    primaryHost: string,
+    repoName = "test-repo",
+  ): Promise<{ status: number; body: string }> {
+    const { req, res } = createMockReqRes("POST", "/api/launch");
+    process.nextTick(() => {
+      req.emit("data", Buffer.from(JSON.stringify({ x: 1 })));
+      req.emit("end");
+    });
+    await proxyToWorkerWithFallback(
+      req,
+      res,
+      {
+        repoName,
+        primaryHost,
+        port: worker.port,
+        path: "/api/launch",
+        method: "POST",
+      },
+      JSON.stringify({ x: 1 }),
+    );
+    return {
+      status: (
+        res as unknown as { _getStatusCode: () => number }
+      )._getStatusCode(),
+      body: (res as unknown as { _getBody: () => string })._getBody(),
+    };
+  }
+
+  it("forwards to the primary host when its probe succeeds", async () => {
+    probeImpl = async (host) => host === "127.0.0.1";
+    const { status } = await run("127.0.0.1", "primary-ok");
+    expect(status).toBe(200);
+    expect(probeCalls.map((c) => c.host)).toEqual(["127.0.0.1"]);
+    expect(worker.requests).toHaveLength(1);
+  });
+
+  it("probes host.docker.internal as the fallback when the primary probe fails", async () => {
+    // Both candidates fail in this scenario — the assertion is about
+    // candidate ORDERING, not real reachability. Sending a real request
+    // to host.docker.internal would burn the upstream-request timeout
+    // (~10s) before failing, which exceeds the per-test budget. Driving
+    // both probes to false short-circuits to a 502 immediately and lets
+    // us inspect the recorded probe order.
+    probeImpl = async () => false;
+    const { status } = await run("danxbot-worker-test", "fallback-test");
+    expect(status).toBe(502);
+    const probedHosts = probeCalls.map((c) => c.host);
+    expect(probedHosts).toEqual([
+      "danxbot-worker-test",
+      "host.docker.internal",
+    ]);
+  });
+
+  it("returns 502 when every candidate fails the probe", async () => {
+    probeImpl = async () => false;
+    const { status, body } = await run("danxbot-worker-test", "all-fail");
+    expect(status).toBe(502);
+    expect(JSON.parse(body).error).toMatch(/not reachable on any candidate/);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("uses the cached host on subsequent calls without re-probing", async () => {
+    probeImpl = async () => true;
+    await run("127.0.0.1", "cached-test");
+    const callsAfterFirst = probeCalls.length;
+    expect(callsAfterFirst).toBe(1); // primary probed once
+
+    probeCalls.length = 0;
+    await run("127.0.0.1", "cached-test");
+    expect(probeCalls).toHaveLength(1); // probes the cached host first
+    expect(probeCalls[0].host).toBe("127.0.0.1");
+    expect(worker.requests).toHaveLength(2); // both requests reached worker
+  });
+
+  it("re-probes after the cache is cleared", async () => {
+    probeImpl = async () => true;
+    await run("127.0.0.1", "evict-test");
+    clearCachedWorkerHost("evict-test");
+    probeCalls.length = 0;
+    await run("127.0.0.1", "evict-test");
+    // Cache cleared → buildCandidateHosts returns [primary, host.docker.internal]
+    // (no cached entry) → first probe is the primary, succeeds → done.
+    expect(probeCalls).toHaveLength(1);
+    expect(probeCalls[0].host).toBe("127.0.0.1");
+  });
+
+  it("drops the cached host on a probe miss and falls through to the next candidate", async () => {
+    probeImpl = async () => true;
+    await run("127.0.0.1", "stale-cache");
+    expect(probeCalls).toHaveLength(1);
+
+    // Flip: every probe now fails. The cached entry is consulted first,
+    // misses, gets evicted, and the loop falls through to the remaining
+    // candidates. Driving them all to false short-circuits to 502 without
+    // burning the upstream-request timeout, while still proving ordering.
+    probeCalls.length = 0;
+    probeImpl = async () => false;
+    const { status } = await run("danxbot-worker-test", "stale-cache");
+    expect(status).toBe(502);
+    const probedHosts = probeCalls.map((c) => c.host);
+    // Cached host (127.0.0.1) is probed first and rejected.
+    expect(probedHosts[0]).toBe("127.0.0.1");
+    // Then the wrapper falls through the remaining candidate ordering.
+    expect(probedHosts).toContain("danxbot-worker-test");
+    expect(probedHosts).toContain("host.docker.internal");
   });
 });

@@ -40,7 +40,7 @@ import {
   type Settings,
 } from "../settings-file.js";
 import { readFlag, type CriticalFailurePayload } from "../critical-failure.js";
-import { proxyToWorker } from "./dispatch-proxy.js";
+import { proxyToWorkerWithFallback } from "./dispatch-proxy.js";
 import { eventBus } from "./event-bus.js";
 
 const log = createLogger("agents-routes");
@@ -365,11 +365,12 @@ export async function handleClearAgentCriticalFailure(
     return;
   }
 
-  await proxyToWorker(
+  await proxyToWorkerWithFallback(
     req,
     res,
     {
-      host: deps.resolveHost(repo.name),
+      repoName: repo.name,
+      primaryHost: deps.resolveHost(repo.name),
       port: repo.workerPort,
       path: "/api/poller/critical-failure",
       method: "DELETE",

@@ -26,6 +26,14 @@ services:
     restart: always
     stop_grace_period: 30s
     env_file: .env
+    # Map host.docker.internal to the host gateway in non-Docker-Desktop
+    # environments (Linux dockerd). Docker Desktop already provides this
+    # automatically; the explicit mapping makes the dispatch-proxy host
+    # fallback work uniformly across both runtimes — workers may run as
+    # sibling containers (`danxbot-worker-<repo>`) or as host-side
+    # processes (`make launch-worker-host`), and the proxy probes both.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     ports:
       - "${DASHBOARD_PORT:-5555}:${DASHBOARD_PORT:-5555}"
     volumes:
@@ -73,6 +81,9 @@ services:
     stop_grace_period: 5s
     command: ["npm", "run", "dashboard:dev"]
     working_dir: /danxbot/app
+    # See note on `dashboard.extra_hosts` — same fallback contract.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     environment:
       VITE_API_TARGET: http://dashboard:${DASHBOARD_PORT:-5555}
     ports:

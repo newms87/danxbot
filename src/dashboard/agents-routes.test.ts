@@ -1,7 +1,15 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from "http";
+import {
+  createServer,
+  type Server,
+  type IncomingMessage,
+  type ServerResponse,
+} from "http";
 import type { AddressInfo } from "node:net";
-import { createMockReqWithBody, createMockRes } from "../__tests__/helpers/http-mocks.js";
+import {
+  createMockReqWithBody,
+  createMockRes,
+} from "../__tests__/helpers/http-mocks.js";
 import type { RepoConfig } from "../types.js";
 import type { DispatchProxyDeps } from "./dispatch-proxy.js";
 
@@ -23,14 +31,18 @@ vi.mock("../critical-failure.js", () => ({
 }));
 
 const mockProxyToWorker = vi.fn();
+const mockProxyToWorkerWithFallback = vi.fn();
 vi.mock("./dispatch-proxy.js", () => ({
   proxyToWorker: (...args: unknown[]) => mockProxyToWorker(...args),
+  proxyToWorkerWithFallback: (...args: unknown[]) =>
+    mockProxyToWorkerWithFallback(...args),
 }));
 
 const mockCountDispatchesByRepo = vi.fn();
 
 vi.mock("./dispatches-db.js", () => ({
-  countDispatchesByRepo: (...args: unknown[]) => mockCountDispatchesByRepo(...args),
+  countDispatchesByRepo: (...args: unknown[]) =>
+    mockCountDispatchesByRepo(...args),
 }));
 
 const mockEventBusPublish = vi.fn();
@@ -81,6 +93,8 @@ describe("handleClearAgentCriticalFailure", () => {
   beforeEach(() => {
     mockProxyToWorker.mockReset();
     mockProxyToWorker.mockResolvedValue(undefined);
+    mockProxyToWorkerWithFallback.mockReset();
+    mockProxyToWorkerWithFallback.mockResolvedValue(undefined);
   });
 
   it("rejects requests without a user bearer with 401", async () => {
@@ -90,7 +104,7 @@ describe("handleClearAgentCriticalFailure", () => {
     await handleClearAgentCriticalFailure(req, res, "danxbot", deps());
 
     expect(res._getStatusCode()).toBe(401);
-    expect(mockProxyToWorker).not.toHaveBeenCalled();
+    expect(mockProxyToWorkerWithFallback).not.toHaveBeenCalled();
   });
 
   it("rejects the dispatch token (dispatch token is NOT accepted here)", async () => {
@@ -102,7 +116,7 @@ describe("handleClearAgentCriticalFailure", () => {
     await handleClearAgentCriticalFailure(req, res, "danxbot", deps());
 
     expect(res._getStatusCode()).toBe(401);
-    expect(mockProxyToWorker).not.toHaveBeenCalled();
+    expect(mockProxyToWorkerWithFallback).not.toHaveBeenCalled();
   });
 
   it("returns 404 for an unknown repo", async () => {
@@ -113,20 +127,24 @@ describe("handleClearAgentCriticalFailure", () => {
     await handleClearAgentCriticalFailure(req, res, "not-a-repo", deps());
 
     expect(res._getStatusCode()).toBe(404);
-    expect(mockProxyToWorker).not.toHaveBeenCalled();
+    expect(mockProxyToWorkerWithFallback).not.toHaveBeenCalled();
   });
 
-  it("forwards the DELETE to the worker's /api/poller/critical-failure endpoint", async () => {
+  it("forwards the DELETE to the worker's /api/poller/critical-failure endpoint via the fallback wrapper", async () => {
+    // Container-or-host-aware: the wrapper resolves a reachable host
+    // (cache + probe), so this test asserts on the wrapper's request
+    // shape (repoName + primaryHost) rather than a concrete host.
     const req = createMockReqWithBody("DELETE", {});
     req.headers = { authorization: "Bearer user-alice" };
     const res = createMockRes();
 
     await handleClearAgentCriticalFailure(req, res, "danxbot", deps());
 
-    expect(mockProxyToWorker).toHaveBeenCalledTimes(1);
-    const [, , upstream, body] = mockProxyToWorker.mock.calls[0];
+    expect(mockProxyToWorkerWithFallback).toHaveBeenCalledTimes(1);
+    const [, , upstream, body] = mockProxyToWorkerWithFallback.mock.calls[0];
     expect(upstream).toEqual({
-      host: "127.0.0.1",
+      repoName: "danxbot",
+      primaryHost: "127.0.0.1",
       port: 5562,
       path: "/api/poller/critical-failure",
       method: "DELETE",
@@ -136,7 +154,14 @@ describe("handleClearAgentCriticalFailure", () => {
 });
 
 // Helper settings structure matching the module's Settings shape.
-function settings(overrides?: Partial<{ slack: boolean | null; trelloPoller: boolean | null; dispatchApi: boolean | null; ideator: boolean | null }>) {
+function settings(
+  overrides?: Partial<{
+    slack: boolean | null;
+    trelloPoller: boolean | null;
+    dispatchApi: boolean | null;
+    ideator: boolean | null;
+  }>,
+) {
   return {
     overrides: {
       slack: { enabled: overrides?.slack ?? null },
@@ -326,7 +351,11 @@ describe("handleListAgents", () => {
     await handleListAgents(res, {
       ...deps(),
       repos: [
-        { name: "noport", url: "https://x.com/r.git", localPath: "/repos/noport" },
+        {
+          name: "noport",
+          url: "https://x.com/r.git",
+          localPath: "/repos/noport",
+        },
       ],
     });
 
@@ -386,14 +415,21 @@ describe("handlePatchToggle", () => {
     mockEventBusPublish.mockReset();
   });
 
-  function authReq(body: Record<string, unknown>, token = DEFAULT_TOKEN): IncomingMessage {
+  function authReq(
+    body: Record<string, unknown>,
+    token = DEFAULT_TOKEN,
+  ): IncomingMessage {
     const req = createMockReqWithBody("PATCH", body);
-    (req.headers as Record<string, string>)["authorization"] = `Bearer ${token}`;
+    (req.headers as Record<string, string>)["authorization"] =
+      `Bearer ${token}`;
     return req;
   }
 
   it("returns 401 when the bearer token is missing", async () => {
-    const req = createMockReqWithBody("PATCH", { feature: "slack", enabled: false });
+    const req = createMockReqWithBody("PATCH", {
+      feature: "slack",
+      enabled: false,
+    });
     const res = createMockRes();
     await handlePatchToggle(req, res, "danxbot", deps());
 
@@ -419,7 +455,12 @@ describe("handlePatchToggle", () => {
       "test-dispatch-token",
     );
     const res = createMockRes();
-    await handlePatchToggle(req, res, "danxbot", deps({ token: "test-dispatch-token" }));
+    await handlePatchToggle(
+      req,
+      res,
+      "danxbot",
+      deps({ token: "test-dispatch-token" }),
+    );
 
     expect(res._getStatusCode()).toBe(401);
     expect(mockWriteSettings).not.toHaveBeenCalled();
@@ -475,14 +516,20 @@ describe("handlePatchToggle", () => {
     expect(body.settings.overrides.slack.enabled).toBe(false);
     // Verify agent:updated is published so SSE clients see the toggle without polling.
     expect(mockEventBusPublish).toHaveBeenCalledWith(
-      expect.objectContaining({ topic: "agent:updated", data: expect.objectContaining({ name: "danxbot" }) }),
+      expect.objectContaining({
+        topic: "agent:updated",
+        data: expect.objectContaining({ name: "danxbot" }),
+      }),
     );
   });
 
   it("records the actual operator's username in writtenBy", async () => {
     mockWriteSettings.mockResolvedValue(settings());
 
-    const req = authReq({ feature: "dispatchApi", enabled: true }, "user-alice");
+    const req = authReq(
+      { feature: "dispatchApi", enabled: true },
+      "user-alice",
+    );
     const res = createMockRes();
     await handlePatchToggle(req, res, "danxbot", deps());
 

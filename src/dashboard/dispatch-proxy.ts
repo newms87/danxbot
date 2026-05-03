@@ -33,6 +33,7 @@
 
 import type { IncomingMessage, ServerResponse } from "http";
 import { request as httpRequest } from "http";
+import { connect as netConnect } from "net";
 import { optional } from "../env.js";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
@@ -42,6 +43,177 @@ const log = createLogger("dispatch-proxy");
 
 /** Overall upstream request timeout (connect + read) — not connect-only. */
 const UPSTREAM_TIMEOUT_MS = 10_000;
+
+/**
+ * Worker-host resolution cache. Workers run either as docker containers
+ * (DNS: `danxbot-worker-<repo>`) or as host-side processes (reachable from
+ * inside the dashboard container via `host.docker.internal`). On every
+ * proxied request we probe candidates in order until one connects, then
+ * cache the winner so subsequent requests skip the probe.
+ *
+ * 24h TTL — long enough that day-to-day traffic doesn't probe; short enough
+ * that a long-term mode switch (e.g. the team retires host mode) eventually
+ * re-resolves without manual intervention. Cache is also invalidated on the
+ * real proxied request's connect error, so any bad cache entry self-heals
+ * within one failed request.
+ */
+const HOST_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** TCP-probe timeout. Docker DNS + container-net latency is sub-50ms in
+ * practice; 1s is a generous ceiling that still keeps fallback fast on a
+ * dead candidate. */
+const PROBE_TIMEOUT_MS = 1_000;
+
+/** Docker's standard hostname for the host runtime, available in modern
+ * Docker Desktop + dockerd configurations. Used as the fallback when the
+ * configured per-repo container DNS doesn't resolve. */
+const HOST_DOCKER_INTERNAL = "host.docker.internal";
+
+interface CachedHostEntry {
+  host: string;
+  expiresAt: number;
+}
+
+const cachedWorkerHost = new Map<string, CachedHostEntry>();
+
+function getCachedHost(repoName: string): string | null {
+  const entry = cachedWorkerHost.get(repoName);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    cachedWorkerHost.delete(repoName);
+    return null;
+  }
+  return entry.host;
+}
+
+function setCachedHost(repoName: string, host: string): void {
+  cachedWorkerHost.set(repoName, {
+    host,
+    expiresAt: Date.now() + HOST_CACHE_TTL_MS,
+  });
+}
+
+/**
+ * Drop the cached worker-host entry for a repo (or all of them when called
+ * with no argument). Exposed so the on-connect-error hook in
+ * `proxyToWorkerWithFallback` can self-heal a stale cache, and so admin
+ * tooling has a clean way to force re-resolution without restarting the
+ * dashboard.
+ */
+export function clearCachedWorkerHost(repoName?: string): void {
+  if (repoName === undefined) {
+    cachedWorkerHost.clear();
+    return;
+  }
+  cachedWorkerHost.delete(repoName);
+}
+
+/**
+ * Build the candidate host list in resolution order:
+ *   1. Cached good host (if not expired) — most likely to succeed
+ *   2. Primary host — the configured `workerHost` override OR the
+ *      default `danxbot-worker-<name>` container DNS
+ *   3. `host.docker.internal` — for repos whose worker is currently
+ *      running on the host runtime instead of as a container
+ *
+ * Duplicates are collapsed (e.g. when the cached host is the same as the
+ * primary, only one probe attempt is made).
+ */
+function buildCandidateHosts(primary: string, cached: string | null): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (host: string): void => {
+    if (seen.has(host)) return;
+    seen.add(host);
+    out.push(host);
+  };
+  if (cached) add(cached);
+  add(primary);
+  add(HOST_DOCKER_INTERNAL);
+  return out;
+}
+
+/**
+ * TCP-handshake probe. Resolves to true if a connection establishes within
+ * `timeoutMs`, false on any error or timeout. Connection is destroyed
+ * immediately after a successful handshake — we only check reachability,
+ * not application-layer health.
+ *
+ * Exported for tests; not part of the public API otherwise.
+ */
+export function probeReachable(
+  host: string,
+  port: number,
+  timeoutMs: number = PROBE_TIMEOUT_MS,
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let done = false;
+    const finish = (ok: boolean): void => {
+      if (done) return;
+      done = true;
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+      resolve(ok);
+    };
+    const socket = netConnect({ host, port });
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+  });
+}
+
+/**
+ * Test seam — swap the probe fn used by `resolveReachableHost`. Tests use
+ * this to mock TCP-handshake outcomes without spinning up real servers on
+ * `host.docker.internal` (unreachable from the CI runner). Prod code never
+ * calls this.
+ */
+let activeProbe: typeof probeReachable = probeReachable;
+export function _setProbeForTesting(
+  fn: typeof probeReachable,
+): typeof probeReachable {
+  const prev = activeProbe;
+  activeProbe = fn;
+  return prev;
+}
+
+/**
+ * Probe candidate hosts for `repoName` and return the first reachable one,
+ * or null if every candidate fails. The winner is cached for
+ * HOST_CACHE_TTL_MS so subsequent requests skip the probe loop.
+ *
+ * Cache eviction:
+ *   - TTL expiry (read-time check in `getCachedHost`)
+ *   - Probe miss on the cached entry (this fn deletes it before falling
+ *     through, so the same request and all subsequent ones use the
+ *     refreshed ordering)
+ *   - Real-request connect error in `proxyToWorkerWithFallback` (via
+ *     the `onConnectError` hook in `proxyToWorker`)
+ */
+async function resolveReachableHost(
+  repoName: string,
+  primary: string,
+  port: number,
+): Promise<string | null> {
+  const cached = getCachedHost(repoName);
+  for (const host of buildCandidateHosts(primary, cached)) {
+    if (await activeProbe(host, port)) {
+      setCachedHost(repoName, host);
+      return host;
+    }
+    if (host === cached) {
+      // Probe miss on the cached entry — drop it so the loop falls through
+      // to the fresh ordering on the next iteration AND so subsequent
+      // requests don't keep paying the probe-then-fail cost.
+      cachedWorkerHost.delete(repoName);
+    }
+  }
+  return null;
+}
 
 /**
  * Default docker hostname for a worker container. Matches `container_name`
@@ -73,7 +245,9 @@ export function makeResolveWorkerHost(
 }
 
 /** Strip the `Bearer ` prefix. Returns null when header is missing/malformed. */
-export function extractBearer(header: string | string[] | undefined): string | null {
+export function extractBearer(
+  header: string | string[] | undefined,
+): string | null {
   if (!header) return null;
   const value = Array.isArray(header) ? header[0] : header;
   if (!value.startsWith("Bearer ")) return null;
@@ -115,7 +289,10 @@ export function checkAuth(
   return { ok: true };
 }
 
-export function rejectUnauthorized(res: ServerResponse, result: AuthResult): void {
+export function rejectUnauthorized(
+  res: ServerResponse,
+  result: AuthResult,
+): void {
   if (result.reason === "server_missing_token") {
     json(res, 500, {
       error:
@@ -148,6 +325,16 @@ function sendUpstreamError(
 }
 
 /**
+ * Optional hooks for `proxyToWorker`. Currently only `onConnectError` is
+ * exposed — used by `proxyToWorkerWithFallback` to invalidate the cached
+ * host the moment the real proxied request fails to connect, so the
+ * cache self-heals within one failed request.
+ */
+export interface ProxyToWorkerHooks {
+  onConnectError?: (host: string, err: Error) => void;
+}
+
+/**
  * Proxy an incoming HTTP request to a worker URL. Buffers the upstream body
  * and forwards it with the upstream status and Content-Type. Uses
  * `res.end(buffer)` rather than `pipe()` so mock responses in unit tests work
@@ -158,6 +345,7 @@ export async function proxyToWorker(
   res: ServerResponse,
   upstream: { host: string; port: number; path: string; method: string },
   body: string | null,
+  hooks: ProxyToWorkerHooks = {},
 ): Promise<void> {
   return new Promise((resolve) => {
     const outgoingHeaders: Record<string, string> = {
@@ -202,6 +390,7 @@ export async function proxyToWorker(
       log.warn(
         `Worker upstream unreachable (${upstream.host}:${upstream.port}${upstream.path}): ${err.message}`,
       );
+      hooks.onConnectError?.(upstream.host, err);
       sendUpstreamError(
         res,
         502,
@@ -220,6 +409,73 @@ export async function proxyToWorker(
     if (body !== null) upstreamReq.write(body);
     upstreamReq.end();
   });
+}
+
+/**
+ * Container-or-host-aware request wrapper. Resolves a reachable host for
+ * `repoName` (cache + probe loop), then proxies to it. Wraps the existing
+ * `proxyToWorker` so all the JSON-only / Content-Length / timeout
+ * semantics are preserved exactly.
+ *
+ * Use this for every dashboard → worker proxy call. The dashboard runs
+ * inside a docker container; workers may run as sibling containers
+ * (`danxbot-worker-<repo>`) or as host-side processes. This wrapper makes
+ * the dashboard agnostic to which mode is currently active and switches
+ * without config changes.
+ *
+ * On total reachability failure (every candidate fails the TCP probe),
+ * sends a 502 with a clear message and resolves. On real-request connect
+ * error after a successful probe, evicts the cache so the next request
+ * re-resolves.
+ */
+export async function proxyToWorkerWithFallback(
+  req: IncomingMessage,
+  res: ServerResponse,
+  upstream: {
+    repoName: string;
+    primaryHost: string;
+    port: number;
+    path: string;
+    method: string;
+  },
+  body: string | null,
+): Promise<void> {
+  const reachableHost = await resolveReachableHost(
+    upstream.repoName,
+    upstream.primaryHost,
+    upstream.port,
+  );
+
+  if (!reachableHost) {
+    sendUpstreamError(
+      res,
+      502,
+      `Worker for repo "${upstream.repoName}" is not reachable on any candidate host (tried "${upstream.primaryHost}" and "${HOST_DOCKER_INTERNAL}")`,
+    );
+    return;
+  }
+
+  await proxyToWorker(
+    req,
+    res,
+    {
+      host: reachableHost,
+      port: upstream.port,
+      path: upstream.path,
+      method: upstream.method,
+    },
+    body,
+    {
+      onConnectError: (failedHost) => {
+        // Probe just succeeded but the real request failed — race or
+        // transient kernel-level reset. Drop the cache so the next
+        // request goes through the full probe loop fresh.
+        if (cachedWorkerHost.get(upstream.repoName)?.host === failedHost) {
+          cachedWorkerHost.delete(upstream.repoName);
+        }
+      },
+    },
+  );
 }
 
 /**
@@ -308,11 +564,12 @@ async function forwardRepoBodyToWorker(
   const repo = await authAndResolveRepo(req, res, deps, repoName);
   if (!repo) return;
 
-  await proxyToWorker(
+  await proxyToWorkerWithFallback(
     req,
     res,
     {
-      host: deps.resolveHost(repo.name),
+      repoName: repo.name,
+      primaryHost: deps.resolveHost(repo.name),
       port: repo.workerPort as number,
       path: upstreamPath,
       method: "POST",
@@ -352,7 +609,12 @@ export async function handleResumeProxy(
 export async function handleJobProxy(
   req: IncomingMessage,
   res: ServerResponse,
-  params: { method: string; pathTemplate: string; jobId: string; repoName: string | null },
+  params: {
+    method: string;
+    pathTemplate: string;
+    jobId: string;
+    repoName: string | null;
+  },
   deps: DispatchProxyDeps,
 ): Promise<void> {
   const repo = await authAndResolveRepo(req, res, deps, params.repoName);
@@ -369,13 +631,17 @@ export async function handleJobProxy(
     }
   }
 
-  await proxyToWorker(
+  await proxyToWorkerWithFallback(
     req,
     res,
     {
-      host: deps.resolveHost(repo.name),
+      repoName: repo.name,
+      primaryHost: deps.resolveHost(repo.name),
       port: repo.workerPort as number,
-      path: params.pathTemplate.replace(":jobId", encodeURIComponent(params.jobId)),
+      path: params.pathTemplate.replace(
+        ":jobId",
+        encodeURIComponent(params.jobId),
+      ),
       method: params.method,
     },
     body,
