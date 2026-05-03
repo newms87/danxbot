@@ -473,7 +473,7 @@ describe("danxbot MCP server — issue tools", () => {
       method: "tools/call",
       params: {
         name: "danx_issue_save",
-        arguments: { external_id: "card-1" },
+        arguments: { id: "ISS-1" },
       },
     });
 
@@ -483,7 +483,7 @@ describe("danxbot MCP server — issue tools", () => {
     };
     expect(JSON.parse(result.content[0].text)).toEqual({ saved: true });
     expect(issueServer.saveRequests).toHaveLength(1);
-    expect(issueServer.saveRequests[0].body).toEqual({ external_id: "card-1" });
+    expect(issueServer.saveRequests[0].body).toEqual({ id: "ISS-1" });
   }, 10_000);
 
   it("calls danx_issue_create → POSTs to create URL → forwards worker JSON", async () => {
@@ -554,7 +554,7 @@ describe("danxbot MCP server — issue tools", () => {
       method: "tools/call",
       params: {
         name: "danx_issue_save",
-        arguments: { external_id: "card" },
+        arguments: { id: "ISS-501" },
       },
     });
     expect(response.error).toBeDefined();
@@ -590,7 +590,7 @@ describe("danxbot MCP server — issue tools", () => {
       method: "tools/call",
       params: {
         name: "danx_issue_save",
-        arguments: { external_id: "broken" },
+        arguments: { id: "ISS-broken" },
       },
     });
     const result = response.result as {
@@ -626,7 +626,7 @@ describe("danxbot MCP server — issue tools", () => {
       method: "tools/call",
       params: {
         name: "danx_issue_save",
-        arguments: { external_id: "x" },
+        arguments: { id: "ISS-1" },
       },
     });
     expect(response.error).toBeDefined();

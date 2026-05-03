@@ -9,16 +9,23 @@
  * a live MySQL pool, dispatch row, or filesystem layout.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { autoSyncTrackedIssue } from "../../worker/auto-sync.js";
+import { writeIssue } from "../../poller/yaml-lifecycle.js";
+import { createEmptyIssue } from "../../issue-tracker/yaml.js";
 import type { Dispatch } from "../../dashboard/dispatches.js";
 import type { RepoContext } from "../../types.js";
+
+let scratchRoot = "/tmp/test-repo";
 
 function buildRepo(): RepoContext {
   return {
     name: "test",
     url: "",
-    localPath: "/tmp/test-repo",
+    localPath: scratchRoot,
     workerPort: 0,
     githubToken: "",
     trello: {
@@ -86,15 +93,49 @@ function buildTrelloRow(cardId: string): Dispatch {
 }
 
 describe("autoSyncTrackedIssue", () => {
-  it("AC #4: calls runSync with the trello cardId as external_id", async () => {
+  beforeEach(() => {
+    scratchRoot = mkdtempSync(join(tmpdir(), "danxbot-autosync-"));
+  });
+
+  afterEach(() => {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  });
+
+  it("AC #4: translates trello cardId → internal id via findByExternalId, then calls runSync", async () => {
+    // Seed a YAML file on disk that maps external_id "card-99" → id "ISS-9".
+    // The real findByExternalId implementation scans this dir and returns
+    // the parsed issue, from which auto-sync extracts `.id`.
+    const repo = buildRepo();
+    const issue = {
+      ...createEmptyIssue({
+        id: "ISS-9",
+        external_id: "card-99",
+        title: "Tracked card",
+      }),
+    };
+    writeIssue(repo.localPath, issue);
+
     const runSync = vi.fn().mockResolvedValue({ ok: true, errors: [] });
     const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-99"));
+    await autoSyncTrackedIssue("job-1", repo, { getDispatch, runSync });
+
+    expect(runSync).toHaveBeenCalledTimes(1);
+    expect(runSync).toHaveBeenCalledWith(
+      "job-1",
+      expect.any(Object),
+      "ISS-9",
+    );
+  });
+
+  it("skips runSync when no local YAML carries the trello cardId (no migration done)", async () => {
+    // No YAML file on disk → findByExternalId returns null → no sync.
+    const runSync = vi.fn();
+    const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("ghost"));
     await autoSyncTrackedIssue("job-1", buildRepo(), {
       getDispatch,
       runSync,
     });
-    expect(runSync).toHaveBeenCalledTimes(1);
-    expect(runSync).toHaveBeenCalledWith("job-1", expect.any(Object), "card-99");
+    expect(runSync).not.toHaveBeenCalled();
   });
 
   it("skips sync for slack-triggered dispatches", async () => {
@@ -195,13 +236,23 @@ describe("autoSyncTrackedIssue", () => {
   });
 
   it("logs but does not throw when runSync reports validation errors", async () => {
+    const repo = buildRepo();
+    const issue = {
+      ...createEmptyIssue({
+        id: "ISS-1",
+        external_id: "card-1",
+        title: "Tracked",
+      }),
+    };
+    writeIssue(repo.localPath, issue);
+
     const runSync = vi.fn().mockResolvedValue({
       ok: false,
       errors: ["missing required field: title"],
     });
     const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-1"));
     await expect(
-      autoSyncTrackedIssue("job-1", buildRepo(), { getDispatch, runSync }),
+      autoSyncTrackedIssue("job-1", repo, { getDispatch, runSync }),
     ).resolves.toBeUndefined();
     expect(runSync).toHaveBeenCalledTimes(1);
   });

@@ -178,8 +178,9 @@ function setIssueTracker(seedCardId: string, seedTitle: string): void {
   // The hydrate path just needs getCard + getComments to succeed; field
   // contents are not asserted by the critical-failure scenarios.
   issueTrackerMock.tracker.createCard({
-    schema_version: 1,
+    schema_version: 2,
     tracker: "memory",
+    id: "ISS-1",
     parent_id: null,
     status: "ToDo",
     type: "Feature",
@@ -199,8 +200,9 @@ function setIssueTracker(seedCardId: string, seedTitle: string): void {
   // asserts on hydrated YAML contents.
   const stub = issueTrackerMock.tracker;
   stub.getCard = async (_id: string) => ({
-    schema_version: 1 as const,
+    schema_version: 2 as const,
     tracker: "memory",
+    id: "ISS-1",
     external_id: seedCardId,
     parent_id: null,
     dispatch_id: null,

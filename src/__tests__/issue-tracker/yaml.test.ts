@@ -10,8 +10,9 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 1,
+    schema_version: 2,
     tracker: "trello",
+    id: "ISS-1",
     external_id: "card-1",
     parent_id: null,
     dispatch_id: null,
@@ -87,9 +88,14 @@ describe("serializeIssue / parseIssue", () => {
   });
 
   it("throws IssueParseError when required fields are missing", () => {
-    const yaml = "schema_version: 1\ntracker: trello\n";
+    const yaml = "schema_version: 2\ntracker: trello\n";
     expect(() => parseIssue(yaml)).toThrow(IssueParseError);
     expect(() => parseIssue(yaml)).toThrow(/external_id/);
+  });
+
+  it("rejects schema_version 1 with a migration pointer", () => {
+    const yaml = "schema_version: 1\ntracker: trello\n";
+    expect(() => parseIssue(yaml)).toThrow(/migrate-issues-to-v2/);
   });
 });
 
@@ -99,8 +105,9 @@ describe("validateIssue", () => {
   // start from this base and override the field they want to exercise.
   function valid(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      schema_version: 1,
+      schema_version: 2,
       tracker: "trello",
+      id: "ISS-42",
       external_id: "x1",
       parent_id: null,
       dispatch_id: null,
@@ -143,6 +150,7 @@ describe("validateIssue", () => {
         expect.arrayContaining([
           expect.stringContaining("schema_version"),
           expect.stringContaining("tracker"),
+          expect.stringContaining("id"),
           expect.stringContaining("external_id"),
           expect.stringContaining("parent_id"),
           expect.stringContaining("dispatch_id"),
@@ -220,11 +228,24 @@ describe("validateIssue", () => {
     }
   });
 
-  it("rejects empty external_id", () => {
+  it("accepts empty external_id (memory tracker / pre-create draft)", () => {
     const result = validateIssue(valid({ external_id: "" }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects empty id", () => {
+    const result = validateIssue(valid({ id: "" }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors.some((e) => /external_id/.test(e))).toBe(true);
+      expect(result.errors.some((e) => /id/.test(e))).toBe(true);
+    }
+  });
+
+  it("rejects malformed id (wrong format)", () => {
+    const result = validateIssue(valid({ id: "iss-1" })); // wrong case
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => /ISS-/.test(e))).toBe(true);
     }
   });
 
@@ -271,11 +292,21 @@ describe("validateIssue", () => {
 
   // ---- Test gap E: pin exact validator error wording ----
 
-  it("schema_version: 2 produces the exact error string", () => {
-    const result = validateIssue(valid({ schema_version: 2 }));
+  it("schema_version: 3 produces the exact error string", () => {
+    const result = validateIssue(valid({ schema_version: 3 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors).toContain("schema_version must be 1 (got 2)");
+      expect(result.errors).toContain("schema_version must be 2 (got 3)");
+    }
+  });
+
+  it("schema_version: 1 produces the migration-pointer error string", () => {
+    const result = validateIssue(valid({ schema_version: 1 }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => e.includes("migrate-issues-to-v2")),
+      ).toBe(true);
     }
   });
 
@@ -306,8 +337,9 @@ describe("validateIssue", () => {
   it("parseIssue throws IssueParseError when YAML source carries a tab in retro.action_items", () => {
     // The bookkeeping comment uses a tab as its line separator, so titles
     // carrying an embedded tab would corrupt the parser. Validate-time reject.
-    const yaml = `schema_version: 1
+    const yaml = `schema_version: 2
 tracker: trello
+id: ISS-1
 external_id: x1
 parent_id: null
 dispatch_id: null
@@ -397,23 +429,25 @@ retro:
 });
 
 describe("createEmptyIssue", () => {
-  it("returns a fully-populated minimal Issue that passes validateIssue once external_id+title are seeded", () => {
-    // external_id and title must be non-empty per the validator; everything
-    // else (description, triaged, ac, phases, comments, retro) is filled in
-    // for free by createEmptyIssue.
-    const issue = createEmptyIssue({ external_id: "x", title: "T" });
+  it("returns a fully-populated minimal Issue that passes validateIssue once id+title are seeded", () => {
+    // `id` and `title` must be non-empty per the validator; everything
+    // else (description, triaged, ac, phases, comments, retro) is filled
+    // in for free by createEmptyIssue. external_id may be empty.
+    const issue = createEmptyIssue({ id: "ISS-1", title: "T" });
     const result = validateIssue(issue as unknown as Record<string, unknown>);
     expect(result.ok).toBe(true);
   });
 
   it("applies seeded fields without leaking missing required defaults", () => {
     const issue = createEmptyIssue({
+      id: "ISS-7",
       external_id: "abc",
       status: "In Progress",
       type: "Bug",
       title: "Hello",
       description: "Body",
     });
+    expect(issue.id).toBe("ISS-7");
     expect(issue.external_id).toBe("abc");
     expect(issue.status).toBe("In Progress");
     expect(issue.type).toBe("Bug");
@@ -434,10 +468,11 @@ describe("createEmptyIssue", () => {
 
   it("uses sensible defaults when no seed fields are provided", () => {
     const issue = createEmptyIssue();
-    expect(issue.schema_version).toBe(1);
+    expect(issue.schema_version).toBe(2);
     expect(issue.tracker).toBe("memory");
     expect(issue.status).toBe("ToDo");
     expect(issue.type).toBe("Feature");
+    expect(issue.id).toBe("");
     expect(issue.external_id).toBe("");
     expect(issue.title).toBe("");
     expect(issue.description).toBe("");
@@ -449,8 +484,9 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 1,
+      schema_version: 2,
       tracker: "trello",
+      id: "ISS-99",
       external_id: "card-99",
       parent_id: null,
       dispatch_id: null,
@@ -488,8 +524,9 @@ describe("serializeIssue byte-stable snapshot", () => {
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 1
+      "schema_version: 2
       tracker: trello
+      id: ISS-99
       external_id: card-99
       parent_id: null
       dispatch_id: null

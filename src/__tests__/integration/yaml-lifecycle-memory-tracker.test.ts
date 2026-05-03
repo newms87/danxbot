@@ -307,8 +307,9 @@ async function reservePort(): Promise<number> {
 
 function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
   return {
-    schema_version: 1,
+    schema_version: 2,
     tracker: "memory",
+    id: `ISS-${Math.floor(Math.random() * 9000) + 1000}`,
     external_id: externalId,
     parent_id: null,
     dispatch_id: null,
@@ -456,11 +457,14 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     const seed = buildSeedIssue(externalId, "ToDo");
     const { addCommentCalls } = setIssueTracker(seed);
 
-    const yamlOpenPath = issuePath(repoDir, externalId, "open");
+    // Filename = internal id, NOT external_id. The save handler is also
+    // keyed by internal id, so fake-claude's `danx_issue_save({id})` body
+    // must use the same value.
+    const yamlOpenPath = issuePath(repoDir, seed.id, "open");
     writeFileSync(yamlOpenPath, serializeIssue(seed));
 
     process.env.FAKE_CLAUDE_YAML_PATH = yamlOpenPath;
-    process.env.FAKE_CLAUDE_EXTERNAL_ID = externalId;
+    process.env.FAKE_CLAUDE_EXTERNAL_ID = seed.id;
     process.env.FAKE_CLAUDE_YAML_FINAL_STATUS = "Done";
 
     const launchRes = await fetch(`http://localhost:${workerPort}/api/launch`, {
@@ -510,7 +514,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     // returns early. The agent's explicit second save is what matters.
     await drainIssueRouteAsyncWork();
 
-    const yamlClosedPath = issuePath(repoDir, externalId, "closed");
+    const yamlClosedPath = issuePath(repoDir, seed.id, "closed");
     expect(existsSync(yamlClosedPath)).toBe(true);
     expect(existsSync(yamlOpenPath)).toBe(false);
 
@@ -570,11 +574,14 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     const seed = buildSeedIssue(externalId, "ToDo");
     setIssueTracker(seed);
 
-    const yamlOpenPath = issuePath(repoDir, externalId, "open");
+    // Filename = internal id, NOT external_id. The save handler is also
+    // keyed by internal id, so fake-claude's `danx_issue_save({id})` body
+    // must use the same value.
+    const yamlOpenPath = issuePath(repoDir, seed.id, "open");
     writeFileSync(yamlOpenPath, serializeIssue(seed));
 
     process.env.FAKE_CLAUDE_YAML_PATH = yamlOpenPath;
-    process.env.FAKE_CLAUDE_EXTERNAL_ID = externalId;
+    process.env.FAKE_CLAUDE_EXTERNAL_ID = seed.id;
     process.env.FAKE_CLAUDE_YAML_FINAL_STATUS = "Needs Help";
 
     const launchRes = await fetch(`http://localhost:${workerPort}/api/launch`, {
@@ -608,7 +615,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     // Needs Help is NOT a terminal status for `persistAfterSync` —
     // file stays in open/.
     expect(existsSync(yamlOpenPath)).toBe(true);
-    expect(existsSync(issuePath(repoDir, externalId, "closed"))).toBe(false);
+    expect(existsSync(issuePath(repoDir, seed.id, "closed"))).toBe(false);
 
     const persisted = parseIssue(readFileSync(yamlOpenPath, "utf-8"));
     expect(persisted.status).toBe("Needs Help");
@@ -640,11 +647,14 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     const seed = buildSeedIssue(externalId, "Needs Help");
     setIssueTracker(seed);
 
-    const yamlOpenPath = issuePath(repoDir, externalId, "open");
+    // Filename = internal id, NOT external_id. The save handler is also
+    // keyed by internal id, so fake-claude's `danx_issue_save({id})` body
+    // must use the same value.
+    const yamlOpenPath = issuePath(repoDir, seed.id, "open");
     writeFileSync(yamlOpenPath, serializeIssue(seed));
 
     process.env.FAKE_CLAUDE_YAML_PATH = yamlOpenPath;
-    process.env.FAKE_CLAUDE_EXTERNAL_ID = externalId;
+    process.env.FAKE_CLAUDE_EXTERNAL_ID = seed.id;
     process.env.FAKE_CLAUDE_YAML_FINAL_STATUS = "Done";
 
     const launchRes = await fetch(`http://localhost:${workerPort}/api/launch`, {
@@ -675,7 +685,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
 
     await drainIssueRouteAsyncWork();
 
-    const yamlClosedPath = issuePath(repoDir, externalId, "closed");
+    const yamlClosedPath = issuePath(repoDir, seed.id, "closed");
     expect(existsSync(yamlClosedPath)).toBe(true);
     expect(existsSync(yamlOpenPath)).toBe(false);
 

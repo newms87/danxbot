@@ -22,17 +22,20 @@ import { BOOKKEEPING_SEP } from "./sync.js";
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 1
+ *  - schema_version: 2
  *  - tracker: "memory"
+ *  - id: "" (caller is responsible for assigning via nextIssueId)
+ *  - external_id: ""
  *  - parent_id, dispatch_id: null
  *  - status: "ToDo"
  *  - type: "Feature"
- *  - title, description, external_id: ""
+ *  - title, description: ""
  *  - triaged: { timestamp: "", status: "", explain: "" }
  *  - ac, phases, comments: []
  *  - retro: { good: "", bad: "", action_items: [], commits: [] }
  */
 export function createEmptyIssue(seed: {
+  id?: string;
   external_id?: string;
   status?: IssueStatus;
   type?: IssueType;
@@ -40,8 +43,9 @@ export function createEmptyIssue(seed: {
   description?: string;
 } = {}): Issue {
   return {
-    schema_version: 1,
+    schema_version: 2,
     tracker: "memory",
+    id: seed.id ?? "",
     external_id: seed.external_id ?? "",
     parent_id: null,
     dispatch_id: null,
@@ -75,6 +79,7 @@ export function serializeIssue(issue: Issue): string {
   const doc = {
     schema_version: issue.schema_version,
     tracker: issue.tracker,
+    id: issue.id,
     external_id: issue.external_id,
     parent_id: issue.parent_id,
     dispatch_id: issue.dispatch_id,
@@ -122,39 +127,13 @@ export function serializeIssue(issue: Issue): string {
 /**
  * Parse YAML text into an Issue, throwing IssueParseError with a useful
  * message on either malformed YAML or schema violations.
+ *
+ * In schema v2, `external_id` is always allowed to be empty (memory tracker
+ * issues + drafts pre-create have no tracker mapping yet), so there is no
+ * separate "draft" parse mode — the v1 `parseDraftIssue` is gone. The
+ * primary id (`id`) is the strict required-non-empty field.
  */
 export function parseIssue(text: string): Issue {
-  return parseWithOptions(text, {});
-}
-
-/**
- * Like `parseIssue`, but tolerant of an empty `external_id`. Used by the
- * `danx_issue_create` MCP flow — the agent writes a draft YAML at
- * `<repo>/.danxbot/issues/open/<filename>.yml` BEFORE the tracker has
- * assigned an id, so the file's `external_id` is necessarily empty until
- * the worker stamps it post-create.
- *
- * Draft-time field expectations (NOT enforced by the option flag — the
- * primitive validators already accept empty strings here, so existing
- * `validateAcList` / `validatePhasesList` accept them as-is):
- *
- *   - `ac[i].check_item_id` — empty until the tracker assigns it.
- *   - `phases[i].check_item_id` — empty until the tracker assigns it.
- *
- * Every other field still validates strictly. The asymmetry between the
- * `external_id` flag and the unflagged check_item_id leniency is
- * intentional: external_id absence is a structural contract (rejected
- * by default for sync flow); check_item_id absence is data shape
- * already permitted by the primitive validators.
- */
-export function parseDraftIssue(text: string): Issue {
-  return parseWithOptions(text, { allowEmptyExternalId: true });
-}
-
-function parseWithOptions(
-  text: string,
-  opts: { allowEmptyExternalId?: boolean },
-): Issue {
   let raw: unknown;
   try {
     raw = parseYamlText(text);
@@ -164,7 +143,7 @@ function parseWithOptions(
     }
     throw new IssueParseError(`Malformed YAML: ${String(err)}`);
   }
-  const result = validateIssue(raw, opts);
+  const result = validateIssue(raw);
   if (!result.ok) {
     throw new IssueParseError(
       `Invalid Issue YAML:\n  - ${result.errors.join("\n  - ")}`,
@@ -172,6 +151,13 @@ function parseWithOptions(
   }
   return result.issue;
 }
+
+/**
+ * Format check for an internal issue id. The id-generator emits this format
+ * exclusively (`ISS-<positive-integer>`); the validator enforces it so a
+ * typo'd or hand-written id is rejected at YAML parse time.
+ */
+export const ISSUE_ID_REGEX = /^ISS-\d+$/;
 
 type ValidateResult =
   | { ok: true; issue: Issue }
@@ -185,14 +171,15 @@ type ValidateResult =
  * match. Does NOT validate: ISO 8601 timestamp shape, UUID format, etc.;
  * those are caller responsibilities.
  *
- * `opts.allowEmptyExternalId` permits `external_id: ""` for the
- * `danx_issue_create` draft flow, where the tracker has not yet assigned
- * an id. Default is strict (empty `external_id` is an error).
+ * Schema v2 contract:
+ *  - `id` is required, non-empty, must match `ISS-<positive-integer>`.
+ *  - `external_id` is required as a field but may be empty (memory tracker
+ *    issues + drafts pre-tracker-create have no external mapping yet).
+ *  - v1 documents are rejected with a migration suggestion — there is NO
+ *    runtime backwards-compat shim. Run the migration script once on each
+ *    repo (Phase 5 of the id-vs-external_id epic).
  */
-export function validateIssue(
-  value: unknown,
-  opts: { allowEmptyExternalId?: boolean } = {},
-): ValidateResult {
+export function validateIssue(value: unknown): ValidateResult {
   const errors: string[] = [];
 
   if (!isPlainObject(value)) {
@@ -200,11 +187,15 @@ export function validateIssue(
   }
   const v = value as Record<string, unknown>;
 
-  // schema_version
+  // schema_version — v2 only. Reject v1 with a loud migration pointer.
   if (!("schema_version" in v)) {
     errors.push("missing required field: schema_version");
-  } else if (v.schema_version !== 1) {
-    errors.push(`schema_version must be 1 (got ${JSON.stringify(v.schema_version)})`);
+  } else if (v.schema_version === 1) {
+    errors.push(
+      "schema_version 1 is no longer supported — run scripts/migrate-issues-to-v2.ts to upgrade",
+    );
+  } else if (v.schema_version !== 2) {
+    errors.push(`schema_version must be 2 (got ${JSON.stringify(v.schema_version)})`);
   }
 
   // tracker
@@ -214,13 +205,25 @@ export function validateIssue(
     errors.push("tracker must be a non-empty string");
   }
 
-  // external_id
+  // id — internal primary id, always non-empty, must match ISS-N format.
+  if (!("id" in v)) {
+    errors.push("missing required field: id");
+  } else if (typeof v.id !== "string") {
+    errors.push("id must be a string");
+  } else if (v.id.length === 0) {
+    errors.push("id must be a non-empty string (format: ISS-<positive integer>)");
+  } else if (!ISSUE_ID_REGEX.test(v.id)) {
+    errors.push(
+      `id must match ISS-<positive integer> (got ${JSON.stringify(v.id)})`,
+    );
+  }
+
+  // external_id — required as a field; empty string is permitted (memory
+  // tracker issues + drafts pre-create have no external mapping yet).
   if (!("external_id" in v)) {
     errors.push("missing required field: external_id");
   } else if (typeof v.external_id !== "string") {
     errors.push("external_id must be a string");
-  } else if (v.external_id.length === 0 && !opts.allowEmptyExternalId) {
-    errors.push("external_id must be a non-empty string");
   }
 
   // parent_id
@@ -328,8 +331,9 @@ export function validateIssue(
 
   // All required fields present and well-typed; build the validated Issue.
   const issue: Issue = {
-    schema_version: 1,
+    schema_version: 2,
     tracker: v.tracker as string,
+    id: v.id as string,
     external_id: v.external_id as string,
     parent_id: v.parent_id as string | null,
     dispatch_id: v.dispatch_id as string | null,

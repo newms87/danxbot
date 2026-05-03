@@ -40,19 +40,25 @@ describe("TrelloTracker", () => {
   }
 
   it("fetchOpenCards calls each open list and tags status correctly", async () => {
+    // Title prefix `#ISS-N: <title>` is the v2 contract — fetchOpenCards
+    // parses the prefix and surfaces `id` separately. Cards without the
+    // prefix surface with `id: ""` (legacy / human-created).
     fetchMock.mockImplementation(async (url: string) => {
-      if (url.includes("list-review/cards")) return jsonResponse([{ id: "r1", name: "R1" }]);
-      if (url.includes("list-todo/cards")) return jsonResponse([{ id: "t1", name: "T1" }]);
+      if (url.includes("list-review/cards"))
+        return jsonResponse([{ id: "r1", name: "#ISS-1: R1" }]);
+      if (url.includes("list-todo/cards"))
+        return jsonResponse([{ id: "t1", name: "T1" }]);
       if (url.includes("list-ip/cards")) return jsonResponse([]);
-      if (url.includes("list-nh/cards")) return jsonResponse([{ id: "n1", name: "N1" }]);
+      if (url.includes("list-nh/cards"))
+        return jsonResponse([{ id: "n1", name: "#ISS-3: N1" }]);
       throw new Error(`unexpected url: ${url}`);
     });
     const tracker = new TrelloTracker(TRELLO);
     const refs = await tracker.fetchOpenCards();
     expect(refs).toEqual([
-      { external_id: "r1", title: "R1", status: "Review" },
-      { external_id: "t1", title: "T1", status: "ToDo" },
-      { external_id: "n1", title: "N1", status: "Needs Help" },
+      { id: "ISS-1", external_id: "r1", title: "R1", status: "Review" },
+      { id: "", external_id: "t1", title: "T1", status: "ToDo" },
+      { id: "ISS-3", external_id: "n1", title: "N1", status: "Needs Help" },
     ]);
     // Pin the call count so a future regression that drops one of the
     // four open-list statuses (Review, ToDo, In Progress, Needs Help)
@@ -137,8 +143,9 @@ describe("TrelloTracker", () => {
 
     const tracker = new TrelloTracker(TRELLO);
     const result = await tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "trello",
+      id: "ISS-1",
       parent_id: null,
       status: "ToDo",
       type: "Feature",
@@ -562,8 +569,9 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(TRELLO);
     await tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "trello",
+      id: "ISS-9",
       parent_id: null,
       status: "ToDo",
       type: "Feature",
@@ -579,7 +587,9 @@ describe("TrelloTracker", () => {
     expect(post[0]).toContain(authQs());
     const body = JSON.parse(post[1].body as string);
     expect(body.idList).toBe("list-todo");
-    expect(body.name).toBe("T");
+    // createCard prefixes the title with `#<id>: ` so humans on the
+    // Trello UI can correlate cards back to local YAMLs.
+    expect(body.name).toBe("#ISS-9: T");
     expect(body.desc).toBe("D");
     expect(body.pos).toBe("top");
     expect(typeof body.idLabels).toBe("string"); // comma-joined ids

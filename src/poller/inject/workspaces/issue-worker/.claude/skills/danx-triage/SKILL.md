@@ -93,7 +93,7 @@ Run steps 2a–2g exactly as defined in danx-triage SKILL.md (read full YAML, fi
 Return ONLY this JSON object on your final message:
 
 {
-  "external_id": "<id>",
+  "id": "<id>",
   "name": "<title>",
   "state": "Keep|Partial|Complete|Obsolete|Duplicate|Ambiguous",
   "saved": <bool>,
@@ -150,13 +150,13 @@ Skip ICE for Complete / Obsolete / Duplicate / Ambiguous.
 Scan `description`, `ac[]`, `comments[]` for:
 
 - Phrases: `depends on`, `blocked by`, `after card`, `requires`, `needs`
-- Tracker URLs / external_ids
+- Mentions of another issue's `id` (e.g. `ISS-42`)
 - Same-file / same-symbol overlap with another card
 
 For inferred deps (no explicit signal but deduced): append to `description`:
 
 ```
-Depends on: <external_id> — <reason>
+Depends on: <id> — <reason>
 ```
 
 Preserve the rest of `description` verbatim.
@@ -189,7 +189,7 @@ Preserve the rest of `description` verbatim.
 
 #### 2g. Save
 
-`danx_issue_save({external_id: "<id>"})`. Check the response — `{saved: false}` means the YAML failed validation; report the error in the JSON return value.
+`danx_issue_save({id: "<id>"})`. Check the response — `{saved: false}` means the YAML failed validation; report the error in the JSON return value.
 
 For terminal moves (Done / Cancelled), the worker moves the file `open/` → `closed/` as part of save.
 
@@ -205,7 +205,7 @@ Replace each `(epic parent, phase 1, phase 2, ...)` tuple in the Keep/Partial se
 
 **Epic identification:**
 - Parent: `type === "Epic"`
-- Phase: `parent_id` matches the epic's `external_id` AND title starts with `<Epic Title> > Phase N:`
+- Phase: `parent_id` matches the epic's `id` AND title starts with `<Epic Title> > Phase N:`
 
 ---
 

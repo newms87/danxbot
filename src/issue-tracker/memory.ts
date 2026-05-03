@@ -25,6 +25,13 @@ interface StoredCard {
    * fixture round-trips with `tracker: "trello"`).
    */
   tracker: string;
+  /**
+   * Internal issue id (`ISS-N`). Stored alongside the tracker-native id
+   * so memory tracker round-trips preserve it. Empty string is permitted
+   * for seeded fixtures that pre-date the id contract; tests touching
+   * the schema are responsible for supplying a valid id.
+   */
+  id: string;
   external_id: string;
   parent_id: string | null;
   dispatch_id: string | null;
@@ -89,6 +96,7 @@ export class MemoryTracker implements IssueTracker {
     for (const card of this.cards.values()) {
       if (open.has(card.status)) {
         refs.push({
+          id: card.id,
           external_id: card.external_id,
           title: card.title,
           status: card.status,
@@ -124,6 +132,7 @@ export class MemoryTracker implements IssueTracker {
     }));
     const stored: StoredCard = {
       tracker: "memory",
+      id: input.id,
       external_id: externalId,
       parent_id: input.parent_id,
       dispatch_id: null,
@@ -324,6 +333,11 @@ export class MemoryTracker implements IssueTracker {
     const externalId = `mem-${this.nextExternalId++}`;
     this.cards.set(externalId, {
       tracker: "memory",
+      // Action-items spawn cards do not get an internal id from this path —
+      // the YAML for the spawned card is created later by the operator (or
+      // by /danx-triage on next pickup) and gets its `ISS-N` then. Until
+      // that happens, this card has no local YAML at all.
+      id: "",
       external_id: externalId,
       parent_id: null,
       dispatch_id: null,
@@ -375,8 +389,9 @@ export class MemoryTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 1,
+      schema_version: 2,
       tracker: card.tracker,
+      id: card.id,
       external_id: card.external_id,
       parent_id: card.parent_id,
       dispatch_id: card.dispatch_id,
@@ -405,6 +420,7 @@ export class MemoryTracker implements IssueTracker {
   private cloneIssueAsStored(issue: Issue): StoredCard {
     return {
       tracker: issue.tracker || "memory",
+      id: issue.id,
       external_id: issue.external_id,
       parent_id: issue.parent_id,
       dispatch_id: issue.dispatch_id,

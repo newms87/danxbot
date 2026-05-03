@@ -218,7 +218,7 @@ export interface DispatchInput {
    *
    * Use case: the Trello poller (Phase 2 of the tracker-agnostic-agents
    * epic) pre-generates the UUID so it can stamp the same value into the
-   * per-issue YAML at `<repo>/.danxbot/issues/open/<external_id>.yml`
+   * per-issue YAML at `<repo>/.danxbot/issues/open/<id>.yml`
    * BEFORE the spawn happens. The dashboard's job_id then matches the
    * `dispatch_id` field on disk — one identity end-to-end. External
    * callers (HTTP `/api/launch`, Slack listener) keep omitting this and

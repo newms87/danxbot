@@ -25,13 +25,14 @@ import {
 import {
   ensureGitignoreEntry,
   ensureIssuesDirs,
+  findByExternalId,
   hydrateFromRemote,
   issuePath,
-  loadLocal,
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
 import { createIssueTracker } from "../issue-tracker/index.js";
+import type { Issue } from "../issue-tracker/interface.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
@@ -263,36 +264,46 @@ async function _poll(repo: RepoContext): Promise<void> {
     listName: "ToDo",
   };
 
-  // Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO):
-  //   1. Pre-generate the dispatch UUID so the same value lands in BOTH the
-  //      dispatch row AND the YAML's `dispatch_id` field — one identity
-  //      end-to-end, surfaced as `job_id` in the dashboard.
-  //   2. Hydrate-or-load the per-issue YAML at
-  //      `<repo>/.danxbot/issues/open/<external_id>.yml`. Brand-new card on
-  //      remote → one-time full hydration; existing local file →
-  //      authoritative, only `dispatch_id` is overwritten. NO refetch.
-  //   3. Compose the dispatch task with the YAML directive. The
-  //      `danx_issue_save` MCP tool ships in Phase 3 (Trello wsb4TVNT) —
-  //      until then the directive is informational text and agents still
-  //      call Trello MCP directly for save behavior.
+  // Hydrate-or-load by tracker-native external_id (the Trello card id),
+  // then dispatch using the resolved INTERNAL id. The agent never sees
+  // external_id — the dispatch prompt and YAML filename both use `id`.
+  //   1. Pre-generate the dispatch UUID so the same value lands in BOTH
+  //      the dispatch row AND the YAML's `dispatch_id` field.
+  //   2. `findByExternalId` scans existing YAMLs — if one carries this
+  //      external_id, it's authoritative; only `dispatch_id` overwrites.
+  //   3. No match → `hydrateFromRemote` pulls metadata, allocates an
+  //      ISS-N (or parses one from the title prefix), patches the
+  //      tracker title, and writes a fresh local YAML.
+  //   4. Dispatch task references the local id — agent calls
+  //      `danx_issue_save({id})` and never knows external trackers exist.
   const dispatchId = randomUUID();
-  const localIssue = loadLocal(repo.localPath, primary.id);
-  if (localIssue) {
-    stampDispatchAndWrite(repo.localPath, localIssue, dispatchId);
+  const existing = findByExternalId(repo.localPath, primary.id);
+  let resolvedIssue: Issue;
+  if (existing) {
+    resolvedIssue = stampDispatchAndWrite(
+      repo.localPath,
+      existing,
+      dispatchId,
+    );
   } else {
     // Constructed only when hydration is actually needed — the existing-
     // file path is the steady-state hot path, and skipping the factory
     // call there avoids allocating a TrelloTracker (which opens an HTTP
     // client on construction) on every tick where the YAML already exists.
     const tracker = createIssueTracker(repo);
-    const hydrated = await hydrateFromRemote(tracker, primary.id, dispatchId);
-    writeIssue(repo.localPath, hydrated);
+    resolvedIssue = await hydrateFromRemote(
+      tracker,
+      primary.id,
+      dispatchId,
+      repo.localPath,
+    );
+    writeIssue(repo.localPath, resolvedIssue);
   }
 
-  const yamlPath = issuePath(repo.localPath, primary.id, "open");
+  const yamlPath = issuePath(repo.localPath, resolvedIssue.id, "open");
   const task =
     `${TEAM_PROMPT}\n\nEdit ${yamlPath}. ` +
-    `Call danx_issue_save({external_id: "${primary.id}"}) when done.`;
+    `Call danx_issue_save({id: "${resolvedIssue.id}"}) when done.`;
 
   spawnClaude(repo, task, { trigger: "trello", metadata: trelloMeta }, dispatchId);
 }

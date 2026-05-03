@@ -94,7 +94,8 @@ export class TrelloTracker implements IssueTracker {
     for (const [status, listId] of openLists) {
       const cards = await this.fetchListCards(listId);
       for (const card of cards) {
-        refs.push({ external_id: card.id, title: card.name, status });
+        const { id, title } = parseCardTitle(card.name);
+        refs.push({ id, external_id: card.id, title, status });
       }
     }
     return refs;
@@ -144,15 +145,22 @@ export class TrelloTracker implements IssueTracker {
     // must call `getComments` separately. This avoids a redundant
     // `/actions` round-trip every time `syncIssue` runs (which already
     // calls `getComments` itself for the merge step).
+    const parsed = parseCardTitle(card.name);
     return {
-      schema_version: 1,
+      schema_version: 2,
       tracker: "trello",
+      // Internal id is parsed from the `#ISS-N: ` title prefix. Cards
+      // pre-dating the id epoch (or human-created without the prefix)
+      // surface here with `id: ""` — sync.ts and higher-level callers
+      // are responsible for handling that case (typically by ignoring or
+      // running the migration script).
+      id: parsed.id,
       external_id: card.id,
       parent_id: null,
       dispatch_id: null,
       status,
       type,
-      title: card.name,
+      title: parsed.title,
       description: card.desc ?? "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac,
@@ -174,6 +182,9 @@ export class TrelloTracker implements IssueTracker {
       triaged: input.triaged.timestamp !== "",
     });
     const url = `${TRELLO_BASE}/cards?${this.auth()}`;
+    // The Trello card title carries the internal id prefix `#<id>: ` so
+    // humans on the Trello UI can correlate cards back to local YAMLs at
+    // a glance. `parseCardTitle` is the inverse on read.
     const created = await this.requestJson<TrelloCardDto>(
       url,
       {
@@ -181,7 +192,7 @@ export class TrelloTracker implements IssueTracker {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           idList: listId,
-          name: input.title,
+          name: formatCardTitle(input.id, input.title),
           desc: input.description,
           idLabels: labelIds.join(","),
           pos: "top",
@@ -226,12 +237,17 @@ export class TrelloTracker implements IssueTracker {
 
   async updateCard(
     externalId: string,
-    patch: { title?: string; description?: string },
+    patch: { title?: string; description?: string; id?: string },
   ): Promise<void> {
     if (patch.title === undefined && patch.description === undefined) return;
     const url = `${TRELLO_BASE}/cards/${externalId}?${this.auth()}`;
     const body: Record<string, string> = {};
-    if (patch.title !== undefined) body.name = patch.title;
+    if (patch.title !== undefined) {
+      // Preserve the `#<id>: ` title prefix on every title update. Sync
+      // passes the local issue's `id` through `patch.id` so we can
+      // reformat without a round-trip to read the existing card name.
+      body.name = patch.id ? formatCardTitle(patch.id, patch.title) : patch.title;
+    }
     if (patch.description !== undefined) body.desc = patch.description;
     await this.requestVoid(
       url,
@@ -713,6 +729,36 @@ export class TrelloTracker implements IssueTracker {
       );
     }
   }
+}
+
+// ---------- Card-title id-prefix encode / decode (exported for tests) ----------
+
+/**
+ * Format a Trello card title with the `#<id>: ` prefix so humans on the
+ * Trello UI can correlate cards back to local YAML files at a glance.
+ *
+ * Format: `#<id>: <title>` — example `#ISS-138: [Danxbot] Do stuff`.
+ * Empty `id` is a programmer error (every card we create has an id by
+ * the time it reaches this point); throws to surface the mistake loudly.
+ */
+export function formatCardTitle(id: string, title: string): string {
+  if (!id) {
+    throw new Error("formatCardTitle requires a non-empty id");
+  }
+  return `#${id}: ${title}`;
+}
+
+/**
+ * Inverse of `formatCardTitle`. Splits a Trello card name into
+ * `{ id, title }`. Cards without the `#ISS-N: ` prefix (human-created,
+ * pre-migration legacy, etc.) return `id: ""` and the entire name as
+ * `title` — sync layers must handle that case explicitly (typically by
+ * skipping the card or running the migration script).
+ */
+export function parseCardTitle(name: string): { id: string; title: string } {
+  const m = /^#(ISS-\d+):\s*(.*)$/.exec(name);
+  if (!m) return { id: "", title: name };
+  return { id: m[1], title: m[2] };
 }
 
 // ---------- Phase-name encode / decode (exported for tests) ----------

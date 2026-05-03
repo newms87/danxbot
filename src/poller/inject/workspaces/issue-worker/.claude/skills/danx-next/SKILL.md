@@ -10,8 +10,8 @@ You process ONE card. You are the orchestrator — do not delegate workflow step
 The dispatch prompt told you the YAML path:
 
 ```
-Edit <repo>/.danxbot/issues/open/<external_id>.yml.
-Call danx_issue_save({external_id: "<id>"}) when done.
+Edit <repo>/.danxbot/issues/open/<id>.yml.
+Call danx_issue_save({id: "<id>"}) when done.
 ```
 
 That YAML is the source of truth for the card. The poller pre-hydrated it from the tracker before this dispatch ran. You read, edit, and save the YAML — you do NOT make tracker calls. The worker pushes your changes to the tracker asynchronously.
@@ -22,10 +22,10 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | `1` | Never change. |
+| `schema_version` | `2` | Never change. |
 | `tracker` | string | Don't change. |
-| `external_id` | string | The id you save with. Don't change. |
-| `parent_id` | string \| null | Set on phase cards (epic's external_id). |
+| `id` | string (`ISS-N`) | The id you save with. Matches the filename. Don't change. |
+| `parent_id` | string \| null | Set on phase cards (epic's `id`). |
 | `dispatch_id` | string \| null | Poller-managed. Don't touch. |
 | `status` | `Review` \| `ToDo` \| `In Progress` \| `Needs Help` \| `Done` \| `Cancelled` | Editing this is how you move the card across lists. |
 | `type` | `Bug` \| `Feature` \| `Epic` | Required label. |
@@ -37,7 +37,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
 | `retro` | `{good, bad, action_items[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save AND spawns one tracker card per `action_items[]` entry. **`action_items[]` is a LAST RESORT** — see Step 1.5. Only file an action item when the work is BOTH unrelated to this card's ACs AND too large to reasonably finish in this session (multi-phase refactor, redesign, cross-cutting work needing its own scoping). Small in-scope or small unrelated fixes you spotted → DO THEM NOW, don't defer. Do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for follow-ups — list them in `action_items[]` instead. `action_items[]` strings cannot contain `→` (reserved bookkeeping separator). |
 
-**Save semantics:** `danx_issue_save({external_id})` validates the YAML synchronously and returns `{saved: true}` or `{saved: false, errors}`. Tracker push runs detached — tracker errors NEVER appear in the tool result. When `status` is `Done` or `Cancelled`, the worker moves the file `open/` → `closed/` as part of save. Save after every meaningful edit.
+**Save semantics:** `danx_issue_save({id})` validates the YAML synchronously and returns `{saved: true}` or `{saved: false, errors}`. Tracker-side bookkeeping runs detached — those errors NEVER appear in the tool result. When `status` is `Done` or `Cancelled`, the worker moves the file `open/` → `closed/` as part of save. Save after every meaningful edit.
 
 **Auto-sync:** `danxbot_complete` triggers a final auto-sync as a safety net, so a missed save before completion still pushes. Prefer explicit saves anyway — they validate earlier.
 
@@ -55,7 +55,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 7. Commit (Step 7).
 8. Definition-of-Done gate (Step 8).
 9. Move to Done (Step 9) OR Needs Help (Step 10).
-10. `danx_issue_save({external_id})`.
+10. `danx_issue_save({id})`.
 11. `danxbot_complete` (Step 11).
 
 Config references: `.claude/rules/danx-repo-config.md` for repo commands. Never hardcode IDs.
@@ -64,7 +64,7 @@ Config references: `.claude/rules/danx-repo-config.md` for repo commands. Never 
 
 ## Step 1 — Read the YAML
 
-`Read <repo>/.danxbot/issues/open/<external_id>.yml`. The dispatch prompt has the absolute path.
+`Read <repo>/.danxbot/issues/open/<id>.yml`. The dispatch prompt has the absolute path.
 
 The YAML carries `status: ToDo` at this point — the poller picked it up and hydrated it. Your first edit is to flip `status: ToDo` → `status: In Progress` and call `danx_issue_save`. That's how you "claim" the card — the worker syncs the tracker move to In Progress for you.
 
@@ -129,21 +129,21 @@ If the card is 3+ implementation phases, spans different domains, or will exceed
 
 1. Edit the parent YAML: set `type: Epic`. Keep `status: In Progress` — the epic stays open while phases work. Append a comment summarizing the split (no `id` field). Save.
 2. For each phase, write a draft YAML at `<repo>/.danxbot/issues/open/<slug>.yml` (filename can be the kebab-case slug; `.yml` suffix optional in the create call — both forms accepted) with every required field populated. Use this template (`<DRAFT_TEMPLATE>`):
-   - `schema_version: 1`
+   - `schema_version: 2`
    - `tracker: <same as parent>`
-   - `external_id: ""` (tracker assigns)
-   - `parent_id: <epic external_id>`
+   - `id: ""` (worker assigns the next `ISS-N`)
+   - `parent_id: "<epic id>"` (the epic's `id`, e.g. `ISS-12`)
    - `dispatch_id: null`
    - `status: "ToDo"`
    - `type: "Bug"` or `"Feature"` (the phase's own kind, not `Epic`)
    - `title: "<Epic Title> > Phase N: Description"`
    - `description: "<full body>"`
    - `triaged: {timestamp: "", status: "", explain: ""}`
-   - `ac: [{check_item_id: "", title: "...", checked: false}, ...]` (every required field present, `check_item_id: ""` until tracker assigns)
+   - `ac: [{check_item_id: "", title: "...", checked: false}, ...]` (every required field present, `check_item_id: ""` until worker assigns)
    - `phases: []` (or seeded items with `check_item_id: ""`)
    - `comments: []`
    - `retro: {good: "", bad: "", action_items: [], commits: []}`
-3. For each phase YAML, call `danx_issue_create({filename: "<slug>"})`. The worker validates as a draft (allows empty `external_id` + empty `check_item_id`s), creates the tracker card, stamps assigned ids back into the YAML, and renames the file to `<external_id>.yml`. Capture the returned `external_id`. `{created: false, errors}` → fix the draft and retry.
+3. For each phase YAML, call `danx_issue_create({filename: "<slug>"})`. The worker validates the draft (empty `id` + empty `check_item_id`s are allowed), creates the issue, stamps the assigned `id` back into the YAML, and renames the file to `<id>.yml`. Capture the returned `id` from the response. `{created: false, errors}` → fix the draft and retry.
 4. Restart this workflow at Step 1 using the first phase card's YAML.
 
 The epic stays at `status: In Progress` until ALL phase cards are Done — then the final phase agent (or you, if no more phases) flips the epic to `Done` and saves it. After a phase completes, the next phase card lives in `<repo>/.danxbot/issues/open/`. The poller picks it up on the next tick.
@@ -163,7 +163,7 @@ The epic stays at `status: In Progress` until ALL phase cards are Done — then 
 
 For large repetitive edits, dispatch a `batch-editor` subagent via `Agent` / `Task`.
 
-After implementation, save: `danx_issue_save({external_id})`.
+After implementation, save: `danx_issue_save({id})`.
 
 ---
 
@@ -177,7 +177,7 @@ Append each result as a new comment to `comments[]`. For each: set `author` to `
 
 If critical issues found, fix them, re-run the failed gate, append a `## Review Fixes` comment summarizing the fixes.
 
-Save: `danx_issue_save({external_id})`.
+Save: `danx_issue_save({id})`.
 
 ---
 
@@ -207,7 +207,7 @@ Before deciding Done vs Needs Help, **inspect the actual state of every AC item 
 
 Mechanical procedure:
 
-1. Re-read `<repo>/.danxbot/issues/open/<external_id>.yml`.
+1. Re-read `<repo>/.danxbot/issues/open/<id>.yml`.
 2. Count `ac` entries where `checked === false`.
 3. **Zero unchecked** → Step 9 (Done).
 4. **One or more unchecked** → run the **Step 1.5 fix-it-yourself check**
@@ -250,7 +250,7 @@ Edit YAML:
    ```
 3. Fill `retro.good`, `retro.bad`, `retro.action_items[]`, `retro.commits[]`. The worker renders the `## Retro` comment automatically on save and spawns one tracker card per `action_items[]` entry — do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for action items. `action_items[]` strings must not contain `→`. **Action items are a LAST RESORT** — re-apply the Step 1.5 filter to every candidate. If it's required for THIS card's ACs (already done, since you're at Done) it's not an action item. If it's small + you could do it now, do it now and re-commit instead of filing. Only large, separate, scoped follow-ups belong here. Empty `action_items[]` is the right answer most of the time.
 
-Save: `danx_issue_save({external_id})`. The worker validates, posts the rendered retro comment, spawns Action Items cards, then moves the file `open/` → `closed/` and pushes the tracker move to Done.
+Save: `danx_issue_save({id})`. The worker validates, posts the rendered retro comment, spawns Action Items cards, then moves the file `open/` → `closed/` and pushes the tracker move to Done.
 
 Skip to Step 11.
 
@@ -301,7 +301,7 @@ Edit YAML:
 3. **Bug cards** with partial progress: also append the `## Bug Diagnosis` block.
 4. Fill `retro.{good, bad, action_items, commits}` honestly — the AC gap is the primary "what went wrong." The worker auto-renders the `## Retro` comment and spawns Action Items cards on save (Needs Help is a non-terminal status, so the retro / action-items WILL not be auto-rendered yet — they render when the next pickup eventually moves the card to Done or Cancelled). Filling `retro` now still helps: the next agent inherits it through the YAML. **Re-apply the Step 1.5 filter to every action item candidate.** The fix the next agent will need to make → describe in the Needs Help comment, not as an action item card. Only large, unrelated, separately-scopeable follow-ups belong in `action_items[]`. Empty `action_items[]` is the right answer most of the time.
 
-Save: `danx_issue_save({external_id})`.
+Save: `danx_issue_save({id})`.
 
 Skip to Step 11.
 

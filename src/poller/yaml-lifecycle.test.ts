@@ -7,18 +7,20 @@ import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
 import {
   ensureGitignoreEntry,
   ensureIssuesDirs,
+  findByExternalId,
   hydrateFromRemote,
   issuePath,
   loadLocal,
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
-import type { CreateCardInput, Issue } from "../issue-tracker/interface.js";
+import type { CreateCardInput } from "../issue-tracker/interface.js";
 
 function defaultCreate(overrides: Partial<CreateCardInput> = {}): CreateCardInput {
   return {
-    schema_version: 1,
+    schema_version: 2,
     tracker: "memory",
+    id: "ISS-1",
     parent_id: null,
     status: "ToDo",
     type: "Feature",
@@ -45,14 +47,14 @@ describe("yaml-lifecycle", () => {
   });
 
   describe("issuePath", () => {
-    it("returns absolute path under .danxbot/issues/<state>/<external_id>.yml", () => {
-      const path = issuePath(repoRoot, "abc-123", "open");
-      expect(path).toBe(resolve(repoRoot, ".danxbot/issues/open/abc-123.yml"));
+    it("returns absolute path under .danxbot/issues/<state>/<id>.yml", () => {
+      const path = issuePath(repoRoot, "ISS-7", "open");
+      expect(path).toBe(resolve(repoRoot, ".danxbot/issues/open/ISS-7.yml"));
     });
 
     it("returns closed path when state is closed", () => {
-      const path = issuePath(repoRoot, "abc-123", "closed");
-      expect(path).toBe(resolve(repoRoot, ".danxbot/issues/closed/abc-123.yml"));
+      const path = issuePath(repoRoot, "ISS-7", "closed");
+      expect(path).toBe(resolve(repoRoot, ".danxbot/issues/closed/ISS-7.yml"));
     });
   });
 
@@ -69,14 +71,25 @@ describe("yaml-lifecycle", () => {
   });
 
   describe("hydrateFromRemote", () => {
-    it("calls tracker.getCard + tracker.getComments exactly once each and writes valid YAML with stamped dispatch_id", async () => {
+    it("calls tracker.getCard + tracker.getComments and writes valid YAML with stamped dispatch_id", async () => {
       const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(defaultCreate());
+      // Seed a memory card carrying an internal id (the memory tracker
+      // round-trips it; getCard returns it as `Issue.id` so hydrate
+      // doesn't have to allocate a new ISS-N).
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-77" }),
+      );
       tracker.clearRequestLog();
 
       const dispatchId = "dispatch-uuid-abc";
-      const issue = await hydrateFromRemote(tracker, external_id, dispatchId);
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        dispatchId,
+        repoRoot,
+      );
 
+      expect(issue.id).toBe("ISS-77");
       expect(issue.external_id).toBe(external_id);
       expect(issue.dispatch_id).toBe(dispatchId);
       expect(issue.title).toBe("Card title");
@@ -85,13 +98,37 @@ describe("yaml-lifecycle", () => {
       expect(methods).toEqual(["getCard", "getComments"]);
     });
 
+    it("allocates a new ISS-N when the remote card has no id (legacy / human-created)", async () => {
+      const tracker = new MemoryTracker();
+      // Memory tracker preserves whatever id we seed — empty here means
+      // the equivalent of "remote card created without a `#ISS-N: ` prefix".
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "" }),
+      );
+
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
+      expect(issue.id).toMatch(/^ISS-\d+$/);
+    });
+
     it("includes remote comments in the hydrated Issue", async () => {
       const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(defaultCreate());
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-3" }),
+      );
       await tracker.addComment(external_id, "first comment");
       await tracker.addComment(external_id, "second comment");
 
-      const issue = await hydrateFromRemote(tracker, external_id, "did-1");
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
       expect(issue.comments).toHaveLength(2);
       expect(issue.comments[0].text).toContain("first comment");
       expect(issue.comments[1].text).toContain("second comment");
@@ -102,53 +139,98 @@ describe("yaml-lifecycle", () => {
   describe("loadLocal", () => {
     it("returns null when no file exists in open/ or closed/", () => {
       ensureIssuesDirs(repoRoot);
-      expect(loadLocal(repoRoot, "missing-id")).toBeNull();
+      expect(loadLocal(repoRoot, "ISS-9999")).toBeNull();
     });
 
     it("returns the parsed Issue from open/ when present", async () => {
       const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(defaultCreate());
-      const issue = await hydrateFromRemote(tracker, external_id, "did-1");
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-10" }),
+      );
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
       writeIssue(repoRoot, issue);
 
-      const loaded = loadLocal(repoRoot, external_id);
+      const loaded = loadLocal(repoRoot, "ISS-10");
       expect(loaded).not.toBeNull();
+      expect(loaded?.id).toBe("ISS-10");
       expect(loaded?.external_id).toBe(external_id);
       expect(loaded?.dispatch_id).toBe("did-1");
     });
 
     it("returns the parsed Issue from closed/ when present and absent from open/", async () => {
       const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(defaultCreate());
-      const issue = await hydrateFromRemote(tracker, external_id, "did-1");
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-11" }),
+      );
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
       ensureIssuesDirs(repoRoot);
       writeFileSync(
-        issuePath(repoRoot, external_id, "closed"),
+        issuePath(repoRoot, "ISS-11", "closed"),
         serializeIssue(issue),
       );
 
-      const loaded = loadLocal(repoRoot, external_id);
-      expect(loaded?.external_id).toBe(external_id);
+      const loaded = loadLocal(repoRoot, "ISS-11");
+      expect(loaded?.id).toBe("ISS-11");
     });
 
     it("throws on corrupt YAML", () => {
       ensureIssuesDirs(repoRoot);
-      writeFileSync(issuePath(repoRoot, "bad-id", "open"), "not: valid: yaml: at: all\n  - broken");
-      expect(() => loadLocal(repoRoot, "bad-id")).toThrow();
+      writeFileSync(
+        issuePath(repoRoot, "ISS-99", "open"),
+        "not: valid: yaml: at: all\n  - broken",
+      );
+      expect(() => loadLocal(repoRoot, "ISS-99")).toThrow();
+    });
+  });
+
+  describe("findByExternalId", () => {
+    it("returns the issue whose external_id matches by scanning open + closed", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id: ext } = await tracker.createCard(
+        defaultCreate({ id: "ISS-50" }),
+      );
+      const issue = await hydrateFromRemote(tracker, ext, "did-1", repoRoot);
+      writeIssue(repoRoot, issue);
+
+      const found = findByExternalId(repoRoot, ext);
+      expect(found?.id).toBe("ISS-50");
+    });
+
+    it("returns null when no YAML carries the external_id", () => {
+      ensureIssuesDirs(repoRoot);
+      expect(findByExternalId(repoRoot, "ghost-card")).toBeNull();
     });
   });
 
   describe("writeIssue", () => {
-    it("serializes and writes to open/<external_id>.yml; round-trips through parseIssue", async () => {
+    it("serializes and writes to open/<id>.yml; round-trips through parseIssue", async () => {
       const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(defaultCreate());
-      const issue = await hydrateFromRemote(tracker, external_id, "did-1");
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-12" }),
+      );
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
 
       writeIssue(repoRoot, issue);
 
-      const path = issuePath(repoRoot, external_id, "open");
+      const path = issuePath(repoRoot, "ISS-12", "open");
       expect(existsSync(path)).toBe(true);
       const roundTripped = parseIssue(readFileSync(path, "utf-8"));
+      expect(roundTripped.id).toBe("ISS-12");
       expect(roundTripped.external_id).toBe(external_id);
       expect(roundTripped.dispatch_id).toBe("did-1");
     });
@@ -157,14 +239,21 @@ describe("yaml-lifecycle", () => {
   describe("stampDispatchAndWrite", () => {
     it("overwrites dispatch_id and writes back, returning the updated Issue", async () => {
       const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(defaultCreate());
-      const original = await hydrateFromRemote(tracker, external_id, "did-1");
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-13" }),
+      );
+      const original = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
       writeIssue(repoRoot, original);
 
       const updated = stampDispatchAndWrite(repoRoot, original, "did-2");
       expect(updated.dispatch_id).toBe("did-2");
 
-      const reloaded = loadLocal(repoRoot, external_id);
+      const reloaded = loadLocal(repoRoot, "ISS-13");
       expect(reloaded?.dispatch_id).toBe("did-2");
     });
   });

@@ -9,10 +9,10 @@
  * `DANXBOT_ISSUE_SAVE_URL` / `DANXBOT_ISSUE_CREATE_URL` by the dispatch
  * core), and the bulk of the work lives here in-process.
  *
- * `danx_issue_save({external_id})` — two-tier semantics:
+ * `danx_issue_save({id})` — two-tier semantics:
  *
  *   1. Sync (returned to agent): load + parseIssue from
- *      `<repo>/.danxbot/issues/{open,closed}/<external_id>.yml`. Format
+ *      `<repo>/.danxbot/issues/{open,closed}/<id>.yml`. Format
  *      errors → `{saved: false, errors: [...]}` at HTTP 200 (agent-side
  *      failure, not a network error). Validation passing →
  *      `{saved: true}` returned IMMEDIATELY.
@@ -24,24 +24,26 @@
  *      already exists).
  *
  * `danx_issue_create({filename})` — fully synchronous. Reads
- * `<repo>/.danxbot/issues/open/<filename>.yml`, validates as a draft
- * (allowing empty `external_id`), calls `tracker.createCard`, stamps
- * returned ids back into the YAML, renames to `<external_id>.yml`,
- * returns `{created: true, external_id}`. Drafts that already carry a
- * non-empty `external_id` are rejected — that's a save case, not a
- * create case.
+ * `<repo>/.danxbot/issues/open/<filename>.yml` (a draft slug, e.g.
+ * `add-jsonl-tail.yml`), allocates the next internal `ISS-N` id via
+ * `nextIssueId`, stamps it into the draft, calls `tracker.createCard`,
+ * stamps the returned `external_id` + check_item_ids back into the YAML,
+ * renames the file to `<id>.yml`, and returns `{created: true, id,
+ * external_id}`. Drafts that already carry a non-empty `id` are rejected
+ * — that's a save case, not a create case.
  *
  * HTTP status codes:
  *   - 200 with `{ok: false, errors}` for every agent-recoverable failure
  *     (missing field, missing file, schema invalid, tracker rejected).
  *   - 400 ONLY for malformed JSON body (network-level malformed input).
  *
- * Concurrency: a process-scoped `Map<external_id, Promise<void>>`
- * serializes async sync work per issue. Worker mode = single Node process
- * per repo, so an in-memory Map is sufficient. No filesystem locks. A
- * separate `Set<Promise<void>>` tracks in-flight tasks for the test-only
- * drain helper — keeps drain semantics independent of the lock-chain
- * map's microtask-ordered deletion.
+ * Concurrency: a process-scoped `Map<id, Promise<void>>` serializes async
+ * sync work per issue (keyed by internal id, NOT external_id, because
+ * external_id is empty for memory-tracker issues + drafts pre-create).
+ * Worker mode = single Node process per repo, so an in-memory Map is
+ * sufficient. No filesystem locks. A separate `Set<Promise<void>>` tracks
+ * in-flight tasks for the test-only drain helper — keeps drain semantics
+ * independent of the lock-chain map's microtask-ordered deletion.
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
@@ -51,13 +53,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import path from "node:path";
 import { json, parseBody } from "../http/helpers.js";
 import {
   IssueParseError,
-  parseDraftIssue,
   parseIssue,
   serializeIssue,
 } from "../issue-tracker/yaml.js";
+import { nextIssueId } from "../issue-tracker/id-generator.js";
 import { syncIssue } from "../issue-tracker/sync.js";
 import {
   ensureIssuesDirs,
@@ -93,7 +96,7 @@ export interface IssueRouteDeps {
  */
 let cachedTracker: IssueTracker | null = null;
 
-/** Per-issue mutex — serializes async sync calls on the same external_id. */
+/** Per-issue mutex — serializes async sync calls on the same internal id. */
 const issueLocks = new Map<string, Promise<void>>();
 
 /**
@@ -168,18 +171,18 @@ export async function _drainAsyncWorkForTesting(): Promise<void> {
  * mutex semantics in one place.
  */
 function chainOnIssueLock(
-  externalId: string,
+  id: string,
   task: () => Promise<void>,
 ): Promise<void> {
-  const prior = issueLocks.get(externalId) ?? Promise.resolve();
+  const prior = issueLocks.get(id) ?? Promise.resolve();
   const next = prior.catch(() => undefined).then(() => task());
   const finalized = next.finally(() => {
-    if (issueLocks.get(externalId) === finalized) {
-      issueLocks.delete(externalId);
+    if (issueLocks.get(id) === finalized) {
+      issueLocks.delete(id);
     }
     inFlight.delete(finalized);
   });
-  issueLocks.set(externalId, finalized);
+  issueLocks.set(id, finalized);
   inFlight.add(finalized);
   return finalized;
 }
@@ -205,23 +208,20 @@ export async function handleIssueSave(
     return;
   }
 
-  const externalId =
-    typeof body.external_id === "string" ? body.external_id.trim() : "";
-  if (!externalId) {
+  const id = typeof body.id === "string" ? body.id.trim() : "";
+  if (!id) {
     json(res, 200, {
       saved: false,
-      errors: ["missing required field: external_id"],
+      errors: ["missing required field: id"],
     });
     return;
   }
 
-  const sourcePath = locateIssueFile(repo.localPath, externalId);
+  const sourcePath = locateIssueFile(repo.localPath, id);
   if (!sourcePath) {
     json(res, 200, {
       saved: false,
-      errors: [
-        `No YAML file found at .danxbot/issues/{open,closed}/${externalId}.yml`,
-      ],
+      errors: [`No YAML file found at .danxbot/issues/{open,closed}/${id}.yml`],
     });
     return;
   }
@@ -240,9 +240,18 @@ export async function handleIssueSave(
   // detached and reports failures to the dispatch row.
   json(res, 200, { saved: true });
 
-  chainOnIssueLock(issue.external_id, () =>
-    runSync(deps, dispatchId, repo, issue),
-  );
+  // Skip the tracker push entirely when no external_id has been assigned
+  // (memory-tracker issues never get one; pre-create drafts go through
+  // handleIssueCreate, not handleIssueSave). The local file write is the
+  // entire save semantics in that case.
+  if (!issue.external_id) {
+    chainOnIssueLock(issue.id, async () => {
+      persistAfterSync(repo.localPath, issue);
+    });
+    return;
+  }
+
+  chainOnIssueLock(issue.id, () => runSync(deps, dispatchId, repo, issue));
 }
 
 async function runSync(
@@ -268,11 +277,14 @@ async function runSync(
  * the saved status is terminal. Idempotent: re-running on a Done issue
  * already in `closed/` produces zero filesystem mutations beyond
  * rewriting the same content.
+ *
+ * Filename is the issue's internal `id` — the local primary key. The
+ * external_id is irrelevant to file layout (some issues have none).
  */
 function persistAfterSync(repoLocalPath: string, issue: Issue): void {
   ensureIssuesDirs(repoLocalPath);
-  const openPath = issuePath(repoLocalPath, issue.external_id, "open");
-  const closedPath = issuePath(repoLocalPath, issue.external_id, "closed");
+  const openPath = issuePath(repoLocalPath, issue.id, "open");
+  const closedPath = issuePath(repoLocalPath, issue.id, "closed");
   const isTerminal = issue.status === "Done" || issue.status === "Cancelled";
 
   if (isTerminal) {
@@ -330,35 +342,90 @@ export async function handleIssueCreate(
     return;
   }
 
+  // Drafts pre-create have empty `id` AND empty `external_id`. We parse
+  // strict (parseIssue requires a non-empty id) AFTER stamping the id —
+  // see below. To get there we need to read the raw YAML first.
+  let rawDraft: unknown;
+  try {
+    const yaml = await import("yaml");
+    rawDraft = yaml.parse(readFileSync(sourcePath, "utf-8"));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    json(res, 200, { created: false, errors: [`Malformed YAML: ${msg}`] });
+    return;
+  }
+
+  if (
+    typeof rawDraft !== "object" ||
+    rawDraft === null ||
+    Array.isArray(rawDraft)
+  ) {
+    json(res, 200, {
+      created: false,
+      errors: ["Draft YAML must be a mapping"],
+    });
+    return;
+  }
+  const draftMap = rawDraft as Record<string, unknown>;
+
+  // Reject drafts that already carry an id or external_id. Either is a
+  // signal the file is not a fresh draft — running create on it would
+  // either duplicate the tracker card or overwrite the existing id.
+  // Fail loud and push the agent toward `danx_issue_save`.
+  if (typeof draftMap.id === "string" && draftMap.id.length > 0) {
+    json(res, 200, {
+      created: false,
+      errors: [
+        `Draft already has id "${String(draftMap.id)}" — use danx_issue_save to update an existing issue, not danx_issue_create`,
+      ],
+    });
+    return;
+  }
+  if (
+    typeof draftMap.external_id === "string" &&
+    draftMap.external_id.length > 0
+  ) {
+    json(res, 200, {
+      created: false,
+      errors: [
+        `Draft already has external_id "${String(draftMap.external_id)}" — use danx_issue_save to update an existing issue, not danx_issue_create`,
+      ],
+    });
+    return;
+  }
+
+  // Allocate the next ISS-N before parsing so the strict validator
+  // accepts the draft as a fully-formed v2 issue.
+  const newId = await nextIssueId(
+    path.join(repo.localPath, ".danxbot", "issues"),
+  );
+  draftMap.id = newId;
+  // `parseIssue` requires schema_version: 2 — auto-fill if the agent
+  // omitted it (drafts are increasingly skeletal).
+  if (draftMap.schema_version === undefined) {
+    draftMap.schema_version = 2;
+  }
+  // Provide an empty external_id explicitly so the validator's required-
+  // field check passes.
+  if (draftMap.external_id === undefined) {
+    draftMap.external_id = "";
+  }
+
   let draft: Issue;
   try {
-    draft = parseDraftIssue(readFileSync(sourcePath, "utf-8"));
+    // Re-validate via the strict path so every other field is checked.
+    const yaml = await import("yaml");
+    draft = parseIssue(yaml.stringify(draftMap));
   } catch (err) {
     const msg = err instanceof IssueParseError ? err.message : String(err);
     json(res, 200, { created: false, errors: [msg] });
     return;
   }
 
-  // Reject drafts that already carry an external_id. Creating a card
-  // for a draft that the tracker already knows about would silently
-  // produce a duplicate remote card and stamp a NEW id over the
-  // existing one — the local YAML and tracker would then disagree on
-  // identity. The fail-loud path is to push the agent to call
-  // `danx_issue_save` instead, which is the right tool for an existing
-  // card.
-  if (draft.external_id !== "") {
-    json(res, 200, {
-      created: false,
-      errors: [
-        `Draft already has external_id "${draft.external_id}" — use danx_issue_save to update an existing card, not danx_issue_create`,
-      ],
-    });
-    return;
-  }
-
   const input: CreateCardInput = {
-    schema_version: 1,
+    schema_version: 2,
     tracker: draft.tracker,
+    id: draft.id,
     parent_id: draft.parent_id,
     status: draft.status,
     type: draft.type,
@@ -404,23 +471,33 @@ export async function handleIssueCreate(
   };
 
   ensureIssuesDirs(repo.localPath);
-  const targetPath = issuePath(repo.localPath, result.external_id, "open");
+  // Filename = internal id, NOT external_id. external_id is just one of
+  // the values stored inside the YAML.
+  const targetPath = issuePath(repo.localPath, draft.id, "open");
   writeFileSync(targetPath, serializeIssue(stamped));
   if (sourcePath !== targetPath && existsSync(sourcePath)) {
     unlinkSync(sourcePath);
   }
 
-  json(res, 200, { created: true, external_id: result.external_id });
+  json(res, 200, {
+    created: true,
+    id: draft.id,
+    external_id: result.external_id,
+  });
 }
 
-/** Look in `open/` first, then `closed/`. Returns null when neither exists. */
+/**
+ * Look in `open/` first, then `closed/`. Returns null when neither exists.
+ * Lookup key is the issue's internal `id` (the on-disk filename basename),
+ * not the external_id.
+ */
 function locateIssueFile(
   repoLocalPath: string,
-  externalId: string,
+  id: string,
 ): string | null {
-  const open = issuePath(repoLocalPath, externalId, "open");
+  const open = issuePath(repoLocalPath, id, "open");
   if (existsSync(open)) return open;
-  const closed = issuePath(repoLocalPath, externalId, "closed");
+  const closed = issuePath(repoLocalPath, id, "closed");
   if (existsSync(closed)) return closed;
   return null;
 }
@@ -438,17 +515,15 @@ function locateIssueFile(
 export async function syncTrackedIssueOnComplete(
   dispatchId: string,
   repo: RepoContext,
-  externalId: string,
+  id: string,
   override?: IssueRouteDeps,
 ): Promise<{ ok: boolean; errors: string[] }> {
   const deps = getDeps(repo, override);
-  const sourcePath = locateIssueFile(repo.localPath, externalId);
+  const sourcePath = locateIssueFile(repo.localPath, id);
   if (!sourcePath) {
     return {
       ok: false,
-      errors: [
-        `No YAML file found at .danxbot/issues/{open,closed}/${externalId}.yml`,
-      ],
+      errors: [`No YAML file found at .danxbot/issues/{open,closed}/${id}.yml`],
     };
   }
 
@@ -464,10 +539,20 @@ export async function syncTrackedIssueOnComplete(
     return { ok: false, errors: [msg] };
   }
 
+  // Skip the tracker push entirely when no external_id is set (memory
+  // tracker, drafts that never made it to create). Persist the local
+  // file so terminal-status moves still happen.
+  if (!issue.external_id) {
+    await chainOnIssueLock(issue.id, async () => {
+      persistAfterSync(repo.localPath, issue);
+    });
+    return { ok: true, errors: [] };
+  }
+
   // Wait on the per-issue mutex so we don't race a concurrent agent-
   // initiated save. The agent is shutting down here, so we await the
   // tracker push synchronously (unlike the async branch in handleIssueSave).
-  await chainOnIssueLock(externalId, () =>
+  await chainOnIssueLock(issue.id, () =>
     runSync(deps, dispatchId, repo, issue),
   );
   return { ok: true, errors: [] };

@@ -159,8 +159,9 @@ vi.mock("../dispatch/core.js", () => ({
 // integration existed) keep dispatching without crashing on a `undefined`
 // from a missing default.
 const FAKE_ISSUE_FOR_TESTS = {
-  schema_version: 1 as const,
+  schema_version: 2 as const,
   tracker: "trello",
+  id: "ISS-FAKE",
   external_id: "fake",
   parent_id: null,
   dispatch_id: null,
@@ -176,12 +177,20 @@ const FAKE_ISSUE_FOR_TESTS = {
 };
 const mockHydrateFromRemote = vi
   .fn()
-  .mockImplementation(async (_t: unknown, externalId: string, dispatchId: string) => ({
-    ...FAKE_ISSUE_FOR_TESTS,
-    external_id: externalId,
-    dispatch_id: dispatchId,
-  }));
+  .mockImplementation(
+    async (
+      _t: unknown,
+      externalId: string,
+      dispatchId: string,
+      _repoLocalPath: string,
+    ) => ({
+      ...FAKE_ISSUE_FOR_TESTS,
+      external_id: externalId,
+      dispatch_id: dispatchId,
+    }),
+  );
 const mockLoadLocal = vi.fn().mockReturnValue(null);
+const mockFindByExternalId = vi.fn().mockReturnValue(null);
 const mockWriteIssueFn = vi.fn();
 const mockStampDispatchAndWrite = vi
   .fn()
@@ -196,6 +205,7 @@ const mockEnsureGitignoreEntry = vi.fn();
 vi.mock("./yaml-lifecycle.js", () => ({
   hydrateFromRemote: (...args: unknown[]) => mockHydrateFromRemote(...args),
   loadLocal: (...args: unknown[]) => mockLoadLocal(...args),
+  findByExternalId: (...args: unknown[]) => mockFindByExternalId(...args),
   writeIssue: (...args: unknown[]) => mockWriteIssueFn(...args),
   stampDispatchAndWrite: (...args: unknown[]) =>
     mockStampDispatchAndWrite(...args),
@@ -2345,8 +2355,10 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     mockGetTrelloPollerPickupPrefix.mockReset();
     mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
     // Default to the brand-new-card hydration path; tests that need the
-    // existing-file path override mockLoadLocal to return an Issue.
+    // existing-file path override mockFindByExternalId to return an Issue.
     mockLoadLocal.mockReturnValue(null);
+    mockFindByExternalId.mockReset();
+    mockFindByExternalId.mockReturnValue(null);
     // Implementation (not return value) so the hydrated Issue's
     // external_id + dispatch_id reflect the actual call args. Tests
     // assert on the writeIssue payload, so a static return value would
@@ -2357,6 +2369,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
         _t: unknown,
         externalId: string,
         dispatchId: string,
+        _repoLocalPath: string,
       ) => ({
         ...FAKE_ISSUE_FOR_TESTS,
         external_id: externalId,
@@ -2380,11 +2393,15 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const dispatchArg = mockDispatch.mock.calls[0][0] as { task: string };
     expect(dispatchArg.task).toContain("/danx-next");
+    // The poller's dispatch task references the issue's INTERNAL id —
+    // never the tracker-native external_id (= Trello card id "card-uuid-1").
+    // mockHydrateFromRemote returns FAKE_ISSUE_FOR_TESTS which carries
+    // id: "ISS-FAKE", so that's what shows up in the path + tool call.
     expect(dispatchArg.task).toContain(
-      "Edit /test/repos/test-repo/.danxbot/issues/open/card-uuid-1.yml",
+      "Edit /test/repos/test-repo/.danxbot/issues/open/ISS-FAKE.yml",
     );
     expect(dispatchArg.task).toContain(
-      'Call danx_issue_save({external_id: "card-uuid-1"}) when done.',
+      'Call danx_issue_save({id: "ISS-FAKE"}) when done.',
     );
   });
 
@@ -2403,12 +2420,14 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
 
-    // Hydration path (loadLocal returned null) → hydrateFromRemote receives
-    // the dispatchId so the brand-new YAML is written with it stamped in.
+    // Hydration path (findByExternalId returned null) → hydrateFromRemote
+    // receives the dispatchId so the brand-new YAML is written with it
+    // stamped in. Fourth arg is repoLocalPath (added in the id refactor).
     expect(mockHydrateFromRemote).toHaveBeenCalledWith(
       expect.anything(),
       "card-uuid-2",
       dispatchArg.dispatchId,
+      expect.any(String),
     );
   });
 
@@ -2455,9 +2474,10 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     // authoritative. Pin: hydration-path NOT taken AND tracker factory
     // NOT invoked.
     mockFetchTodoCards.mockResolvedValue([{ id: "card-cached", name: "Cached" }]);
-    mockLoadLocal.mockReturnValue({
-      schema_version: 1,
+    mockFindByExternalId.mockReturnValue({
+      schema_version: 2,
       tracker: "trello",
+      id: "ISS-100",
       external_id: "card-cached",
       parent_id: null,
       dispatch_id: "old",
@@ -2478,15 +2498,14 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     expect(mockHydrateFromRemote).not.toHaveBeenCalled();
   });
 
-  it("propagates a corrupt-YAML error from loadLocal — the poller does not silently fall back to hydration", async () => {
-    // `loadLocal` throws IssueParseError on corrupt YAML (per the strict
-    // validator contract). The poller must NOT catch + retry-as-hydrate,
-    // because that would silently overwrite operator-edited YAML on the
-    // first parse error. Failing loud is the correct response — the
-    // operator gets a visible error and fixes the file by hand.
+  it("propagates a corrupt-YAML error from findByExternalId — the poller does not silently fall back to hydration", async () => {
+    // `findByExternalId` throws IssueParseError when it parses a corrupt
+    // YAML during its scan (the strict validator). The poller must NOT
+    // catch + retry-as-hydrate — that would silently overwrite operator-
+    // edited YAML on the first parse error. Failing loud is correct.
     mockFetchTodoCards.mockResolvedValue([{ id: "card-bad", name: "Bad YAML" }]);
     const parseError = new Error("Invalid Issue YAML: missing required field: tracker");
-    mockLoadLocal.mockImplementation(() => {
+    mockFindByExternalId.mockImplementation(() => {
       throw parseError;
     });
 
@@ -2500,7 +2519,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     // an agent against a missing YAML. The error should bubble up to the
     // poll loop's caller; the next tick re-attempts.
     mockFetchTodoCards.mockResolvedValue([{ id: "card-net-fail", name: "Net fail" }]);
-    mockLoadLocal.mockReturnValue(null);
+    mockFindByExternalId.mockReturnValue(null);
     mockHydrateFromRemote.mockRejectedValueOnce(
       new Error("Trello API error: 401 Unauthorized"),
     );
@@ -2513,8 +2532,9 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
   it("skips hydration when a local YAML already exists and uses stampDispatchAndWrite to overwrite the dispatch_id only", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "card-uuid-3", name: "Card 3" }]);
     const existingIssue = {
-      schema_version: 1,
+      schema_version: 2,
       tracker: "trello",
+      id: "ISS-200",
       external_id: "card-uuid-3",
       parent_id: null,
       dispatch_id: "old-dispatch",
@@ -2528,7 +2548,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       comments: [],
       retro: { good: "", bad: "", action_items: [], commits: [] },
     };
-    mockLoadLocal.mockReturnValue(existingIssue);
+    mockFindByExternalId.mockReturnValue(existingIssue);
 
     await poll(MOCK_REPO_CONTEXT);
 

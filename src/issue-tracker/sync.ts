@@ -92,8 +92,14 @@ export async function syncIssue(
   // --- Step 4: apply local-as-truth diff. ---
 
   // 4a: title / description
-  const cardPatch: { title?: string; description?: string } = {};
-  if (local.title !== remoteCard.title) cardPatch.title = local.title;
+  // We compare against the SEMANTIC title (without `#<id>: ` prefix) so
+  // tracker implementations that prefix titles don't loop forever
+  // patching themselves back to their formatted form.
+  const cardPatch: { title?: string; description?: string; id?: string } = {};
+  if (local.title !== remoteCard.title) {
+    cardPatch.title = local.title;
+    if (local.id) cardPatch.id = local.id;
+  }
   if (local.description !== remoteCard.description)
     cardPatch.description = local.description;
   if (cardPatch.title !== undefined || cardPatch.description !== undefined) {

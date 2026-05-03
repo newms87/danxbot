@@ -150,14 +150,16 @@ async function startTestServer(): Promise<TestHarness> {
 }
 
 function writeYaml(repoLocalPath: string, issue: Issue, state: "open" | "closed" = "open"): string {
-  const path = issuePath(repoLocalPath, issue.external_id, state);
+  // Filename basename is the internal `id`. external_id is just one of
+  // the values inside the YAML body and may be empty.
+  const path = issuePath(repoLocalPath, issue.id, state);
   ensureIssuesDirs(repoLocalPath);
   writeFileSync(path, serializeIssue(issue));
   return path;
 }
 
-function readYaml(repoLocalPath: string, externalId: string, state: "open" | "closed" = "open"): string {
-  return readFileSync(issuePath(repoLocalPath, externalId, state), "utf-8");
+function readYaml(repoLocalPath: string, id: string, state: "open" | "closed" = "open"): string {
+  return readFileSync(issuePath(repoLocalPath, id, state), "utf-8");
 }
 
 describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
@@ -176,6 +178,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
   it("returns saved:true synchronously and runs sync in the background", async () => {
     const issue: Issue = {
       ...createEmptyIssue({
+        id: "ISS-1",
         external_id: "card-1",
         title: "T",
       }),
@@ -183,8 +186,9 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     };
     // Seed the tracker so syncIssue has something to read.
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-1",
       parent_id: null,
       status: "ToDo",
       type: "Feature",
@@ -204,7 +208,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     const res = await fetch(`${h.url}/api/issue-save/dispatch-1`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-1" }),
     });
 
     expect(res.status).toBe(200);
@@ -212,21 +216,21 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     expect(body).toEqual({ saved: true });
 
     await _drainAsyncWorkForTesting();
-    // syncIssue should have called updateCard with the fresh title.
+    // syncIssue should have called updateCard with the fresh title and id.
     const updates = h.tracker.getRequestLog().filter((l) => l.method === "updateCard");
     expect(updates).toHaveLength(1);
-    expect(updates[0].details).toEqual({ patch: { title: "fresh-local" } });
+    expect(updates[0].details).toEqual({ patch: { title: "fresh-local", id: "ISS-1" } });
   });
 
   it("returns saved:false with errors on schema-validation failure", async () => {
-    const path = issuePath(h.repo.localPath, "bad-card", "open");
+    const path = issuePath(h.repo.localPath, "ISS-2", "open");
     ensureIssuesDirs(h.repo.localPath);
-    writeFileSync(path, "schema_version: 1\nbroken: true\n");
+    writeFileSync(path, "schema_version: 2\nbroken: true\n");
 
     const res = await fetch(`${h.url}/api/issue-save/dispatch-2`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "bad-card" }),
+      body: JSON.stringify({ id: "ISS-2" }),
     });
 
     expect(res.status).toBe(200);
@@ -241,15 +245,15 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     const res = await fetch(`${h.url}/api/issue-save/dispatch-3`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "ghost-card" }),
+      body: JSON.stringify({ id: "ISS-3" }),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.saved).toBe(false);
-    expect(body.errors[0]).toMatch(/No YAML file found/);
+    expect(body.errors[0]).toMatch(/No YAML file found at \.danxbot\/issues/);
   });
 
-  it("returns saved:false (HTTP 200) when external_id is missing — agent-recoverable failure", async () => {
+  it("returns saved:false (HTTP 200) when id is missing — agent-recoverable failure", async () => {
     const res = await fetch(`${h.url}/api/issue-save/dispatch-x`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -258,7 +262,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.saved).toBe(false);
-    expect(body.errors[0]).toContain("external_id");
+    expect(body.errors[0]).toContain("id");
   });
 
   it("returns HTTP 400 only for malformed JSON body (network-level failure)", async () => {
@@ -274,8 +278,9 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #2: tracker errors NEVER surface to the agent — saved:true returned regardless", async () => {
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-4",
       parent_id: null,
       status: "ToDo",
       type: "Feature",
@@ -288,7 +293,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       retro: { good: "", bad: "", action_items: [], commits: [] },
     });
     const issue: Issue = {
-      ...createEmptyIssue({ external_id: "mem-1", title: "local-title" }),
+      ...createEmptyIssue({ id: "ISS-4", external_id: "mem-1", title: "local-title" }),
       tracker: "memory",
     };
     writeYaml(h.repo.localPath, issue);
@@ -298,7 +303,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     const res = await fetch(`${h.url}/api/issue-save/dispatch-fail`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-4" }),
     });
 
     expect(res.status).toBe(200);
@@ -313,10 +318,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     expect(h.recordedErrors[0].message).toContain("mem-1");
   });
 
-  it("AC #5: serializes concurrent saves on the same external_id", async () => {
+  it("AC #5: serializes concurrent saves on the same id", async () => {
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-5",
       parent_id: null,
       status: "ToDo",
       type: "Feature",
@@ -341,14 +347,14 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     // sync tasks are still racing once both are queued — the mutex is
     // what guarantees their ORDER in the request log.
     const issue: Issue = {
-      ...createEmptyIssue({ external_id: "mem-1", title: "first" }),
+      ...createEmptyIssue({ id: "ISS-5", external_id: "mem-1", title: "first" }),
       tracker: "memory",
     };
     writeYaml(h.repo.localPath, issue);
     const r1 = await fetch(`${h.url}/api/issue-save/dispatch-c1`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-5" }),
     });
     expect(await r1.json()).toEqual({ saved: true });
 
@@ -357,7 +363,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     const r2 = await fetch(`${h.url}/api/issue-save/dispatch-c2`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-5" }),
     });
     expect(await r2.json()).toEqual({ saved: true });
 
@@ -368,15 +374,16 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       .filter((l) => l.method === "updateCard");
     // Two saves, two updateCard calls. Order matters: serialized.
     expect(updates.map((u) => u.details)).toEqual([
-      { patch: { title: "first" } },
-      { patch: { title: "second" } },
+      { patch: { title: "first", id: "ISS-5" } },
+      { patch: { title: "second", id: "ISS-5" } },
     ]);
   });
 
   it("AC #7: saved status Done moves YAML from open/ to closed/ — idempotent", async () => {
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-6",
       parent_id: null,
       status: "Done",
       type: "Feature",
@@ -390,6 +397,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     });
     const issue: Issue = {
       ...createEmptyIssue({
+        id: "ISS-6",
         external_id: "mem-1",
         status: "Done",
         title: "done-card",
@@ -401,30 +409,31 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     const res = await fetch(`${h.url}/api/issue-save/dispatch-done`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-6" }),
     });
     expect(await res.json()).toEqual({ saved: true });
     await _drainAsyncWorkForTesting();
 
-    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "open"))).toBe(false);
-    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "closed"))).toBe(true);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-6", "open"))).toBe(false);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-6", "closed"))).toBe(true);
 
     // Idempotent re-save: load from closed, no further open-side artifacts.
     const res2 = await fetch(`${h.url}/api/issue-save/dispatch-done-2`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-6" }),
     });
     expect(await res2.json()).toEqual({ saved: true });
     await _drainAsyncWorkForTesting();
-    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "open"))).toBe(false);
-    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "closed"))).toBe(true);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-6", "open"))).toBe(false);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-6", "closed"))).toBe(true);
   });
 
   it("Cancelled status also triggers open→closed move", async () => {
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-7",
       parent_id: null,
       status: "Cancelled",
       type: "Feature",
@@ -438,6 +447,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     });
     const issue: Issue = {
       ...createEmptyIssue({
+        id: "ISS-7",
         external_id: "mem-1",
         status: "Cancelled",
         title: "cancelled-card",
@@ -449,18 +459,19 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     const res = await fetch(`${h.url}/api/issue-save/dispatch-x`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-7" }),
     });
     expect(await res.json()).toEqual({ saved: true });
     await _drainAsyncWorkForTesting();
-    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "open"))).toBe(false);
-    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "closed"))).toBe(true);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-7", "open"))).toBe(false);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-7", "closed"))).toBe(true);
   });
 
   it("AC #5: queue is NOT poisoned when the FIRST sync fails — second still runs", async () => {
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-8",
       parent_id: null,
       status: "ToDo",
       type: "Feature",
@@ -473,7 +484,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       retro: { good: "", bad: "", action_items: [], commits: [] },
     });
     const issue: Issue = {
-      ...createEmptyIssue({ external_id: "mem-1", title: "first" }),
+      ...createEmptyIssue({ id: "ISS-8", external_id: "mem-1", title: "first" }),
       tracker: "memory",
     };
     writeYaml(h.repo.localPath, issue);
@@ -481,7 +492,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     await fetch(`${h.url}/api/issue-save/dispatch-fail-1`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-8" }),
     });
 
     issue.title = "second";
@@ -489,7 +500,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     await fetch(`${h.url}/api/issue-save/dispatch-fail-2`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-8" }),
     });
 
     await _drainAsyncWorkForTesting();
@@ -502,13 +513,14 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       .getRequestLog()
       .filter((l) => l.method === "updateCard");
     expect(updates).toHaveLength(1);
-    expect(updates[0].details).toEqual({ patch: { title: "second" } });
+    expect(updates[0].details).toEqual({ patch: { title: "second", id: "ISS-8" } });
   });
 
   it("AC #5: true-concurrency Promise.all with same content — both saves complete, no drops", async () => {
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-9",
       parent_id: null,
       status: "ToDo",
       type: "Feature",
@@ -521,7 +533,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       retro: { good: "", bad: "", action_items: [], commits: [] },
     });
     const issue: Issue = {
-      ...createEmptyIssue({ external_id: "mem-1", title: "concurrent" }),
+      ...createEmptyIssue({ id: "ISS-9", external_id: "mem-1", title: "concurrent" }),
       tracker: "memory",
     };
     writeYaml(h.repo.localPath, issue);
@@ -530,12 +542,12 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       fetch(`${h.url}/api/issue-save/dispatch-pa-1`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ external_id: "mem-1" }),
+        body: JSON.stringify({ id: "ISS-9" }),
       }),
       fetch(`${h.url}/api/issue-save/dispatch-pa-2`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ external_id: "mem-1" }),
+        body: JSON.stringify({ id: "ISS-9" }),
       }),
     ]);
     expect(await r1.json()).toEqual({ saved: true });
@@ -567,8 +579,9 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("non-terminal status keeps file in open/", async () => {
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-10",
       parent_id: null,
       status: "In Progress",
       type: "Feature",
@@ -582,6 +595,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     });
     const issue: Issue = {
       ...createEmptyIssue({
+        id: "ISS-10",
         external_id: "mem-1",
         status: "In Progress",
         title: "wip",
@@ -593,11 +607,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     await fetch(`${h.url}/api/issue-save/dispatch-y`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: "mem-1" }),
+      body: JSON.stringify({ id: "ISS-10" }),
     });
     await _drainAsyncWorkForTesting();
-    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "open"))).toBe(true);
-    expect(existsSync(issuePath(h.repo.localPath, "mem-1", "closed"))).toBe(false);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-10", "open"))).toBe(true);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-10", "closed"))).toBe(false);
   });
 });
 
@@ -614,9 +628,9 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
     await h.close();
   });
 
-  it("AC #3: creates remote card, stamps ids, renames file to <external_id>.yml", async () => {
+  it("AC #3: creates remote card, stamps ids, renames file to <id>.yml", async () => {
     const draft: Issue = {
-      ...createEmptyIssue({ external_id: "", title: "new feature" }),
+      ...createEmptyIssue({ id: "", external_id: "", title: "new feature" }),
       tracker: "memory",
       ac: [{ check_item_id: "", title: "AC1", checked: false }],
       phases: [
@@ -635,19 +649,21 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.created).toBe(true);
+    expect(body.id).toBe("ISS-1");
     expect(body.external_id).toBe("mem-1");
 
     expect(existsSync(draftPath)).toBe(false);
-    const stampedPath = issuePath(h.repo.localPath, "mem-1", "open");
+    const stampedPath = issuePath(h.repo.localPath, "ISS-1", "open");
     expect(existsSync(stampedPath)).toBe(true);
-    const stamped = readYaml(h.repo.localPath, "mem-1");
+    const stamped = readYaml(h.repo.localPath, "ISS-1");
+    expect(stamped).toContain("id: ISS-1");
     expect(stamped).toContain("external_id: mem-1");
     expect(stamped).toContain("check_item_id: chk-");
   });
 
   it("strips a trailing .yml suffix on filename", async () => {
     const draft: Issue = {
-      ...createEmptyIssue({ external_id: "", title: "with-suffix" }),
+      ...createEmptyIssue({ id: "", external_id: "", title: "with-suffix" }),
       tracker: "memory",
     };
     writeFileSync(
@@ -676,7 +692,7 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
 
   it("returns created:false on schema-validation failure", async () => {
     const path = issuePath(h.repo.localPath, "broken", "open");
-    writeFileSync(path, "schema_version: 1\nstatus: ToDo\n");
+    writeFileSync(path, "schema_version: 2\nstatus: ToDo\n");
     const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -690,6 +706,7 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
   it("rejects drafts that already carry a non-empty external_id (use save, not create)", async () => {
     const draft: Issue = {
       ...createEmptyIssue({
+        id: "",
         external_id: "card-already-exists",
         title: "double-create",
       }),
@@ -754,7 +771,7 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
 
   it("returns created:false when the tracker rejects the create", async () => {
     const draft: Issue = {
-      ...createEmptyIssue({ external_id: "", title: "tracker-fails" }),
+      ...createEmptyIssue({ id: "", external_id: "", title: "tracker-fails" }),
       tracker: "memory",
     };
     writeFileSync(
@@ -786,10 +803,11 @@ describe("syncTrackedIssueOnComplete", () => {
     await h.close();
   });
 
-  it("AC #4: calls syncIssue synchronously for the tracked external_id", async () => {
+  it("AC #4: calls syncIssue synchronously for the tracked id", async () => {
     await h.tracker.createCard({
-      schema_version: 1,
+      schema_version: 2,
       tracker: "memory",
+      id: "ISS-11",
       parent_id: null,
       status: "ToDo",
       type: "Feature",
@@ -803,6 +821,7 @@ describe("syncTrackedIssueOnComplete", () => {
     });
     const issue: Issue = {
       ...createEmptyIssue({
+        id: "ISS-11",
         external_id: "mem-1",
         title: "fresh-via-complete",
       }),
@@ -813,7 +832,7 @@ describe("syncTrackedIssueOnComplete", () => {
     const result = await syncTrackedIssueOnComplete(
       "dispatch-complete",
       h.repo,
-      "mem-1",
+      "ISS-11",
       { tracker: h.tracker, recordError: async () => {} },
     );
     expect(result.ok).toBe(true);
@@ -827,10 +846,10 @@ describe("syncTrackedIssueOnComplete", () => {
     const result = await syncTrackedIssueOnComplete(
       "dispatch-complete",
       h.repo,
-      "ghost",
+      "ISS-ghost",
       { tracker: h.tracker, recordError: async () => {} },
     );
     expect(result.ok).toBe(false);
-    expect(result.errors[0]).toMatch(/No YAML file found/);
+    expect(result.errors[0]).toMatch(/No YAML file found at \.danxbot\/issues/);
   });
 });

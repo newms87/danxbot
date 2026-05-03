@@ -503,7 +503,7 @@ async function runYamlLifecycleScenario(): Promise<void> {
             type: "tool_use",
             id: saveToolUseId,
             name: "mcp__danxbot__danx_issue_save",
-            input: { external_id: externalId },
+            input: { id: externalId },
           },
         ],
         usage: { input_tokens: 60, output_tokens: 15 },
@@ -515,7 +515,7 @@ async function runYamlLifecycleScenario(): Promise<void> {
     const res = await fetch(issueSaveUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ external_id: externalId }),
+      body: JSON.stringify({ id: externalId }),
     });
     const body = await res.text();
 

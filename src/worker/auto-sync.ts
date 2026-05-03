@@ -7,7 +7,11 @@
  *
  * Lookup chain:
  *   1. `getDispatch(jobId)` → trigger metadata.
- *   2. `trigger === "trello"` && `metadata.cardId` → external_id.
+ *   2. `trigger === "trello"` && `metadata.cardId` → tracker-native
+ *      external_id. Translate to internal `id` by scanning the local
+ *      YAML directory (`findByExternalId`); skip if no local file
+ *      mirrors that external_id (the dispatch ran but no save ever
+ *      happened, so there's nothing local to sync).
  *   3. Anything else (Slack, api, missing row) → no-op.
  *
  * Errors (DB lookup failure, sync exception) are logged and swallowed —
@@ -21,6 +25,7 @@
  */
 
 import { syncTrackedIssueOnComplete } from "./issue-route.js";
+import { findByExternalId } from "../poller/yaml-lifecycle.js";
 import { createLogger } from "../logger.js";
 import type {
   Dispatch,
@@ -69,7 +74,13 @@ export async function autoSyncTrackedIssue(
     const meta = row.triggerMetadata as TrelloTriggerMetadata;
     const externalId = meta.cardId;
     if (!externalId) return;
-    const result = await deps.runSync(jobId, repo, externalId);
+    // Translate tracker-native external_id → internal id by scanning
+    // local YAMLs. The trigger metadata still carries the external_id
+    // (it's the only stable handle the poller has at dispatch time),
+    // but the worker's save-route is keyed by the internal id.
+    const local = findByExternalId(repo.localPath, externalId);
+    if (!local) return;
+    const result = await deps.runSync(jobId, repo, local.id);
     if (!result.ok && result.errors.length > 0) {
       log.warn(
         `[Dispatch ${jobId}] danxbot_complete auto-sync skipped: ${result.errors.join("; ")}`,

@@ -27,7 +27,7 @@ Current repo only.
    - Checks `<repo>/.danxbot/issues/open/*.yml` for duplicates (search by title / keywords).
    - Generates 3-5 prioritized feature drafts.
    - For each draft, writes a YAML at `<repo>/.danxbot/issues/open/<filename>.yml` with:
-     - `external_id: ""` (tracker assigns — drafts with non-empty `external_id` are REJECTED)
+     - `id: ""` (worker assigns the next `ISS-N` — drafts with non-empty `id` are REJECTED)
      - `parent_id: null`
      - `dispatch_id: null`
      - `status: "Review"`
@@ -38,23 +38,23 @@ Current repo only.
      - `phases: []` (or seeded with `check_item_id: ""`)
      - `comments: []`
      - `retro: {good: "", bad: "", action_items: [], commits: []}`
-     - `schema_version: 1`
-     - `tracker: "trello"` (or whichever tracker the repo uses)
-   - Calls `danx_issue_create({filename: "<filename>"})` for each draft. The worker validates, creates the tracker card, stamps assigned ids back into the YAML, and renames the file to `<external_id>.yml`. Captures the returned `external_id`.
+     - `schema_version: 2`
+     - `tracker: "memory"` (or whichever tracker the repo uses — leave the value the parent YAML carries)
+   - Calls `danx_issue_create({filename: "<filename>"})` for each draft. The worker validates, allocates the next `ISS-N`, stamps it back into the YAML, and renames the file to `<id>.yml`. Captures the returned `id`.
    - Saves discoveries back to `docs/features.md`.
 
 3. Report what the ideator produced:
    - Features discovered or recategorized.
    - ICE scores and top priorities.
-   - Cards created (with titles + assigned `external_id`s).
+   - Cards created (with titles + assigned `id`s).
    - Knowledge docs updated (if any).
 
 4. **Signal completion (MANDATORY):** `danxbot_complete({status: "completed", summary: "..."})`. Worker finalizes the dispatch row + SIGTERMs the Claude process. Never exit without it.
 
 ## Filename convention
 
-Drafts use a kebab-case slug derived from the title, e.g. `add-jsonl-tail-helper.yml`. Keep filenames stable across the create call — the worker renames the file to `<external_id>.yml` after `danx_issue_create` succeeds. Until then, the filename is the only handle.
+Drafts use a kebab-case slug derived from the title, e.g. `add-jsonl-tail-helper.yml`. Keep filenames stable across the create call — the worker renames the file to `<id>.yml` after `danx_issue_create` succeeds. Until then, the filename is the only handle.
 
 ## Drafts that fail validation
 
-If `danx_issue_create` returns `{created: false, errors: [...]}`, the YAML failed schema validation OR the tracker rejected it. Read the errors, fix the draft YAML, and retry. Do NOT delete the draft file unless you intend to abandon the idea — the file is the durable record until `external_id` is assigned.
+If `danx_issue_create` returns `{created: false, errors: [...]}`, the YAML failed schema validation. Read the errors, fix the draft YAML, and retry. Do NOT delete the draft file unless you intend to abandon the idea — the file is the durable record until an `id` is assigned.

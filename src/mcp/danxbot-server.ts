@@ -150,40 +150,36 @@ export const TOOLS = [
   {
     name: "danx_issue_save",
     description:
-      "Save the per-issue YAML at .danxbot/issues/open/<external_id>.yml " +
-      "(or .danxbot/issues/closed/<external_id>.yml if the issue was already " +
-      "marked Done/Cancelled). The worker validates the YAML synchronously " +
-      "and returns {saved: true} on success or {saved: false, errors: [...]} " +
-      "on schema-validation failure. Tracker push (Trello / GitHub / etc.) " +
-      "runs ASYNCHRONOUSLY in the background — tracker errors NEVER appear " +
-      "in this tool's result; they surface only on the dashboard. Call this " +
-      "after every meaningful edit to the local YAML so the tracker stays " +
-      "in sync. When the saved status is Done or Cancelled, the worker " +
-      "moves the file from open/ → closed/ as part of the save.",
+      "Save the per-issue YAML at .danxbot/issues/open/<id>.yml " +
+      "(or .danxbot/issues/closed/<id>.yml if the issue is Done/Cancelled). " +
+      "The worker validates the YAML synchronously and returns " +
+      "{saved: true} on success or {saved: false, errors: [...]} on " +
+      "schema-validation failure. Call this after every meaningful edit " +
+      "to the local YAML. When the saved status is Done or Cancelled, " +
+      "the worker moves the file from open/ → closed/ as part of the save.",
     inputSchema: {
       type: "object",
       properties: {
-        external_id: {
+        id: {
           type: "string",
           description:
-            "The issue's external_id (matches the YAML filename without " +
-            "the .yml extension).",
+            "The issue's id (matches the YAML filename without the .yml " +
+            "extension, e.g. ISS-138).",
         },
       },
-      required: ["external_id"],
+      required: ["id"],
     },
   },
   {
     name: "danx_issue_create",
     description:
-      "Create a brand-new tracker card from a draft YAML at " +
-      ".danxbot/issues/open/<filename>.yml. The draft can have an empty " +
-      "external_id and empty check_item_ids; the tracker assigns them. " +
-      "On success the worker stamps the assigned ids back into the YAML " +
-      "and renames the file to <external_id>.yml — your subsequent " +
-      "danx_issue_save calls must use that new external_id. Returns " +
-      "{created: true, external_id} on success or {created: false, " +
-      "errors: [...]} on schema-validation or tracker rejection.",
+      "Create a brand-new issue from a draft YAML at " +
+      ".danxbot/issues/open/<filename>.yml. The draft can have empty " +
+      "id and empty check_item_ids; the worker assigns them. On success " +
+      "the worker stamps the assigned id back into the YAML and renames " +
+      "the file to <id>.yml — your subsequent danx_issue_save calls must " +
+      "use that new id. Returns {created: true, id} on success or " +
+      "{created: false, errors: [...]} on schema-validation failure.",
     inputSchema: {
       type: "object",
       properties: {
@@ -339,16 +335,8 @@ async function callDanxIssueSave(
         "(no worker endpoint available)",
     );
   }
-  const externalId = requireNonBlankString(
-    "danx_issue_save",
-    "external_id",
-    args.external_id,
-  );
-  return postIssueRoute(
-    urls.issueSave,
-    { external_id: externalId },
-    "danx_issue_save",
-  );
+  const id = requireNonBlankString("danx_issue_save", "id", args.id);
+  return postIssueRoute(urls.issueSave, { id }, "danx_issue_save");
 }
 
 async function callDanxIssueCreate(
