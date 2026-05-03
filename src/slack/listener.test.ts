@@ -271,7 +271,7 @@ describe("deep agent dispatch", () => {
     );
   });
 
-  it("calls dispatch with workspace='slack-worker' and DANXBOT_WORKER_PORT in overlay; slack URLs auto-injected by the dispatch core", async () => {
+  it("calls dispatch with workspace='slack-worker' and an empty caller overlay; every required placeholder auto-injected by the dispatch core", async () => {
     arrangeDispatchSuccess();
 
     await handler({ message: makeSlackMessage({ ts: "555.111" }), client });
@@ -279,22 +279,16 @@ describe("deep agent dispatch", () => {
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const input = mockDispatch.mock.calls[0][0] as Record<string, unknown>;
 
-    // The slack listener names the workspace and supplies the port
-    // placeholder only. The dispatch core auto-injects `DANXBOT_STOP_URL`
-    // + `DANXBOT_SLACK_*_URL` from the dispatchId (callers can't pre-
-    // compute them). The workspace's `.mcp.json` (with --strict-mcp-config)
+    // The slack listener names the workspace and passes nothing else —
+    // every placeholder the slack-worker workspace requires
+    // (`DANXBOT_STOP_URL`, `DANXBOT_WORKER_PORT`, `DANXBOT_SLACK_*_URL`)
+    // is auto-injected by `dispatch()` from `repo.workerPort` and the
+    // dispatchId. The workspace's `.mcp.json` (with --strict-mcp-config)
     // is the agent's MCP surface; built-ins are all available by default —
     // no per-dispatch allowlist exists.
     expect(input.workspace).toBe("slack-worker");
     expect(input).not.toHaveProperty("allowTools");
-    const overlay = input.overlay as Record<string, string>;
-    expect(overlay.DANXBOT_WORKER_PORT).toBe(
-      String((input.repo as Record<string, unknown>).workerPort),
-    );
-    // The listener MUST NOT pre-inject slack URL placeholders — that is
-    // the dispatch core's responsibility (URLs are dispatchId-derived).
-    expect(overlay.DANXBOT_SLACK_REPLY_URL).toBeUndefined();
-    expect(overlay.DANXBOT_SLACK_UPDATE_URL).toBeUndefined();
+    expect(input.overlay).toEqual({});
 
     // apiDispatchMeta carries the Slack trigger + full metadata. Still
     // persisted on the dispatch row so the dashboard can filter by

@@ -375,7 +375,7 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("calls dispatch() with the issue-worker workspace and trello overlay when cards exist", async () => {
+  it("calls dispatch() with the issue-worker workspace and an empty caller overlay when cards exist", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -386,17 +386,15 @@ describe("poll", () => {
         repo: expect.objectContaining({ name: "test-repo" }),
         // Phase 3 invariant (workspace-dispatch epic, Trello `q5aFuINM`):
         // the poller dispatches via the named `issue-worker` workspace.
-        // The MCP server set + allowed-tools live in
-        // `src/poller/inject/workspaces/issue-worker/`; the overlay
-        // supplies the trello credentials the workspace's `.mcp.json`
-        // substitutes into its env block.
+        // Phase 5 of tracker-agnostic-agents retired the trello MCP
+        // server entry from this workspace; the issue-worker manifest
+        // now requires only DANXBOT_STOP_URL + DANXBOT_WORKER_PORT,
+        // both of which `dispatch()` auto-injects from `repo.workerPort`
+        // and the dispatchId. The poller therefore passes an empty
+        // caller overlay — agents reach the tracker via the danxbot
+        // MCP server's `danx_issue_*` tools, not direct Trello calls.
         workspace: "issue-worker",
-        overlay: expect.objectContaining({
-          DANXBOT_WORKER_PORT: String(MOCK_REPO_CONTEXT.workerPort),
-          TRELLO_API_KEY: MOCK_REPO_CONTEXT.trello.apiKey,
-          TRELLO_TOKEN: MOCK_REPO_CONTEXT.trello.apiToken,
-          TRELLO_BOARD_ID: MOCK_REPO_CONTEXT.trello.boardId,
-        }),
+        overlay: {},
       }),
     );
   });

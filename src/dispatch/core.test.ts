@@ -186,6 +186,57 @@ describe("dispatch() — slack-worker integration", () => {
     },
   };
 
+  it("a caller-supplied DANXBOT_WORKER_PORT in the overlay wins over the auto-injected value (precedence contract documented on `DispatchInput.overlay`)", async () => {
+    // The `DispatchInput.overlay` docstring says "Caller overlay wins
+    // over auto-injected values — tests rely on that." Pin that
+    // contract: pass an explicit override and verify the spawn env
+    // carries the override, not `String(slackRepo.workerPort)`. This is
+    // load-bearing for future refactors that might be tempted to flip
+    // the merge order.
+    const overrideValue = "9999";
+    await dispatch({
+      repo: slackRepo,
+      task: "investigate",
+      workspace: "slack-worker",
+      overlay: { DANXBOT_WORKER_PORT: overrideValue },
+      apiDispatchMeta: SLACK_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.env.DANXBOT_WORKER_PORT).toBe(overrideValue);
+    expect(opts.env.DANXBOT_WORKER_PORT).not.toBe(String(slackRepo.workerPort));
+  });
+
+  it("auto-injects DANXBOT_WORKER_PORT from repo.workerPort so callers never duplicate the same `String(repo.workerPort)` line (Phase 5 hotfix, Trello 69f7764f...)", async () => {
+    // The slack-worker workspace's `.claude/settings.json` references
+    // `${DANXBOT_WORKER_PORT}` and declares it in `required-placeholders`.
+    // Pre-hotfix, every dispatch caller (poller, slack listener, HTTP
+    // `/api/launch` smoke tests) had to pass it manually; HTTP launches
+    // without an overlay therefore failed at workspace resolution time
+    // (verified by `make test-system-yaml-memory`). Auto-injection in
+    // dispatch core fixes that without forcing every caller to know
+    // about the placeholder.
+    const result = await dispatch({
+      repo: slackRepo,
+      task: "investigate",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: SLACK_META,
+    });
+
+    // The slack-worker's `.claude/settings.json` env block declares
+    // `DANXBOT_WORKER_PORT: "${DANXBOT_WORKER_PORT}"`. Auto-injection
+    // makes the placeholder resolvable without a caller overlay; the
+    // resolver hands the substituted env block to `dispatch`, which
+    // forwards it as `env` on the spawnAgent options.
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.env.DANXBOT_WORKER_PORT).toBe(String(slackRepo.workerPort));
+    // The dispatch row's id is the same dispatchId returned to the
+    // caller — sanity check that auto-injection used `repo.workerPort`,
+    // not some other source.
+    expect(result.dispatchId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
   it("auto-injects DANXBOT_SLACK_REPLY_URL and DANXBOT_SLACK_UPDATE_URL into the overlay so callers never pre-compute dispatchId-derived URLs", async () => {
     // The listener passes ONLY `DANXBOT_WORKER_PORT`; the dispatch core
     // fills in the rest. Observable boundary: the danxbot MCP server's
@@ -195,7 +246,7 @@ describe("dispatch() — slack-worker integration", () => {
       repo: slackRepo,
       task: "investigate",
       workspace: "slack-worker",
-      overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+      overlay: {},
       apiDispatchMeta: SLACK_META,
     });
 
@@ -229,7 +280,7 @@ describe("dispatch() — slack-worker integration", () => {
       repo: slackRepo,
       task: "investigate",
       workspace: "slack-worker",
-      overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+      overlay: {},
       apiDispatchMeta: SLACK_META,
     });
 
@@ -261,7 +312,7 @@ describe("dispatch() — slack-worker integration", () => {
         repo: slackRepo,
         task: "investigate",
         workspace: "slack-worker",
-        overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+        overlay: {},
         apiDispatchMeta: SLACK_META,
       }),
     ).rejects.toThrow(/allowed-tools\.txt/);
@@ -274,7 +325,7 @@ describe("dispatch() — slack-worker integration", () => {
       repo: slackRepo,
       task: "investigate",
       workspace: "slack-worker",
-      overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+      overlay: {},
       apiDispatchMeta: SLACK_META,
     });
 
@@ -311,7 +362,7 @@ describe("dispatch() — slack-worker integration", () => {
         repo: slackRepo,
         task: "should not spawn",
         workspace: "slack-worker",
-        overlay: { DANXBOT_WORKER_PORT: String(slackRepo.workerPort) },
+        overlay: {},
         apiDispatchMeta: SLACK_META,
       }),
     ).rejects.toThrow(/settings\.slack\.enabled/);
@@ -348,14 +399,14 @@ describe("listActiveJobs()", () => {
         repo: testRepo,
         task: "task A",
         workspace: "slack-worker",
-        overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+        overlay: {},
         apiDispatchMeta: DEFAULT_DISPATCH_META,
       });
       const { job: jobB } = await dispatch({
         repo: testRepo,
         task: "task B",
         workspace: "slack-worker",
-        overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+        overlay: {},
         apiDispatchMeta: DEFAULT_DISPATCH_META,
       });
 
@@ -394,7 +445,7 @@ describe("listActiveJobs()", () => {
         repo: testRepo,
         task: "task",
         workspace: "slack-worker",
-        overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+        overlay: {},
         apiDispatchMeta: DEFAULT_DISPATCH_META,
       });
 
@@ -474,7 +525,7 @@ describe("dispatch() — apiDispatchMeta wiring", () => {
       repo: testRepo,
       task: "task",
       workspace: "slack-worker",
-      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      overlay: {},
       apiDispatchMeta: meta,
       statusUrl: "https://forwarder.example/status",
       apiToken: "tok-stall",
@@ -500,7 +551,7 @@ describe("dispatch() — apiDispatchMeta wiring", () => {
       repo: testRepo,
       task: "investigate failure",
       workspace: "slack-worker",
-      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      overlay: {},
       apiDispatchMeta: meta,
     });
 
@@ -625,7 +676,7 @@ describe("dispatch() — dispatchId override", () => {
       repo: testRepo,
       task: "task",
       workspace: "slack-worker",
-      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      overlay: {},
       apiDispatchMeta: DEFAULT_DISPATCH_META,
       dispatchId: explicitId,
     });
@@ -642,7 +693,7 @@ describe("dispatch() — dispatchId override", () => {
       repo: testRepo,
       task: "task",
       workspace: "slack-worker",
-      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      overlay: {},
       apiDispatchMeta: DEFAULT_DISPATCH_META,
       dispatchId: explicitId,
     });
@@ -672,7 +723,7 @@ describe("dispatch() — dispatchId override", () => {
       repo: testRepo,
       task: "task",
       workspace: "slack-worker",
-      overlay: { DANXBOT_WORKER_PORT: String(testRepo.workerPort) },
+      overlay: {},
       apiDispatchMeta: DEFAULT_DISPATCH_META,
     });
 

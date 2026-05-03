@@ -7,7 +7,6 @@ import {
   copyFileSync,
   chmodSync,
   statSync,
-  lstatSync,
   readlinkSync,
   symlinkSync,
   rmSync,
@@ -38,6 +37,8 @@ import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
+import { injectIssueWorkerAlias } from "./issue-worker-alias.js";
+import { isLinkOrFile, isSymlink } from "./fs-probe.js";
 import {
   fetchTodoCards,
   fetchNeedsHelpCards,
@@ -617,52 +618,6 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
  * symlink (or stray directory left behind by an older copy-based
  * implementation) is replaced.
  */
-/**
- * Phase 5 alias: `<workspaces>/trello-worker → issue-worker`.
- *
- * Skipped when `<workspaces>/trello-worker` exists as anything other
- * than a symlink pointing at `issue-worker` — a populated directory
- * (operator-authored workspace) MUST NOT be clobbered. Skipped when the
- * `issue-worker` target itself is missing (the inject pipeline runs
- * before this helper, but a partially-prepared fixture in tests can
- * trip the guard — fail soft rather than create a dangling symlink).
- *
- * Drop this helper one release after Phase 5 ships.
- */
-function injectIssueWorkerAlias(workspacesTargetDir: string): void {
-  const targetIssueWorker = resolve(workspacesTargetDir, "issue-worker");
-  const aliasPath = resolve(workspacesTargetDir, "trello-worker");
-
-  if (!existsSync(targetIssueWorker)) return;
-
-  if (isLinkOrFile(aliasPath)) {
-    if (isSymlink(aliasPath)) {
-      // Resolve both sides through the symlink so a previous run that
-      // wrote a relative target (`./issue-worker`) still compares equal
-      // to the absolute one we'd write today. Skip the rewrite when the
-      // resolved targets match — otherwise rewriting on every tick
-      // would be silent churn.
-      const linkTarget = (() => {
-        try {
-          return resolve(workspacesTargetDir, readlinkSync(aliasPath));
-        } catch {
-          return null;
-        }
-      })();
-      if (linkTarget === targetIssueWorker) return;
-      rmSync(aliasPath, { force: true });
-    } else {
-      // Operator-authored `trello-worker/` directory present — leave it
-      // alone. Logging once would spam every poll tick; the silent skip
-      // is intentional + matches the "never clobber" invariant of
-      // `injectDanxWorkspaces`.
-      return;
-    }
-  }
-
-  symlinkSync(targetIssueWorker, aliasPath, "dir");
-}
-
 function injectMcpServers(workspaceDir: string): void {
   const srcRoot = resolve(projectRoot, "mcp-servers");
   if (!existsSync(srcRoot)) return;
@@ -673,23 +628,6 @@ function injectMcpServers(workspaceDir: string): void {
     rmSync(linkPath, { recursive: true, force: true });
   }
   symlinkSync(srcRoot, linkPath, "dir");
-}
-
-function isSymlink(path: string): boolean {
-  try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
-function isLinkOrFile(path: string): boolean {
-  try {
-    lstatSync(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -955,10 +893,13 @@ function spawnClaude(
       ? apiDispatchMeta.metadata.cardId
       : null;
 
-  // The poller only ever runs when trello credentials are loaded — they
-  // are the precondition for fetching cards. Fail loud here so a missing
-  // value surfaces as a clear configuration error rather than as an
-  // opaque `WorkspacePlaceholderMissingError` from the resolver.
+  // The poller's own card-lifecycle calls (fetchTodoCards,
+  // moveCardToList, retro comments) require trello credentials on
+  // `RepoContext`. Fail loud here so a missing value surfaces as a
+  // clear configuration error before we spawn an agent that the poller
+  // can't follow up on. The dispatch overlay itself no longer needs
+  // these (Phase 5 of tracker-agnostic-agents retired the trello MCP
+  // server entry from the issue-worker workspace).
   const trello = repo.trello;
   if (!trello?.apiKey || !trello?.apiToken || !trello?.boardId) {
     throw new Error(
@@ -985,12 +926,14 @@ function spawnClaude(
     repo,
     task: prompt,
     workspace: "issue-worker",
-    overlay: {
-      DANXBOT_WORKER_PORT: String(repo.workerPort),
-      TRELLO_API_KEY: trello.apiKey,
-      TRELLO_TOKEN: trello.apiToken,
-      TRELLO_BOARD_ID: trello.boardId,
-    },
+    // `DANXBOT_WORKER_PORT` and the dispatchId-derived URLs are
+    // auto-injected by `dispatch()` from `repo.workerPort`. Phase 5 of
+    // tracker-agnostic-agents retired the trello MCP server entry from
+    // the issue-worker workspace, so TRELLO_API_KEY / TRELLO_TOKEN /
+    // TRELLO_BOARD_ID no longer need an overlay either — agents now
+    // talk to the tracker through the danxbot MCP server's
+    // `danx_issue_*` tools, which the worker proxies.
+    overlay: {},
     timeoutMs: config.pollerIntervalMs * 60,
     apiDispatchMeta,
     // Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO): when the trello

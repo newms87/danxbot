@@ -18,6 +18,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -38,6 +39,28 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     expect(raw).not.toMatch(/TRELLO_API_KEY/);
     expect(raw).not.toMatch(/TRELLO_TOKEN/);
     expect(raw).not.toMatch(/TRELLO_BOARD_ID/);
+  });
+
+  // Phase 5 hotfix (Trello 69f7764f...): the manifest's
+  // `required-placeholders` list is the dispatch boundary's contract for
+  // what overlay keys the resolver insists on. After Phase 4 dropped the
+  // trello MCP server entry, no fixture file inside this workspace
+  // references TRELLO_API_KEY / TRELLO_TOKEN / TRELLO_BOARD_ID — leaving
+  // them in the required-placeholders block was dead weight that broke
+  // every non-poller dispatch (HTTP `/api/launch`, the YAML-memory system
+  // test) since those callers don't supply Trello creds. Pin the
+  // allowlist so a future agent can't silently re-introduce a dead
+  // required key — substitute() would still be the loud failure mode at
+  // runtime, but a unit-test failure here surfaces it during the edit.
+  it("workspace.yml required-placeholders is exactly the keys actually substituted by the resolver", () => {
+    const path = resolve(HERE, "workspace.yml");
+    const manifest = parseYaml(readFileSync(path, "utf-8")) as {
+      "required-placeholders"?: string[];
+    };
+    const required = manifest["required-placeholders"] ?? [];
+    expect([...required].sort()).toEqual(
+      ["DANXBOT_STOP_URL", "DANXBOT_WORKER_PORT"].sort(),
+    );
   });
 
   it("no SKILL.md mentions `mcp__trello__*` or the legacy `<!-- danxbot -->` marker", () => {

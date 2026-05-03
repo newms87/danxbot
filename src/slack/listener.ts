@@ -249,16 +249,12 @@ async function launchSlackDispatch(
       repo: ls.repo,
       task: prompt,
       workspace: "slack-worker",
-      // `DANXBOT_STOP_URL` + `DANXBOT_SLACK_*_URL` are auto-injected by
-      // `dispatch` from the dispatchId — the caller can't pre-compute
-      // them. `DANXBOT_WORKER_PORT` is the only caller-supplied
-      // placeholder the slack-worker workspace requires; the workspace
-      // references it from its `.claude/settings.json` env block so the
-      // dispatched agent's MCP subprocesses resolve
-      // `${DANXBOT_WORKER_PORT}` at startup.
-      overlay: {
-        DANXBOT_WORKER_PORT: String(ls.repo.workerPort),
-      },
+      // Every placeholder the slack-worker workspace requires
+      // (`DANXBOT_STOP_URL`, `DANXBOT_WORKER_PORT`,
+      // `DANXBOT_SLACK_REPLY_URL`, `DANXBOT_SLACK_UPDATE_URL`) is
+      // auto-injected by `dispatch()` from `repo.workerPort` +
+      // `dispatchId`. No caller overlay needed.
+      overlay: {},
       apiDispatchMeta: { trigger: "slack", metadata: slackMeta },
       resumeSessionId,
       parentJobId,

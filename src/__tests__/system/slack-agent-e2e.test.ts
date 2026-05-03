@@ -731,15 +731,18 @@ describe("scenario 9: MCP cross-worker guard", () => {
 // PUT loop directly.
 
 describe("scenario 10: Slack-worker dispatch contract", () => {
-  it("every Slack-triggered dispatch arrives with workspace=slack-worker, apiDispatchMeta.trigger=slack, and overlay.DANXBOT_WORKER_PORT set to repo.workerPort", async () => {
+  it("every Slack-triggered dispatch arrives with workspace=slack-worker, apiDispatchMeta.trigger=slack, and an empty caller overlay (DANXBOT_WORKER_PORT auto-injected by dispatch core)", async () => {
     nextSimulatedAgent = { reply: "Done.", status: "completed" };
     await fireMessage({ ts: "10.10", text: "trigger me" });
 
     expect(lastDispatchInput!.workspace).toBe("slack-worker");
     expect(lastDispatchInput!.apiDispatchMeta.trigger).toBe("slack");
-    expect(lastDispatchInput!.overlay.DANXBOT_WORKER_PORT).toBe(
-      String(repo.workerPort),
-    );
+    // Phase 5 hotfix: dispatch() auto-injects DANXBOT_WORKER_PORT from
+    // `repo.workerPort`. The slack listener no longer pre-stamps it
+    // into the overlay — observe an empty overlay coming out of the
+    // listener; verifying the actual port lands in the resolved
+    // settings.json belongs in dispatch-core integration tests.
+    expect(lastDispatchInput!.overlay).toEqual({});
   });
 });
 

@@ -140,9 +140,11 @@ export interface DispatchInput {
   /**
    * Placeholder substitution map. Every `${KEY}` in the workspace's
    * `.mcp.json` and `.claude/settings.json` is replaced from this map.
-   * `DANXBOT_STOP_URL` and the Slack URL placeholders are auto-injected
-   * from the dispatchId so callers don't have to pre-compute them;
-   * everything else (TRELLO_*, SCHEMA_*, etc.) is caller-supplied.
+   * `DANXBOT_STOP_URL`, `DANXBOT_WORKER_PORT`, the Slack URL pair, and
+   * the issue-tool URL pair are auto-injected from `repo.workerPort` +
+   * `dispatchId` so callers don't have to pre-compute them; everything
+   * else (SCHEMA_*, etc.) is caller-supplied. Caller overlay wins over
+   * auto-injected values — tests rely on that.
    */
   overlay: Readonly<Record<string, string>>;
   /**
@@ -318,10 +320,10 @@ async function runResolved(
           : undefined;
       // Dispatch-level env invariants. Every dispatched agent ALWAYS gets
       // `DANXBOT_REPO_NAME` set from `input.repo.name`; the caller never
-      // has to remember. Resolver-supplied `envOverrides` (e.g. workspace
-      // `DANXBOT_WORKER_PORT`) merge next, then `input.env` wins last so
-      // tests can override anything for isolation. See the
-      // `DispatchInput.env` docstring for the contract.
+      // has to remember. Resolver-supplied `envOverrides` (the workspace's
+      // `.claude/settings.json` env block, post-substitution) merge next,
+      // then `input.env` wins last so tests can override anything for
+      // isolation. See the `DispatchInput.env` docstring for the contract.
       const env: Record<string, string> = {
         DANXBOT_REPO_NAME: input.repo.name,
         ...resolved.envOverrides,
@@ -501,6 +503,13 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   const issueCreateUrl = `http://localhost:${input.repo.workerPort}/api/issue-create/${dispatchId}`;
   const overlay: Record<string, string> = {
     DANXBOT_STOP_URL: workerStopUrl,
+    // `DANXBOT_WORKER_PORT` is auto-injected from `repo.workerPort` so
+    // every dispatch caller (poller, slack, HTTP `/api/launch`) gets it
+    // without duplicating the same `String(repo.workerPort)` line.
+    // Workspaces that don't reference it (system-test) ignore the extra
+    // overlay key; workspaces that do (issue-worker, slack-worker) get
+    // the placeholder satisfied without per-call boilerplate.
+    DANXBOT_WORKER_PORT: String(input.repo.workerPort),
     DANXBOT_SLACK_REPLY_URL: `http://localhost:${input.repo.workerPort}/api/slack/reply/${dispatchId}`,
     DANXBOT_SLACK_UPDATE_URL: `http://localhost:${input.repo.workerPort}/api/slack/update/${dispatchId}`,
     DANXBOT_ISSUE_SAVE_URL: issueSaveUrl,
