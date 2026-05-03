@@ -35,7 +35,6 @@ import {
 import { createIssueTracker } from "../issue-tracker/index.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
-import { writeTrelloConfigRule } from "./trello-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
@@ -424,7 +423,7 @@ export function validateRepoConfig(repo: RepoContext): void {
  * workspace-dispatch epics, Trello `7ha2CSpc`/`jAdeJgi5`), so that's
  * where per-repo rendered rules + tools must land — duplicated into
  * each workspace dir so cwd-relative skill references like
- * `.claude/rules/danx-trello-config.md` resolve LOCALLY without claude
+ * `.claude/rules/danx-repo-config.md` resolve LOCALLY without claude
  * having to walk ancestor `.claude/` dirs (which would land on the
  * developer's repo-root `.claude/`, an isolation contract violation
  * that produced the Phase 6 stale-board-IDs incident).
@@ -569,6 +568,24 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
     );
   }
 
+  // Phase 5 of tracker-agnostic-agents (Trello OWQdETAI): the old
+  // `trello-worker` workspace was renamed to `issue-worker`. Existing
+  // dispatches (live `/api/launch` callers, in-flight Slack agents,
+  // hardcoded Make targets) still reference the old name. Drop a
+  // symlink alias `<repo>/.danxbot/workspaces/trello-worker → issue-worker`
+  // for one release cycle so they keep resolving.
+  //
+  // CRITICAL: only create the symlink when the old path doesn't already
+  // exist as a populated directory. A connected repo could have authored
+  // its own `trello-worker/` workspace (precedent: gpt-manager's
+  // schema-builder/) and replacing it with a symlink would silently
+  // shadow that work. Idempotent — existing correct symlink is left
+  // alone; absent or stray entry is replaced.
+  //
+  // Drop the alias one release after Phase 5 ships — a follow-up Action
+  // Items card tracks the cleanup.
+  injectIssueWorkerAlias(workspacesTargetDir);
+
   // Symlink mcp-servers/ into EVERY workspace present at target, including
   // repo-authored workspaces (e.g. gpt-manager's schema-builder) that
   // didn't come through our inject source. Every dispatched agent expects
@@ -600,6 +617,52 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
  * symlink (or stray directory left behind by an older copy-based
  * implementation) is replaced.
  */
+/**
+ * Phase 5 alias: `<workspaces>/trello-worker → issue-worker`.
+ *
+ * Skipped when `<workspaces>/trello-worker` exists as anything other
+ * than a symlink pointing at `issue-worker` — a populated directory
+ * (operator-authored workspace) MUST NOT be clobbered. Skipped when the
+ * `issue-worker` target itself is missing (the inject pipeline runs
+ * before this helper, but a partially-prepared fixture in tests can
+ * trip the guard — fail soft rather than create a dangling symlink).
+ *
+ * Drop this helper one release after Phase 5 ships.
+ */
+function injectIssueWorkerAlias(workspacesTargetDir: string): void {
+  const targetIssueWorker = resolve(workspacesTargetDir, "issue-worker");
+  const aliasPath = resolve(workspacesTargetDir, "trello-worker");
+
+  if (!existsSync(targetIssueWorker)) return;
+
+  if (isLinkOrFile(aliasPath)) {
+    if (isSymlink(aliasPath)) {
+      // Resolve both sides through the symlink so a previous run that
+      // wrote a relative target (`./issue-worker`) still compares equal
+      // to the absolute one we'd write today. Skip the rewrite when the
+      // resolved targets match — otherwise rewriting on every tick
+      // would be silent churn.
+      const linkTarget = (() => {
+        try {
+          return resolve(workspacesTargetDir, readlinkSync(aliasPath));
+        } catch {
+          return null;
+        }
+      })();
+      if (linkTarget === targetIssueWorker) return;
+      rmSync(aliasPath, { force: true });
+    } else {
+      // Operator-authored `trello-worker/` directory present — leave it
+      // alone. Logging once would spam every poll tick; the silent skip
+      // is intentional + matches the "never clobber" invariant of
+      // `injectDanxWorkspaces`.
+      return;
+    }
+  }
+
+  symlinkSync(targetIssueWorker, aliasPath, "dir");
+}
+
 function injectMcpServers(workspaceDir: string): void {
   const srcRoot = resolve(projectRoot, "mcp-servers");
   if (!existsSync(srcRoot)) return;
@@ -720,9 +783,9 @@ function copyFeaturesOnce(danxbotConfigDir: string): void {
  *   2. **Per-repo render** (`renderPerRepoFilesIntoWorkspaces`). For
  *      each workspace, writes the per-repo rendered files into its
  *      `.claude/`: `danx-repo-config.md`, `danx-repo-overview.md`,
- *      `danx-repo-workflow.md`, `danx-tools.md`, repo-specific tool
- *      scripts, and `danx-trello-config.md`. These differ per repo
- *      (board IDs, repo name, etc.) so they cannot live in the static
+ *      `danx-repo-workflow.md`, `danx-tools.md`, and repo-specific tool
+ *      scripts. These differ per repo
+ *      (repo name, runtime, etc.) so they cannot live in the static
  *      inject tree — they are rendered fresh every tick from the
  *      `RepoContext`. Duplicated across every workspace dir so
  *      cwd-relative skill references resolve locally.
@@ -825,7 +888,6 @@ function renderPerRepoFilesIntoWorkspaces(
     copyRepoConfigDocs(danxbotConfigDir, target);
     copyRepoToolsDoc(danxbotConfigDir, target);
     copyRepoToolScripts(danxbotConfigDir, target);
-    writeTrelloConfigRule(repo.trello, target.rulesDir);
   }
 }
 
@@ -906,8 +968,8 @@ function spawnClaude(
 
   // Workspace-shaped dispatch (Phase 3 of the workspace-dispatch epic,
   // Trello `q5aFuINM`). The poller's allowed-tools, MCP server set, and
-  // skill surface live in `src/poller/inject/workspaces/trello-worker/`
-  // and are mirrored to `<repo>/.danxbot/workspaces/trello-worker/` by
+  // skill surface live in `src/poller/inject/workspaces/issue-worker/`
+  // and are mirrored to `<repo>/.danxbot/workspaces/issue-worker/` by
   // the inject pipeline on every poll tick. `dispatch` resolves that
   // fixture, merges the danxbot infrastructure server, and runs the
   // shared spawn loop — stall recovery, activeJobs registration,
@@ -922,7 +984,7 @@ function spawnClaude(
   dispatch({
     repo,
     task: prompt,
-    workspace: "trello-worker",
+    workspace: "issue-worker",
     overlay: {
       DANXBOT_WORKER_PORT: String(repo.workerPort),
       TRELLO_API_KEY: trello.apiKey,

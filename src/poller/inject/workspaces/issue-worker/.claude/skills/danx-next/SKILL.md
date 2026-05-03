@@ -35,7 +35,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `ac` | `[{check_item_id, title, checked}]` | Acceptance Criteria. Empty `check_item_id` on new items — tracker assigns. |
 | `phases` | `[{check_item_id, title, status, notes}]` | `status`: `Pending` \| `Complete` \| `Blocked`. |
 | `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
-| `retro` | `{good, bad, action_items[], commits[]}` | Fill on Done / Needs Help. |
+| `retro` | `{good, bad, action_items[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save AND spawns one tracker card per `action_items[]` entry. Do NOT also append a `## Retro` comment to `comments[]`, and do NOT call `danx_issue_create` for follow-ups — list them in `action_items[]` instead. `action_items[]` strings cannot contain `→` (reserved bookkeeping separator). |
 
 **Save semantics:** `danx_issue_save({external_id})` validates the YAML synchronously and returns `{saved: true}` or `{saved: false, errors}`. Tracker push runs detached — tracker errors NEVER appear in the tool result. When `status` is `Done` or `Cancelled`, the worker moves the file `open/` → `closed/` as part of save. Save after every meaningful edit.
 
@@ -195,15 +195,9 @@ Edit YAML:
    **Root Cause:** ...
    **Solution:** ...
    ```
-3. Append a retro comment to `comments[]`. Logical shape (use real YAML / multi-line block scalars when writing — these are not literal escape sequences):
-   - `author: "danxbot"`
-   - `timestamp: <current ISO>`
-   - `text:` a multi-line markdown body containing `## Retro`, `**What went well:** ...`, `**What went wrong:** ...`, `**Action items:** ...`, `**Commits:** ...`
-   - No `id` field
-4. Fill `retro.good`, `retro.bad`, `retro.action_items[]`, `retro.commits[]`.
-5. **Action item cards:** for each non-trivial action item, write a new draft YAML at `<repo>/.danxbot/issues/open/<slug>.yml` using the `<DRAFT_TEMPLATE>` from Step 3.2, with these overrides: `parent_id: null`, `status: "Review"`, `type: "Bug"` or `"Feature"`, `title: "<action item title>"`, `description: "<one-paragraph context for why this card exists>"`. Then call `danx_issue_create({filename: "<slug>"})`. Append a comment to the current card linking each created action-item id.
+3. Fill `retro.good`, `retro.bad`, `retro.action_items[]`, `retro.commits[]`. The worker renders the `## Retro` comment automatically on save and spawns one tracker card per `action_items[]` entry — do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for action items. `action_items[]` strings must not contain `→`.
 
-Save: `danx_issue_save({external_id})`. The worker validates, then moves the file `open/` → `closed/` and pushes the tracker move to Done.
+Save: `danx_issue_save({external_id})`. The worker validates, posts the rendered retro comment, spawns Action Items cards, then moves the file `open/` → `closed/` and pushes the tracker move to Done.
 
 Skip to Step 11.
 
@@ -228,8 +222,7 @@ Edit YAML:
      - `**Final AC check:** Before Done, every AC must be checked: true.`
    - No `id` field
 3. **Bug cards** with partial progress: also append the `## Bug Diagnosis` block.
-4. Fill `retro.{good, bad, action_items, commits}` honestly — the AC gap is the primary "what went wrong."
-5. Append a standard `## Retro` comment as in Step 9.
+4. Fill `retro.{good, bad, action_items, commits}` honestly — the AC gap is the primary "what went wrong." The worker auto-renders the `## Retro` comment and spawns Action Items cards on save (Needs Help is a non-terminal status, so the retro / action-items WILL not be auto-rendered yet — they render when the next pickup eventually moves the card to Done or Cancelled). Filling `retro` now still helps: the next agent inherits it through the YAML.
 
 Save: `danx_issue_save({external_id})`.
 

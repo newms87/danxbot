@@ -136,8 +136,14 @@ import type { Issue } from "../../issue-tracker/interface.js";
 const issueTrackerMock = vi.hoisted(() => ({
   tracker: null as MemoryTracker | null,
 }));
-function setIssueTracker(seed: Issue): void {
+function setIssueTracker(seed: Issue): {
+  addCommentCalls: Array<{ externalId: string; text: string }>;
+  spawnedActionItems: string[];
+} {
   const tracker = new MemoryTracker();
+  const addCommentCalls: Array<{ externalId: string; text: string }> = [];
+  const spawnedActionItems: string[] = [];
+  let nextCommentSeq = 0;
   // Bypass MemoryTracker's auto-id-mint: install stubs that return the
   // pre-shaped issue regardless of the lookup key. The worker calls
   // `getCard`, `getComments`, and the various mutation helpers as part of
@@ -159,11 +165,21 @@ function setIssueTracker(seed: Issue): void {
   tracker.addPhaseItem = async () => ({ check_item_id: "" });
   tracker.updatePhaseItem = async () => undefined;
   tracker.deletePhaseItem = async () => undefined;
-  tracker.addComment = async () => ({
-    id: "comment-1",
-    timestamp: new Date().toISOString(),
-  });
+  tracker.addComment = async (externalId: string, text: string) => {
+    addCommentCalls.push({ externalId, text });
+    nextCommentSeq += 1;
+    return {
+      id: `comment-${nextCommentSeq}`,
+      timestamp: new Date().toISOString(),
+    };
+  };
+  tracker.editComment = async () => undefined;
+  tracker.addLinkedActionItemCard = async (title: string) => {
+    spawnedActionItems.push(title);
+    return { external_id: `mem-action-${spawnedActionItems.length}` };
+  };
   issueTrackerMock.tracker = tracker;
+  return { addCommentCalls, spawnedActionItems };
 }
 vi.mock("../../issue-tracker/index.js", async () => {
   const actual = await vi.importActual<
@@ -353,12 +369,12 @@ beforeEach(async () => {
   repoDir = join(testState.reposBase, "test-repo");
   mkdirSync(join(repoDir, ".danxbot"), { recursive: true });
 
-  // Phase 4 dispatches resolve workspace `trello-worker`. The fixture
+  // Phase 4 dispatches resolve workspace `issue-worker`. The fixture
   // here is intentionally minimal — the dispatched fake-claude reads the
   // YAML path + URLs from env / --mcp-config, not from the workspace
   // skill files. The skill content lives in src/poller/inject/.../ and
   // is covered by `workspace-shape.test.ts`.
-  writeWorkspaceFixture("trello-worker");
+  writeWorkspaceFixture("issue-worker");
 
   ensureIssuesDirs(repoDir);
 
@@ -387,7 +403,7 @@ beforeEach(async () => {
   });
 
   workspaceSessionDir = deriveSessionDir(
-    join(repoDir, ".danxbot", "workspaces", "trello-worker"),
+    join(repoDir, ".danxbot", "workspaces", "issue-worker"),
   );
 
   process.env.PATH = `${fakeBinDir}:${originalPath ?? ""}`;
@@ -438,7 +454,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
   it("ToDo → In Progress → Done flips the YAML, moves it open/ → closed/, and emits zero mcp__trello__ calls", async () => {
     const externalId = "mem-yaml-1";
     const seed = buildSeedIssue(externalId, "ToDo");
-    setIssueTracker(seed);
+    const { addCommentCalls } = setIssueTracker(seed);
 
     const yamlOpenPath = issuePath(repoDir, externalId, "open");
     writeFileSync(yamlOpenPath, serializeIssue(seed));
@@ -451,7 +467,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        workspace: "trello-worker",
+        workspace: "issue-worker",
         task: `Drive the Phase 4 YAML lifecycle for ${externalId}`,
         api_token: "test-token",
         status_url: captureServer.statusUrl,
@@ -527,6 +543,26 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
       );
     });
     expect(trelloCalls).toEqual([]);
+
+    // Phase 5: the worker-side retro renderer must post a single
+    // `## Retro` comment carrying both danxbot markers, derived from the
+    // YAML's retro fields (fake-claude fills retro.good / retro.bad before
+    // the terminal save). fake-claude no longer appends a manual retro
+    // comment to comments[] — the worker is the single source of retro
+    // rendering on terminal-status save.
+    const retroPosts = addCommentCalls.filter((c) =>
+      c.text.includes("<!-- danxbot-retro -->"),
+    );
+    expect(
+      retroPosts,
+      `expected exactly one worker-rendered retro comment; saw ${addCommentCalls
+        .map((c) => c.text.slice(0, 80))
+        .join(" | ")}`,
+    ).toHaveLength(1);
+    expect(retroPosts[0].text).toContain("## Retro");
+    expect(retroPosts[0].text).toContain("**What went well:** Test ran cleanly.");
+    expect(retroPosts[0].text).toContain("**What went wrong:** Nothing.");
+    expect(retroPosts[0].text.startsWith("<!-- danxbot -->\n")).toBe(true);
   }, 30_000);
 
   it("ToDo → In Progress → Needs Help leaves the YAML in open/, status=Needs Help, ACs unchanged", async () => {
@@ -545,7 +581,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        workspace: "trello-worker",
+        workspace: "issue-worker",
         task: `Drive the Phase 4 Needs Help branch for ${externalId}`,
         api_token: "test-token",
         status_url: captureServer.statusUrl,
@@ -615,7 +651,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        workspace: "trello-worker",
+        workspace: "issue-worker",
         task: `Resume blocker recovery for ${externalId}`,
         api_token: "test-token",
         status_url: captureServer.statusUrl,

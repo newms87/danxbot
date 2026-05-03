@@ -321,7 +321,7 @@ function parseDispatchRequest(
   }
 
   // 2. Workspace required. No fallback / default workspace — danxbot ships
-  //    only its own dispatch surfaces (`trello-worker`, `slack-worker`).
+  //    only its own dispatch surfaces (`issue-worker`, `slack-worker`).
   //    External callers must declare a workspace in their target repo's
   //    `.danxbot/workspaces/`.
   const workspace = requireString(body.workspace);

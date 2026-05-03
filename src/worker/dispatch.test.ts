@@ -891,7 +891,7 @@ describe("handleLaunch — P5 cutover (workspace required, legacy fields rejecte
     async (fieldName, legacyField) => {
       const req = createMockReqWithBody("POST", {
         repo: MOCK_REPO.name,
-        workspace: "trello-worker",
+        workspace: "issue-worker",
         task: "Do something",
         ...legacyField,
       });
@@ -911,7 +911,7 @@ describe("handleLaunch — P5 cutover (workspace required, legacy fields rejecte
   it("returns 400 listing every offending field when multiple legacy fields are present", async () => {
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do something",
       schema_definition_id: "abc",
       allow_tools: ["Read"],
@@ -1015,7 +1015,7 @@ describe("handleResume — P5 cutover (workspace required, legacy fields rejecte
     async (fieldName, legacyField) => {
       const req = createMockReqWithBody("POST", {
         repo: MOCK_REPO.name,
-        workspace: "trello-worker",
+        workspace: "issue-worker",
         job_id: "parent-123",
         task: "Continue",
         ...legacyField,
@@ -1077,7 +1077,7 @@ describe("handleLaunch — overlay localhost normalization", () => {
 
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do something",
       overlay: {
         SCHEMA_API_URL: "http://localhost:80",
@@ -1109,7 +1109,7 @@ describe("handleLaunch — overlay localhost normalization", () => {
 
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do something",
       overlay: {
         SCHEMA_API_URL: "http://127.0.0.1:8080/api",
@@ -1133,7 +1133,7 @@ describe("handleLaunch — overlay localhost normalization", () => {
     try {
       const req = createMockReqWithBody("POST", {
         repo: MOCK_REPO.name,
-        workspace: "trello-worker",
+        workspace: "issue-worker",
         task: "Do something",
         overlay: {
           SCHEMA_API_URL: "http://localhost:80",
@@ -1160,7 +1160,7 @@ describe("handleLaunch — overlay localhost normalization", () => {
 
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do something",
       overlay: {
         SCHEMA_API_URL: "https://gpt-manager-laravel.test-1:80/api",
@@ -1227,7 +1227,7 @@ describe("handleLaunch — apiDispatchMeta build", () => {
     // right here rather than at the dashboard render step.
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Investigate the deploy failure",
     });
     const res = createMockRes();
@@ -1256,7 +1256,7 @@ describe("handleLaunch — apiDispatchMeta build", () => {
     mockDispatchConfig.isHost = false;
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do work",
       status_url: "http://localhost:8080/agent/status",
     });
@@ -1280,7 +1280,7 @@ describe("handleLaunch — apiDispatchMeta build", () => {
     // with the boilerplate suffix.
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Investigate the deploy failure",
     });
     const res = createMockRes();
@@ -1308,7 +1308,7 @@ describe("handleResume — apiDispatchMeta build", () => {
   it("builds apiDispatchMeta with endpoint=/api/resume so the dispatch row distinguishes resumes from launches", async () => {
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       job_id: "parent-job-abc",
       task: "Continue from prior turn",
     });
@@ -1353,7 +1353,7 @@ describe("handleLaunch — callerIp extraction", () => {
   it("uses req.socket.remoteAddress when present", async () => {
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do work",
     });
     // The default mock has socket=null. Setting a real-ish socket
@@ -1373,7 +1373,7 @@ describe("handleLaunch — callerIp extraction", () => {
   it("falls back to X-Forwarded-For when req.socket.remoteAddress is missing", async () => {
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do work",
     });
     // socket present, remoteAddress undefined — exercises ?. on the
@@ -1398,7 +1398,7 @@ describe("handleLaunch — callerIp extraction", () => {
     // visible decision, not a silent change.
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do work",
     });
     (req as unknown as { socket: object }).socket = {};
@@ -1421,7 +1421,7 @@ describe("handleLaunch — callerIp extraction", () => {
   it("returns null when neither socket.remoteAddress nor X-Forwarded-For is present", async () => {
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
-      workspace: "trello-worker",
+      workspace: "issue-worker",
       task: "Do work",
     });
     // Default mock socket is null and headers has no x-forwarded-for —

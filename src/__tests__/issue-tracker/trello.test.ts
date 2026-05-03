@@ -489,6 +489,25 @@ describe("TrelloTracker", () => {
     expect(JSON.parse(call[1].body as string)).toEqual({ text: "hi" });
   });
 
+  it("editComment PUTs to /cards/{cardId}/actions/{actionId}/comments with auth + body {text}", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}));
+    const tracker = new TrelloTracker(TRELLO);
+    await tracker.editComment("c1", "act-1", "edited body");
+    const call = fetchMock.mock.calls[0];
+    expect(call[1].method).toBe("PUT");
+    expect(call[0]).toContain("/cards/c1/actions/act-1/comments");
+    expect(call[0]).toContain(authQs());
+    expect(JSON.parse(call[1].body as string)).toEqual({ text: "edited body" });
+  });
+
+  it("editComment throws on non-2xx response", async () => {
+    fetchMock.mockResolvedValue(new Response("nope", { status: 404 }));
+    const tracker = new TrelloTracker(TRELLO);
+    await expect(
+      tracker.editComment("c1", "act-1", "edited body"),
+    ).rejects.toThrow(/Trello API error: 404/);
+  });
+
   it("addLinkedActionItemCard POSTs with pos: 'top' + idList=actionItems + auth", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ id: "ai-card" }));
     const tracker = new TrelloTracker(TRELLO);

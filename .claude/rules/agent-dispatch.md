@@ -11,7 +11,7 @@ Every dispatched agent (poller, HTTP `/api/launch`, `/api/resume`, Slack) runs w
 - `workspace.yml` — workspace manifest (resolved by `src/workspace/resolve.ts`)
 - `.claude/settings.json` — workspace-specific settings
 - `.claude/skills/` + `.claude/rules/` — static skills and rules shipped from `src/poller/inject/workspaces/<name>/.claude/` (mirrored verbatim every tick by `injectDanxWorkspaces`)
-- `.claude/rules/danx-repo-config.md`, `danx-repo-overview.md`, `danx-repo-workflow.md`, `danx-tools.md`, `danx-trello-config.md` — per-repo rendered files written into every plural workspace by `renderPerRepoFilesIntoWorkspaces` in `src/poller/index.ts`. Rendered fresh from `RepoContext` every tick; duplicated across every workspace dir so cwd-relative skill references like `Read .claude/rules/danx-trello-config.md` resolve LOCALLY without claude walking ancestor `.claude/` dirs.
+- `.claude/rules/danx-repo-config.md`, `danx-repo-overview.md`, `danx-repo-workflow.md`, `danx-tools.md` — per-repo rendered files written into every plural workspace by `renderPerRepoFilesIntoWorkspaces` in `src/poller/index.ts`. Rendered fresh from `RepoContext` every tick; duplicated across every workspace dir so cwd-relative skill references like `Read .claude/rules/danx-repo-config.md` resolve LOCALLY without claude walking ancestor `.claude/` dirs. (`danx-trello-config.md` was retired in Phase 5 once skills moved to the `danx_issue_save` / `danx_issue_create` MCP flow — workspace skills no longer reference Trello list IDs directly.)
 - `.claude/tools/` — repo-specific helper scripts copied from `<repo>/.danxbot/config/tools/`
 
 The **repo-root `.claude/`** is strictly developer territory. Danxbot never reads there and actively scrubs any `danx-*` artifacts that land in `<repo>/.claude/{rules,skills,tools}/` on every poll tick (`scrubRepoRootDanxArtifacts`). The legacy singular `<repo>/.danxbot/workspace/` directory the retired `generateWorkspace` helper produced is also scrubbed every tick (`scrubLegacySingularWorkspace`). A test in `src/poller/index.test.ts` asserts zero writes outside `<repo>/.danxbot/workspaces/` — reintroducing any repo-root or singular-workspace write breaks the isolation boundary and fails CI.
@@ -296,7 +296,7 @@ The poller shares `dispatch()` with `/api/launch` as of Phase 4. Implications:
 - `src/poller/index.ts` never imports `spawnAgent` and never writes its own `settings.json`. If you find yourself adding either back, you are unwinding Phase 4.
 - Poller-triggered agents get `mcp__danxbot__danxbot_complete` automatically (infrastructure), so the poller retired inactivity-timeout-as-completion-signal in favor of the MCP callback. Inactivity timeout remains as a safety net.
 - The poller's `onComplete` callback is the hook for `handleAgentCompletion` — card-progress check, stuck-card recovery, consecutive-failure backoff. Ordering contract: MCP settings cleanup runs BEFORE the caller's onComplete so post-completion checks never observe a half-disposed dispatch.
-- The poller's MCP surface lives in `src/poller/inject/workspaces/trello-worker/.mcp.json`. Adding or removing a Trello tool is a one-line edit to that file — no callsite changes anywhere.
+- The poller's MCP surface lives in `src/poller/inject/workspaces/issue-worker/.mcp.json`. Adding or removing a Trello tool is a one-line edit to that file — no callsite changes anywhere.
 
 ## Key Files
 

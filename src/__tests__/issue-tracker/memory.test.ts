@@ -90,6 +90,41 @@ describe("MemoryTracker", () => {
     expect(comments.map((c) => c.text)).toEqual(["first", "second"]);
   });
 
+  it("editComment replaces text in-place; preserves id, author, timestamp", async () => {
+    let now = 1700000000000;
+    const tracker = new MemoryTracker({ clock: () => new Date(now).toISOString() });
+    const { external_id } = await tracker.createCard(defaultInput());
+    const { id, timestamp } = await tracker.addComment(external_id, "v1");
+    now += 60_000;
+    await tracker.editComment(external_id, id, "v2");
+    const comments = await tracker.getComments(external_id);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].id).toBe(id);
+    expect(comments[0].text).toBe("v2");
+    expect(comments[0].author).toBe("danxbot");
+    expect(comments[0].timestamp).toBe(timestamp);
+  });
+
+  it("editComment throws when the comment id is unknown on the given card", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultInput());
+    await expect(
+      tracker.editComment(external_id, "cmt-nope", "ignored"),
+    ).rejects.toThrow(/Comment .* not found/);
+  });
+
+  it("editComment is a write — failNextWrite rejects it by identity", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultInput());
+    const { id } = await tracker.addComment(external_id, "v1");
+    const err = new Error("boom");
+    tracker.failNextWrite(err);
+    await expect(tracker.editComment(external_id, id, "v2")).rejects.toBe(err);
+    // Subsequent write succeeds; original text untouched after the failed call.
+    const c = (await tracker.getComments(external_id))[0];
+    expect(c.text).toBe("v1");
+  });
+
   it("AC item lifecycle: add, update, delete", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultInput({ ac: [] }));
@@ -167,7 +202,8 @@ describe("MemoryTracker", () => {
       needsHelp: true,
       triaged: true,
     });
-    await tracker.addComment(external_id, "hi");
+    const addedCommentResult = await tracker.addComment(external_id, "hi");
+    await tracker.editComment(external_id, addedCommentResult.id, "hi-edited");
     const ac = await tracker.addAcItem(external_id, { title: "AC2", checked: false });
     await tracker.updateAcItem(external_id, ac.check_item_id, { checked: true });
     await tracker.deleteAcItem(external_id, ac.check_item_id);
@@ -190,6 +226,7 @@ describe("MemoryTracker", () => {
       "moveToStatus",
       "setLabels",
       "addComment",
+      "editComment",
       "addAcItem",
       "updateAcItem",
       "deleteAcItem",
@@ -208,6 +245,7 @@ describe("MemoryTracker", () => {
     expect(byMethod("moveToStatus")?.externalId).toBe(external_id);
     expect(byMethod("setLabels")?.externalId).toBe(external_id);
     expect(byMethod("addComment")?.externalId).toBe(external_id);
+    expect(byMethod("editComment")?.externalId).toBe(external_id);
     expect(byMethod("addAcItem")?.externalId).toBe(external_id);
     expect(byMethod("updateAcItem")?.externalId).toBe(external_id);
     expect(byMethod("deleteAcItem")?.externalId).toBe(external_id);
@@ -225,6 +263,11 @@ describe("MemoryTracker", () => {
     expect(byMethod("moveToStatus")?.details).toEqual({ status: "In Progress" });
     // addComment carries the comment text.
     expect(byMethod("addComment")?.details).toEqual({ text: "hi" });
+    // editComment carries the comment id + new text.
+    expect(byMethod("editComment")?.details).toEqual({
+      commentId: addedCommentResult.id,
+      text: "hi-edited",
+    });
     // updateCard carries the patch.
     expect(byMethod("updateCard")?.details).toEqual({ patch: { title: "T2" } });
     // addAcItem carries the item.

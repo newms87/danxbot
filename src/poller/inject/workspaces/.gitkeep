@@ -2,7 +2,7 @@
 #
 # Phase 2 (Trello `VKJzZjk9`) creates this directory so the inject
 # pipeline has somewhere to mirror workspace trees FROM. Phase 3 adds
-# the first fixture (`trello-worker/`), Phase 4 adds `slack-worker/`,
+# the first fixture (`issue-worker/`), Phase 4 adds `slack-worker/`,
 # Phase 5 adds `http-launch-default/`.
 #
 # Each subdirectory `<name>/` is a full workspace tree matching the

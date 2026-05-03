@@ -374,9 +374,9 @@ beforeEach(async () => {
   mkdirSync(join(repoDir, ".danxbot"), { recursive: true });
 
   // Both workspaces the tests use:
-  //   - trello-worker: poller path (post-dispatch-check variant)
+  //   - issue-worker: poller path (post-dispatch-check variant)
   //   - integration-test: handleLaunch path (agent-signaled variant)
-  writeWorkspaceFixture("trello-worker");
+  writeWorkspaceFixture("issue-worker");
   writeWorkspaceFixture("integration-test");
 
   // Reserve an ephemeral port BEFORE creating RepoContext so the
@@ -570,7 +570,7 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
 
   it("post-dispatch-check writes flag with source=post-dispatch-check when the agent completes but the tracked card stays in ToDo", async () => {
     const wsSessionDir = deriveSessionDir(
-      join(repoDir, ".danxbot", "workspaces", "trello-worker"),
+      join(repoDir, ".danxbot", "workspaces", "issue-worker"),
     );
     process.env.FAKE_CLAUDE_SCENARIO = "complete-only";
     process.env.FAKE_CLAUDE_SESSION_DIR = wsSessionDir;

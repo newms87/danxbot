@@ -868,9 +868,9 @@ test_yaml_memory() {
   # Phase 4 (tracker-agnostic-agents) AC #6 verification.
   #
   # Purpose: end-to-end assertion that an agent dispatched into the
-  # `trello-worker` workspace makes ZERO `mcp__trello__*` tool calls — the
+  # `issue-worker` workspace makes ZERO `mcp__trello__*` tool calls — the
   # structural guarantee Phase 4 delivered by removing the trello server
-  # entry from `src/poller/inject/workspaces/trello-worker/.mcp.json`.
+  # entry from `src/poller/inject/workspaces/issue-worker/.mcp.json`.
   #
   # Note on AC scope: the AC also asks for a "full card lifecycle vs
   # MemoryTracker" driven by `make test-system`. The poller still calls
@@ -886,12 +886,12 @@ test_yaml_memory() {
   # =memory mode — the assertion is structural (workspace MCP shape), not
   # dependent on the tracker backend.
 
-  # Trigger a minimal dispatch in the trello-worker workspace. The task
+  # Trigger a minimal dispatch in the issue-worker workspace. The task
   # is intentionally trivial — the agent is allowed to do anything; we
   # only assert on what's NOT in the JSONL.
   local launch_response
   launch_response=$(http_post "${WORKER_URL}/api/launch" "{
-    \"workspace\": \"trello-worker\",
+    \"workspace\": \"issue-worker\",
     \"task\": \"Reply with the single word OK and call danxbot_complete with status completed and summary OK. Do not perform any other tool calls.\",
     \"api_token\": \"${API_TOKEN}\"
   }")
@@ -920,8 +920,8 @@ test_yaml_memory() {
 
   # Locate the dispatched session JSONL inside the worker. Real claude
   # writes to ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl. The
-  # encoded cwd for a `trello-worker` dispatch is derived from
-  # `<repo>/.danxbot/workspaces/trello-worker` — we don't need to
+  # encoded cwd for a `issue-worker` dispatch is derived from
+  # `<repo>/.danxbot/workspaces/issue-worker` — we don't need to
   # replicate the encoding logic; just grep every JSONL on the worker
   # for the dispatch tag.
   local container_name

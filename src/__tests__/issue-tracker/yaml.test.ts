@@ -302,6 +302,55 @@ describe("validateIssue", () => {
       expect(result.errors).toContain("comments[0] must be a mapping");
     }
   });
+
+  it("parseIssue throws IssueParseError when YAML source carries '→' in retro.action_items", () => {
+    const yaml = `schema_version: 1
+tracker: trello
+external_id: x1
+parent_id: null
+dispatch_id: null
+status: ToDo
+type: Feature
+title: T
+description: ""
+triaged:
+  timestamp: ""
+  status: ""
+  explain: ""
+ac: []
+phases: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_items:
+    - "broken → already-spawned"
+  commits: []
+`;
+    expect(() => parseIssue(yaml)).toThrow(/'→'/);
+  });
+
+  it("rejects retro.action_items entries containing the '→' separator", () => {
+    const result = validateIssue(
+      valid({
+        retro: {
+          good: "",
+          bad: "",
+          action_items: ["legit", "broken → already-spawned"],
+          commits: [],
+        },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) =>
+          e.includes("retro.action_items[1]") && e.includes("→"),
+        ),
+        `expected '→' rejection error; got ${JSON.stringify(result.errors)}`,
+      ).toBe(true);
+    }
+  });
 });
 
 describe("createEmptyIssue", () => {

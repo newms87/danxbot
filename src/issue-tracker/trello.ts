@@ -312,6 +312,29 @@ export class TrelloTracker implements IssueTracker {
     return { id: action.id, timestamp: action.date };
   }
 
+  async editComment(
+    externalId: string,
+    commentId: string,
+    text: string,
+  ): Promise<void> {
+    // Trello's edit-comment endpoint is card-scoped: PUT
+    // /cards/{cardId}/actions/{actionId}/comments. The action id alone
+    // (PUT /actions/{id}) also accepts the same body, but the
+    // card-scoped form fails fast (404) when the comment doesn't belong
+    // to the card — exactly the invariant the interface contract asks
+    // implementations to enforce.
+    const url = `${TRELLO_BASE}/cards/${externalId}/actions/${commentId}/comments?${this.auth()}`;
+    await this.requestVoid(
+      url,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      },
+      `PUT /cards/${externalId}/actions/${commentId}/comments`,
+    );
+  }
+
   async getComments(externalId: string): Promise<
     Array<{ id: string; author: string; timestamp: string; text: string }>
   > {

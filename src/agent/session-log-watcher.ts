@@ -62,8 +62,8 @@ export interface SessionLogWatcherOptions {
  * Derives the Claude Code session directory from a working directory path.
  * Claude Code stores sessions at ~/.claude/projects/<encoded-cwd>/, where
  * the encoded form replaces BOTH `/` and `.` with `-`. Verified empirically
- * against on-disk entries like `-home-newms-web-gpt-manager--danxbot-workspaces-trello-worker`
- * (from `/home/newms/web/gpt-manager/.danxbot/workspaces/trello-worker`) —
+ * against on-disk entries like `-home-newms-web-gpt-manager--danxbot-workspaces-issue-worker`
+ * (from `/home/newms/web/gpt-manager/.danxbot/workspaces/issue-worker`) —
  * the leading `.` of `.danxbot` becomes the second dash in the
  * `--danxbot` run.
  *

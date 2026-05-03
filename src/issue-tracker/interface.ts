@@ -133,6 +133,24 @@ export interface IssueTracker {
     text: string,
   ): Promise<{ id: string; timestamp: string }>;
 
+  /**
+   * Replace the body of an existing tracker comment in-place.
+   *
+   * Used by the worker-side retro renderer to keep ONE retro comment per
+   * card lifetime — when retro fields change between saves, we EDIT the
+   * existing comment rather than POST a duplicate. `commentId` is the
+   * tracker-native id returned by `addComment` / `getComments`.
+   *
+   * Implementations MUST preserve the comment's tracker-native author and
+   * timestamp; only the text is replaced. Throw if the comment does not
+   * exist on the given card.
+   */
+  editComment(
+    externalId: string,
+    commentId: string,
+    text: string,
+  ): Promise<void>;
+
   getComments(externalId: string): Promise<
     Array<{ id: string; author: string; timestamp: string; text: string }>
   >;

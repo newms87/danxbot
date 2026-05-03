@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-describe("trello-worker workspace shape (Phase 4 invariants)", () => {
+describe("issue-worker workspace shape (Phase 4 invariants)", () => {
   it(".mcp.json has no `trello` server entry and keeps `playwright`", () => {
     const path = resolve(HERE, ".mcp.json");
     const content = JSON.parse(readFileSync(path, "utf-8")) as {

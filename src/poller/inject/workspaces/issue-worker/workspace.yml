@@ -1,4 +1,4 @@
-name: trello-worker
+name: issue-worker
 description: Poller dispatch — danx-next, danx-ideate, danx-start, danx-triage
 required-placeholders:
   - DANXBOT_STOP_URL

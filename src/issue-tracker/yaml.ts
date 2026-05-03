@@ -479,6 +479,14 @@ function validateRetro(value: unknown): IssueRetro | string {
       if (typeof v.action_items[i] !== "string") {
         return `retro.action_items[${i}] must be a string`;
       }
+      // The worker's action-items bookkeeping comment uses `<title> → <id>`
+      // as its line format. Allowing `→` in titles would break the parser
+      // and silently lose track of which items have been spawned, so we
+      // reject the character at validate time instead of escaping. Pick
+      // a different separator in titles (e.g. `->` or `:`).
+      if ((v.action_items[i] as string).includes("→")) {
+        return `retro.action_items[${i}] must not contain '→' (reserved separator in the worker's bookkeeping comment)`;
+      }
     }
     actionItems = v.action_items as string[];
   }

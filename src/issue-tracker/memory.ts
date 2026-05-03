@@ -203,6 +203,23 @@ export class MemoryTracker implements IssueTracker {
     return { id, timestamp };
   }
 
+  async editComment(
+    externalId: string,
+    commentId: string,
+    text: string,
+  ): Promise<void> {
+    this.consumeWriteRejection();
+    const card = this.requireCard(externalId);
+    const found = card.comments.find((c) => c.id === commentId);
+    if (!found) {
+      throw new Error(
+        `Comment ${commentId} not found on card ${externalId}`,
+      );
+    }
+    found.text = text;
+    this.log("editComment", externalId, { commentId, text });
+  }
+
   async getComments(externalId: string): Promise<
     Array<{ id: string; author: string; timestamp: string; text: string }>
   > {

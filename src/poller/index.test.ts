@@ -276,6 +276,15 @@ vi.mock("node:fs", () => ({
   // from the module under test resolves. Returning `undefined` is fine.
   chmodSync: vi.fn(),
   statSync: (...args: unknown[]) => mockStatSync(...args),
+  // Phase 5 alias: `injectIssueWorkerAlias` symlinks the legacy
+  // `trello-worker` workspace name to the new `issue-worker`. The unit
+  // tests don't exercise the alias logic directly (covered by the rename
+  // commit's own assertions), so vi.fn() stubs are enough.
+  symlinkSync: vi.fn(),
+  readlinkSync: vi.fn().mockReturnValue(""),
+  lstatSync: vi.fn().mockImplementation(() => ({
+    isSymbolicLink: () => false,
+  })),
 }));
 
 import { poll, shutdown, start, syncRepoFiles, _resetForTesting } from "./index.js";
@@ -366,7 +375,7 @@ describe("poll", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("calls dispatch() with the trello-worker workspace and trello overlay when cards exist", async () => {
+  it("calls dispatch() with the issue-worker workspace and trello overlay when cards exist", async () => {
     mockFetchTodoCards.mockResolvedValue([{ id: "c1", name: "Card 1" }]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -376,12 +385,12 @@ describe("poll", () => {
         task: expect.any(String),
         repo: expect.objectContaining({ name: "test-repo" }),
         // Phase 3 invariant (workspace-dispatch epic, Trello `q5aFuINM`):
-        // the poller dispatches via the named `trello-worker` workspace.
+        // the poller dispatches via the named `issue-worker` workspace.
         // The MCP server set + allowed-tools live in
-        // `src/poller/inject/workspaces/trello-worker/`; the overlay
+        // `src/poller/inject/workspaces/issue-worker/`; the overlay
         // supplies the trello credentials the workspace's `.mcp.json`
         // substitutes into its env block.
-        workspace: "trello-worker",
+        workspace: "issue-worker",
         overlay: expect.objectContaining({
           DANXBOT_WORKER_PORT: String(MOCK_REPO_CONTEXT.workerPort),
           TRELLO_API_KEY: MOCK_REPO_CONTEXT.trello.apiKey,
@@ -420,16 +429,16 @@ describe("poll", () => {
       if (path.endsWith("tools.md")) return true;
       // The poller iterates `.danxbot/workspaces/<name>/` to know which
       // workspaces need per-repo files — the test fixture exposes a
-      // single `trello-worker` workspace.
+      // single `issue-worker` workspace.
       if (path.endsWith("/.danxbot/workspaces")) return true;
-      if (path.endsWith("/.danxbot/workspaces/trello-worker")) return true;
+      if (path.endsWith("/.danxbot/workspaces/issue-worker")) return true;
       return false;
     });
     mockReaddirSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return [];
       if (path.endsWith("/inject/rules")) return [];
       if (path.endsWith("/inject/tools")) return ["danx-helper.sh"];
-      if (path.endsWith("/.danxbot/workspaces")) return ["trello-worker"];
+      if (path.endsWith("/.danxbot/workspaces")) return ["issue-worker"];
       return [];
     });
     mockStatSync.mockReturnValue({ isDirectory: () => true });
@@ -445,18 +454,20 @@ describe("poll", () => {
     const allTouched = [...writtenPaths, ...copiedDests];
 
     const workspaceClaudePrefix =
-      "/test/repos/test-repo/.danxbot/workspaces/trello-worker/.claude/";
+      "/test/repos/test-repo/.danxbot/workspaces/issue-worker/.claude/";
     const repoRootClaudePrefix = "/test/repos/test-repo/.claude/";
     const singularWorkspacePrefix =
       "/test/repos/test-repo/.danxbot/workspace/";
 
     // Per-repo rendered files land in EACH plural workspace's `.claude/`.
+    // Phase 5 dropped `danx-trello-config.md` from this set — workspace
+    // skills moved off the Trello-list-id rule file (Phase 4 onward they
+    // use `danx_issue_save` / `danx_issue_create` MCP tools instead).
     const expectedWorkspaceArtifacts = [
       `${workspaceClaudePrefix}rules/danx-repo-config.md`,
       `${workspaceClaudePrefix}rules/danx-repo-overview.md`,
       `${workspaceClaudePrefix}rules/danx-repo-workflow.md`,
       `${workspaceClaudePrefix}rules/danx-tools.md`,
-      `${workspaceClaudePrefix}rules/danx-trello-config.md`,
     ];
     for (const expected of expectedWorkspaceArtifacts) {
       expect(allTouched).toContain(expected);
@@ -1550,7 +1561,7 @@ describe("poll — Docker mode (headless agent)", () => {
       expect.objectContaining({
         task: expect.stringContaining("/danx-next"),
         repo: expect.objectContaining({ name: "test-repo" }),
-        workspace: "trello-worker",
+        workspace: "issue-worker",
       }),
     );
   });
@@ -1691,7 +1702,7 @@ describe("poll — Docker mode (headless agent)", () => {
 
     const call = mockDispatch.mock.calls[0][0];
     expect(call.allowTools).toBeUndefined();
-    expect(call.workspace).toBe("trello-worker");
+    expect(call.workspace).toBe("issue-worker");
   });
 
   it("tags the dispatch with trigger=trello + the tracked card metadata", async () => {

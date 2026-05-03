@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { MemoryTracker } from "../../issue-tracker/memory.js";
-import { syncIssue } from "../../issue-tracker/sync.js";
+import {
+  ACTION_ITEMS_COMMENT_MARKER,
+  RETRO_COMMENT_MARKER,
+  isRetroNonEmpty,
+  parseActionItemsBookkeeping,
+  renderActionItemsBookkeeping,
+  renderRetroComment,
+  syncIssue,
+} from "../../issue-tracker/sync.js";
 import { DANXBOT_COMMENT_MARKER } from "../../poller/constants.js";
 import type { CreateCardInput, Issue } from "../../issue-tracker/interface.js";
 
@@ -360,5 +368,455 @@ describe("syncIssue", () => {
     expect(after.description).toBe("Local Desc");
     expect(after.status).toBe("Needs Help");
     expect(after.type).toBe("Bug");
+  });
+
+  // ---- Phase 5: worker-rendered retro comment ----
+
+  it("renders ONE retro comment on terminal-status save with both danxbot markers", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const fresh = await tracker.getCard(external_id);
+    const local: Issue = {
+      ...fresh,
+      status: "Done",
+      retro: { good: "shipped", bad: "hard", action_items: [], commits: [] },
+    };
+    tracker.clearRequestLog();
+
+    await syncIssue(tracker, local);
+
+    const comments = await tracker.getComments(external_id);
+    const retroOnly = comments.filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retroOnly).toHaveLength(1);
+    expect(retroOnly[0].text.startsWith(DANXBOT_COMMENT_MARKER + "\n")).toBe(
+      true,
+    );
+    expect(retroOnly[0].text).toContain("## Retro");
+    expect(retroOnly[0].text).toContain("**What went well:** shipped");
+    expect(retroOnly[0].text).toContain("**What went wrong:** hard");
+  });
+
+  it("retro renderer is a no-op on non-terminal status (In Progress / Needs Help)", async () => {
+    for (const status of ["In Progress", "Needs Help"] as const) {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(defaultCreate());
+      const local: Issue = {
+        ...(await tracker.getCard(external_id)),
+        status,
+        retro: { good: "g", bad: "b", action_items: ["x"], commits: ["c"] },
+      };
+      tracker.clearRequestLog();
+
+      await syncIssue(tracker, local);
+
+      const comments = await tracker.getComments(external_id);
+      const retroComments = comments.filter((c) =>
+        c.text.includes(RETRO_COMMENT_MARKER),
+      );
+      expect(
+        retroComments,
+        `expected zero retro comments at status=${status}`,
+      ).toHaveLength(0);
+    }
+  });
+
+  it("retro renderer is a no-op when retro is fully empty even on Done", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    };
+    tracker.clearRequestLog();
+
+    const result = await syncIssue(tracker, local);
+
+    expect(
+      tracker.getRequestLog().some((l) => l.method === "addComment"),
+    ).toBe(false);
+    expect(
+      tracker.getRequestLog().some((l) => l.method === "editComment"),
+    ).toBe(false);
+    // moveToStatus is allowed (status changed), so >=0 writes is fine — only
+    // retro paths must be silent.
+    expect(result.updatedLocal.comments).toHaveLength(0);
+  });
+
+  it("idempotent: re-sync with same retro produces zero retro writes", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: {
+        good: "g",
+        bad: "b",
+        action_items: ["fix x"],
+        commits: ["abc123"],
+      },
+    };
+
+    const first = await syncIssue(tracker, local);
+    // First sync wrote retro + moveToStatus.
+    expect(first.remoteWriteCount).toBeGreaterThan(0);
+    expect(first.updatedLocal.comments.some((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    )).toBe(true);
+
+    tracker.clearRequestLog();
+    const second = await syncIssue(tracker, first.updatedLocal);
+
+    expect(second.remoteWriteCount).toBe(0);
+    expect(
+      tracker.getRequestLog().some(
+        (l) => l.method === "addComment" || l.method === "editComment",
+      ),
+    ).toBe(false);
+  });
+
+  it("editing retro.good triggers editComment on the existing retro comment, NOT a new addComment", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "v1", bad: "b", action_items: [], commits: [] },
+    };
+    const first = await syncIssue(tracker, local);
+
+    const updated: Issue = {
+      ...first.updatedLocal,
+      retro: { ...first.updatedLocal.retro, good: "v2" },
+    };
+    tracker.clearRequestLog();
+    const second = await syncIssue(tracker, updated);
+
+    const log = tracker.getRequestLog();
+    expect(log.some((l) => l.method === "editComment")).toBe(true);
+    expect(log.some((l) => l.method === "addComment")).toBe(false);
+    expect(second.remoteWriteCount).toBe(1);
+
+    // Tracker now has exactly one retro comment, with the updated body.
+    const retros = (await tracker.getComments(external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retros).toHaveLength(1);
+    expect(retros[0].text).toContain("**What went well:** v2");
+  });
+
+  it("a user-authored comment that QUOTES `## Retro` (no danxbot marker) does NOT trip the legacy detector — fresh retro is still posted", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    // User pastes back a Phase-4 retro body in a discussion comment; no
+    // `<!-- danxbot -->` marker, no `<!-- danxbot-retro -->` marker.
+    // The legacy detector requires BOTH markers to suppress; this
+    // comment has neither so the worker MUST still post a fresh retro.
+    await tracker.addComment(
+      external_id,
+      "see this old card's wrap-up:\n\n## Retro\n\n**What went well:** quoted",
+    );
+
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "actual new retro", bad: "", action_items: [], commits: [] },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+
+    const allComments = await tracker.getComments(external_id);
+    const workerRendered = allComments.filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(workerRendered).toHaveLength(1);
+    expect(workerRendered[0].text).toContain("**What went well:** actual new retro");
+  });
+
+  it("legacy `## Retro` comment without our marker is NOT duplicated by the renderer", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    // Simulate Phase 4 behavior: agent manually appended a retro comment with
+    // the standard `<!-- danxbot -->` marker but NO `<!-- danxbot-retro -->`.
+    const legacyText = `${DANXBOT_COMMENT_MARKER}\n\n## Retro\n\n**What went well:** old\n`;
+    await tracker.addComment(external_id, legacyText);
+
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "new", bad: "", action_items: [], commits: [] },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+
+    const allComments = await tracker.getComments(external_id);
+    const retroish = allComments.filter((c) => c.text.includes("## Retro"));
+    // Exactly the legacy one — no duplicate worker-rendered comment.
+    expect(retroish).toHaveLength(1);
+    expect(retroish[0].text).toBe(legacyText);
+    expect(
+      tracker.getRequestLog().some((l) => l.method === "addComment"),
+    ).toBe(false);
+  });
+
+  it("isRetroNonEmpty is true if any single field is populated", () => {
+    expect(
+      isRetroNonEmpty({ good: "g", bad: "", action_items: [], commits: [] }),
+    ).toBe(true);
+    expect(
+      isRetroNonEmpty({ good: "", bad: "b", action_items: [], commits: [] }),
+    ).toBe(true);
+    expect(
+      isRetroNonEmpty({ good: "", bad: "", action_items: ["x"], commits: [] }),
+    ).toBe(true);
+    expect(
+      isRetroNonEmpty({ good: "", bad: "", action_items: [], commits: ["c"] }),
+    ).toBe(true);
+    expect(
+      isRetroNonEmpty({ good: "", bad: "", action_items: [], commits: [] }),
+    ).toBe(false);
+  });
+
+  // ---- Phase 5: worker-spawned action_items cards ----
+
+  it("spawns one tracker card per retro.action_items entry on Done", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: {
+        good: "g",
+        bad: "b",
+        action_items: ["Fix X", "Document Y"],
+        commits: [],
+      },
+    };
+    tracker.clearRequestLog();
+
+    await syncIssue(tracker, local);
+
+    const log = tracker.getRequestLog();
+    const spawnEntries = log.filter((l) => l.method === "addLinkedActionItemCard");
+    expect(spawnEntries).toHaveLength(2);
+    const titles = spawnEntries.map((e) => (e.details as { title: string }).title);
+    expect(titles).toEqual(["Fix X", "Document Y"]);
+
+    const bookkeepingComments = (await tracker.getComments(external_id)).filter(
+      (c) => c.text.includes(ACTION_ITEMS_COMMENT_MARKER),
+    );
+    expect(bookkeepingComments).toHaveLength(1);
+    const ids = spawnEntries.map(
+      (e) => (e.details as { external_id: string }).external_id,
+    );
+    expect(bookkeepingComments[0].text).toContain(`Fix X → ${ids[0]}`);
+    expect(bookkeepingComments[0].text).toContain(`Document Y → ${ids[1]}`);
+  });
+
+  it("idempotent: re-sync with same action_items spawns no new cards and edits no comment", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: {
+        good: "g",
+        bad: "",
+        action_items: ["A", "B"],
+        commits: [],
+      },
+    };
+
+    const first = await syncIssue(tracker, local);
+    expect(first.remoteWriteCount).toBeGreaterThan(0);
+
+    tracker.clearRequestLog();
+    const second = await syncIssue(tracker, first.updatedLocal);
+
+    expect(second.remoteWriteCount).toBe(0);
+    expect(
+      tracker.getRequestLog().some((l) => l.method === "addLinkedActionItemCard"),
+    ).toBe(false);
+    expect(
+      tracker.getRequestLog().some((l) => l.method === "editComment"),
+    ).toBe(false);
+  });
+
+  it("incremental: appending an action_item spawns ONLY the new title and edits the bookkeeping comment", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "g", bad: "", action_items: ["A"], commits: [] },
+    };
+    const first = await syncIssue(tracker, local);
+
+    const updated: Issue = {
+      ...first.updatedLocal,
+      retro: {
+        ...first.updatedLocal.retro,
+        action_items: ["A", "B"],
+      },
+    };
+    tracker.clearRequestLog();
+    const second = await syncIssue(tracker, updated);
+
+    const log = tracker.getRequestLog();
+    const spawns = log.filter((l) => l.method === "addLinkedActionItemCard");
+    expect(spawns).toHaveLength(1);
+    expect((spawns[0].details as { title: string }).title).toBe("B");
+    // Two editComment calls land here: one for the bookkeeping comment
+    // (new B → external_id row) and one for the retro comment itself
+    // (its **Action items:** bullet list now includes B).
+    const editCount = log.filter((l) => l.method === "editComment").length;
+    expect(editCount).toBe(2);
+    expect(second.remoteWriteCount).toBe(3); // 1 spawn + 2 edits
+  });
+
+  it("non-terminal status: action_items are NOT spawned even if populated", async () => {
+    for (const status of ["In Progress", "Needs Help", "ToDo"] as const) {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(defaultCreate());
+      const local: Issue = {
+        ...(await tracker.getCard(external_id)),
+        status,
+        retro: {
+          good: "",
+          bad: "",
+          action_items: ["A"],
+          commits: [],
+        },
+      };
+      tracker.clearRequestLog();
+      await syncIssue(tracker, local);
+      expect(
+        tracker
+          .getRequestLog()
+          .some((l) => l.method === "addLinkedActionItemCard"),
+        `expected zero spawns at status=${status}`,
+      ).toBe(false);
+    }
+  });
+
+  it("re-syncing after a combined first sync (retro + action_items + bookkeeping) yields zero remote writes", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: {
+        good: "g",
+        bad: "b",
+        action_items: ["A", "B"],
+        commits: ["abc123"],
+      },
+    };
+
+    const first = await syncIssue(tracker, local);
+    expect(first.remoteWriteCount).toBeGreaterThan(0);
+
+    tracker.clearRequestLog();
+    const second = await syncIssue(tracker, first.updatedLocal);
+    expect(second.remoteWriteCount).toBe(0);
+    expect(
+      tracker.getRequestLog().some(
+        (l) =>
+          l.method === "addComment" ||
+          l.method === "editComment" ||
+          l.method === "addLinkedActionItemCard",
+      ),
+    ).toBe(false);
+  });
+
+  it("renderActionItemsBookkeeping skips titles missing from the spawned map (silently — incomplete batch)", () => {
+    const titles = ["A", "B", "C"];
+    const partialSpawn = new Map([
+      ["A", "mem-1"],
+      // "B" missing — was scheduled but spawn failed mid-loop.
+      ["C", "mem-3"],
+    ]);
+    const text = renderActionItemsBookkeeping(titles, partialSpawn);
+    expect(text).toContain("- A → mem-1");
+    expect(text).toContain("- C → mem-3");
+    expect(text).not.toMatch(/- B\b/);
+  });
+
+  it("parseActionItemsBookkeeping throws on a bullet line missing the '→' separator", () => {
+    const text = `<!-- danxbot -->
+<!-- danxbot-action-items -->
+
+## Action Items spawned by Phase 5 retro
+
+- A → mem-1
+- malformed line without separator
+- C → mem-3`;
+    expect(() => parseActionItemsBookkeeping(text)).toThrow(
+      /Malformed action-items bookkeeping line/,
+    );
+  });
+
+  it("parseActionItemsBookkeeping throws on a bullet line with empty title or empty external_id", () => {
+    expect(() =>
+      parseActionItemsBookkeeping(
+        "<!-- danxbot-action-items -->\n\n-  → mem-1",
+      ),
+    ).toThrow(/Malformed/);
+    expect(() =>
+      parseActionItemsBookkeeping(
+        "<!-- danxbot-action-items -->\n\n- A → ",
+      ),
+    ).toThrow(/Malformed/);
+  });
+
+  it("renderActionItemsBookkeeping is byte-stable for the same inputs", () => {
+    const titles = ["A", "B"];
+    const map1 = new Map([
+      ["A", "mem-1"],
+      ["B", "mem-2"],
+    ]);
+    const map2 = new Map([
+      ["A", "mem-1"],
+      ["B", "mem-2"],
+    ]);
+    expect(renderActionItemsBookkeeping(titles, map1)).toBe(
+      renderActionItemsBookkeeping(titles, map2),
+    );
+  });
+
+  it("parseActionItemsBookkeeping round-trips its own output", () => {
+    const titles = ["Fix X", "Document Y"];
+    const spawned = new Map([
+      ["Fix X", "mem-1"],
+      ["Document Y", "mem-2"],
+    ]);
+    const text = renderActionItemsBookkeeping(titles, spawned);
+    const parsed = parseActionItemsBookkeeping(text);
+    expect(Array.from(parsed.entries())).toEqual([
+      ["Fix X", "mem-1"],
+      ["Document Y", "mem-2"],
+    ]);
+  });
+
+  it("renderRetroComment formats action_items as a bullet list when populated, 'Nothing' inline when empty", () => {
+    const populated = renderRetroComment({
+      good: "g",
+      bad: "b",
+      action_items: ["a1", "a2"],
+      commits: ["c1"],
+    });
+    expect(populated).toContain("**Action items:**\n- a1\n- a2");
+    expect(populated).toContain("**Commits:** c1");
+
+    const empty = renderRetroComment({
+      good: "g",
+      bad: "b",
+      action_items: [],
+      commits: [],
+    });
+    expect(empty).toContain("**Action items:** Nothing");
+    expect(empty).toContain("**Commits:** —");
   });
 });

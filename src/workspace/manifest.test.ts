@@ -6,7 +6,7 @@ import {
 
 describe("parseManifest", () => {
   it("parses a full manifest with all fields populated", () => {
-    const yaml = `name: trello-worker
+    const yaml = `name: issue-worker
 description: Poller dispatch shape
 required-placeholders:
   - DANXBOT_STOP_URL
@@ -21,7 +21,7 @@ required-gates:
 
     const manifest = parseManifest(yaml);
 
-    expect(manifest.name).toBe("trello-worker");
+    expect(manifest.name).toBe("issue-worker");
     expect(manifest.description).toBe("Poller dispatch shape");
     expect(manifest.requiredPlaceholders).toEqual([
       "DANXBOT_STOP_URL",
