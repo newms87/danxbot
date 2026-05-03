@@ -4,5 +4,5 @@ required-placeholders:
   - DANXBOT_STOP_URL
   - DANXBOT_WORKER_PORT
 required-gates:
-  - "repo.trelloEnabled = true"
+  - "settings.trelloPoller.enabled ≠ false"
   - "no CRITICAL_FAILURE flag"

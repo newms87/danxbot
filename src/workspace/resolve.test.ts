@@ -251,7 +251,7 @@ describe("resolveWorkspace", () => {
   });
 
   describe("gate validation", () => {
-    it("throws WorkspaceGateError when repo.trelloEnabled = true gate fails", () => {
+    it("throws WorkspaceGateError when settings.trelloPoller.enabled ≠ false gate fails (env default false, no override)", () => {
       const disabledRepo = makeRepoContext({
         localPath: repoDir,
         trelloEnabled: false,
@@ -276,7 +276,75 @@ describe("resolveWorkspace", () => {
           workspaceName: "test-workspace",
           overlay: goodOverlay(),
         }),
-      ).toThrow(/repo\.trelloEnabled = true/);
+      ).toThrow(/settings\.trelloPoller\.enabled/);
+    });
+
+    it("passes the trelloPoller gate when operator override is true even though env default is false", () => {
+      // Mirrors the Slack override semantics: operator flips
+      // overrides.trelloPoller.enabled to true on the Agents tab; the
+      // gate must honor that (matching the poller tick + dispatch
+      // enforcement which both go through isFeatureEnabled). Regression
+      // guard for the bug where the gate read repo.trelloEnabled
+      // directly and rejected dispatches the poller had already chosen
+      // to run.
+      const disabledRepo = makeRepoContext({
+        localPath: repoDir,
+        trelloEnabled: false,
+      });
+      writeFileSync(
+        resolve(repoDir, ".danxbot", "settings.json"),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            trelloPoller: { enabled: true },
+            dispatchApi: { enabled: null },
+            ideator: { enabled: null },
+          },
+          display: {},
+          meta: { updatedAt: "2026-04-24T00:00:00Z", updatedBy: "setup" },
+        }),
+      );
+      expect(() =>
+        capture(
+          resolveWorkspace({
+            repo: disabledRepo,
+            workspaceName: "test-workspace",
+            overlay: goodOverlay(),
+          }),
+        ),
+      ).not.toThrow();
+    });
+
+    it("fails the trelloPoller gate when operator override is false even though env default is true", () => {
+      // Symmetric to the slack override-false test below: the explicit
+      // off override must beat the env default in both directions.
+      writeFileSync(
+        resolve(repoDir, ".danxbot", "settings.json"),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            trelloPoller: { enabled: false },
+            dispatchApi: { enabled: null },
+            ideator: { enabled: null },
+          },
+          display: {},
+          meta: { updatedAt: "2026-04-24T00:00:00Z", updatedBy: "setup" },
+        }),
+      );
+      expect(() =>
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      ).toThrow(WorkspaceGateError);
+      expect(() =>
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      ).toThrow(/settings\.trelloPoller\.enabled/);
     });
 
     it("throws when the 'no CRITICAL_FAILURE flag' gate trips", () => {
@@ -739,7 +807,10 @@ description: "unterminated
       });
       // overlay is empty — would trigger PlaceholderError if overlay was
       // validated first. Gates must run first so the operator sees
-      // "trello disabled" not "missing TRELLO_API_KEY".
+      // "trelloPoller disabled" not "missing TRELLO_API_KEY". Fixture
+      // gate is `settings.trelloPoller.enabled ≠ false` and disabledRepo
+      // has env default false + no settings.json → envDefault=false →
+      // gate fails.
       expect(() =>
         resolveWorkspace({
           repo: disabledRepo,
@@ -771,7 +842,7 @@ description: "unterminated
 description: test
 required-placeholders: []
 required-gates:
-  - "repo.trelloEnabled=true"
+  - "settings.trelloPoller.enabled!=false"
 `,
       );
       expect(() =>

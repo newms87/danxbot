@@ -15,7 +15,7 @@ required-placeholders:
 optional-placeholders:
   - TRELLO_ENABLED_TOOLS
 required-gates:
-  - "repo.trelloEnabled = true"
+  - "settings.trelloPoller.enabled ≠ false"
   - "no CRITICAL_FAILURE flag"
 `;
 
@@ -30,7 +30,7 @@ required-gates:
     ]);
     expect(manifest.optionalPlaceholders).toEqual(["TRELLO_ENABLED_TOOLS"]);
     expect(manifest.requiredGates).toEqual([
-      "repo.trelloEnabled = true",
+      "settings.trelloPoller.enabled ≠ false",
       "no CRITICAL_FAILURE flag",
     ]);
   });

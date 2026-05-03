@@ -45,7 +45,7 @@
  * ## Gate registry
  *
  * Gate strings are free-form text in the manifest for readability
- * (`"repo.trelloEnabled = true"`, `"no CRITICAL_FAILURE flag"`). The
+ * (`"settings.trelloPoller.enabled ≠ false"`, `"no CRITICAL_FAILURE flag"`). The
  * resolver holds a hardcoded lookup from gate string to predicate and
  * throws `WorkspaceGateUnknownError` for anything not in the table. A
  * new gate == a new entry here + the workspaces that need it. Parsing a
@@ -153,15 +153,16 @@ const LEGACY_WORKSPACE_FILES: readonly string[] = ["allowed-tools.txt"];
 type GateEvaluator = (repo: RepoContext) => boolean;
 
 const GATE_REGISTRY: Readonly<Record<string, GateEvaluator>> = Object.freeze({
-  "repo.trelloEnabled = true": (repo) => repo.trelloEnabled === true,
   "no CRITICAL_FAILURE flag": (repo) => readFlag(repo.localPath) === null,
-  // Three-valued settings toggle: `overrides.slack.enabled === false` FAILS
-  // the gate; `true` passes; `null` defers to the env default
-  // (`ctx.slack.enabled`). `isFeatureEnabled` implements exactly that
-  // evaluation — see `src/settings-file.ts`. The gate string uses `settings`
-  // (not `overrides`) because operators read this from the workspace manifest
-  // and the dashboard labels the toggle as a settings-file field.
+  // Three-valued settings toggle: `overrides.<feature>.enabled === false`
+  // FAILS the gate; `true` passes; `null` defers to the env default. Both
+  // toggles route through `isFeatureEnabled` (see `src/settings-file.ts`)
+  // so the gate matches the same evaluation the Slack listener, poller
+  // tick, and `/api/launch` use at runtime — operator overrides are
+  // honored uniformly across enforcement paths.
   "settings.slack.enabled ≠ false": (repo) => isFeatureEnabled(repo, "slack"),
+  "settings.trelloPoller.enabled ≠ false": (repo) =>
+    isFeatureEnabled(repo, "trelloPoller"),
 });
 
 function workspaceRoot(repo: RepoContext, name: string): string {

@@ -4,3 +4,4 @@ features.md
 !.env.example
 settings.json
 .settings.lock
+issues/
