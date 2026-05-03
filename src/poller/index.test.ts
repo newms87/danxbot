@@ -262,6 +262,10 @@ const mockCopyFileSync = vi.fn();
 const mockUnlinkSync = vi.fn();
 const mockRmSync = vi.fn();
 const mockStatSync = vi.fn();
+const mockLstatSync = vi.fn().mockImplementation(() => ({
+  isSymbolicLink: () => false,
+}));
+const mockReadlinkSync = vi.fn().mockReturnValue("");
 vi.mock("node:fs", () => ({
   existsSync: (...args: unknown[]) => mockExistsSync(...args),
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
@@ -276,15 +280,14 @@ vi.mock("node:fs", () => ({
   // from the module under test resolves. Returning `undefined` is fine.
   chmodSync: vi.fn(),
   statSync: (...args: unknown[]) => mockStatSync(...args),
-  // Phase 5 alias: `injectIssueWorkerAlias` symlinks the legacy
-  // `trello-worker` workspace name to the new `issue-worker`. The unit
-  // tests don't exercise the alias logic directly (covered by the rename
-  // commit's own assertions), so vi.fn() stubs are enough.
+  // `symlinkSync` is exercised by `injectMcpServers`; we don't assert
+  // on the exact link shape there (covered by dedicated fs-based
+  // tests). `lstatSync` / `readlinkSync` ARE asserted on in the
+  // legacy-trello-worker scrub integration test below — they're named
+  // mocks so individual tests can override the default behavior.
   symlinkSync: vi.fn(),
-  readlinkSync: vi.fn().mockReturnValue(""),
-  lstatSync: vi.fn().mockImplementation(() => ({
-    isSymbolicLink: () => false,
-  })),
+  readlinkSync: (...args: unknown[]) => mockReadlinkSync(...args),
+  lstatSync: (...args: unknown[]) => mockLstatSync(...args),
 }));
 
 import { poll, shutdown, start, syncRepoFiles, _resetForTesting } from "./index.js";
@@ -772,6 +775,128 @@ language: node
     // No write attempts to a `.gitkeep` target — the file is silently skipped.
     const gitkeepWrites = writtenPaths.filter((p) => p.endsWith(".gitkeep"));
     expect(gitkeepWrites).toEqual([]);
+  });
+
+  it("injectDanxWorkspaces removes the legacy alias symlink at workspaces/trello-worker (Phase 5 cleanup wiring)", async () => {
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesTargetRoot =
+      "/test/repos/test-repo/.danxbot/workspaces";
+    const legacyPath = `${workspacesTargetRoot}/trello-worker`;
+    const currentPath = `${workspacesTargetRoot}/issue-worker`;
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.includes("inject/rules") || path.includes("inject/tools") ||
+          path.includes("inject/skills")) {
+        return true;
+      }
+      if (path.endsWith(workspacesSource) || path.includes(`${workspacesSource}/`)) {
+        return true;
+      }
+      if (path === workspacesTargetRoot || path.startsWith(`${workspacesTargetRoot}/`)) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return [];
+      if (path === workspacesTargetRoot) return [];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return { isDirectory: () => false };
+      const isDir =
+        path === workspacesTargetRoot || path.endsWith(workspacesSource);
+      return { isDirectory: () => isDir };
+    });
+
+    // The on-disk shape we're testing against: legacy path is a
+    // symlink resolving to the canonical sibling. Scrub must rmSync it.
+    mockLstatSync.mockImplementation((path: unknown) => ({
+      isSymbolicLink: () => path === legacyPath,
+    }));
+    mockReadlinkSync.mockImplementation((path: unknown) =>
+      path === legacyPath ? currentPath : "",
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const rmCalls = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmCalls).toContain(legacyPath);
+  });
+
+  it("injectDanxWorkspaces preserves a real directory at workspaces/trello-worker (operator-authored — never clobber)", async () => {
+    mockFetchTodoCards.mockResolvedValue([]);
+
+    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesTargetRoot =
+      "/test/repos/test-repo/.danxbot/workspaces";
+    const operatorPath = `${workspacesTargetRoot}/trello-worker`;
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.includes("inject/rules") || path.includes("inject/tools") ||
+          path.includes("inject/skills")) {
+        return true;
+      }
+      if (path.endsWith(workspacesSource) || path.includes(`${workspacesSource}/`)) {
+        return true;
+      }
+      if (path === workspacesTargetRoot || path.startsWith(`${workspacesTargetRoot}/`)) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return [];
+      // Workspaces target root contains an operator-authored real dir
+      // at the legacy name. The scrub must NOT rmSync it.
+      if (path === workspacesTargetRoot) return ["trello-worker"];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return { isDirectory: () => false };
+      const isDir =
+        path === workspacesTargetRoot ||
+        path === operatorPath ||
+        path.endsWith(workspacesSource);
+      return { isDirectory: () => isDir };
+    });
+
+    // Real directory shape: lstatSync reports not-a-symlink; the scrub
+    // exits before reaching readlinkSync.
+    mockLstatSync.mockImplementation(() => ({
+      isSymbolicLink: () => false,
+    }));
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const rmCalls = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmCalls).not.toContain(operatorPath);
   });
 
 });

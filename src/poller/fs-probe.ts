@@ -1,10 +1,10 @@
 /**
  * Tiny filesystem probes shared between poller modules.
  *
- * `isSymlink` / `isLinkOrFile` were duplicated in `index.ts` and
- * `issue-worker-alias.ts` — the same try/`lstatSync`/catch shape both
- * times. Extracted here so editing one set of semantics edits both
- * call-sites at once.
+ * `isSymlink` / `isLinkOrFile` are shared between `index.ts` and
+ * `legacy-trello-worker-scrub.ts` — the same try/`lstatSync`/catch
+ * shape both times. Extracted here so editing one set of semantics
+ * edits both call-sites at once.
  *
  * Both helpers swallow `ENOENT` deliberately (returning `false`) — the
  * caller's question is "does the path exist as a link/file/dir right

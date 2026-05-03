@@ -37,7 +37,7 @@ import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
-import { injectIssueWorkerAlias } from "./issue-worker-alias.js";
+import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { isLinkOrFile, isSymlink } from "./fs-probe.js";
 import {
   fetchTodoCards,
@@ -569,23 +569,13 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
     );
   }
 
-  // Phase 5 of tracker-agnostic-agents (Trello OWQdETAI): the old
-  // `trello-worker` workspace was renamed to `issue-worker`. Existing
-  // dispatches (live `/api/launch` callers, in-flight Slack agents,
-  // hardcoded Make targets) still reference the old name. Drop a
-  // symlink alias `<repo>/.danxbot/workspaces/trello-worker → issue-worker`
-  // for one release cycle so they keep resolving.
-  //
-  // CRITICAL: only create the symlink when the old path doesn't already
-  // exist as a populated directory. A connected repo could have authored
-  // its own `trello-worker/` workspace (precedent: gpt-manager's
-  // schema-builder/) and replacing it with a symlink would silently
-  // shadow that work. Idempotent — existing correct symlink is left
-  // alone; absent or stray entry is replaced.
-  //
-  // Drop the alias one release after Phase 5 ships — a follow-up Action
-  // Items card tracks the cleanup.
-  injectIssueWorkerAlias(workspacesTargetDir);
+  // Phase 5 cleanup (Trello 69f76e8d069eb71dd315d363): the migration
+  // window for the legacy `trello-worker` symlink has closed. Remove
+  // any leftover symlink so the workspace listing reflects only the
+  // canonical name. Real directories at that path are preserved
+  // (operator-authored workspaces, e.g. gpt-manager's schema-builder
+  // sibling pattern). See `legacy-trello-worker-scrub.ts`.
+  scrubLegacyTrelloWorkerSymlink(workspacesTargetDir);
 
   // Symlink mcp-servers/ into EVERY workspace present at target, including
   // repo-authored workspaces (e.g. gpt-manager's schema-builder) that
