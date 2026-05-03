@@ -34,6 +34,14 @@
  *                so the test does not have to learn the per-dispatch URL up
  *                front. Summary text comes from FAKE_CLAUDE_CRITICAL_SUMMARY
  *                (default: "MCP Trello tools failed to load").
+ *     - "yaml-lifecycle": Drives the Phase 4 tracker-agnostic flow. Reads
+ *                the YAML at FAKE_CLAUDE_YAML_PATH, flips status ToDo →
+ *                In Progress, calls danx_issue_save (POST to
+ *                DANXBOT_ISSUE_SAVE_URL from --mcp-config), edits the
+ *                YAML to the final state (status, ac all checked, retro),
+ *                calls danx_issue_save again, then danxbot_complete via
+ *                DANXBOT_STOP_URL. NO mcp__trello__* entries written —
+ *                that's the structural assertion the test makes.
  *     - "complete-only": Like "happy" but POSTs {status, summary} to
  *                DANXBOT_STOP_URL via the danxbot_complete shape (FROM
  *                --mcp-config) instead of just exiting. Used by the
@@ -59,7 +67,7 @@
  *                              is the failure-injection path).
  */
 
-import { mkdirSync, appendFileSync, readFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -86,6 +94,16 @@ const prompt = promptIdx >= 0 && promptIdx + 1 < args.length ? args[promptIdx + 
  * through the dispatch core at all).
  */
 function readStopUrlFromMcpConfig(): string | undefined {
+  return readMcpConfigEnv("DANXBOT_STOP_URL");
+}
+
+/**
+ * Generic reader for any DANXBOT_*_URL value the dispatch core injects
+ * into mcpServers.danxbot.env via --mcp-config. Supports the yaml-lifecycle
+ * scenario reading DANXBOT_ISSUE_SAVE_URL the same way the real
+ * danxbot MCP server does.
+ */
+function readMcpConfigEnv(key: string): string | undefined {
   const cfgIdx = args.indexOf("--mcp-config");
   if (cfgIdx < 0 || cfgIdx + 1 >= args.length) return undefined;
   const cfgPath = args[cfgIdx + 1];
@@ -94,7 +112,7 @@ function readStopUrlFromMcpConfig(): string | undefined {
     const parsed = JSON.parse(raw) as {
       mcpServers?: { danxbot?: { env?: Record<string, string> } };
     };
-    const url = parsed.mcpServers?.danxbot?.env?.DANXBOT_STOP_URL;
+    const url = parsed.mcpServers?.danxbot?.env?.[key];
     return typeof url === "string" && url ? url : undefined;
   } catch {
     return undefined;
@@ -397,6 +415,182 @@ async function runSlackScenario(): Promise<void> {
   await sleep(lingerMs);
 }
 
+/**
+ * Drive the YAML-driven Phase 4 lifecycle. The agent (in real life) edits
+ * `<repo>/.danxbot/issues/open/<external_id>.yml`, calls `danx_issue_save`,
+ * then `danxbot_complete`. fake-claude does the same — but uses ONLY
+ * danxbot infrastructure URLs (issue-save, stop). Zero `mcp__trello__*`
+ * entries are written to the JSONL — that's the structural assertion this
+ * scenario backs.
+ *
+ * Required env:
+ *   FAKE_CLAUDE_YAML_PATH       — Absolute path to the YAML to mutate.
+ *   FAKE_CLAUDE_EXTERNAL_ID     — The id passed to `danx_issue_save`.
+ *
+ * Optional env:
+ *   FAKE_CLAUDE_YAML_FINAL_STATUS — `Done` (default), `Needs Help`, or
+ *                                   `Cancelled`. Drives the final flip
+ *                                   and AC check-off behaviour.
+ *   FAKE_CLAUDE_YAML_RETRO_GOOD / _BAD — retro fields written into the
+ *                                       final YAML state.
+ */
+async function runYamlLifecycleScenario(): Promise<void> {
+  const issueSaveUrl =
+    process.env.DANXBOT_ISSUE_SAVE_URL || readMcpConfigEnv("DANXBOT_ISSUE_SAVE_URL");
+  const stopUrl =
+    process.env.DANXBOT_STOP_URL || readStopUrlFromMcpConfig();
+  const yamlPath = process.env.FAKE_CLAUDE_YAML_PATH;
+  const externalId = process.env.FAKE_CLAUDE_EXTERNAL_ID;
+  const finalStatus = process.env.FAKE_CLAUDE_YAML_FINAL_STATUS ?? "Done";
+  const retroGood =
+    process.env.FAKE_CLAUDE_YAML_RETRO_GOOD ?? "Test ran cleanly.";
+  const retroBad =
+    process.env.FAKE_CLAUDE_YAML_RETRO_BAD ?? "Nothing.";
+
+  if (!issueSaveUrl || !stopUrl || !yamlPath || !externalId) {
+    process.stderr.write(
+      "fake-claude yaml-lifecycle scenario requires DANXBOT_ISSUE_SAVE_URL, " +
+        "DANXBOT_STOP_URL, FAKE_CLAUDE_YAML_PATH, FAKE_CLAUDE_EXTERNAL_ID\n",
+    );
+    process.exit(1);
+  }
+
+  const editAndSave = async (mutate: (yaml: string) => string, toolUseId: string): Promise<void> => {
+    const before = readFileSync(yamlPath, "utf-8");
+    const after = mutate(before);
+    writeFileSync(yamlPath, after);
+
+    writeEntry({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4-7",
+        content: [
+          {
+            type: "tool_use",
+            id: toolUseId,
+            name: "Edit",
+            input: { file_path: yamlPath },
+          },
+        ],
+        usage: { input_tokens: 50, output_tokens: 10 },
+      },
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    writeEntry({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: toolUseId,
+            content: "ok",
+            is_error: false,
+          },
+        ],
+      },
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+
+    const saveToolUseId = `${toolUseId}_save`;
+    writeEntry({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4-7",
+        content: [
+          {
+            type: "tool_use",
+            id: saveToolUseId,
+            name: "mcp__danxbot__danx_issue_save",
+            input: { external_id: externalId },
+          },
+        ],
+        usage: { input_tokens: 60, output_tokens: 15 },
+      },
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+
+    const res = await fetch(issueSaveUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ external_id: externalId }),
+    });
+    const body = await res.text();
+
+    writeEntry({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: saveToolUseId,
+            content: body,
+            is_error: !res.ok,
+          },
+        ],
+      },
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+
+    await sleep(writeDelayMs);
+  };
+
+  // 1. Flip status (ToDo OR Needs Help) → In Progress.
+  //
+  // The `^status: ` anchor relies on `serializeIssue`'s canonical key
+  // order placing the top-level `status` field before the nested
+  // `triaged.status` (which is indented two spaces and would not match
+  // the multiline-mode line-start anchor). Verified against
+  // `src/issue-tracker/yaml.ts#serializeIssue`. If a future schema
+  // refactor reorders keys or changes indentation, switch to a YAML
+  // round-trip via `parseIssue` + `serializeIssue` here.
+  await editAndSave(
+    (yaml) => yaml.replace(/^status: .*/m, "status: In Progress"),
+    "tool_yaml_claim",
+  );
+
+  // 2. Do "implementation work". Apply the final state in one edit:
+  //    - status → finalStatus
+  //    - all ac items → checked: true (only when moving to Done)
+  //    - retro.good / retro.bad populated (`JSON.stringify` produces
+  //      a quoted YAML string, which `parseIssue` accepts the same as
+  //      the unquoted form `serializeIssue` emits canonically)
+  await editAndSave((yaml) => {
+    let next = yaml.replace(/^status: .*/m, `status: ${finalStatus}`);
+    if (finalStatus === "Done") {
+      next = next.replace(/checked: false/g, "checked: true");
+    }
+    next = next.replace(/^  good: .*/m, `  good: ${JSON.stringify(retroGood)}`);
+    next = next.replace(/^  bad: .*/m, `  bad: ${JSON.stringify(retroBad)}`);
+    return next;
+  }, "tool_yaml_finalize");
+
+  // 3. Signal completion.
+  await postJson(stopUrl, {
+    status: finalStatus === "Cancelled" ? "failed" : "completed",
+    summary: `YAML lifecycle: ${externalId} → ${finalStatus}`,
+  });
+
+  // Result entry — session complete.
+  writeEntry({
+    type: "result",
+    subtype: "success",
+    cost_usd: 0.0,
+    num_turns: 3,
+    duration_ms: 200,
+    duration_api_ms: 100,
+    is_error: false,
+    result: `YAML lifecycle complete: ${externalId} → ${finalStatus}`,
+    timestamp: new Date().toISOString(),
+    sessionId,
+  });
+
+  await sleep(lingerMs);
+}
+
 async function runScenario(): Promise<void> {
   const now = new Date().toISOString();
 
@@ -427,6 +621,11 @@ async function runScenario(): Promise<void> {
 
   if (scenario === "complete-only") {
     await runCompleteOnlyScenario();
+    return;
+  }
+
+  if (scenario === "yaml-lifecycle") {
+    await runYamlLifecycleScenario();
     return;
   }
 

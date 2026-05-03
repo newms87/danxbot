@@ -10,7 +10,7 @@
 #
 # Options:
 #   --worker-port PORT   Worker port (default: 5561)
-#   --test NAME          Run a single test (health, dispatch, heartbeat, cancel, error, poller, cleanup)
+#   --test NAME          Run a single test (health, dispatch, heartbeat, cancel, error, poller, yaml-memory, cleanup)
 #   --host-mode          Include host-mode-only tests (stall detection)
 #   --api-token TOKEN    API token for dispatch requests (default: "system-test-token")
 
@@ -861,6 +861,118 @@ _poller_clear_pickup_prefix() {
   ' "$settings_file" 2>/dev/null || true
 }
 
+test_yaml_memory() {
+  log_header "test-system-yaml-memory"
+  local start_time=$SECONDS
+
+  # Phase 4 (tracker-agnostic-agents) AC #6 verification.
+  #
+  # Purpose: end-to-end assertion that an agent dispatched into the
+  # `trello-worker` workspace makes ZERO `mcp__trello__*` tool calls — the
+  # structural guarantee Phase 4 delivered by removing the trello server
+  # entry from `src/poller/inject/workspaces/trello-worker/.mcp.json`.
+  #
+  # Note on AC scope: the AC also asks for a "full card lifecycle vs
+  # MemoryTracker" driven by `make test-system`. The poller still calls
+  # Trello-direct `fetchTodoCards` (Phase 5 work), so a poller-driven
+  # MemoryTracker lifecycle is not yet wireable at Layer 3. The
+  # equivalent agent-side YAML round-trip is covered deterministically by
+  # `src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts`
+  # (Layer 1/2). This Layer 3 scenario verifies the property that depends
+  # on real claude + a real worker: the dispatched session JSONL contains
+  # no `mcp__trello__*` entries.
+  #
+  # Cost: 1 cheap dispatch (~$0.05). Worker need NOT be in DANXBOT_TRACKER
+  # =memory mode — the assertion is structural (workspace MCP shape), not
+  # dependent on the tracker backend.
+
+  # Trigger a minimal dispatch in the trello-worker workspace. The task
+  # is intentionally trivial — the agent is allowed to do anything; we
+  # only assert on what's NOT in the JSONL.
+  local launch_response
+  launch_response=$(http_post "${WORKER_URL}/api/launch" "{
+    \"workspace\": \"trello-worker\",
+    \"task\": \"Reply with the single word OK and call danxbot_complete with status completed and summary OK. Do not perform any other tool calls.\",
+    \"api_token\": \"${API_TOKEN}\"
+  }")
+
+  local job_id
+  job_id=$(json_field "$launch_response" "job_id")
+
+  if [[ -z "$job_id" ]]; then
+    fail "Launch failed: $launch_response"
+    return
+  fi
+  pass "Job launched (id: $job_id)"
+
+  log_info "Polling status (timeout: 120s)..."
+  local final_response final_status
+  if ! final_response=$(poll_status "$job_id" 120 2); then
+    fail "Job did not complete within 120s"
+    return
+  fi
+  final_status=$(json_field "$final_response" "status")
+  if [[ "$final_status" != "completed" ]]; then
+    fail "Status is '$final_status' (expected completed)"
+    return
+  fi
+  pass "Status is completed"
+
+  # Locate the dispatched session JSONL inside the worker. Real claude
+  # writes to ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl. The
+  # encoded cwd for a `trello-worker` dispatch is derived from
+  # `<repo>/.danxbot/workspaces/trello-worker` — we don't need to
+  # replicate the encoding logic; just grep every JSONL on the worker
+  # for the dispatch tag.
+  local container_name
+  container_name=$(docker ps --filter "publish=${WORKER_PORT}" --format "{{.Names}}" 2>/dev/null | head -1)
+
+  local jsonl_content
+  if [[ -n "$container_name" ]]; then
+    # `/home/danxbot/.claude/projects` matches the danxbot user inside
+    # the worker image (Dockerfile creates the danxbot user with that
+    # home dir). If a future image change moves the home dir, this find
+    # returns empty and the assertion below fails loud — a deliberate
+    # canary so the test catches the path drift instead of silently
+    # asserting against an empty string.
+    jsonl_content=$(docker exec "$container_name" sh -c "
+      for f in \$(find /home/danxbot/.claude/projects -name '*.jsonl' 2>/dev/null); do
+        if grep -q 'danxbot-dispatch:${job_id}' \"\$f\" 2>/dev/null; then
+          cat \"\$f\"
+          break
+        fi
+      done
+    " 2>/dev/null)
+  else
+    # Host-mode worker — JSONL on the same filesystem as the test runner.
+    local matched_file
+    matched_file=$(find "$HOME/.claude/projects" -name '*.jsonl' -exec grep -l "danxbot-dispatch:${job_id}" {} \; 2>/dev/null | head -1)
+    if [[ -n "$matched_file" ]]; then
+      jsonl_content=$(cat "$matched_file" 2>/dev/null)
+    fi
+  fi
+
+  if [[ -z "$jsonl_content" ]]; then
+    fail "Could not locate dispatched session JSONL for job ${job_id}"
+    return
+  fi
+  pass "Located session JSONL"
+
+  # Assert: no mcp__trello__ tool calls anywhere in the JSONL. A literal
+  # substring check is enough — the tool name appears verbatim in the
+  # `name` field of every assistant tool_use entry.
+  if echo "$jsonl_content" | grep -q 'mcp__trello__'; then
+    local hit_count
+    hit_count=$(echo "$jsonl_content" | grep -c 'mcp__trello__')
+    fail "Session JSONL contains ${hit_count} mcp__trello__ reference(s) — workspace .mcp.json regression?"
+    echo "$jsonl_content" | grep 'mcp__trello__' | head -3
+    return
+  fi
+  pass "Zero mcp__trello__ tool calls in session JSONL"
+
+  log_info "Completed in $((SECONDS - start_time))s"
+}
+
 test_cleanup() {
   log_header "test-system-cleanup"
 
@@ -918,14 +1030,15 @@ main() {
 
   if [[ -n "$SINGLE_TEST" ]]; then
     case "$SINGLE_TEST" in
-      health)    test_health ;;
-      dispatch)  test_dispatch ;;
-      heartbeat) test_heartbeat ;;
-      cancel)    test_cancel ;;
-      error)     test_error ;;
-      stall)     test_stall ;;
-      poller)    test_poller ;;
-      cleanup)   test_cleanup ;;
+      health)      test_health ;;
+      dispatch)    test_dispatch ;;
+      heartbeat)   test_heartbeat ;;
+      cancel)      test_cancel ;;
+      error)       test_error ;;
+      stall)       test_stall ;;
+      poller)      test_poller ;;
+      yaml-memory) test_yaml_memory ;;
+      cleanup)     test_cleanup ;;
       *) log "${RED}Unknown test: $SINGLE_TEST${NC}"; exit 1 ;;
     esac
   else
@@ -936,6 +1049,7 @@ main() {
     test_error
     test_stall
     test_poller
+    test_yaml_memory
     test_cleanup
   fi
 

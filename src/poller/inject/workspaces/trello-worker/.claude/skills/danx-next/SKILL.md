@@ -5,216 +5,257 @@ description: Pull the top card from ToDo and run the full autonomous card proces
 
 # Danx Next Card
 
-You are processing ONE card from the ToDo list. You are the orchestrator. Do not delegate workflow steps to subagents.
+You process ONE card. You are the orchestrator — do not delegate workflow steps to subagents (except Step 5 quality gates and Step 4 batch-edits).
+
+The dispatch prompt told you the YAML path:
+
+```
+Edit <repo>/.danxbot/issues/open/<external_id>.yml.
+Call danx_issue_save({external_id: "<id>"}) when done.
+```
+
+That YAML is the source of truth for the card. The poller pre-hydrated it from the tracker before this dispatch ran. You read, edit, and save the YAML — you do NOT make tracker calls. The worker pushes your changes to the tracker asynchronously.
 
 ---
 
-## HARD RULES — read these fully before any tool call
+## YAML Schema (read this once)
 
-### 1. The pickup sequence is mandatory and comes FIRST.
+| Field | Type | Notes |
+|---|---|---|
+| `schema_version` | `1` | Never change. |
+| `tracker` | string | Don't change. |
+| `external_id` | string | The id you save with. Don't change. |
+| `parent_id` | string \| null | Set on phase cards (epic's external_id). |
+| `dispatch_id` | string \| null | Poller-managed. Don't touch. |
+| `status` | `Review` \| `ToDo` \| `In Progress` \| `Needs Help` \| `Done` \| `Cancelled` | Editing this is how you move the card across lists. |
+| `type` | `Bug` \| `Feature` \| `Epic` | Required label. |
+| `title` | string | Card name. |
+| `description` | string | Full markdown body. |
+| `triaged` | `{timestamp, status, explain}` | Triage agent owns this. Leave alone. |
+| `ac` | `[{check_item_id, title, checked}]` | Acceptance Criteria. Empty `check_item_id` on new items — tracker assigns. |
+| `phases` | `[{check_item_id, title, status, notes}]` | `status`: `Pending` \| `Complete` \| `Blocked`. |
+| `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
+| `retro` | `{good, bad, action_items[], commits[]}` | Fill on Done / Needs Help. |
 
-Before you Read, Write, Edit, Grep, Glob, Bash, or Task ANY file or command (other than the initial prompt.md that Claude Code reads automatically), you MUST call these four Trello MCP tools, in this exact order, with the parent agent (NOT a subagent):
+**Save semantics:** `danx_issue_save({external_id})` validates the YAML synchronously and returns `{saved: true}` or `{saved: false, errors}`. Tracker push runs detached — tracker errors NEVER appear in the tool result. When `status` is `Done` or `Cancelled`, the worker moves the file `open/` → `closed/` as part of save. Save after every meaningful edit.
 
-1. **`mcp__trello__get_cards_by_list_id`** — list id = the ToDo list id from `.claude/rules/danx-trello-config.md`. Result: the array of cards in ToDo. The top card (first element) is the one you will work on. Save its `id`, `name`, and `idLabels`.
-
-2. **`mcp__trello__move_card`** — move the top card to the In Progress list.
-   - `cardId`: the card's id
-   - `listId`: In Progress list id from `.claude/rules/danx-trello-config.md`
-   - `position`: `"top"`
-   - `boardId`: board id from `.claude/rules/danx-trello-config.md`
-
-   **DO NOT use `mcp__trello__update_card_details` to move the card. That tool updates name/description/labels only — passing a `listId` to it does nothing. Only `move_card` moves a card between lists.**
-
-3. **`mcp__trello__update_card_details`** — apply the `Bug` or `Feature` label if the card doesn't already have one. Skip this call if the card already carries `Bug`, `Feature`, or `Epic`. Use this tool ONLY for labels/name/description updates, never for list moves.
-
-4. **`mcp__trello__create_checklist`** + **`mcp__trello__add_checklist_item`** × 6 — create a `Progress` checklist on the card with items `Planning`, `Tests Written`, `Implementation`, `Tests Pass`, `Code Review`, `Committed`. Save every returned `checkItemId` so you can mark them complete later. Skip if a `Progress` checklist already exists.
-
-**Only after all four succeed may you proceed to read the card's description, comments, or acceptance criteria.**
-
-### 2. Do not delegate the pickup to a subagent.
-
-You will see `Agent` (alias `Task`) as an available tool. **Do not use it for Steps 1–3 of the workflow.** MCP calls MUST come from the parent agent you are reading this in. Subagents do not have the Trello MCP tools configured and will fail or do the wrong thing. Reserve subagents for Step 5 quality gates (`test-reviewer`, `code-reviewer`) and Step 4 `batch-editor` (only for large repetitive edits).
-
-### 3. Do not skip Step 1 because the card "looks simple" or "you already understand it from the list fetch."
-
-The single observed failure mode for this skill is the agent reading the card name in `get_cards_by_list_id`, thinking "I know what to do," and jumping to `Read`/`Write`/`Edit` without moving the card. This leaves the card stuck in ToDo and invisible to other agents, humans, and the dashboard. **The pickup is not decoration. It is how you claim the card.** Without the move, another poller tick could dispatch a second agent on the same card.
-
-### 4. Compliance self-check before every non-Trello tool call
-
-Before any `Read`, `Write`, `Edit`, `Grep`, `Glob`, `Bash`, `Agent`, or `TodoWrite` call, ask:
-
-> "Have I called `mcp__trello__move_card` successfully on the card I picked up?"
-
-If no, **your next tool call must be one of `mcp__trello__get_cards_by_list_id`, `mcp__trello__move_card`, `mcp__trello__update_card_details`, `mcp__trello__create_checklist`, `mcp__trello__add_checklist_item`.** Anything else is a skill violation.
+**Auto-sync:** `danxbot_complete` triggers a final auto-sync as a safety net, so a missed save before completion still pushes. Prefer explicit saves anyway — they validate earlier.
 
 ---
 
-## Steps (top-level orchestration)
+## Top-Level Flow
 
-1. Execute Step 1 (Pick Up Card) below.
-2. If `get_cards_by_list_id` returned an empty list, report "No cards to process" and jump to Step 11 (signal completion).
-3. Run the Card Processing Workflow steps 2–8 in order.
-4. Call `danxbot_complete` (Step 11) as the very last action.
+1. Read the YAML the dispatch prompt named.
+2. Plan (Step 2).
+3. Evaluate scope; epic-split if needed (Step 3).
+4. Implement TDD (Step 4).
+5. Quality gates (Step 5).
+6. Verify ACs (Step 6).
+7. Commit (Step 7).
+8. Definition-of-Done gate (Step 8).
+9. Move to Done (Step 9) OR Needs Help (Step 10).
+10. `danx_issue_save({external_id})`.
+11. `danxbot_complete` (Step 11).
 
-## Report (at the end)
-
-- Card title and outcome (completed / failed / needs-help).
-- What was implemented (one short paragraph).
-- Any issues encountered.
+Config references: `.claude/rules/danx-repo-config.md` for repo commands. Never hardcode IDs.
 
 ---
 
-## Card Processing Workflow
+## Step 1 — Read the YAML
 
-Config references: `.claude/rules/danx-trello-config.md` (Trello IDs), `.claude/rules/danx-repo-config.md` (repo commands). Never hardcode Trello IDs. Every card MUST have a label (Bug or Feature).
+`Read <repo>/.danxbot/issues/open/<external_id>.yml`. The dispatch prompt has the absolute path.
 
-### Step 1 — Pick Up Card (MANDATORY FIRST — see HARD RULES above)
+The YAML carries `status: ToDo` at this point — the poller picked it up and hydrated it. Your first edit is to flip `status: ToDo` → `status: In Progress` and call `danx_issue_save`. That's how you "claim" the card — the worker syncs the tracker move to In Progress for you.
 
-The four MCP calls from HARD RULE 1. Nothing else happens before these succeed.
+If the YAML's `status` is already `In Progress`, treat this as resumption — skip the flip + save and proceed.
 
-**Failure handling for Step 1:**
-- If any Trello call fails, retry once with identical arguments.
-- If still failing, call `mcp__trello__update_card_details` to apply the `Needs Help` label, `mcp__trello__add_comment` to describe what went wrong, `mcp__trello__move_card` to move the card to the `Needs Help` list (position: `"top"`), then jump to Step 11 with `danxbot_complete` `status: "failed"`.
+If the YAML doesn't exist or fails to parse, signal `danxbot_complete({status: "critical_failure"})` per `.claude/rules/danx-halt-flag.md` — the poller is broken if it dispatched without a YAML.
 
-### Step 2 — Plan
+---
 
-1. `mcp__trello__get_card_comments` — read ALL comments on the card.
-2. `mcp__trello__get_acceptance_criteria` — read ALL acceptance criteria (save the checkItemIds).
-3. **Bug cards:** investigate root cause with `Read`/`Grep`/`Bash` before proposing a fix.
-4. **Needs Help short-circuit:** if the card requires human intervention (Slack / Trello settings / external config / credentials), apply `Needs Help` label, add a `<!-- danxbot -->` comment explaining what's needed, move to Needs Help list, jump to Step 11.
-5. Design the approach in your head; no code yet.
-6. Invoke the `/wow` skill to reload Ways of Working.
-7. `mcp__trello__update_checklist_item` — mark `Planning` complete in the Progress checklist (use the saved checkItemId).
+## Step 2 — Plan
 
-### Step 3 — Evaluate Scope
+1. Read the full `description`, all `comments[]`, all `ac[]` titles, and any existing `phases[]`.
+2. **Bug cards (`type: Bug`):** investigate root cause via `Read` / `Grep` / `Bash` before designing the fix.
+3. **Needs Help short-circuit:** if completing the card requires human intervention (Slack / Trello settings / external config / credentials), jump to Step 10.
+4. Design the approach in your head. No code yet.
+5. Invoke the `/wow` skill to reload Ways of Working.
+
+---
+
+## Step 3 — Evaluate Scope (Epic Split)
 
 If the card is 3+ implementation phases, spans different domains, or will exceed ~500 lines: split into an epic.
 
-1. `mcp__trello__update_card_details` — change the parent's label to `Epic`.
-2. `mcp__trello__create_checklist` — name `"Phases"`.
-3. `mcp__trello__add_checklist_item` × N — one item per phase.
-4. `mcp__trello__add_card_to_list` × N — one phase card per item, in In Progress list, position `"top"`, title `Epic Title > Phase N: Description`, each with its own description + acceptance criteria + Bug/Feature label.
-5. `mcp__trello__add_comment` on the epic summarizing the split and linking the phase cards.
-6. `mcp__trello__move_card` — epic to Done, position `"top"`.
-7. Restart this workflow at Step 1 using the first phase card.
+1. Edit the parent YAML: set `type: Epic`. Keep `status: In Progress` — the epic stays open while phases work. Append a comment summarizing the split (no `id` field). Save.
+2. For each phase, write a draft YAML at `<repo>/.danxbot/issues/open/<slug>.yml` (filename can be the kebab-case slug; `.yml` suffix optional in the create call — both forms accepted) with every required field populated. Use this template (`<DRAFT_TEMPLATE>`):
+   - `schema_version: 1`
+   - `tracker: <same as parent>`
+   - `external_id: ""` (tracker assigns)
+   - `parent_id: <epic external_id>`
+   - `dispatch_id: null`
+   - `status: "ToDo"`
+   - `type: "Bug"` or `"Feature"` (the phase's own kind, not `Epic`)
+   - `title: "<Epic Title> > Phase N: Description"`
+   - `description: "<full body>"`
+   - `triaged: {timestamp: "", status: "", explain: ""}`
+   - `ac: [{check_item_id: "", title: "...", checked: false}, ...]` (every required field present, `check_item_id: ""` until tracker assigns)
+   - `phases: []` (or seeded items with `check_item_id: ""`)
+   - `comments: []`
+   - `retro: {good: "", bad: "", action_items: [], commits: []}`
+3. For each phase YAML, call `danx_issue_create({filename: "<slug>"})`. The worker validates as a draft (allows empty `external_id` + empty `check_item_id`s), creates the tracker card, stamps assigned ids back into the YAML, and renames the file to `<external_id>.yml`. Capture the returned `external_id`. `{created: false, errors}` → fix the draft and retry.
+4. Restart this workflow at Step 1 using the first phase card's YAML.
 
-After a phase completes, search In Progress for the next phase (not ToDo) so epic phases stay prioritized.
+The epic stays at `status: In Progress` until ALL phase cards are Done — then the final phase agent (or you, if no more phases) flips the epic to `Done` and saves it. After a phase completes, the next phase card lives in `<repo>/.danxbot/issues/open/`. The poller picks it up on the next tick.
 
-### Step 4 — Implement (TDD)
+---
 
-1. **Write failing test** — a test that captures the expected behavior.
-2. **Run tests** — confirm the new test fails (test command from `.claude/rules/danx-repo-config.md`).
-3. **Implement** — minimum code to make the test pass.
-4. **Run tests** — all tests (new + existing) green.
-5. **Refactor** — clean up; re-run tests.
+## Step 4 — Implement (TDD)
+
+1. **Write failing test** capturing the expected behavior.
+2. **Run tests** — confirm new test fails (test command from `.claude/rules/danx-repo-config.md`).
+3. **Implement** — minimum code to pass.
+4. **Run tests** — all green.
+5. **Refactor** — clean up; re-run.
 6. **Type check** — command from `.claude/rules/danx-repo-config.md` (skip if empty).
 
-**Documentation-only changes:** skip TDD, mark `Tests Written` / `Implementation` / `Tests Pass` together with a one-line note in a comment.
+**Documentation-only changes:** skip TDD; note this in a comment appended to `comments[]`.
 
-For large repetitive edits, spawn a `batch-editor` subagent via `Agent`/`Task`.
+For large repetitive edits, dispatch a `batch-editor` subagent via `Agent` / `Task`.
 
-Mark `Tests Written`, `Implementation`, `Tests Pass` via `mcp__trello__update_checklist_item` as each completes.
+After implementation, save: `danx_issue_save({external_id})`.
 
-### Step 5 — Quality Gates
+---
 
-Launch in parallel via `Agent`/`Task` with `mode: "bypassPermissions"`:
+## Step 5 — Quality Gates
+
+Launch in parallel via `Agent` / `Task` with `mode: "bypassPermissions"`:
 - `test-reviewer` — audit coverage.
 - `code-reviewer` — review quality.
 
-Post each result as a Trello comment via `mcp__trello__add_comment`:
-- `## Test Review\n\n{output}`
-- `## Code Review\n\n{output}`
+Append each result as a new comment to `comments[]`. For each: set `author` to `"test-reviewer"` / `"code-reviewer"`, `timestamp` to the current ISO time, `text` to a multi-line markdown body starting with `## Test Review` or `## Code Review` followed by the subagent output. No `id` field.
 
-If critical issues are found, fix them directly, re-run the failed gate, and post a `## Review Fixes` comment summarizing the fixes.
+If critical issues found, fix them, re-run the failed gate, append a `## Review Fixes` comment summarizing the fixes.
 
-Mark `Code Review` complete.
+Save: `danx_issue_save({external_id})`.
 
-### Step 6 — Check Off Acceptance Criteria
+---
 
-For each AC item, verify it holds (test evidence, command output, direct code read) then call `mcp__trello__update_checklist_item` with `state: "complete"`. **Never check off an unverified item.** "By construction" and "obviously correct" are not evidence. The state of an AC item must reflect direct evidence — a passing test, a captured command output, a quoted line from code that demonstrably satisfies the criterion.
+## Step 6 — Check Off Acceptance Criteria
 
-If you cannot verify an AC item — because it requires changes to a repo this worker cannot commit to, because it requires a live deploy, because it depends on external state, because evidence is unobtainable in this dispatch — leave it INCOMPLETE. Do not check it off with an excuse. Do not paraphrase it as "done in spirit." The state of an AC item must reflect direct evidence.
+For each `ac[i]`, verify it holds (test evidence, command output, direct code read). Set `ac[i].checked: true` only with direct evidence.
 
-### Step 7 — Commit
+**Never check off an unverified item.** "By construction" / "obviously correct" are not evidence. State must reflect a passing test, captured command output, or a quoted line from code that demonstrably satisfies the criterion.
+
+If you cannot verify an item — repo this worker cannot commit to, requires a deploy, depends on external state — leave `checked: false`. Do NOT check it off with an excuse. Do NOT paraphrase it as "done in spirit."
+
+---
+
+## Step 7 — Commit
 
 Consult `Git Mode` in `.claude/rules/danx-repo-config.md`:
 - `auto-merge`: feature branch `danxbot/<kebab-case-title>`, stage + commit, push, merge to main, delete branch.
 - `pr`: feature branch, stage + commit, push, `gh pr create`.
 
-Mark `Committed` complete.
-
-### Step 8 — Definition-of-Done Gate (CRITICAL)
-
-**Before deciding whether to move to Done or Needs Help, you MUST inspect the actual state of every Acceptance Criteria item.**
-
-Mechanical procedure — no shortcuts:
-
-1. Call `mcp__trello__get_acceptance_criteria` (or re-fetch the card) and read the `state` of EVERY AC item.
-2. Count incomplete items (`state` !== `"complete"`).
-3. **If incomplete count is ZERO** → go to Step 9 (move to Done).
-4. **If incomplete count is ONE OR MORE** → go to Step 10 (move to Needs Help). Do NOT move to Done. Do NOT rationalize. Do NOT skip.
-
-Forbidden moves at this gate:
-- "All the important ACs are done, the rest are minor" — irrelevant. ACs aren't ranked.
-- "The remaining ACs require external work, so they don't count" — they count. They were defined as required.
-- "I'll move to Done and the retro will explain the gaps" — no. The card location is the canonical state. Retro narrative does not override list placement.
-- "The work is functionally complete, the AC wording is just strict" — if the wording is wrong, edit the AC item or file a separate card. Do not silently shift the card.
-- "I checked off the AC because the verification step ran, even though it failed" — `state: "complete"` means the criterion HOLDS, not that it was attempted.
-
-A card in Done means: every Acceptance Criteria item is verified complete, with direct evidence. There are no other definitions.
-
-### Step 9 — Move to Done (only if all ACs complete)
-
-1. `mcp__trello__move_card` — card to Done list, position `"top"`.
-2. **Bug cards:** `mcp__trello__add_comment` with a `## Bug Diagnosis` block (Problem / Root Cause / Solution).
-3. `mcp__trello__add_comment` with a retro:
-   ```
-   ## Retro
-
-   **What went well:** [1-2 sentences]
-   **What went wrong:** [1-2 sentences or "Nothing"]
-   **Action items:** [improvements or "Nothing"]
-   **Commits:** [sha(s)]
-   ```
-4. **Action item cards:** if action items aren't "Nothing", `mcp__trello__add_card_to_list` on the Action Items list (one per item, position `"top"`). Then `mcp__trello__add_comment` on the current card linking them.
-
-Skip ahead to Step 11 (Signal Completion).
-
-### Step 10 — Move to Needs Help (if any AC is incomplete)
-
-Use this path when Step 8 found one or more incomplete AC items, when external repo changes are required that this worker cannot make, when verification depends on a deploy this worker cannot run, or when a human decision is needed before continuing.
-
-1. `mcp__trello__update_card_details` — add the `Needs Help` label (preserve any existing labels by passing the full updated array).
-2. `mcp__trello__move_card` — card to **Needs Help** list, position `"top"`.
-3. `mcp__trello__add_comment` with a Needs Help block:
-   ```
-   ## Needs Help — <one-line summary of what's blocked>
-
-   **What's done:** [bullet list of what landed, with commit shas if applicable]
-
-   **What's still needed:** [numbered list — be specific about file paths, repo names, exact edits, verification commands]
-
-   **Why this needs human/host-mode help:** [one paragraph — e.g. "requires commits to gpt-manager + platform repos which this docker worker can't reach", "requires a live deploy to verify AC4", "requires a human decision on tradeoff X"]
-
-   **Incomplete ACs:** [bullet list of every unchecked AC item, verbatim from the checklist]
-
-   **Final AC check:** Before this card moves to Done, every Acceptance Criteria item must be `state: "complete"`. If any AC remains unverifiable, leave the card in Needs Help — don't shortcut.
-   ```
-4. **Bug cards** that made partial progress: also post the `## Bug Diagnosis` block (Problem / Root Cause / Solution).
-5. **Retro is still required.** Post the standard `## Retro` block as in Step 9 — be honest about what went well, what went wrong (the AC gap is the primary "what went wrong"), and what action items remain. The retro narrative complements the Needs Help comment; it does not replace it.
-
-Skip ahead to Step 11 (Signal Completion).
-
-### Step 11 — Signal Completion (MANDATORY)
-
-Call the `danxbot_complete` MCP tool once, at the very end, with:
-- `status`: `"completed"` if the card finished or was moved to Needs Help; `"failed"` if a fatal error stopped the work.
-- `summary`: one-line outcome (card title + commit sha, or the Needs Help reason, or the failure cause).
-
-The worker uses this signal to finalize the MySQL row, SIGTERM the Claude process, and resume polling. Never exit without `danxbot_complete`.
+Append commit shas to `retro.commits[]`.
 
 ---
 
-## If the ToDo list was empty (from Step 1 of top-level Steps)
+## Step 8 — Definition-of-Done Gate (CRITICAL)
 
-Call `danxbot_complete` with `status: "completed"` and `summary: "ToDo list empty — no work to pick up"`. Worker handles lifecycle. Do not invoke any external termination script.
+Before deciding Done vs Needs Help, **inspect the actual state of every AC item in the YAML.**
+
+Mechanical procedure:
+
+1. Re-read `<repo>/.danxbot/issues/open/<external_id>.yml`.
+2. Count `ac` entries where `checked === false`.
+3. **Zero unchecked** → Step 9 (Done).
+4. **One or more unchecked** → Step 10 (Needs Help). Do NOT move to Done. Do NOT rationalize.
+
+Forbidden moves:
+- "All the important ACs are done, the rest are minor" — irrelevant. ACs aren't ranked.
+- "Remaining ACs require external work, so they don't count" — they count. They were defined as required.
+- "I'll move to Done; the retro will explain the gaps" — no. The card location is the canonical state.
+- "Wording is too strict" — edit the AC item or file a separate card. Don't silently shift status.
+- "I checked off the AC because the verification ran, even though it failed" — `checked: true` means the criterion HOLDS, not that it was attempted.
+
+A card in Done means: every AC item is `checked: true` with direct evidence. No other definition.
+
+---
+
+## Step 9 — Move to Done
+
+Edit YAML:
+
+1. `status: Done`
+2. **Bug cards:** prepend a Bug Diagnosis section to `description` OR append a comment:
+   ```
+   ## Bug Diagnosis
+   **Problem:** ...
+   **Root Cause:** ...
+   **Solution:** ...
+   ```
+3. Append a retro comment to `comments[]`. Logical shape (use real YAML / multi-line block scalars when writing — these are not literal escape sequences):
+   - `author: "danxbot"`
+   - `timestamp: <current ISO>`
+   - `text:` a multi-line markdown body containing `## Retro`, `**What went well:** ...`, `**What went wrong:** ...`, `**Action items:** ...`, `**Commits:** ...`
+   - No `id` field
+4. Fill `retro.good`, `retro.bad`, `retro.action_items[]`, `retro.commits[]`.
+5. **Action item cards:** for each non-trivial action item, write a new draft YAML at `<repo>/.danxbot/issues/open/<slug>.yml` using the `<DRAFT_TEMPLATE>` from Step 3.2, with these overrides: `parent_id: null`, `status: "Review"`, `type: "Bug"` or `"Feature"`, `title: "<action item title>"`, `description: "<one-paragraph context for why this card exists>"`. Then call `danx_issue_create({filename: "<slug>"})`. Append a comment to the current card linking each created action-item id.
+
+Save: `danx_issue_save({external_id})`. The worker validates, then moves the file `open/` → `closed/` and pushes the tracker move to Done.
+
+Skip to Step 11.
+
+---
+
+## Step 10 — Move to Needs Help
+
+Use this when Step 8 found unchecked ACs, when external repo changes are required this worker cannot make, when verification depends on a deploy this worker cannot run, or when a human decision is required.
+
+Edit YAML:
+
+1. `status: Needs Help` (worker auto-applies the Needs Help label — don't touch labels yourself).
+2. Append a Needs Help comment to `comments[]`. Logical shape:
+   - `author: "danxbot"`
+   - `timestamp: <current ISO>`
+   - `text:` a multi-line markdown body with these sections:
+     - `## Needs Help — <one-line summary>`
+     - `**What's done:** <bullet list of what landed, with commit shas>`
+     - `**What's still needed:** <numbered list — file paths, repo names, exact edits, verification commands>`
+     - `**Why this needs human/host help:** <one paragraph>`
+     - `**Incomplete ACs:** <bullet list of every unchecked AC item, verbatim>`
+     - `**Final AC check:** Before Done, every AC must be checked: true.`
+   - No `id` field
+3. **Bug cards** with partial progress: also append the `## Bug Diagnosis` block.
+4. Fill `retro.{good, bad, action_items, commits}` honestly — the AC gap is the primary "what went wrong."
+5. Append a standard `## Retro` comment as in Step 9.
+
+Save: `danx_issue_save({external_id})`.
+
+Skip to Step 11.
+
+---
+
+## Step 11 — Signal Completion (MANDATORY)
+
+Call `danxbot_complete` once at the very end:
+
+- `status: "completed"` — card finished or moved to Needs Help.
+- `status: "failed"` — fatal error stopped the work.
+- `status: "critical_failure"` — environment-level blocker (see `.claude/rules/danx-halt-flag.md`).
+- `summary` — one-line outcome (card title + commit sha, Needs Help reason, or failure cause).
+
+The worker:
+1. Auto-syncs the tracked YAML one final time as a safety net.
+2. Finalizes the dispatch row.
+3. SIGTERMs the Claude process.
+4. Resumes polling.
+
+Never exit without `danxbot_complete`.
+
+---
+
+## If the YAML Says Empty / Wrong State
+
+If the dispatched YAML is missing or unparseable, signal `critical_failure` — the poller is broken. If the YAML's `status` is already `Done` or `Cancelled` (file should be in `closed/`), something is wrong upstream — signal `failed` with a summary explaining the inconsistency.

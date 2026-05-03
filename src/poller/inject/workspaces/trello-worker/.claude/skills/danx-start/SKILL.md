@@ -1,24 +1,28 @@
 ---
 name: danx-start
-description: Process all ToDo cards from the Trello board sequentially using the autonomous workflow.
+description: Process all ToDo issue YAMLs sequentially using the autonomous workflow.
 ---
 
 # Danx Start Team
 
-Process ALL cards in the ToDo list sequentially using the card processing workflow from `/danx-next`.
+Process every YAML at `<repo>/.danxbot/issues/open/` whose `status: ToDo` using the workflow from `/danx-next`.
 
 ## Steps
 
-1. Fetch all cards from the ToDo list
-2. If the list is empty, report "No cards to process" and stop
-3. Report how many cards are queued and list their titles
-4. For each card, invoke `/danx-next` workflow (Steps 1-8 from that skill)
-5. After each card, re-fetch the ToDo list (epic splitting may have added new cards)
-6. Loop until ToDo is empty
+1. Glob `<repo>/.danxbot/issues/open/*.yml`. Filter where `status: "ToDo"`.
+2. Empty → report "No cards to process" and stop.
+3. Report how many cards are queued + list their titles.
+4. For each YAML, invoke the `/danx-next` workflow (Steps 1-11 from that skill) using the YAML's path + `external_id`.
+5. After each card, re-glob — epic-splitting may have added phase YAMLs.
+6. Loop until no YAML has `status: ToDo`.
 
 ## Report Summary
 
-When all cards are processed:
+When all cards processed:
 - Total cards processed
-- Cards completed vs failed vs needs-help
+- Cards completed vs failed vs needs-help (counted by terminal `status`)
 - Key issues encountered
+
+## Signal Completion
+
+`danxbot_complete({status: "completed", summary: "Processed N cards — X done, Y needs-help, Z failed"})` at the end.
