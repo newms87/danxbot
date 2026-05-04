@@ -225,10 +225,11 @@ function seedDraft(
   overrides: Partial<CreateCardInput> = {},
 ): Promise<{ external_id: string; ac: { check_item_id: string }[]; phases: { check_item_id: string }[] }> {
   return tracker.createCard({
-    schema_version: 2,
+    schema_version: 3,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
+    children: [],
     status: "ToDo",
     type: "Feature",
     title: "Demo task",
@@ -297,11 +298,12 @@ describe("Integration: poller hot path against MemoryTracker", () => {
       externalId: string,
       dispatchId: string,
     ) => ({
-      schema_version: 2 as const,
+      schema_version: 3 as const,
       tracker: "memory",
       id: "ISS-1",
       external_id: externalId,
       parent_id: null,
+      children: [],
       dispatch_id: dispatchId,
       status: "ToDo" as const,
       type: "Feature" as const,
@@ -362,11 +364,12 @@ describe("Integration: poller hot path against MemoryTracker", () => {
       externalId: string,
       dispatchId: string,
     ) => ({
-      schema_version: 2 as const,
+      schema_version: 3 as const,
       tracker: "memory",
       id: "ISS-1",
       external_id: externalId,
       parent_id: null,
+      children: [],
       dispatch_id: dispatchId,
       status: "ToDo" as const,
       type: "Feature" as const,
@@ -470,11 +473,12 @@ describe("Integration: poller hot path against MemoryTracker", () => {
       externalId: string,
       dispatchId: string,
     ) => ({
-      schema_version: 2 as const,
+      schema_version: 3 as const,
       tracker: "memory",
       id: "ISS-1",
       external_id: externalId,
       parent_id: null,
+      children: [],
       dispatch_id: dispatchId,
       status: "ToDo" as const,
       type: "Feature" as const,
@@ -514,5 +518,233 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     if (originalGetter) {
       Object.defineProperty(trackerHandle, "current", originalGetter);
     }
+  });
+
+  it("bulk-sync: hydrates every ToDo card whose local YAML is missing", async () => {
+    // Wire findByExternalId to a small in-memory ledger that tracks
+    // what bulk-sync's writeIssue has already persisted. This mirrors
+    // the real fs-backed behavior: once bulk-sync writes a YAML, the
+    // primary-selection path's findByExternalId must hit it (avoiding
+    // a redundant hydrate). Without this, the strict "one hydrate per
+    // card" invariant can't be expressed at the mock level.
+    const ledger = new Map<string, Record<string, unknown>>();
+    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
+      return ledger.get(eid) ?? null;
+    });
+    mockWriteIssue.mockImplementation((_repo: string, issue: { external_id: string }) => {
+      ledger.set(issue.external_id, issue as unknown as Record<string, unknown>);
+    });
+
+    let allocCounter = 0;
+    mockHydrateFromRemote.mockImplementation(async (
+      _t: unknown,
+      externalId: string,
+      dispatchId: string | null,
+    ) => ({
+      schema_version: 3 as const,
+      tracker: "memory",
+      id: `ISS-${++allocCounter}`,
+      external_id: externalId,
+      parent_id: null,
+      children: [],
+      dispatch_id: dispatchId,
+      status: "ToDo" as const,
+      type: "Feature" as const,
+      title: `card-${externalId}`,
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    }));
+
+    mockDispatch.mockResolvedValue({ dispatchId: "d", job: { id: "j" } });
+
+    const tracker = trackerHandle.current!;
+    await seedDraft(tracker, { id: "ISS-1", title: "phase 1" });
+    await seedDraft(tracker, { id: "ISS-2", title: "phase 2" });
+    await seedDraft(tracker, { id: "ISS-3", title: "phase 3" });
+
+    await poll(REPO);
+
+    // hydrateFromRemote should fire EXACTLY ONCE per card on the first
+    // tick — bulk-sync writes the two siblings (dispatchId: null), then
+    // the primary-selection path's hydrate runs for cards[0] with the
+    // real dispatchId (the test's mockFindByExternalId returns null
+    // for primary because the bulk-sync loop skips cards[0]).
+    const externalIds = mockHydrateFromRemote.mock.calls.map(
+      (call) => call[1] as string,
+    );
+    expect(externalIds).toHaveLength(3);
+    expect(new Set(externalIds).size).toBe(3); // all distinct
+
+    // writeIssue called once per hydrated card (siblings via bulk-sync,
+    // primary via hydrate-or-load → writeIssue in the primary block).
+    expect(mockWriteIssue).toHaveBeenCalledTimes(3);
+
+    // Two sibling hydrates carry dispatchId: null (bulk-sync write
+    // shape — dispatch UUID lands later via stampDispatchAndWrite when
+    // each sibling becomes the primary on a future tick). The primary
+    // hydrate carries the real UUID.
+    const dispatchIds = mockHydrateFromRemote.mock.calls.map(
+      (call) => call[2] as string | null,
+    );
+    expect(dispatchIds.filter((id) => id === null).length).toBe(2);
+    expect(dispatchIds.filter((id) => id !== null).length).toBe(1);
+  });
+
+  it("bulk-sync: a sibling hydrate failure is logged but does NOT block dispatch of the primary", async () => {
+    // Pin the documented asymmetry: sibling hydrate errors are tolerated
+    // (logged + skipped) so one bad card cannot freeze the whole tick.
+    // Without this test a future refactor that replaces the per-card
+    // try/catch with a single bulk await/throw would silently regress
+    // the contract.
+    const tracker = trackerHandle.current!;
+    await seedDraft(tracker, { id: "ISS-1", title: "primary" });
+    await seedDraft(tracker, { id: "ISS-2", title: "sibling that fails" });
+
+    // Primary (cards[0] === mem-1) succeeds; sibling (mem-2) rejects.
+    mockHydrateFromRemote.mockImplementation(async (
+      _t: unknown,
+      externalId: string,
+      dispatchId: string | null,
+    ) => {
+      if (externalId === "mem-2") {
+        throw new Error("simulated tracker hiccup on sibling");
+      }
+      return {
+        schema_version: 3 as const,
+        tracker: "memory",
+        id: "ISS-1",
+        external_id: externalId,
+        parent_id: null,
+        children: [],
+        dispatch_id: dispatchId,
+        status: "ToDo" as const,
+        type: "Feature" as const,
+        title: `card-${externalId}`,
+        description: "",
+        triaged: { timestamp: "", status: "", explain: "" },
+        ac: [],
+        phases: [],
+        comments: [],
+        retro: { good: "", bad: "", action_items: [], commits: [] },
+      };
+    });
+
+    mockDispatch.mockResolvedValue({ dispatchId: "d", job: { id: "j" } });
+
+    // Sibling failure is swallowed, primary dispatch still fires.
+    await poll(REPO);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("bulk-sync: a primary hydrate failure DOES propagate (preserves the credential-regression-crashes-loud invariant)", async () => {
+    // Counterpart to the sibling-tolerant test: when the primary card's
+    // hydrate fails (e.g. tracker creds revoked), the poller MUST throw
+    // rather than silently log + continue. Pre-Phase-1 contract; the
+    // bulk-sync block only wraps siblings in try/catch — primary stays
+    // outside that block.
+    const tracker = trackerHandle.current!;
+    await seedDraft(tracker, { id: "ISS-1", title: "primary fails" });
+    await seedDraft(tracker, { id: "ISS-2", title: "sibling" });
+
+    mockHydrateFromRemote.mockImplementation(async (
+      _t: unknown,
+      externalId: string,
+      dispatchId: string | null,
+    ) => {
+      if (externalId === "mem-1") {
+        throw new Error("Trello API error: 401 Unauthorized");
+      }
+      return {
+        schema_version: 3 as const,
+        tracker: "memory",
+        id: "ISS-2",
+        external_id: externalId,
+        parent_id: null,
+        children: [],
+        dispatch_id: dispatchId,
+        status: "ToDo" as const,
+        type: "Feature" as const,
+        title: `card-${externalId}`,
+        description: "",
+        triaged: { timestamp: "", status: "", explain: "" },
+        ac: [],
+        phases: [],
+        comments: [],
+        retro: { good: "", bad: "", action_items: [], commits: [] },
+      };
+    });
+
+    await expect(poll(REPO)).rejects.toThrow(/401 Unauthorized/);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("bulk-sync: skips cards whose local YAML already exists", async () => {
+    const tracker = trackerHandle.current!;
+    await seedDraft(tracker, { id: "ISS-1", title: "already-known" });
+    await seedDraft(tracker, { id: "ISS-2", title: "new-card" });
+
+    // Card 1 already has local YAML; card 2 doesn't. The poller should
+    // hydrate ONLY card 2 during bulk-sync, then stamp ISS-1 with the
+    // primary's dispatchId via stampDispatchAndWrite (which the mock
+    // returns as a passthrough).
+    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
+      if (eid === "mem-1") {
+        return {
+          schema_version: 3 as const,
+          tracker: "memory",
+          id: "ISS-1",
+          external_id: "mem-1",
+          parent_id: null,
+          children: [],
+          dispatch_id: null,
+          status: "ToDo" as const,
+          type: "Feature" as const,
+          title: "already-known",
+          description: "",
+          triaged: { timestamp: "", status: "", explain: "" },
+          ac: [],
+          phases: [],
+          comments: [],
+          retro: { good: "", bad: "", action_items: [], commits: [] },
+        };
+      }
+      return null;
+    });
+
+    mockHydrateFromRemote.mockImplementation(async (
+      _t: unknown,
+      externalId: string,
+      dispatchId: string | null,
+    ) => ({
+      schema_version: 3 as const,
+      tracker: "memory",
+      id: "ISS-2",
+      external_id: externalId,
+      parent_id: null,
+      children: [],
+      dispatch_id: dispatchId,
+      status: "ToDo" as const,
+      type: "Feature" as const,
+      title: "new-card",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    }));
+
+    mockDispatch.mockResolvedValue({ dispatchId: "d", job: { id: "j" } });
+
+    await poll(REPO);
+
+    // Only ONE hydrateFromRemote call (for the new card mem-2).
+    expect(mockHydrateFromRemote).toHaveBeenCalledTimes(1);
+    const hydratedId = mockHydrateFromRemote.mock.calls[0][1] as string;
+    expect(hydratedId).toBe("mem-2");
   });
 });

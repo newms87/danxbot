@@ -293,6 +293,49 @@ async function _poll(repo: RepoContext): Promise<void> {
   );
   cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.title}`));
 
+  // Bulk-sync siblings: hydrate every NON-primary ToDo card whose local
+  // YAML is missing. Pre-Phase-1 (commit history below this rule) the
+  // poller only hydrated `cards[0]`, so non-primary cards stayed
+  // invisible to the dispatched agent until they bubbled to the top
+  // across many ticks. That broke the epic-split workflow: a user
+  // creates phase cards directly on Trello, the poller sees them but
+  // never writes their YAMLs, and the agent picking up the parent epic
+  // has no local visibility into its children — leading to duplicate-
+  // phase-card creation. Bulk-sync closes that gap by writing every
+  // sibling YAML to local issues/ on the first tick that sees it.
+  //
+  // Sibling failures are tolerated (logged, skipped). The primary
+  // card's hydration runs in the dedicated block below and DOES throw
+  // on failure — preserving the legacy contract that a poller hydrate
+  // crash blocks dispatch (a tracker-credentials regression must not
+  // be silently masked by a per-card try/catch).
+  //
+  // Cost: O(N-1) `getCard` + `getComments` calls per tick on first
+  // sighting only. Idempotent thereafter (`findByExternalId` short-
+  // circuits). Hydrate also patches the tracker title to add the
+  // `#ISS-N: ` prefix when missing — that's a one-time write per card.
+  // Sibling bulk-sync writes carry `dispatch_id: null`; the primary's
+  // dispatch UUID lands via the primary block below.
+  for (const card of cards.slice(1)) {
+    if (findByExternalId(repo.localPath, card.external_id)) continue;
+    try {
+      const hydrated = await hydrateFromRemote(
+        tracker,
+        card.external_id,
+        null,
+        repo.localPath,
+      );
+      writeIssue(repo.localPath, hydrated);
+      log.info(
+        `[${repo.name}] bulk-sync: hydrated ${card.external_id} → ${hydrated.id}`,
+      );
+    } catch (err) {
+      log.warn(
+        `[${repo.name}] bulk-sync: failed to hydrate ${card.external_id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // Save tracker-native ids for stuck-card recovery on failure
   const state = getState(repo.name);
   state.priorTodoCardIds = cards.map((c) => c.external_id);

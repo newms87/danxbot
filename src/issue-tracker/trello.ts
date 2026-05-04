@@ -147,7 +147,7 @@ export class TrelloTracker implements IssueTracker {
     // calls `getComments` itself for the merge step).
     const parsed = parseCardTitle(card.name);
     return {
-      schema_version: 2,
+      schema_version: 3,
       tracker: "trello",
       // Internal id is parsed from the `#ISS-N: ` title prefix. Cards
       // pre-dating the id epoch (or human-created without the prefix)
@@ -156,7 +156,12 @@ export class TrelloTracker implements IssueTracker {
       // running the migration script).
       id: parsed.id,
       external_id: card.id,
+      // `parent_id` and `children` are local-only metadata. Trello has no
+      // native parent concept, so the tracker always emits null/[] here;
+      // higher layers (poller hydrate, danx-epic-link skill) populate them
+      // on the local YAML.
       parent_id: null,
+      children: [],
       dispatch_id: null,
       status,
       type,

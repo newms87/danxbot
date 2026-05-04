@@ -14,10 +14,11 @@ import type { CreateCardInput, Issue } from "../../issue-tracker/interface.js";
 
 function defaultCreate(): CreateCardInput {
   return {
-    schema_version: 2,
+    schema_version: 3,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
+    children: [],
     status: "ToDo",
     type: "Feature",
     title: "T",
@@ -259,11 +260,12 @@ describe("syncIssue", () => {
     // Build a tracker pre-seeded with a card whose triaged record IS set on
     // the server (via seed Issue), then sync a local that has cleared it.
     const seed: Issue = {
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-2",
       external_id: "card-triaged",
       parent_id: null,
+      children: [],
       dispatch_id: null,
       status: "ToDo",
       type: "Feature",

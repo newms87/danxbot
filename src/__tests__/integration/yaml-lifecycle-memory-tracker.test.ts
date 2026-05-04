@@ -307,11 +307,12 @@ async function reservePort(): Promise<number> {
 
 function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
   return {
-    schema_version: 2,
+    schema_version: 3,
     tracker: "memory",
     id: `ISS-${Math.floor(Math.random() * 9000) + 1000}`,
     external_id: externalId,
     parent_id: null,
+    children: [],
     dispatch_id: null,
     status,
     type: "Feature",

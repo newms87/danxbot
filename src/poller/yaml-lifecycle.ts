@@ -148,6 +148,14 @@ export function writeIssue(repoLocalPath: string, issue: Issue): void {
  *    use that id locally. This is the migration entry point for cards
  *    created by humans without going through `danx_issue_create`.
  *
+ * `dispatchId` may be `null` for bulk-sync writes (the poller pre-
+ * hydrates every ToDo card on each tick so siblings of the dispatch
+ * primary have local YAMLs the moment the poller sees them — see
+ * `pollAndProcess`'s bulk-sync block). Cards hydrated via bulk-sync
+ * carry `dispatch_id: null` until they're picked as the dispatch
+ * primary, at which point `stampDispatchAndWrite` overwrites it with
+ * the real UUID.
+ *
  * The validator is strict — every required field MUST be filled before
  * `validateIssue` runs, so we route through `createEmptyIssue` to
  * guarantee defaults for any field the tracker doesn't supply.
@@ -155,7 +163,7 @@ export function writeIssue(repoLocalPath: string, issue: Issue): void {
 export async function hydrateFromRemote(
   tracker: IssueTracker,
   externalId: string,
-  dispatchId: string,
+  dispatchId: string | null,
   repoLocalPath: string,
 ): Promise<Issue> {
   const remote = await tracker.getCard(externalId);

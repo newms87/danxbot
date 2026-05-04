@@ -18,10 +18,11 @@ import type { CreateCardInput } from "../issue-tracker/interface.js";
 
 function defaultCreate(overrides: Partial<CreateCardInput> = {}): CreateCardInput {
   return {
-    schema_version: 2,
+    schema_version: 3,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
+    children: [],
     status: "ToDo",
     type: "Feature",
     title: "Card title",
@@ -113,6 +114,33 @@ describe("yaml-lifecycle", () => {
         repoRoot,
       );
       expect(issue.id).toMatch(/^ISS-\d+$/);
+    });
+
+    it("accepts dispatchId: null (bulk-sync write shape) and round-trips dispatch_id null through writeIssue + parseIssue", async () => {
+      // Phase 1 of the epic-linkage epic added a bulk-sync block to the
+      // poller that pre-hydrates every ToDo card on each tick. Sibling
+      // hydrations don't carry a dispatch UUID — only the primary card
+      // does. Hydrate's signature was widened from `string` to
+      // `string | null` to support that. Pin the contract so a future
+      // refactor that re-tightens the type can't break bulk-sync.
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-99" }),
+      );
+
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        null,
+        repoRoot,
+      );
+      expect(issue.dispatch_id).toBeNull();
+
+      // Round-trip through writeIssue + the strict parseIssue validator
+      // — null dispatch_id MUST survive serialization.
+      writeIssue(repoRoot, issue);
+      const reloaded = loadLocal(repoRoot, issue.id);
+      expect(reloaded?.dispatch_id).toBeNull();
     });
 
     it("includes remote comments in the hydrated Issue", async () => {

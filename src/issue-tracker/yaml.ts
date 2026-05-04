@@ -22,11 +22,12 @@ import { BOOKKEEPING_SEP } from "./sync.js";
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 2
+ *  - schema_version: 3
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
  *  - parent_id, dispatch_id: null
+ *  - children: []
  *  - status: "ToDo"
  *  - type: "Feature"
  *  - title, description: ""
@@ -43,11 +44,12 @@ export function createEmptyIssue(seed: {
   description?: string;
 } = {}): Issue {
   return {
-    schema_version: 2,
+    schema_version: 3,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
     parent_id: null,
+    children: [],
     dispatch_id: null,
     status: seed.status ?? "ToDo",
     type: seed.type ?? "Feature",
@@ -82,6 +84,7 @@ export function serializeIssue(issue: Issue): string {
     id: issue.id,
     external_id: issue.external_id,
     parent_id: issue.parent_id,
+    children: [...issue.children],
     dispatch_id: issue.dispatch_id,
     status: issue.status,
     type: issue.type,
@@ -128,10 +131,11 @@ export function serializeIssue(issue: Issue): string {
  * Parse YAML text into an Issue, throwing IssueParseError with a useful
  * message on either malformed YAML or schema violations.
  *
- * In schema v2, `external_id` is always allowed to be empty (memory tracker
+ * In schema v3, `external_id` is always allowed to be empty (memory tracker
  * issues + drafts pre-create have no tracker mapping yet), so there is no
  * separate "draft" parse mode — the v1 `parseDraftIssue` is gone. The
- * primary id (`id`) is the strict required-non-empty field.
+ * primary id (`id`) is the strict required-non-empty field. v3 adds the
+ * `children: string[]` field for two-way epic ↔ phase linkage.
  */
 export function parseIssue(text: string): Issue {
   let raw: unknown;
@@ -171,13 +175,16 @@ type ValidateResult =
  * match. Does NOT validate: ISO 8601 timestamp shape, UUID format, etc.;
  * those are caller responsibilities.
  *
- * Schema v2 contract:
+ * Schema v3 contract:
  *  - `id` is required, non-empty, must match `ISS-<positive-integer>`.
  *  - `external_id` is required as a field but may be empty (memory tracker
  *    issues + drafts pre-tracker-create have no external mapping yet).
- *  - v1 documents are rejected with a migration suggestion — there is NO
- *    runtime backwards-compat shim. Run the migration script once on each
- *    repo (Phase 5 of the id-vs-external_id epic).
+ *  - `children` is required, must be an array of `ISS-N` strings (may be
+ *    empty). Reverse linkage to `parent_id`. Only Epic-typed issues
+ *    populate it; non-epics carry `[]`.
+ *  - v1 / v2 documents are rejected with a migration suggestion — there is
+ *    NO runtime backwards-compat shim. Run `scripts/migrate-issues-to-v3.ts`
+ *    once on each repo to upgrade.
  */
 export function validateIssue(value: unknown): ValidateResult {
   const errors: string[] = [];
@@ -187,15 +194,17 @@ export function validateIssue(value: unknown): ValidateResult {
   }
   const v = value as Record<string, unknown>;
 
-  // schema_version — v2 only. Reject v1 with a loud migration pointer.
+  // schema_version — v3 only. Reject older versions with a loud migration
+  // pointer. v1 was retired by `migrate-issues-to-v2`; v2 is retired by
+  // `migrate-issues-to-v3` (adds the required `children: []` field).
   if (!("schema_version" in v)) {
     errors.push("missing required field: schema_version");
-  } else if (v.schema_version === 1) {
+  } else if (v.schema_version === 1 || v.schema_version === 2) {
     errors.push(
-      "schema_version 1 is no longer supported — run scripts/migrate-issues-to-v2.ts to upgrade",
+      `schema_version ${v.schema_version} is no longer supported — run scripts/migrate-issues-to-v3.ts to upgrade`,
     );
-  } else if (v.schema_version !== 2) {
-    errors.push(`schema_version must be 2 (got ${JSON.stringify(v.schema_version)})`);
+  } else if (v.schema_version !== 3) {
+    errors.push(`schema_version must be 3 (got ${JSON.stringify(v.schema_version)})`);
   }
 
   // tracker
@@ -231,6 +240,16 @@ export function validateIssue(value: unknown): ValidateResult {
     errors.push("missing required field: parent_id");
   } else if (v.parent_id !== null && typeof v.parent_id !== "string") {
     errors.push("parent_id must be a string or null");
+  }
+
+  // children — required array of `ISS-N` strings (may be empty).
+  let childrenResult: string[] | null = null;
+  if (!("children" in v)) {
+    errors.push("missing required field: children");
+  } else {
+    const r = validateChildrenList(v.children);
+    if (typeof r === "string") errors.push(r);
+    else childrenResult = r;
   }
 
   // dispatch_id
@@ -331,11 +350,12 @@ export function validateIssue(value: unknown): ValidateResult {
 
   // All required fields present and well-typed; build the validated Issue.
   const issue: Issue = {
-    schema_version: 2,
+    schema_version: 3,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
     parent_id: v.parent_id as string | null,
+    children: childrenResult as string[],
     dispatch_id: v.dispatch_id as string | null,
     status: v.status as IssueStatus,
     type: v.type as IssueType,
@@ -372,6 +392,25 @@ function validateTriaged(value: unknown): IssueTriaged | string {
     status: typeof v.status === "string" ? v.status : "",
     explain: typeof v.explain === "string" ? v.explain : "",
   };
+}
+
+function validateChildrenList(value: unknown): string[] | string {
+  // null normalizes to empty list (yaml has no native "empty array" sigil
+  // distinct from null when the key is present with no value).
+  if (value === null) return [];
+  if (!Array.isArray(value)) return "children must be a list of ISS-N strings";
+  const out: string[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    if (typeof item !== "string") {
+      return `children[${i}] must be a string`;
+    }
+    if (!ISSUE_ID_REGEX.test(item)) {
+      return `children[${i}] must match ISS-<positive integer> (got ${JSON.stringify(item)})`;
+    }
+    out.push(item);
+  }
+  return out;
 }
 
 function validateAcList(value: unknown): IssueAcItem[] | string {

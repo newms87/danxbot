@@ -395,20 +395,26 @@ export async function handleIssueCreate(
   }
 
   // Allocate the next ISS-N before parsing so the strict validator
-  // accepts the draft as a fully-formed v2 issue.
+  // accepts the draft as a fully-formed v3 issue.
   const newId = await nextIssueId(
     path.join(repo.localPath, ".danxbot", "issues"),
   );
   draftMap.id = newId;
-  // `parseIssue` requires schema_version: 2 — auto-fill if the agent
+  // `parseIssue` requires schema_version: 3 — auto-fill if the agent
   // omitted it (drafts are increasingly skeletal).
   if (draftMap.schema_version === undefined) {
-    draftMap.schema_version = 2;
+    draftMap.schema_version = 3;
   }
   // Provide an empty external_id explicitly so the validator's required-
   // field check passes.
   if (draftMap.external_id === undefined) {
     draftMap.external_id = "";
+  }
+  // `children` is required by the strict validator. Drafts almost always
+  // come in without it (children are populated by the danx-epic-link skill
+  // post-create on epics, never on the create call itself).
+  if (draftMap.children === undefined) {
+    draftMap.children = [];
   }
 
   let draft: Issue;
@@ -423,10 +429,11 @@ export async function handleIssueCreate(
   }
 
   const input: CreateCardInput = {
-    schema_version: 2,
+    schema_version: 3,
     tracker: draft.tracker,
     id: draft.id,
     parent_id: draft.parent_id,
+    children: [...draft.children],
     status: draft.status,
     type: draft.type,
     title: draft.title,

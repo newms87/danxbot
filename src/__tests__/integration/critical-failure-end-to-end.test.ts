@@ -167,11 +167,12 @@ function seedHydratedCard(externalId: string, title: string): void {
   // `getCard(externalId)` and `getComments(externalId)`. Seed both with
   // the synthetic Issue the poller will see on this dispatch.
   trackerMock.getCard.mockResolvedValue({
-    schema_version: 2 as const,
+    schema_version: 3 as const,
     tracker: "memory",
     id: "ISS-1",
     external_id: externalId,
     parent_id: null,
+    children: [],
     dispatch_id: null,
     status: "ToDo" as const,
     type: "Feature" as const,

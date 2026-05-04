@@ -186,10 +186,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     };
     // Seed the tracker so syncIssue has something to read.
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
+      children: [],
       status: "ToDo",
       type: "Feature",
       title: "stale-remote",
@@ -225,7 +226,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
   it("returns saved:false with errors on schema-validation failure", async () => {
     const path = issuePath(h.repo.localPath, "ISS-2", "open");
     ensureIssuesDirs(h.repo.localPath);
-    writeFileSync(path, "schema_version: 2\nbroken: true\n");
+    writeFileSync(path, "schema_version: 3\nbroken: true\n");
 
     const res = await fetch(`${h.url}/api/issue-save/dispatch-2`, {
       method: "POST",
@@ -278,10 +279,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #2: tracker errors NEVER surface to the agent — saved:true returned regardless", async () => {
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-4",
       parent_id: null,
+      children: [],
       status: "ToDo",
       type: "Feature",
       title: "remote-title",
@@ -320,10 +322,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #5: serializes concurrent saves on the same id", async () => {
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-5",
       parent_id: null,
+      children: [],
       status: "ToDo",
       type: "Feature",
       title: "remote",
@@ -381,10 +384,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #7: saved status Done moves YAML from open/ to closed/ — idempotent", async () => {
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-6",
       parent_id: null,
+      children: [],
       status: "Done",
       type: "Feature",
       title: "done-card",
@@ -431,10 +435,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("Cancelled status also triggers open→closed move", async () => {
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-7",
       parent_id: null,
+      children: [],
       status: "Cancelled",
       type: "Feature",
       title: "cancelled-card",
@@ -469,10 +474,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #5: queue is NOT poisoned when the FIRST sync fails — second still runs", async () => {
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-8",
       parent_id: null,
+      children: [],
       status: "ToDo",
       type: "Feature",
       title: "remote",
@@ -518,10 +524,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #5: true-concurrency Promise.all with same content — both saves complete, no drops", async () => {
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-9",
       parent_id: null,
+      children: [],
       status: "ToDo",
       type: "Feature",
       title: "remote",
@@ -579,10 +586,11 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("non-terminal status keeps file in open/", async () => {
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-10",
       parent_id: null,
+      children: [],
       status: "In Progress",
       type: "Feature",
       title: "wip",
@@ -661,6 +669,58 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
     expect(stamped).toContain("check_item_id: chk-");
   });
 
+  it("auto-fills children: [] when the draft YAML omits the field", async () => {
+    // The strict v3 validator requires `children`. Drafts written by
+    // skill prose almost never include it (children get populated post-
+    // create by the danx-epic-link skill on epics, never on the create
+    // call itself). The handler must auto-fill an empty list before
+    // running the strict parse — otherwise every create round-trips
+    // back as a validation failure.
+    const draftPath = issuePath(h.repo.localPath, "no-children", "open");
+    ensureIssuesDirs(h.repo.localPath);
+    // Hand-written YAML that intentionally omits `children:` — mirrors a
+    // skill-authored draft.
+    writeFileSync(
+      draftPath,
+      [
+        "schema_version: 3",
+        "tracker: memory",
+        'id: ""',
+        'external_id: ""',
+        "parent_id: null",
+        "dispatch_id: null",
+        "status: ToDo",
+        "type: Feature",
+        "title: skill-authored draft without children",
+        'description: ""',
+        "triaged:",
+        '  timestamp: ""',
+        '  status: ""',
+        '  explain: ""',
+        "ac: []",
+        "phases: []",
+        "comments: []",
+        "retro:",
+        '  good: ""',
+        '  bad: ""',
+        "  action_items: []",
+        "  commits: []",
+        "",
+      ].join("\n"),
+    );
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "no-children" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(true);
+    const stamped = readYaml(h.repo.localPath, body.id);
+    // Auto-filled `children: []` must round-trip into the on-disk YAML.
+    expect(stamped).toMatch(/^children:/m);
+  });
+
   it("strips a trailing .yml suffix on filename", async () => {
     const draft: Issue = {
       ...createEmptyIssue({ id: "", external_id: "", title: "with-suffix" }),
@@ -692,7 +752,7 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
 
   it("returns created:false on schema-validation failure", async () => {
     const path = issuePath(h.repo.localPath, "broken", "open");
-    writeFileSync(path, "schema_version: 2\nstatus: ToDo\n");
+    writeFileSync(path, "schema_version: 3\nstatus: ToDo\n");
     const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -805,10 +865,11 @@ describe("syncTrackedIssueOnComplete", () => {
 
   it("AC #4: calls syncIssue synchronously for the tracked id", async () => {
     await h.tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "memory",
       id: "ISS-11",
       parent_id: null,
+      children: [],
       status: "ToDo",
       type: "Feature",
       title: "stale",

@@ -115,6 +115,11 @@ describe("TrelloTracker", () => {
     ]);
     // Comments are intentionally empty — getCard no longer hits /actions.
     expect(issue.comments).toEqual([]);
+    // `parent_id` and `children` are local-only metadata — Trello has
+    // no native parent concept, so the tracker emits null/[] always.
+    // Higher layers populate them on the local YAML side.
+    expect(issue.parent_id).toBeNull();
+    expect(issue.children).toEqual([]);
     // Verify exactly one round-trip: GET /cards/c1?... and nothing else.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -143,10 +148,11 @@ describe("TrelloTracker", () => {
 
     const tracker = new TrelloTracker(TRELLO);
     const result = await tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "trello",
       id: "ISS-1",
       parent_id: null,
+      children: [],
       status: "ToDo",
       type: "Feature",
       title: "T",
@@ -569,10 +575,11 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(TRELLO);
     await tracker.createCard({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "trello",
       id: "ISS-9",
       parent_id: null,
+      children: [],
       status: "ToDo",
       type: "Feature",
       title: "T",

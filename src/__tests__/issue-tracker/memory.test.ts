@@ -4,10 +4,11 @@ import type { CreateCardInput } from "../../issue-tracker/interface.js";
 
 function defaultInput(overrides: Partial<CreateCardInput> = {}): CreateCardInput {
   return {
-    schema_version: 2,
+    schema_version: 3,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
+    children: [],
     status: "ToDo",
     type: "Feature",
     title: "Make widget",
@@ -321,11 +322,12 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 2,
+          schema_version: 3,
           tracker: "memory",
           id: "ISS-1",
           external_id: "seed-1",
           parent_id: null,
+          children: [],
           dispatch_id: null,
           status: "ToDo",
           type: "Feature",
@@ -351,11 +353,12 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 2,
+          schema_version: 3,
           tracker: "trello",
           id: "ISS-2",
           external_id: "seed-trello",
           parent_id: null,
+          children: [],
           dispatch_id: null,
           status: "ToDo",
           type: "Feature",

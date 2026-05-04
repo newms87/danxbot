@@ -34,6 +34,11 @@ interface StoredCard {
   id: string;
   external_id: string;
   parent_id: string | null;
+  /**
+   * Child issue ids (`ISS-N[]`). Mirrors `Issue.children`. Stored on the
+   * card so seeded fixtures round-trip cleanly through the memory tracker.
+   */
+  children: string[];
   dispatch_id: string | null;
   status: IssueStatus;
   type: IssueType;
@@ -135,6 +140,7 @@ export class MemoryTracker implements IssueTracker {
       id: input.id,
       external_id: externalId,
       parent_id: input.parent_id,
+      children: [...input.children],
       dispatch_id: null,
       status: input.status,
       type: input.type,
@@ -340,6 +346,7 @@ export class MemoryTracker implements IssueTracker {
       id: "",
       external_id: externalId,
       parent_id: null,
+      children: [],
       dispatch_id: null,
       status: "ToDo",
       type: "Feature",
@@ -389,11 +396,12 @@ export class MemoryTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 2,
+      schema_version: 3,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
       parent_id: card.parent_id,
+      children: [...card.children],
       dispatch_id: card.dispatch_id,
       status: card.status,
       type: card.type,
@@ -423,6 +431,7 @@ export class MemoryTracker implements IssueTracker {
       id: issue.id,
       external_id: issue.external_id,
       parent_id: issue.parent_id,
+      children: [...issue.children],
       dispatch_id: issue.dispatch_id,
       status: issue.status,
       type: issue.type,

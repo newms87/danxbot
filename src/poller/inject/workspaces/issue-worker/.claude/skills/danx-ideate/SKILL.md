@@ -29,6 +29,7 @@ Current repo only.
    - For each draft, writes a YAML at `<repo>/.danxbot/issues/open/<filename>.yml` with:
      - `id: ""` (worker assigns the next `ISS-N` — drafts with non-empty `id` are REJECTED)
      - `parent_id: null`
+     - `children: []`
      - `dispatch_id: null`
      - `status: "Review"`
      - `type: "Feature"` (or `"Bug"` for bug drafts)
@@ -38,7 +39,7 @@ Current repo only.
      - `phases: []` (or seeded with `check_item_id: ""`)
      - `comments: []`
      - `retro: {good: "", bad: "", action_items: [], commits: []}`
-     - `schema_version: 2`
+     - `schema_version: 3`
      - `tracker: "memory"` (or whichever tracker the repo uses — leave the value the parent YAML carries)
    - Calls `danx_issue_create({filename: "<filename>"})` for each draft. The worker validates, allocates the next `ISS-N`, stamps it back into the YAML, and renames the file to `<id>.yml`. Captures the returned `id`.
    - Saves discoveries back to `docs/features.md`.

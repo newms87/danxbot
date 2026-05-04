@@ -184,11 +184,12 @@ vi.mock("../dispatch/core.js", () => ({
  * preserves the existing-file path.
  */
 const FAKE_ISSUE_FOR_TESTS = {
-  schema_version: 2 as const,
+  schema_version: 3 as const,
   tracker: "trello",
   id: "ISS-FAKE",
   external_id: "fake",
   parent_id: null,
+  children: [],
   dispatch_id: null,
   status: "ToDo" as const,
   type: "Feature" as const,
@@ -351,11 +352,12 @@ function setupRepoConfigMocks() {
  * return a `ToDo`-status Issue.
  */
 const DEFAULT_GET_CARD_ISSUE = {
-  schema_version: 2 as const,
+  schema_version: 3 as const,
   tracker: "trello",
   id: "ISS-DEFAULT",
   external_id: "default-card",
   parent_id: null,
+  children: [],
   dispatch_id: null,
   status: "Done" as const,
   type: "Feature" as const,
@@ -1440,11 +1442,12 @@ describe("poll — post-dispatch card-progress check", () => {
     status: IssueStatus,
   ) {
     return {
-      schema_version: 2 as const,
+      schema_version: 3 as const,
       tracker: "trello",
       id: "ISS-1",
       external_id: externalId,
       parent_id: null,
+      children: [],
       dispatch_id: null,
       status,
       type: "Feature" as const,
@@ -2372,11 +2375,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     // again across multiple back-to-back ticks (without
     // `_resetForTesting`).
     mockFindByExternalId.mockReturnValue({
-      schema_version: 2,
+      schema_version: 3,
       tracker: "trello",
       id: "ISS-100",
       external_id: "card-cached",
       parent_id: null,
+      children: [],
       dispatch_id: "old",
       status: "ToDo",
       type: "Feature",
@@ -2517,11 +2521,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ref("card-uuid-3", "Card 3", "ToDo"),
     ]);
     const existingIssue = {
-      schema_version: 2,
+      schema_version: 3,
       tracker: "trello",
       id: "ISS-200",
       external_id: "card-uuid-3",
       parent_id: null,
+      children: [],
       dispatch_id: "old-dispatch",
       status: "ToDo",
       type: "Feature",

@@ -10,11 +10,12 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 2,
+    schema_version: 3,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
     parent_id: null,
+    children: [],
     dispatch_id: null,
     status: "ToDo",
     type: "Feature",
@@ -88,14 +89,14 @@ describe("serializeIssue / parseIssue", () => {
   });
 
   it("throws IssueParseError when required fields are missing", () => {
-    const yaml = "schema_version: 2\ntracker: trello\n";
+    const yaml = "schema_version: 3\ntracker: trello\n";
     expect(() => parseIssue(yaml)).toThrow(IssueParseError);
     expect(() => parseIssue(yaml)).toThrow(/external_id/);
   });
 
   it("rejects schema_version 1 with a migration pointer", () => {
     const yaml = "schema_version: 1\ntracker: trello\n";
-    expect(() => parseIssue(yaml)).toThrow(/migrate-issues-to-v2/);
+    expect(() => parseIssue(yaml)).toThrow(/migrate-issues-to-v3/);
   });
 });
 
@@ -105,11 +106,12 @@ describe("validateIssue", () => {
   // start from this base and override the field they want to exercise.
   function valid(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
-      schema_version: 2,
+      schema_version: 3,
       tracker: "trello",
       id: "ISS-42",
       external_id: "x1",
       parent_id: null,
+      children: [],
       dispatch_id: null,
       status: "Review",
       type: "Bug",
@@ -153,6 +155,7 @@ describe("validateIssue", () => {
           expect.stringContaining("id"),
           expect.stringContaining("external_id"),
           expect.stringContaining("parent_id"),
+          expect.stringContaining("children"),
           expect.stringContaining("dispatch_id"),
           expect.stringContaining("status"),
           expect.stringContaining("type"),
@@ -292,11 +295,11 @@ describe("validateIssue", () => {
 
   // ---- Test gap E: pin exact validator error wording ----
 
-  it("schema_version: 3 produces the exact error string", () => {
-    const result = validateIssue(valid({ schema_version: 3 }));
+  it("schema_version: 4 produces the exact error string", () => {
+    const result = validateIssue(valid({ schema_version: 4 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors).toContain("schema_version must be 2 (got 3)");
+      expect(result.errors).toContain("schema_version must be 3 (got 4)");
     }
   });
 
@@ -305,7 +308,17 @@ describe("validateIssue", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
-        result.errors.some((e) => e.includes("migrate-issues-to-v2")),
+        result.errors.some((e) => e.includes("migrate-issues-to-v3")),
+      ).toBe(true);
+    }
+  });
+
+  it("schema_version: 2 produces the migration-pointer error string", () => {
+    const result = validateIssue(valid({ schema_version: 2 }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => e.includes("migrate-issues-to-v3")),
       ).toBe(true);
     }
   });
@@ -337,11 +350,12 @@ describe("validateIssue", () => {
   it("parseIssue throws IssueParseError when YAML source carries a tab in retro.action_items", () => {
     // The bookkeeping comment uses a tab as its line separator, so titles
     // carrying an embedded tab would corrupt the parser. Validate-time reject.
-    const yaml = `schema_version: 2
+    const yaml = `schema_version: 3
 tracker: trello
 id: ISS-1
 external_id: x1
 parent_id: null
+children: []
 dispatch_id: null
 status: ToDo
 type: Feature
@@ -428,6 +442,108 @@ retro:
   });
 });
 
+describe("children field (v3 epic → phase linkage)", () => {
+  function valid(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      schema_version: 3,
+      tracker: "trello",
+      id: "ISS-100",
+      external_id: "x1",
+      parent_id: null,
+      children: [],
+      dispatch_id: null,
+      status: "ToDo",
+      type: "Epic",
+      title: "T",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+      ...overrides,
+    };
+  }
+
+  it("requires the children field", () => {
+    const input = valid();
+    delete input.children;
+    const result = validateIssue(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("missing required field: children");
+    }
+  });
+
+  it("accepts an empty children list", () => {
+    const result = validateIssue(valid({ children: [] }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.issue.children).toEqual([]);
+  });
+
+  it("accepts a list of valid ISS-N strings", () => {
+    const result = validateIssue(
+      valid({ children: ["ISS-101", "ISS-102", "ISS-103"] }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.children).toEqual(["ISS-101", "ISS-102", "ISS-103"]);
+    }
+  });
+
+  it("rejects children containing a non-string entry", () => {
+    const result = validateIssue(valid({ children: ["ISS-101", 42] }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => /children\[1\]/.test(e))).toBe(true);
+    }
+  });
+
+  it("rejects children containing a malformed id", () => {
+    const result = validateIssue(valid({ children: ["iss-1"] }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => /children\[0\]/.test(e) && /ISS-/.test(e)),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects children as a string instead of a list", () => {
+    const result = validateIssue(valid({ children: "ISS-1" }));
+    expect(result.ok).toBe(false);
+  });
+
+  it("normalizes children: null to []", () => {
+    // YAML parses a bare `children:` key (no value) as JS `null`. The
+    // migration script and any hand-edited file may emit that shape, so
+    // the validator MUST collapse null → empty array. Without this
+    // branch every freshly-migrated YAML would re-trip the
+    // missing-required-field error path.
+    const result = validateIssue(valid({ children: null }));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.children).toEqual([]);
+    }
+  });
+
+  it("round-trips children through serialize → parse", () => {
+    const issue = createEmptyIssue({ id: "ISS-1", title: "Epic" });
+    issue.type = "Epic";
+    issue.children = ["ISS-2", "ISS-3"];
+    const yaml = serializeIssue(issue);
+    const parsed = parseIssue(yaml);
+    expect(parsed.children).toEqual(["ISS-2", "ISS-3"]);
+  });
+});
+
+describe("schema_version 3 contract", () => {
+  it("rejects schema_version 2 (must migrate)", () => {
+    const yaml = "schema_version: 2\ntracker: trello\n";
+    expect(() => parseIssue(yaml)).toThrow(/migrate-issues-to-v3/);
+  });
+});
+
 describe("createEmptyIssue", () => {
   it("returns a fully-populated minimal Issue that passes validateIssue once id+title are seeded", () => {
     // `id` and `title` must be non-empty per the validator; everything
@@ -468,8 +584,9 @@ describe("createEmptyIssue", () => {
 
   it("uses sensible defaults when no seed fields are provided", () => {
     const issue = createEmptyIssue();
-    expect(issue.schema_version).toBe(2);
+    expect(issue.schema_version).toBe(3);
     expect(issue.tracker).toBe("memory");
+    expect(issue.children).toEqual([]);
     expect(issue.status).toBe("ToDo");
     expect(issue.type).toBe("Feature");
     expect(issue.id).toBe("");
@@ -484,11 +601,12 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 2,
+      schema_version: 3,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
       parent_id: null,
+      children: ["ISS-100", "ISS-101"],
       dispatch_id: null,
       status: "In Progress",
       type: "Feature",
@@ -524,11 +642,14 @@ describe("serializeIssue byte-stable snapshot", () => {
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 2
+      "schema_version: 3
       tracker: trello
       id: ISS-99
       external_id: card-99
       parent_id: null
+      children:
+        - ISS-100
+        - ISS-101
       dispatch_id: null
       status: In Progress
       type: Feature

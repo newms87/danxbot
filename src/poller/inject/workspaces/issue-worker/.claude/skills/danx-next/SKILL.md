@@ -22,10 +22,11 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | `2` | Never change. |
+| `schema_version` | `3` | Never change. |
 | `tracker` | string | Don't change. |
 | `id` | string (`ISS-N`) | The id you save with. Matches the filename. Don't change. |
-| `parent_id` | string \| null | Set on phase cards (epic's `id`). |
+| `parent_id` | string \| null | Set on phase cards (epic's `id`). Reverse linkage to `children[]`. |
+| `children` | `string[]` (ids) | Set on Epic-typed cards listing their phase children's ids in order. Empty `[]` for non-epics and for epics whose phases live as in-card checklist items rather than separate phase cards. Maintained by `danx_issue_create` (when a phase card is created from a draft) and by the `danx-epic-link` skill (for human-created phase cards). |
 | `dispatch_id` | string \| null | Poller-managed. Don't touch. |
 | `status` | `Review` \| `ToDo` \| `In Progress` \| `Needs Help` \| `Done` \| `Cancelled` | Editing this is how you move the card across lists. |
 | `type` | `Bug` \| `Feature` \| `Epic` | Required label. |
@@ -123,16 +124,56 @@ Needs Help.
 
 ---
 
-## Step 3 — Evaluate Scope (Epic Split)
+## Step 3 — Evaluate Scope (Epic + Phase Linkage)
 
-If the card is 3+ implementation phases, spans different domains, or will exceed ~500 lines: split into an epic.
+### Step 3.0 — Pre-flight: is this card already an epic with linked children?
 
-1. Edit the parent YAML: set `type: Epic`. Keep `status: In Progress` — the epic stays open while phases work. Append a comment summarizing the split (no `id` field). Save.
+Before deciding whether to split, mechanically check the card's existing
+state. ANY of these conditions means the epic is already split — DO NOT
+re-split, DO NOT call `danx_issue_create`:
+
+1. **Card's `children: []` is non-empty.** The epic is fully linked. Read
+   each child YAML at `<repo>/.danxbot/issues/open/<child-id>.yml`,
+   identify the first one with `status: ToDo` (or `In Progress` if you're
+   resuming), and treat THAT phase as the work to do. Re-read its YAML
+   and restart this workflow at Step 1 using the phase card.
+2. **Card's `type: Epic` AND `children: []` is empty.** The epic was
+   created without going through `danx_issue_create` (or by a human on
+   the tracker UI) — phase cards may already exist in
+   `<repo>/.danxbot/issues/open/` but lack the `parent_id` linkage.
+   **Invoke the `danx-epic-link` skill via the Skill tool**. It scans
+   open issues, identifies this epic's phase children, sets `parent_id`
+   on each phase YAML, and sets `children[]` on this epic. After it
+   returns, re-read the epic YAML — `children[]` is now populated —
+   then jump back to the top of Step 3.0 (the first condition now
+   matches and you proceed to the first phase).
+3. **Card's `type` is NOT Epic but other YAMLs reference it as their
+   parent.** Run `Grep` for `parent_id: "<this.id>"` across
+   `<repo>/.danxbot/issues/open/`. Any matches means this card is
+   actually an epic that lost its `Epic` label. Promote it: set
+   `type: Epic`, populate `children[]` from the matched YAMLs (sorted
+   by `Phase N:` like `danx-epic-link` does), save. Then jump back to
+   Step 3.0.
+
+Only if NONE of those conditions match do you proceed to Step 3.1.
+
+### Step 3.1 — Decide whether to split
+
+Split into an epic when the card is 3+ implementation phases, spans
+different domains, or will exceed ~500 lines. Keep as a single card
+with a `phases[]` checklist when the work is sequential but small.
+
+If you decide NOT to split, skip ahead to Step 4.
+
+### Step 3.2 — Perform the split
+
+1. Edit the parent YAML: set `type: Epic`. Keep `status: In Progress` — the epic stays open while phases work. Append a comment summarizing the split (no `id` field). Don't fill `children[]` yet — you don't have the phase ids until after `danx_issue_create` returns. Save.
 2. For each phase, write a draft YAML at `<repo>/.danxbot/issues/open/<slug>.yml` (filename can be the kebab-case slug; `.yml` suffix optional in the create call — both forms accepted) with every required field populated. Use this template (`<DRAFT_TEMPLATE>`):
-   - `schema_version: 2`
+   - `schema_version: 3`
    - `tracker: <same as parent>`
    - `id: ""` (worker assigns the next `ISS-N`)
    - `parent_id: "<epic id>"` (the epic's `id`, e.g. `ISS-12`)
+   - `children: []`
    - `dispatch_id: null`
    - `status: "ToDo"`
    - `type: "Bug"` or `"Feature"` (the phase's own kind, not `Epic`)
@@ -144,7 +185,8 @@ If the card is 3+ implementation phases, spans different domains, or will exceed
    - `comments: []`
    - `retro: {good: "", bad: "", action_items: [], commits: []}`
 3. For each phase YAML, call `danx_issue_create({filename: "<slug>"})`. The worker validates the draft (empty `id` + empty `check_item_id`s are allowed), creates the issue, stamps the assigned `id` back into the YAML, and renames the file to `<id>.yml`. Capture the returned `id` from the response. `{created: false, errors}` → fix the draft and retry.
-4. Restart this workflow at Step 1 using the first phase card's YAML.
+4. After all phase cards exist, edit the epic YAML once more: set `children: ["<phase-1-id>", "<phase-2-id>", ...]` in phase order. Save. This is the reverse linkage that lets a future epic pickup recognize "already split" without re-scanning open issues.
+5. Restart this workflow at Step 1 using the first phase card's YAML.
 
 The epic stays at `status: In Progress` until ALL phase cards are Done — then the final phase agent (or you, if no more phases) flips the epic to `Done` and saves it. After a phase completes, the next phase card lives in `<repo>/.danxbot/issues/open/`. The poller picks it up on the next tick.
 
