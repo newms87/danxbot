@@ -1060,6 +1060,84 @@ describe("createLaravelForwarder with EventQueue (write-ahead + retry)", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(await queue.hasPending()).toBe(false);
   });
+
+  // Regression guard for Trello 69f7844004a63103a75b2bd5: when the queue's
+  // containing directory is removed mid-flush (test teardown via mkdtemp
+  // + rmSync, or production log rotation), `EventQueue.enqueue` ENOENTs
+  // out of `appendFile`. Previously this rejection bubbled out of the
+  // fire-and-forget `void drainAndSend()` calls in `consume()` /
+  // `scheduleFlush()` and out of the `void forwarderFlush?.()` call in
+  // `launcher.ts#runCleanup`, surfacing as an "Unhandled Rejection" in
+  // vitest output. The forwarder's contract is best-effort delivery; a
+  // missing queue dir means events are lost, not that the process should
+  // crash.
+  it("flush() resolves (does not reject) when the queue directory is removed mid-run", async () => {
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+    const { consume, flush } = makeForwarder();
+
+    consume(makeAssistantEntry([{ type: "text", text: "before-removal" }]));
+    rmSync(queueDir, { recursive: true, force: true });
+
+    await expect(flush()).resolves.toBeUndefined();
+  });
+
+  it("BATCH_SIZE-triggered drain does not produce an unhandled rejection when the queue dir is gone", async () => {
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+    const { consume } = makeForwarder();
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      // Filter to ONLY this test's queueDir so any cross-file vitest
+      // worker rejection (a different test's leak) doesn't false-fail
+      // the assertion below. The unhandled rejection we're guarding
+      // against has the queueDir embedded in the ENOENT path.
+      const message = String((reason as Error)?.message ?? reason);
+      if (message.includes(queueDir)) unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      rmSync(queueDir, { recursive: true, force: true });
+      // BATCH_SIZE = 10 in laravel-forwarder; fill the batch to fire the
+      // implicit `void drainAndSend()` path inside consume().
+      for (let i = 0; i < 10; i++) {
+        consume(makeAssistantEntry([{ type: "text", text: `evt ${i}` }]));
+      }
+      // Yield long enough for the awaited appendFile + retry chain to
+      // settle. Two macrotask hops covers the libuv fs callback + any
+      // microtask drain.
+      await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 50));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
+  });
+
+  // Ensures the swallow-with-log.warn contract in `drainAndSend` doesn't
+  // silently rot to a bare `catch {}`. Without an assertion that
+  // log.warn actually fires, a future agent could "simplify" the catch
+  // and lose the operator's only signal that disk-write failures are
+  // happening (ENOSPC, EROFS in production log-rotation scenarios).
+  it("logs a warn when a drain failure is swallowed (no silent catch rot)", async () => {
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+    const { consume, flush } = makeForwarder();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    consume(makeAssistantEntry([{ type: "text", text: "lost" }]));
+    rmSync(queueDir, { recursive: true, force: true });
+
+    await flush();
+
+    const warnLines = errorSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((line) => typeof line === "string" && line.includes('"level":"warn"'))
+      .filter((line) => line.includes("laravel-forwarder"))
+      .filter((line) => line.includes("Drain failed"));
+    expect(warnLines.length).toBeGreaterThanOrEqual(1);
+    expect(warnLines[0]).toContain("ENOENT");
+    errorSpy.mockRestore();
+  });
 });
 
 // ─── Phase 3: replayQueueOnBoot ────────────────────────────────────────

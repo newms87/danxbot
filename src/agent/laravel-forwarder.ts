@@ -343,15 +343,38 @@ export function createLaravelForwarder(
     const toSend = batch;
     batch = [];
 
-    if (queue) {
-      if (toSend.length > 0) await queue.enqueue(toSend);
-      await drainQueue(queue, eventsUrl, apiToken, retryDelaysMs);
-      return;
-    }
+    // Swallow filesystem / network errors at the source so the two
+    // fire-and-forget callers (`void drainAndSend()` in `consume()` /
+    // `scheduleFlush`'s setTimeout) and the cleanup path's
+    // `void forwarderFlush?.()` (launcher.ts) never produce unhandled
+    // rejections. The most common failure here is ENOENT from
+    // `queue.enqueue` → `appendFile` when the queue's containing
+    // directory is removed mid-flush — happens in tests with mkdtemp +
+    // rmSync teardown, but could also happen in production if a log
+    // reaper races the worker. Best-effort delivery: lost events are
+    // acceptable, an unhandled rejection that crashes vitest (or the
+    // worker) is not.
+    try {
+      if (queue) {
+        if (toSend.length > 0) await queue.enqueue(toSend);
+        await drainQueue(queue, eventsUrl, apiToken, retryDelaysMs);
+        return;
+      }
 
-    // No queue: fire-and-forget with retry, no crash safety.
-    if (toSend.length === 0) return;
-    await postEventsWithRetry(eventsUrl, toSend, apiToken, retryDelaysMs);
+      // No queue: postEventsWithRetry's inner try/catch absorbs network
+      // errors and returns "retry-later" instead of throwing, so a throw
+      // out of this branch is unreachable in practice. The outer
+      // try/catch is defense-in-depth against a future refactor that
+      // drops postEventsWithRetry's catch.
+      if (toSend.length === 0) return;
+      await postEventsWithRetry(eventsUrl, toSend, apiToken, retryDelaysMs);
+    } catch (err) {
+      log.warn(
+        `Drain failed; events for this batch were not delivered: ${
+          (err as Error).message
+        }`,
+      );
+    }
   }
 
   function scheduleFlush(): void {

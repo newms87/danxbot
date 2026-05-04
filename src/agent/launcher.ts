@@ -689,6 +689,11 @@ export async function spawnAgent(
       // exactly what was appended in the trailing <pollIntervalMs window.
       await watcher.drain();
       watcher.stop();
+      // drainAndSend swallows its own errors (laravel-forwarder.ts) so
+      // this void can never produce an unhandled rejection. Regression
+      // guard: the "flush() resolves (does not reject) when the queue
+      // directory is removed mid-run" test in laravel-forwarder.test.ts
+      // fails if the inner try/catch is removed.
       void forwarderFlush?.();
       if (dispatchTracker && job.status !== "running") {
         const dispatchStatus =
