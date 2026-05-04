@@ -19,7 +19,16 @@ import { loadTarget } from "./target.js";
  * if the dashboard or a worker can't locate its target there is no
  * meaningful work it can do, so failing import is the right semantics.
  */
-export const repos: RepoConfig[] = loadTarget().repos;
+const _activeTarget = loadTarget();
+export const repos: RepoConfig[] = _activeTarget.repos;
+/**
+ * Active deployment target name as declared in
+ * `deploy/targets/<DANXBOT_TARGET>.yml` (e.g. `danxbot-production`,
+ * `local`). Used as the `holder` identifier in the cross-environment
+ * dispatch lock (`src/issue-tracker/lock.ts`) so two pollers on
+ * different deployments don't double-claim the same tracker card.
+ */
+export const targetName: string = _activeTarget.name;
 
 /**
  * Worker mode: DANXBOT_REPO_NAME is set — this process manages one repo only

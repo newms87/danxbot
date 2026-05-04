@@ -28,14 +28,7 @@
  * are both observable from this in-process harness.
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MemoryTracker } from "../../issue-tracker/memory.js";
 import type { CreateCardInput } from "../../issue-tracker/interface.js";
 
@@ -51,6 +44,7 @@ const { mockConfig } = vi.hoisted(() => ({
 
 vi.mock("../../config.js", () => ({
   config: mockConfig,
+  targetName: "test-target",
 }));
 
 vi.mock("../../repo-context.js", () => ({
@@ -179,7 +173,9 @@ vi.mock("../../issue-tracker/index.js", async () => {
     ...actual,
     createIssueTracker: () => {
       if (!trackerHandle.current) {
-        throw new Error("Test setup: trackerHandle.current must be assigned before poll()");
+        throw new Error(
+          "Test setup: trackerHandle.current must be assigned before poll()",
+        );
       }
       return trackerHandle.current;
     },
@@ -214,7 +210,14 @@ const REPO: RepoContext = {
     needsHelpLabelId: "nh-label",
   },
   slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
-  db: { host: "", port: 3306, user: "", password: "", database: "", enabled: false },
+  db: {
+    host: "",
+    port: 3306,
+    user: "",
+    password: "",
+    database: "",
+    enabled: false,
+  },
   githubToken: "test-github-token",
   trelloEnabled: true,
   workerPort: 5562,
@@ -223,7 +226,11 @@ const REPO: RepoContext = {
 function seedDraft(
   tracker: MemoryTracker,
   overrides: Partial<CreateCardInput> = {},
-): Promise<{ external_id: string; ac: { check_item_id: string }[]; phases: { check_item_id: string }[] }> {
+): Promise<{
+  external_id: string;
+  ac: { check_item_id: string }[];
+  phases: { check_item_id: string }[];
+}> {
   return tracker.createCard({
     schema_version: 3,
     tracker: "memory",
@@ -243,7 +250,9 @@ function seedDraft(
   });
 }
 
-function methodsOnly(log: Array<{ method: string; externalId?: string }>): string[] {
+function methodsOnly(
+  log: Array<{ method: string; externalId?: string }>,
+): string[] {
   return log.map((entry) => entry.method);
 }
 
@@ -293,34 +302,34 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     // hydrateFromRemote keeps the test from worrying about the real
     // hydrate logic — we only care about the FETCH/MOVE/COMMENT
     // sequence on the tracker.
-    mockHydrateFromRemote.mockImplementation(async (
-      _t: unknown,
-      externalId: string,
-      dispatchId: string,
-    ) => ({
-      schema_version: 3 as const,
-      tracker: "memory",
-      id: "ISS-1",
-      external_id: externalId,
-      parent_id: null,
-      children: [],
-      dispatch_id: dispatchId,
-      status: "ToDo" as const,
-      type: "Feature" as const,
-      title: "Demo task",
-      description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
-      ac: [],
-      phases: [],
-      comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
-    }));
+    mockHydrateFromRemote.mockImplementation(
+      async (_t: unknown, externalId: string, dispatchId: string) => ({
+        schema_version: 3 as const,
+        tracker: "memory",
+        id: "ISS-1",
+        external_id: externalId,
+        parent_id: null,
+        children: [],
+        dispatch_id: dispatchId,
+        status: "ToDo" as const,
+        type: "Feature" as const,
+        title: "Demo task",
+        description: "",
+        triaged: { timestamp: "", status: "", explain: "" },
+        ac: [],
+        phases: [],
+        comments: [],
+        retro: { good: "", bad: "", action_items: [], commits: [] },
+      }),
+    );
 
     let capturedOnComplete: ((j: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (j: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ dispatchId: "d", job: { id: "j1" } });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (j: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ dispatchId: "d", job: { id: "j1" } });
+      },
+    );
 
     await poll(REPO);
     expect(capturedOnComplete).toBeDefined();
@@ -359,34 +368,34 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     const { external_id: cardId } = await seedDraft(tracker);
     tracker.clearRequestLog();
 
-    mockHydrateFromRemote.mockImplementation(async (
-      _t: unknown,
-      externalId: string,
-      dispatchId: string,
-    ) => ({
-      schema_version: 3 as const,
-      tracker: "memory",
-      id: "ISS-1",
-      external_id: externalId,
-      parent_id: null,
-      children: [],
-      dispatch_id: dispatchId,
-      status: "ToDo" as const,
-      type: "Feature" as const,
-      title: "Demo task",
-      description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
-      ac: [],
-      phases: [],
-      comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
-    }));
+    mockHydrateFromRemote.mockImplementation(
+      async (_t: unknown, externalId: string, dispatchId: string) => ({
+        schema_version: 3 as const,
+        tracker: "memory",
+        id: "ISS-1",
+        external_id: externalId,
+        parent_id: null,
+        children: [],
+        dispatch_id: dispatchId,
+        status: "ToDo" as const,
+        type: "Feature" as const,
+        title: "Demo task",
+        description: "",
+        triaged: { timestamp: "", status: "", explain: "" },
+        ac: [],
+        phases: [],
+        comments: [],
+        retro: { good: "", bad: "", action_items: [], commits: [] },
+      }),
+    );
 
     let capturedOnComplete: ((j: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (j: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ dispatchId: "d", job: { id: "j1" } });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (j: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ dispatchId: "d", job: { id: "j1" } });
+      },
+    );
 
     await poll(REPO);
     expect(capturedOnComplete).toBeDefined();
@@ -454,42 +463,42 @@ describe("Integration: poller hot path against MemoryTracker", () => {
 
     await seedDraft(tracker, { title: "Persistent card" });
 
-    mockDispatch.mockImplementation((opts: { onComplete?: (j: unknown) => void }) => {
-      // Capture but invoke synchronously after each poll so teamRunning
-      // resets between ticks without _resetForTesting.
-      setImmediate(() =>
-        opts.onComplete?.({
-          id: "j",
-          status: "completed",
-          summary: "ok",
-          startedAt: new Date(),
-          completedAt: new Date(),
-        }),
-      );
-      return Promise.resolve({ dispatchId: "d", job: { id: "j" } });
-    });
-    mockHydrateFromRemote.mockImplementation(async (
-      _t: unknown,
-      externalId: string,
-      dispatchId: string,
-    ) => ({
-      schema_version: 3 as const,
-      tracker: "memory",
-      id: "ISS-1",
-      external_id: externalId,
-      parent_id: null,
-      children: [],
-      dispatch_id: dispatchId,
-      status: "ToDo" as const,
-      type: "Feature" as const,
-      title: "Persistent card",
-      description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
-      ac: [],
-      phases: [],
-      comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
-    }));
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (j: unknown) => void }) => {
+        // Capture but invoke synchronously after each poll so teamRunning
+        // resets between ticks without _resetForTesting.
+        setImmediate(() =>
+          opts.onComplete?.({
+            id: "j",
+            status: "completed",
+            summary: "ok",
+            startedAt: new Date(),
+            completedAt: new Date(),
+          }),
+        );
+        return Promise.resolve({ dispatchId: "d", job: { id: "j" } });
+      },
+    );
+    mockHydrateFromRemote.mockImplementation(
+      async (_t: unknown, externalId: string, dispatchId: string) => ({
+        schema_version: 3 as const,
+        tracker: "memory",
+        id: "ISS-1",
+        external_id: externalId,
+        parent_id: null,
+        children: [],
+        dispatch_id: dispatchId,
+        status: "ToDo" as const,
+        type: "Feature" as const,
+        title: "Persistent card",
+        description: "",
+        triaged: { timestamp: "", status: "", explain: "" },
+        ac: [],
+        phases: [],
+        comments: [],
+        retro: { good: "", bad: "", action_items: [], commits: [] },
+      }),
+    );
 
     factorySpy.mockClear();
     await poll(REPO);
@@ -531,33 +540,36 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
       return ledger.get(eid) ?? null;
     });
-    mockWriteIssue.mockImplementation((_repo: string, issue: { external_id: string }) => {
-      ledger.set(issue.external_id, issue as unknown as Record<string, unknown>);
-    });
+    mockWriteIssue.mockImplementation(
+      (_repo: string, issue: { external_id: string }) => {
+        ledger.set(
+          issue.external_id,
+          issue as unknown as Record<string, unknown>,
+        );
+      },
+    );
 
     let allocCounter = 0;
-    mockHydrateFromRemote.mockImplementation(async (
-      _t: unknown,
-      externalId: string,
-      dispatchId: string | null,
-    ) => ({
-      schema_version: 3 as const,
-      tracker: "memory",
-      id: `ISS-${++allocCounter}`,
-      external_id: externalId,
-      parent_id: null,
-      children: [],
-      dispatch_id: dispatchId,
-      status: "ToDo" as const,
-      type: "Feature" as const,
-      title: `card-${externalId}`,
-      description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
-      ac: [],
-      phases: [],
-      comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
-    }));
+    mockHydrateFromRemote.mockImplementation(
+      async (_t: unknown, externalId: string, dispatchId: string | null) => ({
+        schema_version: 3 as const,
+        tracker: "memory",
+        id: `ISS-${++allocCounter}`,
+        external_id: externalId,
+        parent_id: null,
+        children: [],
+        dispatch_id: dispatchId,
+        status: "ToDo" as const,
+        type: "Feature" as const,
+        title: `card-${externalId}`,
+        description: "",
+        triaged: { timestamp: "", status: "", explain: "" },
+        ac: [],
+        phases: [],
+        comments: [],
+        retro: { good: "", bad: "", action_items: [], commits: [] },
+      }),
+    );
 
     mockDispatch.mockResolvedValue({ dispatchId: "d", job: { id: "j" } });
 
@@ -605,33 +617,31 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     await seedDraft(tracker, { id: "ISS-2", title: "sibling that fails" });
 
     // Primary (cards[0] === mem-1) succeeds; sibling (mem-2) rejects.
-    mockHydrateFromRemote.mockImplementation(async (
-      _t: unknown,
-      externalId: string,
-      dispatchId: string | null,
-    ) => {
-      if (externalId === "mem-2") {
-        throw new Error("simulated tracker hiccup on sibling");
-      }
-      return {
-        schema_version: 3 as const,
-        tracker: "memory",
-        id: "ISS-1",
-        external_id: externalId,
-        parent_id: null,
-        children: [],
-        dispatch_id: dispatchId,
-        status: "ToDo" as const,
-        type: "Feature" as const,
-        title: `card-${externalId}`,
-        description: "",
-        triaged: { timestamp: "", status: "", explain: "" },
-        ac: [],
-        phases: [],
-        comments: [],
-        retro: { good: "", bad: "", action_items: [], commits: [] },
-      };
-    });
+    mockHydrateFromRemote.mockImplementation(
+      async (_t: unknown, externalId: string, dispatchId: string | null) => {
+        if (externalId === "mem-2") {
+          throw new Error("simulated tracker hiccup on sibling");
+        }
+        return {
+          schema_version: 3 as const,
+          tracker: "memory",
+          id: "ISS-1",
+          external_id: externalId,
+          parent_id: null,
+          children: [],
+          dispatch_id: dispatchId,
+          status: "ToDo" as const,
+          type: "Feature" as const,
+          title: `card-${externalId}`,
+          description: "",
+          triaged: { timestamp: "", status: "", explain: "" },
+          ac: [],
+          phases: [],
+          comments: [],
+          retro: { good: "", bad: "", action_items: [], commits: [] },
+        };
+      },
+    );
 
     mockDispatch.mockResolvedValue({ dispatchId: "d", job: { id: "j" } });
 
@@ -650,33 +660,31 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     await seedDraft(tracker, { id: "ISS-1", title: "primary fails" });
     await seedDraft(tracker, { id: "ISS-2", title: "sibling" });
 
-    mockHydrateFromRemote.mockImplementation(async (
-      _t: unknown,
-      externalId: string,
-      dispatchId: string | null,
-    ) => {
-      if (externalId === "mem-1") {
-        throw new Error("Trello API error: 401 Unauthorized");
-      }
-      return {
-        schema_version: 3 as const,
-        tracker: "memory",
-        id: "ISS-2",
-        external_id: externalId,
-        parent_id: null,
-        children: [],
-        dispatch_id: dispatchId,
-        status: "ToDo" as const,
-        type: "Feature" as const,
-        title: `card-${externalId}`,
-        description: "",
-        triaged: { timestamp: "", status: "", explain: "" },
-        ac: [],
-        phases: [],
-        comments: [],
-        retro: { good: "", bad: "", action_items: [], commits: [] },
-      };
-    });
+    mockHydrateFromRemote.mockImplementation(
+      async (_t: unknown, externalId: string, dispatchId: string | null) => {
+        if (externalId === "mem-1") {
+          throw new Error("Trello API error: 401 Unauthorized");
+        }
+        return {
+          schema_version: 3 as const,
+          tracker: "memory",
+          id: "ISS-2",
+          external_id: externalId,
+          parent_id: null,
+          children: [],
+          dispatch_id: dispatchId,
+          status: "ToDo" as const,
+          type: "Feature" as const,
+          title: `card-${externalId}`,
+          description: "",
+          triaged: { timestamp: "", status: "", explain: "" },
+          ac: [],
+          phases: [],
+          comments: [],
+          retro: { good: "", bad: "", action_items: [], commits: [] },
+        };
+      },
+    );
 
     await expect(poll(REPO)).rejects.toThrow(/401 Unauthorized/);
     expect(mockDispatch).not.toHaveBeenCalled();
@@ -715,28 +723,26 @@ describe("Integration: poller hot path against MemoryTracker", () => {
       return null;
     });
 
-    mockHydrateFromRemote.mockImplementation(async (
-      _t: unknown,
-      externalId: string,
-      dispatchId: string | null,
-    ) => ({
-      schema_version: 3 as const,
-      tracker: "memory",
-      id: "ISS-2",
-      external_id: externalId,
-      parent_id: null,
-      children: [],
-      dispatch_id: dispatchId,
-      status: "ToDo" as const,
-      type: "Feature" as const,
-      title: "new-card",
-      description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
-      ac: [],
-      phases: [],
-      comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
-    }));
+    mockHydrateFromRemote.mockImplementation(
+      async (_t: unknown, externalId: string, dispatchId: string | null) => ({
+        schema_version: 3 as const,
+        tracker: "memory",
+        id: "ISS-2",
+        external_id: externalId,
+        parent_id: null,
+        children: [],
+        dispatch_id: dispatchId,
+        status: "ToDo" as const,
+        type: "Feature" as const,
+        title: "new-card",
+        description: "",
+        triaged: { timestamp: "", status: "", explain: "" },
+        ac: [],
+        phases: [],
+        comments: [],
+        retro: { good: "", bad: "", action_items: [], commits: [] },
+      }),
+    );
 
     mockDispatch.mockResolvedValue({ dispatchId: "d", job: { id: "j" } });
 

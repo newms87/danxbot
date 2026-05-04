@@ -83,6 +83,7 @@ mockConfig.logsDir = testState.logsDir;
 
 vi.mock("../../config.js", () => ({
   config: mockConfig,
+  targetName: "test-target",
   // isWorkerMode/isDashboardMode are read by repo-context.ts at module
   // load; we mock repo-context entirely below so the precise value here
   // doesn't matter. workerRepoName + repos shape is also irrelevant
@@ -269,10 +270,7 @@ function writeWorkspaceFixture(workspaceName: string): void {
       "optional-placeholders: []\n" +
       "required-gates: []\n",
   );
-  writeFileSync(
-    join(wsDir, ".mcp.json"),
-    JSON.stringify({ mcpServers: {} }),
-  );
+  writeFileSync(join(wsDir, ".mcp.json"), JSON.stringify({ mcpServers: {} }));
   writeFileSync(
     join(wsDir, ".claude", "settings.json"),
     JSON.stringify({ env: {} }),
@@ -586,8 +584,7 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
       source: "post-dispatch-check",
       cardId: STUCK_CARD_ID,
       cardUrl: `https://trello.com/c/${STUCK_CARD_ID}`,
-      reason:
-        `Tracked card "${STUCK_TITLE}" did not move out of ToDo after dispatch`,
+      reason: `Tracked card "${STUCK_TITLE}" did not move out of ToDo after dispatch`,
     });
     expect(flag?.detail).toContain(STUCK_CARD_ID);
     expect(flag?.detail).toContain(STUCK_TITLE);

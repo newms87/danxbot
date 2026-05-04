@@ -28,7 +28,14 @@ const MOCK_REPO_CONTEXT: RepoContext = {
     needsHelpLabelId: "nh-label",
   },
   slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
-  db: { host: "", port: 3306, user: "", password: "", database: "", enabled: false },
+  db: {
+    host: "",
+    port: 3306,
+    user: "",
+    password: "",
+    database: "",
+    enabled: false,
+  },
   githubToken: "test-github-token",
   trelloEnabled: true,
   workerPort: 5562,
@@ -43,14 +50,30 @@ const { mockRepoContexts } = vi.hoisted(() => {
     url: "https://example.com/test.git",
     localPath: "/test/repos/test-repo",
     trello: {
-      apiKey: "test-key", apiToken: "test-token", boardId: "test-board",
-      reviewListId: "review-list", todoListId: "todo-list", inProgressListId: "ip-list",
-      needsHelpListId: "nh-list", doneListId: "done-list", cancelledListId: "cancelled-list",
-      actionItemsListId: "ai-list", bugLabelId: "bug-label", featureLabelId: "feature-label",
-      epicLabelId: "epic-label", needsHelpLabelId: "nh-label",
+      apiKey: "test-key",
+      apiToken: "test-token",
+      boardId: "test-board",
+      reviewListId: "review-list",
+      todoListId: "todo-list",
+      inProgressListId: "ip-list",
+      needsHelpListId: "nh-list",
+      doneListId: "done-list",
+      cancelledListId: "cancelled-list",
+      actionItemsListId: "ai-list",
+      bugLabelId: "bug-label",
+      featureLabelId: "feature-label",
+      epicLabelId: "epic-label",
+      needsHelpLabelId: "nh-label",
     },
     slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
-    db: { host: "", port: 3306, user: "", password: "", database: "", enabled: false },
+    db: {
+      host: "",
+      port: 3306,
+      user: "",
+      password: "",
+      database: "",
+      enabled: false,
+    },
     githubToken: "test-github-token",
     trelloEnabled: true,
     workerPort: 5562,
@@ -67,6 +90,7 @@ const { mockConfig } = vi.hoisted(() => ({
 }));
 vi.mock("../config.js", () => ({
   config: mockConfig,
+  targetName: "test-target",
 }));
 
 vi.mock("../repo-context.js", () => ({
@@ -97,6 +121,9 @@ const mockTracker = {
   getComments: vi.fn(),
   moveToStatus: vi.fn(),
   addComment: vi.fn(),
+  // dispatch-lock layer (lock.ts) edits the lock comment in-place on
+  // stale-reclaim and self-refresh paths.
+  editComment: vi.fn(),
   // hydrateFromRemote calls updateCard when the remote title is missing
   // the `#ISS-N: ` prefix. Default to no-op resolved.
   updateCard: vi.fn(),
@@ -119,7 +146,11 @@ vi.mock("../issue-tracker/index.js", async () => {
  * resolves the local YAML's internal id via `findByExternalId` /
  * `hydrateFromRemote` instead.
  */
-function ref(external_id: string, title: string, status: IssueStatus): IssueRef {
+function ref(
+  external_id: string,
+  title: string,
+  status: IssueStatus,
+): IssueRef {
   return { id: "", external_id, title, status };
 }
 
@@ -311,7 +342,13 @@ vi.mock("node:fs", () => ({
   lstatSync: (...args: unknown[]) => mockLstatSync(...args),
 }));
 
-import { poll, shutdown, start, syncRepoFiles, _resetForTesting } from "./index.js";
+import {
+  poll,
+  shutdown,
+  start,
+  syncRepoFiles,
+  _resetForTesting,
+} from "./index.js";
 
 function createFakeSpawnResult() {
   return { unref: vi.fn(), on: vi.fn() };
@@ -337,19 +374,24 @@ paths:
 /** Make existsSync return true for .danxbot/config/ paths, false by default */
 function setupRepoConfigMocks() {
   mockExistsSync.mockImplementation((path: string) => {
-    if (typeof path === "string" && (
-      path.includes(".danxbot/config") ||
-      path.endsWith("config.yml") ||
-      path.endsWith("overview.md") ||
-      path.endsWith("workflow.md") ||
-      path.endsWith("trello.yml")
-    )) return true;
+    if (
+      typeof path === "string" &&
+      (path.includes(".danxbot/config") ||
+        path.endsWith("config.yml") ||
+        path.endsWith("overview.md") ||
+        path.endsWith("workflow.md") ||
+        path.endsWith("trello.yml"))
+    )
+      return true;
     return false;
   });
   mockReadFileSync.mockImplementation((path: string) => {
-    if (typeof path === "string" && path.endsWith("config.yml")) return FAKE_CONFIG_YML;
-    if (typeof path === "string" && path.endsWith("trello.yml")) return "board_id: mock-board-id\n";
-    if (typeof path === "string" && path.endsWith(".md")) return "# placeholder";
+    if (typeof path === "string" && path.endsWith("config.yml"))
+      return FAKE_CONFIG_YML;
+    if (typeof path === "string" && path.endsWith("trello.yml"))
+      return "board_id: mock-board-id\n";
+    if (typeof path === "string" && path.endsWith(".md"))
+      return "# placeholder";
     return "";
   });
 }
@@ -399,6 +441,8 @@ function resetTrackerMocks() {
   mockTracker.moveToStatus.mockResolvedValue(undefined);
   mockTracker.addComment.mockReset();
   mockTracker.addComment.mockResolvedValue({ id: "cmt-1", timestamp: "" });
+  mockTracker.editComment.mockReset();
+  mockTracker.editComment.mockResolvedValue(undefined);
   mockTracker.updateCard.mockReset();
   mockTracker.updateCard.mockResolvedValue(undefined);
   // The factory mock still returns the same tracker instance — only call
@@ -438,9 +482,7 @@ describe("poll", () => {
   });
 
   it("skips when teamRunning is true", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
     await poll(MOCK_REPO_CONTEXT);
 
     // Second call: should skip because teamRunning is true
@@ -462,9 +504,7 @@ describe("poll", () => {
   });
 
   it("calls dispatch() with the issue-worker workspace and an empty caller overlay when cards exist", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -527,8 +567,7 @@ describe("poll", () => {
     const workspaceClaudePrefix =
       "/test/repos/test-repo/.danxbot/workspaces/issue-worker/.claude/";
     const repoRootClaudePrefix = "/test/repos/test-repo/.claude/";
-    const singularWorkspacePrefix =
-      "/test/repos/test-repo/.danxbot/workspace/";
+    const singularWorkspacePrefix = "/test/repos/test-repo/.danxbot/workspace/";
 
     const expectedWorkspaceArtifacts = [
       `${workspaceClaudePrefix}rules/danx-repo-config.md`,
@@ -560,15 +599,16 @@ runtime: local
 language: node
 `; // missing `name`
     mockReadFileSync.mockImplementation((path: string) => {
-      if (typeof path === "string" && path.endsWith("config.yml")) return brokenConfig;
-      if (typeof path === "string" && path.endsWith("trello.yml")) return "board_id: mock-board-id\n";
-      if (typeof path === "string" && path.endsWith(".md")) return "# placeholder";
+      if (typeof path === "string" && path.endsWith("config.yml"))
+        return brokenConfig;
+      if (typeof path === "string" && path.endsWith("trello.yml"))
+        return "board_id: mock-board-id\n";
+      if (typeof path === "string" && path.endsWith(".md"))
+        return "# placeholder";
       return "";
     });
 
-    expect(() => syncRepoFiles(MOCK_REPO_CONTEXT)).toThrow(
-      /'name'.*missing/,
-    );
+    expect(() => syncRepoFiles(MOCK_REPO_CONTEXT)).toThrow(/'name'.*missing/);
 
     const writtenPaths = mockWriteFileSync.mock.calls.map(
       (c: unknown[]) => c[0] as string,
@@ -603,9 +643,7 @@ language: node
     const mkdirPaths = mockMkdirSync.mock.calls.map(
       (c: unknown[]) => c[0] as string,
     );
-    expect(mkdirPaths).toContain(
-      "/test/repos/test-repo/.danxbot/workspaces",
-    );
+    expect(mkdirPaths).toContain("/test/repos/test-repo/.danxbot/workspaces");
 
     const writtenPaths = mockWriteFileSync.mock.calls.map(
       (c: unknown[]) => c[0] as string,
@@ -620,8 +658,7 @@ language: node
     const workspacesSource = "src/poller/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const demoToolsSource = `${demoSource}/tools`;
-    const workspacesTargetRoot =
-      "/test/repos/test-repo/.danxbot/workspaces";
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const demoTargetRoot = `${workspacesTargetRoot}/demo`;
     const demoToolsTarget = `${demoTargetRoot}/tools`;
     const orphanWorkspaceTargetRoot = `${workspacesTargetRoot}/old-removed`;
@@ -641,14 +678,23 @@ language: node
       if (path.endsWith("overview.md")) return true;
       if (path.endsWith("workflow.md")) return true;
       if (path.endsWith("trello.yml")) return true;
-      if (path.includes("inject/rules") || path.includes("inject/tools") ||
-          path.includes("inject/skills")) {
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
         return true;
       }
-      if (path.endsWith(workspacesSource) || path.includes(`${workspacesSource}/`)) {
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
         return true;
       }
-      if (path === workspacesTargetRoot || path.startsWith(`${workspacesTargetRoot}/`)) {
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
         return true;
       }
       return false;
@@ -681,7 +727,8 @@ language: node
     mockReadFileSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return "";
       if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
-      if (path.endsWith("workspace.yml")) return "name: demo\ndescription: demo\n";
+      if (path.endsWith("workspace.yml"))
+        return "name: demo\ndescription: demo\n";
       if (path.endsWith("helper.sh")) return "#!/bin/bash\necho ok\n";
       return "";
     });
@@ -694,9 +741,7 @@ language: node
     expect(writtenPaths).toContain(`${demoTargetRoot}/workspace.yml`);
     expect(writtenPaths).toContain(`${demoToolsTarget}/helper.sh`);
 
-    const rmPaths = mockRmSync.mock.calls.map(
-      (c: unknown[]) => c[0] as string,
-    );
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
     expect(rmPaths).not.toContain(`${demoToolsTarget}/stale.sh`);
     expect(rmPaths).not.toContain(orphanWorkspaceTargetRoot);
   });
@@ -705,8 +750,7 @@ language: node
     const workspacesSource = "src/poller/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const gitkeepSource = `${workspacesSource}/.gitkeep`;
-    const workspacesTargetRoot =
-      "/test/repos/test-repo/.danxbot/workspaces";
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const demoTargetRoot = `${workspacesTargetRoot}/demo`;
 
     mockExistsSync.mockImplementation((path: unknown) => {
@@ -716,14 +760,23 @@ language: node
       if (path.endsWith("overview.md")) return true;
       if (path.endsWith("workflow.md")) return true;
       if (path.endsWith("trello.yml")) return true;
-      if (path.includes("inject/rules") || path.includes("inject/tools") ||
-          path.includes("inject/skills")) {
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
         return true;
       }
-      if (path.endsWith(workspacesSource) || path.includes(`${workspacesSource}/`)) {
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
         return true;
       }
-      if (path === workspacesTargetRoot || path.startsWith(`${workspacesTargetRoot}/`)) {
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
         return true;
       }
       return false;
@@ -762,7 +815,8 @@ language: node
     mockReadFileSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return "";
       if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
-      if (path.endsWith("workspace.yml")) return "name: demo\ndescription: demo\n";
+      if (path.endsWith("workspace.yml"))
+        return "name: demo\ndescription: demo\n";
       return "";
     });
 
@@ -778,8 +832,7 @@ language: node
 
   it("injectDanxWorkspaces removes the legacy alias symlink at workspaces/trello-worker (Phase 5 cleanup wiring)", async () => {
     const workspacesSource = "src/poller/inject/workspaces";
-    const workspacesTargetRoot =
-      "/test/repos/test-repo/.danxbot/workspaces";
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const legacyPath = `${workspacesTargetRoot}/trello-worker`;
     const currentPath = `${workspacesTargetRoot}/issue-worker`;
 
@@ -790,14 +843,23 @@ language: node
       if (path.endsWith("overview.md")) return true;
       if (path.endsWith("workflow.md")) return true;
       if (path.endsWith("trello.yml")) return true;
-      if (path.includes("inject/rules") || path.includes("inject/tools") ||
-          path.includes("inject/skills")) {
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
         return true;
       }
-      if (path.endsWith(workspacesSource) || path.includes(`${workspacesSource}/`)) {
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
         return true;
       }
-      if (path === workspacesTargetRoot || path.startsWith(`${workspacesTargetRoot}/`)) {
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
         return true;
       }
       return false;
@@ -835,8 +897,7 @@ language: node
 
   it("injectDanxWorkspaces preserves a real directory at workspaces/trello-worker (operator-authored — never clobber)", async () => {
     const workspacesSource = "src/poller/inject/workspaces";
-    const workspacesTargetRoot =
-      "/test/repos/test-repo/.danxbot/workspaces";
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const operatorPath = `${workspacesTargetRoot}/trello-worker`;
 
     mockExistsSync.mockImplementation((path: unknown) => {
@@ -846,14 +907,23 @@ language: node
       if (path.endsWith("overview.md")) return true;
       if (path.endsWith("workflow.md")) return true;
       if (path.endsWith("trello.yml")) return true;
-      if (path.includes("inject/rules") || path.includes("inject/tools") ||
-          path.includes("inject/skills")) {
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
         return true;
       }
-      if (path.endsWith(workspacesSource) || path.includes(`${workspacesSource}/`)) {
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
         return true;
       }
-      if (path === workspacesTargetRoot || path.startsWith(`${workspacesTargetRoot}/`)) {
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
         return true;
       }
       return false;
@@ -911,7 +981,12 @@ describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; 
     >("../issue-tracker/index.js");
     const repoNoCreds: RepoContext = {
       ...MOCK_REPO_CONTEXT,
-      trello: { ...MOCK_REPO_CONTEXT.trello, apiKey: "", apiToken: "", boardId: "" },
+      trello: {
+        ...MOCK_REPO_CONTEXT.trello,
+        apiKey: "",
+        apiToken: "",
+        boardId: "",
+      },
     };
     const realTrelloTracker = new TrelloTracker(repoNoCreds.trello);
     // Stub the methods we'll use so the test doesn't hit the network
@@ -919,6 +994,14 @@ describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; 
     realTrelloTracker.fetchOpenCards = async () => [
       { id: "", external_id: "c1", title: "Card 1", status: "ToDo" },
     ];
+    // Stub the dispatch-lock probe so it short-circuits without hitting
+    // the real Trello API — the test is exercising the credentials
+    // guard inside `spawnClaude`, not the lock layer.
+    realTrelloTracker.getComments = async () => [];
+    realTrelloTracker.addComment = async () => ({
+      id: "lock-1",
+      timestamp: "",
+    });
     mockCreateIssueTracker.mockReturnValueOnce(realTrelloTracker);
 
     await expect(poll(repoNoCreds)).rejects.toThrow(
@@ -933,14 +1016,75 @@ describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; 
     // the RepoContext has empty creds.
     const repoNoCreds: RepoContext = {
       ...MOCK_REPO_CONTEXT,
-      trello: { ...MOCK_REPO_CONTEXT.trello, apiKey: "", apiToken: "", boardId: "" },
+      trello: {
+        ...MOCK_REPO_CONTEXT.trello,
+        apiKey: "",
+        apiToken: "",
+        boardId: "",
+      },
     };
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await expect(poll(repoNoCreds)).resolves.toBeUndefined();
     expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("poll — dispatch lock gating", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+  });
+
+  it("skips dispatch tick when dispatch lock is held by another holder within TTL", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
+    // Pre-existing lock comment held by a foreign holder, started just
+    // 30 minutes ago — well within the 2h TTL.
+    const foreignLock = `<!-- danxbot -->
+<!-- danxbot-lock -->
+
+**Dispatch lock**
+
+| Field | Value |
+|---|---|
+| holder | \`other-deployment\` |
+| host | \`ip-9-9-9-9\` |
+| dispatch_id | \`other-uuid-1234\` |
+| repo_path | \`/elsewhere\` |
+| jsonl_dir | \`/elsewhere/.claude/projects/x\` |
+| workspace | \`issue-worker\` |
+| started_at | \`${new Date(Date.now() - 30 * 60 * 1000).toISOString()}\` |
+| ttl | \`120m\` |
+| stale_after | \`${new Date(Date.now() + 90 * 60 * 1000).toISOString()}\` |
+`;
+    mockTracker.getComments.mockResolvedValue([
+      { id: "lock-cmt-1", author: "danxbot", timestamp: "", text: foreignLock },
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+    // Lock comment was inspected but NOT overwritten (no edit attempt).
+    expect(mockTracker.editComment).not.toHaveBeenCalled();
+    expect(mockTracker.addComment).not.toHaveBeenCalled();
+  });
+
+  it("proceeds with dispatch and posts a fresh lock comment when no lock exists", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
+    mockTracker.getComments.mockResolvedValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    // Lock layer posted exactly one new comment (the lock) for c1.
+    const lockPostsForC1 = mockTracker.addComment.mock.calls.filter(
+      (c: unknown[]) => c[0] === "c1" && String(c[1]).includes("danxbot-lock"),
+    );
+    expect(lockPostsForC1).toHaveLength(1);
   });
 });
 
@@ -958,9 +1102,7 @@ describe("poll — trelloPoller feature toggle", () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "trelloPoller",
     );
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1052,24 +1194,26 @@ describe("poll — pickup-name-prefix filter", () => {
     ]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementationOnce((input: { onComplete?: (j: unknown) => void }) => {
-      capturedOnComplete = input.onComplete;
-      return Promise.resolve({
-        dispatchId: "d",
-        job: {
-          id: "j",
-          status: "failed" as const,
-          summary: "boom",
-          startedAt: new Date(),
-          usage: {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
+    mockDispatch.mockImplementationOnce(
+      (input: { onComplete?: (j: unknown) => void }) => {
+        capturedOnComplete = input.onComplete;
+        return Promise.resolve({
+          dispatchId: "d",
+          job: {
+            id: "j",
+            status: "failed" as const,
+            summary: "boom",
+            startedAt: new Date(),
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
           },
-        },
-      });
-    });
+        });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
     expect(capturedOnComplete).toBeDefined();
@@ -1125,7 +1269,12 @@ describe("poll — Needs Help checking", () => {
       .mockResolvedValueOnce([nhCard])
       .mockResolvedValueOnce([ref("nh1", "Blocked card", "ToDo")]);
     mockTracker.getComments.mockResolvedValue([
-      { id: "a1", author: "user", timestamp: "2026-01-01T00:00:00Z", text: "I fixed the config" },
+      {
+        id: "a1",
+        author: "user",
+        timestamp: "2026-01-01T00:00:00Z",
+        text: "I fixed the config",
+      },
     ]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -1139,7 +1288,12 @@ describe("poll — Needs Help checking", () => {
       ref("nh1", "Blocked card", "Needs Help"),
     ]);
     mockTracker.getComments.mockResolvedValue([
-      { id: "a1", author: "danxbot", timestamp: "2026-01-01T00:00:00Z", text: "Needs config change\n\n<!-- danxbot -->" },
+      {
+        id: "a1",
+        author: "danxbot",
+        timestamp: "2026-01-01T00:00:00Z",
+        text: "Needs config change\n\n<!-- danxbot -->",
+      },
     ]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -1170,7 +1324,12 @@ describe("poll — Needs Help checking", () => {
     // the poller iterates the refs in order.
     mockTracker.getComments
       .mockResolvedValueOnce([
-        { id: "a1", author: "danxbot", timestamp: "t", text: "Needs help\n\n<!-- danxbot -->" },
+        {
+          id: "a1",
+          author: "danxbot",
+          timestamp: "t",
+          text: "Needs help\n\n<!-- danxbot -->",
+        },
       ])
       .mockResolvedValueOnce([
         { id: "a2", author: "user", timestamp: "t", text: "Done, try again" },
@@ -1202,9 +1361,7 @@ describe("poll — Needs Help checking", () => {
         ref("nh1", "Card 1", "Needs Help"),
         ref("nh2", "Card 2", "Needs Help"),
       ])
-      .mockResolvedValueOnce([
-        ref("nh2", "Card 2", "ToDo"),
-      ]);
+      .mockResolvedValueOnce([ref("nh2", "Card 2", "ToDo")]);
     mockTracker.getComments
       .mockRejectedValueOnce(new Error("API error"))
       .mockResolvedValueOnce([
@@ -1252,14 +1409,17 @@ describe("start", () => {
     setupRepoConfigMocks();
     const origImpl = mockExistsSync.getMockImplementation()!;
     mockExistsSync.mockImplementation((path: string) => {
-      if (typeof path === "string" && path.endsWith(".claude.json")) return true;
+      if (typeof path === "string" && path.endsWith(".claude.json"))
+        return true;
       return origImpl(path);
     });
     for (const [key, value] of Object.entries(requiredEnvVars)) {
       savedEnv[key] = process.env[key];
       process.env[key] = value;
     }
-    mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
+    mockExit = vi
+      .spyOn(process, "exit")
+      .mockImplementation((() => {}) as never);
   });
 
   afterEach(() => {
@@ -1295,8 +1455,16 @@ describe("start", () => {
   });
 
   it("polls every repo in repoContexts — per-tick toggle decides which fetch the tracker", () => {
-    const enabledRepo = { ...mockRepoContexts[0], name: "enabled", trelloEnabled: true };
-    const disabledRepo = { ...mockRepoContexts[0], name: "disabled", trelloEnabled: false };
+    const enabledRepo = {
+      ...mockRepoContexts[0],
+      name: "enabled",
+      trelloEnabled: true,
+    };
+    const disabledRepo = {
+      ...mockRepoContexts[0],
+      name: "disabled",
+      trelloEnabled: false,
+    };
     mockRepoContexts.length = 0;
     mockRepoContexts.push(enabledRepo, disabledRepo);
     mockIsFeatureEnabled.mockImplementation((...args: unknown[]) => {
@@ -1321,7 +1489,11 @@ describe("start", () => {
     expect(disabledCalls.length).toBe(0);
 
     mockRepoContexts.length = 0;
-    mockRepoContexts.push({ ...enabledRepo, name: "test-repo", trelloEnabled: true });
+    mockRepoContexts.push({
+      ...enabledRepo,
+      name: "test-repo",
+      trelloEnabled: true,
+    });
     mockIsFeatureEnabled.mockReturnValue(true);
   });
 });
@@ -1344,9 +1516,7 @@ describe("poll — critical-failure halt gate", () => {
       dispatchId: "dxy",
       reason: "MCP Trello tools failed to load",
     });
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1362,9 +1532,7 @@ describe("poll — critical-failure halt gate", () => {
       dispatchId: "unparseable",
       reason: "Critical-failure flag file present but unparseable",
     });
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1386,9 +1554,7 @@ describe("poll — critical-failure halt gate", () => {
       (...args: unknown[]) => (args[1] as string) !== "trelloPoller",
     );
     mockReadFlag.mockReturnValue(null);
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1476,16 +1642,13 @@ describe("poll — post-dispatch card-progress check", () => {
       issueWithStatus("c1", "Card 1", "ToDo"),
     );
 
-    await runOneDispatch(
-      [{ id: "c1", name: "Card 1" }],
-      {
-        id: "j1",
-        status: "failed",
-        summary: "MCP Trello unavailable",
-        startedAt: new Date(),
-        completedAt: new Date(),
-      },
-    );
+    await runOneDispatch([{ id: "c1", name: "Card 1" }], {
+      id: "j1",
+      status: "failed",
+      summary: "MCP Trello unavailable",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
 
     expect(mockTracker.getCard).toHaveBeenCalledWith("c1");
     expect(mockWriteFlag).toHaveBeenCalledTimes(1);
@@ -1505,16 +1668,13 @@ describe("poll — post-dispatch card-progress check", () => {
       issueWithStatus("c1", "Card 1", "ToDo"),
     );
 
-    await runOneDispatch(
-      [{ id: "c1", name: "Card 1" }],
-      {
-        id: "j1",
-        status: "completed",
-        summary: "done (but really wasn't)",
-        startedAt: new Date(),
-        completedAt: new Date(),
-      },
-    );
+    await runOneDispatch([{ id: "c1", name: "Card 1" }], {
+      id: "j1",
+      status: "completed",
+      summary: "done (but really wasn't)",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
 
     expect(mockWriteFlag).toHaveBeenCalled();
   });
@@ -1524,16 +1684,13 @@ describe("poll — post-dispatch card-progress check", () => {
       issueWithStatus("c1", "Card 1", "In Progress"),
     );
 
-    await runOneDispatch(
-      [{ id: "c1", name: "Card 1" }],
-      {
-        id: "j1",
-        status: "failed",
-        summary: "mid-work crash",
-        startedAt: new Date(),
-        completedAt: new Date(),
-      },
-    );
+    await runOneDispatch([{ id: "c1", name: "Card 1" }], {
+      id: "j1",
+      status: "failed",
+      summary: "mid-work crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
 
     expect(mockTracker.getCard).toHaveBeenCalled();
     expect(mockWriteFlag).not.toHaveBeenCalled();
@@ -1544,16 +1701,13 @@ describe("poll — post-dispatch card-progress check", () => {
       issueWithStatus("c1", "Card 1", "Needs Help"),
     );
 
-    await runOneDispatch(
-      [{ id: "c1", name: "Card 1" }],
-      {
-        id: "j1",
-        status: "completed",
-        summary: "moved to Needs Help",
-        startedAt: new Date(),
-        completedAt: new Date(),
-      },
-    );
+    await runOneDispatch([{ id: "c1", name: "Card 1" }], {
+      id: "j1",
+      status: "completed",
+      summary: "moved to Needs Help",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
 
     expect(mockWriteFlag).not.toHaveBeenCalled();
   });
@@ -1563,16 +1717,13 @@ describe("poll — post-dispatch card-progress check", () => {
       issueWithStatus("c1", "Card 1", "Done"),
     );
 
-    await runOneDispatch(
-      [{ id: "c1", name: "Card 1" }],
-      {
-        id: "j1",
-        status: "completed",
-        summary: "done",
-        startedAt: new Date(),
-        completedAt: new Date(),
-      },
-    );
+    await runOneDispatch([{ id: "c1", name: "Card 1" }], {
+      id: "j1",
+      status: "completed",
+      summary: "done",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
 
     expect(mockWriteFlag).not.toHaveBeenCalled();
   });
@@ -1609,16 +1760,13 @@ describe("poll — post-dispatch card-progress check", () => {
   it("handles getCard failures gracefully without writing the flag", async () => {
     mockTracker.getCard.mockRejectedValue(new Error("Trello API 500"));
 
-    await runOneDispatch(
-      [{ id: "c1", name: "Card 1" }],
-      {
-        id: "j1",
-        status: "failed",
-        summary: "crash",
-        startedAt: new Date(),
-        completedAt: new Date(),
-      },
-    );
+    await runOneDispatch([{ id: "c1", name: "Card 1" }], {
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
 
     expect(mockTracker.getCard).toHaveBeenCalled();
     expect(mockWriteFlag).not.toHaveBeenCalled();
@@ -1633,7 +1781,9 @@ describe("shutdown", () => {
     _resetForTesting();
     resetTrackerMocks();
     setupRepoConfigMocks();
-    mockExit = vi.spyOn(process, "exit").mockImplementation((() => {}) as never);
+    mockExit = vi
+      .spyOn(process, "exit")
+      .mockImplementation((() => {}) as never);
   });
 
   afterEach(() => {
@@ -1668,9 +1818,7 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("routes through dispatch() (not a direct terminal spawn)", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1685,9 +1833,7 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("passes the /danx-next prompt as the dispatch task", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1731,20 +1877,25 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("resets teamRunning via onComplete callback", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "test-job", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
     expect(capturedOnComplete).toBeDefined();
 
-    capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() });
+    capturedOnComplete!({
+      id: "test-job",
+      status: "completed",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
     await flushAsync();
 
     mockTracker.fetchOpenCards.mockResolvedValue([...REVIEW_FILLER]);
@@ -1753,19 +1904,25 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("resets teamRunning on agent failure", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "test-job", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
-    capturedOnComplete!({ id: "test-job", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
+    capturedOnComplete!({
+      id: "test-job",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
     await flushAsync();
 
     mockTracker.fetchOpenCards.mockResolvedValue([...REVIEW_FILLER]);
@@ -1774,9 +1931,7 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("does NOT restate the DANXBOT_REPO_NAME / openTerminal invariants — dispatch() owns those defaults", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1786,9 +1941,7 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("passes its own timeoutMs (pollerIntervalMs * 60) to dispatch()", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1800,9 +1953,7 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("does NOT pass allowTools — the allow-tools concept is gone from dispatch", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -1846,43 +1997,53 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("handles onComplete without throwing", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "test-job", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(() => capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() })).not.toThrow();
+    expect(() =>
+      capturedOnComplete!({
+        id: "test-job",
+        status: "completed",
+        startedAt: new Date(),
+        completedAt: new Date(),
+      }),
+    ).not.toThrow();
     await flushAsync();
   });
 
   it("onComplete re-poll chains into another dispatch() if more cards", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "test-job", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
 
     mockDispatch.mockClear();
     mockDispatch.mockResolvedValue({ id: "test-job-2", status: "running" });
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c2", "Card 2", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c2", "Card 2", "ToDo")]);
 
-    capturedOnComplete!({ id: "test-job", status: "completed", startedAt: new Date(), completedAt: new Date() });
+    capturedOnComplete!({
+      id: "test-job",
+      status: "completed",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
 
     await flushAsync();
     await flushAsync();
@@ -1891,9 +2052,7 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 
   it("resets teamRunning when dispatch() rejects before agent spawns (fire-and-forget .catch)", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
     mockDispatch.mockRejectedValueOnce(new Error("pre-spawn boom"));
 
     await poll(MOCK_REPO_CONTEXT);
@@ -1925,25 +2084,29 @@ describe("poll — exponential backoff on failure", () => {
   });
 
   it("increments consecutive failure counter on agent failure", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
     mockExistsSync.mockReturnValue(false);
-    capturedOnComplete!({ id: "j1", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
+    capturedOnComplete!({
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
     await flushAsync();
 
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c2", "Card 2", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c2", "Card 2", "ToDo")]);
     await poll(MOCK_REPO_CONTEXT);
 
     // Should not spawn because we're in backoff
@@ -1953,20 +2116,26 @@ describe("poll — exponential backoff on failure", () => {
   it("resets failure counter on success — next failure gets first-tier backoff", async () => {
     const originalSchedule = mockConfig.pollerBackoffScheduleMs;
     mockConfig.pollerBackoffScheduleMs = [1, 1, 1, 1];
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
     mockExistsSync.mockReturnValue(false);
-    capturedOnComplete!({ id: "j1", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
+    capturedOnComplete!({
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
     await flushAsync();
     await new Promise((r) => setTimeout(r, 5));
 
@@ -1974,7 +2143,13 @@ describe("poll — exponential backoff on failure", () => {
     await flushAsync();
     const secondOnComplete = capturedOnComplete!;
 
-    secondOnComplete({ id: "j2", status: "completed", summary: "done", startedAt: new Date(), completedAt: new Date() });
+    secondOnComplete({
+      id: "j2",
+      status: "completed",
+      summary: "done",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
     await flushAsync();
     await new Promise((r) => setTimeout(r, 5));
     await flushAsync();
@@ -1989,23 +2164,29 @@ describe("poll — exponential backoff on failure", () => {
   it("halts polling after exhausting all backoff schedule entries", async () => {
     const originalSchedule = mockConfig.pollerBackoffScheduleMs;
     mockConfig.pollerBackoffScheduleMs = [1];
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     const onCompleteFns: Array<(job: unknown) => void> = [];
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      if (opts.onComplete) onCompleteFns.push(opts.onComplete);
-      return Promise.resolve({ id: `j${onCompleteFns.length}`, status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        if (opts.onComplete) onCompleteFns.push(opts.onComplete);
+        return Promise.resolve({
+          id: `j${onCompleteFns.length}`,
+          status: "running",
+        });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
     expect(onCompleteFns).toHaveLength(1);
 
     mockExistsSync.mockReturnValue(false);
     onCompleteFns[0]({
-      id: "j1", status: "failed", summary: "crash",
-      startedAt: new Date(), completedAt: new Date(),
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
     });
     await flushAsync();
     await flushAsync();
@@ -2018,8 +2199,11 @@ describe("poll — exponential backoff on failure", () => {
       mockDispatch.mockClear();
       mockTracker.fetchOpenCards.mockClear();
       onCompleteFns[1]({
-        id: "j2", status: "failed", summary: "crash again",
-        startedAt: new Date(), completedAt: new Date(),
+        id: "j2",
+        status: "failed",
+        summary: "crash again",
+        startedAt: new Date(),
+        completedAt: new Date(),
       });
       await flushAsync();
       await flushAsync();
@@ -2032,20 +2216,26 @@ describe("poll — exponential backoff on failure", () => {
   });
 
   it("skips polling during backoff period", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
     mockExistsSync.mockReturnValue(false);
-    capturedOnComplete!({ id: "j1", status: "failed", summary: "crash", startedAt: new Date(), completedAt: new Date() });
+    capturedOnComplete!({
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
     await flushAsync();
 
     mockDispatch.mockClear();
@@ -2081,10 +2271,12 @@ describe("poll — stuck card recovery on failure", () => {
     ]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -2093,7 +2285,8 @@ describe("poll — stuck card recovery on failure", () => {
     ]);
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
-      id: "j1", status: "failed",
+      id: "j1",
+      status: "failed",
       summary: "Error: permission denied",
       startedAt: new Date(Date.now() - 60_000),
       completedAt: new Date(),
@@ -2121,10 +2314,12 @@ describe("poll — stuck card recovery on failure", () => {
     ]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -2137,8 +2332,11 @@ describe("poll — stuck card recovery on failure", () => {
     ]);
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
-      id: "j1", status: "failed", summary: "crash",
-      startedAt: new Date(), completedAt: new Date(),
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
     });
     await flushAsync();
 
@@ -2151,22 +2349,25 @@ describe("poll — stuck card recovery on failure", () => {
   });
 
   it("does not recover cards on successful completion", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
-      id: "j1", status: "completed", summary: "done",
-      startedAt: new Date(), completedAt: new Date(),
+      id: "j1",
+      status: "completed",
+      summary: "done",
+      startedAt: new Date(),
+      completedAt: new Date(),
     });
     await flushAsync();
 
@@ -2185,10 +2386,12 @@ describe("poll — stuck card recovery on failure", () => {
     ]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -2198,8 +2401,11 @@ describe("poll — stuck card recovery on failure", () => {
     ]);
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
-      id: "j1", status: "failed", summary: "crash",
-      startedAt: new Date(), completedAt: new Date(),
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
     });
     await flushAsync();
 
@@ -2207,21 +2413,27 @@ describe("poll — stuck card recovery on failure", () => {
       (c: unknown[]) => c[1] === "Needs Help",
     );
     expect(nhMoves).toHaveLength(2);
-    expect(mockTracker.addComment).toHaveBeenCalledTimes(2);
+    // Filter out dispatch-lock comments — the lock layer posts one on
+    // the primary card before dispatch. Stuck-card recovery posts the
+    // remaining two ("Needs Help" explanations).
+    const recoveryComments = mockTracker.addComment.mock.calls.filter(
+      (c: unknown[]) => !String(c[1]).includes("danxbot-lock"),
+    );
+    expect(recoveryComments).toHaveLength(2);
     expect(nhMoves).toContainEqual(["c1", "Needs Help"]);
     expect(nhMoves).toContainEqual(["c2", "Needs Help"]);
   });
 
   it("recovers stuck cards on agent timeout (not just failure)", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -2230,7 +2442,8 @@ describe("poll — stuck card recovery on failure", () => {
     ]);
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
-      id: "j1", status: "timeout",
+      id: "j1",
+      status: "timeout",
       summary: "Agent timed out after 300 seconds of inactivity",
       startedAt: new Date(Date.now() - 300_000),
       completedAt: new Date(),
@@ -2245,15 +2458,15 @@ describe("poll — stuck card recovery on failure", () => {
   });
 
   it("handles recovery failure gracefully without crashing", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("c1", "Card 1", "ToDo"),
-    ]);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     let capturedOnComplete: ((job: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (job: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ id: "j1", status: "running" });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "j1", status: "running" });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -2263,8 +2476,11 @@ describe("poll — stuck card recovery on failure", () => {
 
     // Should not throw — error is caught and logged
     capturedOnComplete!({
-      id: "j1", status: "failed", summary: "crash",
-      startedAt: new Date(), completedAt: new Date(),
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
     });
     await flushAsync();
   });
@@ -2356,7 +2572,10 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     expect(mockWriteIssueFn).toHaveBeenCalledTimes(1);
     const writeArgs = mockWriteIssueFn.mock.calls[0];
     expect(writeArgs[0]).toBe(MOCK_REPO_CONTEXT.localPath);
-    const writtenIssue = writeArgs[1] as { external_id: string; dispatch_id: string };
+    const writtenIssue = writeArgs[1] as {
+      external_id: string;
+      dispatch_id: string;
+    };
     expect(writtenIssue.external_id).toBe("card-uuid-w");
     const dispatchArg = mockDispatch.mock.calls[0][0] as { dispatchId: string };
     expect(writtenIssue.dispatch_id).toBe(dispatchArg.dispatchId);
@@ -2408,10 +2627,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     // Drive the dispatch-then-onComplete flow so `teamRunning` clears
     // and the second `poll()` call is allowed to proceed.
     let capturedOnComplete: ((j: unknown) => void) | undefined;
-    mockDispatch.mockImplementation((opts: { onComplete?: (j: unknown) => void }) => {
-      capturedOnComplete = opts.onComplete;
-      return Promise.resolve({ dispatchId: "d", job: { id: "j1" } });
-    });
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (j: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ dispatchId: "d", job: { id: "j1" } });
+      },
+    );
 
     await poll(MOCK_REPO_CONTEXT);
     expect(mockCreateIssueTracker).toHaveBeenCalledTimes(1);
@@ -2488,9 +2709,19 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       .mockResolvedValueOnce([ref("nh1", "Blocked", "ToDo")]);
     mockTracker.getComments.mockResolvedValue([
       // Oldest first — the bot comment that put the card in Needs Help.
-      { id: "a1", author: "danxbot", timestamp: "2026-01-01T00:00:00Z", text: "Help\n\n<!-- danxbot -->" },
+      {
+        id: "a1",
+        author: "danxbot",
+        timestamp: "2026-01-01T00:00:00Z",
+        text: "Help\n\n<!-- danxbot -->",
+      },
       // Newest last — the user reply that should unblock the card.
-      { id: "a2", author: "user", timestamp: "2026-01-02T00:00:00Z", text: "Done, retry" },
+      {
+        id: "a2",
+        author: "user",
+        timestamp: "2026-01-02T00:00:00Z",
+        text: "Done, retry",
+      },
     ]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -2502,7 +2733,9 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("card-bad", "Bad YAML", "ToDo"),
     ]);
-    const parseError = new Error("Invalid Issue YAML: missing required field: tracker");
+    const parseError = new Error(
+      "Invalid Issue YAML: missing required field: tracker",
+    );
     mockFindByExternalId.mockImplementation(() => {
       throw parseError;
     });
@@ -2732,9 +2965,7 @@ describe("poll — In Progress sync + orphan resume", () => {
       inProgressIssue("ISS-78", "ip-live", "live-dispatch-uuid"),
     );
     mockGetActiveJob.mockImplementation((id: string) =>
-      id === "live-dispatch-uuid"
-        ? { id, status: "running" }
-        : undefined,
+      id === "live-dispatch-uuid" ? { id, status: "running" } : undefined,
     );
 
     await poll(MOCK_REPO_CONTEXT);
@@ -2795,7 +3026,11 @@ describe("poll — In Progress sync + orphan resume", () => {
     const orphanB = inProgressIssue("ISS-82", "ip-b", "uuid-b");
     mockFindByExternalId.mockImplementation(
       (_repo: string, externalId: string) =>
-        externalId === "ip-a" ? orphanA : externalId === "ip-b" ? orphanB : null,
+        externalId === "ip-a"
+          ? orphanA
+          : externalId === "ip-b"
+            ? orphanB
+            : null,
     );
     mockResolveParentSessionId.mockImplementation(
       async (_repo: string, jobId: string) =>

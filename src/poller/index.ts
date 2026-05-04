@@ -14,7 +14,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { config } from "../config.js";
+import { config, targetName } from "../config.js";
 import { repoContexts } from "../repo-context.js";
 import {
   REVIEW_MIN_CARDS,
@@ -32,7 +32,12 @@ import {
   writeIssue,
 } from "./yaml-lifecycle.js";
 import { createIssueTracker, TrelloTracker } from "../issue-tracker/index.js";
-import type { Issue, IssueRef, IssueTracker } from "../issue-tracker/interface.js";
+import type {
+  Issue,
+  IssueRef,
+  IssueTracker,
+} from "../issue-tracker/interface.js";
+import { tryAcquireLock, buildLockHolderInfo } from "../issue-tracker/lock.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
@@ -160,7 +165,9 @@ async function checkNeedsHelp(
       const comments = await tracker.getComments(ref.external_id);
       const latest = comments.length > 0 ? comments[comments.length - 1] : null;
       if (latest && !latest.text.includes(DANXBOT_COMMENT_MARKER)) {
-        log.info(`[${repo.name}] User responded on "${ref.title}" — moving to ToDo`);
+        log.info(
+          `[${repo.name}] User responded on "${ref.title}" — moving to ToDo`,
+        );
         await tracker.moveToStatus(ref.external_id, "ToDo");
         movedCount++;
       }
@@ -215,8 +222,12 @@ export async function poll(repo: RepoContext): Promise<void> {
   }
 
   if (Date.now() < state.backoffUntil) {
-    const remainingSeconds = Math.round((state.backoffUntil - Date.now()) / 1000);
-    log.info(`[${repo.name}] In backoff — ${remainingSeconds}s remaining (${state.consecutiveFailures} consecutive failures)`);
+    const remainingSeconds = Math.round(
+      (state.backoffUntil - Date.now()) / 1000,
+    );
+    log.info(
+      `[${repo.name}] In backoff — ${remainingSeconds}s remaining (${state.consecutiveFailures} consecutive failures)`,
+    );
     return;
   }
 
@@ -352,14 +363,42 @@ async function _poll(repo: RepoContext): Promise<void> {
   //   4. Dispatch task references the local id — agent calls
   //      `danx_issue_save({id})` and never knows external trackers exist.
   const dispatchId = randomUUID();
+
+  // Multi-environment dispatch lock. Same Trello card can be polled
+  // independently from local dev + production EC2 worker; without a
+  // tracker-side lock both write competing local YAMLs and silently
+  // overwrite each other on sync. See `src/issue-tracker/lock.ts`.
+  const lockInfo = buildLockHolderInfo({
+    targetName,
+    repoPath: repo.localPath,
+    workspace: "issue-worker",
+    dispatchId,
+  });
+  const lockResult = await tryAcquireLock(
+    tracker,
+    primary.external_id,
+    lockInfo,
+  );
+  if (!lockResult.acquired) {
+    const held = lockResult.existing!;
+    const ageM = Math.round(
+      (Date.now() - new Date(held.startedAt).getTime()) / 60000,
+    );
+    log.info(
+      `[${repo.name}] ${primary.title} held by ${held.holder}@${held.host} (dispatch ${held.dispatchId}, ${ageM}m old) — skipping this tick`,
+    );
+    return;
+  }
+  if (lockResult.reclaimed) {
+    log.info(
+      `[${repo.name}] ${primary.title} lock reclaimed (previous holder went stale)`,
+    );
+  }
+
   const existing = findByExternalId(repo.localPath, primary.external_id);
   let resolvedIssue: Issue;
   if (existing) {
-    resolvedIssue = stampDispatchAndWrite(
-      repo.localPath,
-      existing,
-      dispatchId,
-    );
+    resolvedIssue = stampDispatchAndWrite(repo.localPath, existing, dispatchId);
   } else {
     resolvedIssue = await hydrateFromRemote(
       tracker,
@@ -375,7 +414,12 @@ async function _poll(repo: RepoContext): Promise<void> {
     `${TEAM_PROMPT}\n\nEdit ${yamlPath}. ` +
     `Call danx_issue_save({id: "${resolvedIssue.id}"}) when done.`;
 
-  spawnClaude(repo, task, { trigger: "trello", metadata: trelloMeta }, dispatchId);
+  spawnClaude(
+    repo,
+    task,
+    { trigger: "trello", metadata: trelloMeta },
+    dispatchId,
+  );
 }
 
 /**
@@ -457,10 +501,7 @@ async function tryResumeOrphan(
     // (or stall) through its own monitoring path.
     if (getActiveJob(issue.dispatch_id)) continue;
 
-    const resolved = await resolveParentSessionId(
-      repo.name,
-      issue.dispatch_id,
-    );
+    const resolved = await resolveParentSessionId(repo.name, issue.dispatch_id);
     if (resolved.kind === "no-session-dir") {
       // No claude projects dir for this repo — infrastructure issue
       // that affects every dispatch, not just this one. Stop the
@@ -494,11 +535,7 @@ async function tryResumeOrphan(
       `[${repo.name}] Resuming orphan In Progress card "${issue.title}" (${issue.id}) — parent dispatch ${issue.dispatch_id} session ${resolved.sessionId}`,
     );
     const newDispatchId = randomUUID();
-    const stamped = stampDispatchAndWrite(
-      repo.localPath,
-      issue,
-      newDispatchId,
-    );
+    const stamped = stampDispatchAndWrite(repo.localPath, issue, newDispatchId);
     const yamlPath = issuePath(repo.localPath, stamped.id, "open");
     const task =
       `${TEAM_PROMPT}\n\nResuming prior dispatch on ${stamped.id}. ` +
@@ -623,9 +660,12 @@ export function validateRepoConfig(repo: RepoContext): void {
   }
 
   // 5. Per-repo secrets must be set (loaded via RepoContext)
-  if (!repo.trello.apiKey) errors.push(`Missing DANX_TRELLO_API_KEY in ${repo.name}/.danxbot/.env`);
-  if (!repo.trello.apiToken) errors.push(`Missing DANX_TRELLO_API_TOKEN in ${repo.name}/.danxbot/.env`);
-  if (!repo.githubToken) errors.push(`Missing DANX_GITHUB_TOKEN in ${repo.name}/.danxbot/.env`);
+  if (!repo.trello.apiKey)
+    errors.push(`Missing DANX_TRELLO_API_KEY in ${repo.name}/.danxbot/.env`);
+  if (!repo.trello.apiToken)
+    errors.push(`Missing DANX_TRELLO_API_TOKEN in ${repo.name}/.danxbot/.env`);
+  if (!repo.githubToken)
+    errors.push(`Missing DANX_GITHUB_TOKEN in ${repo.name}/.danxbot/.env`);
 
   // 6. Claude auth files must exist
   const claudeAuthDir = resolve(projectRoot, "claude-auth");
@@ -707,7 +747,10 @@ function copyRepoConfigDocs(
     const srcPath = resolve(danxbotConfigDir, src);
     if (!existsSync(srcPath)) continue;
     const header = `<!-- AUTO-GENERATED by danxbot from .danxbot/config/${src} — do not edit -->\n\n`;
-    writeFileSync(resolve(target.rulesDir, dest), header + readFileSync(srcPath, "utf-8"));
+    writeFileSync(
+      resolve(target.rulesDir, dest),
+      header + readFileSync(srcPath, "utf-8"),
+    );
   }
 }
 
@@ -790,11 +833,7 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
 
   for (const name of sourceNames) {
     const workspaceDir = resolve(workspacesTargetDir, name);
-    mirrorWorkspaceTree(
-      resolve(injectWorkspacesDir, name),
-      workspaceDir,
-      [],
-    );
+    mirrorWorkspaceTree(resolve(injectWorkspacesDir, name), workspaceDir, []);
   }
 
   // Phase 5 cleanup (Trello 69f76e8d069eb71dd315d363): the migration
@@ -1225,7 +1264,9 @@ async function handleAgentCompletion(
 
     const backoffMs = schedule[state.consecutiveFailures - 1];
     state.backoffUntil = Date.now() + backoffMs;
-    log.warn(`[${repo.name}] Backing off ${backoffMs / 1000}s before next attempt`);
+    log.warn(
+      `[${repo.name}] Backing off ${backoffMs / 1000}s before next attempt`,
+    );
   } else {
     if (state.consecutiveFailures > 0) {
       log.info(`[${repo.name}] Agent succeeded — resetting failure counter`);
@@ -1335,7 +1376,9 @@ async function recoverStuckCards(
     );
 
     for (const card of stuckCards) {
-      log.warn(`[${repo.name}] Recovering stuck card "${card.title}" → Needs Help`);
+      log.warn(
+        `[${repo.name}] Recovering stuck card "${card.title}" → Needs Help`,
+      );
       await tracker.moveToStatus(card.external_id, "Needs Help");
 
       const elapsed = formatElapsed(job);
@@ -1357,7 +1400,8 @@ ${DANXBOT_COMMENT_MARKER}`;
 }
 
 function formatElapsed(job: AgentJob): string {
-  const ms = (job.completedAt?.getTime() ?? Date.now()) - job.startedAt.getTime();
+  const ms =
+    (job.completedAt?.getTime() ?? Date.now()) - job.startedAt.getTime();
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
   return `${Math.round(seconds / 60)}min`;
@@ -1422,7 +1466,6 @@ export function shutdown(): void {
 
   process.exit(0);
 }
-
 
 export function start(): void {
   process.on("SIGINT", shutdown);
