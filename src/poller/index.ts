@@ -37,7 +37,8 @@ import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
 import { createLogger } from "../logger.js";
-import { dispatch } from "../dispatch/core.js";
+import { dispatch, getActiveJob } from "../dispatch/core.js";
+import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { isLinkOrFile, isSymlink } from "./fs-probe.js";
 import type { AgentJob } from "../agent/launcher.js";
@@ -250,12 +251,39 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  let cards: IssueRef[];
+  let openCards: IssueRef[];
   try {
-    const all = await tracker.fetchOpenCards();
-    cards = all.filter((c) => c.status === "ToDo");
+    openCards = await tracker.fetchOpenCards();
   } catch (error) {
     log.error(`[${repo.name}] Error fetching cards`, error);
+    return;
+  }
+  let cards = openCards.filter((c) => c.status === "ToDo");
+  const inProgressCards = openCards.filter((c) => c.status === "In Progress");
+
+  // Bulk-sync every ToDo (siblings — `cards.slice(1)` because the
+  // primary ToDo card has its own dedicated hydrate-or-stamp block
+  // below that THROWS on hydrate failure) AND every In Progress card
+  // that lacks a local YAML. The In Progress addition closes a gap:
+  // pre-extension the poller only hydrated ToDo, so a card that moved
+  // to In Progress without a local YAML (e.g. picked up by a prior
+  // worker that died before writing the YAML, or moved manually on
+  // the tracker) stayed invisible to the orphan-resume check below.
+  // Bulk-sync writes still carry `dispatch_id: null` — the dispatch
+  // primary's UUID is stamped via `stampDispatchAndWrite` later, and
+  // an In Progress orphan keeps its existing `dispatch_id` because
+  // `findByExternalId` short-circuits hydration when the YAML
+  // already exists.
+  await bulkSyncMissingYamls(repo, tracker, [
+    ...cards.slice(1),
+    ...inProgressCards,
+  ]);
+
+  // Orphan-resume check. Runs BEFORE the ToDo dispatch path so a
+  // worker that died mid-dispatch can resume its prior session
+  // instead of leaving the card parked in In Progress forever. If a
+  // resume fires, the tick exits early — single-dispatch invariant.
+  if (await tryResumeOrphan(repo, tracker, inProgressCards)) {
     return;
   }
 
@@ -292,49 +320,6 @@ async function _poll(repo: RepoContext): Promise<void> {
     `[${repo.name}] Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`,
   );
   cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.title}`));
-
-  // Bulk-sync siblings: hydrate every NON-primary ToDo card whose local
-  // YAML is missing. Pre-Phase-1 (commit history below this rule) the
-  // poller only hydrated `cards[0]`, so non-primary cards stayed
-  // invisible to the dispatched agent until they bubbled to the top
-  // across many ticks. That broke the epic-split workflow: a user
-  // creates phase cards directly on Trello, the poller sees them but
-  // never writes their YAMLs, and the agent picking up the parent epic
-  // has no local visibility into its children — leading to duplicate-
-  // phase-card creation. Bulk-sync closes that gap by writing every
-  // sibling YAML to local issues/ on the first tick that sees it.
-  //
-  // Sibling failures are tolerated (logged, skipped). The primary
-  // card's hydration runs in the dedicated block below and DOES throw
-  // on failure — preserving the legacy contract that a poller hydrate
-  // crash blocks dispatch (a tracker-credentials regression must not
-  // be silently masked by a per-card try/catch).
-  //
-  // Cost: O(N-1) `getCard` + `getComments` calls per tick on first
-  // sighting only. Idempotent thereafter (`findByExternalId` short-
-  // circuits). Hydrate also patches the tracker title to add the
-  // `#ISS-N: ` prefix when missing — that's a one-time write per card.
-  // Sibling bulk-sync writes carry `dispatch_id: null`; the primary's
-  // dispatch UUID lands via the primary block below.
-  for (const card of cards.slice(1)) {
-    if (findByExternalId(repo.localPath, card.external_id)) continue;
-    try {
-      const hydrated = await hydrateFromRemote(
-        tracker,
-        card.external_id,
-        null,
-        repo.localPath,
-      );
-      writeIssue(repo.localPath, hydrated);
-      log.info(
-        `[${repo.name}] bulk-sync: hydrated ${card.external_id} → ${hydrated.id}`,
-      );
-    } catch (err) {
-      log.warn(
-        `[${repo.name}] bulk-sync: failed to hydrate ${card.external_id}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
 
   // Save tracker-native ids for stuck-card recovery on failure
   const state = getState(repo.name);
@@ -391,6 +376,154 @@ async function _poll(repo: RepoContext): Promise<void> {
     `Call danx_issue_save({id: "${resolvedIssue.id}"}) when done.`;
 
   spawnClaude(repo, task, { trigger: "trello", metadata: trelloMeta }, dispatchId);
+}
+
+/**
+ * Hydrate every card in `targets` that has no local YAML. Tolerates
+ * per-card failures (warns + skips) — bulk-sync is a best-effort
+ * convergence step. The dispatch primary's hydration runs separately
+ * with throw-on-failure semantics.
+ *
+ * `dispatch_id` is null for every bulk-synced YAML — these are
+ * advisory writes that capture remote state, not dispatch claims. A
+ * subsequent tick that picks the card as a primary (ToDo) or as a
+ * resume target (In Progress with a stamped id from a prior dispatch)
+ * stamps the real UUID via `stampDispatchAndWrite`.
+ */
+async function bulkSyncMissingYamls(
+  repo: RepoContext,
+  tracker: IssueTracker,
+  targets: IssueRef[],
+): Promise<void> {
+  for (const card of targets) {
+    if (findByExternalId(repo.localPath, card.external_id)) continue;
+    try {
+      const hydrated = await hydrateFromRemote(
+        tracker,
+        card.external_id,
+        null,
+        repo.localPath,
+      );
+      writeIssue(repo.localPath, hydrated);
+      log.info(
+        `[${repo.name}] bulk-sync: hydrated ${card.external_id} → ${hydrated.id}`,
+      );
+    } catch (err) {
+      log.warn(
+        `[${repo.name}] bulk-sync: failed to hydrate ${card.external_id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
+/**
+ * Look at every In Progress card. For the first one whose local YAML
+ * carries a `dispatch_id` that:
+ *   - is NOT currently in `activeJobs` (still alive on this worker), AND
+ *   - DOES correspond to a Claude session JSONL on disk
+ *
+ * spawn a fresh dispatch with `--resume <sessionId>` so the agent
+ * picks up where it left off. Returns true when a resume fires (the
+ * caller must skip the ToDo dispatch path on this tick to preserve
+ * the single-dispatch invariant).
+ *
+ * Side-effect for the "session file gone" case: card resets to ToDo
+ * locally (YAML status + dispatch_id cleared) AND on the tracker.
+ * The next tick picks it up as a fresh ToDo dispatch.
+ *
+ * Skipped silently when the In Progress card has no local YAML (the
+ * bulk-sync step that runs immediately before this should have
+ * written one — if it didn't, hydration failed and a warning is
+ * already in the log) or no `dispatch_id` (the agent never reached
+ * the YAML stamp before dying — same fresh-ToDo recovery applies on
+ * the next tick once it bubbles up there).
+ */
+async function tryResumeOrphan(
+  repo: RepoContext,
+  tracker: IssueTracker,
+  inProgressRefs: IssueRef[],
+): Promise<boolean> {
+  for (const ref of inProgressRefs) {
+    const issue = findByExternalId(repo.localPath, ref.external_id);
+    // No local YAML or no stamped dispatch_id → nothing to resume
+    // against. Bulk-sync runs immediately before this so the YAML
+    // should exist; a missing dispatch_id means the prior agent died
+    // before reaching the YAML stamp. Either way, skip — recovery
+    // happens via the next ToDo bubble-up or manual operator move.
+    if (!issue || !issue.dispatch_id) continue;
+
+    // Live job on this worker — the orphan check would race with the
+    // running dispatch. Skip; the live dispatch will reach completion
+    // (or stall) through its own monitoring path.
+    if (getActiveJob(issue.dispatch_id)) continue;
+
+    const resolved = await resolveParentSessionId(
+      repo.name,
+      issue.dispatch_id,
+    );
+    if (resolved.kind === "no-session-dir") {
+      // No claude projects dir for this repo — infrastructure issue
+      // that affects every dispatch, not just this one. Stop the
+      // resume scan so we don't keep paying the lookup cost on every
+      // remaining In Progress card.
+      log.error(
+        `[${repo.name}] No claude session dir for repo — skipping orphan-resume scan`,
+      );
+      return false;
+    }
+    if (resolved.kind === "not-found") {
+      log.warn(
+        `[${repo.name}] In Progress card "${issue.title}" (${issue.id}) has dispatch_id ${issue.dispatch_id} but no matching JSONL on disk — resetting to ToDo`,
+      );
+      writeIssue(repo.localPath, {
+        ...issue,
+        status: "ToDo",
+        dispatch_id: null,
+      });
+      try {
+        await tracker.moveToStatus(ref.external_id, "ToDo");
+      } catch (err) {
+        log.error(
+          `[${repo.name}] Failed to reset ${ref.external_id} to ToDo on tracker: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      continue;
+    }
+
+    log.info(
+      `[${repo.name}] Resuming orphan In Progress card "${issue.title}" (${issue.id}) — parent dispatch ${issue.dispatch_id} session ${resolved.sessionId}`,
+    );
+    const newDispatchId = randomUUID();
+    const stamped = stampDispatchAndWrite(
+      repo.localPath,
+      issue,
+      newDispatchId,
+    );
+    const yamlPath = issuePath(repo.localPath, stamped.id, "open");
+    const task =
+      `${TEAM_PROMPT}\n\nResuming prior dispatch on ${stamped.id}. ` +
+      `Read ${yamlPath} for current state, verify progress against ACs, ` +
+      `complete remaining work. ` +
+      `Call danx_issue_save({id: "${stamped.id}"}) when done.`;
+    spawnClaude(
+      repo,
+      task,
+      {
+        trigger: "trello",
+        metadata: {
+          cardId: ref.external_id,
+          cardName: ref.title,
+          cardUrl: `https://trello.com/c/${ref.external_id}`,
+          listId: repo.trello.inProgressListId,
+          listName: "In Progress",
+        },
+      },
+      newDispatchId,
+      { resumeSessionId: resolved.sessionId, parentJobId: issue.dispatch_id },
+    );
+    return true;
+  }
+  return false;
 }
 
 /** Directory containing files to inject into target repos. */
@@ -964,6 +1097,7 @@ function spawnClaude(
   prompt: string,
   apiDispatchMeta: DispatchTriggerMetadata,
   dispatchId?: string,
+  resumeOpts?: { resumeSessionId: string; parentJobId: string },
 ): void {
   const state = getState(repo.name);
 
@@ -1039,6 +1173,8 @@ function spawnClaude(
     // non-trello dispatches omit this and inherit the auto-generated UUID
     // inside `dispatch()`.
     dispatchId,
+    resumeSessionId: resumeOpts?.resumeSessionId,
+    parentJobId: resumeOpts?.parentJobId,
     onComplete: (job) => {
       handleAgentCompletion(repo, state, job).catch((err) =>
         log.error(`[${repo.name}] Error in post-completion handler`, err),

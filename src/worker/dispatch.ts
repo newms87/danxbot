@@ -1,6 +1,4 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { stat } from "node:fs/promises";
-import { basename } from "node:path";
 import { config } from "../config.js";
 import { json, parseBody } from "../http/helpers.js";
 import {
@@ -26,13 +24,7 @@ import { WorkspaceManifestError } from "../workspace/manifest.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
-import {
-  deriveSessionDir,
-  findSessionFileByDispatchId,
-} from "../agent/session-log-watcher.js";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
-import { getReposBase } from "../poller/constants.js";
+import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { normalizeCallbackUrl } from "./url-normalizer.js";
 import { isFeatureEnabled } from "../settings-file.js";
 import { writeFlag } from "../critical-failure.js";
@@ -88,68 +80,6 @@ function parseSharedRequestFields(
   return { statusUrl, callerIp };
 }
 
-/** Result of resolving a parent dispatch's Claude session UUID on disk. */
-export type ResolveParentResult =
-  | { kind: "found"; sessionId: string }
-  | { kind: "not-found" } // Directory exists, no JSONL contains the tag
-  | { kind: "no-session-dir" }; // `~/.claude/projects/<cwd>/` does not exist
-
-/**
- * Resolve the parent dispatch's Claude session UUID by scanning the JSONL
- * directory for the parent's dispatch tag. Works after worker restarts because
- * the tag lives in the file content, not in `activeJobs` memory.
- *
- * Distinguishes three outcomes so the caller can map them to the right HTTP
- * status. A missing session dir is an infrastructure problem (claude never
- * ran in this cwd); a missing tag is a user error (wrong parent id). Per
- * `.claude/rules/code-quality.md` "fallbacks are bugs" — don't collapse these
- * two failure modes into a single 404.
- */
-export async function resolveParentSessionId(
-  repoName: string,
-  parentJobId: string,
-): Promise<ResolveParentResult> {
-  // Dispatched agents cwd into `<repo>/.danxbot/workspaces/<name>/` (the
-  // resolved plural workspace), so claude writes JSONL under the
-  // workspace-encoded projects dir. The parent dispatch could have used
-  // any of the workspaces under `<repo>/.danxbot/workspaces/` — we
-  // don't know which without scanning. Enumerate every workspace and
-  // search each session dir for the parent's dispatch tag.
-  const workspacesDir = resolvePath(
-    getReposBase(),
-    repoName,
-    ".danxbot",
-    "workspaces",
-  );
-  if (!existsSync(workspacesDir)) {
-    return { kind: "no-session-dir" };
-  }
-  const workspaceNames = readdirSync(workspacesDir).filter((entry) => {
-    try {
-      return statSync(resolvePath(workspacesDir, entry)).isDirectory();
-    } catch {
-      return false;
-    }
-  });
-
-  let anySessionDirFound = false;
-  for (const name of workspaceNames) {
-    const sessionDir = deriveSessionDir(resolvePath(workspacesDir, name));
-    try {
-      const s = await stat(sessionDir);
-      if (!s.isDirectory()) continue;
-      anySessionDirFound = true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw err;
-    }
-    const filePath = await findSessionFileByDispatchId(sessionDir, parentJobId);
-    if (filePath) {
-      return { kind: "found", sessionId: basename(filePath, ".jsonl") };
-    }
-  }
-  return anySessionDirFound ? { kind: "not-found" } : { kind: "no-session-dir" };
-}
 
 /**
  * Reject empty strings (including whitespace-only) and non-string values.

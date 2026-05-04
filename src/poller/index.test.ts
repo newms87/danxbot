@@ -174,8 +174,18 @@ const mockDispatch = vi.fn().mockImplementation(() =>
     },
   }),
 );
+const mockGetActiveJob = vi.fn().mockReturnValue(undefined);
 vi.mock("../dispatch/core.js", () => ({
   dispatch: (...args: unknown[]) => mockDispatch(...args),
+  getActiveJob: (...args: unknown[]) => mockGetActiveJob(...args),
+}));
+
+const mockResolveParentSessionId = vi
+  .fn()
+  .mockResolvedValue({ kind: "no-session-dir" } as const);
+vi.mock("../agent/resolve-parent-session.js", () => ({
+  resolveParentSessionId: (...args: unknown[]) =>
+    mockResolveParentSessionId(...args),
 }));
 
 /**
@@ -2558,5 +2568,467 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       "/test/repos/test-repo",
       "issues/",
     );
+  });
+});
+
+/**
+ * Bulk-sync + orphan resume.
+ *
+ * Two related behaviors live in the same describe block because they share
+ * the same _poll setup path: the poller fetches all open cards, hydrates any
+ * ToDo / In Progress card without a local YAML (bulk-sync), then checks
+ * In Progress local YAMLs for orphaned dispatch_ids whose claude session
+ * file still exists on disk and resumes the first one it finds.
+ *
+ * Without this, an orphaned In Progress card (worker died mid-dispatch)
+ * stays parked forever — the previous filter-to-ToDo logic skipped them
+ * and a new dispatch on the same card was impossible because the card
+ * was no longer in ToDo.
+ */
+describe("poll — In Progress sync + orphan resume", () => {
+  function inProgressIssue(
+    id: string,
+    externalId: string,
+    dispatchId: string | null,
+    title = "In Progress card",
+  ) {
+    return {
+      schema_version: 3 as const,
+      tracker: "trello",
+      id,
+      external_id: externalId,
+      parent_id: null,
+      children: [],
+      dispatch_id: dispatchId,
+      status: "In Progress" as const,
+      type: "Feature" as const,
+      title,
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockFindByExternalId.mockReset();
+    mockFindByExternalId.mockReturnValue(null);
+    mockHydrateFromRemote.mockReset();
+    mockHydrateFromRemote.mockImplementation(
+      async (
+        _t: unknown,
+        externalId: string,
+        dispatchId: string | null,
+        _repoLocalPath: string,
+      ) => ({
+        ...FAKE_ISSUE_FOR_TESTS,
+        external_id: externalId,
+        dispatch_id: dispatchId,
+      }),
+    );
+    mockStampDispatchAndWrite.mockImplementation(
+      (_repo: string, issue: Record<string, unknown>, dispatchId: string) => ({
+        ...issue,
+        dispatch_id: dispatchId,
+      }),
+    );
+    mockGetActiveJob.mockReset();
+    mockGetActiveJob.mockReturnValue(undefined);
+    mockResolveParentSessionId.mockReset();
+    mockResolveParentSessionId.mockResolvedValue({ kind: "no-session-dir" });
+  });
+
+  it("hydrates an In Progress card that has no local YAML during bulk-sync (dispatch_id null)", async () => {
+    // The remote shows an In Progress card the local issues/ dir has
+    // never seen — bulk-sync must hydrate it so the next tick can
+    // reason about its dispatch_id from local truth, never from the
+    // tracker. Same contract as ToDo siblings; In Progress just got
+    // added to the sync set.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-new", "Untracked In Progress", "In Progress"),
+      ref("td-1", "ToDo card", "ToDo"),
+    ]);
+    // ToDo card has a local YAML so it short-circuits hydration; the
+    // In Progress card does not.
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "td-1"
+          ? {
+              ...FAKE_ISSUE_FOR_TESTS,
+              external_id: "td-1",
+              status: "ToDo",
+              dispatch_id: null,
+            }
+          : null,
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // hydrateFromRemote was called for the In Progress card with a
+    // null dispatchId (bulk-sync semantics).
+    const ipHydrate = mockHydrateFromRemote.mock.calls.find(
+      (c) => c[1] === "ip-new",
+    );
+    expect(ipHydrate).toBeDefined();
+    expect(ipHydrate![2]).toBeNull();
+    // And writeIssue persisted that hydration before any dispatch.
+    const writeArgs = mockWriteIssueFn.mock.calls.find((c) => {
+      const issue = c[1] as { external_id: string };
+      return issue.external_id === "ip-new";
+    });
+    expect(writeArgs).toBeDefined();
+  });
+
+  it("resumes an orphaned In Progress card whose dispatch_id session file exists on disk", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-1", "Orphaned card", "In Progress"),
+    ]);
+    const orphan = inProgressIssue("ISS-77", "ip-1", "old-dispatch-uuid");
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-1" ? orphan : null,
+    );
+    mockResolveParentSessionId.mockResolvedValue({
+      kind: "found",
+      sessionId: "claude-session-abc",
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockGetActiveJob).toHaveBeenCalledWith("old-dispatch-uuid");
+    expect(mockResolveParentSessionId).toHaveBeenCalledWith(
+      "test-repo",
+      "old-dispatch-uuid",
+    );
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const dispatchArg = mockDispatch.mock.calls[0][0] as {
+      task: string;
+      resumeSessionId?: string;
+      parentJobId?: string;
+      apiDispatchMeta: {
+        trigger: string;
+        metadata: { listName: string; cardId: string };
+      };
+    };
+    expect(dispatchArg.resumeSessionId).toBe("claude-session-abc");
+    expect(dispatchArg.parentJobId).toBe("old-dispatch-uuid");
+    expect(dispatchArg.apiDispatchMeta.metadata.listName).toBe("In Progress");
+    expect(dispatchArg.apiDispatchMeta.metadata.cardId).toBe("ip-1");
+    expect(dispatchArg.task).toContain("ISS-77");
+  });
+
+  it("skips orphan resume when dispatch_id is still in activeJobs (live, not orphan)", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-live", "Live card", "In Progress"),
+    ]);
+    mockFindByExternalId.mockReturnValue(
+      inProgressIssue("ISS-78", "ip-live", "live-dispatch-uuid"),
+    );
+    mockGetActiveJob.mockImplementation((id: string) =>
+      id === "live-dispatch-uuid"
+        ? { id, status: "running" }
+        : undefined,
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockResolveParentSessionId).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("skips orphan resume when In Progress card has no dispatch_id stamped", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-bare", "Bare card", "In Progress"),
+    ]);
+    mockFindByExternalId.mockReturnValue(
+      inProgressIssue("ISS-79", "ip-bare", null),
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockGetActiveJob).not.toHaveBeenCalled();
+    expect(mockResolveParentSessionId).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("resets In Progress → ToDo when the dispatch_id session file is gone (not-found)", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-gone", "Gone card", "In Progress"),
+    ]);
+    const orphan = inProgressIssue("ISS-80", "ip-gone", "vanished-uuid");
+    mockFindByExternalId.mockReturnValue(orphan);
+    mockResolveParentSessionId.mockResolvedValue({ kind: "not-found" });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Card moved back to ToDo on the tracker.
+    expect(mockTracker.moveToStatus).toHaveBeenCalledWith("ip-gone", "ToDo");
+    // YAML rewritten with status reset and dispatch_id cleared.
+    const reset = mockWriteIssueFn.mock.calls.find((c) => {
+      const issue = c[1] as { external_id?: string };
+      return issue?.external_id === "ip-gone";
+    });
+    expect(reset).toBeDefined();
+    const resetIssue = reset![1] as {
+      status: string;
+      dispatch_id: string | null;
+    };
+    expect(resetIssue.status).toBe("ToDo");
+    expect(resetIssue.dispatch_id).toBeNull();
+    // No resume dispatch fired.
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("resumes only the first eligible orphan; remaining orphans wait for next tick", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-a", "Card A", "In Progress"),
+      ref("ip-b", "Card B", "In Progress"),
+    ]);
+    const orphanA = inProgressIssue("ISS-81", "ip-a", "uuid-a");
+    const orphanB = inProgressIssue("ISS-82", "ip-b", "uuid-b");
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-a" ? orphanA : externalId === "ip-b" ? orphanB : null,
+    );
+    mockResolveParentSessionId.mockImplementation(
+      async (_repo: string, jobId: string) =>
+        jobId === "uuid-a"
+          ? { kind: "found", sessionId: "session-a" }
+          : { kind: "found", sessionId: "session-b" },
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as { parentJobId?: string };
+    expect(arg.parentJobId).toBe("uuid-a");
+  });
+
+  it("does NOT process the ToDo dispatch path on a tick that resumed an orphan", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-resume", "Orphan", "In Progress"),
+      ref("td-skip", "Should-skip ToDo", "ToDo"),
+    ]);
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-resume"
+          ? inProgressIssue("ISS-90", "ip-resume", "uuid-resume")
+          : null,
+    );
+    mockResolveParentSessionId.mockResolvedValue({
+      kind: "found",
+      sessionId: "session-resume",
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    // Only the resume dispatch fired — its parentJobId proves it.
+    const arg = mockDispatch.mock.calls[0][0] as { parentJobId?: string };
+    expect(arg.parentJobId).toBe("uuid-resume");
+  });
+
+  it("falls through to ToDo dispatch when no orphans are eligible", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-bare", "No dispatch_id", "In Progress"),
+      ref("td-fresh", "Fresh ToDo", "ToDo"),
+    ]);
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-bare"
+          ? inProgressIssue("ISS-91", "ip-bare", null)
+          : null,
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as {
+      parentJobId?: string;
+      resumeSessionId?: string;
+    };
+    expect(arg.parentJobId).toBeUndefined();
+    expect(arg.resumeSessionId).toBeUndefined();
+  });
+
+  it("aborts the orphan-resume scan when resolveParentSessionId returns no-session-dir (no YAML mutation, no tracker move)", async () => {
+    // The repo's claude-projects dir doesn't exist — infrastructure
+    // problem, not a per-card issue. The scan must NOT fall back to
+    // resetting the YAML to ToDo (that would silently re-trigger
+    // dispatch every tick on an unreachable agent). Just bail and
+    // log. Subsequent ticks may recover once the dir is created.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-nodir", "No session dir", "In Progress"),
+    ]);
+    mockFindByExternalId.mockReturnValue(
+      inProgressIssue("ISS-92", "ip-nodir", "stamped-uuid"),
+    );
+    mockResolveParentSessionId.mockResolvedValue({ kind: "no-session-dir" });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockTracker.moveToStatus).not.toHaveBeenCalled();
+    // YAML must NOT be rewritten to ToDo / null dispatch_id.
+    const reset = mockWriteIssueFn.mock.calls.find((c) => {
+      const issue = c[1] as { external_id?: string; dispatch_id?: unknown };
+      return issue?.external_id === "ip-nodir" && issue.dispatch_id === null;
+    });
+    expect(reset).toBeUndefined();
+  });
+
+  it("composes a resume task containing TEAM_PROMPT, the YAML path, the issue id, the resume phrasing, and the danx_issue_save directive", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-prompt", "Prompt check", "In Progress"),
+    ]);
+    mockFindByExternalId.mockReturnValue(
+      inProgressIssue("ISS-93", "ip-prompt", "uuid-prompt"),
+    );
+    mockResolveParentSessionId.mockResolvedValue({
+      kind: "found",
+      sessionId: "session-prompt",
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const dispatchArg = mockDispatch.mock.calls[0][0] as { task: string };
+    expect(dispatchArg.task).toContain("/danx-next");
+    expect(dispatchArg.task).toContain("Resuming prior dispatch on ISS-93");
+    expect(dispatchArg.task).toContain(
+      "/test/repos/test-repo/.danxbot/issues/open/ISS-93.yml",
+    );
+    expect(dispatchArg.task).toContain(
+      'Call danx_issue_save({id: "ISS-93"}) when done.',
+    );
+  });
+
+  it("stamps + writes the resume YAML BEFORE dispatch — ordering invariant", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-order", "Order", "In Progress"),
+    ]);
+    mockFindByExternalId.mockReturnValue(
+      inProgressIssue("ISS-94", "ip-order", "uuid-order"),
+    );
+    mockResolveParentSessionId.mockResolvedValue({
+      kind: "found",
+      sessionId: "session-order",
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const stampOrder = mockStampDispatchAndWrite.mock.invocationCallOrder[0];
+    const dispatchOrder = mockDispatch.mock.invocationCallOrder[0];
+    expect(stampOrder).toBeDefined();
+    expect(dispatchOrder).toBeDefined();
+    expect(stampOrder).toBeLessThan(dispatchOrder);
+  });
+
+  it("tolerates a moveToStatus failure during reset and continues to the next orphan", async () => {
+    // First orphan's session is gone (not-found). Tracker's
+    // moveToStatus rejects (network, permissions, etc.). The reset
+    // must STILL persist the local YAML and the scan must continue
+    // to the next In Progress card.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-fail-reset", "Reset will fail", "In Progress"),
+      ref("ip-found", "Resumable", "In Progress"),
+    ]);
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-fail-reset"
+          ? inProgressIssue("ISS-95", "ip-fail-reset", "uuid-gone")
+          : externalId === "ip-found"
+            ? inProgressIssue("ISS-96", "ip-found", "uuid-good")
+            : null,
+    );
+    mockResolveParentSessionId.mockImplementation(
+      async (_repo: string, jobId: string) =>
+        jobId === "uuid-gone"
+          ? { kind: "not-found" }
+          : { kind: "found", sessionId: "session-good" },
+    );
+    mockTracker.moveToStatus.mockRejectedValueOnce(
+      new Error("Tracker network error"),
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Reset's local YAML write happened despite tracker failure.
+    const localReset = mockWriteIssueFn.mock.calls.find((c) => {
+      const issue = c[1] as { external_id?: string; status?: string };
+      return issue?.external_id === "ip-fail-reset" && issue.status === "ToDo";
+    });
+    expect(localReset).toBeDefined();
+    // Scan continued; second orphan resumed.
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as { parentJobId?: string };
+    expect(arg.parentJobId).toBe("uuid-good");
+  });
+
+  it("mixed not-found + found across In Progress refs — first resets, second resumes", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-reset", "Stale", "In Progress"),
+      ref("ip-resume", "Resumable", "In Progress"),
+    ]);
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-reset"
+          ? inProgressIssue("ISS-97", "ip-reset", "uuid-stale")
+          : externalId === "ip-resume"
+            ? inProgressIssue("ISS-98", "ip-resume", "uuid-live")
+            : null,
+    );
+    mockResolveParentSessionId.mockImplementation(
+      async (_repo: string, jobId: string) =>
+        jobId === "uuid-stale"
+          ? { kind: "not-found" }
+          : { kind: "found", sessionId: "session-live" },
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockTracker.moveToStatus).toHaveBeenCalledWith("ip-reset", "ToDo");
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as { parentJobId?: string };
+    expect(arg.parentJobId).toBe("uuid-live");
+  });
+
+  it("bulk-syncs missing In Progress YAML BEFORE the orphan-resume check (ordering invariant)", async () => {
+    // The orphan-resume helper relies on findByExternalId returning a
+    // local YAML, which only exists for an unseen In Progress card if
+    // bulk-sync ran first. Pin the order: hydrateFromRemote → before
+    // → resolveParentSessionId. A regression that swapped them would
+    // silently miss every brand-new In Progress orphan.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-fresh", "Brand new IP card", "In Progress"),
+    ]);
+    // findByExternalId returns null on first call (pre-bulk-sync),
+    // populated on second call (post-bulk-sync, during orphan check).
+    let findCount = 0;
+    mockFindByExternalId.mockImplementation(() => {
+      findCount += 1;
+      return findCount === 1
+        ? null
+        : inProgressIssue("ISS-99", "ip-fresh", null);
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const hydrateOrder = mockHydrateFromRemote.mock.invocationCallOrder[0];
+    const resolveOrder = mockResolveParentSessionId.mock.invocationCallOrder[0];
+    expect(hydrateOrder).toBeDefined();
+    // resolveOrder may be undefined when the bulk-synced YAML has
+    // null dispatch_id (the orphan check skips it). The invariant we
+    // care about is that hydrate fired BEFORE any resolve attempt.
+    if (resolveOrder !== undefined) {
+      expect(hydrateOrder).toBeLessThan(resolveOrder);
+    }
   });
 });
