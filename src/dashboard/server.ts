@@ -353,7 +353,7 @@ export async function startDashboard(): Promise<void> {
   // worker-host resolver are all constant across requests. The handler below
   // closes over this object instead of allocating a new one per request.
   // The resolver consults each repo's `workerHost` override (set via
-  // REPO_WORKER_HOSTS / deployment yml `worker_host:`) and falls back to
+  // `worker_host:` in deploy/targets/<TARGET>.yml) and falls back to
   // the default `danxbot-worker-<name>` for repos without one.
   const resolveHost = makeResolveWorkerHost(repos);
   const dispatchDeps: DispatchProxyDeps = {

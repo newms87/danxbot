@@ -12,7 +12,7 @@
  *   ~10s of pure overhead before the SSH connect even starts.
  *
  * After every successful `deploy` (or any path that calls `terraformApply`)
- * we serialize the resolved outputs to `.danxbot/deployments/.cache/<target>.json`.
+ * we serialize the resolved outputs to `deploy/targets/.cache/<target>.json`.
  * Read-only commands that only need IP/ECR/etc. read this file first and skip
  * the entire Terraform chain on a hit. Cache miss falls back to the existing
  * Terraform path so the optimization is a pure speed-up — never a correctness
@@ -61,7 +61,7 @@ const REQUIRED_FIELDS: readonly (keyof CachedOutputs)[] = [
 ];
 
 export function defaultCacheRoot(cwd: string = process.cwd()): string {
-  return resolve(cwd, ".danxbot/deployments/.cache");
+  return resolve(cwd, "deploy/targets/.cache");
 }
 
 export function cachePath(

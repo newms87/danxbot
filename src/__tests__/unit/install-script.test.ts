@@ -24,13 +24,19 @@ const INSTALL_PATH = join(process.cwd(), "install.sh");
 describe("install.sh — claude-projects bootstrap (Trello cjAyJpgr AC6)", () => {
   const text = readFileSync(INSTALL_PATH, "utf-8");
 
-  it("parses REPOS from .env after /setup completes so each connected repo can be processed", () => {
-    // /setup writes REPOS=<name>:<url>,... to .env. install.sh must read
-    // that file AFTER the interactive setup exits, otherwise the loop
-    // runs against an empty REPOS on first install.
+  it("loads connected-repo names from deploy/targets/<DANXBOT_TARGET>.yml after /setup completes", () => {
+    // Phase B: /setup writes the connected-repo list to
+    // deploy/targets/local.yml (not REPOS in .env). install.sh runs
+    // `list-target-repos.ts` to read the same source as the runtime,
+    // capturing names into NAMES for the per-repo loops below. Source
+    // .env first so any custom DANXBOT_TARGET overrides the `local` default.
     expect(
       /\.\s+\.\/\.env|source\s+\.\/\.env|set\s+-a;?\s*\.\s+\.\/\.env/.test(text),
-      "install.sh must source .env after /setup so REPOS is in scope",
+      "install.sh must source .env after /setup so DANXBOT_TARGET is in scope",
+    ).toBe(true);
+    expect(
+      /list-target-repos\.ts/.test(text),
+      "install.sh must invoke list-target-repos.ts to enumerate connected repos",
     ).toBe(true);
   });
 
@@ -64,15 +70,17 @@ describe("install.sh — claude-projects bootstrap (Trello cjAyJpgr AC6)", () =>
     ).toBe(true);
   });
 
-  it("guards against empty REPOS entries — empty `name` after `${entry%%:*}` is skipped, not turned into `repos//claude-projects`", () => {
-    // `REPOS=""` or a trailing comma (`REPOS=foo:url,`) produces a
-    // 1-element array `[""]` from `read -ra`; without an empty-name
-    // guard the loop body would run mkdir on `repos//claude-projects`
-    // — succeeds but creates a meaningless dir. Pin the guard so a
-    // future refactor that drops it fails loudly here.
+  it("guards against empty NAMES output — empty target produces no loop iterations, not a mkdir on `repos//claude-projects`", () => {
+    // Phase B: list-target-repos.ts loads the active deploy YML and
+    // emits one repo name per line. An empty target (zero repos
+    // configured) produces empty stdout, so the `for name in $NAMES`
+    // loop body never runs. The pre-Phase-B `${entry%%:*}` empty-name
+    // guard is no longer needed because the loader rejects empty
+    // names at parse time (src/target.ts requires non-empty
+    // repos[].name, throws otherwise).
     expect(
-      /\[\s*-z\s+["']?\$\{?name\}?["']?\s*\]\s*&&\s*continue|if\s+\[\s*-z\s+["']?\$\{?name\}?["']?\s*\]\s*;\s*then\s+continue/.test(text),
-      "install.sh must skip empty `name` entries before mkdir",
+      /if\s+\[\s+-n\s+["']?\$NAMES["']?\s*\]/.test(text),
+      "install.sh must guard the per-repo loops with `if [ -n \"$NAMES\" ]`",
     ).toBe(true);
   });
 
@@ -107,11 +115,11 @@ describe("install.sh — claude-projects bootstrap (Trello cjAyJpgr AC6)", () =>
     ).toBe(true);
   });
 
-  it("runs the bootstrap AFTER `claude '/setup'` — REPOS is populated by /setup, so order matters", () => {
-    // /setup is the source of REPOS in .env. The bootstrap loop must
-    // appear AFTER the `claude /setup` invocation so it sees the
-    // populated value. A loop above /setup runs against an empty REPOS
-    // on first install and silently no-ops.
+  it("runs the bootstrap AFTER `claude '/setup'` — the active target's repos[] is populated by /setup, so order matters", () => {
+    // /setup populates deploy/targets/local.yml. The bootstrap loop
+    // must appear AFTER the `claude /setup` invocation so list-target-repos
+    // sees the populated value. A loop above /setup runs against an
+    // empty target on first install and silently no-ops.
     const setupIdx = text.search(/claude\s+['"]?\/setup/);
     const mkdirIdx = text.search(/mkdir\s+-p\s+["']?repos\/\$\{?name\}?\/claude-projects/);
     expect(setupIdx, "install.sh must invoke claude /setup").toBeGreaterThan(-1);

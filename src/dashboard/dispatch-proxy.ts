@@ -522,14 +522,6 @@ async function authAndResolveRepo(
     json(res, 404, { error: `Repo "${repoName}" is not configured` });
     return null;
   }
-  if (!repo.workerPort) {
-    // Defense-in-depth — src/config.ts::attachWorkerPorts enforces this at
-    // boot so this path is unreachable when the dashboard starts cleanly.
-    json(res, 500, {
-      error: `Repo "${repoName}" has no workerPort configured on this dashboard`,
-    });
-    return null;
-  }
   return repo;
 }
 
@@ -570,7 +562,7 @@ async function forwardRepoBodyToWorker(
     {
       repoName: repo.name,
       primaryHost: deps.resolveHost(repo.name),
-      port: repo.workerPort as number,
+      port: repo.workerPort,
       path: upstreamPath,
       method: "POST",
     },
@@ -637,7 +629,7 @@ export async function handleJobProxy(
     {
       repoName: repo.name,
       primaryHost: deps.resolveHost(repo.name),
-      port: repo.workerPort as number,
+      port: repo.workerPort,
       path: params.pathTemplate.replace(
         ":jobId",
         encodeURIComponent(params.jobId),

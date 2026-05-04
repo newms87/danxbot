@@ -108,7 +108,7 @@ Full route table (`/api/launch`, `/api/resume`, `/api/status/:id`, `/api/cancel/
 
 ## Deployment
 
-Per-target AWS deploys; per-target config at `.danxbot/deployments/<target>.yml`. Deploy source: `deploy/cli.ts`, terraform under `deploy/terraform/`.
+Per-target AWS deploys; per-target config at `deploy/targets/<target>.yml`. Deploy source: `deploy/cli.ts`, terraform under `deploy/terraform/`.
 
 **Current targets:** `gpt` (hosts both `danxbot` and `gpt-manager` workers).
 

@@ -142,36 +142,33 @@ export function buildSsmPutCommands(
 }
 
 /**
- * Build per-target overrides that are ALWAYS synthesized from the deploy YML
- * (never from local .env). These keys must match the target's actual repo
- * list — NOT the operator's local dev list, which may include unrelated
- * repos. Returns:
- *   REPOS — "<name>:<url>,..." for each repo in this deployment
- *   REPO_WORKER_PORTS — "<name>:<port>,..." matching REPOS entries
- *   REPO_WORKER_HOSTS — "<name>:<host>,..." for repos that declare a
- *     worker_host override; empty when none do (the dashboard then falls
- *     back to the default `danxbot-worker-<name>` for every repo). The key
- *     is always present in the override map so it overwrites any
- *     operator-local REPO_WORKER_HOSTS that might leak via .env, even
- *     though `pushIfSet` skips the SSM put when the value is empty.
+ * Per-target shared-env overrides synthesized from the deploy YML.
+ *
+ * Phase B retired the legacy `REPOS` / `REPO_WORKER_PORTS` /
+ * `REPO_WORKER_HOSTS` env vars — the runtime now reads its
+ * connected-repo list directly from `deploy/targets/<TARGET>.yml` via
+ * `src/target.ts#loadTarget`, so those vars no longer need to be
+ * materialized into SSM. The remaining override is the deploy target's
+ * filename stem (`DANXBOT_TARGET`), which the worker container needs at
+ * boot to resolve which YML to load.
+ *
+ * IMPORTANT: this is the FILENAME stem (`gpt`, `platform`), NOT the
+ * yml's `name:` field (`danxbot-production`, `danxbot-platform`). The
+ * worker resolves `deploy/targets/${DANXBOT_TARGET}.yml`, so the value
+ * must match the filename — using `config.name` would point the worker
+ * at a non-existent file. The filename stem is passed in by the deploy
+ * CLI (which always invokes us as `<command> <target>` where `<target>`
+ * IS the filename stem).
+ *
+ * Local dev never goes through this code path — `loadTarget()` defaults
+ * to the `local` target file when `DANXBOT_TARGET` is unset.
  */
 export function buildTargetOverrides(
-  config: DeployConfig,
+  _config: DeployConfig,
+  target: string,
 ): Record<string, string> {
-  const reposValue = config.repos
-    .map((r) => `${r.name}:${r.url}`)
-    .join(",");
-  const portsValue = config.repos
-    .map((r) => `${r.name}:${r.workerPort}`)
-    .join(",");
-  const hostsValue = config.repos
-    .filter((r) => r.workerHost)
-    .map((r) => `${r.name}:${r.workerHost}`)
-    .join(",");
   return {
-    REPOS: reposValue,
-    REPO_WORKER_PORTS: portsValue,
-    REPO_WORKER_HOSTS: hostsValue,
+    DANXBOT_TARGET: target,
   };
 }
 
@@ -461,11 +458,11 @@ export interface PushSecretsOptions {
 export async function pushSecrets(
   config: DeployConfig,
   cwd: string = process.cwd(),
-  target?: string,
+  target: string,
   options: PushSecretsOptions = {},
 ): Promise<void> {
   const collected = collectDeploymentSecrets(config, cwd, target);
-  const overrides = buildTargetOverrides(config);
+  const overrides = buildTargetOverrides(config, target);
   // `getOrCreateDispatchToken` returns DRY_RUN_DISPATCH_TOKEN when isDryRun()
   // is set (defense-in-depth), so this call is dry-run-safe even though the
   // production path hits SSM. Keeping the call here rather than gating with

@@ -57,38 +57,38 @@ claude '/setup' --dangerously-skip-permissions
 # accepting that values run as bash).
 if [ -f .env ]; then
   set -a; . ./.env; set +a
-  if [ -n "${REPOS:-}" ]; then
+fi
+# Connected-repo names come from deploy/targets/<DANXBOT_TARGET>.yml
+# (default `local`) via the `list-target-repos` helper — same source as
+# the Makefile + the runtime, so install + launch + dispatch never
+# desync. Pre-Phase-B this iterated `$REPOS` from `.env`.
+NAMES="$(DANXBOT_TARGET="${DANXBOT_TARGET:-local}" npx tsx src/cli/list-target-repos.ts 2>/dev/null || true)"
+if [ -n "$NAMES" ]; then
+  echo ""
+  echo "Pre-creating per-repo claude-projects/ dirs..."
+  chown_failed=0
+  for name in $NAMES; do
+    mkdir -p "repos/${name}/claude-projects"
+    # chown 1000:1000 — matches the Dockerfile's `useradd -m danxbot`
+    # first-non-system uid. Try unprivileged first (works when host
+    # UID == 1000), fall back to sudo when it doesn't, fail-soft so
+    # install completes even if chown is rejected (the dir still
+    # exists and the operator can chown manually). The `WARN:`
+    # uppercase prefix matches the `ERROR:` convention above so the
+    # message is grep-visible in install output, and the
+    # `chown_failed` flag drives a final summary line so install
+    # exit 0 doesn't bury the partial-failure signal.
+    chown 1000:1000 "repos/${name}/claude-projects" 2>/dev/null || \
+      sudo chown 1000:1000 "repos/${name}/claude-projects" 2>/dev/null || {
+        echo "WARN: could not chown repos/${name}/claude-projects to 1000:1000 — chown manually before launching the worker"
+        chown_failed=1
+      }
+  done
+  if [ "$chown_failed" = "1" ]; then
     echo ""
-    echo "Pre-creating per-repo claude-projects/ dirs..."
-    chown_failed=0
-    IFS=',' read -ra ENTRIES <<< "$REPOS"
-    for entry in "${ENTRIES[@]}"; do
-      name="${entry%%:*}"
-      # Skip empty entries (REPOS="" or trailing comma) — `mkdir -p
-      # repos//claude-projects` would succeed but be meaningless.
-      [ -z "${name}" ] && continue
-      mkdir -p "repos/${name}/claude-projects"
-      # chown 1000:1000 — matches the Dockerfile's `useradd -m danxbot`
-      # first-non-system uid. Try unprivileged first (works when host
-      # UID == 1000), fall back to sudo when it doesn't, fail-soft so
-      # install completes even if chown is rejected (the dir still
-      # exists and the operator can chown manually). The `WARN:`
-      # uppercase prefix matches the `ERROR:` convention above so the
-      # message is grep-visible in install output, and the
-      # `chown_failed` flag drives a final summary line so install
-      # exit 0 doesn't bury the partial-failure signal.
-      chown 1000:1000 "repos/${name}/claude-projects" 2>/dev/null || \
-        sudo chown 1000:1000 "repos/${name}/claude-projects" 2>/dev/null || {
-          echo "WARN: could not chown repos/${name}/claude-projects to 1000:1000 — chown manually before launching the worker"
-          chown_failed=1
-        }
-    done
-    if [ "$chown_failed" = "1" ]; then
-      echo ""
-      echo "WARN: one or more claude-projects dirs were not chowned to 1000:1000."
-      echo "      The worker container's danxbot user (UID 1000) may fail to write JSONL."
-      echo "      Run: sudo chown 1000:1000 repos/*/claude-projects"
-    fi
+    echo "WARN: one or more claude-projects dirs were not chowned to 1000:1000."
+    echo "      The worker container's danxbot user (UID 1000) may fail to write JSONL."
+    echo "      Run: sudo chown 1000:1000 repos/*/claude-projects"
   fi
 fi
 
@@ -98,7 +98,7 @@ fi
 # this step, the symlinks created below would dangle until the
 # corresponding worker had ticked at least once. Idempotent — the
 # poller runs the same `syncRepoFiles` on every tick.
-if [ -n "${REPOS:-}" ]; then
+if [ -n "$NAMES" ]; then
   echo ""
   echo "Pre-populating per-repo inject pipeline..."
   npx tsx scripts/sync-repos.ts
@@ -111,9 +111,9 @@ fi
 # src/poller/inject/workspaces/trello-worker/.claude/skills/.
 #
 # - For danxbot itself: symlink → ../../src/poller/inject/.../skills/<n>.
-# - For each connected repo in REPOS: symlink → ../../.danxbot/
-#   workspaces/trello-worker/.claude/skills/<n>. Targets exist because
-#   the inject step above ran first.
+# - For each connected repo in the active target: symlink →
+#   ../../.danxbot/workspaces/trello-worker/.claude/skills/<n>. Targets
+#   exist because the inject step above ran first.
 #
 # Idempotent: `ln -sfn` overwrites stale symlinks without prompting.
 # Note: `ln -sfn` does NOT replace pre-existing real directories at
@@ -133,12 +133,9 @@ for s in "${DANX_SKILLS[@]}"; do
 done
 echo "  danxbot: ${DANX_SKILLS[*]}"
 
-# Connected repos (REPOS env var was sourced from .env above)
-if [ -n "${REPOS:-}" ]; then
-  IFS=',' read -ra SKILL_ENTRIES <<< "$REPOS"
-  for entry in "${SKILL_ENTRIES[@]}"; do
-    name="${entry%%:*}"
-    [ -z "${name}" ] && continue
+# Connected repos (loaded from deploy/targets/<DANXBOT_TARGET>.yml above)
+if [ -n "$NAMES" ]; then
+  for name in $NAMES; do
     if [ ! -d "repos/${name}" ]; then
       echo "  WARN: repos/${name} not present — skipping skill symlinks"
       continue

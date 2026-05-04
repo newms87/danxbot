@@ -169,8 +169,9 @@ describe("repoRootVarName", () => {
     // (empty-string repo name). The shell-ident regex allows it, but we
     // want a loud failure here regardless — see the comment in the
     // function. Either the regex catches it directly or the caller's
-    // `parseReposEnv` rejects empty names earlier; this test just pins
-    // that an empty input doesn't silently produce a broken var.
+    // target loader (`src/target.ts#loadTarget`) rejects empty names
+    // earlier; this test just pins that an empty input doesn't silently
+    // produce a broken var.
     // Note: repoRootVarName("") produces "DANXBOT_REPO_ROOT_" which
     // satisfies the regex; the empty-name case is caught upstream.
     // Here we just document the behavior.

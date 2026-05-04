@@ -12,6 +12,7 @@ export function makeConfig(
 ): DeployConfig {
   return {
     name: "test-bot",
+    mode: "deploy",
     region: "us-west-2",
     domain: "bot.example.com",
     hostedZone: "example.com",

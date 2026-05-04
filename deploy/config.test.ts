@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { loadConfig, findConfigPath } from "./config.js";
 
 const TEST_DIR = resolve("/tmp/danxbot-deploy-test");
-const DEPLOYMENTS_DIR = resolve(TEST_DIR, ".danxbot/deployments");
+const DEPLOYMENTS_DIR = resolve(TEST_DIR, "deploy/targets");
 
 function writeDeployment(name: string, yaml: string): string {
   mkdirSync(DEPLOYMENTS_DIR, { recursive: true });
@@ -288,7 +288,7 @@ repos:
     expect(config.repos[1].name).toBe("repo-b");
   });
 
-  it("findConfigPath locates .danxbot/deployments/<target>.yml walking up", () => {
+  it("findConfigPath locates deploy/targets/<target>.yml walking up", () => {
     const p = writeDeployment(
       "gpt",
       `
@@ -310,7 +310,7 @@ aws:
   it("findConfigPath throws with a clear message when target is missing", () => {
     mkdirSync(DEPLOYMENTS_DIR, { recursive: true });
     expect(() => findConfigPath(TEST_DIR, "nonexistent")).toThrow(
-      "No .danxbot/deployments/nonexistent.yml found",
+      "No deploy/targets/nonexistent.yml found",
     );
   });
 
@@ -899,5 +899,53 @@ aws:
 
     const config = loadConfig(p);
     expect(config.region).toBe("us-east-1");
+  });
+
+  it("defaults mode to 'deploy' when omitted (matches gpt.yml/platform.yml shape)", () => {
+    const p = writeDeployment(
+      "default-mode",
+      `
+name: test-bot
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+`,
+    );
+    expect(loadConfig(p).mode).toBe("deploy");
+  });
+
+  it("parses mode: local for non-deployable targets", () => {
+    // local.yml carries `mode: local` so the deploy CLI's main() can
+    // refuse to ship it (deploy/cli.ts gate). The runtime
+    // (src/target.ts) shares the YML shape, so this field has to land
+    // in DeployConfig too.
+    const p = writeDeployment(
+      "local",
+      `
+name: danxbot-local
+mode: local
+domain: localhost
+hosted_zone: localhost
+aws:
+  profile: default
+`,
+    );
+    expect(loadConfig(p).mode).toBe("local");
+  });
+
+  it("rejects mode values other than 'local' or 'deploy'", () => {
+    const p = writeDeployment(
+      "bad-mode",
+      `
+name: test-bot
+mode: staging
+domain: bot.example.com
+hosted_zone: example.com
+aws:
+  profile: default
+`,
+    );
+    expect(() => loadConfig(p)).toThrow(/mode must be "local" or "deploy"/);
   });
 });

@@ -346,23 +346,12 @@ describe("handleListAgents", () => {
     expect(body[1].criticalFailure).toBeNull();
   });
 
-  it("marks workers with no workerPort as unreachable rather than probing", async () => {
-    const res = createMockRes();
-    await handleListAgents(res, {
-      ...deps(),
-      repos: [
-        {
-          name: "noport",
-          url: "https://x.com/r.git",
-          localPath: "/repos/noport",
-        },
-      ],
-    });
-
-    const body = JSON.parse(res._getBody());
-    expect(body[0].worker.reachable).toBe(false);
-    expect(body[0].worker.error).toContain("no workerPort");
-  });
+  // Pre-Phase-B this suite included "marks workers with no workerPort as
+  // unreachable rather than probing" — that scenario is now structurally
+  // impossible: `RepoConfig.workerPort` is required (sourced from the
+  // deploy YML by `src/target.ts#loadTarget`), and the loader rejects
+  // entries that omit `worker_port` at parse time. The runtime can no
+  // longer reach `buildSnapshot` with an undefined `workerPort`.
 });
 
 // ============================================================

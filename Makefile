@@ -5,11 +5,22 @@
 
 SHELL := /bin/bash
 
-# Load .env for REPOS and shared vars
+# Load .env for shared vars (Anthropic key, DB creds, dispatch token, etc).
+# Connected-repo list comes from deploy/targets/<DANXBOT_TARGET>.yml
+# (default `local`) — NOT from any REPOS env var, as of Phase B.
 -include .env
 export
 
 REPOS_DIR := ./repos
+
+# Active deploy target — selects deploy/targets/<DANXBOT_TARGET>.yml at
+# every Makefile invocation. Override on the CLI: `make ... DANXBOT_TARGET=gpt`.
+DANXBOT_TARGET ?= local
+
+# Print the connected-repo names for the active target, one per line.
+# Wraps `npx tsx src/cli/list-target-repos.ts` so every iteration loop
+# reads from the same source as the runtime (`src/target.ts#loadTarget`).
+TARGET_REPO_NAMES = $(shell DANXBOT_TARGET="$(DANXBOT_TARGET)" npx tsx src/cli/list-target-repos.ts 2>/dev/null)
 
 .PHONY: help launch-infra stop-infra launch-worker stop-worker launch-all-workers stop-all-workers build logs validate-repos \
        generate-dev-override \
@@ -34,32 +45,34 @@ build: ## Build the danxbot Docker image
 	docker compose build
 	docker tag danxbot-dashboard:latest danxbot:latest
 
-generate-dev-override: ## Regenerate docker-compose.override.yml from REPOS (local dev only)
+generate-dev-override: ## Regenerate docker-compose.override.yml from deploy/targets/<TARGET>.yml (local dev only)
 	@npx tsx src/cli/dev-compose-override.ts
 
 launch-infra: generate-dev-override ## Start shared infrastructure (MySQL + dashboard)
-	@# Per-repo realpath + env export mirrors `launch-worker`'s pattern
-	@# (Makefile line ~47). `./repos/<name>` is a symlink; binding it
-	@# directly on WSL2+Docker Desktop creates a container-local phantom
-	@# directory disconnected from the host target (observed empirically:
-	@# dashboard writes to `.danxbot/settings.json` never reached the host,
-	@# and the worker's `CRITICAL_FAILURE` file was invisible to the
-	@# dashboard). Exporting the resolved path bypasses the trap.
+	@# Per-repo realpath + env export mirrors `launch-worker`'s pattern.
+	@# `./repos/<name>` is a symlink; binding it directly on WSL2 + Docker
+	@# Desktop creates a container-local phantom directory disconnected
+	@# from the host target (observed empirically: dashboard writes to
+	@# `.danxbot/settings.json` never reached the host, and the worker's
+	@# `CRITICAL_FAILURE` file was invisible to the dashboard). Exporting
+	@# the resolved path bypasses the trap.
 	@# Var-name scheme must match `repoRootVarName()` in
 	@# src/cli/dev-compose-override.ts — uppercase + hyphens → underscores.
+	@# Repo list comes from deploy/targets/$(DANXBOT_TARGET).yml via the
+	@# TARGET_REPO_NAMES helper — single source of truth shared with the
+	@# runtime (`src/target.ts#loadTarget`).
 	@set -e; \
-	if [ -z "$(REPOS)" ]; then \
-		echo "Warning: REPOS not set — dashboard starts with no repo binds; Agents tab will be empty"; \
+	NAMES="$(TARGET_REPO_NAMES)"; \
+	if [ -z "$$NAMES" ]; then \
+		echo "Warning: deploy/targets/$(DANXBOT_TARGET).yml lists no repos — dashboard starts with no repo binds; Agents tab will be empty"; \
 		docker compose up -d; \
 		exit 0; \
 	fi; \
-	IFS=',' read -ra ENTRIES <<< "$(REPOS)"; \
-	for entry in "$${ENTRIES[@]}"; do \
-		name="$${entry%%:*}"; \
+	for name in $$NAMES; do \
 		var="DANXBOT_REPO_ROOT_$$(echo "$$name" | tr 'a-z-' 'A-Z_')"; \
 		path="$$(realpath "$(REPOS_DIR)/$$name" 2>/dev/null)"; \
 		if [ -z "$$path" ]; then \
-			echo "Error: $(REPOS_DIR)/$$name does not exist (REPOS entry: $$name)"; exit 1; \
+			echo "Error: $(REPOS_DIR)/$$name does not exist (target $(DANXBOT_TARGET) lists repo: $$name)"; exit 1; \
 		fi; \
 		export "$$var=$$path"; \
 	done; \
@@ -99,10 +112,9 @@ launch-all-workers: ## Start workers for all configured repos
 	@# continues to the next repo, and make exits 0. Capture the
 	@# subshell's `$$?` separately and check it. Verified empirically
 	@# (Trello K2zQYIdX retro).
-	@if [ -z "$(REPOS)" ]; then echo "Error: REPOS not set in .env"; exit 1; fi; \
-	IFS=',' read -ra ENTRIES <<< "$(REPOS)"; \
-	for entry in "$${ENTRIES[@]}"; do \
-		name="$${entry%%:*}"; \
+	@NAMES="$(TARGET_REPO_NAMES)"; \
+	if [ -z "$$NAMES" ]; then echo "Error: deploy/targets/$(DANXBOT_TARGET).yml lists no repos"; exit 1; fi; \
+	for name in $$NAMES; do \
 		COMPOSE_FILE="$(REPOS_DIR)/$$name/.danxbot/config/compose.yml"; \
 		if [ ! -f "$$COMPOSE_FILE" ]; then \
 			echo "Warning: $$COMPOSE_FILE not found, skipping $$name"; \
@@ -121,10 +133,9 @@ launch-all-workers: ## Start workers for all configured repos
 	done
 
 stop-all-workers: ## Stop all repo workers
-	@if [ -z "$(REPOS)" ]; then echo "Error: REPOS not set in .env"; exit 1; fi; \
-	IFS=',' read -ra ENTRIES <<< "$(REPOS)"; \
-	for entry in "$${ENTRIES[@]}"; do \
-		name="$${entry%%:*}"; \
+	@NAMES="$(TARGET_REPO_NAMES)"; \
+	if [ -z "$$NAMES" ]; then echo "Error: deploy/targets/$(DANXBOT_TARGET).yml lists no repos"; exit 1; fi; \
+	for name in $$NAMES; do \
 		echo "Stopping worker for $$name..."; \
 		docker compose -p "danxbot-worker-$$name" down; \
 	done
@@ -137,11 +148,10 @@ logs: ## Tail logs for infra or a worker (usage: make logs or make logs REPO=pla
 	fi
 
 validate-repos: ## Check host prerequisites for all connected repos before launching workers
-	@if [ -z "$(REPOS)" ]; then echo "Error: REPOS not set in .env"; exit 1; fi; \
+	@NAMES="$(TARGET_REPO_NAMES)"; \
+	if [ -z "$$NAMES" ]; then echo "Error: deploy/targets/$(DANXBOT_TARGET).yml lists no repos"; exit 1; fi; \
 	ERRORS=0; \
-	IFS=',' read -ra ENTRIES <<< "$(REPOS)"; \
-	for entry in "$${ENTRIES[@]}"; do \
-		name="$${entry%%:*}"; \
+	for name in $$NAMES; do \
 		repo_path="$(REPOS_DIR)/$$name"; \
 		echo "Checking $$name..."; \
 		if [ ! -d "$$repo_path" ] && [ ! -L "$$repo_path" ]; then \
@@ -263,7 +273,7 @@ endif
 
 # --- Deploy ---
 #
-# Production AWS deploy — per-deployment config at .danxbot/deployments/<TARGET>.yml.
+# Production AWS deploy — per-deployment config at deploy/targets/<TARGET>.yml.
 # Each TARGET is its own AWS account / region / resources — complete isolation.
 #
 

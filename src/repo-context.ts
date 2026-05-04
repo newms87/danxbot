@@ -14,7 +14,7 @@ import { repos, isWorkerMode, workerRepoName, config } from "./config.js";
 
 /**
  * Resolve DANXBOT_WORKER_PORT. Production (deploy): compose injects it from
- * .danxbot/deployments/<target>.yml per-repo `worker_port`, so it arrives as
+ * deploy/targets/<target>.yml per-repo `worker_port`, so it arrives as
  * process.env.DANXBOT_WORKER_PORT. Local dev: falls back to the repo's
  * .danxbot/.env — the one place danxbot-owned per-repo config lives. The
  * repo-root `.claude/` is strictly developer territory and danxbot never
@@ -60,8 +60,17 @@ function isDockerServiceName(host: string): boolean {
 /**
  * Load a single repo's context from its .danxbot/ directory.
  * Reads trello.yml for board IDs and .env for secrets (Slack, Trello API, DB).
+ *
+ * Only the identity fields (`name`, `url`, `localPath`) are read off the
+ * input — `workerPort` is sourced from the per-repo `.danxbot/.env`
+ * (the authoritative runtime source via `readWorkerPort`), not from any
+ * RepoConfig the caller might pass in. Typed as `Pick<...>` so worker
+ * mode can construct an identity stub without inventing a workerPort
+ * placeholder it doesn't need.
  */
-export function loadRepoContext(repo: RepoConfig): RepoContext {
+export function loadRepoContext(
+  repo: Pick<RepoConfig, "name" | "url" | "localPath">,
+): RepoContext {
   const envPath = resolve(repo.localPath, ".danxbot/.env");
   if (!existsSync(envPath)) {
     throw new Error(
@@ -137,8 +146,9 @@ export function loadRepoContext(repo: RepoConfig): RepoContext {
  * All loaded repo contexts. Loaded at startup.
  *
  * Worker mode: loads only the named repo's context (one entry).
- * Dashboard mode: empty — dashboard reads repo names from REPOS env var
- * or the database, not from filesystem-loaded contexts.
+ * Dashboard mode: empty — dashboard reads repo names from the active
+ * deploy target (`deploy/targets/<DANXBOT_TARGET>.yml`) or the database,
+ * not from filesystem-loaded contexts.
  */
 function loadActiveRepoContexts(): RepoContext[] {
   if (isWorkerMode) {

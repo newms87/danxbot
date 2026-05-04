@@ -1,9 +1,12 @@
 /**
- * YAML parser + validator for .danxbot/deployments/<TARGET>.yml.
+ * YAML parser + validator for deploy/targets/<TARGET>.yml.
  * Multi-deployment variant of gpt-manager's single-deployment config.
  *
  * Key differences vs gpt-manager:
- *   - Config lives at .danxbot/deployments/<target>.yml (not .danxbot/deploy.yml).
+ *   - Config lives at deploy/targets/<target>.yml (not .danxbot/deploy.yml).
+ *     Per-target config is danxbot product-level (describes WHICH connected
+ *     repos a deploy target serves) — it lives outside <repo>/.danxbot/ so the
+ *     per-connected-repo `.danxbot/` shape stays uniform across every repo.
  *   - aws.profile is REQUIRED (no credential-chain fallback; wrong account is expensive).
  *   - Defaults shift to the new minimums (t3.small, 100 GB data volume).
  *   - ssm_prefix defaults to /danxbot-<target> using the yml filename stem.
@@ -68,6 +71,14 @@ export interface DeployRepo {
 
 export interface DeployConfig {
   name: string;
+  /**
+   * `"local"` marks a NON-deployable target (deploy/targets/local.yml).
+   * The deploy CLI's main() refuses to proceed when set; the value
+   * exists solely to share the YML schema between local-runtime
+   * (`src/target.ts#loadTarget`) and the deploy pipeline. Defaults to
+   * `"deploy"` (the field can be omitted in real targets like gpt.yml).
+   */
+  mode: "local" | "deploy";
   region: string;
   domain: string;
   hostedZone: string;
@@ -90,7 +101,7 @@ export interface DeployConfig {
 }
 
 /**
- * Locate .danxbot/deployments/<target>.yml, starting from cwd and walking up.
+ * Locate deploy/targets/<target>.yml, starting from cwd and walking up.
  * Throws a clear error if not found.
  */
 export function findConfigPath(
@@ -101,13 +112,13 @@ export function findConfigPath(
   const root = resolve("/");
 
   while (dir !== root) {
-    const candidate = resolve(dir, ".danxbot/deployments", `${target}.yml`);
+    const candidate = resolve(dir, "deploy/targets", `${target}.yml`);
     if (existsSync(candidate)) return candidate;
     dir = dirname(dir);
   }
 
   throw new Error(
-    `No .danxbot/deployments/${target}.yml found. Create it from .danxbot/deployments.example.yml.`,
+    `No deploy/targets/${target}.yml found. Create it from deploy/targets/example.yml.`,
   );
 }
 
@@ -189,6 +200,22 @@ export function loadConfig(configPath: string): DeployConfig {
   }
 
   const target = basename(configPath, ".yml");
+
+  // Optional `mode:` field — `"local"` flags a non-deployable target
+  // (deploy/targets/local.yml) so the deploy CLI's main() can refuse to
+  // ship it. Default `"deploy"` keeps every existing target file
+  // (gpt.yml, platform.yml — none had `mode:`) shippable as-is.
+  const modeRaw = yaml["mode"];
+  let mode: "local" | "deploy" = "deploy";
+  if (modeRaw !== undefined && modeRaw !== null) {
+    if (modeRaw !== "local" && modeRaw !== "deploy") {
+      errors.push(
+        `mode must be "local" or "deploy" (got ${JSON.stringify(modeRaw)})`,
+      );
+    } else {
+      mode = modeRaw;
+    }
+  }
 
   const name = requireString(yaml, "name", "name");
   const region = optionalString(yaml, "region", "region", "us-east-1");
@@ -399,6 +426,7 @@ export function loadConfig(configPath: string): DeployConfig {
 
   return {
     name,
+    mode,
     region,
     domain,
     hostedZone,

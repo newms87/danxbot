@@ -554,102 +554,39 @@ describe("buildSsmPutCommands", () => {
 });
 
 describe("buildTargetOverrides", () => {
-  it("synthesizes REPOS from deploy config (not local .env)", () => {
+  it("synthesizes DANXBOT_TARGET from the target FILENAME stem (not config.name)", () => {
+    // Phase B: the runtime reads connected repos directly from
+    // deploy/targets/<TARGET>.yml via src/target.ts#loadTarget. The
+    // worker container only needs to know WHICH target file to load.
+    //
+    // CRITICAL: DANXBOT_TARGET MUST be the filename stem (e.g. "gpt"),
+    // not config.name (e.g. "danxbot-production"). loadTarget resolves
+    // `deploy/targets/${DANXBOT_TARGET}.yml`, so passing config.name
+    // would point the worker at a non-existent file. The deploy CLI
+    // invokes us with the filename stem as `target` and threads it
+    // through.
     const cfg = makeConfig({
+      name: "danxbot-production",
       repos: [
         { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561, branch: "main" },
         { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562, branch: "main" },
       ],
     });
-    expect(buildTargetOverrides(cfg).REPOS).toBe(
-      "danxbot:https://github.com/x/d.git,gpt-manager:https://github.com/x/g.git",
-    );
-  });
-
-  it("synthesizes REPO_WORKER_PORTS matching each repo", () => {
-    const cfg = makeConfig({
-      repos: [
-        { name: "platform", url: "https://github.com/x/p.git", workerPort: 5561, branch: "main" },
-        { name: "gpt-manager", url: "https://github.com/x/g.git", workerPort: 5562, branch: "main" },
-      ],
+    expect(buildTargetOverrides(cfg, "gpt")).toEqual({
+      DANXBOT_TARGET: "gpt",
     });
-    expect(buildTargetOverrides(cfg).REPO_WORKER_PORTS).toBe(
-      "platform:5561,gpt-manager:5562",
-    );
+    // Negative: must NOT use cfg.name even when both are passed.
+    expect(buildTargetOverrides(cfg, "gpt").DANXBOT_TARGET).not.toBe(cfg.name);
   });
 
-  it("returns empty strings when the deployment has no repos", () => {
+  it("returns the same DANXBOT_TARGET when the deployment has no repos (target identity is independent of repos[])", () => {
     const cfg = makeConfig({ repos: [] });
-    expect(buildTargetOverrides(cfg)).toEqual({
-      REPOS: "",
-      REPO_WORKER_PORTS: "",
-      REPO_WORKER_HOSTS: "",
+    expect(buildTargetOverrides(cfg, "gpt")).toEqual({
+      DANXBOT_TARGET: "gpt",
     });
   });
 
-  it("synthesizes REPO_WORKER_HOSTS only for repos that declare worker_host", () => {
-    // Per-repo worker_host overrides the default `danxbot-worker-<name>`
-    // hostname for repos whose compose file renames the container. Only
-    // repos that explicitly declare it appear in the env var; the rest
-    // fall back to the default in src/config.ts at parse time.
-    const cfg = makeConfig({
-      repos: [
-        {
-          name: "custom",
-          url: "https://github.com/x/c.git",
-          workerPort: 5561,
-          branch: "main",
-          workerHost: "container-alias",
-        },
-        { name: "defaulted", url: "https://github.com/x/d.git", workerPort: 5562, branch: "main" },
-      ],
-    });
-    expect(buildTargetOverrides(cfg).REPO_WORKER_HOSTS).toBe(
-      "custom:container-alias",
-    );
-  });
-
-  it("REPO_WORKER_HOSTS preserves config.repos order with multiple overrides", () => {
-    // Order matters because the same comma-separated form is the round-trip
-    // key/value layout the dashboard parses back. A reordering bug would
-    // not break parsing but would shuffle which name owns which host.
-    const cfg = makeConfig({
-      repos: [
-        {
-          name: "alpha",
-          url: "https://github.com/x/a.git",
-          workerPort: 5561,
-          branch: "main",
-          workerHost: "alpha-host",
-        },
-        {
-          name: "beta",
-          url: "https://github.com/x/b.git",
-          workerPort: 5562,
-          branch: "main",
-          workerHost: "beta-host",
-        },
-      ],
-    });
-    expect(buildTargetOverrides(cfg).REPO_WORKER_HOSTS).toBe(
-      "alpha:alpha-host,beta:beta-host",
-    );
-  });
-
-  it("emits an empty REPO_WORKER_HOSTS when no repo declares worker_host", () => {
-    // Empty SSM values are skipped by buildSsmPutCommands, so nothing lands
-    // in production — but the override map ALWAYS carries the key so it
-    // overwrites any operator-local REPO_WORKER_HOSTS leaking via .env.
-    const cfg = makeConfig({
-      repos: [
-        { name: "a", url: "https://github.com/x/a.git", workerPort: 5561, branch: "main" },
-        { name: "b", url: "https://github.com/x/b.git", workerPort: 5562, branch: "main" },
-      ],
-    });
-    expect(buildTargetOverrides(cfg).REPO_WORKER_HOSTS).toBe("");
-  });
-
-  it("emits SSM put commands for the override values when merged into shared", () => {
+  it("emits an SSM put command for DANXBOT_TARGET when merged into shared", () => {
     const cfg = makeConfig({
       ssmPrefix: "/danxbot-gpt",
       aws: { profile: "gpt" },
@@ -657,43 +594,19 @@ describe("buildTargetOverrides", () => {
         { name: "danxbot", url: "https://github.com/x/d.git", workerPort: 5561, branch: "main" },
       ],
     });
-    const overrides = buildTargetOverrides(cfg);
+    const overrides = buildTargetOverrides(cfg, "gpt");
     const cmds = buildSsmPutCommands(cfg, {
       shared: { ...overrides, DANXBOT_DISPATCH_TOKEN: "tok" },
       perRepo: {},
     });
     const joined = cmds.join("\n");
-    expect(joined).toContain("/danxbot-gpt/shared/REPOS");
-    expect(joined).toContain(
-      "--value 'danxbot:https://github.com/x/d.git'",
-    );
-    expect(joined).toContain("/danxbot-gpt/shared/REPO_WORKER_PORTS");
-    expect(joined).toContain("--value 'danxbot:5561'");
+    expect(joined).toContain("/danxbot-gpt/shared/DANXBOT_TARGET");
+    expect(joined).toContain(`--value 'gpt'`);
     expect(joined).toContain("/danxbot-gpt/shared/DANXBOT_DISPATCH_TOKEN");
-  });
-
-  it("pushes REPO_WORKER_HOSTS to SSM when at least one repo declares worker_host", () => {
-    const cfg = makeConfig({
-      ssmPrefix: "/danxbot-gpt",
-      aws: { profile: "gpt" },
-      repos: [
-        {
-          name: "danxbot",
-          url: "https://github.com/x/d.git",
-          workerPort: 5561,
-          branch: "main",
-          workerHost: "renamed-container",
-        },
-      ],
-    });
-    const overrides = buildTargetOverrides(cfg);
-    const cmds = buildSsmPutCommands(cfg, {
-      shared: { ...overrides, DANXBOT_DISPATCH_TOKEN: "tok" },
-      perRepo: {},
-    });
-    const joined = cmds.join("\n");
-    expect(joined).toContain("/danxbot-gpt/shared/REPO_WORKER_HOSTS");
-    expect(joined).toContain("--value 'danxbot:renamed-container'");
+    // Negative: the retired CSV vars must NEVER be emitted.
+    expect(joined).not.toContain("/danxbot-gpt/shared/REPOS");
+    expect(joined).not.toContain("/danxbot-gpt/shared/REPO_WORKER_PORTS");
+    expect(joined).not.toContain("/danxbot-gpt/shared/REPO_WORKER_HOSTS");
   });
 });
 
@@ -750,9 +663,10 @@ describe("buildPushSecretsCommands", () => {
   // The orchestrator concern: how `pushSecrets` merges the three input streams
   // (collected .env values, per-target overrides, dispatch token) before
   // emitting put-parameter commands. The merge order is load-bearing —
-  // operator-local REPOS / REPO_WORKER_PORTS must NOT leak into a target
-  // that should only see its own repos. These tests verify the merge
-  // without exercising `runStreaming` or SSM.
+  // operator-local values must NOT leak into a target that should only see
+  // its own values. Pre-Phase-B this guarded REPOS / REPO_WORKER_PORTS;
+  // Phase B retired those CSV vars in favor of DANXBOT_TARGET (the runtime
+  // resolves repos from deploy/targets/<TARGET>.yml directly).
   const cfg = makeConfig({
     ssmPrefix: "/danxbot-test",
     aws: { profile: "p" },
@@ -762,45 +676,22 @@ describe("buildPushSecretsCommands", () => {
   });
 
   it("target overrides win over conflicting keys in collected.shared", () => {
-    // Operator's local .env has REPOS=foo:url,bar:url (every repo they
-    // touch). Deploying the gpt target must push gpt's repo list, not the
-    // operator's union. buildTargetOverrides supplies the gpt-only value
-    // and it must overwrite the local one.
+    // Operator's local .env may have a stale DANXBOT_TARGET from a prior
+    // deploy of a different target. The deploy CLI's target overrides
+    // must overwrite that — otherwise the worker container would boot
+    // pointed at the wrong YML and load the wrong connected-repo list.
     const collected = {
-      shared: { REPOS: "operator-local-junk", ANTHROPIC_API_KEY: "sk-x" },
+      shared: { DANXBOT_TARGET: "stale-other-target", ANTHROPIC_API_KEY: "sk-x" },
       perRepo: {},
     };
-    const overrides = { REPOS: "danxbot:https://github.com/x/d.git" };
+    const overrides = { DANXBOT_TARGET: "gpt" };
     const cmds = buildPushSecretsCommands(cfg, collected, overrides, "tok");
-    const reposCmd = cmds.find((c) =>
-      c.includes(`--name "/danxbot-test/shared/REPOS"`),
+    const targetCmd = cmds.find((c) =>
+      c.includes(`--name "/danxbot-test/shared/DANXBOT_TARGET"`),
     );
-    expect(reposCmd).toBeDefined();
-    expect(reposCmd).toContain("--value 'danxbot:https://github.com/x/d.git'");
-    expect(reposCmd).not.toContain("operator-local-junk");
-  });
-
-  it("target overrides win over conflicting REPO_WORKER_HOSTS in collected.shared", () => {
-    // Same precedence guard as the REPOS test above — an operator's local
-    // REPO_WORKER_HOSTS (e.g. dev container aliases for a repo not in this
-    // deployment) must NEVER leak into the target's SSM. The override key
-    // is always present in buildTargetOverrides, even when empty, so it
-    // overwrites the local value unconditionally.
-    const collected = {
-      shared: {
-        REPO_WORKER_HOSTS: "operator-junk:bad-host",
-        ANTHROPIC_API_KEY: "sk-x",
-      },
-      perRepo: {},
-    };
-    const overrides = { REPO_WORKER_HOSTS: "danxbot:correct-host" };
-    const cmds = buildPushSecretsCommands(cfg, collected, overrides, "tok");
-    const hostsCmd = cmds.find((c) =>
-      c.includes(`--name "/danxbot-test/shared/REPO_WORKER_HOSTS"`),
-    );
-    expect(hostsCmd).toBeDefined();
-    expect(hostsCmd).toContain("--value 'danxbot:correct-host'");
-    expect(hostsCmd).not.toContain("operator-junk");
+    expect(targetCmd).toBeDefined();
+    expect(targetCmd).toContain(`--value 'gpt'`);
+    expect(targetCmd).not.toContain("stale-other-target");
   });
 
   it("DANXBOT_DISPATCH_TOKEN always lands in shared", () => {
@@ -828,7 +719,7 @@ describe("buildPushSecretsCommands", () => {
       >,
     };
     const before = JSON.stringify(collected);
-    buildPushSecretsCommands(cfg, collected, { REPOS: "x" }, "tok");
+    buildPushSecretsCommands(cfg, collected, { DANXBOT_TARGET: "x" }, "tok");
     expect(JSON.stringify(collected)).toBe(before);
   });
 
@@ -865,8 +756,7 @@ describe("buildPushSecretsCommands", () => {
       },
     };
     const overrides = {
-      REPOS: "danxbot:url",
-      REPO_WORKER_PORTS: "danxbot:5561",
+      DANXBOT_TARGET: "gpt",
     };
     const cmds = buildPushSecretsCommands(cfg, collected, overrides, "tok");
     const paths = new Set(
@@ -875,8 +765,7 @@ describe("buildPushSecretsCommands", () => {
     expect(paths).toEqual(
       new Set([
         "/danxbot-test/shared/ANTHROPIC_API_KEY",
-        "/danxbot-test/shared/REPOS",
-        "/danxbot-test/shared/REPO_WORKER_PORTS",
+        "/danxbot-test/shared/DANXBOT_TARGET",
         "/danxbot-test/shared/DANXBOT_DISPATCH_TOKEN",
         "/danxbot-test/repos/danxbot/DANX_TRELLO_API_KEY",
         "/danxbot-test/repos/danxbot/REPO_ENV_APP_KEY",
@@ -1204,7 +1093,7 @@ describe("pushSecrets — diff + parallel", () => {
       for (const { cmd } of cmds) ranCmds.push(cmd);
     };
 
-    await pushSecrets(cfg, CWD2, undefined, {
+    await pushSecrets(cfg, CWD2, "test-target", {
       ssmReader,
       runner,
       // Force a fixed dispatch token so we don't hit the SSM-read for it
@@ -1237,7 +1126,7 @@ describe("pushSecrets — diff + parallel", () => {
       observedConcurrency = concurrency;
     };
 
-    await pushSecrets(cfg, CWD2, undefined, {
+    await pushSecrets(cfg, CWD2, "test-target", {
       ssmReader,
       runner,
       concurrency: 25,
@@ -1260,7 +1149,7 @@ describe("pushSecrets — diff + parallel", () => {
       observedConcurrency = concurrency;
     };
 
-    await pushSecrets(cfg, CWD2, undefined, {
+    await pushSecrets(cfg, CWD2, "test-target", {
       ssmReader,
       runner,
       dispatchToken: "tok",
@@ -1278,7 +1167,7 @@ describe("pushSecrets — diff + parallel", () => {
     ): Promise<void> => {
       for (const { cmd } of cmds) ranCmds.push(cmd);
     };
-    await pushSecrets(cfg, CWD2, undefined, {
+    await pushSecrets(cfg, CWD2, "test-target", {
       ssmReader,
       runner,
       dispatchToken: "tok",
@@ -1304,7 +1193,7 @@ describe("pushSecrets — diff + parallel", () => {
     const runner = async (): Promise<void> => {
       runnerCalled = true;
     };
-    await pushSecrets(cfg, CWD2, undefined, {
+    await pushSecrets(cfg, CWD2, "test-target", {
       ssmReader,
       runner,
       dispatchToken: "tok",

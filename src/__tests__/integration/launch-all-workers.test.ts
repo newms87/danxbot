@@ -60,6 +60,36 @@ function setupFakeProject(repoPorts: [string, string][]): FakeProject {
     writeFileSync(join(danxbotDir, "config/compose.yml"), "services: {}\n");
   }
 
+  // Phase B: the Makefile reads connected-repo names from
+  // deploy/targets/<DANXBOT_TARGET>.yml via `list-target-repos.ts`. The
+  // CLI script lives in the real project src/, so symlink the parts the
+  // helper transitively imports so `npx tsx src/cli/list-target-repos.ts`
+  // resolves cleanly from the temp project dir. Avoids re-shipping
+  // node_modules into every fake project.
+  symlinkSync(join(PROJECT_ROOT, "src"), join(dir, "src"));
+  symlinkSync(join(PROJECT_ROOT, "node_modules"), join(dir, "node_modules"));
+  symlinkSync(join(PROJECT_ROOT, "package.json"), join(dir, "package.json"));
+  symlinkSync(join(PROJECT_ROOT, "tsconfig.json"), join(dir, "tsconfig.json"));
+
+  // Write a `local` target YML listing every fake repo so the loop sees them.
+  // worker_port here is irrelevant to this test (the docker shim reads
+  // the runtime DANXBOT_WORKER_PORT env which scripts/worker-env.sh
+  // exports from each repo's .danxbot/.env), but the YML schema requires
+  // it — give each entry an arbitrary valid port.
+  const targetsDir = join(dir, "deploy/targets");
+  mkdirSync(targetsDir, { recursive: true });
+  const targetYml = [
+    "name: local",
+    "mode: local",
+    "repos:",
+    ...repoPorts.flatMap(([name, port]) => [
+      `  - name: ${name}`,
+      `    url: https://example.com/${name}.git`,
+      `    worker_port: ${port}`,
+    ]),
+  ].join("\n");
+  writeFileSync(join(targetsDir, "local.yml"), targetYml + "\n");
+
   // EVERY worker (not just the danxbot one) bind-mounts the danxbot
   // self-host `claude-auth` dir for Claude credentials in local dev,
   // so `scripts/worker-env.sh` realpaths it on every launch — even

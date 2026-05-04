@@ -1,4 +1,4 @@
-# Danxbot deployment config — copy to .danxbot/deployments/<name>.yml
+# Danxbot deployment config — copy to deploy/targets/<name>.yml
 # and fill in. The filename stem becomes the deployment TARGET.
 # Multiple deployments can coexist; deploy one with `make deploy TARGET=<name>`.
 

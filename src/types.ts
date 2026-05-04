@@ -81,17 +81,19 @@ export interface RepoConfig {
   url: string;
   localPath: string;
   /**
-   * Dashboard-mode only: the worker container port used to forward external
-   * dispatch requests. Populated from REPO_WORKER_PORTS env var. Absent in
-   * worker mode (workerPort lives on RepoContext there).
+   * Worker container port used to forward external dispatch requests.
+   * Sourced from `deploy/targets/<TARGET>.yml` per-repo `worker_port`.
+   * Required — the loader (`src/target.ts#loadTarget`) rejects entries
+   * that omit it, so the dispatch proxy can always route.
    */
-  workerPort?: number;
+  workerPort: number;
   /**
-   * Dashboard-mode only: docker hostname override used by the proxy.
-   * Populated from REPO_WORKER_HOSTS env var. When undefined the dashboard
-   * falls back to `danxbot-worker-<name>` (the per-repo compose default).
-   * Set this when the connected repo's compose `container_name` deviates
-   * from the default — without it, dispatches to that repo silently 502.
+   * Optional docker hostname override used by the proxy. Sourced from
+   * `deploy/targets/<TARGET>.yml` per-repo `worker_host`. When undefined
+   * the dashboard falls back to `danxbot-worker-<name>` (the per-repo
+   * compose default). Set this when the connected repo's compose
+   * `container_name` deviates from the default — without it, dispatches
+   * to that repo silently 502.
    */
   workerHost?: string;
 }

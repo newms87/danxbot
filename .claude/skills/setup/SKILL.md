@@ -33,7 +33,7 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
    ```
 4. If the response is a 401 or error, show it and re-prompt
 5. Present a numbered list of repos. Ask: "Which repo should Danxbot connect to? Enter the number:"
-6. Save `REPOS=<name>:<clone_url>` to `.env` where `<name>` is the repo's short name (after the `/`) and `<clone_url>` is `https://github.com/<nameWithOwner>.git`
+6. Append the repo to `deploy/targets/local.yml`'s `repos:` list as `{ name: <short-name>, url: https://github.com/<nameWithOwner>.git, worker_port: <unique-port> }` where `<short-name>` is the repo's short name (after the `/`). `worker_port` MUST match the repo's `<repo>/.danxbot/.env` `DANXBOT_WORKER_PORT`. (Pre-Phase-B this saved `REPOS=<name>:<clone_url>` to `.env` — the env var was retired.)
 
 ## Step 3: Trello Credentials
 

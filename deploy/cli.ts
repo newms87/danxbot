@@ -430,6 +430,19 @@ async function main(): Promise<void> {
   const path = findConfigPath(process.cwd(), args.target);
   const config = loadConfig(path);
 
+  // `mode: local` marks a target as non-deployable (deploy/targets/local.yml).
+  // Refuse every CLI command for it — accidentally running `make deploy
+  // TARGET=local` would push the operator's dev repo list to AWS, which
+  // is exactly what the local target exists to prevent.
+  if (config.mode === "local") {
+    throw new Error(
+      `Refusing to run \`${args.command}\` against target "${args.target}" — its yml ` +
+        `declares \`mode: local\` (non-deployable). This target is for local-runtime ` +
+        `consumers only (src/target.ts#loadTarget). To deploy, pass a target with ` +
+        `\`mode: deploy\` (the default) — e.g. gpt or platform.`,
+    );
+  }
+
   console.log(`\nDanxbot Deploy — ${config.name} (target: ${args.target})`);
   console.log(`  Region: ${config.region}`);
   console.log(`  Domain: ${config.domain}`);

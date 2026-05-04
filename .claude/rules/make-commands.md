@@ -48,7 +48,7 @@ Common substitutions you will be tempted to skip:
 
 ## Deployment (per-target AWS)
 
-Per-target deploys live at `.danxbot/deployments/<target>.yml`. Current targets: `gpt`.
+Per-target deploys live at `deploy/targets/<target>.yml`. Current targets: `gpt`.
 
 | Command | Purpose |
 |---------|---------|

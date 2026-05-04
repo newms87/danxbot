@@ -26,6 +26,7 @@ import type { DeployConfig } from "./config.js";
 function makeConfig(overrides: Partial<DeployConfig> = {}): DeployConfig {
   return {
     name: "gpt",
+    mode: "deploy",
     region: "us-east-1",
     domain: "example.com",
     hostedZone: "example.com",

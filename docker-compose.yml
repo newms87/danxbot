@@ -43,8 +43,9 @@ services:
       # Dashboard built assets (mount for dev rebuilds)
       - ./dashboard:/danxbot/app/dashboard
       # Per-repo RW binds + per-repo RO claude-projects binds live in
-      # `docker-compose.override.yml` (gitignored, auto-generated from REPOS
-      # by `make launch-infra`). The override mounts:
+      # `docker-compose.override.yml` (gitignored, auto-generated from
+      # deploy/targets/<DANXBOT_TARGET>.yml by `make launch-infra`). The
+      # override mounts:
       #   ./repos/<name>          → /danxbot/app/repos/<name>      (RW, for settings.json)
       #   ./repos/<name>/claude-projects → /danxbot/app/claude-projects/<name>  (RO, for JSONL)
       # See src/cli/dev-compose-override.ts and src/dashboard/jsonl-path-resolver.ts.

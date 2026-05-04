@@ -8,7 +8,7 @@ When a user asks about a deployed job, dispatch, session, or container — go pu
 
 ## Deployments
 
-Per-target config: `.danxbot/deployments/<TARGET>.yml`. Current targets: `gpt` (gpt-manager). Each target is its own AWS account/region/resources — complete isolation, per-target SSM prefix (e.g. `/danxbot-gpt/...`), per-target EC2.
+Per-target config: `deploy/targets/<TARGET>.yml`. Current targets: `gpt` (gpt-manager). Each target is its own AWS account/region/resources — complete isolation, per-target SSM prefix (e.g. `/danxbot-gpt/...`), per-target EC2.
 
 ## Reach paths
 

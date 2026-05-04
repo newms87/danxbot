@@ -41,7 +41,11 @@ import { loadRepoContext } from "./repo-context.js";
 const mockParseEnvFile = vi.mocked(parseEnvFile);
 const mockExistsSync = vi.mocked(existsSync);
 
-const TEST_REPO: RepoConfig = {
+// Identity-only stub — `loadRepoContext` reads workerPort from the
+// repo's `.danxbot/.env` (via `readWorkerPort`), not from the input
+// RepoConfig. Typed as `Pick<...>` to match the function's narrowed
+// signature.
+const TEST_REPO: Pick<RepoConfig, "name" | "url" | "localPath"> = {
   name: "test-repo",
   url: "https://example.com/test.git",
   localPath: "/test/repos/test-repo",

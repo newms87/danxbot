@@ -1,133 +1,25 @@
 import { existsSync } from "node:fs";
 import type { RepoConfig } from "./types.js";
-import { getReposBase } from "./poller/constants.js";
 import { required, optional } from "./env.js";
-import { parseReposEnv } from "./repos-env.js";
-
-function parseRepos(envValue: string): RepoConfig[] {
-  return parseReposEnv(envValue).map(({ name, url }) => ({
-    name,
-    url,
-    localPath: `${getReposBase()}/${name}`,
-  }));
-}
+import { loadTarget } from "./target.js";
 
 /**
- * Parse REPO_WORKER_PORTS — companion env var for REPOS, maps repo name to
- * worker container port. Format: "name:port,name:port". Used by the dashboard
- * to forward external dispatch requests to the matching worker container on
- * the danxbot-net docker network.
- */
-function parseWorkerPorts(envValue: string): Record<string, number> {
-  if (!envValue.trim()) return {};
-  const result: Record<string, number> = {};
-  for (const entry of envValue.split(",")) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    const colonIndex = trimmed.indexOf(":");
-    if (colonIndex <= 0) {
-      throw new Error(
-        `Invalid REPO_WORKER_PORTS entry "${entry}" — expected "name:port" format`,
-      );
-    }
-    const name = trimmed.slice(0, colonIndex).trim();
-    const portStr = trimmed.slice(colonIndex + 1).trim();
-    const port = parseInt(portStr, 10);
-    if (!name || !Number.isInteger(port) || port < 1 || port > 65535) {
-      throw new Error(
-        `Invalid REPO_WORKER_PORTS entry "${entry}" — name required, port must be 1-65535`,
-      );
-    }
-    result[name] = port;
-  }
-  return result;
-}
-
-/**
- * Attach workerPort entries from REPO_WORKER_PORTS onto matching REPOS entries.
- * Throws on orphaned port entries (port name with no matching repo) — silent
- * discards turn typos into 500s at proxy-request time.
- */
-function attachWorkerPorts(
-  parsedRepos: RepoConfig[],
-  ports: Record<string, number>,
-): RepoConfig[] {
-  const repoNames = new Set(parsedRepos.map((r) => r.name));
-  for (const name of Object.keys(ports)) {
-    if (!repoNames.has(name)) {
-      throw new Error(
-        `REPO_WORKER_PORTS references unknown repo "${name}" — each name must match an entry in REPOS`,
-      );
-    }
-  }
-  return parsedRepos.map((r) =>
-    ports[r.name] !== undefined ? { ...r, workerPort: ports[r.name] } : r,
-  );
-}
-
-/**
- * Parse REPO_WORKER_HOSTS — optional per-repo docker hostname override that
- * winds through `<repo>/.danxbot/config/compose.yml` `container_name`. Format:
- * "name:host,name:host". Repos absent from this map fall back to the
- * default `danxbot-worker-<name>` in `src/dashboard/dispatch-proxy.ts`.
+ * Resolve the connected-repo list from `deploy/targets/<DANXBOT_TARGET>.yml`
+ * (defaulting to `local` when DANXBOT_TARGET is unset).
  *
- * Whitespace inside a hostname (DNS labels can't contain spaces) and an
- * empty value after the colon are rejected loudly — both are config
- * mistakes that would silently skew proxy behavior.
+ * Pre-Phase-B this came from two parallel CSV env vars in the local `.env`
+ * (REPOS + REPO_WORKER_PORTS, plus optional REPO_WORKER_HOSTS) and from
+ * SSM-materialized copies of the same vars in production. Both surfaces
+ * routinely desynced from the per-repo authoritative DANXBOT_WORKER_PORT
+ * in `<repo>/.danxbot/.env`. The deploy YML is now the single source of
+ * truth for both local and prod — the parallel env vars are gone.
+ *
+ * Loaded at module-import time (alongside `config` below). A missing or
+ * malformed target YML throws loudly here rather than at first access —
+ * if the dashboard or a worker can't locate its target there is no
+ * meaningful work it can do, so failing import is the right semantics.
  */
-function parseWorkerHosts(envValue: string): Record<string, string> {
-  if (!envValue.trim()) return {};
-  const result: Record<string, string> = {};
-  for (const entry of envValue.split(",")) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    const colonIndex = trimmed.indexOf(":");
-    if (colonIndex <= 0) {
-      throw new Error(
-        `Invalid REPO_WORKER_HOSTS entry "${entry}" — expected "name:host" format`,
-      );
-    }
-    const name = trimmed.slice(0, colonIndex).trim();
-    const host = trimmed.slice(colonIndex + 1).trim();
-    if (!name || !host || /\s/.test(host)) {
-      throw new Error(
-        `Invalid REPO_WORKER_HOSTS entry "${entry}" — name required, host must be a non-empty whitespace-free string`,
-      );
-    }
-    result[name] = host;
-  }
-  return result;
-}
-
-/**
- * Attach workerHost entries from REPO_WORKER_HOSTS onto matching REPOS
- * entries. Same fail-loud contract as `attachWorkerPorts` — typos surface at
- * boot, not as silent 502s under load.
- */
-function attachWorkerHosts(
-  parsedRepos: RepoConfig[],
-  hosts: Record<string, string>,
-): RepoConfig[] {
-  const repoNames = new Set(parsedRepos.map((r) => r.name));
-  for (const name of Object.keys(hosts)) {
-    if (!repoNames.has(name)) {
-      throw new Error(
-        `REPO_WORKER_HOSTS references unknown repo "${name}" — each name must match an entry in REPOS`,
-      );
-    }
-  }
-  return parsedRepos.map((r) =>
-    hosts[r.name] !== undefined ? { ...r, workerHost: hosts[r.name] } : r,
-  );
-}
-
-export const repos: RepoConfig[] = attachWorkerHosts(
-  attachWorkerPorts(
-    parseRepos(optional("REPOS", "")),
-    parseWorkerPorts(optional("REPO_WORKER_PORTS", "")),
-  ),
-  parseWorkerHosts(optional("REPO_WORKER_HOSTS", "")),
-);
+export const repos: RepoConfig[] = loadTarget().repos;
 
 /**
  * Worker mode: DANXBOT_REPO_NAME is set — this process manages one repo only
@@ -143,7 +35,9 @@ export const isDashboardMode = !isWorkerMode;
 export function getRepoPath(name: string): string {
   const repo = repos.find((r) => r.name === name);
   if (!repo) {
-    throw new Error(`Repo "${name}" is not configured in REPOS env var`);
+    throw new Error(
+      `Repo "${name}" is not configured in the active target (deploy/targets/<DANXBOT_TARGET>.yml)`,
+    );
   }
   return repo.localPath;
 }

@@ -148,9 +148,7 @@ async function buildSnapshot(
   resolveHost: (name: string) => string,
 ): Promise<AgentSnapshot> {
   const settings = readSettings(repo.localPath);
-  const worker = repo.workerPort
-    ? await probeWorkerHealth(resolveHost(repo.name), repo.workerPort)
-    : { reachable: false, lastSeenMs: null, error: "no workerPort configured" };
+  const worker = await probeWorkerHealth(resolveHost(repo.name), repo.workerPort);
   // Read the flag from the bind-mounted repo dir — same pattern as
   // settings. The dashboard has read access but NEVER writes the flag
   // (only the worker writes; only the DELETE endpoint below clears via
@@ -356,12 +354,6 @@ export async function handleClearAgentCriticalFailure(
   const repo = deps.repos.find((r) => r.name === repoName);
   if (!repo) {
     json(res, 404, { error: `Repo "${repoName}" is not configured` });
-    return;
-  }
-  if (!repo.workerPort) {
-    json(res, 500, {
-      error: `Repo "${repoName}" has no workerPort configured on this dashboard`,
-    });
     return;
   }
 
