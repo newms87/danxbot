@@ -216,7 +216,10 @@ async function deploy(config: DeployConfig, target: string): Promise<void> {
   // `system prune` (which would remove the danxbot-net bridge).
   pruneStaleDockerImages(remote);
 
-  const ecrImage = buildAndPush(config, outputs.ecrRepositoryUrl);
+  // Build runs ON the EC2 instance (not locally) — see deploy/build.ts
+  // header. RemoteHost is required so build.ts can scp the source tarball
+  // and ssh the build+push pipeline.
+  const ecrImage = buildAndPush(config, outputs.ecrRepositoryUrl, remote);
 
   remote.uploadClaudeAuth();
 

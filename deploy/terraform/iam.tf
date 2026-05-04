@@ -45,7 +45,12 @@ resource "aws_iam_role_policy" "ssm_read" {
   })
 }
 
-# ECR pull access — for pulling the danxbot Docker image
+# ECR pull + push access. Push verbs are required because the Docker image
+# is built ON the EC2 instance (not locally) and pushed to ECR from there
+# — see deploy/build.ts#buildAndPushOnRemote. Building locally on WSL2
+# was unreliable (Ubuntu archive CDN timeouts -> apt exit 100). Building
+# on EC2 puts the build path on AWS's own network and keeps ECR push
+# in-region.
 resource "aws_iam_role_policy" "ecr_pull" {
   name = "${var.name}-ecr-pull"
   role = aws_iam_role.danxbot.id
@@ -59,7 +64,11 @@ resource "aws_iam_role_policy" "ecr_pull" {
           "ecr:GetDownloadUrlForLayer",
           "ecr:BatchGetImage",
           "ecr:BatchCheckLayerAvailability",
-          "ecr:GetAuthorizationToken"
+          "ecr:GetAuthorizationToken",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage"
         ]
         Resource = "*"
       }
