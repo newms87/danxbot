@@ -480,7 +480,6 @@ export function validateRepoConfig(repo: RepoContext): void {
   // 4. Required environment variables (secrets)
   const requiredEnvVars = [
     { name: "ANTHROPIC_API_KEY", label: "Anthropic API key" },
-    { name: "REPOS", label: "Connected repos (name:url,...)" },
   ];
 
   for (const { name, label } of requiredEnvVars) {
