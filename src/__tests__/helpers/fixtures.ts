@@ -66,6 +66,7 @@ export function makeRepoContext(overrides?: Partial<RepoContext>): RepoContext {
       featureLabelId: "test-feature-label-id",
       epicLabelId: "test-epic-label-id",
       needsHelpLabelId: "test-needs-help-label-id",
+      blockedLabelId: "test-blocked-label-id",
     },
     trelloEnabled: true,
     slack: {

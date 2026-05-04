@@ -37,6 +37,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `phases` | `[{check_item_id, title, status, notes}]` | `status`: `Pending` \| `Complete` \| `Blocked`. |
 | `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
 | `retro` | `{good, bad, action_items[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save AND spawns one tracker card per `action_items[]` entry. **`action_items[]` is a LAST RESORT** — see Step 1.5. Only file an action item when the work is BOTH unrelated to this card's ACs AND too large to reasonably finish in this session (multi-phase refactor, redesign, cross-cutting work needing its own scoping). Small in-scope or small unrelated fixes you spotted → DO THEM NOW, don't defer. Do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for follow-ups — list them in `action_items[]` instead. `action_items[]` strings cannot contain `→` (reserved bookkeeping separator). |
+| `blocked` | `null` OR `{reason, timestamp, by[]}` | `null` when nothing blocks this card. Set to a `{reason, timestamp, by}` record when the card cannot proceed because it is waiting on **other in-flight work** that does NOT need a human (a phase sibling shipping first, an Action Items card needs to land, a separately-scoped task). `reason` is a non-empty sentence. `timestamp` is current ISO 8601. `by[]` is a non-empty list of `ISS-N` ids that must reach Done / Cancelled before this card unblocks — if no existing card describes the unblock work, **create one** (`danx_issue_create`) and put its id here. The worker mechanically forces `status: ToDo` whenever `blocked` is non-null; you do not separately move status. The poller skips dispatching the card while any blocker is non-terminal, then auto-clears `blocked` and dispatches once every blocker is Done / Cancelled. **Blocked is NOT Needs Help** — Needs Help is for human action; Blocked is for waiting on other work. See Step 10b. |
 
 **Save semantics:** `danx_issue_save({id})` validates the YAML synchronously and returns `{saved: true}` or `{saved: false, errors}`. Tracker-side bookkeeping runs detached — those errors NEVER appear in the tool result. When `status` is `Done` or `Cancelled`, the worker moves the file `open/` → `closed/` as part of save. Save after every meaningful edit.
 
@@ -55,7 +56,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 6. Verify ACs (Step 6).
 7. Commit (Step 7).
 8. Definition-of-Done gate (Step 8).
-9. Move to Done (Step 9) OR Needs Help (Step 10).
+9. Move to Done (Step 9), Needs Help (Step 10), or Blocked (Step 10b).
 10. `danx_issue_save({id})`.
 11. `danxbot_complete` (Step 11).
 
@@ -118,7 +119,7 @@ Needs Help.
 
 1. Read the full `description`, all `comments[]`, all `ac[]` titles, and any existing `phases[]`.
 2. **Bug cards (`type: Bug`):** investigate root cause via `Read` / `Grep` / `Bash` before designing the fix.
-3. **Needs Help short-circuit:** only if the card matches Step 10's narrowed trigger list (true human / external blocker — credentials, deploy, repo you cannot write to, ambiguous spec needing human decision). Otherwise apply Step 1.5 — fix it yourself in this dispatch.
+3. **Needs Help vs Blocked vs fix-it-yourself:** if the card cannot be done by an agent, route it correctly. Step 10 (Needs Help) ONLY for human-action blockers (credentials, deploy, ambiguous spec needing human decision, architectural ambiguity that changes the goal). Step 10b (Blocked) for waiting on other in-flight work — no human required, the poller auto-unblocks. Anything else → apply Step 1.5 and fix it yourself in this dispatch.
 4. Design the approach in your head. No code yet.
 5. Invoke the `/wow` skill to reload Ways of Working.
 
@@ -298,33 +299,47 @@ Skip to Step 11.
 
 ---
 
-## Step 10 — Move to Needs Help
+## Step 10 — Move to Needs Help (HUMAN INTERVENTION ONLY)
 
-Needs Help is a **LAST RESORT**. Step 1.5 + Step 8's fix-it-yourself check
-must have already failed. Use Step 10 ONLY when the blocker is genuinely
-one of:
+Needs Help is a **LAST RESORT** AND is reserved EXCLUSIVELY for cards that
+cannot proceed without a human acting. If the card is just waiting on
+other in-flight work — that's **Blocked** (Step 10b), not Needs Help.
 
-- External repo / file your worker has no write access to.
-- Credentials, deploy, secrets rotation, or production action a human must
-  perform.
-- Genuine human design decision (ambiguous spec, missing requirement,
-  conflicting stakeholder direction).
-- Tool / environment failure that is card-specific (use `critical_failure`
-  for environment-wide failure — see `.claude/rules/danx-halt-flag.md`).
+Use Step 10 ONLY when the blocker is genuinely one of:
 
-**NOT Step 10 cases — fix in-session instead:**
+- **Credentials / deploy / secrets / production action** a human must
+  perform (rotate a key, run a deploy, push a config to SSM).
+- **External repo / file your worker has no write access to** AND no other
+  agent is going to fix it for you.
+- **Genuine human design decision** (ambiguous spec, missing requirement,
+  conflicting stakeholder direction). Specifically: the answer changes the
+  goal of the card or its implementation plan in a way ONLY the human can
+  decide.
+- **Architectural ambiguity** — multiple valid implementations with
+  different long-term tradeoffs that need a human call.
+- **Card cannot be completed as described** without making an important
+  change to the goal or the implementation plan — escalate to a human.
+- **Card-specific tool / environment failure** (use `critical_failure` for
+  environment-wide failure — see `.claude/rules/danx-halt-flag.md`).
 
-- Stale config in a file you can edit.
-- Bug in a function you can read + edit (in any repo bind-mounted to this
-  worker).
-- Test failure pointing at a defect in the same workspace / repo.
-- Missing file you can write.
+**NOT Step 10 cases — these are Step 10b (Blocked) or in-session work:**
+
+- Waiting on another card / phase / Action Item to ship first → **Blocked
+  (Step 10b)**, not Needs Help. No human action needed; the poller auto-
+  unblocks when blockers are Done.
+- Stale config in a file you can edit → fix in-session.
+- Bug in a function you can read + edit (in any bind-mounted repo) → fix
+  in-session.
+- Test failure pointing at a defect in the same workspace / repo → fix
+  in-session.
+- Missing file you can write → fix in-session.
 - Anything where the next agent would just open the same files you have
-  open and make the same edits you could make now.
+  open and make the same edits you could make now → fix in-session.
 
-If you're about to move to Needs Help, ask one more time: **"Could I do
-this myself in the next 10–30 minutes?"** Yes → do it. Cancel the Needs
-Help.
+If you're about to move to Needs Help, ask one more time: **"Does a human
+*action* unblock this, or am I just waiting on other work?"** If waiting
+on other work, use Step 10b. If you'd just do it yourself in 10–30
+minutes, cancel the Needs Help and do it.
 
 Edit YAML:
 
@@ -344,6 +359,84 @@ Edit YAML:
 4. Fill `retro.{good, bad, action_items, commits}` honestly — the AC gap is the primary "what went wrong." The worker auto-renders the `## Retro` comment and spawns Action Items cards on save (Needs Help is a non-terminal status, so the retro / action-items WILL not be auto-rendered yet — they render when the next pickup eventually moves the card to Done or Cancelled). Filling `retro` now still helps: the next agent inherits it through the YAML. **Re-apply the Step 1.5 filter to every action item candidate.** The fix the next agent will need to make → describe in the Needs Help comment, not as an action item card. Only large, unrelated, separately-scopeable follow-ups belong in `action_items[]`. Empty `action_items[]` is the right answer most of the time.
 
 Save: `danx_issue_save({id})`.
+
+Skip to Step 11.
+
+---
+
+## Step 10b — Move to Blocked (waiting on other in-flight work)
+
+Use Step 10b when the card cannot proceed because it is waiting on **other
+work that is in flight or about to be in flight**, with NO human action
+required. The poller will automatically unblock and dispatch the card once
+every blocker reaches Done / Cancelled — you do not need to come back and
+toggle anything.
+
+Trigger conditions:
+
+- The fix needs another card / phase to ship first (data model change,
+  shared abstraction, dependency upgrade).
+- An Action Items card describes prerequisite work this card depends on.
+- A sibling phase under the same epic must finish before this phase makes
+  sense.
+
+If the only thing blocking the card is human action → use Step 10 (Needs
+Help) instead.
+
+### Procedure
+
+1. **Find the blocking card(s).** Search, in order, until you have at
+   least one concrete `ISS-N` id describing the unblock work:
+   1. **Phase siblings via the parent epic.** If this card has
+      `parent_id`, read that epic's `children[]` and check each phase
+      YAML at `<repo>/.danxbot/issues/open/<child-id>.yml`. The blocker
+      is usually a phase that ships first.
+   2. **Open issues by topic.** `Grep` and `Read` across
+      `<repo>/.danxbot/issues/open/*.yml` for cards covering the
+      prerequisite work — ToDo, In Progress, Needs Help, or Action Items
+      all qualify (the poller imports all of them on every tick).
+   3. **In Progress queue.** Cards already being worked on may be the
+      blocker.
+2. **No existing card describes the unblock work?** You MUST create one.
+   Build a draft YAML at `<repo>/.danxbot/issues/open/<slug>.yml`
+   describing exactly what needs to happen to unblock, then call
+   `danx_issue_create({filename: "<slug>"})`. Pick the right status:
+   - Work an autonomous agent can do → `status: "ToDo"`. The poller
+     dispatches it like any other ToDo card.
+   - Work that needs a human → `status: "Needs Help"` with a clear
+     description of the human task. Include all evidence the human needs
+     to act.
+   Capture the new card's returned `id`.
+3. **Edit this card's YAML:**
+   - Set `blocked` to:
+     ```yaml
+     blocked:
+       reason: "<one-sentence explanation — what needs to happen first>"
+       timestamp: "<current ISO 8601>"
+       by:
+         - <ISS-N of each blocker>
+     ```
+   - Do NOT change `status`. Leave it as is. The worker mechanically
+     forces `status: ToDo` on save when `blocked` is non-null. Setting
+     `Needs Help` here would be wrong (Needs Help is human-action-only)
+     and the worker would normalize it back to `ToDo` anyway.
+   - Append a comment to `comments[]` summarizing what you did, what
+     blocker(s) you found / created, and what state to expect once the
+     blockers ship. No `id` field.
+4. Fill `retro.{good, bad, action_items, commits}` honestly — the gap
+   between what shipped and what was needed is "what went wrong." Same
+   action-items rule as Step 10: only large, separately-scopeable
+   follow-ups belong here; small in-scope work belongs in this dispatch
+   or in the blocker card itself, not as a retro action item.
+
+### Save and exit
+
+Save: `danx_issue_save({id})`. The worker normalizes status to ToDo,
+applies the Blocked label on Trello, and returns. The poller will
+re-evaluate on its next tick and skip dispatching this card while any
+blocker remains non-terminal. When every blocker reaches Done /
+Cancelled, the poller clears `blocked` automatically and dispatches the
+card on the same tick.
 
 Skip to Step 11.
 

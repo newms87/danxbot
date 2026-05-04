@@ -222,6 +222,7 @@ describe("syncIssue", () => {
       type: "Feature",
       needsHelp: true,
       triaged: false,
+      blocked: false,
     });
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -236,6 +237,43 @@ describe("syncIssue", () => {
     expect((setLabels!.details as { labels: { needsHelp: boolean } }).labels.needsHelp).toBe(
       false,
     );
+  });
+
+  it("derives blocked:true from local.blocked != null and pushes the Blocked label", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      blocked: {
+        reason: "waiting on prerequisite",
+        timestamp: "2026-05-04T18:00:00.000Z",
+        by: ["ISS-99"],
+      },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+    const setLabels = tracker
+      .getRequestLog()
+      .find((l) => l.method === "setLabels");
+    expect(setLabels).toBeDefined();
+    expect(
+      (setLabels!.details as { labels: { blocked: boolean } }).labels.blocked,
+    ).toBe(true);
+  });
+
+  it("blocked:null on both sides → no setLabels (idempotent on the unblocked path)", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      blocked: null,
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+    const setLabels = tracker
+      .getRequestLog()
+      .find((l) => l.method === "setLabels");
+    expect(setLabels).toBeUndefined();
   });
 
   it("derives triaged:true when triaged.timestamp is non-empty (gap C)", async () => {
@@ -280,6 +318,7 @@ describe("syncIssue", () => {
       phases: [],
       comments: [],
       retro: { good: "", bad: "", action_items: [], commits: [] },
+      blocked: null,
     };
     const tracker = new MemoryTracker({ seed: [seed] });
     const local: Issue = {

@@ -38,6 +38,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
       { author: "", timestamp: "", text: "local-only comment" },
     ],
     retro: { good: "", bad: "", action_items: [], commits: [] },
+    blocked: null,
     ...overrides,
   };
 }
@@ -58,6 +59,65 @@ describe("serializeIssue / parseIssue", () => {
     const parsed = parseIssue(yaml);
     expect(parsed.parent_id).toBeNull();
     expect(parsed.dispatch_id).toBeNull();
+  });
+
+  describe("blocked field", () => {
+    it("round-trips blocked: null (default for unblocked cards)", () => {
+      const issue = fullIssue({ blocked: null });
+      const yaml = serializeIssue(issue);
+      const parsed = parseIssue(yaml);
+      expect(parsed.blocked).toBeNull();
+      expect(serializeIssue(parsed)).toBe(yaml);
+    });
+
+    it("round-trips a populated blocked record byte-for-byte", () => {
+      const issue = fullIssue({
+        blocked: {
+          reason: "waiting on ISS-99 to ship the migration",
+          timestamp: "2026-05-04T18:00:00.000Z",
+          by: ["ISS-99", "ISS-100"],
+        },
+      });
+      const yaml = serializeIssue(issue);
+      const parsed = parseIssue(yaml);
+      expect(parsed.blocked).toEqual(issue.blocked);
+      expect(serializeIssue(parsed)).toBe(yaml);
+    });
+
+    it("treats a missing blocked field as null on parse (back-compat for older YAMLs)", () => {
+      const yamlNoBlocked = serializeIssue(fullIssue()).replace(
+        /\nblocked:.*$/s,
+        "\n",
+      );
+      // Sanity: stripped form really lacks the field.
+      expect(yamlNoBlocked).not.toContain("blocked:");
+      const parsed = parseIssue(yamlNoBlocked);
+      expect(parsed.blocked).toBeNull();
+    });
+
+    it("rejects a blocked record missing reason", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "blocked: null\n",
+        "blocked:\n  timestamp: t\n  by:\n    - ISS-1\n",
+      );
+      expect(() => parseIssue(yaml)).toThrow(/blocked\.reason/);
+    });
+
+    it("rejects a blocked record with empty by[]", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "blocked: null\n",
+        "blocked:\n  reason: r\n  timestamp: t\n  by: []\n",
+      );
+      expect(() => parseIssue(yaml)).toThrow(/blocked\.by must contain at least one/);
+    });
+
+    it("rejects a blocked.by entry that is not an ISS-N id", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "blocked: null\n",
+        "blocked:\n  reason: r\n  timestamp: t\n  by:\n    - not-an-iss-id\n",
+      );
+      expect(() => parseIssue(yaml)).toThrow(/blocked\.by\[0\] must match ISS-/);
+    });
   });
 
   it("preserves string parent_id and dispatch_id", () => {
@@ -639,6 +699,7 @@ describe("serializeIssue byte-stable snapshot", () => {
         action_items: ["follow-up A", "follow-up B"],
         commits: ["abc1234"],
       },
+      blocked: null,
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
@@ -686,6 +747,7 @@ describe("serializeIssue byte-stable snapshot", () => {
           - follow-up B
         commits:
           - abc1234
+      blocked: null
       "
     `);
   });

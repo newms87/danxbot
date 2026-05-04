@@ -39,6 +39,16 @@ export interface IssueRef {
   external_id: string;
   title: string;
   status: IssueStatus;
+  /**
+   * Tracker-specific list / category the card lives in, when distinct from
+   * `status`. Today the only consumer is `Trello` Action Items: cards on the
+   * Action Items list surface with `status: "ToDo"` (so they can become
+   * blockers / be promoted by an operator) but `list_kind: "action_items"`
+   * so the poller dispatch path skips them. Memory tracker leaves it
+   * undefined. Adding a new kind is purely additive — existing consumers
+   * default to dispatch-eligible when the field is absent.
+   */
+  list_kind?: "todo" | "action_items";
 }
 
 export interface IssueAcItem {
@@ -73,6 +83,34 @@ export interface IssueRetro {
   bad: string;
   action_items: string[];
   commits: string[];
+}
+
+/**
+ * Blocked-state record. Populated when an in-progress card cannot proceed
+ * because it is waiting on other in-flight work (a phase sibling, an Action
+ * Items card, a separately-scoped task), but does NOT need human
+ * intervention. The poller auto-clears `blocked` and dispatches the card
+ * once every issue id in `by[]` reaches a terminal status (Done or
+ * Cancelled).
+ *
+ * Distinct from `status: "Needs Help"`, which means a human must act
+ * (credentials, deploy, ambiguous spec, write-only repo). Cards waiting on
+ * other work go to `blocked`, not Needs Help.
+ *
+ * Invariants enforced by `validateIssue`:
+ *  - `reason` non-empty.
+ *  - `timestamp` non-empty (caller supplies ISO 8601; the validator does not
+ *    parse the format).
+ *  - `by[]` non-empty, every entry matches `ISS-<positive integer>`.
+ *
+ * When the agent has no existing card to point at, it MUST create one
+ * (`danx_issue_create`) describing the unblock work and put that new id in
+ * `by[]` — the field is never empty.
+ */
+export interface IssueBlocked {
+  reason: string;
+  timestamp: string;
+  by: string[];
 }
 
 export interface Issue {
@@ -119,6 +157,14 @@ export interface Issue {
   phases: IssuePhase[];
   comments: IssueComment[];
   retro: IssueRetro;
+  /**
+   * Non-null = the card is waiting on the issues listed in `blocked.by[]`.
+   * Worker forces `status: "ToDo"` whenever this is non-null; poller skips
+   * dispatching the card until every blocker in `by[]` reaches a terminal
+   * status (Done or Cancelled), at which point the poller clears
+   * `blocked` and resumes dispatch. See `IssueBlocked` for the invariants.
+   */
+  blocked: IssueBlocked | null;
 }
 
 /**
@@ -144,6 +190,11 @@ export interface CreateCardInput {
   phases: Array<{ title: string; status: PhaseStatus; notes: string }>;
   comments: IssueComment[];
   retro: IssueRetro;
+  /**
+   * Optional on input — `createCard` always stores `blocked: null` on the
+   * fresh card. Agents add the `blocked` record via subsequent saves.
+   */
+  blocked?: IssueBlocked | null;
 }
 
 export interface IssueTracker {
@@ -173,7 +224,12 @@ export interface IssueTracker {
 
   setLabels(
     externalId: string,
-    labels: { type: IssueType; needsHelp: boolean; triaged: boolean },
+    labels: {
+      type: IssueType;
+      needsHelp: boolean;
+      triaged: boolean;
+      blocked: boolean;
+    },
   ): Promise<void>;
 
   addComment(

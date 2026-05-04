@@ -472,6 +472,7 @@ describe("settings-file", () => {
           featureLabelId: "",
           epicLabelId: "",
           needsHelpLabelId: "",
+          blockedLabelId: "",
         },
         githubToken: "ghp_1234567890abcdef",
       });

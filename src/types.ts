@@ -113,6 +113,14 @@ export interface TrelloConfig {
   featureLabelId: string;
   epicLabelId: string;
   needsHelpLabelId: string;
+  /**
+   * Label applied to cards whose YAML carries a non-null `blocked` field.
+   * Managed automatically by the worker (paired with `setLabels({blocked})`)
+   * so a card waiting on other in-flight work surfaces visually on the
+   * Trello board without an operator manually toggling it. Provisioned by
+   * the setup skill alongside the other danxbot-managed labels.
+   */
+  blockedLabelId: string;
   triagedLabelId?: string;
 }
 

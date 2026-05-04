@@ -26,6 +26,7 @@ const MOCK_REPO_CONTEXT: RepoContext = {
     featureLabelId: "feature-label",
     epicLabelId: "epic-label",
     needsHelpLabelId: "nh-label",
+    blockedLabelId: "blk-label",
   },
   slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
   db: {
@@ -64,6 +65,7 @@ const { mockRepoContexts } = vi.hoisted(() => {
       featureLabelId: "feature-label",
       epicLabelId: "epic-label",
       needsHelpLabelId: "nh-label",
+      blockedLabelId: "blk-label",
     },
     slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
     db: {
@@ -2791,6 +2793,106 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     expect(stampArgs[1]).toBe(existingIssue);
     const dispatchArg = mockDispatch.mock.calls[0][0] as { dispatchId: string };
     expect(stampArgs[2]).toBe(dispatchArg.dispatchId);
+  });
+
+  it("blocked card with non-terminal blocker is skipped (no dispatch this tick)", async () => {
+    // Card carries `blocked: {by: ["ISS-99"]}`. Blocker ISS-99 is open and
+    // not terminal → this tick must NOT dispatch. The blocked-resolution
+    // gate filters the card out of `cards` before the dispatch path runs.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("card-block-1", "Blocked card", "ToDo"),
+    ]);
+    const blockedIssue = {
+      schema_version: 3,
+      tracker: "trello",
+      id: "ISS-300",
+      external_id: "card-block-1",
+      parent_id: null,
+      children: [],
+      dispatch_id: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "Blocked card",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+      blocked: {
+        reason: "waiting on ISS-99",
+        timestamp: "2026-05-04T18:00:00.000Z",
+        by: ["ISS-99"],
+      },
+    };
+    mockFindByExternalId.mockReturnValue(blockedIssue);
+    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+      if (id === "ISS-99") return { ...blockedIssue, id: "ISS-99", status: "ToDo", blocked: null };
+      return null;
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("blocked card whose every blocker is terminal clears blocked, saves, and dispatches", async () => {
+    // ISS-99 is Done → ISS-300 is unblocked. The poller clears the
+    // blocked record on the YAML (via writeFileSync, not mocked here)
+    // and dispatches the card.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("card-block-2", "Now-unblocked card", "ToDo"),
+    ]);
+    const blockedIssue = {
+      schema_version: 3,
+      tracker: "trello",
+      id: "ISS-301",
+      external_id: "card-block-2",
+      parent_id: null,
+      children: [],
+      dispatch_id: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "Now-unblocked card",
+      description: "",
+      triaged: { timestamp: "", status: "", explain: "" },
+      ac: [],
+      phases: [],
+      comments: [],
+      retro: { good: "", bad: "", action_items: [], commits: [] },
+      blocked: {
+        reason: "waiting on ISS-99",
+        timestamp: "2026-05-04T18:00:00.000Z",
+        by: ["ISS-99"],
+      },
+    };
+    mockFindByExternalId.mockReturnValue(blockedIssue);
+    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+      if (id === "ISS-99") return { ...blockedIssue, id: "ISS-99", status: "Done", blocked: null };
+      return null;
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("Action Items list cards (list_kind: action_items) are bulk-synced but not dispatched", async () => {
+    // The Trello tracker tags Action Items cards with `list_kind:
+    // "action_items"`. The poller must bulk-sync them (so blocker
+    // discovery sees them in local YAMLs) but exclude them from
+    // dispatch eligibility — the operator promotes them to the actual
+    // ToDo list when ready.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      { id: "", external_id: "card-ai-1", title: "AI card", status: "ToDo", list_kind: "action_items" },
+    ]);
+    mockFindByExternalId.mockReturnValue(null);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+    // Bulk-sync still hydrated the Action Items card.
+    expect(mockHydrateFromRemote).toHaveBeenCalled();
   });
 
   it("ensures issues/ dirs and gitignore entry on every tick (idempotency lives in the helpers)", async () => {

@@ -5,6 +5,7 @@ import {
   PHASE_STATUSES,
   type Issue,
   type IssueAcItem,
+  type IssueBlocked,
   type IssueComment,
   type IssuePhase,
   type IssueRetro,
@@ -60,6 +61,7 @@ export function createEmptyIssue(seed: {
     phases: [],
     comments: [],
     retro: { good: "", bad: "", action_items: [], commits: [] },
+    blocked: null,
   };
 }
 
@@ -122,6 +124,17 @@ export function serializeIssue(issue: Issue): string {
       action_items: [...issue.retro.action_items],
       commits: [...issue.retro.commits],
     },
+    // `blocked` carries `null` (default) or a record with reason/timestamp/by[].
+    // Position after `retro` keeps the canonical key order stable for older
+    // YAMLs that omit the field — they parse with `blocked: null` defaulted in
+    // and re-serialize at the end of the document.
+    blocked: issue.blocked === null
+      ? null
+      : {
+          reason: issue.blocked.reason,
+          timestamp: issue.blocked.timestamp,
+          by: [...issue.blocked.by],
+        },
   };
 
   return stringifyYaml(doc, { lineWidth: 0 });
@@ -344,6 +357,18 @@ export function validateIssue(value: unknown): ValidateResult {
     else retroResult = r;
   }
 
+  // blocked — optional field. Missing → null. Present must be either YAML
+  // null OR a fully-formed `{reason, timestamp, by[]}` mapping. Tolerating
+  // absence keeps pre-`blocked` YAMLs round-trippable; presence must validate
+  // strictly so a half-written blocked record fails loud instead of silently
+  // un-blocking the card.
+  let blockedResult: IssueBlocked | null = null;
+  if ("blocked" in v) {
+    const r = validateBlocked(v.blocked);
+    if (typeof r === "string") errors.push(r);
+    else blockedResult = r;
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -366,6 +391,7 @@ export function validateIssue(value: unknown): ValidateResult {
     phases: phasesResult as IssuePhase[],
     comments: commentsResult as IssueComment[],
     retro: retroResult as IssueRetro,
+    blocked: blockedResult,
   };
   return { ok: true, issue };
 }
@@ -500,6 +526,38 @@ function validateCommentsList(value: unknown): IssueComment[] | string {
     out.push(c);
   }
   return out;
+}
+
+function validateBlocked(value: unknown): IssueBlocked | null | string {
+  if (value === null || value === undefined) return null;
+  if (!isPlainObject(value)) {
+    return "blocked must be a mapping or null";
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.reason !== "string" || v.reason.length === 0) {
+    return "blocked.reason must be a non-empty string";
+  }
+  if (typeof v.timestamp !== "string" || v.timestamp.length === 0) {
+    return "blocked.timestamp must be a non-empty string";
+  }
+  if (!Array.isArray(v.by)) {
+    return "blocked.by must be a list of ISS-N strings";
+  }
+  if (v.by.length === 0) {
+    return "blocked.by must contain at least one issue id";
+  }
+  const by: string[] = [];
+  for (let i = 0; i < v.by.length; i++) {
+    const item = v.by[i];
+    if (typeof item !== "string") {
+      return `blocked.by[${i}] must be a string`;
+    }
+    if (!ISSUE_ID_REGEX.test(item)) {
+      return `blocked.by[${i}] must match ISS-<positive integer> (got ${JSON.stringify(item)})`;
+    }
+    by.push(item);
+  }
+  return { reason: v.reason, timestamp: v.timestamp, by };
 }
 
 function validateRetro(value: unknown): IssueRetro | string {

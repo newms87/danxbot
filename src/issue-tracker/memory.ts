@@ -49,7 +49,13 @@ interface StoredCard {
   phases: IssuePhase[];
   comments: Required<IssueComment>[];
   retro: { good: string; bad: string; action_items: string[]; commits: string[] };
-  labels: { type: IssueType; needsHelp: boolean; triaged: boolean };
+  blocked: { reason: string; timestamp: string; by: string[] } | null;
+  labels: {
+    type: IssueType;
+    needsHelp: boolean;
+    triaged: boolean;
+    blocked: boolean;
+  };
 }
 
 /**
@@ -161,10 +167,12 @@ export class MemoryTracker implements IssueTracker {
         action_items: [...input.retro.action_items],
         commits: [...input.retro.commits],
       },
+      blocked: null,
       labels: {
         type: input.type,
         needsHelp: input.status === "Needs Help",
         triaged: input.triaged.timestamp !== "",
+        blocked: false,
       },
     };
     this.cards.set(externalId, stored);
@@ -196,7 +204,12 @@ export class MemoryTracker implements IssueTracker {
 
   async setLabels(
     externalId: string,
-    labels: { type: IssueType; needsHelp: boolean; triaged: boolean },
+    labels: {
+      type: IssueType;
+      needsHelp: boolean;
+      triaged: boolean;
+      blocked: boolean;
+    },
   ): Promise<void> {
     this.consumeWriteRejection();
     const card = this.requireCard(externalId);
@@ -357,7 +370,8 @@ export class MemoryTracker implements IssueTracker {
       phases: [],
       comments: [],
       retro: { good: "", bad: "", action_items: [], commits: [] },
-      labels: { type: "Feature", needsHelp: false, triaged: false },
+      blocked: null,
+      labels: { type: "Feature", needsHelp: false, triaged: false, blocked: false },
     });
     this.log("addLinkedActionItemCard", undefined, { title, external_id: externalId });
     return { external_id: externalId };
@@ -422,6 +436,9 @@ export class MemoryTracker implements IssueTracker {
         action_items: [...card.retro.action_items],
         commits: [...card.retro.commits],
       },
+      blocked: card.blocked === null
+        ? null
+        : { ...card.blocked, by: [...card.blocked.by] },
     };
   }
 
@@ -452,10 +469,14 @@ export class MemoryTracker implements IssueTracker {
         action_items: [...issue.retro.action_items],
         commits: [...issue.retro.commits],
       },
+      blocked: issue.blocked === null
+        ? null
+        : { ...issue.blocked, by: [...issue.blocked.by] },
       labels: {
         type: issue.type,
         needsHelp: issue.status === "Needs Help",
         triaged: issue.triaged.timestamp !== "",
+        blocked: issue.blocked !== null,
       },
     };
   }

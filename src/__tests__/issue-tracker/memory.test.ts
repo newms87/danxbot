@@ -75,7 +75,7 @@ describe("MemoryTracker", () => {
   it("setLabels overwrites the label state", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultInput());
-    await tracker.setLabels(external_id, { type: "Bug", needsHelp: true, triaged: false });
+    await tracker.setLabels(external_id, { type: "Bug", needsHelp: true, triaged: false, blocked: false });
     const card = await tracker.getCard(external_id);
     expect(card.type).toBe("Bug");
   });
@@ -203,6 +203,7 @@ describe("MemoryTracker", () => {
       type: "Bug",
       needsHelp: true,
       triaged: true,
+      blocked: false,
     });
     const addedCommentResult = await tracker.addComment(external_id, "hi");
     await tracker.editComment(external_id, addedCommentResult.id, "hi-edited");
@@ -259,7 +260,7 @@ describe("MemoryTracker", () => {
 
     // details payload shape: setLabels carries the labels triple.
     expect(byMethod("setLabels")?.details).toEqual({
-      labels: { type: "Bug", needsHelp: true, triaged: true },
+      labels: { type: "Bug", needsHelp: true, triaged: true, blocked: false },
     });
     // moveToStatus carries the target status.
     expect(byMethod("moveToStatus")?.details).toEqual({ status: "In Progress" });
@@ -338,6 +339,7 @@ describe("MemoryTracker", () => {
           phases: [],
           comments: [],
           retro: { good: "", bad: "", action_items: [], commits: [] },
+          blocked: null,
         },
       ],
     });
@@ -369,6 +371,7 @@ describe("MemoryTracker", () => {
           phases: [],
           comments: [],
           retro: { good: "", bad: "", action_items: [], commits: [] },
+          blocked: null,
         },
       ],
     });

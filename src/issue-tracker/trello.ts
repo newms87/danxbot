@@ -84,18 +84,35 @@ export class TrelloTracker implements IssueTracker {
   // ---------- Public API ----------
 
   async fetchOpenCards(): Promise<IssueRef[]> {
-    const openLists: Array<[IssueStatus, string]> = [
-      ["Review", this.trello.reviewListId],
-      ["ToDo", this.trello.todoListId],
-      ["In Progress", this.trello.inProgressListId],
-      ["Needs Help", this.trello.needsHelpListId],
+    // Cards on the Action Items list surface with `status: "ToDo"` AND
+    // `list_kind: "action_items"`. Importing them into local YAMLs makes
+    // them findable by the agent (blocked-by discovery) without making
+    // them dispatch-eligible — the poller filters dispatch on
+    // `list_kind !== "action_items"`.
+    const openLists: Array<{
+      status: IssueStatus;
+      listId: string;
+      listKind: IssueRef["list_kind"];
+    }> = [
+      { status: "Review", listId: this.trello.reviewListId, listKind: undefined },
+      { status: "ToDo", listId: this.trello.todoListId, listKind: "todo" },
+      { status: "In Progress", listId: this.trello.inProgressListId, listKind: undefined },
+      { status: "Needs Help", listId: this.trello.needsHelpListId, listKind: undefined },
+      { status: "ToDo", listId: this.trello.actionItemsListId, listKind: "action_items" },
     ];
     const refs: IssueRef[] = [];
-    for (const [status, listId] of openLists) {
-      const cards = await this.fetchListCards(listId);
+    for (const entry of openLists) {
+      const cards = await this.fetchListCards(entry.listId);
       for (const card of cards) {
         const { id, title } = parseCardTitle(card.name);
-        refs.push({ id, external_id: card.id, title, status });
+        const ref: IssueRef = {
+          id,
+          external_id: card.id,
+          title,
+          status: entry.status,
+        };
+        if (entry.listKind !== undefined) ref.list_kind = entry.listKind;
+        refs.push(ref);
       }
     }
     return refs;
@@ -172,6 +189,11 @@ export class TrelloTracker implements IssueTracker {
       phases,
       comments: [],
       retro: { good: "", bad: "", action_items: [], commits: [] },
+      // `blocked` is local-only metadata managed by the agent + worker.
+      // Trello has no native field for it; sync.ts diffs the Blocked LABEL
+      // separately. Always emit null on read so the local YAML stays
+      // authoritative for the structured record.
+      blocked: null,
     };
   }
 
@@ -185,6 +207,7 @@ export class TrelloTracker implements IssueTracker {
       type: input.type,
       needsHelp: input.status === "Needs Help",
       triaged: input.triaged.timestamp !== "",
+      blocked: false,
     });
     const url = `${TRELLO_BASE}/cards?${this.auth()}`;
     // The Trello card title carries the internal id prefix `#<id>: ` so
@@ -281,7 +304,12 @@ export class TrelloTracker implements IssueTracker {
 
   async setLabels(
     externalId: string,
-    labels: { type: IssueType; needsHelp: boolean; triaged: boolean },
+    labels: {
+      type: IssueType;
+      needsHelp: boolean;
+      triaged: boolean;
+      blocked: boolean;
+    },
   ): Promise<void> {
     // Eagerly resolve the Triaged label id regardless of `labels.triaged` so
     // the managed-set is always complete. Without this, a stale Triaged
@@ -546,6 +574,12 @@ export class TrelloTracker implements IssueTracker {
     if (listId === this.trello.needsHelpListId) return "Needs Help";
     if (listId === this.trello.doneListId) return "Done";
     if (listId === this.trello.cancelledListId) return "Cancelled";
+    // Action Items: a UI-organization-only list (no separate IssueStatus
+    // value). Cards there are imported as `ToDo` so blocker discovery can
+    // see them, while `IssueRef.list_kind === "action_items"` keeps the
+    // poller from dispatching them. Mirror that here so a direct getCard
+    // on an Action Items card returns a sensible status.
+    if (listId === this.trello.actionItemsListId) return "ToDo";
     throw new Error(`Trello list id ${listId} is not mapped to a status`);
   }
 
@@ -559,6 +593,7 @@ export class TrelloTracker implements IssueTracker {
     type: IssueType;
     needsHelp: boolean;
     triaged: boolean;
+    blocked: boolean;
   }): Promise<string[]> {
     const ids: string[] = [];
     switch (labels.type) {
@@ -573,6 +608,7 @@ export class TrelloTracker implements IssueTracker {
         break;
     }
     if (labels.needsHelp) ids.push(this.trello.needsHelpLabelId);
+    if (labels.blocked) ids.push(this.trello.blockedLabelId);
     if (labels.triaged) ids.push(await this.resolveTriagedLabelId());
     return ids;
   }
@@ -609,6 +645,7 @@ export class TrelloTracker implements IssueTracker {
       this.trello.featureLabelId,
       this.trello.epicLabelId,
       this.trello.needsHelpLabelId,
+      this.trello.blockedLabelId,
       triagedLabelId,
     ];
   }

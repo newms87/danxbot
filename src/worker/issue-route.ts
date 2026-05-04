@@ -235,6 +235,14 @@ export async function handleIssueSave(
     return;
   }
 
+  // Worker contract: `blocked != null` ALWAYS forces `status: "ToDo"`.
+  // Agents set the blocked record only — they don't separately move
+  // status, and a stray `status: Needs Help` / `Done` paired with a
+  // non-null blocked is a category error we silently normalize. The
+  // poller's dispatch gate then skips the card while every blocker in
+  // `by[]` is non-terminal. See `forceBlockedToToDo`.
+  issue = forceBlockedToToDo(issue);
+
   // Sync validation passed — return `saved: true` immediately. Tracker
   // errors must NEVER surface to the agent (AC #2). The async branch runs
   // detached and reports failures to the dispatch row.
@@ -494,6 +502,23 @@ export async function handleIssueCreate(
 }
 
 /**
+ * Force `status: "ToDo"` whenever the YAML carries a non-null `blocked`
+ * record. Returns the original issue unchanged when `blocked === null` or
+ * `status` is already ToDo, so the no-op path doesn't allocate.
+ *
+ * Why this lives in the worker (not the agent's skill text): if any agent
+ * forgets the rule, the worker silently corrects it before persistence and
+ * before the tracker push. The pairing is mechanical — `blocked` and
+ * `status: ToDo` are inseparable — so it belongs at the layer that owns
+ * persistence, not at the layer that's easy to forget.
+ */
+export function forceBlockedToToDo(issue: Issue): Issue {
+  if (issue.blocked === null) return issue;
+  if (issue.status === "ToDo") return issue;
+  return { ...issue, status: "ToDo" };
+}
+
+/**
  * Look in `open/` first, then `closed/`. Returns null when neither exists.
  * Lookup key is the issue's internal `id` (the on-disk filename basename),
  * not the external_id.
@@ -545,6 +570,11 @@ export async function syncTrackedIssueOnComplete(
     );
     return { ok: false, errors: [msg] };
   }
+
+  // Same blocked → ToDo normalization as `handleIssueSave` (see comment
+  // there). Auto-sync on completion goes through this code path when the
+  // agent calls `danxbot_complete` without a final explicit save.
+  issue = forceBlockedToToDo(issue);
 
   // Skip the tracker push entirely when no external_id is set (memory
   // tracker, drafts that never made it to create). Persist the local

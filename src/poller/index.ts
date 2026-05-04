@@ -28,9 +28,11 @@ import {
   findByExternalId,
   hydrateFromRemote,
   issuePath,
+  loadLocal,
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
+import { serializeIssue } from "../issue-tracker/yaml.js";
 import { createIssueTracker, TrelloTracker } from "../issue-tracker/index.js";
 import type {
   Issue,
@@ -269,7 +271,13 @@ async function _poll(repo: RepoContext): Promise<void> {
     log.error(`[${repo.name}] Error fetching cards`, error);
     return;
   }
-  let cards = openCards.filter((c) => c.status === "ToDo");
+  // Action Items list cards surface with `status: "ToDo"` so they land in
+  // local YAMLs (blocker discovery), but `list_kind === "action_items"`
+  // marks them as ineligible for auto-dispatch — operators promote them
+  // to the actual ToDo list when they're ready to be worked.
+  let cards = openCards.filter(
+    (c) => c.status === "ToDo" && c.list_kind !== "action_items",
+  );
   const inProgressCards = openCards.filter((c) => c.status === "In Progress");
 
   // Bulk-sync every ToDo (siblings — `cards.slice(1)` because the
@@ -285,9 +293,18 @@ async function _poll(repo: RepoContext): Promise<void> {
   // an In Progress orphan keeps its existing `dispatch_id` because
   // `findByExternalId` short-circuits hydration when the YAML
   // already exists.
+  // Bulk-sync covers: every dispatch-eligible ToDo sibling, every
+  // In Progress card, AND every Action Items card. The Action Items
+  // import is what makes blocker-discovery findable from the agent's
+  // local YAML scan — see the `blocked` field workflow in
+  // `~/.claude/rules/issues.md`.
+  const actionItemRefs = openCards.filter(
+    (c) => c.list_kind === "action_items",
+  );
   await bulkSyncMissingYamls(repo, tracker, [
     ...cards.slice(1),
     ...inProgressCards,
+    ...actionItemRefs,
   ]);
 
   // Orphan-resume check. Runs BEFORE the ToDo dispatch path so a
@@ -320,6 +337,13 @@ async function _poll(repo: RepoContext): Promise<void> {
       `[${repo.name}] pickupNamePrefix="${pickupPrefix}" filter: ${cards.length}/${before} cards match`,
     );
   }
+
+  // Blocked-card gate. Each card with a non-null `blocked` record is
+  // skipped while ANY entry in `blocked.by[]` is non-terminal. When every
+  // blocker has reached Done / Cancelled, the gate clears `blocked` on
+  // the YAML and saves — the card becomes eligible for dispatch on this
+  // tick. See `resolveBlockedCard` for the contract.
+  cards = await resolveBlockedCards(repo, cards);
 
   if (cards.length === 0) {
     log.info(`[${repo.name}] No cards in ToDo — checking if ideator needed`);
@@ -458,6 +482,72 @@ async function bulkSyncMissingYamls(
       );
     }
   }
+}
+
+/**
+ * Filter `cards` by blocked-state. For each card whose local YAML carries
+ * a non-null `blocked` record:
+ *
+ *   - Resolve every id in `blocked.by[]` against the local YAML store.
+ *   - If ANY blocker is missing locally OR has a non-terminal status
+ *     (anything other than Done / Cancelled), the card stays blocked and
+ *     is dropped from the dispatch list.
+ *   - If EVERY blocker is terminal, clear `blocked` on the card's YAML,
+ *     save, and keep it in the dispatch list.
+ *
+ * Cards with no local YAML (e.g. ToDo cards the poller hasn't yet
+ * hydrated this tick — though bulk-sync should already have covered
+ * them) are passed through unchanged. The dispatch path will
+ * `findByExternalId` / `hydrateFromRemote` afterward.
+ *
+ * Read-only on the tracker: every check is a local-YAML lookup. The only
+ * side effect is the `writeIssue` when blockers fully clear, which is
+ * exactly the state transition the gate exists to record.
+ */
+async function resolveBlockedCards(
+  repo: RepoContext,
+  cards: IssueRef[],
+): Promise<IssueRef[]> {
+  const out: IssueRef[] = [];
+  for (const card of cards) {
+    const local = findByExternalId(repo.localPath, card.external_id);
+    if (!local) {
+      out.push(card);
+      continue;
+    }
+    if (!local.blocked) {
+      out.push(card);
+      continue;
+    }
+    const blockers = local.blocked.by;
+    const stillBlocking: string[] = [];
+    for (const blockerId of blockers) {
+      const blocker = loadLocal(repo.localPath, blockerId);
+      if (!blocker) {
+        stillBlocking.push(`${blockerId}(missing)`);
+        continue;
+      }
+      if (blocker.status !== "Done" && blocker.status !== "Cancelled") {
+        stillBlocking.push(`${blockerId}(${blocker.status})`);
+      }
+    }
+    if (stillBlocking.length > 0) {
+      log.info(
+        `[${repo.name}] ${local.id} still blocked: ${stillBlocking.join(", ")}`,
+      );
+      continue;
+    }
+    // All blockers terminal — clear the record and save. The agent
+    // re-picks the card next tick (or this tick if it's first in `out`).
+    log.info(
+      `[${repo.name}] ${local.id} all blockers terminal — clearing blocked`,
+    );
+    const cleared: Issue = { ...local, blocked: null };
+    const path = issuePath(repo.localPath, cleared.id, "open");
+    writeFileSync(path, serializeIssue(cleared));
+    out.push(card);
+  }
+  return out;
 }
 
 /**

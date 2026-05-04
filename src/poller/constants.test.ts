@@ -67,6 +67,7 @@ describe("loadTrelloIds", () => {
     "  feature: feat1",
     "  epic: ep1",
     "  needs_help: nh1",
+    "  blocked: blk1",
   ];
 
   beforeEach(() => {
@@ -93,6 +94,7 @@ describe("loadTrelloIds", () => {
     expect(ids.featureLabelId).toBe("feat1");
     expect(ids.epicLabelId).toBe("ep1");
     expect(ids.needsHelpLabelId).toBe("nh1");
+    expect(ids.blockedLabelId).toBe("blk1");
   });
 
   it("returns triagedLabelId when labels.triaged is set", () => {

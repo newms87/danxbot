@@ -18,6 +18,7 @@ vi.mock("./poller/constants.js", () => ({
     featureLabelId: "mock-feature-label-id",
     epicLabelId: "mock-epic-label-id",
     needsHelpLabelId: "mock-needs-help-label-id",
+    blockedLabelId: "mock-blocked-label-id",
   }),
   REVIEW_MIN_CARDS: 10,
   DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",

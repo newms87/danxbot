@@ -93,6 +93,7 @@ async function startTestServer(): Promise<TestHarness> {
       featureLabelId: "",
       epicLabelId: "",
       needsHelpLabelId: "",
+      blockedLabelId: "",
     },
     trelloEnabled: false,
     slack: {
@@ -620,6 +621,70 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     await _drainAsyncWorkForTesting();
     expect(existsSync(issuePath(h.repo.localPath, "ISS-10", "open"))).toBe(true);
     expect(existsSync(issuePath(h.repo.localPath, "ISS-10", "closed"))).toBe(false);
+  });
+
+  it("forces status to ToDo on save when blocked is non-null, regardless of agent-written status", async () => {
+    // Worker contract: `blocked != null` and `status != "ToDo"` is a
+    // category error. The worker silently normalizes status → ToDo before
+    // persisting, before the tracker push, and before the open/closed
+    // file move. Agents must set `blocked` only — they don't separately
+    // move status.
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-50",
+        external_id: "",
+        title: "Blocked normalize test",
+      }),
+      tracker: "memory",
+      status: "Needs Help",
+      blocked: {
+        reason: "waiting on ISS-99",
+        timestamp: "2026-05-04T18:00:00.000Z",
+        by: ["ISS-99"],
+      },
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-blk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-50" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ saved: true });
+
+    await _drainAsyncWorkForTesting();
+    const persisted = readYaml(h.repo.localPath, "ISS-50");
+    expect(persisted).toContain("status: ToDo");
+    expect(persisted).not.toContain("status: Needs Help");
+    // File stays in `open/` (ToDo is non-terminal).
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-50", "open"))).toBe(true);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-50", "closed"))).toBe(false);
+  });
+
+  it("preserves status when blocked is null (no normalization)", async () => {
+    // Sanity: forceBlockedToToDo is a no-op when blocked is null. A
+    // legitimate Needs Help save still persists with status: Needs Help.
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-51",
+        external_id: "",
+        title: "Real Needs Help",
+      }),
+      tracker: "memory",
+      status: "Needs Help",
+      blocked: null,
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-nh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-51" }),
+    });
+    await _drainAsyncWorkForTesting();
+    const persisted = readYaml(h.repo.localPath, "ISS-51");
+    expect(persisted).toContain("status: Needs Help");
   });
 });
 

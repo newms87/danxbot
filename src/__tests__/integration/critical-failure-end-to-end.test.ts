@@ -371,6 +371,7 @@ beforeEach(async () => {
       featureLabelId: "label-feature",
       epicLabelId: "label-epic",
       needsHelpLabelId: "label-needshelp",
+      blockedLabelId: "label-blocked",
     },
   });
 

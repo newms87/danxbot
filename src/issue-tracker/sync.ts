@@ -114,20 +114,32 @@ export async function syncIssue(
   }
 
   // 4c: labels
+  // The `blocked` flag pairs with the local YAML's `blocked` record:
+  // non-null record → true → Blocked label applied. Trello stores no
+  // structured blocked data, so `setLabels` is the entire on-tracker
+  // surface. The local YAML remains source of truth for reason / by[].
+  // Remote diff: there's no equivalent to read from `remoteCard.blocked`
+  // (the field doesn't survive the round-trip on Trello), so we treat
+  // the LABEL as the remote signal — `setLabels` is idempotent and the
+  // managed-set filter strips the Blocked label when local goes back to
+  // null.
   const localLabels = {
     type: local.type,
     needsHelp: local.status === "Needs Help",
     triaged: local.triaged.timestamp !== "",
+    blocked: local.blocked !== null,
   };
   const remoteLabels = {
     type: remoteCard.type,
     needsHelp: remoteCard.status === "Needs Help",
     triaged: remoteCard.triaged.timestamp !== "",
+    blocked: remoteCard.blocked !== null,
   };
   if (
     localLabels.type !== remoteLabels.type ||
     localLabels.needsHelp !== remoteLabels.needsHelp ||
-    localLabels.triaged !== remoteLabels.triaged
+    localLabels.triaged !== remoteLabels.triaged ||
+    localLabels.blocked !== remoteLabels.blocked
   ) {
     await tracker.setLabels(local.external_id, localLabels);
     writes++;

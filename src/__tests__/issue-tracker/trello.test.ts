@@ -17,6 +17,7 @@ const TRELLO: TrelloConfig = {
   featureLabelId: "lbl-feature",
   epicLabelId: "lbl-epic",
   needsHelpLabelId: "lbl-nh",
+  blockedLabelId: "lbl-blocked",
   triagedLabelId: "lbl-triaged",
 };
 
@@ -51,19 +52,31 @@ describe("TrelloTracker", () => {
       if (url.includes("list-ip/cards")) return jsonResponse([]);
       if (url.includes("list-nh/cards"))
         return jsonResponse([{ id: "n1", name: "#ISS-3: N1" }]);
+      if (url.includes("list-ai/cards"))
+        return jsonResponse([{ id: "a1", name: "#ISS-4: A1" }]);
       throw new Error(`unexpected url: ${url}`);
     });
     const tracker = new TrelloTracker(TRELLO);
     const refs = await tracker.fetchOpenCards();
     expect(refs).toEqual([
       { id: "ISS-1", external_id: "r1", title: "R1", status: "Review" },
-      { id: "", external_id: "t1", title: "T1", status: "ToDo" },
+      { id: "", external_id: "t1", title: "T1", status: "ToDo", list_kind: "todo" },
       { id: "ISS-3", external_id: "n1", title: "N1", status: "Needs Help" },
+      // Action Items list cards surface as ToDo + list_kind: "action_items"
+      // so blocker discovery sees them but the poller dispatch path skips.
+      {
+        id: "ISS-4",
+        external_id: "a1",
+        title: "A1",
+        status: "ToDo",
+        list_kind: "action_items",
+      },
     ]);
     // Pin the call count so a future regression that drops one of the
-    // four open-list statuses (Review, ToDo, In Progress, Needs Help)
-    // gets caught here, even when the dropped list happened to be empty.
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    // five open-list statuses (Review, ToDo, In Progress, Needs Help,
+    // Action Items) gets caught here, even when the dropped list
+    // happened to be empty.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("getCard hydrates description, status, type, ac, phases (NOT comments — call getComments separately)", async () => {
@@ -203,7 +216,7 @@ describe("TrelloTracker", () => {
       return jsonResponse({});
     });
     const tracker = new TrelloTracker(TRELLO);
-    await tracker.setLabels("c1", { type: "Feature", needsHelp: true, triaged: false });
+    await tracker.setLabels("c1", { type: "Feature", needsHelp: true, triaged: false, blocked: false });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
     const body = JSON.parse(putCall[1].body as string);
@@ -257,7 +270,7 @@ describe("TrelloTracker", () => {
       return jsonResponse({});
     });
     const tracker = new TrelloTracker(cfg);
-    await tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: true });
+    await tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: true, blocked: false });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
     const body = JSON.parse(putCall[1].body as string);
@@ -277,7 +290,7 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(cfg);
     await expect(
-      tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: true }),
+      tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: true, blocked: false }),
     ).rejects.toThrow(/Trello board has no Triaged label configured/);
   });
 
@@ -293,7 +306,7 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(cfg);
     await expect(
-      tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: false }),
+      tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: false, blocked: false }),
     ).rejects.toThrow(/Trello board has no Triaged label configured/);
   });
 
@@ -315,7 +328,7 @@ describe("TrelloTracker", () => {
       return jsonResponse({});
     });
     const tracker = new TrelloTracker(cfg);
-    await tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: false });
+    await tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: false, blocked: false });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
     const body = JSON.parse(putCall[1].body as string);

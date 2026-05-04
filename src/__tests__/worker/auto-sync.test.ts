@@ -43,6 +43,7 @@ function buildRepo(): RepoContext {
       featureLabelId: "",
       epicLabelId: "",
       needsHelpLabelId: "",
+      blockedLabelId: "",
     },
     trelloEnabled: false,
     slack: { enabled: false, botToken: "", appToken: "", channelId: "" },

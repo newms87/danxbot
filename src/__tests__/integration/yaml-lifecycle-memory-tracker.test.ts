@@ -330,6 +330,7 @@ function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
     phases: [],
     comments: [],
     retro: { good: "", bad: "", action_items: [], commits: [] },
+    blocked: null,
   };
 }
 
@@ -405,6 +406,7 @@ beforeEach(async () => {
       featureLabelId: "label-feature",
       epicLabelId: "label-epic",
       needsHelpLabelId: "label-needshelp",
+      blockedLabelId: "label-blocked",
     },
   });
 

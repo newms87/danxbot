@@ -20,6 +20,7 @@ vi.mock("./poller/constants.js", () => ({
     featureLabelId: "feat",
     epicLabelId: "epic",
     needsHelpLabelId: "nhl",
+    blockedLabelId: "blk",
   }),
 }));
 

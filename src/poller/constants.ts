@@ -71,6 +71,7 @@ export function loadTrelloIds(repoPath: string): Omit<TrelloConfig, "apiKey" | "
     featureLabelId: req("labels.feature"),
     epicLabelId: req("labels.epic"),
     needsHelpLabelId: req("labels.needs_help"),
+    blockedLabelId: req("labels.blocked"),
     ...(triaged ? { triagedLabelId: triaged } : {}),
   };
 }
