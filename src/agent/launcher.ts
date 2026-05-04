@@ -802,7 +802,7 @@ export async function spawnAgent(
         statusUrl: options.statusUrl,
         apiToken: options.apiToken,
         env,
-        onExit: () => {
+        onExit: async () => {
           if (job.status !== "running") return;
 
           // In host mode the PID died without going through job.stop()
@@ -815,6 +815,18 @@ export async function spawnAgent(
           //      startup. Reporting "completed" for that case is a silent
           //      fallback — see `.claude/rules/code-quality.md` "fallbacks
           //      are bugs". Fail loud so the caller can retry.
+          //
+          // Same race + fix shape as the docker close handler in
+          // `setupProcessHandlers` (process-utils.ts). drain() before
+          // classifying so a final-turn-after-last-poll lands in
+          // lastAssistantText; catch + log so a rejecting drain doesn't
+          // strand the host job mid-transition.
+          try {
+            await job.watcher?.drain();
+          } catch (err) {
+            log.error(`[Job ${jobId}] watcher.drain() failed during host onExit — falling back to last observed assistant text`, err);
+          }
+
           const finalText = lastAssistantText.trim();
           if (finalText) {
             job.status = "completed";

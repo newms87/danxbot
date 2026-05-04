@@ -154,12 +154,35 @@ export function setupProcessHandlers(
   getStderr: () => string,
   options: ProcessHandlerOptions,
 ): void {
-  child.on("close", (code: number | null) => {
+  child.on("close", async (code: number | null) => {
     // Order matters: transition job.status BEFORE invoking cleanup. Cleanup
     // observers (DispatchTracker.finalize, Laravel forwarder flush) read
     // job.status to decide what to write — running cleanup first leaves the
     // dispatch row stuck at "running" forever. Mirrors job.stop()'s ordering.
     if (job.status === "running") {
+      // Drain the watcher BEFORE reading lastAssistantText. The watcher
+      // polls JSONL on a 5s cadence, so the agent's final assistant turn
+      // can land on disk between the last scheduled poll and process
+      // exit — capturing summary without draining left job.summary
+      // stuck on the previous assistant text (e.g. "I'll help you with
+      // that task." instead of the final "Task completed successfully").
+      // Same race the dispatch-tracker's finalize already fixed for
+      // usage totals; this closes it for the in-memory summary that
+      // onComplete callers consume synchronously.
+      //
+      // Catch rather than rethrow: an unhandled rejection inside a Node
+      // 'close' listener strands the job mid-transition (status stays
+      // "running" forever, cleanup never fires, dispatch row never
+      // finalizes). Logging + falling through to the synchronous summary
+      // capture is strictly better — at worst job.summary carries the
+      // pre-drain lastAssistantText, which is what behaviour was before
+      // the drain was added; at best the partial drain still updated it.
+      try {
+        await job.watcher?.drain();
+      } catch (err) {
+        log.error(`[Job ${job.id}] watcher.drain() failed during close handler — falling back to last observed assistant text`, err);
+      }
+
       const isSuccess = code === 0;
       job.status = isSuccess ? "completed" : "failed";
       job.summary = isSuccess

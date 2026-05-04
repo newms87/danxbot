@@ -243,31 +243,41 @@ describe("setupProcessHandlers", () => {
     };
   }
 
-  it("sets status to 'completed' and summary from last assistant text on exit code 0", () => {
+  // Helper: flush all pending microtasks so the now-async close handler
+  // (which awaits `job.watcher?.drain()` to capture the agent's final
+  // assistant text before reading lastAssistantText) finishes before the
+  // test asserts.
+  async function flushMicrotasks(): Promise<void> {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  it("sets status to 'completed' and summary from last assistant text on exit code 0", async () => {
     const job = makeJob();
     const child = makeChild();
     const onComplete = vi.fn();
 
     setupProcessHandlers(child as never, job, () => "final answer", () => "", { onComplete });
     child.emit("close", 0);
+    await flushMicrotasks();
 
     expect(job.status).toBe("completed");
     expect(job.summary).toBe("final answer");
     expect(onComplete).toHaveBeenCalledWith(job);
   });
 
-  it("uses fallback summary 'Agent completed successfully' when no assistant text", () => {
+  it("uses fallback summary 'Agent completed successfully' when no assistant text", async () => {
     const job = makeJob();
     const child = makeChild();
 
     setupProcessHandlers(child as never, job, () => "", () => "", {});
     child.emit("close", 0);
+    await flushMicrotasks();
 
     expect(job.status).toBe("completed");
     expect(job.summary).toBe("Agent completed successfully");
   });
 
-  it("sets status to 'failed' and includes stderr in summary on non-zero exit", () => {
+  it("sets status to 'failed' and includes stderr in summary on non-zero exit", async () => {
     const job = makeJob();
     const child = makeChild();
     const onComplete = vi.fn();
@@ -279,6 +289,7 @@ describe("setupProcessHandlers", () => {
       { onComplete },
     );
     child.emit("close", 1);
+    await flushMicrotasks();
 
     expect(job.status).toBe("failed");
     expect(job.summary).toContain("1");
@@ -286,12 +297,13 @@ describe("setupProcessHandlers", () => {
     expect(onComplete).toHaveBeenCalledWith(job);
   });
 
-  it("falls back to last assistant text when stderr is empty on failed exit", () => {
+  it("falls back to last assistant text when stderr is empty on failed exit", async () => {
     const job = makeJob();
     const child = makeChild();
 
     setupProcessHandlers(child as never, job, () => "last words", () => "", {});
     child.emit("close", 2);
+    await flushMicrotasks();
 
     expect(job.status).toBe("failed");
     expect(job.summary).toContain("last words");
@@ -344,7 +356,29 @@ describe("setupProcessHandlers", () => {
     expect(onComplete).not.toHaveBeenCalled();
   });
 
-  it("calls cleanup function on both close and error events", () => {
+  it("transitions to 'completed' even when watcher.drain() rejects (defensive — never strand the job)", async () => {
+    // Drain rejection inside an async Node 'close' listener would otherwise
+    // produce an unhandled rejection AND strand the job at status="running"
+    // — cleanup never fires, dispatch row never finalizes, statusUrl never
+    // PUTs terminal. The close handler catches the rejection so the
+    // synchronous summary capture + cleanup chain still runs.
+    const job = makeJob();
+    const child = makeChild();
+    const onComplete = vi.fn();
+    job.watcher = {
+      drain: vi.fn().mockRejectedValue(new Error("drain boom")),
+    } as unknown as AgentJob["watcher"];
+
+    setupProcessHandlers(child as never, job, () => "best-effort summary", () => "", { onComplete });
+    child.emit("close", 0);
+    await flushMicrotasks();
+
+    expect(job.status).toBe("completed");
+    expect(job.summary).toBe("best-effort summary");
+    expect(onComplete).toHaveBeenCalledWith(job);
+  });
+
+  it("calls cleanup function on both close and error events", async () => {
     const cleanup = vi.fn(async () => {});
 
     // close path
@@ -352,6 +386,7 @@ describe("setupProcessHandlers", () => {
     const child1 = makeChild();
     setupProcessHandlers(child1 as never, job1, () => "", () => "", { cleanup });
     child1.emit("close", 0);
+    await flushMicrotasks();
     expect(cleanup).toHaveBeenCalledTimes(1);
 
     cleanup.mockClear();
@@ -371,7 +406,7 @@ describe("setupProcessHandlers", () => {
   // row stuck at "running" forever (production: 4fdbe75b on danxbot,
   // bd7a3da6 on gpt-manager). Lock the order down so any future regression
   // fails here, not in MySQL.
-  it("transitions job.status to 'completed' BEFORE invoking cleanup on clean exit", () => {
+  it("transitions job.status to 'completed' BEFORE invoking cleanup on clean exit", async () => {
     const job = makeJob();
     const child = makeChild();
     let observedStatusInsideCleanup: string | undefined;
@@ -381,11 +416,12 @@ describe("setupProcessHandlers", () => {
 
     setupProcessHandlers(child as never, job, () => "ok", () => "", { cleanup });
     child.emit("close", 0);
+    await flushMicrotasks();
 
     expect(observedStatusInsideCleanup).toBe("completed");
   });
 
-  it("transitions job.status to 'failed' BEFORE invoking cleanup on non-zero exit", () => {
+  it("transitions job.status to 'failed' BEFORE invoking cleanup on non-zero exit", async () => {
     const job = makeJob();
     const child = makeChild();
     let observedStatusInsideCleanup: string | undefined;
@@ -395,6 +431,7 @@ describe("setupProcessHandlers", () => {
 
     setupProcessHandlers(child as never, job, () => "", () => "boom", { cleanup });
     child.emit("close", 1);
+    await flushMicrotasks();
 
     expect(observedStatusInsideCleanup).toBe("failed");
   });
@@ -413,7 +450,7 @@ describe("setupProcessHandlers", () => {
     expect(observedStatusInsideCleanup).toBe("failed");
   });
 
-  it("populates job.summary and job.completedAt BEFORE invoking cleanup on clean exit", () => {
+  it("populates job.summary and job.completedAt BEFORE invoking cleanup on clean exit", async () => {
     const job = makeJob();
     const child = makeChild();
     let observedSummary: string | undefined;
@@ -425,12 +462,13 @@ describe("setupProcessHandlers", () => {
 
     setupProcessHandlers(child as never, job, () => "all done", () => "", { cleanup });
     child.emit("close", 0);
+    await flushMicrotasks();
 
     expect(observedSummary).toBe("all done");
     expect(observedCompletedAt).toBeInstanceOf(Date);
   });
 
-  it("populates job.summary and job.completedAt BEFORE invoking cleanup on non-zero exit", () => {
+  it("populates job.summary and job.completedAt BEFORE invoking cleanup on non-zero exit", async () => {
     const job = makeJob();
     const child = makeChild();
     let observedSummary: string | undefined;
@@ -442,6 +480,7 @@ describe("setupProcessHandlers", () => {
 
     setupProcessHandlers(child as never, job, () => "", () => "boom", { cleanup });
     child.emit("close", 1);
+    await flushMicrotasks();
 
     expect(observedSummary).toContain("boom");
     expect(observedCompletedAt).toBeInstanceOf(Date);
@@ -464,7 +503,7 @@ describe("setupProcessHandlers", () => {
     expect(observedCompletedAt).toBeInstanceOf(Date);
   });
 
-  it("invokes cleanup BEFORE onComplete on clean exit (Laravel forwarder + heartbeat consume onComplete)", () => {
+  it("invokes cleanup BEFORE onComplete on clean exit (Laravel forwarder + heartbeat consume onComplete)", async () => {
     const job = makeJob();
     const child = makeChild();
     const calls: string[] = [];
@@ -473,6 +512,7 @@ describe("setupProcessHandlers", () => {
 
     setupProcessHandlers(child as never, job, () => "ok", () => "", { cleanup, onComplete });
     child.emit("close", 0);
+    await flushMicrotasks();
 
     expect(calls).toEqual(["cleanup", "onComplete"]);
   });

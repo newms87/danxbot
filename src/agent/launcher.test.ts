@@ -481,6 +481,11 @@ describe("spawnAgent", () => {
     });
 
     child.emit("close", 0);
+    // Close handler now awaits watcher.drain() before transitioning state
+    // (so the agent's final assistant turn lands in lastAssistantText
+    // before summary capture). Flush microtasks so the async handler
+    // completes before the assertions read job state.
+    await vi.runAllTimersAsync();
 
     expect(job.status).toBe("completed");
     expect(job.completedAt).toBeInstanceOf(Date);
@@ -492,7 +497,14 @@ describe("spawnAgent", () => {
     // exit are dropped — DispatchTracker.finalize then snapshots stale
     // job.usage and the dispatches row undercounts every token + counter
     // field. This test asserts the full cleanup ordering: drain runs BEFORE
-    // stop, and exactly once.
+    // stop in cleanup itself.
+    //
+    // Two drains land before stop: the close handler awaits drain BEFORE
+    // capturing summary (so the agent's final assistant text reaches
+    // lastAssistantText) and cleanup awaits drain again BEFORE finalize
+    // (so dispatchTracker totals reflect the same trailing JSONL bytes).
+    // The second drain is a no-op-on-bytes but the call still happens —
+    // both calls are cheap, idempotent, and protect different invariants.
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -510,8 +522,8 @@ describe("spawnAgent", () => {
 
     expect(job.status).toBe("completed");
     // Strict equality on the call sequence — a regression where stop runs
-    // first or drain runs twice would slip past indexOf-based ordering checks.
-    expect(mockWatcherCallOrder).toEqual(["drain", "stop"]);
+    // before either drain would slip past indexOf-based ordering checks.
+    expect(mockWatcherCallOrder).toEqual(["drain", "drain", "stop"]);
   });
 
   it("cleanup is idempotent — second invocation does not re-drain or re-stop", async () => {
@@ -520,8 +532,13 @@ describe("spawnAgent", () => {
     // defensive else-branch firing after job.stop ran cleanup directly).
     // The second caller MUST NOT trigger a second finalize — that would
     // overwrite the first finalize's correct totals with stale ones — and
-    // MUST NOT poll the JSONL twice. Both observable via the shared
-    // mockWatcherCallOrder array.
+    // MUST NOT poll the JSONL twice from cleanup. Both observable via the
+    // shared mockWatcherCallOrder array.
+    //
+    // The first close emit yields ["drain", "drain", "stop"]: the close
+    // handler drains before capturing summary, then cleanup drains again
+    // and stops. A re-invocation of cleanup MUST short-circuit on the
+    // cached cleanupPromise and add nothing.
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
 
@@ -534,11 +551,11 @@ describe("spawnAgent", () => {
 
     child.emit("close", 0);
     await vi.runAllTimersAsync();
-    expect(mockWatcherCallOrder).toEqual(["drain", "stop"]);
+    expect(mockWatcherCallOrder).toEqual(["drain", "drain", "stop"]);
 
     // Second invocation — must short-circuit on the cached cleanupPromise.
     await job._cleanup?.();
-    expect(mockWatcherCallOrder).toEqual(["drain", "stop"]);
+    expect(mockWatcherCallOrder).toEqual(["drain", "drain", "stop"]);
   });
 
   it("sets job status to failed on non-zero exit", async () => {
@@ -553,6 +570,7 @@ describe("spawnAgent", () => {
     });
 
     child.emit("close", 1);
+    await vi.runAllTimersAsync();
 
     expect(job.status).toBe("failed");
     expect(job.completedAt).toBeInstanceOf(Date);
@@ -768,6 +786,7 @@ describe("spawnAgent", () => {
     });
 
     child.emit("close", 0);
+    await vi.runAllTimersAsync();
 
     expect(job.status).toBe("completed");
     expect(job.summary).toBe("Task completed successfully");
@@ -1057,6 +1076,7 @@ describe("spawnAgent", () => {
     });
 
     child.emit("close", 0);
+    await vi.runAllTimersAsync();
 
     const status = getJobStatus(job);
     expect(status).toMatchObject({
@@ -1178,6 +1198,7 @@ describe("spawnAgent", () => {
     });
 
     child.emit("close", 0);
+    await vi.runAllTimersAsync();
 
     expect(onComplete).toHaveBeenCalledWith(job);
   });
@@ -1269,6 +1290,7 @@ describe("spawnAgent", () => {
 
     child.stderr.emit("data", Buffer.from("Error: permission denied"));
     child.emit("close", 1);
+    await vi.runAllTimersAsync();
 
     expect(job.status).toBe("failed");
     expect(job.summary).toContain("permission denied");
@@ -1304,6 +1326,7 @@ describe("spawnAgent", () => {
     });
 
     child.emit("close", 0);
+    await vi.runAllTimersAsync();
     expect(job.status).toBe("completed");
 
     await vi.advanceTimersByTimeAsync(61_000);
@@ -1469,6 +1492,7 @@ describe("spawnAgent", () => {
     });
 
     child.emit("close", 0);
+    await vi.runAllTimersAsync();
     expect(job.status).toBe("completed");
 
     // Calling stop on a completed job should be a no-op
@@ -2054,9 +2078,49 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
 
     // Simulate claude PID going away
     mockHostExitWatchers[0]!.fire();
+    // Host onExit handler now awaits watcher.drain() before classifying
+    // (so the agent's final assistant turn — written between the last
+    // scheduled poll and PID exit — lands in lastAssistantText). Flush
+    // microtasks so the async handler completes before assertions.
+    await vi.runAllTimersAsync();
 
     expect(job.status).toBe("completed");
     expect(job.summary).toBe("Task done");
+    expect(onComplete).toHaveBeenCalledWith(job);
+  });
+
+  it("host onExit transitions to terminal state even when watcher.drain() rejects (defensive — never strand the job)", async () => {
+    // An unhandled rejection inside the host onExit listener would
+    // strand the job at status="running" — cleanup never fires, no
+    // PUT, no onComplete. The catch around drain() lets fall-through
+    // classification still run with the pre-drain lastAssistantText.
+    mockReadPidFileWithTimeout.mockResolvedValue(666_777);
+    const onComplete = vi.fn();
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
+      openTerminal: true,
+      onComplete,
+    });
+
+    // Pre-load lastAssistantText with a final-turn entry, then make drain
+    // reject. The fix preserves the entry already observed.
+    emitWatcherEntry({
+      type: "assistant",
+      timestamp: Date.now(),
+      summary: "test",
+      data: { content: [{ type: "text", text: "Pre-drain final text" }] },
+    });
+    job.watcher!.drain = vi.fn().mockRejectedValue(new Error("drain boom"));
+
+    mockHostExitWatchers[0]!.fire();
+    await vi.runAllTimersAsync();
+
+    expect(job.status).toBe("completed");
+    expect(job.summary).toBe("Pre-drain final text");
     expect(onComplete).toHaveBeenCalledWith(job);
   });
 
@@ -2079,6 +2143,7 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     // NO watcher entries emitted — lastAssistantText is "".
     // Simulate claude PID going away.
     mockHostExitWatchers[0]!.fire();
+    await vi.runAllTimersAsync();
 
     expect(job.status).toBe("failed");
     expect(job.summary).toMatch(/without producing/i);
@@ -2479,6 +2544,7 @@ describe("cancelJob", () => {
     });
 
     child.emit("close", 0);
+    await vi.runAllTimersAsync();
     expect(job.status).toBe("completed");
 
     await cancelJob(job, "test-token");

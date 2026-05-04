@@ -332,6 +332,33 @@ describe("Integration: dispatch pipeline", () => {
       expect(job.summary).toContain("Task completed successfully");
     }, 20_000);
 
+    it("captures last assistant text when final block is written between watcher polls", async () => {
+      // Deterministic reproduction of the close-handler race that left
+      // `job.summary` carrying an intermediate assistant block instead of
+      // the agent's final text. With pollIntervalMs hardcoded at 5_000 in
+      // the launcher and writeDelayMs=2500 between fake-claude entries:
+      //   t=0:    user written
+      //   t=2500: assistant1 ("I'll help you with that task.")
+      //   t=5000: tool_result
+      //   t=7500: assistant2 ("Task completed successfully")
+      //   t=10000: result
+      //   t=10100: process exits (lingerMs=100)
+      // Watcher polls land at ~t=1000 (discovery immediate) and ~t=6000
+      // (interval). The next interval at ~t=11000 never fires — fake-claude
+      // already exited. Without `drain()` before summary capture in the
+      // close handler, lastAssistantText is "I'll help…" when summary is
+      // read. Drain ensures the JSONL bytes for assistant2 + result are
+      // pulled in before the close handler reads getLastAssistantText().
+      const job = await runToCompletion({
+        writeDelayMs: 2500,
+        lingerMs: 100,
+        timeoutMs: 15_000,
+      });
+
+      expect(job.status).toBe("completed");
+      expect(job.summary).toContain("Task completed successfully");
+    }, 30_000);
+
     it("watcher discovers JSONL file and collects entries", async () => {
       const job = await runToCompletion();
 
