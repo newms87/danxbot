@@ -129,6 +129,25 @@ export interface AgentJob {
    */
   _cleanup?: () => Promise<void>;
   /**
+   * Promise tracking the in-flight `forwarderFlush?.()` started by
+   * `runCleanup`. The launcher fires the final flush as fire-and-forget
+   * (`void forwarderFlush?.()`) to keep production cleanup latency
+   * short — Laravel POST retries can take up to ~60s under
+   * exponential-backoff but the dispatch row + putStatus PUT must NOT
+   * block on them. Tests need an awaitable handle on that work so
+   * subsequent `rmSync(<config.logsDir>)` cannot race a pending
+   * `appendFile` against `<config.logsDir>/event-queue/<jobId>.jsonl`
+   * (Trello 69f77e9b77472aefac1317b2 — teardown leak in
+   * `yaml-lifecycle-memory-tracker.test.ts`).
+   *
+   * Always set when the dispatch was created with `eventForwarding`;
+   * `undefined` otherwise (poller-style dispatches that omit
+   * apiToken/statusUrl). The promise resolves when `drainAndSend`
+   * returns — drainAndSend's inner try/catch swallows ENOENT and
+   * network errors, so awaiting this never rejects.
+   */
+  _forwarderFlush?: Promise<void>;
+  /**
    * Fires options.onComplete with the job when a terminal state is reached
    * outside of the close/exit handler flow (i.e. from cancelJob). Lets
    * dispatch-layer teardown such as cleanupMcpSettings run on cancel — the
@@ -690,11 +709,18 @@ export async function spawnAgent(
       await watcher.drain();
       watcher.stop();
       // drainAndSend swallows its own errors (laravel-forwarder.ts) so
-      // this void can never produce an unhandled rejection. Regression
-      // guard: the "flush() resolves (does not reject) when the queue
+      // this never produces an unhandled rejection. Regression guard:
+      // the "flush() resolves (does not reject) when the queue
       // directory is removed mid-run" test in laravel-forwarder.test.ts
       // fails if the inner try/catch is removed.
-      void forwarderFlush?.();
+      //
+      // Stash the promise on the job (instead of `void`) so test
+      // teardown can await any in-flight queue writes BEFORE rmSync of
+      // the logs dir — the fire-and-forget shape stays for production
+      // cleanup latency, but tests can drain explicitly via
+      // `_drainPendingCleanupsForTesting()` in dispatch/core.ts.
+      // Reproduce / Trello 69f77e9b77472aefac1317b2.
+      job._forwarderFlush = forwarderFlush?.();
       if (dispatchTracker && job.status !== "running") {
         const dispatchStatus =
           job.status === "completed"

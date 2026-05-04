@@ -100,12 +100,21 @@ vi.mock("./projects-dir-preflight.js", async () => {
   };
 });
 
+// `flush` is mocked as `mockResolvedValue(undefined)` (Promise<void>)
+// to match the real `drainAndSend` shape — the launcher now stashes
+// `forwarder.flush()` on `job._forwarderFlush` (Trello
+// 69f77e9b77472aefac1317b2 — teardown leak fix), and a sync `vi.fn()`
+// returning bare `undefined` would mask any regression that drops the
+// promise type.
 vi.mock("./laravel-forwarder.js", () => ({
   createLaravelForwarder: vi.fn().mockReturnValue({
     consume: vi.fn(),
-    flush: vi.fn(),
+    flush: vi.fn().mockResolvedValue(undefined),
   }),
   deriveEventsUrl: vi.fn((url: string) => url.replace(/\/status$/, "/events")),
+  deriveQueuePath: vi.fn(
+    (baseDir: string, dispatchId: string) => `${baseDir}/${dispatchId}.jsonl`,
+  ),
 }));
 
 const mockBuildDispatchScript = vi
@@ -524,6 +533,64 @@ describe("spawnAgent", () => {
     // Strict equality on the call sequence — a regression where stop runs
     // before either drain would slip past indexOf-based ordering checks.
     expect(mockWatcherCallOrder).toEqual(["drain", "drain", "stop"]);
+  });
+
+  it("exposes the forwarder flush promise on job._forwarderFlush when eventForwarding is configured (Trello 69f77e9b77472aefac1317b2)", async () => {
+    // Production cleanup keeps `forwarderFlush?.()` fire-and-forget so
+    // the dispatch row + putStatus PUT do not block on Laravel
+    // exponential-backoff retries (up to ~60s). The launcher MUST still
+    // expose the in-flight flush promise on the job so test teardown
+    // (and any other awaiter) can drain it before nuking the queue
+    // dir — without this, `afterAll rmSync(<config.logsDir>)` races
+    // pending `appendFile` and reproduces the ENOENT teardown leak.
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
+      statusUrl: "http://localhost/status",
+      apiToken: "tok",
+      eventForwarding: {
+        statusUrl: "http://localhost/status",
+        apiToken: "tok",
+      },
+    });
+
+    child.emit("close", 0);
+    await vi.runAllTimersAsync();
+
+    expect(job._forwarderFlush).toBeInstanceOf(Promise);
+    // Awaiting must not reject — drainAndSend's inner try/catch
+    // swallows everything (incl. ENOENT). This pins the contract that
+    // the helper in `dispatch/core.ts#_drainPendingCleanupsForTesting`
+    // depends on.
+    await expect(job._forwarderFlush).resolves.toBeUndefined();
+  });
+
+  it("leaves job._forwarderFlush undefined when eventForwarding is not configured (poller-style dispatch)", async () => {
+    // Poller-triggered dispatches omit apiToken; `dispatch/core.ts`
+    // gates `eventForwarding` on the (statusUrl && apiToken) pair, so
+    // these jobs never get an EventForwarder. `_forwarderFlush` MUST
+    // stay `undefined` on those jobs so `_drainPendingCleanupsForTesting`
+    // skips the await branch cleanly. Pins the doc claim on the
+    // `_forwarderFlush` field.
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
+    });
+
+    child.emit("close", 0);
+    await vi.runAllTimersAsync();
+
+    expect(job._forwarderFlush).toBeUndefined();
   });
 
   it("cleanup is idempotent — second invocation does not re-drain or re-stop", async () => {

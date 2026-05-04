@@ -208,7 +208,11 @@ vi.mock("../../dashboard/dispatches-db.js", () => ({
 
 import { startWorkerServer } from "../../worker/server.js";
 import { deriveSessionDir } from "../../agent/session-log-watcher.js";
-import { _resetForTesting as resetDispatchCore } from "../../dispatch/core.js";
+import {
+  _resetForTesting as resetDispatchCore,
+  _drainPendingCleanupsForTesting as drainPendingCleanupsForTesting,
+  listActiveJobs,
+} from "../../dispatch/core.js";
 import {
   _resetForTesting as resetPollerState,
 } from "../../poller/index.js";
@@ -422,6 +426,14 @@ afterEach(async () => {
     await new Promise<void>((res) => workerServer!.close(() => res()));
     workerServer = undefined;
   }
+  // Drain in-flight dispatch cleanups (incl. EventForwarder flushes
+  // writing to <logsDir>/event-queue/) BEFORE shutting down the
+  // capture server. The forwarder POSTs to captureServer.statusUrl;
+  // stopping the server first turns drainAndSend into a 60-second
+  // exponential-backoff retry loop and trips the 10 s afterEach hook
+  // timeout. Drain first → captureServer.stop() second is the
+  // correct teardown order. Trello 69f77e9b77472aefac1317b2.
+  await drainPendingCleanupsForTesting();
   await captureServer.stop();
   resetPollerState();
   resetDispatchCore();
@@ -444,7 +456,13 @@ afterEach(async () => {
   }
 });
 
-afterAll(() => {
+afterAll(async () => {
+  // Defense-in-depth: every test's afterEach already drains, but if a
+  // test fails before its afterEach completes (vitest still runs
+  // afterAll regardless), the activeJobs registry may still hold a
+  // dispatch with an in-flight forwarder flush. Drain again so the
+  // rmSync below cannot race a pending appendFile / writeFile.
+  await drainPendingCleanupsForTesting();
   if (existsSync(testState.logsDir)) {
     rmSync(testState.logsDir, { recursive: true, force: true });
   }
@@ -706,5 +724,110 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
       );
     });
     expect(trelloCalls).toEqual([]);
+  }, 30_000);
+
+  // Regression guard for Trello 69f77e9b77472aefac1317b2: the previous
+  // unhandled-rejection fix (commit fa15457) wrapped `drainAndSend` so
+  // ENOENT no longer escapes from the inner appendFile/writeFile calls,
+  // but did NOT address the underlying TEARDOWN LEAK — the EventForwarder
+  // continued doing async work AFTER the test resolved, which (a) kept
+  // vitest's event loop warm and (b) re-introduced the rejection class
+  // the moment the inner catch is removed.
+  //
+  // Two structural guarantees this test pins:
+  // 1. `_drainPendingCleanupsForTesting()` exists in dispatch/core.ts and
+  //    awaits every `_cleanup()` + `_forwarderFlush` for jobs in
+  //    `listActiveJobs()`.
+  // 2. After the helper resolves, the queue dir can be removed without
+  //    producing any unhandled rejection or escaping ENOENT — the
+  //    process.on("unhandledRejection") listener filtered to this
+  //    test's logsDir would catch any leak.
+  it("_drainPendingCleanupsForTesting awaits forwarder writes so subsequent rmSync produces no ENOENT", async () => {
+    const externalId = "mem-yaml-drain";
+    const seed = buildSeedIssue(externalId, "ToDo");
+    setIssueTracker(seed);
+
+    const yamlOpenPath = issuePath(repoDir, seed.id, "open");
+    writeFileSync(yamlOpenPath, serializeIssue(seed));
+
+    process.env.FAKE_CLAUDE_YAML_PATH = yamlOpenPath;
+    process.env.FAKE_CLAUDE_EXTERNAL_ID = seed.id;
+    process.env.FAKE_CLAUDE_YAML_FINAL_STATUS = "Done";
+
+    const launchRes = await fetch(`http://localhost:${workerPort}/api/launch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspace: "issue-worker",
+        task: `Drive lifecycle to verify drain helper`,
+        api_token: "test-token",
+        status_url: captureServer.statusUrl,
+      }),
+    });
+    expect(launchRes.status).toBe(200);
+    const { job_id } = (await launchRes.json()) as { job_id: string };
+
+    await waitFor(
+      async () => {
+        const res = await fetch(
+          `http://localhost:${workerPort}/api/status/${job_id}`,
+        );
+        if (res.status !== 200) return false;
+        const body = (await res.json()) as { status: string };
+        return body.status !== "running";
+      },
+      15_000,
+      "/api/status to report terminal",
+    );
+
+    await drainIssueRouteAsyncWork();
+
+    // Drain forwarder activity. After this resolves, all in-flight
+    // cleanups (including the runCleanup chain that sets
+    // `job._forwarderFlush`) have completed and no pending writes to
+    // the event-queue file remain.
+    await drainPendingCleanupsForTesting();
+
+    // Post-drain assertion: the dispatched job is still in activeJobs
+    // (TTL grace window) and exposes the forwarder flush promise the
+    // launcher set during runCleanup. This pins the launcher contract:
+    // every dispatch with `eventForwarding` enabled MUST surface the
+    // flush as `_forwarderFlush` so the drain helper above has
+    // something to await.
+    const jobsAfterDrain = listActiveJobs();
+    expect(jobsAfterDrain.length).toBeGreaterThanOrEqual(1);
+    const dispatchedJob = jobsAfterDrain.find((j) => j.id === job_id);
+    expect(dispatchedJob).toBeDefined();
+    expect(dispatchedJob!._forwarderFlush).toBeInstanceOf(Promise);
+
+    // Filter to ONLY this test's logsDir so any cross-test interference
+    // doesn't false-fail the assertion. The unhandled rejection we're
+    // guarding against has the testState.logsDir embedded in the ENOENT
+    // path.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      const message = String((reason as Error)?.message ?? reason);
+      if (message.includes(testState.logsDir)) unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      // Nuke the event-queue subdir directly so any in-flight writes
+      // would ENOENT instantly. testState.logsDir itself stays intact
+      // for afterAll's full removal.
+      rmSync(join(testState.logsDir, "event-queue"), {
+        recursive: true,
+        force: true,
+      });
+      // Yield long enough for any pending appendFile / writeFile to
+      // settle. Two macrotask hops covers the libuv fs callback + any
+      // microtask drain — same shape as the laravel-forwarder unit test
+      // for "BATCH_SIZE-triggered drain produces no unhandled rejection".
+      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 100));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
   }, 30_000);
 });

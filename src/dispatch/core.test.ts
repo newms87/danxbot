@@ -87,7 +87,12 @@ vi.mock("../agent/stall-detector.js", () => ({
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { dispatch, listActiveJobs } from "./core.js";
+import {
+  dispatch,
+  listActiveJobs,
+  _drainPendingCleanupsForTesting,
+  _resetForTesting,
+} from "./core.js";
 // The mocked `../config.js` module exposes a plain mutable object. The cast
 // to `{ isHost: boolean }` defeats the readonly type from the real config
 // module — in the mocked factory, the object is a plain literal and writes
@@ -453,6 +458,187 @@ describe("listActiveJobs()", () => {
       first.length = 0;
       const second = listActiveJobs();
       expect(second.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(tmpRepoDir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Pin the test-only drain helper added for Trello 69f77e9b77472aefac1317b2:
+ * the `yaml-lifecycle-memory-tracker.test.ts` teardown leak. The helper
+ * iterates `activeJobs` and awaits each `_cleanup()` + `_forwarderFlush`
+ * so test teardown can `rmSync(<config.logsDir>)` without racing the
+ * fire-and-forget forwarder flush the launcher kicks off in `runCleanup`.
+ *
+ * Helper signature is intentionally narrow — these tests guard against
+ * regressions that drop one of the two awaited handles, or stop
+ * snapshotting `activeJobs` upfront.
+ */
+describe("_drainPendingCleanupsForTesting", () => {
+  beforeEach(() => {
+    _resetForTesting();
+  });
+
+  afterEach(() => {
+    _resetForTesting();
+  });
+
+  function makeJobWithSpies(id: string): {
+    job: ReturnType<typeof makeRunningJob> & {
+      _cleanup: ReturnType<typeof vi.fn>;
+      _forwarderFlush: Promise<void>;
+    };
+    cleanupSpy: ReturnType<typeof vi.fn>;
+    flushResolve: () => void;
+  } {
+    const cleanupSpy = vi.fn().mockResolvedValue(undefined);
+    let flushResolve!: () => void;
+    const flushPromise = new Promise<void>((resolve) => {
+      flushResolve = resolve;
+    });
+    const job = {
+      ...makeRunningJob(),
+      id,
+      _cleanup: cleanupSpy,
+      _forwarderFlush: flushPromise,
+    };
+    return { job, cleanupSpy, flushResolve };
+  }
+
+  it("awaits both _cleanup() and _forwarderFlush for every job in the registry", async () => {
+    // Two jobs, each with distinct cleanup spy + flush promise. The
+    // helper must await BOTH per job — a regression that drops
+    // `_forwarderFlush` from the awaited list (or vice versa) is
+    // exactly the failure mode this test catches.
+    const a = makeJobWithSpies("job-a");
+    const b = makeJobWithSpies("job-b");
+
+    const slackWorkerSrc = resolve(
+      __dirname,
+      "..",
+      "poller",
+      "inject",
+      "workspaces",
+      "slack-worker",
+    );
+    const tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-test-drain-"));
+    try {
+      const dest = resolve(
+        tmpRepoDir,
+        ".danxbot",
+        "workspaces",
+        "slack-worker",
+      );
+      mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+        recursive: true,
+      });
+      cpSync(slackWorkerSrc, dest, { recursive: true });
+      const testRepo = makeRepoContext({ localPath: tmpRepoDir });
+
+      mockSpawnAgent.mockResolvedValueOnce(a.job);
+      mockSpawnAgent.mockResolvedValueOnce(b.job);
+
+      await dispatch({
+        repo: testRepo,
+        task: "task A",
+        workspace: "slack-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      });
+      await dispatch({
+        repo: testRepo,
+        task: "task B",
+        workspace: "slack-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      });
+
+      // Drain hangs until both flush promises resolve — proves the
+      // helper actually awaits `_forwarderFlush` (not just `_cleanup()`).
+      const drainPromise = _drainPendingCleanupsForTesting();
+      let drained = false;
+      void drainPromise.then(() => {
+        drained = true;
+      });
+
+      // Yield twice — long enough for any non-awaiting helper variant
+      // to early-resolve. If `drained` flips here, the helper is NOT
+      // awaiting `_forwarderFlush`.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      expect(drained).toBe(false);
+
+      a.flushResolve();
+      b.flushResolve();
+      await drainPromise;
+
+      expect(a.cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(b.cleanupSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(tmpRepoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("is a no-op when activeJobs is empty (resolves without error)", async () => {
+    // Defensive baseline: a fresh registry should drain instantly.
+    // Guards against a future refactor that adds a side effect (e.g.
+    // logging) which could throw on an empty input.
+    await expect(
+      _drainPendingCleanupsForTesting(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("skips the _forwarderFlush await when the job has no forwarder (poller-style dispatch)", async () => {
+    // Poller dispatches gate `eventForwarding` on (statusUrl &&
+    // apiToken). When apiToken is absent, the launcher leaves
+    // `_forwarderFlush` undefined. The helper must not crash on
+    // `await undefined` — TypeScript's `if (job._forwarderFlush)`
+    // guard is the contract, this test pins it.
+    const cleanupSpy = vi.fn().mockResolvedValue(undefined);
+    const job = {
+      ...makeRunningJob(),
+      id: "poller-job",
+      _cleanup: cleanupSpy,
+      // _forwarderFlush deliberately undefined.
+    };
+
+    const slackWorkerSrc = resolve(
+      __dirname,
+      "..",
+      "poller",
+      "inject",
+      "workspaces",
+      "slack-worker",
+    );
+    const tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-test-drain-noflush-"));
+    try {
+      const dest = resolve(
+        tmpRepoDir,
+        ".danxbot",
+        "workspaces",
+        "slack-worker",
+      );
+      mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+        recursive: true,
+      });
+      cpSync(slackWorkerSrc, dest, { recursive: true });
+      const testRepo = makeRepoContext({ localPath: tmpRepoDir });
+
+      mockSpawnAgent.mockResolvedValueOnce(job);
+
+      await dispatch({
+        repo: testRepo,
+        task: "poller task",
+        workspace: "slack-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      });
+
+      await expect(
+        _drainPendingCleanupsForTesting(),
+      ).resolves.toBeUndefined();
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
     } finally {
       rmSync(tmpRepoDir, { recursive: true, force: true });
     }

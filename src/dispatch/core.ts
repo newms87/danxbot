@@ -117,6 +117,39 @@ export function _resetForTesting(): void {
 }
 
 /**
+ * Await every in-flight cleanup chain — `_cleanup()` (cached promise,
+ * cheap when already resolved) plus the `_forwarderFlush` queue-write
+ * promise the launcher exposes for fire-and-forget forwarder flushes.
+ *
+ * Test-only. Production cleanup latency stays unchanged because the
+ * launcher's `runCleanup` still fires `forwarderFlush` as fire-and-
+ * forget — this helper is the test-side handle on that work so
+ * teardown can `rmSync(<config.logsDir>)` without racing pending
+ * `appendFile` calls into `<config.logsDir>/event-queue/<jobId>.jsonl`.
+ *
+ * Trello 69f77e9b77472aefac1317b2 — teardown leak in
+ * `yaml-lifecycle-memory-tracker.test.ts`. The previous unhandled-
+ * rejection fix (commit fa15457) wrapped `drainAndSend` so ENOENT
+ * never escapes; this helper closes the underlying race so the test
+ * suite stops keeping vitest's event loop warm with pending writes
+ * after each dispatch terminates.
+ *
+ * Both promises are awaited per-job; both are guaranteed not to
+ * reject (drainAndSend swallows internally), so we don't wrap in
+ * try/catch here — a future refactor that breaks that contract should
+ * surface loudly in the test that consumes this helper.
+ */
+export async function _drainPendingCleanupsForTesting(): Promise<void> {
+  const jobs = Array.from(activeJobs.values());
+  await Promise.all(
+    jobs.map(async (job) => {
+      if (job._cleanup) await job._cleanup();
+      if (job._forwarderFlush) await job._forwarderFlush;
+    }),
+  );
+}
+
+/**
  * Everything a dispatch needs. Caller-facing shape — HTTP handlers map their
  * body into this; the poller constructs one from a Trello trigger; the Slack
  * listener constructs one for every deep-agent reply.
