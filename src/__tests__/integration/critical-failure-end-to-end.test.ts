@@ -145,70 +145,37 @@ vi.mock("../../repo-context.js", () => ({
   getRepoContext: vi.fn(),
 }));
 
-// Shared mutable mocks for the trello-client. Reset in beforeEach.
-const trelloMocks = vi.hoisted(() => ({
-  fetchTodoCards: vi.fn(),
-  fetchNeedsHelpCards: vi.fn(),
-  fetchReviewCards: vi.fn(),
-  fetchInProgressCards: vi.fn(),
-  fetchLatestComment: vi.fn(),
-  fetchCard: vi.fn(),
-  moveCardToList: vi.fn(),
+// Shared mutable mock for the IssueTracker the poller resolves via
+// `createIssueTracker(repo)`. Phase 5 of tracker-agnostic-agents (Trello
+// 69f76d57359b5fe89f80ab22) retired the legacy direct Trello-HTTP calls
+// from the poller hot path — every fetch / move / comment now goes
+// through the IssueTracker abstraction. The mock exposes only the
+// methods the poller actually calls; if a future scenario needs more,
+// add a `vi.fn()` here. Defaults are set in beforeEach so each test
+// gets a clean slate.
+const trackerMock = vi.hoisted(() => ({
+  fetchOpenCards: vi.fn(),
+  getCard: vi.fn(),
+  getComments: vi.fn(),
+  moveToStatus: vi.fn(),
   addComment: vi.fn(),
-  isUserResponse: vi.fn().mockReturnValue(false),
+  updateCard: vi.fn(),
 }));
 
-vi.mock("../../poller/trello-client.js", () => trelloMocks);
-
-// Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO): the poller now
-// calls `createIssueTracker(repo)` to hydrate the per-issue YAML before
-// dispatch. The integration test fixture uses fake trello creds, so the
-// real TrelloTracker would 401 on the first hydration. Replace the
-// factory with one that returns a `MemoryTracker` seeded just-in-time
-// with whatever card the test about to fire — keeps the legacy
-// trello-client mocks driving the test surface, while satisfying the
-// new IssueTracker call site without a real network.
-import { MemoryTracker } from "../../issue-tracker/memory.js";
-const issueTrackerMock = vi.hoisted(() => ({
-  tracker: null as MemoryTracker | null,
-}));
-function setIssueTracker(seedCardId: string, seedTitle: string): void {
-  issueTrackerMock.tracker = new MemoryTracker();
-  // Seed via createCard so the MemoryTracker keeps a complete StoredCard.
-  // The hydrate path just needs getCard + getComments to succeed; field
-  // contents are not asserted by the critical-failure scenarios.
-  issueTrackerMock.tracker.createCard({
-    schema_version: 2,
-    tracker: "memory",
-    id: "ISS-1",
-    parent_id: null,
-    status: "ToDo",
-    type: "Feature",
-    title: seedTitle,
-    description: "",
-    triaged: { timestamp: "", status: "", explain: "" },
-    ac: [],
-    phases: [],
-    comments: [],
-    retro: { good: "", bad: "", action_items: [], commits: [] },
-  });
-  // MemoryTracker.createCard mints its own external_id (mem-N). The
-  // poller will hydrate by the trello-card id, so we manually re-seed
-  // under that id to match.
-  // The simplest way: register a fresh tracker and stub getCard /
-  // getComments to ignore the external_id mismatch — the test never
-  // asserts on hydrated YAML contents.
-  const stub = issueTrackerMock.tracker;
-  stub.getCard = async (_id: string) => ({
+function seedHydratedCard(externalId: string, title: string): void {
+  // Brand-new-card hydration path: `hydrateFromRemote` calls
+  // `getCard(externalId)` and `getComments(externalId)`. Seed both with
+  // the synthetic Issue the poller will see on this dispatch.
+  trackerMock.getCard.mockResolvedValue({
     schema_version: 2 as const,
     tracker: "memory",
     id: "ISS-1",
-    external_id: seedCardId,
+    external_id: externalId,
     parent_id: null,
     dispatch_id: null,
     status: "ToDo" as const,
     type: "Feature" as const,
-    title: seedTitle,
+    title,
     description: "",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [],
@@ -216,22 +183,16 @@ function setIssueTracker(seedCardId: string, seedTitle: string): void {
     comments: [],
     retro: { good: "", bad: "", action_items: [], commits: [] },
   });
-  stub.getComments = async (_id: string) => [];
+  trackerMock.getComments.mockResolvedValue([]);
 }
+
 vi.mock("../../issue-tracker/index.js", async () => {
   const actual = await vi.importActual<
     typeof import("../../issue-tracker/index.js")
   >("../../issue-tracker/index.js");
   return {
     ...actual,
-    createIssueTracker: () => {
-      if (!issueTrackerMock.tracker) {
-        throw new Error(
-          "Test setup: setIssueTracker(cardId, title) must be called before poll()",
-        );
-      }
-      return issueTrackerMock.tracker;
-    },
+    createIssueTracker: () => trackerMock,
   };
 });
 
@@ -362,7 +323,13 @@ beforeAll(() => {
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  trelloMocks.isUserResponse.mockReturnValue(false);
+  // Default tracker behaviors: empty open list, empty comments. Tests
+  // override what they need.
+  trackerMock.fetchOpenCards.mockResolvedValue([]);
+  trackerMock.getComments.mockResolvedValue([]);
+  trackerMock.moveToStatus.mockResolvedValue(undefined);
+  trackerMock.addComment.mockResolvedValue({ id: "cmt-1", timestamp: "" });
+  trackerMock.updateCard.mockResolvedValue(undefined);
   mockConfig.isHost = false;
   await captureServer.start();
 
@@ -528,18 +495,14 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
       summary: "MCP Trello tools failed to load",
     });
 
-    // Halt: poll() must return WITHOUT calling any Trello fetch helper.
-    trelloMocks.fetchNeedsHelpCards.mockResolvedValue([]);
-    trelloMocks.fetchTodoCards.mockResolvedValue([]);
+    // Halt: poll() must return WITHOUT calling the tracker.
     // After the flag clears, the resume tick falls through to the
-    // ideator branch (no cards in ToDo) which calls fetchReviewCards.
-    // Stub it so the resume assertion below doesn't blow up on
-    // undefined.length.
-    trelloMocks.fetchReviewCards.mockResolvedValue([]);
-    trelloMocks.fetchInProgressCards.mockResolvedValue([]);
+    // ideator branch (no cards in ToDo). `fetchOpenCards` returning [] is
+    // sufficient for both Needs Help / ToDo / Review filters in the
+    // resume tick — they all derive from the single tracker call.
+    trackerMock.fetchOpenCards.mockResolvedValue([]);
     await poll(repo);
-    expect(trelloMocks.fetchTodoCards).not.toHaveBeenCalled();
-    expect(trelloMocks.fetchNeedsHelpCards).not.toHaveBeenCalled();
+    expect(trackerMock.fetchOpenCards).not.toHaveBeenCalled();
 
     // Clear via the worker DELETE endpoint (mirrors the dashboard
     // proxy's request shape, including the same path).
@@ -552,11 +515,11 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
     expect(cleared.cleared).toBe(true);
     expect(existsSync(flagPath(repoDir))).toBe(false);
 
-    // Resume: poll() must now reach fetchTodoCards. The mock returns
-    // [] so the tick falls through to the no-cards branch — the
-    // assertion is only that the halt gate let us through.
+    // Resume: poll() must now reach the tracker. The mock returns [] so
+    // the tick falls through to the no-cards branch — the assertion is
+    // only that the halt gate let us through.
     await poll(repo);
-    expect(trelloMocks.fetchTodoCards).toHaveBeenCalled();
+    expect(trackerMock.fetchOpenCards).toHaveBeenCalled();
 
     // A second clear is idempotent — already-absent file returns
     // {cleared: false}, NOT 404.
@@ -580,26 +543,27 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
     process.env.FAKE_CLAUDE_COMPLETE_SUMMARY = "claimed-done";
 
     const STUCK_CARD_ID = "card-stuck-in-todo";
-    const STUCK_CARD = {
-      id: STUCK_CARD_ID,
-      name: "A card that never moves",
-      idList: repo.trello.todoListId,
-      idLabels: [] as string[],
-    };
+    const STUCK_TITLE = "A card that never moves";
 
-    trelloMocks.fetchNeedsHelpCards.mockResolvedValue([]);
-    trelloMocks.fetchTodoCards.mockResolvedValue([STUCK_CARD]);
-    trelloMocks.fetchInProgressCards.mockResolvedValue([]);
-    trelloMocks.fetchReviewCards.mockResolvedValue([]);
-    // Critical: fetchCard returns the SAME idList as todoListId — that's
-    // the signal `checkCardProgressedOrHalt` uses to decide the agent
-    // never moved the card.
-    trelloMocks.fetchCard.mockResolvedValue(STUCK_CARD);
-    // Phase 2 of tracker-agnostic-agents: hydrate-or-load runs BEFORE the
-    // dispatch. Seed the IssueTracker mock so the brand-new-card hydration
-    // path returns synthetic data instead of trying to hit the real Trello
-    // API with the test fixture's fake credentials.
-    setIssueTracker(STUCK_CARD_ID, STUCK_CARD.name);
+    // The poller now drives every fetch / move / status check through
+    // the cached IssueTracker. fetchOpenCards returns the stuck ToDo
+    // card so `_poll` dispatches against it; the post-completion
+    // `checkCardProgressedOrHalt` calls `getCard` and writes the flag
+    // when status is still "ToDo".
+    trackerMock.fetchOpenCards.mockResolvedValue([
+      {
+        id: "",
+        external_id: STUCK_CARD_ID,
+        title: STUCK_TITLE,
+        status: "ToDo",
+      },
+    ]);
+    // Hydrate path needs getCard + getComments. Critical for the halt
+    // assertion: status === "ToDo" — that's the signal
+    // `checkCardProgressedOrHalt` uses to decide the agent never moved
+    // the card. The same getCard mock satisfies both the hydrate-time
+    // call and the post-dispatch progress check.
+    seedHydratedCard(STUCK_CARD_ID, STUCK_TITLE);
 
     expect(existsSync(flagPath(repoDir))).toBe(false);
 
@@ -622,10 +586,10 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
       cardId: STUCK_CARD_ID,
       cardUrl: `https://trello.com/c/${STUCK_CARD_ID}`,
       reason:
-        `Tracked card "${STUCK_CARD.name}" did not move out of ToDo after dispatch`,
+        `Tracked card "${STUCK_TITLE}" did not move out of ToDo after dispatch`,
     });
     expect(flag?.detail).toContain(STUCK_CARD_ID);
-    expect(flag?.detail).toContain(STUCK_CARD.name);
+    expect(flag?.detail).toContain(STUCK_TITLE);
     // dispatchId is the spawn's jobId — opaque to the test, but the
     // worker must persist it so operators can correlate the flag with
     // the failed dispatch.

@@ -865,22 +865,27 @@ test_yaml_memory() {
   log_header "test-system-yaml-memory"
   local start_time=$SECONDS
 
-  # Phase 4 (tracker-agnostic-agents) AC #6 verification.
+  # Phase 4 + Phase 5 (tracker-agnostic-agents) AC #6 verification.
   #
   # Purpose: end-to-end assertion that an agent dispatched into the
   # `issue-worker` workspace makes ZERO `mcp__trello__*` tool calls — the
-  # structural guarantee Phase 4 delivered by removing the trello server
-  # entry from `src/poller/inject/workspaces/issue-worker/.mcp.json`.
+  # structural guarantee delivered by:
+  #   - Phase 4: removing the trello server entry from
+  #     `src/poller/inject/workspaces/issue-worker/.mcp.json`
+  #   - Phase 5: routing every poller hot-path tracker call (fetchOpenCards,
+  #     moveToStatus, addComment, getCard, getComments) through the
+  #     IssueTracker abstraction so a future Layer 3 harness booted with
+  #     `DANXBOT_TRACKER=memory` would drive the entire lifecycle through
+  #     MemoryTracker without any direct Trello HTTP traffic.
   #
-  # Note on AC scope: the AC also asks for a "full card lifecycle vs
-  # MemoryTracker" driven by `make test-system`. The poller still calls
-  # Trello-direct `fetchTodoCards` (Phase 5 work), so a poller-driven
-  # MemoryTracker lifecycle is not yet wireable at Layer 3. The
-  # equivalent agent-side YAML round-trip is covered deterministically by
-  # `src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts`
-  # (Layer 1/2). This Layer 3 scenario verifies the property that depends
-  # on real claude + a real worker: the dispatched session JSONL contains
-  # no `mcp__trello__*` entries.
+  # The "MemoryTracker request log shows the expected fetchOpenCards/
+  # moveToStatus/addComment sequence" half of the AC is verified
+  # deterministically at Layer 2 by
+  # `src/__tests__/integration/poller-memory-tracker.test.ts` (no Docker,
+  # no real claude — drives `poll()` against a real MemoryTracker and
+  # asserts on `getRequestLog()`). The Layer 3 harness here is the
+  # JSONL/structural half: a real claude run from a real worker writes
+  # ZERO `mcp__trello__*` entries to the session JSONL.
   #
   # Cost: 1 cheap dispatch (~$0.05). Worker need NOT be in DANXBOT_TRACKER
   # =memory mode — the assertion is structural (workspace MCP shape), not

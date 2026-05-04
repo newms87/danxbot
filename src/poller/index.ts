@@ -31,8 +31,8 @@ import {
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
-import { createIssueTracker } from "../issue-tracker/index.js";
-import type { Issue } from "../issue-tracker/interface.js";
+import { createIssueTracker, TrelloTracker } from "../issue-tracker/index.js";
+import type { Issue, IssueRef, IssueTracker } from "../issue-tracker/interface.js";
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
@@ -40,19 +40,8 @@ import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { isLinkOrFile, isSymlink } from "./fs-probe.js";
-import {
-  fetchTodoCards,
-  fetchNeedsHelpCards,
-  fetchReviewCards,
-  fetchInProgressCards,
-  fetchLatestComment,
-  fetchCard,
-  moveCardToList,
-  addComment,
-  isUserResponse,
-} from "./trello-client.js";
 import type { AgentJob } from "../agent/launcher.js";
-import type { RepoContext, TrelloConfig } from "../types.js";
+import type { RepoContext } from "../types.js";
 import {
   getTrelloPollerPickupPrefix,
   isFeatureEnabled,
@@ -107,32 +96,78 @@ function getState(repoName: string): RepoPollerState {
 }
 
 /**
+ * Cache of one IssueTracker per repo, populated lazily by `getRepoTracker`.
+ *
+ * The cache is essential for `MemoryTracker` (`DANXBOT_TRACKER=memory`):
+ * a fresh tracker per tick would lose every card it ever stored, breaking
+ * any Layer 3 scenario that drives a full ToDo → In Progress → Done
+ * lifecycle through repeated `poll()` calls. With caching, the in-memory
+ * card sequence survives the entire run. `TrelloTracker` also benefits —
+ * `checklistIdCache` and `triagedLabelIdCache` survive across ticks
+ * instead of cold-starting every minute.
+ *
+ * **Lifecycle invariant:** the cache lives until process restart. The
+ * worker never rotates `RepoContext` at runtime — credential changes
+ * require a redeploy, which recreates the worker container, which
+ * tears down this Map naturally. Adding a future tracker with
+ * refreshable / short-lived auth (OAuth, rotating tokens) would need
+ * to invalidate selectively here; until then, no production code path
+ * reads or writes the cache outside `getRepoTracker`.
+ *
+ * Cleared by `_resetForTesting` so per-test isolation works.
+ */
+const trackerByRepo = new Map<string, IssueTracker>();
+
+function getRepoTracker(repo: RepoContext): IssueTracker {
+  let tracker = trackerByRepo.get(repo.name);
+  if (!tracker) {
+    tracker = createIssueTracker(repo);
+    trackerByRepo.set(repo.name, tracker);
+  }
+  return tracker;
+}
+
+/**
  * Check Needs Help cards for user responses. Cards where a user has replied
  * (latest comment lacks the danxbot marker) are moved to the top of ToDo
  * so they get higher priority than existing ToDo cards.
+ *
+ * `tracker.getComments` returns comments sorted ascending by timestamp,
+ * so the LAST element is the most recent — opposite of the retired
+ * Trello-direct comment fetch (which used `limit=1` against an endpoint
+ * that returned newest-first). Both produce the same answer: is the
+ * most recent comment from the user (no danxbot marker)?
  */
-async function checkNeedsHelp(trello: TrelloConfig): Promise<number> {
-  let cards;
+async function checkNeedsHelp(
+  repo: RepoContext,
+  tracker: IssueTracker,
+): Promise<number> {
+  let refs: IssueRef[];
   try {
-    cards = await fetchNeedsHelpCards(trello);
+    const all = await tracker.fetchOpenCards();
+    refs = all.filter((c) => c.status === "Needs Help");
   } catch (error) {
-    log.error("Error fetching Needs Help cards", error);
+    log.error(`[${repo.name}] Error fetching Needs Help cards`, error);
     return 0;
   }
 
-  if (cards.length === 0) return 0;
+  if (refs.length === 0) return 0;
 
   let movedCount = 0;
-  for (const card of cards) {
+  for (const ref of refs) {
     try {
-      const latestComment = await fetchLatestComment(trello, card.id);
-      if (isUserResponse(latestComment)) {
-        log.info(`User responded on "${card.name}" — moving to ToDo`);
-        await moveCardToList(trello, card.id, trello.todoListId, "top");
+      const comments = await tracker.getComments(ref.external_id);
+      const latest = comments.length > 0 ? comments[comments.length - 1] : null;
+      if (latest && !latest.text.includes(DANXBOT_COMMENT_MARKER)) {
+        log.info(`[${repo.name}] User responded on "${ref.title}" — moving to ToDo`);
+        await tracker.moveToStatus(ref.external_id, "ToDo");
         movedCount++;
       }
     } catch (error) {
-      log.error(`Error checking comments for card "${card.name}"`, error);
+      log.error(
+        `[${repo.name}] Error checking comments for card "${ref.title}"`,
+        error,
+      );
     }
   }
 
@@ -201,17 +236,24 @@ async function _poll(repo: RepoContext): Promise<void> {
 
   log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
 
+  // ONE tracker per repo, reused across every tick (see `getRepoTracker`).
+  // Threaded through every helper that needs to talk to the issue
+  // tracker so `MemoryTracker` state survives the lifecycle and so
+  // tests can assert on a single mock.
+  const tracker = getRepoTracker(repo);
+
   // Check Needs Help first — user-responded cards get moved to ToDo top
-  const movedFromNeedsHelp = await checkNeedsHelp(repo.trello);
+  const movedFromNeedsHelp = await checkNeedsHelp(repo, tracker);
   if (movedFromNeedsHelp > 0) {
     log.info(
       `[${repo.name}] Moved ${movedFromNeedsHelp} card${movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`,
     );
   }
 
-  let cards;
+  let cards: IssueRef[];
   try {
-    cards = await fetchTodoCards(repo.trello);
+    const all = await tracker.fetchOpenCards();
+    cards = all.filter((c) => c.status === "ToDo");
   } catch (error) {
     log.error(`[${repo.name}] Error fetching cards`, error);
     return;
@@ -227,10 +269,14 @@ async function _poll(repo: RepoContext): Promise<void> {
   // only non-matching cards falls through to the ideator check rather
   // than dispatching, AND before `priorTodoCardIds` is captured so
   // stuck-card recovery only considers cards in this dispatch's scope.
+  // Match against `IssueRef.title` — TrelloTracker strips the `#ISS-N: `
+  // id prefix from card names, so `[System Test] foo` still matches the
+  // operator-configured prefix `[System Test]` regardless of whether the
+  // card has been reconciled with a local YAML.
   const pickupPrefix = getTrelloPollerPickupPrefix(repo.localPath);
   if (pickupPrefix) {
     const before = cards.length;
-    cards = cards.filter((c) => c.name.startsWith(pickupPrefix));
+    cards = cards.filter((c) => c.title.startsWith(pickupPrefix));
     log.info(
       `[${repo.name}] pickupNamePrefix="${pickupPrefix}" filter: ${cards.length}/${before} cards match`,
     );
@@ -238,46 +284,47 @@ async function _poll(repo: RepoContext): Promise<void> {
 
   if (cards.length === 0) {
     log.info(`[${repo.name}] No cards in ToDo — checking if ideator needed`);
-    await checkAndSpawnIdeator(repo);
+    await checkAndSpawnIdeator(repo, tracker);
     return;
   }
 
   log.info(
     `[${repo.name}] Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`,
   );
-  cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.name}`));
+  cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.title}`));
 
-  // Save card IDs for stuck-card recovery on failure
+  // Save tracker-native ids for stuck-card recovery on failure
   const state = getState(repo.name);
-  state.priorTodoCardIds = cards.map((c) => c.id);
+  state.priorTodoCardIds = cards.map((c) => c.external_id);
 
   // Record the first card as the dispatch trigger. One agent session processes
   // the whole ToDo queue; tagging it with the primary card lets the dashboard
   // show what kicked off the run. The UI can expand to show all processed cards
-  // by scanning the JSONL for Trello MCP calls.
+  // by scanning the JSONL for tracker MCP calls.
   const primary = cards[0];
   const trelloMeta: TrelloTriggerMetadata = {
-    cardId: primary.id,
-    cardName: primary.name,
-    cardUrl: `https://trello.com/c/${primary.id}`,
+    cardId: primary.external_id,
+    cardName: primary.title,
+    cardUrl: `https://trello.com/c/${primary.external_id}`,
     listId: repo.trello.todoListId,
     listName: "ToDo",
   };
 
-  // Hydrate-or-load by tracker-native external_id (the Trello card id),
-  // then dispatch using the resolved INTERNAL id. The agent never sees
-  // external_id — the dispatch prompt and YAML filename both use `id`.
+  // Hydrate-or-load by tracker-native external_id, then dispatch using
+  // the resolved INTERNAL id. The agent never sees external_id — the
+  // dispatch prompt and YAML filename both use `id`.
   //   1. Pre-generate the dispatch UUID so the same value lands in BOTH
   //      the dispatch row AND the YAML's `dispatch_id` field.
   //   2. `findByExternalId` scans existing YAMLs — if one carries this
   //      external_id, it's authoritative; only `dispatch_id` overwrites.
   //   3. No match → `hydrateFromRemote` pulls metadata, allocates an
   //      ISS-N (or parses one from the title prefix), patches the
-  //      tracker title, and writes a fresh local YAML.
+  //      tracker title, and writes a fresh local YAML. Reuses the same
+  //      cached tracker instance so MemoryTracker state survives.
   //   4. Dispatch task references the local id — agent calls
   //      `danx_issue_save({id})` and never knows external trackers exist.
   const dispatchId = randomUUID();
-  const existing = findByExternalId(repo.localPath, primary.id);
+  const existing = findByExternalId(repo.localPath, primary.external_id);
   let resolvedIssue: Issue;
   if (existing) {
     resolvedIssue = stampDispatchAndWrite(
@@ -286,14 +333,9 @@ async function _poll(repo: RepoContext): Promise<void> {
       dispatchId,
     );
   } else {
-    // Constructed only when hydration is actually needed — the existing-
-    // file path is the steady-state hot path, and skipping the factory
-    // call there avoids allocating a TrelloTracker (which opens an HTTP
-    // client on construction) on every tick where the YAML already exists.
-    const tracker = createIssueTracker(repo);
     resolvedIssue = await hydrateFromRemote(
       tracker,
-      primary.id,
+      primary.external_id,
       dispatchId,
       repo.localPath,
     );
@@ -894,15 +936,27 @@ function spawnClaude(
       ? apiDispatchMeta.metadata.cardId
       : null;
 
-  // The poller's own card-lifecycle calls (fetchTodoCards,
-  // moveCardToList, retro comments) require trello credentials on
-  // `RepoContext`. Fail loud here so a missing value surfaces as a
-  // clear configuration error before we spawn an agent that the poller
-  // can't follow up on. The dispatch overlay itself no longer needs
-  // these (Phase 5 of tracker-agnostic-agents retired the trello MCP
-  // server entry from the issue-worker workspace).
+  // The poller's tracker calls (fetchOpenCards, moveToStatus, retro
+  // comments) need a usable IssueTracker. Resolve the cached tracker
+  // up front so the validation key is the RESOLVED tracker class, not
+  // an env var the createIssueTracker factory reads internally — that
+  // keeps "which tracker is active" with one source of truth and
+  // eliminates the only `process.env` read that used to live on the
+  // poller hot path.
+  //
+  // Only TrelloTracker requires populated credentials on RepoContext;
+  // MemoryTracker (DANXBOT_TRACKER=memory) constructs without them.
+  // Fail loud here so a missing value surfaces as a clear configuration
+  // error before we spawn an agent that the poller can't follow up on.
+  // The dispatch overlay itself no longer needs these (Phase 5 of
+  // tracker-agnostic-agents retired the trello MCP server entry from
+  // the issue-worker workspace).
+  const tracker = getRepoTracker(repo);
   const trello = repo.trello;
-  if (!trello?.apiKey || !trello?.apiToken || !trello?.boardId) {
+  if (
+    tracker instanceof TrelloTracker &&
+    (!trello?.apiKey || !trello?.apiToken || !trello?.boardId)
+  ) {
     throw new Error(
       `[${repo.name}] poller dispatchCard called without complete trello credentials on RepoContext`,
     );
@@ -1048,9 +1102,10 @@ async function checkCardProgressedOrHalt(
   const cardId = state.trackedCardId;
   if (!cardId) return;
 
-  let card;
+  const tracker = getRepoTracker(repo);
+  let card: Issue;
   try {
-    card = await fetchCard(repo.trello, cardId);
+    card = await tracker.getCard(cardId);
   } catch (err) {
     log.error(
       `[${repo.name}] Failed to fetch tracked card ${cardId} after dispatch — skipping card-progress check`,
@@ -1059,7 +1114,7 @@ async function checkCardProgressedOrHalt(
     return;
   }
 
-  if (card.idList !== repo.trello.todoListId) {
+  if (card.status !== "ToDo") {
     // Card moved to In Progress / Needs Help / Done / Cancelled / Review.
     // The dispatch made SOME progress even if it ultimately failed — not
     // an env-level issue. Leave the flag untripped.
@@ -1067,16 +1122,16 @@ async function checkCardProgressedOrHalt(
   }
 
   log.error(
-    `[${repo.name}] Tracked card "${card.name}" (${cardId}) still in ToDo after dispatch ${job.id} — writing critical-failure flag`,
+    `[${repo.name}] Tracked card "${card.title}" (${cardId}) still in ToDo after dispatch ${job.id} — writing critical-failure flag`,
   );
   writeFlag(repo.localPath, {
     source: "post-dispatch-check",
     dispatchId: job.id,
     cardId,
     cardUrl: `https://trello.com/c/${cardId}`,
-    reason: `Tracked card "${card.name}" did not move out of ToDo after dispatch`,
+    reason: `Tracked card "${card.title}" did not move out of ToDo after dispatch`,
     detail:
-      `Card ${cardId} (${card.name}) stayed in the ToDo list across dispatch ${job.id} ` +
+      `Card ${cardId} (${card.title}) stayed in the ToDo list across dispatch ${job.id} ` +
       `(status=${job.status}, summary=${job.summary || "none"}). ` +
       `Poller halts until this flag is cleared and the underlying environment blocker is fixed.`,
   });
@@ -1093,15 +1148,17 @@ async function recoverStuckCards(
 ): Promise<void> {
   if (state.priorTodoCardIds.length === 0) return;
 
+  const tracker = getRepoTracker(repo);
   try {
-    const inProgressCards = await fetchInProgressCards(repo.trello);
+    const all = await tracker.fetchOpenCards();
+    const inProgressCards = all.filter((c) => c.status === "In Progress");
     const stuckCards = inProgressCards.filter((card) =>
-      state.priorTodoCardIds.includes(card.id),
+      state.priorTodoCardIds.includes(card.external_id),
     );
 
     for (const card of stuckCards) {
-      log.warn(`[${repo.name}] Recovering stuck card "${card.name}" → Needs Help`);
-      await moveCardToList(repo.trello, card.id, repo.trello.needsHelpListId, "top");
+      log.warn(`[${repo.name}] Recovering stuck card "${card.title}" → Needs Help`);
+      await tracker.moveToStatus(card.external_id, "Needs Help");
 
       const elapsed = formatElapsed(job);
       const comment = `## Agent Failure — Card Recovery
@@ -1114,7 +1171,7 @@ This card was automatically moved to Needs Help. Review the error and move back 
 
 ${DANXBOT_COMMENT_MARKER}`;
 
-      await addComment(repo.trello, card.id, comment);
+      await tracker.addComment(card.external_id, comment);
     }
   } catch (err) {
     log.error(`[${repo.name}] Failed to recover stuck cards`, err);
@@ -1128,10 +1185,13 @@ function formatElapsed(job: AgentJob): string {
   return `${Math.round(seconds / 60)}min`;
 }
 
-async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {
+async function checkAndSpawnIdeator(
+  repo: RepoContext,
+  tracker: IssueTracker,
+): Promise<void> {
   // Per-repo runtime toggle. Env default is `false` — operators opt in
   // via the dashboard Agents tab. Checked BEFORE the Review-list fetch
-  // so a disabled repo doesn't pay the Trello round-trip on every
+  // so a disabled repo doesn't pay the tracker round-trip on every
   // empty-ToDo tick. See `.claude/rules/settings-file.md`.
   if (!isFeatureEnabled(repo, "ideator")) {
     log.info(
@@ -1140,9 +1200,10 @@ async function checkAndSpawnIdeator(repo: RepoContext): Promise<void> {
     return;
   }
 
-  let reviewCards;
+  let reviewCards: IssueRef[];
   try {
-    reviewCards = await fetchReviewCards(repo.trello);
+    const all = await tracker.fetchOpenCards();
+    reviewCards = all.filter((c) => c.status === "Review");
   } catch (error) {
     log.error(`[${repo.name}] Error fetching Review cards`, error);
     return;
@@ -1230,6 +1291,7 @@ export function _resetForTesting(): void {
     }
   }
   repoState.clear();
+  trackerByRepo.clear();
 }
 
 // Auto-start when run as the direct entrypoint.
