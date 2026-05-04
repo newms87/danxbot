@@ -14,7 +14,7 @@ import {
   type IssueType,
   type PhaseStatus,
 } from "./interface.js";
-import { BOOKKEEPING_SEP } from "./sync.js";
+import { BOOKKEEPING_SEP } from "./markers.js";
 
 /**
  * Build a fully-populated minimal Issue from a small seed. Every required

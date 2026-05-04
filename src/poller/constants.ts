@@ -81,9 +81,6 @@ export const REVIEW_MIN_CARDS = parseInt(
   10,
 );
 
-/** Marker appended to all Danxbot-posted Trello comments. The poller uses this to distinguish bot comments from user responses. */
-export const DANXBOT_COMMENT_MARKER = "<!-- danxbot -->";
-
 /** Claude CLI prompts for the poller's agent modes. */
 export const TEAM_PROMPT = "/danx-next";
 export const IDEATOR_PROMPT = "/danx-ideate";

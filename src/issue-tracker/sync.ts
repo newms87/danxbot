@@ -1,4 +1,10 @@
-import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
+import {
+  ACTION_ITEMS_COMMENT_MARKER,
+  BOOKKEEPING_SEP,
+  DANXBOT_COMMENT_MARKER,
+  RETRO_COMMENT_MARKER,
+  findCommentByMarker,
+} from "./markers.js";
 import {
   type Issue,
   type IssueAcItem,
@@ -7,45 +13,6 @@ import {
   type IssueRetro,
   type IssueTracker,
 } from "./interface.js";
-
-/**
- * Idempotency marker for the worker-rendered retro comment. Every retro
- * comment carries BOTH this marker and `DANXBOT_COMMENT_MARKER` so the
- * poller's `isUserResponse` filter still skips them.
- *
- * The retro renderer scans existing comments for this marker to decide
- * whether to edit-in-place, post fresh, or skip — see `renderRetroComment`.
- */
-export const RETRO_COMMENT_MARKER = "<!-- danxbot-retro -->";
-
-/**
- * Idempotency marker for the worker-managed action-items bookkeeping
- * comment. Tracks `<title>\t<external_id>` (TAB-separated) for every retro
- * action_item already spawned to a tracker card, so re-syncs are no-ops.
- *
- * The separator is U+0009 HORIZONTAL TAB rather than a glyph (the original
- * design used U+2192 '→'). Glyphs and ASCII bigrams that visually render as
- * arrows (`->`, `=>`, `⟶`, `➔`, `➡`, `⇒`) are easy for an agent or human
- * to type into an action_item title; with the arrow as separator a title
- * carrying one risked silent misattribution on reread. Tab is invisible in
- * the tracker UI, never appears in human prose, and is rejected by
- * `validateRetro` in `src/issue-tracker/yaml.ts` so a title cannot collide
- * with the separator. See card 69f771d6cbd1ada690743c73 for the design
- * discussion.
- */
-export const ACTION_ITEMS_COMMENT_MARKER = "<!-- danxbot-action-items -->";
-
-/**
- * The bookkeeping line separator between `<title>` and `<external_id>`.
- * U+0009 HORIZONTAL TAB. `validateRetro` in `src/issue-tracker/yaml.ts`
- * rejects tab in `retro.action_items[i]`, so a bullet line contains
- * exactly one tab and `indexOf` recovers the title/id split unambiguously.
- *
- * Exported so the validator imports the same constant rather than
- * hardcoding `"\t"` independently — a future separator change touches
- * one site, not two.
- */
-export const BOOKKEEPING_SEP = "\t";
 
 /**
  * Deterministic, idempotent worker-side sync.
@@ -328,8 +295,9 @@ export async function syncIssue(
     const knownCommentsForActionItems: IssueComment[] = updatedComments.map(
       (c, idx) => stampedCommentsByOriginalIndex.get(idx) ?? c,
     );
-    const existing = findActionItemsBookkeepingComment(
+    const existing = findCommentByMarker(
       knownCommentsForActionItems,
+      ACTION_ITEMS_COMMENT_MARKER,
     );
     const alreadySpawned = existing
       ? parseActionItemsBookkeeping(existing.text)
@@ -400,7 +368,10 @@ export async function syncIssue(
   let retroAppendedComment: IssueComment | null = null;
   if (isTerminal && retroNonEmpty) {
     const desiredText = renderRetroComment(local.retro);
-    const managed = findManagedRetroComment(knownCommentsForRetro);
+    const managed = findCommentByMarker(
+      knownCommentsForRetro,
+      RETRO_COMMENT_MARKER,
+    );
     if (managed) {
       // Already worker-managed — only write if body changed.
       if (managed.text !== desiredText) {
@@ -511,24 +482,6 @@ export function renderRetroComment(retro: IssueRetro): string {
   return `${DANXBOT_COMMENT_MARKER}\n${RETRO_COMMENT_MARKER}\n\n${body}`;
 }
 
-function findCommentByMarker(
-  comments: IssueComment[],
-  marker: string,
-): { id: string; text: string } | null {
-  for (const c of comments) {
-    if (!c.id) continue;
-    if (c.text.includes(marker)) {
-      return { id: c.id, text: c.text };
-    }
-  }
-  return null;
-}
-
-function findManagedRetroComment(
-  comments: IssueComment[],
-): { id: string; text: string } | null {
-  return findCommentByMarker(comments, RETRO_COMMENT_MARKER);
-}
 
 // ---------- action-items bookkeeping helpers (exported for tests) ----------
 
@@ -630,11 +583,6 @@ export function parseActionItemsBookkeeping(
   return out;
 }
 
-function findActionItemsBookkeepingComment(
-  comments: IssueComment[],
-): { id: string; text: string } | null {
-  return findCommentByMarker(comments, ACTION_ITEMS_COMMENT_MARKER);
-}
 
 /**
  * Detect a Phase-4-shape manually-appended retro comment — a danxbot-

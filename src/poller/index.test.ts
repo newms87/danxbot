@@ -102,7 +102,6 @@ vi.mock("../repo-context.js", () => ({
 vi.mock("./constants.js", () => ({
   getReposBase: () => "/danxbot/repos",
   REVIEW_MIN_CARDS: 10,
-  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
   TEAM_PROMPT: "/danx-next",
   IDEATOR_PROMPT: "/danx-ideate",
 }));

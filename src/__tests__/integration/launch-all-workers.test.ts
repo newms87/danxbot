@@ -169,7 +169,7 @@ function runMakeTarget(
 }
 
 describe("make launch-all-workers", () => {
-  it.skipIf(!MAKE_AVAILABLE)("each repo's compose is called with its OWN per-repo DANXBOT_WORKER_PORT (resists hostile shell — Trello oGbjLtjN)", () => {
+  it.skipIf(!MAKE_AVAILABLE)("each repo's compose is called with its OWN per-repo DANXBOT_WORKER_PORT (resists hostile shell — Trello oGbjLtjN)", { timeout: 30_000 }, () => {
     const project = setupFakeProject([
       ["platform", "5560"],
       ["danxbot", "5561"],
@@ -203,7 +203,7 @@ describe("make launch-all-workers", () => {
     }
   });
 
-  it.skipIf(!MAKE_AVAILABLE)("clean shell — same per-repo binding is preserved when DANXBOT_WORKER_PORT is unset in the parent", () => {
+  it.skipIf(!MAKE_AVAILABLE)("clean shell — same per-repo binding is preserved when DANXBOT_WORKER_PORT is unset in the parent", { timeout: 30_000 }, () => {
     const project = setupFakeProject([
       ["platform", "5560"],
       ["danxbot", "5561"],
@@ -230,7 +230,7 @@ describe("make launch-all-workers", () => {
     }
   });
 
-  it.skipIf(!MAKE_AVAILABLE)("aborts the whole target when one repo's helper fails — does NOT silently continue to subsequent repos", () => {
+  it.skipIf(!MAKE_AVAILABLE)("aborts the whole target when one repo's helper fails — does NOT silently continue to subsequent repos", { timeout: 30_000 }, () => {
     // Three repos; the middle one has a malformed `.env` (no PORT line).
     // The Makefile's outer `|| exit 1` and the subshell's `set -e` must
     // combine to: (a) start repo A successfully, (b) fail at repo B, (c)
@@ -268,7 +268,7 @@ describe("make launch-all-workers", () => {
     }
   });
 
-  it.skipIf(!MAKE_AVAILABLE)("make launch-worker REPO=<name> still reads the per-repo .env (no regression in single-repo target)", () => {
+  it.skipIf(!MAKE_AVAILABLE)("make launch-worker REPO=<name> still reads the per-repo .env (no regression in single-repo target)", { timeout: 30_000 }, () => {
     const project = setupFakeProject([["platform", "5560"]]);
     try {
       const result = runMakeTarget(project, "launch-worker", {

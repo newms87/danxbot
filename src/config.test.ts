@@ -21,7 +21,6 @@ vi.mock("./poller/constants.js", () => ({
     blockedLabelId: "mock-blocked-label-id",
   }),
   REVIEW_MIN_CARDS: 10,
-  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
 }));
 
 // Phase B: src/config.ts loads the connected-repo list via

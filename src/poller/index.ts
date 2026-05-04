@@ -18,10 +18,10 @@ import { config, targetName } from "../config.js";
 import { repoContexts } from "../repo-context.js";
 import {
   REVIEW_MIN_CARDS,
-  DANXBOT_COMMENT_MARKER,
   TEAM_PROMPT,
   IDEATOR_PROMPT,
 } from "./constants.js";
+import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 import {
   ensureGitignoreEntry,
   ensureIssuesDirs,

@@ -1,12 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { TrelloConfig } from "../types.js";
 
-// Mock constants before import — prevents YAML file read
-vi.mock("../poller/constants.js", () => ({
-  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
-}));
-
-import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
+import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 
 // Mock global fetch
 const mockFetch = vi.fn();

@@ -1,6 +1,6 @@
 import type { TrelloConfig } from "../types.js";
 import { createLogger } from "../logger.js";
-import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
+import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 
 const log = createLogger("trello-notifier");
 

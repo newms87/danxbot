@@ -1,15 +1,17 @@
 import { describe, it, expect } from "vitest";
 import { MemoryTracker } from "../../issue-tracker/memory.js";
 import {
-  ACTION_ITEMS_COMMENT_MARKER,
-  RETRO_COMMENT_MARKER,
   isRetroNonEmpty,
   parseActionItemsBookkeeping,
   renderActionItemsBookkeeping,
   renderRetroComment,
   syncIssue,
 } from "../../issue-tracker/sync.js";
-import { DANXBOT_COMMENT_MARKER } from "../../poller/constants.js";
+import {
+  ACTION_ITEMS_COMMENT_MARKER,
+  DANXBOT_COMMENT_MARKER,
+  RETRO_COMMENT_MARKER,
+} from "../../issue-tracker/markers.js";
 import type { CreateCardInput, Issue } from "../../issue-tracker/interface.js";
 
 function defaultCreate(): CreateCardInput {

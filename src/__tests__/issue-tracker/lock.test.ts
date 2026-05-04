@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { MemoryTracker } from "../../issue-tracker/memory.js";
 import {
-  LOCK_COMMENT_MARKER,
   LOCK_TTL_MS,
   parseLockComment,
   renderLockComment,
   tryAcquireLock,
 } from "../../issue-tracker/lock.js";
-import { DANXBOT_COMMENT_MARKER } from "../../poller/constants.js";
+import {
+  DANXBOT_COMMENT_MARKER,
+  LOCK_COMMENT_MARKER,
+} from "../../issue-tracker/markers.js";
 import type { CreateCardInput } from "../../issue-tracker/interface.js";
 
 const HOLDER_A = {

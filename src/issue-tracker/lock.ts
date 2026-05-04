@@ -36,14 +36,15 @@
  */
 
 import { hostname, homedir } from "node:os";
-import { DANXBOT_COMMENT_MARKER } from "../poller/constants.js";
+import {
+  DANXBOT_COMMENT_MARKER,
+  LOCK_COMMENT_MARKER,
+  findCommentByMarker,
+} from "./markers.js";
 import { createLogger } from "../logger.js";
 import { type IssueTracker } from "./interface.js";
 
 const log = createLogger("dispatch-lock");
-
-/** Marker line identifying this comment as the dispatch lock. */
-export const LOCK_COMMENT_MARKER = "<!-- danxbot-lock -->";
 
 /** Lock lifetime. After this, a different holder may reclaim. */
 export const LOCK_TTL_MS = 2 * 60 * 60 * 1000;
@@ -217,9 +218,7 @@ export async function tryAcquireLock(
   ttlMs: number = LOCK_TTL_MS,
 ): Promise<AcquireResult> {
   const comments = await tracker.getComments(externalId);
-  const existingComment = comments.find((c) =>
-    c.text.includes(LOCK_COMMENT_MARKER),
-  );
+  const existingComment = findCommentByMarker(comments, LOCK_COMMENT_MARKER);
   const startedAt = now.toISOString();
   const text = renderLockComment(info, startedAt, ttlMs);
 

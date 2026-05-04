@@ -11,10 +11,10 @@ vi.mock("../config.js", () => ({
 // Mock constants.ts since it reads from a YAML file that doesn't exist in tests
 vi.mock("./constants.js", () => ({
   REVIEW_MIN_CARDS: 10,
-  DANXBOT_COMMENT_MARKER: "<!-- danxbot -->",
 }));
 
-import { config, DANXBOT_COMMENT_MARKER } from "./config.js";
+import { config } from "./config.js";
+import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 
 describe("config", () => {
   it("re-exports config from main config.ts", () => {
