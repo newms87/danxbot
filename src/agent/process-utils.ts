@@ -15,7 +15,7 @@ import { ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createLogger } from "../logger.js";
-import type { AgentJob } from "./launcher.js";
+import type { AgentJob } from "./agent-types.js";
 
 const log = createLogger("process-utils");
 

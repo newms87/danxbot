@@ -14,30 +14,11 @@
  * - maxRuntimeMs: hard runtime cap
  */
 
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
-import {
-  buildCleanEnv,
-  logPromptToDisk,
-  createInactivityTimer,
-  setupProcessHandlers,
-} from "./process-utils.js";
+import { createInactivityTimer } from "./process-utils.js";
 import { SessionLogWatcher } from "./session-log-watcher.js";
-import { buildClaudeInvocation } from "./claude-invocation.js";
-import { probeAllMcpServers } from "./mcp-server-probe.js";
-import {
-  preflightClaudeAuth,
-  ClaudeAuthError,
-} from "./claude-auth-preflight.js";
-import {
-  preflightProjectsDir,
-  ProjectsDirError,
-} from "./projects-dir-preflight.js";
 import {
   createLaravelForwarder,
   deriveQueuePath,
@@ -48,343 +29,38 @@ import {
   startDispatchTracking,
   type DispatchTracker,
 } from "../dashboard/dispatch-tracker.js";
-import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import {
-  buildDispatchScript,
-  getTerminalLogPath,
-  spawnInTerminal,
-} from "../terminal.js";
-import { readPidFileWithTimeout, createHostExitWatcher } from "./host-pid.js";
+  putStatus,
+  startHeartbeat,
+  notifyTerminalStatus,
+} from "./agent-status.js";
+import { runHostModeFork } from "./spawn-host-mode.js";
+import { spawnDockerMode } from "./spawn-docker-mode.js";
+import { attachUsageAccumulator } from "./usage-accumulator.js";
+import { buildCleanup } from "./agent-cleanup.js";
+import { buildJobStopHandler } from "./agent-stop.js";
+import { runSpawnPreflight } from "./spawn-preflight.js";
 import {
-  createDockerHandle,
-  createHostHandle,
-  type AgentHandle,
-} from "./agent-handle.js";
+  type AgentJob,
+  type SpawnAgentOptions,
+  terminateWithGrace,
+} from "./agent-types.js";
+
+// Re-exported so the historical import surface
+// (`import { putStatus, startHeartbeat, AgentJob, ... } from "../agent/launcher.js"`)
+// keeps working — these symbols moved to sibling modules during the
+// launcher.ts split (Trello g8NF9oat) but still belong to the launcher's
+// public contract.
+export { putStatus, startHeartbeat, stopHeartbeat } from "./agent-status.js";
+export { buildCompletionInstruction } from "./completion-instruction.js";
+export {
+  type AgentJob,
+  type AgentUsage,
+  type SpawnAgentOptions,
+  terminateWithGrace,
+} from "./agent-types.js";
 
 const log = createLogger("launcher");
-
-const HEARTBEAT_INTERVAL_MS = 10_000;
-const TERMINAL_STATUS_RETRIES = 3;
-const TERMINAL_STATUS_RETRY_DELAY_MS = 2_000;
-
-/** How long to wait for the host-mode bash script to write its PID file. */
-const HOST_PID_FILE_TIMEOUT_MS = 2_000;
-/** Polling cadence while waiting for the host-mode PID file to appear. */
-const HOST_PID_FILE_POLL_MS = 50;
-/** Polling cadence for the host-mode liveness check (SIGNAL 0 on the PID). */
-const HOST_EXIT_POLL_MS = 500;
-
-export interface AgentUsage {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_input_tokens: number;
-  cache_creation_input_tokens: number;
-}
-
-export interface AgentJob {
-  id: string;
-  status: "running" | "completed" | "failed" | "timeout" | "canceled";
-  summary: string;
-  startedAt: Date;
-  completedAt?: Date;
-  statusUrl?: string;
-  /**
-   * Running totals accumulated from every assistant entry's `message.usage`
-   * in the single dispatch JSONL. Claude Code emits per-turn usage on each
-   * assistant entry; total = sum across entries. One JSONL per dispatch
-   * (see `.claude/rules/agent-dispatch.md`) means no double-counting.
-   */
-  usage: AgentUsage;
-  /**
-   * Runtime handle for the spawned claude process. Set during the runtime
-   * fork inside `spawnAgent`. Docker mode wraps a ChildProcess; host mode
-   * wraps a tracked PID + its liveness-poll watcher. Every lifecycle site
-   * (kill, isAlive, onExit, dispose) goes through this single interface;
-   * the runtime branch is decided once at fork time, not at every callsite.
-   * See `src/agent/agent-handle.ts` for the contract.
-   */
-  handle?: AgentHandle;
-  heartbeatInterval?: ReturnType<typeof setInterval>;
-  /** The SessionLogWatcher monitoring this job's JSONL session file. */
-  watcher?: SessionLogWatcher;
-  /**
-   * Dispatch row tracker. Set when `options.dispatch` is passed to spawnAgent.
-   * Undefined for runs that should not appear in the dispatch history.
-   */
-  dispatchTracker?: DispatchTracker;
-  /**
-   * Path where `script -q -f` writes terminal output when openTerminal is true.
-   * Used by TerminalOutputWatcher + StallDetector for thinking indicator detection.
-   */
-  terminalLogPath?: string;
-  /**
-   * Internal cleanup callback — tears down watcher, forwarder, timers, and
-   * awaits `dispatchTracker.finalize` so the dispatches DB row reflects the
-   * full token + counter totals from the JSONL. Returns a promise so call
-   * sites that issue terminal-state HTTP PUTs (cancelJob, job.stop) can
-   * sequence the PUT after the final DB write. Fire-and-forget callers
-   * (inactivity / max-runtime timers, defensive re-runs from
-   * setupProcessHandlers) drop the promise — the launcher caches the
-   * in-flight cleanup promise so concurrent callers observe the same chain.
-   */
-  _cleanup?: () => Promise<void>;
-  /**
-   * Promise tracking the in-flight `forwarderFlush?.()` started by
-   * `runCleanup`. The launcher fires the final flush as fire-and-forget
-   * (`void forwarderFlush?.()`) to keep production cleanup latency
-   * short — Laravel POST retries can take up to ~60s under
-   * exponential-backoff but the dispatch row + putStatus PUT must NOT
-   * block on them. Tests need an awaitable handle on that work so
-   * subsequent `rmSync(<config.logsDir>)` cannot race a pending
-   * `appendFile` against `<config.logsDir>/event-queue/<jobId>.jsonl`
-   * (Trello 69f77e9b77472aefac1317b2 — teardown leak in
-   * `yaml-lifecycle-memory-tracker.test.ts`).
-   *
-   * Always set when the dispatch was created with `eventForwarding`;
-   * `undefined` otherwise (poller-style dispatches that omit
-   * apiToken/statusUrl). The promise resolves when `drainAndSend`
-   * returns — drainAndSend's inner try/catch swallows ENOENT and
-   * network errors, so awaiting this never rejects.
-   */
-  _forwarderFlush?: Promise<void>;
-  /**
-   * Fires options.onComplete with the job when a terminal state is reached
-   * outside of the close/exit handler flow (i.e. from cancelJob). Lets
-   * dispatch-layer teardown such as cleanupMcpSettings run on cancel — the
-   * close handler would otherwise early-return because status is pre-set.
-   */
-  _onComplete?: () => void;
-  /**
-   * Agent-initiated stop — signals that the agent completed or failed gracefully.
-   * Sends SIGTERM, waits 5s, then SIGKILL if needed, then fires onComplete.
-   * Use for lifecycle tool callbacks (dispatch agents). For user cancellations, use cancelJob().
-   *
-   * Always set by `spawnAgent()` before the job is returned to the caller — required,
-   * not optional, so call sites don't have to silently no-op on a missing handler.
-   */
-  stop: (status: "completed" | "failed", summary?: string) => Promise<void>;
-}
-
-/**
- * Send SIGTERM, wait `graceMs`, then SIGKILL if the process is still alive.
- * The two-phase pattern gives the agent a chance to flush state (final
- * assistant message, usage totals) before forceful termination. Works
- * identically in docker and host mode via `job.handle` — the runtime
- * branch was decided once at spawn time. No-op when no handle is attached
- * (e.g. after cleanup).
- *
- * Exported so callers outside the launcher (dispatch stall recovery, future
- * lifecycle tools) can drive termination without duplicating the runtime
- * fork — see `.claude/rules/agent-dispatch.md`, "Single Fork Principle".
- */
-export async function terminateWithGrace(
-  job: AgentJob,
-  graceMs: number,
-): Promise<void> {
-  if (!job.handle) return;
-  job.handle.kill("SIGTERM");
-  await new Promise((resolve) => setTimeout(resolve, graceMs));
-  if (job.handle.isAlive()) {
-    job.handle.kill("SIGKILL");
-  }
-}
-
-export interface SpawnAgentOptions {
-  /** The prompt/command to pass to claude CLI */
-  prompt: string;
-  /** Short title shown in the agent's initial message alongside the prompt file reference.
-   *  Typically includes tracking IDs (e.g. "AgentDispatch #AGD-359, SchemaDefinition #SD-176")
-   *  so humans can identify the dispatch in session logs and thread UIs. */
-  title?: string;
-  /** Repo name — used to resolve cwd to repos/<name> */
-  repoName: string;
-  /**
-   * Spawned agent's working directory — the resolved
-   * `<repo>/.danxbot/workspaces/<name>/` workspace dir from
-   * `resolveWorkspace`. Required: every dispatch goes through the
-   * workspace resolver, no caller spawns without an explicit cwd. The
-   * legacy singular `<repo>/.danxbot/workspace/` fallback was retired
-   * with the workspace-dispatch epic (Trello `jAdeJgi5`).
-   */
-  cwd: string;
-  /** Optional pre-generated job ID. If not set, a UUID is generated. Used to keep
-   *  the activeJobs key stable across stall-recovery respawns. */
-  jobId?: string;
-  /** Inactivity timeout in milliseconds */
-  timeoutMs: number;
-  /** Additional env vars to merge into the spawned process environment */
-  env?: Record<string, string>;
-  /** Called when the agent finishes (success, failure, or timeout) */
-  onComplete?: (job: AgentJob) => void;
-  /** Path to MCP settings JSON. When set, adds --mcp-config to CLI args. */
-  mcpConfigPath?: string;
-  /**
-   * Agent definitions forwarded to Claude CLI's `--agents <json>` flag.
-   * Must be an object keyed by agent name (the shape Claude CLI requires) —
-   * a list silently falls back to built-in agents and makes
-   * `Agent(subagent_type: "<name>")` fail with "Agent type not found".
-   * See `.claude/rules/agent-dispatch.md`.
-   */
-  agents?: Record<string, Record<string, unknown>>;
-  /** Status URL for heartbeat/putStatus (stored on AgentJob for startHeartbeat) */
-  statusUrl?: string;
-  /** API token for heartbeat and event forwarding */
-  apiToken?: string;
-  /** When set, starts batched event forwarding to the Laravel API */
-  eventForwarding?: {
-    statusUrl: string;
-    apiToken: string;
-  };
-  /** Hard runtime cap in milliseconds (does NOT reset on activity) */
-  maxRuntimeMs?: number;
-  /** If true, also opens an interactive Windows Terminal tab for the agent */
-  openTerminal?: boolean;
-  /**
-   * When set, a `dispatches` row is created for this spawn and finalized when
-   * the agent reaches a terminal state. Omit for runs that should not appear
-   * in the dispatch history (e.g., Slack router-only responses).
-   */
-  dispatch?: DispatchTriggerMetadata;
-  /**
-   * Claude session UUID to resume via `claude --resume`. Passed through to
-   * `buildClaudeInvocation`. When set, claude loads the prior session's
-   * history; a fresh dispatch tag is still prepended so SessionLogWatcher can
-   * disambiguate this spawn's slice inside the shared JSONL.
-   */
-  resumeSessionId?: string;
-  /**
-   * Parent dispatch ID when this spawn is a resume child. Forwarded to the
-   * dispatches row so the resume chain is queryable. Requires `dispatch` to
-   * also be set — a non-tracked run with a parent would silently drop the
-   * lineage, so spawnAgent throws when parentJobId is set without dispatch.
-   */
-  parentJobId?: string | null;
-}
-
-/**
- * PUT status update to the dispatch's status_url.
- * Terminal statuses (completed, failed, canceled) retry up to 3 times.
- */
-export async function putStatus(
-  job: AgentJob,
-  apiToken: string,
-  status: string,
-  message?: string,
-  data?: Record<string, unknown>,
-): Promise<void> {
-  if (!job.statusUrl) return;
-
-  const body = JSON.stringify({
-    status,
-    message: message || undefined,
-    data: data || undefined,
-  });
-
-  const isTerminal = status !== "running";
-  const maxAttempts = isTerminal ? TERMINAL_STATUS_RETRIES : 1;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const response = await fetch(job.statusUrl, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiToken}`,
-        },
-        body,
-      });
-
-      if (response.ok) return;
-
-      log.error(
-        `[Job ${job.id}] Status PUT failed (attempt ${attempt}/${maxAttempts}): HTTP ${response.status}`,
-      );
-    } catch (err) {
-      log.error(
-        `[Job ${job.id}] Status PUT error (attempt ${attempt}/${maxAttempts}):`,
-        err,
-      );
-    }
-
-    if (attempt < maxAttempts) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, TERMINAL_STATUS_RETRY_DELAY_MS),
-      );
-    }
-  }
-
-  if (isTerminal) {
-    log.error(
-      `[Job ${job.id}] All ${maxAttempts} status PUT attempts failed for terminal status '${status}'.`,
-    );
-  }
-}
-
-/**
- * Start the heartbeat loop for a running job.
- * Sends PUT {status_url} with { status: "running" } every 10 seconds.
- */
-export function startHeartbeat(job: AgentJob, apiToken: string): void {
-  if (!job.statusUrl) return;
-
-  job.heartbeatInterval = setInterval(() => {
-    if (job.status !== "running") {
-      stopHeartbeat(job);
-      return;
-    }
-    putStatus(job, apiToken, "running");
-  }, HEARTBEAT_INTERVAL_MS);
-}
-
-export function stopHeartbeat(job: AgentJob): void {
-  if (job.heartbeatInterval) {
-    clearInterval(job.heartbeatInterval);
-    job.heartbeatInterval = undefined;
-  }
-}
-
-/**
- * Fire-and-forget terminal notification: PUT the external dispatcher (if
- * configured) then invoke the caller's onComplete. Used by every sync-context
- * terminal transition (inactivity timer, max-runtime timer, host onExit).
- *
- * The await-variants (job.stop, cancelJob, spawnHostMode spawn-error catch)
- * compose this pattern inline because they need await for other reasons
- * (5s grace wait, error propagation via rethrow). The docker close-handler
- * wrapper has its own shape because it coerces status via exit-code mapping
- * inside setupProcessHandlers. See the follow-up Action Items card
- * `[Danxbot] Extract finalizeTerminalState helper` for the broader unification.
- */
-function notifyTerminalStatus(
-  job: AgentJob,
-  options: {
-    statusUrl?: string;
-    apiToken?: string;
-    onComplete?: (j: AgentJob) => void;
-  },
-  status: string,
-  summary?: string,
-): void {
-  if (options.statusUrl && options.apiToken) {
-    putStatus(job, options.apiToken, status, summary);
-  }
-  options.onComplete?.(job);
-}
-
-/**
- * Returns the system instruction appended to dispatch agent prompts when the
- * danxbot_complete MCP tool is available. Tells the agent to call the tool
- * instead of silently stopping output.
- */
-export function buildCompletionInstruction(): string {
-  return (
-    "\n\n---\nIMPORTANT: When you have finished all work, you MUST call the " +
-    "`danxbot_complete` tool with status 'completed' and a brief summary. " +
-    "Do not simply stop producing output — always call the completion tool to " +
-    "signal that you are done. If you encounter a fatal error, call it with " +
-    "status 'failed' and a description of the error."
-  );
-}
 
 /**
  * Spawn a Claude Code agent process.
@@ -399,124 +75,15 @@ export function buildCompletionInstruction(): string {
 export async function spawnAgent(
   options: SpawnAgentOptions,
 ): Promise<AgentJob> {
-  // Fail loud: a parent lineage without a dispatch row is a silent drop of
-  // resume context — callers that want resume MUST opt into tracking.
-  if (options.parentJobId && !options.dispatch) {
-    throw new Error(
-      "spawnAgent: parentJobId requires dispatch metadata — a resume without a dispatch row silently drops lineage",
-    );
-  }
-
-  // Claude-auth preflight (Trello 3l2d7i46). RO bind / expired token / missing
-  // credentials all surface as silent dispatch timeouts — `claude -p` exits
-  // 0 with empty stdout, the watcher never attaches, and the worker reports
-  // "Agent timed out after N seconds of inactivity" pointing at network
-  // instead of at the actual broken auth chain. Run this BEFORE
-  // `buildClaudeInvocation` (which writes a prompt temp dir) so the early
-  // failure path needs no cleanup. Cheap — single stat + read on the bind.
-  const authPreflight = await preflightClaudeAuth();
-  if (!authPreflight.ok) {
-    throw new ClaudeAuthError(authPreflight);
-  }
-
-  // Trello cjAyJpgr-followup: parallel silent-failure mode on the projects
-  // dir bind. If `~/.claude/projects/` is owned by root (Docker auto-create
-  // when the OLD `${CLAUDE_PROJECTS_DIR:?...}` mount resolved to a
-  // non-existent path on first compose-up), claude `-p` silently fails
-  // to write JSONL, the watcher never attaches, and the dispatch times
-  // out with no useful summary. Same pattern as auth-preflight: fail
-  // loud at spawn so the operator sees the actionable chown command.
-  const projectsPreflight = await preflightProjectsDir();
-  if (!projectsPreflight.ok) {
-    throw new ProjectsDirError(projectsPreflight);
-  }
-
-  const jobId = options.jobId ?? randomUUID();
-
-  // `stop` is assigned below (line ~661) once the cleanup closure is built. Use
-  // a throwing placeholder so the type contract stays non-optional — calling
-  // stop() before the real handler is wired would be a construction bug, not
-  // a legitimate race we need to tolerate.
-  const job: AgentJob = {
-    id: jobId,
-    status: "running",
-    summary: "",
-    startedAt: new Date(),
-    statusUrl: options.statusUrl,
-    stop: async () => {
-      throw new Error(`spawnAgent: job.stop called before initialization (jobId=${jobId})`);
-    },
-    usage: {
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_input_tokens: 0,
-      cache_creation_input_tokens: 0,
-    },
-  };
-
-  const env = buildCleanEnv(options.env);
-
-  // Single builder — docker and host paths share the exact flags + firstMessage.
-  // Runtime only decides whether firstMessage is appended via `-p` (docker
-  // headless) or passed as a positional argument inside the bash wrapper
-  // (host interactive). See `.claude/rules/agent-dispatch.md`.
-  const invocation = buildClaudeInvocation({
-    prompt: options.prompt,
-    jobId,
-    title: options.title,
-    mcpConfigPath: options.mcpConfigPath,
-    agents: options.agents,
-    resumeSessionId: options.resumeSessionId,
-  });
-  const { flags, firstMessage, promptDir } = invocation;
-
-  // Dispatched agents cwd into the resolved plural workspace at
-  // `<repo>/.danxbot/workspaces/<name>/`. The repo root belongs to the
-  // developer's interactive claude session (use case #1) — the
-  // agent-isolation contract forbids dispatched cwd at the repo root.
-  // See Trello card `7ha2CSpc` and `.claude/rules/agent-dispatch.md`.
-  const agentCwd = options.cwd;
-
-  log.info(`[Job ${jobId}] Launching agent`);
-  log.info(`[Job ${jobId}] Prompt: ${options.prompt.substring(0, 200)}`);
-
-  logPromptToDisk(config.logsDir, jobId, options.prompt, options.agents);
-
-  // Pre-launch MCP probe — verify every configured MCP server can actually
-  // start and respond to an `initialize` request before claude is spawned.
-  // Claude launches happily even when an MCP server crashes on startup; the
-  // tools silently disappear from the agent's tool set and the agent either
-  // burns credits before noticing or never notices at all. Failing loudly
-  // here preserves the "fallbacks are bugs" invariant (see
-  // `.claude/rules/code-quality.md`).
-  //
-  // Cleanup on failure: we must rmSync `promptDir` ourselves because the
-  // internal `cleanup()` closure (defined below, which would normally handle
-  // it) isn't in scope yet. The caller-side catch in `dispatch()` (see
-  // `src/dispatch/core.ts`'s `spawnForDispatch`) handles the MCP settings
-  // temp dir but does NOT know about `promptDir`. Skipping this would leak
-  // a /tmp/danxbot-prompt-* dir on every broken dispatch.
-  if (options.mcpConfigPath) {
-    const probeResult = await probeAllMcpServers(
-      options.mcpConfigPath,
-      config.dispatch.mcpProbeTimeoutMs,
-    );
-    if (!probeResult.ok) {
-      if (promptDir) rmSync(promptDir, { recursive: true, force: true });
-      const names = probeResult.failures.map((f) => f.serverName).join(", ");
-      const details = probeResult.failures
-        .map((f) => `  - ${f.message}`)
-        .join("\n");
-      throw new Error(
-        `MCP server probe failed for [${names}] before launching agent:\n${details}`,
-      );
-    }
-  }
+  // Validate inputs, run auth + projects-dir + MCP-probe preflights, allocate
+  // jobId, build the AgentJob skeleton, and resolve the claude invocation.
+  // All failure modes throw loudly with no cleanup needed by the caller —
+  // `runSpawnPreflight` self-cleans the prompt temp dir on MCP probe failure.
+  const { jobId, job, env, flags, firstMessage, promptDir, agentCwd } =
+    await runSpawnPreflight(options);
 
   // --- SessionLogWatcher: the single monitoring mechanism, runs identically in
   //     both docker and host modes (see `.claude/rules/agent-dispatch.md`). ---
-  let lastAssistantText = "";
-
   const watcher = new SessionLogWatcher({
     cwd: agentCwd,
     pollIntervalMs: 5_000,
@@ -524,51 +91,14 @@ export async function spawnAgent(
   });
   job.watcher = watcher;
 
-  // Track last assistant text for job summary + accumulate per-turn usage
-  // totals + reset inactivity timeout.
-  //
-  // Usage dedup: Claude Code writes one JSONL entry per content block in a
-  // multi-block assistant turn (text + tool_use, thinking + text + tool_use,
-  // etc.) but stamps the IDENTICAL response-level `message.usage` on every
-  // entry. Without dedup the accumulator counted that single API response
-  // 2-5× — verified in production (gpt-manager job 830cbd99: real usage
-  // in=6/out=110/cache_creation=100,362, accumulator reported double).
-  // Track seen `message.id`s in this closure and accumulate at most once
-  // per id. Entries without an id (malformed; never seen in real Claude
-  // Code output) still accumulate so a single bad line never silently
-  // zeroes billable usage.
-  const seenUsageMessageIds = new Set<string>();
-  let warnedMissingMessageId = false;
-  watcher.onEntry((entry) => {
-    inactivityTimer.reset();
-
-    if (entry.type === "assistant") {
-      const content = (entry.data.content ?? []) as Record<string, unknown>[];
-      for (const block of content) {
-        if (block.type === "text" && block.text) {
-          lastAssistantText = block.text as string;
-        }
-      }
-
-      const usage = entry.data.usage as Partial<AgentUsage> | undefined;
-      if (usage) {
-        const messageId = entry.data.messageId as string | undefined;
-        if (messageId) {
-          if (seenUsageMessageIds.has(messageId)) return;
-          seenUsageMessageIds.add(messageId);
-        } else if (!warnedMissingMessageId) {
-          warnedMissingMessageId = true;
-          log.warn(
-            `[Job ${jobId}] Assistant entry has usage but no message.id — accumulating defensively. If this is a new Claude Code release, the dedup contract may need updating.`,
-          );
-        }
-        job.usage.input_tokens += usage.input_tokens ?? 0;
-        job.usage.output_tokens += usage.output_tokens ?? 0;
-        job.usage.cache_read_input_tokens += usage.cache_read_input_tokens ?? 0;
-        job.usage.cache_creation_input_tokens +=
-          usage.cache_creation_input_tokens ?? 0;
-      }
-    }
+  // Watcher subscriber: tracks last assistant text for job summary,
+  // accumulates per-turn usage (with multi-block dedup), and resets the
+  // inactivity timer on every entry. See `usage-accumulator.ts` for the
+  // dedup contract.
+  const usageAccumulator = attachUsageAccumulator({
+    job,
+    watcher,
+    onActivity: () => inactivityTimer.reset(),
   });
 
   // --- Optional event forwarding ---
@@ -606,7 +136,6 @@ export async function spawnAgent(
 
   watcher.start();
 
-  let stderr = "";
   let termSettingsDirToClean: string | undefined;
 
   // --- Inactivity timer: resets on watcher entries, kills via the runtime-
@@ -662,9 +191,20 @@ export async function spawnAgent(
   // before the first chain has actually finished. A bare boolean flag would
   // satisfy idempotency but defeat the only reason cancelJob and job.stop
   // await the cleanup at all (sequencing the external `putStatus` PUT after
-  // the dispatch row's finalize commit).
+  // the dispatch row's finalize commit). The un-cached payload lives in
+  // `agent-cleanup.ts`; this closure adds the cache + the catch.
+  const runCleanup = buildCleanup({
+    job,
+    jobId,
+    watcher,
+    inactivityTimer,
+    getMaxRuntimeHandle: () => maxRuntimeHandle,
+    forwarderFlush,
+    dispatchTracker,
+    promptDir,
+    getTermSettingsDir: () => termSettingsDirToClean,
+  });
   let cleanupPromise: Promise<void> | undefined;
-
   function cleanup(): Promise<void> {
     if (cleanupPromise) return cleanupPromise;
     // Catch so fire-and-forget callers (close handler, inactivity timer,
@@ -678,138 +218,22 @@ export async function spawnAgent(
     return cleanupPromise;
   }
 
-  async function runCleanup(): Promise<void> {
-    // Synchronous teardown FIRST — stops external observers (heartbeat
-    // PUTs, host exit watcher, inactivity + max-runtime timers) before the
-    // first await yields control. Callers that fire-and-forget cleanup and
-    // then immediately read job state (existing tests, the dispatch
-    // pipeline's onComplete) see a fully-quiesced job. Async work (drain,
-    // finalize, forwarder flush) runs afterward — those write to external
-    // stores (JSONL, dispatches DB, Laravel API) the synchronous reader
-    // doesn't depend on.
-    inactivityTimer.clear();
-    stopHeartbeat(job);
-    if (maxRuntimeHandle) clearTimeout(maxRuntimeHandle);
-    // Idempotent + safe after exit. Docker handles no-op; host handles
-    // stop the liveness-poll interval.
-    job.handle?.dispose();
-
-    // Observer teardown is wrapped in try/finally so a synchronous throw from
-    // any observer (watcher.stop, dispatchTracker.finalize, forwarder.flush)
-    // cannot strand the temp dirs. Temp-dir cleanup MUST run.
-    try {
-      // Drain any JSONL bytes written between the last scheduled poll and
-      // now BEFORE stopping the watcher. Without this, the agent's final
-      // assistant entry — which carries the closing `usage` block + the
-      // `tool_use` for `danxbot_complete` — lands in the JSONL after the
-      // last tick fired, the watcher halts before reading it, and
-      // `dispatchTracker.finalize` snapshots stale `job.usage`. Manifests
-      // as every token + counter field undercounting the on-disk JSONL by
-      // exactly what was appended in the trailing <pollIntervalMs window.
-      await watcher.drain();
-      watcher.stop();
-      // drainAndSend swallows its own errors (laravel-forwarder.ts) so
-      // this never produces an unhandled rejection. Regression guard:
-      // the "flush() resolves (does not reject) when the queue
-      // directory is removed mid-run" test in laravel-forwarder.test.ts
-      // fails if the inner try/catch is removed.
-      //
-      // Stash the promise on the job (instead of `void`) so test
-      // teardown can await any in-flight queue writes BEFORE rmSync of
-      // the logs dir — the fire-and-forget shape stays for production
-      // cleanup latency, but tests can drain explicitly via
-      // `_drainPendingCleanupsForTesting()` in dispatch/core.ts.
-      // Reproduce / Trello 69f77e9b77472aefac1317b2.
-      job._forwarderFlush = forwarderFlush?.();
-      if (dispatchTracker && job.status !== "running") {
-        const dispatchStatus =
-          job.status === "completed"
-            ? "completed"
-            : job.status === "canceled"
-              ? "cancelled"
-              : "failed";
-        try {
-          await dispatchTracker.finalize(dispatchStatus, {
-            summary: job.summary || null,
-            error: dispatchStatus === "failed" ? job.summary || null : null,
-            tokens: {
-              tokensIn: job.usage.input_tokens,
-              tokensOut: job.usage.output_tokens,
-              cacheRead: job.usage.cache_read_input_tokens,
-              cacheWrite: job.usage.cache_creation_input_tokens,
-            },
-          });
-        } catch (err) {
-          log.error(`[Job ${jobId}] Dispatch finalize failed`, err);
-        }
-      }
-    } finally {
-      // rmSync with force:true is no-op on missing paths, so we don't need
-      // existence guards. `promptDir` is null when the prompt was short
-      // enough to inline directly into firstMessage (see INLINE_PROMPT_THRESHOLD
-      // in claude-invocation.ts) — nothing to clean up in that case.
-      if (promptDir) rmSync(promptDir, { recursive: true, force: true });
-      if (termSettingsDirToClean) {
-        rmSync(termSettingsDirToClean, { recursive: true, force: true });
-      }
-    }
-  }
-
   job._cleanup = cleanup;
   job._onComplete = () => options.onComplete?.(job);
 
   // --- Agent-initiated stop mechanism ---
   // The agent calls stop() via the HTTP /api/stop/:jobId endpoint when lifecycle
   // tools signal completion. This is distinct from cancelJob() (user-initiated).
-  job.stop = async (
-    status: "completed" | "failed",
-    summary?: string,
-  ): Promise<void> => {
-    if (job.status !== "running") return;
-    if (!job.handle) return;
-
-    log.info(`[Job ${jobId}] Agent self-stop (${status}) — sending SIGTERM`);
-
-    // Set terminal status BEFORE killing to prevent the close handler from overriding it
-    job.status = status;
-    if (summary) job.summary = summary;
-    job.completedAt = new Date();
-
-    // Register exit listener BEFORE kill to avoid missing a fast exit. Both
-    // runtimes converge on the handle's onExit — docker delegates to
-    // ChildProcess.once("close"), host delegates to the PID watcher.
-    //
-    // Note: the SIGTERM → 5s wait → SIGKILL pattern below mirrors
-    // `terminateWithGrace` but is intentionally open-coded here — only this
-    // call site cares about whether exit fired during the grace window
-    // (`processExited`), so we can skip the SIGKILL when the kernel already
-    // reaped the process. `terminateWithGrace` operates on `isAlive()` only
-    // and is correct for `cancelJob` + stall recovery, which don't need
-    // that signal.
-    let processExited = false;
-    job.handle.onExit(() => {
-      processExited = true;
-    });
-
-    job.handle.kill("SIGTERM");
-
-    await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
-    if (!processExited && job.handle.isAlive()) {
-      log.info(`[Job ${jobId}] Still alive after 5s — sending SIGKILL`);
-      job.handle.kill("SIGKILL");
-    }
-
-    // Use job._cleanup rather than the internal closure so any wrappers registered
-    // after spawn (e.g. stall detection teardown from setupStallDetection) are honored.
-    // Awaited so the dispatch row's final token totals land BEFORE the
-    // external putStatus PUT — see cleanup() comment for the race fix.
-    await (job._cleanup ?? cleanup)();
-
-    if (options.statusUrl && options.apiToken) {
-      await putStatus(job, options.apiToken, status, job.summary);
-    }
-    options.onComplete?.(job);
-  };
+  // See `agent-stop.ts` for the SIGTERM/SIGKILL grace pattern + cleanup
+  // ordering rationale.
+  job.stop = buildJobStopHandler({
+    job,
+    jobId,
+    cleanup,
+    statusUrl: options.statusUrl,
+    apiToken: options.apiToken,
+    onComplete: options.onComplete,
+  });
 
   // ============================================================================
   // Runtime fork — ONLY the spawn shape differs. Monitoring, heartbeat, stall
@@ -817,210 +241,36 @@ export async function spawnAgent(
   // identical across docker and host modes (see agent-dispatch.md).
   // ============================================================================
   if (options.openTerminal) {
-    try {
-      await spawnHostMode({
-        job,
-        jobId,
-        repoName: options.repoName,
-        flags,
-        firstMessage,
-        agentCwd,
-        statusUrl: options.statusUrl,
-        apiToken: options.apiToken,
-        env,
-        onExit: async () => {
-          if (job.status !== "running") return;
-
-          // In host mode the PID died without going through job.stop()
-          // (which sets job.status before killing). Two paths land here:
-          //   1. The agent produced assistant output then exited — treat as
-          //      completed (e.g., user closed the tab after seeing results).
-          //   2. The agent produced NO output before dying — treat as failed.
-          //      Empty output means either the watcher never attached (bad
-          //      cwd / missing dispatch tag) or the claude process crashed at
-          //      startup. Reporting "completed" for that case is a silent
-          //      fallback — see `.claude/rules/code-quality.md` "fallbacks
-          //      are bugs". Fail loud so the caller can retry.
-          //
-          // Same race + fix shape as the docker close handler in
-          // `setupProcessHandlers` (process-utils.ts). drain() before
-          // classifying so a final-turn-after-last-poll lands in
-          // lastAssistantText; catch + log so a rejecting drain doesn't
-          // strand the host job mid-transition.
-          try {
-            await job.watcher?.drain();
-          } catch (err) {
-            log.error(`[Job ${jobId}] watcher.drain() failed during host onExit — falling back to last observed assistant text`, err);
-          }
-
-          const finalText = lastAssistantText.trim();
-          if (finalText) {
-            job.status = "completed";
-            job.summary = finalText;
-            log.info(`[Job ${jobId}] Host-mode claude exited with output`);
-          } else {
-            job.status = "failed";
-            job.summary =
-              "Host-mode claude exited without producing any assistant output — watcher may not have attached or agent crashed at startup";
-            log.warn(`[Job ${jobId}] ${job.summary}`);
-          }
-          job.completedAt = new Date();
-          void cleanup();
-          notifyTerminalStatus(job, options, job.status, job.summary);
-        },
-        registerTermDir: (dir) => {
-          termSettingsDirToClean = dir;
-        },
-      });
-    } catch (err) {
-      // spawnHostMode can fail when the bash script never writes its PID file
-      // (wt.exe missing, script crashed, MCP config broken, etc.). If we let
-      // the exception escape without running cleanup, the watcher, heartbeat,
-      // max-runtime timer, and termSettingsDir all leak. Fail the job loudly
-      // so callers see the error, run cleanup so nothing is left dangling.
-      log.error(`[Job ${jobId}] Host-mode spawn failed:`, err);
-      job.status = "failed";
-      job.summary = `Host-mode spawn failed: ${(err as Error).message}`;
-      job.completedAt = new Date();
-      void cleanup();
-      if (options.statusUrl && options.apiToken) {
-        await putStatus(job, options.apiToken, "failed", job.summary);
-      }
-      options.onComplete?.(job);
-      throw err;
-    }
-  } else {
-    // stdio: stdin ignore (no interactive input in docker mode), stdout ignore
-    // (SessionLogWatcher reads the JSONL session file from disk — stdout is
-    // not a monitoring channel), stderr pipe so we can surface failure messages
-    // in the job summary when the process exits non-zero.
-    const child = spawn("claude", [...flags, "-p", firstMessage], {
-      env,
-      stdio: ["ignore", "ignore", "pipe"],
-      cwd: agentCwd,
-    });
-
-    job.handle = createDockerHandle(child);
-
-    child.stderr?.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    setupProcessHandlers(
-      child,
+    await runHostModeFork({
       job,
-      () => lastAssistantText,
-      () => stderr,
-      {
-        onComplete: (j) => {
-          if (options.statusUrl && options.apiToken) {
-            const status = j.status === "completed" ? "completed" : "failed";
-            putStatus(j, options.apiToken!, status, j.summary);
-          }
-          options.onComplete?.(j);
-        },
-        cleanup,
+      jobId,
+      options,
+      flags,
+      firstMessage,
+      agentCwd,
+      env,
+      cleanup,
+      getLastAssistantText: usageAccumulator.getLastAssistantText,
+      registerTermDir: (dir) => {
+        termSettingsDirToClean = dir;
       },
-    );
+    });
+  } else {
+    spawnDockerMode({
+      job,
+      flags,
+      firstMessage,
+      agentCwd,
+      env,
+      getLastAssistantText: usageAccumulator.getLastAssistantText,
+      cleanup,
+      statusUrl: options.statusUrl,
+      apiToken: options.apiToken,
+      onComplete: options.onComplete,
+    });
   }
 
   return job;
-}
-
-interface SpawnHostModeOptions {
-  job: AgentJob;
-  jobId: string;
-  repoName: string;
-  /** Pre-built claude CLI flags (shared with the docker path, byte-identical). */
-  flags: string[];
-  /** Pre-built first-user-message (shared with the docker path, byte-identical). */
-  firstMessage: string;
-  agentCwd: string;
-  statusUrl?: string;
-  apiToken?: string;
-  env: Record<string, string>;
-  /** Called exactly once when the host claude PID is observed to have exited. */
-  onExit: () => void;
-  /** Share the temp settings dir with the outer cleanup closure. */
-  registerTermDir: (dir: string) => void;
-}
-
-/**
- * Host-mode spawn: writes the dispatch bash script, launches it in a Windows
- * Terminal tab via wt.exe, reads the claude PID the script emits, and wires
- * a PID-liveness watcher so the outer lifecycle sees the exit. Does NOT spawn
- * a second headless claude — that would defeat the single-fork invariant (see
- * `.claude/rules/agent-dispatch.md`).
- */
-async function spawnHostMode(opts: SpawnHostModeOptions): Promise<void> {
-  const {
-    job,
-    jobId,
-    repoName,
-    flags,
-    firstMessage,
-    agentCwd,
-    env,
-    onExit,
-    statusUrl,
-    apiToken,
-    registerTermDir,
-  } = opts;
-
-  // Paired: a statusUrl without an apiToken would bake an empty Bearer token
-  // into the bash curl (malformed auth header). Fail loud at the call site
-  // instead of pretending to post unauthenticated — per "fallbacks are bugs".
-  if (statusUrl && !apiToken) {
-    throw new Error(
-      `[Job ${jobId}] spawnAgent({openTerminal: true}) requires apiToken when statusUrl is set`,
-    );
-  }
-
-  const termLogPath = getTerminalLogPath(jobId);
-  job.terminalLogPath = termLogPath;
-
-  const termSettingsDir = mkdtempSync(join(tmpdir(), "danxbot-term-"));
-  registerTermDir(termSettingsDir);
-
-  const pidFilePath = join(termSettingsDir, "claude.pid");
-  // wt.exe's stdout+stderr land here. Read this file when diagnosing a
-  // host-mode PID-file timeout — it's the only window into what happened
-  // between `spawnInTerminal()` and the bash wrapper writing its PID.
-  const wtLogPath = join(termSettingsDir, "wt-stderr.log");
-
-  const scriptPath = buildDispatchScript(termSettingsDir, {
-    flags,
-    firstMessage,
-    jobId,
-    statusUrl,
-    // apiToken is guaranteed defined if statusUrl is set (guard above). If no
-    // statusUrl, the bash `report_status` guard short-circuits on empty URL,
-    // so the empty-string default here never reaches curl.
-    apiToken: apiToken ?? "",
-    terminalLogPath: termLogPath,
-    pidFilePath,
-  });
-
-  log.info(`[Job ${jobId}] Opening terminal viewer (log: ${termLogPath})`);
-  spawnInTerminal({
-    title: `danxbot: ${repoName} [${jobId.slice(0, 8)}]`,
-    script: scriptPath,
-    cwd: agentCwd,
-    env: env as Record<string, string | undefined>,
-    wtLogPath,
-  });
-
-  const pid = await readPidFileWithTimeout(
-    pidFilePath,
-    HOST_PID_FILE_TIMEOUT_MS,
-    HOST_PID_FILE_POLL_MS,
-    wtLogPath,
-  );
-  log.info(`[Job ${jobId}] Host-mode dispatch PID: ${pid}`);
-
-  const hostExitWatcher = createHostExitWatcher(pid, HOST_EXIT_POLL_MS);
-  job.handle = createHostHandle(pid, hostExitWatcher);
-  job.handle.onExit(onExit);
 }
 
 /**
