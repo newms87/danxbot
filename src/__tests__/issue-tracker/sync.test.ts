@@ -79,6 +79,69 @@ describe("syncIssue", () => {
     expect(result.remoteWriteCount).toBe(0); // comment merge is a read
   });
 
+  describe("orphan recovery (empty external_id → createCard)", () => {
+    function orphan(): Issue {
+      return {
+        schema_version: 3,
+        tracker: "memory",
+        id: "ISS-1",
+        external_id: "",
+        parent_id: null,
+        children: [],
+        dispatch_id: null,
+        status: "ToDo",
+        type: "Bug",
+        title: "Orphan",
+        description: "body",
+        triaged: { timestamp: "", status: "", explain: "" },
+        ac: [{ check_item_id: "", title: "AC1", checked: false }],
+        phases: [
+          { check_item_id: "", title: "P1", status: "Pending", notes: "" },
+        ],
+        comments: [],
+        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+        blocked: null,
+      };
+    }
+
+    it("calls tracker.createCard exactly once and never calls getCard/getComments with empty id", async () => {
+      const tracker = new MemoryTracker();
+      const result = await syncIssue(tracker, orphan());
+      const log = tracker.getRequestLog();
+      const methods = log.map((l) => l.method);
+      expect(methods).toContain("createCard");
+      const reads = log.filter(
+        (l) =>
+          (l.method === "getCard" || l.method === "getComments") &&
+          l.externalId === "",
+      );
+      expect(reads).toEqual([]);
+      expect(result.remoteWriteCount).toBe(1);
+    });
+
+    it("stamps external_id and check_item_ids onto updatedLocal", async () => {
+      const tracker = new MemoryTracker();
+      const result = await syncIssue(tracker, orphan());
+      expect(result.updatedLocal.external_id).toMatch(/^mem-/);
+      expect(result.updatedLocal.ac[0].check_item_id).toMatch(/^chk-/);
+      expect(result.updatedLocal.phases[0].check_item_id).toMatch(/^chk-/);
+    });
+
+    it("propagates createCard failure as a thrown error", async () => {
+      const tracker = new MemoryTracker();
+      tracker.failNextWrite(new Error("boom"));
+      await expect(syncIssue(tracker, orphan())).rejects.toThrow("boom");
+    });
+
+    it("idempotent: re-syncing the stamped result issues zero writes", async () => {
+      const tracker = new MemoryTracker();
+      const first = await syncIssue(tracker, orphan());
+      tracker.clearRequestLog();
+      const second = await syncIssue(tracker, first.updatedLocal);
+      expect(second.remoteWriteCount).toBe(0);
+    });
+  });
+
   it("title change → updateCard", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());

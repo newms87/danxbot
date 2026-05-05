@@ -4,6 +4,7 @@ import {
   findCommentByMarker,
 } from "./markers.js";
 import {
+  type CreateCardInput,
   type Issue,
   type IssueAcItem,
   type IssueComment,
@@ -11,6 +12,70 @@ import {
   type IssueRetro,
   type IssueTracker,
 } from "./interface.js";
+
+/**
+ * Project an Issue body into the `CreateCardInput` payload for
+ * `tracker.createCard()`. Used by both the fresh-create flow (in the MCP
+ * `createIssue` handler) and the orphan-recovery branch at the top of
+ * `syncIssue`, so the two paths produce identical tracker inputs by
+ * construction.
+ */
+export function toCreateCardInput(issue: Issue): CreateCardInput {
+  return {
+    schema_version: 3,
+    tracker: issue.tracker,
+    id: issue.id,
+    parent_id: issue.parent_id,
+    children: [...issue.children],
+    status: issue.status,
+    type: issue.type,
+    title: issue.title,
+    description: issue.description,
+    triaged: { ...issue.triaged },
+    ac: issue.ac.map((a) => ({ title: a.title, checked: a.checked })),
+    phases: issue.phases.map((p) => ({
+      title: p.title,
+      status: p.status,
+      notes: p.notes,
+    })),
+    comments: issue.comments.map((c) => ({ ...c })),
+    retro: {
+      good: issue.retro.good,
+      bad: issue.retro.bad,
+      action_item_ids: [...issue.retro.action_item_ids],
+      commits: [...issue.retro.commits],
+    },
+  };
+}
+
+/**
+ * Stamp tracker-assigned ids back onto the local Issue. After a successful
+ * `tracker.createCard()`, the tracker has allocated an `external_id` for the
+ * card and a `check_item_id` for every AC and phase item; this function
+ * returns a NEW Issue mirroring those ids so the caller can persist the
+ * bidirectional binding without mutating the input.
+ */
+export function stampTrackerIds(
+  issue: Issue,
+  created: {
+    external_id: string;
+    ac: { check_item_id: string }[];
+    phases: { check_item_id: string }[];
+  },
+): Issue {
+  return {
+    ...issue,
+    external_id: created.external_id,
+    ac: issue.ac.map((item, i) => ({
+      ...item,
+      check_item_id: created.ac[i]?.check_item_id ?? item.check_item_id,
+    })),
+    phases: issue.phases.map((item, i) => ({
+      ...item,
+      check_item_id: created.phases[i]?.check_item_id ?? item.check_item_id,
+    })),
+  };
+}
 
 /**
  * Deterministic, idempotent worker-side sync.
@@ -45,6 +110,20 @@ export async function syncIssue(
   local: Issue,
   options: { actionItemTitles?: ActionItemTitleResolver } = {},
 ): Promise<{ updatedLocal: Issue; remoteWriteCount: number }> {
+  // --- Step 0: orphan guard. ---
+  //
+  // A YAML with `external_id: ""` has never reached the tracker. The diff
+  // path below calls `getCard` / `getComments` on the empty id, which Trello
+  // rejects with 400 (`GET /cards//actions`). Route these through
+  // `createCard`, stamp tracker-assigned ids back, and return — the
+  // reconciler is the wrong primitive for first-time push. Any future
+  // consumer of `syncIssue` (worker poller, dashboard, MCP handlers) gets
+  // the same protection without reinventing the branch.
+  if (local.external_id === "") {
+    const created = await tracker.createCard(toCreateCardInput(local));
+    return { updatedLocal: stampTrackerIds(local, created), remoteWriteCount: 1 };
+  }
+
   let writes = 0;
 
   // --- Step 1+2: merge remote comments into local. ---
