@@ -29,6 +29,8 @@ import {
   handleIssueCreate,
   handleIssueSave,
 } from "./issue-route.js";
+import { handleRestart } from "./restart-route.js";
+import { seedCooldownFromDb } from "./restart.js";
 import type { RepoContext } from "../types.js";
 
 const log = createLogger("worker-server");
@@ -105,6 +107,12 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
       return;
     }
 
+    const restartMatch = url.pathname.match(/^\/api\/restart\/(.+)$/);
+    if (method === "POST" && restartMatch) {
+      await handleRestart(req, res, restartMatch[1], repo);
+      return;
+    }
+
     const statusMatch = url.pathname.match(/^\/api\/status\/(.+)$/);
     if (method === "GET" && statusMatch) {
       handleStatus(res, statusMatch[1]);
@@ -130,5 +138,20 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
       resolve();
     });
   });
+
+  // Seed the restart-cooldown map from the worker_restarts table so a
+  // fast restart-then-restart-again across a worker boundary still
+  // hits the cooldown. Best-effort — log + continue if the table
+  // doesn't exist yet (pre-migration boot).
+  try {
+    await seedCooldownFromDb(repo.name);
+  } catch (err) {
+    log.warn(
+      `Failed to seed restart cooldown for "${repo.name}": ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
   return server;
 }

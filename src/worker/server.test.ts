@@ -33,6 +33,16 @@ vi.mock("./critical-failure-route.js", () => ({
     mockHandleClearCriticalFailure(...args),
 }));
 
+const mockHandleRestart = vi.fn();
+vi.mock("./restart-route.js", () => ({
+  handleRestart: (...args: unknown[]) => mockHandleRestart(...args),
+}));
+
+const mockSeedCooldown = vi.fn().mockResolvedValue(undefined);
+vi.mock("./restart.js", () => ({
+  seedCooldownFromDb: (...args: unknown[]) => mockSeedCooldown(...args),
+}));
+
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
@@ -64,13 +74,23 @@ import { startWorkerServer } from "./server.js";
 
 const MOCK_REPO = makeRepoContext();
 
+let bootSeedCalls: unknown[][] = [];
+
 describe("worker server", () => {
   beforeAll(async () => {
     await startWorkerServer(MOCK_REPO);
+    bootSeedCalls = mockSeedCooldown.mock.calls.map((c) => [...c]);
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe("boot — restart cooldown seed", () => {
+    it("calls seedCooldownFromDb with the repo name", () => {
+      expect(bootSeedCalls.length).toBeGreaterThanOrEqual(1);
+      expect(bootSeedCalls[0][0]).toBe(MOCK_REPO.name);
+    });
   });
 
   describe("GET /health", () => {
@@ -305,6 +325,30 @@ describe("worker server", () => {
       await requestHandler(req, res);
 
       expect(mockHandleClearCriticalFailure).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("POST /api/restart/:dispatchId", () => {
+    it("delegates to handleRestart with req, res, dispatchId, and the worker's repo", async () => {
+      mockHandleRestart.mockResolvedValue(undefined);
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/restart/dispatch-abc",
+      );
+      await requestHandler(req, res);
+      expect(mockHandleRestart).toHaveBeenCalledWith(
+        req,
+        res,
+        "dispatch-abc",
+        MOCK_REPO,
+      );
+    });
+
+    it("does not match GET /api/restart/:dispatchId", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/restart/dispatch-abc");
+      await requestHandler(req, res);
+      expect(mockHandleRestart).not.toHaveBeenCalled();
       expect(res._getStatusCode()).toBe(404);
     });
   });
