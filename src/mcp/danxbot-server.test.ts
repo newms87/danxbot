@@ -11,6 +11,7 @@ import type { DanxbotToolUrls } from "./danxbot-server.js";
 const STOP_URL = "http://localhost:5562/api/stop/job-xyz";
 const SLACK_REPLY_URL = "http://localhost:5562/api/slack/reply/job-xyz";
 const SLACK_UPDATE_URL = "http://localhost:5562/api/slack/update/job-xyz";
+const RESTART_URL = "http://localhost:5562/api/restart/job-xyz";
 
 function urls(over: Partial<DanxbotToolUrls> = {}): DanxbotToolUrls {
   return {
@@ -362,6 +363,148 @@ describe("callTool — danxbot_slack_post_update", () => {
   });
 });
 
+describe("danxbot_restart_worker tool schema", () => {
+  const tool = TOOLS.find((t) => t.name === "danxbot_restart_worker");
+
+  it("is registered in TOOLS", () => {
+    expect(tool).toBeDefined();
+  });
+
+  it("requires repo and reason; drain_in_flight + timeout_ms optional", () => {
+    const schema = tool!.inputSchema as unknown as {
+      properties: Record<string, { type: string }>;
+      required: string[];
+    };
+    expect(schema.properties.repo.type).toBe("string");
+    expect(schema.properties.reason.type).toBe("string");
+    expect(schema.properties.drain_in_flight.type).toBe("boolean");
+    expect(schema.properties.timeout_ms.type).toBe("number");
+    expect(schema.required.sort()).toEqual(["reason", "repo"]);
+  });
+});
+
+describe("callTool — danxbot_restart_worker", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          started: true,
+          oldPid: 123,
+          restartId: 7,
+          outcome: "started",
+        }),
+        { status: 202, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs camelCase body to the restart URL on happy path and returns response verbatim", async () => {
+    const result = await callTool(
+      "danxbot_restart_worker",
+      {
+        repo: "danxbot",
+        reason: "poller stuck mid-tick",
+        drain_in_flight: true,
+        timeout_ms: 30000,
+      },
+      urls({ restartWorker: RESTART_URL }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(RESTART_URL);
+    expect((init as RequestInit).method).toBe("POST");
+    expect((init as RequestInit).headers).toEqual({
+      "Content-Type": "application/json",
+    });
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      repo: "danxbot",
+      reason: "poller stuck mid-tick",
+      drainInFlight: true,
+      timeoutMs: 30000,
+    });
+    expect(JSON.parse(result)).toEqual({
+      started: true,
+      oldPid: 123,
+      restartId: 7,
+      outcome: "started",
+    });
+  });
+
+  it("omits optional fields when caller doesn't supply them — worker defaults apply", async () => {
+    await callTool(
+      "danxbot_restart_worker",
+      { repo: "danxbot", reason: "fresh process needed" },
+      urls({ restartWorker: RESTART_URL }),
+    );
+    const body = JSON.parse(
+      (fetchMock.mock.calls[0][1] as RequestInit).body as string,
+    );
+    expect(body).toEqual({ repo: "danxbot", reason: "fresh process needed" });
+    expect(body).not.toHaveProperty("drainInFlight");
+    expect(body).not.toHaveProperty("timeoutMs");
+  });
+
+  it("throws when restartWorker URL is absent — fail loud, no silent no-op", async () => {
+    await expect(
+      callTool(
+        "danxbot_restart_worker",
+        { repo: "danxbot", reason: "x" },
+        urls(),
+      ),
+    ).rejects.toThrow(/DANXBOT_RESTART_WORKER_URL|not configured/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when repo is missing", async () => {
+    await expect(
+      callTool(
+        "danxbot_restart_worker",
+        { reason: "x" },
+        urls({ restartWorker: RESTART_URL }),
+      ),
+    ).rejects.toThrow(/repo/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when reason is missing or blank", async () => {
+    await expect(
+      callTool(
+        "danxbot_restart_worker",
+        { repo: "danxbot" },
+        urls({ restartWorker: RESTART_URL }),
+      ),
+    ).rejects.toThrow(/reason/);
+    await expect(
+      callTool(
+        "danxbot_restart_worker",
+        { repo: "danxbot", reason: "   " },
+        urls({ restartWorker: RESTART_URL }),
+      ),
+    ).rejects.toThrow(/reason/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces non-2xx responses from the restart URL", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response("worker error", { status: 500 }),
+    );
+    await expect(
+      callTool(
+        "danxbot_restart_worker",
+        { repo: "danxbot", reason: "x" },
+        urls({ restartWorker: RESTART_URL }),
+      ),
+    ).rejects.toThrow(/HTTP 500/);
+  });
+});
+
 describe("buildActiveTools — advertise-filter", () => {
   // The advertise-filter is the SOLE enforcement seam for Slack-tool
   // exposure (the CLI-side `--allowed-tools` belt was retired entirely
@@ -372,6 +515,23 @@ describe("buildActiveTools — advertise-filter", () => {
   it("advertises only danxbot_complete when no slack URLs are configured", () => {
     const tools = buildActiveTools({ stop: STOP_URL });
     expect(tools.map((t) => t.name)).toEqual(["danxbot_complete"]);
+  });
+
+  it("advertises danxbot_restart_worker iff restartWorker URL is set", () => {
+    expect(
+      buildActiveTools({ stop: STOP_URL }).map((t) => t.name),
+    ).not.toContain("danxbot_restart_worker");
+    expect(
+      buildActiveTools({ stop: STOP_URL, restartWorker: RESTART_URL }).map(
+        (t) => t.name,
+      ),
+    ).toContain("danxbot_restart_worker");
+    // Empty string env-var failure mode — same `!!` guard as the slack pair.
+    expect(
+      buildActiveTools({ stop: STOP_URL, restartWorker: "" }).map(
+        (t) => t.name,
+      ),
+    ).not.toContain("danxbot_restart_worker");
   });
 
   it("advertises danxbot_slack_reply alongside danxbot_complete when slackReply is set (but not slackUpdate)", () => {

@@ -63,6 +63,13 @@ const DANXBOT_ENTRY: McpServerEntry = {
       env.DANXBOT_ISSUE_SAVE_URL = opts.issue.saveUrl;
       env.DANXBOT_ISSUE_CREATE_URL = opts.issue.createUrl;
     }
+    // Worker-restart URL injection. The danxbot MCP process gets the
+    // URL via env and `buildActiveTools` exposes `danxbot_restart_worker`
+    // only when the env var is set. Single-URL surface (unlike the
+    // slack + issue pairs) — the worker route is one endpoint.
+    if (opts.restartWorkerUrl) {
+      env.DANXBOT_RESTART_WORKER_URL = opts.restartWorkerUrl;
+    }
     return {
       command: "npx",
       args: ["tsx", DANXBOT_MCP_SERVER_PATH],

@@ -73,6 +73,20 @@ export interface McpFactoryOptions {
     saveUrl: string;
     createUrl: string;
   };
+  /**
+   * Worker URL the agent's `danxbot_restart_worker` tool will POST to —
+   * `http://localhost:<workerPort>/api/restart/<dispatchId>`. When
+   * present, the danxbot MCP server gets the URL via env and the
+   * advertise-filter exposes `danxbot_restart_worker`. Absent, the tool
+   * does NOT appear in `tools/list` and an agent cannot call it.
+   *
+   * Auto-injected by `dispatch()` for every dispatched agent in worker
+   * mode (the URL is dispatchId-derived, parallel to the issue + slack
+   * pair). Carried as a single string (not an object) because the
+   * worker route is single-endpoint, unlike issue (save + create) and
+   * slack (reply + update).
+   */
+  restartWorkerUrl?: string;
 }
 
 export interface McpServerEntry {

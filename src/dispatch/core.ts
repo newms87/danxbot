@@ -584,6 +584,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // URLs.
   const issueSaveUrl = `http://localhost:${input.repo.workerPort}/api/issue-save/${dispatchId}`;
   const issueCreateUrl = `http://localhost:${input.repo.workerPort}/api/issue-create/${dispatchId}`;
+  const restartWorkerUrl = `http://localhost:${input.repo.workerPort}/api/restart/${dispatchId}`;
   const overlay: Record<string, string> = {
     DANXBOT_STOP_URL: workerStopUrl,
     // `DANXBOT_WORKER_PORT` is auto-injected from `repo.workerPort` so
@@ -597,6 +598,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     DANXBOT_SLACK_UPDATE_URL: `http://localhost:${input.repo.workerPort}/api/slack/update/${dispatchId}`,
     DANXBOT_ISSUE_SAVE_URL: issueSaveUrl,
     DANXBOT_ISSUE_CREATE_URL: issueCreateUrl,
+    DANXBOT_RESTART_WORKER_URL: restartWorkerUrl,
     ...input.overlay,
   };
 
@@ -643,10 +645,16 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     ? { saveUrl: issueSaveUrl, createUrl: issueCreateUrl }
     : undefined;
 
+  // Worker-restart MCP tool — same workerPort gate as issue. Absent the
+  // worker port (dashboard-mode tests), the tool simply doesn't appear
+  // in `tools/list`.
+  const restartWorker = input.repo.workerPort ? restartWorkerUrl : undefined;
+
   const danxbotServer = defaultMcpRegistry[DANXBOT_SERVER_NAME].build({
     danxbotStopUrl: workerStopUrl,
     slack,
     issue,
+    restartWorkerUrl: restartWorker,
   });
   const mcpServers: Record<string, unknown> = {
     ...workspaceMcp.mcpServers,

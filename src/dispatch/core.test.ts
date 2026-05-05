@@ -271,6 +271,12 @@ describe("dispatch() — slack-worker integration", () => {
     expect(env.DANXBOT_ISSUE_CREATE_URL).toBe(
       `http://localhost:${slackRepo.workerPort}/api/issue-create/${result.dispatchId}`,
     );
+    // ISS-72 (autonomous worker restart Phase 2): the restart URL is
+    // auto-injected on the same worker-port gate. Regression that drops
+    // it silently disables `danxbot_restart_worker`.
+    expect(env.DANXBOT_RESTART_WORKER_URL).toBe(
+      `http://localhost:${slackRepo.workerPort}/api/restart/${result.dispatchId}`,
+    );
   });
 
   it("never passes an allowedTools field to spawnAgent — the allowlist concept is gone", async () => {
@@ -975,6 +981,9 @@ describe("dispatch() — dispatchId override", () => {
     );
     expect(env.DANXBOT_ISSUE_CREATE_URL).toBe(
       `http://localhost:${testRepo.workerPort}/api/issue-create/${explicitId}`,
+    );
+    expect(env.DANXBOT_RESTART_WORKER_URL).toBe(
+      `http://localhost:${testRepo.workerPort}/api/restart/${explicitId}`,
     );
   });
 

@@ -91,6 +91,23 @@ describe("danxbot MCP registry — build()", () => {
     });
   });
 
+  it("adds DANXBOT_RESTART_WORKER_URL when opts.restartWorkerUrl is supplied (ISS-72)", () => {
+    const cfg = build({
+      danxbotStopUrl: STOP_URL,
+      restartWorkerUrl: "http://localhost:9999/api/restart/job-1",
+    });
+    expect(cfg.env?.DANXBOT_RESTART_WORKER_URL).toBe(
+      "http://localhost:9999/api/restart/job-1",
+    );
+    expect(cfg.env?.DANXBOT_SLACK_REPLY_URL).toBeUndefined();
+    expect(cfg.env?.DANXBOT_ISSUE_SAVE_URL).toBeUndefined();
+  });
+
+  it("omits DANXBOT_RESTART_WORKER_URL when opts.restartWorkerUrl is absent", () => {
+    const cfg = build({ danxbotStopUrl: STOP_URL });
+    expect(cfg.env?.DANXBOT_RESTART_WORKER_URL).toBeUndefined();
+  });
+
   it("returns the absolute path to the danxbot MCP server script", () => {
     const cfg = build({ danxbotStopUrl: STOP_URL });
     expect(cfg.command).toBe("npx");

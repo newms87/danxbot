@@ -77,6 +77,17 @@ export interface DanxbotToolUrls {
    */
   issueSave?: string;
   issueCreate?: string;
+  /**
+   * Worker-restart endpoint (`POST /api/restart/:dispatchId`). When
+   * present, `buildActiveTools` exposes `danxbot_restart_worker` and
+   * the dispatcher routes calls to `callDanxbotRestartWorker`. Absent,
+   * the tool is filtered out of `tools/list` and a `callTool`
+   * invocation throws fail-loud.
+   *
+   * Auto-injected by `dispatch()` in worker mode (the URL is
+   * dispatchId-derived: `http://localhost:<workerPort>/api/restart/<dispatchId>`).
+   */
+  restartWorker?: string;
 }
 
 export const TOOLS = [
@@ -193,6 +204,49 @@ export const TOOLS = [
       required: ["filename"],
     },
   },
+  {
+    name: "danxbot_restart_worker",
+    description:
+      "Restart the danxbot worker daemon serving this repo. Use when the " +
+      "worker has reached an unrecoverable in-memory state and a fresh " +
+      "process is the only fix (poller stuck mid-tick, MCP child leak, " +
+      "config drift after deploy). The worker enforces a cooldown, refuses " +
+      "cross-repo restarts, refuses self-restart inside docker, and writes " +
+      "an audit row for every attempt. The 202 response body is returned " +
+      "verbatim so the agent sees `{started: true, oldPid, restartId, " +
+      "outcome: \"started\"}` on success or `{started: false, outcome: \"<guard>\"}` " +
+      "on a guarded rejection.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: {
+          type: "string",
+          description:
+            "Repo name the restart targets. The worker refuses (403) when " +
+            "this does not match the worker's own repo — cross-repo " +
+            "restarts via dashboard proxy are out of scope for this tool.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Non-empty operator-readable explanation of why the restart is " +
+            "needed. Recorded on the worker_restarts audit row.",
+        },
+        drain_in_flight: {
+          type: "boolean",
+          description:
+            "When true, the worker waits for in-flight dispatches to drain " +
+            "before SIGTERM. Default false — caller opts in.",
+        },
+        timeout_ms: {
+          type: "number",
+          description:
+            "Drain + health-check timeout in ms. Default 60000.",
+        },
+      },
+      required: ["repo", "reason"],
+    },
+  },
 ];
 
 async function postJson(url: string, body: unknown): Promise<Response> {
@@ -300,17 +354,16 @@ async function callDanxbotSlackPostUpdate(
 }
 
 /**
- * Forward a `danx_issue_*` tool call to the worker and return the JSON
- * response body verbatim so the agent sees `{saved: true | false,
- * errors?: [...]}` (or the `{created, external_id, errors}` shape) as
- * the tool's text content.
+ * Forward an MCP tool call to one of the worker's HTTP routes
+ * (`/api/issue-save`, `/api/issue-create`, `/api/restart`) and return
+ * the response body verbatim as the tool's text content.
  *
  * Network / 4xx / 5xx are surfaced as JSON-RPC errors — those represent
- * worker-side failures, not the agent's expected save/create
- * outcomes. The agent's success/failure semantics live entirely in the
- * 200-response body shape.
+ * worker-side failures, not the agent's expected outcomes. The agent's
+ * success/failure semantics live entirely in the 200-response body
+ * shape (e.g. `{saved: true|false}`, `{started: true|false}`).
  */
-async function postIssueRoute(
+async function postWorkerRoute(
   url: string,
   body: Record<string, unknown>,
   toolName: string,
@@ -336,7 +389,37 @@ async function callDanxIssueSave(
     );
   }
   const id = requireNonBlankString("danx_issue_save", "id", args.id);
-  return postIssueRoute(urls.issueSave, { id }, "danx_issue_save");
+  return postWorkerRoute(urls.issueSave, { id }, "danx_issue_save");
+}
+
+async function callDanxbotRestartWorker(
+  args: Record<string, unknown>,
+  urls: DanxbotToolUrls,
+): Promise<string> {
+  if (!urls.restartWorker) {
+    throw new Error(
+      "danxbot_restart_worker called without DANXBOT_RESTART_WORKER_URL configured " +
+        "(no worker endpoint available)",
+    );
+  }
+  const repo = requireNonBlankString("danxbot_restart_worker", "repo", args.repo);
+  const reason = requireNonBlankString(
+    "danxbot_restart_worker",
+    "reason",
+    args.reason,
+  );
+  // The agent-facing schema uses snake_case (MCP convention); the worker's
+  // RestartRequest is camelCase. Translate at the boundary so the worker
+  // body shape stays untouched (Phase 1 contract). Forward the optional
+  // fields only when present so the worker's defaults apply otherwise.
+  const body: Record<string, unknown> = { repo, reason };
+  if (typeof args.drain_in_flight === "boolean") {
+    body.drainInFlight = args.drain_in_flight;
+  }
+  if (typeof args.timeout_ms === "number") {
+    body.timeoutMs = args.timeout_ms;
+  }
+  return postWorkerRoute(urls.restartWorker, body, "danxbot_restart_worker");
 }
 
 async function callDanxIssueCreate(
@@ -354,7 +437,7 @@ async function callDanxIssueCreate(
     "filename",
     args.filename,
   );
-  return postIssueRoute(
+  return postWorkerRoute(
     urls.issueCreate,
     { filename },
     "danx_issue_create",
@@ -397,6 +480,11 @@ export async function callTool(
         requireObjectArgs("danx_issue_create", args),
         urls,
       );
+    case "danxbot_restart_worker":
+      return callDanxbotRestartWorker(
+        requireObjectArgs("danxbot_restart_worker", args),
+        urls,
+      );
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -433,6 +521,7 @@ export function buildActiveTools(urls: DanxbotToolUrls) {
     if (t.name === "danxbot_slack_post_update") return !!urls.slackUpdate;
     if (t.name === "danx_issue_save") return !!urls.issueSave;
     if (t.name === "danx_issue_create") return !!urls.issueCreate;
+    if (t.name === "danxbot_restart_worker") return !!urls.restartWorker;
     return true;
   });
 }
@@ -515,6 +604,7 @@ if (import.meta.url === entryUrl) {
     slackUpdate: process.env.DANXBOT_SLACK_UPDATE_URL,
     issueSave: process.env.DANXBOT_ISSUE_SAVE_URL,
     issueCreate: process.env.DANXBOT_ISSUE_CREATE_URL,
+    restartWorker: process.env.DANXBOT_RESTART_WORKER_URL,
   };
   main(urls);
 }
