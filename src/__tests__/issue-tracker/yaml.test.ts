@@ -419,6 +419,66 @@ describe("validateIssue", () => {
       expect(result.errors).toContain("comments[0] must be a mapping");
     }
   });
+
+  it("rejects legacy retro.action_items with populated free-text strings", () => {
+    const result = validateIssue(
+      valid({
+        retro: {
+          good: "",
+          bad: "",
+          action_items: ["Migrate the X service", "Add tests for Y"],
+          commits: [],
+        },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const msg = result.errors.find((e) =>
+        e.includes("retro.action_items (legacy free-text shape)"),
+      );
+      expect(msg).toBeDefined();
+      expect(msg).toContain("danx_issue_create");
+      expect(msg).toContain("action_item_ids");
+    }
+  });
+
+  it("accepts legacy retro.action_items: [] (empty) silently — no information lost", () => {
+    const result = validateIssue(
+      valid({
+        retro: {
+          good: "",
+          bad: "",
+          action_items: [],
+          commits: [],
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.retro.action_item_ids).toEqual([]);
+    }
+  });
+
+  it("rejects retro.action_item_ids[i] not matching ISS-N format", () => {
+    const result = validateIssue(
+      valid({
+        retro: {
+          good: "",
+          bad: "",
+          action_item_ids: ["not-an-id"],
+          commits: [],
+        },
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) =>
+          e.includes("retro.action_item_ids[0] must match ISS-"),
+        ),
+      ).toBe(true);
+    }
+  });
 });
 
 describe("children field (v3 epic → phase linkage)", () => {
@@ -617,7 +677,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       retro: {
         good: "we shipped",
         bad: "took longer than expected",
-        action_item_ids: ["follow-up A", "follow-up B"],
+        action_item_ids: ["ISS-100", "ISS-101"],
         commits: ["abc1234"],
       },
       blocked: null,
@@ -664,8 +724,8 @@ describe("serializeIssue byte-stable snapshot", () => {
         good: we shipped
         bad: took longer than expected
         action_item_ids:
-          - follow-up A
-          - follow-up B
+          - ISS-100
+          - ISS-101
         commits:
           - abc1234
       blocked: null

@@ -31,12 +31,14 @@ import {
  * Optional ID-to-title resolver for rendering `retro.action_item_ids` in
  * the structured retro comment. Caller (worker / poller) reads each linked
  * action-item card's local YAML and supplies its title. IDs missing from
- * the resolver render as `<ISS-N: unknown>` so a typo or stale reference
- * is loud, not silent. Absent resolver → every id renders as unknown.
+ * the map render as `<ISS-N: unknown>` so a typo or stale reference is
+ * loud, not silent. Absent map → every id renders as unknown.
+ *
+ * Single canonical shape (Map). Earlier prototypes accepted both Map and
+ * Record; the worker only ever produces a Map, so the second form was
+ * dead generality. Keep this type narrow.
  */
-export type ActionItemTitleResolver =
-  | Map<string, string>
-  | Record<string, string>;
+export type ActionItemTitleResolver = Map<string, string>;
 
 export async function syncIssue(
   tracker: IssueTracker,
@@ -420,17 +422,11 @@ export function isRetroNonEmpty(retro: IssueRetro): boolean {
  */
 export function renderRetroComment(
   retro: IssueRetro,
-  actionItemTitles?: Map<string, string> | Record<string, string>,
+  actionItemTitles?: ActionItemTitleResolver,
 ): string {
   const goodLine = retro.good === "" ? "—" : retro.good;
   const badLine = retro.bad === "" ? "—" : retro.bad;
-  const lookup = (id: string): string | undefined => {
-    if (!actionItemTitles) return undefined;
-    if (actionItemTitles instanceof Map) return actionItemTitles.get(id);
-    return Object.prototype.hasOwnProperty.call(actionItemTitles, id)
-      ? actionItemTitles[id]
-      : undefined;
-  };
+  const lookup = (id: string): string | undefined => actionItemTitles?.get(id);
   const actionItemsBlock =
     retro.action_item_ids.length === 0
       ? " Nothing"

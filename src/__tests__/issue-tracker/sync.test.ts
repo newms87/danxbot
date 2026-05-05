@@ -705,9 +705,37 @@ describe("syncIssue", () => {
         action_item_ids: ["ISS-1", "ISS-2"],
         commits: [],
       },
-      { "ISS-1": "Known" },
+      new Map([["ISS-1", "Known"]]),
     );
     expect(partialResolver).toContain("- Known (ISS-1)");
     expect(partialResolver).toContain("- <ISS-2: unknown>");
+  });
+
+  it("renderRetroComment is byte-stable for the same (retro, resolver) input", () => {
+    const retro: IssueRetro = {
+      good: "g",
+      bad: "b",
+      action_item_ids: ["ISS-1", "ISS-2"],
+      commits: ["sha1"],
+    };
+    const resolver = new Map([
+      ["ISS-1", "Title One"],
+      ["ISS-2", "Title Two"],
+    ]);
+    const a = renderRetroComment(retro, resolver);
+    const b = renderRetroComment(retro, resolver);
+    expect(a).toBe(b);
+  });
+
+  it("renderRetroComment unknown-id literal is exactly '<ISS-N: unknown>'", () => {
+    const out = renderRetroComment({
+      good: "",
+      bad: "",
+      action_item_ids: ["ISS-7"],
+      commits: [],
+    });
+    // Verbatim literal so callers can grep for the marker if they need to
+    // surface stale references in tooling.
+    expect(out).toContain("- <ISS-7: unknown>");
   });
 });

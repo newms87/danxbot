@@ -583,24 +583,26 @@ function validateRetro(value: unknown): IssueRetro | string {
     return "retro.bad must be a string";
   }
   // Legacy `action_items: string[]` (free-text titles) is no longer accepted.
-  // The schema migrated to `action_item_ids: string[]` of `ISS-N` references —
-  // each entry MUST point at a real, agent-created action-item card. Existing
-  // YAMLs holding the legacy field are silently dropped on parse: the legacy
-  // strings were title-only debt by design (one-line free-text), and the
-  // operator decided clearing them is preferable to forwarding them as
-  // ghost-titles. A warning is surfaced via `console.warn` so the migration
-  // is visible.
+  // Reject loudly: silent-drop would lose information from the only place it
+  // exists. The agent must convert each title to a `danx_issue_create` call
+  // and reference the returned `ISS-N` in `action_item_ids[]`. An empty
+  // `action_items: []` field on disk is harmless legacy noise — accept that
+  // shape silently because no information is lost. Anything non-empty fails
+  // validation so the operator/agent fixes it once instead of forever.
   if (v.action_items !== undefined) {
-    if (Array.isArray(v.action_items) && v.action_items.length > 0) {
+    if (!Array.isArray(v.action_items)) {
+      return "retro.action_items is no longer supported (legacy free-text shape). Remove the field; use retro.action_item_ids[] of ISS-N references instead.";
+    }
+    if (v.action_items.length > 0) {
       const sample = v.action_items
         .filter((s) => typeof s === "string")
         .slice(0, 3)
         .map((s) => JSON.stringify(s))
         .join(", ");
-      console.warn(
-        `retro.action_items (legacy free-text shape) is no longer supported and will be dropped on save. ` +
-          `Recreate each action item as a full issue via danx_issue_create and reference its ISS-N in retro.action_item_ids[]. ` +
-          `Dropped sample: [${sample}${v.action_items.length > 3 ? ", …" : ""}]`,
+      return (
+        `retro.action_items (legacy free-text shape) is no longer supported. ` +
+        `Create each action item as a full issue via danx_issue_create and reference its ISS-N in retro.action_item_ids[]. ` +
+        `Offending sample: [${sample}${v.action_items.length > 3 ? ", …" : ""}]`
       );
     }
   }
