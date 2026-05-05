@@ -307,6 +307,7 @@ describe("syncIssue", () => {
     await tracker.setLabels(external_id, {
       type: "Feature",
       needsHelp: true,
+      needsApproval: false,
       triaged: false,
       blocked: false,
     });
@@ -324,6 +325,28 @@ describe("syncIssue", () => {
       (setLabels!.details as { labels: { needsHelp: boolean } }).labels
         .needsHelp,
     ).toBe(false);
+  });
+
+  it("derives needsApproval:true from status='Needs Approval' (Phase 1 of auto-triage epic)", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Needs Approval",
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+    const setLabels = tracker
+      .getRequestLog()
+      .find((l) => l.method === "setLabels");
+    expect(setLabels).toBeDefined();
+    const labels = (
+      setLabels!.details as {
+        labels: { needsApproval: boolean; needsHelp: boolean };
+      }
+    ).labels;
+    expect(labels.needsApproval).toBe(true);
+    expect(labels.needsHelp).toBe(false);
   });
 
   it("derives blocked:true from local.blocked != null and pushes the Blocked label", async () => {

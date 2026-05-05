@@ -86,6 +86,7 @@ async function startTestServer(): Promise<TestHarness> {
       todoListId: "",
       inProgressListId: "",
       needsHelpListId: "",
+      needsApprovalListId: "",
       doneListId: "",
       cancelledListId: "",
       actionItemsListId: "",
@@ -93,6 +94,7 @@ async function startTestServer(): Promise<TestHarness> {
       featureLabelId: "",
       epicLabelId: "",
       needsHelpLabelId: "",
+      needsApprovalLabelId: "",
       blockedLabelId: "",
     },
     trelloEnabled: false,
@@ -621,6 +623,38 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     await _drainAsyncWorkForTesting();
     expect(existsSync(issuePath(h.repo.localPath, "ISS-10", "open"))).toBe(true);
     expect(existsSync(issuePath(h.repo.localPath, "ISS-10", "closed"))).toBe(false);
+  });
+
+  it("status: 'Needs Approval' keeps file in open/ (Phase 1 of auto-triage epic)", async () => {
+    // Needs Approval is a non-dispatchable, non-terminal parking status —
+    // distinct from Needs Help. It must NOT trigger the open→closed move
+    // (which is reserved for Done / Cancelled). Pin the contract here so a
+    // future regression that adds Needs Approval to the terminal set gets
+    // caught.
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-77",
+        external_id: "",
+        title: "Awaiting design approval",
+      }),
+      tracker: "memory",
+      status: "Needs Approval",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-na`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-77" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ saved: true });
+
+    await _drainAsyncWorkForTesting();
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-77", "open"))).toBe(true);
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-77", "closed"))).toBe(false);
+    const persisted = readYaml(h.repo.localPath, "ISS-77");
+    expect(persisted).toContain("status: Needs Approval");
   });
 
   it("forces status to ToDo on save when blocked is non-null, regardless of agent-written status", async () => {

@@ -56,6 +56,17 @@ describe("serializeIssue / parseIssue", () => {
     expect(yaml2).toBe(yaml1);
   });
 
+  it("round-trips status: 'Needs Approval' (Phase 1 of auto-triage epic)", () => {
+    // The new status must serialize, validate, and parse back without
+    // schema rejection. Pinning here so a future enum-tightening change
+    // can't silently drop the value.
+    const issue = fullIssue({ status: "Needs Approval" });
+    const yaml = serializeIssue(issue);
+    const parsed = parseIssue(yaml);
+    expect(parsed.status).toBe("Needs Approval");
+    expect(serializeIssue(parsed)).toBe(yaml);
+  });
+
   it("preserves null parent_id and dispatch_id through round-trip", () => {
     const issue = fullIssue({ parent_id: null, dispatch_id: null });
     const yaml = serializeIssue(issue);

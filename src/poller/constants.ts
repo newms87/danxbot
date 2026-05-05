@@ -64,6 +64,13 @@ export function loadTrelloIds(repoPath: string): Omit<TrelloConfig, "apiKey" | "
     todoListId: req("lists.todo"),
     inProgressListId: req("lists.in_progress"),
     needsHelpListId: req("lists.needs_help"),
+    // `lists.needs_approval` is OPTIONAL during the rollout of the new
+    // `Needs Approval` status — existing repos predate the line and would
+    // otherwise fail to load. Default to empty; trello.ts throws at the
+    // statusToListId call site when an agent actually tries to route a
+    // card to Needs Approval without a provisioned list, which is the
+    // correct fail-loud surface.
+    needsApprovalListId: yaml["lists.needs_approval"] ?? "",
     doneListId: req("lists.done"),
     cancelledListId: req("lists.cancelled"),
     actionItemsListId: req("lists.action_items"),
@@ -71,6 +78,9 @@ export function loadTrelloIds(repoPath: string): Omit<TrelloConfig, "apiKey" | "
     featureLabelId: req("labels.feature"),
     epicLabelId: req("labels.epic"),
     needsHelpLabelId: req("labels.needs_help"),
+    // `labels.needs_approval` mirrors `lists.needs_approval` — optional
+    // during rollout; setLabels skips applying when empty.
+    needsApprovalLabelId: yaml["labels.needs_approval"] ?? "",
     blockedLabelId: req("labels.blocked"),
     ...(triaged ? { triagedLabelId: triaged } : {}),
   };

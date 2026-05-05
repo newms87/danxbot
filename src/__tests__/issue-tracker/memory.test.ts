@@ -84,6 +84,7 @@ describe("MemoryTracker", () => {
     await tracker.setLabels(external_id, {
       type: "Bug",
       needsHelp: true,
+      needsApproval: false,
       triaged: false,
       blocked: false,
     });
@@ -208,6 +209,7 @@ describe("MemoryTracker", () => {
     await tracker.setLabels(external_id, {
       type: "Bug",
       needsHelp: true,
+      needsApproval: false,
       triaged: true,
       blocked: false,
     });
@@ -269,7 +271,7 @@ describe("MemoryTracker", () => {
 
     // details payload shape: setLabels carries the labels triple.
     expect(byMethod("setLabels")?.details).toEqual({
-      labels: { type: "Bug", needsHelp: true, triaged: true, blocked: false },
+      labels: { type: "Bug", needsHelp: true, needsApproval: false, triaged: true, blocked: false },
     });
     // moveToStatus carries the target status.
     expect(byMethod("moveToStatus")?.details).toEqual({

@@ -15,6 +15,7 @@ const TRELLO: TrelloConfig = {
   todoListId: "t",
   inProgressListId: "i",
   needsHelpListId: "n",
+  needsApprovalListId: "n",
   doneListId: "d",
   cancelledListId: "c",
   actionItemsListId: "a",
@@ -22,6 +23,7 @@ const TRELLO: TrelloConfig = {
   featureLabelId: "lf",
   epicLabelId: "le",
   needsHelpLabelId: "lnh",
+  needsApprovalLabelId: "lnh",
   blockedLabelId: "lblk",
 };
 

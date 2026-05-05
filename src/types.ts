@@ -106,6 +106,18 @@ export interface TrelloConfig {
   todoListId: string;
   inProgressListId: string;
   needsHelpListId: string;
+  /**
+   * Trello list id for the "Needs Approval" column. Pairs with the
+   * `Needs Approval` `IssueStatus` value. Empty string when the operator
+   * has not yet provisioned the list on the board — `statusToListId`
+   * throws with a "Trello board has no Needs Approval list configured"
+   * message in that case so the fail-loud contract is preserved (the
+   * alternative — silently routing to a fallback list — would lose
+   * every Needs-Approval card on push). `fetchOpenCards` and
+   * `listIdToStatus` short-circuit on the empty value so reading the
+   * board is safe even before the list is provisioned.
+   */
+  needsApprovalListId: string;
   doneListId: string;
   cancelledListId: string;
   actionItemsListId: string;
@@ -113,6 +125,13 @@ export interface TrelloConfig {
   featureLabelId: string;
   epicLabelId: string;
   needsHelpLabelId: string;
+  /**
+   * Trello label id auto-applied to cards with `status: "Needs Approval"`.
+   * Mirrors `needsHelpLabelId`. Empty string when the operator has not
+   * provisioned the label yet — `setLabels` skips applying it in that
+   * case (managed-set filter still strips a stale label if one exists).
+   */
+  needsApprovalLabelId: string;
   /**
    * Label applied to cards whose YAML carries a non-null `blocked` field.
    * Managed automatically by the worker (paired with `setLabels({blocked})`)

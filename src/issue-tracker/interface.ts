@@ -21,11 +21,25 @@
  * external_id` via the YAML's two id fields.
  */
 
+/**
+ * Open-issue status enum.
+ *
+ * `Needs Approval` is a fifth non-dispatchable status, distinct from
+ * `Needs Help`. Use it when an agent COULD write code for a card but is
+ * uncertain whether the chosen direction is correct (architectural risk,
+ * cross-cutting scope, disruptive refactor) and a human should sanity-check
+ * the plan before work starts. `Needs Help` remains reserved for cards
+ * where a human must SUPPLY information (creds, missing decision input,
+ * ambiguous AC) — conflating the two loses signal for the operator
+ * triaging the parked-card list. Both statuses keep the YAML in `open/`;
+ * neither is dispatched by the poller.
+ */
 export type IssueStatus =
   | "Review"
   | "ToDo"
   | "In Progress"
   | "Needs Help"
+  | "Needs Approval"
   | "Done"
   | "Cancelled";
 
@@ -207,6 +221,26 @@ export interface CreateCardInput {
   blocked?: IssueBlocked | null;
 }
 
+/**
+ * The set of "managed" labels danxbot owns on every card. The poller / sync
+ * layer derives these booleans from the local YAML's `status`, `triaged`,
+ * and `blocked` fields and pushes via `setLabels`. Labels not in this set
+ * (operator-applied labels) are preserved by tracker implementations'
+ * `setLabels` filter.
+ *
+ * Extracted so adding a new managed label is a one-line edit instead of
+ * four (interface signature + setLabels arg shape in trello.ts +
+ * memory.ts + sync diff). The booleans are derived data — never store
+ * them on the YAML.
+ */
+export interface ManagedLabels {
+  type: IssueType;
+  needsHelp: boolean;
+  needsApproval: boolean;
+  triaged: boolean;
+  blocked: boolean;
+}
+
 export interface IssueTracker {
   fetchOpenCards(): Promise<IssueRef[]>;
 
@@ -232,15 +266,7 @@ export interface IssueTracker {
 
   moveToStatus(externalId: string, status: IssueStatus): Promise<void>;
 
-  setLabels(
-    externalId: string,
-    labels: {
-      type: IssueType;
-      needsHelp: boolean;
-      triaged: boolean;
-      blocked: boolean;
-    },
-  ): Promise<void>;
+  setLabels(externalId: string, labels: ManagedLabels): Promise<void>;
 
   addComment(
     externalId: string,
@@ -303,6 +329,7 @@ export const ISSUE_STATUSES: readonly IssueStatus[] = [
   "ToDo",
   "In Progress",
   "Needs Help",
+  "Needs Approval",
   "Done",
   "Cancelled",
 ] as const;

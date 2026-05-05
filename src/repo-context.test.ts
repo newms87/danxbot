@@ -13,6 +13,7 @@ vi.mock("./poller/constants.js", () => ({
     todoListId: "t",
     inProgressListId: "ip",
     needsHelpListId: "nh",
+    needsApprovalListId: "nh",
     doneListId: "d",
     cancelledListId: "c",
     actionItemsListId: "a",
@@ -20,6 +21,7 @@ vi.mock("./poller/constants.js", () => ({
     featureLabelId: "feat",
     epicLabelId: "epic",
     needsHelpLabelId: "nhl",
+    needsApprovalLabelId: "nhl",
     blockedLabelId: "blk",
   }),
 }));

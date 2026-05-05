@@ -34,6 +34,7 @@ const COLUMN_ORDER: readonly IssueStatus[] = [
   "ToDo",
   "In Progress",
   "Needs Help",
+  "Needs Approval",
   "Done",
   "Cancelled",
 ];

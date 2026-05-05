@@ -8,6 +8,7 @@ import {
   type IssueStatus,
   type IssueTracker,
   type IssueType,
+  type ManagedLabels,
   type PhaseStatus,
 } from "./interface.js";
 
@@ -55,12 +56,7 @@ interface StoredCard {
     commits: string[];
   };
   blocked: { reason: string; timestamp: string; by: string[] } | null;
-  labels: {
-    type: IssueType;
-    needsHelp: boolean;
-    triaged: boolean;
-    blocked: boolean;
-  };
+  labels: ManagedLabels;
 }
 
 /**
@@ -114,6 +110,7 @@ export class MemoryTracker implements IssueTracker {
       "ToDo",
       "In Progress",
       "Needs Help",
+      "Needs Approval",
     ]);
     const refs: IssueRef[] = [];
     for (const card of this.cards.values()) {
@@ -183,6 +180,7 @@ export class MemoryTracker implements IssueTracker {
       labels: {
         type: input.type,
         needsHelp: input.status === "Needs Help",
+        needsApproval: input.status === "Needs Approval",
         triaged: input.triaged.timestamp !== "",
         blocked: false,
       },
@@ -216,12 +214,7 @@ export class MemoryTracker implements IssueTracker {
 
   async setLabels(
     externalId: string,
-    labels: {
-      type: IssueType;
-      needsHelp: boolean;
-      triaged: boolean;
-      blocked: boolean;
-    },
+    labels: ManagedLabels,
   ): Promise<void> {
     this.consumeWriteRejection();
     const card = this.requireCard(externalId);
@@ -474,6 +467,7 @@ export class MemoryTracker implements IssueTracker {
       labels: {
         type: issue.type,
         needsHelp: issue.status === "Needs Help",
+        needsApproval: issue.status === "Needs Approval",
         triaged: issue.triaged.timestamp !== "",
         blocked: issue.blocked !== null,
       },

@@ -14,6 +14,7 @@ const TRELLO: TrelloConfig = {
   todoListId: "list-todo",
   inProgressListId: "list-ip",
   needsHelpListId: "list-nh",
+  needsApprovalListId: "list-na",
   doneListId: "list-done",
   cancelledListId: "list-cancelled",
   actionItemsListId: "list-ai",
@@ -21,6 +22,7 @@ const TRELLO: TrelloConfig = {
   featureLabelId: "lbl-feature",
   epicLabelId: "lbl-epic",
   needsHelpLabelId: "lbl-nh",
+  needsApprovalLabelId: "lbl-na",
   blockedLabelId: "lbl-blocked",
   triagedLabelId: "lbl-triaged",
 };
@@ -56,6 +58,8 @@ describe("TrelloTracker", () => {
       if (url.includes("list-ip/cards")) return jsonResponse([]);
       if (url.includes("list-nh/cards"))
         return jsonResponse([{ id: "n1", name: "#ISS-3: N1" }]);
+      if (url.includes("list-na/cards"))
+        return jsonResponse([{ id: "p1", name: "#ISS-9: P1" }]);
       if (url.includes("list-ai/cards"))
         return jsonResponse([{ id: "a1", name: "#ISS-4: A1" }]);
       throw new Error(`unexpected url: ${url}`);
@@ -72,6 +76,12 @@ describe("TrelloTracker", () => {
         list_kind: "todo",
       },
       { id: "ISS-3", external_id: "n1", title: "N1", status: "Needs Help" },
+      {
+        id: "ISS-9",
+        external_id: "p1",
+        title: "P1",
+        status: "Needs Approval",
+      },
       // Action Items list cards surface as ToDo + list_kind: "action_items"
       // so blocker discovery sees them but the poller dispatch path skips.
       {
@@ -83,10 +93,10 @@ describe("TrelloTracker", () => {
       },
     ]);
     // Pin the call count so a future regression that drops one of the
-    // five open-list statuses (Review, ToDo, In Progress, Needs Help,
-    // Action Items) gets caught here, even when the dropped list
-    // happened to be empty.
-    expect(fetchMock).toHaveBeenCalledTimes(5);
+    // six open-list statuses (Review, ToDo, In Progress, Needs Help,
+    // Needs Approval, Action Items) gets caught here, even when the
+    // dropped list happened to be empty.
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   it("getCard hydrates description, status, type, ac, phases (NOT comments — call getComments separately)", async () => {
@@ -237,6 +247,7 @@ describe("TrelloTracker", () => {
     await tracker.setLabels("c1", {
       type: "Feature",
       needsHelp: true,
+      needsApproval: false,
       triaged: false,
       blocked: false,
     });
@@ -294,6 +305,7 @@ describe("TrelloTracker", () => {
     await tracker.setLabels("c1", {
       type: "Bug",
       needsHelp: false,
+      needsApproval: false,
       triaged: true,
       blocked: false,
     });
@@ -319,6 +331,7 @@ describe("TrelloTracker", () => {
       tracker.setLabels("c1", {
         type: "Bug",
         needsHelp: false,
+      needsApproval: false,
         triaged: true,
         blocked: false,
       }),
@@ -340,6 +353,7 @@ describe("TrelloTracker", () => {
       tracker.setLabels("c1", {
         type: "Bug",
         needsHelp: false,
+      needsApproval: false,
         triaged: false,
         blocked: false,
       }),
@@ -367,6 +381,7 @@ describe("TrelloTracker", () => {
     await tracker.setLabels("c1", {
       type: "Bug",
       needsHelp: false,
+      needsApproval: false,
       triaged: false,
       blocked: false,
     });
@@ -376,6 +391,154 @@ describe("TrelloTracker", () => {
     const ids = (body.idLabels as string).split(",").filter(Boolean);
     expect(ids).not.toContain("discovered-triaged");
     expect(ids).toContain("lbl-bug");
+  });
+
+  // ---- Needs Approval (Phase 1 of auto-triage epic, ISS-75) ----
+
+  describe("Needs Approval status", () => {
+    it("moveToStatus('Needs Approval') routes to needsApprovalListId", async () => {
+      fetchMock.mockResolvedValue(jsonResponse({}));
+      const tracker = new TrelloTracker(TRELLO);
+      await tracker.moveToStatus("c1", "Needs Approval");
+      const call = fetchMock.mock.calls[0];
+      expect(JSON.parse(call[1].body as string)).toEqual({
+        idList: "list-na",
+        pos: "top",
+      });
+    });
+
+    it("moveToStatus('Needs Approval') throws when the list id is empty (operator has not provisioned the list)", async () => {
+      const cfg: TrelloConfig = { ...TRELLO, needsApprovalListId: "" };
+      const tracker = new TrelloTracker(cfg);
+      await expect(
+        tracker.moveToStatus("c1", "Needs Approval"),
+      ).rejects.toThrow(
+        /Trello board has no Needs Approval list configured/,
+      );
+    });
+
+    it("setLabels({needsApproval:true}) applies the Needs Approval label when provisioned", async () => {
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === "GET") {
+          return jsonResponse({ idLabels: ["lbl-feature"] });
+        }
+        return jsonResponse({});
+      });
+      const tracker = new TrelloTracker(TRELLO);
+      await tracker.setLabels("c1", {
+        type: "Feature",
+        needsHelp: false,
+        needsApproval: true,
+        triaged: false,
+        blocked: false,
+      });
+      const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
+      if (!putCall) throw new Error("expected PUT");
+      const body = JSON.parse(putCall[1].body as string);
+      const ids = (body.idLabels as string).split(",");
+      expect(ids).toContain("lbl-na");
+    });
+
+    it("setLabels({needsApproval:true}) silently skips applying the label when needsApprovalLabelId is empty (rollout)", async () => {
+      // Rollout state: list provisioned, label not yet. The Needs Approval
+      // status push must succeed; the missing label is a no-op rather
+      // than an error so the rest of the card's labels still sync.
+      const cfg: TrelloConfig = { ...TRELLO, needsApprovalLabelId: "" };
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === "GET") {
+          return jsonResponse({ idLabels: ["lbl-feature"] });
+        }
+        return jsonResponse({});
+      });
+      const tracker = new TrelloTracker(cfg);
+      await tracker.setLabels("c1", {
+        type: "Feature",
+        needsHelp: false,
+        needsApproval: true,
+        triaged: false,
+        blocked: false,
+      });
+      const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
+      if (!putCall) throw new Error("expected PUT");
+      const body = JSON.parse(putCall[1].body as string);
+      const ids = (body.idLabels as string).split(",").filter(Boolean);
+      // Empty needsApprovalLabelId → no `""` in idLabels (which would
+      // otherwise become a malformed comma-separated entry).
+      expect(ids).toEqual(["lbl-feature"]);
+    });
+
+    it("setLabels with empty needsApprovalLabelId does not strip non-managed labels (managed-set excludes empty id)", async () => {
+      // If `""` were in the managed set, the preserved-labels filter would
+      // strip every card label whose id matches `""` — which is no real
+      // card, but the bug surface is the filter's contract: only stamp
+      // configured ids, never blanks. Pin the contract.
+      const cfg: TrelloConfig = { ...TRELLO, needsApprovalLabelId: "" };
+      fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === "GET") {
+          return jsonResponse({
+            idLabels: ["lbl-bug", "lbl-priority-p0"],
+          });
+        }
+        return jsonResponse({});
+      });
+      const tracker = new TrelloTracker(cfg);
+      await tracker.setLabels("c1", {
+        type: "Bug",
+        needsHelp: false,
+        needsApproval: false,
+        triaged: false,
+        blocked: false,
+      });
+      const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
+      if (!putCall) throw new Error("expected PUT");
+      const body = JSON.parse(putCall[1].body as string);
+      const ids = (body.idLabels as string).split(",").filter(Boolean);
+      expect(ids).toContain("lbl-priority-p0");
+      expect(ids).toContain("lbl-bug");
+    });
+
+    it("getCard maps a card on the Needs Approval list to status: 'Needs Approval'", async () => {
+      fetchMock.mockImplementation(async (url: string) => {
+        if (url.includes("/cards/c1?")) {
+          return jsonResponse({
+            id: "c1",
+            name: "#ISS-9: P1",
+            desc: "",
+            idList: "list-na",
+            idLabels: [],
+            checklists: [],
+          });
+        }
+        throw new Error(`unexpected url: ${url}`);
+      });
+      const tracker = new TrelloTracker(TRELLO);
+      const issue = await tracker.getCard("c1");
+      expect(issue.status).toBe("Needs Approval");
+    });
+
+    it("listIdToStatus does NOT match an empty needsApprovalListId on a card with a blank idList (regression guard for the && empty check)", async () => {
+      const cfg: TrelloConfig = { ...TRELLO, needsApprovalListId: "" };
+      fetchMock.mockImplementation(async (url: string) => {
+        if (url.includes("/cards/c1?")) {
+          return jsonResponse({
+            id: "c1",
+            name: "#ISS-9: P1",
+            desc: "",
+            // Hypothetical: a card whose idList came back empty would
+            // erroneously match an empty needsApprovalListId without the
+            // truthiness guard. Pin that the guard exists.
+            idList: "",
+            idLabels: [],
+            checklists: [],
+          });
+        }
+        throw new Error(`unexpected url: ${url}`);
+      });
+      const tracker = new TrelloTracker(cfg);
+      await expect(tracker.getCard("c1")).rejects.toThrow(
+        / is not mapped to a status/,
+      );
+    });
   });
 
   // ---- Test gap A: HTTP method/URL/auth/body assertions per method ----

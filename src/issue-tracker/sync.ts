@@ -184,18 +184,21 @@ export async function syncIssue(
   const localLabels = {
     type: local.type,
     needsHelp: local.status === "Needs Help",
+    needsApproval: local.status === "Needs Approval",
     triaged: local.triaged.timestamp !== "",
     blocked: local.blocked !== null,
   };
   const remoteLabels = {
     type: remoteCard.type,
     needsHelp: remoteCard.status === "Needs Help",
+    needsApproval: remoteCard.status === "Needs Approval",
     triaged: remoteCard.triaged.timestamp !== "",
     blocked: remoteCard.blocked !== null,
   };
   if (
     localLabels.type !== remoteLabels.type ||
     localLabels.needsHelp !== remoteLabels.needsHelp ||
+    localLabels.needsApproval !== remoteLabels.needsApproval ||
     localLabels.triaged !== remoteLabels.triaged ||
     localLabels.blocked !== remoteLabels.blocked
   ) {

@@ -7,6 +7,7 @@ import {
   type IssueStatus,
   type IssueTracker,
   type IssueType,
+  type ManagedLabels,
   type PhaseStatus,
 } from "./interface.js";
 
@@ -111,6 +112,11 @@ export class TrelloTracker implements IssueTracker {
         listKind: undefined,
       },
       {
+        status: "Needs Approval",
+        listId: this.trello.needsApprovalListId,
+        listKind: undefined,
+      },
+      {
         status: "ToDo",
         listId: this.trello.actionItemsListId,
         listKind: "action_items",
@@ -118,6 +124,10 @@ export class TrelloTracker implements IssueTracker {
     ];
     const refs: IssueRef[] = [];
     for (const entry of openLists) {
+      // Skip lists the operator has not provisioned yet (empty id).
+      // Currently only `Needs Approval` can be empty during rollout; the
+      // others are required by `loadTrelloIds`.
+      if (!entry.listId) continue;
       const cards = await this.fetchListCards(entry.listId);
       for (const card of cards) {
         const { id, title } = parseCardTitle(card.name);
@@ -222,6 +232,7 @@ export class TrelloTracker implements IssueTracker {
     const labelIds = await this.resolveLabelIds({
       type: input.type,
       needsHelp: input.status === "Needs Help",
+      needsApproval: input.status === "Needs Approval",
       triaged: input.triaged.timestamp !== "",
       blocked: false,
     });
@@ -326,15 +337,7 @@ export class TrelloTracker implements IssueTracker {
     );
   }
 
-  async setLabels(
-    externalId: string,
-    labels: {
-      type: IssueType;
-      needsHelp: boolean;
-      triaged: boolean;
-      blocked: boolean;
-    },
-  ): Promise<void> {
+  async setLabels(externalId: string, labels: ManagedLabels): Promise<void> {
     // Eagerly resolve the Triaged label id regardless of `labels.triaged` so
     // the managed-set is always complete. Without this, a stale Triaged
     // label cannot be stripped on `triaged: false` when the cache is cold,
@@ -575,6 +578,13 @@ export class TrelloTracker implements IssueTracker {
         return this.trello.inProgressListId;
       case "Needs Help":
         return this.trello.needsHelpListId;
+      case "Needs Approval":
+        if (!this.trello.needsApprovalListId) {
+          throw new Error(
+            "Trello board has no Needs Approval list configured — add `lists.needs_approval` to .danxbot/config/trello.yml after creating the list on the board.",
+          );
+        }
+        return this.trello.needsApprovalListId;
       case "Done":
         return this.trello.doneListId;
       case "Cancelled":
@@ -587,6 +597,12 @@ export class TrelloTracker implements IssueTracker {
     if (listId === this.trello.todoListId) return "ToDo";
     if (listId === this.trello.inProgressListId) return "In Progress";
     if (listId === this.trello.needsHelpListId) return "Needs Help";
+    if (
+      this.trello.needsApprovalListId &&
+      listId === this.trello.needsApprovalListId
+    ) {
+      return "Needs Approval";
+    }
     if (listId === this.trello.doneListId) return "Done";
     if (listId === this.trello.cancelledListId) return "Cancelled";
     // Action Items: a UI-organization-only list (no separate IssueStatus
@@ -604,12 +620,7 @@ export class TrelloTracker implements IssueTracker {
     return "Feature";
   }
 
-  private async resolveLabelIds(labels: {
-    type: IssueType;
-    needsHelp: boolean;
-    triaged: boolean;
-    blocked: boolean;
-  }): Promise<string[]> {
+  private async resolveLabelIds(labels: ManagedLabels): Promise<string[]> {
     const ids: string[] = [];
     switch (labels.type) {
       case "Epic":
@@ -623,6 +634,12 @@ export class TrelloTracker implements IssueTracker {
         break;
     }
     if (labels.needsHelp) ids.push(this.trello.needsHelpLabelId);
+    // Apply the Needs Approval label only when the operator has provisioned
+    // it. Empty id during rollout → silently skip; the managed-set filter
+    // still strips a stale label if the operator removes it later.
+    if (labels.needsApproval && this.trello.needsApprovalLabelId) {
+      ids.push(this.trello.needsApprovalLabelId);
+    }
     if (labels.blocked) ids.push(this.trello.blockedLabelId);
     if (labels.triaged) ids.push(await this.resolveTriagedLabelId());
     return ids;
@@ -655,7 +672,7 @@ export class TrelloTracker implements IssueTracker {
    * stripped on `setLabels({triaged: false})` even when the cache is cold.
    */
   private allManagedLabelIdsForFiltering(triagedLabelId: string): string[] {
-    return [
+    const ids = [
       this.trello.bugLabelId,
       this.trello.featureLabelId,
       this.trello.epicLabelId,
@@ -663,6 +680,13 @@ export class TrelloTracker implements IssueTracker {
       this.trello.blockedLabelId,
       triagedLabelId,
     ];
+    // Include the Needs Approval label id only when provisioned. An empty
+    // string in the managed set would erroneously strip every unlabeled
+    // card's labels (the filter compares by exact id match including "").
+    if (this.trello.needsApprovalLabelId) {
+      ids.push(this.trello.needsApprovalLabelId);
+    }
+    return ids;
   }
 
   private async createChecklist(cardId: string, name: string): Promise<string> {
