@@ -52,6 +52,7 @@ import { updateDispatch } from "../dashboard/dispatches-db.js";
 import {
   resolveWorkspace,
   cleanupWorkspaceMcpSettings,
+  cleanupWorkspaceSettings,
 } from "../workspace/resolve.js";
 import {
   cleanupStagedFiles,
@@ -428,12 +429,18 @@ async function runResolved(
           // both must finish before the caller observes a terminal job.
           cleanupMcpSettings(settingsDir);
           cleanupStagedFiles(resolved.stagedFilePaths);
+          if (resolved.settingsPath) {
+            cleanupWorkspaceSettings(resolved.settingsPath);
+          }
           input.onComplete?.(completedJob);
         },
       });
     } catch (spawnErr) {
       cleanupMcpSettings(settingsDir);
       cleanupStagedFiles(resolved.stagedFilePaths);
+      if (resolved.settingsPath) {
+        cleanupWorkspaceSettings(resolved.settingsPath);
+      }
       throw spawnErr;
     }
 

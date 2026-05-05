@@ -330,6 +330,16 @@ export function cleanupWorkspaceMcpSettings(mcpSettingsPath: string): void {
   rmSync(dir, { recursive: true, force: true });
 }
 
+/**
+ * Remove the temp directory holding the substituted `.claude/settings.json`
+ * copy created by `writeSubstitutedSettings`. Same idempotency contract
+ * as `cleanupWorkspaceMcpSettings`.
+ */
+export function cleanupWorkspaceSettings(settingsPath: string): void {
+  const dir = dirname(settingsPath);
+  rmSync(dir, { recursive: true, force: true });
+}
+
 export function resolveWorkspace(
   options: ResolveWorkspaceOptions,
 ): ResolvedWorkspace {
