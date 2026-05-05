@@ -81,6 +81,7 @@ function buildTrelloRow(cardId: string): Dispatch {
     summary: null,
     error: null,
     runtimeMode: "docker",
+    hostPid: process.pid,
     tokensTotal: 0,
     tokensIn: 0,
     tokensOut: 0,

@@ -85,6 +85,20 @@ export interface Dispatch {
   summary: string | null;
   error: string | null;
   runtimeMode: RuntimeMode;
+  /**
+   * OS process id of the worker that spawned this dispatch (`process.pid`
+   * at row-insert time). Stays populated for the row's lifetime — never
+   * rewritten on restart.
+   *
+   * Worker startup uses it to distinguish "claude still running across a
+   * restart" (PID alive → leave alone) from "orphaned row, owning worker
+   * gone" (PID dead OR `null` → mark failed). The poller's pre-claim DB
+   * guard reads it to skip cards whose existing dispatch is still live.
+   *
+   * `null` for rows inserted before migration 013 lands (legacy rows are
+   * treated as orphaned by the first reconciliation after upgrade).
+   */
+  hostPid: number | null;
   tokensTotal: number;
   tokensIn: number;
   tokensOut: number;

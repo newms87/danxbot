@@ -124,6 +124,26 @@ describe("startDispatchTracking", () => {
     expect(inserted.parentJobId).toBeNull();
   });
 
+  it("stamps the worker's host_pid on the inserted row (ISS-69 startup reconciliation key)", async () => {
+    // Worker startup distinguishes "claude still running across a restart"
+    // (PID alive) from "orphaned row, owning worker gone" (PID dead /
+    // null) by comparing this column to the live PID table. The poller's
+    // pre-claim DB guard reads the same column to skip re-dispatching a
+    // card whose existing dispatch is still live. A refactor that
+    // dropped this field would silently regress both paths.
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "pid-stamp-job",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "host",
+      danxbotCommit: "abc",
+      watcher: watcher as never,
+    });
+    const inserted = mockInsertDispatch.mock.calls[0][0];
+    expect(inserted.hostPid).toBe(process.pid);
+  });
+
   it("denormalizes slack thread + channel into dedicated columns when trigger is slack (Phase 1 of kMQ170Ea)", async () => {
     // Phase 2's thread-continuity lookup queries `slack_thread_ts` via
     // a real index — it cannot afford a JSON path scan. Phase 1's job

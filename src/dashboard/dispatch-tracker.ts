@@ -104,6 +104,12 @@ export async function startDispatchTracking(
     summary: null,
     error: null,
     runtimeMode: args.runtimeMode,
+    // `process.pid` is the worker's PID. In host mode the spawned claude
+    // is reparented to PID 1 by `script -q -f`, so the worker's PID is
+    // the only process whose lifetime we can use as a "this dispatch is
+    // owned by a still-running worker" signal at restart time. See
+    // ISS-69 + the `host_pid` docstring on `Dispatch`.
+    hostPid: process.pid,
     tokensTotal: 0,
     tokensIn: 0,
     tokensOut: 0,

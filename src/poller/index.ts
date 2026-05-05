@@ -60,6 +60,9 @@ import type {
   DispatchTriggerMetadata,
   TrelloTriggerMetadata,
 } from "../dashboard/dispatches.js";
+import { findNonTerminalDispatches } from "../dashboard/dispatches-db.js";
+import { isPidAlive } from "../agent/host-pid.js";
+import { hasLiveDispatchForCard as hasLiveDispatchForCardImpl } from "./live-dispatch-guard.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -415,6 +418,21 @@ async function _poll(repo: RepoContext): Promise<void> {
   //      `danx_issue_save({id})` and never knows external trackers exist.
   const dispatchId = randomUUID();
 
+  // Pre-claim DB guard (ISS-69). Host-mode dispatches outlive the worker
+  // — a worker restart leaves the prior dispatch's claude process running
+  // under PID 1 with the dispatch row still `running`. Before acquiring
+  // the tracker lock (which is wall-clock based and will eventually
+  // reclaim a stale-looking-but-actually-live dispatch) check whether
+  // any non-terminal row references this card and whose `host_pid` is
+  // alive — if so, skip this tick. The pre-existing claude is still
+  // working and will finalize via ISS-68's stop-handler DB fallback.
+  if (await hasLiveDispatchForCard(repo.name, primary.external_id)) {
+    log.info(
+      `[${repo.name}] ${primary.title} already has live dispatch (host_pid alive) — skipping`,
+    );
+    return;
+  }
+
   // Multi-environment dispatch lock. Same Trello card can be polled
   // independently from local dev + production EC2 worker; without a
   // tracker-side lock both write competing local YAMLs and silently
@@ -485,6 +503,24 @@ async function _poll(repo: RepoContext): Promise<void> {
  * resume target (In Progress with a stamped id from a prior dispatch)
  * stamps the real UUID via `stampDispatchAndWrite`.
  */
+/**
+ * Pre-claim DB guard (ISS-69). Thin wrapper that wires the impl in
+ * `live-dispatch-guard.ts` to the production `findNonTerminalDispatches`
+ * + `isPidAlive` + `log`. Lives inline so the call site in `_poll`
+ * stays a single readable line; the underlying logic is unit-tested in
+ * `live-dispatch-guard.test.ts`.
+ */
+async function hasLiveDispatchForCard(
+  repoName: string,
+  cardId: string,
+): Promise<boolean> {
+  return hasLiveDispatchForCardImpl(repoName, cardId, {
+    findNonTerminalDispatches,
+    isPidAlive,
+    log,
+  });
+}
+
 async function bulkSyncMissingYamls(
   repo: RepoContext,
   tracker: IssueTracker,

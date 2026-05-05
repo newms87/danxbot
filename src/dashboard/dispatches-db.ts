@@ -41,6 +41,7 @@ const COLUMN_MAP: Readonly<Record<keyof Dispatch, string>> = {
   summary: "summary",
   error: "error",
   runtimeMode: "runtime_mode",
+  hostPid: "host_pid",
   tokensTotal: "tokens_total",
   tokensIn: "tokens_in",
   tokensOut: "tokens_out",
@@ -81,6 +82,7 @@ export interface DispatchRow {
   summary: string | null;
   error: string | null;
   runtime_mode: string;
+  host_pid: number | null;
   tokens_total: number;
   tokens_in: number;
   tokens_out: number;
@@ -121,6 +123,11 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     summary: row.summary,
     error: row.error,
     runtimeMode: row.runtime_mode as RuntimeMode,
+    // Loose `==` on purpose: catches both DB `NULL` (mysql2 returns
+    // null) and missing-column / pre-migration test fixtures (undefined).
+    // Do NOT "fix" to `===` — that would let `Number(undefined)` produce
+    // NaN and silently corrupt every consumer of `hostPid`.
+    hostPid: row.host_pid == null ? null : Number(row.host_pid),
     tokensTotal: Number(row.tokens_total),
     tokensIn: Number(row.tokens_in),
     tokensOut: Number(row.tokens_out),
@@ -336,6 +343,25 @@ export async function countDispatchesByRepo(): Promise<
     }
   }
   return out;
+}
+
+/**
+ * Return every non-terminal dispatch row for `repoName` — `queued` and
+ * `running`. Caller decides what to do with each: worker startup
+ * reconciliation marks rows whose `host_pid` is dead as `failed`; the
+ * poller pre-claim DB guard skips Trello cards whose row's PID is alive.
+ *
+ * Sorted oldest-first so the worker's reconcile log reads in spawn order.
+ */
+export async function findNonTerminalDispatches(
+  repoName: string,
+): Promise<Dispatch[]> {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    "SELECT * FROM dispatches WHERE repo_name = ? AND `status` IN ('queued', 'running') ORDER BY started_at ASC",
+    [repoName],
+  );
+  return (rows as DispatchRow[]).map(rowToDispatch);
 }
 
 export async function deleteOldDispatches(

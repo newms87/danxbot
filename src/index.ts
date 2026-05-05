@@ -15,6 +15,7 @@ import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
+import { reconcileOrphanedDispatches } from "./worker/reconcile.js";
 
 const log = createLogger("startup");
 
@@ -120,6 +121,21 @@ async function startWorkerMode(): Promise<void> {
     process.env.DANX_DB_USER = repo.db.user;
     process.env.DANX_DB_PASSWORD = repo.db.password;
     process.env.DANX_DB_NAME = repo.db.database;
+  }
+
+  // Reconcile non-terminal dispatch rows from prior worker incarnations.
+  // Host-mode dispatches outlive the worker (claude is reparented to PID 1
+  // by `script -q -f`) — at startup we mark every row whose `host_pid` is
+  // dead or null as `failed`, and leave rows with a still-alive PID
+  // running. The poller's pre-claim DB guard prevents re-dispatching the
+  // latter while they're alive. See ISS-69.
+  try {
+    await reconcileOrphanedDispatches(repo.name);
+  } catch (err) {
+    // Reconciliation is a best-effort consistency pass — the DB is a
+    // side-channel and a transient failure should not block the worker
+    // from serving live dispatches. Log and continue.
+    log.error(`[${repo.name}] Dispatch reconciliation failed`, err);
   }
 
   // Start the worker HTTP server (dispatch API + health)

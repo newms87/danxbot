@@ -25,6 +25,7 @@ import {
   updateDispatch,
   getDispatchById,
   findLatestDispatchBySlackThread,
+  findNonTerminalDispatches,
   listDispatches,
   deleteOldDispatches,
   rowToDispatch,
@@ -93,6 +94,7 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     summary: null,
     error: null,
     runtimeMode: "docker",
+    hostPid: process.pid,
     tokensTotal: 0,
     tokensIn: 0,
     tokensOut: 0,
@@ -143,6 +145,7 @@ describe("dispatchToInsertParams", () => {
       "slackThreadTs", "slackChannelId",
       "sessionUuid", "jsonlPath", "parentJobId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "hostPid",
       "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
       "toolCallCount", "subagentCount", "nudgeCount", "danxbotCommit",
     ];
@@ -158,6 +161,7 @@ describe("dispatchToInsertParams", () => {
       "slackThreadTs", "slackChannelId",
       "sessionUuid", "jsonlPath", "parentJobId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "hostPid",
       "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
       "toolCallCount", "subagentCount", "nudgeCount", "danxbotCommit",
     ];
@@ -190,6 +194,7 @@ describe("dispatchToInsertParams", () => {
       "slackThreadTs", "slackChannelId",
       "sessionUuid", "jsonlPath", "parentJobId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "hostPid",
       "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
       "toolCallCount", "subagentCount", "nudgeCount", "danxbotCommit",
     ];
@@ -205,6 +210,7 @@ describe("dispatchToInsertParams", () => {
       "slackThreadTs", "slackChannelId",
       "sessionUuid", "jsonlPath", "parentJobId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "hostPid",
       "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
       "toolCallCount", "subagentCount", "nudgeCount", "danxbotCommit",
     ];
@@ -231,6 +237,7 @@ describe("rowToDispatch", () => {
       summary: "all done",
       error: null,
       runtime_mode: "host",
+      host_pid: 4242,
       tokens_total: 100,
       tokens_in: 40,
       tokens_out: 30,
@@ -248,6 +255,7 @@ describe("rowToDispatch", () => {
     expect(d.status).toBe("completed");
     expect(d.tokensTotal).toBe(100);
     expect(d.runtimeMode).toBe("host");
+    expect(d.hostPid).toBe(4242);
     // Resume lineage round-trips through rowToDispatch.
     expect(d.parentJobId).toBe("parent-aea75840");
   });
@@ -270,6 +278,7 @@ describe("rowToDispatch", () => {
       summary: null,
       error: null,
       runtime_mode: "docker",
+      host_pid: null,
       tokens_total: 0,
       tokens_in: 0,
       tokens_out: 0,
@@ -282,6 +291,7 @@ describe("rowToDispatch", () => {
     };
     const d = rowToDispatch(row);
     expect(d.triggerMetadata).toEqual(meta);
+    expect(d.hostPid).toBeNull();
   });
 });
 
@@ -455,6 +465,60 @@ describe("findLatestDispatchBySlackThread", () => {
     expect(params).toEqual(["1234.5678"]);
   });
 
+});
+
+describe("findNonTerminalDispatches", () => {
+  it("queries by repo_name with status IN (queued, running) and oldest-first ordering", async () => {
+    mockExecute.mockResolvedValueOnce([[], []]);
+    await findNonTerminalDispatches("danxbot");
+    const sql = mockExecute.mock.calls[0][0] as string;
+    const params = mockExecute.mock.calls[0][1] as unknown[];
+    expect(sql).toContain("FROM dispatches");
+    expect(sql).toContain("repo_name = ?");
+    expect(sql).toContain("'queued'");
+    expect(sql).toContain("'running'");
+    expect(sql).toMatch(/ORDER BY started_at ASC/i);
+    expect(params).toEqual(["danxbot"]);
+  });
+
+  it("hydrates rows via rowToDispatch (host_pid round-trips)", async () => {
+    mockExecute.mockResolvedValueOnce([
+      [
+        {
+          id: "alive-1",
+          repo_name: "danxbot",
+          trigger: "trello",
+          trigger_metadata: JSON.stringify(makeTrelloMeta()),
+          slack_thread_ts: null,
+          slack_channel_id: null,
+          session_uuid: null,
+          jsonl_path: null,
+          parent_job_id: null,
+          status: "running",
+          started_at: 1000,
+          completed_at: null,
+          summary: null,
+          error: null,
+          runtime_mode: "host",
+          host_pid: 4321,
+          tokens_total: 0,
+          tokens_in: 0,
+          tokens_out: 0,
+          cache_read: 0,
+          cache_write: 0,
+          tool_call_count: 0,
+          subagent_count: 0,
+          nudge_count: 0,
+          danxbot_commit: null,
+        },
+      ],
+      [],
+    ]);
+    const rows = await findNonTerminalDispatches("danxbot");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("alive-1");
+    expect(rows[0].hostPid).toBe(4321);
+  });
 });
 
 describe("listDispatches", () => {

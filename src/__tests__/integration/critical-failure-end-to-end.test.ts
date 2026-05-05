@@ -207,6 +207,10 @@ vi.mock("../../dashboard/dispatches-db.js", () => ({
   insertDispatch: vi.fn().mockResolvedValue(undefined),
   updateDispatch: vi.fn().mockResolvedValue(undefined),
   getDispatchById: vi.fn().mockResolvedValue(null),
+  // ISS-69 pre-claim guard reads non-terminal dispatches before claiming
+  // a card. Empty list keeps the integration test on the original code
+  // path (no live duplicate to skip).
+  findNonTerminalDispatches: vi.fn().mockResolvedValue([]),
 }));
 
 // --- Real imports (the pipeline under test) ---
