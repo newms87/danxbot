@@ -1,7 +1,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
-import { fetchIssues } from "../api";
-import type { IssueListItem } from "../types";
+import { fetchIssueDetail, fetchIssues } from "../api";
+import type { IssueDetail, IssueListItem } from "../types";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -10,6 +10,7 @@ export interface UseIssues {
   loading: Ref<boolean>;
   error: Ref<string | null>;
   refresh: () => Promise<void>;
+  fetchDetail: (id: string) => Promise<IssueDetail>;
 }
 
 /**
@@ -30,6 +31,17 @@ export function useIssues(repo: Ref<string>): UseIssues {
   let timer: ReturnType<typeof setInterval> | null = null;
   let cancelled = false;
   let currentReq = 0;
+  const detailCache = new Map<string, IssueDetail>();
+
+  async function fetchDetail(id: string): Promise<IssueDetail> {
+    const requestRepo = repo.value;
+    const cacheKey = `${requestRepo}:${id}`;
+    const cached = detailCache.get(cacheKey);
+    if (cached) return cached;
+    const detail = await fetchIssueDetail(requestRepo, id);
+    detailCache.set(cacheKey, detail);
+    return detail;
+  }
 
   async function load(): Promise<void> {
     if (!repo.value) {
@@ -43,6 +55,16 @@ export function useIssues(repo: Ref<string>): UseIssues {
     try {
       const result = await fetchIssues(requestRepo);
       if (cancelled || reqId !== currentReq) return;
+      // Invalidate cached detail entries whose underlying file mtime has
+      // advanced. Keeps reopen-same-drawer instant while preventing stale
+      // detail from sticking around after the YAML changes.
+      for (const item of result) {
+        const cacheKey = `${requestRepo}:${item.id}`;
+        const cached = detailCache.get(cacheKey);
+        if (cached && cached.updated_at !== item.updated_at) {
+          detailCache.delete(cacheKey);
+        }
+      }
       issues.value = result;
       error.value = null;
     } catch (err) {
@@ -71,6 +93,7 @@ export function useIssues(repo: Ref<string>): UseIssues {
   });
 
   watch(repo, () => {
+    detailCache.clear();
     void load();
     startTimer();
   });
@@ -80,5 +103,5 @@ export function useIssues(repo: Ref<string>): UseIssues {
     stopTimer();
   });
 
-  return { issues, loading, error, refresh: load };
+  return { issues, loading, error, refresh: load, fetchDetail };
 }
