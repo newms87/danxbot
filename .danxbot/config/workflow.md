@@ -11,6 +11,16 @@
 
 Importing anything from `src/poller/index.ts` (or any file that transitively loads `src/config.ts`) in a test hard-requires `DANXBOT_DB_USER` and friends at module-import time — the test fails before any assertion with a confusing "Missing required environment variable" error. Keep pure helpers (rule-file renderers, formatters, classifiers) in their own modules so test files can import them without pulling the config chain.
 
+## Adding an Export to `src/dashboard/dispatches-db.ts` — Update Every Vitest Mock
+
+`vi.mock("…/dispatches-db.js", () => ({ ... }))` in integration tests must list EVERY export the system-under-test calls. New export → add it to every mock factory or vitest throws `No "<name>" export is defined on the mock` at runtime (passes typecheck, fails at test-run). Before committing a new `dispatches-db` export, grep:
+
+```
+grep -rln 'vi.mock(.*dispatches-db' src/
+```
+
+and add the new function to each. ISS-69 burned ~5 min on this with `findNonTerminalDispatches`.
+
 ## UI Frontend Test Exemption
 
 The Vue UI layer under `dashboard/src/` (SFCs, composables, UI utilities, `api.ts`) is exempt from the test requirement. `test-reviewer` and the pipeline's Test-coverage gate MUST NOT flag missing coverage there. Backend `src/dashboard/**` (server, SSE, auth, analytics, proxies) + everything else under `src/**` still require unit + integration tests. Type checking (`vue-tsc --noEmit`) still required. Full rule + scope list: `CLAUDE.md` § Testing → "UI Frontend Test Exemption".
