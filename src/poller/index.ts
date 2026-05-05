@@ -663,6 +663,23 @@ async function tryResumeOrphan(
     // (or stall) through its own monitoring path.
     if (getActiveJob(issue.dispatch_id)) continue;
 
+    // ISS-69 mirror: in-memory `activeJobs` is wiped on every worker
+    // restart, but host-mode dispatches outlive the worker — `script
+    // -q -f` reparents claude to PID 1, so the prior agent is still
+    // running. Without this DB-backed liveness probe the orphan-resume
+    // path stamps a NEW dispatch_id and spawns a duplicate claude
+    // (observed in the ISS-66 dispatch that produced this fix). The
+    // ToDo dispatch path already guards via `hasLiveDispatchForCard`
+    // (see line ~429); orphan-resume runs BEFORE that path and must
+    // apply the same check or the duplicate happens before the ToDo
+    // guard ever gets a chance to fire.
+    if (await hasLiveDispatchForCard(repo.name, ref.external_id)) {
+      log.info(
+        `[${repo.name}] Skipping orphan-resume for "${issue.title}" (${issue.id}) — dispatches DB has live host_pid for card ${ref.external_id}`,
+      );
+      continue;
+    }
+
     const resolved = await resolveParentSessionId(repo.name, issue.dispatch_id);
     if (resolved.kind === "no-session-dir") {
       // No claude projects dir for this repo — infrastructure issue

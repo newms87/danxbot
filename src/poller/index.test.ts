@@ -215,6 +215,20 @@ vi.mock("../dispatch/core.js", () => ({
 const mockResolveParentSessionId = vi
   .fn()
   .mockResolvedValue({ kind: "no-session-dir" } as const);
+// ISS-69 mirror: orphan-resume now consults the same DB-backed liveness
+// guard the ToDo dispatch path uses. Default mock = no live rows + dead
+// PID so existing orphan-resume tests behave as before; new tests opt
+// into a live row to assert the skip path.
+const mockFindNonTerminalDispatches = vi.fn().mockResolvedValue([]);
+vi.mock("../dashboard/dispatches-db.js", () => ({
+  findNonTerminalDispatches: (...args: unknown[]) =>
+    mockFindNonTerminalDispatches(...args),
+}));
+const mockIsPidAlive = vi.fn().mockReturnValue(false);
+vi.mock("../agent/host-pid.js", () => ({
+  isPidAlive: (...args: unknown[]) => mockIsPidAlive(...args),
+}));
+
 vi.mock("../agent/resolve-parent-session.js", () => ({
   resolveParentSessionId: (...args: unknown[]) =>
     mockResolveParentSessionId(...args),
@@ -3108,6 +3122,10 @@ describe("poll — In Progress sync + orphan resume", () => {
     mockGetActiveJob.mockReturnValue(undefined);
     mockResolveParentSessionId.mockReset();
     mockResolveParentSessionId.mockResolvedValue({ kind: "no-session-dir" });
+    mockFindNonTerminalDispatches.mockReset();
+    mockFindNonTerminalDispatches.mockResolvedValue([]);
+    mockIsPidAlive.mockReset();
+    mockIsPidAlive.mockReturnValue(false);
   });
 
   it("hydrates an In Progress card that has no local YAML during bulk-sync (dispatch_id null)", async () => {
@@ -3187,6 +3205,58 @@ describe("poll — In Progress sync + orphan resume", () => {
     expect(dispatchArg.apiDispatchMeta.metadata.listName).toBe("In Progress");
     expect(dispatchArg.apiDispatchMeta.metadata.cardId).toBe("ip-1");
     expect(dispatchArg.task).toContain("ISS-77");
+  });
+
+  it("skips orphan resume when DB has a non-terminal dispatch row with a live host_pid for the card (cross-restart liveness)", async () => {
+    // Regression: worker restart wipes in-memory `activeJobs`, so the
+    // pre-existing `getActiveJob` check returns false even when claude
+    // is genuinely still running (host-mode `script -q -f` reparents
+    // claude to PID 1 → survives SIGTERM to the worker). ISS-69 added
+    // the same liveness guard on the ToDo dispatch path; orphan-resume
+    // runs FIRST and must apply the same probe or it stamps a new
+    // dispatch_id and spawns a duplicate before the ToDo guard ever
+    // gets a chance to fire.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-restart", "Card with surviving claude", "In Progress"),
+    ]);
+    const orphan = inProgressIssue(
+      "ISS-66",
+      "ip-restart",
+      "old-dispatch-uuid",
+    );
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-restart" ? orphan : null,
+    );
+    // activeJobs cleared by restart — getActiveJob returns null.
+    mockGetActiveJob.mockReturnValue(undefined);
+    // DB still shows the prior dispatch's row, host_pid alive.
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      {
+        id: "old-dispatch-uuid",
+        repoName: "test-repo",
+        trigger: "trello",
+        triggerMetadata: { cardId: "ip-restart" },
+        status: "running",
+        hostPid: 12345,
+      },
+    ]);
+    mockIsPidAlive.mockImplementation((pid: number) => pid === 12345);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Liveness probe consulted before resume scan does its work.
+    expect(mockIsPidAlive).toHaveBeenCalledWith(12345);
+    // No JSONL lookup — short-circuit before resolveParentSessionId.
+    expect(mockResolveParentSessionId).not.toHaveBeenCalled();
+    // No dispatch — duplicate-claude bug avoided.
+    expect(mockDispatch).not.toHaveBeenCalled();
+    // No YAML mutation — dispatch_id stays the surviving claude's id.
+    const writes = mockWriteIssueFn.mock.calls.filter((c) => {
+      const issue = c[1] as { external_id?: string };
+      return issue?.external_id === "ip-restart";
+    });
+    expect(writes).toHaveLength(0);
   });
 
   it("skips orphan resume when dispatch_id is still in activeJobs (live, not orphan)", async () => {
