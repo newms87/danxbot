@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import { useIssues } from "../../composables/useIssues";
-import { useIssueFilters } from "../../composables/useIssueFilters";
+import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
 import FilterToolbar from "./FilterToolbar.vue";
 import IssueBoard from "./IssueBoard.vue";
 import IssueDrawer from "./IssueDrawer.vue";
@@ -18,9 +18,21 @@ const { issues, loading, error, refresh, fetchDetail } = useIssues(
   toRef(selectedRepo),
 );
 
-const { q, types, blockedOnly, showClosed, toggleType } = useIssueFilters(
-  selectedRepo,
-);
+const {
+  q,
+  types,
+  blockedOnly,
+  showClosed,
+  scopedEpicId,
+  scopeMode,
+  toggleType,
+} = useIssueFilters(selectedRepo);
+
+const scopedEpicTitle = computed<string | null>(() => {
+  if (!scopedEpicId.value) return null;
+  const hit = issues.value.find((i) => i.id === scopedEpicId.value);
+  return hit?.title ?? null;
+});
 
 const CLOSED_STATUSES: ReadonlyArray<IssueStatus> = ["Done", "Cancelled"];
 
@@ -42,6 +54,13 @@ const filteredIssues = computed<IssueListItem[]>(() => {
       const hay = `${i.id} ${i.title} ${i.description}`.toLowerCase();
       if (!hay.includes(needle)) return false;
     }
+    // Filter mode: drop out-of-scope cards. Highlight mode keeps every
+    // card visible — `IssueBoard` dims the out-of-scope ones via class.
+    if (
+      scopedEpicId.value &&
+      scopeMode.value === "filter" &&
+      !isInScope(i, scopedEpicId.value)
+    ) return false;
     return true;
   });
 });
@@ -97,7 +116,23 @@ function onSelect(issue: IssueListItem): void {
 }
 
 function onJumpIssue(id: string): void {
+  // Issue ids are scoped per-repo (ISS-N collides across repos), so any
+  // chip in this drawer references a card in `selectedRepo` by data-model
+  // invariant. If a future global-id model lands, branch here to switch
+  // `selectedRepo` before opening.
   void openDrawer(id);
+}
+
+function onParentClick(parentId: string): void {
+  scopedEpicId.value = parentId;
+}
+
+function onToggleScope(): void {
+  const detail = selectedDetail.value;
+  if (!detail) return;
+  const target = detail.type === "Epic" ? detail.id : detail.parent_id;
+  if (!target) return;
+  scopedEpicId.value = scopedEpicId.value === target ? null : target;
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -138,10 +173,15 @@ watch(
         :show-closed="showClosed"
         :visible-count="filteredIssues.length"
         :total-count="issues.length"
+        :scoped-epic-id="scopedEpicId"
+        :scoped-epic-title="scopedEpicTitle"
+        :scope-mode="scopeMode"
         @update:q="q = $event"
         @toggle-type="toggleType"
         @update:blocked-only="blockedOnly = $event"
         @update:show-closed="showClosed = $event"
+        @update:scope-mode="scopeMode = $event"
+        @clear-scope="scopedEpicId = null"
       />
       <div v-if="loading && issues.length === 0" class="placeholder">Loading issues…</div>
       <div v-else-if="issues.length === 0" class="placeholder">No issues yet</div>
@@ -149,7 +189,10 @@ watch(
         v-else
         :issues="filteredIssues"
         :show-closed="showClosed"
+        :scoped-epic-id="scopedEpicId"
+        :scope-mode="scopeMode"
         @select="onSelect"
+        @parent-click="onParentClick"
       />
     </template>
 
@@ -158,8 +201,10 @@ watch(
       :issue="selectedDetail"
       :loading="detailLoading"
       :all-issues="issues"
+      :scoped-epic-id="scopedEpicId"
       @close="closeDrawer"
       @jump-issue="onJumpIssue"
+      @toggle-scope="onToggleScope"
     />
     <div v-if="detailError" class="error-banner detail-err">
       {{ detailError }}

@@ -3,14 +3,27 @@ import type { IssueDetail } from "../../types";
 import TypeBadge from "./TypeBadge.vue";
 import { relativeTime } from "../../utils/relativeTime";
 
-defineProps<{
+import { computed } from "vue";
+
+const props = defineProps<{
   issue: IssueDetail;
+  scopedEpicId: string | null;
 }>();
 
 const emit = defineEmits<{
   close: [];
   "jump-issue": [id: string];
+  "toggle-scope": [];
 }>();
+
+const scopeTarget = computed<string | null>(() => {
+  if (props.issue.type === "Epic") return props.issue.id;
+  return props.issue.parent_id ?? null;
+});
+
+const isScoped = computed(
+  () => !!props.scopedEpicId && props.scopedEpicId === scopeTarget.value,
+);
 </script>
 
 <template>
@@ -30,7 +43,7 @@ const emit = defineEmits<{
     </div>
     <h2 class="title">{{ issue.title }}</h2>
     <div
-      v-if="issue.parent_id || (issue.children && issue.children.length > 0)"
+      v-if="issue.parent_id || (issue.children && issue.children.length > 0) || scopeTarget"
       class="rel-row"
     >
       <button
@@ -42,6 +55,13 @@ const emit = defineEmits<{
       <span v-if="issue.children.length > 0" class="children-count">
         {{ issue.children.length }} children
       </span>
+      <button
+        v-if="scopeTarget"
+        type="button"
+        class="scope-toggle"
+        :class="{ active: isScoped }"
+        @click="emit('toggle-scope')"
+      >{{ isScoped ? "✓ Scoped to epic" : "Scope board to epic" }}</button>
     </div>
   </div>
 </template>
@@ -127,5 +147,22 @@ const emit = defineEmits<{
 .children-count {
   font-size: 11px;
   color: #64748b;
+}
+.scope-toggle {
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+  background: rgb(30 41 59 / 0.5);
+  border: 1px solid #334155;
+  cursor: pointer;
+  font-family: inherit;
+}
+.scope-toggle.active {
+  color: #fcd34d;
+  background: rgb(245 158 11 / 0.12);
+  border-color: rgb(245 158 11 / 0.3);
 }
 </style>

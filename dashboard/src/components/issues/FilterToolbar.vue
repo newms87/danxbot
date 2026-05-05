@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import { ISSUE_TYPE_META } from "./issuePalette";
-import type { IssueTypeFilter } from "../../composables/useIssueFilters";
+import type { IssueTypeFilter, ScopeMode } from "../../composables/useIssueFilters";
 
 const props = defineProps<{
   q: string;
@@ -10,6 +10,9 @@ const props = defineProps<{
   showClosed: boolean;
   visibleCount: number;
   totalCount: number;
+  scopedEpicId: string | null;
+  scopedEpicTitle: string | null;
+  scopeMode: ScopeMode;
 }>();
 
 const emit = defineEmits<{
@@ -17,7 +20,14 @@ const emit = defineEmits<{
   "toggle-type": [t: IssueTypeFilter];
   "update:blockedOnly": [value: boolean];
   "update:showClosed": [value: boolean];
+  "update:scopeMode": [value: ScopeMode];
+  "clear-scope": [];
 }>();
+
+const SCOPE_MODES: ReadonlyArray<{ id: ScopeMode; label: string }> = [
+  { id: "filter", label: "Filter" },
+  { id: "highlight", label: "Highlight" },
+];
 
 const TYPE_ORDER: ReadonlyArray<IssueTypeFilter> = ["epic", "bug", "feature"];
 
@@ -102,6 +112,31 @@ function clearSearch(): void {
       </label>
 
       <span class="count">{{ props.visibleCount }} of {{ props.totalCount }}</span>
+    </div>
+
+    <div v-if="props.scopedEpicId" class="scope" data-test="scope-row">
+      <span class="scope-label">Scoped to epic</span>
+      <span class="scope-id">{{ props.scopedEpicId }}</span>
+      <span
+        class="scope-title"
+        :class="{ unknown: !props.scopedEpicTitle }"
+      >{{ props.scopedEpicTitle ?? "<not in current view>" }}</span>
+      <div class="mode-group" role="group" aria-label="Scope mode">
+        <button
+          v-for="m in SCOPE_MODES"
+          :key="m.id"
+          type="button"
+          class="mode-seg"
+          :class="{ active: props.scopeMode === m.id }"
+          @click="emit('update:scopeMode', m.id)"
+        >{{ m.label }}</button>
+      </div>
+      <button
+        type="button"
+        class="clear-scope"
+        aria-label="Clear scoped epic"
+        @click="emit('clear-scope')"
+      >Clear ×</button>
     </div>
   </div>
 </template>
@@ -211,5 +246,75 @@ function clearSearch(): void {
   font-size: 11px;
   color: #64748b;
   font-variant-numeric: tabular-nums;
+}
+.scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgb(99 102 241 / 0.1);
+  border: 1px solid rgb(99 102 241 / 0.3);
+}
+.scope-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #a5b4fc;
+}
+.scope-id {
+  font-size: 11px;
+  font-weight: 600;
+  color: #c7d2fe;
+  font-variant-numeric: tabular-nums;
+}
+.scope-title {
+  flex: 1 1 160px;
+  font-size: 12px;
+  color: #cbd5e1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.scope-title.unknown {
+  color: #94a3b8;
+  font-style: italic;
+}
+.mode-group {
+  display: inline-flex;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgb(99 102 241 / 0.3);
+}
+.mode-seg {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+.mode-seg.active {
+  background: rgb(99 102 241 / 0.25);
+  color: #c7d2fe;
+}
+.clear-scope {
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+  background: transparent;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.clear-scope:hover {
+  color: #e2e8f0;
+  border-color: #475569;
 }
 </style>

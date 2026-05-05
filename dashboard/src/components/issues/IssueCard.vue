@@ -6,9 +6,14 @@ import PhaseChecklist from "./PhaseChecklist.vue";
 import ACBar from "./ACBar.vue";
 import { relativeTime } from "../../utils/relativeTime";
 
-const props = defineProps<{
-  issue: IssueListItem;
-}>();
+const props = withDefaults(
+  defineProps<{
+    issue: IssueListItem;
+    dimmed?: boolean;
+    scoped?: boolean;
+  }>(),
+  { dimmed: false, scoped: false },
+);
 
 const emit = defineEmits<{
   select: [issue: IssueListItem];
@@ -40,7 +45,7 @@ function onParentClick(e: MouseEvent): void {
 <template>
   <button
     class="issue-card"
-    :class="{ epic: isEpic, blocked }"
+    :class="{ epic: isEpic, blocked, dimmed: props.dimmed, scoped: props.scoped }"
     type="button"
     @click="emit('select', issue)"
   >
@@ -111,6 +116,25 @@ function onParentClick(e: MouseEvent): void {
 }
 .issue-card:hover {
   transform: translateY(-1px);
+}
+.issue-card.scoped {
+  background: rgb(99 102 241 / 0.08);
+  border-color: rgb(99 102 241 / 0.5);
+  box-shadow:
+    0 0 0 1px rgb(99 102 241 / 0.2),
+    0 4px 12px rgb(99 102 241 / 0.08);
+}
+.issue-card.scoped.epic {
+  border-left: 3px solid #6366f1;
+}
+.issue-card.scoped.blocked {
+  border-left: 3px solid #ef4444;
+}
+.issue-card.dimmed {
+  opacity: 0.32;
+}
+.issue-card.dimmed:hover {
+  transform: none;
 }
 .card-header {
   display: flex;

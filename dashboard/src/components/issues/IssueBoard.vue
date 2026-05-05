@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import type { IssueListItem, IssueStatus } from "../../types";
 import IssueCard from "./IssueCard.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
+import { isInScope, type ScopeMode } from "../../composables/useIssueFilters";
 
 const props = defineProps<{
   issues: IssueListItem[];
@@ -13,6 +14,14 @@ const props = defineProps<{
    * render a 0 count + collapsed summary.
    */
   showClosed?: boolean;
+  /**
+   * When non-null, the board is scoped to an epic family. Out-of-scope
+   * cards either dim (highlight mode) or are filtered upstream. The
+   * board still receives the full list and applies the dim class via
+   * the predicate; filter-mode exclusion happens in `IssuesPage`.
+   */
+  scopedEpicId: string | null;
+  scopeMode: ScopeMode;
 }>();
 
 const emit = defineEmits<{
@@ -59,6 +68,18 @@ const grouped = computed<Record<IssueStatus, IssueListItem[]>>(() => {
   return g;
 });
 
+function dimmedFor(i: IssueListItem): boolean {
+  return (
+    !!props.scopedEpicId &&
+    props.scopeMode === "highlight" &&
+    !isInScope(i, props.scopedEpicId)
+  );
+}
+
+function scopedFor(i: IssueListItem): boolean {
+  return !!props.scopedEpicId && isInScope(i, props.scopedEpicId);
+}
+
 function toggle(status: IssueStatus): void {
   collapsed.value = { ...collapsed.value, [status]: !collapsed.value[status] };
 }
@@ -103,6 +124,8 @@ watch(
           v-for="issue in grouped[status]"
           :key="issue.id"
           :issue="issue"
+          :dimmed="dimmedFor(issue)"
+          :scoped="scopedFor(issue)"
           @select="(i) => emit('select', i)"
           @parent-click="(pid) => emit('parent-click', pid)"
         />

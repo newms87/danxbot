@@ -13,11 +13,13 @@ const props = defineProps<{
   issue: IssueDetail | null;
   loading: boolean;
   allIssues: IssueListItem[];
+  scopedEpicId: string | null;
 }>();
 
 const emit = defineEmits<{
   close: [];
   "jump-issue": [id: string];
+  "toggle-scope": [];
 }>();
 
 const tab = ref<TabId>("overview");
@@ -70,8 +72,10 @@ function selectTab(id: TabId, disabled: boolean): void {
     <template v-else-if="issue">
       <DrawerHeader
         :issue="issue"
+        :scoped-epic-id="props.scopedEpicId"
         @close="emit('close')"
         @jump-issue="(id) => emit('jump-issue', id)"
+        @toggle-scope="emit('toggle-scope')"
       />
       <div class="tabs">
         <button
