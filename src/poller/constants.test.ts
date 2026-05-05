@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { getReposBase, loadTrelloIds } from "./constants.js";
+import {
+  getReposBase,
+  IDEATOR_PROMPT,
+  loadTrelloIds,
+  TEAM_PROMPT,
+  TRIAGE_AUTO_PROMPT,
+} from "./constants.js";
 
 describe("getReposBase", () => {
   let originalEnv: string | undefined;
@@ -141,5 +147,41 @@ describe("loadTrelloIds", () => {
   it("throws when trello.yml is absent", () => {
     // No writeYml call
     expect(() => loadTrelloIds(tempRepo)).toThrow(/Trello config not found/);
+  });
+});
+
+describe("agent-mode prompts", () => {
+  it("TEAM_PROMPT and IDEATOR_PROMPT are stable slash commands", () => {
+    expect(TEAM_PROMPT).toBe("/danx-next");
+    expect(IDEATOR_PROMPT).toBe("/danx-ideate");
+  });
+
+  describe("TRIAGE_AUTO_PROMPT", () => {
+    it("invokes the danx-triage skill in auto mode", () => {
+      // First line MUST be the slash command — Phase 5 spawns this verbatim
+      // and Claude only treats line 0 as the command invocation.
+      expect(TRIAGE_AUTO_PROMPT.split("\n")[0]).toBe("/danx-triage auto");
+    });
+
+    it("emphasizes the Action Items first / Review second priority order", () => {
+      expect(TRIAGE_AUTO_PROMPT).toMatch(/Action Items.*priority 1/);
+      expect(TRIAGE_AUTO_PROMPT).toMatch(/Review.*priority 2/);
+    });
+
+    it("lists all five outcome statuses", () => {
+      // Reaching auto mode means every card MUST land on one of these five.
+      // If the skill ever drifts to a sixth, this test trips so the prompt
+      // doc gets updated alongside the skill.
+      for (const status of [
+        "ToDo",
+        "Done",
+        "Cancelled",
+        "Needs Help",
+        "Needs Approval",
+      ]) {
+        expect(TRIAGE_AUTO_PROMPT).toContain(status);
+      }
+    });
+
   });
 });

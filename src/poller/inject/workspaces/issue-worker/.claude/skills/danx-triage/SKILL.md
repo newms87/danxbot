@@ -22,6 +22,7 @@ Default scope: every `<repo>/.danxbot/issues/open/*.yml` whose `triaged.timestam
 |---|---|
 | `/danx-triage` | All open YAMLs, skip already-triaged, skip <24h |
 | `/danx-triage <prompt>` | Interpret the free-form prompt and adjust scope |
+| `/danx-triage auto` | Action Items list (priority 1) + Review list (priority 2). Ignores the default open-YAML scope, the already-triaged skip, and the <24h floor. NEVER skips — every card in scope gets a decision. Used by the poller's auto-triage hook (Phase 5 / ISS-79). |
 
 **Scope override keywords:**
 
@@ -42,9 +43,9 @@ When ambiguous, pick the more conservative scope and state it in the report.
 | Field | When |
 |---|---|
 | `triaged.timestamp` | Set to current ISO time on every triage (e.g. `2026-05-03T14:32:00Z`). Worker derives the Triaged label from `timestamp !== ""`. |
-| `triaged.status` | One of `Keep` \| `Partial` \| `Complete` \| `Obsolete` \| `Duplicate` \| `Ambiguous`. |
+| `triaged.status` | One of `Keep` \| `Partial` \| `Complete` \| `Obsolete` \| `Duplicate` \| `NeedsHelp` \| `NeedsApproval`. |
 | `triaged.explain` | Human-readable 1-2 sentences explaining the decision. Include ICE if applicable. |
-| `status` | Move terminal cases: `Complete` → `Done`, `Obsolete`/`Duplicate` → `Cancelled`, `Ambiguous` → `Needs Help`. Keep/Partial cases: leave unchanged. |
+| `status` | Move terminal cases: `Complete` → `Done`, `Obsolete`/`Duplicate` → `Cancelled`, `NeedsHelp` → `Needs Help`, `NeedsApproval` → `Needs Approval`. Keep/Partial cases: leave unchanged in default mode; in `auto` mode, Keep/Partial → `ToDo`. |
 | `description` | Append `Depends on: <id> — <reason>` line for inferred deps. Preserve existing content. |
 | `comments[]` | Append a triage summary comment (no `id`). |
 
@@ -61,6 +62,24 @@ Append new comments without an `id` field — the worker handles tracker push se
    ```
    Scope (resolved): <count> cards | filters: <filters> | skip-triaged=<bool> | age-floor=<value>
    ```
+
+### Step 1.auto — Auto-mode scope
+
+When invoked as `/danx-triage auto`:
+
+1. **Resolve the partition.** Auto mode is invoked in two ways:
+   - **Phase 5 / poller dispatch** — the spawn site reads `tracker.fetchOpenCards()` and supplies an explicit partition of card ids in the prompt body (Action Items list ids first, Review list ids second). When the prompt provides explicit ids, use them verbatim.
+   - **Manual smoke / standalone invocation** — no explicit partition supplied. Glob `<repo>/.danxbot/issues/open/*.yml` and partition by `status`:
+     - **ToDo partition (priority 1)** — every card whose `status === "ToDo"`. This includes both real ToDo and Action Items cards; on disk they are indistinguishable because `list_kind` is not persisted on YAML (it lives only on the tracker `IssueRef`). The skill triages all of them at priority 1; the poller continues to gate Action Items dispatch via `list_kind` AFTER the triage decision lands. This is honest scope: in standalone mode "Action Items first" expands to "all ToDo first."
+     - **Review partition (priority 2)** — every card whose `status === "Review"`.
+2. Concatenate the priority-1 set first, then priority-2. This is the order used by the report.
+3. Ignore the default already-triaged skip and the <24h age floor. Every card in scope is triaged, even if `triaged.timestamp` is non-empty.
+4. Print:
+   ```
+   Scope (auto): <p1_count> priority-1 + <p2_count> Review = <total> cards
+   ```
+
+Auto mode requires the `Needs Approval` status to be available. Before emitting `NeedsApproval` for the first time, read `<repo>/.danxbot/config/trello.yml` and check that `lists.needs_approval` is non-empty. If it is empty, the auto-mode subagent MUST fall back to `NeedsHelp` for that card and append a one-line note in `triaged.explain`: `"Direction approval needed; Trello board not yet provisioned for Needs Approval — falling back to Needs Help."` This keeps the YAML save valid (`Needs Help` is always available) until the operator provisions the list + label per `.claude/rules/trello-config.md`.
 
 ---
 
@@ -95,7 +114,7 @@ Return ONLY this JSON object on your final message:
 {
   "id": "<id>",
   "name": "<title>",
-  "state": "Keep|Partial|Complete|Obsolete|Duplicate|Ambiguous",
+  "state": "Keep|Partial|Complete|Obsolete|Duplicate|NeedsHelp|NeedsApproval",
   "saved": <bool>,
   "ice": { "total": <int|null>, "I": <int|null>, "C": <int|null>, "E": <int|null> },
   "deps": { "explicit": ["<id>", ...], "inferred": ["<id>", ...] },
@@ -104,7 +123,7 @@ Return ONLY this JSON object on your final message:
   "error": "<string|null>"
 }
 
-`saved: true` only when `danx_issue_save` returned `{saved: true}`. If anything fails (YAML parse error, save validation failure, internal error), return `state: "Ambiguous"`, `saved: false`, and `error: "<message>"` — do NOT throw. Do NOT call `danx_issue_save` on a YAML you couldn't parse.
+`saved: true` only when `danx_issue_save` returned `{saved: true}`. If anything fails (YAML parse error, save validation failure, internal error), return `state: "NeedsHelp"`, `saved: false`, and `error: "<message>"` — do NOT throw. Do NOT call `danx_issue_save` on a YAML you couldn't parse.
 ```
 
 ### Subagent steps (run inside the subagent)
@@ -122,16 +141,34 @@ Return ONLY this JSON object on your final message:
 
 Don't run `git log -S` pickaxes. Don't diff unrelated commits.
 
-#### 2c. Classify into One of Six States
+#### 2c. Classify into One of the Seven States
 
-| State | When |
-|---|---|
-| **Keep** | Still relevant, no meaningful progress |
-| **Partial** | Some `ac[]` items satisfied; others outstanding |
-| **Complete** | All `ac[]` satisfied; behavior live in code |
-| **Obsolete** | Superseded by a different approach, or no longer desired |
-| **Duplicate** | Another card covers the same work |
-| **Ambiguous** | Evidence inconclusive; can't decide |
+| State | When | YAML `status` after save |
+|---|---|---|
+| **Keep** | Still relevant, no meaningful progress | unchanged (default) / `ToDo` (auto mode) |
+| **Partial** | Some `ac[]` items satisfied; others outstanding | unchanged (default) / `ToDo` (auto mode) |
+| **Complete** | All `ac[]` satisfied; behavior live in code | `Done` |
+| **Obsolete** | Superseded by a different approach, or no longer desired | `Cancelled` |
+| **Duplicate** | Another card covers the same work | `Cancelled` |
+| **NeedsHelp** | Spec is incomplete; agent needs a human to **supply information** (creds, missing decision input, ambiguous AC, write-only repo). Without that input the agent fundamentally cannot do the work. | `Needs Help` |
+| **NeedsApproval** | Card is implementable but the **direction is uncertain** — architectural risk, cross-cutting scope, disruptive refactor, plausible-but-not-obvious ask. The agent could write code, but a human should sign off on the approach before work starts. | `Needs Approval` |
+
+**Distinguishing NeedsHelp vs NeedsApproval — worked examples:**
+
+| Card | Verdict | Reason |
+|---|---|---|
+| "Rotate prod API key — set new value in SSM" | **NeedsHelp** | Agent has no creds / no SSM write access. Human must rotate + push. |
+| "Implement bulk delete on the dispatches table" | **NeedsApproval** | Agent CAN write the migration + UI, but bulk delete is a load-bearing destructive op; design needs sanity-check before it ships. |
+| "Add field X to schema — but it's unclear whether it should be string or enum" | **NeedsHelp** | Spec ambiguity — only the human can answer. |
+| "Refactor the entire dispatch-core into separate per-runtime modules" | **NeedsApproval** | Agent can do it, but the blast radius is large and there are 2-3 plausible decompositions. Human picks. |
+| "Fix the typo on the dashboard login page" | **Keep** (or **Complete** if already shipped) — neither NeedsHelp nor NeedsApproval; trivially actionable. |
+| "Add Slack DM support — depends on workspace permissions our bot doesn't have yet" | **NeedsHelp** | Workspace install requires a human admin. |
+| "Migrate from Vue 2 to Vue 3" | **NeedsApproval** | Agent could attempt it, but the cross-cutting impact + tradeoff space (incremental vs big-bang) demands a human call. |
+
+Rule of thumb: **could a competent agent, given full repo access and a free hand, finish the card without ever asking the human a question?**
+- Yes → Keep / Partial / Complete (or Obsolete / Duplicate if no longer applicable).
+- No, because the agent lacks information / access → NeedsHelp.
+- No, because the agent lacks confidence the chosen direction is right → NeedsApproval.
 
 #### 2d. ICE Score (Keep + Partial only)
 
@@ -143,7 +180,7 @@ Each 1-10, product max 1000.
 
 `ICE = Impact × Confidence × Ease`. Each component MUST have a one-sentence justification — no bare numbers.
 
-Skip ICE for Complete / Obsolete / Duplicate / Ambiguous.
+Skip ICE for Complete / Obsolete / Duplicate / NeedsHelp / NeedsApproval.
 
 #### 2e. Detect Dependencies
 
@@ -169,12 +206,15 @@ Preserve the rest of `description` verbatim.
 2. Set `triaged.status` to the classification.
 3. Set `triaged.explain` to 1-2 sentences explaining the decision (include ICE breakdown if scored).
 4. **Terminal moves** — edit `status` field:
-   | Classification | New `status` |
-   |---|---|
-   | `Keep` / `Partial` | unchanged |
-   | `Complete` | `Done` |
-   | `Obsolete` / `Duplicate` | `Cancelled` |
-   | `Ambiguous` | `Needs Help` |
+   | Classification | New `status` (default) | New `status` (auto mode) |
+   |---|---|---|
+   | `Keep` / `Partial` | unchanged | `ToDo` |
+   | `Complete` | `Done` | `Done` |
+   | `Obsolete` / `Duplicate` | `Cancelled` | `Cancelled` |
+   | `NeedsHelp` | `Needs Help` | `Needs Help` |
+   | `NeedsApproval` | `Needs Approval` | `Needs Approval` |
+
+   In `auto` mode, Keep + Partial promote to `ToDo` so the next poller tick dispatches them. In default mode the card's prior status is preserved (the operator may have parked it intentionally).
 5. Append a triage comment to `comments[]`. Logical shape:
    - `author: "danxbot-triage"`
    - `timestamp: <current ISO>`
@@ -239,6 +279,8 @@ Cards examined: N | Triaged: X | Skipped (already triaged): Y | Skipped (<24h): 
 | 2 | [Bug] Fix baz | Review → Done | Complete | — | — | — | Implemented by a1b2c3d |
 | 3 | Auth epic | Review → Review | Keep | 630 | depends on #1 | Parent | 3 phases below |
 | 3a | Auth > Phase 1 | Review → Review | Keep | 540 | (epic) | Phase 1 | — |
+| 4 | [Feature] Bulk delete | Review → Needs Approval | NeedsApproval | — | — | — | Direction sign-off needed |
+| 5 | [Bug] Rotate API key | Review → Needs Help | NeedsHelp | — | — | — | Human must rotate creds |
 
 ### Cycles Resolved
 - A ↔ B: dropped A→B (inferred, lower confidence)
@@ -247,7 +289,30 @@ Cards examined: N | Triaged: X | Skipped (already triaged): Y | Skipped (<24h): 
 - <card title>: <error message>
 ```
 
-Rows in priority order. Phase children indent under parent (`3a`, `3b`, …). Omit empty Cycles / Errors sections.
+Rows in priority order. Phase children indent under parent (`3a`, `3b`, …). Omit empty Cycles / Errors sections. The `State` column renders `NeedsHelp` and `NeedsApproval` distinctly so operators can scan for either at a glance.
+
+### Auto-mode addendum
+
+When invoked as `/danx-triage auto`, the report MUST also include this block immediately after the main table:
+
+```markdown
+### Auto-triage outcome
+
+- **Promoted to ToDo (dispatchable next tick):** <count>
+- **Done / Cancelled (file moved to closed/):** <count>
+- **Needs Help (waiting on human input):** <count>
+- **Needs Approval (waiting on direction sign-off):** <count>
+
+#### Needs Approval — review these
+- [ISS-N] <title>
+- [ISS-N] <title>
+
+#### Needs Help — operator action required
+- [ISS-N] <title>
+- [ISS-N] <title>
+```
+
+Operators skim the tracker but the report comment is the canonical signal — every card with a `NeedsApproval` outcome MUST appear in the "Needs Approval — review these" sublist with its `ISS-N` and title verbatim. Same for `NeedsHelp`. Omit a sublist when its count is zero.
 
 ---
 
@@ -269,6 +334,18 @@ Only YAMLs in resolved scope (plus epic parents pulled in for grouping) may be r
 
 ## Step 6 — Signal Completion
 
-Call `danxbot_complete({status: "completed", summary: "Triaged N cards — top X promoted"})`.
+Default mode: `danxbot_complete({status: "completed", summary: "Triaged N cards — top X promoted"})`.
+
+Auto mode summary template:
+
+```
+Auto-triaged <total> cards — <promoted> ToDo, <done> Done, <cancelled> Cancelled, <needs_help> Needs Help, <needs_approval> Needs Approval
+```
+
+Substitute the counts. Example:
+
+```
+Auto-triaged 18 cards — 9 ToDo, 2 Done, 3 Cancelled, 1 Needs Help, 3 Needs Approval
+```
 
 If the environment is broken (MCP missing, Bash failing, auth rejected), use `status: "critical_failure"` per `.claude/rules/danx-halt-flag.md`. For card-specific blockers (a single YAML fails to parse), continue triaging the rest and surface in the Errors section.

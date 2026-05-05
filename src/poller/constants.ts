@@ -95,3 +95,28 @@ export const REVIEW_MIN_CARDS = parseInt(
 export const TEAM_PROMPT = "/danx-next";
 export const IDEATOR_PROMPT = "/danx-ideate";
 
+/**
+ * Auto-triage prompt — invoked by the poller (Phase 5 / ISS-79) when
+ * the ToDo queue is empty and `overrides.autoTriage.enabled` is true.
+ *
+ * Drives the `danx-triage` skill in `auto` mode (see
+ * `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-triage/SKILL.md`,
+ * scope row "/danx-triage auto"). Scope: Action Items list (priority 1)
+ * + Review list (priority 2). Every card in scope gets a decision —
+ * the skill never skips. Decisions map to one of five YAML statuses:
+ * `ToDo`, `Done`, `Cancelled`, `Needs Help`, or `Needs Approval`.
+ *
+ * Defining the prompt as a constant here keeps the spawn site in
+ * `src/poller/index.ts` (Phase 5) small and gives tests one place to
+ * assert the auto-mode markers.
+ */
+export const TRIAGE_AUTO_PROMPT = [
+  "/danx-triage auto",
+  "",
+  "Scope: Action Items list (priority 1) + Review list (priority 2).",
+  "Every card gets ONE decision — never skip.",
+  "Outcomes map to YAML status: ToDo, Done, Cancelled, Needs Help, or Needs Approval.",
+  "Use `Needs Approval` when uncertain about direction (architectural risk, cross-cutting scope, disruptive refactor).",
+  "Use `Needs Help` ONLY when missing information from a human (creds, ambiguous spec, write-only access).",
+].join("\n");
+
