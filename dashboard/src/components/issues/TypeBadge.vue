@@ -1,19 +1,14 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { IssueType } from "../../types";
+import { ISSUE_TYPE_META, typeToId } from "./issuePalette";
 
 const props = defineProps<{
   type: IssueType;
   compact?: boolean;
 }>();
 
-const META: Record<IssueType, { label: string; fg: string; bg: string; border: string }> = {
-  Epic:    { label: "Epic",    fg: "#a5b4fc", bg: "rgb(99 102 241 / 0.15)", border: "rgb(99 102 241 / 0.35)" },
-  Bug:     { label: "Bug",     fg: "#fca5a5", bg: "rgb(239 68 68 / 0.15)",  border: "rgb(239 68 68 / 0.35)" },
-  Feature: { label: "Feature", fg: "#86efac", bg: "rgb(16 185 129 / 0.15)", border: "rgb(16 185 129 / 0.35)" },
-};
-
-const meta = computed(() => META[props.type]);
+const meta = computed(() => ISSUE_TYPE_META[typeToId(props.type)]);
 </script>
 
 <template>

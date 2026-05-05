@@ -110,11 +110,47 @@ describe("listIssues", () => {
       ac_done: 1,
       phases_total: 3,
       phases_done: 1,
+      phases: [
+        { name: "p1", status: "done" },
+        { name: "p2", status: "todo" },
+        { name: "p3", status: "blocked" },
+      ],
       blocked: true,
+      blocked_reason: "waiting",
       comments_count: 2,
       has_retro: true,
       updated_at: 1_700_000_000_000,
     });
+  });
+
+  it("omits phases[] for non-epic cards (slim list shape)", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-2",
+        type: "Feature",
+        phases: [
+          { check_item_id: "p1", title: "p1", status: "Pending", notes: "" },
+        ],
+      }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    expect(items[0].phases).toBeUndefined();
+  });
+
+  it("emits empty phases[] for epics with no phases", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-1", type: "Epic" }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    expect(items[0].phases).toEqual([]);
   });
 
   it("sorts by updated_at descending across open + closed", async () => {

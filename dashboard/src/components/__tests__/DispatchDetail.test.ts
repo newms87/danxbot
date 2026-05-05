@@ -48,6 +48,7 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     subagentCount: 0,
     nudgeCount: 0,
     danxbotCommit: null,
+    hostPid: null,
     ...overrides,
   };
 }

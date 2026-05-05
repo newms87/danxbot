@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import type { IssueListItem, IssueStatus } from "../../types";
 import IssueCard from "./IssueCard.vue";
+import { COLUMN_ACCENTS } from "./issuePalette";
 
 const props = defineProps<{
   issues: IssueListItem[];
@@ -9,43 +10,33 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   select: [issue: IssueListItem];
+  "parent-click": [parentId: string];
 }>();
 
-interface Column {
-  status: IssueStatus;
-  /** Lowercase, snake_case projection — matches design fixture column ids. */
-  id: "review" | "todo" | "in_progress" | "needs_help" | "done" | "cancelled";
-  label: string;
-  accent: string;
-  collapsedByDefault: boolean;
-}
-
-const COLUMNS: readonly Column[] = [
-  { status: "Review",      id: "review",      label: "Review",      accent: "#a78bfa", collapsedByDefault: false },
-  { status: "ToDo",        id: "todo",        label: "To Do",       accent: "#64748b", collapsedByDefault: false },
-  { status: "In Progress", id: "in_progress", label: "In Progress", accent: "#fcd34d", collapsedByDefault: false },
-  { status: "Needs Help",  id: "needs_help",  label: "Needs Help",  accent: "#ef4444", collapsedByDefault: false },
-  { status: "Done",        id: "done",        label: "Done",        accent: "#10b981", collapsedByDefault: true  },
-  { status: "Cancelled",   id: "cancelled",   label: "Cancelled",   accent: "#475569", collapsedByDefault: true  },
+const COLUMN_ORDER: readonly IssueStatus[] = [
+  "Review",
+  "ToDo",
+  "In Progress",
+  "Needs Help",
+  "Done",
+  "Cancelled",
 ];
 
 const collapsed = ref<Record<IssueStatus, boolean>>(
-  COLUMNS.reduce(
-    (acc, c) => { acc[c.status] = c.collapsedByDefault; return acc; },
+  COLUMN_ORDER.reduce(
+    (acc, s) => { acc[s] = COLUMN_ACCENTS[s].collapsedByDefault; return acc; },
     {} as Record<IssueStatus, boolean>,
   ),
 );
 
 const grouped = computed<Record<IssueStatus, IssueListItem[]>>(() => {
-  const g = COLUMNS.reduce(
-    (acc, c) => { acc[c.status] = []; return acc; },
+  const g = COLUMN_ORDER.reduce(
+    (acc, s) => { acc[s] = []; return acc; },
     {} as Record<IssueStatus, IssueListItem[]>,
   );
   for (const issue of props.issues) {
     const bucket = g[issue.status];
     if (!bucket) {
-      // Backend's IssueStatus union is the contract; an unknown status here
-      // means a backend drift — log loud, don't silently drop.
       // eslint-disable-next-line no-console
       console.warn(`IssueBoard: unknown issue status "${issue.status}" on ${issue.id}`);
       continue;
@@ -69,36 +60,37 @@ function toggle(status: IssueStatus): void {
 <template>
   <div class="board">
     <div
-      v-for="col in COLUMNS"
-      :key="col.id"
+      v-for="status in COLUMN_ORDER"
+      :key="status"
       class="column"
-      :class="{ collapsed: collapsed[col.status] }"
+      :class="{ collapsed: collapsed[status] }"
     >
       <button
         class="header"
         type="button"
-        :data-test="`column-header-${col.id}`"
-        :style="{ borderBottomColor: col.accent }"
-        @click="toggle(col.status)"
+        :data-test="`column-header-${COLUMN_ACCENTS[status].id}`"
+        :style="{ borderBottomColor: COLUMN_ACCENTS[status].accent }"
+        @click="toggle(status)"
       >
-        <span class="dot" :style="{ background: col.accent }" />
-        <span class="label">{{ col.label }}</span>
-        <span class="count">{{ grouped[col.status].length }}</span>
-        <span class="glyph">{{ collapsed[col.status] ? "▸" : "▾" }}</span>
+        <span class="dot" :style="{ background: COLUMN_ACCENTS[status].accent }" />
+        <span class="label">{{ COLUMN_ACCENTS[status].label }}</span>
+        <span class="count">{{ grouped[status].length }}</span>
+        <span class="glyph">{{ collapsed[status] ? "▸" : "▾" }}</span>
       </button>
 
-      <div v-if="!collapsed[col.status]" class="cards">
-        <div v-if="grouped[col.status].length === 0" class="empty">No items</div>
+      <div v-if="!collapsed[status]" class="cards">
+        <div v-if="grouped[status].length === 0" class="empty">No items</div>
         <IssueCard
-          v-for="issue in grouped[col.status]"
+          v-for="issue in grouped[status]"
           :key="issue.id"
           :issue="issue"
           @select="(i) => emit('select', i)"
+          @parent-click="(pid) => emit('parent-click', pid)"
         />
       </div>
 
-      <div v-else-if="grouped[col.status].length > 0" class="collapsed-summary">
-        {{ grouped[col.status].length }} hidden — click header to expand
+      <div v-else-if="grouped[status].length > 0" class="collapsed-summary">
+        {{ grouped[status].length }} hidden — click header to expand
       </div>
     </div>
   </div>

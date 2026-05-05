@@ -4,16 +4,33 @@ import type {
   Issue,
   IssueStatus,
   IssueType,
+  PhaseStatus,
 } from "../issue-tracker/interface.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("issues-reader");
 
+/** Phase status id used by the design system's PHASE_STATUS_META palette. */
+export type PhaseStatusId = "done" | "todo" | "blocked";
+
+const PHASE_STATUS_TO_ID: Record<PhaseStatus, PhaseStatusId> = {
+  Complete: "done",
+  Pending: "todo",
+  Blocked: "blocked",
+};
+
+/** Slim phase entry on the list shape — name + design-cased status id. */
+export interface IssueListPhase {
+  name: string;
+  status: PhaseStatusId;
+}
+
 /**
  * List-card projection of an Issue. Sized for the Issues-tab board view —
  * AC / phase / comment counts are pre-rolled so the SPA can render the
- * card without a per-row detail fetch.
+ * card without a per-row detail fetch. `phases[]` is included on epics
+ * so the board can render the per-phase checklist without a detail fetch.
  */
 export interface IssueListItem {
   id: string;
@@ -26,7 +43,11 @@ export interface IssueListItem {
   ac_done: number;
   phases_total: number;
   phases_done: number;
+  /** Present only when `type === "Epic"`. Empty array = epic with no phases. */
+  phases?: IssueListPhase[];
   blocked: boolean;
+  /** Set when `blocked === true`; null otherwise. Surfaces blocker reason on the card without a detail fetch. */
+  blocked_reason: string | null;
   comments_count: number;
   has_retro: boolean;
   updated_at: number;
@@ -104,6 +125,7 @@ async function listYamlNames(dir: string): Promise<string[]> {
 
 function toListItem(raw: RawIssue): IssueListItem {
   const { issue, mtimeMs } = raw;
+  const isEpic = issue.type === "Epic";
   return {
     id: issue.id,
     type: issue.type,
@@ -115,7 +137,16 @@ function toListItem(raw: RawIssue): IssueListItem {
     ac_done: issue.ac.filter((a) => a.checked).length,
     phases_total: issue.phases.length,
     phases_done: issue.phases.filter((p) => p.status === "Complete").length,
+    ...(isEpic
+      ? {
+          phases: issue.phases.map((p) => ({
+            name: p.title,
+            status: PHASE_STATUS_TO_ID[p.status],
+          })),
+        }
+      : {}),
     blocked: issue.blocked !== null,
+    blocked_reason: issue.blocked?.reason ?? null,
     comments_count: issue.comments.length,
     has_retro:
       issue.retro.good.length > 0 ||
