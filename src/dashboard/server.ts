@@ -33,6 +33,10 @@ import {
   handlePatchToggle,
 } from "./agents-routes.js";
 import {
+  handleGetIssue,
+  handleListIssues,
+} from "./issues-routes.js";
+import {
   handleLogin,
   handleLogout,
   handleMe,
@@ -306,6 +310,29 @@ async function route(
 
   if (method === "POST" && url.pathname === "/api/admin/reset") {
     await handleAdminReset(req, res);
+    return true;
+  }
+
+  if (method === "GET" && url.pathname === "/api/issues") {
+    await handleListIssues(
+      res,
+      {
+        repo: url.searchParams.get("repo"),
+        includeClosed: url.searchParams.get("include_closed"),
+      },
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  const issueDetailMatch = url.pathname.match(/^\/api\/issues\/([^/]+)$/);
+  if (method === "GET" && issueDetailMatch) {
+    await handleGetIssue(
+      res,
+      decodeURIComponent(issueDetailMatch[1]),
+      { repo: url.searchParams.get("repo") },
+      dispatchDeps,
+    );
     return true;
   }
 
