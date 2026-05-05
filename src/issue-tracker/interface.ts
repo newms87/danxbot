@@ -81,7 +81,17 @@ export interface IssueTriaged {
 export interface IssueRetro {
   good: string;
   bad: string;
-  action_items: string[];
+  /**
+   * IDs (`ISS-N`) of pre-existing issue cards filed as action items by the
+   * agent during this card's lifecycle. The agent MUST create each action
+   * item card via `danx_issue_create` (with full title + description + ac)
+   * BEFORE pushing the resulting `ISS-N` here. The worker NEVER spawns cards
+   * from this field; on terminal save it just resolves each id to the
+   * corresponding issue's `title` for the rendered retro comment. Unknown
+   * ids surface as `<ISS-N: unknown>` in the comment so a typo is loud, not
+   * silent.
+   */
+  action_item_ids: string[];
   commits: string[];
 }
 
@@ -255,7 +265,9 @@ export interface IssueTracker {
     text: string,
   ): Promise<void>;
 
-  getComments(externalId: string): Promise<
+  getComments(
+    externalId: string,
+  ): Promise<
     Array<{ id: string; author: string; timestamp: string; text: string }>
   >;
 
@@ -284,17 +296,6 @@ export interface IssueTracker {
   ): Promise<void>;
 
   deletePhaseItem(externalId: string, checkItemId: string): Promise<void>;
-
-  /**
-   * Create a fresh card on the tracker's Action Items list with the given
-   * title. The new card is intentionally NOT linked to any parent at the
-   * tracker layer — `parent_id` is local-only metadata (per the Phase 1
-   * Issue contract), so callers wire parent linkage by setting `parent_id`
-   * on the local Issue YAML themselves.
-   */
-  addLinkedActionItemCard(
-    title: string,
-  ): Promise<{ external_id: string }>;
 }
 
 export const ISSUE_STATUSES: readonly IssueStatus[] = [

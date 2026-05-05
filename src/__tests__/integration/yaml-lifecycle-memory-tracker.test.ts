@@ -56,7 +56,9 @@ const { testState, mockConfig } = vi.hoisted(() => {
   const path = require("node:path");
   return {
     testState: {
-      logsDir: fs.mkdtempSync(path.join(os.tmpdir(), "danxbot-yaml-test-logs-")),
+      logsDir: fs.mkdtempSync(
+        path.join(os.tmpdir(), "danxbot-yaml-test-logs-"),
+      ),
       reposBase: "/tmp/danxbot-yaml-test-repos",
     },
     mockConfig: {
@@ -174,10 +176,6 @@ function setIssueTracker(seed: Issue): {
     };
   };
   tracker.editComment = async () => undefined;
-  tracker.addLinkedActionItemCard = async (title: string) => {
-    spawnedActionItems.push(title);
-    return { external_id: `mem-action-${spawnedActionItems.length}` };
-  };
   issueTrackerMock.tracker = tracker;
   return { addCommentCalls, spawnedActionItems };
 }
@@ -213,17 +211,12 @@ import {
   _drainPendingCleanupsForTesting as drainPendingCleanupsForTesting,
   listActiveJobs,
 } from "../../dispatch/core.js";
-import {
-  _resetForTesting as resetPollerState,
-} from "../../poller/index.js";
+import { _resetForTesting as resetPollerState } from "../../poller/index.js";
 import {
   _resetForTesting as resetIssueRoute,
   _drainAsyncWorkForTesting as drainIssueRouteAsyncWork,
 } from "../../worker/issue-route.js";
-import {
-  ensureIssuesDirs,
-  issuePath,
-} from "../../poller/yaml-lifecycle.js";
+import { ensureIssuesDirs, issuePath } from "../../poller/yaml-lifecycle.js";
 import { serializeIssue, parseIssue } from "../../issue-tracker/yaml.js";
 import { CaptureServer } from "./helpers/capture-server.js";
 import { makeRepoContext } from "../helpers/fixtures.js";
@@ -269,10 +262,7 @@ function writeWorkspaceFixture(workspaceName: string): void {
       "optional-placeholders: []\n" +
       "required-gates: []\n",
   );
-  writeFileSync(
-    join(wsDir, ".mcp.json"),
-    JSON.stringify({ mcpServers: {} }),
-  );
+  writeFileSync(join(wsDir, ".mcp.json"), JSON.stringify({ mcpServers: {} }));
   writeFileSync(
     join(wsDir, ".claude", "settings.json"),
     JSON.stringify({ env: {} }),
@@ -325,11 +315,15 @@ function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [
       { check_item_id: "ac-1", title: "First criterion holds", checked: false },
-      { check_item_id: "ac-2", title: "Second criterion holds", checked: false },
+      {
+        check_item_id: "ac-2",
+        title: "Second criterion holds",
+        checked: false,
+      },
     ],
     phases: [],
     comments: [],
-    retro: { good: "", bad: "", action_items: [], commits: [] },
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
   };
 }
@@ -552,7 +546,8 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
       if (e.type !== "assistant") return false;
       const message = e.message as { content?: Array<Record<string, unknown>> };
       return (message.content ?? []).some(
-        (c) => c.type === "tool_use" && c.name === "mcp__danxbot__danx_issue_save",
+        (c) =>
+          c.type === "tool_use" && c.name === "mcp__danxbot__danx_issue_save",
       );
     });
     expect(issueSaveCalls.length).toBeGreaterThanOrEqual(2);
@@ -585,7 +580,9 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
         .join(" | ")}`,
     ).toHaveLength(1);
     expect(retroPosts[0].text).toContain("## Retro");
-    expect(retroPosts[0].text).toContain("**What went well:** Test ran cleanly.");
+    expect(retroPosts[0].text).toContain(
+      "**What went well:** Test ran cleanly.",
+    );
     expect(retroPosts[0].text).toContain("**What went wrong:** Nothing.");
     expect(retroPosts[0].text.startsWith("<!-- danxbot -->\n")).toBe(true);
   }, 30_000);

@@ -4,9 +4,9 @@
  *
  * Every danxbot-managed tracker comment carries `DANXBOT_COMMENT_MARKER` so
  * the poller's `isUserResponse` filter ignores it. Specialized comments
- * (retro, action-items bookkeeping, dispatch lock) ALSO carry a per-shape
- * marker so the worker can deterministically locate its own managed
- * comment for edit-in-place idempotency.
+ * (retro, dispatch lock) ALSO carry a per-shape marker so the worker can
+ * deterministically locate its own managed comment for edit-in-place
+ * idempotency.
  *
  * Defining all markers in one module is the only way to keep the
  * `<!-- danxbot... -->` literal in exactly one place — consumers import,
@@ -24,28 +24,8 @@ export const DANXBOT_COMMENT_MARKER = "<!-- danxbot -->";
  */
 export const RETRO_COMMENT_MARKER = "<!-- danxbot-retro -->";
 
-/**
- * Idempotency marker for the worker-managed action-items bookkeeping
- * comment. Tracks `<title>\t<external_id>` (TAB-separated) for every retro
- * action_item already spawned to a tracker card, so re-syncs are no-ops.
- */
-export const ACTION_ITEMS_COMMENT_MARKER = "<!-- danxbot-action-items -->";
-
 /** Marker line identifying a comment as the dispatch lock. */
 export const LOCK_COMMENT_MARKER = "<!-- danxbot-lock -->";
-
-/**
- * Bookkeeping line separator between `<title>` and `<external_id>` in the
- * action-items comment. U+0009 HORIZONTAL TAB. `validateRetro` in
- * `yaml.ts` rejects tab in `retro.action_items[i]`, so a bullet line
- * contains exactly one tab and `indexOf` recovers the title/id split
- * unambiguously.
- *
- * Exported so the validator imports the same constant rather than
- * hardcoding `"\t"` independently — a future separator change touches
- * one site, not two.
- */
-export const BOOKKEEPING_SEP = "\t";
 
 /**
  * Locate the first comment whose `text` includes `marker` and whose

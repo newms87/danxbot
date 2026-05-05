@@ -22,9 +22,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Do the thing",
     description: "A longer body",
     triaged: { timestamp: "", status: "", explain: "" },
-    ac: [
-      { check_item_id: "ac-1", title: "Returns 200", checked: false },
-    ],
+    ac: [{ check_item_id: "ac-1", title: "Returns 200", checked: false }],
     phases: [
       {
         check_item_id: "ph-1",
@@ -34,10 +32,15 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
       },
     ],
     comments: [
-      { id: "c-1", author: "alice", timestamp: "2026-05-01T12:00:00Z", text: "hi" },
+      {
+        id: "c-1",
+        author: "alice",
+        timestamp: "2026-05-01T12:00:00Z",
+        text: "hi",
+      },
       { author: "", timestamp: "", text: "local-only comment" },
     ],
-    retro: { good: "", bad: "", action_items: [], commits: [] },
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
     ...overrides,
   };
@@ -108,7 +111,9 @@ describe("serializeIssue / parseIssue", () => {
         "blocked: null\n",
         "blocked:\n  reason: r\n  timestamp: t\n  by: []\n",
       );
-      expect(() => parseIssue(yaml)).toThrow(/blocked\.by must contain at least one/);
+      expect(() => parseIssue(yaml)).toThrow(
+        /blocked\.by must contain at least one/,
+      );
     });
 
     it("rejects a blocked.by entry that is not an ISS-N id", () => {
@@ -116,7 +121,9 @@ describe("serializeIssue / parseIssue", () => {
         "blocked: null\n",
         "blocked:\n  reason: r\n  timestamp: t\n  by:\n    - not-an-iss-id\n",
       );
-      expect(() => parseIssue(yaml)).toThrow(/blocked\.by\[0\] must match ISS-/);
+      expect(() => parseIssue(yaml)).toThrow(
+        /blocked\.by\[0\] must match ISS-/,
+      );
     });
   });
 
@@ -164,7 +171,9 @@ describe("validateIssue", () => {
   // Build a minimal-but-fully-populated input. The validator is strict
   // (missing required fields are errors, not silently defaulted), so tests
   // start from this base and override the field they want to exercise.
-  function valid(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  function valid(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
     return {
       schema_version: 3,
       tracker: "trello",
@@ -181,7 +190,7 @@ describe("validateIssue", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       ...overrides,
     };
   }
@@ -196,7 +205,7 @@ describe("validateIssue", () => {
       expect(result.issue.retro).toEqual({
         good: "",
         bad: "",
-        action_items: [],
+        action_item_ids: [],
         commits: [],
       });
     }
@@ -331,12 +340,16 @@ describe("validateIssue", () => {
   it("rejects invalid phase status", () => {
     const result = validateIssue(
       valid({
-        phases: [{ check_item_id: "p1", title: "x", status: "Wibble", notes: "" }],
+        phases: [
+          { check_item_id: "p1", title: "x", status: "Wibble", notes: "" },
+        ],
       }),
     );
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors.some((e) => /phases\[0\]\.status/.test(e))).toBe(true);
+      expect(result.errors.some((e) => /phases\[0\]\.status/.test(e))).toBe(
+        true,
+      );
     }
   });
 
@@ -406,104 +419,12 @@ describe("validateIssue", () => {
       expect(result.errors).toContain("comments[0] must be a mapping");
     }
   });
-
-  it("parseIssue throws IssueParseError when YAML source carries a tab in retro.action_items", () => {
-    // The bookkeeping comment uses a tab as its line separator, so titles
-    // carrying an embedded tab would corrupt the parser. Validate-time reject.
-    const yaml = `schema_version: 3
-tracker: trello
-id: ISS-1
-external_id: x1
-parent_id: null
-children: []
-dispatch_id: null
-status: ToDo
-type: Feature
-title: T
-description: ""
-triaged:
-  timestamp: ""
-  status: ""
-  explain: ""
-ac: []
-phases: []
-comments: []
-retro:
-  good: ""
-  bad: ""
-  action_items:
-    - "broken\\talready-spawned"
-  commits: []
-`;
-    expect(() => parseIssue(yaml)).toThrow(/tab/);
-  });
-
-  it("rejects retro.action_items entries containing a tab character", () => {
-    const result = validateIssue(
-      valid({
-        retro: {
-          good: "",
-          bad: "",
-          action_items: ["legit", "broken\talready-spawned"],
-          commits: [],
-        },
-      }),
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(
-        result.errors.some(
-          (e) => e.includes("retro.action_items[1]") && e.includes("tab"),
-        ),
-        `expected tab rejection error; got ${JSON.stringify(result.errors)}`,
-      ).toBe(true);
-    }
-  });
-
-  it("rejects retro.action_items entries with leading or trailing tab", () => {
-    for (const offending of ["\tleading-tab", "trailing-tab\t"]) {
-      const result = validateIssue(
-        valid({
-          retro: {
-            good: "",
-            bad: "",
-            action_items: [offending],
-            commits: [],
-          },
-        }),
-      );
-      expect(
-        result.ok,
-        `expected rejection for ${JSON.stringify(offending)}`,
-      ).toBe(false);
-    }
-  });
-
-  it("accepts retro.action_items entries containing arrow lookalikes (no longer the separator)", () => {
-    // Post-hardening: the separator is a tab. Arrow lookalikes ('->', '=>',
-    // U+2192 '→', and Unicode arrow variants) are normal title text and
-    // must round-trip cleanly. See card 69f771d6cbd1ada690743c73.
-    const titles = [
-      "Fix: A -> B already-spawned",
-      "Refactor: X => Y",
-      "Migrate → new format",
-      "Replace ⟶ glyph",
-      "Document ➔ flow",
-    ];
-    const result = validateIssue(
-      valid({
-        retro: { good: "", bad: "", action_items: titles, commits: [] },
-      }),
-    );
-    expect(
-      result.ok,
-      result.ok ? "" : `unexpected rejection: ${JSON.stringify(result.errors)}`,
-    ).toBe(true);
-  });
 });
 
 describe("children field (v3 epic → phase linkage)", () => {
-  function valid(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  function valid(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
     return {
       schema_version: 3,
       tracker: "trello",
@@ -520,7 +441,7 @@ describe("children field (v3 epic → phase linkage)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       ...overrides,
     };
   }
@@ -637,7 +558,7 @@ describe("createEmptyIssue", () => {
     expect(issue.retro).toEqual({
       good: "",
       bad: "",
-      action_items: [],
+      action_item_ids: [],
       commits: [],
     });
   });
@@ -696,7 +617,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       retro: {
         good: "we shipped",
         bad: "took longer than expected",
-        action_items: ["follow-up A", "follow-up B"],
+        action_item_ids: ["follow-up A", "follow-up B"],
         commits: ["abc1234"],
       },
       blocked: null,
@@ -742,7 +663,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       retro:
         good: we shipped
         bad: took longer than expected
-        action_items:
+        action_item_ids:
           - follow-up A
           - follow-up B
         commits:

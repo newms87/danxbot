@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { TrelloTracker, encodePhaseItemName, decodePhaseItemName } from "../../issue-tracker/trello.js";
+import {
+  TrelloTracker,
+  encodePhaseItemName,
+  decodePhaseItemName,
+} from "../../issue-tracker/trello.js";
 import type { TrelloConfig } from "../../types.js";
 
 const TRELLO: TrelloConfig = {
@@ -60,7 +64,13 @@ describe("TrelloTracker", () => {
     const refs = await tracker.fetchOpenCards();
     expect(refs).toEqual([
       { id: "ISS-1", external_id: "r1", title: "R1", status: "Review" },
-      { id: "", external_id: "t1", title: "T1", status: "ToDo", list_kind: "todo" },
+      {
+        id: "",
+        external_id: "t1",
+        title: "T1",
+        status: "ToDo",
+        list_kind: "todo",
+      },
       { id: "ISS-3", external_id: "n1", title: "N1", status: "Needs Help" },
       // Action Items list cards surface as ToDo + list_kind: "action_items"
       // so blocker discovery sees them but the poller dispatch path skips.
@@ -100,7 +110,11 @@ describe("TrelloTracker", () => {
               id: "ck-ph",
               name: "Implementation Phases",
               checkItems: [
-                { id: "ci-2", name: "Pending: Phase 1\nNote line", state: "incomplete" },
+                {
+                  id: "ci-2",
+                  name: "Pending: Phase 1\nNote line",
+                  state: "incomplete",
+                },
               ],
             },
           ],
@@ -153,7 +167,11 @@ describe("TrelloTracker", () => {
       if (url.endsWith(`/cards/new-card/checklists?${authQs()}`)) {
         return jsonResponse({ id: "chk-new" });
       }
-      if (url.startsWith("https://api.trello.com/1/checklists/chk-new/checkItems?")) {
+      if (
+        url.startsWith(
+          "https://api.trello.com/1/checklists/chk-new/checkItems?",
+        )
+      ) {
         return jsonResponse({ id: "ci-new" });
       }
       throw new Error(`unexpected url: ${url}`);
@@ -174,7 +192,7 @@ describe("TrelloTracker", () => {
       ac: [{ title: "AC1", checked: false }],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
 
     expect(result.external_id).toBe("new-card");
@@ -216,7 +234,12 @@ describe("TrelloTracker", () => {
       return jsonResponse({});
     });
     const tracker = new TrelloTracker(TRELLO);
-    await tracker.setLabels("c1", { type: "Feature", needsHelp: true, triaged: false, blocked: false });
+    await tracker.setLabels("c1", {
+      type: "Feature",
+      needsHelp: true,
+      triaged: false,
+      blocked: false,
+    });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
     const body = JSON.parse(putCall[1].body as string);
@@ -229,30 +252,28 @@ describe("TrelloTracker", () => {
 
   it("addComment POSTs and returns id+timestamp", async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse({ id: "act-x", date: "2026-05-01T00:00:00.000Z", data: { text: "hi" } }),
+      jsonResponse({
+        id: "act-x",
+        date: "2026-05-01T00:00:00.000Z",
+        data: { text: "hi" },
+      }),
     );
     const tracker = new TrelloTracker(TRELLO);
     const result = await tracker.addComment("c1", "hi");
-    expect(result).toEqual({ id: "act-x", timestamp: "2026-05-01T00:00:00.000Z" });
+    expect(result).toEqual({
+      id: "act-x",
+      timestamp: "2026-05-01T00:00:00.000Z",
+    });
   });
 
   it("non-2xx response throws Trello API error message", async () => {
-    fetchMock.mockResolvedValue(new Response("nope", { status: 500, statusText: "Server Error" }));
+    fetchMock.mockResolvedValue(
+      new Response("nope", { status: 500, statusText: "Server Error" }),
+    );
     const tracker = new TrelloTracker(TRELLO);
     await expect(tracker.updateCard("c1", { title: "x" })).rejects.toThrow(
       /Trello API error: 500 Server Error/,
     );
-  });
-
-  it("addLinkedActionItemCard creates on the action items list", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ id: "ai-card" }));
-    const tracker = new TrelloTracker(TRELLO);
-    const result = await tracker.addLinkedActionItemCard("Follow up");
-    expect(result).toEqual({ external_id: "ai-card" });
-    const call = fetchMock.mock.calls[0];
-    const body = JSON.parse(call[1].body as string);
-    expect(body.idList).toBe("list-ai");
-    expect(body.name).toBe("Follow up");
   });
 
   it("looks up Triaged label from the board when triagedLabelId not configured", async () => {
@@ -270,7 +291,12 @@ describe("TrelloTracker", () => {
       return jsonResponse({});
     });
     const tracker = new TrelloTracker(cfg);
-    await tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: true, blocked: false });
+    await tracker.setLabels("c1", {
+      type: "Bug",
+      needsHelp: false,
+      triaged: true,
+      blocked: false,
+    });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
     const body = JSON.parse(putCall[1].body as string);
@@ -290,7 +316,12 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(cfg);
     await expect(
-      tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: true, blocked: false }),
+      tracker.setLabels("c1", {
+        type: "Bug",
+        needsHelp: false,
+        triaged: true,
+        blocked: false,
+      }),
     ).rejects.toThrow(/Trello board has no Triaged label configured/);
   });
 
@@ -306,7 +337,12 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(cfg);
     await expect(
-      tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: false, blocked: false }),
+      tracker.setLabels("c1", {
+        type: "Bug",
+        needsHelp: false,
+        triaged: false,
+        blocked: false,
+      }),
     ).rejects.toThrow(/Trello board has no Triaged label configured/);
   });
 
@@ -328,7 +364,12 @@ describe("TrelloTracker", () => {
       return jsonResponse({});
     });
     const tracker = new TrelloTracker(cfg);
-    await tracker.setLabels("c1", { type: "Bug", needsHelp: false, triaged: false, blocked: false });
+    await tracker.setLabels("c1", {
+      type: "Bug",
+      needsHelp: false,
+      triaged: false,
+      blocked: false,
+    });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
     const body = JSON.parse(putCall[1].body as string);
@@ -345,18 +386,26 @@ describe("TrelloTracker", () => {
       if (init?.method === "GET" && url.includes("/cards/c1/checklists")) {
         return jsonResponse([{ id: "ck-ac", name: "Acceptance Criteria" }]);
       }
-      if (init?.method === "POST" && url.includes("/checklists/ck-ac/checkItems")) {
+      if (
+        init?.method === "POST" &&
+        url.includes("/checklists/ck-ac/checkItems")
+      ) {
         return jsonResponse({ id: "ci-new" });
       }
       throw new Error(`unexpected ${init?.method} ${url}`);
     });
     const tracker = new TrelloTracker(TRELLO);
-    const result = await tracker.addAcItem("c1", { title: "AC1", checked: true });
+    const result = await tracker.addAcItem("c1", {
+      title: "AC1",
+      checked: true,
+    });
     expect(result.check_item_id).toBe("ci-new");
     const post = fetchMock.mock.calls.find(
       (c) =>
         c[1]?.method === "POST" &&
-        (c[0] as string).startsWith("https://api.trello.com/1/checklists/ck-ac/checkItems"),
+        (c[0] as string).startsWith(
+          "https://api.trello.com/1/checklists/ck-ac/checkItems",
+        ),
     );
     if (!post) throw new Error("expected POST /checkItems");
     expect(post[0]).toContain(authQs());
@@ -432,7 +481,10 @@ describe("TrelloTracker", () => {
       if (init?.method === "GET" && url.includes("/cards/c1/checklists")) {
         return jsonResponse([{ id: "ck-ph", name: "Implementation Phases" }]);
       }
-      if (init?.method === "GET" && url.includes("/checklists/ck-ph/checkItems/ci-ph")) {
+      if (
+        init?.method === "GET" &&
+        url.includes("/checklists/ck-ph/checkItems/ci-ph")
+      ) {
         return jsonResponse({
           id: "ci-ph",
           name: "Pending: Old\nold notes",
@@ -504,7 +556,11 @@ describe("TrelloTracker", () => {
 
   it("addComment POSTs to /actions/comments with auth + body {text}", async () => {
     fetchMock.mockResolvedValue(
-      jsonResponse({ id: "act-x", date: "2026-05-01T00:00:00.000Z", data: { text: "hi" } }),
+      jsonResponse({
+        id: "act-x",
+        date: "2026-05-01T00:00:00.000Z",
+        data: { text: "hi" },
+      }),
     );
     const tracker = new TrelloTracker(TRELLO);
     await tracker.addComment("c1", "hi");
@@ -532,20 +588,6 @@ describe("TrelloTracker", () => {
     await expect(
       tracker.editComment("c1", "act-1", "edited body"),
     ).rejects.toThrow(/Trello API error: 404/);
-  });
-
-  it("addLinkedActionItemCard POSTs with pos: 'top' + idList=actionItems + auth", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({ id: "ai-card" }));
-    const tracker = new TrelloTracker(TRELLO);
-    await tracker.addLinkedActionItemCard("Follow up");
-    const call = fetchMock.mock.calls[0];
-    expect(call[1].method).toBe("POST");
-    expect(call[0]).toContain("/cards");
-    expect(call[0]).toContain(authQs());
-    const body = JSON.parse(call[1].body as string);
-    expect(body.idList).toBe("list-ai");
-    expect(body.name).toBe("Follow up");
-    expect(body.pos).toBe("top");
   });
 
   it("getCard request URL carries auth + checklists=all + checklist_fields=name", async () => {
@@ -601,7 +643,7 @@ describe("TrelloTracker", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     const post = fetchMock.mock.calls[0];
     expect(post[0]).toContain(authQs());

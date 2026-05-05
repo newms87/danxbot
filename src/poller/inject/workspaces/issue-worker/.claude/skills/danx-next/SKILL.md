@@ -36,7 +36,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `ac` | `[{check_item_id, title, checked}]` | Acceptance Criteria. Empty `check_item_id` on new items — tracker assigns. |
 | `phases` | `[{check_item_id, title, status, notes}]` | `status`: `Pending` \| `Complete` \| `Blocked`. |
 | `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
-| `retro` | `{good, bad, action_items[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save AND spawns one tracker card per `action_items[]` entry. **`action_items[]` is a LAST RESORT** — see Step 1.5. Only file an action item when the work is BOTH unrelated to this card's ACs AND too large to reasonably finish in this session (multi-phase refactor, redesign, cross-cutting work needing its own scoping). Small in-scope or small unrelated fixes you spotted → DO THEM NOW, don't defer. Do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for follow-ups — list them in `action_items[]` instead. `action_items[]` strings cannot contain `→` (reserved bookkeeping separator). |
+| `retro` | `{good, bad, action_item_ids[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save. `action_item_ids[]` is a `string[]` of `ISS-N` references. **`action_item_ids[]` is a LAST RESORT** — see Step 1.5. Only reference an action item when the work is BOTH unrelated to this card's ACs AND too large to reasonably finish in this session (multi-phase refactor, redesign, cross-cutting work needing its own scoping). Small in-scope or small unrelated fixes you spotted → DO THEM NOW, don't defer. Create the action item card first via `danx_issue_create({type, title, description, ac, ...})`, then push its returned `id` here. `action_item_ids[]` must contain only valid `ISS-N` format strings. Do NOT append a `## Retro` comment to `comments[]` yourself. |
 | `blocked` | `null` OR `{reason, timestamp, by[]}` | `null` when nothing blocks this card. Set to a `{reason, timestamp, by}` record when the card cannot proceed because it is waiting on **other in-flight work** that does NOT need a human (a phase sibling shipping first, an Action Items card needs to land, a separately-scoped task). `reason` is a non-empty sentence. `timestamp` is current ISO 8601. `by[]` is a non-empty list of `ISS-N` ids that must reach Done / Cancelled before this card unblocks — if no existing card describes the unblock work, **create one** (`danx_issue_create`) and put its id here. The worker mechanically forces `status: ToDo` whenever `blocked` is non-null; you do not separately move status. The poller skips dispatching the card while any blocker is non-terminal, then auto-clears `blocked` and dispatches once every blocker is Done / Cancelled. **Blocked is NOT Needs Help** — Needs Help is for human action; Blocked is for waiting on other work. See Step 10b. |
 
 **Save semantics:** `danx_issue_save({id})` validates the YAML synchronously and returns `{saved: true}` or `{saved: false, errors}`. Tracker-side bookkeeping runs detached — those errors NEVER appear in the tool result. When `status` is `Done` or `Cancelled`, the worker moves the file `open/` → `closed/` as part of save. Save after every meaningful edit.
@@ -184,7 +184,7 @@ If you decide NOT to split, skip ahead to Step 4.
    - `ac: [{check_item_id: "", title: "...", checked: false}, ...]` (every required field present, `check_item_id: ""` until worker assigns)
    - `phases: []` (or seeded items with `check_item_id: ""`)
    - `comments: []`
-   - `retro: {good: "", bad: "", action_items: [], commits: []}`
+   - `retro: {good: "", bad: "", action_item_ids: [], commits: []}`
 3. For each phase YAML, call `danx_issue_create({filename: "<slug>"})`. The worker validates the draft (empty `id` + empty `check_item_id`s are allowed), creates the issue, stamps the assigned `id` back into the YAML, and renames the file to `<id>.yml`. Capture the returned `id` from the response. `{created: false, errors}` → fix the draft and retry.
 4. After all phase cards exist, edit the epic YAML once more: set `children: ["<phase-1-id>", "<phase-2-id>", ...]` in phase order. Save. This is the reverse linkage that lets a future epic pickup recognize "already split" without re-scanning open issues.
 5. Restart this workflow at Step 1 using the first phase card's YAML.
@@ -291,7 +291,7 @@ Edit YAML:
    **Root Cause:** ...
    **Solution:** ...
    ```
-3. Fill `retro.good`, `retro.bad`, `retro.action_items[]`, `retro.commits[]`. The worker renders the `## Retro` comment automatically on save and spawns one tracker card per `action_items[]` entry — do NOT append a `## Retro` comment to `comments[]` yourself, and do NOT call `danx_issue_create` for action items. `action_items[]` strings must not contain `→`. **Action items are a LAST RESORT** — re-apply the Step 1.5 filter to every candidate. If it's required for THIS card's ACs (already done, since you're at Done) it's not an action item. If it's small + you could do it now, do it now and re-commit instead of filing. Only large, separate, scoped follow-ups belong here. Empty `action_items[]` is the right answer most of the time.
+3. Fill `retro.good`, `retro.bad`, `retro.action_item_ids[]`, `retro.commits[]`. The worker renders the `## Retro` comment automatically on save. Do NOT append a `## Retro` comment to `comments[]` yourself. **Action items are a LAST RESORT** — re-apply the Step 1.5 filter to every candidate. If it's required for THIS card's ACs (already done, since you're at Done) it's not an action item. If it's small + you could do it now, do it now and re-commit instead of filing. Only large, separate, scoped follow-ups belong here. Create the action item card first via `danx_issue_create({type, title, description, ac, ...})`, then push its returned `ISS-N` here. Empty `action_item_ids[]` is the right answer most of the time.
 
 Save: `danx_issue_save({id})`. The worker validates, posts the rendered retro comment, spawns Action Items cards, then moves the file `open/` → `closed/` and pushes the tracker move to Done.
 
@@ -356,7 +356,7 @@ Edit YAML:
      - `**Final AC check:** Before Done, every AC must be checked: true.`
    - No `id` field
 3. **Bug cards** with partial progress: also append the `## Bug Diagnosis` block.
-4. Fill `retro.{good, bad, action_items, commits}` honestly — the AC gap is the primary "what went wrong." The worker auto-renders the `## Retro` comment and spawns Action Items cards on save (Needs Help is a non-terminal status, so the retro / action-items WILL not be auto-rendered yet — they render when the next pickup eventually moves the card to Done or Cancelled). Filling `retro` now still helps: the next agent inherits it through the YAML. **Re-apply the Step 1.5 filter to every action item candidate.** The fix the next agent will need to make → describe in the Needs Help comment, not as an action item card. Only large, unrelated, separately-scopeable follow-ups belong in `action_items[]`. Empty `action_items[]` is the right answer most of the time.
+4. Fill `retro.{good, bad, action_item_ids, commits}` honestly — the AC gap is the primary "what went wrong." The worker auto-renders the `## Retro` comment on save (Needs Help is a non-terminal status, so rendering happens when the next pickup eventually moves the card to Done or Cancelled). Filling `retro` now still helps: the next agent inherits it through the YAML. **Re-apply the Step 1.5 filter to every action item candidate.** The fix the next agent will need to make → describe in the Needs Help comment, not as an action item card. Only large, unrelated, separately-scopeable follow-ups belong here. Create any action item card first via `danx_issue_create({type, title, description, ac, ...})`, then push its returned `ISS-N` here. Empty `action_item_ids[]` is the right answer most of the time.
 
 Save: `danx_issue_save({id})`.
 
@@ -423,11 +423,14 @@ Help) instead.
    - Append a comment to `comments[]` summarizing what you did, what
      blocker(s) you found / created, and what state to expect once the
      blockers ship. No `id` field.
-4. Fill `retro.{good, bad, action_items, commits}` honestly — the gap
+4. Fill `retro.{good, bad, action_item_ids, commits}` honestly — the gap
    between what shipped and what was needed is "what went wrong." Same
    action-items rule as Step 10: only large, separately-scopeable
-   follow-ups belong here; small in-scope work belongs in this dispatch
-   or in the blocker card itself, not as a retro action item.
+   follow-ups belong here. Create any action item card first via
+   `danx_issue_create({type, title, description, ac, ...})`, then push
+   its returned `ISS-N` to `action_item_ids[]`. Small in-scope work
+   belongs in this dispatch or in the blocker card itself, not as a retro
+   action item.
 
 ### Save and exit
 

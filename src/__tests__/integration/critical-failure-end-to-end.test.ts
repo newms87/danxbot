@@ -183,7 +183,7 @@ function seedHydratedCard(externalId: string, title: string): void {
     ac: [],
     phases: [],
     comments: [],
-    retro: { good: "", bad: "", action_items: [], commits: [] },
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
   });
   trackerMock.getComments.mockResolvedValue([]);
 }

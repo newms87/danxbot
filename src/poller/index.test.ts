@@ -241,7 +241,7 @@ const FAKE_ISSUE_FOR_TESTS = {
   ac: [],
   phases: [],
   comments: [],
-  retro: { good: "", bad: "", action_items: [], commits: [] },
+  retro: { good: "", bad: "", action_item_ids: [], commits: [] },
 };
 const mockHydrateFromRemote = vi
   .fn()
@@ -420,7 +420,7 @@ const DEFAULT_GET_CARD_ISSUE = {
   ac: [],
   phases: [],
   comments: [],
-  retro: { good: "", bad: "", action_items: [], commits: [] },
+  retro: { good: "", bad: "", action_item_ids: [], commits: [] },
 };
 
 /**
@@ -1640,7 +1640,7 @@ describe("poll — post-dispatch card-progress check", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     };
   }
 
@@ -2751,7 +2751,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("card-cached", "Cached", "ToDo"),
@@ -2911,7 +2911,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     };
     mockFindByExternalId.mockReturnValue(existingIssue);
 
@@ -2948,7 +2948,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: {
         reason: "waiting on ISS-99",
         timestamp: "2026-05-04T18:00:00.000Z",
@@ -2989,7 +2989,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: {
         reason: "waiting on ISS-99",
         timestamp: "2026-05-04T18:00:00.000Z",
@@ -3073,7 +3073,7 @@ describe("poll — In Progress sync + orphan resume", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     };
   }
 

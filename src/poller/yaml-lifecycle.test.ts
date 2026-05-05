@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { MemoryTracker } from "../issue-tracker/memory.js";
@@ -16,7 +23,9 @@ import {
 } from "./yaml-lifecycle.js";
 import type { CreateCardInput } from "../issue-tracker/interface.js";
 
-function defaultCreate(overrides: Partial<CreateCardInput> = {}): CreateCardInput {
+function defaultCreate(
+  overrides: Partial<CreateCardInput> = {},
+): CreateCardInput {
   return {
     schema_version: 3,
     tracker: "memory",
@@ -31,7 +40,7 @@ function defaultCreate(overrides: Partial<CreateCardInput> = {}): CreateCardInpu
     ac: [{ title: "AC1", checked: false }],
     phases: [],
     comments: [],
-    retro: { good: "", bad: "", action_items: [], commits: [] },
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     ...overrides,
   };
 }
@@ -63,7 +72,9 @@ describe("yaml-lifecycle", () => {
     it("creates open/ and closed/ dirs idempotently", () => {
       ensureIssuesDirs(repoRoot);
       expect(existsSync(resolve(repoRoot, ".danxbot/issues/open"))).toBe(true);
-      expect(existsSync(resolve(repoRoot, ".danxbot/issues/closed"))).toBe(true);
+      expect(existsSync(resolve(repoRoot, ".danxbot/issues/closed"))).toBe(
+        true,
+      );
 
       // Second call must not throw.
       ensureIssuesDirs(repoRoot);
@@ -95,7 +106,10 @@ describe("yaml-lifecycle", () => {
       expect(issue.dispatch_id).toBe(dispatchId);
       expect(issue.title).toBe("Card title");
 
-      const methods = tracker.getRequestLog().map((l) => l.method).sort();
+      const methods = tracker
+        .getRequestLog()
+        .map((l) => l.method)
+        .sort();
       expect(methods).toEqual(["getCard", "getComments"]);
     });
 
@@ -290,7 +304,10 @@ describe("yaml-lifecycle", () => {
     it("creates the gitignore with the line when file does not exist", () => {
       mkdirSync(resolve(repoRoot, ".danxbot"), { recursive: true });
       ensureGitignoreEntry(repoRoot, "issues/");
-      const content = readFileSync(resolve(repoRoot, ".danxbot/.gitignore"), "utf-8");
+      const content = readFileSync(
+        resolve(repoRoot, ".danxbot/.gitignore"),
+        "utf-8",
+      );
       expect(content.split("\n")).toContain("issues/");
     });
 
@@ -301,7 +318,10 @@ describe("yaml-lifecycle", () => {
         "features.md\n.env\nsettings.json\n",
       );
       ensureGitignoreEntry(repoRoot, "issues/");
-      const content = readFileSync(resolve(repoRoot, ".danxbot/.gitignore"), "utf-8");
+      const content = readFileSync(
+        resolve(repoRoot, ".danxbot/.gitignore"),
+        "utf-8",
+      );
       const lines = content.split("\n");
       expect(lines).toContain("features.md");
       expect(lines).toContain(".env");
@@ -314,7 +334,10 @@ describe("yaml-lifecycle", () => {
       writeFileSync(resolve(repoRoot, ".danxbot/.gitignore"), "features.md\n");
       ensureGitignoreEntry(repoRoot, "issues/");
       ensureGitignoreEntry(repoRoot, "issues/");
-      const content = readFileSync(resolve(repoRoot, ".danxbot/.gitignore"), "utf-8");
+      const content = readFileSync(
+        resolve(repoRoot, ".danxbot/.gitignore"),
+        "utf-8",
+      );
       const occurrences = content.split("\n").filter((l) => l === "issues/");
       expect(occurrences).toHaveLength(1);
     });
@@ -323,7 +346,10 @@ describe("yaml-lifecycle", () => {
       mkdirSync(resolve(repoRoot, ".danxbot"), { recursive: true });
       writeFileSync(resolve(repoRoot, ".danxbot/.gitignore"), "old-issues/\n");
       ensureGitignoreEntry(repoRoot, "issues/");
-      const content = readFileSync(resolve(repoRoot, ".danxbot/.gitignore"), "utf-8");
+      const content = readFileSync(
+        resolve(repoRoot, ".danxbot/.gitignore"),
+        "utf-8",
+      );
       const lines = content.split("\n");
       expect(lines).toContain("old-issues/");
       expect(lines).toContain("issues/");

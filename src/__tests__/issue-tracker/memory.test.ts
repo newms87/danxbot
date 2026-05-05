@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import { MemoryTracker } from "../../issue-tracker/memory.js";
 import type { CreateCardInput } from "../../issue-tracker/interface.js";
 
-function defaultInput(overrides: Partial<CreateCardInput> = {}): CreateCardInput {
+function defaultInput(
+  overrides: Partial<CreateCardInput> = {},
+): CreateCardInput {
   return {
     schema_version: 3,
     tracker: "memory",
@@ -17,7 +19,7 @@ function defaultInput(overrides: Partial<CreateCardInput> = {}): CreateCardInput
     ac: [{ title: "Returns 200", checked: false }],
     phases: [{ title: "Wire", status: "Pending", notes: "" }],
     comments: [],
-    retro: { good: "", bad: "", action_items: [], commits: [] },
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     ...overrides,
   };
 }
@@ -44,8 +46,12 @@ describe("MemoryTracker", () => {
 
   it("fetchOpenCards returns only open statuses", async () => {
     const tracker = new MemoryTracker();
-    const a = await tracker.createCard(defaultInput({ status: "ToDo", title: "open" }));
-    const b = await tracker.createCard(defaultInput({ status: "Done", title: "closed" }));
+    const a = await tracker.createCard(
+      defaultInput({ status: "ToDo", title: "open" }),
+    );
+    const b = await tracker.createCard(
+      defaultInput({ status: "Done", title: "closed" }),
+    );
     const refs = await tracker.fetchOpenCards();
     const ids = refs.map((r) => r.external_id);
     expect(ids).toContain(a.external_id);
@@ -75,14 +81,21 @@ describe("MemoryTracker", () => {
   it("setLabels overwrites the label state", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultInput());
-    await tracker.setLabels(external_id, { type: "Bug", needsHelp: true, triaged: false, blocked: false });
+    await tracker.setLabels(external_id, {
+      type: "Bug",
+      needsHelp: true,
+      triaged: false,
+      blocked: false,
+    });
     const card = await tracker.getCard(external_id);
     expect(card.type).toBe("Bug");
   });
 
   it("addComment returns id and timestamp; getComments returns oldest-first", async () => {
     let now = 1700000000000;
-    const tracker = new MemoryTracker({ clock: () => new Date(now).toISOString() });
+    const tracker = new MemoryTracker({
+      clock: () => new Date(now).toISOString(),
+    });
     const { external_id } = await tracker.createCard(defaultInput());
     const c1 = await tracker.addComment(external_id, "first");
     now += 1000;
@@ -94,7 +107,9 @@ describe("MemoryTracker", () => {
 
   it("editComment replaces text in-place; preserves id, author, timestamp", async () => {
     let now = 1700000000000;
-    const tracker = new MemoryTracker({ clock: () => new Date(now).toISOString() });
+    const tracker = new MemoryTracker({
+      clock: () => new Date(now).toISOString(),
+    });
     const { external_id } = await tracker.createCard(defaultInput());
     const { id, timestamp } = await tracker.addComment(external_id, "v1");
     now += 60_000;
@@ -144,31 +159,22 @@ describe("MemoryTracker", () => {
 
   it("phase item lifecycle: add, update, delete", async () => {
     const tracker = new MemoryTracker();
-    const { external_id } = await tracker.createCard(defaultInput({ phases: [] }));
+    const { external_id } = await tracker.createCard(
+      defaultInput({ phases: [] }),
+    );
     const { check_item_id } = await tracker.addPhaseItem(external_id, {
       title: "P1",
       status: "Pending",
       notes: "n",
     });
-    await tracker.updatePhaseItem(external_id, check_item_id, { status: "Complete" });
+    await tracker.updatePhaseItem(external_id, check_item_id, {
+      status: "Complete",
+    });
     let card = await tracker.getCard(external_id);
     expect(card.phases[0].status).toBe("Complete");
     await tracker.deletePhaseItem(external_id, check_item_id);
     card = await tracker.getCard(external_id);
     expect(card.phases).toHaveLength(0);
-  });
-
-  it("addLinkedActionItemCard creates a new unlinked action-items card; caller wires parent_id locally", async () => {
-    const tracker = new MemoryTracker();
-    const parent = await tracker.createCard(defaultInput());
-    const child = await tracker.addLinkedActionItemCard("Follow-up");
-    expect(child.external_id).not.toBe(parent.external_id);
-    const card = await tracker.getCard(child.external_id);
-    // parent_id is local-only metadata — the tracker abstraction doesn't
-    // store it. The new card starts with parent_id: null until a caller
-    // sets it on the local Issue YAML.
-    expect(card.parent_id).toBeNull();
-    expect(card.title).toBe("Follow-up");
   });
 
   it("logs every interface call", async () => {
@@ -207,17 +213,23 @@ describe("MemoryTracker", () => {
     });
     const addedCommentResult = await tracker.addComment(external_id, "hi");
     await tracker.editComment(external_id, addedCommentResult.id, "hi-edited");
-    const ac = await tracker.addAcItem(external_id, { title: "AC2", checked: false });
-    await tracker.updateAcItem(external_id, ac.check_item_id, { checked: true });
+    const ac = await tracker.addAcItem(external_id, {
+      title: "AC2",
+      checked: false,
+    });
+    await tracker.updateAcItem(external_id, ac.check_item_id, {
+      checked: true,
+    });
     await tracker.deleteAcItem(external_id, ac.check_item_id);
     const ph = await tracker.addPhaseItem(external_id, {
       title: "P2",
       status: "Pending",
       notes: "",
     });
-    await tracker.updatePhaseItem(external_id, ph.check_item_id, { status: "Complete" });
+    await tracker.updatePhaseItem(external_id, ph.check_item_id, {
+      status: "Complete",
+    });
     await tracker.deletePhaseItem(external_id, ph.check_item_id);
-    await tracker.addLinkedActionItemCard("Follow-up");
 
     const log = tracker.getRequestLog();
     const methods = log.map((l) => l.method);
@@ -236,7 +248,6 @@ describe("MemoryTracker", () => {
       "addPhaseItem",
       "updatePhaseItem",
       "deletePhaseItem",
-      "addLinkedActionItemCard",
     ]);
 
     // externalId is recorded everywhere it applies (fetchOpenCards has none).
@@ -255,15 +266,15 @@ describe("MemoryTracker", () => {
     expect(byMethod("addPhaseItem")?.externalId).toBe(external_id);
     expect(byMethod("updatePhaseItem")?.externalId).toBe(external_id);
     expect(byMethod("deletePhaseItem")?.externalId).toBe(external_id);
-    // addLinkedActionItemCard takes no parent param; it records no externalId.
-    expect(byMethod("addLinkedActionItemCard")?.externalId).toBeUndefined();
 
     // details payload shape: setLabels carries the labels triple.
     expect(byMethod("setLabels")?.details).toEqual({
       labels: { type: "Bug", needsHelp: true, triaged: true, blocked: false },
     });
     // moveToStatus carries the target status.
-    expect(byMethod("moveToStatus")?.details).toEqual({ status: "In Progress" });
+    expect(byMethod("moveToStatus")?.details).toEqual({
+      status: "In Progress",
+    });
     // addComment carries the comment text.
     expect(byMethod("addComment")?.details).toEqual({ text: "hi" });
     // editComment carries the comment id + new text.
@@ -281,13 +292,6 @@ describe("MemoryTracker", () => {
     expect(byMethod("addPhaseItem")?.details).toEqual({
       item: { title: "P2", status: "Pending", notes: "" },
     });
-    // addLinkedActionItemCard carries the title and the new external_id.
-    const aiDetails = byMethod("addLinkedActionItemCard")?.details as {
-      title: string;
-      external_id: string;
-    };
-    expect(aiDetails.title).toBe("Follow-up");
-    expect(aiDetails.external_id).toMatch(/^mem-/);
   });
 
   it("failNextWrite rejects the next mutating call with the EXACT queued Error instance", async () => {
@@ -298,9 +302,9 @@ describe("MemoryTracker", () => {
     // Use rejects.toBe(err) — checks identity, not just message text — so
     // a regression that swallows the queued Error and throws a fresh one
     // gets caught here.
-    await expect(
-      tracker.updateCard(external_id, { title: "x" }),
-    ).rejects.toBe(err);
+    await expect(tracker.updateCard(external_id, { title: "x" })).rejects.toBe(
+      err,
+    );
     // Subsequent write should now succeed.
     await tracker.updateCard(external_id, { title: "y" });
     expect((await tracker.getCard(external_id)).title).toBe("y");
@@ -338,7 +342,7 @@ describe("MemoryTracker", () => {
           ac: [],
           phases: [],
           comments: [],
-          retro: { good: "", bad: "", action_items: [], commits: [] },
+          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,
         },
       ],
@@ -370,7 +374,7 @@ describe("MemoryTracker", () => {
           ac: [],
           phases: [],
           comments: [],
-          retro: { good: "", bad: "", action_items: [], commits: [] },
+          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,
         },
       ],

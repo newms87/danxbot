@@ -1,6 +1,4 @@
 import {
-  ACTION_ITEMS_COMMENT_MARKER,
-  BOOKKEEPING_SEP,
   DANXBOT_COMMENT_MARKER,
   RETRO_COMMENT_MARKER,
   findCommentByMarker,
@@ -29,9 +27,21 @@ import {
  * Idempotent: a second invocation on the returned `updatedLocal` issues zero
  * mutating calls (`remoteWriteCount === 0`).
  */
+/**
+ * Optional ID-to-title resolver for rendering `retro.action_item_ids` in
+ * the structured retro comment. Caller (worker / poller) reads each linked
+ * action-item card's local YAML and supplies its title. IDs missing from
+ * the resolver render as `<ISS-N: unknown>` so a typo or stale reference
+ * is loud, not silent. Absent resolver → every id renders as unknown.
+ */
+export type ActionItemTitleResolver =
+  | Map<string, string>
+  | Record<string, string>;
+
 export async function syncIssue(
   tracker: IssueTracker,
   local: Issue,
+  options: { actionItemTitles?: ActionItemTitleResolver } = {},
 ): Promise<{ updatedLocal: Issue; remoteWriteCount: number }> {
   let writes = 0;
 
@@ -113,7 +123,7 @@ export async function syncIssue(
   }
 
   // 4d: AC items diff
-  const acAdds: { itemRef: typeof local.ac[number]; idx: number }[] = [];
+  const acAdds: { itemRef: (typeof local.ac)[number]; idx: number }[] = [];
   const acUpdates: {
     checkItemId: string;
     patch: { title?: string; checked?: boolean };
@@ -172,10 +182,15 @@ export async function syncIssue(
   }
 
   // 4e: Phases diff (parallel structure to AC).
-  const phaseAdds: { itemRef: typeof local.phases[number]; idx: number }[] = [];
+  const phaseAdds: { itemRef: (typeof local.phases)[number]; idx: number }[] =
+    [];
   const phaseUpdates: {
     checkItemId: string;
-    patch: { title?: string; status?: typeof local.phases[number]["status"]; notes?: string };
+    patch: {
+      title?: string;
+      status?: (typeof local.phases)[number]["status"];
+      notes?: string;
+    };
   }[] = [];
 
   const remotePhasesById = new Map(
@@ -196,13 +211,17 @@ export async function syncIssue(
     }
     const patch: {
       title?: string;
-      status?: typeof local.phases[number]["status"];
+      status?: (typeof local.phases)[number]["status"];
       notes?: string;
     } = {};
     if (item.title !== remote.title) patch.title = item.title;
     if (item.status !== remote.status) patch.status = item.status;
     if (item.notes !== remote.notes) patch.notes = item.notes;
-    if (patch.title !== undefined || patch.status !== undefined || patch.notes !== undefined) {
+    if (
+      patch.title !== undefined ||
+      patch.status !== undefined ||
+      patch.notes !== undefined
+    ) {
       phaseUpdates.push({ checkItemId: item.check_item_id, patch });
     }
   }
@@ -253,95 +272,22 @@ export async function syncIssue(
     });
   }
 
-  // Collects in-place comment edits issued below (action-items bookkeeping
-  // and retro renderer) keyed by tracker comment id, so the `finalComments`
-  // mapping at the end can reflect new bodies in the local snapshot. The
-  // next sync's identity check then sees matching text and short-circuits
-  // to zero writes. Adding a third edit-source (e.g. a future structured-
-  // status comment) is one `editedCommentTexts.set(id, text)` line — no
-  // new variable pair, no extra branch in the finalize block.
+  // Collects in-place comment edits issued below (the retro renderer)
+  // keyed by tracker comment id, so the `finalComments` mapping at the end
+  // can reflect new bodies in the local snapshot. The next sync's identity
+  // check then sees matching text and short-circuits to zero writes.
+  // Adding a future edit-source is one `editedCommentTexts.set(id, text)`
+  // line — no new variable pair, no extra branch in the finalize block.
   const editedCommentTexts = new Map<string, string>();
 
-  // --- Step 5: terminal-status action-items spawning. ---
+  // --- Step 5: (removed) terminal-status action-items spawning. ---
   //
-  // When the saved status is Done or Cancelled and the local retro carries
-  // action_items, ensure each title has a corresponding card on the
-  // tracker's Action Items list. A single bookkeeping comment with the
-  // `<!-- danxbot-action-items -->` marker tracks `<title>\t<external_id>`
-  // for every spawned card; on every sync we parse it to compute the
-  // delta and edit-in-place rather than POST a new bookkeeping comment.
-  //
-  // Idempotent by construction: re-syncing the same retro produces zero
-  // tracker writes; appending a new title spawns ONLY that new title.
-  //
-  // Coupling note: when `retro.action_items[]` changes, BOTH this
-  // bookkeeping comment AND the retro comment (rendered in Step 6) get
-  // edited. The retro body's `**Action items:**` bullet list is rendered
-  // from the same `local.retro.action_items` field that drives the
-  // spawn-and-edit logic here. This is intentional — the retro is the
-  // human-readable summary, the bookkeeping is the machine-readable spawn
-  // ledger keyed by `<title>\t<external_id>`. Verified by the
-  // "incremental: appending an action_item" test in `sync.test.ts`, which
-  // expects 3 writes per delta (1 spawn + 2 edits).
-  let actionItemsAppendedComment: IssueComment | null = null;
-  const isTerminalForActionItems =
-    local.status === "Done" || local.status === "Cancelled";
-  if (
-    isTerminalForActionItems &&
-    local.retro.action_items.length > 0
-  ) {
-    // Re-derive the known-comment snapshot AFTER the comments-without-id
-    // POST loop so freshly-stamped comments are visible.
-    const knownCommentsForActionItems: IssueComment[] = updatedComments.map(
-      (c, idx) => stampedCommentsByOriginalIndex.get(idx) ?? c,
-    );
-    const existing = findCommentByMarker(
-      knownCommentsForActionItems,
-      ACTION_ITEMS_COMMENT_MARKER,
-    );
-    const alreadySpawned = existing
-      ? parseActionItemsBookkeeping(existing.text)
-      : new Map<string, string>();
-
-    const newlySpawned: Array<{ title: string; external_id: string }> = [];
-    for (const title of local.retro.action_items) {
-      if (alreadySpawned.has(title)) continue;
-      const result = await tracker.addLinkedActionItemCard(title);
-      writes++;
-      newlySpawned.push({ title, external_id: result.external_id });
-      alreadySpawned.set(title, result.external_id);
-    }
-
-    if (newlySpawned.length > 0 || !existing) {
-      const desiredText = renderActionItemsBookkeeping(
-        local.retro.action_items,
-        alreadySpawned,
-      );
-      if (existing) {
-        if (existing.text !== desiredText) {
-          await tracker.editComment(
-            local.external_id,
-            existing.id,
-            desiredText,
-          );
-          writes++;
-          editedCommentTexts.set(existing.id, desiredText);
-        }
-      } else {
-        const result = await tracker.addComment(
-          local.external_id,
-          desiredText,
-        );
-        writes++;
-        actionItemsAppendedComment = {
-          id: result.id,
-          author: "danxbot",
-          timestamp: result.timestamp,
-          text: desiredText,
-        };
-      }
-    }
-  }
+  // The legacy spawn loop is gone. Action items are now full issues that
+  // the agent creates ahead of time via `danx_issue_create` and references
+  // by `ISS-N` in `retro.action_item_ids[]`. The retro renderer below
+  // resolves those ids → titles via `options.actionItemTitles` and renders
+  // them as bullets in the structured retro comment. No tracker writes are
+  // issued for action items themselves — the cards already exist.
 
   // --- Step 6: terminal-status retro renderer. ---
   //
@@ -360,14 +306,19 @@ export async function syncIssue(
 
   // Refresh local snapshot of all known comments (remote-merged + freshly
   // POSTed this round) so retro detection sees stamped variants too.
-  const knownCommentsForRetro: IssueComment[] = updatedComments.map((c, idx) => {
-    const stamped = stampedCommentsByOriginalIndex.get(idx);
-    return stamped ?? c;
-  });
+  const knownCommentsForRetro: IssueComment[] = updatedComments.map(
+    (c, idx) => {
+      const stamped = stampedCommentsByOriginalIndex.get(idx);
+      return stamped ?? c;
+    },
+  );
 
   let retroAppendedComment: IssueComment | null = null;
   if (isTerminal && retroNonEmpty) {
-    const desiredText = renderRetroComment(local.retro);
+    const desiredText = renderRetroComment(
+      local.retro,
+      options.actionItemTitles,
+    );
     const managed = findCommentByMarker(
       knownCommentsForRetro,
       RETRO_COMMENT_MARKER,
@@ -410,11 +361,10 @@ export async function syncIssue(
   const finalComments = updatedComments.map((c, idx) => {
     const stamped = stampedCommentsByOriginalIndex.get(idx);
     const base = stamped ?? { ...c };
-    // If any in-place comment edit issued above (retro renderer, action-
-    // items bookkeeping, or any future edit-source) targeted this exact
-    // comment id, reflect the new body in the local snapshot so the next
-    // sync's identity check sees matching text and short-circuits to zero
-    // writes.
+    // If any in-place comment edit issued above (retro renderer or any
+    // future edit-source) targeted this exact comment id, reflect the new
+    // body in the local snapshot so the next sync's identity check sees
+    // matching text and short-circuits to zero writes.
     if (base.id) {
       const editedText = editedCommentTexts.get(base.id);
       if (editedText !== undefined) {
@@ -423,10 +373,9 @@ export async function syncIssue(
     }
     return base;
   });
-  // Stamp newly-POSTed retro / action-items comments into local so next
-  // sync's read-side merge skips them.
+  // Stamp newly-POSTed retro comment into local so next sync's read-side
+  // merge skips it.
   if (retroAppendedComment) finalComments.push(retroAppendedComment);
-  if (actionItemsAppendedComment) finalComments.push(actionItemsAppendedComment);
 
   // `parent_id` and `dispatch_id` are local-only metadata managed by the
   // poller (Phase 2) and the danx_issue_create flow (Phase 3). The tracker
@@ -449,7 +398,7 @@ export function isRetroNonEmpty(retro: IssueRetro): boolean {
   return (
     retro.good !== "" ||
     retro.bad !== "" ||
-    retro.action_items.length > 0 ||
+    retro.action_item_ids.length > 0 ||
     retro.commits.length > 0
   );
 }
@@ -460,17 +409,39 @@ export function isRetroNonEmpty(retro: IssueRetro): boolean {
  * filter skips it) and the `<!-- danxbot-retro -->` idempotency marker
  * (so re-sync recognizes our managed comment).
  *
- * The format is byte-stable: identical retro inputs produce identical
- * output, so the round-trip identity check (`managed.text === desiredText`)
- * yields zero remote writes on a no-op re-sync.
+ * The format is byte-stable: identical retro inputs (with the same title
+ * resolver) produce identical output, so the round-trip identity check
+ * (`managed.text === desiredText`) yields zero remote writes on a no-op
+ * re-sync.
+ *
+ * Action items render as `- {title} ({ISS-N})` resolving each id through
+ * `actionItemTitles`. Unknown ids surface as `- <ISS-N: unknown>` so a
+ * stale or typo'd reference is loud, not silent.
  */
-export function renderRetroComment(retro: IssueRetro): string {
+export function renderRetroComment(
+  retro: IssueRetro,
+  actionItemTitles?: Map<string, string> | Record<string, string>,
+): string {
   const goodLine = retro.good === "" ? "—" : retro.good;
   const badLine = retro.bad === "" ? "—" : retro.bad;
+  const lookup = (id: string): string | undefined => {
+    if (!actionItemTitles) return undefined;
+    if (actionItemTitles instanceof Map) return actionItemTitles.get(id);
+    return Object.prototype.hasOwnProperty.call(actionItemTitles, id)
+      ? actionItemTitles[id]
+      : undefined;
+  };
   const actionItemsBlock =
-    retro.action_items.length === 0
+    retro.action_item_ids.length === 0
       ? " Nothing"
-      : `\n${retro.action_items.map((s) => `- ${s}`).join("\n")}`;
+      : `\n${retro.action_item_ids
+          .map((id) => {
+            const title = lookup(id);
+            return title === undefined
+              ? `- <${id}: unknown>`
+              : `- ${title} (${id})`;
+          })
+          .join("\n")}`;
   const commitsLine =
     retro.commits.length === 0 ? "—" : retro.commits.join(", ");
   const body = `## Retro
@@ -481,108 +452,6 @@ export function renderRetroComment(retro: IssueRetro): string {
 **Commits:** ${commitsLine}`;
   return `${DANXBOT_COMMENT_MARKER}\n${RETRO_COMMENT_MARKER}\n\n${body}`;
 }
-
-
-// ---------- action-items bookkeeping helpers (exported for tests) ----------
-
-/**
- * Render the bookkeeping comment that tracks every action_item title we've
- * already spawned to the tracker's Action Items list.
- *
- * Format (byte-stable for idempotent re-sync identity-check):
- *
- *   <!-- danxbot -->
- *   <!-- danxbot-action-items -->
- *
- *   ## Action Items spawned by retro
- *
- *   - <title>\t<external_id>
- *   - <title>\t<external_id>
- *
- * The bullet separator is U+0009 HORIZONTAL TAB (`BOOKKEEPING_SEP`). Tab
- * is invisible in the tracker UI but never appears in human prose, and
- * `validateRetro` rejects tab in `retro.action_items[i]` so a title can
- * never collide with the separator. The order of bullets follows the
- * YAML's `retro.action_items[]` order so appending a new title moves only
- * the trailing bullet, never reorders existing ones (which would invert
- * the byte-identity check).
- */
-export function renderActionItemsBookkeeping(
-  orderedTitles: readonly string[],
-  spawned: Map<string, string>,
-): string {
-  const lines: string[] = [];
-  for (const title of orderedTitles) {
-    const externalId = spawned.get(title);
-    if (!externalId) continue;
-    lines.push(`- ${title}${BOOKKEEPING_SEP}${externalId}`);
-  }
-  const body = `## Action Items spawned by retro
-
-${lines.join("\n")}`;
-  return `${DANXBOT_COMMENT_MARKER}\n${ACTION_ITEMS_COMMENT_MARKER}\n\n${body}`;
-}
-
-/**
- * Parse the bookkeeping comment back into a title-to-external_id map.
- *
- * Non-bullet lines are skipped — the format reserves room for a future
- * footer (e.g. "spawned at <timestamp>") to be appended without
- * confusing the parser. Bullet lines (`^- `) MUST conform to the
- * `<title>\t<external_id>` shape; any malformed bullet throws so a
- * silently-truncated or hand-edited bookkeeping comment surfaces the
- * corruption immediately rather than re-spawning duplicate Action Items
- * cards on every subsequent sync (the failure mode the throw exists
- * to prevent).
- *
- * No legacy-format fallback and no whitespace tolerance: the prior
- * arrow-glyph shape is NOT accepted, and CRLF or trailing-space variants
- * throw the same Malformed error. Pre-hardening bookkeeping comments
- * surface as a loud parse failure; the operator deletes the offending
- * comment from the tracker and the next sync re-renders in the new
- * format. Per CLAUDE.md zero-tech-debt rule, loud failure beats silent
- * dual-format compatibility.
- */
-export function parseActionItemsBookkeeping(
-  text: string,
-): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const rawLine of text.split("\n")) {
-    if (!rawLine.startsWith("- ")) continue;
-    const sepIdx = rawLine.indexOf(BOOKKEEPING_SEP);
-    if (sepIdx === -1) {
-      throw new Error(
-        `Malformed action-items bookkeeping line (missing tab separator): ${JSON.stringify(rawLine)}`,
-      );
-    }
-    if (rawLine.indexOf(BOOKKEEPING_SEP, sepIdx + 1) !== -1) {
-      // The validator guarantees titles cannot contain tab and
-      // tracker-assigned external_ids never do. A line carrying a second
-      // tab is corrupt input (hand-edited or wrong format); accepting it
-      // would let one of the two halves carry an embedded tab and silently
-      // misattribute a spawn id.
-      throw new Error(
-        `Malformed action-items bookkeeping line (multiple tab separators): ${JSON.stringify(rawLine)}`,
-      );
-    }
-    const title = rawLine.slice(2, sepIdx);
-    const externalId = rawLine.slice(sepIdx + 1);
-    // Trim only for the empty-side check, not for the stored value:
-    // the YAML round-trip key must equal the raw title bytes so a
-    // hypothetical title like " foo " (validator allows non-tab
-    // whitespace) still matches `local.retro.action_items[i]` in the
-    // already-spawned lookup. Whitespace-only halves are still corrupt
-    // input and throw loud.
-    if (title.trim() === "" || externalId.trim() === "") {
-      throw new Error(
-        `Malformed action-items bookkeeping line (empty title or external_id): ${JSON.stringify(rawLine)}`,
-      );
-    }
-    out.set(title, externalId);
-  }
-  return out;
-}
-
 
 /**
  * Detect a Phase-4-shape manually-appended retro comment — a danxbot-

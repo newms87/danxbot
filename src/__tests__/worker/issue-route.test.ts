@@ -200,7 +200,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     // The seeded card has external_id = "mem-1"; rename our local issue to match.
     issue.external_id = "mem-1";
@@ -293,7 +293,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     const issue: Issue = {
       ...createEmptyIssue({ id: "ISS-4", external_id: "mem-1", title: "local-title" }),
@@ -336,7 +336,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
 
     // Mutex is observable when:
@@ -398,7 +398,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     const issue: Issue = {
       ...createEmptyIssue({
@@ -449,7 +449,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     const issue: Issue = {
       ...createEmptyIssue({
@@ -488,7 +488,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     const issue: Issue = {
       ...createEmptyIssue({ id: "ISS-8", external_id: "mem-1", title: "first" }),
@@ -538,7 +538,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     const issue: Issue = {
       ...createEmptyIssue({ id: "ISS-9", external_id: "mem-1", title: "concurrent" }),
@@ -600,7 +600,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     const issue: Issue = {
       ...createEmptyIssue({
@@ -768,7 +768,7 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
         "retro:",
         '  good: ""',
         '  bad: ""',
-        "  action_items: []",
+        "  action_item_ids: []",
         "  commits: []",
         "",
       ].join("\n"),
@@ -943,7 +943,7 @@ describe("syncTrackedIssueOnComplete", () => {
       ac: [],
       phases: [],
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
     const issue: Issue = {
       ...createEmptyIssue({

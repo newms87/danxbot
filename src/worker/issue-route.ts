@@ -47,12 +47,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import {
-  existsSync,
-  readFileSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { json, parseBody } from "../http/helpers.js";
 import {
@@ -62,10 +57,7 @@ import {
 } from "../issue-tracker/yaml.js";
 import { nextIssueId } from "../issue-tracker/id-generator.js";
 import { syncIssue } from "../issue-tracker/sync.js";
-import {
-  ensureIssuesDirs,
-  issuePath,
-} from "../poller/yaml-lifecycle.js";
+import { ensureIssuesDirs, issuePath } from "../poller/yaml-lifecycle.js";
 import type {
   CreateCardInput,
   Issue,
@@ -131,10 +123,7 @@ async function defaultRecordError(
     const { updateDispatch } = await import("../dashboard/dispatches-db.js");
     await updateDispatch(dispatchId, { error: message });
   } catch (err) {
-    log.error(
-      `Failed to record sync error on dispatch ${dispatchId}`,
-      err,
-    );
+    log.error(`Failed to record sync error on dispatch ${dispatchId}`, err);
   }
 }
 
@@ -262,6 +251,38 @@ export async function handleIssueSave(
   chainOnIssueLock(issue.id, () => runSync(deps, dispatchId, repo, issue));
 }
 
+/**
+ * Resolve `retro.action_item_ids[]` to a `{id → title}` map by reading each
+ * referenced YAML from the local repo. IDs missing on disk are simply
+ * absent from the map; the renderer surfaces them as `<ISS-N: unknown>`
+ * so a typo / stale reference is loud, not silent. Returns an empty map
+ * when there are no ids to resolve, avoiding pointless filesystem walks
+ * on the common no-action-items case.
+ */
+function loadActionItemTitles(
+  repoLocalPath: string,
+  ids: readonly string[],
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const id of ids) {
+    const path = locateIssueFile(repoLocalPath, id);
+    if (!path) continue;
+    try {
+      const linked = parseIssue(readFileSync(path, "utf-8"));
+      out.set(id, linked.title);
+    } catch (err) {
+      // Don't kill the parent sync over a malformed linked YAML — leave
+      // the id absent from the map so the renderer flags it as unknown.
+      log.warn(
+        `loadActionItemTitles: failed to parse ${path}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return out;
+}
+
 async function runSync(
   deps: IssueRouteDeps,
   dispatchId: string,
@@ -269,7 +290,13 @@ async function runSync(
   issue: Issue,
 ): Promise<void> {
   try {
-    const { updatedLocal } = await syncIssue(deps.tracker, issue);
+    const actionItemTitles = loadActionItemTitles(
+      repo.localPath,
+      issue.retro.action_item_ids,
+    );
+    const { updatedLocal } = await syncIssue(deps.tracker, issue, {
+      actionItemTitles,
+    });
     persistAfterSync(repo.localPath, updatedLocal);
   } catch (err) {
     const msg = `danx_issue_save async sync failed for ${issue.external_id}: ${
@@ -523,10 +550,7 @@ export function forceBlockedToToDo(issue: Issue): Issue {
  * Lookup key is the issue's internal `id` (the on-disk filename basename),
  * not the external_id.
  */
-function locateIssueFile(
-  repoLocalPath: string,
-  id: string,
-): string | null {
+function locateIssueFile(repoLocalPath: string, id: string): string | null {
   const open = issuePath(repoLocalPath, id, "open");
   if (existsSync(open)) return open;
   const closed = issuePath(repoLocalPath, id, "closed");

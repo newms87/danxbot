@@ -246,7 +246,7 @@ function seedDraft(
     ac: [],
     phases: [],
     comments: [],
-    retro: { good: "", bad: "", action_items: [], commits: [] },
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     ...overrides,
   });
 }
@@ -320,7 +320,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         ac: [],
         phases: [],
         comments: [],
-        retro: { good: "", bad: "", action_items: [], commits: [] },
+        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
     );
 
@@ -386,7 +386,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         ac: [],
         phases: [],
         comments: [],
-        retro: { good: "", bad: "", action_items: [], commits: [] },
+        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
     );
 
@@ -497,7 +497,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         ac: [],
         phases: [],
         comments: [],
-        retro: { good: "", bad: "", action_items: [], commits: [] },
+        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
     );
 
@@ -568,7 +568,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         ac: [],
         phases: [],
         comments: [],
-        retro: { good: "", bad: "", action_items: [], commits: [] },
+        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
     );
 
@@ -639,7 +639,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
           ac: [],
           phases: [],
           comments: [],
-          retro: { good: "", bad: "", action_items: [], commits: [] },
+          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         };
       },
     );
@@ -682,7 +682,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
           ac: [],
           phases: [],
           comments: [],
-          retro: { good: "", bad: "", action_items: [], commits: [] },
+          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         };
       },
     );
@@ -718,7 +718,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
           ac: [],
           phases: [],
           comments: [],
-          retro: { good: "", bad: "", action_items: [], commits: [] },
+          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         };
       }
       return null;
@@ -741,7 +741,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         ac: [],
         phases: [],
         comments: [],
-        retro: { good: "", bad: "", action_items: [], commits: [] },
+        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
     );
 

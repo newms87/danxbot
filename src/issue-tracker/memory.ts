@@ -48,7 +48,12 @@ interface StoredCard {
   ac: IssueAcItem[];
   phases: IssuePhase[];
   comments: Required<IssueComment>[];
-  retro: { good: string; bad: string; action_items: string[]; commits: string[] };
+  retro: {
+    good: string;
+    bad: string;
+    action_item_ids: string[];
+    commits: string[];
+  };
   blocked: { reason: string; timestamp: string; by: string[] } | null;
   labels: {
     type: IssueType;
@@ -93,16 +98,23 @@ export class MemoryTracker implements IssueTracker {
 
   /**
    * Queue a rejection on the next mutating call (createCard, updateCard,
-   * moveToStatus, setLabels, addComment, AC mutations, phase mutations,
-   * addLinkedActionItemCard). Read methods are unaffected.
+   * moveToStatus, setLabels, addComment, AC mutations, phase mutations).
+   * Read methods are unaffected.
    */
-  failNextWrite(error: Error = new Error("MemoryTracker forced write failure")): void {
+  failNextWrite(
+    error: Error = new Error("MemoryTracker forced write failure"),
+  ): void {
     this.pendingWriteRejection = error;
   }
 
   async fetchOpenCards(): Promise<IssueRef[]> {
     this.log("fetchOpenCards");
-    const open = new Set<IssueStatus>(["Review", "ToDo", "In Progress", "Needs Help"]);
+    const open = new Set<IssueStatus>([
+      "Review",
+      "ToDo",
+      "In Progress",
+      "Needs Help",
+    ]);
     const refs: IssueRef[] = [];
     for (const card of this.cards.values()) {
       if (open.has(card.status)) {
@@ -164,7 +176,7 @@ export class MemoryTracker implements IssueTracker {
       retro: {
         good: input.retro.good,
         bad: input.retro.bad,
-        action_items: [...input.retro.action_items],
+        action_item_ids: [...input.retro.action_item_ids],
         commits: [...input.retro.commits],
       },
       blocked: null,
@@ -240,21 +252,26 @@ export class MemoryTracker implements IssueTracker {
     const card = this.requireCard(externalId);
     const found = card.comments.find((c) => c.id === commentId);
     if (!found) {
-      throw new Error(
-        `Comment ${commentId} not found on card ${externalId}`,
-      );
+      throw new Error(`Comment ${commentId} not found on card ${externalId}`);
     }
     found.text = text;
     this.log("editComment", externalId, { commentId, text });
   }
 
-  async getComments(externalId: string): Promise<
+  async getComments(
+    externalId: string,
+  ): Promise<
     Array<{ id: string; author: string; timestamp: string; text: string }>
   > {
     this.log("getComments", externalId);
     const card = this.requireCard(externalId);
     return card.comments
-      .map((c) => ({ id: c.id, author: c.author, timestamp: c.timestamp, text: c.text }))
+      .map((c) => ({
+        id: c.id,
+        author: c.author,
+        timestamp: c.timestamp,
+        text: c.text,
+      }))
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   }
 
@@ -265,7 +282,11 @@ export class MemoryTracker implements IssueTracker {
     this.consumeWriteRejection();
     const card = this.requireCard(externalId);
     const checkItemId = this.allocCheckItemId();
-    card.ac.push({ check_item_id: checkItemId, title: item.title, checked: item.checked });
+    card.ac.push({
+      check_item_id: checkItemId,
+      title: item.title,
+      checked: item.checked,
+    });
     this.log("addAcItem", externalId, { item });
     return { check_item_id: checkItemId };
   }
@@ -323,7 +344,9 @@ export class MemoryTracker implements IssueTracker {
     const card = this.requireCard(externalId);
     const found = card.phases.find((p) => p.check_item_id === checkItemId);
     if (!found) {
-      throw new Error(`Phase item ${checkItemId} not found on card ${externalId}`);
+      throw new Error(
+        `Phase item ${checkItemId} not found on card ${externalId}`,
+      );
     }
     if (patch.title !== undefined) found.title = patch.title;
     if (patch.status !== undefined) found.status = patch.status;
@@ -331,50 +354,20 @@ export class MemoryTracker implements IssueTracker {
     this.log("updatePhaseItem", externalId, { checkItemId, patch });
   }
 
-  async deletePhaseItem(externalId: string, checkItemId: string): Promise<void> {
+  async deletePhaseItem(
+    externalId: string,
+    checkItemId: string,
+  ): Promise<void> {
     this.consumeWriteRejection();
     const card = this.requireCard(externalId);
     const idx = card.phases.findIndex((p) => p.check_item_id === checkItemId);
     if (idx === -1) {
-      throw new Error(`Phase item ${checkItemId} not found on card ${externalId}`);
+      throw new Error(
+        `Phase item ${checkItemId} not found on card ${externalId}`,
+      );
     }
     card.phases.splice(idx, 1);
     this.log("deletePhaseItem", externalId, { checkItemId });
-  }
-
-  async addLinkedActionItemCard(
-    title: string,
-  ): Promise<{ external_id: string }> {
-    this.consumeWriteRejection();
-    // The interface contract: this creates an unlinked card on the action
-    // items list. `parent_id` stays null; callers wire local parent linkage
-    // separately on the YAML side.
-    const externalId = `mem-${this.nextExternalId++}`;
-    this.cards.set(externalId, {
-      tracker: "memory",
-      // Action-items spawn cards do not get an internal id from this path —
-      // the YAML for the spawned card is created later by the operator (or
-      // by /danx-triage on next pickup) and gets its `ISS-N` then. Until
-      // that happens, this card has no local YAML at all.
-      id: "",
-      external_id: externalId,
-      parent_id: null,
-      children: [],
-      dispatch_id: null,
-      status: "ToDo",
-      type: "Feature",
-      title,
-      description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
-      ac: [],
-      phases: [],
-      comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
-      blocked: null,
-      labels: { type: "Feature", needsHelp: false, triaged: false, blocked: false },
-    });
-    this.log("addLinkedActionItemCard", undefined, { title, external_id: externalId });
-    return { external_id: externalId };
   }
 
   private requireCard(externalId: string): StoredCard {
@@ -393,7 +386,11 @@ export class MemoryTracker implements IssueTracker {
     }
   }
 
-  private log(method: string, externalId?: string, details?: Record<string, unknown>): void {
+  private log(
+    method: string,
+    externalId?: string,
+    details?: Record<string, unknown>,
+  ): void {
     const entry: RequestLogEntry = { method };
     if (externalId !== undefined) entry.externalId = externalId;
     if (details !== undefined) entry.details = details;
@@ -433,12 +430,13 @@ export class MemoryTracker implements IssueTracker {
       retro: {
         good: card.retro.good,
         bad: card.retro.bad,
-        action_items: [...card.retro.action_items],
+        action_item_ids: [...card.retro.action_item_ids],
         commits: [...card.retro.commits],
       },
-      blocked: card.blocked === null
-        ? null
-        : { ...card.blocked, by: [...card.blocked.by] },
+      blocked:
+        card.blocked === null
+          ? null
+          : { ...card.blocked, by: [...card.blocked.by] },
     };
   }
 
@@ -466,12 +464,13 @@ export class MemoryTracker implements IssueTracker {
       retro: {
         good: issue.retro.good,
         bad: issue.retro.bad,
-        action_items: [...issue.retro.action_items],
+        action_item_ids: [...issue.retro.action_item_ids],
         commits: [...issue.retro.commits],
       },
-      blocked: issue.blocked === null
-        ? null
-        : { ...issue.blocked, by: [...issue.blocked.by] },
+      blocked:
+        issue.blocked === null
+          ? null
+          : { ...issue.blocked, by: [...issue.blocked.by] },
       labels: {
         type: issue.type,
         needsHelp: issue.status === "Needs Help",

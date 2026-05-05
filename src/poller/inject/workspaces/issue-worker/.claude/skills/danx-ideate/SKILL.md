@@ -38,7 +38,7 @@ Current repo only.
      - `ac: [{check_item_id: "", title: "...", checked: false}, ...]`
      - `phases: []` (or seeded with `check_item_id: ""`)
      - `comments: []`
-     - `retro: {good: "", bad: "", action_items: [], commits: []}`
+     - `retro: {good: "", bad: "", action_item_ids: [], commits: []}`
      - `schema_version: 3`
      - `tracker: "memory"` (or whichever tracker the repo uses — leave the value the parent YAML carries)
    - Calls `danx_issue_create({filename: "<filename>"})` for each draft. The worker validates, allocates the next `ISS-N`, stamps it back into the YAML, and renames the file to `<id>.yml`. Captures the returned `id`.

@@ -1,4 +1,8 @@
-import { parse as parseYamlText, stringify as stringifyYaml, YAMLParseError } from "yaml";
+import {
+  parse as parseYamlText,
+  stringify as stringifyYaml,
+  YAMLParseError,
+} from "yaml";
 import {
   ISSUE_STATUSES,
   ISSUE_TYPES,
@@ -14,7 +18,6 @@ import {
   type IssueType,
   type PhaseStatus,
 } from "./interface.js";
-import { BOOKKEEPING_SEP } from "./markers.js";
 
 /**
  * Build a fully-populated minimal Issue from a small seed. Every required
@@ -34,16 +37,18 @@ import { BOOKKEEPING_SEP } from "./markers.js";
  *  - title, description: ""
  *  - triaged: { timestamp: "", status: "", explain: "" }
  *  - ac, phases, comments: []
- *  - retro: { good: "", bad: "", action_items: [], commits: [] }
+ *  - retro: { good: "", bad: "", action_item_ids: [], commits: [] }
  */
-export function createEmptyIssue(seed: {
-  id?: string;
-  external_id?: string;
-  status?: IssueStatus;
-  type?: IssueType;
-  title?: string;
-  description?: string;
-} = {}): Issue {
+export function createEmptyIssue(
+  seed: {
+    id?: string;
+    external_id?: string;
+    status?: IssueStatus;
+    type?: IssueType;
+    title?: string;
+    description?: string;
+  } = {},
+): Issue {
   return {
     schema_version: 3,
     tracker: "memory",
@@ -60,7 +65,7 @@ export function createEmptyIssue(seed: {
     ac: [],
     phases: [],
     comments: [],
-    retro: { good: "", bad: "", action_items: [], commits: [] },
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
   };
 }
@@ -121,20 +126,21 @@ export function serializeIssue(issue: Issue): string {
     retro: {
       good: issue.retro.good,
       bad: issue.retro.bad,
-      action_items: [...issue.retro.action_items],
+      action_item_ids: [...issue.retro.action_item_ids],
       commits: [...issue.retro.commits],
     },
     // `blocked` carries `null` (default) or a record with reason/timestamp/by[].
     // Position after `retro` keeps the canonical key order stable for older
     // YAMLs that omit the field — they parse with `blocked: null` defaulted in
     // and re-serialize at the end of the document.
-    blocked: issue.blocked === null
-      ? null
-      : {
-          reason: issue.blocked.reason,
-          timestamp: issue.blocked.timestamp,
-          by: [...issue.blocked.by],
-        },
+    blocked:
+      issue.blocked === null
+        ? null
+        : {
+            reason: issue.blocked.reason,
+            timestamp: issue.blocked.timestamp,
+            by: [...issue.blocked.by],
+          },
   };
 
   return stringifyYaml(doc, { lineWidth: 0 });
@@ -217,7 +223,9 @@ export function validateIssue(value: unknown): ValidateResult {
       `schema_version ${v.schema_version} is no longer supported — run scripts/migrate-issues-to-v3.ts to upgrade`,
     );
   } else if (v.schema_version !== 3) {
-    errors.push(`schema_version must be 3 (got ${JSON.stringify(v.schema_version)})`);
+    errors.push(
+      `schema_version must be 3 (got ${JSON.stringify(v.schema_version)})`,
+    );
   }
 
   // tracker
@@ -233,7 +241,9 @@ export function validateIssue(value: unknown): ValidateResult {
   } else if (typeof v.id !== "string") {
     errors.push("id must be a string");
   } else if (v.id.length === 0) {
-    errors.push("id must be a non-empty string (format: ISS-<positive integer>)");
+    errors.push(
+      "id must be a non-empty string (format: ISS-<positive integer>)",
+    );
   } else if (!ISSUE_ID_REGEX.test(v.id)) {
     errors.push(
       `id must match ISS-<positive integer> (got ${JSON.stringify(v.id)})`,
@@ -562,7 +572,7 @@ function validateBlocked(value: unknown): IssueBlocked | null | string {
 
 function validateRetro(value: unknown): IssueRetro | string {
   if (value === null) {
-    return { good: "", bad: "", action_items: [], commits: [] };
+    return { good: "", bad: "", action_item_ids: [], commits: [] };
   }
   if (!isPlainObject(value)) return "retro must be a mapping";
   const v = value as Record<string, unknown>;
@@ -572,29 +582,43 @@ function validateRetro(value: unknown): IssueRetro | string {
   if (v.bad !== undefined && typeof v.bad !== "string") {
     return "retro.bad must be a string";
   }
-  let actionItems: string[] = [];
+  // Legacy `action_items: string[]` (free-text titles) is no longer accepted.
+  // The schema migrated to `action_item_ids: string[]` of `ISS-N` references —
+  // each entry MUST point at a real, agent-created action-item card. Existing
+  // YAMLs holding the legacy field are silently dropped on parse: the legacy
+  // strings were title-only debt by design (one-line free-text), and the
+  // operator decided clearing them is preferable to forwarding them as
+  // ghost-titles. A warning is surfaced via `console.warn` so the migration
+  // is visible.
   if (v.action_items !== undefined) {
-    if (!Array.isArray(v.action_items)) {
-      return "retro.action_items must be a list of strings";
+    if (Array.isArray(v.action_items) && v.action_items.length > 0) {
+      const sample = v.action_items
+        .filter((s) => typeof s === "string")
+        .slice(0, 3)
+        .map((s) => JSON.stringify(s))
+        .join(", ");
+      console.warn(
+        `retro.action_items (legacy free-text shape) is no longer supported and will be dropped on save. ` +
+          `Recreate each action item as a full issue via danx_issue_create and reference its ISS-N in retro.action_item_ids[]. ` +
+          `Dropped sample: [${sample}${v.action_items.length > 3 ? ", …" : ""}]`,
+      );
     }
-    for (let i = 0; i < v.action_items.length; i++) {
-      if (typeof v.action_items[i] !== "string") {
-        return `retro.action_items[${i}] must be a string`;
+  }
+  let actionItemIds: string[] = [];
+  if (v.action_item_ids !== undefined) {
+    if (!Array.isArray(v.action_item_ids)) {
+      return "retro.action_item_ids must be a list of ISS-N strings";
+    }
+    for (let i = 0; i < v.action_item_ids.length; i++) {
+      const item = v.action_item_ids[i];
+      if (typeof item !== "string") {
+        return `retro.action_item_ids[${i}] must be a string`;
       }
-      // The worker's action-items bookkeeping comment uses
-      // `BOOKKEEPING_SEP` (U+0009 TAB) as its `<title><sep><external_id>`
-      // separator (see `src/issue-tracker/sync.ts`). Allowing the
-      // separator in a title would break the parser and silently
-      // misattribute spawned-card ids on reread, so we reject it at
-      // validate time instead of escaping. Use a space or `:` for
-      // separators in titles. Arrow lookalikes (`->`, `=>`, `→`, `⟶`,
-      // `➔`, etc.) are inert under the tab-separator design and are
-      // accepted as ordinary title text.
-      if ((v.action_items[i] as string).includes(BOOKKEEPING_SEP)) {
-        return `retro.action_items[${i}] must not contain a tab character (reserved separator in the worker's bookkeeping comment)`;
+      if (!ISSUE_ID_REGEX.test(item)) {
+        return `retro.action_item_ids[${i}] must match ISS-<positive integer> (got ${JSON.stringify(item)}). Create the action-item card via danx_issue_create first, then reference its ISS-N here.`;
       }
     }
-    actionItems = v.action_items as string[];
+    actionItemIds = v.action_item_ids as string[];
   }
   let commits: string[] = [];
   if (v.commits !== undefined) {
@@ -611,7 +635,7 @@ function validateRetro(value: unknown): IssueRetro | string {
   return {
     good: typeof v.good === "string" ? v.good : "",
     bad: typeof v.bad === "string" ? v.bad : "",
-    action_items: actionItems,
+    action_item_ids: actionItemIds,
     commits,
   };
 }

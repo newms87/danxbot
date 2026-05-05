@@ -2,23 +2,11 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  ACTION_ITEMS_COMMENT_MARKER,
-  BOOKKEEPING_SEP,
   DANXBOT_COMMENT_MARKER,
   LOCK_COMMENT_MARKER,
   RETRO_COMMENT_MARKER,
   findCommentByMarker,
 } from "../../issue-tracker/markers.js";
-
-describe("markers — constant identity", () => {
-  it("matches the on-disk literals every other module relies on", () => {
-    expect(DANXBOT_COMMENT_MARKER).toBe("<!-- danxbot -->");
-    expect(RETRO_COMMENT_MARKER).toBe("<!-- danxbot-retro -->");
-    expect(ACTION_ITEMS_COMMENT_MARKER).toBe("<!-- danxbot-action-items -->");
-    expect(LOCK_COMMENT_MARKER).toBe("<!-- danxbot-lock -->");
-    expect(BOOKKEEPING_SEP).toBe("\t");
-  });
-});
 
 describe("findCommentByMarker", () => {
   it("returns the matching element verbatim (preserves all fields)", () => {
@@ -88,26 +76,12 @@ describe("findCommentByMarker", () => {
 
   it("matches a marker as a substring (non-anchored String.includes contract)", () => {
     const comments = [
-      { id: "c1", text: `prose mentioning ${RETRO_COMMENT_MARKER} mid-sentence` },
+      {
+        id: "c1",
+        text: `prose mentioning ${RETRO_COMMENT_MARKER} mid-sentence`,
+      },
     ];
     expect(findCommentByMarker(comments, RETRO_COMMENT_MARKER)?.id).toBe("c1");
-  });
-
-  it("does not false-positive across the four marker constants (lexical distinctness)", () => {
-    // Each specialized marker is its own literal — none is a substring of
-    // another. The shared `<!-- danxbot -->` base is co-included on every
-    // managed comment so the poller's `isUserResponse` filter still skips
-    // them; that pairing is deliberate and tested via the consumers.
-    const justRetro = [{ id: "c", text: RETRO_COMMENT_MARKER }];
-    const justActionItems = [{ id: "c", text: ACTION_ITEMS_COMMENT_MARKER }];
-    const justLock = [{ id: "c", text: LOCK_COMMENT_MARKER }];
-    expect(findCommentByMarker(justRetro, DANXBOT_COMMENT_MARKER)).toBeNull();
-    expect(findCommentByMarker(justRetro, ACTION_ITEMS_COMMENT_MARKER)).toBeNull();
-    expect(findCommentByMarker(justRetro, LOCK_COMMENT_MARKER)).toBeNull();
-    expect(findCommentByMarker(justActionItems, RETRO_COMMENT_MARKER)).toBeNull();
-    expect(findCommentByMarker(justActionItems, LOCK_COMMENT_MARKER)).toBeNull();
-    expect(findCommentByMarker(justLock, RETRO_COMMENT_MARKER)).toBeNull();
-    expect(findCommentByMarker(justLock, ACTION_ITEMS_COMMENT_MARKER)).toBeNull();
   });
 });
 

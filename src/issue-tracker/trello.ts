@@ -94,11 +94,27 @@ export class TrelloTracker implements IssueTracker {
       listId: string;
       listKind: IssueRef["list_kind"];
     }> = [
-      { status: "Review", listId: this.trello.reviewListId, listKind: undefined },
+      {
+        status: "Review",
+        listId: this.trello.reviewListId,
+        listKind: undefined,
+      },
       { status: "ToDo", listId: this.trello.todoListId, listKind: "todo" },
-      { status: "In Progress", listId: this.trello.inProgressListId, listKind: undefined },
-      { status: "Needs Help", listId: this.trello.needsHelpListId, listKind: undefined },
-      { status: "ToDo", listId: this.trello.actionItemsListId, listKind: "action_items" },
+      {
+        status: "In Progress",
+        listId: this.trello.inProgressListId,
+        listKind: undefined,
+      },
+      {
+        status: "Needs Help",
+        listId: this.trello.needsHelpListId,
+        listKind: undefined,
+      },
+      {
+        status: "ToDo",
+        listId: this.trello.actionItemsListId,
+        listKind: "action_items",
+      },
     ];
     const refs: IssueRef[] = [];
     for (const entry of openLists) {
@@ -124,17 +140,17 @@ export class TrelloTracker implements IssueTracker {
       checklists: "all",
       checklist_fields: "name",
     });
-    const card = await this.requestJson<TrelloCardDto & { checklists: TrelloChecklistDto[] }>(
-      cardUrl,
-      { method: "GET" },
-      `GET /cards/${externalId}`,
-    );
+    const card = await this.requestJson<
+      TrelloCardDto & { checklists: TrelloChecklistDto[] }
+    >(cardUrl, { method: "GET" }, `GET /cards/${externalId}`);
 
     const status = this.listIdToStatus(card.idList);
     const type = await this.deriveType(card.idLabels);
     const checklists = card.checklists ?? [];
     const acChecklist = checklists.find((c) => c.name === AC_CHECKLIST_NAME);
-    const phasesChecklist = checklists.find((c) => c.name === PHASES_CHECKLIST_NAME);
+    const phasesChecklist = checklists.find(
+      (c) => c.name === PHASES_CHECKLIST_NAME,
+    );
 
     if (acChecklist || phasesChecklist) {
       this.checklistIdCache.set(externalId, {
@@ -188,7 +204,7 @@ export class TrelloTracker implements IssueTracker {
       ac,
       phases,
       comments: [],
-      retro: { good: "", bad: "", action_items: [], commits: [] },
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       // `blocked` is local-only metadata managed by the agent + worker.
       // Trello has no native field for it; sync.ts diffs the Blocked LABEL
       // separately. Always emit null on read so the local YAML stays
@@ -231,7 +247,10 @@ export class TrelloTracker implements IssueTracker {
 
     const acIds: { check_item_id: string }[] = [];
     if (input.ac.length > 0) {
-      const acChecklistId = await this.createChecklist(created.id, AC_CHECKLIST_NAME);
+      const acChecklistId = await this.createChecklist(
+        created.id,
+        AC_CHECKLIST_NAME,
+      );
       this.rememberChecklist(created.id, "ac", acChecklistId);
       for (const item of input.ac) {
         const checkItem = await this.createCheckItem(
@@ -244,7 +263,10 @@ export class TrelloTracker implements IssueTracker {
     }
     const phaseIds: { check_item_id: string }[] = [];
     if (input.phases.length > 0) {
-      const phChecklistId = await this.createChecklist(created.id, PHASES_CHECKLIST_NAME);
+      const phChecklistId = await this.createChecklist(
+        created.id,
+        PHASES_CHECKLIST_NAME,
+      );
       this.rememberChecklist(created.id, "phases", phChecklistId);
       for (const p of input.phases) {
         const checkItem = await this.createCheckItem(
@@ -274,7 +296,9 @@ export class TrelloTracker implements IssueTracker {
       // Preserve the `#<id>: ` title prefix on every title update. Sync
       // passes the local issue's `id` through `patch.id` so we can
       // reformat without a round-trip to read the existing card name.
-      body.name = patch.id ? formatCardTitle(patch.id, patch.title) : patch.title;
+      body.name = patch.id
+        ? formatCardTitle(patch.id, patch.title)
+        : patch.title;
     }
     if (patch.description !== undefined) body.desc = patch.description;
     await this.requestVoid(
@@ -320,7 +344,9 @@ export class TrelloTracker implements IssueTracker {
     const triagedLabelId = await this.resolveTriagedLabelId();
 
     const desiredIds = await this.resolveLabelIds(labels);
-    const getUrl = this.buildUrl(`/cards/${externalId}`, { fields: "idLabels" });
+    const getUrl = this.buildUrl(`/cards/${externalId}`, {
+      fields: "idLabels",
+    });
     // Read current labels so we can preserve any non-danxbot-managed labels.
     const card = await this.requestJson<TrelloCardDto>(
       getUrl,
@@ -384,7 +410,9 @@ export class TrelloTracker implements IssueTracker {
     );
   }
 
-  async getComments(externalId: string): Promise<
+  async getComments(
+    externalId: string,
+  ): Promise<
     Array<{ id: string; author: string; timestamp: string; text: string }>
   > {
     const url = this.buildUrl(`/cards/${externalId}/actions`, {
@@ -398,8 +426,7 @@ export class TrelloTracker implements IssueTracker {
     );
     const comments = actions.map((a) => ({
       id: a.id,
-      author:
-        a.memberCreator?.username ?? a.memberCreator?.fullName ?? "",
+      author: a.memberCreator?.username ?? a.memberCreator?.fullName ?? "",
       timestamp: a.date,
       text: a.data.text,
     }));
@@ -412,7 +439,11 @@ export class TrelloTracker implements IssueTracker {
     item: { title: string; checked: boolean },
   ): Promise<{ check_item_id: string }> {
     const checklistId = await this.ensureChecklistId(externalId, "ac");
-    const ci = await this.createCheckItem(checklistId, item.title, item.checked);
+    const ci = await this.createCheckItem(
+      checklistId,
+      item.title,
+      item.checked,
+    );
     return { check_item_id: ci.id };
   }
 
@@ -466,7 +497,8 @@ export class TrelloTracker implements IssueTracker {
       patch.title === undefined &&
       patch.status === undefined &&
       patch.notes === undefined
-    ) return;
+    )
+      return;
     // Need to fetch existing item to preserve fields the patch doesn't touch.
     const checklistId = await this.ensureChecklistId(externalId, "phases");
     const existing = await this.fetchCheckItem(checklistId, checkItemId);
@@ -491,29 +523,12 @@ export class TrelloTracker implements IssueTracker {
     );
   }
 
-  async deletePhaseItem(externalId: string, checkItemId: string): Promise<void> {
+  async deletePhaseItem(
+    externalId: string,
+    checkItemId: string,
+  ): Promise<void> {
     const checklistId = await this.ensureChecklistId(externalId, "phases");
     await this.deleteCheckItem(checklistId, checkItemId);
-  }
-
-  async addLinkedActionItemCard(
-    title: string,
-  ): Promise<{ external_id: string }> {
-    const url = `${TRELLO_BASE}/cards?${this.auth()}`;
-    const created = await this.requestJson<TrelloCardDto>(
-      url,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          idList: this.trello.actionItemsListId,
-          name: title,
-          pos: "top",
-        }),
-      },
-      "POST /cards (action item)",
-    );
-    return { external_id: created.id };
   }
 
   // ---------- internals ----------
@@ -727,12 +742,11 @@ export class TrelloTracker implements IssueTracker {
     const url = this.buildUrl(`/cards/${externalId}/checklists`, {
       fields: "id,name",
     });
-    const checklists = await this.requestJson<Array<{ id: string; name: string }>>(
-      url,
-      { method: "GET" },
-      `GET /cards/${externalId}/checklists`,
-    );
-    const wantedName = kind === "ac" ? AC_CHECKLIST_NAME : PHASES_CHECKLIST_NAME;
+    const checklists = await this.requestJson<
+      Array<{ id: string; name: string }>
+    >(url, { method: "GET" }, `GET /cards/${externalId}/checklists`);
+    const wantedName =
+      kind === "ac" ? AC_CHECKLIST_NAME : PHASES_CHECKLIST_NAME;
     const found = checklists.find((c) => c.name === wantedName);
     if (found) {
       this.rememberChecklist(externalId, kind, found.id);
@@ -839,9 +853,7 @@ export function decodePhaseItemName(name: string): PhaseEncodeInput {
   // once per unique header so operators see the drift without spam.
   if (!phaseDecodeWarnedHeaders.has(header)) {
     phaseDecodeWarnedHeaders.add(header);
-    phaseDecodeLogger.warn(
-      `phase decode fallback to Pending: ${header}`,
-    );
+    phaseDecodeLogger.warn(`phase decode fallback to Pending: ${header}`);
   }
   return { status: "Pending", title: header, notes };
 }
