@@ -36,6 +36,8 @@ export interface IssueListItem {
   id: string;
   type: IssueType;
   title: string;
+  /** Full markdown body. Included so the SPA's search filter can match against the description without a per-row detail fetch. */
+  description: string;
   status: IssueStatus;
   parent_id: string | null;
   children: string[];
@@ -130,6 +132,7 @@ function toListItem(raw: RawIssue): IssueListItem {
     id: issue.id,
     type: issue.type,
     title: issue.title,
+    description: issue.description,
     status: issue.status,
     parent_id: issue.parent_id,
     children: [...issue.children],

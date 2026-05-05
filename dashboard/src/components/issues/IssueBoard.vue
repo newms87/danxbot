@@ -1,11 +1,18 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { IssueListItem, IssueStatus } from "../../types";
 import IssueCard from "./IssueCard.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
 
 const props = defineProps<{
   issues: IssueListItem[];
+  /**
+   * When true, force-expands the Done + Cancelled columns regardless of
+   * their default-collapsed setting. Cards in those columns are already
+   * filtered out upstream when this is false, so the columns simply
+   * render a 0 count + collapsed summary.
+   */
+  showClosed?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -55,6 +62,18 @@ const grouped = computed<Record<IssueStatus, IssueListItem[]>>(() => {
 function toggle(status: IssueStatus): void {
   collapsed.value = { ...collapsed.value, [status]: !collapsed.value[status] };
 }
+
+// Show-closed = true force-expands Done + Cancelled. The off branch is a
+// no-op: cards are already filtered out upstream, so the user's manual
+// collapse state is preserved (and irrelevant to visibility).
+watch(
+  () => props.showClosed,
+  (next) => {
+    if (!next) return;
+    collapsed.value = { ...collapsed.value, Done: false, Cancelled: false };
+  },
+  { immediate: true },
+);
 </script>
 
 <template>

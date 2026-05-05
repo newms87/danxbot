@@ -1,21 +1,50 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import { useIssues } from "../../composables/useIssues";
+import { useIssueFilters } from "../../composables/useIssueFilters";
+import FilterToolbar from "./FilterToolbar.vue";
 import IssueBoard from "./IssueBoard.vue";
 import IssueDrawer from "./IssueDrawer.vue";
-import type { IssueDetail, IssueListItem } from "../../types";
+import { typeToId } from "./issuePalette";
+import type { IssueDetail, IssueListItem, IssueStatus } from "../../types";
 
-const props = defineProps<{
-  selectedRepo: string;
-}>();
+const selectedRepo = defineModel<string>("selectedRepo", { required: true });
 
 const emit = defineEmits<{
   select: [issue: IssueListItem];
 }>();
 
 const { issues, loading, error, refresh, fetchDetail } = useIssues(
-  toRef(props, "selectedRepo"),
+  toRef(selectedRepo),
 );
+
+const { q, types, blockedOnly, showClosed, toggleType } = useIssueFilters(
+  selectedRepo,
+);
+
+const CLOSED_STATUSES: ReadonlyArray<IssueStatus> = ["Done", "Cancelled"];
+
+/**
+ * Client-side filter pipeline. Runs over `issues[]` already loaded by
+ * `useIssues`; no re-fetch on filter change. Order: show-closed visibility
+ * gate -> type chips -> blocked-only -> case-insensitive search across
+ * id + title + description.
+ */
+const filteredIssues = computed<IssueListItem[]>(() => {
+  const needle = q.value.trim().toLowerCase();
+  return issues.value.filter((i) => {
+    if (!showClosed.value && CLOSED_STATUSES.includes(i.status)) return false;
+    if (types.value.length > 0 && !types.value.includes(typeToId(i.type))) {
+      return false;
+    }
+    if (blockedOnly.value && !i.blocked) return false;
+    if (needle) {
+      const hay = `${i.id} ${i.title} ${i.description}`.toLowerCase();
+      if (!hay.includes(needle)) return false;
+    }
+    return true;
+  });
+});
 
 const selectedIssueId = ref<string | null>(null);
 const selectedDetail = ref<IssueDetail | null>(null);
@@ -85,9 +114,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
 });
 
-// On repo switch, drop selection — different repo's issue ids don't apply.
 watch(
-  () => props.selectedRepo,
+  selectedRepo,
   () => {
     if (selectedIssueId.value) closeDrawer();
   },
@@ -102,9 +130,28 @@ watch(
     </div>
 
     <div v-if="!selectedRepo" class="placeholder">Select a repo to see issues</div>
-    <div v-else-if="loading && issues.length === 0" class="placeholder">Loading issues…</div>
-    <div v-else-if="issues.length === 0" class="placeholder">No issues yet</div>
-    <IssueBoard v-else :issues="issues" @select="onSelect" />
+    <template v-else>
+      <FilterToolbar
+        :q="q"
+        :types="types"
+        :blocked-only="blockedOnly"
+        :show-closed="showClosed"
+        :visible-count="filteredIssues.length"
+        :total-count="issues.length"
+        @update:q="q = $event"
+        @toggle-type="toggleType"
+        @update:blocked-only="blockedOnly = $event"
+        @update:show-closed="showClosed = $event"
+      />
+      <div v-if="loading && issues.length === 0" class="placeholder">Loading issues…</div>
+      <div v-else-if="issues.length === 0" class="placeholder">No issues yet</div>
+      <IssueBoard
+        v-else
+        :issues="filteredIssues"
+        :show-closed="showClosed"
+        @select="onSelect"
+      />
+    </template>
 
     <IssueDrawer
       v-if="selectedIssueId"

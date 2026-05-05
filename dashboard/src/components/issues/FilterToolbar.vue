@@ -1,0 +1,215 @@
+<script setup lang="ts">
+import { ref, watch } from "vue";
+import { ISSUE_TYPE_META } from "./issuePalette";
+import type { IssueTypeFilter } from "../../composables/useIssueFilters";
+
+const props = defineProps<{
+  q: string;
+  types: IssueTypeFilter[];
+  blockedOnly: boolean;
+  showClosed: boolean;
+  visibleCount: number;
+  totalCount: number;
+}>();
+
+const emit = defineEmits<{
+  "update:q": [value: string];
+  "toggle-type": [t: IssueTypeFilter];
+  "update:blockedOnly": [value: boolean];
+  "update:showClosed": [value: boolean];
+}>();
+
+const TYPE_ORDER: ReadonlyArray<IssueTypeFilter> = ["epic", "bug", "feature"];
+
+// Local mirror of `q` so typing stays buttery; debounce 200ms before
+// pushing upstream (which mirrors to URL).
+const localQ = ref<string>(props.q);
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(
+  () => props.q,
+  (v) => {
+    if (v !== localQ.value) localQ.value = v;
+  },
+);
+
+function onInput(e: Event): void {
+  const target = e.target as HTMLInputElement;
+  localQ.value = target.value;
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    emit("update:q", localQ.value);
+  }, 200);
+}
+
+function clearSearch(): void {
+  localQ.value = "";
+  if (debounceTimer) clearTimeout(debounceTimer);
+  emit("update:q", "");
+}
+</script>
+
+<template>
+  <div class="toolbar">
+    <div class="row">
+      <div class="search" :class="{ active: localQ.length > 0 }">
+        <span class="glyph">⌕</span>
+        <input
+          type="text"
+          :value="localQ"
+          placeholder="Search id, title, description, comments…"
+          aria-label="Search issues"
+          @input="onInput"
+        />
+        <button
+          v-if="localQ.length > 0"
+          type="button"
+          class="clear"
+          aria-label="Clear search"
+          @click="clearSearch"
+        >×</button>
+      </div>
+
+      <div class="types">
+        <button
+          v-for="t in TYPE_ORDER"
+          :key="t"
+          type="button"
+          class="chip"
+          :class="{ active: props.types.includes(t) }"
+          :data-type="t"
+          :style="props.types.includes(t)
+            ? { color: ISSUE_TYPE_META[t].fg, background: ISSUE_TYPE_META[t].bg, borderColor: ISSUE_TYPE_META[t].border }
+            : undefined"
+          @click="emit('toggle-type', t)"
+        >{{ ISSUE_TYPE_META[t].label }}</button>
+      </div>
+
+      <button
+        type="button"
+        class="blocked-pill"
+        :class="{ active: props.blockedOnly }"
+        @click="emit('update:blockedOnly', !props.blockedOnly)"
+      >⛔ Blocked only</button>
+
+      <label class="closed">
+        <input
+          type="checkbox"
+          :checked="props.showClosed"
+          @change="emit('update:showClosed', ($event.target as HTMLInputElement).checked)"
+        />
+        Show closed
+      </label>
+
+      <span class="count">{{ props.visibleCount }} of {{ props.totalCount }}</span>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: rgb(15 23 42 / 0.5);
+  border: 1px solid #1e293b;
+  margin-bottom: 16px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: rgb(15 23 42 / 0.4);
+  border: 1px solid transparent;
+  flex: 1 1 220px;
+  min-width: 180px;
+  max-width: 360px;
+  transition: all 150ms;
+}
+.search.active {
+  background: rgb(30 41 59 / 0.8);
+  border-color: #334155;
+}
+.search .glyph {
+  font-size: 11px;
+  color: #475569;
+}
+.search input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: #e2e8f0;
+  font-size: 12px;
+  font-family: inherit;
+}
+.search .clear {
+  background: none;
+  border: 0;
+  color: #64748b;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+.types {
+  display: flex;
+  gap: 4px;
+}
+.chip {
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  background: rgb(30 41 59 / 0.5);
+  border: 1px solid #334155;
+  cursor: pointer;
+  font-family: inherit;
+  text-transform: capitalize;
+  letter-spacing: 0.02em;
+}
+.blocked-pill {
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  background: rgb(30 41 59 / 0.5);
+  border: 1px solid #334155;
+  cursor: pointer;
+  font-family: inherit;
+}
+.blocked-pill.active {
+  color: #fca5a5;
+  background: rgb(239 68 68 / 0.15);
+  border-color: rgb(239 68 68 / 0.35);
+}
+.closed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #94a3b8;
+  cursor: pointer;
+}
+.closed input {
+  accent-color: #6366f1;
+  cursor: pointer;
+}
+.count {
+  margin-left: auto;
+  font-size: 11px;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+</style>

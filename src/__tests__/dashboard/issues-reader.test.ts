@@ -67,6 +67,7 @@ describe("listIssues", () => {
         id: "ISS-1",
         type: "Epic",
         title: "Epic title",
+        description: "Epic body markdown",
         status: "In Progress",
         children: ["ISS-2", "ISS-3"],
         ac: [
@@ -103,6 +104,7 @@ describe("listIssues", () => {
       id: "ISS-1",
       type: "Epic",
       title: "Epic title",
+      description: "Epic body markdown",
       status: "In Progress",
       parent_id: null,
       children: ["ISS-2", "ISS-3"],

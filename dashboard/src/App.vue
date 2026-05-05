@@ -125,7 +125,7 @@ function selectDispatch(d: Dispatch): void {
         />
       </template>
 
-      <IssuesPage v-else-if="activeTab === 'issues'" :selected-repo="selectedRepo" />
+      <IssuesPage v-else-if="activeTab === 'issues'" v-model:selected-repo="selectedRepo" />
 
       <AgentsPage v-else-if="activeTab === 'agents'" />
 
