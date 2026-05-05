@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import type { IssueDetail } from "../../types";
 import { relativeTime } from "../../utils/relativeTime";
+import { MarkdownEditor } from "danx-ui";
 
 const props = defineProps<{
   issue: IssueDetail;
@@ -45,7 +46,12 @@ const comments = computed<RenderedComment[]>(() =>
         <span class="author" :class="{ danxbot: c.isDanxbot }">{{ c.author }}</span>
         <span class="ts">{{ c.tsLabel }}</span>
       </div>
-      <div class="text">{{ c.text }}</div>
+      <MarkdownEditor
+        :model-value="c.text"
+        readonly
+        hide-footer
+        class="text"
+      />
     </div>
   </div>
 </template>
@@ -95,7 +101,5 @@ const comments = computed<RenderedComment[]>(() =>
   font-size: 13px;
   color: #cbd5e1;
   line-height: 1.5;
-  text-wrap: pretty;
-  white-space: pre-wrap;
 }
 </style>

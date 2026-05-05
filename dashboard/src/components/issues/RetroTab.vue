@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { IssueDetail } from "../../types";
+import { MarkdownEditor } from "danx-ui";
 
 const props = defineProps<{
   issue: IssueDetail;
@@ -35,15 +36,29 @@ const hasContent = computed(
   <div v-else class="retro">
     <section v-if="good.length > 0">
       <div class="head good">What went well</div>
-      <ul>
-        <li v-for="(x, i) in good" :key="i">{{ x }}</li>
-      </ul>
+      <div class="md-list">
+        <MarkdownEditor
+          v-for="(x, i) in good"
+          :key="`g${i}`"
+          :model-value="x"
+          readonly
+          hide-footer
+          class="md-item"
+        />
+      </div>
     </section>
     <section v-if="bad.length > 0">
       <div class="head bad">What didn't</div>
-      <ul>
-        <li v-for="(x, i) in bad" :key="i">{{ x }}</li>
-      </ul>
+      <div class="md-list">
+        <MarkdownEditor
+          v-for="(x, i) in bad"
+          :key="`b${i}`"
+          :model-value="x"
+          readonly
+          hide-footer
+          class="md-item"
+        />
+      </div>
     </section>
     <section v-if="actionItems.length > 0">
       <div class="head action">Action items</div>
@@ -88,15 +103,15 @@ const hasContent = computed(
 .head.bad { color: #fca5a5; }
 .head.action { color: #fcd34d; }
 .head.commits { color: #94a3b8; }
-ul {
-  margin: 0;
-  padding-left: 18px;
-  color: #cbd5e1;
-  font-size: 13px;
-  line-height: 1.6;
+.md-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
-li {
-  text-wrap: pretty;
+.md-item {
+  font-size: 13px;
+  color: #cbd5e1;
+  line-height: 1.6;
 }
 .commit-row {
   display: flex;

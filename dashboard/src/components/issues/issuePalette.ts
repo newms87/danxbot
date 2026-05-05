@@ -1,5 +1,6 @@
 import type { IssueStatus, IssueType } from "../../types";
 import type { PhaseStatusId } from "@backend/dashboard/issues-reader.js";
+import type { PhaseStatus } from "../../types";
 
 /** Lowercase column id used by the design system. */
 export type ColumnId =
@@ -76,6 +77,15 @@ export function typeToId(type: IssueType): IssueTypeId {
   return TYPE_TO_ID[type];
 }
 
-// Backend → frontend phase-status mapping lives in `src/dashboard/issues-reader.ts`
-// (PHASE_STATUS_TO_ID). The list shape pre-projects `PhaseStatus → PhaseStatusId`
-// over the wire, so the frontend never needs to convert. Do not duplicate it here.
+// Backend `IssueListItem` pre-projects `PhaseStatus → PhaseStatusId` for the
+// list shape. `IssueDetail` carries the raw `Issue` shape (PhaseStatus), so
+// detail-tab consumers convert via this map.
+export const PHASE_STATUS_TO_ID: Record<PhaseStatus, PhaseStatusId> = {
+  Complete: "done",
+  Pending: "todo",
+  Blocked: "blocked",
+};
+
+export function phaseStatusMeta(status: PhaseStatus): PhaseStatusMeta {
+  return PHASE_STATUS_META[PHASE_STATUS_TO_ID[status]];
+}

@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { IssueDetail, IssueListItem, PhaseStatus } from "../../types";
-import type { PhaseStatusId } from "@backend/dashboard/issues-reader.js";
+import type { IssueDetail, IssueListItem } from "../../types";
 import TypeBadge from "./TypeBadge.vue";
-import MarkdownView from "./MarkdownView.vue";
-import { PHASE_STATUS_META } from "./issuePalette";
+import { MarkdownEditor } from "danx-ui";
+import { phaseStatusMeta } from "./issuePalette";
 
 const props = defineProps<{
   issue: IssueDetail;
@@ -15,30 +14,22 @@ const emit = defineEmits<{
   "jump-issue": [id: string];
 }>();
 
-const PHASE_STATUS_TO_ID: Record<PhaseStatus, PhaseStatusId> = {
-  Complete: "done",
-  Pending: "todo",
-  Blocked: "blocked",
-};
-
-const acDone = computed(() => props.issue.ac.filter((a) => a.checked).length);
-
 const childIssues = computed(() =>
   props.issue.children
     .map((id) => props.allIssues.find((i) => i.id === id))
     .filter((i): i is IssueListItem => Boolean(i)),
 );
-
-function phaseMeta(status: PhaseStatus) {
-  return PHASE_STATUS_META[PHASE_STATUS_TO_ID[status]];
-}
 </script>
 
 <template>
   <div class="overview">
     <section v-if="issue.description">
       <div class="section-label">Description</div>
-      <MarkdownView :text="issue.description" />
+      <MarkdownEditor
+        :model-value="issue.description"
+        readonly
+        hide-footer
+      />
     </section>
 
     <section v-if="issue.blocked" class="blocked-panel">
@@ -56,24 +47,6 @@ function phaseMeta(status: PhaseStatus) {
       </div>
     </section>
 
-    <section v-if="issue.ac.length > 0">
-      <div class="section-label">
-        <span>Acceptance Criteria</span>
-        <span class="ac-count">{{ acDone }}/{{ issue.ac.length }}</span>
-      </div>
-      <div class="ac-list">
-        <div
-          v-for="(a, i) in issue.ac"
-          :key="i"
-          class="ac-row"
-          :class="{ done: a.checked }"
-        >
-          <span class="ac-chip" :class="{ done: a.checked }">{{ a.checked ? "✓" : "" }}</span>
-          <span class="ac-text">{{ a.title }}</span>
-        </div>
-      </div>
-    </section>
-
     <section v-if="issue.phases.length > 0">
       <div class="section-label">Phases</div>
       <div class="phase-list">
@@ -84,14 +57,14 @@ function phaseMeta(status: PhaseStatus) {
         >
           <span
             class="phase-chip"
-            :style="{ background: phaseMeta(p.status).bg, color: phaseMeta(p.status).fg }"
-          >{{ phaseMeta(p.status).glyph }}</span>
+            :style="{ background: phaseStatusMeta(p.status).bg, color: phaseStatusMeta(p.status).fg }"
+          >{{ phaseStatusMeta(p.status).glyph }}</span>
           <span class="phase-name">
             <span class="phase-num">{{ i + 1 }}.</span> {{ p.title }}
           </span>
           <span
             class="phase-pill"
-            :style="{ background: phaseMeta(p.status).bg, color: phaseMeta(p.status).fg }"
+            :style="{ background: phaseStatusMeta(p.status).bg, color: phaseStatusMeta(p.status).fg }"
           >{{ p.status }}</span>
         </div>
       </div>
@@ -135,10 +108,6 @@ function phaseMeta(status: PhaseStatus) {
   align-items: center;
   gap: 6px;
 }
-.ac-count {
-  color: #94a3b8;
-  font-weight: 400;
-}
 .blocked-panel {
   padding: 10px 12px;
   border-radius: 6px;
@@ -177,46 +146,6 @@ function phaseMeta(status: PhaseStatus) {
   border: 1px solid rgb(239 68 68 / 0.3);
   cursor: pointer;
   font-family: inherit;
-}
-.ac-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.ac-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 13px;
-  color: #e2e8f0;
-  line-height: 1.4;
-}
-.ac-row.done {
-  color: #64748b;
-}
-.ac-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
-  flex-shrink: 0;
-  margin-top: 1px;
-  background: rgb(51 65 85 / 0.5);
-  color: #475569;
-  font-size: 11px;
-  font-weight: 700;
-}
-.ac-chip.done {
-  background: rgb(16 185 129 / 0.18);
-  color: #6ee7b7;
-}
-.ac-text {
-  text-wrap: pretty;
-}
-.ac-row.done .ac-text {
-  text-decoration: line-through;
 }
 .phase-list {
   display: flex;

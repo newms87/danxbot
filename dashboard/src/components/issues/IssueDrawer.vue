@@ -3,11 +3,13 @@ import { computed, ref, watch } from "vue";
 import type { IssueDetail, IssueListItem } from "../../types";
 import DrawerHeader from "./DrawerHeader.vue";
 import OverviewTab from "./OverviewTab.vue";
+import ACTab from "./ACTab.vue";
 import CommentsTab from "./CommentsTab.vue";
 import RetroTab from "./RetroTab.vue";
 import RawTab from "./RawTab.vue";
+import { acCounts } from "./acCounts";
 
-type TabId = "overview" | "comments" | "retro" | "raw";
+type TabId = "overview" | "ac" | "comments" | "retro" | "raw";
 
 const props = defineProps<{
   issue: IssueDetail | null;
@@ -35,8 +37,17 @@ const hasRetro = computed(() => {
   );
 });
 
+const ac = computed(() =>
+  props.issue ? acCounts(props.issue.ac) : { done: 0, total: 0 },
+);
+
 const tabs = computed(() => [
   { id: "overview" as const, label: "Overview", disabled: false },
+  {
+    id: "ac" as const,
+    label: "AC" + (ac.value.total > 0 ? ` · ${ac.value.done}/${ac.value.total}` : ""),
+    disabled: ac.value.total === 0,
+  },
   {
     id: "comments" as const,
     label:
@@ -95,6 +106,7 @@ function selectTab(id: TabId, disabled: boolean): void {
           :all-issues="allIssues"
           @jump-issue="(id) => emit('jump-issue', id)"
         />
+        <ACTab v-else-if="tab === 'ac'" :issue="issue" />
         <CommentsTab v-else-if="tab === 'comments'" :issue="issue" />
         <RetroTab v-else-if="tab === 'retro'" :issue="issue" />
         <RawTab v-else-if="tab === 'raw'" :issue="issue" />

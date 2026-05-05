@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -354,22 +354,35 @@ describe("readIssueDetail", () => {
 
   it("looks in closed/ when not found in open/", async () => {
     const repo = setupRepo();
-    writeIssue(
+    const path = writeIssue(
       repo,
       "closed",
       emptyIssue({ id: "ISS-7", status: "Done" }),
       5_000,
     );
+    const onDisk = readFileSync(path, "utf-8");
     const detail = await readIssueDetail(repo, "ISS-7");
     expect(detail).not.toBeNull();
     expect(detail!.id).toBe("ISS-7");
     expect(detail!.status).toBe("Done");
+    expect(detail!.raw_yaml).toBe(onDisk);
   });
 
   it("returns null when the id is unknown", async () => {
     const repo = setupRepo();
     const detail = await readIssueDetail(repo, "ISS-404");
     expect(detail).toBeNull();
+  });
+
+  it("includes raw_yaml field with the verbatim file text", async () => {
+    const repo = setupRepo();
+    const issue = emptyIssue({ id: "ISS-2", description: "hello" });
+    const path = writeIssue(repo, "open", issue, 3_000);
+    const onDisk = readFileSync(path, "utf-8");
+
+    const detail = await readIssueDetail(repo, "ISS-2");
+    expect(detail).not.toBeNull();
+    expect(detail!.raw_yaml).toBe(onDisk);
   });
 
   it("returns null for a malformed YAML without throwing", async () => {

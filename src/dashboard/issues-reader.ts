@@ -55,8 +55,8 @@ export interface IssueListItem {
   updated_at: number;
 }
 
-/** Full Issue plus the file's mtime in ms. */
-export type IssueDetail = Issue & { updated_at: number };
+/** Full Issue plus the file's mtime in ms and the raw YAML source text. */
+export type IssueDetail = Issue & { updated_at: number; raw_yaml: string };
 
 const DEFAULT_CLOSED_LIMIT = 50;
 
@@ -71,6 +71,7 @@ export function __resetWarnedPathsForTests(): void {
 interface RawIssue {
   issue: Issue;
   mtimeMs: number;
+  text: string;
 }
 
 async function readIssueFile(path: string): Promise<RawIssue | null> {
@@ -94,7 +95,7 @@ async function readIssueFile(path: string): Promise<RawIssue | null> {
   }
   try {
     const issue = parseIssue(text);
-    return { issue, mtimeMs };
+    return { issue, mtimeMs, text };
   } catch (err) {
     if (!warnedPaths.has(path)) {
       warnedPaths.add(path);
@@ -214,7 +215,7 @@ export async function readIssueDetail(
     const path = join(repoCwd, ".danxbot", "issues", sub, `${id}.yml`);
     const raw = await readIssueFile(path);
     if (raw) {
-      return { ...raw.issue, updated_at: raw.mtimeMs };
+      return { ...raw.issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };
     }
   }
   return null;
