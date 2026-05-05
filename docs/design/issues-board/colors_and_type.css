@@ -1,0 +1,500 @@
+/* ==========================================================================
+   Danxbot Design System — tokens
+   --------------------------------------------------------------------------
+   This file reconciles with the actual `danx-ui` source at
+   https://github.com/newms87/danx-ui (src/shared/tokens/*.css).
+
+   danx-ui uses a three-tier token system:
+     1. PRIMITIVES  — raw color / spacing / type values (never use directly)
+     2. SEMANTIC    — contextual tokens that reference primitives
+                      (--color-surface, --color-text, --color-interactive, …)
+     3. COMPONENT   — per-component tokens (not redefined here; use semantic)
+
+   Dark mode overrides ONLY the semantic layer, via `html.dark`. The
+   Danxbot dashboard sets `.dark` inline before first paint.
+
+   Import once:
+     <link rel="stylesheet" href="colors_and_type.css">
+
+   Use semantic tokens (--color-surface, --color-text, --color-interactive…)
+   in components. Reach for primitives only when building new semantic names.
+   ========================================================================== */
+
+
+/* ==========================================================================
+   LAYER 1 — Primitives (lifted verbatim from danx-ui/src/shared/tokens/primitives.css)
+   Raw palette + spacing + type scale. Never reference these in components.
+   ========================================================================== */
+:root {
+  color-scheme: light dark;
+
+  /* Neutrals */
+  --color-white: #ffffff;
+  --color-black: #000000;
+
+  --color-slate-50:  #f8fafc;
+  --color-slate-100: #f1f5f9;
+  --color-slate-200: #e2e8f0;
+  --color-slate-300: #cbd5e1;
+  --color-slate-400: #94a3b8;
+  --color-slate-500: #64748b;
+  --color-slate-600: #475569;
+  --color-slate-700: #334155;
+  --color-slate-800: #1e293b;
+  --color-slate-900: #0f172a;
+  --color-slate-950: #020617;
+
+  /* Blue — primary interactive (danx-ui's "interactive" hue) */
+  --color-blue-50:  #eff6ff;
+  --color-blue-100: #dbeafe;
+  --color-blue-200: #bfdbfe;
+  --color-blue-300: #93c5fd;
+  --color-blue-400: #60a5fa;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #2563eb;
+  --color-blue-700: #1d4ed8;
+  --color-blue-800: #1e40af;
+  --color-blue-900: #1e3a8a;
+  --color-blue-950: #172554;
+
+  /* Red — danger */
+  --color-red-50:  #fef2f2;
+  --color-red-100: #fee2e2;
+  --color-red-200: #fecaca;
+  --color-red-300: #fca5a5;
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+  --color-red-600: #dc2626;
+  --color-red-700: #b91c1c;
+  --color-red-800: #991b1b;
+  --color-red-900: #7f1d1d;
+  --color-red-950: #450a0a;
+
+  /* Green — success */
+  --color-green-50:  #f0fdf4;
+  --color-green-100: #dcfce7;
+  --color-green-200: #bbf7d0;
+  --color-green-300: #86efac;
+  --color-green-400: #4ade80;
+  --color-green-500: #22c55e;
+  --color-green-600: #16a34a;
+  --color-green-700: #15803d;
+  --color-green-800: #166534;
+  --color-green-900: #14532d;
+  --color-green-950: #052e16;
+
+  /* Amber — warning */
+  --color-amber-50:  #fffbeb;
+  --color-amber-100: #fef3c7;
+  --color-amber-200: #fde68a;
+  --color-amber-300: #fcd34d;
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #d97706;
+  --color-amber-700: #b45309;
+  --color-amber-800: #92400e;
+  --color-amber-900: #78350f;
+  --color-amber-950: #451a03;
+
+  /* Indigo — Danxbot dashboard accent (tab underline, primary CTA).
+     danx-ui ships this palette; Danxbot elects it as its accent. */
+  --color-indigo-50:  #eef2ff;
+  --color-indigo-100: #e0e7ff;
+  --color-indigo-200: #c7d2fe;
+  --color-indigo-300: #a5b4fc;
+  --color-indigo-400: #818cf8;
+  --color-indigo-500: #6366f1;
+  --color-indigo-600: #4f46e5;
+  --color-indigo-700: #4338ca;
+  --color-indigo-800: #3730a3;
+  --color-indigo-900: #312e81;
+  --color-indigo-950: #1e1b4b;
+
+  /* Purple, Violet — trigger: Slack */
+  --color-purple-200: #e9d5ff;
+  --color-purple-300: #d8b4fe;
+  --color-purple-700: #7c3aed;
+  --color-purple-900: #581c87;
+  --color-violet-300: #c4b5fd;
+  --color-violet-500: #8b5cf6;
+
+  /* Emerald — trigger: API, connected */
+  --color-emerald-300: #6ee7b7;
+  --color-emerald-400: #34d399;
+  --color-emerald-500: #10b981;
+  --color-emerald-700: #047857;
+
+  /* Pink — sub-agent accent (the one decorative hue in the dashboard) */
+  --color-pink-300: #f9a8d4;
+  --color-pink-400: #f472b6;
+  --color-pink-500: #ec4899;
+
+  /* --------- Spacing (rems, 4px base = 0.25rem) --------- */
+  --spacing-0:   0;
+  --spacing-px:  1px;
+  --spacing-0-5: 0.125rem;
+  --spacing-1:   0.25rem;
+  --spacing-1-5: 0.375rem;
+  --spacing-2:   0.5rem;
+  --spacing-2-5: 0.625rem;
+  --spacing-3:   0.75rem;
+  --spacing-4:   1rem;
+  --spacing-5:   1.25rem;
+  --spacing-6:   1.5rem;
+  --spacing-8:   2rem;
+  --spacing-10:  2.5rem;
+  --spacing-12:  3rem;
+
+  /* --------- Radii --------- */
+  --radius-none:    0;
+  --radius-sm:      0.125rem;
+  --radius-default: 0.25rem;
+  --radius-md:      0.375rem;
+  --radius-lg:      0.5rem;
+  --radius-xl:      0.75rem;
+  --radius-2xl:     1rem;
+  --radius-full:    9999px;
+
+  /* --------- Shadows --------- */
+  --shadow-sm:      0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-default: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-md:      0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-lg:      0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --shadow-xl:      0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  --shadow-2xl:     0 25px 50px -12px rgb(0 0 0 / 0.25);
+
+  /* --------- Typography --------- */
+  --font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  --text-xs:   0.75rem;   /* 12px */
+  --text-sm:   0.875rem;  /* 14px (danx-ui default — dashboard uses 13px in practice, see dashboard tokens below) */
+  --text-base: 1rem;      /* 16px */
+  --text-lg:   1.125rem;
+  --text-xl:   1.25rem;
+  --text-2xl:  1.5rem;
+
+  --leading-none:    1;
+  --leading-tight:   1.25;
+  --leading-snug:    1.375;
+  --leading-normal:  1.5;
+
+  --font-normal:   400;
+  --font-medium:   500;
+  --font-semibold: 600;
+  --font-bold:     700;
+
+  /* --------- Transitions --------- */
+  --duration-150: 150ms;
+  --duration-200: 200ms;
+  --ease-out:     cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out:  cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+
+/* ==========================================================================
+   LAYER 2a — Semantic tokens (Light)
+   Lifted from danx-ui/src/shared/tokens/semantic.css. Default surface
+   state for environments that don't apply `.dark`.
+   ========================================================================== */
+:root {
+  /* Surfaces */
+  --color-surface:             var(--color-white);
+  --color-surface-elevated:    var(--color-white);
+  --color-surface-sunken:      var(--color-slate-50);
+  --color-surface-overlay:     var(--color-slate-900);
+  --color-surface-accent:      var(--color-blue-50);
+  --color-surface-placeholder: var(--color-slate-200);
+
+  /* Text */
+  --color-text:          var(--color-slate-900);
+  --color-text-muted:    var(--color-slate-600);
+  --color-text-subtle:   var(--color-slate-400);
+  --color-text-inverted: var(--color-white);
+  --color-text-on-color: var(--color-white);
+  --color-text-accent:   var(--color-blue-600);
+
+  /* Borders */
+  --color-border:        var(--color-slate-200);
+  --color-border-strong: var(--color-slate-300);
+  --color-border-subtle: var(--color-slate-100);
+  --color-border-accent: var(--color-blue-200);
+
+  /* Interactive (danx-ui ships blue — Danxbot overrides to indigo below) */
+  --color-interactive:         var(--color-blue-500);
+  --color-interactive-hover:   var(--color-blue-600);
+  --color-interactive-active:  var(--color-blue-700);
+  --color-interactive-subtle:  var(--color-blue-50);
+
+  /* Status */
+  --color-danger:         var(--color-red-500);
+  --color-danger-hover:   var(--color-red-600);
+  --color-danger-muted:   var(--color-red-300);
+  --color-danger-subtle:  var(--color-red-50);
+  --color-danger-tint:    var(--color-red-50);
+
+  --color-success:        var(--color-green-500);
+  --color-success-hover:  var(--color-green-600);
+  --color-success-muted:  var(--color-green-300);
+  --color-success-subtle: var(--color-green-50);
+  --color-success-tint:   var(--color-green-50);
+
+  --color-warning:        var(--color-amber-400);
+  --color-warning-hover:  var(--color-amber-500);
+  --color-warning-muted:  var(--color-amber-300);
+  --color-warning-subtle: var(--color-amber-50);
+  --color-warning-tint:   var(--color-amber-50);
+  --color-warning-on-color: var(--color-amber-950);
+
+  --color-info:           var(--color-blue-500);
+  --color-info-hover:     var(--color-blue-600);
+  --color-info-muted:     var(--color-blue-300);
+  --color-info-subtle:    var(--color-blue-50);
+  --color-info-tint:      var(--color-blue-50);
+
+  /* Focus + backdrop */
+  --color-focus-ring: var(--color-blue-500);
+  --color-selection:  var(--color-blue-100);
+  --color-backdrop:   rgb(15 23 42 / 0.6);
+
+  /* Semantic spacing / radii / shadows */
+  --space-xs: var(--spacing-1);
+  --space-sm: var(--spacing-2);
+  --space-md: var(--spacing-4);
+  --space-lg: var(--spacing-6);
+  --space-xl: var(--spacing-8);
+
+  --radius-component: var(--radius-lg);
+  --radius-button:    var(--radius-md);
+  --radius-input:     var(--radius-md);
+  --radius-card:      var(--radius-xl);
+  --radius-dialog:    var(--radius-2xl);
+
+  --shadow-component: var(--shadow-default);
+  --shadow-elevated:  var(--shadow-lg);
+  --shadow-dialog:    var(--shadow-xl);
+
+  --transition-fast:   var(--duration-150) var(--ease-out);
+  --transition-normal: var(--duration-200) var(--ease-out);
+}
+
+
+/* ==========================================================================
+   LAYER 2b — Semantic tokens (Dark) — CANONICAL for Danxbot
+   Lifted from danx-ui/src/shared/tokens/semantic-dark.css. The dashboard
+   ships `<html class="dark">` inline before first paint, so these are
+   the tokens every Danxbot screen actually sees.
+   ========================================================================== */
+html.dark, .dark {
+  --color-surface:             var(--color-slate-900);
+  --color-surface-elevated:    var(--color-slate-800);
+  --color-surface-sunken:      var(--color-slate-950);
+  --color-surface-overlay:     var(--color-slate-950);
+  --color-surface-accent:      var(--color-blue-950);
+  --color-surface-placeholder: var(--color-slate-700);
+
+  --color-text:          var(--color-slate-100);
+  --color-text-muted:    var(--color-slate-400);
+  --color-text-subtle:   var(--color-slate-500);
+  --color-text-inverted: var(--color-slate-900);
+  --color-text-on-color: var(--color-white);
+  --color-text-accent:   var(--color-blue-400);
+
+  --color-border:        var(--color-slate-700);
+  --color-border-strong: var(--color-slate-600);
+  --color-border-subtle: var(--color-slate-800);
+  --color-border-accent: var(--color-blue-800);
+
+  --color-interactive:         var(--color-blue-400);
+  --color-interactive-hover:   var(--color-blue-300);
+  --color-interactive-active:  var(--color-blue-500);
+  --color-interactive-subtle:  var(--color-blue-950);
+
+  --color-danger:         var(--color-red-400);
+  --color-danger-hover:   var(--color-red-300);
+  --color-danger-muted:   var(--color-red-700);
+  --color-danger-subtle:  var(--color-red-950);
+  --color-danger-tint:    var(--color-red-900);
+
+  --color-success:        var(--color-green-300);
+  --color-success-hover:  var(--color-green-200);
+  --color-success-muted:  var(--color-green-600);
+  --color-success-subtle: var(--color-green-900);
+  --color-success-tint:   var(--color-green-700);
+
+  --color-warning:        var(--color-amber-200);
+  --color-warning-hover:  var(--color-amber-100);
+  --color-warning-muted:  var(--color-amber-600);
+  --color-warning-subtle: var(--color-amber-950);
+  --color-warning-tint:   var(--color-amber-900);
+
+  --color-info:           var(--color-blue-300);
+  --color-info-hover:     var(--color-blue-200);
+  --color-info-muted:     var(--color-blue-600);
+  --color-info-subtle:    var(--color-blue-900);
+  --color-info-tint:      var(--color-blue-700);
+
+  --color-focus-ring: var(--color-blue-400);
+  --color-selection:  var(--color-blue-900);
+  --color-backdrop:   rgb(0 0 0 / 0.8);
+}
+
+
+/* ==========================================================================
+   LAYER 3 — Danxbot dashboard overrides
+   --------------------------------------------------------------------------
+   The dashboard deviates from stock danx-ui in two narrow, deliberate ways:
+     1. Interactive color swaps from blue → indigo (saturated accent,
+        easier to distinguish from the info-blue status tint).
+     2. Dark mode drops one step deeper: surface=slate-950 (canvas),
+        elevated=slate-900 (panels). The stock semantic-dark uses -900/-800.
+   These overrides are minimal and reuse danx-ui primitives only.
+   ========================================================================== */
+html.dark, .dark {
+  --color-surface:          var(--color-slate-950);    /* canvas */
+  --color-surface-elevated: var(--color-slate-900);    /* raised panel */
+  --color-surface-sunken:   var(--color-slate-950);
+  --color-border:           var(--color-slate-800);    /* one step softer */
+  --color-border-strong:    var(--color-slate-700);
+
+  --color-interactive:       var(--color-indigo-500);
+  --color-interactive-hover: var(--color-indigo-600);
+  --color-interactive-active:var(--color-indigo-700);
+  --color-interactive-subtle:rgb(99 102 241 / 0.20);
+  --color-text-accent:       var(--color-indigo-300);
+  --color-focus-ring:        var(--color-indigo-500);
+}
+:root {
+  --color-interactive:       var(--color-indigo-500);
+  --color-interactive-hover: var(--color-indigo-600);
+  --color-interactive-active:var(--color-indigo-700);
+  --color-text-accent:       var(--color-indigo-600);
+  --color-focus-ring:        var(--color-indigo-500);
+
+  /* --------- Danxbot-specific status tints ---------
+     The dashboard renders all pills as `bg-<hue>-500/20 text-<hue>-300`
+     on dark. Expose that recipe as tokens so components don't reach into
+     primitives directly. Each pair keys a status in the dispatch table. */
+  --db-status-running-bg: rgb(245 158 11 / 0.20);   /* amber-500/20 */
+  --db-status-running-fg: var(--color-amber-300);
+  --db-status-ok-bg:      rgb(16 185 129 / 0.20);   /* emerald-500/20 */
+  --db-status-ok-fg:      var(--color-emerald-300);
+  --db-status-err-bg:     rgb(239 68 68 / 0.20);    /* red-500/20 */
+  --db-status-err-fg:     var(--color-red-300);
+  --db-status-neutral-bg: rgb(51 65 85 / 0.40);     /* slate-700/40 */
+  --db-status-neutral-fg: var(--color-slate-200);
+  --db-status-sub-bg:     rgb(236 72 153 / 0.20);   /* pink-500/20 — sub-agent */
+  --db-status-sub-fg:     var(--color-pink-300);
+
+  /* Trigger pills — Slack / Trello / API / GitHub */
+  --db-trigger-slack-bg:  rgb(126 34 206 / 0.20);   /* purple-700/20 */
+  --db-trigger-slack-fg:  var(--color-purple-300);
+  --db-trigger-trello-bg: rgb(29 78 216 / 0.20);    /* blue-700/20 */
+  --db-trigger-trello-fg: var(--color-blue-300);
+  --db-trigger-api-bg:    rgb(16 185 129 / 0.20);   /* emerald-500/20 */
+  --db-trigger-api-fg:    var(--color-emerald-300);
+
+  /* Dashboard density — 13px base, 12.5px tables, 11px eyebrows.
+     danx-ui primitives only go down to 12px; Danxbot packs one step
+     tighter because it's an operator console. */
+  --db-text-eyebrow: 11px;
+  --db-text-table:   12.5px;
+  --db-text-body:    13px;
+
+  /* Row hover — slate-800/20 */
+  --color-row-hover: rgb(30 41 59 / 0.20);
+}
+
+
+/* ==========================================================================
+   Element defaults
+   ========================================================================== */
+html, body {
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--db-text-body);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  margin: 0;
+}
+
+h1 {
+  font-size: var(--text-2xl);         /* 24px — dashboard's largest */
+  font-weight: var(--font-bold);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+  margin: 0 0 4px;
+}
+h2 {
+  font-size: var(--text-lg);          /* 18px — RepoCard */
+  font-weight: var(--font-bold);
+  line-height: var(--leading-snug);
+  color: var(--color-text);
+  margin: 0 0 4px;
+}
+h3 {
+  font-size: var(--text-base);        /* 16px */
+  font-weight: var(--font-semibold);
+  color: var(--color-text);
+  margin: 0 0 4px;
+}
+p {
+  font-size: var(--db-text-body);
+  color: var(--color-text-muted);
+  margin: 0 0 8px;
+}
+
+/* Dashboard's iconic uppercase eyebrow —
+   11px, tracking-wider, slate-500 (subtle). Used for every table
+   header and every side-panel section label. */
+.db-eyebrow {
+  font-size: var(--db-text-eyebrow);
+  font-weight: var(--font-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-subtle);
+}
+
+code, kbd, samp, pre, .db-mono {
+  font-family: var(--font-mono);
+  font-size: var(--db-text-table);
+}
+pre {
+  background: rgb(99 102 241 / 0.05);
+  border: 1px solid rgb(99 102 241 / 0.20);
+  border-radius: var(--radius-button);
+  padding: 8px 12px;
+  color: var(--color-indigo-300);
+  overflow-x: auto;
+  margin: 0;
+}
+
+a {
+  color: var(--color-text-accent);
+  text-decoration: none;
+}
+a:hover { color: var(--color-indigo-200); text-decoration: underline; }
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  margin: 16px 0;
+}
+
+/* Icon sizing utility for inlined danx-icon SVGs
+   Icons from danx-icon (FontAwesome) use fill=currentColor, so they
+   inherit color from the text ladder. 16px is the dashboard default. */
+.db-icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+  fill: currentColor;
+  flex-shrink: 0;
+}
+.db-icon--sm { width: 12px; height: 12px; }
+.db-icon--md { width: 16px; height: 16px; }
+.db-icon--lg { width: 20px; height: 20px; }

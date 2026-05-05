@@ -2,15 +2,6 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Short commit SHA of the danxbot repo at image-build time. Populated by
-# `make build` and `deploy/build.ts` from `git rev-parse --short HEAD`.
-# Read at runtime by `getDanxbotCommit()` so dispatched-agent rows record
-# the danxbot version that ran them — even when the container has no
-# `.git` dir. Empty in unparameterized builds; the runtime falls back to
-# `git rev-parse` against the source root in that case (dev shells).
-ARG DANXBOT_COMMIT=
-ENV DANXBOT_COMMIT=${DANXBOT_COMMIT}
-
 # System dependencies
 RUN apt-get update && apt-get install -y \
     curl \
@@ -77,6 +68,22 @@ RUN cd dashboard && npm run build
 # Entrypoint (must run as root initially to copy auth, then drops to danxbot user)
 COPY entrypoint.sh /danxbot/entrypoint.sh
 RUN chmod +x /danxbot/entrypoint.sh
+
+# Short commit SHA of the danxbot repo at image-build time. Populated by
+# `make build` and `deploy/build.ts` from `git rev-parse --short HEAD`.
+# Read at runtime by `getDanxbotCommit()` so dispatched-agent rows record
+# the danxbot version that ran them — even when the container has no
+# `.git` dir. Empty in unparameterized builds; the runtime falls back to
+# `git rev-parse` against the source root in that case (dev shells).
+#
+# CRITICAL: keep this at the BOTTOM of the Dockerfile. ARG before any
+# RUN/COPY sets the ENV in every subsequent layer's BuildKit cache key;
+# every deploy passes a different SHA, which would invalidate apt-get,
+# npm install, and every other heavy layer above. Empirically observed:
+# bumping ARG placement to the bottom turns ~48-min cold deploys into
+# ~3-min warm deploys.
+ARG DANXBOT_COMMIT=
+ENV DANXBOT_COMMIT=${DANXBOT_COMMIT}
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD curl -f http://localhost:${DASHBOARD_PORT:-5555}/health || exit 1
