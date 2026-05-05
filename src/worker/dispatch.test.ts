@@ -198,10 +198,12 @@ vi.mock("../dispatch/core.js", async () => {
 vi.mock("../slack/listener.js", () => ({
   getSlackClientForRepo: vi.fn(),
 }));
+const mockGetDispatchById = vi.fn();
+const mockUpdateDispatch = vi.fn().mockResolvedValue(undefined);
 vi.mock("../dashboard/dispatches-db.js", () => ({
-  getDispatchById: vi.fn(),
+  getDispatchById: (...args: unknown[]) => mockGetDispatchById(...args),
   insertDispatch: vi.fn(),
-  updateDispatch: vi.fn().mockResolvedValue(undefined),
+  updateDispatch: (...args: unknown[]) => mockUpdateDispatch(...args),
 }));
 
 // Mock the critical-failure module so handleStop's writeFlag path doesn't
@@ -251,6 +253,8 @@ beforeEach(() => {
   mockGetActiveJob.mockReset();
   mockListActiveJobs.mockReset().mockReturnValue([]);
   mockDispatchFn.mockReset();
+  mockGetDispatchById.mockReset();
+  mockUpdateDispatch.mockReset().mockResolvedValue(undefined);
 });
 
 describe("handleLaunch — dispatchApi feature toggle", () => {
@@ -823,6 +827,284 @@ describe("handleStop", () => {
     );
     expect(mockWriteFlag).not.toHaveBeenCalled();
     expect(mockStop).not.toHaveBeenCalled();
+  });
+
+  // ISS-68: DB fallback for /api/stop/:jobId after worker restart.
+  // activeJobs is in-memory only; a worker restart clears it. Long-lived
+  // claude processes (parent is `script -q -f`, not the worker daemon)
+  // survive the restart and call `danxbot_complete` against a worker that
+  // has no record of them. Without DB fallback, the agent gets 404 and
+  // dies without finalizing the dispatch row or syncing the YAML.
+  describe("ISS-68: DB fallback when activeJobs misses", () => {
+    it("falls back to DB and finalizes a running dispatch as completed", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-dispatch",
+        status: "running",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "ok across restart",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-dispatch", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
+      expect(mockGetDispatchById).toHaveBeenCalledWith("ghost-dispatch");
+      expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith(
+        "ghost-dispatch",
+        MOCK_REPO,
+      );
+      expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+      const [updateId, updates] = mockUpdateDispatch.mock.calls[0];
+      expect(updateId).toBe("ghost-dispatch");
+      expect(updates.status).toBe("completed");
+      expect(updates.summary).toBe("ok across restart");
+      expect(typeof updates.completedAt).toBe("number");
+    });
+
+    it("falls back to DB and finalizes as failed when status=failed", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-fail",
+        status: "running",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "failed",
+        summary: "boom",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-fail", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "failed" });
+      expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith(
+        "ghost-fail",
+        MOCK_REPO,
+      );
+      expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("failed");
+      expect(mockUpdateDispatch.mock.calls[0][1].summary).toBe("boom");
+    });
+
+    it("critical_failure on DB-fallback writes flag, marks failed, and skips autoSync", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-crit",
+        status: "running",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "critical_failure",
+        summary: "MCP failed to load",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-crit", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({
+        status: "critical_failure",
+      });
+      expect(mockWriteFlag).toHaveBeenCalledWith(MOCK_REPO.localPath, {
+        source: "agent",
+        dispatchId: "ghost-crit",
+        reason: "Agent-signaled critical failure",
+        detail: "MCP failed to load",
+      });
+      expect(mockAutoSyncTrackedIssue).not.toHaveBeenCalled();
+      expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("failed");
+      expect(mockUpdateDispatch.mock.calls[0][1].summary).toBe(
+        "MCP failed to load",
+      );
+    });
+
+    it("returns 404 when neither activeJobs nor DB has the row", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue(null);
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "no row",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "missing", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(404);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ error: "Job not found" });
+      expect(mockUpdateDispatch).not.toHaveBeenCalled();
+      expect(mockAutoSyncTrackedIssue).not.toHaveBeenCalled();
+    });
+
+    it("is idempotent on already-terminal rows — returns 200 with existing status, no double-update", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "already-done",
+        status: "completed",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "racy duplicate signal",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "already-done", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
+      expect(mockUpdateDispatch).not.toHaveBeenCalled();
+      expect(mockAutoSyncTrackedIssue).not.toHaveBeenCalled();
+      expect(mockWriteFlag).not.toHaveBeenCalled();
+    });
+
+    it("idempotent on already-failed rows preserves the original terminal reason", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "already-failed",
+        status: "failed",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "agent thinks it won",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "already-failed", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "failed" });
+      expect(mockUpdateDispatch).not.toHaveBeenCalled();
+    });
+
+    it("idempotent on already-cancelled rows", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "already-cancelled",
+        status: "cancelled",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "late signal",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "already-cancelled", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "cancelled" });
+      expect(mockUpdateDispatch).not.toHaveBeenCalled();
+    });
+
+    it("DB-fallback path validates body — invalid status returns 400, no DB update", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-bad",
+        status: "running",
+      });
+      const stopReq = createMockReqWithBody("POST", { status: "bogus" });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-bad", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(400);
+      expect(JSON.parse(stopRes._getBody()).error).toMatch(/Invalid status/);
+      expect(mockUpdateDispatch).not.toHaveBeenCalled();
+    });
+
+    it("queued (non-terminal, not running) row finalizes the same as running", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-queued",
+        status: "queued",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "queued→completed",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-queued", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
+      expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("completed");
+    });
+
+    it("DB-fallback path returns 400 when status is missing — fail-loud, no lenient default", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-no-status",
+        status: "running",
+      });
+      const stopReq = createMockReqWithBody("POST", {});
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-no-status", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(400);
+      expect(JSON.parse(stopRes._getBody()).error).toMatch(
+        /Missing required field: status/,
+      );
+      expect(mockUpdateDispatch).not.toHaveBeenCalled();
+    });
+
+    it("DB-fallback completed without summary still updates row (summary undefined) and 200s", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-no-summary",
+        status: "running",
+      });
+      const stopReq = createMockReqWithBody("POST", { status: "completed" });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-no-summary", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+      expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("completed");
+      expect(mockUpdateDispatch.mock.calls[0][1].summary).toBeUndefined();
+    });
+
+    it("DB-fallback returns 500 when updateDispatch rejects (outer try/catch covers it)", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-throw",
+        status: "running",
+      });
+      mockUpdateDispatch.mockRejectedValueOnce(new Error("db down"));
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "ok",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-throw", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(500);
+      expect(JSON.parse(stopRes._getBody()).error).toMatch(/db down/);
+    });
+
+    it("DB-fallback critical_failure without summary returns 400 and does not write the flag", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-nosummary",
+        status: "running",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "critical_failure",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-nosummary", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(400);
+      expect(JSON.parse(stopRes._getBody()).error).toMatch(
+        /Missing required field: summary/,
+      );
+      expect(mockWriteFlag).not.toHaveBeenCalled();
+      expect(mockUpdateDispatch).not.toHaveBeenCalled();
+    });
   });
 
   it("returns 400 when the status field is present but not one of the three valid values", async () => {

@@ -20,6 +20,7 @@ import {
 } from "../dispatch/staged-files.js";
 import { WorkspaceManifestError } from "../workspace/manifest.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
+import { isTerminalStatus, type DispatchStatus } from "../dashboard/dispatches.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
 import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
@@ -30,7 +31,7 @@ import {
   isCompleteStatus,
   type CompleteStatus,
 } from "../mcp/danxbot-server.js";
-import { getDispatchById } from "../dashboard/dispatches-db.js";
+import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
 import { autoSyncTrackedIssue } from "./auto-sync.js";
 import { getSlackClientForRepo } from "../slack/listener.js";
 import type { SlackTriggerMetadata } from "../dashboard/dispatches.js";
@@ -853,6 +854,92 @@ export async function handleSlackUpdate(
   await handleSlackPost(req, res, dispatchId, repo, "update");
 }
 
+/**
+ * Map the agent-facing `CompleteStatus` to the DB-facing `DispatchStatus`.
+ * The DB schema only knows `completed`/`failed`; the `critical_failure`
+ * agent signal is recorded as a `failed` row (the halt signal lives in
+ * the flag file, not the row's status). Mirrors the asymmetry the
+ * in-memory `handleStop` branch encodes via `job.stop("failed", ...)`
+ * during a critical_failure.
+ */
+function mapCompleteToDispatchStatus(status: CompleteStatus): DispatchStatus {
+  return status === "completed" ? "completed" : "failed";
+}
+
+/**
+ * ISS-68: DB-fallback path for `/api/stop/:jobId` when `activeJobs` has no
+ * record of the dispatch (e.g. worker restart between spawn and the
+ * agent's `danxbot_complete` call). The in-process `job.stop` lifecycle
+ * is gone, but the only side effects that hadn't already happened are
+ * the dispatch-row update and the tracked-YAML sync — both of which we
+ * can do directly from the DB row.
+ *
+ * Idempotency contract: an already-terminal row returns 200 with the
+ * existing status and does NOT re-mark. Preserves the original terminal
+ * reason on retried/duplicate signals.
+ */
+async function handleStopFromDb(
+  req: IncomingMessage,
+  res: ServerResponse,
+  jobId: string,
+  repo: RepoContext,
+): Promise<void> {
+  const dispatch = await getDispatchById(jobId);
+  if (!dispatch) {
+    json(res, 404, { error: "Job not found" });
+    return;
+  }
+
+  // Idempotent: a row already in a terminal state means a prior call
+  // (this worker incarnation or another) already finalized it. Don't
+  // re-mark — the original terminal reason wins.
+  if (isTerminalStatus(dispatch.status)) {
+    json(res, 200, { status: dispatch.status });
+    return;
+  }
+
+  const body = await parseBody(req);
+  const status = parseStopStatus(body, res);
+  if (!status) return;
+  const summary = typeof body.summary === "string" ? body.summary : undefined;
+
+  if (status === "critical_failure") {
+    if (!summary) {
+      json(res, 400, {
+        error:
+          'Missing required field: summary (required when status="critical_failure")',
+      });
+      return;
+    }
+    writeFlag(repo.localPath, {
+      source: "agent",
+      dispatchId: jobId,
+      reason: "Agent-signaled critical failure",
+      detail: summary,
+    });
+    // Same asymmetry as the in-memory path: response advertises
+    // critical_failure while the DB row is finalized as `failed` (the
+    // halt signal lives in the flag file, not the dispatch status).
+    await updateDispatch(jobId, {
+      status: mapCompleteToDispatchStatus(status),
+      summary,
+      completedAt: Date.now(),
+    });
+    json(res, 200, { status });
+    return;
+  }
+
+  // Non-critical terminal: sync the tracked YAML before marking the row
+  // terminal, mirroring the in-memory path's ordering.
+  await autoSyncTrackedIssue(jobId, repo);
+  await updateDispatch(jobId, {
+    status: mapCompleteToDispatchStatus(status),
+    summary,
+    completedAt: Date.now(),
+  });
+  json(res, 200, { status });
+}
+
 export async function handleStop(
   req: IncomingMessage,
   res: ServerResponse,
@@ -862,7 +949,13 @@ export async function handleStop(
   try {
     const job: AgentJob | undefined = getActiveJob(jobId);
     if (!job) {
-      json(res, 404, { error: "Job not found" });
+      // ISS-68: activeJobs is in-memory only and is wiped by every worker
+      // restart. Long-lived dispatched claude processes (parent is
+      // `script -q -f`, not the worker daemon) survive the restart and
+      // call `danxbot_complete` against a worker that has no record of
+      // them. Fall back to the dispatch row so the agent can finalize
+      // its DB state + tracker sync without 404'ing.
+      await handleStopFromDb(req, res, jobId, repo);
       return;
     }
     if (job.status !== "running") {
