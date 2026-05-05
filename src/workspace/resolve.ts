@@ -166,6 +166,17 @@ export interface ResolvedWorkspace {
    * eliminating the ~4s ToolSearch tax MCP tools otherwise pay.
    */
   topLevelAgent?: string;
+  /**
+   * Absolute path to a placeholder-substituted copy of the workspace's
+   * `.claude/settings.json`, written to a fresh temp dir at resolve
+   * time. Forwarded to claude as `--settings <path>` so workspace-scope
+   * hooks (SessionStart, SubagentStart, etc.) load without requiring
+   * the project-trust dialog. Substituting placeholders here (rather
+   * than letting claude read the raw file) keeps `${KEY}` references
+   * inside the hook config + env block resolvable — claude does NOT
+   * understand danxbot's overlay system.
+   */
+  settingsPath: string;
 }
 
 /** Files whose presence in a workspace dir is a hard error — see WorkspaceLegacyFileError. */
@@ -213,6 +224,37 @@ function requireWorkspaceFile(path: string, label: string): string {
     );
   }
   return readFileSync(path, "utf-8");
+}
+
+/**
+ * Write the placeholder-substituted workspace settings.json to a fresh
+ * temp file. Returned path is what gets forwarded via claude's
+ * `--settings` flag.
+ *
+ * Writing a substituted COPY (rather than passing the raw workspace
+ * file) is load-bearing: the workspace settings.json may legitimately
+ * contain `${KEY}` references (e.g. `${SCHEMA_DEFINITION_ID}` inside
+ * the `env` block to propagate the dispatch overlay into the spawned
+ * process env), and claude does NOT understand danxbot's overlay
+ * system. Without substitution the literal `${KEY}` lands inside the
+ * spawned process env or hook command line.
+ *
+ * Caller has already validated `.claude/settings.json` exists +
+ * substituted via `resolveEnv`. We re-read here rather than pipe the
+ * substituted string through to keep `resolveEnv`'s shape narrow
+ * (it only owes the env block back to its caller).
+ */
+function writeSubstitutedSettings(
+  workspaceDir: string,
+  subs: Readonly<Record<string, string>>,
+): string {
+  const settingsPath = resolve(workspaceDir, ".claude", "settings.json");
+  const raw = readFileSync(settingsPath, "utf-8");
+  const substituted = substitute(raw, subs);
+  const dir = mkdtempSync(join(tmpdir(), "danxbot-workspace-settings-"));
+  const outPath = join(dir, "settings.json");
+  writeFileSync(outPath, substituted);
+  return outPath;
 }
 
 function rejectLegacyFiles(workspaceDir: string): void {
@@ -322,6 +364,7 @@ export function resolveWorkspace(
 
   const mcpSettingsPath = writeMcpSettings(cwd, subs);
   const env = resolveEnv(cwd, subs);
+  const settingsPath = writeSubstitutedSettings(cwd, subs);
   const stagingPaths = manifest.stagingPaths.map((p) => substitute(p, subs));
 
   // top_level_agent: validate the referenced agent file exists. The flag
@@ -351,5 +394,6 @@ export function resolveWorkspace(
     promptDelivery: "at-file",
     stagingPaths,
     topLevelAgent,
+    settingsPath,
   };
 }

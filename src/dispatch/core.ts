@@ -28,7 +28,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -295,18 +295,6 @@ function writeMcpSettingsFile(mcpServers: Record<string, unknown>): {
   const settingsPath = join(settingsDir, "settings.json");
   writeFileSync(settingsPath, JSON.stringify({ mcpServers }, null, 2));
   return { settingsDir, settingsPath };
-}
-
-/**
- * Resolve the workspace's `.claude/settings.json` path, returning it only when
- * the file exists. Forwarded to claude as `--settings <path>` so workspace-
- * scope hooks (SessionStart, SubagentStart) load without requiring the
- * project-trust dialog — dispatched workers run untrusted workspace dirs by
- * default and Claude Code otherwise ignores their project-scope settings.
- */
-function resolveWorkspaceSettingsPath(cwd: string): string | undefined {
-  const candidate = join(cwd, ".claude", "settings.json");
-  return existsSync(candidate) ? candidate : undefined;
 }
 
 function cleanupMcpSettings(settingsDir: string): void {
@@ -684,7 +672,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
       envOverrides: workspace.env,
       stagedFilePaths,
       topLevelAgent: workspace.topLevelAgent,
-      settingsPath: resolveWorkspaceSettingsPath(workspace.cwd),
+      settingsPath: workspace.settingsPath,
     });
   } catch (err) {
     // runResolved already cleans up MCP settings + staged files in the
