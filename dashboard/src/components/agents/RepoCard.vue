@@ -19,13 +19,15 @@ defineEmits<{
 // The env default each feature falls back to when the override is null.
 // For slack, configured === slack.enabled on the backend. For
 // trelloPoller, `display.trello.configured` is a good proxy; for
-// dispatchApi the default is always true; for ideator the default is
-// false (explicit opt-in — see `src/settings-file.ts#envDefault`).
+// dispatchApi the default is always true; for ideator and autoTriage
+// the default is false (explicit opt-in — see
+// `src/settings-file.ts#envDefault`).
 const envDefaults = computed<Record<Feature, boolean>>(() => ({
   slack: !!props.agent.settings.display.slack?.configured,
   trelloPoller: !!props.agent.settings.display.trello?.configured,
   dispatchApi: true,
   ideator: false,
+  autoTriage: false,
 }));
 
 const slackSub = computed(
@@ -118,7 +120,7 @@ const links = computed(() => props.agent.settings.display.links ?? {});
       @clear="(r) => $emit('clearCriticalFailure', r)"
     />
 
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
       <FeatureToggle
         feature="slack"
         label="Slack"
@@ -153,6 +155,15 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         :env-default="envDefaults.ideator"
         subline="generates feature cards when Review is short"
         :busy="busyFeature === 'ideator'"
+        @change="(f, e) => $emit('toggle', agent.name, f, e)"
+      />
+      <FeatureToggle
+        feature="autoTriage"
+        label="Auto-triage"
+        :enabled="agent.settings.overrides.autoTriage.enabled"
+        :env-default="envDefaults.autoTriage"
+        subline="triages Action Items + Review when ToDo is empty"
+        :busy="busyFeature === 'autoTriage'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
       />
     </div>

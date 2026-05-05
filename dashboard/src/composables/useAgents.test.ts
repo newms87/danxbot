@@ -69,7 +69,10 @@ import { useAgents, applyAgentEvent, isAgentSnapshot } from "./useAgents";
 function snap(
   name: string,
   overrides: Partial<
-    Record<"slack" | "trelloPoller" | "dispatchApi" | "ideator", boolean | null>
+    Record<
+      "slack" | "trelloPoller" | "dispatchApi" | "ideator" | "autoTriage",
+      boolean | null
+    >
   > = {},
 ): AgentSnapshot {
   return {
@@ -81,6 +84,7 @@ function snap(
         trelloPoller: { enabled: overrides.trelloPoller ?? null },
         dispatchApi: { enabled: overrides.dispatchApi ?? null },
         ideator: { enabled: overrides.ideator ?? null },
+        autoTriage: { enabled: overrides.autoTriage ?? null },
       },
       display: {},
       meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:test" },

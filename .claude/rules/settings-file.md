@@ -4,12 +4,13 @@ The per-repo operational state lives at `<repo>/.danxbot/settings.json`.
 This file is the single source of truth for:
 
 - **Feature toggles** (`overrides.slack`, `overrides.trelloPoller`,
-  `overrides.dispatchApi`, `overrides.ideator`) — three-valued
-  (`true` / `false` / `null`). `null` means "defer to the env default
-  on `RepoContext`". `true` / `false` are explicit runtime overrides
-  that win over the env var. Ideator's env default is `false` (explicit
-  opt-in); the other three default to their respective env-driven
-  values.
+  `overrides.dispatchApi`, `overrides.ideator`, `overrides.autoTriage`)
+  — three-valued (`true` / `false` / `null`). `null` means "defer to
+  the env default on `RepoContext`". `true` / `false` are explicit
+  runtime overrides that win over the env var. Ideator and autoTriage
+  both default to `false` (explicit opt-in — recurring agent dispatches
+  that cost tokens); the other three default to their respective
+  env-driven values.
 - **Masked config mirrors** (`display.*`) — safe, read-only projections of
   what the dashboard renders on the Agents tab. **Never contains raw secrets.**
 - **Metadata** (`meta.updatedAt`, `meta.updatedBy`) — last write stamp.
@@ -109,7 +110,10 @@ of the config, no duplicated display-building logic.
     "dispatchApi":  { "enabled": true | false | null },
     // env default `false` — operator opts in per-repo when they want
     // /danx-ideate to run when the Review list runs short.
-    "ideator":      { "enabled": true | false | null }
+    "ideator":      { "enabled": true | false | null },
+    // env default `false` — operator opts in per-repo when they want
+    // /danx-triage to run on Action Items + Review when ToDo is empty.
+    "autoTriage":   { "enabled": true | false | null }
   },
   "display": {
     "worker":  { "port": 5562, "runtime": "docker" },

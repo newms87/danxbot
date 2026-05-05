@@ -99,6 +99,7 @@ describe("settings-file", () => {
           trelloPoller: { enabled: true },
           dispatchApi: { enabled: null },
           ideator: { enabled: null },
+          autoTriage: { enabled: null },
         },
         display: { worker: { port: 1234, runtime: "host" } },
         meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:alice" },
@@ -416,12 +417,13 @@ describe("settings-file", () => {
       expect(isFeatureEnabled(ctx, "trelloPoller")).toBe(true);
     });
 
-    it("covers all four features via the FEATURES constant", () => {
+    it("covers all five features via the FEATURES constant", () => {
       expect(FEATURES).toEqual([
         "slack",
         "trelloPoller",
         "dispatchApi",
         "ideator",
+        "autoTriage",
       ]);
     });
 
@@ -446,6 +448,48 @@ describe("settings-file", () => {
       });
       const ctx = makeRepoContext({ localPath });
       expect(isFeatureEnabled(ctx, "ideator")).toBe(false);
+    });
+
+    it("autoTriage env default is false (explicit opt-in)", () => {
+      const ctx = makeRepoContext({ localPath });
+      expect(isFeatureEnabled(ctx, "autoTriage")).toBe(false);
+    });
+
+    it("autoTriage returns true when override is true", async () => {
+      await writeSettings(localPath, {
+        overrides: { autoTriage: { enabled: true } },
+        writtenBy: "dashboard:test",
+      });
+      const ctx = makeRepoContext({ localPath });
+      expect(isFeatureEnabled(ctx, "autoTriage")).toBe(true);
+    });
+
+    it("autoTriage returns false when override explicitly false", async () => {
+      await writeSettings(localPath, {
+        overrides: { autoTriage: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+      const ctx = makeRepoContext({ localPath });
+      expect(isFeatureEnabled(ctx, "autoTriage")).toBe(false);
+    });
+
+    it("autoTriage default settings include slot initialized to enabled: null", () => {
+      const s = readSettings(localPath);
+      expect(s.overrides.autoTriage).toEqual({ enabled: null });
+    });
+
+    it("preserves autoTriage override across an unrelated patch", async () => {
+      await writeSettings(localPath, {
+        overrides: { autoTriage: { enabled: true } },
+        writtenBy: "dashboard:test",
+      });
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+      const s = readSettings(localPath);
+      expect(s.overrides.autoTriage.enabled).toBe(true);
+      expect(s.overrides.slack.enabled).toBe(false);
     });
   });
 

@@ -42,13 +42,19 @@ import type { RepoContext } from "./types.js";
 
 const log = createLogger("settings-file");
 
-export type Feature = "slack" | "trelloPoller" | "dispatchApi" | "ideator";
+export type Feature =
+  | "slack"
+  | "trelloPoller"
+  | "dispatchApi"
+  | "ideator"
+  | "autoTriage";
 
 export const FEATURES: readonly Feature[] = [
   "slack",
   "trelloPoller",
   "dispatchApi",
   "ideator",
+  "autoTriage",
 ] as const;
 
 /**
@@ -90,6 +96,7 @@ export interface SettingsOverrides {
   trelloPoller: TrelloPollerOverride;
   dispatchApi: FeatureOverride;
   ideator: FeatureOverride;
+  autoTriage: FeatureOverride;
 }
 
 export interface SettingsDisplayWorker {
@@ -127,6 +134,7 @@ export interface WriteSettingsPatchOverrides {
   trelloPoller?: TrelloPollerOverride;
   dispatchApi?: FeatureOverride;
   ideator?: FeatureOverride;
+  autoTriage?: FeatureOverride;
 }
 
 export interface WriteSettingsPatch {
@@ -151,6 +159,7 @@ export function defaultSettings(): Settings {
       trelloPoller: { enabled: null, pickupNamePrefix: null },
       dispatchApi: { enabled: null },
       ideator: { enabled: null },
+      autoTriage: { enabled: null },
     },
     display: {},
     meta: { updatedAt: new Date(0).toISOString(), updatedBy: "worker" },
@@ -244,6 +253,7 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
       ),
       dispatchApi: normalizeOverride(partial.overrides?.dispatchApi),
       ideator: normalizeOverride(partial.overrides?.ideator),
+      autoTriage: normalizeOverride(partial.overrides?.autoTriage),
     },
     display:
       partial.display && typeof partial.display === "object"
@@ -333,6 +343,8 @@ async function runWrite(
         dispatchApi:
           patch.overrides?.dispatchApi ?? existing.overrides.dispatchApi,
         ideator: patch.overrides?.ideator ?? existing.overrides.ideator,
+        autoTriage:
+          patch.overrides?.autoTriage ?? existing.overrides.autoTriage,
       },
       display: patch.display
         ? { ...existing.display, ...patch.display }
@@ -438,6 +450,12 @@ function envDefault(ctx: RepoContext, feature: Feature): boolean {
       // the Review list runs short and is therefore the most expensive
       // recurring spawn the poller can produce. Operators turn it on
       // per-repo from the Agents tab when they want feature generation.
+      return false;
+    case "autoTriage":
+      // Explicit opt-in: same rationale as ideator — the auto-triage
+      // poller spawns `/danx-triage` to clean Action Items + Review
+      // when ToDo is empty, a recurring agent dispatch that costs
+      // tokens. Operators turn it on per-repo from the Agents tab.
       return false;
   }
 }
