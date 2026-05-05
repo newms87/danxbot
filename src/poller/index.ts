@@ -311,8 +311,16 @@ async function _poll(repo: RepoContext): Promise<void> {
   // worker that died mid-dispatch can resume its prior session
   // instead of leaving the card parked in In Progress forever. If a
   // resume fires, the tick exits early — single-dispatch invariant.
-  if (await tryResumeOrphan(repo, tracker, inProgressCards)) {
+  // If an orphan's session file is gone, the scan resets the card to
+  // ToDo on both the YAML and the tracker; the returned
+  // `resetToToDo` refs are folded back into `cards` so this tick
+  // dispatches them rather than waiting a full poll interval.
+  const orphanScan = await tryResumeOrphan(repo, tracker, inProgressCards);
+  if (orphanScan.resumed) {
     return;
+  }
+  if (orphanScan.resetToToDo.length > 0) {
+    cards = [...cards, ...orphanScan.resetToToDo];
   }
 
   // Optional pickup-name-prefix filter from per-repo settings. When set,
@@ -557,13 +565,17 @@ async function resolveBlockedCards(
  *   - DOES correspond to a Claude session JSONL on disk
  *
  * spawn a fresh dispatch with `--resume <sessionId>` so the agent
- * picks up where it left off. Returns true when a resume fires (the
- * caller must skip the ToDo dispatch path on this tick to preserve
- * the single-dispatch invariant).
+ * picks up where it left off. Returns `{ resumed: true }` when a resume
+ * fires (the caller must skip the ToDo dispatch path on this tick to
+ * preserve the single-dispatch invariant).
  *
  * Side-effect for the "session file gone" case: card resets to ToDo
- * locally (YAML status + dispatch_id cleared) AND on the tracker.
- * The next tick picks it up as a fresh ToDo dispatch.
+ * locally (YAML status + dispatch_id cleared) AND on the tracker. The
+ * reset card's `IssueRef` (with `status: "ToDo"`) is returned in
+ * `resetToToDo` so the caller can include it in this tick's dispatch
+ * pool — the snapshot of `cards` taken before this scan ran is stale
+ * by the time we mutate the card's status, and waiting a full poll
+ * interval before picking it up wastes the tick.
  *
  * Skipped silently when the In Progress card has no local YAML (the
  * bulk-sync step that runs immediately before this should have
@@ -572,11 +584,16 @@ async function resolveBlockedCards(
  * the YAML stamp before dying — same fresh-ToDo recovery applies on
  * the next tick once it bubbles up there).
  */
+type OrphanScanResult =
+  | { resumed: true }
+  | { resumed: false; resetToToDo: IssueRef[] };
+
 async function tryResumeOrphan(
   repo: RepoContext,
   tracker: IssueTracker,
   inProgressRefs: IssueRef[],
-): Promise<boolean> {
+): Promise<OrphanScanResult> {
+  const resetToToDo: IssueRef[] = [];
   for (const ref of inProgressRefs) {
     const issue = findByExternalId(repo.localPath, ref.external_id);
     // No local YAML or no stamped dispatch_id → nothing to resume
@@ -600,7 +617,7 @@ async function tryResumeOrphan(
       log.error(
         `[${repo.name}] No claude session dir for repo — skipping orphan-resume scan`,
       );
-      return false;
+      return { resumed: false, resetToToDo };
     }
     if (resolved.kind === "not-found") {
       log.warn(
@@ -618,6 +635,11 @@ async function tryResumeOrphan(
           `[${repo.name}] Failed to reset ${ref.external_id} to ToDo on tracker: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+      // Surface the reset to the caller so this tick can dispatch the
+      // card immediately as a ToDo. `cards` was snapshotted before the
+      // orphan scan ran, so the caller appends `resetToToDo` to it
+      // before falling through to the dispatch path.
+      resetToToDo.push({ ...ref, status: "ToDo" });
       continue;
     }
 
@@ -648,9 +670,9 @@ async function tryResumeOrphan(
       newDispatchId,
       { resumeSessionId: resolved.sessionId, parentJobId: issue.dispatch_id },
     );
-    return true;
+    return { resumed: true };
   }
-  return false;
+  return { resumed: false, resetToToDo };
 }
 
 /** Directory containing files to inject into target repos. */
@@ -1427,6 +1449,42 @@ async function checkCardProgressedOrHalt(
     // Card moved to In Progress / Needs Help / Done / Cancelled / Review.
     // The dispatch made SOME progress even if it ultimately failed — not
     // an env-level issue. Leave the flag untripped.
+    return;
+  }
+
+  // Legitimately Blocked: the agent decided the card is waiting on
+  // other in-flight work and stamped a `blocked` record on the local
+  // YAML (worker contract `blocked != null` → `status: "ToDo"`). The
+  // tracker reports ToDo, but this is intentional progress, not an
+  // env-level failure. The poller's blocked-card gate handles
+  // re-dispatching once the blocker terminates. Read the local YAML
+  // (the only source of structured `blocked` data — Trello has no
+  // native field) and skip the flag when it's set.
+  //
+  // Ordering invariant: the agent calls `danx_issue_save` (which
+  // synchronously persists the YAML via writeFileSync in the worker's
+  // issue-save handler) BEFORE calling `danxbot_complete`. By the time
+  // the worker fires `onComplete` and we reach this check, the blocked
+  // record is already on disk. No race.
+  //
+  // `findByExternalId` is the only structured reader we have for the
+  // YAML's `blocked` field; tolerate read failures the same way we
+  // tolerate `tracker.getCard` failures above — log and skip the flag
+  // (false-negative, never false-positive).
+  let local;
+  try {
+    local = findByExternalId(repo.localPath, cardId);
+  } catch (err) {
+    log.error(
+      `[${repo.name}] Failed to read local YAML for ${cardId} during post-dispatch check — skipping flag`,
+      err,
+    );
+    return;
+  }
+  if (local?.blocked) {
+    log.info(
+      `[${repo.name}] Tracked card "${card.title}" (${cardId}) intentionally Blocked by ${local.blocked.by.join(", ")} — skipping critical-failure check`,
+    );
     return;
   }
 

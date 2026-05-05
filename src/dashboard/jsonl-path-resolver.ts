@@ -32,8 +32,36 @@ import type { Dispatch } from "./dispatches.js";
  */
 export const DASHBOARD_CLAUDE_PROJECTS_BASE = "/danxbot/app/claude-projects";
 
+/**
+ * Dashboard-internal mount point for host-mode dispatches' JSONL logs.
+ *
+ * Host-mode workers run on the developer's host (not in a container) and
+ * write to the developer's own `~/.claude/projects/` — under encoded
+ * subdirs reflecting the host filesystem layout (e.g.
+ * `-home-newms-web-gpt-manager--danxbot-workspaces-issue-worker/`). Those
+ * subdirs are NOT inside any per-repo `claude-projects/` symlink and are
+ * therefore invisible through `DASHBOARD_CLAUDE_PROJECTS_BASE`.
+ *
+ * `dev-compose-override.ts` mounts the developer's `${HOME}/.claude/projects`
+ * here so `translateHostPath` can rewrite stored host paths into
+ * dashboard-accessible paths.
+ *
+ * Must match `CONTAINER_HOST_CLAUDE_PROJECTS_BASE` in
+ * `src/cli/dev-compose-override.ts`.
+ */
+export const DASHBOARD_HOST_CLAUDE_PROJECTS_BASE =
+  "/danxbot/app/host-claude-projects";
+
 /** Prefix of native worker JSONL paths (worker-internal view). */
 const WORKER_PROJECTS_PREFIX = "/home/danxbot/.claude/projects/";
+
+/**
+ * Match `<anything>/.claude/projects/<rest>` and capture `<rest>`. Used to
+ * translate host-mode JSONL paths regardless of which user `~` resolves to
+ * — the dashboard container does NOT know the developer's host username,
+ * so we anchor on the structural `/.claude/projects/` segment instead.
+ */
+const HOST_PROJECTS_RE = /\/\.claude\/projects\/(.+)$/;
 
 /**
  * Enumerate plausible dashboard JSONL paths for a dispatch by scanning
@@ -80,23 +108,65 @@ export function translateWorkerPath(
 }
 
 /**
+ * Translate a host-mode JSONL path (anywhere under `<some-home>/.claude/projects/`)
+ * to the dashboard-accessible mount at `DASHBOARD_HOST_CLAUDE_PROJECTS_BASE`.
+ *
+ * Returns `null` when the path does not contain the structural
+ * `/.claude/projects/` segment (e.g. malformed paths). The dashboard
+ * container does NOT know the developer's host username, so we anchor
+ * on the literal segment rather than `${HOME}`.
+ *
+ * **Order-dependence (CRITICAL):** the regex `HOST_PROJECTS_RE` ALSO
+ * matches the worker-internal prefix `/home/danxbot/.claude/projects/…`
+ * because both layouts share the same `/.claude/projects/<rest>` shape.
+ * Callers MUST try `translateWorkerPath` BEFORE this function — both
+ * `expectedJsonlPath` and `resolveJsonlPath` enforce that order. A
+ * future caller that flips the order silently routes worker paths to
+ * the host-claude-projects mount (where they don't exist) and breaks
+ * the docker-mode dashboard timeline.
+ */
+export function translateHostPath(hostPath: string): string | null {
+  const m = HOST_PROJECTS_RE.exec(hostPath);
+  if (!m) return null;
+  return `${DASHBOARD_HOST_CLAUDE_PROJECTS_BASE}/${m[1]}`;
+}
+
+/**
  * Derive the expected JSONL path without checking filesystem existence.
  * Used by `handleStream` in `stream-routes.ts` to pre-validate
  * `dispatch:jsonl:<id>` topics even before the agent has created the file
  * (the per-topic watcher retries until the file appears).
  *
  * Resolution order:
- *  1. If `jsonlPath` is a worker-internal path → translate it.
- *  2. If `jsonlPath` is some other path (host-mode) → return as-is.
- *  3. If only `sessionUuid` is known → compute deterministically.
- *  4. Otherwise → null.
+ *  1. If `jsonlPath` is a worker-internal path → translate it to the
+ *     per-repo dashboard mount.
+ *  2. If `jsonlPath` is a host-mode path (`<host_home>/.claude/projects/...`)
+ *     → translate it to the host-claude-projects dashboard mount.
+ *  3. If `jsonlPath` is some other path → return as-is. Note this
+ *     return is only statable when the dashboard runs on the host
+ *     (e.g. `make launch-dashboard-host`); a containerized dashboard
+ *     receiving an arbitrary host absolute path will fail to read it.
+ *  4. If only `sessionUuid` is known → compute deterministically from
+ *     the per-workspace candidate scan.
+ *  5. Otherwise → null.
+ *
+ * Lockstep with `resolveJsonlPath`: both functions try worker-translate
+ * before host-translate (see `translateHostPath` order-dependence note).
+ * A divergence in branch order would silently break the SSE pre-validation
+ * path that consumes `expectedJsonlPath`.
  */
 export function expectedJsonlPath(
   dispatch: Pick<Dispatch, "jsonlPath" | "sessionUuid" | "repoName">,
 ): string | null {
   if (dispatch.jsonlPath) {
-    const translated = translateWorkerPath(dispatch.jsonlPath, dispatch.repoName);
-    return translated ?? dispatch.jsonlPath;
+    const workerTranslated = translateWorkerPath(
+      dispatch.jsonlPath,
+      dispatch.repoName,
+    );
+    if (workerTranslated) return workerTranslated;
+    const hostTranslated = translateHostPath(dispatch.jsonlPath);
+    if (hostTranslated) return hostTranslated;
+    return dispatch.jsonlPath;
   }
   if (dispatch.sessionUuid) {
     const [first] = dashboardJsonlCandidates(
@@ -140,12 +210,31 @@ export async function resolveJsonlPath(
   existsFn: (p: string) => Promise<boolean> = defaultExists,
 ): Promise<string | null> {
   if (dispatch.jsonlPath) {
-    // Strategy 1: stored path directly (host-mode)
+    // Strategy 1: stored path directly (host-mode dashboard hits this when
+    // the dashboard runs on the host alongside the worker — the path the
+    // worker recorded is identical to the path the dashboard can `stat`).
+    // Lockstep with `expectedJsonlPath` step 3: both functions return the
+    // raw path when neither translator matches and the path is reachable.
     if (await existsFn(dispatch.jsonlPath)) return dispatch.jsonlPath;
 
     // Strategy 2: translate worker path to per-repo dashboard mount
-    const translated = translateWorkerPath(dispatch.jsonlPath, dispatch.repoName);
-    if (translated && (await existsFn(translated))) return translated;
+    // (docker-mode worker, dashboard reads via per-repo claude-projects bind).
+    const workerTranslated = translateWorkerPath(
+      dispatch.jsonlPath,
+      dispatch.repoName,
+    );
+    if (workerTranslated && (await existsFn(workerTranslated))) {
+      return workerTranslated;
+    }
+
+    // Strategy 2b: translate host-mode path to host-claude-projects mount
+    // (host-mode worker writes to the developer's `~/.claude/projects/`,
+    // docker-mode dashboard reads via the single `${HOME}/.claude/projects`
+    // bind installed by `dev-compose-override.ts`).
+    const hostTranslated = translateHostPath(dispatch.jsonlPath);
+    if (hostTranslated && (await existsFn(hostTranslated))) {
+      return hostTranslated;
+    }
   }
 
   // Strategy 3: enumerate plausible per-workspace paths from sessionUuid

@@ -47,6 +47,27 @@ import { loadTarget } from "../target.js";
 export const OVERRIDE_FILENAME = "docker-compose.override.yml";
 const CONTAINER_REPOS_BASE = "/danxbot/app/repos";
 const CONTAINER_CLAUDE_PROJECTS_BASE = "/danxbot/app/claude-projects";
+/**
+ * Single shared mount for host-mode dispatches' JSONL session logs.
+ *
+ * Host-mode workers run on the developer's host (not inside a container),
+ * so claude writes session logs to the developer's `~/.claude/projects/`
+ * — under encoded-cwd subdirs that match the host filesystem layout
+ * (e.g. `-home-newms-web-gpt-manager--danxbot-workspaces-issue-worker/`).
+ * Those subdirs are NOT inside any per-repo `claude-projects/` symlink
+ * (which only contains the docker worker's encoded paths under
+ * `/danxbot/app/repos/<name>/...`), so a docker-mode dashboard cannot
+ * find them via the per-repo `claude-projects` mount.
+ *
+ * This single mount surfaces the developer's whole `~/.claude/projects/`
+ * tree to the dashboard at a fixed dashboard-internal path. Dispatched
+ * jsonl paths get translated by `translateHostPath` in
+ * `src/dashboard/jsonl-path-resolver.ts`.
+ *
+ * Dev-only: prod uses `docker-compose.prod.yml` which does not include
+ * this override. Host-mode is a dev-only runtime.
+ */
+const CONTAINER_HOST_CLAUDE_PROJECTS_BASE = "/danxbot/app/host-claude-projects";
 
 /**
  * Map a repo name to the env var that `make launch-infra` exports with
@@ -119,6 +140,22 @@ export function buildOverride(repoNames: string[]): string {
     return `      - \${${v}:-./repos/${name}}/claude-projects:${CONTAINER_CLAUDE_PROJECTS_BASE}/${name}:ro`;
   });
 
+  // Single RO bind for host-mode dispatches' JSONL logs. Host-mode
+  // workers write to the developer's `~/.claude/projects/` (the
+  // host's HOME), under encoded-cwd subdirs that don't appear under
+  // any repo's `claude-projects/` symlink. `${HOME}` is interpolated
+  // by docker compose at parse time from the launching shell.
+  //
+  // No `:-` fallback: a missing/empty HOME would silently bind a
+  // wrong directory (`/.claude/projects` or a relative path) and
+  // produce empty host-mode timelines with no visible error — the
+  // exact silent-fallback pattern the code-quality rule forbids.
+  // Compose will fail loudly with an interpolation error instead,
+  // which is the right behavior. `make launch-infra` always runs in
+  // a user shell where HOME is set.
+  const hostProjectsBind =
+    `      - \${HOME}/.claude/projects:${CONTAINER_HOST_CLAUDE_PROJECTS_BASE}:ro`;
+
   return [
     ...header,
     "services:",
@@ -126,6 +163,7 @@ export function buildOverride(repoNames: string[]): string {
     "    volumes:",
     ...repoBinds,
     ...projectsBinds,
+    hostProjectsBind,
     "",
   ].join("\n");
 }

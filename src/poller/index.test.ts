@@ -1575,6 +1575,12 @@ describe("poll — post-dispatch card-progress check", () => {
     mockReadFlag.mockReturnValue(null);
     mockIsFeatureEnabled.mockReturnValue(true);
     mockDispatch.mockResolvedValue({ id: "test-job", status: "running" });
+    // The post-dispatch check now reads the local YAML to detect
+    // intentional `blocked` records (regression for the false-positive
+    // critical-failure trip). Reset between tests so per-test
+    // implementations don't leak forward.
+    mockFindByExternalId.mockReset();
+    mockFindByExternalId.mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -1755,6 +1761,131 @@ describe("poll — post-dispatch card-progress check", () => {
     await flushAsync();
 
     expect(mockTracker.getCard).not.toHaveBeenCalled();
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("does NOT write the flag when the tracked card is in ToDo because the agent intentionally Blocked it (local YAML has blocked record)", async () => {
+    // Regression for the false-positive critical-failure trip that
+    // happened when an epic's agent legitimately set
+    // `blocked: { by: ["ISS-X"] }` on the local YAML and saved. The
+    // worker's issue-save handler enforces `blocked != null →
+    // status: "ToDo"` (`forceBlockedToToDo`), so the tracker still
+    // shows ToDo after the dispatch — but this is intentional
+    // progress, not an env-level blocker. The post-dispatch check
+    // must read the local YAML and treat a non-null `blocked` field
+    // as legitimate.
+    //
+    // Bug timeline: dispatch starts (YAML has blocked: null, card
+    // dispatches normally) → agent runs and sets blocked → save →
+    // dispatch ends → post-dispatch check fetches the card (still
+    // ToDo on tracker because forceBlockedToToDo) → BEFORE the fix,
+    // the check would write the critical-failure flag because it
+    // only looked at tracker status. AFTER the fix, the check also
+    // reads the local YAML and skips the flag when blocked is set.
+    mockTracker.getCard.mockResolvedValue(
+      issueWithStatus("c1", "Epic card", "ToDo"),
+    );
+    // First call (during primary dispatch in `poll`): YAML's blocked
+    // is null, so the card dispatches normally. Post-dispatch check
+    // calls findByExternalId AGAIN — by then the agent has saved a
+    // blocked record. Two-stage mock simulates that mid-dispatch
+    // mutation.
+    let blockedSet = false;
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) => {
+        if (externalId !== "c1") return null;
+        return blockedSet
+          ? {
+              ...issueWithStatus("c1", "Epic card", "ToDo"),
+              blocked: {
+                reason: "Waiting on ISS-20 to resolve AC #11",
+                timestamp: "2026-05-04T23:48:59.000Z",
+                by: ["ISS-20"],
+              },
+            }
+          : null;
+      },
+    );
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("c1", "Epic card", "ToDo"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+    // Simulate the agent saving a blocked record mid-dispatch.
+    blockedSet = true;
+
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!({
+      id: "j1",
+      status: "completed",
+      summary: "Set blocked.by=[ISS-20]",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+    await flushAsync();
+
+    expect(mockTracker.getCard).toHaveBeenCalledWith("c1");
+    expect(mockFindByExternalId).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.localPath,
+      "c1",
+    );
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("does NOT write the flag when findByExternalId throws during the post-dispatch check (tolerate read failure same as getCard failure)", async () => {
+    // Symmetric tolerance with the `getCard` failure path: if the
+    // local YAML read throws (corrupt file, permissions, race with a
+    // concurrent writer), prefer a false-negative (no flag) over a
+    // false-positive (halt the poller). The check returns early
+    // without writing the flag.
+    mockTracker.getCard.mockResolvedValue(
+      issueWithStatus("c1", "Card 1", "ToDo"),
+    );
+    let blockedCheckFire = false;
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) => {
+        if (externalId !== "c1") return null;
+        // Primary dispatch path (1st call) returns null → triggers
+        // hydrateFromRemote. Post-dispatch check (2nd call) throws.
+        if (!blockedCheckFire) return null;
+        throw new Error("Disk read failure");
+      },
+    );
+
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("c1", "Card 1", "ToDo"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+    blockedCheckFire = true;
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!({
+      id: "j1",
+      status: "failed",
+      summary: "crash",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+    await flushAsync();
+
+    expect(mockTracker.getCard).toHaveBeenCalledWith("c1");
     expect(mockWriteFlag).not.toHaveBeenCalled();
   });
 
@@ -3090,7 +3221,16 @@ describe("poll — In Progress sync + orphan resume", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("resets In Progress → ToDo when the dispatch_id session file is gone (not-found)", async () => {
+  it("resets In Progress → ToDo when the dispatch_id session file is gone, AND dispatches the reset card on the same tick (no resume)", async () => {
+    // Regression for the bug where the orphan-reset path mutated the
+    // card's status mid-tick but the `cards` snapshot taken at the
+    // top of `tickRepo` was already captured pre-reset — leaving the
+    // newly-ToDo card invisible to this tick's dispatch path. The
+    // poller would log "resetting to ToDo" + "No cards in ToDo" on
+    // the SAME tick and then wait a full poll interval before
+    // picking up the card. The fix returns reset refs from
+    // `tryResumeOrphan` so `tickRepo` can append them to `cards`
+    // before falling through.
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("ip-gone", "Gone card", "In Progress"),
     ]);
@@ -3114,8 +3254,91 @@ describe("poll — In Progress sync + orphan resume", () => {
     };
     expect(resetIssue.status).toBe("ToDo");
     expect(resetIssue.dispatch_id).toBeNull();
-    // No resume dispatch fired.
-    expect(mockDispatch).not.toHaveBeenCalled();
+    // The reset card is dispatched on the SAME tick as a fresh ToDo
+    // (no resume — the parent session is gone). Single dispatch
+    // invariant preserved (only one card was eligible).
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as {
+      parentJobId?: string;
+      resumeSessionId?: string;
+      apiDispatchMeta: { metadata: { cardId: string; listName: string } };
+    };
+    expect(arg.parentJobId).toBeUndefined();
+    expect(arg.resumeSessionId).toBeUndefined();
+    expect(arg.apiDispatchMeta.metadata.cardId).toBe("ip-gone");
+    // Dispatch metadata reports listName=ToDo (post-reset) — the
+    // orphan came from In Progress but is now being dispatched as
+    // ToDo, so the trigger metadata reflects ToDo.
+    expect(arg.apiDispatchMeta.metadata.listName).toBe("ToDo");
+  });
+
+  it("surfaces the reset card to the dispatch pool even when tracker.moveToStatus fails (lone-orphan path, no resumable follower)", async () => {
+    // Existing "tolerates a moveToStatus failure" test exercises the
+    // failure path with a SECOND orphan that resumes — the resume's
+    // `resumed: true` short-circuit drops `resetToToDo`, so that test
+    // doesn't actually pin the post-fix behavior. Cover the lone-orphan
+    // path here: tracker rejects, no second orphan, the reset card
+    // STILL gets dispatched on this tick (proves the resetToToDo push
+    // runs after the try/catch, not inside the try block).
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-lonely", "Lonely orphan", "In Progress"),
+    ]);
+    const orphan = inProgressIssue("ISS-100", "ip-lonely", "vanished-uuid");
+    mockFindByExternalId.mockReturnValue(orphan);
+    mockResolveParentSessionId.mockResolvedValue({ kind: "not-found" });
+    mockTracker.moveToStatus.mockRejectedValueOnce(
+      new Error("Tracker network error"),
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Local YAML reset persisted despite tracker failure.
+    const reset = mockWriteIssueFn.mock.calls.find((c) => {
+      const issue = c[1] as { external_id?: string; status?: string };
+      return issue?.external_id === "ip-lonely" && issue.status === "ToDo";
+    });
+    expect(reset).toBeDefined();
+    // Reset card dispatched same tick as a fresh ToDo (the regression
+    // anchor: a moveToStatus throw must NOT bypass the resetToToDo
+    // push that surfaces the card to the caller).
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as {
+      apiDispatchMeta: { metadata: { cardId: string } };
+      parentJobId?: string;
+    };
+    expect(arg.apiDispatchMeta.metadata.cardId).toBe("ip-lonely");
+    expect(arg.parentJobId).toBeUndefined();
+  });
+
+  it("dispatches a single card on a tick where one orphan was reset to ToDo and another card already lived in ToDo (single-dispatch invariant)", async () => {
+    // Multi-card scenario for the bug-#1 fix: a vanished orphan resets
+    // to ToDo on the same tick a fresh ToDo card was already eligible.
+    // Both end up in `cards`, but the single-dispatch invariant means
+    // only the FIRST (the pre-existing ToDo card) dispatches; the
+    // newly-reset orphan waits for the next tick. This pins the
+    // ordering: orphan-reset refs are appended AFTER the ToDo
+    // snapshot, so existing ToDo cards still win pickup.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("td-pre", "Pre-existing ToDo", "ToDo"),
+      ref("ip-gone", "Vanished orphan", "In Progress"),
+    ]);
+    const orphan = inProgressIssue("ISS-101", "ip-gone", "vanished-uuid");
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-gone" ? orphan : null,
+    );
+    mockResolveParentSessionId.mockResolvedValue({ kind: "not-found" });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Orphan was reset on tracker + locally.
+    expect(mockTracker.moveToStatus).toHaveBeenCalledWith("ip-gone", "ToDo");
+    // Exactly one dispatch; the primary is the pre-existing ToDo card.
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as {
+      apiDispatchMeta: { metadata: { cardId: string } };
+    };
+    expect(arg.apiDispatchMeta.metadata.cardId).toBe("td-pre");
   });
 
   it("resumes only the first eligible orphan; remaining orphans wait for next tick", async () => {

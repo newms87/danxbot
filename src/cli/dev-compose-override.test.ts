@@ -34,6 +34,33 @@ describe("buildOverride", () => {
     );
   });
 
+  it("emits a single RO host-claude-projects bind from ${HOME}/.claude/projects (no fallback — silent fallback rule)", () => {
+    // Host-mode dispatches write JSONL to the developer's
+    // `~/.claude/projects/`. The dashboard container can only see those
+    // paths through this single shared mount. `${HOME}` is interpolated
+    // by docker compose at parse time from the launching shell.
+    //
+    // No `:-` fallback: a missing HOME would silently bind a wrong
+    // directory and produce empty host-mode timelines. Compose must
+    // fail loudly. Must match `DASHBOARD_HOST_CLAUDE_PROJECTS_BASE` in
+    // src/dashboard/jsonl-path-resolver.ts.
+    const out = buildOverride(["danxbot"]);
+    expect(out).toContain(
+      "      - ${HOME}/.claude/projects:/danxbot/app/host-claude-projects:ro",
+    );
+    // Specifically: NO `${HOME:-...}` fallback form.
+    expect(out).not.toMatch(/\$\{HOME:-/);
+  });
+
+  it("emits the host-claude-projects bind exactly once even with multiple repos", () => {
+    // The host mount is shared across all repos (one developer, one
+    // ~/.claude/projects/). Per-repo iteration must NOT duplicate it.
+    const out = buildOverride(["danxbot", "gpt-manager", "platform"]);
+    const matches = out.match(/\/danxbot\/app\/host-claude-projects:ro/g);
+    expect(matches).not.toBeNull();
+    expect(matches!.length).toBe(1);
+  });
+
   it("emits one RO claude-projects bind per repo, also parameterized by the same var", () => {
     // Same env-var indirection on the claude-projects sub-path — the
     // symlink trap affects any bind whose source descends through a
