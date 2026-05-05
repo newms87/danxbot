@@ -23,7 +23,7 @@ A new gitignored file at `<repo>/.danxbot/settings.json` holds per-repo operatio
 {
   "overrides": {
     "slack":        { "enabled": true | false | null },
-    "trelloPoller": { "enabled": true | false | null },
+    "issuePoller": { "enabled": true | false | null },
     "dispatchApi":  { "enabled": true | false | null }
   },
   "display": {
@@ -69,7 +69,7 @@ A new module `src/dashboard/agents-routes.ts` exposes three routes on the existi
 |-------|--------|------|----------|
 | `/api/agents` | `GET` | open (parity with existing `/api/dispatches`) | Aggregates per-repo state: reads each repo's `settings.json`, joins dispatch counts from the `dispatches` MySQL table (total / 24h / today, broken out by trigger), probes each worker's `/health` endpoint with a 2-second timeout. Returns an array ordered by `REPOS` env var. |
 | `/api/agents/:repo` | `GET` | open | Same shape, single repo. Used by the SPA after a toggle round-trip to refresh one card without re-fetching all. |
-| `/api/agents/:repo/toggles` | `PATCH` | bearer (`DANXBOT_DISPATCH_TOKEN` via existing `checkAuth`) | Body `{feature: "slack" \| "trelloPoller" \| "dispatchApi", enabled: true \| false \| null}`. Validates shape, rewrites only `overrides.<feature>` + `meta` — never touches `display`. Responds with the refreshed aggregated record for the repo. |
+| `/api/agents/:repo/toggles` | `PATCH` | bearer (`DANXBOT_DISPATCH_TOKEN` via existing `checkAuth`) | Body `{feature: "slack" \| "issuePoller" \| "dispatchApi", enabled: true \| false \| null}`. Validates shape, rewrites only `overrides.<feature>` + `meta` — never touches `display`. Responds with the refreshed aggregated record for the repo. |
 
 Worker health probing uses the existing `workerHost(repoName)` from `dispatch-proxy.ts` plus the `workerPort` on `RepoConfig`. Unreachable workers return `{worker: {reachable: false, lastSeenMs: null}}` so the UI can render a red pill without breaking the page. The route file contains no secrets and never reads `.env`.
 

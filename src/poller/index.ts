@@ -52,7 +52,7 @@ import { isLinkOrFile, isSymlink } from "./fs-probe.js";
 import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext } from "../types.js";
 import {
-  getTrelloPollerPickupPrefix,
+  getIssuePollerPickupPrefix,
   isFeatureEnabled,
 } from "../settings-file.js";
 import { readFlag, writeFlag } from "../critical-failure.js";
@@ -198,7 +198,7 @@ export async function poll(repo: RepoContext): Promise<void> {
   // via the settings file, skip the tick entirely. Checked per-tick so
   // operators can toggle without a worker restart. See
   // `.claude/rules/settings-file.md`.
-  if (!isFeatureEnabled(repo, "trelloPoller")) {
+  if (!isFeatureEnabled(repo, "issuePoller")) {
     log.info(`[${repo.name}] poller disabled via settings — skipping`);
     return;
   }
@@ -359,7 +359,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   // id prefix from card names, so `[System Test] foo` still matches the
   // operator-configured prefix `[System Test]` regardless of whether the
   // card has been reconciled with a local YAML.
-  const pickupPrefix = getTrelloPollerPickupPrefix(repo.localPath);
+  const pickupPrefix = getIssuePollerPickupPrefix(repo.localPath);
   if (pickupPrefix) {
     const before = cards.length;
     cards = cards.filter((c) => c.title.startsWith(pickupPrefix));
@@ -1697,7 +1697,7 @@ export function start(): void {
   }
 
   // Every repo gets a polling interval scheduled regardless of the env
-  // default — the per-tick `isFeatureEnabled(repo, "trelloPoller")` check
+  // default — the per-tick `isFeatureEnabled(repo, "issuePoller")` check
   // in `poll()` honors runtime overrides from `.danxbot/settings.json`, so
   // boot-time skipping would defeat the toggle. Boot-time validation only
   // runs when the env default says Trello is supposed to be on; a repo

@@ -21,7 +21,7 @@ const mockWriteSettings = vi.fn();
 vi.mock("../settings-file.js", () => ({
   readSettings: (...args: unknown[]) => mockReadSettings(...args),
   writeSettings: (...args: unknown[]) => mockWriteSettings(...args),
-  FEATURES: ["slack", "trelloPoller", "dispatchApi", "ideator"],
+  FEATURES: ["slack", "issuePoller", "dispatchApi", "ideator"],
   DASHBOARD_PREFIX: "dashboard:",
 }));
 
@@ -157,7 +157,7 @@ describe("handleClearAgentCriticalFailure", () => {
 function settings(
   overrides?: Partial<{
     slack: boolean | null;
-    trelloPoller: boolean | null;
+    issuePoller: boolean | null;
     dispatchApi: boolean | null;
     ideator: boolean | null;
   }>,
@@ -165,7 +165,7 @@ function settings(
   return {
     overrides: {
       slack: { enabled: overrides?.slack ?? null },
-      trelloPoller: { enabled: overrides?.trelloPoller ?? null },
+      issuePoller: { enabled: overrides?.issuePoller ?? null },
       dispatchApi: { enabled: overrides?.dispatchApi ?? null },
       ideator: { enabled: overrides?.ideator ?? null },
     },
@@ -532,7 +532,7 @@ describe("handlePatchToggle", () => {
   it("accepts enabled: null as an explicit 'defer to env default'", async () => {
     mockWriteSettings.mockResolvedValue(settings());
 
-    const req = authReq({ feature: "trelloPoller", enabled: null });
+    const req = authReq({ feature: "issuePoller", enabled: null });
     const res = createMockRes();
     await handlePatchToggle(req, res, "danxbot", deps());
 
@@ -540,9 +540,20 @@ describe("handlePatchToggle", () => {
     expect(mockWriteSettings).toHaveBeenCalledWith(
       "/repos/danxbot",
       expect.objectContaining({
-        overrides: { trelloPoller: { enabled: null } },
+        overrides: { issuePoller: { enabled: null } },
       }),
     );
+  });
+
+  it("rejects the legacy `trelloPoller` feature key (post-rename canonical is issuePoller)", async () => {
+    // Pin behaviour: the route accepts only the canonical Feature union
+    // (issuePoller). The read-side legacy fallback in normalize() is for
+    // disk migration only — operator PATCHes always use the new key.
+    const req = authReq({ feature: "trelloPoller", enabled: true });
+    const res = createMockRes();
+    await handlePatchToggle(req, res, "danxbot", deps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
   });
 
   it("returns 500 when writeSettings throws", async () => {

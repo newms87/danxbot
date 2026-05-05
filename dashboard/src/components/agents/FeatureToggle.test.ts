@@ -31,7 +31,7 @@ describe("FeatureToggle", () => {
   it("falls back to env default when override is null and shows a '(default)' hint", () => {
     const w = mount(FeatureToggle, {
       props: {
-        feature: "trelloPoller",
+        feature: "issuePoller",
         label: "Trello poller",
         enabled: null,
         envDefault: true,
@@ -61,7 +61,7 @@ describe("FeatureToggle", () => {
   it("cycles null → opposite-of-env-default on click so the flip is visible", async () => {
     const w = mount(FeatureToggle, {
       props: {
-        feature: "trelloPoller",
+        feature: "issuePoller",
         label: "Trello poller",
         enabled: null,
         envDefault: true,
@@ -71,7 +71,7 @@ describe("FeatureToggle", () => {
     await w.get('[role="switch"]').trigger("click");
 
     const events = w.emitted<[string, boolean | null]>("change");
-    expect(events![0]).toEqual(["trelloPoller", false]);
+    expect(events![0]).toEqual(["issuePoller", false]);
   });
 
   it("emits change(feature, null) when the reset button is clicked", async () => {

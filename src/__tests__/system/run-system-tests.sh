@@ -619,13 +619,13 @@ test_poller() {
   # It creates a real card, waits for the poller to process it, and cleans up.
   # Skipped by default since it requires a full environment setup.
   #
-  # Isolation: writes overrides.trelloPoller.pickupNamePrefix into the
+  # Isolation: writes overrides.issuePoller.pickupNamePrefix into the
   # repo's settings.json BEFORE creating the card so the poller only
   # picks up cards starting with the test prefix. Without this filter, a
   # pre-existing real ToDo card (or a stuck in-flight dispatch) races the
   # test card and the 120s pickup deadline expires while the worker is
   # busy with unrelated work. Cleared on every exit path. See Trello
-  # `IleofrBj` and `getTrelloPollerPickupPrefix` in `src/settings-file.ts`.
+  # `IleofrBj` and `getIssuePollerPickupPrefix` in `src/settings-file.ts`.
 
   if [[ -z "${TRELLO_API_KEY:-}" || -z "${TRELLO_API_TOKEN:-}" ]]; then
     skip "Poller test requires TRELLO_API_KEY and TRELLO_API_TOKEN env vars"
@@ -813,7 +813,7 @@ _poller_set_pickup_prefix() {
     let cur = {
       overrides: {
         slack: { enabled: null },
-        trelloPoller: { enabled: null, pickupNamePrefix: null },
+        issuePoller: { enabled: null, pickupNamePrefix: null },
         dispatchApi: { enabled: null },
         ideator: { enabled: null },
       },
@@ -824,9 +824,9 @@ _poller_set_pickup_prefix() {
       try { cur = JSON.parse(fs.readFileSync(path, "utf-8")); } catch {}
     }
     cur.overrides = cur.overrides || {};
-    cur.overrides.trelloPoller = {
-      ...(cur.overrides.trelloPoller || {}),
-      enabled: cur.overrides.trelloPoller?.enabled ?? null,
+    cur.overrides.issuePoller = {
+      ...(cur.overrides.issuePoller || {}),
+      enabled: cur.overrides.issuePoller?.enabled ?? null,
       pickupNamePrefix: prefix,
     };
     cur.meta = { updatedAt: new Date().toISOString(), updatedBy: "setup" };
@@ -851,9 +851,9 @@ _poller_clear_pickup_prefix() {
       process.exit(0);
     }
     cur.overrides = cur.overrides || {};
-    cur.overrides.trelloPoller = {
-      ...(cur.overrides.trelloPoller || {}),
-      enabled: cur.overrides.trelloPoller?.enabled ?? null,
+    cur.overrides.issuePoller = {
+      ...(cur.overrides.issuePoller || {}),
+      enabled: cur.overrides.issuePoller?.enabled ?? null,
       pickupNamePrefix: null,
     };
     cur.meta = { updatedAt: new Date().toISOString(), updatedBy: "setup" };

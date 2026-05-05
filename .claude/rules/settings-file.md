@@ -3,7 +3,7 @@
 The per-repo operational state lives at `<repo>/.danxbot/settings.json`.
 This file is the single source of truth for:
 
-- **Feature toggles** (`overrides.slack`, `overrides.trelloPoller`,
+- **Feature toggles** (`overrides.slack`, `overrides.issuePoller`,
   `overrides.dispatchApi`, `overrides.ideator`, `overrides.autoTriage`)
   — three-valued (`true` / `false` / `null`). `null` means "defer to
   the env default on `RepoContext`". `true` / `false` are explicit
@@ -96,7 +96,7 @@ of the config, no duplicated display-building logic.
 {
   "overrides": {
     "slack":        { "enabled": true | false | null },
-    "trelloPoller": {
+    "issuePoller": {
       "enabled":          true | false | null,
       // Optional. When set as a non-empty string, the poller only
       // dispatches ToDo cards whose name starts with this prefix —
@@ -126,6 +126,18 @@ of the config, no duplicated display-building logic.
   "meta": { "updatedAt": "...", "updatedBy": "dashboard:<username>" | "deploy" | "setup" | "worker" }
 }
 ```
+
+### Legacy `trelloPoller` key migration
+
+Pre-rename settings.json files (deployed boxes that haven't been
+re-written since the rename) carry `overrides.trelloPoller` instead of
+`overrides.issuePoller`. The read-side (`normalize` in
+`src/settings-file.ts`) accepts the legacy key for one release and
+copies its value into the `issuePoller` slot so operator toggles +
+`pickupNamePrefix` survive across the rename. The write-side ALWAYS
+emits `issuePoller`; no code path emits the legacy key. The very next
+`writeSettings` call canonicalizes the file. A follow-up card retires
+the read fallback after one release.
 
 See `src/settings-file.ts` for the canonical TypeScript types and
 `docs/superpowers/specs/2026-04-20-agents-tab-design.md` for the full

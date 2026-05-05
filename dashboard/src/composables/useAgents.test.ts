@@ -70,7 +70,7 @@ function snap(
   name: string,
   overrides: Partial<
     Record<
-      "slack" | "trelloPoller" | "dispatchApi" | "ideator" | "autoTriage",
+      "slack" | "issuePoller" | "dispatchApi" | "ideator" | "autoTriage",
       boolean | null
     >
   > = {},
@@ -81,7 +81,7 @@ function snap(
     settings: {
       overrides: {
         slack: { enabled: overrides.slack ?? null },
-        trelloPoller: { enabled: overrides.trelloPoller ?? null },
+        issuePoller: { enabled: overrides.issuePoller ?? null },
         dispatchApi: { enabled: overrides.dispatchApi ?? null },
         ideator: { enabled: overrides.ideator ?? null },
         autoTriage: { enabled: overrides.autoTriage ?? null },

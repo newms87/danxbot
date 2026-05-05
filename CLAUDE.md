@@ -22,9 +22,11 @@ Slack message → Router (Haiku, ~300ms) → quick reply
                     ↓ (if needsAgent)
                 dispatch() → spawnAgent (Claude CLI) → agent posts reply via danxbot_slack_reply
 
-Trello card    → Poller (per-repo)        → dispatch() → spawnAgent (Claude CLI)
+Local YAML     → Poller (per-repo)        → dispatch() → spawnAgent (Claude CLI)
 HTTP /launch   → Worker dispatch endpoint → dispatch() → spawnAgent (Claude CLI)
 ```
+
+The poller dispatches off `<repo>/.danxbot/issues/open/*.yml` (status: ToDo, blocked: null, list_kind != "action_items"). The Trello tracker is a one-way mirror; the poller never reads Trello to decide what to dispatch. See "Source of Truth" below.
 
 Every dispatched agent (Slack deep-agent, Trello poller, `/api/launch`) takes the same spawned-CLI path. The Slack listener posts the initial "thinking" placeholder, then the dispatched agent itself writes the final reply by calling the `danxbot_slack_reply` MCP tool — a worker HTTP endpoint routes the payload back to the bolt client for the originating repo.
 
@@ -33,7 +35,7 @@ Every dispatched agent (Slack deep-agent, Trello poller, `/api/launch`) takes th
 | Router | `src/agent/router.ts` | Anthropic SDK call to Haiku for instant Slack triage |
 | Dispatch core | `src/dispatch/core.ts` (`dispatch`) | Unified dispatch — MCP resolution, spawnAgent, stall recovery, activeJobs |
 | Launcher | `src/agent/launcher.ts` (`spawnAgent`) | Single entry point for every dispatched Claude CLI process |
-| Poller | `src/poller/index.ts` | Per-repo Trello tick loop. State is in-memory (`state.teamRunning`, `state.polling`) — no on-disk lock files. |
+| Poller | `src/poller/index.ts` | Per-repo tick loop. Reads local YAML for dispatch decisions. Mirrors YAML state to Trello + pulls new tracker-born cards and human comments inbound. State is in-memory (`state.teamRunning`, `state.polling`) — no on-disk lock files. |
 | Slack listener | `src/slack/listener.ts` | One `@slack/bolt` App per Slack-enabled repo; calls `dispatch()` for deep-agent replies |
 | Dashboard API | `src/dashboard/server.ts` | REST + SSE on port 5555 |
 | Dashboard SPA | `dashboard/` | Vite + Vue 3 + Tailwind 4 |
@@ -87,7 +89,7 @@ Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller sy
 
 ### Per-Repo Feature Toggles
 
-Three runtime toggles per repo (Slack / Trello poller / Dispatch API) live at `<repo>/.danxbot/settings.json` — three-valued (`true` / `false` / `null` defers to env default). Workers re-read on every event so toggles take effect with no restart. Operator overrides survive every redeploy. Full ownership contract + schema: `.claude/rules/settings-file.md`. Spec: `docs/superpowers/specs/2026-04-20-agents-tab-design.md`.
+Three runtime toggles per repo (Slack / Issue poller / Dispatch API) live at `<repo>/.danxbot/settings.json` — three-valued (`true` / `false` / `null` defers to env default). Workers re-read on every event so toggles take effect with no restart. Operator overrides survive every redeploy. Full ownership contract + schema: `.claude/rules/settings-file.md`. Spec: `docs/superpowers/specs/2026-04-20-agents-tab-design.md`.
 
 ## External Dispatch API (Production)
 
@@ -196,6 +198,14 @@ The main session is the orchestrator. Subagents are launched via Task with `mode
 | Validator | `.claude/agents/validator.md` | Real Claude API validation tests |
 | Test Reviewer | `.claude/agents/test-reviewer.md` | Audits test coverage (read-only) |
 | Code Reviewer | `.claude/agents/code-reviewer.md` | Reviews code quality (read-only) |
+
+### Source of Truth
+
+**Local YAML at `<repo>/.danxbot/issues/{open,closed}/<id>.yml` is the single source of truth for every issue.** The poller's dispatch decisions read local YAML. The danxbot agent path reads + writes local YAML.
+
+The backend tracker (Trello) is a **one-way mirror** with two narrow inbound exceptions: (a) new cards created on the tracker get hydrated into a fresh YAML on the next tick, and (b) human-authored comments on the tracker get pulled into the YAML's `comments[]`. Everything else inbound is ignored — a human dragging a card between lists, ticking an AC checkbox, or editing the title on Trello has no effect on the local YAML; the next tick re-asserts YAML state. Tracker = view + comment surface, not an editing surface for card structure.
+
+Outbound (every tick): every YAML field — title, description, status, AC, phases, labels, comments, blocked record — is pushed to the tracker so humans see current state.
 
 ### Trello Board
 

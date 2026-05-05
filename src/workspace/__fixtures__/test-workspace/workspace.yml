@@ -7,4 +7,4 @@ required-placeholders:
 optional-placeholders:
   - TEST_OPTIONAL_FLAG
 required-gates:
-  - "settings.trelloPoller.enabled ≠ false"
+  - "settings.issuePoller.enabled ≠ false"

@@ -353,7 +353,7 @@ describe("dispatch() — slack-worker integration", () => {
       JSON.stringify({
         overrides: {
           slack: { enabled: false },
-          trelloPoller: { enabled: null },
+          issuePoller: { enabled: null },
           dispatchApi: { enabled: null },
         },
         display: {},

@@ -18,13 +18,13 @@ defineEmits<{
 
 // The env default each feature falls back to when the override is null.
 // For slack, configured === slack.enabled on the backend. For
-// trelloPoller, `display.trello.configured` is a good proxy; for
+// issuePoller, `display.trello.configured` is a good proxy; for
 // dispatchApi the default is always true; for ideator and autoTriage
 // the default is false (explicit opt-in — see
 // `src/settings-file.ts#envDefault`).
 const envDefaults = computed<Record<Feature, boolean>>(() => ({
   slack: !!props.agent.settings.display.slack?.configured,
-  trelloPoller: !!props.agent.settings.display.trello?.configured,
+  issuePoller: !!props.agent.settings.display.trello?.configured,
   dispatchApi: true,
   ideator: false,
   autoTriage: false,
@@ -131,12 +131,12 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
       />
       <FeatureToggle
-        feature="trelloPoller"
-        label="Trello poller"
-        :enabled="agent.settings.overrides.trelloPoller.enabled"
-        :env-default="envDefaults.trelloPoller"
+        feature="issuePoller"
+        label="Issue poller"
+        :enabled="agent.settings.overrides.issuePoller.enabled"
+        :env-default="envDefaults.issuePoller"
         :subline="trelloSub"
-        :busy="busyFeature === 'trelloPoller'"
+        :busy="busyFeature === 'issuePoller'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
       />
       <FeatureToggle

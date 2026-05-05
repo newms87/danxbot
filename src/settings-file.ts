@@ -1,7 +1,7 @@
 /**
  * Per-repo settings file at `<repo>/.danxbot/settings.json`.
  *
- * Source of truth for runtime feature toggles (Slack / Trello poller /
+ * Source of truth for runtime feature toggles (Slack / issue poller /
  * dispatch API) and masked-config mirrors the dashboard displays. Full
  * design in `docs/superpowers/specs/2026-04-20-agents-tab-design.md` and
  * `.claude/rules/settings-file.md`.
@@ -44,14 +44,14 @@ const log = createLogger("settings-file");
 
 export type Feature =
   | "slack"
-  | "trelloPoller"
+  | "issuePoller"
   | "dispatchApi"
   | "ideator"
   | "autoTriage";
 
 export const FEATURES: readonly Feature[] = [
   "slack",
-  "trelloPoller",
+  "issuePoller",
   "dispatchApi",
   "ideator",
   "autoTriage",
@@ -77,23 +77,23 @@ export interface FeatureOverride {
 }
 
 /**
- * Trello-poller-specific override carrying both the standard `enabled`
+ * Issue-poller-specific override carrying both the standard `enabled`
  * toggle and the optional `pickupNamePrefix` filter. When the prefix is
  * a non-empty string, the poller only picks up ToDo cards whose name
  * starts with it — used for system-test isolation so a fixture card
  * doesn't race real ToDo cards. `null`/missing means "no filter".
  *
- * Lives on the `trelloPoller` slot of `SettingsOverrides` so the rest
+ * Lives on the `issuePoller` slot of `SettingsOverrides` so the rest
  * of the override surface stays a flat enabled-toggle. See
  * `.claude/rules/settings-file.md` for the full schema contract.
  */
-export interface TrelloPollerOverride extends FeatureOverride {
+export interface IssuePollerOverride extends FeatureOverride {
   pickupNamePrefix?: string | null;
 }
 
 export interface SettingsOverrides {
   slack: FeatureOverride;
-  trelloPoller: TrelloPollerOverride;
+  issuePoller: IssuePollerOverride;
   dispatchApi: FeatureOverride;
   ideator: FeatureOverride;
   autoTriage: FeatureOverride;
@@ -131,7 +131,7 @@ export interface Settings {
 
 export interface WriteSettingsPatchOverrides {
   slack?: FeatureOverride;
-  trelloPoller?: TrelloPollerOverride;
+  issuePoller?: IssuePollerOverride;
   dispatchApi?: FeatureOverride;
   ideator?: FeatureOverride;
   autoTriage?: FeatureOverride;
@@ -156,7 +156,7 @@ export function defaultSettings(): Settings {
   return {
     overrides: {
       slack: { enabled: null },
-      trelloPoller: { enabled: null, pickupNamePrefix: null },
+      issuePoller: { enabled: null, pickupNamePrefix: null },
       dispatchApi: { enabled: null },
       ideator: { enabled: null },
       autoTriage: { enabled: null },
@@ -222,7 +222,7 @@ function normalizePickupNamePrefix(raw: unknown): string | null {
   return raw;
 }
 
-function normalizeTrelloPollerOverride(raw: unknown): TrelloPollerOverride {
+function normalizeIssuePollerOverride(raw: unknown): IssuePollerOverride {
   const base = normalizeOverride(raw);
   let pickupNamePrefix: string | null = null;
   if (raw && typeof raw === "object" && "pickupNamePrefix" in raw) {
@@ -248,8 +248,17 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
   return {
     overrides: {
       slack: normalizeOverride(partial.overrides?.slack),
-      trelloPoller: normalizeTrelloPollerOverride(
-        partial.overrides?.trelloPoller,
+      // Legacy-key migration: pre-rename settings.json files carry
+      // `overrides.trelloPoller`. Read it as a fallback when the new
+      // `issuePoller` slot is absent so deployed boxes keep their
+      // operator toggles + pickupNamePrefix across the rename. Write-
+      // side never emits the legacy key, so the next write
+      // canonicalizes the file. Retire the fallback in a follow-up
+      // card after one release.
+      issuePoller: normalizeIssuePollerOverride(
+        partial.overrides?.issuePoller ??
+          (partial.overrides as { trelloPoller?: unknown } | undefined)
+            ?.trelloPoller,
       ),
       dispatchApi: normalizeOverride(partial.overrides?.dispatchApi),
       ideator: normalizeOverride(partial.overrides?.ideator),
@@ -338,8 +347,8 @@ async function runWrite(
     const merged: Settings = {
       overrides: {
         slack: patch.overrides?.slack ?? existing.overrides.slack,
-        trelloPoller:
-          patch.overrides?.trelloPoller ?? existing.overrides.trelloPoller,
+        issuePoller:
+          patch.overrides?.issuePoller ?? existing.overrides.issuePoller,
         dispatchApi:
           patch.overrides?.dispatchApi ?? existing.overrides.dispatchApi,
         ideator: patch.overrides?.ideator ?? existing.overrides.ideator,
@@ -441,7 +450,7 @@ function envDefault(ctx: RepoContext, feature: Feature): boolean {
   switch (feature) {
     case "slack":
       return ctx.slack.enabled;
-    case "trelloPoller":
+    case "issuePoller":
       return ctx.trelloEnabled;
     case "dispatchApi":
       return true;
@@ -482,7 +491,7 @@ export function isFeatureEnabled(ctx: RepoContext, feature: Feature): boolean {
 
 /**
  * The optional "only pick up cards whose name starts with this prefix"
- * filter for the Trello poller. Reads `overrides.trelloPoller.pickupNamePrefix`
+ * filter for the issue poller. Reads `overrides.issuePoller.pickupNamePrefix`
  * from the per-repo settings file. Returns the prefix when set as a
  * non-empty string; returns `null` when the file is missing, the prefix
  * is unset / null / empty / non-string, or any read error occurs.
@@ -497,15 +506,15 @@ export function isFeatureEnabled(ctx: RepoContext, feature: Feature): boolean {
  * Never throws — on any failure returns `null` so the poller's
  * "no filter" path runs instead of breaking the tick.
  */
-export function getTrelloPollerPickupPrefix(
+export function getIssuePollerPickupPrefix(
   localPath: string,
 ): string | null {
   try {
     const settings = readSettings(localPath);
-    return settings.overrides.trelloPoller.pickupNamePrefix ?? null;
+    return settings.overrides.issuePoller.pickupNamePrefix ?? null;
   } catch (err) {
     log.error(
-      `getTrelloPollerPickupPrefix threw — returning null for ${localPath}`,
+      `getIssuePollerPickupPrefix threw — returning null for ${localPath}`,
       err,
     );
     return null;

@@ -45,7 +45,7 @@
  * ## Gate registry
  *
  * Gate strings are free-form text in the manifest for readability
- * (`"settings.trelloPoller.enabled ≠ false"`, `"no CRITICAL_FAILURE flag"`). The
+ * (`"settings.issuePoller.enabled ≠ false"`, `"no CRITICAL_FAILURE flag"`). The
  * resolver holds a hardcoded lookup from gate string to predicate and
  * throws `WorkspaceGateUnknownError` for anything not in the table. A
  * new gate == a new entry here + the workspaces that need it. Parsing a
@@ -193,8 +193,8 @@ const GATE_REGISTRY: Readonly<Record<string, GateEvaluator>> = Object.freeze({
   // tick, and `/api/launch` use at runtime — operator overrides are
   // honored uniformly across enforcement paths.
   "settings.slack.enabled ≠ false": (repo) => isFeatureEnabled(repo, "slack"),
-  "settings.trelloPoller.enabled ≠ false": (repo) =>
-    isFeatureEnabled(repo, "trelloPoller"),
+  "settings.issuePoller.enabled ≠ false": (repo) =>
+    isFeatureEnabled(repo, "issuePoller"),
 });
 
 function workspaceRoot(repo: RepoContext, name: string): string {

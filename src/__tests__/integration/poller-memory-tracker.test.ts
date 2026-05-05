@@ -156,7 +156,7 @@ vi.mock("../../critical-failure.js", () => ({
 
 vi.mock("../../settings-file.js", () => ({
   isFeatureEnabled: (_ctx: unknown, feature: string) => feature !== "ideator",
-  getTrelloPollerPickupPrefix: () => null,
+  getIssuePollerPickupPrefix: () => null,
 }));
 
 vi.mock("../../workspace/write-if-changed.js", () => ({

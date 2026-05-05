@@ -15,7 +15,7 @@ import {
   _resetForTesting,
   buildDisplayFromContext,
   defaultSettings,
-  getTrelloPollerPickupPrefix,
+  getIssuePollerPickupPrefix,
   isFeatureEnabled,
   mask,
   readSettings,
@@ -88,7 +88,7 @@ describe("settings-file", () => {
       const s = readSettings(localPath);
       expect(s).toEqual(defaultSettings());
       expect(s.overrides.slack.enabled).toBeNull();
-      expect(s.overrides.trelloPoller.enabled).toBeNull();
+      expect(s.overrides.issuePoller.enabled).toBeNull();
       expect(s.overrides.dispatchApi.enabled).toBeNull();
     });
 
@@ -96,7 +96,7 @@ describe("settings-file", () => {
       const body: Settings = {
         overrides: {
           slack: { enabled: false },
-          trelloPoller: { enabled: true },
+          issuePoller: { enabled: true },
           dispatchApi: { enabled: null },
           ideator: { enabled: null },
           autoTriage: { enabled: null },
@@ -108,7 +108,7 @@ describe("settings-file", () => {
 
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
-      expect(s.overrides.trelloPoller.enabled).toBe(true);
+      expect(s.overrides.issuePoller.enabled).toBe(true);
       expect(s.overrides.dispatchApi.enabled).toBeNull();
       expect(s.display.worker).toEqual({ port: 1234, runtime: "host" });
       expect(s.meta.updatedBy).toBe("dashboard:alice");
@@ -120,20 +120,77 @@ describe("settings-file", () => {
       expect(s).toEqual(defaultSettings());
     });
 
+    it("migrates legacy `trelloPoller` key into the `issuePoller` slot on read", () => {
+      // Pre-rename settings.json files (deployed boxes that haven't been
+      // re-written yet) carry `overrides.trelloPoller` with both
+      // `enabled` and `pickupNamePrefix`. The read path migrates that
+      // value into the new `issuePoller` slot so operator toggles +
+      // prefix survive the rename without a forced rewrite.
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            trelloPoller: { enabled: false, pickupNamePrefix: "[Legacy]" },
+            dispatchApi: { enabled: null },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.overrides.issuePoller.enabled).toBe(false);
+      expect(s.overrides.issuePoller.pickupNamePrefix).toBe("[Legacy]");
+    });
+
+    it("migrates legacy `trelloPoller` carrying only `enabled` (no prefix) without leaking enabled", () => {
+      // Regression guard: the migration shape must not depend on the
+      // legacy payload also having `pickupNamePrefix`. Bare
+      // `{ enabled: true }` must surface the boolean cleanly.
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            trelloPoller: { enabled: true },
+            dispatchApi: { enabled: null },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.overrides.issuePoller.enabled).toBe(true);
+      expect(s.overrides.issuePoller.pickupNamePrefix).toBeNull();
+    });
+
+    it("prefers the new `issuePoller` slot when both legacy and new keys are present", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            issuePoller: { enabled: true, pickupNamePrefix: "[New]" },
+            trelloPoller: { enabled: false, pickupNamePrefix: "[Legacy]" },
+            dispatchApi: { enabled: null },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.overrides.issuePoller.enabled).toBe(true);
+      expect(s.overrides.issuePoller.pickupNamePrefix).toBe("[New]");
+    });
+
     it("normalizes unknown override shapes to null", () => {
       writeFileSync(
         settingsFilePath(localPath),
         JSON.stringify({
           overrides: {
             slack: { enabled: "yes" }, // not a boolean/null
-            trelloPoller: null,
+            issuePoller: null,
             dispatchApi: 42,
           },
         }),
       );
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBeNull();
-      expect(s.overrides.trelloPoller.enabled).toBeNull();
+      expect(s.overrides.issuePoller.enabled).toBeNull();
       expect(s.overrides.dispatchApi.enabled).toBeNull();
     });
 
@@ -168,7 +225,7 @@ describe("settings-file", () => {
 
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
-      expect(s.overrides.trelloPoller.enabled).toBeNull();
+      expect(s.overrides.issuePoller.enabled).toBeNull();
       expect(s.meta.updatedBy).toBe("dashboard:test");
       expect(s.meta.updatedAt).not.toBe(defaultSettings().meta.updatedAt);
     });
@@ -191,7 +248,7 @@ describe("settings-file", () => {
       await writeSettings(localPath, {
         overrides: {
           slack: { enabled: false },
-          trelloPoller: { enabled: true },
+          issuePoller: { enabled: true },
         },
         writtenBy: "setup",
       });
@@ -203,7 +260,7 @@ describe("settings-file", () => {
 
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
-      expect(s.overrides.trelloPoller.enabled).toBe(true);
+      expect(s.overrides.issuePoller.enabled).toBe(true);
       expect(s.overrides.dispatchApi.enabled).toBe(false);
       expect(s.meta.updatedBy).toBe("dashboard:test");
     });
@@ -353,7 +410,7 @@ describe("settings-file", () => {
         JSON.stringify({
           overrides: {
             slack: { enabled: null },
-            trelloPoller: { enabled: null },
+            issuePoller: { enabled: null },
             dispatchApi: { enabled: null },
           },
           display: {},
@@ -380,18 +437,18 @@ describe("settings-file", () => {
         trelloEnabled: false,
       });
       expect(isFeatureEnabled(ctxOn, "slack")).toBe(true);
-      expect(isFeatureEnabled(ctxOn, "trelloPoller")).toBe(false);
+      expect(isFeatureEnabled(ctxOn, "issuePoller")).toBe(false);
       // dispatchApi env default is always true
       expect(isFeatureEnabled(ctxOn, "dispatchApi")).toBe(true);
     });
 
     it("returns override value when override is true", async () => {
       await writeSettings(localPath, {
-        overrides: { trelloPoller: { enabled: true } },
+        overrides: { issuePoller: { enabled: true } },
         writtenBy: "dashboard:test",
       });
       const ctx = makeRepoContext({ localPath, trelloEnabled: false });
-      expect(isFeatureEnabled(ctx, "trelloPoller")).toBe(true);
+      expect(isFeatureEnabled(ctx, "issuePoller")).toBe(true);
     });
 
     it("returns override value when override is false", async () => {
@@ -414,13 +471,13 @@ describe("settings-file", () => {
     it("falls back to env default when settings file is corrupt", () => {
       writeFileSync(settingsFilePath(localPath), "broken json");
       const ctx = makeRepoContext({ localPath, trelloEnabled: true });
-      expect(isFeatureEnabled(ctx, "trelloPoller")).toBe(true);
+      expect(isFeatureEnabled(ctx, "issuePoller")).toBe(true);
     });
 
     it("covers all five features via the FEATURES constant", () => {
       expect(FEATURES).toEqual([
         "slack",
-        "trelloPoller",
+        "issuePoller",
         "dispatchApi",
         "ideator",
         "autoTriage",
@@ -615,66 +672,66 @@ describe("settings-file", () => {
   });
 
   // ============================================================
-  // getTrelloPollerPickupPrefix() — test isolation hook
+  // getIssuePollerPickupPrefix() — test isolation hook
   // ============================================================
 
-  describe("getTrelloPollerPickupPrefix", () => {
+  describe("getIssuePollerPickupPrefix", () => {
     it("returns null when settings file is missing", () => {
-      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+      expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
     });
 
     it("returns null when prefix is unset", async () => {
       await writeSettings(localPath, {
-        overrides: { trelloPoller: { enabled: true } },
+        overrides: { issuePoller: { enabled: true } },
         writtenBy: "setup",
       });
-      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+      expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
     });
 
     it("returns the prefix when set as a non-empty string", async () => {
       await writeSettings(localPath, {
         overrides: {
-          trelloPoller: { enabled: null, pickupNamePrefix: "[System Test]" },
+          issuePoller: { enabled: null, pickupNamePrefix: "[System Test]" },
         },
         writtenBy: "setup",
       });
-      expect(getTrelloPollerPickupPrefix(localPath)).toBe("[System Test]");
+      expect(getIssuePollerPickupPrefix(localPath)).toBe("[System Test]");
     });
 
     it("returns null when prefix is empty string", async () => {
       await writeSettings(localPath, {
         overrides: {
-          trelloPoller: { enabled: null, pickupNamePrefix: "" },
+          issuePoller: { enabled: null, pickupNamePrefix: "" },
         },
         writtenBy: "setup",
       });
-      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+      expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
     });
 
     it("returns null on corrupt JSON without throwing", () => {
       writeFileSync(settingsFilePath(localPath), "not json");
-      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+      expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
     });
 
     it("preserves pickupNamePrefix across an unrelated override patch", async () => {
       await writeSettings(localPath, {
         overrides: {
-          trelloPoller: { enabled: null, pickupNamePrefix: "[X]" },
+          issuePoller: { enabled: null, pickupNamePrefix: "[X]" },
         },
         writtenBy: "setup",
       });
-      // Operator toggles slack — must not clobber the trelloPoller prefix.
+      // Operator toggles slack — must not clobber the issuePoller prefix.
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
         writtenBy: "dashboard:test",
       });
-      expect(getTrelloPollerPickupPrefix(localPath)).toBe("[X]");
+      expect(getIssuePollerPickupPrefix(localPath)).toBe("[X]");
     });
 
     it("preserves pickupNamePrefix across a display-only patch", async () => {
       await writeSettings(localPath, {
         overrides: {
-          trelloPoller: { enabled: null, pickupNamePrefix: "[X]" },
+          issuePoller: { enabled: null, pickupNamePrefix: "[X]" },
         },
         writtenBy: "setup",
       });
@@ -682,7 +739,7 @@ describe("settings-file", () => {
         display: { worker: { port: 1234, runtime: "host" } },
         writtenBy: "deploy",
       });
-      expect(getTrelloPollerPickupPrefix(localPath)).toBe("[X]");
+      expect(getIssuePollerPickupPrefix(localPath)).toBe("[X]");
     });
 
     it("normalizes non-string prefix to null without throwing", () => {
@@ -691,44 +748,44 @@ describe("settings-file", () => {
         JSON.stringify({
           overrides: {
             slack: { enabled: null },
-            trelloPoller: { enabled: null, pickupNamePrefix: 42 },
+            issuePoller: { enabled: null, pickupNamePrefix: 42 },
             dispatchApi: { enabled: null },
           },
         }),
       );
-      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+      expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
     });
 
     it("clears pickupNamePrefix when patch sets it to null", async () => {
       await writeSettings(localPath, {
         overrides: {
-          trelloPoller: { enabled: null, pickupNamePrefix: "[X]" },
+          issuePoller: { enabled: null, pickupNamePrefix: "[X]" },
         },
         writtenBy: "setup",
       });
       await writeSettings(localPath, {
         overrides: {
-          trelloPoller: { enabled: null, pickupNamePrefix: null },
+          issuePoller: { enabled: null, pickupNamePrefix: null },
         },
         writtenBy: "setup",
       });
-      expect(getTrelloPollerPickupPrefix(localPath)).toBeNull();
+      expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
     });
 
     it("preserves the enabled toggle when only the prefix is patched", async () => {
       await writeSettings(localPath, {
-        overrides: { trelloPoller: { enabled: false } },
+        overrides: { issuePoller: { enabled: false } },
         writtenBy: "dashboard:test",
       });
       await writeSettings(localPath, {
         overrides: {
-          trelloPoller: { enabled: false, pickupNamePrefix: "[X]" },
+          issuePoller: { enabled: false, pickupNamePrefix: "[X]" },
         },
         writtenBy: "setup",
       });
       const s = readSettings(localPath);
-      expect(s.overrides.trelloPoller.enabled).toBe(false);
-      expect(getTrelloPollerPickupPrefix(localPath)).toBe("[X]");
+      expect(s.overrides.issuePoller.enabled).toBe(false);
+      expect(getIssuePollerPickupPrefix(localPath)).toBe("[X]");
     });
   });
 
@@ -752,7 +809,7 @@ describe("settings-file", () => {
       await writeSettings(localPath, {
         overrides: {
           slack: { enabled: true },
-          trelloPoller: { enabled: false },
+          issuePoller: { enabled: false },
           dispatchApi: { enabled: null },
         },
         writtenBy: "setup",
@@ -761,8 +818,41 @@ describe("settings-file", () => {
         readFileSync(settingsFilePath(localPath), "utf-8"),
       );
       expect(raw.overrides.slack).toEqual({ enabled: true });
-      expect(raw.overrides.trelloPoller).toEqual({ enabled: false });
+      expect(raw.overrides.issuePoller).toEqual({ enabled: false });
       expect(raw.overrides.dispatchApi).toEqual({ enabled: null });
+    });
+
+    it("write-side never emits the legacy `trelloPoller` key — even after migrating from one", async () => {
+      // Plant a legacy file on disk.
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            trelloPoller: { enabled: true, pickupNamePrefix: "[X]" },
+            dispatchApi: { enabled: null },
+          },
+          display: {},
+          meta: { updatedAt: "2026-04-19T12:00:00Z", updatedBy: "worker" },
+        }),
+      );
+
+      // An unrelated patch (operator toggles slack) — the merge runs
+      // through `safeParse` → `normalize`, which migrates the legacy
+      // `trelloPoller` slot. The rewritten file must carry only the
+      // canonical `issuePoller` key.
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+      const raw = JSON.parse(
+        readFileSync(settingsFilePath(localPath), "utf-8"),
+      );
+      expect(raw.overrides.issuePoller).toEqual({
+        enabled: true,
+        pickupNamePrefix: "[X]",
+      });
+      expect(raw.overrides.trelloPoller).toBeUndefined();
     });
   });
 });

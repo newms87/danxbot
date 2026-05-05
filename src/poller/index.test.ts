@@ -305,11 +305,11 @@ vi.mock("./yaml-lifecycle.js", () => ({
 const mockIsFeatureEnabled = vi.fn(
   (...args: unknown[]) => (args[1] as string) !== "ideator",
 );
-const mockGetTrelloPollerPickupPrefix = vi.fn().mockReturnValue(null);
+const mockGetIssuePollerPickupPrefix = vi.fn().mockReturnValue(null);
 vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
-  getTrelloPollerPickupPrefix: (...args: unknown[]) =>
-    mockGetTrelloPollerPickupPrefix(...args),
+  getIssuePollerPickupPrefix: (...args: unknown[]) =>
+    mockGetIssuePollerPickupPrefix(...args),
 }));
 
 vi.mock("../workspace/write-if-changed.js", () => ({
@@ -471,8 +471,8 @@ function resetTrackerMocks() {
   mockIsFeatureEnabled.mockImplementation(
     (...args: unknown[]) => (args[1] as string) !== "ideator",
   );
-  mockGetTrelloPollerPickupPrefix.mockReset();
-  mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+  mockGetIssuePollerPickupPrefix.mockReset();
+  mockGetIssuePollerPickupPrefix.mockReturnValue(null);
 }
 
 /** Flush async work triggered by fire-and-forget onComplete handlers. */
@@ -492,8 +492,8 @@ describe("poll", () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockGetTrelloPollerPickupPrefix.mockReset();
-    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+    mockGetIssuePollerPickupPrefix.mockReset();
+    mockGetIssuePollerPickupPrefix.mockReturnValue(null);
   });
 
   it("skips when teamRunning is true", async () => {
@@ -1103,7 +1103,7 @@ describe("poll — dispatch lock gating", () => {
   });
 });
 
-describe("poll — trelloPoller feature toggle", () => {
+describe("poll — issuePoller feature toggle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -1115,7 +1115,7 @@ describe("poll — trelloPoller feature toggle", () => {
 
   it("skips the tick and does not fetch cards when disabled", async () => {
     mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) => (args[1] as string) !== "trelloPoller",
+      (...args: unknown[]) => (args[1] as string) !== "issuePoller",
     );
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card", "ToDo")]);
 
@@ -1123,7 +1123,7 @@ describe("poll — trelloPoller feature toggle", () => {
 
     expect(mockIsFeatureEnabled).toHaveBeenCalledWith(
       expect.any(Object),
-      "trelloPoller",
+      "issuePoller",
     );
     expect(mockTracker.fetchOpenCards).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
@@ -1151,11 +1151,11 @@ describe("poll — pickup-name-prefix filter", () => {
   });
 
   afterEach(() => {
-    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+    mockGetIssuePollerPickupPrefix.mockReturnValue(null);
   });
 
   it("dispatches the matching test card when other ToDo cards are present (system-test isolation)", async () => {
-    mockGetTrelloPollerPickupPrefix.mockReturnValue("[System Test]");
+    mockGetIssuePollerPickupPrefix.mockReturnValue("[System Test]");
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("stuck", "Fix: Dispatch token usage…", "ToDo"),
       ref("real", "Real ToDo card B", "ToDo"),
@@ -1178,7 +1178,7 @@ describe("poll — pickup-name-prefix filter", () => {
   });
 
   it("falls through to the no-cards branch when prefix is set but no card matches", async () => {
-    mockGetTrelloPollerPickupPrefix.mockReturnValue("[System Test]");
+    mockGetIssuePollerPickupPrefix.mockReturnValue("[System Test]");
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("a", "Real ToDo card A", "ToDo"),
       ref("b", "Real ToDo card B", "ToDo"),
@@ -1191,7 +1191,7 @@ describe("poll — pickup-name-prefix filter", () => {
   });
 
   it("dispatches normally when prefix is null (filter disabled)", async () => {
-    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+    mockGetIssuePollerPickupPrefix.mockReturnValue(null);
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("any", "Some real card", "ToDo"),
     ]);
@@ -1202,7 +1202,7 @@ describe("poll — pickup-name-prefix filter", () => {
   });
 
   it("preserves stuck-card recovery scope: only matching cards are saved as priorTodoCardIds", async () => {
-    mockGetTrelloPollerPickupPrefix.mockReturnValue("[X]");
+    mockGetIssuePollerPickupPrefix.mockReturnValue("[X]");
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("real-1", "Real card 1", "ToDo"),
       ref("x-1", "[X] test card", "ToDo"),
@@ -1454,14 +1454,14 @@ describe("start", () => {
   it("starts polling for every repo regardless of trelloEnabled — the per-tick isFeatureEnabled check decides whether to skip", () => {
     mockRepoContexts[0].trelloEnabled = false;
     mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) => (args[1] as string) !== "trelloPoller",
+      (...args: unknown[]) => (args[1] as string) !== "issuePoller",
     );
 
     start();
 
     expect(mockIsFeatureEnabled).toHaveBeenCalledWith(
       expect.any(Object),
-      "trelloPoller",
+      "issuePoller",
     );
     expect(mockTracker.fetchOpenCards).not.toHaveBeenCalled();
 
@@ -1485,7 +1485,7 @@ describe("start", () => {
     mockIsFeatureEnabled.mockImplementation((...args: unknown[]) => {
       const ctx = args[0] as { name: string };
       const feature = args[1] as string;
-      if (feature !== "trelloPoller") return true;
+      if (feature !== "issuePoller") return true;
       return ctx.name === "enabled";
     });
 
@@ -1566,7 +1566,7 @@ describe("poll — critical-failure halt gate", () => {
 
   it("halt gate runs AFTER the feature toggle — disabled poller never checks the flag", async () => {
     mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) => (args[1] as string) !== "trelloPoller",
+      (...args: unknown[]) => (args[1] as string) !== "issuePoller",
     );
     mockReadFlag.mockReturnValue(null);
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card", "ToDo")]);
@@ -1955,8 +1955,8 @@ describe("poll — Docker mode (headless agent)", () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockGetTrelloPollerPickupPrefix.mockReset();
-    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+    mockGetIssuePollerPickupPrefix.mockReset();
+    mockGetIssuePollerPickupPrefix.mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -2643,8 +2643,8 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockGetTrelloPollerPickupPrefix.mockReset();
-    mockGetTrelloPollerPickupPrefix.mockReturnValue(null);
+    mockGetIssuePollerPickupPrefix.mockReset();
+    mockGetIssuePollerPickupPrefix.mockReturnValue(null);
     mockLoadLocal.mockReturnValue(null);
     mockFindByExternalId.mockReset();
     mockFindByExternalId.mockReturnValue(null);
