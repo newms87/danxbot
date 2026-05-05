@@ -5,6 +5,7 @@ import DispatchList from "./components/DispatchList.vue";
 import DispatchFilters from "./components/DispatchFilters.vue";
 import DispatchDetail from "./components/DispatchDetail.vue";
 import AgentsPage from "./components/agents/AgentsPage.vue";
+import IssuesPage from "./components/issues/IssuesPage.vue";
 import SettingsPage from "./components/SettingsPage.vue";
 import Login from "./components/auth/Login.vue";
 import { useDispatches } from "./composables/useDispatches";
@@ -123,6 +124,8 @@ function selectDispatch(d: Dispatch): void {
           @close="selectedDispatch = null"
         />
       </template>
+
+      <IssuesPage v-else-if="activeTab === 'issues'" :selected-repo="selectedRepo" />
 
       <AgentsPage v-else-if="activeTab === 'agents'" />
 

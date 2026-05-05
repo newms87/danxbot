@@ -3,7 +3,7 @@ import { useTheme } from "../composables/useTheme";
 import { useAuth } from "../composables/useAuth";
 import type { RepoInfo } from "../api";
 
-export type TabId = "dispatches" | "agents" | "settings";
+export type TabId = "dispatches" | "issues" | "agents" | "settings";
 
 defineProps<{
   connected: boolean;
@@ -47,7 +47,7 @@ async function onLogout(): Promise<void> {
           {{ currentUser.username }}
         </span>
         <select
-          v-if="repos.length > 1 && activeTab === 'dispatches'"
+          v-if="repos.length > 1 && (activeTab === 'dispatches' || activeTab === 'issues')"
           :value="selectedRepo"
           class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300 border-0 outline-none cursor-pointer"
           @change="emit('update:selectedRepo', ($event.target as HTMLSelectElement).value)"
@@ -93,6 +93,19 @@ async function onLogout(): Promise<void> {
         @click="emit('update:activeTab', 'dispatches')"
       >
         Dispatches
+      </button>
+      <button
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === 'issues'"
+        data-test="issues-tab"
+        class="px-4 py-2 text-sm font-medium border-b-2 transition-colors"
+        :class="activeTab === 'issues'
+          ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+          : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
+        @click="emit('update:activeTab', 'issues')"
+      >
+        Issues
       </button>
       <button
         type="button"

@@ -53,3 +53,15 @@ export type {
   SettingsMeta,
 } from "@backend/settings-file.js";
 export type { RepoDispatchCounts, DispatchCountsByTrigger } from "@backend/dashboard/dispatches-db.js";
+export type { IssueListItem, IssueDetail } from "@backend/dashboard/issues-reader.js";
+export type {
+  Issue,
+  IssueStatus,
+  IssueType,
+  IssueAcItem,
+  IssuePhase,
+  IssueComment,
+  IssueRetro,
+  IssueBlocked,
+  PhaseStatus,
+} from "@backend/issue-tracker/interface.js";

@@ -5,6 +5,8 @@ import type {
   DispatchDetail,
   DispatchFilters,
   Feature,
+  IssueDetail,
+  IssueListItem,
   JsonlBlock,
 } from "./types";
 import { useAuth } from "./composables/useAuth";
@@ -83,6 +85,29 @@ export async function fetchDispatchDetail(id: string): Promise<DispatchDetail> {
 export async function fetchAgents(): Promise<AgentSnapshot[]> {
   const res = await fetchWithAuth("/api/agents");
   if (!res.ok) throw new Error(`fetchAgents failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchIssues(
+  repo: string,
+  opts: { includeClosed?: "recent" | "all" } = {},
+): Promise<IssueListItem[]> {
+  const params = new URLSearchParams({ repo });
+  if (opts.includeClosed) params.set("include_closed", opts.includeClosed);
+  const res = await fetchWithAuth(`/api/issues?${params.toString()}`);
+  if (!res.ok) throw new Error(`fetchIssues failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchIssueDetail(
+  repo: string,
+  id: string,
+): Promise<IssueDetail> {
+  const params = new URLSearchParams({ repo });
+  const res = await fetchWithAuth(
+    `/api/issues/${encodeURIComponent(id)}?${params.toString()}`,
+  );
+  if (!res.ok) throw new Error(`fetchIssueDetail failed: ${res.status}`);
   return res.json();
 }
 
