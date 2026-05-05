@@ -337,6 +337,14 @@ interface ResolvedSurface {
    * dispatches. Empty when the caller supplied no `staged_files`.
    */
   readonly stagedFilePaths: readonly string[];
+  /**
+   * Top-level agent name from the workspace manifest. Forwarded via
+   * `--agent <name>` to claude so the top-level session BECOMES the
+   * named agent — eager-loads its `tools:` frontmatter, eliminating the
+   * ~4s ToolSearch tax MCP tools otherwise pay. Undefined when the
+   * workspace omits `top_level_agent`.
+   */
+  readonly topLevelAgent?: string;
 }
 
 /**
@@ -392,6 +400,7 @@ async function runResolved(
         timeoutMs: input.timeoutMs ?? config.dispatch.agentTimeoutMs,
         env,
         mcpConfigPath: settingsPath,
+        topLevelAgent: resolved.topLevelAgent,
         statusUrl: input.statusUrl,
         apiToken: input.apiToken,
         maxRuntimeMs: input.maxRuntimeMs,
@@ -653,6 +662,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
       cwd: workspace.cwd,
       envOverrides: workspace.env,
       stagedFilePaths,
+      topLevelAgent: workspace.topLevelAgent,
     });
   } catch (err) {
     // runResolved already cleans up MCP settings + staged files in the

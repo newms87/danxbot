@@ -49,6 +49,15 @@ export interface WorkspaceManifest {
    * empty `staged_files` payload (fail closed).
    */
   readonly stagingPaths: readonly string[];
+  /**
+   * Optional top-level agent name. When set, the resolver validates that
+   * `<workspace>/.claude/agents/<topLevelAgent>.md` exists, and the
+   * spawner forwards `--agent <name>` to claude so the top-level session
+   * BECOMES that agent (eager-loads its `tools:` frontmatter, eliminating
+   * the ~4s ToolSearch tax MCP tools otherwise pay). Undefined when the
+   * workspace omits the field — claude runs without the flag.
+   */
+  readonly topLevelAgent?: string;
 }
 
 export interface ParseManifestOptions {
@@ -73,6 +82,21 @@ function requireString(
   if (typeof value !== "string" || !value.trim()) {
     throw new WorkspaceManifestError(
       `workspace manifest missing required string field "${key}"${locator(options)}`,
+    );
+  }
+  return value;
+}
+
+function readOptionalString(
+  raw: Record<string, unknown>,
+  key: string,
+  options?: ParseManifestOptions,
+): string | undefined {
+  const value = raw[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new WorkspaceManifestError(
+      `workspace manifest field "${key}" must be a non-empty string when present${locator(options)}`,
     );
   }
   return value;
@@ -139,5 +163,6 @@ export function parseManifest(
     ),
     requiredGates: readStringArray(obj, "required-gates", options),
     stagingPaths: readStringArray(obj, "staging-paths", options),
+    topLevelAgent: readOptionalString(obj, "top_level_agent", options),
   };
 }

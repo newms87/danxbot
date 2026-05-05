@@ -189,6 +189,42 @@ staging-paths:
     expect(() => parseManifest(yaml)).toThrow(/staging-paths/);
   });
 
+  it("parses top_level_agent string", () => {
+    const yaml = `name: x
+description: y
+top_level_agent: orchestrator
+`;
+    const manifest = parseManifest(yaml);
+    expect(manifest.topLevelAgent).toBe("orchestrator");
+  });
+
+  it("defaults topLevelAgent to undefined when absent", () => {
+    const yaml = `name: x
+description: y
+`;
+    const manifest = parseManifest(yaml);
+    expect(manifest.topLevelAgent).toBeUndefined();
+  });
+
+  it("throws WorkspaceManifestError when top_level_agent is not a string", () => {
+    const yaml = `name: x
+description: y
+top_level_agent:
+  - listy
+`;
+    expect(() => parseManifest(yaml)).toThrow(WorkspaceManifestError);
+    expect(() => parseManifest(yaml)).toThrow(/top_level_agent/);
+  });
+
+  it("throws WorkspaceManifestError when top_level_agent is whitespace-only", () => {
+    const yaml = `name: x
+description: y
+top_level_agent: "   "
+`;
+    expect(() => parseManifest(yaml)).toThrow(WorkspaceManifestError);
+    expect(() => parseManifest(yaml)).toThrow(/top_level_agent/);
+  });
+
   it("returns a fresh array that does not alias the parsed YAML structure", () => {
     const yaml = `name: x
 description: y

@@ -130,6 +130,7 @@ export async function runSpawnPreflight(
     title: options.title,
     mcpConfigPath: options.mcpConfigPath,
     agents: options.agents,
+    topLevelAgent: options.topLevelAgent,
     resumeSessionId: options.resumeSessionId,
   });
   const { flags, firstMessage, promptDir } = invocation;

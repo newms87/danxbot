@@ -799,6 +799,89 @@ description: "unterminated
     });
   });
 
+  describe("top-level agent", () => {
+    function setTopLevelAgent(agent: string | null): void {
+      const lines = [
+        "name: test-workspace",
+        "description: Fixture exercised by workspace unit tests",
+        "required-placeholders:",
+        "  - DANXBOT_STOP_URL",
+        "  - DANXBOT_WORKER_PORT",
+        "  - TEST_API_KEY",
+        "optional-placeholders:",
+        "  - TEST_OPTIONAL_FLAG",
+        'required-gates:',
+        '  - "settings.trelloPoller.enabled ≠ false"',
+      ];
+      if (agent !== null) lines.push(`top_level_agent: ${agent}`);
+      writeFileSync(
+        resolve(
+          repoDir,
+          ".danxbot",
+          "workspaces",
+          "test-workspace",
+          "workspace.yml",
+        ),
+        lines.join("\n") + "\n",
+      );
+    }
+
+    it("returns topLevelAgent on the resolved workspace when manifest declares it AND the agent file exists", () => {
+      setTopLevelAgent("orchestrator");
+      const agentsDir = resolve(
+        repoDir,
+        ".danxbot",
+        "workspaces",
+        "test-workspace",
+        ".claude",
+        "agents",
+      );
+      mkdirSync(agentsDir, { recursive: true });
+      writeFileSync(
+        resolve(agentsDir, "orchestrator.md"),
+        "---\nname: orchestrator\ndescription: x\n---\nbody\n",
+      );
+      const result = capture(
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      );
+      expect(result.topLevelAgent).toBe("orchestrator");
+    });
+
+    it("returns topLevelAgent undefined when the manifest omits the field", () => {
+      const result = capture(
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      );
+      expect(result.topLevelAgent).toBeUndefined();
+    });
+
+    it("throws WorkspaceFileMissingError when top_level_agent is set but the agent file is absent", () => {
+      setTopLevelAgent("orchestrator");
+      // No agent file written.
+      expect(() =>
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      ).toThrow(WorkspaceFileMissingError);
+      expect(() =>
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      ).toThrow(/orchestrator\.md/);
+    });
+  });
+
   describe("evaluation order", () => {
     it("runs gates before overlay validation (gate failure reported, not missing-placeholder)", () => {
       const disabledRepo = makeRepoContext({

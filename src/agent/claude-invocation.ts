@@ -36,6 +36,14 @@ export interface BuildClaudeInvocationOptions {
   /** Optional agents map forwarded via `--agents <json>`. Empty object = no flag. */
   agents?: Record<string, Record<string, unknown>>;
   /**
+   * Top-level agent name forwarded via `--agent <name>`. When set, claude
+   * makes the top-level session BECOME the named agent — its
+   * `.claude/agents/<name>.md` frontmatter (notably the `tools:` allowlist)
+   * applies, so MCP tools are eager-loaded instead of deferred behind
+   * ToolSearch. Empty string omitted to avoid silent fallback.
+   */
+  topLevelAgent?: string;
+  /**
    * Claude session UUID to resume via `--resume <id>`. When set, claude loads
    * the prior session's history and appends new turns to the same JSONL file.
    * The dispatch tag is still prepended to the firstMessage, so SessionLogWatcher
@@ -124,6 +132,10 @@ export function buildClaudeInvocation(
 
   if (options.resumeSessionId) {
     flags.push("--resume", options.resumeSessionId);
+  }
+
+  if (options.topLevelAgent) {
+    flags.push("--agent", options.topLevelAgent);
   }
 
   if (options.mcpConfigPath) {

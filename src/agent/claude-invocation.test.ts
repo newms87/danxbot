@@ -233,6 +233,39 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(inv.flags).not.toContain("--resume");
   });
 
+  it("flags include --agent <name> when topLevelAgent is provided", () => {
+    // Phase 4 of the schema-builder sub-30s epic (ISS-55). When a workspace
+    // declares `top_level_agent: orchestrator`, the resolver propagates the
+    // agent name; the spawner forwards it as `--agent <name>`. claude then
+    // makes the top-level session BECOME that agent, eager-loading its
+    // `tools:` frontmatter — eliminating the ~4s ToolSearch tax MCP tools
+    // otherwise pay because they default to deferred loading.
+    const inv = build({ topLevelAgent: "orchestrator" });
+    const idx = inv.flags.indexOf("--agent");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(inv.flags[idx + 1]).toBe("orchestrator");
+  });
+
+  it("flags omit --agent when topLevelAgent is undefined", () => {
+    const inv = build({ topLevelAgent: undefined });
+    expect(inv.flags).not.toContain("--agent");
+  });
+
+  it("flags omit --agent when topLevelAgent is an empty string (no silent fallback)", () => {
+    const inv = build({ topLevelAgent: "" });
+    expect(inv.flags).not.toContain("--agent");
+  });
+
+  it("flags include --agent on the resume path so the ToolSearch tax doesn't reappear on resume", () => {
+    const inv = build({
+      topLevelAgent: "orchestrator",
+      resumeSessionId: "abc-123",
+    });
+    const idx = inv.flags.indexOf("--agent");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(inv.flags[idx + 1]).toBe("orchestrator");
+  });
+
   it("--resume comes before --mcp-config and --agents in the flag list", () => {
     // claude accepts flags in any order today, but locking resume at the front
     // of the optional-flag block makes the CLI invocation easier to read in

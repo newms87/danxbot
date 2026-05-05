@@ -157,6 +157,15 @@ export interface ResolvedWorkspace {
    * the allowlist before writing.
    */
   stagingPaths: readonly string[];
+  /**
+   * Top-level agent name forwarded as `--agent <name>` to claude. Set
+   * when the workspace's `workspace.yml` declares `top_level_agent: X`
+   * AND `.claude/agents/X.md` exists. Undefined otherwise. The dispatch
+   * core threads this through to `spawnAgent` so the top-level session
+   * BECOMES that agent — eager-loads its `tools:` frontmatter,
+   * eliminating the ~4s ToolSearch tax MCP tools otherwise pay.
+   */
+  topLevelAgent?: string;
 }
 
 /** Files whose presence in a workspace dir is a hard error — see WorkspaceLegacyFileError. */
@@ -315,11 +324,32 @@ export function resolveWorkspace(
   const env = resolveEnv(cwd, subs);
   const stagingPaths = manifest.stagingPaths.map((p) => substitute(p, subs));
 
+  // top_level_agent: validate the referenced agent file exists. The flag
+  // is forwarded as `--agent <name>` at spawn time, and claude resolves it
+  // against `<cwd>/.claude/agents/<name>.md`. Failing here keeps every
+  // bad-config failure mode loud at resolve time, before a process spawns.
+  let topLevelAgent: string | undefined;
+  if (manifest.topLevelAgent) {
+    const agentPath = resolve(
+      cwd,
+      ".claude",
+      "agents",
+      `${manifest.topLevelAgent}.md`,
+    );
+    if (!existsSync(agentPath)) {
+      throw new WorkspaceFileMissingError(
+        `workspace "${manifest.name}" declares top_level_agent="${manifest.topLevelAgent}" but agent file is missing at ${agentPath}`,
+      );
+    }
+    topLevelAgent = manifest.topLevelAgent;
+  }
+
   return {
     cwd,
     env,
     mcpSettingsPath,
     promptDelivery: "at-file",
     stagingPaths,
+    topLevelAgent,
   };
 }

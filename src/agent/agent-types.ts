@@ -142,6 +142,15 @@ export interface SpawnAgentOptions {
    * See `.claude/rules/agent-dispatch.md`.
    */
   agents?: Record<string, Record<string, unknown>>;
+  /**
+   * Top-level agent name forwarded as `--agent <name>` to claude. When set,
+   * claude makes the top-level session BECOME the named agent — its
+   * `<cwd>/.claude/agents/<name>.md` frontmatter (notably the `tools:`
+   * allowlist) applies, so MCP tools are eager-loaded instead of deferred
+   * behind ToolSearch. Resolved by `resolveWorkspace` from the manifest's
+   * `top_level_agent` field; threaded into spawnAgent by `dispatch()`.
+   */
+  topLevelAgent?: string;
   /** Status URL for heartbeat/putStatus (stored on AgentJob for startHeartbeat) */
   statusUrl?: string;
   /** API token for heartbeat and event forwarding */

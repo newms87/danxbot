@@ -369,6 +369,89 @@ describe("dispatch() — slack-worker integration", () => {
   });
 });
 
+describe("dispatch() — top_level_agent forwarding", () => {
+  // Phase 4 of the schema-builder sub-30s epic (ISS-55). When a workspace
+  // declares `top_level_agent: orchestrator`, the resolver propagates the
+  // name and dispatch core threads it through to spawnAgent so claude
+  // receives `--agent orchestrator` — the top-level session BECOMES the
+  // agent, eager-loading its `tools:` frontmatter and eliminating the
+  // ~4s ToolSearch tax MCP tools otherwise pay.
+  let tmpRepoDir: string;
+  let agentRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-tla-dispatch-"));
+    const ws = resolve(tmpRepoDir, ".danxbot", "workspaces", "ws-with-agent");
+    mkdirSync(resolve(ws, ".claude", "agents"), { recursive: true });
+    writeFileSync(
+      resolve(ws, "workspace.yml"),
+      [
+        "name: ws-with-agent",
+        "description: fixture for top_level_agent test",
+        "top_level_agent: orchestrator",
+        "required-placeholders: []",
+      ].join("\n") + "\n",
+    );
+    writeFileSync(
+      resolve(ws, ".mcp.json"),
+      JSON.stringify({ mcpServers: {} }),
+    );
+    writeFileSync(
+      resolve(ws, ".claude", "settings.json"),
+      JSON.stringify({ env: {} }),
+    );
+    writeFileSync(
+      resolve(ws, ".claude", "agents", "orchestrator.md"),
+      "---\nname: orchestrator\ndescription: x\n---\nbody\n",
+    );
+    agentRepo = makeRepoContext({ localPath: tmpRepoDir });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  it("forwards topLevelAgent to spawnAgent when the manifest declares top_level_agent", async () => {
+    await dispatch({
+      repo: agentRepo,
+      task: "investigate",
+      workspace: "ws-with-agent",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.topLevelAgent).toBe("orchestrator");
+  });
+
+  it("omits topLevelAgent on spawnAgent options when the manifest does not declare top_level_agent", async () => {
+    // Strip the field from the fixture's workspace.yml.
+    const wsYml = resolve(
+      tmpRepoDir,
+      ".danxbot",
+      "workspaces",
+      "ws-with-agent",
+      "workspace.yml",
+    );
+    writeFileSync(
+      wsYml,
+      [
+        "name: ws-with-agent",
+        "description: fixture for top_level_agent test",
+        "required-placeholders: []",
+      ].join("\n") + "\n",
+    );
+    await dispatch({
+      repo: agentRepo,
+      task: "investigate",
+      workspace: "ws-with-agent",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.topLevelAgent).toBeUndefined();
+  });
+});
+
 describe("listActiveJobs()", () => {
   it("returns every job currently in the activeJobs map", async () => {
     const slackWorkerSrc = resolve(
