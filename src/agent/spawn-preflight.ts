@@ -129,6 +129,7 @@ export async function runSpawnPreflight(
     jobId,
     title: options.title,
     mcpConfigPath: options.mcpConfigPath,
+    settingsPath: options.settingsPath,
     agents: options.agents,
     topLevelAgent: options.topLevelAgent,
     resumeSessionId: options.resumeSessionId,

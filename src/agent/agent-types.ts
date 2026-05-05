@@ -135,6 +135,15 @@ export interface SpawnAgentOptions {
   /** Path to MCP settings JSON. When set, adds --mcp-config to CLI args. */
   mcpConfigPath?: string;
   /**
+   * Absolute path to a Claude Code settings JSON. When set, adds
+   * `--settings <path>` to CLI args. Used to load workspace-level
+   * `.claude/settings.json` (e.g. SessionStart / SubagentStart hook
+   * registrations) without relying on Claude Code's project-trust dialog —
+   * dispatched workers run untrusted workspace dirs, so the project-scope
+   * settings file is otherwise ignored.
+   */
+  settingsPath?: string;
+  /**
    * Agent definitions forwarded to Claude CLI's `--agents <json>` flag.
    * Must be an object keyed by agent name (the shape Claude CLI requires) —
    * a list silently falls back to built-in agents and makes

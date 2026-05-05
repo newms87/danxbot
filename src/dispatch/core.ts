@@ -28,7 +28,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -297,6 +297,18 @@ function writeMcpSettingsFile(mcpServers: Record<string, unknown>): {
   return { settingsDir, settingsPath };
 }
 
+/**
+ * Resolve the workspace's `.claude/settings.json` path, returning it only when
+ * the file exists. Forwarded to claude as `--settings <path>` so workspace-
+ * scope hooks (SessionStart, SubagentStart) load without requiring the
+ * project-trust dialog — dispatched workers run untrusted workspace dirs by
+ * default and Claude Code otherwise ignores their project-scope settings.
+ */
+function resolveWorkspaceSettingsPath(cwd: string): string | undefined {
+  const candidate = join(cwd, ".claude", "settings.json");
+  return existsSync(candidate) ? candidate : undefined;
+}
+
 function cleanupMcpSettings(settingsDir: string): void {
   try {
     rmSync(settingsDir, { recursive: true, force: true });
@@ -345,6 +357,14 @@ interface ResolvedSurface {
    * workspace omits `top_level_agent`.
    */
   readonly topLevelAgent?: string;
+  /**
+   * Absolute path to the workspace's `.claude/settings.json`, when one
+   * exists at `<cwd>/.claude/settings.json`. Forwarded as
+   * `--settings <path>` so Claude Code loads workspace-scope hooks
+   * (SessionStart, SubagentStart, etc.) without requiring the trust
+   * dialog. Undefined when the file does not exist.
+   */
+  readonly settingsPath?: string;
 }
 
 /**
@@ -400,6 +420,7 @@ async function runResolved(
         timeoutMs: input.timeoutMs ?? config.dispatch.agentTimeoutMs,
         env,
         mcpConfigPath: settingsPath,
+        settingsPath: resolved.settingsPath,
         topLevelAgent: resolved.topLevelAgent,
         statusUrl: input.statusUrl,
         apiToken: input.apiToken,
@@ -663,6 +684,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
       envOverrides: workspace.env,
       stagedFilePaths,
       topLevelAgent: workspace.topLevelAgent,
+      settingsPath: resolveWorkspaceSettingsPath(workspace.cwd),
     });
   } catch (err) {
     // runResolved already cleans up MCP settings + staged files in the

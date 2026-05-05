@@ -33,6 +33,14 @@ export interface BuildClaudeInvocationOptions {
   title?: string;
   /** Optional path to MCP settings JSON. Adds `--mcp-config <path>` to flags. */
   mcpConfigPath?: string;
+  /**
+   * Optional path to a Claude Code settings JSON file. Adds `--settings <path>`
+   * to flags. Used to load workspace-level `.claude/settings.json` (e.g. hook
+   * registrations) without relying on Claude Code's project-trust dialog —
+   * dispatched workers run untrusted workspace dirs by default, so the
+   * project-scope settings file is otherwise ignored. Pass an absolute path.
+   */
+  settingsPath?: string;
   /** Optional agents map forwarded via `--agents <json>`. Empty object = no flag. */
   agents?: Record<string, Record<string, unknown>>;
   /**
@@ -140,6 +148,10 @@ export function buildClaudeInvocation(
 
   if (options.mcpConfigPath) {
     flags.push("--mcp-config", options.mcpConfigPath);
+  }
+
+  if (options.settingsPath) {
+    flags.push("--settings", options.settingsPath);
   }
 
   if (options.agents && Object.keys(options.agents).length > 0) {

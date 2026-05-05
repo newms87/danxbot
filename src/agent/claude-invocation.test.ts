@@ -202,6 +202,18 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(inv.flags).not.toContain("--mcp-config");
   });
 
+  it("flags include --settings when settingsPath is provided", () => {
+    const inv = build({ settingsPath: "/abs/workspace/.claude/settings.json" });
+    const idx = inv.flags.indexOf("--settings");
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(inv.flags[idx + 1]).toBe("/abs/workspace/.claude/settings.json");
+  });
+
+  it("flags omit --settings when settingsPath is absent", () => {
+    const inv = build({ settingsPath: undefined });
+    expect(inv.flags).not.toContain("--settings");
+  });
+
   it("flags include --agents with a JSON blob when agents is a non-empty object", () => {
     const inv = build({ agents: { Validator: { description: "v", prompt: "p" } } });
     const idx = inv.flags.indexOf("--agents");
