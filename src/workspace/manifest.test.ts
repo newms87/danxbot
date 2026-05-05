@@ -1,8 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  parseManifest,
-  WorkspaceManifestError,
-} from "./manifest.js";
+import { parseManifest, WorkspaceManifestError } from "./manifest.js";
 
 describe("parseManifest", () => {
   it("parses a full manifest with all fields populated", () => {
@@ -111,9 +108,9 @@ required-placeholders:
   it("includes optional source in error message when provided", () => {
     const yaml = `description: y
 `;
-    expect(() =>
-      parseManifest(yaml, { source: "workspace.yml" }),
-    ).toThrow(/workspace\.yml/);
+    expect(() => parseManifest(yaml, { source: "workspace.yml" })).toThrow(
+      /workspace\.yml/,
+    );
   });
 
   it("ignores unknown top-level fields", () => {
@@ -158,6 +155,38 @@ optional-placeholders: ~
     const manifest = parseManifest(yaml);
     expect(manifest.requiredPlaceholders).toEqual([]);
     expect(manifest.optionalPlaceholders).toEqual([]);
+  });
+
+  it("parses staging-paths array", () => {
+    const yaml = `name: x
+description: y
+staging-paths:
+  - "/tmp/schemas/\${SCHEMA_DEFINITION_ID}/"
+  - "/tmp/blueprints/\${SCHEMA_DEFINITION_ID}/"
+`;
+    const manifest = parseManifest(yaml);
+    expect(manifest.stagingPaths).toEqual([
+      "/tmp/schemas/${SCHEMA_DEFINITION_ID}/",
+      "/tmp/blueprints/${SCHEMA_DEFINITION_ID}/",
+    ]);
+  });
+
+  it("defaults staging-paths to empty when absent", () => {
+    const yaml = `name: x
+description: y
+`;
+    const manifest = parseManifest(yaml);
+    expect(manifest.stagingPaths).toEqual([]);
+  });
+
+  it("throws WorkspaceManifestError when staging-paths contains a non-string entry", () => {
+    const yaml = `name: x
+description: y
+staging-paths:
+  - 42
+`;
+    expect(() => parseManifest(yaml)).toThrow(WorkspaceManifestError);
+    expect(() => parseManifest(yaml)).toThrow(/staging-paths/);
   });
 
   it("returns a fresh array that does not alias the parsed YAML structure", () => {

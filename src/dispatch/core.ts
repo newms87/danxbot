@@ -53,6 +53,12 @@ import {
   resolveWorkspace,
   cleanupWorkspaceMcpSettings,
 } from "../workspace/resolve.js";
+import {
+  cleanupStagedFiles,
+  prepareStagedFiles,
+  writeStagedFiles,
+  type StagedFileInput,
+} from "./staged-files.js";
 
 const log = createLogger("dispatch-core");
 
@@ -258,6 +264,16 @@ export interface DispatchInput {
    * inherit the auto-generated UUID.
    */
   dispatchId?: string;
+  /**
+   * Optional `staged_files` entries from `/api/launch`. Written to disk
+   * before the agent spawns and removed when the dispatch reaches a
+   * terminal state. Every path is placeholder-substituted against
+   * `overlay` and validated against the workspace's declared
+   * `staging-paths` allowlist. Validation failures throw
+   * `StagedFilesError("validation")`; write failures throw
+   * `StagedFilesError("write")` — neither path leaves files on disk.
+   */
+  stagedFiles?: readonly StagedFileInput[];
 }
 
 export interface DispatchResult {
@@ -271,9 +287,10 @@ export interface DispatchResult {
  * produced the `mcpServers` map. Caller is responsible for the
  * temp-dir cleanup (wired through `onComplete` below).
  */
-function writeMcpSettingsFile(
-  mcpServers: Record<string, unknown>,
-): { settingsDir: string; settingsPath: string } {
+function writeMcpSettingsFile(mcpServers: Record<string, unknown>): {
+  settingsDir: string;
+  settingsPath: string;
+} {
   const settingsDir = mkdtempSync(join(tmpdir(), "danxbot-mcp-"));
   const settingsPath = join(settingsDir, "settings.json");
   writeFileSync(settingsPath, JSON.stringify({ mcpServers }, null, 2));
@@ -284,10 +301,7 @@ function cleanupMcpSettings(settingsDir: string): void {
   try {
     rmSync(settingsDir, { recursive: true, force: true });
   } catch (err) {
-    log.error(
-      `Failed to clean up MCP settings dir ${settingsDir}:`,
-      err,
-    );
+    log.error(`Failed to clean up MCP settings dir ${settingsDir}:`, err);
   }
 }
 
@@ -316,6 +330,13 @@ interface ResolvedSurface {
    * env block). Merged after the dispatch invariants and before `input.env`.
    */
   readonly envOverrides?: Record<string, string>;
+  /**
+   * Absolute paths of files written to disk before spawn via
+   * `writeStagedFiles`. Cleaned up in the dispatch onComplete chain so
+   * the workspace's staging dir doesn't accumulate stale files between
+   * dispatches. Empty when the caller supplied no `staged_files`.
+   */
+  readonly stagedFilePaths: readonly string[];
 }
 
 /**
@@ -385,12 +406,16 @@ async function runResolved(
         onComplete: (completedJob) => {
           // See `DispatchInput.onComplete` — cleanup runs before the
           // caller callback (the ordering guarantee is load-bearing).
+          // Staged files cleanup runs alongside the MCP settings cleanup;
+          // both must finish before the caller observes a terminal job.
           cleanupMcpSettings(settingsDir);
+          cleanupStagedFiles(resolved.stagedFilePaths);
           input.onComplete?.(completedJob);
         },
       });
     } catch (spawnErr) {
       cleanupMcpSettings(settingsDir);
+      cleanupStagedFiles(resolved.stagedFilePaths);
       throw spawnErr;
     }
 
@@ -603,15 +628,38 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     [DANXBOT_SERVER_NAME]: danxbotServer,
   };
 
+  // Stage files BEFORE spawn. Validation runs against the workspace's
+  // already-substituted `staging-paths` allowlist; placeholder
+  // substitution shares the same overlay used for the workspace's
+  // `.mcp.json` and `.claude/settings.json`. A validation failure
+  // surfaces to the HTTP handler as 400 (caller body bug); a write
+  // failure as 500 (worker-side IO). Either way, no agent spawns.
+  const prepared = prepareStagedFiles({
+    stagedFiles: input.stagedFiles ?? [],
+    stagingPaths: workspace.stagingPaths,
+    overlay,
+  });
+  const stagedFilePaths = writeStagedFiles(prepared);
+
   // No allowlist: the workspace's `.mcp.json` (with the danxbot
   // infrastructure server merged in here) IS the agent's MCP surface.
   // `--strict-mcp-config` keeps the agent confined to those servers, and
   // claude built-ins are all available by default. `danxbot_complete` is
   // reachable because the danxbot server registers it, not because it's
   // listed anywhere.
-  return runResolved(input, dispatchId, {
-    mcpServers,
-    cwd: workspace.cwd,
-    envOverrides: workspace.env,
-  });
+  try {
+    return await runResolved(input, dispatchId, {
+      mcpServers,
+      cwd: workspace.cwd,
+      envOverrides: workspace.env,
+      stagedFilePaths,
+    });
+  } catch (err) {
+    // runResolved already cleans up MCP settings + staged files in the
+    // spawn-failure branch via the catch block in spawnForDispatch. This
+    // outer catch covers anything that throws BEFORE spawnForDispatch
+    // runs — keeps the all-or-nothing staging contract intact.
+    cleanupStagedFiles(stagedFilePaths);
+    throw err;
+  }
 }

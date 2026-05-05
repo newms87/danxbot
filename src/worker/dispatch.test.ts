@@ -31,9 +31,9 @@ vi.mock("../agent/launcher.js", () => ({
  * call. `mockSettingsRead(spawnOpts)` centralizes the read for terse asserts.
  */
 import { readFileSync } from "node:fs";
-function mockSettingsRead(
-  spawnOpts: Record<string, unknown> | undefined,
-): { mcpServers: Record<string, { env: Record<string, string> }> } {
+function mockSettingsRead(spawnOpts: Record<string, unknown> | undefined): {
+  mcpServers: Record<string, { env: Record<string, string> }>;
+} {
   const p = spawnOpts?.mcpConfigPath as string;
   return JSON.parse(readFileSync(p, "utf-8"));
 }
@@ -207,10 +207,12 @@ vi.mock("../dashboard/dispatches-db.js", () => ({
 // Mock the critical-failure module so handleStop's writeFlag path doesn't
 // touch the real filesystem. Tests assert on the mock args to verify the
 // agent-signal payload shape.
-const mockWriteFlag = vi.fn().mockImplementation((_lp: string, payload: unknown) => ({
-  timestamp: "2026-04-21T00:00:00.000Z",
-  ...(payload as object),
-}));
+const mockWriteFlag = vi
+  .fn()
+  .mockImplementation((_lp: string, payload: unknown) => ({
+    timestamp: "2026-04-21T00:00:00.000Z",
+    ...(payload as object),
+  }));
 vi.mock("../critical-failure.js", () => ({
   writeFlag: (...args: unknown[]) => mockWriteFlag(...args),
   readFlag: vi.fn().mockReturnValue(null),
@@ -251,7 +253,6 @@ beforeEach(() => {
   mockDispatchFn.mockReset();
 });
 
-
 describe("handleLaunch — dispatchApi feature toggle", () => {
   it("returns 503 with the documented body when dispatchApi is disabled", async () => {
     mockIsFeatureEnabled.mockImplementation(
@@ -277,7 +278,6 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
     expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 });
-
 
 describe("handleLaunch / handleResume — claude-auth preflight (Trello 3l2d7i46)", () => {
   // Hoisted lazily so the import doesn't pay the cost on every test file load.
@@ -363,7 +363,6 @@ describe("handleLaunch / handleResume — claude-auth preflight (Trello 3l2d7i46
     expect(res._getStatusCode()).not.toBe(500);
   });
 });
-
 
 describe("handleStatus", () => {
   it("returns 404 for unknown job", () => {
@@ -979,6 +978,58 @@ describe("handleLaunch — P5 cutover (workspace required, legacy fields rejecte
     expect(JSON.parse(res._getBody())).toEqual({
       error: "Missing workspace",
     });
+  });
+
+  it("returns 400 when staged_files is not an array", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "issue-worker",
+      task: "Do something",
+      staged_files: { path: "/tmp/x", content: "y" },
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /staged_files must be an array/,
+    );
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when staged_files entry is missing path", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "issue-worker",
+      task: "Do something",
+      staged_files: [{ content: "y" }],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/staged_files\[0\]\.path/);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when staged_files entry has non-string content", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "issue-worker",
+      task: "Do something",
+      staged_files: [{ path: "/tmp/x", content: 42 }],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /staged_files\[0\]\.content/,
+    );
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 
   it("legacy-field rejection precedes missing-workspace check (legacy body without workspace produces the legacy error, not Missing workspace)", async () => {

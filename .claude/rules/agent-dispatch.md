@@ -156,6 +156,58 @@ Flow:
 
 Agents always have `danxbot_complete` available — even when the dispatch did not pass MCP config for any other reason. The launcher always injects it.
 
+## Pre-dispatch file staging — `staged_files`
+
+`/api/launch` accepts an optional `staged_files: [{path, content}]` array. Every entry is written to disk BEFORE `spawnAgent` so the dispatched agent sees a fully-populated workspace state on first turn. The mechanism replaces the older "agent calls an MCP tool at startup to fetch its own state" pattern, which put a runtime contract on the agent (must call exactly once, no re-call) and failed opaquely when the agent forgot.
+
+**Body shape:**
+
+```json
+{
+  "repo": "gpt-manager",
+  "workspace": "schema-builder",
+  "task": "...",
+  "overlay": { "SCHEMA_DEFINITION_ID": "42" },
+  "staged_files": [
+    { "path": "/tmp/schemas/${SCHEMA_DEFINITION_ID}/schema.json", "content": "..." }
+  ]
+}
+```
+
+**Workspace contract — `staging-paths` allowlist:**
+
+A workspace's `workspace.yml` declares the allowlist roots:
+
+```yaml
+staging-paths:
+  - "/tmp/schemas/${SCHEMA_DEFINITION_ID}/"
+```
+
+Each root may contain `${KEY}` placeholders substituted at request time against the dispatch overlay (same overlay used for `.mcp.json` and `.claude/settings.json`). A workspace with no `staging-paths` rejects any non-empty `staged_files` payload with 400 (fail closed).
+
+**Validation pipeline (`src/dispatch/staged-files.ts` is the single source of truth):**
+
+1. Body shape — every entry MUST be `{path: string, content: string}`. Bad shape → 400.
+2. Placeholder substitution — `${KEY}` references in `staged_files[].path` resolve against the overlay; unknown keys → 400.
+3. Allowlist check — every resolved absolute path MUST live under one of the workspace's substituted `staging-paths` roots. Path-traversal payloads (`..`, absolute paths outside the allowlist, sibling-prefix attacks like `/tmp/schemas/42-evil` against root `/tmp/schemas/42/`) → 400.
+4. Write — `mkdir -p` parents, `writeFileSync(path, content)` for each. Any IO failure rolls back every file written by THIS call (in reverse order) and returns 500. No agent spawns on either failure path.
+
+**Cleanup contract:** when the dispatch reaches a terminal state, `cleanupStagedFiles` removes EVERY path the worker wrote — and ONLY those paths. Sibling files in the same directory survive. Directories created during staging are NOT removed (a shared root like `/tmp/schemas/42/` may be used by sibling dispatches; tearing it down because we happen to be the last writer is the wrong contract). Cleanup is best-effort: failures are swallowed so a stuck file doesn't mask the dispatch's terminal status.
+
+**Error mapping:**
+
+- `StagedFilesError("validation")` → HTTP 400 (caller body bug)
+- `StagedFilesError("write")` → HTTP 500 (worker IO)
+- Either branch leaves zero files on disk — the `writeStagedFiles` rollback guarantees all-or-nothing.
+
+**Why inline-in-launch (not a separate `PUT /api/workspace/<name>/files`)?**
+
+- Atomic — no race window where staged files exist but the dispatch never lands (or vice versa).
+- One round-trip — schema dispatches stage ~10–30 small JSON files; one POST is faster than orchestrating per-file PUTs.
+- Reuses `/api/launch`'s bearer auth — no new public surface to defend.
+
+A future out-of-band staging endpoint can be added as a thin wrapper around `prepareStagedFiles` + `writeStagedFiles` if a real consumer needs it; today every consumer pre-populates inline.
+
 ## Multi-block assistant turns — one API response, multiple JSONL lines, ONE usage block
 
 Empirically verified against real Claude Code captures (gpt-manager job `830cbd99`, danxbot smoke `2e60f7ce`): when an assistant turn returns more than one content block (text + tool_use, thinking + text + tool_use, etc.), Claude Code writes ONE JSONL entry per content block, but stamps the IDENTICAL response-level `message.usage` on every entry. All entries share the same `message.id`. The API charged the response ONCE; the JSONL just splits the rendering.

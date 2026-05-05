@@ -21,9 +21,9 @@ import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 const mockSpawnAgent = vi.fn();
 
 vi.mock("../agent/launcher.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("../agent/launcher.js")
-  >("../agent/launcher.js");
+  const actual = await vi.importActual<typeof import("../agent/launcher.js")>(
+    "../agent/launcher.js",
+  );
   return {
     ...actual,
     spawnAgent: (...args: unknown[]) => mockSpawnAgent(...args),
@@ -136,8 +136,6 @@ beforeEach(() => {
   mockUpdateDispatch.mockResolvedValue(undefined);
 });
 
-
-
 describe("dispatch() — slack-worker integration", () => {
   // Copy the real `src/poller/inject/workspaces/slack-worker/` fixture
   // into a per-test tmpdir so the resolver walks actual slack-worker
@@ -162,12 +160,7 @@ describe("dispatch() — slack-worker integration", () => {
 
   beforeEach(() => {
     tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-slack-dispatch-"));
-    const dest = resolve(
-      tmpRepoDir,
-      ".danxbot",
-      "workspaces",
-      "slack-worker",
-    );
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "slack-worker");
     mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
       recursive: true,
     });
@@ -584,9 +577,7 @@ describe("_drainPendingCleanupsForTesting", () => {
     // Defensive baseline: a fresh registry should drain instantly.
     // Guards against a future refactor that adds a side effect (e.g.
     // logging) which could throw on an empty input.
-    await expect(
-      _drainPendingCleanupsForTesting(),
-    ).resolves.toBeUndefined();
+    await expect(_drainPendingCleanupsForTesting()).resolves.toBeUndefined();
   });
 
   it("skips the _forwarderFlush await when the job has no forwarder (poller-style dispatch)", async () => {
@@ -611,7 +602,9 @@ describe("_drainPendingCleanupsForTesting", () => {
       "workspaces",
       "slack-worker",
     );
-    const tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-test-drain-noflush-"));
+    const tmpRepoDir = mkdtempSync(
+      resolve(tmpdir(), "danxbot-test-drain-noflush-"),
+    );
     try {
       const dest = resolve(
         tmpRepoDir,
@@ -635,9 +628,7 @@ describe("_drainPendingCleanupsForTesting", () => {
         apiDispatchMeta: DEFAULT_DISPATCH_META,
       });
 
-      await expect(
-        _drainPendingCleanupsForTesting(),
-      ).resolves.toBeUndefined();
+      await expect(_drainPendingCleanupsForTesting()).resolves.toBeUndefined();
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
     } finally {
       rmSync(tmpRepoDir, { recursive: true, force: true });
@@ -917,5 +908,150 @@ describe("dispatch() — dispatchId override", () => {
     expect(result.dispatchId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
+  });
+});
+
+describe("dispatch() — staged_files staging", () => {
+  let tmpRepoDir: string;
+  let stagingRoot: string;
+  let testRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-staging-test-"));
+    // Real on-disk slack-worker fixture, then overwrite workspace.yml to add
+    // `staging-paths`. Easier than minting a fresh fixture inline; the
+    // resolver doesn't care which workspace declares the field.
+    const slackWorkerSrc = resolve(
+      __dirname,
+      "..",
+      "poller",
+      "inject",
+      "workspaces",
+      "slack-worker",
+    );
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "slack-worker");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(slackWorkerSrc, dest, { recursive: true });
+
+    stagingRoot = resolve(tmpRepoDir, "staging-${SCHEMA_DEFINITION_ID}");
+    writeFileSync(
+      resolve(dest, "workspace.yml"),
+      `name: slack-worker
+description: staging test
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANXBOT_WORKER_PORT
+  - DANXBOT_SLACK_REPLY_URL
+  - DANXBOT_SLACK_UPDATE_URL
+required-gates:
+  - "settings.slack.enabled ≠ false"
+staging-paths:
+  - "${stagingRoot}/"
+`,
+    );
+    testRepo = makeRepoContext({ localPath: tmpRepoDir });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  it("writes every staged_files entry under the workspace allowlist before spawn", async () => {
+    const overlay = { SCHEMA_DEFINITION_ID: "42" };
+    const resolvedRoot = resolve(tmpRepoDir, "staging-42");
+
+    let onSpawnExisted: { schema?: boolean; bp?: boolean } = {};
+    mockSpawnAgent.mockImplementationOnce(async () => {
+      // At spawnAgent call time the staged files MUST be on disk.
+      onSpawnExisted = {
+        schema: existsSync(resolve(resolvedRoot, "schema.json")),
+        bp: existsSync(resolve(resolvedRoot, "blueprints/7.json")),
+      };
+      return makeRunningJob();
+    });
+
+    await dispatch({
+      repo: testRepo,
+      task: "task",
+      workspace: "slack-worker",
+      overlay,
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      stagedFiles: [
+        { path: resolvedRoot + "/schema.json", content: '{"a":1}' },
+        { path: resolvedRoot + "/blueprints/7.json", content: '{"b":2}' },
+      ],
+    });
+
+    expect(onSpawnExisted).toEqual({ schema: true, bp: true });
+    expect(readFileSync(resolve(resolvedRoot, "schema.json"), "utf-8")).toBe(
+      '{"a":1}',
+    );
+  });
+
+  it("rejects path outside the allowlist BEFORE spawn — no agent runs, no files left on disk", async () => {
+    const evil = "/tmp/danxbot-staging-evil-target.json";
+    await expect(
+      dispatch({
+        repo: testRepo,
+        task: "task",
+        workspace: "slack-worker",
+        overlay: { SCHEMA_DEFINITION_ID: "42" },
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        stagedFiles: [{ path: evil, content: "x" }],
+      }),
+    ).rejects.toThrow(/outside the workspace allowlist/);
+
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(existsSync(evil)).toBe(false);
+  });
+
+  it("rejects ../ path traversal that escapes the allowlist", async () => {
+    await expect(
+      dispatch({
+        repo: testRepo,
+        task: "task",
+        workspace: "slack-worker",
+        overlay: { SCHEMA_DEFINITION_ID: "42" },
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        stagedFiles: [
+          {
+            path: resolve(tmpRepoDir, "staging-42/../../etc/passwd"),
+            content: "x",
+          },
+        ],
+      }),
+    ).rejects.toThrow(/outside the workspace allowlist/);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("removes every staged file when the dispatch reaches a terminal state via onComplete", async () => {
+    const overlay = { SCHEMA_DEFINITION_ID: "99" };
+    const resolvedRoot = resolve(tmpRepoDir, "staging-99");
+    const filePath = resolve(resolvedRoot, "schema.json");
+
+    let capturedOnComplete:
+      | ((job: ReturnType<typeof makeRunningJob>) => void)
+      | undefined;
+    mockSpawnAgent.mockImplementationOnce(async (opts: unknown) => {
+      capturedOnComplete = (opts as { onComplete?: typeof capturedOnComplete })
+        .onComplete;
+      return makeRunningJob();
+    });
+
+    await dispatch({
+      repo: testRepo,
+      task: "task",
+      workspace: "slack-worker",
+      overlay,
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      stagedFiles: [{ path: filePath, content: '{"a":1}' }],
+    });
+
+    expect(existsSync(filePath)).toBe(true);
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!(makeRunningJob());
+    expect(existsSync(filePath)).toBe(false);
   });
 });

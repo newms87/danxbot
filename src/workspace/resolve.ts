@@ -76,7 +76,11 @@ import { readFlag } from "../critical-failure.js";
 import { isFeatureEnabled } from "../settings-file.js";
 import type { RepoContext } from "../types.js";
 import { parseManifest, type WorkspaceManifest } from "./manifest.js";
-import { buildSubstitutionMap, substitute, validateOverlay } from "./placeholders.js";
+import {
+  buildSubstitutionMap,
+  substitute,
+  validateOverlay,
+} from "./placeholders.js";
 
 export class WorkspaceNotFoundError extends Error {
   constructor(message: string) {
@@ -145,6 +149,14 @@ export interface ResolvedWorkspace {
   env: Record<string, string>;
   mcpSettingsPath: string;
   promptDelivery: PromptDelivery;
+  /**
+   * Allowlist roots for `staged_files[]` writes — manifest's
+   * `staging-paths`, with `${KEY}` placeholders substituted from the
+   * dispatch overlay. Empty when the workspace declares none. The
+   * dispatch core uses this to validate every staged-file path against
+   * the allowlist before writing.
+   */
+  stagingPaths: readonly string[];
 }
 
 /** Files whose presence in a workspace dir is a hard error — see WorkspaceLegacyFileError. */
@@ -169,10 +181,7 @@ function workspaceRoot(repo: RepoContext, name: string): string {
   return resolve(repo.localPath, ".danxbot", "workspaces", name);
 }
 
-function evaluateGates(
-  manifest: WorkspaceManifest,
-  repo: RepoContext,
-): void {
+function evaluateGates(manifest: WorkspaceManifest, repo: RepoContext): void {
   for (const gate of manifest.requiredGates) {
     const evaluator = GATE_REGISTRY[gate];
     if (!evaluator) {
@@ -304,11 +313,13 @@ export function resolveWorkspace(
 
   const mcpSettingsPath = writeMcpSettings(cwd, subs);
   const env = resolveEnv(cwd, subs);
+  const stagingPaths = manifest.stagingPaths.map((p) => substitute(p, subs));
 
   return {
     cwd,
     env,
     mcpSettingsPath,
     promptDelivery: "at-file",
+    stagingPaths,
   };
 }

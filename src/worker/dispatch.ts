@@ -1,11 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "http";
 import { config } from "../config.js";
 import { json, parseBody } from "../http/helpers.js";
-import {
-  cancelJob,
-  getJobStatus,
-  type AgentJob,
-} from "../agent/launcher.js";
+import { cancelJob, getJobStatus, type AgentJob } from "../agent/launcher.js";
 import { McpResolveError } from "../agent/mcp-types.js";
 import { ClaudeAuthError } from "../agent/claude-auth-preflight.js";
 import { ProjectsDirError } from "../agent/projects-dir-preflight.js";
@@ -17,9 +13,11 @@ import {
   WorkspaceGateError,
   WorkspaceGateUnknownError,
 } from "../workspace/resolve.js";
+import { PlaceholderError } from "../workspace/placeholders.js";
 import {
-  PlaceholderError,
-} from "../workspace/placeholders.js";
+  StagedFilesError,
+  type StagedFileInput,
+} from "../dispatch/staged-files.js";
 import { WorkspaceManifestError } from "../workspace/manifest.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import { createLogger } from "../logger.js";
@@ -79,7 +77,6 @@ function parseSharedRequestFields(
     null;
   return { statusUrl, callerIp };
 }
-
 
 /**
  * Reject empty strings (including whitespace-only) and non-string values.
@@ -189,6 +186,53 @@ interface ParsedDispatchRequest {
   callerIp: string | null;
   title: string | undefined;
   maxRuntimeMs: number | undefined;
+  stagedFiles: readonly StagedFileInput[];
+}
+
+/**
+ * Validate the body's `staged_files` field. Caller-supplied; reject loudly
+ * so a bad client sees a precise error. Returns the parsed array (empty
+ * when omitted), or null after writing a 400.
+ *
+ * Shape only — placeholder substitution + allowlist enforcement happen
+ * inside `dispatch/staged-files.ts` against the resolved workspace.
+ */
+function validateStagedFilesBody(
+  raw: unknown,
+  res: ServerResponse,
+): readonly StagedFileInput[] | null {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) {
+    json(res, 400, {
+      error: "staged_files must be an array of {path, content} objects",
+    });
+    return null;
+  }
+  const out: StagedFileInput[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      json(res, 400, {
+        error: `staged_files[${i}] must be an object with {path, content}`,
+      });
+      return null;
+    }
+    const obj = entry as Record<string, unknown>;
+    if (typeof obj.path !== "string" || obj.path.length === 0) {
+      json(res, 400, {
+        error: `staged_files[${i}].path must be a non-empty string`,
+      });
+      return null;
+    }
+    if (typeof obj.content !== "string") {
+      json(res, 400, {
+        error: `staged_files[${i}].content must be a string`,
+      });
+      return null;
+    }
+    out.push({ path: obj.path, content: obj.content });
+  }
+  return out;
 }
 
 /**
@@ -202,11 +246,7 @@ function validateOverlayBody(
   res: ServerResponse,
 ): Record<string, string> | null {
   if (raw === undefined) return {};
-  if (
-    raw === null ||
-    typeof raw !== "object" ||
-    Array.isArray(raw)
-  ) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     json(res, 400, {
       error: "overlay must be an object mapping string → string",
     });
@@ -277,11 +317,15 @@ function parseDispatchRequest(
   // pass through untouched).
   const normalizedOverlay: Record<string, string> = {};
   for (const [key, value] of Object.entries(overlay)) {
-    normalizedOverlay[key] = normalizeCallbackUrl(value, config.isHost) ?? value;
+    normalizedOverlay[key] =
+      normalizeCallbackUrl(value, config.isHost) ?? value;
   }
   const { statusUrl, callerIp } = parseSharedRequestFields(req, body);
   const apiToken =
     typeof body.api_token === "string" ? body.api_token : undefined;
+
+  const stagedFiles = validateStagedFilesBody(body.staged_files, res);
+  if (stagedFiles === null) return null;
 
   return {
     workspace,
@@ -293,6 +337,7 @@ function parseDispatchRequest(
     title: typeof body.title === "string" ? body.title : undefined,
     maxRuntimeMs:
       typeof body.max_runtime_ms === "number" ? body.max_runtime_ms : undefined,
+    stagedFiles,
   };
 }
 
@@ -320,6 +365,7 @@ function buildDispatchInput(
     apiDispatchMeta,
     resumeSessionId: extras.resumeSessionId,
     parentJobId: extras.parentJobId,
+    stagedFiles: parsed.stagedFiles,
   };
 }
 
@@ -409,6 +455,15 @@ export async function handleLaunch(
     if (isWorkspaceCallerError(err)) {
       json(res, 400, {
         error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    if (err instanceof StagedFilesError) {
+      // validation = caller body bug → 400; write = worker IO → 500.
+      // Either branch leaves no files on disk thanks to the all-or-
+      // nothing rollback inside `writeStagedFiles`.
+      json(res, err.kind === "validation" ? 400 : 500, {
+        error: err.message,
       });
       return;
     }
@@ -523,6 +578,15 @@ export async function handleResume(
     if (isWorkspaceCallerError(err)) {
       json(res, 400, {
         error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    if (err instanceof StagedFilesError) {
+      // validation = caller body bug → 400; write = worker IO → 500.
+      // Either branch leaves no files on disk thanks to the all-or-
+      // nothing rollback inside `writeStagedFiles`.
+      json(res, err.kind === "validation" ? 400 : 500, {
+        error: err.message,
       });
       return;
     }
@@ -814,8 +878,7 @@ export async function handleStop(
     const status = parseStopStatus(body, res);
     if (!status) return;
 
-    const summary =
-      typeof body.summary === "string" ? body.summary : undefined;
+    const summary = typeof body.summary === "string" ? body.summary : undefined;
 
     if (status === "critical_failure") {
       // The flag file is the operator's sole source of truth for what
@@ -873,4 +936,3 @@ export async function handleStop(
     });
   }
 }
-

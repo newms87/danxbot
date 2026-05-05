@@ -17,6 +17,7 @@ function manifest(
     requiredPlaceholders: required,
     optionalPlaceholders: optional,
     requiredGates: [],
+    stagingPaths: [],
   };
 }
 
@@ -70,9 +71,7 @@ describe("substitute", () => {
   });
 
   it("includes known overlay keys in the unknown-placeholder error message", () => {
-    expect(() =>
-      substitute("${MISSING}", { A: "1", B: "2" }),
-    ).toThrow(/A, B/);
+    expect(() => substitute("${MISSING}", { A: "1", B: "2" })).toThrow(/A, B/);
   });
 
   it("reports '(none)' when overlay is empty and a placeholder is unknown", () => {
@@ -88,18 +87,16 @@ describe("validateOverlay", () => {
   });
 
   it("throws PlaceholderError when a required placeholder is missing", () => {
-    expect(() =>
-      validateOverlay(manifest(["A", "B"]), { A: "1" }),
-    ).toThrow(PlaceholderError);
-    expect(() =>
-      validateOverlay(manifest(["A", "B"]), { A: "1" }),
-    ).toThrow(/B/);
+    expect(() => validateOverlay(manifest(["A", "B"]), { A: "1" })).toThrow(
+      PlaceholderError,
+    );
+    expect(() => validateOverlay(manifest(["A", "B"]), { A: "1" })).toThrow(
+      /B/,
+    );
   });
 
   it("includes workspace name in error message", () => {
-    expect(() =>
-      validateOverlay(manifest(["MISSING"]), {}),
-    ).toThrow(/test/);
+    expect(() => validateOverlay(manifest(["MISSING"]), {})).toThrow(/test/);
   });
 
   it("allows extra overlay keys that are not declared in the manifest", () => {
@@ -109,15 +106,13 @@ describe("validateOverlay", () => {
   });
 
   it("allows missing optional placeholders", () => {
-    expect(() =>
-      validateOverlay(manifest([], ["OPTIONAL"]), {}),
-    ).not.toThrow();
+    expect(() => validateOverlay(manifest([], ["OPTIONAL"]), {})).not.toThrow();
   });
 
   it("throws for an empty-string value on a required placeholder", () => {
-    expect(() =>
-      validateOverlay(manifest(["A"]), { A: "" }),
-    ).toThrow(PlaceholderError);
+    expect(() => validateOverlay(manifest(["A"]), { A: "" })).toThrow(
+      PlaceholderError,
+    );
   });
 
   it("throws when a required placeholder has a non-string value", () => {

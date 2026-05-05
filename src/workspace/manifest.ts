@@ -41,6 +41,14 @@ export interface WorkspaceManifest {
   readonly requiredPlaceholders: readonly string[];
   readonly optionalPlaceholders: readonly string[];
   readonly requiredGates: readonly string[];
+  /**
+   * Allowlist of root paths under which `/api/launch` may stage files via
+   * its `staged_files[]` body field. Each entry may contain `${KEY}`
+   * placeholders that are substituted against the dispatch overlay at
+   * resolve time. A workspace with no `staging-paths` rejects any non-
+   * empty `staged_files` payload (fail closed).
+   */
+  readonly stagingPaths: readonly string[];
 }
 
 export interface ParseManifestOptions {
@@ -102,8 +110,7 @@ export function parseManifest(
   try {
     raw = parseYaml(yamlContent);
   } catch (err) {
-    const detail =
-      err instanceof YAMLParseError ? err.message : String(err);
+    const detail = err instanceof YAMLParseError ? err.message : String(err);
     throw new WorkspaceManifestError(
       `failed to parse workspace manifest${locator(options)}: ${detail}`,
     );
@@ -120,8 +127,17 @@ export function parseManifest(
   return {
     name: requireString(obj, "name", options),
     description: requireString(obj, "description", options),
-    requiredPlaceholders: readStringArray(obj, "required-placeholders", options),
-    optionalPlaceholders: readStringArray(obj, "optional-placeholders", options),
+    requiredPlaceholders: readStringArray(
+      obj,
+      "required-placeholders",
+      options,
+    ),
+    optionalPlaceholders: readStringArray(
+      obj,
+      "optional-placeholders",
+      options,
+    ),
     requiredGates: readStringArray(obj, "required-gates", options),
+    stagingPaths: readStringArray(obj, "staging-paths", options),
   };
 }
