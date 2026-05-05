@@ -47,6 +47,7 @@ import { createLogger } from "../logger.js";
 import { dispatch, getActiveJob } from "../dispatch/core.js";
 import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
+import { pushOrphans } from "./orphan-push.js";
 import { isLinkOrFile, isSymlink } from "./fs-probe.js";
 import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext } from "../types.js";
@@ -306,6 +307,24 @@ async function _poll(repo: RepoContext): Promise<void> {
     ...inProgressCards,
     ...actionItemRefs,
   ]);
+
+  // Orphan-push: scan local YAMLs for empty `external_id` and push each
+  // to the tracker via `createCard`. Closes the gap for cards written
+  // by hand (or by the `danx-epic-link` flow that splits an epic into
+  // phase children) without going through `danx_issue_create` — those
+  // YAMLs would otherwise stay invisible on the tracker forever.
+  // Failures per card are non-fatal: logged + tick continues.
+  const orphanPush = await pushOrphans(repo.localPath, tracker);
+  if (orphanPush.pushed > 0) {
+    log.info(
+      `[${repo.name}] Pushed ${orphanPush.pushed} local orphan${orphanPush.pushed > 1 ? "s" : ""} to tracker`,
+    );
+  }
+  for (const err of orphanPush.errors) {
+    log.error(
+      `[${repo.name}] orphan-push failed for ${err.id}: ${err.message}`,
+    );
+  }
 
   // Orphan-resume check. Runs BEFORE the ToDo dispatch path so a
   // worker that died mid-dispatch can resume its prior session

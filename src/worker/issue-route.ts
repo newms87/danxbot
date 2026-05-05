@@ -52,6 +52,7 @@ import path from "node:path";
 import { json, parseBody } from "../http/helpers.js";
 import {
   IssueParseError,
+  issueToCreateInput,
   parseIssue,
   serializeIssue,
 } from "../issue-tracker/yaml.js";
@@ -463,26 +464,7 @@ export async function handleIssueCreate(
     return;
   }
 
-  const input: CreateCardInput = {
-    schema_version: 3,
-    tracker: draft.tracker,
-    id: draft.id,
-    parent_id: draft.parent_id,
-    children: [...draft.children],
-    status: draft.status,
-    type: draft.type,
-    title: draft.title,
-    description: draft.description,
-    triaged: draft.triaged,
-    ac: draft.ac.map((a) => ({ title: a.title, checked: a.checked })),
-    phases: draft.phases.map((p) => ({
-      title: p.title,
-      status: p.status,
-      notes: p.notes,
-    })),
-    comments: draft.comments,
-    retro: draft.retro,
-  };
+  const input: CreateCardInput = issueToCreateInput(draft);
 
   let result: {
     external_id: string;

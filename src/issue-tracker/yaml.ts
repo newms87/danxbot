@@ -7,6 +7,7 @@ import {
   ISSUE_STATUSES,
   ISSUE_TYPES,
   PHASE_STATUSES,
+  type CreateCardInput,
   type Issue,
   type IssueAcItem,
   type IssueBlocked,
@@ -181,6 +182,41 @@ export function parseIssue(text: string): Issue {
  * typo'd or hand-written id is rejected at YAML parse time.
  */
 export const ISSUE_ID_REGEX = /^ISS-\d+$/;
+
+/**
+ * Project an `Issue` into the `CreateCardInput` shape the tracker accepts.
+ * `check_item_id` is dropped intentionally — the tracker assigns those on
+ * `createCard` and the result is stamped back into the YAML by the caller.
+ * Used by both the `danx_issue_create` worker route and the poller's
+ * orphan-push pass to keep a single shape.
+ */
+export function issueToCreateInput(issue: Issue): CreateCardInput {
+  return {
+    schema_version: 3,
+    tracker: issue.tracker,
+    id: issue.id,
+    parent_id: issue.parent_id,
+    children: [...issue.children],
+    status: issue.status,
+    type: issue.type,
+    title: issue.title,
+    description: issue.description,
+    triaged: { ...issue.triaged },
+    ac: issue.ac.map((a) => ({ title: a.title, checked: a.checked })),
+    phases: issue.phases.map((p) => ({
+      title: p.title,
+      status: p.status,
+      notes: p.notes,
+    })),
+    comments: issue.comments.map((c) => ({ ...c })),
+    retro: {
+      good: issue.retro.good,
+      bad: issue.retro.bad,
+      action_item_ids: [...issue.retro.action_item_ids],
+      commits: [...issue.retro.commits],
+    },
+  };
+}
 
 type ValidateResult =
   | { ok: true; issue: Issue }

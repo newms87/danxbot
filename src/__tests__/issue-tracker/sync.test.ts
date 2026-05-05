@@ -9,7 +9,11 @@ import {
   DANXBOT_COMMENT_MARKER,
   RETRO_COMMENT_MARKER,
 } from "../../issue-tracker/markers.js";
-import type { CreateCardInput, Issue } from "../../issue-tracker/interface.js";
+import type {
+  CreateCardInput,
+  Issue,
+  IssueRetro,
+} from "../../issue-tracker/interface.js";
 
 function defaultCreate(): CreateCardInput {
   return {
