@@ -2,8 +2,8 @@
   "extraKnownMarketplaces": {
     "newms-plugins": {
       "source": {
-        "source": "directory",
-        "path": "/home/newms/web/claude-plugins"
+        "source": "github",
+        "repo": "newms87/claude-plugins"
       }
     }
   },

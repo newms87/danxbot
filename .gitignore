@@ -68,8 +68,3 @@ deploy/targets/.cache/
 # Source of truth: src/poller/inject/workspaces/<name>/ (committed).
 .danxbot/workspaces/
 .danxbot/CRITICAL_FAILURE
-
-# Staged claude-plugins monorepo for Docker build context.
-# Populated by `make sync-claude-plugins` (auto-runs as a `make build` prereq).
-# Source of truth: ~/web/claude-plugins/ (separate repo).
-.build-claude-plugins/
