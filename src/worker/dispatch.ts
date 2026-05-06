@@ -16,11 +16,15 @@ import {
 import { PlaceholderError } from "../workspace/placeholders.js";
 import {
   StagedFilesError,
+  validateStagedFilesShape,
   type StagedFileInput,
 } from "../dispatch/staged-files.js";
 import { WorkspaceManifestError } from "../workspace/manifest.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
-import { isTerminalStatus, type DispatchStatus } from "../dashboard/dispatches.js";
+import {
+  isTerminalStatus,
+  type DispatchStatus,
+} from "../dashboard/dispatches.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
 import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
@@ -195,8 +199,11 @@ interface ParsedDispatchRequest {
  * so a bad client sees a precise error. Returns the parsed array (empty
  * when omitted), or null after writing a 400.
  *
- * Shape only — placeholder substitution + allowlist enforcement happen
- * inside `dispatch/staged-files.ts` against the resolved workspace.
+ * Per-entry shape (content vs source_url variant, required/forbidden
+ * field combinations, header typing) is delegated to
+ * `dispatch/staged-files.ts > validateStagedFilesShape` — the same
+ * function called by `prepareStagedFiles`. Single source of truth: this
+ * gate gives a fast pre-dispatch 400 without duplicating the rules.
  */
 function validateStagedFilesBody(
   raw: unknown,
@@ -205,35 +212,23 @@ function validateStagedFilesBody(
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
     json(res, 400, {
-      error: "staged_files must be an array of {path, content} objects",
+      error:
+        "staged_files must be an array of {path, content} or {path, source_url} objects",
     });
     return null;
   }
-  const out: StagedFileInput[] = [];
-  for (let i = 0; i < raw.length; i++) {
-    const entry = raw[i];
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      json(res, 400, {
-        error: `staged_files[${i}] must be an object with {path, content}`,
+  try {
+    validateStagedFilesShape(raw);
+  } catch (err) {
+    if (err instanceof StagedFilesError) {
+      json(res, err.kind === "validation" ? 400 : 500, {
+        error: err.message,
       });
       return null;
     }
-    const obj = entry as Record<string, unknown>;
-    if (typeof obj.path !== "string" || obj.path.length === 0) {
-      json(res, 400, {
-        error: `staged_files[${i}].path must be a non-empty string`,
-      });
-      return null;
-    }
-    if (typeof obj.content !== "string") {
-      json(res, 400, {
-        error: `staged_files[${i}].content must be a string`,
-      });
-      return null;
-    }
-    out.push({ path: obj.path, content: obj.content });
+    throw err;
   }
-  return out;
+  return raw;
 }
 
 /**

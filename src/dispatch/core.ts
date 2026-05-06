@@ -672,7 +672,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     stagingPaths: workspace.stagingPaths,
     overlay,
   });
-  const stagedFilePaths = writeStagedFiles(prepared);
+  const stagedFilePaths = await writeStagedFiles(prepared);
 
   // No allowlist: the workspace's `.mcp.json` (with the danxbot
   // infrastructure server merged in here) IS the agent's MCP surface.
