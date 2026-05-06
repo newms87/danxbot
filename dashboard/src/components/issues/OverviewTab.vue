@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { IssueDetail, IssueListItem } from "../../types";
+import type { ChildStatusId, IssueDetail, IssueListItem } from "../../types";
 import TypeBadge from "./TypeBadge.vue";
+import { CHILD_STATUS_META } from "./issuePalette";
 import { MarkdownEditor } from "danx-ui";
 
 const props = defineProps<{
@@ -13,11 +14,28 @@ const emit = defineEmits<{
   "jump-issue": [id: string];
 }>();
 
-const childIssues = computed(() =>
-  props.issue.children
-    .map((id) => props.allIssues.find((i) => i.id === id))
-    .filter((i): i is IssueListItem => Boolean(i)),
-);
+// Read the parent's pre-projected `children_detail[]` so this drawer
+// renders each child with the SAME `done|todo|blocked` glyph as
+// `IssueCard.vue`'s `ChildrenChecklist.vue`. `allIssues` lookup remains
+// the source for `type` (TypeBadge) and `title`.
+const childRows = computed(() => {
+  const parentListing = props.allIssues.find((i) => i.id === props.issue.id);
+  const statusById = new Map<string, ChildStatusId>(
+    (parentListing?.children_detail ?? []).map((c) => [c.id, c.status]),
+  );
+  return props.issue.children
+    .map((id) => {
+      const child = props.allIssues.find((i) => i.id === id);
+      if (!child) return null;
+      return {
+        id: child.id,
+        type: child.type,
+        title: child.title,
+        status: statusById.get(child.id) ?? "todo",
+      };
+    })
+    .filter(<T,>(r: T | null): r is T => r !== null);
+});
 
 const childrenSectionLabel = computed(() =>
   props.issue.type === "Epic" ? "Phases" : "Children",
@@ -50,20 +68,27 @@ const childrenSectionLabel = computed(() =>
       </div>
     </section>
 
-    <section v-if="childIssues.length > 0">
-      <div class="section-label">{{ childrenSectionLabel }} · {{ childIssues.length }}</div>
+    <section v-if="childRows.length > 0">
+      <div class="section-label">{{ childrenSectionLabel }} · {{ childRows.length }}</div>
       <div class="child-list">
         <button
-          v-for="c in childIssues"
+          v-for="c in childRows"
           :key="c.id"
           type="button"
           class="child-row"
+          :class="{ done: c.status === 'done' }"
           @click="emit('jump-issue', c.id)"
         >
+          <span
+            class="status-chip"
+            :style="{
+              background: CHILD_STATUS_META[c.status].bg,
+              color: CHILD_STATUS_META[c.status].fg,
+            }"
+          >{{ CHILD_STATUS_META[c.status].glyph }}</span>
           <span class="child-id">{{ c.id }}</span>
           <TypeBadge :type="c.type" compact />
           <span class="child-title">{{ c.title }}</span>
-          <span class="child-status">{{ c.status }}</span>
         </button>
       </div>
     </section>
@@ -159,9 +184,19 @@ const childrenSectionLabel = computed(() =>
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.child-status {
+.child-row.done {
+  color: #64748b;
+  text-decoration: line-through;
+}
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  flex-shrink: 0;
   font-size: 10px;
-  color: #94a3b8;
-  text-transform: capitalize;
+  font-weight: 600;
 }
 </style>

@@ -441,9 +441,6 @@ describe("syncIssue", () => {
     }
   });
 
-  // ---- Test gap D: phases full update + delete paths ----
-
-
   it("local-as-truth wins on every non-comment field", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
