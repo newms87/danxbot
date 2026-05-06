@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import type { IssueListItem } from "../../types";
 import TypeBadge from "./TypeBadge.vue";
-import PhaseChecklist from "./PhaseChecklist.vue";
+import ChildrenChecklist from "./ChildrenChecklist.vue";
 import ACBar from "./ACBar.vue";
 import { relativeTime } from "../../utils/relativeTime";
 
@@ -24,17 +24,10 @@ const isEpic = computed(() => props.issue.type === "Epic");
 const blocked = computed(() => props.issue.blocked);
 const updatedLabel = computed(() => relativeTime(props.issue.updated_at));
 
-// Backend contract (issues-reader.ts): `phases` is present iff `type === "Epic"`.
-// Throw loud if violated rather than silently rendering "0 phases".
-const epicPhases = computed(() => {
-  if (!isEpic.value) return [];
-  if (props.issue.phases === undefined) {
-    throw new Error(
-      `IssueListItem ${props.issue.id} is Epic but missing phases[] — backend contract violated`,
-    );
-  }
-  return props.issue.phases;
-});
+// Unified `children[]` (ISS-81). Epic = phase cards (label "Phases"),
+// non-epic = sub-cards (label "Children"). Same render shape either way.
+const childrenDetail = computed(() => props.issue.children_detail);
+const childrenLabel = computed(() => (isEpic.value ? "phases" : "children"));
 
 function onParentClick(e: MouseEvent): void {
   e.stopPropagation();
@@ -52,8 +45,8 @@ function onParentClick(e: MouseEvent): void {
     <div class="card-header">
       <span class="id-chip">{{ issue.id }}</span>
       <TypeBadge :type="issue.type" compact />
-      <span v-if="isEpic" class="phase-count-chip">
-        {{ epicPhases.length }} phases
+      <span v-if="childrenDetail.length > 0" class="phase-count-chip">
+        {{ childrenDetail.length }} {{ childrenLabel }}
       </span>
       <span
         v-if="blocked"
@@ -66,12 +59,12 @@ function onParentClick(e: MouseEvent): void {
 
     <div class="title">{{ issue.title }}</div>
 
-    <PhaseChecklist
-      v-if="isEpic && epicPhases.length > 0"
-      :phases="epicPhases"
+    <ChildrenChecklist
+      v-if="childrenDetail.length > 0"
+      :items="childrenDetail"
     />
 
-    <div v-if="!isEpic && issue.ac_total > 0" class="ac-wrap">
+    <div v-if="issue.ac_total > 0" class="ac-wrap">
       <ACBar :done="issue.ac_done" :total="issue.ac_total" />
     </div>
 

@@ -8,7 +8,6 @@ import {
   type Issue,
   type IssueAcItem,
   type IssueComment,
-  type IssuePhase,
   type IssueRetro,
   type IssueTracker,
 } from "./interface.js";
@@ -33,11 +32,6 @@ export function toCreateCardInput(issue: Issue): CreateCardInput {
     description: issue.description,
     triaged: { ...issue.triaged },
     ac: issue.ac.map((a) => ({ title: a.title, checked: a.checked })),
-    phases: issue.phases.map((p) => ({
-      title: p.title,
-      status: p.status,
-      notes: p.notes,
-    })),
     comments: issue.comments.map((c) => ({ ...c })),
     retro: {
       good: issue.retro.good,
@@ -51,16 +45,15 @@ export function toCreateCardInput(issue: Issue): CreateCardInput {
 /**
  * Stamp tracker-assigned ids back onto the local Issue. After a successful
  * `tracker.createCard()`, the tracker has allocated an `external_id` for the
- * card and a `check_item_id` for every AC and phase item; this function
- * returns a NEW Issue mirroring those ids so the caller can persist the
- * bidirectional binding without mutating the input.
+ * card and a `check_item_id` for every AC item; this function returns a NEW
+ * Issue mirroring those ids so the caller can persist the bidirectional
+ * binding without mutating the input.
  */
 export function stampTrackerIds(
   issue: Issue,
   created: {
     external_id: string;
     ac: { check_item_id: string }[];
-    phases: { check_item_id: string }[];
   },
 ): Issue {
   return {
@@ -69,10 +62,6 @@ export function stampTrackerIds(
     ac: issue.ac.map((item, i) => ({
       ...item,
       check_item_id: created.ac[i]?.check_item_id ?? item.check_item_id,
-    })),
-    phases: issue.phases.map((item, i) => ({
-      ...item,
-      check_item_id: created.phases[i]?.check_item_id ?? item.check_item_id,
     })),
   };
 }
@@ -265,77 +254,10 @@ export async function syncIssue(
     }
   }
 
-  // 4e: Phases diff (parallel structure to AC).
-  const phaseAdds: { itemRef: (typeof local.phases)[number]; idx: number }[] =
-    [];
-  const phaseUpdates: {
-    checkItemId: string;
-    patch: {
-      title?: string;
-      status?: (typeof local.phases)[number]["status"];
-      notes?: string;
-    };
-  }[] = [];
-
-  const remotePhasesById = new Map(
-    remoteCard.phases.map((p) => [p.check_item_id, p] as const),
-  );
-  const stampedPhasesByOriginalIndex = new Map<number, IssuePhase>();
-
-  for (let i = 0; i < local.phases.length; i++) {
-    const item = local.phases[i];
-    if (!item.check_item_id) {
-      phaseAdds.push({ itemRef: item, idx: i });
-      continue;
-    }
-    const remote = remotePhasesById.get(item.check_item_id);
-    if (!remote) {
-      phaseAdds.push({ itemRef: item, idx: i });
-      continue;
-    }
-    const patch: {
-      title?: string;
-      status?: (typeof local.phases)[number]["status"];
-      notes?: string;
-    } = {};
-    if (item.title !== remote.title) patch.title = item.title;
-    if (item.status !== remote.status) patch.status = item.status;
-    if (item.notes !== remote.notes) patch.notes = item.notes;
-    if (
-      patch.title !== undefined ||
-      patch.status !== undefined ||
-      patch.notes !== undefined
-    ) {
-      phaseUpdates.push({ checkItemId: item.check_item_id, patch });
-    }
-  }
-  for (const u of phaseUpdates) {
-    await tracker.updatePhaseItem(local.external_id, u.checkItemId, u.patch);
-    writes++;
-  }
-  for (const add of phaseAdds) {
-    const result = await tracker.addPhaseItem(local.external_id, {
-      title: add.itemRef.title,
-      status: add.itemRef.status,
-      notes: add.itemRef.notes,
-    });
-    writes++;
-    stampedPhasesByOriginalIndex.set(add.idx, {
-      check_item_id: result.check_item_id,
-      title: add.itemRef.title,
-      status: add.itemRef.status,
-      notes: add.itemRef.notes,
-    });
-  }
-  const localPhaseIds = new Set(
-    local.phases.map((p) => p.check_item_id).filter((id) => !!id),
-  );
-  for (const remote of remoteCard.phases) {
-    if (!localPhaseIds.has(remote.check_item_id)) {
-      await tracker.deletePhaseItem(local.external_id, remote.check_item_id);
-      writes++;
-    }
-  }
+  // 4e: (removed) Phases diff. The `phases[]` field was retired in ISS-81 —
+  // unified into `children[]`. There is no in-card phase checklist to diff
+  // anymore; child cards are independent issues that sync via their own
+  // YAMLs.
 
   // 4f: Local comments without `id` are new — POST them, prepending the
   // danxbot marker so the poller's user-response detector ignores them.
@@ -437,11 +359,6 @@ export async function syncIssue(
     if (stamped) return stamped;
     return { ...item };
   });
-  const finalPhases = local.phases.map((item, idx) => {
-    const stamped = stampedPhasesByOriginalIndex.get(idx);
-    if (stamped) return stamped;
-    return { ...item };
-  });
   const finalComments = updatedComments.map((c, idx) => {
     const stamped = stampedCommentsByOriginalIndex.get(idx);
     const base = stamped ?? { ...c };
@@ -469,7 +386,6 @@ export async function syncIssue(
   const updatedLocal: Issue = {
     ...local,
     ac: finalAc,
-    phases: finalPhases,
     comments: finalComments,
   };
 

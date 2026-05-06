@@ -3,13 +3,11 @@ import {
   type Issue,
   type IssueAcItem,
   type IssueComment,
-  type IssuePhase,
   type IssueRef,
   type IssueStatus,
   type IssueTracker,
   type IssueType,
   type ManagedLabels,
-  type PhaseStatus,
 } from "./interface.js";
 
 export interface RequestLogEntry {
@@ -47,7 +45,6 @@ interface StoredCard {
   description: string;
   triaged: { timestamp: string; status: string; explain: string };
   ac: IssueAcItem[];
-  phases: IssuePhase[];
   comments: Required<IssueComment>[];
   retro: {
     good: string;
@@ -94,7 +91,7 @@ export class MemoryTracker implements IssueTracker {
 
   /**
    * Queue a rejection on the next mutating call (createCard, updateCard,
-   * moveToStatus, setLabels, addComment, AC mutations, phase mutations).
+   * moveToStatus, setLabels, addComment, AC mutations).
    * Read methods are unaffected.
    */
   failNextWrite(
@@ -135,7 +132,6 @@ export class MemoryTracker implements IssueTracker {
   async createCard(input: CreateCardInput): Promise<{
     external_id: string;
     ac: { check_item_id: string }[];
-    phases: { check_item_id: string }[];
   }> {
     this.consumeWriteRejection();
     const externalId = `mem-${this.nextExternalId++}`;
@@ -143,12 +139,6 @@ export class MemoryTracker implements IssueTracker {
       check_item_id: this.allocCheckItemId(),
       title: item.title,
       checked: item.checked,
-    }));
-    const phases: IssuePhase[] = input.phases.map((p) => ({
-      check_item_id: this.allocCheckItemId(),
-      title: p.title,
-      status: p.status,
-      notes: p.notes,
     }));
     const stored: StoredCard = {
       tracker: "memory",
@@ -163,7 +153,6 @@ export class MemoryTracker implements IssueTracker {
       description: input.description,
       triaged: { ...input.triaged },
       ac,
-      phases,
       comments: input.comments.map((c) => ({
         id: c.id ?? this.allocCommentId(),
         author: c.author,
@@ -190,7 +179,6 @@ export class MemoryTracker implements IssueTracker {
     return {
       external_id: externalId,
       ac: ac.map((a) => ({ check_item_id: a.check_item_id })),
-      phases: phases.map((p) => ({ check_item_id: p.check_item_id })),
     };
   }
 
@@ -311,58 +299,6 @@ export class MemoryTracker implements IssueTracker {
     this.log("deleteAcItem", externalId, { checkItemId });
   }
 
-  async addPhaseItem(
-    externalId: string,
-    item: { title: string; status: PhaseStatus; notes: string },
-  ): Promise<{ check_item_id: string }> {
-    this.consumeWriteRejection();
-    const card = this.requireCard(externalId);
-    const checkItemId = this.allocCheckItemId();
-    card.phases.push({
-      check_item_id: checkItemId,
-      title: item.title,
-      status: item.status,
-      notes: item.notes,
-    });
-    this.log("addPhaseItem", externalId, { item });
-    return { check_item_id: checkItemId };
-  }
-
-  async updatePhaseItem(
-    externalId: string,
-    checkItemId: string,
-    patch: { title?: string; status?: PhaseStatus; notes?: string },
-  ): Promise<void> {
-    this.consumeWriteRejection();
-    const card = this.requireCard(externalId);
-    const found = card.phases.find((p) => p.check_item_id === checkItemId);
-    if (!found) {
-      throw new Error(
-        `Phase item ${checkItemId} not found on card ${externalId}`,
-      );
-    }
-    if (patch.title !== undefined) found.title = patch.title;
-    if (patch.status !== undefined) found.status = patch.status;
-    if (patch.notes !== undefined) found.notes = patch.notes;
-    this.log("updatePhaseItem", externalId, { checkItemId, patch });
-  }
-
-  async deletePhaseItem(
-    externalId: string,
-    checkItemId: string,
-  ): Promise<void> {
-    this.consumeWriteRejection();
-    const card = this.requireCard(externalId);
-    const idx = card.phases.findIndex((p) => p.check_item_id === checkItemId);
-    if (idx === -1) {
-      throw new Error(
-        `Phase item ${checkItemId} not found on card ${externalId}`,
-      );
-    }
-    card.phases.splice(idx, 1);
-    this.log("deletePhaseItem", externalId, { checkItemId });
-  }
-
   private requireCard(externalId: string): StoredCard {
     const card = this.cards.get(externalId);
     if (!card) {
@@ -413,7 +349,6 @@ export class MemoryTracker implements IssueTracker {
       description: card.description,
       triaged: { ...card.triaged },
       ac: card.ac.map((a) => ({ ...a })),
-      phases: card.phases.map((p) => ({ ...p })),
       comments: card.comments.map((c) => ({
         id: c.id,
         author: c.author,
@@ -447,7 +382,6 @@ export class MemoryTracker implements IssueTracker {
       description: issue.description,
       triaged: { ...issue.triaged },
       ac: issue.ac.map((a) => ({ ...a })),
-      phases: issue.phases.map((p) => ({ ...p })),
       comments: issue.comments.map((c) => ({
         id: c.id ?? this.allocCommentId(),
         author: c.author,

@@ -257,7 +257,6 @@ const FAKE_ISSUE_FOR_TESTS = {
   description: "",
   triaged: { timestamp: "", status: "", explain: "" },
   ac: [],
-  phases: [],
   comments: [],
   retro: { good: "", bad: "", action_item_ids: [], commits: [] },
 };
@@ -436,7 +435,6 @@ const DEFAULT_GET_CARD_ISSUE = {
   description: "",
   triaged: { timestamp: "", status: "", explain: "" },
   ac: [],
-  phases: [],
   comments: [],
   retro: { good: "", bad: "", action_item_ids: [], commits: [] },
 };

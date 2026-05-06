@@ -453,6 +453,24 @@ export async function handleIssueCreate(
     draftMap.children = [];
   }
 
+  // `phases` was retired in ISS-81 — unified into `children[]`. Reject any
+  // draft that carries a non-empty phases payload so the agent learns to
+  // use `children[]` instead. An empty `phases: []` from a stale template is
+  // tolerated silently and stripped below.
+  if (draftMap.phases !== undefined) {
+    const isEmptyArr = Array.isArray(draftMap.phases) && draftMap.phases.length === 0;
+    if (!isEmptyArr) {
+      json(res, 200, {
+        created: false,
+        errors: [
+          "phases field removed (ISS-81); use children[] for sub-cards / epic phase cards",
+        ],
+      });
+      return;
+    }
+    delete draftMap.phases;
+  }
+
   let draft: Issue;
   try {
     // Re-validate via the strict path so every other field is checked.
@@ -469,7 +487,6 @@ export async function handleIssueCreate(
   let result: {
     external_id: string;
     ac: { check_item_id: string }[];
-    phases: { check_item_id: string }[];
   };
   try {
     result = await deps.tracker.createCard(input);
@@ -487,10 +504,6 @@ export async function handleIssueCreate(
     ac: draft.ac.map((a, i) => ({
       ...a,
       check_item_id: result.ac[i]?.check_item_id ?? a.check_item_id,
-    })),
-    phases: draft.phases.map((p, i) => ({
-      ...p,
-      check_item_id: result.phases[i]?.check_item_id ?? p.check_item_id,
     })),
   };
 

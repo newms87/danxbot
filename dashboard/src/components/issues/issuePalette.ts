@@ -1,6 +1,5 @@
 import type { IssueStatus, IssueType } from "../../types";
 import type { PhaseStatusId } from "@backend/dashboard/issues-reader.js";
-import type { PhaseStatus } from "../../types";
 
 /** Lowercase column id used by the design system. */
 export type ColumnId =
@@ -42,12 +41,10 @@ export const ISSUE_TYPE_META: Record<IssueTypeId, TypeMeta> = {
 };
 
 /**
- * The design fixture (`docs/design/issues-board/IssuesFixtures.jsx`) advertises
- * four phase statuses (done / in_progress / todo / blocked). Real data only
- * yields three: the backend `PhaseStatus` enum is `Pending | Complete | Blocked`
- * — there is no `In Progress` phase status. `PhaseStatusId` matches the
- * backend's reachable set; do not add `in_progress` here unless the backend
- * enum grows first.
+ * Status palette for child cards (epic phases or non-epic sub-cards). The
+ * backend's `IssueListChild.status` is one of `done | todo | blocked`,
+ * derived from each child's own `Issue.status` + `Issue.blocked` per
+ * `projectChildStatus` in `src/dashboard/issues-reader.ts`.
  */
 export const PHASE_STATUS_META: Record<PhaseStatusId, PhaseStatusMeta> = {
   done:    { fg: "#6ee7b7", bg: "rgb(16 185 129 / 0.18)", glyph: "✓" },
@@ -79,15 +76,3 @@ export function typeToId(type: IssueType): IssueTypeId {
   return TYPE_TO_ID[type];
 }
 
-// Backend `IssueListItem` pre-projects `PhaseStatus → PhaseStatusId` for the
-// list shape. `IssueDetail` carries the raw `Issue` shape (PhaseStatus), so
-// detail-tab consumers convert via this map.
-export const PHASE_STATUS_TO_ID: Record<PhaseStatus, PhaseStatusId> = {
-  Complete: "done",
-  Pending: "todo",
-  Blocked: "blocked",
-};
-
-export function phaseStatusMeta(status: PhaseStatus): PhaseStatusMeta {
-  return PHASE_STATUS_META[PHASE_STATUS_TO_ID[status]];
-}

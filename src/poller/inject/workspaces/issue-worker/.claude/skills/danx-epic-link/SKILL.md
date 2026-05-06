@@ -109,6 +109,28 @@ After all phase YAMLs are saved, edit the epic's YAML:
 
 ---
 
+## Step 3.5 — Stamp `blocked` on phase 2..N for serial ordering
+
+Phase cards picked up by the poller dispatch in tracker-list-top order, NOT
+phase order. To force serial dispatch (Phase 1 → Phase 2 → ... → Phase N),
+stamp `blocked.by` on every phase except the first:
+
+For each phase YAML at index `i >= 1` in the ordered `children[]`:
+
+1. `Read <repo>/.danxbot/issues/open/<phase-id>.yml`.
+2. Edit: set `blocked: {reason: "Waits for <prev-phase-id> (<prev-phase-title>) to complete.", timestamp: "<current ISO>", by: ["<children[i-1]>"]}`.
+3. `danx_issue_save({id: "<phase-id>"})`.
+
+Phase 1 (`children[0]`) stays `blocked: null` — it dispatches first. The
+poller auto-clears `blocked` and releases phase N+1 once phase N reaches
+Done / Cancelled.
+
+**Skip this step ONLY when phases are genuinely independent** (different
+domains, no shared state, can ship in any order). Default = sequential.
+If you skip, explain in a comment on the epic.
+
+---
+
 ## Step 4 — Return control to the orchestrator
 
 You are a sub-skill. The orchestrator (`danx-next`) called you to set

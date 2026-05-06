@@ -25,7 +25,6 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     description: "",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [],
-    phases: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
@@ -74,11 +73,6 @@ describe("listIssues", () => {
           { check_item_id: "a", title: "ac1", checked: true },
           { check_item_id: "b", title: "ac2", checked: false },
         ],
-        phases: [
-          { check_item_id: "p1", title: "p1", status: "Complete", notes: "" },
-          { check_item_id: "p2", title: "p2", status: "Pending", notes: "" },
-          { check_item_id: "p3", title: "p3", status: "Blocked", notes: "" },
-        ],
         comments: [
           { author: "x", timestamp: "t1", text: "hi" },
           { author: "y", timestamp: "t2", text: "yo" },
@@ -110,12 +104,11 @@ describe("listIssues", () => {
       children: ["ISS-2", "ISS-3"],
       ac_total: 2,
       ac_done: 1,
-      phases_total: 3,
-      phases_done: 1,
-      phases: [
-        { name: "p1", status: "done" },
-        { name: "p2", status: "todo" },
-        { name: "p3", status: "blocked" },
+      children_total: 2,
+      children_done: 0,
+      children_detail: [
+        { id: "ISS-2", name: "<ISS-2: unknown>", status: "todo" },
+        { id: "ISS-3", name: "<ISS-3: unknown>", status: "todo" },
       ],
       blocked: true,
       blocked_reason: "waiting",
@@ -125,7 +118,7 @@ describe("listIssues", () => {
     });
   });
 
-  it("omits phases[] for non-epic cards (slim list shape)", async () => {
+  it("has empty children_detail for non-epic cards with no children", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -133,17 +126,14 @@ describe("listIssues", () => {
       emptyIssue({
         id: "ISS-2",
         type: "Feature",
-        phases: [
-          { check_item_id: "p1", title: "p1", status: "Pending", notes: "" },
-        ],
       }),
       1_000,
     );
     const items = await listIssues(repo);
-    expect(items[0].phases).toBeUndefined();
+    expect(items[0].children_detail).toEqual([]);
   });
 
-  it("emits empty phases[] for epics with no phases", async () => {
+  it("emits empty children_detail for epics with no children", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -152,7 +142,7 @@ describe("listIssues", () => {
       1_000,
     );
     const items = await listIssues(repo);
-    expect(items[0].phases).toEqual([]);
+    expect(items[0].children_detail).toEqual([]);
   });
 
   it("sorts by updated_at descending across open + closed", async () => {

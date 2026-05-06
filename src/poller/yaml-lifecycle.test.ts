@@ -38,7 +38,6 @@ function defaultCreate(
     description: "Card description",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [{ title: "AC1", checked: false }],
-    phases: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     ...overrides,

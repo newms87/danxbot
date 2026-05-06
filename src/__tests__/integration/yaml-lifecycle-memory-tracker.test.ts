@@ -164,9 +164,6 @@ function setIssueTracker(seed: Issue): {
   tracker.addAcItem = async () => ({ check_item_id: "" });
   tracker.updateAcItem = async () => undefined;
   tracker.deleteAcItem = async () => undefined;
-  tracker.addPhaseItem = async () => ({ check_item_id: "" });
-  tracker.updatePhaseItem = async () => undefined;
-  tracker.deletePhaseItem = async () => undefined;
   tracker.addComment = async (externalId: string, text: string) => {
     addCommentCalls.push({ externalId, text });
     nextCommentSeq += 1;
@@ -321,7 +318,6 @@ function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
         checked: false,
       },
     ],
-    phases: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,

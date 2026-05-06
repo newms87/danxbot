@@ -45,8 +45,6 @@ export type IssueStatus =
 
 export type IssueType = "Epic" | "Bug" | "Feature";
 
-export type PhaseStatus = "Pending" | "Complete" | "Blocked";
-
 export interface IssueRef {
   /** Internal id (`ISS-N`). Empty for refs from a tracker that has not yet been reconciled with a local YAML. */
   id: string;
@@ -69,13 +67,6 @@ export interface IssueAcItem {
   check_item_id: string;
   title: string;
   checked: boolean;
-}
-
-export interface IssuePhase {
-  check_item_id: string;
-  title: string;
-  status: PhaseStatus;
-  notes: string;
 }
 
 export interface IssueComment {
@@ -161,14 +152,21 @@ export interface Issue {
    */
   parent_id: string | null;
   /**
-   * Child issue ids (`ISS-N[]`). Populated only on Epic-typed issues whose
-   * phases are split into separate cards. Reverse linkage to `parent_id`:
-   * each entry in `children` MUST have its own YAML with
-   * `parent_id == <this.id>`. Empty for non-epics and for epics whose phases
-   * live as in-card checklist items rather than separate cards. Local-only
-   * metadata; not synced to any external tracker (parallel to `parent_id`).
+   * Child issue ids (`ISS-N[]`). Available on every card type. Reverse
+   * linkage to `parent_id`: each entry in `children` MUST have its own
+   * YAML with `parent_id == <this.id>`. Local-only metadata; not synced to
+   * any external tracker (parallel to `parent_id`).
+   *
+   * Two label conventions:
+   *  - On `type === "Epic"`, `children[]` IS the ordered list of phase
+   *    cards. UI / skills label them **Phases**. One card per phase; phases
+   *    are NEVER tracked as an in-card checklist (no `phases[]` field
+   *    exists on the schema — that concept was retired in ISS-81).
+   *  - On non-epic types (`Bug` / `Feature`), `children[]` is the list of
+   *    sub-cards. UI / skills label them **Children**.
+   *
    * Maintained by the `danx-epic-link` skill on first epic pickup and by
-   * the `danx_issue_create` flow when a new phase card is created.
+   * the `danx_issue_create` flow when a new child card is created.
    */
   children: string[];
   dispatch_id: string | null;
@@ -178,7 +176,6 @@ export interface Issue {
   description: string;
   triaged: IssueTriaged;
   ac: IssueAcItem[];
-  phases: IssuePhase[];
   comments: IssueComment[];
   retro: IssueRetro;
   /**
@@ -211,7 +208,6 @@ export interface CreateCardInput {
   description: string;
   triaged: IssueTriaged;
   ac: Array<{ title: string; checked: boolean }>;
-  phases: Array<{ title: string; status: PhaseStatus; notes: string }>;
   comments: IssueComment[];
   retro: IssueRetro;
   /**
@@ -249,7 +245,6 @@ export interface IssueTracker {
   createCard(input: CreateCardInput): Promise<{
     external_id: string;
     ac: { check_item_id: string }[];
-    phases: { check_item_id: string }[];
   }>;
 
   /**
@@ -309,19 +304,6 @@ export interface IssueTracker {
   ): Promise<void>;
 
   deleteAcItem(externalId: string, checkItemId: string): Promise<void>;
-
-  addPhaseItem(
-    externalId: string,
-    item: { title: string; status: PhaseStatus; notes: string },
-  ): Promise<{ check_item_id: string }>;
-
-  updatePhaseItem(
-    externalId: string,
-    checkItemId: string,
-    patch: { title?: string; status?: PhaseStatus; notes?: string },
-  ): Promise<void>;
-
-  deletePhaseItem(externalId: string, checkItemId: string): Promise<void>;
 }
 
 export const ISSUE_STATUSES: readonly IssueStatus[] = [
@@ -338,10 +320,4 @@ export const ISSUE_TYPES: readonly IssueType[] = [
   "Epic",
   "Bug",
   "Feature",
-] as const;
-
-export const PHASE_STATUSES: readonly PhaseStatus[] = [
-  "Pending",
-  "Complete",
-  "Blocked",
 ] as const;

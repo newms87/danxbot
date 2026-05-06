@@ -195,7 +195,6 @@ export async function hydrateFromRemote(
     dispatch_id: dispatchId,
     triaged: remote.triaged,
     ac: remote.ac,
-    phases: remote.phases,
     comments: remoteComments.map((c) => ({
       id: c.id,
       author: c.author,

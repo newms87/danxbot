@@ -6,18 +6,15 @@ import {
 import {
   ISSUE_STATUSES,
   ISSUE_TYPES,
-  PHASE_STATUSES,
   type CreateCardInput,
   type Issue,
   type IssueAcItem,
   type IssueBlocked,
   type IssueComment,
-  type IssuePhase,
   type IssueRetro,
   type IssueStatus,
   type IssueTriaged,
   type IssueType,
-  type PhaseStatus,
 } from "./interface.js";
 
 /**
@@ -37,7 +34,7 @@ import {
  *  - type: "Feature"
  *  - title, description: ""
  *  - triaged: { timestamp: "", status: "", explain: "" }
- *  - ac, phases, comments: []
+ *  - ac, comments: []
  *  - retro: { good: "", bad: "", action_item_ids: [], commits: [] }
  */
 export function createEmptyIssue(
@@ -64,7 +61,6 @@ export function createEmptyIssue(
     description: seed.description ?? "",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [],
-    phases: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
@@ -107,12 +103,6 @@ export function serializeIssue(issue: Issue): string {
       check_item_id: item.check_item_id,
       title: item.title,
       checked: item.checked,
-    })),
-    phases: issue.phases.map((p) => ({
-      check_item_id: p.check_item_id,
-      title: p.title,
-      status: p.status,
-      notes: p.notes,
     })),
     comments: issue.comments.map((c) => {
       const out: Record<string, unknown> = {};
@@ -203,11 +193,6 @@ export function issueToCreateInput(issue: Issue): CreateCardInput {
     description: issue.description,
     triaged: { ...issue.triaged },
     ac: issue.ac.map((a) => ({ title: a.title, checked: a.checked })),
-    phases: issue.phases.map((p) => ({
-      title: p.title,
-      status: p.status,
-      notes: p.notes,
-    })),
     comments: issue.comments.map((c) => ({ ...c })),
     retro: {
       good: issue.retro.good,
@@ -235,8 +220,10 @@ type ValidateResult =
  *  - `external_id` is required as a field but may be empty (memory tracker
  *    issues + drafts pre-tracker-create have no external mapping yet).
  *  - `children` is required, must be an array of `ISS-N` strings (may be
- *    empty). Reverse linkage to `parent_id`. Only Epic-typed issues
- *    populate it; non-epics carry `[]`.
+ *    empty). Available on every card type. On Epic = ordered phase cards;
+ *    on non-epic = ordered sub-cards. Reverse linkage to `parent_id`.
+ *  - `phases` is RETIRED in ISS-81. Legacy YAMLs may still carry it; the
+ *    parse path tolerates any value and drops the field on the next save.
  *  - v1 / v2 documents are rejected with a migration suggestion — there is
  *    NO runtime backwards-compat shim. Run `scripts/migrate-issues-to-v3.ts`
  *    once on each repo to upgrade.
@@ -373,15 +360,12 @@ export function validateIssue(value: unknown): ValidateResult {
     else acResult = r;
   }
 
-  // phases — required.
-  let phasesResult: IssuePhase[] | null = null;
-  if (!("phases" in v)) {
-    errors.push("missing required field: phases");
-  } else {
-    const r = validatePhasesList(v.phases);
-    if (typeof r === "string") errors.push(r);
-    else phasesResult = r;
-  }
+  // phases — RETIRED in ISS-81. Legacy YAMLs may still carry the key; the
+  // normalize-on-read path tolerates any value here (including malformed
+  // shapes) and drops it silently. The next save re-emits the YAML without
+  // `phases:`. The unified field for child cards is `children[]`.
+  // Intentionally NO validation: a legacy `phases: []` or `phases: [...stuff]`
+  // must never block a parse, otherwise pre-ISS-81 YAMLs become unreadable.
 
   // comments — required.
   let commentsResult: IssueComment[] | null = null;
@@ -434,7 +418,6 @@ export function validateIssue(value: unknown): ValidateResult {
     description: description as string,
     triaged: triaged as IssueTriaged,
     ac: acResult as IssueAcItem[],
-    phases: phasesResult as IssuePhase[],
     comments: commentsResult as IssueComment[],
     retro: retroResult as IssueRetro,
     blocked: blockedResult,
@@ -508,36 +491,6 @@ function validateAcList(value: unknown): IssueAcItem[] | string {
       check_item_id: v.check_item_id,
       title: v.title,
       checked: v.checked,
-    });
-  }
-  return out;
-}
-
-function validatePhasesList(value: unknown): IssuePhase[] | string {
-  if (value === null) return [];
-  if (!Array.isArray(value)) return "phases must be a list";
-  const out: IssuePhase[] = [];
-  for (let i = 0; i < value.length; i++) {
-    const item = value[i];
-    if (!isPlainObject(item)) return `phases[${i}] must be a mapping`;
-    const v = item as Record<string, unknown>;
-    if (typeof v.check_item_id !== "string") {
-      return `phases[${i}].check_item_id must be a string`;
-    }
-    if (typeof v.title !== "string") {
-      return `phases[${i}].title must be a string`;
-    }
-    if (!PHASE_STATUSES.includes(v.status as PhaseStatus)) {
-      return `phases[${i}].status must be one of [${PHASE_STATUSES.join(", ")}] (got ${JSON.stringify(v.status)})`;
-    }
-    if (v.notes !== undefined && typeof v.notes !== "string") {
-      return `phases[${i}].notes must be a string`;
-    }
-    out.push({
-      check_item_id: v.check_item_id,
-      title: v.title,
-      status: v.status as PhaseStatus,
-      notes: typeof v.notes === "string" ? v.notes : "",
     });
   }
   return out;

@@ -1,9 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  TrelloTracker,
-  encodePhaseItemName,
-  decodePhaseItemName,
-} from "../../issue-tracker/trello.js";
+import { TrelloTracker } from "../../issue-tracker/trello.js";
 import type { TrelloConfig } from "../../types.js";
 
 const TRELLO: TrelloConfig = {
@@ -99,7 +95,7 @@ describe("TrelloTracker", () => {
     expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
-  it("getCard hydrates description, status, type, ac, phases (NOT comments — call getComments separately)", async () => {
+  it("getCard hydrates description, status, type, ac (NOT comments — call getComments separately)", async () => {
     fetchMock.mockImplementation(async (url: string) => {
       if (url.includes("/cards/c1?")) {
         return jsonResponse({
@@ -116,17 +112,6 @@ describe("TrelloTracker", () => {
                 { id: "ci-1", name: "Returns 200", state: "complete" },
               ],
             },
-            {
-              id: "ck-ph",
-              name: "Implementation Phases",
-              checkItems: [
-                {
-                  id: "ci-2",
-                  name: "Pending: Phase 1\nNote line",
-                  state: "incomplete",
-                },
-              ],
-            },
           ],
         });
       }
@@ -141,14 +126,6 @@ describe("TrelloTracker", () => {
     expect(issue.type).toBe("Bug");
     expect(issue.ac).toEqual([
       { check_item_id: "ci-1", title: "Returns 200", checked: true },
-    ]);
-    expect(issue.phases).toEqual([
-      {
-        check_item_id: "ci-2",
-        title: "Phase 1",
-        status: "Pending",
-        notes: "Note line",
-      },
     ]);
     // Comments are intentionally empty — getCard no longer hits /actions.
     expect(issue.comments).toEqual([]);
@@ -200,7 +177,6 @@ describe("TrelloTracker", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [{ title: "AC1", checked: false }],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -615,75 +591,6 @@ describe("TrelloTracker", () => {
     expect(del[0]).toContain(authQs());
   });
 
-  it("addPhaseItem POSTs encoded name (status: title) + auth", async () => {
-    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === "GET" && url.includes("/cards/c1/checklists")) {
-        return jsonResponse([{ id: "ck-ph", name: "Implementation Phases" }]);
-      }
-      if (init?.method === "POST") return jsonResponse({ id: "ci-ph" });
-      throw new Error(`unexpected ${init?.method} ${url}`);
-    });
-    const tracker = new TrelloTracker(TRELLO);
-    const result = await tracker.addPhaseItem("c1", {
-      title: "Wire up",
-      status: "Pending",
-      notes: "be careful",
-    });
-    expect(result.check_item_id).toBe("ci-ph");
-    const post = fetchMock.mock.calls.find((c) => c[1]?.method === "POST");
-    if (!post) throw new Error("expected POST");
-    expect(post[0]).toContain("/checklists/ck-ph/checkItems");
-    expect(post[0]).toContain(authQs());
-    const body = JSON.parse(post[1].body as string);
-    expect(body.name).toBe("Pending: Wire up\nbe careful");
-    expect(body.checked).toBe("false");
-  });
-
-  it("updatePhaseItem fetches existing then PUTs encoded name+state", async () => {
-    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === "GET" && url.includes("/cards/c1/checklists")) {
-        return jsonResponse([{ id: "ck-ph", name: "Implementation Phases" }]);
-      }
-      if (
-        init?.method === "GET" &&
-        url.includes("/checklists/ck-ph/checkItems/ci-ph")
-      ) {
-        return jsonResponse({
-          id: "ci-ph",
-          name: "Pending: Old\nold notes",
-          state: "incomplete",
-        });
-      }
-      if (init?.method === "PUT") return jsonResponse({});
-      throw new Error(`unexpected ${init?.method} ${url}`);
-    });
-    const tracker = new TrelloTracker(TRELLO);
-    await tracker.updatePhaseItem("c1", "ci-ph", { status: "Complete" });
-    const put = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
-    if (!put) throw new Error("expected PUT");
-    expect(put[0]).toContain("/cards/c1/checkItem/ci-ph");
-    expect(put[0]).toContain(authQs());
-    const body = JSON.parse(put[1].body as string);
-    // notes + title preserved from the existing item
-    expect(body.name).toBe("Complete: Old\nold notes");
-    expect(body.state).toBe("complete");
-  });
-
-  it("deletePhaseItem DELETEs via the resolved checklist id", async () => {
-    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === "GET" && url.includes("/cards/c1/checklists")) {
-        return jsonResponse([{ id: "ck-ph", name: "Implementation Phases" }]);
-      }
-      if (init?.method === "DELETE") return jsonResponse({});
-      throw new Error(`unexpected ${init?.method} ${url}`);
-    });
-    const tracker = new TrelloTracker(TRELLO);
-    await tracker.deletePhaseItem("c1", "ci-ph");
-    const del = fetchMock.mock.calls.find((c) => c[1]?.method === "DELETE");
-    if (!del) throw new Error("expected DELETE");
-    expect(del[0]).toContain("/checklists/ck-ph/checkItems/ci-ph");
-    expect(del[0]).toContain(authQs());
-  });
 
   it("getComments uses filter=commentCard&limit=1000 + sorts oldest-first", async () => {
     fetchMock.mockImplementation(async (url: string) => {
@@ -804,7 +711,6 @@ describe("TrelloTracker", () => {
       description: "D",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -822,42 +728,6 @@ describe("TrelloTracker", () => {
   });
 });
 
-describe("phase encode/decode", () => {
-  it("round-trips status + title + notes", () => {
-    const encoded = encodePhaseItemName({
-      title: "Wire it up",
-      status: "Blocked",
-      notes: "missing creds",
-    });
-    expect(decodePhaseItemName(encoded)).toEqual({
-      title: "Wire it up",
-      status: "Blocked",
-      notes: "missing creds",
-    });
-  });
-
-  it("omits notes line when notes are empty", () => {
-    const encoded = encodePhaseItemName({
-      title: "T",
-      status: "Pending",
-      notes: "",
-    });
-    expect(encoded).toBe("Pending: T");
-    expect(decodePhaseItemName(encoded)).toEqual({
-      title: "T",
-      status: "Pending",
-      notes: "",
-    });
-  });
-
-  it("falls back to Pending when header has no recognized prefix", () => {
-    expect(decodePhaseItemName("Random title\nbody")).toEqual({
-      title: "Random title",
-      status: "Pending",
-      notes: "body",
-    });
-  });
-});
 
 function authQs(): string {
   return "key=k&token=t";

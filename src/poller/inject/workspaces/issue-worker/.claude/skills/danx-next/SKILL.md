@@ -25,16 +25,15 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `schema_version` | `3` | Never change. |
 | `tracker` | string | Don't change. |
 | `id` | string (`ISS-N`) | The id you save with. Matches the filename. Don't change. |
-| `parent_id` | string \| null | Set on phase cards (epic's `id`). Reverse linkage to `children[]`. |
-| `children` | `string[]` (ids) | Set on Epic-typed cards listing their phase children's ids in order. Empty `[]` for non-epics and for epics whose phases live as in-card checklist items rather than separate phase cards. Maintained by `danx_issue_create` (when a phase card is created from a draft) and by the `danx-epic-link` skill (for human-created phase cards). |
+| `parent_id` | string \| null | Set on child cards (epic's `id` for phase children, or any other parent's `id` for sub-cards). Reverse linkage to `children[]`. |
+| `children` | `string[]` (ids) | Ordered list of child issue ids (`ISS-N`). On `type: Epic` cards, `children[]` IS the list of phase cards (label "Phases"). On non-epic cards, it's the list of sub-cards (label "Children"). Same field, two labels. Maintained by `danx_issue_create` (when a child card is created from a draft) and by the `danx-epic-link` skill (for human-created phase cards). Phases MUST be cards — there is no separate in-card phase checklist. |
 | `dispatch_id` | string \| null | Poller-managed. Don't touch. |
-| `status` | `Review` \| `ToDo` \| `In Progress` \| `Needs Help` \| `Done` \| `Cancelled` | Editing this is how you move the card across lists. |
+| `status` | `Review` \| `ToDo` \| `In Progress` \| `Needs Help` \| `Needs Approval` \| `Done` \| `Cancelled` | Editing this is how you move the card across lists. |
 | `type` | `Bug` \| `Feature` \| `Epic` | Required label. |
 | `title` | string | Card name. |
 | `description` | string | Full markdown body. |
 | `triaged` | `{timestamp, status, explain}` | Triage agent owns this. Leave alone. |
 | `ac` | `[{check_item_id, title, checked}]` | Acceptance Criteria. Empty `check_item_id` on new items — tracker assigns. |
-| `phases` | `[{check_item_id, title, status, notes}]` | `status`: `Pending` \| `Complete` \| `Blocked`. |
 | `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
 | `retro` | `{good, bad, action_item_ids[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save. `action_item_ids[]` is a `string[]` of `ISS-N` references. **`action_item_ids[]` is a LAST RESORT** — see Step 1.5. Only reference an action item when the work is BOTH unrelated to this card's ACs AND too large to reasonably finish in this session (multi-phase refactor, redesign, cross-cutting work needing its own scoping). Small in-scope or small unrelated fixes you spotted → DO THEM NOW, don't defer. Create the action item card first via `danx_issue_create({type, title, description, ac, ...})`, then push its returned `id` here. `action_item_ids[]` must contain only valid `ISS-N` format strings. Do NOT append a `## Retro` comment to `comments[]` yourself. |
 | `blocked` | `null` OR `{reason, timestamp, by[]}` | `null` when nothing blocks this card. Set to a `{reason, timestamp, by}` record when the card cannot proceed because it is waiting on **other in-flight work** that does NOT need a human (a phase sibling shipping first, an Action Items card needs to land, a separately-scoped task). `reason` is a non-empty sentence. `timestamp` is current ISO 8601. `by[]` is a non-empty list of `ISS-N` ids that must reach Done / Cancelled before this card unblocks — if no existing card describes the unblock work, **create one** (`danx_issue_create`) and put its id here. The worker mechanically forces `status: ToDo` whenever `blocked` is non-null; you do not separately move status. The poller skips dispatching the card while any blocker is non-terminal, then auto-clears `blocked` and dispatches once every blocker is Done / Cancelled. **Blocked is NOT Needs Help** — Needs Help is for human action; Blocked is for waiting on other work. See Step 10b. |
@@ -117,7 +116,7 @@ Needs Help.
 
 ## Step 2 — Plan
 
-1. Read the full `description`, all `comments[]`, all `ac[]` titles, and any existing `phases[]`.
+1. Read the full `description`, all `comments[]`, all `ac[]` titles, and any existing `children[]` (look up each child YAML to see what's already been built).
 2. **Bug cards (`type: Bug`):** investigate root cause via `Read` / `Grep` / `Bash` before designing the fix.
 3. **Needs Help vs Blocked vs fix-it-yourself:** if the card cannot be done by an agent, route it correctly. Step 10 (Needs Help) ONLY for human-action blockers (credentials, deploy, ambiguous spec needing human decision, architectural ambiguity that changes the goal). Step 10b (Blocked) for waiting on other in-flight work — no human required, the poller auto-unblocks. Anything else → apply Step 1.5 and fix it yourself in this dispatch.
 4. Design the approach in your head. No code yet.
@@ -162,7 +161,9 @@ Only if NONE of those conditions match do you proceed to Step 3.1.
 
 Split into an epic when the card is 3+ implementation phases, spans
 different domains, or will exceed ~500 lines. Keep as a single card
-with a `phases[]` checklist when the work is sequential but small.
+when the work is sequential but small — track the work via `ac[]`
+items only. There is no in-card phase checklist; phases MUST be
+their own cards (ISS-81 retired the old `phases[]` field).
 
 If you decide NOT to split, skip ahead to Step 4.
 
@@ -182,12 +183,16 @@ If you decide NOT to split, skip ahead to Step 4.
    - `description: "<full body>"`
    - `triaged: {timestamp: "", status: "", explain: ""}`
    - `ac: [{check_item_id: "", title: "...", checked: false}, ...]` (every required field present, `check_item_id: ""` until worker assigns)
-   - `phases: []` (or seeded items with `check_item_id: ""`)
    - `comments: []`
    - `retro: {good: "", bad: "", action_item_ids: [], commits: []}`
 3. For each phase YAML, call `danx_issue_create({filename: "<slug>"})`. The worker validates the draft (empty `id` + empty `check_item_id`s are allowed), creates the issue, stamps the assigned `id` back into the YAML, and renames the file to `<id>.yml`. Capture the returned `id` from the response. `{created: false, errors}` → fix the draft and retry.
 4. After all phase cards exist, edit the epic YAML once more: set `children: ["<phase-1-id>", "<phase-2-id>", ...]` in phase order. Save. This is the reverse linkage that lets a future epic pickup recognize "already split" without re-scanning open issues.
-5. Restart this workflow at Step 1 using the first phase card's YAML.
+5. **Stamp `blocked` on phase 2..N for serial ordering.** `createCard` always stores `blocked: null` — you must add the record in a follow-up save. For each phase card whose index in `children[]` is `>= 1`, edit the phase YAML:
+   - Set `blocked: {reason: "Waits for <prev-phase-id> (<prev-phase-title>) to complete.", timestamp: "<current ISO>", by: ["<prev-phase-id>"]}`. `<prev-phase-id>` is `children[i-1]`.
+   - Phase 1 (`children[0]`) stays `blocked: null` — it dispatches first.
+   - Save each (`danx_issue_save({id})`). The worker forces `status: ToDo` on save (already true) and the poller skips dispatching while any blocker is non-terminal, then auto-clears `blocked` and dispatches phase N+1 once phase N reaches Done / Cancelled.
+   - **Skip this stamping ONLY when phases are genuinely independent** (different domains, no shared state, can ship in any order). Default is sequential — explain in a comment on the epic if you skip.
+6. Restart this workflow at Step 1 using the first phase card's YAML.
 
 The epic stays at `status: In Progress` until ALL phase cards are Done — then the final phase agent (or you, if no more phases) flips the epic to `Done` and saves it. After a phase completes, the next phase card lives in `<repo>/.danxbot/issues/open/`. The poller picks it up on the next tick.
 

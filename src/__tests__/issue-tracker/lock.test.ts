@@ -45,7 +45,6 @@ function defaultCreate(): CreateCardInput {
     description: "D",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [],
-    phases: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
   };

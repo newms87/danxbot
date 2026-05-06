@@ -1,4 +1,3 @@
-import { createLogger } from "../logger.js";
 import type { TrelloConfig } from "../types.js";
 import {
   type CreateCardInput,
@@ -8,33 +7,11 @@ import {
   type IssueTracker,
   type IssueType,
   type ManagedLabels,
-  type PhaseStatus,
 } from "./interface.js";
 
 const TRELLO_BASE = "https://api.trello.com/1";
 
 const AC_CHECKLIST_NAME = "Acceptance Criteria";
-const PHASES_CHECKLIST_NAME = "Implementation Phases";
-
-/**
- * Encoding for Phase items inside Trello checklist items.
- *
- * Trello check-items have only `name` (string) and `state` (`"complete" |
- * "incomplete"`). Phase items carry richer state — title, status (Pending /
- * Complete / Blocked), and free-form notes. We pack all three into the
- * check-item's `name` using a deterministic header line plus a notes block:
- *
- *   <STATUS>: <TITLE>
- *   <NOTES>     (omitted entirely when notes are empty)
- *
- * The check-item's `state` mirrors `status === "Complete"` so the Trello UI
- * shows expected check-marks, but `status` is the source of truth on read.
- *
- * The encoder writes `phase.status` directly into the header; the decoder
- * exhausts the `PhaseStatus` discriminated union explicitly. Adding a new
- * status value will fail TypeScript's exhaustiveness check in
- * `decodePhaseItemName` and force an update here — no identity-map needed.
- */
 
 interface TrelloLabelDto {
   id: string;
@@ -73,12 +50,9 @@ interface TrelloActionDto {
 
 export class TrelloTracker implements IssueTracker {
   private triagedLabelIdCache: string | null = null;
-  // Maps external_id -> { ac: checklistId, phases: checklistId } so callbacks
-  // for AC/phase mutations don't re-walk the card.
-  private checklistIdCache = new Map<
-    string,
-    { ac?: string; phases?: string }
-  >();
+  // Maps external_id -> { ac: checklistId } so callbacks for AC mutations
+  // don't re-walk the card.
+  private checklistIdCache = new Map<string, { ac?: string }>();
 
   constructor(private readonly trello: TrelloConfig) {}
 
@@ -158,15 +132,9 @@ export class TrelloTracker implements IssueTracker {
     const type = await this.deriveType(card.idLabels);
     const checklists = card.checklists ?? [];
     const acChecklist = checklists.find((c) => c.name === AC_CHECKLIST_NAME);
-    const phasesChecklist = checklists.find(
-      (c) => c.name === PHASES_CHECKLIST_NAME,
-    );
 
-    if (acChecklist || phasesChecklist) {
-      this.checklistIdCache.set(externalId, {
-        ac: acChecklist?.id,
-        phases: phasesChecklist?.id,
-      });
+    if (acChecklist) {
+      this.checklistIdCache.set(externalId, { ac: acChecklist.id });
     }
 
     const ac = (acChecklist?.checkItems ?? []).map((item) => ({
@@ -174,15 +142,6 @@ export class TrelloTracker implements IssueTracker {
       title: item.name,
       checked: item.state === "complete",
     }));
-    const phases = (phasesChecklist?.checkItems ?? []).map((item) => {
-      const decoded = decodePhaseItemName(item.name);
-      return {
-        check_item_id: item.id,
-        title: decoded.title,
-        status: decoded.status,
-        notes: decoded.notes,
-      };
-    });
 
     // `getCard` does NOT auto-fetch comments — callers that want comments
     // must call `getComments` separately. This avoids a redundant
@@ -212,7 +171,6 @@ export class TrelloTracker implements IssueTracker {
       description: card.desc ?? "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac,
-      phases,
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       // `blocked` is local-only metadata managed by the agent + worker.
@@ -226,7 +184,6 @@ export class TrelloTracker implements IssueTracker {
   async createCard(input: CreateCardInput): Promise<{
     external_id: string;
     ac: { check_item_id: string }[];
-    phases: { check_item_id: string }[];
   }> {
     const listId = this.statusToListId(input.status);
     const labelIds = await this.resolveLabelIds({
@@ -272,28 +229,12 @@ export class TrelloTracker implements IssueTracker {
         acIds.push({ check_item_id: checkItem.id });
       }
     }
-    const phaseIds: { check_item_id: string }[] = [];
-    if (input.phases.length > 0) {
-      const phChecklistId = await this.createChecklist(
-        created.id,
-        PHASES_CHECKLIST_NAME,
-      );
-      this.rememberChecklist(created.id, "phases", phChecklistId);
-      for (const p of input.phases) {
-        const checkItem = await this.createCheckItem(
-          phChecklistId,
-          encodePhaseItemName(p),
-          p.status === "Complete",
-        );
-        phaseIds.push({ check_item_id: checkItem.id });
-      }
-    }
     for (const c of input.comments) {
       // Push any pre-existing comments through; no special marker handling here
       // — the worker prepends DANXBOT_COMMENT_MARKER in sync.ts.
       await this.addComment(created.id, c.text);
     }
-    return { external_id: created.id, ac: acIds, phases: phaseIds };
+    return { external_id: created.id, ac: acIds };
   }
 
   async updateCard(
@@ -475,62 +416,6 @@ export class TrelloTracker implements IssueTracker {
 
   async deleteAcItem(externalId: string, checkItemId: string): Promise<void> {
     const checklistId = await this.ensureChecklistId(externalId, "ac");
-    await this.deleteCheckItem(checklistId, checkItemId);
-  }
-
-  async addPhaseItem(
-    externalId: string,
-    item: { title: string; status: PhaseStatus; notes: string },
-  ): Promise<{ check_item_id: string }> {
-    const checklistId = await this.ensureChecklistId(externalId, "phases");
-    const ci = await this.createCheckItem(
-      checklistId,
-      encodePhaseItemName(item),
-      item.status === "Complete",
-    );
-    return { check_item_id: ci.id };
-  }
-
-  async updatePhaseItem(
-    externalId: string,
-    checkItemId: string,
-    patch: { title?: string; status?: PhaseStatus; notes?: string },
-  ): Promise<void> {
-    if (
-      patch.title === undefined &&
-      patch.status === undefined &&
-      patch.notes === undefined
-    )
-      return;
-    // Need to fetch existing item to preserve fields the patch doesn't touch.
-    const checklistId = await this.ensureChecklistId(externalId, "phases");
-    const existing = await this.fetchCheckItem(checklistId, checkItemId);
-    const decoded = decodePhaseItemName(existing.name);
-    const next = {
-      title: patch.title ?? decoded.title,
-      status: patch.status ?? decoded.status,
-      notes: patch.notes ?? decoded.notes,
-    };
-    const url = `${TRELLO_BASE}/cards/${externalId}/checkItem/${checkItemId}?${this.auth()}`;
-    await this.requestVoid(
-      url,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: encodePhaseItemName(next),
-          state: next.status === "Complete" ? "complete" : "incomplete",
-        }),
-      },
-      `PUT /cards/${externalId}/checkItem/${checkItemId}`,
-    );
-  }
-
-  async deletePhaseItem(
-    externalId: string,
-    checkItemId: string,
-  ): Promise<void> {
-    const checklistId = await this.ensureChecklistId(externalId, "phases");
     await this.deleteCheckItem(checklistId, checkItemId);
   }
 
@@ -723,18 +608,6 @@ export class TrelloTracker implements IssueTracker {
     );
   }
 
-  private async fetchCheckItem(
-    checklistId: string,
-    checkItemId: string,
-  ): Promise<TrelloCheckItemDto> {
-    const url = `${TRELLO_BASE}/checklists/${checklistId}/checkItems/${checkItemId}?${this.auth()}`;
-    return await this.requestJson<TrelloCheckItemDto>(
-      url,
-      { method: "GET" },
-      `GET /checklists/${checklistId}/checkItems/${checkItemId}`,
-    );
-  }
-
   private async deleteCheckItem(
     checklistId: string,
     checkItemId: string,
@@ -749,7 +622,7 @@ export class TrelloTracker implements IssueTracker {
 
   private rememberChecklist(
     cardId: string,
-    kind: "ac" | "phases",
+    kind: "ac",
     checklistId: string,
   ): void {
     const existing = this.checklistIdCache.get(cardId) ?? {};
@@ -759,7 +632,7 @@ export class TrelloTracker implements IssueTracker {
 
   private async ensureChecklistId(
     externalId: string,
-    kind: "ac" | "phases",
+    kind: "ac",
   ): Promise<string> {
     const cached = this.checklistIdCache.get(externalId);
     if (cached?.[kind]) return cached[kind] as string;
@@ -769,8 +642,7 @@ export class TrelloTracker implements IssueTracker {
     const checklists = await this.requestJson<
       Array<{ id: string; name: string }>
     >(url, { method: "GET" }, `GET /cards/${externalId}/checklists`);
-    const wantedName =
-      kind === "ac" ? AC_CHECKLIST_NAME : PHASES_CHECKLIST_NAME;
+    const wantedName = AC_CHECKLIST_NAME;
     const found = checklists.find((c) => c.name === wantedName);
     if (found) {
       this.rememberChecklist(externalId, kind, found.id);
@@ -841,43 +713,3 @@ export function parseCardTitle(name: string): { id: string; title: string } {
   return { id: m[1], title: m[2] };
 }
 
-// ---------- Phase-name encode / decode (exported for tests) ----------
-
-export interface PhaseEncodeInput {
-  title: string;
-  status: PhaseStatus;
-  notes: string;
-}
-
-export function encodePhaseItemName(p: PhaseEncodeInput): string {
-  const header = `${p.status}: ${p.title}`;
-  if (!p.notes) return header;
-  return `${header}\n${p.notes}`;
-}
-
-// Module-level cache of phase headers we've already warned about, so a
-// malformed header in a long-running poller doesn't spam logs every tick.
-const phaseDecodeWarnedHeaders = new Set<string>();
-const phaseDecodeLogger = createLogger("issue-tracker.trello");
-
-export function decodePhaseItemName(name: string): PhaseEncodeInput {
-  const lines = name.split("\n");
-  const header = lines[0] ?? "";
-  const notes = lines.slice(1).join("\n");
-  const statuses: readonly PhaseStatus[] = ["Pending", "Complete", "Blocked"];
-  for (const status of statuses) {
-    const prefix = `${status}: `;
-    if (header.startsWith(prefix)) {
-      return { status, title: header.slice(prefix.length), notes };
-    }
-  }
-  // Fallback for items that pre-existed before this encoding (e.g. items
-  // added by an older tool that wrote raw titles). Treat the entire header
-  // as the title with `Pending` status — keeps the round-trip stable. Warn
-  // once per unique header so operators see the drift without spam.
-  if (!phaseDecodeWarnedHeaders.has(header)) {
-    phaseDecodeWarnedHeaders.add(header);
-    phaseDecodeLogger.warn(`phase decode fallback to Pending: ${header}`);
-  }
-  return { status: "Pending", title: header, notes };
-}

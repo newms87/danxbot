@@ -141,21 +141,12 @@ export async function pushOrphans(
           `tracker.createCard returned ${result.ac.length} ac items, expected ${issue.ac.length}`,
         );
       }
-      if (result.phases.length !== issue.phases.length) {
-        throw new Error(
-          `tracker.createCard returned ${result.phases.length} phases, expected ${issue.phases.length}`,
-        );
-      }
       const stamped: Issue = {
         ...issue,
         external_id: result.external_id,
         ac: issue.ac.map((a, i) => ({
           ...a,
           check_item_id: result.ac[i].check_item_id,
-        })),
-        phases: issue.phases.map((p, i) => ({
-          ...p,
-          check_item_id: result.phases[i].check_item_id,
         })),
       };
       writeIssue(repoLocalPath, stamped);

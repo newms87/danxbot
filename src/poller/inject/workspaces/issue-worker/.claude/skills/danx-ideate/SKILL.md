@@ -36,7 +36,6 @@ Current repo only.
      - `title`, `description` populated
      - `triaged: {timestamp: "", status: "", explain: ""}`
      - `ac: [{check_item_id: "", title: "...", checked: false}, ...]`
-     - `phases: []` (or seeded with `check_item_id: ""`)
      - `comments: []`
      - `retro: {good: "", bad: "", action_item_ids: [], commits: []}`
      - `schema_version: 3`

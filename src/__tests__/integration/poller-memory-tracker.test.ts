@@ -232,7 +232,6 @@ function seedDraft(
 ): Promise<{
   external_id: string;
   ac: { check_item_id: string }[];
-  phases: { check_item_id: string }[];
 }> {
   return tracker.createCard({
     schema_version: 3,
@@ -246,7 +245,6 @@ function seedDraft(
     description: "",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [],
-    phases: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     ...overrides,
@@ -320,7 +318,6 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         description: "",
         triaged: { timestamp: "", status: "", explain: "" },
         ac: [],
-        phases: [],
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
@@ -386,7 +383,6 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         description: "",
         triaged: { timestamp: "", status: "", explain: "" },
         ac: [],
-        phases: [],
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
@@ -497,7 +493,6 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         description: "",
         triaged: { timestamp: "", status: "", explain: "" },
         ac: [],
-        phases: [],
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
@@ -568,7 +563,6 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         description: "",
         triaged: { timestamp: "", status: "", explain: "" },
         ac: [],
-        phases: [],
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),
@@ -639,7 +633,6 @@ describe("Integration: poller hot path against MemoryTracker", () => {
           description: "",
           triaged: { timestamp: "", status: "", explain: "" },
           ac: [],
-          phases: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         };
@@ -682,7 +675,6 @@ describe("Integration: poller hot path against MemoryTracker", () => {
           description: "",
           triaged: { timestamp: "", status: "", explain: "" },
           ac: [],
-          phases: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         };
@@ -718,7 +710,6 @@ describe("Integration: poller hot path against MemoryTracker", () => {
           description: "",
           triaged: { timestamp: "", status: "", explain: "" },
           ac: [],
-          phases: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         };
@@ -741,7 +732,6 @@ describe("Integration: poller hot path against MemoryTracker", () => {
         description: "",
         triaged: { timestamp: "", status: "", explain: "" },
         ac: [],
-        phases: [],
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       }),

@@ -200,7 +200,6 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -293,7 +292,6 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -336,7 +334,6 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -398,7 +395,6 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -449,7 +445,6 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -488,7 +483,6 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -538,7 +532,6 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -600,7 +593,6 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -740,9 +732,6 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
       ...createEmptyIssue({ id: "", external_id: "", title: "new feature" }),
       tracker: "memory",
       ac: [{ check_item_id: "", title: "AC1", checked: false }],
-      phases: [
-        { check_item_id: "", title: "Phase 1", status: "Pending", notes: "" },
-      ],
     };
     const draftPath = issuePath(h.repo.localPath, "new-feature", "open");
     ensureIssuesDirs(h.repo.localPath);
@@ -975,7 +964,6 @@ describe("syncTrackedIssueOnComplete", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });

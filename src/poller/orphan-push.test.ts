@@ -28,7 +28,6 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     description: "",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [],
-    phases: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
@@ -166,27 +165,6 @@ describe("pushOrphans", () => {
     expect(second.pushed).toBe(0);
   });
 
-  it("stamps phases[i].check_item_id back into the YAML alongside ac items", async () => {
-    writeOrphan(
-      repoRoot,
-      makeIssue({
-        id: "ISS-1",
-        phases: [
-          { check_item_id: "", title: "P1", status: "Pending", notes: "" },
-          { check_item_id: "", title: "P2", status: "Pending", notes: "" },
-        ],
-      }),
-    );
-
-    const result = await pushOrphans(repoRoot, tracker);
-    expect(result.pushed).toBe(1);
-    const stamped = readYaml(repoRoot, "ISS-1");
-    expect(stamped.phases[0].check_item_id).not.toBe("");
-    expect(stamped.phases[1].check_item_id).not.toBe("");
-    expect(stamped.phases[0].check_item_id).not.toBe(
-      stamped.phases[1].check_item_id,
-    );
-  });
 
   it("emits an orphan whose parent_id points at a non-orphan immediately", async () => {
     // Parent already has external_id set → not in the orphan set; child

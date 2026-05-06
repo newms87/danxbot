@@ -1,28 +1,29 @@
 <script setup lang="ts">
-import type { IssueListPhase } from "@backend/dashboard/issues-reader.js";
+import type { IssueListChild } from "../../types";
 import { PHASE_STATUS_META } from "./issuePalette";
 
 defineProps<{
-  phases: IssueListPhase[];
+  items: IssueListChild[];
 }>();
 </script>
 
 <template>
   <div class="checklist">
     <div
-      v-for="(p, i) in phases"
-      :key="i"
+      v-for="(c, i) in items"
+      :key="c.id"
       class="row"
-      :class="{ done: p.status === 'done' }"
+      :class="{ done: c.status === 'done' }"
     >
       <span
         class="chip"
         :style="{
-          background: PHASE_STATUS_META[p.status].bg,
-          color: PHASE_STATUS_META[p.status].fg,
+          background: PHASE_STATUS_META[c.status].bg,
+          color: PHASE_STATUS_META[c.status].fg,
         }"
-      >{{ PHASE_STATUS_META[p.status].glyph }}</span>
-      <span class="label">{{ i + 1 }}: {{ p.name }}</span>
+      >{{ PHASE_STATUS_META[c.status].glyph }}</span>
+      <span class="id-chip">{{ c.id }}</span>
+      <span class="label">{{ i + 1 }}: {{ c.name }}</span>
     </div>
   </div>
 </template>
@@ -56,6 +57,14 @@ defineProps<{
   flex-shrink: 0;
   font-size: 10px;
   font-weight: 600;
+}
+.id-chip {
+  font-size: 10px;
+  font-weight: 600;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
 }
 .label {
   flex: 1;

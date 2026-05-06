@@ -28,7 +28,6 @@ function defaultCreate(): CreateCardInput {
     description: "D",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [{ title: "AC1", checked: false }],
-    phases: [{ title: "P1", status: "Pending", notes: "n" }],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
   };
@@ -95,9 +94,6 @@ describe("syncIssue", () => {
         description: "body",
         triaged: { timestamp: "", status: "", explain: "" },
         ac: [{ check_item_id: "", title: "AC1", checked: false }],
-        phases: [
-          { check_item_id: "", title: "P1", status: "Pending", notes: "" },
-        ],
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         blocked: null,
@@ -124,7 +120,6 @@ describe("syncIssue", () => {
       const result = await syncIssue(tracker, orphan());
       expect(result.updatedLocal.external_id).toMatch(/^mem-/);
       expect(result.updatedLocal.ac[0].check_item_id).toMatch(/^chk-/);
-      expect(result.updatedLocal.phases[0].check_item_id).toMatch(/^chk-/);
     });
 
     it("propagates createCard failure as a thrown error", async () => {
@@ -218,26 +213,6 @@ describe("syncIssue", () => {
     expect(after.ac).toHaveLength(0);
   });
 
-  it("phase item add → addPhaseItem with status & notes", async () => {
-    const tracker = new MemoryTracker();
-    const { external_id } = await tracker.createCard(defaultCreate());
-    const local = await tracker.getCard(external_id);
-    local.phases.push({
-      check_item_id: "",
-      title: "P2",
-      status: "Blocked",
-      notes: "stuck",
-    });
-    const result = await syncIssue(tracker, local);
-    expect(result.updatedLocal.phases).toHaveLength(2);
-    expect(result.updatedLocal.phases[1].check_item_id).toMatch(/^chk-/);
-    const after = await tracker.getCard(external_id);
-    expect(after.phases[1]).toMatchObject({
-      title: "P2",
-      status: "Blocked",
-      notes: "stuck",
-    });
-  });
 
   it("local comment without id → addComment, marker prepended, id stamped", async () => {
     const tracker = new MemoryTracker();
@@ -425,7 +400,6 @@ describe("syncIssue", () => {
         explain: "",
       },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
@@ -469,41 +443,6 @@ describe("syncIssue", () => {
 
   // ---- Test gap D: phases full update + delete paths ----
 
-  it("phase item update mutates title/status/notes via updatePhaseItem (gap D)", async () => {
-    const tracker = new MemoryTracker();
-    const { external_id } = await tracker.createCard(defaultCreate());
-    const local = await tracker.getCard(external_id);
-    local.phases[0].title = "Renamed";
-    local.phases[0].status = "Complete";
-    local.phases[0].notes = "done";
-    tracker.clearRequestLog();
-    await syncIssue(tracker, local);
-    const update = tracker
-      .getRequestLog()
-      .find((l) => l.method === "updatePhaseItem");
-    expect(update).toBeDefined();
-    const after = await tracker.getCard(external_id);
-    expect(after.phases[0]).toMatchObject({
-      title: "Renamed",
-      status: "Complete",
-      notes: "done",
-    });
-  });
-
-  it("phase item missing locally → deletePhaseItem (gap D)", async () => {
-    const tracker = new MemoryTracker();
-    const { external_id } = await tracker.createCard(defaultCreate());
-    const local = await tracker.getCard(external_id);
-    local.phases = [];
-    tracker.clearRequestLog();
-    await syncIssue(tracker, local);
-    const del = tracker
-      .getRequestLog()
-      .find((l) => l.method === "deletePhaseItem");
-    expect(del).toBeDefined();
-    const after = await tracker.getCard(external_id);
-    expect(after.phases).toHaveLength(0);
-  });
 
   it("local-as-truth wins on every non-comment field", async () => {
     const tracker = new MemoryTracker();

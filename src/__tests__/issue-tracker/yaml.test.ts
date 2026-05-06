@@ -23,14 +23,6 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     description: "A longer body",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [{ check_item_id: "ac-1", title: "Returns 200", checked: false }],
-    phases: [
-      {
-        check_item_id: "ph-1",
-        title: "Wire it up",
-        status: "Pending",
-        notes: "be careful with X",
-      },
-    ],
     comments: [
       {
         id: "c-1",
@@ -199,7 +191,6 @@ describe("validateIssue", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       ...overrides,
@@ -211,7 +202,6 @@ describe("validateIssue", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.issue.ac).toEqual([]);
-      expect(result.issue.phases).toEqual([]);
       expect(result.issue.comments).toEqual([]);
       expect(result.issue.retro).toEqual({
         good: "",
@@ -226,7 +216,7 @@ describe("validateIssue", () => {
     const result = validateIssue({});
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // After Fix 1 description, triaged, ac, phases, comments, retro are
+      // After Fix 1 description, triaged, ac, comments, retro are
       // ALL required (no silent defaults).
       expect(result.errors).toEqual(
         expect.arrayContaining([
@@ -243,7 +233,6 @@ describe("validateIssue", () => {
           expect.stringContaining("description"),
           expect.stringContaining("triaged"),
           expect.stringContaining("ac"),
-          expect.stringContaining("phases"),
           expect.stringContaining("comments"),
           expect.stringContaining("retro"),
         ]),
@@ -281,15 +270,6 @@ describe("validateIssue", () => {
     }
   });
 
-  it("rejects missing phases specifically", () => {
-    const input = valid();
-    delete input.phases;
-    const result = validateIssue(input);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.errors).toContain("missing required field: phases");
-    }
-  });
 
   it("rejects missing comments specifically", () => {
     const input = valid();
@@ -348,21 +328,6 @@ describe("validateIssue", () => {
     }
   });
 
-  it("rejects invalid phase status", () => {
-    const result = validateIssue(
-      valid({
-        phases: [
-          { check_item_id: "p1", title: "x", status: "Wibble", notes: "" },
-        ],
-      }),
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.errors.some((e) => /phases\[0\]\.status/.test(e))).toBe(
-        true,
-      );
-    }
-  });
 
   it("rejects wrong types (array where string expected)", () => {
     const result = validateIssue(valid({ title: ["not", "a", "string"] }));
@@ -510,7 +475,6 @@ describe("children field (v3 epic → phase linkage)", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       ...overrides,
@@ -624,7 +588,6 @@ describe("createEmptyIssue", () => {
     expect(issue.parent_id).toBeNull();
     expect(issue.dispatch_id).toBeNull();
     expect(issue.ac).toEqual([]);
-    expect(issue.phases).toEqual([]);
     expect(issue.comments).toEqual([]);
     expect(issue.retro).toEqual({
       good: "",
@@ -668,14 +631,6 @@ describe("serializeIssue byte-stable snapshot", () => {
       ac: [
         { check_item_id: "ac-1", title: "Returns 200", checked: false },
         { check_item_id: "ac-2", title: "Handles errors", checked: true },
-      ],
-      phases: [
-        {
-          check_item_id: "ph-1",
-          title: "Wire it up",
-          status: "Pending",
-          notes: "watch out for X",
-        },
       ],
       comments: [
         {
@@ -721,11 +676,6 @@ describe("serializeIssue byte-stable snapshot", () => {
         - check_item_id: ac-2
           title: Handles errors
           checked: true
-      phases:
-        - check_item_id: ph-1
-          title: Wire it up
-          status: Pending
-          notes: watch out for X
       comments:
         - id: c-1
           author: alice

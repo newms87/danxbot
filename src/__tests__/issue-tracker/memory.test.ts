@@ -17,7 +17,6 @@ function defaultInput(
     description: "",
     triaged: { timestamp: "", status: "", explain: "" },
     ac: [{ title: "Returns 200", checked: false }],
-    phases: [{ title: "Wire", status: "Pending", notes: "" }],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     ...overrides,
@@ -31,7 +30,6 @@ describe("MemoryTracker", () => {
     expect(created.external_id).toMatch(/^mem-/);
     expect(created.ac).toHaveLength(1);
     expect(created.ac[0].check_item_id).toMatch(/^chk-/);
-    expect(created.phases[0].check_item_id).toMatch(/^chk-/);
   });
 
   it("getCard returns the full Issue with assigned ids", async () => {
@@ -41,7 +39,6 @@ describe("MemoryTracker", () => {
     expect(card.external_id).toBe(external_id);
     expect(card.title).toBe("Make widget");
     expect(card.ac).toHaveLength(1);
-    expect(card.phases).toHaveLength(1);
   });
 
   it("fetchOpenCards returns only open statuses", async () => {
@@ -158,25 +155,6 @@ describe("MemoryTracker", () => {
     expect(card.ac).toHaveLength(0);
   });
 
-  it("phase item lifecycle: add, update, delete", async () => {
-    const tracker = new MemoryTracker();
-    const { external_id } = await tracker.createCard(
-      defaultInput({ phases: [] }),
-    );
-    const { check_item_id } = await tracker.addPhaseItem(external_id, {
-      title: "P1",
-      status: "Pending",
-      notes: "n",
-    });
-    await tracker.updatePhaseItem(external_id, check_item_id, {
-      status: "Complete",
-    });
-    let card = await tracker.getCard(external_id);
-    expect(card.phases[0].status).toBe("Complete");
-    await tracker.deletePhaseItem(external_id, check_item_id);
-    card = await tracker.getCard(external_id);
-    expect(card.phases).toHaveLength(0);
-  });
 
   it("logs every interface call", async () => {
     const tracker = new MemoryTracker();
@@ -223,15 +201,6 @@ describe("MemoryTracker", () => {
       checked: true,
     });
     await tracker.deleteAcItem(external_id, ac.check_item_id);
-    const ph = await tracker.addPhaseItem(external_id, {
-      title: "P2",
-      status: "Pending",
-      notes: "",
-    });
-    await tracker.updatePhaseItem(external_id, ph.check_item_id, {
-      status: "Complete",
-    });
-    await tracker.deletePhaseItem(external_id, ph.check_item_id);
 
     const log = tracker.getRequestLog();
     const methods = log.map((l) => l.method);
@@ -247,9 +216,6 @@ describe("MemoryTracker", () => {
       "addAcItem",
       "updateAcItem",
       "deleteAcItem",
-      "addPhaseItem",
-      "updatePhaseItem",
-      "deletePhaseItem",
     ]);
 
     // externalId is recorded everywhere it applies (fetchOpenCards has none).
@@ -265,9 +231,6 @@ describe("MemoryTracker", () => {
     expect(byMethod("addAcItem")?.externalId).toBe(external_id);
     expect(byMethod("updateAcItem")?.externalId).toBe(external_id);
     expect(byMethod("deleteAcItem")?.externalId).toBe(external_id);
-    expect(byMethod("addPhaseItem")?.externalId).toBe(external_id);
-    expect(byMethod("updatePhaseItem")?.externalId).toBe(external_id);
-    expect(byMethod("deletePhaseItem")?.externalId).toBe(external_id);
 
     // details payload shape: setLabels carries the labels triple.
     expect(byMethod("setLabels")?.details).toEqual({
@@ -289,10 +252,6 @@ describe("MemoryTracker", () => {
     // addAcItem carries the item.
     expect(byMethod("addAcItem")?.details).toEqual({
       item: { title: "AC2", checked: false },
-    });
-    // addPhaseItem carries the item.
-    expect(byMethod("addPhaseItem")?.details).toEqual({
-      item: { title: "P2", status: "Pending", notes: "" },
     });
   });
 
@@ -342,7 +301,6 @@ describe("MemoryTracker", () => {
           description: "",
           triaged: { timestamp: "", status: "", explain: "" },
           ac: [],
-          phases: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,
@@ -374,7 +332,6 @@ describe("MemoryTracker", () => {
           description: "",
           triaged: { timestamp: "", status: "", explain: "" },
           ac: [],
-          phases: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,

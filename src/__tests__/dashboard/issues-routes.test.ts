@@ -162,7 +162,6 @@ describe("handleGetIssue", () => {
       title: "t",
       description: "body",
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,

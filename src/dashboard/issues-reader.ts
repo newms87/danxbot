@@ -4,33 +4,34 @@ import type {
   Issue,
   IssueStatus,
   IssueType,
-  PhaseStatus,
 } from "../issue-tracker/interface.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("issues-reader");
 
-/** Phase status id used by the design system's PHASE_STATUS_META palette. */
+/** Phase / child status id used by the design system's PHASE_STATUS_META palette. */
 export type PhaseStatusId = "done" | "todo" | "blocked";
 
-const PHASE_STATUS_TO_ID: Record<PhaseStatus, PhaseStatusId> = {
-  Complete: "done",
-  Pending: "todo",
-  Blocked: "blocked",
-};
-
-/** Slim phase entry on the list shape — name + design-cased status id. */
-export interface IssueListPhase {
+/**
+ * Slim child entry on the list shape — child id + title + design-cased
+ * status id derived from the child's own status / blocked record. Used for
+ * both epic phases and non-epic sub-cards (the shape is identical; the SPA
+ * relabels the section header per parent type).
+ */
+export interface IssueListChild {
+  id: string;
   name: string;
   status: PhaseStatusId;
 }
 
 /**
  * List-card projection of an Issue. Sized for the Issues-tab board view —
- * AC / phase / comment counts are pre-rolled so the SPA can render the
- * card without a per-row detail fetch. `phases[]` is included on epics
- * so the board can render the per-phase checklist without a detail fetch.
+ * AC / child / comment counts are pre-rolled so the SPA can render the
+ * card without a per-row detail fetch. `children_detail[]` is included on
+ * cards that have any children so the board can render the per-child
+ * checklist (labelled "Phases" on epics, "Children" on non-epics) without
+ * a detail fetch.
  */
 export interface IssueListItem {
   id: string;
@@ -43,10 +44,12 @@ export interface IssueListItem {
   children: string[];
   ac_total: number;
   ac_done: number;
-  phases_total: number;
-  phases_done: number;
-  /** Present only when `type === "Epic"`. Empty array = epic with no phases. */
-  phases?: IssueListPhase[];
+  /** Total children. Equals `children.length`. */
+  children_total: number;
+  /** Children whose own status is `Done`. */
+  children_done: number;
+  /** Detail array for rendering. Empty when `children.length === 0`. */
+  children_detail: IssueListChild[];
   blocked: boolean;
   /** Set when `blocked === true`; null otherwise. Surfaces blocker reason on the card without a detail fetch. */
   blocked_reason: string | null;
@@ -126,9 +129,48 @@ async function listYamlNames(dir: string): Promise<string[]> {
   }
 }
 
-function toListItem(raw: RawIssue): IssueListItem {
+/**
+ * Project a child issue's full state into the design system's
+ * `done | todo | blocked` palette. Used by the parent card's
+ * `children_detail[]` summary.
+ *
+ *  - Done / Cancelled                                     → "done"
+ *  - non-null `blocked` record OR `Needs Help` / `Needs Approval` → "blocked"
+ *  - Anything else (Review, ToDo, In Progress)            → "todo"
+ */
+function projectChildStatus(child: Issue): PhaseStatusId {
+  if (child.status === "Done" || child.status === "Cancelled") return "done";
+  if (
+    child.blocked !== null ||
+    child.status === "Needs Help" ||
+    child.status === "Needs Approval"
+  ) {
+    return "blocked";
+  }
+  return "todo";
+}
+
+function toListItem(
+  raw: RawIssue,
+  byId: Map<string, Issue>,
+): IssueListItem {
   const { issue, mtimeMs } = raw;
-  const isEpic = issue.type === "Epic";
+  const childrenDetail: IssueListChild[] = issue.children
+    .map((cid) => {
+      const child = byId.get(cid);
+      if (!child) {
+        return {
+          id: cid,
+          name: `<${cid}: unknown>`,
+          status: "todo" as PhaseStatusId,
+        };
+      }
+      return {
+        id: cid,
+        name: child.title,
+        status: projectChildStatus(child),
+      };
+    });
   return {
     id: issue.id,
     type: issue.type,
@@ -139,16 +181,9 @@ function toListItem(raw: RawIssue): IssueListItem {
     children: [...issue.children],
     ac_total: issue.ac.length,
     ac_done: issue.ac.filter((a) => a.checked).length,
-    phases_total: issue.phases.length,
-    phases_done: issue.phases.filter((p) => p.status === "Complete").length,
-    ...(isEpic
-      ? {
-          phases: issue.phases.map((p) => ({
-            name: p.title,
-            status: PHASE_STATUS_TO_ID[p.status],
-          })),
-        }
-      : {}),
+    children_total: issue.children.length,
+    children_done: childrenDetail.filter((c) => c.status === "done").length,
+    children_detail: childrenDetail,
     blocked: issue.blocked !== null,
     blocked_reason: issue.blocked?.reason ?? null,
     comments_count: issue.comments.length,
@@ -199,8 +234,12 @@ export async function listIssues(
       : closedRaw.slice(0, DEFAULT_CLOSED_LIMIT);
 
   const all = [...openRaw, ...closedSlice];
+  // Build an id → Issue map across BOTH open + closed so parents can
+  // resolve their `children[]` ids regardless of where each child lives.
+  const byId = new Map<string, Issue>();
+  for (const r of all) byId.set(r.issue.id, r.issue);
   all.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return all.map(toListItem);
+  return all.map((r) => toListItem(r, byId));
 }
 
 /**

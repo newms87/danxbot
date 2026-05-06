@@ -55,7 +55,7 @@ export type {
 export type { RepoDispatchCounts, DispatchCountsByTrigger } from "@backend/dashboard/dispatches-db.js";
 export type {
   IssueListItem,
-  IssueListPhase,
+  IssueListChild,
   IssueDetail,
   PhaseStatusId,
 } from "@backend/dashboard/issues-reader.js";
@@ -64,9 +64,7 @@ export type {
   IssueStatus,
   IssueType,
   IssueAcItem,
-  IssuePhase,
   IssueComment,
   IssueRetro,
   IssueBlocked,
-  PhaseStatus,
 } from "@backend/issue-tracker/interface.js";
