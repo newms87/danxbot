@@ -111,6 +111,11 @@ services:
       # Makefile-level export pinned every worker at the danxbot repo's
       # dir; non-danxbot dispatches got empty timelines as a result.
       - ../../claude-projects:/home/danxbot/.claude/projects
+      # Host docker socket — gives the worker `docker exec` access into
+      # sibling containers on the shared docker network. The image
+      # installs the docker CLI but no daemon; this mount is what makes
+      # `docker` calls resolve to the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "${DANXBOT_WORKER_PORT}:${DANXBOT_WORKER_PORT}"
     # In docker runtime, src/worker/url-normalizer.ts rewrites dispatcher

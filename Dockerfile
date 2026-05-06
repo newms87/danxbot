@@ -23,6 +23,25 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI + compose plugin.
+#
+# The worker dispatches commands into sibling containers on the shared
+# docker network — e.g. `docker exec gpt-manager-laravel.test-1
+# ./vendor/bin/sail artisan test` — so it can run repo tests, artisan
+# commands, etc. against the live app stack. We do NOT run a docker
+# daemon inside the worker; we mount the host's `/var/run/docker.sock`
+# (see compose.yml) so the CLI talks to the host daemon. Mounting the
+# socket gives the worker root-on-host capability — accepted because
+# the worker already runs Claude Code with --dangerously-skip-permissions
+# and is fully trusted by the host operator.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu jammy stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli docker-compose-plugin \
+    && rm -rf /var/lib/apt/lists/*
+
 # Claude Code CLI (needed by the SDK)
 RUN npm install -g @anthropic-ai/claude-code
 

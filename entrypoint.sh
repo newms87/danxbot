@@ -53,6 +53,26 @@ for dir in /danxbot/threads /danxbot/data /danxbot/logs; do
     [ -d "$dir" ] && chown -R danxbot:danxbot "$dir"
 done
 
+# Wire docker.sock access for the danxbot user when the host socket is
+# mounted (worker mode). The socket's GID on the host is not known at
+# image build time and varies across hosts (dev vs prod), so we resolve
+# it at startup and either reuse an existing group with that GID or
+# create one and add danxbot to it. Without this step, `docker` CLI
+# calls from the danxbot user fail with permission denied even though
+# the binary is installed and the socket is mounted.
+if [ -S /var/run/docker.sock ]; then
+    SOCK_GID="$(stat -c '%g' /var/run/docker.sock)"
+    if [ -n "$SOCK_GID" ] && [ "$SOCK_GID" != "0" ]; then
+        existing_group="$(getent group "$SOCK_GID" | cut -d: -f1 || true)"
+        if [ -z "$existing_group" ]; then
+            groupadd -g "$SOCK_GID" docker_host
+            existing_group="docker_host"
+        fi
+        usermod -aG "$existing_group" danxbot
+        echo "Granted docker.sock access to danxbot via group '$existing_group' (GID $SOCK_GID)."
+    fi
+fi
+
 # Start the Danxbot service as the non-root danxbot user.
 # Docker compose's `command:` override comes in as positional args — honor them
 # so services like `dashboard-dev` can run `npm run dashboard:dev` instead of
