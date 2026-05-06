@@ -1,4 +1,35 @@
-import type { ChildStatusId, IssueStatus, IssueType } from "../../types";
+import type { IssueStatus, IssueType } from "../../types";
+
+/**
+ * Child-status palette key used by `CHILD_STATUS_META`. Owned by the SPA
+ * because the palette is a 3-color design-system decision: Cancelled is
+ * conflated with Done to keep the palette to three colors. If operators
+ * ever need to distinguish "shipped" from "won't ship," split this into
+ * a fourth `cancelled` state with its own glyph + meta entry.
+ */
+export type ChildStatusId = "done" | "todo" | "blocked";
+
+/**
+ * Project a child issue's raw `(status, blocked)` into the
+ * `done | todo | blocked` palette key.
+ *
+ *  - Done / Cancelled                                     → "done"
+ *  - non-null `blocked` record OR `Needs Help` / `Needs Approval` → "blocked"
+ *  - Anything else (Review, ToDo, In Progress)            → "todo"
+ *
+ * Done / Cancelled win over a blocked record because both are terminal —
+ * a card cannot be "blocked" once shipped or dropped.
+ */
+export function projectChildStatus(
+  status: IssueStatus,
+  blocked: boolean,
+): ChildStatusId {
+  if (status === "Done" || status === "Cancelled") return "done";
+  if (blocked || status === "Needs Help" || status === "Needs Approval") {
+    return "blocked";
+  }
+  return "todo";
+}
 
 /** Lowercase column id used by the design system. */
 export type ColumnId =
@@ -40,10 +71,10 @@ export const ISSUE_TYPE_META: Record<IssueTypeId, TypeMeta> = {
 };
 
 /**
- * Status palette for child cards (epic phases or non-epic sub-cards). The
- * backend's `IssueListChild.status` is one of `done | todo | blocked`,
- * derived from each child's own `Issue.status` + `Issue.blocked` per
- * `projectChildStatus` in `src/dashboard/issues-reader.ts`.
+ * Status palette for child cards (epic phases or non-epic sub-cards).
+ * The wire shape `IssueListChild` carries the child's raw `status` +
+ * `blocked` flag; consumers project them into a `ChildStatusId` via
+ * `projectChildStatus` (above) before indexing this map.
  */
 export const CHILD_STATUS_META: Record<ChildStatusId, ChildStatusMeta> = {
   done:    { fg: "#6ee7b7", bg: "rgb(16 185 129 / 0.18)", glyph: "✓" },

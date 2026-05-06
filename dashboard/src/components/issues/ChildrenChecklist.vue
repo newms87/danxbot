@@ -1,16 +1,25 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import type { IssueListChild } from "../../types";
-import { CHILD_STATUS_META } from "./issuePalette";
+import { CHILD_STATUS_META, projectChildStatus } from "./issuePalette";
 
-defineProps<{
+const props = defineProps<{
   items: IssueListChild[];
 }>();
+
+const rows = computed(() =>
+  props.items.map((c) => ({
+    id: c.id,
+    name: c.name,
+    status: projectChildStatus(c.status, c.blocked),
+  })),
+);
 </script>
 
 <template>
   <div class="checklist">
     <div
-      v-for="(c, i) in items"
+      v-for="(c, i) in rows"
       :key="c.id"
       class="row"
       :class="{ done: c.status === 'done' }"

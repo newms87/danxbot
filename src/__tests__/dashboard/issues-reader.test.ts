@@ -105,8 +105,8 @@ describe("listIssues", () => {
       ac_total: 2,
       ac_done: 1,
       children_detail: [
-        { id: "ISS-2", name: "<ISS-2: unknown>", status: "todo" },
-        { id: "ISS-3", name: "<ISS-3: unknown>", status: "todo" },
+        { id: "ISS-2", name: "<ISS-2: unknown>", type: "Feature", status: "ToDo", blocked: true, missing: true },
+        { id: "ISS-3", name: "<ISS-3: unknown>", type: "Feature", status: "ToDo", blocked: true, missing: true },
       ],
       blocked: true,
       blocked_reason: "waiting",
@@ -143,7 +143,7 @@ describe("listIssues", () => {
     expect(items[0].children_detail).toEqual([]);
   });
 
-  it("projectChildStatus: resolves child Done → 'done' and uses child.title as name", async () => {
+  it("children_detail carries child's raw Done status + blocked=false and uses child.title as name", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -168,11 +168,11 @@ describe("listIssues", () => {
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
     expect(epic.children_detail).toEqual([
-      { id: "ISS-2", name: "Phase one shipped", status: "done" },
+      { id: "ISS-2", name: "Phase one shipped", type: "Feature", status: "Done", blocked: false, missing: false },
     ]);
   });
 
-  it("projectChildStatus: Cancelled → 'done' (terminal-from-parent's-perspective)", async () => {
+  it("children_detail carries Cancelled raw (no projection in backend)", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -188,10 +188,11 @@ describe("listIssues", () => {
     );
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("done");
+    expect(epic.children_detail[0].status).toBe("Cancelled");
+    expect(epic.children_detail[0].blocked).toBe(false);
   });
 
-  it("projectChildStatus: non-null blocked record → 'blocked'", async () => {
+  it("children_detail carries blocked=true when child has a blocked record (status untouched)", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -216,10 +217,11 @@ describe("listIssues", () => {
     );
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("blocked");
+    expect(epic.children_detail[0].status).toBe("ToDo");
+    expect(epic.children_detail[0].blocked).toBe(true);
   });
 
-  it("projectChildStatus: Needs Help → 'blocked'", async () => {
+  it("children_detail carries Needs Help raw + blocked=false", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -235,10 +237,11 @@ describe("listIssues", () => {
     );
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("blocked");
+    expect(epic.children_detail[0].status).toBe("Needs Help");
+    expect(epic.children_detail[0].blocked).toBe(false);
   });
 
-  it("projectChildStatus: Needs Approval → 'blocked'", async () => {
+  it("children_detail carries Needs Approval raw + blocked=false", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -258,10 +261,60 @@ describe("listIssues", () => {
     );
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("blocked");
+    expect(epic.children_detail[0].status).toBe("Needs Approval");
+    expect(epic.children_detail[0].blocked).toBe(false);
   });
 
-  it("projectChildStatus: In Progress (open, unblocked) → 'todo'", async () => {
+  it("children_detail carries the child's raw type (Bug/Feature/Epic flows through)", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        type: "Epic",
+        children: ["ISS-2", "ISS-3"],
+      }),
+      3_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-2", type: "Bug", title: "bug child" }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-3", type: "Feature", title: "feat child" }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-1")!;
+    expect(epic.children_detail.map((c) => c.type)).toEqual(["Bug", "Feature"]);
+  });
+
+  it("missing children get missing=true + blocked=true so the SPA renders them as a distinct ⛔ row", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-1", type: "Epic", children: ["ISS-99"] }),
+      2_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-1")!;
+    expect(epic.children_detail[0]).toEqual({
+      id: "ISS-99",
+      name: "<ISS-99: unknown>",
+      type: "Feature",
+      status: "ToDo",
+      blocked: true,
+      missing: true,
+    });
+  });
+
+  it("children_detail carries In Progress raw + blocked=false", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -281,7 +334,8 @@ describe("listIssues", () => {
     );
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("todo");
+    expect(epic.children_detail[0].status).toBe("In Progress");
+    expect(epic.children_detail[0].blocked).toBe(false);
   });
 
   it("sorts by updated_at descending across open + closed", async () => {

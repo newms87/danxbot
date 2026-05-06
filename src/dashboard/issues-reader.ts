@@ -10,19 +10,25 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("issues-reader");
 
-/** Child status id used by the design system's CHILD_STATUS_META palette. Applies to epic phase cards and non-epic sub-cards alike. */
-export type ChildStatusId = "done" | "todo" | "blocked";
-
 /**
- * Slim child entry on the list shape — child id + title + design-cased
- * status id derived from the child's own status / blocked record. Used for
- * both epic phases and non-epic sub-cards (the shape is identical; the SPA
+ * Slim child entry on the list shape — child id + title + type + raw
+ * status + raw blocked flag + missing flag. The SPA projects
+ * `(status, blocked)` into its design-system `done | todo | blocked`
+ * palette via `projectChildStatus` in
+ * `dashboard/src/components/issues/issuePalette.ts`. `missing` is true
+ * when the child id was referenced but no Issue was loaded (e.g. closed
+ * beyond the recent-50 cap, or genuinely orphaned); the SPA renders
+ * such rows with the unknown placeholder name. Used for both epic
+ * phases and non-epic sub-cards (the shape is identical; the SPA
  * relabels the section header per parent type).
  */
 export interface IssueListChild {
   id: string;
   name: string;
-  status: ChildStatusId;
+  type: IssueType;
+  status: IssueStatus;
+  blocked: boolean;
+  missing: boolean;
 }
 
 /**
@@ -125,33 +131,6 @@ async function listYamlNames(dir: string): Promise<string[]> {
   }
 }
 
-/**
- * Project a child issue's full state into the design system's
- * `done | todo | blocked` palette. Used by the parent card's
- * `children_detail[]` summary.
- *
- *  - Done / Cancelled                                     → "done"
- *  - non-null `blocked` record OR `Needs Help` / `Needs Approval` → "blocked"
- *  - Anything else (Review, ToDo, In Progress)            → "todo"
- *
- * Cancelled is conflated with Done to keep the palette to three colors —
- * both are terminal-from-the-parent's-perspective. The render at
- * `ChildrenChecklist.vue` shows both as a green "✓"; if operators ever
- * need to distinguish "shipped" from "won't ship," split this into a
- * fourth `cancelled` state with a distinct glyph.
- */
-function projectChildStatus(child: Issue): ChildStatusId {
-  if (child.status === "Done" || child.status === "Cancelled") return "done";
-  if (
-    child.blocked !== null ||
-    child.status === "Needs Help" ||
-    child.status === "Needs Approval"
-  ) {
-    return "blocked";
-  }
-  return "todo";
-}
-
 function toListItem(
   raw: RawIssue,
   byId: Map<string, Issue>,
@@ -161,16 +140,25 @@ function toListItem(
     .map((cid) => {
       const child = byId.get(cid);
       if (!child) {
+        // Surface as blocked so the SPA's projection routes the row
+        // into the red ⛔ chip — visually distinct from a real ToDo
+        // child. `missing: true` is the canonical discriminator.
         return {
           id: cid,
           name: `<${cid}: unknown>`,
-          status: "todo",
+          type: "Feature" as IssueType,
+          status: "ToDo" as IssueStatus,
+          blocked: true,
+          missing: true,
         };
       }
       return {
         id: cid,
         name: child.title,
-        status: projectChildStatus(child),
+        type: child.type,
+        status: child.status,
+        blocked: child.blocked !== null,
+        missing: false,
       };
     });
   return {

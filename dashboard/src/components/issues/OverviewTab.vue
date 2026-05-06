@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { ChildStatusId, IssueDetail, IssueListItem } from "../../types";
+import type { IssueDetail, IssueListItem } from "../../types";
 import TypeBadge from "./TypeBadge.vue";
-import { CHILD_STATUS_META } from "./issuePalette";
+import { CHILD_STATUS_META, projectChildStatus } from "./issuePalette";
 import { MarkdownEditor } from "danx-ui";
 
 const props = defineProps<{
@@ -14,27 +14,19 @@ const emit = defineEmits<{
   "jump-issue": [id: string];
 }>();
 
-// Read the parent's pre-projected `children_detail[]` so this drawer
-// renders each child with the SAME `done|todo|blocked` glyph as
-// `IssueCard.vue`'s `ChildrenChecklist.vue`. `allIssues` lookup remains
-// the source for `type` (TypeBadge) and `title`.
+// Render each child from the parent listing's `children_detail[]`.
+// `IssueListChild` carries `type` + raw `(status, blocked)` so this
+// drawer no longer needs a per-child `allIssues` lookup — every row
+// renders even for children missing from `allIssues` (matches
+// `ChildrenChecklist.vue`'s behavior).
 const childRows = computed(() => {
   const parentListing = props.allIssues.find((i) => i.id === props.issue.id);
-  const statusById = new Map<string, ChildStatusId>(
-    (parentListing?.children_detail ?? []).map((c) => [c.id, c.status]),
-  );
-  return props.issue.children
-    .map((id) => {
-      const child = props.allIssues.find((i) => i.id === id);
-      if (!child) return null;
-      return {
-        id: child.id,
-        type: child.type,
-        title: child.title,
-        status: statusById.get(child.id) ?? "todo",
-      };
-    })
-    .filter(<T,>(r: T | null): r is T => r !== null);
+  return (parentListing?.children_detail ?? []).map((c) => ({
+    id: c.id,
+    type: c.type,
+    title: c.name,
+    status: projectChildStatus(c.status, c.blocked),
+  }));
 });
 
 const childrenSectionLabel = computed(() =>
