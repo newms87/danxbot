@@ -43,6 +43,20 @@ RUN mkdir -p /danxbot/app /danxbot/repos /danxbot/threads /danxbot/data /danxbot
 RUN mkdir -p /home/danxbot/.claude/session-env \
     && chown -R danxbot:danxbot /home/danxbot/.claude
 
+# Bake claude-plugins monorepo into the image at /opt/claude-plugins so
+# every dispatched workspace can resolve its declared `extraKnownMarketplaces`
+# entry (which points to `/opt/claude-plugins`). The build context is staged
+# by `make sync-claude-plugins` (called from `make build`); see Makefile.
+COPY --chown=danxbot:danxbot .build-claude-plugins /opt/claude-plugins
+
+# Pre-register the marketplace at the user level so workspace settings can
+# enable plugins without each workspace re-declaring the marketplace path.
+# Workspace settings.json files DO redeclare it for completeness, but this
+# user-level entry is the authoritative one for any session that doesn't
+# pin its own (e.g. ad-hoc claude shell inside the container).
+RUN printf '{\n  "extraKnownMarketplaces": {\n    "newms-plugins": {\n      "source": {\n        "source": "directory",\n        "path": "/opt/claude-plugins"\n      }\n    }\n  }\n}\n' > /home/danxbot/.claude/settings.json \
+    && chown danxbot:danxbot /home/danxbot/.claude/settings.json
+
 WORKDIR /danxbot/app
 
 # Install backend dependencies (layer cached unless package.json changes)

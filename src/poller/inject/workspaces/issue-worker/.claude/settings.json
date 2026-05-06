@@ -1,5 +1,21 @@
 {
   "env": {
     "DANXBOT_WORKER_PORT": "${DANXBOT_WORKER_PORT}"
+  },
+  "extraKnownMarketplaces": {
+    "newms-plugins": {
+      "source": {
+        "source": "directory",
+        "path": "/opt/claude-plugins"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "base@newms-plugins": true,
+    "investigate@newms-plugins": true,
+    "dev@newms-plugins": true,
+    "issues@newms-plugins": true,
+    "danxbot@newms-plugins": true,
+    "issue-worker@newms-plugins": true
   }
 }

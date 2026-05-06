@@ -29,12 +29,31 @@ TARGET_REPO_NAMES = $(shell DANXBOT_TARGET="$(DANXBOT_TARGET)" npx tsx src/cli/l
        test-system-error test-system-stall test-system-poller test-system-yaml-memory test-system-cleanup \
        test-system-slack \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
-       create-user ensure-root-user reset-data
+       create-user ensure-root-user reset-data \
+       sync-claude-plugins
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
 
-build: ## Build the danxbot Docker image
+sync-claude-plugins: ## Stage ~/web/claude-plugins/ into .build-claude-plugins/ for docker build context (called by `build`)
+	@set -e; \
+	SRC=$$HOME/web/claude-plugins; \
+	DEST=.build-claude-plugins; \
+	if [ ! -d "$$SRC" ]; then \
+		echo "Error: $$SRC not found — clone or create the claude-plugins monorepo first"; exit 1; \
+	fi; \
+	rm -rf $$DEST; \
+	mkdir -p $$DEST; \
+	cp -r $$SRC/.claude-plugin $$SRC/README.md $$DEST/ 2>/dev/null || true; \
+	for p in $$SRC/*/; do \
+		name=$$(basename "$$p"); \
+		if [ "$$name" != ".claude-plugin" ] && [ "$$name" != ".git" ]; then \
+			cp -r "$$p" "$$DEST/$$name"; \
+		fi; \
+	done; \
+	echo "Staged claude-plugins → $$DEST"
+
+build: sync-claude-plugins ## Build the danxbot Docker image (auto-stages claude-plugins into build context)
 	@set -e; \
 	DANXBOT_COMMIT="$$(git rev-parse --short HEAD)"; \
 	if [ -z "$$DANXBOT_COMMIT" ]; then \
