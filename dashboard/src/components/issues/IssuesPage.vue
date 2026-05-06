@@ -5,6 +5,7 @@ import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
 import FilterToolbar from "./FilterToolbar.vue";
 import IssueBoard from "./IssueBoard.vue";
 import IssueDrawer from "./IssueDrawer.vue";
+import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import { typeToId } from "./issuePalette";
 import type { IssueDetail, IssueListItem, IssueStatus } from "../../types";
 
@@ -69,6 +70,7 @@ const selectedIssueId = ref<string | null>(null);
 const selectedDetail = ref<IssueDetail | null>(null);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
+const boardChatOpen = ref(false);
 
 function readUrlIssue(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -182,6 +184,7 @@ watch(
         @update:show-closed="showClosed = $event"
         @update:scope-mode="scopeMode = $event"
         @clear-scope="scopedEpicId = null"
+        @open-board-chat="boardChatOpen = true"
       />
       <div v-if="loading && issues.length === 0" class="placeholder">Loading issues…</div>
       <div v-else-if="issues.length === 0" class="placeholder">No issues yet</div>
@@ -202,9 +205,15 @@ watch(
       :loading="detailLoading"
       :all-issues="issues"
       :scoped-epic-id="scopedEpicId"
+      :selected-repo="selectedRepo"
       @close="closeDrawer"
       @jump-issue="onJumpIssue"
       @toggle-scope="onToggleScope"
+    />
+    <BoardChatOverlay
+      v-if="boardChatOpen"
+      :repo="selectedRepo"
+      @close="boardChatOpen = false"
     />
     <div v-if="detailError" class="error-banner detail-err">
       {{ detailError }}

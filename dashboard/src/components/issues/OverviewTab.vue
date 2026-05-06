@@ -1,37 +1,15 @@
 <script setup lang="ts">
-import { computed } from "vue";
 import type { IssueDetail, IssueListItem } from "../../types";
-import TypeBadge from "./TypeBadge.vue";
-import { CHILD_STATUS_META, projectChildStatus } from "./issuePalette";
 import { MarkdownEditor } from "danx-ui";
 
-const props = defineProps<{
+defineProps<{
   issue: IssueDetail;
   allIssues: IssueListItem[];
 }>();
 
-const emit = defineEmits<{
+defineEmits<{
   "jump-issue": [id: string];
 }>();
-
-// Render each child from the parent listing's `children_detail[]`.
-// `IssueListChild` carries `type` + raw `(status, blocked)` so this
-// drawer no longer needs a per-child `allIssues` lookup — every row
-// renders even for children missing from `allIssues` (matches
-// `ChildrenChecklist.vue`'s behavior).
-const childRows = computed(() => {
-  const parentListing = props.allIssues.find((i) => i.id === props.issue.id);
-  return (parentListing?.children_detail ?? []).map((c) => ({
-    id: c.id,
-    type: c.type,
-    title: c.name,
-    status: projectChildStatus(c.status, c.blocked),
-  }));
-});
-
-const childrenSectionLabel = computed(() =>
-  props.issue.type === "Epic" ? "Phases" : "Children",
-);
 </script>
 
 <template>
@@ -55,33 +33,8 @@ const childrenSectionLabel = computed(() =>
           :key="bid"
           type="button"
           class="blocker-chip"
-          @click="emit('jump-issue', bid)"
+          @click="$emit('jump-issue', bid)"
         >{{ bid }}</button>
-      </div>
-    </section>
-
-    <section v-if="childRows.length > 0">
-      <div class="section-label">{{ childrenSectionLabel }} · {{ childRows.length }}</div>
-      <div class="child-list">
-        <button
-          v-for="c in childRows"
-          :key="c.id"
-          type="button"
-          class="child-row"
-          :class="{ done: c.status === 'done' }"
-          @click="emit('jump-issue', c.id)"
-        >
-          <span
-            class="status-chip"
-            :style="{
-              background: CHILD_STATUS_META[c.status].bg,
-              color: CHILD_STATUS_META[c.status].fg,
-            }"
-          >{{ CHILD_STATUS_META[c.status].glyph }}</span>
-          <span class="child-id">{{ c.id }}</span>
-          <TypeBadge :type="c.type" compact />
-          <span class="child-title">{{ c.title }}</span>
-        </button>
       </div>
     </section>
   </div>
@@ -143,52 +96,5 @@ const childrenSectionLabel = computed(() =>
   border: 1px solid rgb(239 68 68 / 0.3);
   cursor: pointer;
   font-family: inherit;
-}
-.child-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.child-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  text-align: left;
-  background: rgb(15 23 42 / 0.6);
-  border: 1px solid #1e293b;
-  cursor: pointer;
-  font-family: inherit;
-  width: 100%;
-}
-.child-id {
-  font-size: 10px;
-  font-weight: 600;
-  color: #64748b;
-  font-variant-numeric: tabular-nums;
-}
-.child-title {
-  flex: 1;
-  font-size: 12px;
-  color: #e2e8f0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.child-row.done {
-  color: #64748b;
-  text-decoration: line-through;
-}
-.status-chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 600;
 }
 </style>

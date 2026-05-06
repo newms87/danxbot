@@ -7,15 +7,17 @@ import ACTab from "./ACTab.vue";
 import CommentsTab from "./CommentsTab.vue";
 import RetroTab from "./RetroTab.vue";
 import RawTab from "./RawTab.vue";
+import AgentChat from "../chat/AgentChat.vue";
 import { acCounts } from "./acCounts";
 
-type TabId = "overview" | "ac" | "comments" | "retro" | "raw";
+type TabId = "overview" | "ac" | "chat" | "comments" | "retro" | "raw";
 
 const props = defineProps<{
   issue: IssueDetail | null;
   loading: boolean;
   allIssues: IssueListItem[];
   scopedEpicId: string | null;
+  selectedRepo: string;
 }>();
 
 const emit = defineEmits<{
@@ -48,6 +50,7 @@ const tabs = computed(() => [
     label: "AC" + (ac.value.total > 0 ? ` · ${ac.value.done}/${ac.value.total}` : ""),
     disabled: ac.value.total === 0,
   },
+  { id: "chat" as const, label: "Chat", disabled: false },
   {
     id: "comments" as const,
     label:
@@ -99,7 +102,10 @@ function selectTab(id: TabId, disabled: boolean): void {
           @click="selectTab(t.id, t.disabled)"
         >{{ t.label }}</button>
       </div>
-      <div class="body">
+      <div v-if="tab === 'chat'" class="chat-body">
+        <AgentChat mode="issue" :issue="issue" :repo="props.selectedRepo" />
+      </div>
+      <div v-else class="body">
         <OverviewTab
           v-if="tab === 'overview'"
           :issue="issue"
@@ -128,7 +134,7 @@ function selectTab(id: TabId, disabled: boolean): void {
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(560px, 100vw);
+  width: min(640px, 100vw);
   background: #0b1220;
   border-left: 1px solid #1e293b;
   z-index: 50;
@@ -173,6 +179,13 @@ function selectTab(id: TabId, disabled: boolean): void {
 .body {
   flex: 1;
   overflow-y: auto;
+}
+.chat-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 @keyframes iss-slide {

@@ -22,6 +22,7 @@ const emit = defineEmits<{
   "update:showClosed": [value: boolean];
   "update:scopeMode": [value: ScopeMode];
   "clear-scope": [];
+  "open-board-chat": [];
 }>();
 
 const SCOPE_MODES: ReadonlyArray<{ id: ScopeMode; label: string }> = [
@@ -110,6 +111,12 @@ function clearSearch(): void {
         />
         Show closed
       </label>
+
+      <button
+        type="button"
+        class="chat-btn"
+        @click="emit('open-board-chat')"
+      >💬 Chat with danxbot</button>
 
       <span class="count">{{ props.visibleCount }} of {{ props.totalCount }}</span>
     </div>
@@ -241,8 +248,22 @@ function clearSearch(): void {
   accent-color: #6366f1;
   cursor: pointer;
 }
-.count {
+.chat-btn {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  background: rgb(99 102 241 / 0.15);
+  color: #c7d2fe;
+  border: 1px solid rgb(99 102 241 / 0.3);
+  cursor: pointer;
+  font-family: inherit;
+}
+.count {
   font-size: 11px;
   color: #64748b;
   font-variant-numeric: tabular-nums;
