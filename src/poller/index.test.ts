@@ -1654,7 +1654,6 @@ describe("poll — post-dispatch card-progress check", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     };
@@ -2765,7 +2764,6 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     });
@@ -2925,7 +2923,6 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     };
@@ -2962,7 +2959,6 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: {
@@ -3003,7 +2999,6 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: {
@@ -3087,7 +3082,6 @@ describe("poll — In Progress sync + orphan resume", () => {
       description: "",
       triaged: { timestamp: "", status: "", explain: "" },
       ac: [],
-      phases: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     };

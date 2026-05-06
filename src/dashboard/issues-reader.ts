@@ -10,8 +10,8 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("issues-reader");
 
-/** Phase / child status id used by the design system's PHASE_STATUS_META palette. */
-export type PhaseStatusId = "done" | "todo" | "blocked";
+/** Child status id used by the design system's CHILD_STATUS_META palette. Applies to epic phase cards and non-epic sub-cards alike. */
+export type ChildStatusId = "done" | "todo" | "blocked";
 
 /**
  * Slim child entry on the list shape — child id + title + design-cased
@@ -22,7 +22,7 @@ export type PhaseStatusId = "done" | "todo" | "blocked";
 export interface IssueListChild {
   id: string;
   name: string;
-  status: PhaseStatusId;
+  status: ChildStatusId;
 }
 
 /**
@@ -44,11 +44,7 @@ export interface IssueListItem {
   children: string[];
   ac_total: number;
   ac_done: number;
-  /** Total children. Equals `children.length`. */
-  children_total: number;
-  /** Children whose own status is `Done`. */
-  children_done: number;
-  /** Detail array for rendering. Empty when `children.length === 0`. */
+  /** Detail array for rendering. Empty when `children.length === 0`. SPA derives total/done counts from this. */
   children_detail: IssueListChild[];
   blocked: boolean;
   /** Set when `blocked === true`; null otherwise. Surfaces blocker reason on the card without a detail fetch. */
@@ -137,8 +133,14 @@ async function listYamlNames(dir: string): Promise<string[]> {
  *  - Done / Cancelled                                     → "done"
  *  - non-null `blocked` record OR `Needs Help` / `Needs Approval` → "blocked"
  *  - Anything else (Review, ToDo, In Progress)            → "todo"
+ *
+ * Cancelled is conflated with Done to keep the palette to three colors —
+ * both are terminal-from-the-parent's-perspective. The render at
+ * `ChildrenChecklist.vue` shows both as a green "✓"; if operators ever
+ * need to distinguish "shipped" from "won't ship," split this into a
+ * fourth `cancelled` state with a distinct glyph.
  */
-function projectChildStatus(child: Issue): PhaseStatusId {
+function projectChildStatus(child: Issue): ChildStatusId {
   if (child.status === "Done" || child.status === "Cancelled") return "done";
   if (
     child.blocked !== null ||
@@ -162,7 +164,7 @@ function toListItem(
         return {
           id: cid,
           name: `<${cid}: unknown>`,
-          status: "todo" as PhaseStatusId,
+          status: "todo",
         };
       }
       return {
@@ -181,8 +183,6 @@ function toListItem(
     children: [...issue.children],
     ac_total: issue.ac.length,
     ac_done: issue.ac.filter((a) => a.checked).length,
-    children_total: issue.children.length,
-    children_done: childrenDetail.filter((c) => c.status === "done").length,
     children_detail: childrenDetail,
     blocked: issue.blocked !== null,
     blocked_reason: issue.blocked?.reason ?? null,

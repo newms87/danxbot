@@ -757,13 +757,17 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
     expect(stamped).toContain("check_item_id: chk-");
   });
 
-  it("auto-fills children: [] when the draft YAML omits the field", async () => {
+  it("auto-fills children: [] when the draft YAML omits the field; tolerates legacy phases: [] (ISS-81)", async () => {
     // The strict v3 validator requires `children`. Drafts written by
     // skill prose almost never include it (children get populated post-
     // create by the danx-epic-link skill on epics, never on the create
     // call itself). The handler must auto-fill an empty list before
     // running the strict parse — otherwise every create round-trips
     // back as a validation failure.
+    //
+    // Also exercises ISS-81 empty-phases tolerance: pre-ISS-81 skill
+    // templates emit `phases: []` even though the field is retired.
+    // The handler silently strips empty `phases:` and the create succeeds.
     const draftPath = issuePath(h.repo.localPath, "no-children", "open");
     ensureIssuesDirs(h.repo.localPath);
     // Hand-written YAML that intentionally omits `children:` — mirrors a
@@ -807,6 +811,58 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
     const stamped = readYaml(h.repo.localPath, body.id);
     // Auto-filled `children: []` must round-trip into the on-disk YAML.
     expect(stamped).toMatch(/^children:/m);
+    // ISS-81: re-serialized YAML must NOT carry the legacy `phases:` key.
+    expect(stamped).not.toMatch(/^phases:/m);
+  });
+
+  it("rejects danx_issue_create when the draft carries a non-empty phases: [...] payload (ISS-81)", async () => {
+    const draftPath = issuePath(h.repo.localPath, "with-phases", "open");
+    ensureIssuesDirs(h.repo.localPath);
+    writeFileSync(
+      draftPath,
+      [
+        "schema_version: 3",
+        "tracker: memory",
+        'id: ""',
+        'external_id: ""',
+        "parent_id: null",
+        "children: []",
+        "dispatch_id: null",
+        "status: ToDo",
+        "type: Feature",
+        "title: legacy draft with phases payload",
+        'description: ""',
+        "triaged:",
+        '  timestamp: ""',
+        '  status: ""',
+        '  explain: ""',
+        "ac: []",
+        "phases:",
+        '  - title: "Phase 1"',
+        "    status: Pending",
+        '    notes: ""',
+        "comments: []",
+        "retro:",
+        '  good: ""',
+        '  bad: ""',
+        "  action_item_ids: []",
+        "  commits: []",
+        "",
+      ].join("\n"),
+    );
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "with-phases" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(false);
+    expect(body.errors).toEqual([
+      "phases field removed (ISS-81); use children[] for sub-cards / epic phase cards",
+    ]);
+    // Draft file untouched — agent retries after migrating to children[].
+    expect(existsSync(draftPath)).toBe(true);
   });
 
   it("strips a trailing .yml suffix on filename", async () => {

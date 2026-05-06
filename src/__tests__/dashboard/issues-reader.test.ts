@@ -104,8 +104,6 @@ describe("listIssues", () => {
       children: ["ISS-2", "ISS-3"],
       ac_total: 2,
       ac_done: 1,
-      children_total: 2,
-      children_done: 0,
       children_detail: [
         { id: "ISS-2", name: "<ISS-2: unknown>", status: "todo" },
         { id: "ISS-3", name: "<ISS-3: unknown>", status: "todo" },
@@ -143,6 +141,147 @@ describe("listIssues", () => {
     );
     const items = await listIssues(repo);
     expect(items[0].children_detail).toEqual([]);
+  });
+
+  it("projectChildStatus: resolves child Done → 'done' and uses child.title as name", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        type: "Epic",
+        children: ["ISS-2"],
+      }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "closed",
+      emptyIssue({
+        id: "ISS-2",
+        title: "Phase one shipped",
+        status: "Done",
+      }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-1")!;
+    expect(epic.children_detail).toEqual([
+      { id: "ISS-2", name: "Phase one shipped", status: "done" },
+    ]);
+  });
+
+  it("projectChildStatus: Cancelled → 'done' (terminal-from-parent's-perspective)", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-1", type: "Epic", children: ["ISS-2"] }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "closed",
+      emptyIssue({ id: "ISS-2", title: "phase 2", status: "Cancelled" }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-1")!;
+    expect(epic.children_detail[0].status).toBe("done");
+  });
+
+  it("projectChildStatus: non-null blocked record → 'blocked'", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-1", type: "Epic", children: ["ISS-2"] }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-2",
+        title: "blocked phase",
+        status: "ToDo",
+        blocked: {
+          reason: "waiting",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-3"],
+        },
+      }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-1")!;
+    expect(epic.children_detail[0].status).toBe("blocked");
+  });
+
+  it("projectChildStatus: Needs Help → 'blocked'", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-1", type: "Epic", children: ["ISS-2"] }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-2", title: "help me", status: "Needs Help" }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-1")!;
+    expect(epic.children_detail[0].status).toBe("blocked");
+  });
+
+  it("projectChildStatus: Needs Approval → 'blocked'", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-1", type: "Epic", children: ["ISS-2"] }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-2",
+        title: "approve me",
+        status: "Needs Approval",
+      }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-1")!;
+    expect(epic.children_detail[0].status).toBe("blocked");
+  });
+
+  it("projectChildStatus: In Progress (open, unblocked) → 'todo'", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-1", type: "Epic", children: ["ISS-2"] }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-2",
+        title: "active",
+        status: "In Progress",
+      }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-1")!;
+    expect(epic.children_detail[0].status).toBe("todo");
   });
 
   it("sorts by updated_at descending across open + closed", async () => {

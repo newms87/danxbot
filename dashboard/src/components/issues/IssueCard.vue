@@ -45,7 +45,7 @@ function onParentClick(e: MouseEvent): void {
     <div class="card-header">
       <span class="id-chip">{{ issue.id }}</span>
       <TypeBadge :type="issue.type" compact />
-      <span v-if="childrenDetail.length > 0" class="phase-count-chip">
+      <span v-if="childrenDetail.length > 0" class="children-count-chip">
         {{ childrenDetail.length }} {{ childrenLabel }}
       </span>
       <span
@@ -142,7 +142,7 @@ function onParentClick(e: MouseEvent): void {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
-.phase-count-chip {
+.children-count-chip {
   font-size: 10px;
   font-weight: 500;
   color: #a5b4fc;

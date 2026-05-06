@@ -57,7 +57,7 @@ export type {
   IssueListItem,
   IssueListChild,
   IssueDetail,
-  PhaseStatusId,
+  ChildStatusId,
 } from "@backend/dashboard/issues-reader.js";
 export type {
   Issue,

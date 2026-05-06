@@ -177,8 +177,12 @@ export const ISSUE_ID_REGEX = /^ISS-\d+$/;
  * Project an `Issue` into the `CreateCardInput` shape the tracker accepts.
  * `check_item_id` is dropped intentionally — the tracker assigns those on
  * `createCard` and the result is stamped back into the YAML by the caller.
- * Used by both the `danx_issue_create` worker route and the poller's
- * orphan-push pass to keep a single shape.
+ * Used by every code path that pushes a fresh issue to the tracker:
+ * `danx_issue_create` (worker route), poller orphan-push, and `syncIssue`'s
+ * orphan-recovery branch — all funnel through this one function.
+ *
+ * `dispatch_id` is intentionally omitted — local-only metadata managed by
+ * the poller; the tracker abstraction has no place to store it.
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {

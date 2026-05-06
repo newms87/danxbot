@@ -168,6 +168,49 @@ describe("serializeIssue / parseIssue", () => {
     const yaml = "schema_version: 1\ntracker: trello\n";
     expect(() => parseIssue(yaml)).toThrow(/migrate-issues-to-v3/);
   });
+
+  it("tolerates a legacy phases: [...] key on read and drops it on re-serialize (ISS-81)", () => {
+    const legacyYaml = [
+      "schema_version: 3",
+      "tracker: trello",
+      "id: ISS-1",
+      'external_id: "ext-1"',
+      "parent_id: null",
+      "children: []",
+      "dispatch_id: null",
+      "status: ToDo",
+      "type: Feature",
+      "title: legacy",
+      "description: body",
+      "triaged: { timestamp: '', status: '', explain: '' }",
+      "ac: []",
+      "phases:",
+      "  - check_item_id: chk-1",
+      "    title: Phase 1",
+      "    status: Pending",
+      '    notes: ""',
+      "  - check_item_id: chk-2",
+      "    title: Phase 2",
+      "    status: Complete",
+      '    notes: ""',
+      "comments: []",
+      "retro: { good: '', bad: '', action_item_ids: [], commits: [] }",
+      "",
+    ].join("\n");
+
+    // Parse must succeed — legacy field is silently ignored.
+    const issue = parseIssue(legacyYaml);
+    expect(issue.id).toBe("ISS-1");
+    // The Issue type no longer carries `phases`; assertion confirms it
+    // never lands on the parsed object.
+    expect("phases" in issue).toBe(false);
+
+    // Round-trip: serialized form must NOT emit a `phases:` key.
+    const out = serializeIssue(issue);
+    expect(out).not.toMatch(/^phases:/m);
+    // Re-parse round-trips clean.
+    expect(() => parseIssue(out)).not.toThrow();
+  });
 });
 
 describe("validateIssue", () => {
@@ -563,7 +606,7 @@ describe("schema_version 3 contract", () => {
 describe("createEmptyIssue", () => {
   it("returns a fully-populated minimal Issue that passes validateIssue once id+title are seeded", () => {
     // `id` and `title` must be non-empty per the validator; everything
-    // else (description, triaged, ac, phases, comments, retro) is filled
+    // else (description, triaged, ac, comments, retro) is filled
     // in for free by createEmptyIssue. external_id may be empty.
     const issue = createEmptyIssue({ id: "ISS-1", title: "T" });
     const result = validateIssue(issue as unknown as Record<string, unknown>);

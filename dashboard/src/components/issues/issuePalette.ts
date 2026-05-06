@@ -1,5 +1,4 @@
-import type { IssueStatus, IssueType } from "../../types";
-import type { PhaseStatusId } from "@backend/dashboard/issues-reader.js";
+import type { ChildStatusId, IssueStatus, IssueType } from "../../types";
 
 /** Lowercase column id used by the design system. */
 export type ColumnId =
@@ -21,7 +20,7 @@ interface TypeMeta {
   border: string;
 }
 
-interface PhaseStatusMeta {
+interface ChildStatusMeta {
   fg: string;
   bg: string;
   glyph: string;
@@ -46,7 +45,7 @@ export const ISSUE_TYPE_META: Record<IssueTypeId, TypeMeta> = {
  * derived from each child's own `Issue.status` + `Issue.blocked` per
  * `projectChildStatus` in `src/dashboard/issues-reader.ts`.
  */
-export const PHASE_STATUS_META: Record<PhaseStatusId, PhaseStatusMeta> = {
+export const CHILD_STATUS_META: Record<ChildStatusId, ChildStatusMeta> = {
   done:    { fg: "#6ee7b7", bg: "rgb(16 185 129 / 0.18)", glyph: "✓" },
   todo:    { fg: "#cbd5e1", bg: "rgb(51 65 85 / 0.40)",   glyph: "○" },
   blocked: { fg: "#fca5a5", bg: "rgb(239 68 68 / 0.18)",  glyph: "⛔" },

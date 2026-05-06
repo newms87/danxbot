@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { IssueListChild } from "../../types";
-import { PHASE_STATUS_META } from "./issuePalette";
+import { CHILD_STATUS_META } from "./issuePalette";
 
 defineProps<{
   items: IssueListChild[];
@@ -18,10 +18,10 @@ defineProps<{
       <span
         class="chip"
         :style="{
-          background: PHASE_STATUS_META[c.status].bg,
-          color: PHASE_STATUS_META[c.status].fg,
+          background: CHILD_STATUS_META[c.status].bg,
+          color: CHILD_STATUS_META[c.status].fg,
         }"
-      >{{ PHASE_STATUS_META[c.status].glyph }}</span>
+      >{{ CHILD_STATUS_META[c.status].glyph }}</span>
       <span class="id-chip">{{ c.id }}</span>
       <span class="label">{{ i + 1 }}: {{ c.name }}</span>
     </div>

@@ -123,9 +123,9 @@ function migrateV1(
     description: map.description ?? "",
     triaged: map.triaged ?? { timestamp: "", status: "", explain: "" },
     ac: map.ac ?? [],
-    phases: map.phases ?? [],
     comments: map.comments ?? [],
-    retro: map.retro ?? { good: "", bad: "", action_items: [], commits: [] },
+    retro: map.retro ?? { good: "", bad: "", action_item_ids: [], commits: [] },
+    blocked: null,
   };
 
   const newYaml = stringify(next, { lineWidth: 0 });

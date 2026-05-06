@@ -9,10 +9,11 @@
  * `danx_issue_save`. Run this script to clean up everything in one pass.
  */
 import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseIssue, serializeIssue } from "../src/issue-tracker/yaml.js";
 
-const repoRoot = resolve(import.meta.dirname, "..");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dirs = ["open", "closed"].map((sub) =>
   join(repoRoot, ".danxbot", "issues", sub),
 );
@@ -52,6 +53,12 @@ for (const dir of dirs) {
 
 console.log(`\nScanned ${scanned} files. Stripped phases: from ${stripped}.`);
 if (skipped.length > 0) {
-  console.log(`Skipped ${skipped.length} files:`);
-  for (const s of skipped) console.log(`  ${s.path} — ${s.reason}`);
+  console.error(
+    `\n!! WARNING: ${skipped.length} file(s) FAILED strict-schema parse and were NOT stripped of legacy phases:`,
+  );
+  console.error(
+    `!! Their on-disk YAML still contains the legacy field. Fix the validation errors then re-run.`,
+  );
+  for (const s of skipped) console.error(`  ${s.path} — ${s.reason}`);
+  process.exitCode = 1;
 }

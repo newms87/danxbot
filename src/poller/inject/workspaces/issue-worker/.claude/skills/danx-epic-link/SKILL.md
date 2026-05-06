@@ -42,10 +42,10 @@ immediately — the epic is already linked.
 5. List the matched candidates back to yourself with their ids and titles.
 
 If zero candidates match, the epic genuinely has no phase children —
-write `children: []` to the epic (already empty, but make the intent
-explicit in a comment) and exit. The epic's phases live as in-card
-checklist items rather than separate cards. The orchestrator continues
-with normal Step 4 implementation on the epic itself.
+leave `children: []` on the epic and exit. There is no in-card phase
+checklist (ISS-81 retired that field). The orchestrator continues with
+normal Step 4 implementation directly on the epic itself; epics
+without phase children are implemented as a single card.
 
 If one or more candidates match, proceed to Step 2.
 

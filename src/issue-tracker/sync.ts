@@ -4,13 +4,13 @@ import {
   findCommentByMarker,
 } from "./markers.js";
 import {
-  type CreateCardInput,
   type Issue,
   type IssueAcItem,
   type IssueComment,
   type IssueRetro,
   type IssueTracker,
 } from "./interface.js";
+import { issueToCreateInput } from "./yaml.js";
 
 /**
  * Project an Issue body into the `CreateCardInput` payload for
@@ -18,29 +18,11 @@ import {
  * `createIssue` handler) and the orphan-recovery branch at the top of
  * `syncIssue`, so the two paths produce identical tracker inputs by
  * construction.
+ *
+ * Re-exported from `yaml.ts#issueToCreateInput` — single canonical
+ * implementation; sync + worker + poller all funnel through it.
  */
-export function toCreateCardInput(issue: Issue): CreateCardInput {
-  return {
-    schema_version: 3,
-    tracker: issue.tracker,
-    id: issue.id,
-    parent_id: issue.parent_id,
-    children: [...issue.children],
-    status: issue.status,
-    type: issue.type,
-    title: issue.title,
-    description: issue.description,
-    triaged: { ...issue.triaged },
-    ac: issue.ac.map((a) => ({ title: a.title, checked: a.checked })),
-    comments: issue.comments.map((c) => ({ ...c })),
-    retro: {
-      good: issue.retro.good,
-      bad: issue.retro.bad,
-      action_item_ids: [...issue.retro.action_item_ids],
-      commits: [...issue.retro.commits],
-    },
-  };
-}
+export const toCreateCardInput = issueToCreateInput;
 
 /**
  * Stamp tracker-assigned ids back onto the local Issue. After a successful

@@ -247,7 +247,7 @@ describe("pushOrphans", () => {
     expect(result.errors[0].id).toBe("ISS-7");
   });
 
-  it("records an error when tracker.createCard returns mismatched ac/phases length", async () => {
+  it("records an error when tracker.createCard returns mismatched ac length", async () => {
     // Build a stub tracker that returns one ac stamp for a 2-ac issue.
     // `Object.create(tracker)` preserves MemoryTracker methods + lets us
     // override `createCard` only — keeps the IssueTracker interface
@@ -256,7 +256,6 @@ describe("pushOrphans", () => {
     stubTracker.createCard = async () => ({
       external_id: "stub-1",
       ac: [{ check_item_id: "ci-1" }],
-      phases: [],
     });
     writeOrphan(
       repoRoot,
