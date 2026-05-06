@@ -108,8 +108,10 @@ launch-worker: ## Start a worker for a repo (usage: make launch-worker REPO=plat
 	if [ "$(REPO)" = "danxbot" ]; then \
 		./scripts/check-claude-auth-env.sh || exit 1; \
 	fi; \
+	./scripts/check-worker-port.sh container "$(REPO)" "$$DANXBOT_WORKER_PORT" || exit 1; \
 	mkdir -p "$(REPOS_DIR)/$(REPO)/claude-projects"; \
-	docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$(REPO)" up -d
+	docker compose -f "$$COMPOSE_FILE" -p "danxbot-worker-$(REPO)" up -d || exit 1; \
+	./scripts/check-worker-port.sh post-up "$(REPO)" "$$DANXBOT_WORKER_PORT" || exit 1
 
 stop-worker: ## Stop a worker (usage: make stop-worker REPO=platform)
 	@if [ -z "$(REPO)" ]; then echo "Error: REPO is required. Usage: make stop-worker REPO=platform"; exit 1; fi
@@ -206,6 +208,7 @@ launch-worker-host: ## Start a worker on the host (usage: make launch-worker-hos
 	if [ ! -f "$$REPO_ENV" ]; then echo "Error: $$REPO_ENV not found — needs DANXBOT_WORKER_PORT"; exit 1; fi; \
 	set -a && . ./.env && . "$$REPO_ENV" && set +a; \
 	if [ -z "$$DANXBOT_WORKER_PORT" ]; then echo "Error: DANXBOT_WORKER_PORT missing in $$REPO_ENV"; exit 1; fi; \
+	./scripts/check-worker-port.sh host "$(REPO)" "$$DANXBOT_WORKER_PORT" || exit 1; \
 	DANXBOT_REPO_NAME=$(REPO) npx tsx src/index.ts
 
 launch-dashboard-host: ## Start the dashboard on the host
