@@ -349,6 +349,7 @@ The poller shares `dispatch()` with `/api/launch` as of Phase 4. Implications:
 - Poller-triggered agents get `mcp__danxbot__danxbot_complete` automatically (infrastructure), so the poller retired inactivity-timeout-as-completion-signal in favor of the MCP callback. Inactivity timeout remains as a safety net.
 - The poller's `onComplete` callback is the hook for `handleAgentCompletion` — card-progress check, stuck-card recovery, consecutive-failure backoff. Ordering contract: MCP settings cleanup runs BEFORE the caller's onComplete so post-completion checks never observe a half-disposed dispatch.
 - The poller's MCP surface lives in `src/poller/inject/workspaces/issue-worker/.mcp.json`. Adding or removing a Trello tool is a one-line edit to that file — no callsite changes anywhere.
+- Empty-ToDo branch ordering (ISS-79): `_poll` calls `checkAndSpawnTriage` BEFORE `checkAndSpawnIdeator`. When `autoTriage` is enabled AND any Action Items / Review card lacks `triaged.timestamp`, the poller spawns the `danx-triage` agent (`TRIAGE_AUTO_PROMPT`, `endpoint: "poller/auto-triage"`) and returns — single-dispatch invariant. Triage spawn preempts the ideator on the same tick; ideator only runs when triage finds nothing eligible (or `autoTriage` is off).
 
 ## Key Files
 

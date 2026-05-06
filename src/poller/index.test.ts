@@ -108,6 +108,7 @@ vi.mock("./constants.js", () => ({
   REVIEW_MIN_CARDS: 10,
   TEAM_PROMPT: "/danx-next",
   IDEATOR_PROMPT: "/danx-ideate",
+  TRIAGE_AUTO_PROMPT: "/danx-triage auto",
 }));
 
 /**
@@ -471,7 +472,8 @@ function resetTrackerMocks() {
   // override the pickup prefix.
   mockIsFeatureEnabled.mockReset();
   mockIsFeatureEnabled.mockImplementation(
-    (...args: unknown[]) => (args[1] as string) !== "ideator",
+    (...args: unknown[]) =>
+      (args[1] as string) !== "ideator" && (args[1] as string) !== "autoTriage",
   );
   mockGetIssuePollerPickupPrefix.mockReset();
   mockGetIssuePollerPickupPrefix.mockReturnValue(null);
@@ -492,7 +494,8 @@ describe("poll", () => {
     setupRepoConfigMocks();
     mockIsFeatureEnabled.mockReset();
     mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) => (args[1] as string) !== "ideator",
+      (...args: unknown[]) =>
+      (args[1] as string) !== "ideator" && (args[1] as string) !== "autoTriage",
     );
     mockGetIssuePollerPickupPrefix.mockReset();
     mockGetIssuePollerPickupPrefix.mockReturnValue(null);
@@ -1954,7 +1957,8 @@ describe("poll — Docker mode (headless agent)", () => {
     setupRepoConfigMocks();
     mockIsFeatureEnabled.mockReset();
     mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) => (args[1] as string) !== "ideator",
+      (...args: unknown[]) =>
+      (args[1] as string) !== "ideator" && (args[1] as string) !== "autoTriage",
     );
     mockGetIssuePollerPickupPrefix.mockReset();
     mockGetIssuePollerPickupPrefix.mockReturnValue(null);
@@ -2015,7 +2019,8 @@ describe("poll — Docker mode (headless agent)", () => {
   it("does NOT spawn ideator when override explicitly disables it even though Review is empty", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([]);
     mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) => (args[1] as string) !== "ideator",
+      (...args: unknown[]) =>
+      (args[1] as string) !== "ideator" && (args[1] as string) !== "autoTriage",
     );
 
     await poll(MOCK_REPO_CONTEXT);
@@ -2642,7 +2647,8 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     setupRepoConfigMocks();
     mockIsFeatureEnabled.mockReset();
     mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) => (args[1] as string) !== "ideator",
+      (...args: unknown[]) =>
+      (args[1] as string) !== "ideator" && (args[1] as string) !== "autoTriage",
     );
     mockGetIssuePollerPickupPrefix.mockReset();
     mockGetIssuePollerPickupPrefix.mockReturnValue(null);
@@ -2813,7 +2819,11 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       // No ToDo / Needs Help / In Progress — only Review filler.
       ...REVIEW_FILLER,
     ]);
-    mockIsFeatureEnabled.mockImplementation(() => true);
+    // Enable ideator but keep autoTriage off — Review filler would
+    // otherwise become triage candidates and steal the dispatch.
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "autoTriage",
+    );
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -3655,5 +3665,218 @@ describe("poll — In Progress sync + orphan resume", () => {
     if (resolveOrder !== undefined) {
       expect(hydrateOrder).toBeLessThan(resolveOrder);
     }
+  });
+});
+
+/**
+ * checkAndSpawnTriage (ISS-79 / Phase 5 of the auto-triage epic).
+ *
+ * Wires the poller's empty-ToDo branch to spawn the triage agent BEFORE
+ * the ideator when:
+ *   - `autoTriage` is enabled, AND
+ *   - at least one Action Items / Review card has not yet been triaged.
+ *
+ * Single-dispatch invariant: triage spawn preempts ideator spawn — never
+ * both in the same tick. Both still preempted by any non-empty ToDo
+ * dispatch path.
+ */
+describe("poll — auto-triage spawn gate (ISS-79)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockIsFeatureEnabled.mockReset();
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) =>
+        (args[1] as string) !== "ideator" &&
+        (args[1] as string) !== "autoTriage",
+    );
+    mockGetIssuePollerPickupPrefix.mockReset();
+    mockGetIssuePollerPickupPrefix.mockReturnValue(null);
+    mockFindByExternalId.mockReset();
+    mockFindByExternalId.mockReturnValue(null);
+  });
+
+  function actionItemsRef(external_id: string, title: string): IssueRef {
+    return {
+      id: "",
+      external_id,
+      title,
+      status: "ToDo",
+      list_kind: "action_items",
+    };
+  }
+
+  it("does NOT spawn triage when autoTriage is disabled even with eligible Action Items / Review cards", async () => {
+    // Default mock keeps autoTriage off. Eligible cards are present.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      actionItemsRef("ai1", "Action Item 1"),
+      ref("rv1", "Review Card", "Review"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("spawns triage with the auto prompt and trigger=api when autoTriage is on, ToDo is empty, and Action Items has untriaged cards", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      actionItemsRef("ai1", "Action Item 1"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const call = mockDispatch.mock.calls[0][0];
+    expect(call.task).toContain("/danx-triage auto");
+    expect(call.apiDispatchMeta).toEqual({
+      trigger: "api",
+      metadata: expect.objectContaining({
+        endpoint: "poller/auto-triage",
+      }),
+    });
+    // No second dispatch — ideator is preempted on the same tick.
+    expect(
+      mockDispatch.mock.calls.some(
+        (c) => typeof c[0]?.task === "string" && c[0].task.includes("/danx-ideate"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does NOT spawn triage and falls through to ideator when openCards has no Action Items / Review entries", async () => {
+    // ideator on AND autoTriage on. fetchOpenCards returns NeedsHelp +
+    // In Progress cards only — neither matches the triage candidate
+    // filter (`list_kind === "action_items"` OR `status === "Review"`).
+    // No-candidates branch returns false → ideator runs. Exercises the
+    // candidate-filter path with a non-empty openCards list (an empty
+    // openCards would short-circuit earlier and not exercise the
+    // filter).
+    mockIsFeatureEnabled.mockImplementation(() => true);
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("nh1", "Needs Help card", "Needs Help"),
+      ref("ip1", "In Progress card", "In Progress"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-ideate");
+  });
+
+  it("does NOT spawn triage when every eligible candidate already carries triaged.timestamp", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      actionItemsRef("ai1", "Already triaged AI"),
+      ref("rv1", "Already triaged Review", "Review"),
+    ]);
+    // Both candidates resolve to local YAMLs with non-empty
+    // triaged.timestamp — auto-triage skips them.
+    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => ({
+      ...FAKE_ISSUE_FOR_TESTS,
+      external_id: eid,
+      triaged: {
+        timestamp: "2026-05-01T00:00:00Z",
+        status: "Keep",
+        explain: "prior triage",
+      },
+    }));
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("does NOT consider triage when ToDo has cards — the existing dispatch path wins", async () => {
+    // ToDo card present (NOT action_items) AND eligible triage candidates
+    // also present. Cards.length > 0 means we never enter the empty-ToDo
+    // branch where checkAndSpawnTriage runs.
+    mockIsFeatureEnabled.mockImplementation(() => true);
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("td1", "Real ToDo", "ToDo"),
+      actionItemsRef("ai1", "Action Item — would be eligible"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const call = mockDispatch.mock.calls[0][0];
+    expect(call.task).toContain("/danx-next");
+    expect(call.task).not.toContain("/danx-triage");
+  });
+
+  it("preserves the single-dispatch invariant: triage runs and ideator is NOT also dispatched in the same tick", async () => {
+    mockIsFeatureEnabled.mockImplementation(() => true);
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("rv1", "Review Card", "Review"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-triage auto");
+  });
+
+  it("fails CLOSED on findByExternalId throw — corrupt YAML candidate is treated as triaged so a persistently broken file does not respawn every tick", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      actionItemsRef("ai-corrupt", "Corrupt YAML"),
+    ]);
+    // bulkSyncMissingYamls calls findByExternalId BEFORE the triage gate
+    // does — let the bulk-sync read return null (no local YAML yet) and
+    // throw only on the triage gate's subsequent read for the same id.
+    const seen = new Set<string>();
+    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
+      if (eid === "ai-corrupt") {
+        if (seen.has(eid)) throw new Error("corrupt YAML");
+        seen.add(eid);
+        return null;
+      }
+      return null;
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // The single candidate raises on the triage-gate read → skipped →
+    // eligible.length === 0 → no spawn. (Ideator is also disabled in this
+    // test, so no fall-through dispatch either.)
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("spawns triage when at least one candidate is untriaged even though others are already triaged", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      actionItemsRef("ai-old", "Already triaged AI"),
+      ref("rv-new", "Untriaged Review", "Review"),
+    ]);
+    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
+      if (eid === "ai-old") {
+        return {
+          ...FAKE_ISSUE_FOR_TESTS,
+          external_id: eid,
+          triaged: {
+            timestamp: "2026-05-01T00:00:00Z",
+            status: "Keep",
+            explain: "prior",
+          },
+        };
+      }
+      return null;
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-triage auto");
   });
 });

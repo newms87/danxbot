@@ -89,7 +89,7 @@ Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller sy
 
 ### Per-Repo Feature Toggles
 
-Three runtime toggles per repo (Slack / Issue poller / Dispatch API) live at `<repo>/.danxbot/settings.json` — three-valued (`true` / `false` / `null` defers to env default). Workers re-read on every event so toggles take effect with no restart. Operator overrides survive every redeploy. Full ownership contract + schema: `.claude/rules/settings-file.md`. Spec: `docs/superpowers/specs/2026-04-20-agents-tab-design.md`.
+Five runtime toggles per repo (Slack / Issue poller / Dispatch API / Ideator / Auto-triage) live at `<repo>/.danxbot/settings.json` — three-valued (`true` / `false` / `null` defers to env default). Workers re-read on every event so toggles take effect with no restart. Operator overrides survive every redeploy. `autoTriage` (env default `false` — explicit opt-in) lets the poller spawn the `danx-triage` agent in `auto` mode when the ToDo queue is empty AND there are untriaged Action Items / Review cards; triage spawn preempts the ideator on the same tick. Full ownership contract + schema: `.claude/rules/settings-file.md`. Spec: `docs/superpowers/specs/2026-04-20-agents-tab-design.md`.
 
 ## External Dispatch API (Production)
 

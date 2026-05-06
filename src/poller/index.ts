@@ -20,6 +20,7 @@ import {
   REVIEW_MIN_CARDS,
   TEAM_PROMPT,
   IDEATOR_PROMPT,
+  TRIAGE_AUTO_PROMPT,
 } from "./constants.js";
 import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 import {
@@ -376,6 +377,14 @@ async function _poll(repo: RepoContext): Promise<void> {
   cards = await resolveBlockedCards(repo, cards);
 
   if (cards.length === 0) {
+    // Auto-triage runs BEFORE the ideator on an empty ToDo tick. When
+    // `autoTriage` is enabled and there are untriaged Action Items / Review
+    // cards, spawn the triage agent and honor the per-tick single-dispatch
+    // invariant. Falls through to the ideator only when triage finds
+    // nothing eligible. See ISS-79 + `.claude/rules/agent-dispatch.md`.
+    if (await checkAndSpawnTriage(repo, openCards)) {
+      return;
+    }
     log.info(`[${repo.name}] No cards in ToDo — checking if ideator needed`);
     await checkAndSpawnIdeator(repo, tracker);
     return;
@@ -1627,6 +1636,105 @@ function formatElapsed(job: AgentJob): string {
   return `${Math.round(seconds / 60)}min`;
 }
 
+/**
+ * Auto-triage spawn gate (ISS-79 / Phase 5 of the auto-triage epic).
+ *
+ * Invoked from the empty-ToDo branch of `_poll` BEFORE
+ * `checkAndSpawnIdeator`. Returns `true` when it spawned the triage
+ * agent — the caller honors the per-tick single-dispatch invariant by
+ * returning immediately. Returns `false` when:
+ *   - `autoTriage` is disabled (env default or operator override), OR
+ *   - no untriaged Action Items / Review cards exist.
+ *
+ * Eligibility:
+ *   - Action Items list cards (`list_kind === "action_items"`)
+ *   - Review cards (`status === "Review"`)
+ * minus any whose local YAML carries non-empty `triaged.timestamp`
+ * (already triaged within the idempotence window — re-triage requires
+ * explicit `/danx-triage refresh`). Cards without a local YAML count as
+ * untriaged.
+ *
+ * Reuses `openCards` from the caller — the poll tick already paid for
+ * one `tracker.fetchOpenCards()` call.
+ */
+/**
+ * Shared spawn shape for poller-driven, non-card API dispatches (ideator,
+ * auto-triage, and any future periodic). Wraps the `spawnClaude` call
+ * with the metadata block every poller-side `api` trigger needs:
+ * `endpoint` slug, `initialPrompt` preview slice, and the null
+ * `callerIp` / `statusUrl` fields the Trello-trigger path doesn't apply.
+ */
+function spawnPollerApiAgent(
+  repo: RepoContext,
+  prompt: string,
+  endpoint: string,
+): void {
+  spawnClaude(repo, prompt, {
+    trigger: "api",
+    metadata: {
+      endpoint,
+      callerIp: null,
+      statusUrl: null,
+      initialPrompt: prompt.slice(0, 500),
+    },
+  });
+}
+
+async function checkAndSpawnTriage(
+  repo: RepoContext,
+  openCards: IssueRef[],
+): Promise<boolean> {
+  // Per-repo runtime toggle. Env default is `false` — operators opt in
+  // via the dashboard Agents tab. Logged on disabled for symmetry with
+  // `checkAndSpawnIdeator`. See `.claude/rules/settings-file.md`.
+  if (!isFeatureEnabled(repo, "autoTriage")) {
+    log.info(
+      `[${repo.name}] Auto-triage disabled (settings.json override or env default) — skipping`,
+    );
+    return false;
+  }
+
+  const candidates = openCards.filter(
+    (c) => c.list_kind === "action_items" || c.status === "Review",
+  );
+  if (candidates.length === 0) {
+    return false;
+  }
+
+  // Skip cards whose local YAML is already triaged. Cards without a
+  // local YAML (findByExternalId returns null) count as untriaged.
+  // A read failure (corrupt YAML) fails CLOSED — treat as triaged so
+  // a persistently broken file doesn't cause a triage spawn every
+  // empty-ToDo tick. The danxbot worker's normal YAML-validation path
+  // surfaces the parse error elsewhere.
+  const eligible = candidates.filter((c) => {
+    let local: Issue | null;
+    try {
+      local = findByExternalId(repo.localPath, c.external_id);
+    } catch (error) {
+      log.warn(
+        `[${repo.name}] auto-triage: findByExternalId failed for ${c.external_id} — skipping (fail closed)`,
+        error,
+      );
+      return false;
+    }
+    return !local || !local.triaged.timestamp;
+  });
+
+  if (eligible.length === 0) {
+    log.info(
+      `[${repo.name}] Auto-triage: ${candidates.length} candidate${candidates.length > 1 ? "s" : ""} all already triaged — skipping`,
+    );
+    return false;
+  }
+
+  log.info(
+    `[${repo.name}] Auto-triage: ${eligible.length} untriaged card${eligible.length > 1 ? "s" : ""} — spawning triage`,
+  );
+  spawnPollerApiAgent(repo, TRIAGE_AUTO_PROMPT, "poller/auto-triage");
+  return true;
+}
+
 async function checkAndSpawnIdeator(
   repo: RepoContext,
   tracker: IssueTracker,
@@ -1663,15 +1771,7 @@ async function checkAndSpawnIdeator(
   );
   // Ideator runs don't originate from a specific card — tag them as API
   // dispatches so the poller run is still visible in dispatch history.
-  spawnClaude(repo, IDEATOR_PROMPT, {
-    trigger: "api",
-    metadata: {
-      endpoint: "poller/ideator",
-      callerIp: null,
-      statusUrl: null,
-      initialPrompt: IDEATOR_PROMPT.slice(0, 500),
-    },
-  });
+  spawnPollerApiAgent(repo, IDEATOR_PROMPT, "poller/ideator");
 }
 
 export function shutdown(): void {
