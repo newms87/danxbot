@@ -52,10 +52,12 @@ export function stampTrackerIds(
 /**
  * Deterministic, idempotent worker-side sync.
  *
- * Diff strategy: we fetch the remote card ONCE (via `getCard`) at the top of
- * the sync, plus the remote comments (separately, because `getCard` already
- * returns a comments slice but `sync` needs a sortable, full list — keeping
- * the two reads explicit avoids API drift between trackers).
+ * Diff strategy: we fetch the remote card ONCE (via `getCard` — which
+ * also surfaces the projected `Issue.labels` so the outbound label diff
+ * needs no second round-trip) plus the remote comments separately
+ * (`getCard` already returns a comments slice but `sync` needs a
+ * sortable, full list). The two reads are explicit so tracker
+ * implementations can answer them efficiently without API drift.
  *
  * We then diff local-vs-remote field by field and apply the minimum set of
  * mutations. `local` is the source of truth for everything except remote
@@ -63,6 +65,48 @@ export function stampTrackerIds(
  *
  * Idempotent: a second invocation on the returned `updatedLocal` issues zero
  * mutating calls (`remoteWriteCount === 0`).
+ *
+ * Outbound mirror — full-fidelity audit (ISS-88, Slice C). Every field on
+ * the `Issue` type either reaches the tracker via one of the writes below
+ * or is intentionally local-only:
+ *
+ *   id            → encoded into the title prefix (`#<id>: <title>`) by
+ *                   tracker implementations during `createCard` /
+ *                   `updateCard`. Diffed via `local.title` vs
+ *                   `remoteCard.title` (semantic title, prefix stripped).
+ *   external_id   → tracker primary key. Created by `createCard` (orphan
+ *                   recovery branch above) and `pushOrphans`.
+ *   parent_id     → LOCAL-ONLY. Trackers expose no native parent concept;
+ *                   `parent_id` references the parent's INTERNAL `ISS-N`
+ *                   id, not its `external_id`. Sync passes through verbatim.
+ *   children      → LOCAL-ONLY. Reverse linkage to `parent_id`; same
+ *                   reasoning. Maintained by the `danx-epic-link` skill and
+ *                   the `danx_issue_create` flow.
+ *   dispatch_id   → LOCAL-ONLY. Poller-managed metadata.
+ *   status        → list move via `moveToStatus` (Step 4b).
+ *   type          → managed label via `setLabels` (Step 4c).
+ *   title         → `updateCard({title})` (Step 4a).
+ *   description   → `updateCard({description})` (Step 4a).
+ *   triaged       → managed label via `setLabels` (Step 4c). The label is
+ *                   the entire tracker-side surface; the structured
+ *                   record (`timestamp`, `status`, `explain`) stays
+ *                   local-only.
+ *   ac            → `addAcItem` / `updateAcItem` / `deleteAcItem` (Step 4d).
+ *   comments      → bot-authored comments POSTed via `addComment` with the
+ *                   danxbot marker prefix (Step 4f). Human-authored
+ *                   tracker comments flow inbound (Step 1+2).
+ *   retro         → ONE rendered comment via `addComment` /
+ *                   `editComment` on terminal status (Step 6).
+ *   blocked       → managed label via `setLabels` (Step 4c). Same shape as
+ *                   `triaged`: label-only on the tracker; structured
+ *                   record (`reason`, `timestamp`, `by[]`) stays local.
+ *
+ * The label diff (Step 4c) compares local-derived intent against
+ * `remoteCard.labels` (a projection trackers populate inside `getCard`)
+ * rather than re-deriving from `remoteCard`'s data fields, because
+ * `triaged` and `blocked` (and on Trello, `type`) do not round-trip
+ * through their data-field counterparts. Reading the label set directly
+ * closes the diff loop and keeps `setLabels` writes idempotent.
  */
 /**
  * Optional ID-to-title resolver for rendering `retro.action_item_ids` in
@@ -171,15 +215,24 @@ export async function syncIssue(
   }
 
   // 4c: labels
-  // The `blocked` flag pairs with the local YAML's `blocked` record:
-  // non-null record → true → Blocked label applied. Trello stores no
-  // structured blocked data, so `setLabels` is the entire on-tracker
-  // surface. The local YAML remains source of truth for reason / by[].
-  // Remote diff: there's no equivalent to read from `remoteCard.blocked`
-  // (the field doesn't survive the round-trip on Trello), so we treat
-  // the LABEL as the remote signal — `setLabels` is idempotent and the
-  // managed-set filter strips the Blocked label when local goes back to
-  // null.
+  //
+  // The five managed labels — type, needsHelp, needsApproval, triaged,
+  // blocked — are derived from local YAML data (`status`, `type`,
+  // `triaged.timestamp`, `blocked`). On Trello, NONE of those source
+  // fields round-trip through `getCard`'s data shape — `triaged` and
+  // `blocked` have no native column, and `type` itself is derived from
+  // labels. So the remote-side diff MUST come from the actual label
+  // state. Trackers project their idLabels onto `remoteCard.labels`
+  // inside `getCard`; we compare local-derived intent against that
+  // projection. Without this, every tick re-wrote the Triaged / Blocked
+  // labels because the data fields the diff used to compare always read
+  // empty on Trello — a real idempotency bug found by the ISS-88 audit
+  // (Slice C).
+  if (!remoteCard.labels) {
+    throw new Error(
+      `tracker.getCard returned no labels projection for ${local.external_id} — every IssueTracker implementation must populate Issue.labels`,
+    );
+  }
   const localLabels = {
     type: local.type,
     needsHelp: local.status === "Needs Help",
@@ -187,13 +240,7 @@ export async function syncIssue(
     triaged: local.triaged.timestamp !== "",
     blocked: local.blocked !== null,
   };
-  const remoteLabels = {
-    type: remoteCard.type,
-    needsHelp: remoteCard.status === "Needs Help",
-    needsApproval: remoteCard.status === "Needs Approval",
-    triaged: remoteCard.triaged.timestamp !== "",
-    blocked: remoteCard.blocked !== null,
-  };
+  const remoteLabels = remoteCard.labels;
   if (
     localLabels.type !== remoteLabels.type ||
     localLabels.needsHelp !== remoteLabels.needsHelp ||

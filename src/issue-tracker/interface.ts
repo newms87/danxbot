@@ -186,6 +186,18 @@ export interface Issue {
    * `blocked` and resumes dispatch. See `IssueBlocked` for the invariants.
    */
   blocked: IssueBlocked | null;
+  /**
+   * TRANSIENT, tracker-derived projection of the card's managed labels.
+   * Populated by `tracker.getCard()` so `syncIssue`'s outbound label diff
+   * can compare against the actual remote label state (the only source of
+   * truth on Trello — `triaged` / `blocked` data fields don't round-trip).
+   * NEVER serialized to YAML and NEVER written by agents — the local
+   * YAML's `status` / `type` / `triaged.timestamp` / `blocked` fields are
+   * the source of truth, and `labels` is recomputed from those at sync
+   * time. `parseIssue` ignores it on disk; `serializeIssue` never emits
+   * it.
+   */
+  labels?: ManagedLabels;
 }
 
 /**

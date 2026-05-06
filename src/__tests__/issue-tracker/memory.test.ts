@@ -89,6 +89,39 @@ describe("MemoryTracker", () => {
     expect(card.type).toBe("Bug");
   });
 
+  it("getCard surfaces the current managed-label projection on Issue.labels (ISS-88)", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultInput());
+
+    // Right after createCard the card's labels mirror the createCard
+    // input — type matches, the rest are derived defaults.
+    const initial = await tracker.getCard(external_id);
+    expect(initial.labels).toEqual({
+      type: "Feature",
+      needsHelp: false,
+      needsApproval: false,
+      triaged: false,
+      blocked: false,
+    });
+
+    // After setLabels, the same getCard call reflects the new label state.
+    await tracker.setLabels(external_id, {
+      type: "Bug",
+      needsHelp: true,
+      needsApproval: false,
+      triaged: true,
+      blocked: true,
+    });
+    const updated = await tracker.getCard(external_id);
+    expect(updated.labels).toEqual({
+      type: "Bug",
+      needsHelp: true,
+      needsApproval: false,
+      triaged: true,
+      blocked: true,
+    });
+  });
+
   it("addComment returns id and timestamp; getComments returns oldest-first", async () => {
     let now = 1700000000000;
     const tracker = new MemoryTracker({

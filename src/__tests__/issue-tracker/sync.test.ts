@@ -869,4 +869,136 @@ describe("syncIssue", () => {
     // surface stale references in tooling.
     expect(out).toContain("- <ISS-7: unknown>");
   });
+
+  // ---- ISS-88 (Slice C: outbound full-fidelity mirror audit) ----
+  //
+  // These tests codify which Issue fields are intentionally NOT mirrored
+  // outbound. Sync's diff loop only writes title / description / status /
+  // labels / ac / comments / retro. `parent_id`, `children`, and
+  // `dispatch_id` are local-only metadata — mutating them MUST NOT trigger
+  // any tracker write, ever. Without these tests a future contributor
+  // could silently wire one through and the only signal would be doubled
+  // tracker traffic in production.
+
+  it("children[] is local-only — mutating local.children issues zero tracker writes", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const fresh = await tracker.getCard(external_id);
+    const local: Issue = {
+      ...fresh,
+      children: ["ISS-42", "ISS-43"],
+    };
+    tracker.clearRequestLog();
+
+    const result = await syncIssue(tracker, local);
+
+    expect(result.remoteWriteCount).toBe(0);
+    const methods = tracker.getRequestLog().map((l) => l.method);
+    expect(methods.sort()).toEqual(["getCard", "getComments"]);
+  });
+
+  it("parent_id is local-only — mutating local.parent_id issues zero tracker writes", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const fresh = await tracker.getCard(external_id);
+    const local: Issue = { ...fresh, parent_id: "ISS-99" };
+    tracker.clearRequestLog();
+
+    const result = await syncIssue(tracker, local);
+
+    expect(result.remoteWriteCount).toBe(0);
+  });
+
+  it("dispatch_id is local-only — mutating local.dispatch_id issues zero tracker writes", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const fresh = await tracker.getCard(external_id);
+    const local: Issue = {
+      ...fresh,
+      dispatch_id: "61ef8878-c2be-4920-8294-678619ef5ea2",
+    };
+    tracker.clearRequestLog();
+
+    const result = await syncIssue(tracker, local);
+
+    expect(result.remoteWriteCount).toBe(0);
+  });
+
+  it("comprehensive idempotency: full-populated YAML re-syncs with zero writes across every diffable field", async () => {
+    // Sets every mirrored field to a non-default value, syncs once to push,
+    // then re-syncs and asserts zero writes — covers title / description /
+    // status / labels (type + needsHelp + needsApproval + triaged + blocked)
+    // / AC items / bot comments / retro in one round-trip.
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const fresh = await tracker.getCard(external_id);
+    const local: Issue = {
+      ...fresh,
+      title: "Full populated",
+      description: "With body",
+      status: "Done",
+      type: "Bug",
+      triaged: {
+        timestamp: "2026-05-05T00:00:00Z",
+        status: "ok",
+        explain: "",
+      },
+      ac: [
+        { check_item_id: fresh.ac[0].check_item_id, title: "AC1", checked: true },
+        { check_item_id: "", title: "AC2", checked: false },
+      ],
+      comments: [
+        { author: "danxbot", timestamp: "2026-05-05T00:00:01Z", text: "fresh note" },
+      ],
+      retro: {
+        good: "shipped",
+        bad: "rough",
+        action_item_ids: [],
+        commits: ["abc1234"],
+      },
+      blocked: null,
+    };
+
+    const first = await syncIssue(tracker, local);
+    expect(first.remoteWriteCount).toBeGreaterThan(0);
+
+    tracker.clearRequestLog();
+    const second = await syncIssue(tracker, first.updatedLocal);
+
+    expect(second.remoteWriteCount).toBe(0);
+    const methods = tracker.getRequestLog().map((l) => l.method);
+    expect(methods.sort()).toEqual(["getCard", "getComments"]);
+  });
+
+  it("blocked label idempotency: blocked.reason / by[] mutations alone produce zero writes (only the boolean is mirrored)", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const fresh = await tracker.getCard(external_id);
+
+    // First sync flips blocked:true → setLabels write.
+    const blocked: Issue = {
+      ...fresh,
+      blocked: {
+        reason: "Waits on sibling",
+        timestamp: "2026-05-05T00:00:00Z",
+        by: ["ISS-77"],
+      },
+    };
+    const first = await syncIssue(tracker, blocked);
+    expect(first.remoteWriteCount).toBeGreaterThan(0);
+
+    // Re-sync with DIFFERENT reason / by[] but same boolean → zero writes.
+    tracker.clearRequestLog();
+    const reworded: Issue = {
+      ...first.updatedLocal,
+      blocked: {
+        reason: "Different sentence — same blocker semantics",
+        timestamp: "2026-05-06T00:00:00Z",
+        by: ["ISS-77", "ISS-78"],
+      },
+    };
+    const second = await syncIssue(tracker, reworded);
+
+    expect(second.remoteWriteCount).toBe(0);
+  });
 });

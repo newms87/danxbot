@@ -156,7 +156,19 @@ function setIssueTracker(seed: Issue): {
   // focused on the reachability of the YAML round-trip, not on
   // MemoryTracker-internal write semantics (those have their own unit
   // suite).
-  tracker.getCard = async (_id: string) => seed;
+  // Populate `labels` on the returned Issue so sync's outbound label diff
+  // is a no-op against the seed (matches the stubbed reads above).
+  const seedWithLabels: Issue = {
+    ...seed,
+    labels: {
+      type: seed.type,
+      needsHelp: seed.status === "Needs Help",
+      needsApproval: seed.status === "Needs Approval",
+      triaged: seed.triaged.timestamp !== "",
+      blocked: seed.blocked !== null,
+    },
+  };
+  tracker.getCard = async (_id: string) => seedWithLabels;
   tracker.getComments = async (_id: string) => [];
   tracker.updateCard = async () => undefined;
   tracker.moveToStatus = async () => undefined;

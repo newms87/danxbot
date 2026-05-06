@@ -130,6 +130,7 @@ export class TrelloTracker implements IssueTracker {
 
     const status = this.listIdToStatus(card.idList);
     const type = await this.deriveType(card.idLabels);
+    const labels = await this.projectLabels(card.idLabels, type);
     const checklists = card.checklists ?? [];
     const acChecklist = checklists.find((c) => c.name === AC_CHECKLIST_NAME);
 
@@ -178,6 +179,7 @@ export class TrelloTracker implements IssueTracker {
       // separately. Always emit null on read so the local YAML stays
       // authoritative for the structured record.
       blocked: null,
+      labels,
     };
   }
 
@@ -312,6 +314,28 @@ export class TrelloTracker implements IssueTracker {
       },
       `PUT /cards/${externalId} (setLabels)`,
     );
+  }
+
+  /**
+   * Project a card's `idLabels` array onto the ManagedLabels shape. Inverse
+   * of `resolveLabelIds`. Reused by `getCard` so the returned Issue carries
+   * the remote-side label state inline — `syncIssue`'s outbound label diff
+   * compares against these without an extra HTTP round-trip.
+   */
+  private async projectLabels(
+    idLabels: string[],
+    type: IssueType,
+  ): Promise<ManagedLabels> {
+    const triagedLabelId = await this.resolveTriagedLabelId();
+    return {
+      type,
+      needsHelp: idLabels.includes(this.trello.needsHelpLabelId),
+      needsApproval:
+        !!this.trello.needsApprovalLabelId &&
+        idLabels.includes(this.trello.needsApprovalLabelId),
+      triaged: idLabels.includes(triagedLabelId),
+      blocked: idLabels.includes(this.trello.blockedLabelId),
+    };
   }
 
   async addComment(

@@ -138,6 +138,57 @@ describe("TrelloTracker", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("getCard projects idLabels onto Issue.labels for the outbound diff (ISS-88)", async () => {
+    // Card carries Bug + Triaged + Blocked + Needs Help; Needs Approval is
+    // off. The projection inverts setLabels so syncIssue can compare
+    // local-derived labels against the actual remote label state without
+    // re-deriving from data fields that don't round-trip on Trello.
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("/cards/c-projection?")) {
+        return jsonResponse({
+          id: "c-projection",
+          name: "T",
+          desc: "",
+          idList: "list-todo",
+          idLabels: ["lbl-bug", "lbl-triaged", "lbl-blocked", "lbl-nh"],
+          checklists: [],
+        });
+      }
+      throw new Error(`unexpected url: ${url}`);
+    });
+
+    const tracker = new TrelloTracker(TRELLO);
+    const issue = await tracker.getCard("c-projection");
+    expect(issue.labels).toEqual({
+      type: "Bug",
+      needsHelp: true,
+      needsApproval: false,
+      triaged: true,
+      blocked: true,
+    });
+    // No second round-trip: getCard reuses card.idLabels in-process.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("getCard.labels returns needsApproval:false when needsApprovalLabelId is unset (rollout guard)", async () => {
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({
+        id: "c-rollout",
+        name: "T",
+        desc: "",
+        idList: "list-todo",
+        idLabels: ["lbl-feature"],
+        checklists: [],
+      }),
+    );
+
+    const cfg = { ...TRELLO };
+    delete (cfg as { needsApprovalLabelId?: string }).needsApprovalLabelId;
+    const tracker = new TrelloTracker(cfg);
+    const issue = await tracker.getCard("c-rollout");
+    expect(issue.labels?.needsApproval).toBe(false);
+  });
+
   it("createCard issues POST /cards then creates checklists+items", async () => {
     const calls: string[] = [];
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {

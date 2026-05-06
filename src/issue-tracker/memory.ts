@@ -365,6 +365,7 @@ export class MemoryTracker implements IssueTracker {
         card.blocked === null
           ? null
           : { ...card.blocked, by: [...card.blocked.by] },
+      labels: { ...card.labels },
     };
   }
 
