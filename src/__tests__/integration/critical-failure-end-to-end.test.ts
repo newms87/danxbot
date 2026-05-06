@@ -570,6 +570,40 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
     // call and the post-dispatch progress check.
     seedHydratedCard(STUCK_CARD_ID, STUCK_TITLE);
 
+    // ISS-86: dispatch source is local YAML, not the tracker view. Pre-
+    // write a YAML so `listDispatchableYamls` finds the stuck card.
+    const issuesDir = join(repoDir, ".danxbot", "issues", "open");
+    mkdirSync(issuesDir, { recursive: true });
+    writeFileSync(
+      join(issuesDir, "ISS-1.yml"),
+      [
+        "schema_version: 3",
+        "tracker: trello",
+        "id: ISS-1",
+        `external_id: ${STUCK_CARD_ID}`,
+        "parent_id: null",
+        "children: []",
+        "dispatch_id: null",
+        "status: ToDo",
+        "type: Feature",
+        `title: ${JSON.stringify(STUCK_TITLE)}`,
+        'description: ""',
+        "triaged:",
+        '  timestamp: ""',
+        '  status: ""',
+        '  explain: ""',
+        "ac: []",
+        "comments: []",
+        "retro:",
+        '  good: ""',
+        '  bad: ""',
+        "  action_item_ids: []",
+        "  commits: []",
+        "blocked: null",
+        "",
+      ].join("\n"),
+    );
+
     expect(existsSync(flagPath(repoDir))).toBe(false);
 
     // Drive the poller path. poll() resolves once the agent is spawned

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { RepoContext } from "../types.js";
-import type { IssueRef, IssueStatus } from "../issue-tracker/interface.js";
+import type { Issue, IssueRef, IssueStatus } from "../issue-tracker/interface.js";
 
 // Set REPOS before index.ts loads so getDanxbotConfigDir() resolves a path
 vi.hoisted(() => {
@@ -288,6 +288,73 @@ const mockStampDispatchAndWrite = vi
   );
 const mockEnsureIssuesDirs = vi.fn();
 const mockEnsureGitignoreEntry = vi.fn();
+/**
+ * Default impls derive Issue[] from the most recent
+ * `tracker.fetchOpenCards` resolved value, projecting each `IssueRef`
+ * into a fully-populated `Issue` so existing tests (which set up
+ * dispatch decisions via `fetchOpenCards.mockResolvedValueOnce(refs)`)
+ * keep working after the ISS-86 cutover where local YAMLs drive the
+ * dispatch source. Tests that need a custom local-YAML scan can
+ * override via `.mockReturnValueOnce`.
+ */
+function refToFakeIssue(ref: IssueRef): Issue {
+  return {
+    schema_version: 3,
+    tracker: "trello",
+    id: ref.id || `ISS-FAKE-${ref.external_id}`,
+    external_id: ref.external_id,
+    parent_id: null,
+    children: [],
+    dispatch_id: null,
+    status: ref.status,
+    type: "Feature",
+    title: ref.title,
+    description: "",
+    triaged: { timestamp: "", status: "", explain: "" },
+    ac: [],
+    comments: [],
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    blocked: null,
+  };
+}
+
+function _currentOpenCards(): IssueRef[] {
+  const settled = mockTracker.fetchOpenCards.mock.settledResults;
+  if (!settled || settled.length === 0) return [];
+  const last = settled[settled.length - 1];
+  return last.type === "fulfilled" ? (last.value as IssueRef[]) : [];
+}
+
+const mockListDispatchableYamls = vi.fn(
+  (
+    _repoPath: string,
+    options: { excludeExternalIds?: ReadonlySet<string> } = {},
+  ): Issue[] => {
+    const exclude = options.excludeExternalIds;
+    return _currentOpenCards()
+      .filter((r) => r.status === "ToDo" && r.list_kind !== "action_items")
+      .filter(
+        (r) => !exclude || r.external_id === "" || !exclude.has(r.external_id),
+      )
+      .map(refToFakeIssue);
+  },
+);
+const mockListInProgressYamls = vi.fn((_repoPath: string): Issue[] =>
+  _currentOpenCards()
+    .filter((r) => r.status === "In Progress")
+    .map(refToFakeIssue),
+);
+const mockListBlockedTodoYamls = vi.fn((_repoPath: string): Issue[] => []);
+
+vi.mock("./local-issues.js", () => ({
+  listDispatchableYamls: (...args: unknown[]) =>
+    mockListDispatchableYamls(...(args as [string, { excludeExternalIds?: ReadonlySet<string> }?])),
+  listInProgressYamls: (...args: unknown[]) =>
+    mockListInProgressYamls(...(args as [string])),
+  listBlockedTodoYamls: (...args: unknown[]) =>
+    mockListBlockedTodoYamls(...(args as [string])),
+}));
+
 vi.mock("./yaml-lifecycle.js", () => ({
   hydrateFromRemote: (...args: unknown[]) => mockHydrateFromRemote(...args),
   loadLocal: (...args: unknown[]) => mockLoadLocal(...args),
@@ -1023,6 +1090,12 @@ describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; 
       timestamp: "",
     });
     mockCreateIssueTracker.mockReturnValueOnce(realTrelloTracker);
+    // ISS-86: dispatch source is local YAML, not the (real) tracker's
+    // fetchOpenCards. Provide one synthetic local Issue so the
+    // credentials guard inside spawnClaude is reached.
+    mockListDispatchableYamls.mockReturnValueOnce([
+      refToFakeIssue({ id: "", external_id: "c1", title: "Card 1", status: "ToDo" }),
+    ]);
 
     await expect(poll(repoNoCreds)).rejects.toThrow(
       /without complete trello credentials/,
@@ -2432,8 +2505,10 @@ describe("poll — stuck card recovery on failure", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    mockTracker.fetchOpenCards.mockResolvedValueOnce([
-      ref("c1", "My Card", "In Progress"),
+    // ISS-86: stuck-card recovery now reads local YAML, not the
+    // tracker view. Inject the In-Progress projection directly.
+    mockListInProgressYamls.mockReturnValueOnce([
+      refToFakeIssue({ id: "ISS-1", external_id: "c1", title: "My Card", status: "In Progress" }),
     ]);
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
@@ -2477,10 +2552,10 @@ describe("poll — stuck card recovery on failure", () => {
 
     // Recovery's IP fetch sees both the just-moved card AND a
     // pre-existing IP card. Only the dispatch's own card should be
-    // recovered.
-    mockTracker.fetchOpenCards.mockResolvedValueOnce([
-      ref("c1", "My Card", "In Progress"),
-      ref("c99", "Already In Progress", "In Progress"),
+    // recovered. ISS-86: source is local YAML.
+    mockListInProgressYamls.mockReturnValueOnce([
+      refToFakeIssue({ id: "ISS-1", external_id: "c1", title: "My Card", status: "In Progress" }),
+      refToFakeIssue({ id: "ISS-99", external_id: "c99", title: "Already In Progress", status: "In Progress" }),
     ]);
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
@@ -2547,9 +2622,10 @@ describe("poll — stuck card recovery on failure", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    mockTracker.fetchOpenCards.mockResolvedValueOnce([
-      ref("c1", "Card 1", "In Progress"),
-      ref("c2", "Card 2", "In Progress"),
+    // ISS-86: source is local YAML.
+    mockListInProgressYamls.mockReturnValueOnce([
+      refToFakeIssue({ id: "ISS-1", external_id: "c1", title: "Card 1", status: "In Progress" }),
+      refToFakeIssue({ id: "ISS-2", external_id: "c2", title: "Card 2", status: "In Progress" }),
     ]);
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
@@ -2589,8 +2665,9 @@ describe("poll — stuck card recovery on failure", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    mockTracker.fetchOpenCards.mockResolvedValueOnce([
-      ref("c1", "Card 1", "In Progress"),
+    // ISS-86: source is local YAML.
+    mockListInProgressYamls.mockReturnValueOnce([
+      refToFakeIssue({ id: "ISS-1", external_id: "c1", title: "Card 1", status: "In Progress" }),
     ]);
     mockExistsSync.mockReturnValue(false);
     capturedOnComplete!({
@@ -2622,8 +2699,12 @@ describe("poll — stuck card recovery on failure", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    // Recovery's IP fetch fails — handler should swallow and continue.
-    mockTracker.fetchOpenCards.mockRejectedValueOnce(new Error("API down"));
+    // Recovery's IP read fails — handler should swallow and continue.
+    // ISS-86: source is local YAML; have the helper throw to simulate
+    // a disk read failure mid-recovery.
+    mockListInProgressYamls.mockImplementationOnce(() => {
+      throw new Error("Disk read down");
+    });
     mockExistsSync.mockReturnValue(false);
 
     // Should not throw — error is caught and logged
@@ -2982,6 +3063,10 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       if (id === "ISS-99") return { ...blockedIssue, id: "ISS-99", status: "ToDo", blocked: null };
       return null;
     });
+    // ISS-86: blocked YAMLs are surfaced via listBlockedTodoYamls (NOT
+    // the dispatchable list). resolveBlockedCards then keeps or drops.
+    mockListDispatchableYamls.mockReturnValueOnce([]);
+    mockListBlockedTodoYamls.mockReturnValueOnce([blockedIssue as Issue]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -3022,6 +3107,11 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       if (id === "ISS-99") return { ...blockedIssue, id: "ISS-99", status: "Done", blocked: null };
       return null;
     });
+    // ISS-86: blocked YAMLs come via listBlockedTodoYamls; the
+    // resolve gate clears `blocked` on terminal blockers and pushes
+    // the cleared ref into `cards` for dispatch this tick.
+    mockListDispatchableYamls.mockReturnValueOnce([]);
+    mockListBlockedTodoYamls.mockReturnValueOnce([blockedIssue as Issue]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -3878,5 +3968,197 @@ describe("poll — auto-triage spawn gate (ISS-79)", () => {
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-triage auto");
+  });
+});
+
+/**
+ * ISS-86 — dispatch source is local YAML, not the tracker view. The
+ * default `mockListDispatchableYamls` derives Issue[] from the
+ * tracker's most recent `fetchOpenCards` value, which is fine for
+ * legacy tests — but the cutover semantics need their own pinning.
+ * These tests override `mockListDispatchableYamls` /
+ * `mockListInProgressYamls` directly so the assertions are about the
+ * local-YAML source, not the tracker mirror.
+ */
+describe("poll — local-YAML dispatch source (ISS-86)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockIsFeatureEnabled.mockReset();
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) =>
+        (args[1] as string) !== "ideator" &&
+        (args[1] as string) !== "autoTriage",
+    );
+    mockGetIssuePollerPickupPrefix.mockReset();
+    mockGetIssuePollerPickupPrefix.mockReturnValue(null);
+  });
+
+  it("dispatches a hand-written ToDo YAML even when the tracker returns NO matching card (orphan dispatchable on the same tick orphan-push runs)", async () => {
+    // Tracker has no ToDo card — only Review filler. The local YAML
+    // walker stands in for a hand-written `<id>.yml` on disk.
+    mockTracker.fetchOpenCards.mockResolvedValue([...REVIEW_FILLER]);
+    const localOnly: Issue = refToFakeIssue({
+      id: "ISS-555",
+      external_id: "local-orphan-1",
+      title: "Hand-written card",
+      status: "ToDo",
+    });
+    mockListDispatchableYamls.mockReturnValueOnce([localOnly]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as {
+      apiDispatchMeta: { metadata: { cardId: string } };
+    };
+    expect(arg.apiDispatchMeta.metadata.cardId).toBe("local-orphan-1");
+  });
+
+  it("does NOT dispatch a YAML the helper omitted because it carries blocked != null", async () => {
+    // Tracker view says ToDo; local YAML walker filters it out (blocked
+    // record). Because no card surfaces in either dispatchable or
+    // blocked-resolution lists, no dispatch fires. Pins the
+    // `listDispatchableYamls` filter contract end-to-end at the _poll
+    // call site.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("blocked-card", "Blocked", "ToDo"),
+    ]);
+    mockListDispatchableYamls.mockReturnValueOnce([]);
+    mockListBlockedTodoYamls.mockReturnValueOnce([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("does NOT dispatch a tracker ToDo card whose local YAML reports status=In Progress (local wins)", async () => {
+    // Classic split-brain scenario the source-of-truth contract
+    // resolves: tracker UI says ToDo; local YAML says In Progress.
+    // Dispatch source is local — the card flows into the orphan-resume
+    // path, not the ToDo dispatch path. With no dispatch_id stamped
+    // and no JSONL on disk, orphan-resume returns no-session-dir and
+    // no dispatch fires this tick.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("split-brain", "Split-brain card", "ToDo"),
+    ]);
+    mockListDispatchableYamls.mockReturnValueOnce([]);
+    mockListInProgressYamls.mockReturnValueOnce([
+      refToFakeIssue({
+        id: "ISS-700",
+        external_id: "split-brain",
+        title: "Split-brain card",
+        status: "In Progress",
+      }),
+    ]);
+    // No dispatch_id stamped → tryResumeOrphan skips silently.
+    mockFindByExternalId.mockReturnValue(null);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("pickup-prefix filter operates on the local-YAML-derived list (system-test isolation invariant survives the cutover)", async () => {
+    // Two local YAMLs; only the prefix-matching one gets dispatched.
+    // Pre-cutover this filter ran on the tracker IssueRef list; post-
+    // cutover it must run on the local-YAML projection.
+    mockGetIssuePollerPickupPrefix.mockReturnValue("[ST]");
+    mockTracker.fetchOpenCards.mockResolvedValue([]);
+    mockListDispatchableYamls.mockReturnValueOnce([
+      refToFakeIssue({
+        id: "ISS-801",
+        external_id: "card-skip",
+        title: "Real card not for the test",
+        status: "ToDo",
+      }),
+      refToFakeIssue({
+        id: "ISS-802",
+        external_id: "card-st",
+        title: "[ST] system test card",
+        status: "ToDo",
+      }),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as {
+      apiDispatchMeta: { metadata: { cardId: string } };
+    };
+    expect(arg.apiDispatchMeta.metadata.cardId).toBe("card-st");
+  });
+
+  it("invokes listInProgressYamls (NOT tracker.fetchOpenCards filter) to source the orphan-resume scan — AC4", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("td-only", "ToDo card", "ToDo"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockListInProgressYamls).toHaveBeenCalledWith("/test/repos/test-repo");
+  });
+
+  it("still calls tracker.fetchOpenCards each tick (Slice B inbound channel) — AC5", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("td-1", "Card 1", "ToDo"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Needs Help check + _poll's ToDo branch both call fetchOpenCards;
+    // assert at least one to lock the inbound-channel invariant.
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+  });
+
+  it("dispatches the FIFO-oldest ToDo YAML when the helper returns multiple candidates — locks _poll's no-resort invariant", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([]);
+    // The helper is contractually FIFO-sorted; _poll must not re-sort
+    // or shuffle. Order the mock return as [older, newer] and assert
+    // the older card dispatches.
+    mockListDispatchableYamls.mockReturnValueOnce([
+      refToFakeIssue({
+        id: "ISS-OLD",
+        external_id: "card-older",
+        title: "Older card",
+        status: "ToDo",
+      }),
+      refToFakeIssue({
+        id: "ISS-NEW",
+        external_id: "card-newer",
+        title: "Newer card",
+        status: "ToDo",
+      }),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as {
+      apiDispatchMeta: { metadata: { cardId: string } };
+    };
+    expect(arg.apiDispatchMeta.metadata.cardId).toBe("card-older");
+  });
+
+  it("passes the action-items external-id Set to listDispatchableYamls so action-items YAMLs are excluded from dispatch", async () => {
+    // Action Items hydrate as full local YAMLs (so they can act as
+    // blockers) but `list_kind` is NOT persisted on disk — the call
+    // site derives the exclude set from the tracker view and passes
+    // it through. Pin the wiring.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      { id: "", external_id: "ai-1", title: "AI card", status: "ToDo", list_kind: "action_items" },
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockListDispatchableYamls).toHaveBeenCalled();
+    const callArgs = mockListDispatchableYamls.mock.calls[0];
+    const opts = callArgs[1] as
+      | { excludeExternalIds?: ReadonlySet<string> }
+      | undefined;
+    expect(opts?.excludeExternalIds?.has("ai-1")).toBe(true);
   });
 });

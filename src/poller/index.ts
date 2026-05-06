@@ -49,6 +49,11 @@ import { dispatch, getActiveJob } from "../dispatch/core.js";
 import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { pushOrphans } from "./orphan-push.js";
+import {
+  listBlockedTodoYamls,
+  listDispatchableYamls,
+  listInProgressYamls,
+} from "./local-issues.js";
 import { isLinkOrFile, isSymlink } from "./fs-probe.js";
 import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext } from "../types.js";
@@ -68,6 +73,21 @@ import { hasLiveDispatchForCard as hasLiveDispatchForCardImpl } from "./live-dis
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const log = createLogger("poller");
+
+/**
+ * Project a local-YAML `Issue` into the `IssueRef` shape the dispatch
+ * pipeline downstream consumes. `list_kind` is intentionally undefined
+ * for local-derived refs — it's a tracker-only concept (the helper has
+ * already filtered out Action Items via `excludeExternalIds`).
+ */
+function localIssueToRef(issue: Issue): IssueRef {
+  return {
+    id: issue.id,
+    external_id: issue.external_id,
+    title: issue.title,
+    status: issue.status,
+  };
+}
 
 /** Per-repo poller state */
 interface RepoPollerState {
@@ -276,16 +296,26 @@ async function _poll(repo: RepoContext): Promise<void> {
     log.error(`[${repo.name}] Error fetching cards`, error);
     return;
   }
-  // Action Items list cards surface with `status: "ToDo"` so they land in
-  // local YAMLs (blocker discovery), but `list_kind === "action_items"`
-  // marks them as ineligible for auto-dispatch — operators promote them
-  // to the actual ToDo list when they're ready to be worked.
-  let cards = openCards.filter(
+  // ISS-86: tracker.fetchOpenCards() is the inbound channel ONLY (new
+  // cards + bulk-sync + Action Items hydration). It NO LONGER decides
+  // what gets dispatched — local YAML is the source of truth. The
+  // tracker-derived ToDo / In Progress / Action Items partitions below
+  // exist solely to drive the inbound mirror (bulkSyncMissingYamls,
+  // pushOrphans, triage). The dispatch + stuck-card scan switch to
+  // listDispatchableYamls / listInProgressYamls AFTER the inbound
+  // mirror runs, so hand-written YAMLs land in dispatch on the same
+  // tick orphan-push stamps their external_id.
+  const trackerToDoRefs = openCards.filter(
     (c) => c.status === "ToDo" && c.list_kind !== "action_items",
   );
-  const inProgressCards = openCards.filter((c) => c.status === "In Progress");
+  const trackerInProgressRefs = openCards.filter(
+    (c) => c.status === "In Progress",
+  );
+  const actionItemRefs = openCards.filter(
+    (c) => c.list_kind === "action_items",
+  );
 
-  // Bulk-sync every ToDo (siblings — `cards.slice(1)` because the
+  // Bulk-sync every ToDo (siblings — `slice(1)` because the
   // primary ToDo card has its own dedicated hydrate-or-stamp block
   // below that THROWS on hydrate failure) AND every In Progress card
   // that lacks a local YAML. The In Progress addition closes a gap:
@@ -303,12 +333,9 @@ async function _poll(repo: RepoContext): Promise<void> {
   // import is what makes blocker-discovery findable from the agent's
   // local YAML scan — see the `blocked` field workflow in
   // `~/.claude/rules/issues.md`.
-  const actionItemRefs = openCards.filter(
-    (c) => c.list_kind === "action_items",
-  );
   await bulkSyncMissingYamls(repo, tracker, [
-    ...cards.slice(1),
-    ...inProgressCards,
+    ...trackerToDoRefs.slice(1),
+    ...trackerInProgressRefs,
     ...actionItemRefs,
   ]);
 
@@ -329,6 +356,21 @@ async function _poll(repo: RepoContext): Promise<void> {
       `[${repo.name}] orphan-push failed for ${err.id}: ${err.message}`,
     );
   }
+
+  // ISS-86: dispatch source is local YAML, not the tracker fetch above.
+  // Action Items hydrate as full local YAMLs (so they can act as
+  // blockers) but `list_kind` is NOT persisted on disk — derive the
+  // exclude set from the tracker view and pass it through. Orphans
+  // (`external_id === ""`) bypass the exclude set unconditionally.
+  const actionItemExternalIds = new Set(
+    actionItemRefs.map((c) => c.external_id),
+  );
+  let cards: IssueRef[] = listDispatchableYamls(repo.localPath, {
+    excludeExternalIds: actionItemExternalIds,
+  }).map(localIssueToRef);
+  const inProgressCards: IssueRef[] = listInProgressYamls(
+    repo.localPath,
+  ).map(localIssueToRef);
 
   // Orphan-resume check. Runs BEFORE the ToDo dispatch path so a
   // worker that died mid-dispatch can resume its prior session
@@ -369,12 +411,19 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  // Blocked-card gate. Each card with a non-null `blocked` record is
-  // skipped while ANY entry in `blocked.by[]` is non-terminal. When every
-  // blocker has reached Done / Cancelled, the gate clears `blocked` on
-  // the YAML and saves — the card becomes eligible for dispatch on this
-  // tick. See `resolveBlockedCard` for the contract.
-  cards = await resolveBlockedCards(repo, cards);
+  // Blocked-card gate. `listDispatchableYamls` already filtered out
+  // every YAML with non-null `blocked`, so the input set is exclusively
+  // not-blocked. The unblock-on-terminal path runs over a separate
+  // sweep of the blocked ToDo YAMLs: `resolveBlockedCards` clears the
+  // record + saves, and the freshly-cleared cards join the dispatchable
+  // pool for this tick. See `resolveBlockedCard` for the contract.
+  const blockedRefs: IssueRef[] = listBlockedTodoYamls(repo.localPath).map(
+    localIssueToRef,
+  );
+  if (blockedRefs.length > 0) {
+    const cleared = await resolveBlockedCards(repo, blockedRefs);
+    if (cleared.length > 0) cards = [...cards, ...cleared];
+  }
 
   if (cards.length === 0) {
     // Auto-triage runs BEFORE the ideator on an empty ToDo tick. When
@@ -1598,11 +1647,13 @@ async function recoverStuckCards(
 
   const tracker = getRepoTracker(repo);
   try {
-    const all = await tracker.fetchOpenCards();
-    const inProgressCards = all.filter((c) => c.status === "In Progress");
-    const stuckCards = inProgressCards.filter((card) =>
-      state.priorTodoCardIds.includes(card.external_id),
-    );
+    // ISS-86: source of truth for "is this card stuck in progress?" is
+    // the local YAML, not tracker.fetchOpenCards. Match by external_id
+    // so the priorTodoCardIds set (recorded before dispatch from the
+    // tracker view) keys correctly into the local-derived list.
+    const stuckCards = listInProgressYamls(repo.localPath)
+      .map(localIssueToRef)
+      .filter((card) => state.priorTodoCardIds.includes(card.external_id));
 
     for (const card of stuckCards) {
       log.warn(

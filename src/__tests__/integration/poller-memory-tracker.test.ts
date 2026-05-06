@@ -30,7 +30,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MemoryTracker } from "../../issue-tracker/memory.js";
-import type { CreateCardInput } from "../../issue-tracker/interface.js";
+import type {
+  CreateCardInput,
+  Issue,
+  IssueRef,
+} from "../../issue-tracker/interface.js";
 
 // --- Hoisted mocks ---
 
@@ -163,6 +167,52 @@ vi.mock("../../workspace/write-if-changed.js", () => ({
   writeIfChanged: () => true,
 }));
 
+// ISS-86: dispatch source is local YAML, not the tracker view. The
+// integration test mocks node:fs so the real local-issues walker
+// finds nothing. Stand in for the local-YAML scan by deriving Issue[]
+// projections from the most recent `tracker.fetchOpenCards()` value
+// captured by the wrapping factory below.
+const lastOpenCards: { value: IssueRef[] } = { value: [] };
+function refToFakeIssue(ref: IssueRef): Issue {
+  return {
+    schema_version: 3,
+    tracker: "memory",
+    id: ref.id || `ISS-FAKE-${ref.external_id}`,
+    external_id: ref.external_id,
+    parent_id: null,
+    children: [],
+    dispatch_id: null,
+    status: ref.status,
+    type: "Feature",
+    title: ref.title,
+    description: "",
+    triaged: { timestamp: "", status: "", explain: "" },
+    ac: [],
+    comments: [],
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    blocked: null,
+  };
+}
+vi.mock("../../poller/local-issues.js", () => ({
+  listDispatchableYamls: (
+    _repoPath: string,
+    options: { excludeExternalIds?: ReadonlySet<string> } = {},
+  ): Issue[] => {
+    const exclude = options.excludeExternalIds;
+    return lastOpenCards.value
+      .filter((r) => r.status === "ToDo" && r.list_kind !== "action_items")
+      .filter(
+        (r) => !exclude || r.external_id === "" || !exclude.has(r.external_id),
+      )
+      .map(refToFakeIssue);
+  },
+  listInProgressYamls: (_repoPath: string): Issue[] =>
+    lastOpenCards.value
+      .filter((r) => r.status === "In Progress")
+      .map(refToFakeIssue),
+  listBlockedTodoYamls: (_repoPath: string): Issue[] => [],
+}));
+
 // The factory mock returns the real MemoryTracker the test sets up.
 const trackerHandle: { current: MemoryTracker | null } = { current: null };
 vi.mock("../../issue-tracker/index.js", async () => {
@@ -177,7 +227,14 @@ vi.mock("../../issue-tracker/index.js", async () => {
           "Test setup: trackerHandle.current must be assigned before poll()",
         );
       }
-      return trackerHandle.current;
+      const tracker = trackerHandle.current;
+      const origFetch = tracker.fetchOpenCards.bind(tracker);
+      tracker.fetchOpenCards = async () => {
+        const result = await origFetch();
+        lastOpenCards.value = result;
+        return result;
+      };
+      return tracker;
     },
   };
 });
@@ -268,6 +325,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     mockHydrateFromRemote.mockReset();
     mockWriteIssue.mockReset();
     trackerHandle.current = new MemoryTracker();
+    lastOpenCards.value = [];
   });
 
   afterEach(() => {
@@ -402,6 +460,11 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     // Simulate the agent moving the card to In Progress mid-work, then
     // failing — the recovery path should fire.
     await tracker.moveToStatus(cardId, "In Progress");
+    // ISS-86: stuck-card recovery reads local YAML, not tracker. The
+    // local-issues mock projects from the most recent fetchOpenCards
+    // capture, so refresh it AFTER the moveToStatus so recovery sees
+    // the In-Progress state.
+    await tracker.fetchOpenCards();
     tracker.clearRequestLog();
 
     capturedOnComplete!({
@@ -415,11 +478,11 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     await new Promise((r) => setImmediate(r));
 
     const methods = methodsOnly(tracker.getRequestLog());
-    // Recovery sequence: fetchOpenCards (recovery's IP fetch) →
-    // moveToStatus(card, Needs Help) → addComment(card, retro).
-    // getCard fires for the post-dispatch check (card now in Needs
-    // Help, no flag).
-    expect(methods).toContain("fetchOpenCards");
+    // ISS-86: recovery sources its In-Progress list from the local
+    // YAML walker (no `fetchOpenCards` here). The recovery still
+    // pushes Needs Help via moveToStatus + addComment; getCard fires
+    // for the post-dispatch progress check (card now in Needs Help,
+    // no flag).
     expect(methods).toContain("moveToStatus");
     expect(methods).toContain("addComment");
 
