@@ -2,6 +2,7 @@ import {
   DANXBOT_COMMENT_MARKER,
   RETRO_COMMENT_MARKER,
   findCommentByMarker,
+  isBotMirroredComment,
 } from "./markers.js";
 import {
   type Issue,
@@ -98,13 +99,40 @@ export async function syncIssue(
   let writes = 0;
 
   // --- Step 1+2: merge remote comments into local. ---
+  //
+  // Inbound channel from the tracker is intentionally narrow. Per the
+  // Source-of-Truth contract (`~/.claude/rules/issues.md` "Source of
+  // Truth"), only TWO things flow tracker → YAML:
+  //
+  //   1. NEW CARDS — a tracker card with no matching local YAML gets
+  //      hydrated by `bulkSyncMissingYamls` (see
+  //      `src/poller/yaml-lifecycle.ts#hydrateFromRemote`). NOT this
+  //      block — `syncIssue` only runs against an already-hydrated
+  //      Issue.
+  //   2. NEW COMMENTS — human-authored tracker comments are appended
+  //      to local `comments[]` here. Bot-mirrored comments (any text
+  //      containing `DANXBOT_COMMENT_MARKER`) are skipped to prevent
+  //      echo loops where the bot re-imports its own outbound posts.
+  //
+  // EVERYTHING ELSE inbound is ignored. Title / description / status /
+  // AC / labels / blocked on the tracker do NOT propagate back to the
+  // YAML — Step 4 below re-asserts the local values onto the tracker
+  // every tick. A human dragging a card or ticking a checkbox on the
+  // tracker has no effect on the YAML; the next tick reverts it.
   const remoteComments = await tracker.getComments(local.external_id);
   const localCommentIds = new Set(
     local.comments.map((c) => c.id).filter((id): id is string => !!id),
   );
 
-  // Append any tracker-side comments we haven't seen locally yet.
-  const newRemote = remoteComments.filter((c) => !localCommentIds.has(c.id));
+  // Append any tracker-side comments we haven't seen locally yet, then
+  // strip bot-marked comments via `isBotMirroredComment` (anchored
+  // `startsWith` — see markers.ts). Belt-and-suspenders against the
+  // echo loop: if the same deployment already stamped the id, dedup
+  // wins; if a different bot stamped it (or the id stamping failed),
+  // the anchored marker check still catches it.
+  const newRemote = remoteComments.filter(
+    (c) => !localCommentIds.has(c.id) && !isBotMirroredComment(c),
+  );
   const updatedComments: IssueComment[] = [
     ...local.comments,
     ...newRemote.map((c) => ({

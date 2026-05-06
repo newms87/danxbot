@@ -37,6 +37,22 @@ export const LOCK_COMMENT_MARKER = "<!-- danxbot-lock -->";
  * been POSTed to the tracker — every consumer of this helper needs the
  * tracker-native id (to edit in place, parse, or report a duplicate).
  */
+/**
+ * True if a comment was authored by danxbot (carries the
+ * `DANXBOT_COMMENT_MARKER` at the start of its body — every outbound
+ * post in `syncIssue` prepends the marker on its own line, so anchored
+ * `startsWith` is the precise inverse). Anchored match deliberately —
+ * `includes` would also match a human reply that quoted a prior bot
+ * comment in its body, suppressing legitimate inbound text.
+ *
+ * Used by the inbound merge in `syncIssue` to break echo loops where a
+ * bot-mirrored comment whose `id` failed to land in the local YAML
+ * would otherwise be re-imported as "human" on the next pull.
+ */
+export function isBotMirroredComment(comment: { text: string }): boolean {
+  return comment.text.startsWith(DANXBOT_COMMENT_MARKER);
+}
+
 export function findCommentByMarker<T extends { text: string; id?: string }>(
   comments: readonly T[],
   marker: string,

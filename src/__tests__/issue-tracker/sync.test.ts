@@ -78,6 +78,111 @@ describe("syncIssue", () => {
     expect(result.remoteWriteCount).toBe(0); // comment merge is a read
   });
 
+  // ---- ISS-87 (inbound channel discipline) ----
+
+  it("inbound merge SKIPS bot-marked comments even when the local YAML has no matching id (no echo loop)", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    // Tracker has a danxbot-marked comment but local hasn't been
+    // stamped with its id (simulates a different deployment, a worker
+    // crash before id-stamping, or a manual API post that mimicked the
+    // bot prefix). Pure id-dedup would re-import this and trigger an
+    // echo loop on the next outbound. Marker check must catch it.
+    await tracker.addComment(
+      external_id,
+      `${DANXBOT_COMMENT_MARKER}\n\nbot-mirrored body`,
+    );
+    const local = await tracker.getCard(external_id);
+    const stripped: Issue = { ...local, comments: [] };
+    const result = await syncIssue(tracker, stripped);
+    expect(result.updatedLocal.comments).toHaveLength(0);
+  });
+
+  it("inbound merge ANCHORS the marker check — a human comment that QUOTES the marker mid-body is still pulled", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    // A human reply that quotes the bot's prior comment (marker
+    // appears mid-body, not at position 0). `includes` would suppress
+    // this; anchored `startsWith` lets it through.
+    await tracker.addComment(
+      external_id,
+      `Re: bot's note "${DANXBOT_COMMENT_MARKER}" — disagree.`,
+    );
+    const local = await tracker.getCard(external_id);
+    const stripped: Issue = { ...local, comments: [] };
+    const result = await syncIssue(tracker, stripped);
+    expect(result.updatedLocal.comments).toHaveLength(1);
+    expect(result.updatedLocal.comments[0].text).toContain("disagree");
+  });
+
+  it("inbound merge appends a human comment but skips a bot comment in the SAME pull", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    await tracker.addComment(external_id, "human one");
+    await tracker.addComment(
+      external_id,
+      `${DANXBOT_COMMENT_MARKER}\n\nbot mirror`,
+    );
+    await tracker.addComment(external_id, "human two");
+    const local = await tracker.getCard(external_id);
+    const stripped: Issue = { ...local, comments: [] };
+    const result = await syncIssue(tracker, stripped);
+    expect(result.updatedLocal.comments.map((c) => c.text)).toEqual([
+      "human one",
+      "human two",
+    ]);
+  });
+
+  it("inbound merge dedupes by id when local already carries the human comment", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    await tracker.addComment(external_id, "from a human");
+    const local = await tracker.getCard(external_id);
+    expect(local.comments).toHaveLength(1);
+    // Re-sync with local already carrying the comment — no append.
+    const result = await syncIssue(tracker, local);
+    expect(result.updatedLocal.comments).toHaveLength(1);
+  });
+
+  it("tracker-side title edit does NOT propagate to YAML — next sync re-asserts local title onto the tracker", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local = await tracker.getCard(external_id);
+    expect(local.title).toBe("T");
+    // Simulate a human editing the title on the tracker UI.
+    await tracker.updateCard(external_id, { title: "tracker-edit" });
+    const remoteAfterEdit = await tracker.getCard(external_id);
+    expect(remoteAfterEdit.title).toBe("tracker-edit");
+
+    // Sync the (unchanged) local. YAML must stay "T", and the tracker
+    // must be reverted to "T".
+    const result = await syncIssue(tracker, local);
+    expect(result.updatedLocal.title).toBe("T");
+    const remoteAfterSync = await tracker.getCard(external_id);
+    expect(remoteAfterSync.title).toBe("T");
+  });
+
+  it("tracker-side description / status / AC edits do NOT propagate to YAML", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local = await tracker.getCard(external_id);
+    const originalDesc = local.description;
+    const originalStatus = local.status;
+    const originalAcChecked = local.ac[0].checked;
+
+    // Mutate every inbound-forbidden field on the tracker.
+    await tracker.updateCard(external_id, { description: "tracker desc" });
+    await tracker.moveToStatus(external_id, "Done");
+    await tracker.updateAcItem(external_id, local.ac[0].check_item_id, {
+      checked: true,
+    });
+
+    const result = await syncIssue(tracker, local);
+    expect(result.updatedLocal.description).toBe(originalDesc);
+    expect(result.updatedLocal.status).toBe(originalStatus);
+    expect(result.updatedLocal.ac[0].checked).toBe(originalAcChecked);
+  });
+
   describe("orphan recovery (empty external_id → createCard)", () => {
     function orphan(): Issue {
       return {

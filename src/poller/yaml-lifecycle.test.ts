@@ -156,6 +156,56 @@ describe("yaml-lifecycle", () => {
       expect(reloaded?.dispatch_id).toBeNull();
     });
 
+    it("ISS-87: hydrated Issue is complete — every required field populated, round-trips through serialize+parse", async () => {
+      // Card-hydration completeness regression: a tracker-born card
+      // with no matching local YAML must produce a YAML that the strict
+      // parseIssue validator accepts on round-trip. Defends against a
+      // future hydrateFromRemote refactor that drops a required field
+      // (e.g. `children`, `blocked`) and only fails downstream when the
+      // poller eventually re-reads the file.
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-200" }),
+      );
+      const issue = await hydrateFromRemote(tracker, external_id, null, repoRoot);
+
+      // Every required field is populated with the expected value
+      // (not just well-typed) so a hydration regression that drops a
+      // remote field's content (e.g. returns `[]` for a non-empty AC
+      // list) fails loudly here.
+      expect(issue.schema_version).toBe(3);
+      expect(issue.id).toBe("ISS-200");
+      expect(issue.external_id).toBe(external_id);
+      expect(issue.parent_id).toBeNull();
+      expect(issue.children).toEqual([]);
+      expect(issue.dispatch_id).toBeNull();
+      expect(issue.status).toBe("ToDo");
+      expect(issue.type).toBe("Feature");
+      expect(issue.title).toBe("Card title");
+      expect(typeof issue.description).toBe("string");
+      expect(issue.triaged).toEqual({ timestamp: "", status: "", explain: "" });
+      expect(issue.ac).toHaveLength(1);
+      expect(issue.ac[0].title).toBe("AC1");
+      expect(issue.ac[0].checked).toBe(false);
+      expect(issue.ac[0].check_item_id).toBeTruthy();
+      expect(issue.comments).toEqual([]);
+      expect(issue.retro).toEqual({
+        good: "",
+        bad: "",
+        action_item_ids: [],
+        commits: [],
+      });
+      expect(issue.blocked).toBeNull();
+
+      // Round-trip through writeIssue + loadLocal (which uses the
+      // strict parseIssue). Any missing required field would throw
+      // here.
+      writeIssue(repoRoot, issue);
+      const reloaded = loadLocal(repoRoot, issue.id);
+      expect(reloaded).not.toBeNull();
+      expect(reloaded?.external_id).toBe(external_id);
+    });
+
     it("includes remote comments in the hydrated Issue", async () => {
       const tracker = new MemoryTracker();
       const { external_id } = await tracker.createCard(
