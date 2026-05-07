@@ -4,7 +4,8 @@
       "source": {
         "source": "github",
         "repo": "newms87/claude-plugins"
-      }
+      },
+      "autoUpdate": true
     }
   },
   "enabledPlugins": {
