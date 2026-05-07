@@ -46,7 +46,9 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
    ```
 5. If 200, credentials are valid. Otherwise re-prompt.
 6. Save `TRELLO_API_KEY` and `TRELLO_API_TOKEN` to `.env` (secrets — stay in danxbot)
-7. **Hold the API key and token in memory** — they're needed for Step 4 and Step 4b.
+7. **Hold the API key and token in memory** — needed for Step 4 (board setup).
+
+> The agent path NEVER sees Trello. The worker uses these credentials internally to mirror local YAML state to the Trello board (one-way). Dispatched agents read and write `<repo>/.danxbot/issues/open/*.yml` only.
 
 ## Step 4: Trello Board Setup
 
@@ -74,31 +76,6 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 10. Create any missing labels via: `curl -s -X POST "https://api.trello.com/1/boards/<BOARD_ID>/labels?name=<NAME>&color=<COLOR>&key=<KEY>&token=<TOKEN>"`
     - Bug: red, Feature: green, Epic: purple, Needs Help: orange, Blocked: red_light, Triaged: sky
 11. **Hold all IDs in memory** — they go to `.danxbot/config/trello.yml` in Step 8, NOT to `.env`
-
-## Step 4b: Configure Trello MCP Server
-
-The Claude Code CLI uses an MCP (Model Context Protocol) server to interact with Trello. This must be configured in the project's settings so that `/danx-next`, `/danx-start`, and other skills can read/write Trello cards.
-
-1. Read the existing `.mcp.json` in the project root (create if missing)
-2. Add or update the `mcpServers.trello` section with the credentials from Step 3:
-   ```json
-   {
-     "mcpServers": {
-       "trello": {
-         "command": "npx",
-         "args": ["-y", "@anthropic-ai/trello-mcp-server@latest"],
-         "env": {
-           "TRELLO_API_KEY": "<API_KEY from Step 3>",
-           "TRELLO_TOKEN": "<TOKEN from Step 3>"
-         }
-       }
-     }
-   }
-   ```
-3. **IMPORTANT:** The MCP server uses `TRELLO_TOKEN` (not `TRELLO_API_TOKEN`). Use the same token value from Step 3.
-4. Merge with existing servers — preserve any other MCP server entries.
-5. Write the merged result back to `.mcp.json`.
-6. Ensure `.mcp.json` is in `.gitignore` (it contains credentials).
 
 ## Step 5: Slack Setup (Optional)
 

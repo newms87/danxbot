@@ -79,7 +79,7 @@ When invoked as `/danx-triage auto`:
    Scope (auto): <p1_count> priority-1 + <p2_count> Review = <total> cards
    ```
 
-Auto mode requires the `Needs Approval` status to be available. Before emitting `NeedsApproval` for the first time, read `<repo>/.danxbot/config/trello.yml` and check that `lists.needs_approval` is non-empty. If it is empty, the auto-mode subagent MUST fall back to `NeedsHelp` for that card and append a one-line note in `triaged.explain`: `"Direction approval needed; Trello board not yet provisioned for Needs Approval — falling back to Needs Help."` This keeps the YAML save valid (`Needs Help` is always available) until the operator provisions the list + label per `.claude/rules/trello-config.md`.
+Auto mode requires the `Needs Approval` status to be available. Before emitting `NeedsApproval` for the first time, read the tracker config at `<repo>/.danxbot/config/trello.yml` and check that `lists.needs_approval` is non-empty. If it is empty, the auto-mode subagent MUST fall back to `NeedsHelp` for that card and append a one-line note in `triaged.explain`: `"Direction approval needed; tracker not yet provisioned for Needs Approval — falling back to Needs Help."` This keeps the YAML save valid (`Needs Help` is always available) until the operator provisions the list + label.
 
 ---
 

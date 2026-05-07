@@ -50,8 +50,8 @@ danxbot_complete({
 
 `summary` is REQUIRED and must be non-empty. The operator reads it to decide
 what to fix on the host. Useless: `"Environment broken"`. Actionable: `"MCP
-Trello tools not loaded — tools list shows only builtins; `mcp__trello__*` is
-missing"`.
+playwright tools not loaded — tools list shows only builtins; expected
+`mcp__playwright__*` tools missing — likely the playwright container is down"`.
 
 ## What happens next
 

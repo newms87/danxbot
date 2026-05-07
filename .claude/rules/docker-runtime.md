@@ -121,29 +121,17 @@ Merge contract (`deploy/secrets.ts#collectDeploymentSecrets`):
 
 Files are gitignored by default — `.env.*` with `!.env.example` exception so any `.env.example` you commit for documentation stays trackable.
 
-## Interactive CLI — MCP Env via direnv + `.danxbot/mcp.env`
+## Interactive CLI — no repo-root MCP exposure
 
-Use case #1 (developer runs bare `claude` at repo root) resolves `.mcp.json`'s `${VAR}` placeholders ONLY from the shell process env of the `claude` command. Claude Code's `settings.json.env` is NOT exported to MCP subprocesses ([anthropics/claude-code#1254](https://github.com/anthropics/claude-code/issues/1254), closed "not planned"). There is no first-party `--env-file` or `mcpEnv` mechanism. The documented path is shell env.
+The danxbot repo no longer ships a repo-root `.mcp.json`. A developer running bare `claude` at the repo root sees zero MCP servers — only built-in tools. Issue inspection and edits go through the local YAMLs at `<repo>/.danxbot/issues/open/` (Glob + Read + Edit). Backend tracker sync is the worker's responsibility; agents never see it.
 
-The repo uses **direnv** for this:
-
-- `<repo>/.envrc` (committed) contains `dotenv_if_exists .danxbot/mcp.env`.
-- `<repo>/.danxbot/mcp.env` (gitignored, dev-owned) holds the dev's MCP secrets, e.g. `TRELLO_API_KEY=...` / `TRELLO_API_TOKEN=...` / `MCP_TRELLO_PATH=...`.
-- `.mcp.json` interpolates `${TRELLO_API_KEY}` / `${TRELLO_TOKEN}` against the process env direnv exports.
-
-One-time dev setup: `sudo apt-get install -y direnv` + `echo 'eval "$(direnv hook bash)"' >> ~/.bashrc` + `direnv allow` once in the repo. Every `cd` into the repo after that auto-exports `.danxbot/mcp.env` into the shell — bare `claude` Just Works.
+If you add a workspace-scoped MCP config in the future, declare it inside the workspace dir (e.g. `<repo>/.danxbot/workspaces/<name>/.mcp.json`) — never at repo root.
 
 ### CRITICAL: never put an `.env.local` (or any `.env.{APP_ENV}`) file at the connected repo's root
 
 Laravel's `LoadEnvironmentVariables::checkForSpecificEnvironmentFile()` substitutes `.env.{APP_ENV}` in place of `.env` whenever `APP_ENV` is already in the env repository at bootstrap time. Under plain `artisan tinker` this is harmless (APP_ENV is not yet set at the check). Under Octane's swoole worker bootstrap, APP_ENV is inherited from the parent process, so every worker loads `.env.{APP_ENV}` INSTEAD of `.env` — stripping `APP_KEY`, `REDIS_HOST`, and every other Laravel var not duplicated in the overlay file. Result: `MissingAppKeyException`, Clockwork/Redis connection refused, supervisor FATAL, HTTP RST. This has bitten us in production once; do not reintroduce it.
 
-This is why the dev secrets file lives at `<repo>/.danxbot/mcp.env`, NOT at `<repo>/.env.local`:
-
-- Laravel only opens `.env` and `.env.{APP_ENV}` at the **repo root**. It never walks into `.danxbot/` and never reads `.envrc` (direnv's bash script).
-- `.envrc` at repo root is required (direnv only activates on ancestor directories of `cwd`) and is safe — it's a direnv config, not an env file.
-- Naming the secrets file `mcp.env` (not `.env.*`) is belt-and-suspenders: even a future `APP_ENV=mcp` cannot match because the file is not at repo root.
-
-When wiring up a new connected repo (especially Laravel / any framework with an env overlay convention), verify zero files at the repo root match `.env*` beyond what the framework itself expects. The dev MCP secrets ALWAYS go under `<repo>/.danxbot/mcp.env`.
+When wiring up a new connected repo (especially Laravel / any framework with an env overlay convention), verify zero files at the repo root match `.env*` beyond what the framework itself expects.
 
 ### `.claude/settings.local.json` — Developer-Only
 
@@ -151,7 +139,7 @@ When wiring up a new connected repo (especially Laravel / any framework with an 
 
 ### Strict isolation from danxbot
 
-Use case #1's `.danxbot/mcp.env` governs the DEVELOPER's interactive `claude` only. Danxbot-dispatched agents (poller, `/api/launch`, Slack) do NOT read it — they use their own per-dispatch MCP config and env from `<repo>/.danxbot/.env` delivered to the worker container via `env_file: ../.env` in `<repo>/.danxbot/config/compose.yml`. Zero overlap between dev env and bot env — by design. Dev creds and bot creds can (and usually should) differ.
+Danxbot-dispatched agents (poller, `/api/launch`, Slack) use their own per-dispatch MCP config and env from `<repo>/.danxbot/.env` delivered to the worker container via `env_file: ../.env` in `<repo>/.danxbot/config/compose.yml`. The dev's interactive `claude` sees no MCP servers (no repo-root `.mcp.json`). Zero overlap between dev env and bot env — by design.
 
 ### The workspace: dispatched-agent cwd
 

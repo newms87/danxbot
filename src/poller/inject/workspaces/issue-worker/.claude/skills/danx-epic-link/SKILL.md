@@ -8,7 +8,7 @@ description: Wire two-way parent_id ↔ children[] linkage between an Epic card 
 You are running because the orchestrator picked up an Epic-typed card whose
 local YAML's `children: []` is empty. That means one of two things happened:
 
-1. **A human created phase cards directly on the Trello UI** without going
+1. **A human created phase cards directly on the tracker UI** without going
    through `danx_issue_create`. The phase YAMLs were bulk-synced into local
    `issues/open/` by the poller on a previous tick, but no `parent_id` was
    set on them and no `children[]` was set on the epic.

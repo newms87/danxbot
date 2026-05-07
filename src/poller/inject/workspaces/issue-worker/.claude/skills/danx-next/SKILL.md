@@ -440,7 +440,7 @@ Help) instead.
 ### Save and exit
 
 Save: `danx_issue_save({id})`. The worker normalizes status to ToDo,
-applies the Blocked label on Trello, and returns. The poller will
+applies the Blocked label via the tracker, and returns. The poller will
 re-evaluate on its next tick and skip dispatching this card while any
 blocker remains non-terminal. When every blocker reaches Done /
 Cancelled, the poller clears `blocked` automatically and dispatches the
