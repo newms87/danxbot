@@ -310,16 +310,19 @@ If no database is configured, create placeholder files noting that database docs
 
 Synced by poller to: `docs/domains/` and `docs/schema/`
 
-### CRITICAL: Do NOT manually sync to danxbot's `.claude/` directory
+### CRITICAL: Do NOT manually sync to the connected repo's workspace dirs
 
-**Never create, copy, or write files in danxbot's `.claude/rules/`, `docs/`, or `repo-overrides/` directories during setup.** The poller (`src/poller/index.ts:syncRepoFiles()`) handles all syncing automatically:
+**Never create, copy, or write files in `<repo>/.danxbot/workspaces/` or `<repo>/.claude/` during setup.** The poller (`src/poller/index.ts:syncRepoFiles()`) handles all syncing automatically every tick. Each plural workspace under `<repo>/.danxbot/workspaces/<name>/` gets:
 
-- `.danxbot/config/config.yml` → generates `.claude/rules/repo-config.md`
-- `.danxbot/config/trello.yml` → generates `.claude/rules/trello-config.md`
-- `.danxbot/config/overview.md` → copies to `.claude/rules/repo-overview.md`
-- `.danxbot/config/workflow.md` → copies to `.claude/rules/repo-workflow.md`
-- `.danxbot/config/compose.yml` → copies to `repo-overrides/<name>-compose.yml`
-- `.danxbot/config/docs/` → copies to `docs/domains/` and `docs/schema/`
+- `.danxbot/config/config.yml` → renders to `<workspace>/.claude/rules/danx-repo-config.md`
+- `.danxbot/config/overview.md` → copies to `<workspace>/.claude/rules/danx-repo-overview.md`
+- `.danxbot/config/workflow.md` → copies to `<workspace>/.claude/rules/danx-repo-workflow.md`
+- `.danxbot/config/tools.md` → copies to `<workspace>/.claude/rules/danx-tools.md`
+- `.danxbot/config/tools/*.sh` → copies to `<workspace>/.claude/tools/`
+- `.danxbot/config/compose.yml` → copies to danxbot's `repo-overrides/<name>-compose.yml`
+- `.danxbot/config/docs/` → copies to danxbot's `docs/domains/` and `docs/schema/`
+
+`<repo>/.claude/` is strictly developer territory — danxbot never reads or writes there. Trello config (`trello.yml`) is consumed by the worker for backend-tracker sync only; it is NOT injected into the workspace as a rule (`danx-trello-config.md` was retired in Phase 5 once skills moved to the `danx_issue_save` / `danx_issue_create` MCP flow).
 
 All of these target paths are gitignored in danxbot. They are generated artifacts, not source files. The poller syncs them before each Claude spawn.
 

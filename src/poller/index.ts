@@ -1529,6 +1529,63 @@ function mirrorWorkspaceTree(
 }
 
 /**
+ * Shared `danx-*`-artifact scrubber for a `.claude/` root. Used by
+ * both the workspace prune (`pruneStaleDanxArtifactsInWorkspace`,
+ * scoped to a workspace's target `.claude/`) and the repo-root scrub
+ * (`scrubRepoRootDanxArtifacts`, scoped to the developer-owned
+ * `<repo>/.claude/`). Centralizing the logic prevents the two from
+ * drifting apart on prefix conventions, subdir scope, or failure
+ * semantics.
+ *
+ * For each subdir in `opts.subdirs`:
+ *   - Walks `<claudeRootDir>/<sub>/`
+ *   - For every direct child whose name starts with `danx-`:
+ *     - Keeps it if `opts.keepIfShippedFrom?.(sub)` returns a Set
+ *       containing the entry (caller-supplied source-of-truth for
+ *       "this name still ships from the inject tree").
+ *     - Keeps it if `opts.keepNames?.(sub)` returns a Set containing
+ *       the entry (caller-supplied per-name allowlist, e.g. the
+ *       per-repo render outputs that this scrubber runs BEFORE the
+ *       renderer writes them).
+ *     - Otherwise rm-r's it.
+ *
+ * Fail-loud per CLAUDE.md "Fail loudly" rule: an `rm` failure on a
+ * stale `danx-*` artifact means the dispatched agent will load dead
+ * config on the next dispatch — exactly the bug this scrubber exists
+ * to prevent. Do not swallow the error. The older
+ * `scrubRepoRootDanxArtifacts` historically used `try/catch
+ * log.warn`; that pattern is retired here in favor of the new
+ * standing rule.
+ */
+interface ScrubDanxArtifactsOptions {
+  readonly subdirs: readonly string[];
+  readonly keepIfShippedFrom?: (sub: string) => ReadonlySet<string>;
+  readonly keepNames?: (sub: string) => ReadonlySet<string>;
+}
+
+const EMPTY_NAME_SET: ReadonlySet<string> = new Set<string>();
+
+function scrubDanxArtifacts(
+  claudeRootDir: string,
+  opts: ScrubDanxArtifactsOptions,
+): void {
+  for (const sub of opts.subdirs) {
+    const dir = resolve(claudeRootDir, sub);
+    if (!existsSync(dir)) continue;
+
+    const keepShipped = opts.keepIfShippedFrom?.(sub) ?? EMPTY_NAME_SET;
+    const keepWhitelist = opts.keepNames?.(sub) ?? EMPTY_NAME_SET;
+
+    for (const entry of readdirSync(dir)) {
+      if (!entry.startsWith("danx-")) continue;
+      if (keepShipped.has(entry)) continue;
+      if (keepWhitelist.has(entry)) continue;
+      rmSync(resolve(dir, entry), { recursive: true, force: true });
+    }
+  }
+}
+
+/**
  * Prune stale `danx-*` artifacts left behind in a workspace's
  * `.claude/{rules,skills}/` after `mirrorWorkspaceTree`. The mirror is
  * write-only — when a `danx-*` rule or skill is RETIRED from the inject
@@ -1537,63 +1594,39 @@ function mirrorWorkspaceTree(
  * `danx-trello-config.md` lingered in `repos/gpt-manager/.danxbot/workspaces/`
  * for weeks past its retirement, costing ~200 tokens per dispatch).
  *
- * Algorithm: for each direct child of `<target>/.claude/{rules,skills}/`
- * whose name starts with `danx-`, rm it unless one of:
+ * Keep rules:
  *   1. The matching name exists in `<source>/.claude/<sub>/` (still
  *      shipped from the static inject tree), OR
- *   2. The name is in `PER_REPO_RENDER_RULE_NAMES` — the rules
+ *   2. The name is in `PER_REPO_RENDER_RULE_NAMES` — rules that
  *      `renderPerRepoFilesIntoWorkspaces` writes per-tick from
- *      `RepoContext` AFTER this prune runs. Those don't ship from
- *      inject; allowlisting prevents the prune from clobbering them.
- *      The set is co-located with the writers so the prune cannot
- *      drift out of sync.
+ *      `RepoContext` AFTER this prune runs. The set is co-located
+ *      with the writers so the prune cannot drift out of sync.
  *
  * Scope is intentionally narrow — only `rules/` and `skills/`, only
- * `danx-*` prefix:
- *   - `tools/` is excluded because `copyRepoToolScripts` legitimately
- *     writes per-repo, NON-`danx-*`-prefixed scripts there. Pruning
- *     `danx-*` from `tools/` would be safe today but adds maintenance
- *     burden for zero current benefit. Diverges from
- *     `scrubRepoRootDanxArtifacts` (which DOES include `tools/`)
- *     because the repo-root contract forbids any `danx-*` artifact
- *     anywhere, while the workspace contract is "danx-* in rules/skills
- *     ships from danxbot; tools/ is per-repo".
- *   - Non-`danx-*`-prefixed entries are operator-authored or per-repo
- *     scripts and survive untouched. If we ever ship a non-prefixed
- *     workspace rule/skill we'll need a different mechanism — current
- *     assumption: every danxbot-shipped rule/skill is `danx-*`.
- *
- * Fail-loud per CLAUDE.md "Fail loudly" rule: an `rm` failure on a
- * stale rule means the dispatched agent will load dead config — that's
- * exactly the bug this exists to prevent. Do not swallow the error.
- * One bad workspace halts the rest of the tick (operator sees the
- * failure immediately and can fix it) rather than silently leaving
- * stale rules in place. Diverges intentionally from
- * `scrubRepoRootDanxArtifacts` which still uses the older `try/catch
- * log.warn` pattern; the older sibling is a candidate for a follow-up
- * unification, but DRYing the two together is out of scope for this
- * fix.
+ * `danx-*` prefix. `tools/` is excluded because `copyRepoToolScripts`
+ * legitimately writes per-repo, NON-`danx-*`-prefixed scripts there
+ * (operator-authored tooling). The repo-root scrub
+ * (`scrubRepoRootDanxArtifacts`) DOES include `tools/` because the
+ * repo-root contract forbids any `danx-*` artifact anywhere, while
+ * the workspace contract is "danx-* in rules/skills ships from
+ * danxbot; tools/ is per-repo". Non-prefixed entries are
+ * operator-authored or per-repo scripts and survive untouched.
  */
 function pruneStaleDanxArtifactsInWorkspace(
   workspaceSourceDir: string,
   workspaceTargetDir: string,
 ): void {
-  for (const sub of ["rules", "skills"] as const) {
-    const targetSubDir = resolve(workspaceTargetDir, ".claude", sub);
-    if (!existsSync(targetSubDir)) continue;
-
-    const sourceSubDir = resolve(workspaceSourceDir, ".claude", sub);
-    const sourceEntries = existsSync(sourceSubDir)
-      ? new Set(readdirSync(sourceSubDir))
-      : new Set<string>();
-
-    for (const entry of readdirSync(targetSubDir)) {
-      if (!entry.startsWith("danx-")) continue;
-      if (sourceEntries.has(entry)) continue;
-      if (sub === "rules" && PER_REPO_RENDER_RULE_NAMES.has(entry)) continue;
-      rmSync(resolve(targetSubDir, entry), { recursive: true, force: true });
-    }
-  }
+  scrubDanxArtifacts(resolve(workspaceTargetDir, ".claude"), {
+    subdirs: ["rules", "skills"],
+    keepIfShippedFrom: (sub) => {
+      const sourceSubDir = resolve(workspaceSourceDir, ".claude", sub);
+      return existsSync(sourceSubDir)
+        ? new Set(readdirSync(sourceSubDir))
+        : EMPTY_NAME_SET;
+    },
+    keepNames: (sub) =>
+      sub === "rules" ? PER_REPO_RENDER_RULE_NAMES : EMPTY_NAME_SET,
+  });
 }
 
 /** Step 7: optional compose override -> repo-overrides/<name>-compose.yml. */
@@ -1785,22 +1818,18 @@ function scrubLegacySingularWorkspace(repoLocalPath: string): void {
  * Scope is intentionally narrow — only the `danx-*` prefix, only the
  * three subdirs (`rules/`, `skills/`, `tools/`). Nothing else under
  * `<repo>/.claude/` is touched.
+ *
+ * Fail-loud per CLAUDE.md "Fail loudly" rule: a swallowed `rm` error
+ * here would leave stale `danx-*` config in repo-root, which is the
+ * exact bug this scrubber exists to prevent. The pre-Phase-5 sibling
+ * used `try/catch log.warn`; that pattern is retired in favor of
+ * loud abort so the operator surfaces the underlying perm/lock issue
+ * before the next dispatch loads stale rules.
  */
 function scrubRepoRootDanxArtifacts(repoLocalPath: string): void {
-  const subdirs = ["rules", "skills", "tools"];
-  for (const sub of subdirs) {
-    const dir = resolve(repoLocalPath, ".claude", sub);
-    if (!existsSync(dir)) continue;
-    for (const entry of readdirSync(dir)) {
-      if (!entry.startsWith("danx-")) continue;
-      const path = resolve(dir, entry);
-      try {
-        rmSync(path, { recursive: true, force: true });
-      } catch (err) {
-        log.warn(`Failed to scrub ${path}:`, err);
-      }
-    }
-  }
+  scrubDanxArtifacts(resolve(repoLocalPath, ".claude"), {
+    subdirs: ["rules", "skills", "tools"],
+  });
 }
 
 async function spawnClaude(

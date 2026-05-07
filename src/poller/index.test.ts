@@ -1529,6 +1529,81 @@ language: node
 
     await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/EACCES/);
   });
+
+  // Symmetric fail-loud test for `scrubRepoRootDanxArtifacts`. Phase 5
+  // retired the older `try/catch log.warn` swallow in favor of loud
+  // abort; this pins the new invariant so a future regression that
+  // re-introduces the swallow surfaces immediately. Without fail-loud
+  // semantics here, a perm/lock failure leaves stale `danx-*` rules
+  // at `<repo>/.claude/` that claude's ancestor walk would load on
+  // the next dispatch — exact bug the scrubber exists to prevent.
+  it("scrubRepoRootDanxArtifacts propagates an rm failure (fail-loud per CLAUDE.md)", async () => {
+    const workspacesSource = "src/poller/inject/workspaces";
+    const repoRootClaudeRulesDir = "/test/repos/test-repo/.claude/rules";
+    const staleRepoRootRulePath = `${repoRootClaudeRulesDir}/danx-leftover.md`;
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
+        return true;
+      }
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
+        return true;
+      }
+      if (path === workspacesTargetRoot) return true;
+      if (path === repoRootClaudeRulesDir) return true;
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return [];
+      if (path === workspacesTargetRoot) return [];
+      if (path === repoRootClaudeRulesDir) return ["danx-leftover.md"];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        path === workspacesTargetRoot ||
+        path === repoRootClaudeRulesDir ||
+        path.endsWith(workspacesSource);
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      return "";
+    });
+
+    mockRmSync.mockImplementation((path: unknown) => {
+      if (path === staleRepoRootRulePath) {
+        throw new Error("EACCES: permission denied");
+      }
+    });
+
+    await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/EACCES/);
+  });
 });
 
 describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; MemoryTracker does not)", () => {
