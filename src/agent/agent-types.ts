@@ -103,6 +103,29 @@ export interface AgentJob {
    * not optional, so call sites don't have to silently no-op on a missing handler.
    */
   stop: (status: "completed" | "failed", summary?: string) => Promise<void>;
+  /**
+   * Restage context preserved at /api/launch + /api/resume time so a
+   * later POST /api/restage/:dispatchId can re-run the same
+   * `prepareStagedFiles + writeStagedFiles` chain that produced the
+   * original staged files.
+   *
+   * Stamped by `dispatch()` after the workspace + overlay are resolved.
+   * Undefined for dispatches whose workspace omits `staging-paths`
+   * (no allowlist → no restage surface).
+   *
+   * @see ../worker/restage-route.ts Caller (HTTP endpoint)
+   */
+  restageContext?: {
+    /** Already-substituted allowlist roots from the workspace manifest. */
+    readonly stagingPaths: readonly string[];
+    /**
+     * Same overlay used at launch — restage payloads with `${KEY}`
+     * placeholders are substituted via this map before validation +
+     * write so the per-dispatch `${SCHEMA_DEFINITION_ID}` etc. stay
+     * consistent with the original staging.
+     */
+    readonly overlay: Readonly<Record<string, string>>;
+  };
 }
 
 export interface SpawnAgentOptions {

@@ -38,6 +38,11 @@ vi.mock("./restart-route.js", () => ({
   handleRestart: (...args: unknown[]) => mockHandleRestart(...args),
 }));
 
+const mockHandleRestage = vi.fn();
+vi.mock("./restage-route.js", () => ({
+  handleRestage: (...args: unknown[]) => mockHandleRestage(...args),
+}));
+
 const mockSeedCooldown = vi.fn().mockResolvedValue(undefined);
 vi.mock("./restart.js", () => ({
   seedCooldownFromDb: (...args: unknown[]) => mockSeedCooldown(...args),
@@ -349,6 +354,32 @@ describe("worker server", () => {
       const { req, res } = createMockReqRes("GET", "/api/restart/dispatch-abc");
       await requestHandler(req, res);
       expect(mockHandleRestart).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("POST /api/restage/:dispatchId", () => {
+    it("delegates to handleRestage with req, res, and dispatchId", async () => {
+      mockHandleRestage.mockResolvedValue(undefined);
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/restage/dispatch-restage-1",
+      );
+      await requestHandler(req, res);
+      expect(mockHandleRestage).toHaveBeenCalledWith(
+        req,
+        res,
+        "dispatch-restage-1",
+      );
+    });
+
+    it("does not match GET /api/restage/:dispatchId", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/restage/dispatch-restage-1",
+      );
+      await requestHandler(req, res);
+      expect(mockHandleRestage).not.toHaveBeenCalled();
       expect(res._getStatusCode()).toBe(404);
     });
   });

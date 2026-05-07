@@ -1358,3 +1358,83 @@ staging-paths:
     expect(existsSync(filePath)).toBe(false);
   });
 });
+
+describe("dispatch() — restageContext stamping (gpt-manager ISS-102 / Phase 5c)", () => {
+  // The schema-builder workspace ships its own `staging-paths` allowlist
+  // and lives in gpt-manager, not danxbot. Test against a synthetic
+  // workspace fixture so the contract is verified independent of any
+  // particular consumer.
+  let tmpRepoDir: string;
+  let stagingRepo: ReturnType<typeof makeRepoContext>;
+
+  function buildWorkspace(stagingPath: string | null): void {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-restage-ctx-"));
+    const ws = resolve(tmpRepoDir, ".danxbot", "workspaces", "ws-restage");
+    mkdirSync(resolve(ws, ".claude"), { recursive: true });
+    const lines = [
+      "name: ws-restage",
+      "description: fixture for restage stamping test",
+      "required-placeholders: []",
+    ];
+    if (stagingPath !== null) {
+      lines.push("staging-paths:");
+      lines.push(`  - ${stagingPath}`);
+    }
+    writeFileSync(resolve(ws, "workspace.yml"), lines.join("\n") + "\n");
+    writeFileSync(
+      resolve(ws, ".mcp.json"),
+      JSON.stringify({ mcpServers: {} }),
+    );
+    writeFileSync(
+      resolve(ws, ".claude", "settings.json"),
+      JSON.stringify({ env: {} }),
+    );
+    stagingRepo = makeRepoContext({ localPath: tmpRepoDir });
+  }
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  it("stamps restageContext on the AgentJob with substituted stagingPaths + the launch overlay", async () => {
+    // Substitute SCHEMA_DEFINITION_ID through a placeholder in the
+    // staging path so we can assert post-substitution paths flow
+    // through to the AgentJob (not the raw template).
+    buildWorkspace("/tmp/schemas/${SCHEMA_DEFINITION_ID}/");
+
+    const overlay = { SCHEMA_DEFINITION_ID: "42" };
+    const result = await dispatch({
+      repo: stagingRepo,
+      task: "investigate",
+      workspace: "ws-restage",
+      overlay,
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    expect(result.job.restageContext).toBeDefined();
+    expect(result.job.restageContext!.stagingPaths).toEqual([
+      "/tmp/schemas/42/",
+    ]);
+    // The stored overlay must include the caller's keys plus every
+    // auto-injected danxbot infrastructure key — restage payloads with
+    // any of those `${KEY}` placeholders need consistent substitution.
+    expect(result.job.restageContext!.overlay.SCHEMA_DEFINITION_ID).toBe("42");
+    expect(result.job.restageContext!.overlay.DANX_REPO_ROOT).toBe(
+      stagingRepo.localPath,
+    );
+  });
+
+  it("leaves restageContext undefined when the workspace declares no staging-paths", async () => {
+    buildWorkspace(null);
+
+    const result = await dispatch({
+      repo: stagingRepo,
+      task: "investigate",
+      workspace: "ws-restage",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    expect(result.job.restageContext).toBeUndefined();
+  });
+});

@@ -8,6 +8,9 @@
  * - GET /api/status/:jobId — check job status
  * - POST /api/cancel/:jobId — cancel a running job
  * - POST /api/stop/:jobId — agent self-stop (lifecycle tool callback)
+ * - POST /api/restage/:dispatchId — Phase 5c (gpt-manager ISS-102):
+ *   regenerate staged files mid-dispatch when an external writer
+ *   mutates a row materialized into the agent's workspace.
  */
 
 import { createServer, type Server } from "http";
@@ -30,6 +33,7 @@ import {
   handleIssueSave,
 } from "./issue-route.js";
 import { handleRestart } from "./restart-route.js";
+import { handleRestage } from "./restage-route.js";
 import { seedCooldownFromDb } from "./restart.js";
 import type { RepoContext } from "../types.js";
 
@@ -110,6 +114,12 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
     const restartMatch = url.pathname.match(/^\/api\/restart\/(.+)$/);
     if (method === "POST" && restartMatch) {
       await handleRestart(req, res, restartMatch[1], repo);
+      return;
+    }
+
+    const restageMatch = url.pathname.match(/^\/api\/restage\/(.+)$/);
+    if (method === "POST" && restageMatch) {
+      await handleRestage(req, res, restageMatch[1]);
       return;
     }
 
