@@ -7,6 +7,13 @@ description: Pull the top card from ToDo and run the full autonomous card proces
 
 You process ONE card. You are the orchestrator — do not delegate workflow steps to subagents (except Step 5 quality gates and Step 4 batch-edits).
 
+**Never ask the operator anything.** No `AskUserQuestion`, no plan-mode
+pause, no "ready to proceed?" prompt. There is no terminal attached;
+prompts hang the dispatch until the inactivity timer kills it. When you'd
+otherwise ask: decide unilaterally + document, OR escalate to Needs Help
+with the question on the card. Full contract:
+`.claude/rules/danx-no-interactive.md`.
+
 The dispatch prompt told you the YAML path:
 
 ```
