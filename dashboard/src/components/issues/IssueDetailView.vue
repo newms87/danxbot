@@ -83,31 +83,38 @@ const childrenLabel = computed(() => {
   return childCount.value > 0 ? `${base} · ${childCount.value}` : base;
 });
 
-const tabs = computed(() => [
-  { id: "overview" as const, label: "Overview", disabled: false },
-  {
-    id: "ac" as const,
-    label: "AC" + (ac.value.total > 0 ? ` · ${ac.value.done}/${ac.value.total}` : ""),
-    disabled: ac.value.total === 0,
-  },
-  {
-    id: "children" as const,
-    label: childrenLabel.value,
-    disabled: childCount.value === 0,
-  },
-  { id: "chat" as const, label: "Chat", disabled: false },
-  {
-    id: "comments" as const,
-    label:
-      "Comments" +
-      (props.issue && props.issue.comments.length > 0
-        ? ` · ${props.issue.comments.length}`
-        : ""),
-    disabled: false,
-  },
-  { id: "retro" as const, label: "Retro", disabled: !hasRetro.value },
-  { id: "raw" as const, label: "Raw YAML", disabled: false },
-]);
+const tabs = computed(() => {
+  // Epics use children (phase cards) as their acceptance criteria —
+  // AC tab is suppressed entirely so the operator never sees an empty
+  // tab on an epic and the children panel remains the canonical
+  // completion view.
+  const out: { id: TabId; label: string; disabled: boolean }[] = [
+    { id: "overview", label: "Overview", disabled: false },
+  ];
+  if (!isEpic.value) {
+    out.push({
+      id: "ac",
+      label: "AC" + (ac.value.total > 0 ? ` · ${ac.value.done}/${ac.value.total}` : ""),
+      disabled: ac.value.total === 0,
+    });
+  }
+  out.push(
+    { id: "children", label: childrenLabel.value, disabled: childCount.value === 0 },
+    { id: "chat", label: "Chat", disabled: false },
+    {
+      id: "comments",
+      label:
+        "Comments" +
+        (props.issue && props.issue.comments.length > 0
+          ? ` · ${props.issue.comments.length}`
+          : ""),
+      disabled: false,
+    },
+    { id: "retro", label: "Retro", disabled: !hasRetro.value },
+    { id: "raw", label: "Raw YAML", disabled: false },
+  );
+  return out;
+});
 
 watch(
   () => props.issue?.id,

@@ -99,18 +99,24 @@ describe("listIssues", () => {
       type: "Epic",
       title: "Epic title",
       description: "Epic body markdown",
-      status: "In Progress",
+      // Both children are missing → projected as blocked, which the
+      // epic inherits → status pulled to Needs Help and blocked_by /
+      // reason derived from the blocked children. The fixture's own
+      // YAML `blocked` (waiting on ISS-2) is masked by the inherited
+      // computation since it was a self-block (epic blocked by its
+      // own child).
+      status: "Needs Help",
       parent_id: null,
       children: ["ISS-2", "ISS-3"],
       ac_total: 2,
       ac_done: 1,
       children_detail: [
-        { id: "ISS-2", name: "<ISS-2: unknown>", type: "Feature", status: "ToDo", blocked: true, missing: true },
-        { id: "ISS-3", name: "<ISS-3: unknown>", type: "Feature", status: "ToDo", blocked: true, missing: true },
+        { id: "ISS-2", name: "<ISS-2: unknown>", type: "Feature", status: "ToDo", blocked: true, blocked_by_card: false, missing: true },
+        { id: "ISS-3", name: "<ISS-3: unknown>", type: "Feature", status: "ToDo", blocked: true, blocked_by_card: false, missing: true },
       ],
       blocked: true,
-      blocked_reason: "waiting",
-      blocked_by: ["ISS-2"],
+      blocked_reason: "Waiting on 2 blocked children: ISS-2, ISS-3.",
+      blocked_by: ["ISS-2", "ISS-3"],
       comments_count: 2,
       has_retro: true,
       updated_at: 1_700_000_000_000,
@@ -169,7 +175,7 @@ describe("listIssues", () => {
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
     expect(epic.children_detail).toEqual([
-      { id: "ISS-2", name: "Phase one shipped", type: "Feature", status: "Done", blocked: false, missing: false },
+      { id: "ISS-2", name: "Phase one shipped", type: "Feature", status: "Done", blocked: false, blocked_by_card: false, missing: false },
     ]);
   });
 
@@ -311,6 +317,7 @@ describe("listIssues", () => {
       type: "Feature",
       status: "ToDo",
       blocked: true,
+      blocked_by_card: false,
       missing: true,
     });
   });

@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import type { IssueDetail, IssueListItem } from "../../types";
 import { MarkdownEditor } from "@thehammer/danx-ui";
 
-defineProps<{
+const props = defineProps<{
   issue: IssueDetail;
   allIssues: IssueListItem[];
 }>();
@@ -10,24 +11,25 @@ defineProps<{
 defineEmits<{
   "jump-issue": [id: string];
 }>();
+
+const blockedByCard = computed(
+  () => !!props.issue.blocked && props.issue.blocked.by.length > 0,
+);
 </script>
 
 <template>
   <div class="overview">
-    <section v-if="issue.description">
-      <div class="section-label">Description</div>
-      <MarkdownEditor
-        :model-value="issue.description"
-        readonly
-        hide-footer
-      />
-    </section>
-
-    <section v-if="issue.blocked" class="blocked-panel">
-      <div class="blocked-title">⛔ Blocked</div>
+    <section
+      v-if="issue.blocked"
+      class="blocked-panel"
+      :class="{ 'by-card': blockedByCard }"
+    >
+      <div class="blocked-title">
+        <span class="glyph">{{ blockedByCard ? "⏸" : "⛔" }}</span>
+        {{ blockedByCard ? "Blocked by" : "Blocked" }}
+      </div>
       <div class="blocked-reason">{{ issue.blocked.reason }}</div>
       <div v-if="issue.blocked.by.length > 0" class="blocked-by">
-        <span class="by-label">by:</span>
         <button
           v-for="bid in issue.blocked.by"
           :key="bid"
@@ -36,6 +38,15 @@ defineEmits<{
           @click="$emit('jump-issue', bid)"
         >{{ bid }}</button>
       </div>
+    </section>
+
+    <section v-if="issue.description">
+      <div class="section-label">Description</div>
+      <MarkdownEditor
+        :model-value="issue.description"
+        readonly
+        hide-footer
+      />
     </section>
   </div>
 </template>
@@ -64,16 +75,34 @@ defineEmits<{
   background: rgb(239 68 68 / 0.08);
   border: 1px solid rgb(239 68 68 / 0.25);
 }
+.blocked-panel.by-card {
+  background: rgb(245 158 11 / 0.1);
+  border-color: rgb(245 158 11 / 0.35);
+}
 .blocked-title {
   font-size: 11px;
   font-weight: 600;
   color: #fca5a5;
   margin-bottom: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.blocked-panel.by-card .blocked-title {
+  color: #fcd34d;
+}
+.glyph {
+  font-size: 12px;
 }
 .blocked-reason {
   font-size: 13px;
   color: #fecaca;
   line-height: 1.5;
+}
+.blocked-panel.by-card .blocked-reason {
+  color: #fde68a;
 }
 .blocked-by {
   margin-top: 6px;
@@ -82,19 +111,21 @@ defineEmits<{
   flex-wrap: wrap;
   align-items: center;
 }
-.by-label {
-  font-size: 11px;
-  color: #fca5a5;
-}
 .blocker-chip {
-  padding: 1px 6px;
+  padding: 2px 8px;
   border-radius: 4px;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   color: #fecaca;
   background: rgb(239 68 68 / 0.15);
   border: 1px solid rgb(239 68 68 / 0.3);
   cursor: pointer;
   font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.blocked-panel.by-card .blocker-chip {
+  color: #fde68a;
+  background: rgb(245 158 11 / 0.18);
+  border-color: rgb(245 158 11 / 0.4);
 }
 </style>

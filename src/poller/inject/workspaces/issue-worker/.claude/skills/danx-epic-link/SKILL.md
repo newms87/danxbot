@@ -129,6 +129,17 @@ Done / Cancelled.
 domains, no shared state, can ship in any order). Default = sequential.
 If you skip, explain in a comment on the epic.
 
+### `blocked.by[]` is the IMMEDIATE blocker only — never list transitive blockers
+
+Phase 3 lists `["children[1]"]` (Phase 2). It does NOT list Phase 1, even
+though Phase 1 must ship before Phase 2 can ship. The chain Phase 3 → Phase
+2 → Phase 1 is computed automatically by the poller + dashboard from each
+card's direct blocker; restating the upstream chain in `by[]` is redundant
+data that drifts the moment the chain is reorganized.
+
+Same rule applies outside epics: when card A is blocked by card B which is
+blocked by card C, A's `blocked.by[]` is `["B"]` only — NOT `["B", "C"]`.
+
 ---
 
 ## Step 4 — Return control to the orchestrator

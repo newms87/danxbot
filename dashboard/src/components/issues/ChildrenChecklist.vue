@@ -11,7 +11,7 @@ const rows = computed(() =>
   props.items.map((c) => ({
     id: c.id,
     name: c.name,
-    status: projectChildStatus(c.status, c.blocked),
+    status: projectChildStatus(c.status, c.blocked, c.blocked_by_card),
   })),
 );
 </script>

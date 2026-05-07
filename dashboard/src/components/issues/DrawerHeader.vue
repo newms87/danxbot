@@ -28,6 +28,10 @@ const scopeTarget = computed<string | null>(() => {
 const isScoped = computed(
   () => !!props.scopedEpicId && props.scopedEpicId === scopeTarget.value,
 );
+
+const blockedByCard = computed(
+  () => !!props.issue.blocked && props.issue.blocked.by.length > 0,
+);
 </script>
 
 <template>
@@ -36,7 +40,11 @@ const isScoped = computed(
       <span class="id">{{ issue.id }}</span>
       <TypeBadge :type="issue.type" />
       <span class="status-pill">{{ issue.status }}</span>
-      <span v-if="issue.blocked" class="blocked-badge">⛔ Blocked</span>
+      <span
+        v-if="issue.blocked"
+        class="blocked-badge"
+        :class="{ 'by-card': blockedByCard }"
+      >{{ blockedByCard ? "⏸ Blocked by" : "⛔ Blocked" }}</span>
       <span class="updated">{{ relativeTime(issue.updated_at) }}</span>
       <button
         v-if="props.showClose"
@@ -108,6 +116,11 @@ const isScoped = computed(
   border-radius: 4px;
   background: rgb(239 68 68 / 0.15);
   border: 1px solid rgb(239 68 68 / 0.3);
+}
+.blocked-badge.by-card {
+  color: #fcd34d;
+  background: rgb(245 158 11 / 0.15);
+  border-color: rgb(245 158 11 / 0.35);
 }
 .updated {
   margin-left: auto;

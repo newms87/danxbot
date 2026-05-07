@@ -28,6 +28,13 @@ export interface IssueListChild {
   type: IssueType;
   status: IssueStatus;
   blocked: boolean;
+  /**
+   * True when the child's `blocked.by[]` is non-empty — i.e. the child
+   * is waiting on another card, not on a human / external. Drives the
+   * yellow ⏸ glyph variant in the children checklist; plain `blocked`
+   * (no card refs) keeps the red ⛔ variant.
+   */
+  blocked_by_card: boolean;
   missing: boolean;
 }
 
@@ -151,6 +158,7 @@ function toListItem(
           type: "Feature" as IssueType,
           status: "ToDo" as IssueStatus,
           blocked: true,
+          blocked_by_card: false,
           missing: true,
         };
       }
@@ -160,23 +168,82 @@ function toListItem(
         type: child.type,
         status: child.status,
         blocked: child.blocked !== null,
+        blocked_by_card:
+          child.blocked !== null && child.blocked.by.length > 0,
         missing: false,
       };
     });
+  // Epics are not "blocked" by their own children — the children ARE
+  // the epic's completion criteria. If every blocker on the epic is
+  // one of its own children, the projection drops the blocked state
+  // entirely so the board doesn't render the epic with a ⛔ pill that
+  // misrepresents the relationship. External blockers (other epics,
+  // unrelated cards) still surface as normal.
+  const childSet = new Set(issue.children);
+  const isEpic = issue.type === "Epic";
+  const rawBy = issue.blocked?.by ?? [];
+  const externalBy = isEpic ? rawBy.filter((id) => !childSet.has(id)) : rawBy;
+  const epicSelfBlocked =
+    isEpic &&
+    issue.blocked !== null &&
+    rawBy.length > 0 &&
+    externalBy.length === 0;
+
+  // Inherited block: an epic with at least one Blocked, In Progress
+  // (Needs Help / Needs Approval / blocked-record) child surfaces on
+  // the board in the Blocked column with a yellow ⏸ "Blocked by"
+  // banner listing those children. The epic's own status field stays
+  // untouched in the YAML — this is purely a read-side projection so
+  // the operator sees the impedance immediately without waiting for
+  // the agent to stamp `blocked` on the epic.
+  const blockedChildIds = isEpic
+    ? childrenDetail
+        .filter((c) =>
+          c.blocked || c.status === "Needs Help" || c.status === "Needs Approval",
+        )
+        .map((c) => c.id)
+    : [];
+  const inheritedBlock = isEpic && blockedChildIds.length > 0;
+
+  let projectedStatus: IssueStatus = issue.status;
+  let projectedBlocked = issue.blocked !== null && !epicSelfBlocked;
+  let projectedBlockedReason: string | null = epicSelfBlocked
+    ? null
+    : issue.blocked?.reason ?? null;
+  let projectedBlockedBy = externalBy;
+  if (inheritedBlock) {
+    // Don't override Done / Cancelled — those are terminal regardless
+    // of stragglers. In Progress / ToDo / Review get pulled to Needs
+    // Help so the epic surfaces in the Blocked column.
+    if (
+      issue.status !== "Done" &&
+      issue.status !== "Cancelled" &&
+      issue.status !== "Needs Help"
+    ) {
+      projectedStatus = "Needs Help";
+    }
+    projectedBlocked = true;
+    projectedBlockedBy = blockedChildIds;
+    projectedBlockedReason =
+      `Waiting on ${blockedChildIds.length} blocked child` +
+      (blockedChildIds.length === 1 ? "" : "ren") +
+      `: ${blockedChildIds.join(", ")}.`;
+  }
+
   return {
     id: issue.id,
     type: issue.type,
     title: issue.title,
     description: issue.description,
-    status: issue.status,
+    status: projectedStatus,
     parent_id: issue.parent_id,
     children: [...issue.children],
     ac_total: issue.ac.length,
     ac_done: issue.ac.filter((a) => a.checked).length,
     children_detail: childrenDetail,
-    blocked: issue.blocked !== null,
-    blocked_reason: issue.blocked?.reason ?? null,
-    blocked_by: issue.blocked?.by ?? [],
+    blocked: projectedBlocked,
+    blocked_reason: projectedBlockedReason,
+    blocked_by: projectedBlockedBy,
     comments_count: issue.comments.length,
     has_retro:
       issue.retro.good.length > 0 ||
@@ -245,8 +312,28 @@ export async function readIssueDetail(
     const path = join(repoCwd, ".danxbot", "issues", sub, `${id}.yml`);
     const raw = await readIssueFile(path);
     if (raw) {
-      return { ...raw.issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };
+      const issue = applyEpicBlockedProjection(raw.issue);
+      return { ...issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };
     }
   }
   return null;
+}
+
+/**
+ * Strip the `blocked` block from epics that are blocked solely by
+ * their own children. Mirrors the projection in `toListItem` so the
+ * drawer (which reads the full `Issue` shape) doesn't render a ⛔
+ * panel that contradicts the board card.
+ */
+function applyEpicBlockedProjection(issue: Issue): Issue {
+  if (issue.type !== "Epic" || issue.blocked === null) return issue;
+  const childSet = new Set(issue.children);
+  const externalBy = issue.blocked.by.filter((id) => !childSet.has(id));
+  if (issue.blocked.by.length > 0 && externalBy.length === 0) {
+    return { ...issue, blocked: null };
+  }
+  if (externalBy.length !== issue.blocked.by.length) {
+    return { ...issue, blocked: { ...issue.blocked, by: externalBy } };
+  }
+  return issue;
 }

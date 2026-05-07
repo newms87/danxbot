@@ -297,8 +297,8 @@ watch(
     <DanxDialog
       v-if="cardPresentation === 'dialog' && selectedIssueId"
       :model-value="!!selectedIssueId"
-      width="min(960px, 92vw)"
-      height="min(820px, 88vh)"
+      width="90vw"
+      height="90vh"
       close-x
       @update:model-value="(v: boolean) => { if (!v) closeDrawer(); }"
       @close="closeDrawer"

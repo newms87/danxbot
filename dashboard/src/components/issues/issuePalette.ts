@@ -7,7 +7,7 @@ import type { IssueStatus, IssueType } from "../../types";
  * ever need to distinguish "shipped" from "won't ship," split this into
  * a fourth `cancelled` state with its own glyph + meta entry.
  */
-export type ChildStatusId = "done" | "todo" | "blocked";
+export type ChildStatusId = "done" | "todo" | "blocked" | "blocked_by_card";
 
 /**
  * Project a child issue's raw `(status, blocked)` into the
@@ -23,8 +23,10 @@ export type ChildStatusId = "done" | "todo" | "blocked";
 export function projectChildStatus(
   status: IssueStatus,
   blocked: boolean,
+  blockedByCard: boolean = false,
 ): ChildStatusId {
   if (status === "Done" || status === "Cancelled") return "done";
+  if (blockedByCard) return "blocked_by_card";
   if (blocked || status === "Needs Help" || status === "Needs Approval") {
     return "blocked";
   }
@@ -80,6 +82,7 @@ export const CHILD_STATUS_META: Record<ChildStatusId, ChildStatusMeta> = {
   done:    { fg: "#6ee7b7", bg: "rgb(16 185 129 / 0.18)", glyph: "✓" },
   todo:    { fg: "#cbd5e1", bg: "rgb(51 65 85 / 0.40)",   glyph: "○" },
   blocked: { fg: "#fca5a5", bg: "rgb(239 68 68 / 0.18)",  glyph: "⛔" },
+  blocked_by_card: { fg: "#fcd34d", bg: "rgb(245 158 11 / 0.20)", glyph: "⏸" },
 };
 
 export const COLUMN_ACCENTS: Record<IssueStatus, ColumnAccent> = {
