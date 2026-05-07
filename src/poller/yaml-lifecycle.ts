@@ -37,7 +37,11 @@ import {
   validateIssue,
 } from "../issue-tracker/yaml.js";
 import { nextIssueId } from "../issue-tracker/id-generator.js";
-import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
+import type {
+  Issue,
+  IssueDispatch,
+  IssueTracker,
+} from "../issue-tracker/interface.js";
 
 export type IssueState = "open" | "closed";
 
@@ -229,27 +233,70 @@ export async function hydrateFromRemote(
  * where the local YAML is authoritative for everything except the
  * dispatch record (which the poller refreshes for every new dispatch).
  *
- * Phase 1 of the poller-triage rework keeps the schema shape but does
- * not yet populate PID / host / started_at — Phase 2 enriches the
- * record. Callers that already know the full dispatch shape can pass
- * a populated record via `stampDispatchRecordAndWrite`.
+ * Two call shapes:
+ *
+ *   - `string` — the legacy "id only" form. Stamps a placeholder
+ *     record with `pid: 0`, `host: ""`, `kind: "work"`, empty
+ *     `started_at`, `ttl_seconds: 0`. The placeholder is what the
+ *     pre-spawn write produces — the poller then enriches it
+ *     post-spawn via the full-record form below.
+ *   - `IssueDispatch` — the Phase 2 enriched form. Caller has captured
+ *     real PID + host + kind + started_at + ttl_seconds (typically
+ *     after `dispatch()` returns). Writes verbatim.
+ *
+ * Both forms persist via `writeIssue`. Validation lives in
+ * `validateIssue` — `IssueDispatch.id` must be non-empty, the
+ * placeholder shape passes the strict validator because Phase 1
+ * deliberately allows `pid: 0` / `host: ""` / `started_at: ""` /
+ * `ttl_seconds: 0` for in-flight migrations.
  */
 export function stampDispatchAndWrite(
   repoLocalPath: string,
   issue: Issue,
-  dispatchId: string,
+  dispatchOrId: string | IssueDispatch,
 ): Issue {
-  const updated: Issue = {
-    ...issue,
-    dispatch: {
-      id: dispatchId,
-      pid: 0,
-      host: "",
-      kind: "work",
-      started_at: "",
-      ttl_seconds: 0,
-    },
-  };
+  const dispatch: IssueDispatch =
+    typeof dispatchOrId === "string"
+      ? {
+          id: dispatchOrId,
+          pid: 0,
+          host: "",
+          kind: "work",
+          started_at: "",
+          ttl_seconds: 0,
+        }
+      : { ...dispatchOrId };
+  const updated: Issue = { ...issue, dispatch };
+  writeIssue(repoLocalPath, updated);
+  return updated;
+}
+
+/**
+ * Clear `dispatch` on an existing local Issue and persist the change.
+ * Returns the updated Issue. Used on the dispatch-end path:
+ *
+ *   - Worker `persistAfterSync` clears whenever the saved status is
+ *     terminal-for-session (Done / Cancelled / Needs Help / Needs
+ *     Approval) or when `blocked != null`. The agent's session is
+ *     done with this card; leaving the stale `dispatch` block on
+ *     disk would falsely trip the next poller startup's reattach
+ *     into "live" status.
+ *   - Poller `onComplete` clears whenever the agent terminates without
+ *     reaching a terminal save (timeout, stall, kill, crash). The
+ *     YAML's `status` may still be `In Progress` — that's fine; the
+ *     orphan-resume path keys off `dispatch.id` for resume detection,
+ *     and clearing forces the regular ToDo dispatch path on the next
+ *     tick.
+ *
+ * No-op when `issue.dispatch` is already null (returns the input
+ * unchanged AND skips the write).
+ */
+export function clearDispatchAndWrite(
+  repoLocalPath: string,
+  issue: Issue,
+): Issue {
+  if (issue.dispatch === null) return issue;
+  const updated: Issue = { ...issue, dispatch: null };
   writeIssue(repoLocalPath, updated);
   return updated;
 }

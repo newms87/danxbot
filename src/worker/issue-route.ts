@@ -309,6 +309,36 @@ async function runSync(
 }
 
 /**
+ * `persistAfterSync` clears `dispatch: null` whenever the agent's save
+ * indicates the dispatch slot is no longer needed (ISS-92, Phase 2).
+ *
+ * Triggers on save:
+ *  - terminal status: Done, Cancelled, Needs Help, Needs Approval
+ *  - non-terminal status with `blocked != null`: the agent has flipped
+ *    the card to Blocked (worker normalizes to ToDo) and is exiting
+ *    its session. Mid-session saves keep status: ToDo / In Progress
+ *    with `blocked: null`, which fall through and preserve the live
+ *    dispatch record.
+ *
+ * Without this, a stale `dispatch{}` block survives every Done /
+ * Needs Help / Blocked save and falsely re-claims the card on the
+ * next poller startup's reattach pass — the symptom that prompted
+ * Phase 2 of the poller-triage rework.
+ */
+export function isDispatchSessionTerminal(issue: Issue): boolean {
+  if (
+    issue.status === "Done" ||
+    issue.status === "Cancelled" ||
+    issue.status === "Needs Help" ||
+    issue.status === "Needs Approval"
+  ) {
+    return true;
+  }
+  if (issue.blocked !== null) return true;
+  return false;
+}
+
+/**
  * Write `updatedLocal` back to disk, applying the open→closed move when
  * the saved status is terminal. Idempotent: re-running on a Done issue
  * already in `closed/` produces zero filesystem mutations beyond
@@ -323,11 +353,19 @@ function persistAfterSync(repoLocalPath: string, issue: Issue): void {
   const closedPath = issuePath(repoLocalPath, issue.id, "closed");
   const isTerminal = issue.status === "Done" || issue.status === "Cancelled";
 
+  // Clear the dispatch slot on terminal-for-session saves (ISS-92,
+  // Phase 2). Mid-session saves with non-null dispatch survive
+  // unchanged so the reattach pass + per-tick liveness scan still see
+  // the running agent.
+  const persisted = isDispatchSessionTerminal(issue) && issue.dispatch !== null
+    ? { ...issue, dispatch: null }
+    : issue;
+
   if (isTerminal) {
-    writeFileSync(closedPath, serializeIssue(issue));
+    writeFileSync(closedPath, serializeIssue(persisted));
     if (existsSync(openPath)) unlinkSync(openPath);
   } else {
-    writeFileSync(openPath, serializeIssue(issue));
+    writeFileSync(openPath, serializeIssue(persisted));
     // If a stale closed copy lingers from a previous Done save that the
     // operator manually re-opened, the open copy now wins — leave the
     // closed file alone. The poller will treat the open copy as

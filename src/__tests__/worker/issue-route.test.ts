@@ -688,6 +688,180 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     expect(existsSync(issuePath(h.repo.localPath, "ISS-50", "closed"))).toBe(false);
   });
 
+  it("ISS-92 Phase 2: clears dispatch on Done save (terminal status)", async () => {
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-9201",
+        external_id: "",
+        title: "Done with dispatch",
+      }),
+      tracker: "memory",
+      status: "Done",
+      dispatch: {
+        id: "dispatch-uuid-1",
+        pid: 9999,
+        host: "host-x",
+        kind: "work",
+        started_at: "2026-05-07T12:00:00.000Z",
+        ttl_seconds: 7200,
+      },
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-done`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-9201" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Done → file moved to closed/. Dispatch must be null in the
+    // persisted file so the next reattach pass doesn't see a phantom.
+    const persisted = readYaml(h.repo.localPath, "ISS-9201", "closed");
+    expect(persisted).toContain("dispatch: null");
+    expect(persisted).not.toContain("dispatch-uuid-1");
+  });
+
+  it("ISS-92 Phase 2: clears dispatch on Cancelled save (terminal status)", async () => {
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-9202",
+        external_id: "",
+        title: "Cancelled with dispatch",
+      }),
+      tracker: "memory",
+      status: "Cancelled",
+      dispatch: {
+        id: "dispatch-uuid-2",
+        pid: 9999,
+        host: "host-x",
+        kind: "work",
+        started_at: "2026-05-07T12:00:00.000Z",
+        ttl_seconds: 7200,
+      },
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-cancelled`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-9202" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const persisted = readYaml(h.repo.localPath, "ISS-9202", "closed");
+    expect(persisted).toContain("dispatch: null");
+  });
+
+  it("ISS-92 Phase 2: clears dispatch on Needs Help save (file stays in open/)", async () => {
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-9203",
+        external_id: "",
+        title: "Needs Help with dispatch",
+      }),
+      tracker: "memory",
+      status: "Needs Help",
+      dispatch: {
+        id: "dispatch-uuid-3",
+        pid: 9999,
+        host: "host-x",
+        kind: "work",
+        started_at: "2026-05-07T12:00:00.000Z",
+        ttl_seconds: 7200,
+      },
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-nh-clr`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-9203" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Needs Help is non-terminal for the file move (stays in open/) but
+    // is terminal-for-session — dispatch clears.
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-9203", "open"))).toBe(true);
+    const persisted = readYaml(h.repo.localPath, "ISS-9203");
+    expect(persisted).toContain("dispatch: null");
+  });
+
+  it("ISS-92 Phase 2: clears dispatch on Blocked save (status normalizes to ToDo)", async () => {
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-9204",
+        external_id: "",
+        title: "Blocked with dispatch",
+      }),
+      tracker: "memory",
+      // Agent set status: ToDo with blocked!=null. Worker keeps status as
+      // ToDo (forceBlockedToToDo) AND clears dispatch.
+      status: "ToDo",
+      blocked: {
+        reason: "waiting on ISS-99",
+        timestamp: "2026-05-07T12:00:00.000Z",
+        by: ["ISS-99"],
+      },
+      dispatch: {
+        id: "dispatch-uuid-4",
+        pid: 9999,
+        host: "host-x",
+        kind: "work",
+        started_at: "2026-05-07T12:00:00.000Z",
+        ttl_seconds: 7200,
+      },
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-blk-clr`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-9204" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const persisted = readYaml(h.repo.localPath, "ISS-9204");
+    expect(persisted).toContain("dispatch: null");
+    expect(persisted).toContain("status: ToDo");
+  });
+
+  it("ISS-92 Phase 2: PRESERVES dispatch on mid-session In Progress save", async () => {
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-9205",
+        external_id: "",
+        title: "Mid-session save",
+      }),
+      tracker: "memory",
+      status: "In Progress",
+      blocked: null,
+      dispatch: {
+        id: "dispatch-uuid-5",
+        pid: 9999,
+        host: "host-x",
+        kind: "work",
+        started_at: "2026-05-07T12:00:00.000Z",
+        ttl_seconds: 7200,
+      },
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-mid`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-9205" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Mid-session In Progress save MUST keep the dispatch{} block.
+    // The reattach pass + per-tick liveness scan rely on it.
+    const persisted = readYaml(h.repo.localPath, "ISS-9205");
+    expect(persisted).not.toContain("dispatch: null");
+    expect(persisted).toContain("dispatch-uuid-5");
+    expect(persisted).toContain("pid: 9999");
+  });
+
   it("preserves status when blocked is null (no normalization)", async () => {
     // Sanity: forceBlockedToToDo is a no-op when blocked is null. A
     // legitimate Needs Help save still persists with status: Needs Help.

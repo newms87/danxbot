@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { MemoryTracker } from "../issue-tracker/memory.js";
 import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
 import {
+  clearDispatchAndWrite,
   ensureGitignoreEntry,
   ensureIssuesDirs,
   findByExternalId,
@@ -353,6 +354,116 @@ describe("yaml-lifecycle", () => {
 
       const reloaded = loadLocal(repoRoot, "ISS-13");
       expect(reloaded?.dispatch?.id).toBe("did-2");
+    });
+
+    it("string form stamps the placeholder dispatch shape", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-14" }),
+      );
+      const original = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
+      writeIssue(repoRoot, original);
+
+      const updated = stampDispatchAndWrite(repoRoot, original, "did-2");
+      expect(updated.dispatch).toEqual({
+        id: "did-2",
+        pid: 0,
+        host: "",
+        kind: "work",
+        started_at: "",
+        ttl_seconds: 0,
+      });
+    });
+
+    it("IssueDispatch form stamps the full record verbatim", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-15" }),
+      );
+      const original = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
+      writeIssue(repoRoot, original);
+
+      const updated = stampDispatchAndWrite(repoRoot, original, {
+        id: "did-2",
+        pid: 4321,
+        host: "danxbot-host-a",
+        kind: "work",
+        started_at: "2026-05-07T12:00:00.000Z",
+        ttl_seconds: 7200,
+      });
+      expect(updated.dispatch).toEqual({
+        id: "did-2",
+        pid: 4321,
+        host: "danxbot-host-a",
+        kind: "work",
+        started_at: "2026-05-07T12:00:00.000Z",
+        ttl_seconds: 7200,
+      });
+
+      const reloaded = loadLocal(repoRoot, "ISS-15");
+      expect(reloaded?.dispatch?.pid).toBe(4321);
+      expect(reloaded?.dispatch?.host).toBe("danxbot-host-a");
+      expect(reloaded?.dispatch?.started_at).toBe("2026-05-07T12:00:00.000Z");
+      expect(reloaded?.dispatch?.ttl_seconds).toBe(7200);
+    });
+  });
+
+  describe("clearDispatchAndWrite", () => {
+    it("sets dispatch to null and persists", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-16" }),
+      );
+      const original = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+      );
+      const stamped = stampDispatchAndWrite(repoRoot, original, {
+        id: "did-1",
+        pid: 9999,
+        host: "host-x",
+        kind: "work",
+        started_at: "2026-05-07T12:00:00.000Z",
+        ttl_seconds: 7200,
+      });
+      expect(stamped.dispatch).not.toBeNull();
+
+      const cleared = clearDispatchAndWrite(repoRoot, stamped);
+      expect(cleared.dispatch).toBeNull();
+
+      const reloaded = loadLocal(repoRoot, "ISS-16");
+      expect(reloaded?.dispatch).toBeNull();
+    });
+
+    it("is a no-op when dispatch is already null (returns input, no write)", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-17" }),
+      );
+      const original = await hydrateFromRemote(
+        tracker,
+        external_id,
+        null,
+        repoRoot,
+      );
+      writeIssue(repoRoot, original);
+      expect(original.dispatch).toBeNull();
+
+      const result = clearDispatchAndWrite(repoRoot, original);
+      // Same reference — no allocation, no spread.
+      expect(result).toBe(original);
     });
   });
 

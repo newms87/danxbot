@@ -23,6 +23,19 @@ import type { ChildProcess } from "node:child_process";
 import { isPidAlive, killHostPid, type HostExitWatcher } from "./host-pid.js";
 
 export interface AgentHandle {
+  /**
+   * OS PID of the spawned claude process. Set at fork time and never
+   * mutated. Docker mode = `child.pid`; host mode = the `script -q -f`
+   * wrapper PID (its direct child is claude). Consumers stamp this onto
+   * the per-issue YAML's `dispatch.pid` for cross-restart liveness checks
+   * (ISS-92, Phase 2 of the poller-triage rework).
+   *
+   * Docker's `child.pid` is `number | undefined` per Node's typings —
+   * undefined only for spawn failures (which throw before we wrap the
+   * handle), so we coerce to `number` here and fail-loud at the spawn
+   * site if the wrap is ever attempted on a child that never started.
+   */
+  readonly pid: number;
   /** Send a POSIX signal. Safe to call after exit (per-runtime ESRCH handling). */
   kill(signal: NodeJS.Signals): void;
   /** True iff the process is still running. */
@@ -44,7 +57,23 @@ export interface AgentHandle {
  * replace `child.kill` after construction still observe the new mock.
  */
 export function createDockerHandle(child: ChildProcess): AgentHandle {
+  // Spawn-failure paths throw inside `child_process.spawn` before this
+  // wrapper is constructed, so a missing `pid` here would mean the
+  // contract was breached upstream. Fail loud — propagating an undefined
+  // pid through `AgentHandle.pid` would corrupt the YAML stamp.
+  //
+  // `0` is rejected even though it's `typeof number`: POSIX uses pid 0
+  // for "the current process group" in `kill(2)`, so propagating it
+  // would broadcast every kill to ourselves and falsely report alive on
+  // every liveness probe. Same fail-loud reasoning as `undefined`.
+  if (typeof child.pid !== "number" || child.pid <= 0) {
+    throw new Error(
+      `createDockerHandle: ChildProcess has invalid pid (${String(child.pid)}) — spawn must have failed`,
+    );
+  }
+  const pid = child.pid;
   return {
+    pid,
     kill(signal) {
       child.kill(signal);
     },
@@ -77,6 +106,7 @@ export function createHostHandle(
   watcher: HostExitWatcher,
 ): AgentHandle {
   return {
+    pid,
     kill(signal) {
       killHostPid(pid, signal);
     },

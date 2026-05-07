@@ -24,6 +24,7 @@ import {
 } from "./constants.js";
 import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 import {
+  clearDispatchAndWrite,
   ensureGitignoreEntry,
   ensureIssuesDirs,
   findByExternalId,
@@ -69,6 +70,10 @@ import type {
 import { findNonTerminalDispatches } from "../dashboard/dispatches-db.js";
 import { isPidAlive } from "../agent/host-pid.js";
 import { hasLiveDispatchForCard as hasLiveDispatchForCardImpl } from "./live-dispatch-guard.js";
+import { hostname as osHostname } from "node:os";
+import type { IssueDispatch } from "../issue-tracker/interface.js";
+import { TTL_SECONDS_BY_KIND } from "./dispatch-liveness-yaml.js";
+import { buildReattachPlan } from "./dispatch-reattach.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -110,6 +115,213 @@ interface RepoPollerState {
 }
 
 const repoState = new Map<string, RepoPollerState>();
+
+/**
+ * Per-repo in-memory mirror of every YAML's non-null `dispatch{}` block
+ * — keyed by issue id (`ISS-N`). Populated by the boot reattach pass
+ * (`runStartupReattach`) and refreshed per-tick by `evictDeadDispatches`.
+ *
+ * The single source of truth is the on-disk YAML — this map is a fast
+ * lookup for "is this card occupied". Every entry's `dispatch` value
+ * must mirror the YAML's `dispatch` block at the time of write; any
+ * mutation to either side updates the other in the same code path.
+ *
+ * ISS-92 (Phase 2 of the poller-triage rework). The companion DB-side
+ * guard `hasLiveDispatchForCard` (ISS-69) keys off the dispatches table
+ * and remains for the pre-claim path; this map keys off the YAML and
+ * drives the reattach + per-tick scan.
+ */
+const activeDispatches = new Map<string, Map<string, IssueDispatch>>();
+
+function getActiveDispatches(
+  repoName: string,
+): Map<string, IssueDispatch> {
+  let map = activeDispatches.get(repoName);
+  if (!map) {
+    map = new Map();
+    activeDispatches.set(repoName, map);
+  }
+  return map;
+}
+
+/**
+ * Test-only accessor — returns the per-repo `activeDispatches` map so
+ * tests can assert on the in-memory mirror without exporting the
+ * top-level Map (which would let production code mutate it).
+ */
+export function _getActiveDispatchesForTesting(
+  repoName: string,
+): ReadonlyMap<string, IssueDispatch> {
+  return getActiveDispatches(repoName);
+}
+
+/**
+ * Walk every open YAML in `<repo>/.danxbot/issues/open/` and collect
+ * the ones with a non-null `dispatch{}` block. Used by the boot
+ * reattach pass; tolerates malformed files (logs + skips) so a single
+ * corrupt YAML doesn't halt the boot phase.
+ */
+function readOpenIssuesWithDispatch(
+  repo: RepoContext,
+): Issue[] {
+  const dir = resolve(repo.localPath, ".danxbot", "issues", "open");
+  if (!existsSync(dir)) return [];
+  const out: Issue[] = [];
+  for (const entry of readdirSync(dir)) {
+    if (!entry.endsWith(".yml")) continue;
+    const stem = entry.slice(0, -".yml".length);
+    const path = resolve(dir, entry);
+    try {
+      // `loadLocal` validates strictly. The reattach pass deliberately
+      // doesn't use `walkOpenIssues` from local-issues.ts (which has
+      // its own ID-regex filter) because we want the same fail-loud
+      // semantics as `loadLocal` here — a YAML that survived the disk
+      // write but parses as garbage indicates corruption that
+      // observability should surface.
+      const issue = loadLocal(repo.localPath, stem);
+      if (issue && issue.dispatch !== null) {
+        out.push(issue);
+      }
+    } catch (err) {
+      log.warn(
+        `[${repo.name}] reattach: skipping ${path}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Boot reattach pass (ISS-92, Phase 2). Runs once per worker startup,
+ * BEFORE the polling interval registers. Walks every open YAML, asks
+ * `buildReattachPlan` to partition by liveness, then:
+ *
+ *   - alive → register in `activeDispatches`. Skips redispatch on the
+ *     first tick (the per-tick `evictDeadDispatches` will re-verify).
+ *   - cleared → write `dispatch: null` on the YAML and skip the in-
+ *     memory entry entirely. The card stays where it is on disk
+ *     (status unchanged) — the regular dispatch / orphan-resume paths
+ *     pick it back up on the first poll.
+ *
+ * Cross-host verdicts on a local-only deploy are treated as cleared
+ * (operator intervention via the dashboard's Agents tab); the
+ * verdict.kind is logged so a future multi-host extension knows
+ * exactly which entries it would need to probe.
+ */
+export function runStartupReattach(repo: RepoContext): void {
+  const issues = readOpenIssuesWithDispatch(repo);
+  if (issues.length === 0) return;
+
+  const plan = buildReattachPlan(issues, {
+    currentHost: osHostname(),
+    now: Date.now(),
+    isPidAlive,
+  });
+
+  const map = getActiveDispatches(repo.name);
+
+  for (const action of plan.alive) {
+    map.set(action.issue.id, action.issue.dispatch!);
+    log.info(
+      `[${repo.name}] reattach: ${action.issue.id} alive (pid=${action.issue.dispatch!.pid}, dispatch=${action.issue.dispatch!.id}) — registered`,
+    );
+  }
+
+  for (const action of plan.cleared) {
+    log.warn(
+      `[${repo.name}] reattach: clearing ${action.issue.id} (verdict=${action.verdict.kind}, dispatch=${action.issue.dispatch!.id})`,
+    );
+    try {
+      clearDispatchAndWrite(repo.localPath, action.issue);
+    } catch (err) {
+      log.error(
+        `[${repo.name}] reattach: clearDispatch failed for ${action.issue.id}`,
+        err,
+      );
+    }
+    map.delete(action.issue.id);
+  }
+}
+
+/**
+ * Per-tick liveness scan (ISS-92, Phase 2). Re-runs the same liveness
+ * verdict against every in-memory `activeDispatches` entry and evicts
+ * any whose verdict !== alive. Eviction clears `dispatch: null` on the
+ * YAML in addition to dropping the in-memory entry.
+ *
+ * Reads the YAML at eviction time (not the in-memory copy) so that
+ * any field the agent updated mid-session (status flips, AC ticks)
+ * survives the clear. Concurrent dispatches that wrote a fresh
+ * `dispatch{}` block on the same YAML between reattach and now would
+ * normally be safe — `clearDispatchAndWrite` reads-then-writes, so a
+ * stamp written after this read but before this write would be
+ * overwritten. In practice the poller never has two dispatches on the
+ * same card simultaneously (single-dispatch-per-tick invariant), so
+ * the read-modify-write race window is empty.
+ */
+export function evictDeadDispatches(repo: RepoContext): void {
+  const map = getActiveDispatches(repo.name);
+  if (map.size === 0) return;
+
+  const currentHost = osHostname();
+  const now = Date.now();
+
+  for (const [issueId, dispatchBlock] of map) {
+    const plan = buildReattachPlan(
+      [
+        // Synthetic single-issue input — buildReattachPlan only reads
+        // `issue.dispatch`. Keeps the verdict logic in one place
+        // without forcing the per-tick scan to re-load every YAML.
+        {
+          schema_version: 3,
+          tracker: "memory",
+          id: issueId,
+          external_id: "",
+          parent_id: null,
+          children: [],
+          dispatch: dispatchBlock,
+          status: "In Progress",
+          type: "Feature",
+          title: issueId,
+          description: "",
+          triage: {
+            expires_at: "",
+            reassess_hint: "",
+            last_status: "",
+            last_explain: "",
+            ice: { total: 0, i: 0, c: 0, e: 0 },
+            history: [],
+          },
+          ac: [],
+          comments: [],
+          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+          blocked: null,
+        } as Issue,
+      ],
+      { currentHost, now, isPidAlive },
+    );
+
+    for (const action of plan.cleared) {
+      log.warn(
+        `[${repo.name}] liveness: evicting ${issueId} (verdict=${action.verdict.kind}, dispatch=${dispatchBlock.id})`,
+      );
+      const issue = loadLocal(repo.localPath, issueId);
+      if (issue) {
+        try {
+          clearDispatchAndWrite(repo.localPath, issue);
+        } catch (err) {
+          log.error(
+            `[${repo.name}] liveness: clearDispatch failed for ${issueId}`,
+            err,
+          );
+        }
+      }
+      map.delete(issueId);
+    }
+  }
+}
 
 function getState(repoName: string): RepoPollerState {
   let state = repoState.get(repoName);
@@ -272,6 +484,17 @@ async function _poll(repo: RepoContext): Promise<void> {
   // without a restart. `syncRepoFiles` is idempotent — see its
   // docstring + the per-workspace render loop inside.
   syncRepoFiles(repo);
+
+  // YAML-driven liveness scan (ISS-92, Phase 2). Walks the in-memory
+  // `activeDispatches` mirror, re-checks every entry, and evicts any
+  // whose verdict turned dead/expired/cross-host. The YAML's
+  // `dispatch{}` is also cleared on disk so the next tick (or a
+  // restart) doesn't have to re-discover the same dead entry. Cheap:
+  // the map is per-repo and tracks only currently-dispatched cards
+  // (typically 0–1 entries). Runs BEFORE the tracker fetch so the
+  // ToDo dispatch path can immediately re-claim a card whose previous
+  // dispatch just died.
+  evictDeadDispatches(repo);
 
   log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
 
@@ -476,6 +699,28 @@ async function _poll(repo: RepoContext): Promise<void> {
   //      `danx_issue_save({id})` and never knows external trackers exist.
   const dispatchId = randomUUID();
 
+  // ISS-92 Phase 2: YAML-based liveness guard (defense in depth with
+  // the DB-backed check below). A primary in `listDispatchableYamls`
+  // already has `status: ToDo` + `blocked: null`, so an active
+  // `dispatch{}` block on it is exceptional — but the boot reattach
+  // pass populates `activeDispatches` for every alive PID it finds,
+  // and we honor that mirror here in case the stale state ever leaks
+  // through. We resolve the local id via `findByExternalId` because
+  // the in-memory map is keyed by issue id, not external_id.
+  const existingForGuard = findByExternalId(
+    repo.localPath,
+    primary.external_id,
+  );
+  if (
+    existingForGuard &&
+    getActiveDispatches(repo.name).has(existingForGuard.id)
+  ) {
+    log.info(
+      `[${repo.name}] ${primary.title} already has live YAML dispatch (${existingForGuard.id}) — skipping`,
+    );
+    return;
+  }
+
   // Pre-claim DB guard (ISS-69). Host-mode dispatches outlive the worker
   // — a worker restart leaves the prior dispatch's claude process running
   // under PID 1 with the dispatch row still `running`. Before acquiring
@@ -522,10 +767,29 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  const existing = findByExternalId(repo.localPath, primary.external_id);
+  // Pre-stamp the YAML with the dispatch shell BEFORE spawn so a
+  // crash between `dispatch()` resolving and the post-spawn pid stamp
+  // still leaves a partial record on disk that the next reattach pass
+  // can recover from. `pid: 0` is the sentinel — `dispatch-liveness-yaml`
+  // treats it as dead, so the next tick clears it without spawning a
+  // duplicate. Phase 2 of poller-triage rework (ISS-92).
+  const startStamp: IssueDispatch = {
+    id: dispatchId,
+    pid: 0,
+    host: osHostname(),
+    kind: "work",
+    started_at: new Date().toISOString(),
+    ttl_seconds: TTL_SECONDS_BY_KIND.work,
+  };
+
+  // Reuse the lookup the YAML-based guard above already performed when
+  // present — `findByExternalId` is O(N) over the open dir, so paying
+  // it twice would burn CPU on every dispatch tick.
+  const existing =
+    existingForGuard ?? findByExternalId(repo.localPath, primary.external_id);
   let resolvedIssue: Issue;
   if (existing) {
-    resolvedIssue = stampDispatchAndWrite(repo.localPath, existing, dispatchId);
+    resolvedIssue = stampDispatchAndWrite(repo.localPath, existing, startStamp);
   } else {
     resolvedIssue = await hydrateFromRemote(
       tracker,
@@ -533,7 +797,15 @@ async function _poll(repo: RepoContext): Promise<void> {
       dispatchId,
       repo.localPath,
     );
-    writeIssue(repo.localPath, resolvedIssue);
+    // hydrateFromRemote stamps the placeholder dispatch shape (pid:0,
+    // host:"", started_at:"", ttl_seconds:0). Overwrite with the
+    // enriched start record so the YAML carries the real
+    // host/started_at/ttl_seconds even before the spawn returns.
+    resolvedIssue = stampDispatchAndWrite(
+      repo.localPath,
+      resolvedIssue,
+      startStamp,
+    );
   }
 
   const yamlPath = issuePath(repo.localPath, resolvedIssue.id, "open");
@@ -541,11 +813,13 @@ async function _poll(repo: RepoContext): Promise<void> {
     `${TEAM_PROMPT}\n\nEdit ${yamlPath}. ` +
     `Call danx_issue_save({id: "${resolvedIssue.id}"}) when done.`;
 
-  spawnClaude(
+  await spawnClaude(
     repo,
     task,
     { trigger: "trello", metadata: trelloMeta },
     dispatchId,
+    undefined,
+    { issueId: resolvedIssue.id, startStamp },
   );
 }
 
@@ -753,6 +1027,20 @@ async function tryResumeOrphan(
     // (or stall) through its own monitoring path.
     if (getActiveJob(dispatchId)) continue;
 
+    // ISS-92 Phase 2: YAML-based liveness guard. The boot reattach
+    // pass populated `activeDispatches` with every alive PID it found
+    // on disk. An entry here means "this card's dispatch{} block
+    // points at a same-host PID that responded to signal 0 within the
+    // TTL window" — the prior dispatch is still alive across the
+    // worker restart. Skip orphan-resume; the YAML's evictDeadDispatches
+    // path will clear it on the tick after the PID dies.
+    if (getActiveDispatches(repo.name).has(issue.id)) {
+      log.info(
+        `[${repo.name}] Skipping orphan-resume for "${issue.title}" (${issue.id}) — YAML reattach has it registered as alive (dispatch ${dispatchId})`,
+      );
+      continue;
+    }
+
     // ISS-69 mirror: in-memory `activeJobs` is wiped on every worker
     // restart, but host-mode dispatches outlive the worker — `script
     // -q -f` reparents claude to PID 1, so the prior agent is still
@@ -763,6 +1051,11 @@ async function tryResumeOrphan(
     // (see line ~429); orphan-resume runs BEFORE that path and must
     // apply the same check or the duplicate happens before the ToDo
     // guard ever gets a chance to fire.
+    //
+    // Kept alongside the YAML-based check as defense-in-depth: the DB
+    // guard catches dispatches whose YAML block was lost (file deleted
+    // by an operator, schema corruption) but whose dispatches table
+    // row still records the live host_pid.
     if (await hasLiveDispatchForCard(repo.name, ref.external_id)) {
       log.info(
         `[${repo.name}] Skipping orphan-resume for "${issue.title}" (${issue.id}) — dispatches DB has live host_pid for card ${ref.external_id}`,
@@ -809,14 +1102,22 @@ async function tryResumeOrphan(
       `[${repo.name}] Resuming orphan In Progress card "${issue.title}" (${issue.id}) — parent dispatch ${dispatchId} session ${resolved.sessionId}`,
     );
     const newDispatchId = randomUUID();
-    const stamped = stampDispatchAndWrite(repo.localPath, issue, newDispatchId);
+    const startStamp: IssueDispatch = {
+      id: newDispatchId,
+      pid: 0,
+      host: osHostname(),
+      kind: "work",
+      started_at: new Date().toISOString(),
+      ttl_seconds: TTL_SECONDS_BY_KIND.work,
+    };
+    const stamped = stampDispatchAndWrite(repo.localPath, issue, startStamp);
     const yamlPath = issuePath(repo.localPath, stamped.id, "open");
     const task =
       `${TEAM_PROMPT}\n\nResuming prior dispatch on ${stamped.id}. ` +
       `Read ${yamlPath} for current state, verify progress against ACs, ` +
       `complete remaining work. ` +
       `Call danx_issue_save({id: "${stamped.id}"}) when done.`;
-    spawnClaude(
+    await spawnClaude(
       repo,
       task,
       {
@@ -831,6 +1132,7 @@ async function tryResumeOrphan(
       },
       newDispatchId,
       { resumeSessionId: resolved.sessionId, parentJobId: dispatchId },
+      { issueId: stamped.id, startStamp },
     );
     return { resumed: true };
   }
@@ -1405,13 +1707,25 @@ function scrubRepoRootDanxArtifacts(repoLocalPath: string): void {
   }
 }
 
-function spawnClaude(
+async function spawnClaude(
   repo: RepoContext,
   prompt: string,
   apiDispatchMeta: DispatchTriggerMetadata,
   dispatchId?: string,
   resumeOpts?: { resumeSessionId: string; parentJobId: string },
-): void {
+  /**
+   * When set, the dispatch is bound to a per-card YAML. After
+   * `dispatch()` returns the spawned `AgentJob`, the poller stamps the
+   * agent's real PID into the YAML's `dispatch.pid` AND registers the
+   * card in `activeDispatches`. The completion callback later clears
+   * `dispatch: null` and drops the in-memory entry. Ideator / auto-
+   * triage paths omit this — there is no card-bound dispatch slot for
+   * those (auto-triage runs across many cards as one session).
+   *
+   * ISS-92, Phase 2 of the poller-triage rework.
+   */
+  dispatchStamp?: { issueId: string; startStamp: IssueDispatch },
+): Promise<void> {
   const state = getState(repo.name);
 
   state.teamRunning = true;
@@ -1462,38 +1776,78 @@ function spawnClaude(
   // `timeoutMs` (60x poll interval) and chains `handleAgentCompletion`
   // through `onComplete`. See `.claude/rules/agent-dispatch.md`.
   //
-  // Fire-and-forget: `dispatch` returns once the agent is spawned (NOT
-  // when it completes). The poller already hands completion to
-  // `onComplete`, so awaiting here would only serialize the initial
-  // spawn with... nothing.
-  dispatch({
-    repo,
-    task: prompt,
-    workspace: "issue-worker",
-    // `DANXBOT_WORKER_PORT` and the dispatchId-derived URLs are
-    // auto-injected by `dispatch()` from `repo.workerPort`. Phase 5 of
-    // tracker-agnostic-agents retired the trello MCP server entry from
-    // the issue-worker workspace, so TRELLO_API_KEY / TRELLO_TOKEN /
-    // TRELLO_BOARD_ID no longer need an overlay either — agents now
-    // talk to the tracker through the danxbot MCP server's
-    // `danx_issue_*` tools, which the worker proxies.
-    overlay: {},
-    timeoutMs: config.pollerIntervalMs * 60,
-    apiDispatchMeta,
-    // Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO): when the trello
-    // trigger pre-stamped a UUID into the YAML, thread it through so the
-    // dispatch row's id matches the YAML's `dispatch.id`. Ideator and other
-    // non-trello dispatches omit this and inherit the auto-generated UUID
-    // inside `dispatch()`.
-    dispatchId,
-    resumeSessionId: resumeOpts?.resumeSessionId,
-    parentJobId: resumeOpts?.parentJobId,
-    onComplete: (job) => {
-      handleAgentCompletion(repo, state, job).catch((err) =>
-        log.error(`[${repo.name}] Error in post-completion handler`, err),
+  // Awaited (not fire-and-forget): the post-spawn YAML PID stamp
+  // requires the AgentJob's PID, which is only known once `dispatch()`
+  // resolves. Awaiting blocks the poll tick for the spawn duration
+  // (~1–3s in practice). The runtime agent execution is still async
+  // via `onComplete` — we only sequence the spawn itself.
+  try {
+    const result = await dispatch({
+      repo,
+      task: prompt,
+      workspace: "issue-worker",
+      // `DANXBOT_WORKER_PORT` and the dispatchId-derived URLs are
+      // auto-injected by `dispatch()` from `repo.workerPort`. Phase 5 of
+      // tracker-agnostic-agents retired the trello MCP server entry from
+      // the issue-worker workspace, so TRELLO_API_KEY / TRELLO_TOKEN /
+      // TRELLO_BOARD_ID no longer need an overlay either — agents now
+      // talk to the tracker through the danxbot MCP server's
+      // `danx_issue_*` tools, which the worker proxies.
+      overlay: {},
+      timeoutMs: config.pollerIntervalMs * 60,
+      apiDispatchMeta,
+      // Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO): when the trello
+      // trigger pre-stamped a UUID into the YAML, thread it through so the
+      // dispatch row's id matches the YAML's `dispatch.id`. Ideator and other
+      // non-trello dispatches omit this and inherit the auto-generated UUID
+      // inside `dispatch()`.
+      dispatchId,
+      resumeSessionId: resumeOpts?.resumeSessionId,
+      parentJobId: resumeOpts?.parentJobId,
+      onComplete: (job) => {
+        // ISS-92 Phase 2: dispatch end clears the YAML's `dispatch{}`
+        // and drops the in-memory entry. Runs BEFORE the failure-
+        // handling backoff so a rapid re-tick doesn't see stale state.
+        // Skipped silently when no dispatchStamp was passed (ideator /
+        // auto-triage paths).
+        if (dispatchStamp) {
+          clearActiveDispatch(repo, dispatchStamp.issueId);
+        }
+        handleAgentCompletion(repo, state, job).catch((err) =>
+          log.error(`[${repo.name}] Error in post-completion handler`, err),
+        );
+      },
+    });
+
+    // Post-spawn stamping (ISS-92, Phase 2). The dispatch returned the
+    // spawned `AgentJob`; its `handle.pid` is the OS PID we stamp into
+    // the YAML's `dispatch.pid` and mirror in `activeDispatches`. A
+    // missing handle (test mock that bypasses the runtime fork) is
+    // tolerated — the YAML keeps `pid: 0`, and the next reattach pass
+    // clears it as a placeholder.
+    if (dispatchStamp) {
+      const pid = result?.job?.handle?.pid ?? 0;
+      const enrichedStamp: IssueDispatch = {
+        ...dispatchStamp.startStamp,
+        pid,
+      };
+      const issue = loadLocal(repo.localPath, dispatchStamp.issueId);
+      if (issue) {
+        try {
+          stampDispatchAndWrite(repo.localPath, issue, enrichedStamp);
+        } catch (err) {
+          log.error(
+            `[${repo.name}] post-spawn YAML pid stamp failed for ${dispatchStamp.issueId}`,
+            err,
+          );
+        }
+      }
+      getActiveDispatches(repo.name).set(
+        dispatchStamp.issueId,
+        enrichedStamp,
       );
-    },
-  }).catch((err) => {
+    }
+  } catch (err) {
     // Pre-spawn failures (workspace resolution error, OS spawn error, MCP probe
     // failure) deliberately skip the exponential-backoff escalator:
     // these are configuration / infrastructure errors, not intermittent
@@ -1502,8 +1856,52 @@ function spawnClaude(
     // operator fixes it. Runtime agent failures take the separate
     // `handleAgentCompletion` path above, which DOES apply backoff.
     log.error(`[${repo.name}] dispatch() failed before agent spawned`, err);
+    if (dispatchStamp) {
+      // Pre-spawn failure leaves the pre-stamped dispatch{} block on
+      // the YAML pointing at a dispatch that never started. Clear so
+      // the next tick sees a clean slate; the regular ToDo dispatch
+      // path will re-pick the card up with a fresh dispatchId.
+      const issue = loadLocal(repo.localPath, dispatchStamp.issueId);
+      if (issue) {
+        try {
+          clearDispatchAndWrite(repo.localPath, issue);
+        } catch (clearErr) {
+          log.error(
+            `[${repo.name}] pre-spawn cleanup: clearDispatch failed for ${dispatchStamp.issueId}`,
+            clearErr,
+          );
+        }
+      }
+      getActiveDispatches(repo.name).delete(dispatchStamp.issueId);
+    }
     cleanupAfterAgent(state);
-  });
+  }
+}
+
+/**
+ * Drop a card from the per-repo `activeDispatches` map AND clear its
+ * YAML's `dispatch{}` block. Idempotent — missing in-memory entry +
+ * already-null YAML are both no-ops.
+ *
+ * Called from the dispatch onComplete chain. Distinct from
+ * `evictDeadDispatches` (per-tick liveness cleanup) — this fires on
+ * agent termination, regardless of whether the agent saved a terminal
+ * status or simply exited (timeout, stall, kill).
+ */
+function clearActiveDispatch(repo: RepoContext, issueId: string): void {
+  const map = getActiveDispatches(repo.name);
+  map.delete(issueId);
+  const issue = loadLocal(repo.localPath, issueId);
+  if (issue && issue.dispatch !== null) {
+    try {
+      clearDispatchAndWrite(repo.localPath, issue);
+    } catch (err) {
+      log.error(
+        `[${repo.name}] clearActiveDispatch: write failed for ${issueId}`,
+        err,
+      );
+    }
+  }
 }
 
 /**
@@ -1752,7 +2150,12 @@ function spawnPollerApiAgent(
   prompt: string,
   endpoint: string,
 ): void {
-  spawnClaude(repo, prompt, {
+  // Fire-and-forget: ideator and auto-triage have no per-card YAML
+  // stamp to write post-spawn (no `dispatchStamp` arg), so the only
+  // reason to await `spawnClaude` here would be sequencing — and the
+  // caller (`_poll` empty-ToDo branch) is already at end-of-tick.
+  // Errors surface via the dispatch.catch path inside `spawnClaude`.
+  void spawnClaude(repo, prompt, {
     trigger: "api",
     metadata: {
       endpoint,
@@ -1903,6 +2306,13 @@ export function start(): void {
     const intervalSeconds = config.pollerIntervalMs / 1000;
     log.info(`[${repo.name}] Started — polling every ${intervalSeconds}s`);
 
+    // Boot reattach (ISS-92, Phase 2). Walks every open YAML, registers
+    // alive dispatches in `activeDispatches`, clears YAMLs whose
+    // dispatch is dead/expired/cross-host. MUST run before the first
+    // `poll(repo)` call so the dispatch path doesn't double-spawn a
+    // card whose previous claude is still alive across worker restart.
+    runStartupReattach(repo);
+
     poll(repo);
     state.intervalId = setInterval(() => poll(repo), config.pollerIntervalMs);
   }
@@ -1920,6 +2330,7 @@ export function _resetForTesting(): void {
   }
   repoState.clear();
   trackerByRepo.clear();
+  activeDispatches.clear();
 }
 
 // Auto-start when run as the direct entrypoint.

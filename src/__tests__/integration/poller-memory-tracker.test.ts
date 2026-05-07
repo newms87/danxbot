@@ -651,9 +651,13 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     expect(externalIds).toHaveLength(3);
     expect(new Set(externalIds).size).toBe(3); // all distinct
 
-    // writeIssue called once per hydrated card (siblings via bulk-sync,
-    // primary via hydrate-or-load → writeIssue in the primary block).
-    expect(mockWriteIssue).toHaveBeenCalledTimes(3);
+    // ISS-92 Phase 2: bulk-sync siblings still write via writeIssue
+    // (dispatchId: null shape), but the primary hydration path now
+    // funnels through stampDispatchAndWrite (with the enriched
+    // dispatch start record) instead of a bare writeIssue. Assert the
+    // count is 2 (siblings) — the primary's write is counted under
+    // stampDispatchAndWrite, not writeIssue.
+    expect(mockWriteIssue).toHaveBeenCalledTimes(2);
 
     // Two sibling hydrates carry dispatchId: null (bulk-sync write
     // shape — dispatch UUID lands later via stampDispatchAndWrite when

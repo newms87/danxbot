@@ -15,10 +15,11 @@ import type { HostExitWatcher } from "./host-pid.js";
 interface FakeChild extends EventEmitter {
   kill: ReturnType<typeof vi.fn>;
   exitCode: number | null;
+  pid: number | undefined;
   setExitCode: (code: number | null) => void;
 }
 
-function makeFakeChild(): FakeChild {
+function makeFakeChild(pid: number | undefined = 4242): FakeChild {
   const ee = new EventEmitter() as FakeChild;
   // exitCode is read by createDockerHandle.isAlive — mutable so tests can
   // simulate exit without going through Node's actual ChildProcess.
@@ -31,6 +32,7 @@ function makeFakeChild(): FakeChild {
     _exitCode = c;
   };
   ee.kill = vi.fn();
+  ee.pid = pid;
   return ee;
 }
 
@@ -110,6 +112,40 @@ describe("createDockerHandle", () => {
     expect(() => handle.dispose()).not.toThrow();
     expect(child.kill).not.toHaveBeenCalled();
   });
+
+  it("exposes child.pid via the readonly pid property (ISS-92, Phase 2)", () => {
+    const child = makeFakeChild(98712);
+    const handle = createDockerHandle(asChildProcess(child));
+    expect(handle.pid).toBe(98712);
+  });
+
+  it("throws when wrapping a child with no pid (spawn-failure indicator)", () => {
+    const child = makeFakeChild();
+    // Default `pid: number | undefined = 4242` means passing `undefined`
+    // restores the default — explicitly clear after construction so
+    // the assertion exercises the spawn-failure path.
+    child.pid = undefined;
+    expect(() => createDockerHandle(asChildProcess(child))).toThrow(
+      /pid/i,
+    );
+  });
+
+  it("throws when wrapping a child with pid: 0 (POSIX broadcast sentinel)", () => {
+    // `process.kill(0, signal)` broadcasts to the current process group —
+    // accepting pid:0 would falsely report alive on every probe AND
+    // multicast every SIGTERM to ourselves. Fail loud.
+    const child = makeFakeChild(0);
+    expect(() => createDockerHandle(asChildProcess(child))).toThrow(
+      /pid/i,
+    );
+  });
+
+  it("throws when wrapping a child with negative pid", () => {
+    const child = makeFakeChild(-1);
+    expect(() => createDockerHandle(asChildProcess(child))).toThrow(
+      /pid/i,
+    );
+  });
 });
 
 describe("createHostHandle", () => {
@@ -164,6 +200,12 @@ describe("createHostHandle", () => {
     handle.dispose();
 
     expect(watcher.stopMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes the wrapper PID via the readonly pid property (ISS-92, Phase 2)", () => {
+    const watcher = makeFakeWatcher();
+    const handle = createHostHandle(77777, watcher);
+    expect(handle.pid).toBe(77777);
   });
 
   it("dispose is idempotent — multiple calls do not throw and forward each call to watcher.stop", () => {

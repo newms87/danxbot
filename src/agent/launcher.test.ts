@@ -3003,6 +3003,7 @@ describe("terminateWithGrace", () => {
     overrides: Partial<AgentHandle> = {},
   ): { job: AgentJob; handle: AgentHandle } {
     const handle: AgentHandle = {
+      pid: 12345,
       kill: vi.fn(),
       isAlive: vi.fn().mockReturnValue(false),
       onExit: vi.fn(),
