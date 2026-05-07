@@ -17,8 +17,32 @@ const { currentUser, init, handleExpired } = useAuth();
 
 const repos = ref<RepoInfo[]>([]);
 const selectedDispatch = ref<Dispatch | null>(null);
-const activeTab = ref<TabId>("dispatches");
 const authReady = ref(false);
+
+const VALID_TABS: readonly TabId[] = ["dispatches", "issues", "agents", "settings"];
+
+function readUrlTab(): TabId {
+  const params = new URLSearchParams(window.location.search);
+  const t = params.get("tab");
+  return (VALID_TABS as readonly string[]).includes(t ?? "")
+    ? (t as TabId)
+    : "dispatches";
+}
+
+function writeUrlTab(tab: TabId): void {
+  const url = new URL(window.location.href);
+  if (tab === "dispatches") url.searchParams.delete("tab");
+  else url.searchParams.set("tab", tab);
+  window.history.replaceState({}, "", url.toString());
+}
+
+const activeTab = ref<TabId>(readUrlTab());
+
+watch(activeTab, (next) => writeUrlTab(next));
+
+function onPopState(): void {
+  activeTab.value = readUrlTab();
+}
 
 const {
   dispatches,
@@ -57,12 +81,14 @@ async function loadDashboard(): Promise<void> {
 
 onMounted(async () => {
   window.addEventListener("auth:expired", onAuthExpired);
+  window.addEventListener("popstate", onPopState);
   await init();
   authReady.value = true;
 });
 
 onUnmounted(() => {
   window.removeEventListener("auth:expired", onAuthExpired);
+  window.removeEventListener("popstate", onPopState);
   destroy();
 });
 
@@ -93,13 +119,14 @@ function selectDispatch(d: Dispatch): void {
     <Login />
   </template>
   <template v-else>
-    <div class="w-full px-4 py-6">
+    <div :class="['w-full px-4 py-6', activeTab === 'issues' ? 'h-screen flex flex-col overflow-hidden' : '']">
       <DashboardHeader
         v-model:selected-repo="selectedRepo"
         v-model:active-tab="activeTab"
         :connected="true"
         :event-count="dispatches.length"
         :repos="repos"
+        :refreshing="loading"
         @refresh="refresh"
       />
 
@@ -125,7 +152,7 @@ function selectDispatch(d: Dispatch): void {
         />
       </template>
 
-      <IssuesPage v-else-if="activeTab === 'issues'" v-model:selected-repo="selectedRepo" />
+      <IssuesPage v-else-if="activeTab === 'issues'" v-model:selected-repo="selectedRepo" class="flex-1 min-h-0" />
 
       <AgentsPage v-else-if="activeTab === 'agents'" />
 

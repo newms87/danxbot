@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { DanxButton, DanxDialog, useDialog } from "danx-ui";
+import { DanxButton, DanxDialog, useDialog } from "@thehammer/danx-ui";
 import { resetAllData, type ResetAllDataResult } from "../api";
 
 const { isOpen, open, close } = useDialog();

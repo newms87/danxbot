@@ -71,9 +71,9 @@ describe("SettingsPage", () => {
     confirmBtn!.click();
     await flushPromises();
 
-    const err = w.find('[data-test="reset-data-error"]');
-    expect(err.exists()).toBe(true);
-    expect(err.text()).toContain("db down");
+    const err = document.querySelector('[data-test="reset-data-error"]');
+    expect(err).toBeTruthy();
+    expect(err?.textContent).toContain("db down");
     // Success panel is NOT shown
     expect(w.find('[data-test="reset-data-success"]').exists()).toBe(false);
     w.unmount();

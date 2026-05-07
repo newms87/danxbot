@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { IssueDetail } from "../../types";
-import { CodeViewer } from "danx-ui";
+import { CodeViewer } from "@thehammer/danx-ui";
 
 defineProps<{
   issue: IssueDetail;

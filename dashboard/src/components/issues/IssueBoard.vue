@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { DanxScroll } from "@thehammer/danx-ui";
 import type { IssueListItem, IssueStatus } from "../../types";
 import IssueCard from "./IssueCard.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
@@ -7,19 +8,7 @@ import { isInScope, type ScopeMode } from "../../composables/useIssueFilters";
 
 const props = defineProps<{
   issues: IssueListItem[];
-  /**
-   * When true, force-expands the Done + Cancelled columns regardless of
-   * their default-collapsed setting. Cards in those columns are already
-   * filtered out upstream when this is false, so the columns simply
-   * render a 0 count + collapsed summary.
-   */
   showClosed?: boolean;
-  /**
-   * When non-null, the board is scoped to an epic family. Out-of-scope
-   * cards either dim (highlight mode) or are filtered upstream. The
-   * board still receives the full list and applies the dim class via
-   * the predicate; filter-mode exclusion happens in `IssuesPage`.
-   */
   scopedEpicId: string | null;
   scopeMode: ScopeMode;
 }>();
@@ -29,44 +18,84 @@ const emit = defineEmits<{
   "parent-click": [parentId: string];
 }>();
 
-const COLUMN_ORDER: readonly IssueStatus[] = [
-  "Review",
-  "ToDo",
-  "In Progress",
-  "Needs Help",
-  "Needs Approval",
-  "Done",
-  "Cancelled",
-];
+interface BoardColumn {
+  key: string;
+  label: string;
+  accent: string;
+  testId: string;
+  collapsedByDefault: boolean;
+  match: (i: IssueListItem) => boolean;
+}
 
-const collapsed = ref<Record<IssueStatus, boolean>>(
-  COLUMN_ORDER.reduce(
-    (acc, s) => { acc[s] = COLUMN_ACCENTS[s].collapsedByDefault; return acc; },
-    {} as Record<IssueStatus, boolean>,
-  ),
+const RECENT_DONE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function statusColumn(status: IssueStatus): BoardColumn {
+  const meta = COLUMN_ACCENTS[status];
+  return {
+    key: meta.id,
+    label: meta.label,
+    accent: meta.accent,
+    testId: meta.id,
+    collapsedByDefault: meta.collapsedByDefault,
+    match: (i) => i.status === status,
+  };
+}
+
+const columns = computed<BoardColumn[]>(() => {
+  const review = statusColumn("Review");
+  const needsApproval = statusColumn("Needs Approval");
+  const todo = statusColumn("ToDo");
+  const blocked = statusColumn("Needs Help");
+  const inProgress = statusColumn("In Progress");
+
+  if (props.showClosed) {
+    const done = { ...statusColumn("Done"), collapsedByDefault: false };
+    const cancelled = { ...statusColumn("Cancelled"), collapsedByDefault: false };
+    return [review, needsApproval, todo, blocked, inProgress, done, cancelled];
+  }
+
+  const cutoff = Date.now() - RECENT_DONE_WINDOW_MS;
+  const doneRecent: BoardColumn = {
+    key: "done_recent",
+    label: "Done (Recent)",
+    accent: COLUMN_ACCENTS["Done"].accent,
+    testId: "done_recent",
+    collapsedByDefault: false,
+    match: (i) => i.status === "Done" && i.updated_at * 1000 >= cutoff,
+  };
+  return [review, needsApproval, todo, blocked, inProgress, doneRecent];
+});
+
+const collapsed = ref<Record<string, boolean>>({});
+
+watch(
+  columns,
+  (next) => {
+    const merged: Record<string, boolean> = {};
+    for (const col of next) {
+      merged[col.key] = collapsed.value[col.key] ?? col.collapsedByDefault;
+    }
+    collapsed.value = merged;
+  },
+  { immediate: true },
 );
 
-const grouped = computed<Record<IssueStatus, IssueListItem[]>>(() => {
-  const g = COLUMN_ORDER.reduce(
-    (acc, s) => { acc[s] = []; return acc; },
-    {} as Record<IssueStatus, IssueListItem[]>,
-  );
+const grouped = computed<Record<string, IssueListItem[]>>(() => {
+  const result: Record<string, IssueListItem[]> = {};
+  const cols = columns.value;
+  for (const col of cols) result[col.key] = [];
   for (const issue of props.issues) {
-    const bucket = g[issue.status];
-    if (!bucket) {
-      // eslint-disable-next-line no-console
-      console.warn(`IssueBoard: unknown issue status "${issue.status}" on ${issue.id}`);
-      continue;
-    }
-    bucket.push(issue);
+    const col = cols.find((c) => c.match(issue));
+    if (!col) continue;
+    result[col.key].push(issue);
   }
-  for (const status of Object.keys(g) as IssueStatus[]) {
-    g[status].sort((a, b) => {
+  for (const col of cols) {
+    result[col.key].sort((a, b) => {
       if ((a.type === "Epic") !== (b.type === "Epic")) return a.type === "Epic" ? -1 : 1;
       return b.updated_at - a.updated_at;
     });
   }
-  return g;
+  return result;
 });
 
 function dimmedFor(i: IssueListItem): boolean {
@@ -81,59 +110,49 @@ function scopedFor(i: IssueListItem): boolean {
   return !!props.scopedEpicId && isInScope(i, props.scopedEpicId);
 }
 
-function toggle(status: IssueStatus): void {
-  collapsed.value = { ...collapsed.value, [status]: !collapsed.value[status] };
+function toggle(key: string): void {
+  collapsed.value = { ...collapsed.value, [key]: !collapsed.value[key] };
 }
-
-// Show-closed = true force-expands Done + Cancelled. The off branch is a
-// no-op: cards are already filtered out upstream, so the user's manual
-// collapse state is preserved (and irrelevant to visibility).
-watch(
-  () => props.showClosed,
-  (next) => {
-    if (!next) return;
-    collapsed.value = { ...collapsed.value, Done: false, Cancelled: false };
-  },
-  { immediate: true },
-);
 </script>
 
 <template>
   <div class="board">
     <div
-      v-for="status in COLUMN_ORDER"
-      :key="status"
+      v-for="col in columns"
+      :key="col.key"
       class="column"
-      :class="{ collapsed: collapsed[status] }"
+      :class="{ collapsed: collapsed[col.key] }"
     >
       <button
         class="header"
         type="button"
-        :data-test="`column-header-${COLUMN_ACCENTS[status].id}`"
-        :style="{ borderBottomColor: COLUMN_ACCENTS[status].accent }"
-        @click="toggle(status)"
+        :data-test="`column-header-${col.testId}`"
+        :style="{ borderBottomColor: col.accent }"
+        @click="toggle(col.key)"
       >
-        <span class="dot" :style="{ background: COLUMN_ACCENTS[status].accent }" />
-        <span class="label">{{ COLUMN_ACCENTS[status].label }}</span>
-        <span class="count">{{ grouped[status].length }}</span>
-        <span class="glyph">{{ collapsed[status] ? "▸" : "▾" }}</span>
+        <span class="dot" :style="{ background: col.accent }" />
+        <span class="label">{{ col.label }}</span>
+        <span class="count">{{ grouped[col.key]?.length ?? 0 }}</span>
+        <span class="glyph">{{ collapsed[col.key] ? "▸" : "▾" }}</span>
       </button>
 
-      <div v-if="!collapsed[status]" class="cards">
-        <div v-if="grouped[status].length === 0" class="empty">No items</div>
-        <IssueCard
-          v-for="issue in grouped[status]"
-          :key="issue.id"
-          :issue="issue"
-          :dimmed="dimmedFor(issue)"
-          :scoped="scopedFor(issue)"
-          @select="(i) => emit('select', i)"
-          @parent-click="(pid) => emit('parent-click', pid)"
-        />
-      </div>
+      <DanxScroll v-if="!collapsed[col.key]" class="cards-scroll">
+        <div class="cards">
+          <div v-if="(grouped[col.key]?.length ?? 0) === 0" class="empty">No items</div>
+          <IssueCard
+            v-for="issue in grouped[col.key] ?? []"
+            :key="issue.id"
+            :issue="issue"
+            :dimmed="dimmedFor(issue)"
+            :scoped="scopedFor(issue)"
+            @select="(i) => emit('select', i)"
+            @parent-click="(pid) => emit('parent-click', pid)"
+          />
+        </div>
+      </DanxScroll>
 
-      <div v-else-if="grouped[status].length > 0" class="collapsed-summary">
-        {{ grouped[status].length }} hidden — click header to expand
+      <div v-else-if="(grouped[col.key]?.length ?? 0) > 0" class="collapsed-summary">
+        {{ grouped[col.key]?.length ?? 0 }} hidden — click header to expand
       </div>
     </div>
   </div>
@@ -142,20 +161,25 @@ watch(
 <style scoped>
 .board {
   display: grid;
-  grid-template-columns: repeat(6, minmax(260px, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(260px, 1fr);
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
   overflow-x: auto;
   padding-bottom: 8px;
+  height: 100%;
+  min-height: 0;
 }
 .column {
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-width: 260px;
+  min-height: 0;
 }
 .column.collapsed {
   min-width: 180px;
+  flex-grow: 0;
 }
 .header {
   display: flex;
@@ -169,6 +193,7 @@ watch(
   cursor: pointer;
   font-family: inherit;
   color: #94a3b8;
+  flex-shrink: 0;
 }
 .dot {
   width: 6px;
@@ -196,10 +221,15 @@ watch(
   font-size: 10px;
   color: #64748b;
 }
+.cards-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .cards {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding-right: 4px;
 }
 .empty {
   padding: 20px 12px;

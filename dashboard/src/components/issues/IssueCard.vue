@@ -22,6 +22,15 @@ const emit = defineEmits<{
 
 const isEpic = computed(() => props.issue.type === "Epic");
 const blocked = computed(() => props.issue.blocked);
+const blockedByIds = computed(() => props.issue.blocked_by ?? []);
+const blockedByCard = computed(
+  () => blocked.value && blockedByIds.value.length > 0,
+);
+const blockedLabel = computed(() => {
+  if (!blocked.value) return "";
+  if (blockedByCard.value) return `Blocked by ${blockedByIds.value.join(", ")}`;
+  return "Blocked";
+});
 const updatedLabel = computed(() => relativeTime(props.issue.updated_at));
 
 // Unified `children[]` (ISS-81). Epic = phase cards (label "Phases"),
@@ -38,7 +47,7 @@ function onParentClick(e: MouseEvent): void {
 <template>
   <button
     class="issue-card"
-    :class="{ epic: isEpic, blocked, dimmed: props.dimmed, scoped: props.scoped }"
+    :class="{ epic: isEpic, blocked, 'blocked-by-card': blockedByCard, dimmed: props.dimmed, scoped: props.scoped }"
     type="button"
     @click="emit('select', issue)"
   >
@@ -51,9 +60,11 @@ function onParentClick(e: MouseEvent): void {
       <span
         v-if="blocked"
         class="blocked-badge"
+        :class="{ 'blocked-by-card': blockedByCard }"
         :title="issue.blocked_reason ?? undefined"
       >
-        <span class="blocked-glyph">⛔</span> Blocked
+        <span class="blocked-glyph">{{ blockedByCard ? '⏸' : '⛔' }}</span>
+        {{ blockedLabel }}
       </span>
     </div>
 
@@ -107,6 +118,9 @@ function onParentClick(e: MouseEvent): void {
 .issue-card.blocked {
   border-left: 3px solid #ef4444;
 }
+.issue-card.blocked-by-card {
+  border-left: 3px solid #f59e0b;
+}
 .issue-card:hover {
   transform: translateY(-1px);
 }
@@ -122,6 +136,9 @@ function onParentClick(e: MouseEvent): void {
 }
 .issue-card.scoped.blocked {
   border-left: 3px solid #ef4444;
+}
+.issue-card.scoped.blocked-by-card {
+  border-left: 3px solid #f59e0b;
 }
 .issue-card.dimmed {
   opacity: 0.32;
@@ -158,6 +175,9 @@ function onParentClick(e: MouseEvent): void {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+}
+.blocked-badge.blocked-by-card {
+  color: #fcd34d;
 }
 .blocked-glyph {
   font-size: 9px;

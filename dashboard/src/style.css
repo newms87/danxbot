@@ -1,7 +1,4 @@
 @import "tailwindcss";
-@import "danx-ui/shared/tokens" layer(tokens);
-@import "danx-ui/components/button/styles" layer(components);
-@import "danx-ui/components/code-viewer/styles" layer(components);
-@import "danx-ui/components/dialog/styles" layer(components);
-@import "danx-ui/components/markdown-editor/styles" layer(components);
+@import "@thehammer/danx-ui/shared/tokens" layer(tokens);
+@import "@thehammer/danx-ui/styles" layer(components);
 @custom-variant dark (&:where(.dark, .dark *));

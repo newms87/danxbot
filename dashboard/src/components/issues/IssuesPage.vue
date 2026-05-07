@@ -7,7 +7,7 @@ import IssueBoard from "./IssueBoard.vue";
 import IssueDrawer from "./IssueDrawer.vue";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import { typeToId } from "./issuePalette";
-import type { IssueDetail, IssueListItem, IssueStatus } from "../../types";
+import type { IssueDetail, IssueListItem } from "../../types";
 
 const selectedRepo = defineModel<string>("selectedRepo", { required: true });
 
@@ -35,18 +35,19 @@ const scopedEpicTitle = computed<string | null>(() => {
   return hit?.title ?? null;
 });
 
-const CLOSED_STATUSES: ReadonlyArray<IssueStatus> = ["Done", "Cancelled"];
-
 /**
  * Client-side filter pipeline. Runs over `issues[]` already loaded by
  * `useIssues`; no re-fetch on filter change. Order: show-closed visibility
  * gate -> type chips -> blocked-only -> case-insensitive search across
  * id + title + description.
+ *
+ * Show-closed off: drop Cancelled entirely; let Done flow through so
+ * `IssueBoard`'s "Done (Recent)" column can pick the last-24h slice.
  */
 const filteredIssues = computed<IssueListItem[]>(() => {
   const needle = q.value.trim().toLowerCase();
   return issues.value.filter((i) => {
-    if (!showClosed.value && CLOSED_STATUSES.includes(i.status)) return false;
+    if (!showClosed.value && i.status === "Cancelled") return false;
     if (types.value.length > 0 && !types.value.includes(typeToId(i.type))) {
       return false;
     }
@@ -160,7 +161,7 @@ watch(
 </script>
 
 <template>
-  <section>
+  <section class="issues-section">
     <div v-if="error" class="error-banner">
       {{ error }}
       <button type="button" class="retry" @click="refresh">retry</button>
@@ -188,15 +189,16 @@ watch(
       />
       <div v-if="loading && issues.length === 0" class="placeholder">Loading issues…</div>
       <div v-else-if="issues.length === 0" class="placeholder">No issues yet</div>
-      <IssueBoard
-        v-else
-        :issues="filteredIssues"
-        :show-closed="showClosed"
-        :scoped-epic-id="scopedEpicId"
-        :scope-mode="scopeMode"
-        @select="onSelect"
-        @parent-click="onParentClick"
-      />
+      <div v-else class="board-wrap">
+        <IssueBoard
+          :issues="filteredIssues"
+          :show-closed="showClosed"
+          :scoped-epic-id="scopedEpicId"
+          :scope-mode="scopeMode"
+          @select="onSelect"
+          @parent-click="onParentClick"
+        />
+      </div>
     </template>
 
     <IssueDrawer
@@ -222,6 +224,21 @@ watch(
 </template>
 
 <style scoped>
+.issues-section {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.board-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.board-wrap > :deep(.board) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .error-banner {
   margin-bottom: 12px;
   padding: 10px 12px;

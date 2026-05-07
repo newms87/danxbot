@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import type { IssueDetail } from "../../types";
 import { relativeTime } from "../../utils/relativeTime";
-import { MarkdownEditor } from "danx-ui";
+import { MarkdownEditor } from "@thehammer/danx-ui";
 
 const props = defineProps<{
   issue: IssueDetail;

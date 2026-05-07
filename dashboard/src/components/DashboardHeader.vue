@@ -1,16 +1,19 @@
 <script setup lang="ts">
+import { computed } from "vue";
+import { DanxButton, DanxTabs, DanxTooltip, type DanxTab } from "@thehammer/danx-ui";
 import { useTheme } from "../composables/useTheme";
 import { useAuth } from "../composables/useAuth";
 import type { RepoInfo } from "../api";
 
 export type TabId = "dispatches" | "issues" | "agents" | "settings";
 
-defineProps<{
+const props = defineProps<{
   connected: boolean;
   eventCount: number;
   repos: RepoInfo[];
   selectedRepo: string;
   activeTab: TabId;
+  refreshing?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -25,113 +28,106 @@ const { currentUser, logout } = useAuth();
 async function onLogout(): Promise<void> {
   await logout();
 }
+
+const tabs = computed<DanxTab[]>(() => [
+  { value: "dispatches", label: "Dispatches", count: props.eventCount },
+  { value: "issues", label: "Issues" },
+  { value: "agents", label: "Agents" },
+  { value: "settings", label: "Settings" },
+]);
+
+const activeTabModel = computed<string>({
+  get: () => props.activeTab,
+  set: (v) => emit("update:activeTab", v as TabId),
+});
 </script>
 
 <template>
-  <div class="mb-8">
-    <div class="flex items-center justify-between">
-      <div>
-        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Danxbot Dashboard</h1>
-        <p class="text-gray-500 dark:text-gray-400 text-sm mt-1">
-          <span :class="connected ? 'text-green-500 dark:text-green-400' : 'text-red-500 dark:text-red-400'">●</span>
-          {{ connected ? 'Connected' : 'Disconnected' }}
-          <span v-if="activeTab === 'dispatches'"> · {{ eventCount }} dispatches tracked</span>
-        </p>
-      </div>
-      <div class="flex items-center gap-2">
-        <span
-          v-if="currentUser"
-          data-test="current-user"
-          class="text-sm text-gray-500 dark:text-gray-400 hidden sm:inline"
-        >
-          {{ currentUser.username }}
-        </span>
-        <select
-          v-if="repos.length > 1 && (activeTab === 'dispatches' || activeTab === 'issues')"
-          :value="selectedRepo"
-          class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300 border-0 outline-none cursor-pointer"
-          @change="emit('update:selectedRepo', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">All repos</option>
-          <option v-for="repo in repos" :key="repo.name" :value="repo.name">
-            {{ repo.name }}
-          </option>
-        </select>
-        <button
-          :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
-          class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300"
-          @click="toggleTheme"
-        >
-          {{ isDark ? '☀️' : '🌙' }}
-        </button>
-        <button
-          class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300"
-          @click="emit('refresh')"
-        >
-          Refresh
-        </button>
-        <button
-          v-if="currentUser"
-          data-test="logout-button"
-          class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300"
-          @click="onLogout"
-        >
-          Log out
-        </button>
-      </div>
+  <header class="mb-6 flex items-center gap-12 border-b border-gray-200 dark:border-gray-700 pb-2">
+    <div class="shrink-0 flex items-baseline gap-3">
+      <h1 class="text-base font-semibold text-gray-900 dark:text-white leading-tight">Danxbot Dashboard</h1>
+      <p class="text-gray-500 dark:text-gray-400 text-xs whitespace-nowrap">
+        <span :class="connected ? 'text-green-500 dark:text-green-400' : 'text-red-500 dark:text-red-400'">●</span>
+        {{ connected ? 'Connected' : 'Disconnected' }}
+      </p>
     </div>
 
-    <nav class="mt-5 border-b border-gray-200 dark:border-gray-700 flex gap-1" role="tablist">
-      <button
-        type="button"
-        role="tab"
-        :aria-selected="activeTab === 'dispatches'"
-        class="px-4 py-2 text-sm font-medium border-b-2 transition-colors"
-        :class="activeTab === 'dispatches'
-          ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-          : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
-        @click="emit('update:activeTab', 'dispatches')"
+    <DanxTabs v-model="activeTabModel" :tabs="tabs" class="self-end" />
+
+    <div class="flex items-center gap-2 ml-auto shrink-0">
+      <span
+        v-if="currentUser"
+        data-test="current-user"
+        class="flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400"
       >
-        Dispatches
-      </button>
-      <button
-        type="button"
-        role="tab"
-        :aria-selected="activeTab === 'issues'"
-        data-test="issues-tab"
-        class="px-4 py-2 text-sm font-medium border-b-2 transition-colors"
-        :class="activeTab === 'issues'
-          ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-          : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
-        @click="emit('update:activeTab', 'issues')"
+        <svg
+          class="w-4 h-4"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+        </svg>
+        <span class="hidden sm:inline">{{ currentUser.username }}</span>
+      </span>
+
+      <select
+        v-if="repos.length > 1 && (activeTab === 'dispatches' || activeTab === 'issues')"
+        :value="selectedRepo"
+        class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300 border-0 outline-none cursor-pointer"
+        @change="emit('update:selectedRepo', ($event.target as HTMLSelectElement).value)"
       >
-        Issues
-      </button>
+        <option value="">All repos</option>
+        <option v-for="repo in repos" :key="repo.name" :value="repo.name">
+          {{ repo.name }}
+        </option>
+      </select>
+
       <button
-        type="button"
-        role="tab"
-        :aria-selected="activeTab === 'agents'"
-        class="px-4 py-2 text-sm font-medium border-b-2 transition-colors"
-        :class="activeTab === 'agents'
-          ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-          : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
-        @click="emit('update:activeTab', 'agents')"
+        :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
+        class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300"
+        @click="toggleTheme"
       >
-        Agents
+        {{ isDark ? '☀️' : '🌙' }}
       </button>
-      <button
-        type="button"
-        role="tab"
-        :aria-selected="activeTab === 'settings'"
-        data-test="settings-tab"
-        class="px-4 py-2 text-sm font-medium border-b-2 transition-colors"
-        :class="activeTab === 'settings'
-          ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-          : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'"
-        @click="emit('update:activeTab', 'settings')"
-      >
-        Settings
-      </button>
-    </nav>
-  </div>
+
+      <DanxTooltip tooltip="Refresh">
+        <template #trigger>
+          <DanxButton
+            size="sm"
+            icon="refresh"
+            aria-label="Refresh"
+            :disabled="refreshing"
+            :class="{ 'refresh-spinning': refreshing }"
+            @click="emit('refresh')"
+          />
+        </template>
+      </DanxTooltip>
+
+      <DanxTooltip v-if="currentUser" tooltip="Log out">
+        <template #trigger>
+          <DanxButton
+            size="sm"
+            variant="danger"
+            icon="cancel"
+            aria-label="Log out"
+            data-test="logout-button"
+            @click="onLogout"
+          />
+        </template>
+      </DanxTooltip>
+    </div>
+  </header>
 </template>
+
+<style scoped>
+.refresh-spinning :deep(svg) {
+  animation: dx-spin 0.8s linear infinite;
+}
+@keyframes dx-spin {
+  to { transform: rotate(360deg); }
+}
+</style>

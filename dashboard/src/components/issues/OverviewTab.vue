@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { IssueDetail, IssueListItem } from "../../types";
-import { MarkdownEditor } from "danx-ui";
+import { MarkdownEditor } from "@thehammer/danx-ui";
 
 defineProps<{
   issue: IssueDetail;

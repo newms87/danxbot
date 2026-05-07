@@ -55,6 +55,8 @@ export interface IssueListItem {
   blocked: boolean;
   /** Set when `blocked === true`; null otherwise. Surfaces blocker reason on the card without a detail fetch. */
   blocked_reason: string | null;
+  /** Issue ids (`ISS-N[]`) this card is waiting on. Empty when `blocked === false` OR when the block has no by[] (rare — schema requires `by[]` non-empty when `blocked` set, but defensive default is `[]`). */
+  blocked_by: string[];
   comments_count: number;
   has_retro: boolean;
   updated_at: number;
@@ -174,6 +176,7 @@ function toListItem(
     children_detail: childrenDetail,
     blocked: issue.blocked !== null,
     blocked_reason: issue.blocked?.reason ?? null,
+    blocked_by: issue.blocked?.by ?? [],
     comments_count: issue.comments.length,
     has_retro:
       issue.retro.good.length > 0 ||
