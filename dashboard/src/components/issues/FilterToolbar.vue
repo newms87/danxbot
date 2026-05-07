@@ -14,6 +14,7 @@ const props = defineProps<{
   scopedEpicTitle: string | null;
   scopeMode: ScopeMode;
   showEpicChildren: boolean;
+  cardPresentation: "drawer" | "dialog";
 }>();
 
 const emit = defineEmits<{
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   "update:showClosed": [value: boolean];
   "update:scopeMode": [value: ScopeMode];
   "update:showEpicChildren": [value: boolean];
+  "update:cardPresentation": [value: "drawer" | "dialog"];
   "clear-scope": [];
   "open-board-chat": [];
 }>();
@@ -122,6 +124,23 @@ function clearSearch(): void {
         />
         Show children
       </label>
+
+      <div class="presentation-group" role="group" aria-label="Card presentation">
+        <button
+          type="button"
+          class="presentation-seg"
+          :class="{ active: props.cardPresentation === 'drawer' }"
+          data-test="presentation-drawer"
+          @click="emit('update:cardPresentation', 'drawer')"
+        >Drawer</button>
+        <button
+          type="button"
+          class="presentation-seg"
+          :class="{ active: props.cardPresentation === 'dialog' }"
+          data-test="presentation-dialog"
+          @click="emit('update:cardPresentation', 'dialog')"
+        >Dialog</button>
+      </div>
 
       <button
         type="button"
@@ -258,6 +277,26 @@ function clearSearch(): void {
 .closed input {
   accent-color: #6366f1;
   cursor: pointer;
+}
+.presentation-group {
+  display: inline-flex;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #334155;
+}
+.presentation-seg {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  background: rgb(30 41 59 / 0.5);
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+.presentation-seg.active {
+  background: rgb(99 102 241 / 0.25);
+  color: #c7d2fe;
 }
 .chat-btn {
   margin-left: auto;

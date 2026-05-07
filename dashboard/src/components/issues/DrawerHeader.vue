@@ -5,10 +5,14 @@ import { relativeTime } from "../../utils/relativeTime";
 
 import { computed } from "vue";
 
-const props = defineProps<{
-  issue: IssueDetail;
-  scopedEpicId: string | null;
-}>();
+const props = withDefaults(
+  defineProps<{
+    issue: IssueDetail;
+    scopedEpicId: string | null;
+    showClose?: boolean;
+  }>(),
+  { showClose: true },
+);
 
 const emit = defineEmits<{
   close: [];
@@ -35,6 +39,7 @@ const isScoped = computed(
       <span v-if="issue.blocked" class="blocked-badge">⛔ Blocked</span>
       <span class="updated">{{ relativeTime(issue.updated_at) }}</span>
       <button
+        v-if="props.showClose"
         type="button"
         class="close"
         aria-label="Close"

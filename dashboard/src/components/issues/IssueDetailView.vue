@@ -41,13 +41,17 @@ function writeTabPref(epic: boolean, value: TabId): void {
   }
 }
 
-const props = defineProps<{
-  issue: IssueDetail | null;
-  loading: boolean;
-  allIssues: IssueListItem[];
-  scopedEpicId: string | null;
-  selectedRepo: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    issue: IssueDetail | null;
+    loading: boolean;
+    allIssues: IssueListItem[];
+    scopedEpicId: string | null;
+    selectedRepo: string;
+    showCloseButton?: boolean;
+  }>(),
+  { showCloseButton: true },
+);
 
 const emit = defineEmits<{
   close: [];
@@ -124,8 +128,7 @@ function selectTab(id: TabId, disabled: boolean): void {
 </script>
 
 <template>
-  <div class="scrim" @click="emit('close')" />
-  <aside class="drawer" role="dialog" aria-modal="true">
+  <div class="issue-detail-view">
     <template v-if="loading && !issue">
       <div class="loading">Loading…</div>
     </template>
@@ -133,6 +136,7 @@ function selectTab(id: TabId, disabled: boolean): void {
       <DrawerHeader
         :issue="issue"
         :scoped-epic-id="props.scopedEpicId"
+        :show-close="showCloseButton"
         @close="emit('close')"
         @jump-issue="(id) => emit('jump-issue', id)"
         @toggle-scope="emit('toggle-scope')"
@@ -170,30 +174,16 @@ function selectTab(id: TabId, disabled: boolean): void {
         <RawTab v-else-if="tab === 'raw'" :issue="issue" />
       </div>
     </template>
-  </aside>
+  </div>
 </template>
 
 <style scoped>
-.scrim {
-  position: fixed;
-  inset: 0;
-  background: rgb(2 6 23 / 0.5);
-  z-index: 40;
-  animation: iss-fade 150ms ease-out;
-}
-.drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(640px, 100vw);
-  background: #0b1220;
-  border-left: 1px solid #1e293b;
-  z-index: 50;
+.issue-detail-view {
   display: flex;
   flex-direction: column;
-  box-shadow: -12px 0 32px rgb(0 0 0 / 0.4);
-  animation: iss-slide 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  height: 100%;
+  min-height: 0;
+  background: #0b1220;
 }
 .loading {
   padding: 40px;
@@ -206,6 +196,7 @@ function selectTab(id: TabId, disabled: boolean): void {
   gap: 2px;
   padding: 0 20px;
   border-bottom: 1px solid #1e293b;
+  flex-shrink: 0;
 }
 .tab {
   padding: 10px 14px;
@@ -231,6 +222,7 @@ function selectTab(id: TabId, disabled: boolean): void {
 .body {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
 }
 .chat-body {
   flex: 1;
@@ -238,14 +230,5 @@ function selectTab(id: TabId, disabled: boolean): void {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-}
-
-@keyframes iss-slide {
-  from { transform: translateX(100%); }
-  to { transform: translateX(0); }
-}
-@keyframes iss-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
 }
 </style>

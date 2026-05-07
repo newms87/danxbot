@@ -2,9 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import { useIssues } from "../../composables/useIssues";
 import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
+import { DanxDialog, DanxSplitPanel } from "@thehammer/danx-ui";
 import FilterToolbar from "./FilterToolbar.vue";
 import IssueBoard from "./IssueBoard.vue";
-import IssueDrawer from "./IssueDrawer.vue";
+import IssueDetailView from "./IssueDetailView.vue";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import { typeToId } from "./issuePalette";
 import type { IssueDetail, IssueListItem } from "../../types";
@@ -88,6 +89,43 @@ const selectedDetail = ref<IssueDetail | null>(null);
 const detailLoading = ref(false);
 const detailError = ref<string | null>(null);
 const boardChatOpen = ref(false);
+
+type CardPresentation = "drawer" | "dialog";
+
+function readPresentation(): CardPresentation {
+  try {
+    const v = window.localStorage.getItem("issues.cardPresentation");
+    if (v === "dialog") return "dialog";
+  } catch {
+    /* localStorage disabled */
+  }
+  return "drawer";
+}
+
+const cardPresentation = ref<CardPresentation>(readPresentation());
+
+watch(cardPresentation, (v) => {
+  try {
+    window.localStorage.setItem("issues.cardPresentation", v);
+  } catch {
+    /* localStorage disabled */
+  }
+});
+
+const splitPanels = [
+  { id: "board", label: "Board", defaultWidth: 60 },
+  { id: "drawer", label: "Drawer", defaultWidth: 40 },
+];
+
+const activeSplitPanels = computed<string[]>(() =>
+  selectedIssueId.value ? ["board", "drawer"] : ["board"],
+);
+
+function onSplitPanelsUpdate(value: string[]): void {
+  // Closing the drawer panel via the SplitPanel's own toggle UI is
+  // equivalent to closing the issue detail.
+  if (selectedIssueId.value && !value.includes("drawer")) closeDrawer();
+}
 
 function readUrlIssue(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -196,17 +234,54 @@ watch(
         :scoped-epic-title="scopedEpicTitle"
         :scope-mode="scopeMode"
         :show-epic-children="showEpicChildren"
+        :card-presentation="cardPresentation"
         @update:q="q = $event"
         @toggle-type="toggleType"
         @update:blocked-only="blockedOnly = $event"
         @update:show-closed="showClosed = $event"
         @update:scope-mode="scopeMode = $event"
         @update:show-epic-children="showEpicChildren = $event"
+        @update:card-presentation="cardPresentation = $event"
         @clear-scope="scopedEpicId = null"
         @open-board-chat="boardChatOpen = true"
       />
       <div v-if="loading && issues.length === 0" class="placeholder">Loading issues…</div>
       <div v-else-if="issues.length === 0" class="placeholder">No issues yet</div>
+      <DanxSplitPanel
+        v-else-if="cardPresentation === 'drawer'"
+        class="split-wrap"
+        :panels="splitPanels"
+        :model-value="activeSplitPanels"
+        storage-key="issues.split"
+        require-active
+        @update:model-value="onSplitPanelsUpdate"
+      >
+        <template #board>
+          <div class="board-wrap">
+            <IssueBoard
+              :issues="filteredIssues"
+              :show-closed="showClosed"
+              :scoped-epic-id="scopedEpicId"
+              :scope-mode="scopeMode"
+              @select="onSelect"
+              @parent-click="onParentClick"
+            />
+          </div>
+        </template>
+        <template #drawer>
+          <IssueDetailView
+            v-if="selectedIssueId"
+            :issue="selectedDetail"
+            :loading="detailLoading"
+            :all-issues="issues"
+            :scoped-epic-id="scopedEpicId"
+            :selected-repo="selectedRepo"
+            @close="closeDrawer"
+            @jump-issue="onJumpIssue"
+            @toggle-scope="onToggleScope"
+          />
+        </template>
+      </DanxSplitPanel>
       <div v-else class="board-wrap">
         <IssueBoard
           :issues="filteredIssues"
@@ -219,17 +294,27 @@ watch(
       </div>
     </template>
 
-    <IssueDrawer
-      v-if="selectedIssueId"
-      :issue="selectedDetail"
-      :loading="detailLoading"
-      :all-issues="issues"
-      :scoped-epic-id="scopedEpicId"
-      :selected-repo="selectedRepo"
+    <DanxDialog
+      v-if="cardPresentation === 'dialog' && selectedIssueId"
+      :model-value="!!selectedIssueId"
+      width="min(960px, 92vw)"
+      height="min(820px, 88vh)"
+      close-x
+      @update:model-value="(v: boolean) => { if (!v) closeDrawer(); }"
       @close="closeDrawer"
-      @jump-issue="onJumpIssue"
-      @toggle-scope="onToggleScope"
-    />
+    >
+      <IssueDetailView
+        :issue="selectedDetail"
+        :loading="detailLoading"
+        :all-issues="issues"
+        :scoped-epic-id="scopedEpicId"
+        :selected-repo="selectedRepo"
+        :show-close-button="false"
+        @close="closeDrawer"
+        @jump-issue="onJumpIssue"
+        @toggle-scope="onToggleScope"
+      />
+    </DanxDialog>
     <BoardChatOverlay
       v-if="boardChatOpen"
       :repo="selectedRepo"
@@ -252,8 +337,13 @@ watch(
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
+  height: 100%;
 }
 .board-wrap > :deep(.board) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.split-wrap {
   flex: 1 1 auto;
   min-height: 0;
 }
