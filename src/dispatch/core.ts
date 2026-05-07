@@ -180,11 +180,19 @@ export interface DispatchInput {
   /**
    * Placeholder substitution map. Every `${KEY}` in the workspace's
    * `.mcp.json` and `.claude/settings.json` is replaced from this map.
-   * `DANXBOT_STOP_URL`, `DANXBOT_WORKER_PORT`, the Slack URL pair, and
-   * the issue-tool URL pair are auto-injected from `repo.workerPort` +
-   * `dispatchId` so callers don't have to pre-compute them; everything
-   * else (SCHEMA_*, etc.) is caller-supplied. Caller overlay wins over
-   * auto-injected values — tests rely on that.
+   * Two groups are auto-injected from `RepoContext` + `dispatchId` so
+   * callers don't have to pre-compute them:
+   *   - **Danxbot infra URLs** — `DANXBOT_STOP_URL`, `DANXBOT_WORKER_PORT`,
+   *     the Slack URL pair, the issue-tool URL pair, and
+   *     `DANXBOT_RESTART_WORKER_URL`. Derived from `repo.workerPort` +
+   *     `dispatchId`.
+   *   - **Per-repo MCP env block** — `DANX_REPO_ROOT`, `DANX_TRACKER`,
+   *     `TRELLO_API_KEY`, `TRELLO_API_TOKEN`. Derived from
+   *     `repo.localPath` + `repo.trelloEnabled` + `repo.trello.{apiKey,
+   *     apiToken}`. Consumed by the workspace-declared `danx-issue` MCP
+   *     server (`@thehammer/danx-issue-mcp`).
+   * Everything else (`SCHEMA_*`, etc.) is caller-supplied. Caller overlay
+   * wins over auto-injected values — tests rely on that.
    */
   overlay: Readonly<Record<string, string>>;
   /**
@@ -354,6 +362,23 @@ interface ResolvedSurface {
    * dialog. Undefined when the file does not exist.
    */
   readonly settingsPath?: string;
+  /**
+   * Phase 5c (gpt-manager ISS-102): already-substituted `staging-paths`
+   * allowlist from the workspace manifest. Plumbed through to the
+   * spawn loop so the dispatch handler can stamp it onto the
+   * AgentJob — POST /api/restage/:dispatchId reads it back to validate
+   * mid-dispatch staged-file rewrites against the same allowlist used
+   * at launch time. Empty when the workspace declares no
+   * `staging-paths` (no restage surface for that dispatch).
+   */
+  readonly stagingPaths: readonly string[];
+  /**
+   * Phase 5c: overlay used at launch (post-merge — caller overlay +
+   * auto-injected danxbot infrastructure keys). Captured here so the
+   * restage endpoint can substitute the same `${KEY}` placeholders
+   * the launch path used.
+   */
+  readonly overlay: Readonly<Record<string, string>>;
 }
 
 /**
@@ -530,6 +555,17 @@ async function runResolved(
   const job = await spawnForDispatch(taskWithInstruction, false);
   setupStallDetection(job);
 
+  // Phase 5c (ISS-102): preserve the workspace's stagingPaths + the
+  // overlay so a later POST /api/restage/:dispatchId can re-run the
+  // same prepareStagedFiles + writeStagedFiles chain that produced
+  // the original staged files at launch time. Single producer.
+  if (resolved.stagingPaths.length > 0) {
+    job.restageContext = {
+      stagingPaths: resolved.stagingPaths,
+      overlay: resolved.overlay,
+    };
+  }
+
   // TTL eviction — keep finished jobs in `activeJobs` for an hour after
   // completion so late `/api/status` polls still succeed, then drop them.
   const cleanupInterval = setInterval(() => {
@@ -599,6 +635,18 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     DANXBOT_ISSUE_SAVE_URL: issueSaveUrl,
     DANXBOT_ISSUE_CREATE_URL: issueCreateUrl,
     DANXBOT_RESTART_WORKER_URL: restartWorkerUrl,
+    // Auto-inject every value the per-workspace `danx-issue` MCP server
+    // (`@thehammer/danx-issue-mcp`) needs to talk to its own repo's
+    // `.danxbot/issues/` store + tracker. `DANX_REPO_ROOT` is required
+    // (the MCP server fails loud without it); the trello triple is
+    // optional so non-trello deploys don't need to special-case the
+    // overlay. The issue-worker workspace declares the placeholders
+    // accordingly. Other workspaces that don't reference these keys
+    // simply ignore them.
+    DANX_REPO_ROOT: input.repo.localPath,
+    DANX_TRACKER: input.repo.trelloEnabled ? "trello" : "memory",
+    TRELLO_API_KEY: input.repo.trello.apiKey,
+    TRELLO_API_TOKEN: input.repo.trello.apiToken,
     ...input.overlay,
   };
 
@@ -688,6 +736,8 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
       stagedFilePaths,
       topLevelAgent: workspace.topLevelAgent,
       settingsPath: workspace.settingsPath,
+      stagingPaths: workspace.stagingPaths,
+      overlay,
     });
   } catch (err) {
     // runResolved already cleans up MCP settings + staged files in the

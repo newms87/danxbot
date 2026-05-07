@@ -1,5 +1,16 @@
 {
   "mcpServers": {
+    "danx-issue": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@thehammer/danx-issue-mcp"],
+      "env": {
+        "DANX_REPO_ROOT": "${DANX_REPO_ROOT}",
+        "DANX_TRACKER": "${DANX_TRACKER}",
+        "TRELLO_API_KEY": "${TRELLO_API_KEY}",
+        "TRELLO_API_TOKEN": "${TRELLO_API_TOKEN}"
+      }
+    },
     "playwright": {
       "command": "npx",
       "args": ["tsx", "mcp-servers/playwright/src/index.ts"],

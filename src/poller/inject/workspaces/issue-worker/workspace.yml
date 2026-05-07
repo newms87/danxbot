@@ -1,8 +1,13 @@
 name: issue-worker
-description: Poller dispatch — danx-next, danx-ideate, danx-start, danx-triage
+description: Poller dispatch — danx-next, danx-start, danx-ideate, danx-epic-link, danx-triage-card (+ deprecated danx-triage redirect)
 required-placeholders:
   - DANXBOT_STOP_URL
   - DANXBOT_WORKER_PORT
+  - DANX_REPO_ROOT
+optional-placeholders:
+  - DANX_TRACKER
+  - TRELLO_API_KEY
+  - TRELLO_API_TOKEN
 required-gates:
   - "settings.issuePoller.enabled ≠ false"
   - "no CRITICAL_FAILURE flag"

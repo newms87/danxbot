@@ -375,6 +375,217 @@ describe("dispatch() — slack-worker integration", () => {
   });
 });
 
+describe("dispatch() — issue-worker integration (Phase 3 of ISS-90)", () => {
+  // Phase 3 wired the `danx-issue` MCP server into the issue-worker
+  // workspace's `.mcp.json` so the new `danx-triage-card` skill can call
+  // `mcp__danx-issue__danx_issue_get` / `danx_issue_save` directly. The
+  // server reads `DANX_REPO_ROOT`, `DANX_TRACKER`, `TRELLO_API_KEY`,
+  // `TRELLO_API_TOKEN` from env. dispatch() must auto-inject all four into
+  // the overlay from `RepoContext` so callers don't have to.
+  //
+  // Boundary asserted here: the merged settings.json handed to spawnAgent
+  // (the file claude actually reads) carries the `danx-issue` server with
+  // every placeholder substituted to the matching `RepoContext` value.
+  // Regression that drops `DANX_REPO_ROOT` from the overlay would either
+  // throw `PlaceholderError` (when required) or — worse — substitute it to
+  // empty string and let the MCP server start with a missing repo root,
+  // producing confusing 500s on every triage call.
+  const issueWorkerSrc = resolve(
+    __dirname,
+    "..",
+    "poller",
+    "inject",
+    "workspaces",
+    "issue-worker",
+  );
+
+  let tmpRepoDir: string;
+  let issueRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-issue-dispatch-"));
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "issue-worker");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(issueWorkerSrc, dest, { recursive: true });
+    // Scaffold the empty `.danxbot/issues/` dir the MCP server would later
+    // walk (the resolver doesn't read it, but other gates might).
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "issues", "open"), {
+      recursive: true,
+    });
+    const baseRepo = makeRepoContext({ localPath: tmpRepoDir });
+    issueRepo = {
+      ...baseRepo,
+      trelloEnabled: true,
+      trello: {
+        ...baseRepo.trello,
+        apiKey: "issue-worker-test-key",
+        apiToken: "issue-worker-test-token",
+      },
+    };
+  });
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  it("auto-injects DANX_REPO_ROOT + DANX_TRACKER + TRELLO_API_KEY + TRELLO_API_TOKEN into the danx-issue server's env", async () => {
+    await dispatch({
+      repo: issueRepo,
+      task: "Triage card ISS-1 using the danx-triage-card skill.",
+      workspace: "issue-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8")) as {
+      mcpServers: Record<string, { env?: Record<string, string> }>;
+    };
+    const danxIssue = settings.mcpServers["danx-issue"];
+    expect(danxIssue).toBeDefined();
+    expect(danxIssue.env).toEqual({
+      DANX_REPO_ROOT: tmpRepoDir,
+      DANX_TRACKER: "trello",
+      TRELLO_API_KEY: "issue-worker-test-key",
+      TRELLO_API_TOKEN: "issue-worker-test-token",
+    });
+  });
+
+  it("substitutes DANX_TRACKER to 'memory' when the repo has trelloEnabled=false (operator force-enabled the poller via settings.json)", async () => {
+    // When trelloEnabled is false, `envDefault(issuePoller)` returns false
+    // and the workspace gate `settings.issuePoller.enabled ≠ false` would
+    // fail. An operator may still want to dispatch into this workspace
+    // (e.g. memory-backed test deployments), so they flip
+    // `overrides.issuePoller.enabled = true` in settings.json. Mimic that
+    // here.
+    writeFileSync(
+      resolve(tmpRepoDir, ".danxbot", "settings.json"),
+      JSON.stringify({
+        overrides: { issuePoller: { enabled: true, pickupNamePrefix: null } },
+      }),
+    );
+    issueRepo = makeRepoContext({
+      localPath: tmpRepoDir,
+      trelloEnabled: false,
+      trello: { ...issueRepo.trello, apiKey: "", apiToken: "" },
+    });
+
+    await dispatch({
+      repo: issueRepo,
+      task: "Triage card ISS-1 using the danx-triage-card skill.",
+      workspace: "issue-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8")) as {
+      mcpServers: Record<string, { env?: Record<string, string> }>;
+    };
+    expect(settings.mcpServers["danx-issue"].env).toEqual({
+      DANX_REPO_ROOT: tmpRepoDir,
+      DANX_TRACKER: "memory",
+      TRELLO_API_KEY: "",
+      TRELLO_API_TOKEN: "",
+    });
+  });
+
+  it("merges the danxbot infrastructure server alongside the workspace's `danx-issue` server", async () => {
+    // Defence-in-depth: the workspace's `.mcp.json` declares danx-issue +
+    // playwright; dispatch core merges danxbot infra. A regression that
+    // either dropped infra or replaced (rather than merged) workspace
+    // servers would silently break the agent's tool surface. Use
+    // `toContain` rather than strict-equal-set so a future workspace
+    // addition (e.g. a `schema` server) doesn't fail this test for the
+    // wrong reason — the regression of interest is "infra+danx-issue both
+    // present", not "exactly these three."
+    await dispatch({
+      repo: issueRepo,
+      task: "Triage card ISS-1.",
+      workspace: "issue-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    const serverNames = Object.keys(settings.mcpServers);
+    expect(serverNames).toContain("danx-issue");
+    expect(serverNames).toContain("danxbot");
+    expect(serverNames).toContain("playwright");
+  });
+
+  // Precedence contract — caller overlay wins over EVERY auto-injected
+  // key, not just DANX_REPO_ROOT. A regression that broke spread order for
+  // the trello triple but not DANX_REPO_ROOT would silently pass without
+  // this matrix.
+  it.each([
+    ["DANX_REPO_ROOT", "/tmp/other-repo-root"],
+    ["DANX_TRACKER", "memory"],
+    ["TRELLO_API_KEY", "override-key"],
+    ["TRELLO_API_TOKEN", "override-token"],
+  ])(
+    "caller-supplied %s in overlay wins over the auto-injected value (precedence contract)",
+    async (key, overrideValue) => {
+      // For DANX_REPO_ROOT specifically, the resolver hits `existsSync` on
+      // the overridden path before substitution lands — scaffold it.
+      if (key === "DANX_REPO_ROOT") {
+        mkdirSync(resolve(overrideValue, ".danxbot", "issues", "open"), {
+          recursive: true,
+        });
+      }
+      try {
+        await dispatch({
+          repo: issueRepo,
+          task: "Triage card ISS-1.",
+          workspace: "issue-worker",
+          overlay: { [key]: overrideValue },
+          apiDispatchMeta: DEFAULT_DISPATCH_META,
+        });
+
+        const opts = mockSpawnAgent.mock.calls[0][0];
+        const settings = JSON.parse(
+          readFileSync(opts.mcpConfigPath, "utf-8"),
+        ) as { mcpServers: Record<string, { env?: Record<string, string> }> };
+        expect(settings.mcpServers["danx-issue"].env?.[key]).toBe(overrideValue);
+      } finally {
+        if (key === "DANX_REPO_ROOT") {
+          rmSync(overrideValue, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it("rejects dispatch with WorkspaceGateError when overrides.issuePoller.enabled = false (parallel to slack-worker gate test)", async () => {
+    // Symmetry with the slack-worker test at line ~342. The issue-worker
+    // workspace declares `settings.issuePoller.enabled ≠ false` as a gate;
+    // a regression that flipped the evaluator off would let dispatch
+    // proceed against an operator-disabled repo. Pin the rejection.
+    writeFileSync(
+      resolve(tmpRepoDir, ".danxbot", "settings.json"),
+      JSON.stringify({
+        overrides: { issuePoller: { enabled: false, pickupNamePrefix: null } },
+      }),
+    );
+
+    await expect(
+      dispatch({
+        repo: issueRepo,
+        task: "Triage card ISS-1.",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      }),
+    ).rejects.toThrow(/settings\.issuePoller\.enabled/);
+
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+});
+
 describe("dispatch() — top_level_agent forwarding", () => {
   // Phase 4 of the schema-builder sub-30s epic (ISS-55). When a workspace
   // declares `top_level_agent: orchestrator`, the resolver propagates the
