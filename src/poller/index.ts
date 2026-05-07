@@ -323,9 +323,9 @@ async function _poll(repo: RepoContext): Promise<void> {
   // to In Progress without a local YAML (e.g. picked up by a prior
   // worker that died before writing the YAML, or moved manually on
   // the tracker) stayed invisible to the orphan-resume check below.
-  // Bulk-sync writes still carry `dispatch_id: null` — the dispatch
-  // primary's UUID is stamped via `stampDispatchAndWrite` later, and
-  // an In Progress orphan keeps its existing `dispatch_id` because
+  // Bulk-sync writes still carry `dispatch: null` — the dispatch
+  // primary's record is stamped via `stampDispatchAndWrite` later, and
+  // an In Progress orphan keeps its existing `dispatch` because
   // `findByExternalId` short-circuits hydration when the YAML
   // already exists.
   // Bulk-sync covers: every dispatch-eligible ToDo sibling, every
@@ -465,9 +465,9 @@ async function _poll(repo: RepoContext): Promise<void> {
   // the resolved INTERNAL id. The agent never sees external_id — the
   // dispatch prompt and YAML filename both use `id`.
   //   1. Pre-generate the dispatch UUID so the same value lands in BOTH
-  //      the dispatch row AND the YAML's `dispatch_id` field.
+  //      the dispatch row AND the YAML's `dispatch.id` field.
   //   2. `findByExternalId` scans existing YAMLs — if one carries this
-  //      external_id, it's authoritative; only `dispatch_id` overwrites.
+  //      external_id, it's authoritative; only `dispatch` overwrites.
   //   3. No match → `hydrateFromRemote` pulls metadata, allocates an
   //      ISS-N (or parses one from the title prefix), patches the
   //      tracker title, and writes a fresh local YAML. Reuses the same
@@ -555,7 +555,7 @@ async function _poll(repo: RepoContext): Promise<void> {
  * convergence step. The dispatch primary's hydration runs separately
  * with throw-on-failure semantics.
  *
- * `dispatch_id` is null for every bulk-synced YAML — these are
+ * `dispatch` is null for every bulk-synced YAML — these are
  * advisory writes that capture remote state, not dispatch claims. A
  * subsequent tick that picks the card as a primary (ToDo) or as a
  * resume target (In Progress with a stamped id from a prior dispatch)
@@ -673,7 +673,7 @@ async function resolveBlockedCards(
 
 /**
  * Look at every In Progress card. For the first one whose local YAML
- * carries a `dispatch_id` that:
+ * carries a `dispatch.id` that:
  *   - is NOT currently in `activeJobs` (still alive on this worker), AND
  *   - DOES correspond to a Claude session JSONL on disk
  *
@@ -683,7 +683,7 @@ async function resolveBlockedCards(
  * preserve the single-dispatch invariant).
  *
  * Side-effect for the "session file gone" case: card resets to ToDo
- * locally (YAML status + dispatch_id cleared) AND on the tracker. The
+ * locally (YAML status + dispatch cleared) AND on the tracker. The
  * reset card's `IssueRef` (with `status: "ToDo"`) is returned in
  * `resetToToDo` so the caller can include it in this tick's dispatch
  * pool — the snapshot of `cards` taken before this scan ran is stale
@@ -693,9 +693,9 @@ async function resolveBlockedCards(
  * Skipped silently when the In Progress card has no local YAML (the
  * bulk-sync step that runs immediately before this should have
  * written one — if it didn't, hydration failed and a warning is
- * already in the log) or no `dispatch_id` (the agent never reached
- * the YAML stamp before dying — same fresh-ToDo recovery applies on
- * the next tick once it bubbles up there).
+ * already in the log) or no `dispatch` record (the agent never
+ * reached the YAML stamp before dying — same fresh-ToDo recovery
+ * applies on the next tick once it bubbles up there).
  */
 type OrphanScanResult =
   | { resumed: true }
@@ -709,23 +709,55 @@ async function tryResumeOrphan(
   const resetToToDo: IssueRef[] = [];
   for (const ref of inProgressRefs) {
     const issue = findByExternalId(repo.localPath, ref.external_id);
-    // No local YAML or no stamped dispatch_id → nothing to resume
-    // against. Bulk-sync runs immediately before this so the YAML
-    // should exist; a missing dispatch_id means the prior agent died
-    // before reaching the YAML stamp. Either way, skip — recovery
-    // happens via the next ToDo bubble-up or manual operator move.
-    if (!issue || !issue.dispatch_id) continue;
+    // No local YAML — bulk-sync runs immediately before this so a
+    // missing YAML means hydration failed; warning already logged
+    // upstream. Skip and let the next sync attempt fix it.
+    if (!issue) continue;
+
+    // No `dispatch` record on a card sitting in In Progress. The prior
+    // agent died before the YAML stamp (or the card was force-moved by
+    // an operator). Nothing to resume against, and the card will sit
+    // in In Progress forever unless we reset it. Reset to ToDo so the
+    // poller's regular dispatch path picks it up on the next bubble.
+    // Skip the reset only when the dispatches DB shows a live host_pid
+    // for this card (host-mode `script -q -f` reparented claude to
+    // PID 1 and is still running — see ISS-69).
+    if (!issue.dispatch) {
+      if (await hasLiveDispatchForCard(repo.name, ref.external_id)) {
+        log.info(
+          `[${repo.name}] Skipping orphan-reset for "${issue.title}" (${issue.id}) — no YAML dispatch stamp, but dispatches DB has live host_pid`,
+        );
+        continue;
+      }
+      log.warn(
+        `[${repo.name}] In Progress card "${issue.title}" (${issue.id}) has no dispatch stamp — resetting to ToDo for fresh dispatch`,
+      );
+      writeIssue(repo.localPath, {
+        ...issue,
+        status: "ToDo",
+      });
+      try {
+        await tracker.moveToStatus(ref.external_id, "ToDo");
+      } catch (err) {
+        log.error(
+          `[${repo.name}] Failed to reset ${ref.external_id} to ToDo on tracker: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      resetToToDo.push({ ...ref, status: "ToDo" });
+      continue;
+    }
+    const dispatchId = issue.dispatch.id;
 
     // Live job on this worker — the orphan check would race with the
     // running dispatch. Skip; the live dispatch will reach completion
     // (or stall) through its own monitoring path.
-    if (getActiveJob(issue.dispatch_id)) continue;
+    if (getActiveJob(dispatchId)) continue;
 
     // ISS-69 mirror: in-memory `activeJobs` is wiped on every worker
     // restart, but host-mode dispatches outlive the worker — `script
     // -q -f` reparents claude to PID 1, so the prior agent is still
     // running. Without this DB-backed liveness probe the orphan-resume
-    // path stamps a NEW dispatch_id and spawns a duplicate claude
+    // path stamps a NEW dispatch.id and spawns a duplicate claude
     // (observed in the ISS-66 dispatch that produced this fix). The
     // ToDo dispatch path already guards via `hasLiveDispatchForCard`
     // (see line ~429); orphan-resume runs BEFORE that path and must
@@ -738,7 +770,7 @@ async function tryResumeOrphan(
       continue;
     }
 
-    const resolved = await resolveParentSessionId(repo.name, issue.dispatch_id);
+    const resolved = await resolveParentSessionId(repo.name, dispatchId);
     if (resolved.kind === "no-session-dir") {
       // No claude projects dir for this repo — infrastructure issue
       // that affects every dispatch, not just this one. Stop the
@@ -751,12 +783,12 @@ async function tryResumeOrphan(
     }
     if (resolved.kind === "not-found") {
       log.warn(
-        `[${repo.name}] In Progress card "${issue.title}" (${issue.id}) has dispatch_id ${issue.dispatch_id} but no matching JSONL on disk — resetting to ToDo`,
+        `[${repo.name}] In Progress card "${issue.title}" (${issue.id}) has dispatch.id ${dispatchId} but no matching JSONL on disk — resetting to ToDo`,
       );
       writeIssue(repo.localPath, {
         ...issue,
         status: "ToDo",
-        dispatch_id: null,
+        dispatch: null,
       });
       try {
         await tracker.moveToStatus(ref.external_id, "ToDo");
@@ -774,7 +806,7 @@ async function tryResumeOrphan(
     }
 
     log.info(
-      `[${repo.name}] Resuming orphan In Progress card "${issue.title}" (${issue.id}) — parent dispatch ${issue.dispatch_id} session ${resolved.sessionId}`,
+      `[${repo.name}] Resuming orphan In Progress card "${issue.title}" (${issue.id}) — parent dispatch ${dispatchId} session ${resolved.sessionId}`,
     );
     const newDispatchId = randomUUID();
     const stamped = stampDispatchAndWrite(repo.localPath, issue, newDispatchId);
@@ -798,7 +830,7 @@ async function tryResumeOrphan(
         },
       },
       newDispatchId,
-      { resumeSessionId: resolved.sessionId, parentJobId: issue.dispatch_id },
+      { resumeSessionId: resolved.sessionId, parentJobId: dispatchId },
     );
     return { resumed: true };
   }
@@ -1450,7 +1482,7 @@ function spawnClaude(
     apiDispatchMeta,
     // Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO): when the trello
     // trigger pre-stamped a UUID into the YAML, thread it through so the
-    // dispatch row's id matches the YAML's `dispatch_id`. Ideator and other
+    // dispatch row's id matches the YAML's `dispatch.id`. Ideator and other
     // non-trello dispatches omit this and inherit the auto-generated UUID
     // inside `dispatch()`.
     dispatchId,
@@ -1700,7 +1732,7 @@ function formatElapsed(job: AgentJob): string {
  * Eligibility:
  *   - Action Items list cards (`list_kind === "action_items"`)
  *   - Review cards (`status === "Review"`)
- * minus any whose local YAML carries non-empty `triaged.timestamp`
+ * minus any whose local YAML carries non-empty `triage.last_status`
  * (already triaged within the idempotence window — re-triage requires
  * explicit `/danx-triage refresh`). Cards without a local YAML count as
  * untriaged.
@@ -1769,7 +1801,11 @@ async function checkAndSpawnTriage(
       );
       return false;
     }
-    return !local || !local.triaged.timestamp;
+    // Phase 1 of the poller-triage rework keeps the legacy "has been
+    // triaged at all" semantics by checking `triage.last_status` (set
+    // on the first triage decision). Phase 4 will switch to the
+    // `triage.expires_at` TTL gate so cards re-triage on cadence.
+    return !local || !local.triage.last_status;
   });
 
   if (eligible.length === 0) {

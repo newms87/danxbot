@@ -1,30 +1,21 @@
 #!/usr/bin/env -S npx tsx
 /**
- * Migrate every `<repo>/.danxbot/issues/{open,closed}/*.yml` from
- * schema_version 2 → 3.
+ * RETIRED — superseded by `migrate-issues-to-triage-v3.ts`.
  *
- * The only schema change v2 → v3 is the addition of the required
- * `children: string[]` field (reverse linkage from `parent_id` for the
- * epic ↔ phase relationship). Migration:
+ * The triage-rework migration (Phase 1 of ISS-90) tightened the strict
+ * `parseIssue` validator to reject the legacy `triaged` and
+ * `dispatch_id` fields. This script's post-write `parseIssue` round-trip
+ * therefore fails on every v1 → v3 promotion (the intermediate v3 still
+ * carries the legacy fields). Rather than maintain two migration paths,
+ * `migrate-issues-to-triage-v3.ts` now subsumes v1 + v2 promotion AND
+ * the triage/dispatch field rename in a single idempotent script.
  *
- *   - Bumps `schema_version: 2` → `3`.
- *   - Inserts `children: []` immediately after `parent_id` if absent.
- *   - Issues already at v3 are skipped (idempotent re-run).
- *   - Issues at any other schema_version (1, 4+) abort the migration loud
- *     so the operator can investigate.
+ * Run that one instead:
  *
- * Repos to migrate are passed as CLI args (paths to repo roots that
- * contain a `.danxbot/issues/` directory). Defaults to walking
- * `<danxbot-root>/repos/*` if none are supplied — matches dev convention.
+ *   npx tsx scripts/migrate-issues-to-triage-v3.ts
  *
- * Usage:
- *   npx tsx scripts/migrate-issues-to-v3.ts                    # all dev repos
- *   npx tsx scripts/migrate-issues-to-v3.ts /path/to/repo ...  # specific
- *
- * The script reads + writes YAML in-place via the `yaml` package so
- * comment / formatting is preserved as well as the parser allows.
- * Children-bumped files round-trip cleanly through the new strict
- * `parseIssue` validator post-write.
+ * This file remains as a thin redirect so historical operator scripts
+ * that invoke it by name fail loud with the new pointer.
  */
 
 import {
@@ -263,6 +254,15 @@ function findIssueYamls(repoRoot: string): string[] {
   return out;
 }
 
+// Loud redirect — fail with a clear pointer instead of silently
+// running and producing files the new validator rejects.
+console.error(
+  "scripts/migrate-issues-to-v3.ts is retired — run scripts/migrate-issues-to-triage-v3.ts instead.",
+);
+process.exit(1);
+
+// Unreachable — kept so the original implementation below still
+// type-checks while the file lives in the tree.
 function main(): void {
   const args = process.argv.slice(2);
 
@@ -324,4 +324,4 @@ function main(): void {
   }
 }
 
-main();
+// main(); — see redirect at top of file.

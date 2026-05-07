@@ -5,6 +5,7 @@ import {
   isBotMirroredComment,
 } from "./markers.js";
 import {
+  isTriaged,
   type Issue,
   type IssueAcItem,
   type IssueComment,
@@ -82,15 +83,15 @@ export function stampTrackerIds(
  *   children      → LOCAL-ONLY. Reverse linkage to `parent_id`; same
  *                   reasoning. Maintained by the `danx-epic-link` skill and
  *                   the `danx_issue_create` flow.
- *   dispatch_id   → LOCAL-ONLY. Poller-managed metadata.
+ *   dispatch      → LOCAL-ONLY. Poller-managed metadata (PID, host, kind).
  *   status        → list move via `moveToStatus` (Step 4b).
  *   type          → managed label via `setLabels` (Step 4c).
  *   title         → `updateCard({title})` (Step 4a).
  *   description   → `updateCard({description})` (Step 4a).
- *   triaged       → managed label via `setLabels` (Step 4c). The label is
+ *   triage        → managed label via `setLabels` (Step 4c). The label is
  *                   the entire tracker-side surface; the structured
- *                   record (`timestamp`, `status`, `explain`) stays
- *                   local-only.
+ *                   record (`expires_at`, `last_status`, `last_explain`,
+ *                   `ice`, `history`) stays local-only.
  *   ac            → `addAcItem` / `updateAcItem` / `deleteAcItem` (Step 4d).
  *   comments      → bot-authored comments POSTed via `addComment` with the
  *                   danxbot marker prefix (Step 4f). Human-authored
@@ -98,7 +99,7 @@ export function stampTrackerIds(
  *   retro         → ONE rendered comment via `addComment` /
  *                   `editComment` on terminal status (Step 6).
  *   blocked       → managed label via `setLabels` (Step 4c). Same shape as
- *                   `triaged`: label-only on the tracker; structured
+ *                   `triage`: label-only on the tracker; structured
  *                   record (`reason`, `timestamp`, `by[]`) stays local.
  *
  * The label diff (Step 4c) compares local-derived intent against
@@ -218,16 +219,16 @@ export async function syncIssue(
   //
   // The five managed labels — type, needsHelp, needsApproval, triaged,
   // blocked — are derived from local YAML data (`status`, `type`,
-  // `triaged.timestamp`, `blocked`). On Trello, NONE of those source
-  // fields round-trip through `getCard`'s data shape — `triaged` and
-  // `blocked` have no native column, and `type` itself is derived from
-  // labels. So the remote-side diff MUST come from the actual label
-  // state. Trackers project their idLabels onto `remoteCard.labels`
-  // inside `getCard`; we compare local-derived intent against that
-  // projection. Without this, every tick re-wrote the Triaged / Blocked
-  // labels because the data fields the diff used to compare always read
-  // empty on Trello — a real idempotency bug found by the ISS-88 audit
-  // (Slice C).
+  // `triage.last_status` / `triage.history`, `blocked`). On Trello, NONE
+  // of those source fields round-trip through `getCard`'s data shape —
+  // `triage` and `blocked` have no native column, and `type` itself is
+  // derived from labels. So the remote-side diff MUST come from the
+  // actual label state. Trackers project their idLabels onto
+  // `remoteCard.labels` inside `getCard`; we compare local-derived
+  // intent against that projection. Without this, every tick re-wrote
+  // the Triaged / Blocked labels because the data fields the diff used
+  // to compare always read empty on Trello — a real idempotency bug
+  // found by the ISS-88 audit (Slice C).
   if (!remoteCard.labels) {
     throw new Error(
       `tracker.getCard returned no labels projection for ${local.external_id} — every IssueTracker implementation must populate Issue.labels`,
@@ -237,7 +238,13 @@ export async function syncIssue(
     type: local.type,
     needsHelp: local.status === "Needs Help",
     needsApproval: local.status === "Needs Approval",
-    triaged: local.triaged.timestamp !== "",
+    // The "triaged" label flips on as soon as the triage agent has made
+    // any decision on the card — `last_status` is non-empty after the
+    // first triage. `expires_at` is unsuitable here because the migration
+    // backfills `""` to force re-triage on rollout, but the label should
+    // STILL be on (the card was triaged in the legacy world; we just
+    // re-triage soon).
+    triaged: isTriaged(local.triage),
     blocked: local.blocked !== null,
   };
   const remoteLabels = remoteCard.labels;

@@ -26,7 +26,7 @@ function defaultCreate(): CreateCardInput {
     type: "Feature",
     title: "T",
     description: "D",
-    triaged: { timestamp: "", status: "", explain: "" },
+    triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [{ title: "AC1", checked: false }],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -192,12 +192,12 @@ describe("syncIssue", () => {
         external_id: "",
         parent_id: null,
         children: [],
-        dispatch_id: null,
+        dispatch: null,
         status: "ToDo",
         type: "Bug",
         title: "Orphan",
         description: "body",
-        triaged: { timestamp: "", status: "", explain: "" },
+        triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
         ac: [{ check_item_id: "", title: "AC1", checked: false }],
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -471,7 +471,7 @@ describe("syncIssue", () => {
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
-      triaged: { timestamp: "2026-05-01T00:00:00Z", status: "ok", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "ok", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [{ timestamp: "2026-05-01T00:00:00Z", status: "ok", explain: "", expires_at: "", ice: { total: 0, i: 0, c: 0, e: 0 } }] },
     };
     tracker.clearRequestLog();
     await syncIssue(tracker, local);
@@ -494,15 +494,26 @@ describe("syncIssue", () => {
       external_id: "card-triaged",
       parent_id: null,
       children: [],
-      dispatch_id: null,
+      dispatch: null,
       status: "ToDo",
       type: "Feature",
       title: "T",
       description: "D",
-      triaged: {
-        timestamp: "2026-04-30T00:00:00Z",
-        status: "ok",
-        explain: "",
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "ok",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [
+          {
+            timestamp: "2026-04-30T00:00:00Z",
+            status: "ok",
+            explain: "",
+            expires_at: "",
+            ice: { total: 0, i: 0, c: 0, e: 0 },
+          },
+        ],
       },
       ac: [],
       comments: [],
@@ -512,7 +523,7 @@ describe("syncIssue", () => {
     const tracker = new MemoryTracker({ seed: [seed] });
     const local: Issue = {
       ...(await tracker.getCard("card-triaged")),
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     };
     tracker.clearRequestLog();
     await syncIssue(tracker, local);
@@ -909,13 +920,13 @@ describe("syncIssue", () => {
     expect(result.remoteWriteCount).toBe(0);
   });
 
-  it("dispatch_id is local-only — mutating local.dispatch_id issues zero tracker writes", async () => {
+  it("dispatch_id is local-only — mutating local.dispatch?.id issues zero tracker writes", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
     const local: Issue = {
       ...fresh,
-      dispatch_id: "61ef8878-c2be-4920-8294-678619ef5ea2",
+      dispatch: { id: "61ef8878-c2be-4920-8294-678619ef5ea2", pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
     };
     tracker.clearRequestLog();
 
@@ -938,10 +949,21 @@ describe("syncIssue", () => {
       description: "With body",
       status: "Done",
       type: "Bug",
-      triaged: {
-        timestamp: "2026-05-05T00:00:00Z",
-        status: "ok",
-        explain: "",
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "ok",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [
+          {
+            timestamp: "2026-05-05T00:00:00Z",
+            status: "ok",
+            explain: "",
+            expires_at: "",
+            ice: { total: 0, i: 0, c: 0, e: 0 },
+          },
+        ],
       },
       ac: [
         { check_item_id: fresh.ac[0].check_item_id, title: "AC1", checked: true },

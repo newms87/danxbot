@@ -1,5 +1,6 @@
 import type { TrelloConfig } from "../types.js";
 import {
+  isTriaged,
   type CreateCardInput,
   type Issue,
   type IssueRef,
@@ -165,12 +166,19 @@ export class TrelloTracker implements IssueTracker {
       // on the local YAML.
       parent_id: null,
       children: [],
-      dispatch_id: null,
+      dispatch: null,
       status,
       type,
       title: parsed.title,
       description: card.desc ?? "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
       ac,
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -192,7 +200,7 @@ export class TrelloTracker implements IssueTracker {
       type: input.type,
       needsHelp: input.status === "Needs Help",
       needsApproval: input.status === "Needs Approval",
-      triaged: input.triaged.timestamp !== "",
+      triaged: isTriaged(input.triage),
       blocked: false,
     });
     const url = `${TRELLO_BASE}/cards?${this.auth()}`;

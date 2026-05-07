@@ -542,8 +542,8 @@ async function runYamlLifecycleScenario(): Promise<void> {
   //
   // The `^status: ` anchor relies on `serializeIssue`'s canonical key
   // order placing the top-level `status` field before the nested
-  // `triaged.status` (which is indented two spaces and would not match
-  // the multiline-mode line-start anchor). Verified against
+  // history-entry `status` fields (which are indented and would not
+  // match the multiline-mode line-start anchor). Verified against
   // `src/issue-tracker/yaml.ts#serializeIssue`. If a future schema
   // refactor reorders keys or changes indentation, switch to a YAML
   // round-trip via `parseIssue` + `serializeIssue` here.

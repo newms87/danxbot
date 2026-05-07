@@ -1,14 +1,38 @@
 import {
+  isTriaged,
   type CreateCardInput,
   type Issue,
   type IssueAcItem,
   type IssueComment,
+  type IssueDispatch,
   type IssueRef,
   type IssueStatus,
   type IssueTracker,
+  type IssueTriage,
   type IssueType,
   type ManagedLabels,
 } from "./interface.js";
+
+function cloneTriage(t: IssueTriage): IssueTriage {
+  return {
+    expires_at: t.expires_at,
+    reassess_hint: t.reassess_hint,
+    last_status: t.last_status,
+    last_explain: t.last_explain,
+    ice: { total: t.ice.total, i: t.ice.i, c: t.ice.c, e: t.ice.e },
+    history: t.history.map((h) => ({
+      timestamp: h.timestamp,
+      status: h.status,
+      explain: h.explain,
+      expires_at: h.expires_at,
+      ice: { total: h.ice.total, i: h.ice.i, c: h.ice.c, e: h.ice.e },
+    })),
+  };
+}
+
+function cloneDispatch(d: IssueDispatch | null): IssueDispatch | null {
+  return d === null ? null : { ...d };
+}
 
 export interface RequestLogEntry {
   method: string;
@@ -38,12 +62,12 @@ interface StoredCard {
    * card so seeded fixtures round-trip cleanly through the memory tracker.
    */
   children: string[];
-  dispatch_id: string | null;
+  dispatch: IssueDispatch | null;
   status: IssueStatus;
   type: IssueType;
   title: string;
   description: string;
-  triaged: { timestamp: string; status: string; explain: string };
+  triage: IssueTriage;
   ac: IssueAcItem[];
   comments: Required<IssueComment>[];
   retro: {
@@ -146,12 +170,12 @@ export class MemoryTracker implements IssueTracker {
       external_id: externalId,
       parent_id: input.parent_id,
       children: [...input.children],
-      dispatch_id: null,
+      dispatch: null,
       status: input.status,
       type: input.type,
       title: input.title,
       description: input.description,
-      triaged: { ...input.triaged },
+      triage: cloneTriage(input.triage),
       ac,
       comments: input.comments.map((c) => ({
         id: c.id ?? this.allocCommentId(),
@@ -170,7 +194,7 @@ export class MemoryTracker implements IssueTracker {
         type: input.type,
         needsHelp: input.status === "Needs Help",
         needsApproval: input.status === "Needs Approval",
-        triaged: input.triaged.timestamp !== "",
+        triaged: isTriaged(input.triage),
         blocked: false,
       },
     };
@@ -342,12 +366,12 @@ export class MemoryTracker implements IssueTracker {
       external_id: card.external_id,
       parent_id: card.parent_id,
       children: [...card.children],
-      dispatch_id: card.dispatch_id,
+      dispatch: cloneDispatch(card.dispatch),
       status: card.status,
       type: card.type,
       title: card.title,
       description: card.description,
-      triaged: { ...card.triaged },
+      triage: cloneTriage(card.triage),
       ac: card.ac.map((a) => ({ ...a })),
       comments: card.comments.map((c) => ({
         id: c.id,
@@ -376,12 +400,12 @@ export class MemoryTracker implements IssueTracker {
       external_id: issue.external_id,
       parent_id: issue.parent_id,
       children: [...issue.children],
-      dispatch_id: issue.dispatch_id,
+      dispatch: cloneDispatch(issue.dispatch),
       status: issue.status,
       type: issue.type,
       title: issue.title,
       description: issue.description,
-      triaged: { ...issue.triaged },
+      triage: cloneTriage(issue.triage),
       ac: issue.ac.map((a) => ({ ...a })),
       comments: issue.comments.map((c) => ({
         id: c.id ?? this.allocCommentId(),
@@ -403,7 +427,7 @@ export class MemoryTracker implements IssueTracker {
         type: issue.type,
         needsHelp: issue.status === "Needs Help",
         needsApproval: issue.status === "Needs Approval",
-        triaged: issue.triaged.timestamp !== "",
+        triaged: isTriaged(issue.triage),
         blocked: issue.blocked !== null,
       },
     };

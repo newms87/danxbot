@@ -43,7 +43,7 @@ function defaultCreate(): CreateCardInput {
     type: "Feature",
     title: "T",
     description: "D",
-    triaged: { timestamp: "", status: "", explain: "" },
+    triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },

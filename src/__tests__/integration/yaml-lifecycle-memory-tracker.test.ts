@@ -164,7 +164,7 @@ function setIssueTracker(seed: Issue): {
       type: seed.type,
       needsHelp: seed.status === "Needs Help",
       needsApproval: seed.status === "Needs Approval",
-      triaged: seed.triaged.timestamp !== "",
+      triaged: seed.triage.last_status !== "",
       blocked: seed.blocked !== null,
     },
   };
@@ -316,12 +316,12 @@ function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
     external_id: externalId,
     parent_id: null,
     children: [],
-    dispatch_id: null,
+    dispatch: null,
     status,
     type: "Feature",
     title: "yaml-lifecycle seed card",
     description: "Drive the Phase 4 YAML round-trip end-to-end.",
-    triaged: { timestamp: "", status: "", explain: "" },
+    triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [
       { check_item_id: "ac-1", title: "First criterion holds", checked: false },
       {

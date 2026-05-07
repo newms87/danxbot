@@ -13,7 +13,7 @@
  *     open/<id>.yml      active issues   (filename = internal id, e.g. ISS-138.yml)
  *     closed/<id>.yml    issues whose status is Done or Cancelled
  *
- * `dispatch_id` overwrites every dispatch — it is the resume key, not a
+ * `dispatch` overwrites every dispatch — it is the resume key, not a
  * history. The poller pre-generates the dispatch UUID, threads it
  * through `DispatchInput.dispatchId` to `dispatch()`, and stamps the
  * SAME UUID into the YAML file via `stampDispatchAndWrite` (existing
@@ -152,9 +152,9 @@ export function writeIssue(repoLocalPath: string, issue: Issue): void {
  * hydrates every ToDo card on each tick so siblings of the dispatch
  * primary have local YAMLs the moment the poller sees them — see
  * `pollAndProcess`'s bulk-sync block). Cards hydrated via bulk-sync
- * carry `dispatch_id: null` until they're picked as the dispatch
- * primary, at which point `stampDispatchAndWrite` overwrites it with
- * the real UUID.
+ * carry `dispatch: null` until they're picked as the dispatch primary,
+ * at which point `stampDispatchAndWrite` overwrites it with the real
+ * dispatch record.
  *
  * The validator is strict — every required field MUST be filled before
  * `validateIssue` runs, so we route through `createEmptyIssue` to
@@ -192,8 +192,18 @@ export async function hydrateFromRemote(
     ...seed,
     tracker: remote.tracker,
     parent_id: remote.parent_id,
-    dispatch_id: dispatchId,
-    triaged: remote.triaged,
+    dispatch:
+      dispatchId === null
+        ? null
+        : {
+            id: dispatchId,
+            pid: 0,
+            host: "",
+            kind: "work",
+            started_at: "",
+            ttl_seconds: 0,
+          },
+    triage: remote.triage,
     ac: remote.ac,
     comments: remoteComments.map((c) => ({
       id: c.id,
@@ -214,17 +224,32 @@ export async function hydrateFromRemote(
 }
 
 /**
- * Overwrite `dispatch_id` on an existing local Issue and persist the
+ * Overwrite `dispatch` on an existing local Issue and persist the
  * change. Returns the updated Issue. Used on the existing-file path
  * where the local YAML is authoritative for everything except the
- * dispatch_id (which the poller refreshes for every new dispatch).
+ * dispatch record (which the poller refreshes for every new dispatch).
+ *
+ * Phase 1 of the poller-triage rework keeps the schema shape but does
+ * not yet populate PID / host / started_at — Phase 2 enriches the
+ * record. Callers that already know the full dispatch shape can pass
+ * a populated record via `stampDispatchRecordAndWrite`.
  */
 export function stampDispatchAndWrite(
   repoLocalPath: string,
   issue: Issue,
   dispatchId: string,
 ): Issue {
-  const updated: Issue = { ...issue, dispatch_id: dispatchId };
+  const updated: Issue = {
+    ...issue,
+    dispatch: {
+      id: dispatchId,
+      pid: 0,
+      host: "",
+      kind: "work",
+      started_at: "",
+      ttl_seconds: 0,
+    },
+  };
   writeIssue(repoLocalPath, updated);
   return updated;
 }

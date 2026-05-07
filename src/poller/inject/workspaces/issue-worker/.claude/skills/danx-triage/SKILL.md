@@ -6,7 +6,26 @@ argument-hint: <optional free-form scope prompt>
 
 # Danx Triage
 
-You audit local issue YAMLs at `<repo>/.danxbot/issues/open/`. For each card you classify state, ICE-score keepers, detect dependencies, group epics, edit the YAML's `triaged` field (and `status` for terminal cases), and call `danx_issue_save`. The worker pushes status moves and labels to the tracker.
+> **Phase-1 schema rework note (ISS-91).** The bulk-triage skill below is the
+> legacy single-decision triage agent. The schema underneath was migrated:
+> what used to be `triaged.{timestamp,status,explain}` is now the structured
+> `triage.{expires_at,reassess_hint,last_status,last_explain,ice,history}`
+> block (see `issue-card-workflow`). Until Phase 3 of ISS-90 ships the new
+> per-card triage agent that fully exploits the new fields, this skill
+> continues to operate in single-decision mode but writes into the new shape:
+>
+> | Legacy field (pre-rework) | New mapping |
+> |---|---|
+> | `triaged.timestamp` | `triage.last_status` truthiness for the "has been triaged" gate; the timestamp itself goes onto `triage.history[].timestamp` for the appended decision |
+> | `triaged.status` | `triage.last_status` (and mirrored to `triage.history[].status`) |
+> | `triaged.explain` | `triage.last_explain` (and mirrored to `triage.history[].explain`) |
+>
+> When in doubt, write **both** `triage.last_*` and append a fresh entry to
+> `triage.history[]` (cap 10; oldest dropped on overflow). Leave
+> `triage.expires_at`, `triage.reassess_hint`, and `triage.ice` empty/zero —
+> the Phase 3 / Phase 4 work owns those.
+
+You audit local issue YAMLs at `<repo>/.danxbot/issues/open/`. For each card you classify state, ICE-score keepers, detect dependencies, group epics, edit the YAML's `triage` block (and `status` for terminal cases), and call `danx_issue_save`. The worker pushes status moves and labels to the tracker.
 
 You read, edit, and save YAMLs. You do NOT make tracker calls.
 
@@ -16,7 +35,7 @@ Config references: `.claude/rules/danx-repo-config.md` (repo commands).
 
 ## Scope
 
-Default scope: every `<repo>/.danxbot/issues/open/*.yml` whose `triaged.timestamp` is empty AND whose file mtime is ≥24h old.
+Default scope: every `<repo>/.danxbot/issues/open/*.yml` whose `triage.last_status` is empty AND whose file mtime is ≥24h old.
 
 | Invocation | Scope |
 |---|---|
@@ -26,7 +45,7 @@ Default scope: every `<repo>/.danxbot/issues/open/*.yml` whose `triaged.timestam
 
 **Scope override keywords:**
 
-- `re-triage` / `force` / `all` / `refresh` → include cards whose `triaged.timestamp` is non-empty
+- `re-triage` / `force` / `all` / `refresh` → include cards whose `triage.last_status` is non-empty
 - `include new` / `all ages` → ignore the 24h age floor
 - Status filter (`todo`, `in progress`, `review`, etc.) → restrict to YAMLs with that `status`
 - `only <type>` → filter by `type` field (`Bug` / `Feature` / `Epic`)
@@ -42,9 +61,9 @@ When ambiguous, pick the more conservative scope and state it in the report.
 
 | Field | When |
 |---|---|
-| `triaged.timestamp` | Set to current ISO time on every triage (e.g. `2026-05-03T14:32:00Z`). Worker derives the Triaged label from `timestamp !== ""`. |
-| `triaged.status` | One of `Keep` \| `Partial` \| `Complete` \| `Obsolete` \| `Duplicate` \| `NeedsHelp` \| `NeedsApproval`. |
-| `triaged.explain` | Human-readable 1-2 sentences explaining the decision. Include ICE if applicable. |
+| `triage.last_status` | Set to current ISO time on every triage (e.g. `2026-05-03T14:32:00Z`). Worker derives the Triaged label from `timestamp !== ""`. |
+| `triage.last_status` | One of `Keep` \| `Partial` \| `Complete` \| `Obsolete` \| `Duplicate` \| `NeedsHelp` \| `NeedsApproval`. |
+| `triage.last_explain` | Human-readable 1-2 sentences explaining the decision. Include ICE if applicable. |
 | `status` | Move terminal cases: `Complete` → `Done`, `Obsolete`/`Duplicate` → `Cancelled`, `NeedsHelp` → `Needs Help`, `NeedsApproval` → `Needs Approval`. Keep/Partial cases: leave unchanged in default mode; in `auto` mode, Keep/Partial → `ToDo`. |
 | `description` | Append `Depends on: <id> — <reason>` line for inferred deps. Preserve existing content. |
 | `comments[]` | Append a triage summary comment (no `id`). |
@@ -73,13 +92,13 @@ When invoked as `/danx-triage auto`:
      - **ToDo partition (priority 1)** — every card whose `status === "ToDo"`. This includes both real ToDo and Action Items cards; on disk they are indistinguishable because `list_kind` is not persisted on YAML (it lives only on the tracker `IssueRef`). The skill triages all of them at priority 1; the poller continues to gate Action Items dispatch via `list_kind` AFTER the triage decision lands. This is honest scope: in standalone mode "Action Items first" expands to "all ToDo first."
      - **Review partition (priority 2)** — every card whose `status === "Review"`.
 2. Concatenate the priority-1 set first, then priority-2. This is the order used by the report.
-3. Ignore the default already-triaged skip and the <24h age floor. Every card in scope is triaged, even if `triaged.timestamp` is non-empty.
+3. Ignore the default already-triaged skip and the <24h age floor. Every card in scope is triaged, even if `triage.last_status` is non-empty.
 4. Print:
    ```
    Scope (auto): <p1_count> priority-1 + <p2_count> Review = <total> cards
    ```
 
-Auto mode requires the `Needs Approval` status to be available. Before emitting `NeedsApproval` for the first time, read the tracker config at `<repo>/.danxbot/config/trello.yml` and check that `lists.needs_approval` is non-empty. If it is empty, the auto-mode subagent MUST fall back to `NeedsHelp` for that card and append a one-line note in `triaged.explain`: `"Direction approval needed; tracker not yet provisioned for Needs Approval — falling back to Needs Help."` This keeps the YAML save valid (`Needs Help` is always available) until the operator provisions the list + label.
+Auto mode requires the `Needs Approval` status to be available. Before emitting `NeedsApproval` for the first time, read the tracker config at `<repo>/.danxbot/config/trello.yml` and check that `lists.needs_approval` is non-empty. If it is empty, the auto-mode subagent MUST fall back to `NeedsHelp` for that card and append a one-line note in `triage.last_explain`: `"Direction approval needed; tracker not yet provisioned for Needs Approval — falling back to Needs Help."` This keeps the YAML save valid (`Needs Help` is always available) until the operator provisions the list + label.
 
 ---
 
@@ -107,7 +126,7 @@ You are a Triage subagent for ONE issue YAML. Audit it and return a compact JSON
 YAML path: <absolute path to .danxbot/issues/open/<filename>.yml>
 Repo: <repoName>
 
-Run steps 2a–2g exactly as defined in danx-triage SKILL.md (read full YAML, find evidence, classify, ICE-score keepers, detect deps, edit triaged.{timestamp,status,explain}, edit status for terminal cases, append triage comment, call danx_issue_save).
+Run steps 2a–2g exactly as defined in danx-triage SKILL.md (read full YAML, find evidence, classify, ICE-score keepers, detect deps, edit triage.{...}, edit status for terminal cases, append triage comment, call danx_issue_save).
 
 Return ONLY this JSON object on your final message:
 
@@ -202,9 +221,9 @@ Preserve the rest of `description` verbatim.
 
 #### 2f. Edit the YAML
 
-1. Set `triaged.timestamp` to current ISO time (`<YYYY-MM-DDTHH:MM:SSZ>`).
-2. Set `triaged.status` to the classification.
-3. Set `triaged.explain` to 1-2 sentences explaining the decision (include ICE breakdown if scored).
+1. Set `triage.last_status` to current ISO time (`<YYYY-MM-DDTHH:MM:SSZ>`).
+2. Set `triage.last_status` to the classification.
+3. Set `triage.last_explain` to 1-2 sentences explaining the decision (include ICE breakdown if scored).
 4. **Terminal moves** — edit `status` field:
    | Classification | New `status` (default) | New `status` (auto mode) |
    |---|---|---|
@@ -320,7 +339,7 @@ Operators skim the tracker but the report comment is the canonical signal — ev
 
 ### Idempotence
 
-A YAML with `triaged.timestamp` non-empty is skipped in default scope. Re-triage scopes ignore the field.
+A YAML with `triage.last_status` non-empty is skipped in default scope. Re-triage scopes ignore the field.
 
 ### Failure Isolation
 

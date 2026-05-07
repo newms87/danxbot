@@ -27,6 +27,7 @@ const PROJECT_ROOT = resolve(__dirname, "../../..");
 const REAL_MAKEFILE = join(PROJECT_ROOT, "Makefile");
 const REAL_WORKER_ENV = join(PROJECT_ROOT, "scripts/worker-env.sh");
 const REAL_AUTH_CHECK = join(PROJECT_ROOT, "scripts/check-claude-auth-env.sh");
+const REAL_PORT_CHECK = join(PROJECT_ROOT, "scripts/check-worker-port.sh");
 
 // `make` is part of the standard host toolchain (every developer has it
 // for `make launch-all-workers`) but is intentionally absent from the
@@ -103,6 +104,7 @@ function setupFakeProject(repoPorts: [string, string][]): FakeProject {
   mkdirSync(join(dir, "scripts"));
   symlinkSync(REAL_WORKER_ENV, join(dir, "scripts/worker-env.sh"));
   symlinkSync(REAL_AUTH_CHECK, join(dir, "scripts/check-claude-auth-env.sh"));
+  symlinkSync(REAL_PORT_CHECK, join(dir, "scripts/check-worker-port.sh"));
 
   // Docker shim. Captures `$DANXBOT_WORKER_PORT` and the `-p` arg so the
   // test can correlate each call with the repo it was for. Must `exec`
@@ -119,6 +121,25 @@ function setupFakeProject(repoPorts: [string, string][]): FakeProject {
     [
       "#!/usr/bin/env bash",
       `LOG="${dockerLog}"`,
+      // `docker port <name>` is invoked by check-worker-port.sh post-up to
+      // verify the container actually published its port. The shim has no
+      // real container; emit a fake mapping that matches whatever the
+      // helper expects (it greps "^${PORT}/tcp"). The port is the second
+      // arg's last segment after `-`, but check-worker-port.sh always
+      // passes the active DANXBOT_WORKER_PORT, so just echo every value
+      // so any port grep matches.
+      'if [ "${1:-}" = "port" ]; then',
+      '  echo "5560/tcp -> 0.0.0.0:5560"',
+      '  echo "5561/tcp -> 0.0.0.0:5561"',
+      '  echo "5562/tcp -> 0.0.0.0:5562"',
+      '  echo "9999/tcp -> 0.0.0.0:9999"',
+      '  exit 0',
+      'fi',
+      // `docker ps --quiet --filter ...` checks whether the per-repo
+      // container is already running. The shim has no running container,
+      // so emit nothing and exit 0 (the helper interprets empty as "not
+      // running" and proceeds).
+      'if [ "${1:-}" = "ps" ]; then exit 0; fi',
       'is_compose=0; is_up=0; project=""',
       'for arg in "$@"; do',
       '  case "$arg" in',

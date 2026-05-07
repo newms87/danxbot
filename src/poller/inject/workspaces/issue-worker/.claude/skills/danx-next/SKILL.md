@@ -27,12 +27,12 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `id` | string (`ISS-N`) | The id you save with. Matches the filename. Don't change. |
 | `parent_id` | string \| null | Set on child cards (epic's `id` for phase children, or any other parent's `id` for sub-cards). Reverse linkage to `children[]`. |
 | `children` | `string[]` (ids) | Ordered list of child issue ids (`ISS-N`). On `type: Epic` cards, `children[]` IS the list of phase cards (label "Phases"). On non-epic cards, it's the list of sub-cards (label "Children"). Same field, two labels. Maintained by `danx_issue_create` (when a child card is created from a draft) and by the `danx-epic-link` skill (for human-created phase cards). Phases MUST be cards — there is no separate in-card phase checklist. |
-| `dispatch_id` | string \| null | Poller-managed. Don't touch. |
+| `dispatch` | `{id, pid, host, kind, started_at, ttl_seconds} \| null` | Poller-managed dispatch record. `null` when no agent is running. Don't touch. |
 | `status` | `Review` \| `ToDo` \| `In Progress` \| `Needs Help` \| `Needs Approval` \| `Done` \| `Cancelled` | Editing this is how you move the card across lists. |
 | `type` | `Bug` \| `Feature` \| `Epic` | Required label. |
 | `title` | string | Card name. |
 | `description` | string | Full markdown body. |
-| `triaged` | `{timestamp, status, explain}` | Triage agent owns this. Leave alone. |
+| `triage` | `{expires_at, reassess_hint, last_status, last_explain, ice, history[]}` | Triage agent owns this. Leave alone. |
 | `ac` | `[{check_item_id, title, checked}]` | Acceptance Criteria. Empty `check_item_id` on new items — tracker assigns. |
 | `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
 | `retro` | `{good, bad, action_item_ids[], commits[]}` | Fill on Done / Cancelled / Needs Help. The worker auto-renders this as ONE structured comment on terminal save. `action_item_ids[]` is a `string[]` of `ISS-N` references. **`action_item_ids[]` is a LAST RESORT** — see Step 1.5. Only reference an action item when the work is BOTH unrelated to this card's ACs AND too large to reasonably finish in this session (multi-phase refactor, redesign, cross-cutting work needing its own scoping). Small in-scope or small unrelated fixes you spotted → DO THEM NOW, don't defer. Create the action item card first via `danx_issue_create({type, title, description, ac, ...})`, then push its returned `id` here. `action_item_ids[]` must contain only valid `ISS-N` format strings. Do NOT append a `## Retro` comment to `comments[]` yourself. |
@@ -176,12 +176,12 @@ If you decide NOT to split, skip ahead to Step 4.
    - `id: ""` (worker assigns the next `ISS-N`)
    - `parent_id: "<epic id>"` (the epic's `id`, e.g. `ISS-12`)
    - `children: []`
-   - `dispatch_id: null`
+   - `dispatch: null`
    - `status: "ToDo"`
    - `type: "Bug"` or `"Feature"` (the phase's own kind, not `Epic`)
    - `title: "<Epic Title> > Phase N: Description"`
    - `description: "<full body>"`
-   - `triaged: {timestamp: "", status: "", explain: ""}`
+   - `triage: {expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: {total: 0, i: 0, c: 0, e: 0}, history: []}`
    - `ac: [{check_item_id: "", title: "...", checked: false}, ...]` (every required field present, `check_item_id: ""` until worker assigns)
    - `comments: []`
    - `retro: {good: "", bad: "", action_item_ids: [], commits: []}`

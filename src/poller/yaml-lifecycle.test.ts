@@ -36,7 +36,7 @@ function defaultCreate(
     type: "Feature",
     title: "Card title",
     description: "Card description",
-    triaged: { timestamp: "", status: "", explain: "" },
+    triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [{ title: "AC1", checked: false }],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -102,7 +102,7 @@ describe("yaml-lifecycle", () => {
 
       expect(issue.id).toBe("ISS-77");
       expect(issue.external_id).toBe(external_id);
-      expect(issue.dispatch_id).toBe(dispatchId);
+      expect(issue.dispatch?.id).toBe(dispatchId);
       expect(issue.title).toBe("Card title");
 
       const methods = tracker
@@ -147,13 +147,13 @@ describe("yaml-lifecycle", () => {
         null,
         repoRoot,
       );
-      expect(issue.dispatch_id).toBeNull();
+      expect(issue.dispatch).toBeNull();
 
       // Round-trip through writeIssue + the strict parseIssue validator
-      // — null dispatch_id MUST survive serialization.
+      // — null dispatch MUST survive serialization.
       writeIssue(repoRoot, issue);
       const reloaded = loadLocal(repoRoot, issue.id);
-      expect(reloaded?.dispatch_id).toBeNull();
+      expect(reloaded?.dispatch).toBeNull();
     });
 
     it("ISS-87: hydrated Issue is complete — every required field populated, round-trips through serialize+parse", async () => {
@@ -178,12 +178,19 @@ describe("yaml-lifecycle", () => {
       expect(issue.external_id).toBe(external_id);
       expect(issue.parent_id).toBeNull();
       expect(issue.children).toEqual([]);
-      expect(issue.dispatch_id).toBeNull();
+      expect(issue.dispatch).toBeNull();
       expect(issue.status).toBe("ToDo");
       expect(issue.type).toBe("Feature");
       expect(issue.title).toBe("Card title");
       expect(typeof issue.description).toBe("string");
-      expect(issue.triaged).toEqual({ timestamp: "", status: "", explain: "" });
+      expect(issue.triage).toEqual({
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      });
       expect(issue.ac).toHaveLength(1);
       expect(issue.ac[0].title).toBe("AC1");
       expect(issue.ac[0].checked).toBe(false);
@@ -250,7 +257,7 @@ describe("yaml-lifecycle", () => {
       expect(loaded).not.toBeNull();
       expect(loaded?.id).toBe("ISS-10");
       expect(loaded?.external_id).toBe(external_id);
-      expect(loaded?.dispatch_id).toBe("did-1");
+      expect(loaded?.dispatch?.id).toBe("did-1");
     });
 
     it("returns the parsed Issue from closed/ when present and absent from open/", async () => {
@@ -323,7 +330,7 @@ describe("yaml-lifecycle", () => {
       const roundTripped = parseIssue(readFileSync(path, "utf-8"));
       expect(roundTripped.id).toBe("ISS-12");
       expect(roundTripped.external_id).toBe(external_id);
-      expect(roundTripped.dispatch_id).toBe("did-1");
+      expect(roundTripped.dispatch?.id).toBe("did-1");
     });
   });
 
@@ -342,10 +349,10 @@ describe("yaml-lifecycle", () => {
       writeIssue(repoRoot, original);
 
       const updated = stampDispatchAndWrite(repoRoot, original, "did-2");
-      expect(updated.dispatch_id).toBe("did-2");
+      expect(updated.dispatch?.id).toBe("did-2");
 
       const reloaded = loadLocal(repoRoot, "ISS-13");
-      expect(reloaded?.dispatch_id).toBe("did-2");
+      expect(reloaded?.dispatch?.id).toBe("did-2");
     });
   });
 

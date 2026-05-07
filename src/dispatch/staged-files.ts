@@ -317,7 +317,7 @@ export function prepareStagedFiles(
       );
     }
 
-    const obj = entry as Record<string, unknown>;
+    const obj = entry as unknown as Record<string, unknown>;
     if (isContentEntry(obj)) {
       return {
         kind: "content" as const,

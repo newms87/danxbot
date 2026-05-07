@@ -77,10 +77,107 @@ export interface IssueComment {
   text: string;
 }
 
-export interface IssueTriaged {
+/**
+ * ICE score (Impact × Confidence × Ease) — populated by the triage agent.
+ * Each axis is 0 (unscored) or 1-5; `total` is `i × c × e` cached for the
+ * dispatch sort path so it doesn't recompute on every tick.
+ */
+export interface IssueIce {
+  total: number;
+  i: number;
+  c: number;
+  e: number;
+}
+
+/**
+ * One historical triage decision. The triage agent appends one of these to
+ * `triage.history[]` every time it touches the card, capping at 10 entries
+ * (oldest dropped on overflow). `last_*` fields on `IssueTriage` mirror the
+ * most recent entry for fast read-back without walking the array.
+ */
+export interface IssueTriageHistoryEntry {
   timestamp: string;
   status: string;
   explain: string;
+  expires_at: string;
+  ice: IssueIce;
+}
+
+/**
+ * Per-card triage record.
+ *
+ * Replaces the older flat `IssueTriaged {timestamp, status, explain}` block
+ * with a TTL-driven structure so the poller can re-triage stale cards on a
+ * cadence (Phase 1 of the poller-triage rework, ISS-90 / ISS-91).
+ *
+ *  - `expires_at`: ISO 8601 — when this triage decision needs re-evaluation.
+ *    Empty string forces re-triage on the next poll (newly hydrated cards
+ *    and post-migration cards default to `""`).
+ *  - `reassess_hint`: 1-line note from the previous triage agent describing
+ *    how the next agent can re-check quickly (e.g. "If gpt-manager has
+ *    deployed, can demote to ToDo").
+ *  - `last_status` / `last_explain`: the most recent decision (mirror of
+ *    `history[history.length-1]`) so callers don't walk the array for hot
+ *    reads. Allowed values for `last_status` are agent-determined — today
+ *    one of `Keep | Cancel | Approve | Demote | Confirm-Block`, but the
+ *    schema enforces only "string", so future agents can extend without a
+ *    schema bump.
+ *  - `ice`: most recent ICE score. Mirrors `history[history.length-1].ice`.
+ *  - `history`: append-only audit log capped at 10 entries (oldest dropped
+ *    on overflow). Used for "why was this card recently confirmed-blocked"
+ *    diagnostics and the dashboard's triage timeline.
+ */
+export interface IssueTriage {
+  expires_at: string;
+  reassess_hint: string;
+  last_status: string;
+  last_explain: string;
+  ice: IssueIce;
+  history: IssueTriageHistoryEntry[];
+}
+
+/**
+ * Single source of truth for "has this card been triaged?" — used by every
+ * tracker implementation (`MemoryTracker`, `TrelloTracker`) and the outbound
+ * sync layer (`syncIssue`) to derive the `triaged` managed-label boolean.
+ *
+ * A card counts as triaged when EITHER:
+ *  - `last_status` is non-empty (the triage agent recorded its most recent
+ *    decision), OR
+ *  - `history[]` is non-empty (a decision was recorded but `last_status`
+ *    was cleared by a malformed write — the audit log is the fallback
+ *    source of truth).
+ *
+ * Three call sites used to compute this inline with two slightly different
+ * rules; consolidating the logic here keeps tracker implementations and
+ * the sync-layer label diff in lockstep so a future agent that writes
+ * only to `history[]` (or only `last_*`) doesn't trigger label drift.
+ */
+export function isTriaged(t: IssueTriage): boolean {
+  return t.last_status !== "" || t.history.length > 0;
+}
+
+/**
+ * Active dispatch tracking — replaces the bare `dispatch_id: string|null`
+ * field. Populated by the poller when it spawns a Claude Code process for
+ * the card; cleared when the dispatch terminates. Phase 2 of the
+ * poller-triage rework adds PID-based liveness + reattach-on-restart;
+ * Phase 1 (this card) just lands the schema shape so consumers can read
+ * the new fields without a second migration.
+ */
+export interface IssueDispatch {
+  /** Poller-generated UUID. Unique across the dispatch's lifetime. */
+  id: string;
+  /** OS PID on the host running the dispatched Claude process. 0 = unknown. */
+  pid: number;
+  /** Hostname for cross-host correlation. Empty = unknown. */
+  host: string;
+  /** Which dispatch class is occupying this slot. */
+  kind: "work" | "triage";
+  /** ISO 8601 dispatch start. Empty = unknown. */
+  started_at: string;
+  /** Liveness threshold (seconds). Phase 2 enforces; Phase 1 ignores. */
+  ttl_seconds: number;
 }
 
 export interface IssueRetro {
@@ -145,7 +242,7 @@ export interface Issue {
    */
   external_id: string;
   /**
-   * `parent_id` and `dispatch_id` are local-only metadata managed by the
+   * `parent_id` and `dispatch` are local-only metadata managed by the
    * poller and the danx_issue_create flow. `parent_id` references the
    * parent issue's `id` (NOT `external_id`). The tracker abstraction has
    * no place to store them, so sync passes them through verbatim.
@@ -169,12 +266,28 @@ export interface Issue {
    * the `danx_issue_create` flow when a new child card is created.
    */
   children: string[];
-  dispatch_id: string | null;
+  /**
+   * Active dispatch record OR null when no dispatch is in flight. Replaces
+   * the bare `dispatch_id: string|null` schema (retired with the
+   * poller-triage rework). Phase 1 introduces the field and migrates every
+   * existing YAML; Phase 2 begins populating PID + host on every spawn.
+   * The tracker abstraction never sees `dispatch` — it's local-only
+   * metadata, same as `parent_id` / `children`.
+   */
+  dispatch: IssueDispatch | null;
   status: IssueStatus;
   type: IssueType;
   title: string;
   description: string;
-  triaged: IssueTriaged;
+  /**
+   * Per-card triage record. Replaces the older flat
+   * `triaged: {timestamp, status, explain}` block. Newly hydrated cards
+   * (poller hydration + agent-create) get a fully empty `triage` (every
+   * field empty string / 0; `history: []`); the triage agent populates on
+   * first triage. `expires_at: ""` forces re-triage on the next poll —
+   * the migration script uses this to backfill every existing open card.
+   */
+  triage: IssueTriage;
   ac: IssueAcItem[];
   comments: IssueComment[];
   retro: IssueRetro;
@@ -190,9 +303,9 @@ export interface Issue {
    * TRANSIENT, tracker-derived projection of the card's managed labels.
    * Populated by `tracker.getCard()` so `syncIssue`'s outbound label diff
    * can compare against the actual remote label state (the only source of
-   * truth on Trello — `triaged` / `blocked` data fields don't round-trip).
+   * truth on Trello — `triage` / `blocked` data fields don't round-trip).
    * NEVER serialized to YAML and NEVER written by agents — the local
-   * YAML's `status` / `type` / `triaged.timestamp` / `blocked` fields are
+   * YAML's `status` / `type` / `triage.last_status` / `blocked` fields are
    * the source of truth, and `labels` is recomputed from those at sync
    * time. `parseIssue` ignores it on disk; `serializeIssue` never emits
    * it.
@@ -218,7 +331,7 @@ export interface CreateCardInput {
   type: IssueType;
   title: string;
   description: string;
-  triaged: IssueTriaged;
+  triage: IssueTriage;
   ac: Array<{ title: string; checked: boolean }>;
   comments: IssueComment[];
   retro: IssueRetro;
@@ -231,7 +344,7 @@ export interface CreateCardInput {
 
 /**
  * The set of "managed" labels danxbot owns on every card. The poller / sync
- * layer derives these booleans from the local YAML's `status`, `triaged`,
+ * layer derives these booleans from the local YAML's `status`, `triage`,
  * and `blocked` fields and pushes via `setLabels`. Labels not in this set
  * (operator-applied labels) are preserved by tracker implementations'
  * `setLabels` filter.

@@ -30,11 +30,11 @@ Current repo only.
      - `id: ""` (worker assigns the next `ISS-N` — drafts with non-empty `id` are REJECTED)
      - `parent_id: null`
      - `children: []`
-     - `dispatch_id: null`
+     - `dispatch: null`
      - `status: "Review"`
      - `type: "Feature"` (or `"Bug"` for bug drafts)
      - `title`, `description` populated
-     - `triaged: {timestamp: "", status: "", explain: ""}`
+     - `triage: {expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: {total: 0, i: 0, c: 0, e: 0}, history: []}`
      - `ac: [{check_item_id: "", title: "...", checked: false}, ...]`
      - `comments: []`
      - `retro: {good: "", bad: "", action_item_ids: [], commits: []}`

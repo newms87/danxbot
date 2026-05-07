@@ -6,6 +6,7 @@ import {
   serializeIssue,
   validateIssue,
 } from "../../issue-tracker/yaml.js";
+import { isTriaged } from "../../issue-tracker/interface.js";
 import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
@@ -16,12 +17,12 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     external_id: "card-1",
     parent_id: null,
     children: [],
-    dispatch_id: null,
+    dispatch: null,
     status: "ToDo",
     type: "Feature",
     title: "Do the thing",
     description: "A longer body",
-    triaged: { timestamp: "", status: "", explain: "" },
+    triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [{ check_item_id: "ac-1", title: "Returns 200", checked: false }],
     comments: [
       {
@@ -59,12 +60,12 @@ describe("serializeIssue / parseIssue", () => {
     expect(serializeIssue(parsed)).toBe(yaml);
   });
 
-  it("preserves null parent_id and dispatch_id through round-trip", () => {
-    const issue = fullIssue({ parent_id: null, dispatch_id: null });
+  it("preserves null parent_id and dispatch through round-trip", () => {
+    const issue = fullIssue({ parent_id: null, dispatch: null });
     const yaml = serializeIssue(issue);
     const parsed = parseIssue(yaml);
     expect(parsed.parent_id).toBeNull();
-    expect(parsed.dispatch_id).toBeNull();
+    expect(parsed.dispatch).toBeNull();
   });
 
   describe("blocked field", () => {
@@ -130,15 +131,22 @@ describe("serializeIssue / parseIssue", () => {
     });
   });
 
-  it("preserves string parent_id and dispatch_id", () => {
+  it("preserves string parent_id and dispatch record", () => {
     const issue = fullIssue({
       parent_id: "epic-100",
-      dispatch_id: "abc-uuid",
+      dispatch: {
+        id: "abc-uuid",
+        pid: 12345,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-07T00:00:00Z",
+        ttl_seconds: 600,
+      },
     });
     const yaml = serializeIssue(issue);
     const parsed = parseIssue(yaml);
     expect(parsed.parent_id).toBe("epic-100");
-    expect(parsed.dispatch_id).toBe("abc-uuid");
+    expect(parsed.dispatch).toEqual(issue.dispatch);
   });
 
   it("omits id field for local-only comments and preserves it for tracker-known comments", () => {
@@ -177,12 +185,12 @@ describe("serializeIssue / parseIssue", () => {
       'external_id: "ext-1"',
       "parent_id: null",
       "children: []",
-      "dispatch_id: null",
+      "dispatch: null",
       "status: ToDo",
       "type: Feature",
       "title: legacy",
       "description: body",
-      "triaged: { timestamp: '', status: '', explain: '' }",
+      "triage: { expires_at: '', reassess_hint: '', last_status: '', last_explain: '', ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] }",
       "ac: []",
       "phases:",
       "  - check_item_id: chk-1",
@@ -227,12 +235,12 @@ describe("validateIssue", () => {
       external_id: "x1",
       parent_id: null,
       children: [],
-      dispatch_id: null,
+      dispatch: null,
       status: "Review",
       type: "Bug",
       title: "T",
       description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -259,8 +267,12 @@ describe("validateIssue", () => {
     const result = validateIssue({});
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      // After Fix 1 description, triaged, ac, comments, retro are
-      // ALL required (no silent defaults).
+      // After Fix 1 description, triage, ac, comments, retro are ALL
+      // required (no silent defaults). `dispatch` is intentionally NOT
+      // listed here — a missing field defaults to null at parse time
+      // for back-compat with pre-rework YAMLs that pre-date the field
+      // entirely. Validation enforces the structured shape only when
+      // the field is present.
       expect(result.errors).toEqual(
         expect.arrayContaining([
           expect.stringContaining("schema_version"),
@@ -269,12 +281,11 @@ describe("validateIssue", () => {
           expect.stringContaining("external_id"),
           expect.stringContaining("parent_id"),
           expect.stringContaining("children"),
-          expect.stringContaining("dispatch_id"),
           expect.stringContaining("status"),
           expect.stringContaining("type"),
           expect.stringContaining("title"),
           expect.stringContaining("description"),
-          expect.stringContaining("triaged"),
+          expect.stringContaining("triage"),
           expect.stringContaining("ac"),
           expect.stringContaining("comments"),
           expect.stringContaining("retro"),
@@ -293,13 +304,48 @@ describe("validateIssue", () => {
     }
   });
 
-  it("rejects missing triaged specifically", () => {
+  it("rejects missing triage specifically", () => {
     const input = valid();
-    delete input.triaged;
+    delete input.triage;
     const result = validateIssue(input);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors).toContain("missing required field: triaged");
+      expect(result.errors).toContain("missing required field: triage");
+    }
+  });
+
+  it("rejects a YAML carrying the legacy `triaged` field with a migration pointer", () => {
+    const input = valid();
+    delete input.triage;
+    (input as Record<string, unknown>).triaged = {
+      timestamp: "2026-04-01T00:00:00Z",
+      status: "ToDo",
+      explain: "legacy",
+    };
+    const result = validateIssue(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain(
+        "Legacy `triaged` field is no longer supported",
+      );
+      expect(result.errors.join("\n")).toContain(
+        "scripts/migrate-issues-to-triage-v3.ts",
+      );
+    }
+  });
+
+  it("rejects a YAML carrying the legacy `dispatch_id` field with a migration pointer", () => {
+    const input = valid();
+    (input as Record<string, unknown>).dispatch_id = "abc";
+    const result = validateIssue(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.join("\n")).toContain(
+        "Legacy `dispatch_id` field is no longer supported",
+      );
+      expect(result.errors.join("\n")).toContain(
+        "scripts/migrate-issues-to-triage-v3.ts",
+      );
     }
   });
 
@@ -511,12 +557,12 @@ describe("children field (v3 epic → phase linkage)", () => {
       external_id: "x1",
       parent_id: null,
       children: [],
-      dispatch_id: null,
+      dispatch: null,
       status: "ToDo",
       type: "Epic",
       title: "T",
       description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -629,7 +675,7 @@ describe("createEmptyIssue", () => {
     expect(issue.title).toBe("Hello");
     expect(issue.description).toBe("Body");
     expect(issue.parent_id).toBeNull();
-    expect(issue.dispatch_id).toBeNull();
+    expect(issue.dispatch).toBeNull();
     expect(issue.ac).toEqual([]);
     expect(issue.comments).toEqual([]);
     expect(issue.retro).toEqual({
@@ -665,12 +711,12 @@ describe("serializeIssue byte-stable snapshot", () => {
       external_id: "card-99",
       parent_id: null,
       children: ["ISS-100", "ISS-101"],
-      dispatch_id: null,
+      dispatch: null,
       status: "In Progress",
       type: "Feature",
       title: "Canonical fixture",
       description: "First line of description.\nSecond line, with detail.",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [
         { check_item_id: "ac-1", title: "Returns 200", checked: false },
         { check_item_id: "ac-2", title: "Handles errors", checked: true },
@@ -701,17 +747,24 @@ describe("serializeIssue byte-stable snapshot", () => {
       children:
         - ISS-100
         - ISS-101
-      dispatch_id: null
+      dispatch: null
       status: In Progress
       type: Feature
       title: Canonical fixture
       description: |-
         First line of description.
         Second line, with detail.
-      triaged:
-        timestamp: ""
-        status: ""
-        explain: ""
+      triage:
+        expires_at: ""
+        reassess_hint: ""
+        last_status: ""
+        last_explain: ""
+        ice:
+          total: 0
+          i: 0
+          c: 0
+          e: 0
+        history: []
       ac:
         - check_item_id: ac-1
           title: Returns 200
@@ -735,5 +788,385 @@ describe("serializeIssue byte-stable snapshot", () => {
       blocked: null
       "
     `);
+  });
+});
+
+// ---- validateIssue: dispatch + triage branch coverage (ISS-91) ----
+
+describe("validateIssue dispatch", () => {
+  function withDispatch(value: unknown): Record<string, unknown> {
+    const base = JSON.parse(JSON.stringify(fullIssue())) as Record<
+      string,
+      unknown
+    >;
+    base.dispatch = value;
+    return base;
+  }
+
+  it("accepts dispatch: null explicitly", () => {
+    const result = validateIssue(withDispatch(null));
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts a fully-populated dispatch record", () => {
+    const result = validateIssue(
+      withDispatch({
+        id: "abc-uuid",
+        pid: 1234,
+        host: "host.local",
+        kind: "work",
+        started_at: "2026-05-07T00:00:00Z",
+        ttl_seconds: 60,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.dispatch?.id).toBe("abc-uuid");
+      expect(result.issue.dispatch?.kind).toBe("work");
+    }
+  });
+
+  it("accepts kind: 'triage' (Phase 2 forward-compat)", () => {
+    const result = validateIssue(
+      withDispatch({
+        id: "x",
+        pid: 0,
+        host: "",
+        kind: "triage",
+        started_at: "",
+        ttl_seconds: 0,
+      }),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects empty-string dispatch.id", () => {
+    const result = validateIssue(
+      withDispatch({
+        id: "",
+        pid: 0,
+        host: "",
+        kind: "work",
+        started_at: "",
+        ttl_seconds: 0,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("dispatch.id must be a non-empty string");
+    }
+  });
+
+  it("rejects non-string dispatch.id", () => {
+    const result = validateIssue(
+      withDispatch({
+        id: 42,
+        pid: 0,
+        host: "",
+        kind: "work",
+        started_at: "",
+        ttl_seconds: 0,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("dispatch.id must be a non-empty string");
+    }
+  });
+
+  it("rejects non-number dispatch.pid", () => {
+    const result = validateIssue(
+      withDispatch({
+        id: "x",
+        pid: "1234",
+        host: "",
+        kind: "work",
+        started_at: "",
+        ttl_seconds: 0,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("dispatch.pid must be a number");
+    }
+  });
+
+  it("rejects invalid dispatch.kind enum value", () => {
+    const result = validateIssue(
+      withDispatch({
+        id: "x",
+        pid: 0,
+        host: "",
+        kind: "wokr",
+        started_at: "",
+        ttl_seconds: 0,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => e.startsWith("dispatch.kind must be one of")),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects non-string dispatch.kind", () => {
+    const result = validateIssue(
+      withDispatch({
+        id: "x",
+        pid: 0,
+        host: "",
+        kind: 42,
+        started_at: "",
+        ttl_seconds: 0,
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("dispatch.kind must be a string");
+    }
+  });
+
+  it("rejects non-number dispatch.ttl_seconds", () => {
+    const result = validateIssue(
+      withDispatch({
+        id: "x",
+        pid: 0,
+        host: "",
+        kind: "work",
+        started_at: "",
+        ttl_seconds: "60",
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("dispatch.ttl_seconds must be a number");
+    }
+  });
+
+  it("rejects empty dispatch object (missing required fields)", () => {
+    const result = validateIssue(withDispatch({}));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // First missing field surfaces; subsequent checks short-circuit on
+      // earlier failures, so we only assert SOMETHING was reported.
+      expect(result.errors.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("rejects dispatch as a non-mapping (e.g. string)", () => {
+    const result = validateIssue(withDispatch("not-an-object"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("dispatch must be a mapping or null");
+    }
+  });
+});
+
+describe("validateIssue triage", () => {
+  function withTriage(value: unknown): Record<string, unknown> {
+    const base = JSON.parse(JSON.stringify(fullIssue())) as Record<
+      string,
+      unknown
+    >;
+    base.triage = value;
+    return base;
+  }
+
+  it("normalizes triage: null to a fully-empty IssueTriage", () => {
+    const result = validateIssue(withTriage(null));
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.triage).toEqual({
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      });
+    }
+  });
+
+  it("rejects triage as a non-mapping", () => {
+    const result = validateIssue(withTriage("not-an-object"));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("triage must be a mapping");
+    }
+  });
+
+  it("rejects non-string triage.expires_at", () => {
+    const result = validateIssue(
+      withTriage({
+        expires_at: 42,
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("triage.expires_at must be a string");
+    }
+  });
+
+  it("rejects non-number triage.ice.i", () => {
+    const result = validateIssue(
+      withTriage({
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: "1", c: 0, e: 0 },
+        history: [],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("triage.ice.i must be a number");
+    }
+  });
+
+  it("rejects triage.history as a non-array", () => {
+    const result = validateIssue(
+      withTriage({
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: "nope",
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("triage.history must be a list");
+    }
+  });
+
+  it("rejects history entry that isn't a mapping", () => {
+    const result = validateIssue(
+      withTriage({
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: ["not-an-object"],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("triage.history[0] must be a mapping");
+    }
+  });
+
+  it("silently slices triage.history beyond TRIAGE_HISTORY_CAP (10)", () => {
+    const big = Array.from({ length: 13 }, (_, i) => ({
+      timestamp: `t-${i}`,
+      status: "Keep",
+      explain: `decision ${i}`,
+      expires_at: "",
+      ice: { total: 0, i: 0, c: 0, e: 0 },
+    }));
+    const result = validateIssue(
+      withTriage({
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "Keep",
+        last_explain: "x",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: big,
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // Cap to 10; oldest entries (indices 0-2) dropped.
+      expect(result.issue.triage.history).toHaveLength(10);
+      expect(result.issue.triage.history[0].timestamp).toBe("t-3");
+      expect(result.issue.triage.history[9].timestamp).toBe("t-12");
+    }
+  });
+
+  it("round-trips a fully-populated triage with multiple history entries", () => {
+    const populated: Issue = fullIssue({
+      triage: {
+        expires_at: "2026-05-08T00:00:00Z",
+        reassess_hint: "if X has shipped, demote",
+        last_status: "Confirm-Block",
+        last_explain: "still waiting on prod deploy",
+        ice: { total: 60, i: 4, c: 5, e: 3 },
+        history: [
+          {
+            timestamp: "2026-05-01T00:00:00Z",
+            status: "Keep",
+            explain: "promising",
+            expires_at: "2026-05-02T00:00:00Z",
+            ice: { total: 30, i: 3, c: 5, e: 2 },
+          },
+          {
+            timestamp: "2026-05-07T00:00:00Z",
+            status: "Confirm-Block",
+            explain: "still waiting on prod deploy",
+            expires_at: "2026-05-08T00:00:00Z",
+            ice: { total: 60, i: 4, c: 5, e: 3 },
+          },
+        ],
+      },
+    });
+    const yaml = serializeIssue(populated);
+    const parsed = parseIssue(yaml);
+    expect(parsed).toEqual(populated);
+  });
+});
+
+describe("isTriaged helper", () => {
+  function tri(overrides: {
+    last_status?: string;
+    history?: Array<{
+      timestamp: string;
+      status: string;
+      explain: string;
+      expires_at: string;
+      ice: { total: number; i: number; c: number; e: number };
+    }>;
+  } = {}) {
+    return {
+      expires_at: "",
+      reassess_hint: "",
+      last_status: overrides.last_status ?? "",
+      last_explain: "",
+      ice: { total: 0, i: 0, c: 0, e: 0 },
+      history: overrides.history ?? [],
+    };
+  }
+
+  it("is false when last_status is empty AND history is empty", () => {
+    expect(isTriaged(tri())).toBe(false);
+  });
+
+  it("is true when last_status is non-empty", () => {
+    expect(isTriaged(tri({ last_status: "Keep" }))).toBe(true);
+  });
+
+  it("is true when history is non-empty (even with empty last_status — fallback path)", () => {
+    expect(
+      isTriaged(
+        tri({
+          history: [
+            {
+              timestamp: "t",
+              status: "Keep",
+              explain: "x",
+              expires_at: "",
+              ice: { total: 0, i: 0, c: 0, e: 0 },
+            },
+          ],
+        }),
+      ),
+    ).toBe(true);
   });
 });

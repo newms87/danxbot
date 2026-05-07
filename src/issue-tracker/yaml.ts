@@ -11,11 +11,32 @@ import {
   type IssueAcItem,
   type IssueBlocked,
   type IssueComment,
+  type IssueDispatch,
+  type IssueIce,
   type IssueRetro,
   type IssueStatus,
-  type IssueTriaged,
+  type IssueTriage,
+  type IssueTriageHistoryEntry,
   type IssueType,
 } from "./interface.js";
+
+const TRIAGE_HISTORY_CAP = 10;
+const VALID_DISPATCH_KINDS: ReadonlySet<string> = new Set(["work", "triage"]);
+
+function emptyIce(): IssueIce {
+  return { total: 0, i: 0, c: 0, e: 0 };
+}
+
+function emptyTriage(): IssueTriage {
+  return {
+    expires_at: "",
+    reassess_hint: "",
+    last_status: "",
+    last_explain: "",
+    ice: emptyIce(),
+    history: [],
+  };
+}
 
 /**
  * Build a fully-populated minimal Issue from a small seed. Every required
@@ -28,12 +49,12 @@ import {
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
- *  - parent_id, dispatch_id: null
+ *  - parent_id: null, dispatch: null
  *  - children: []
  *  - status: "ToDo"
  *  - type: "Feature"
  *  - title, description: ""
- *  - triaged: { timestamp: "", status: "", explain: "" }
+ *  - triage: empty (every field "" / 0; history: []) — re-triages on next poll
  *  - ac, comments: []
  *  - retro: { good: "", bad: "", action_item_ids: [], commits: [] }
  */
@@ -54,12 +75,12 @@ export function createEmptyIssue(
     external_id: seed.external_id ?? "",
     parent_id: null,
     children: [],
-    dispatch_id: null,
+    dispatch: null,
     status: seed.status ?? "ToDo",
     type: seed.type ?? "Feature",
     title: seed.title ?? "",
     description: seed.description ?? "",
-    triaged: { timestamp: "", status: "", explain: "" },
+    triage: emptyTriage(),
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -89,15 +110,39 @@ export function serializeIssue(issue: Issue): string {
     external_id: issue.external_id,
     parent_id: issue.parent_id,
     children: [...issue.children],
-    dispatch_id: issue.dispatch_id,
+    dispatch:
+      issue.dispatch === null
+        ? null
+        : {
+            id: issue.dispatch.id,
+            pid: issue.dispatch.pid,
+            host: issue.dispatch.host,
+            kind: issue.dispatch.kind,
+            started_at: issue.dispatch.started_at,
+            ttl_seconds: issue.dispatch.ttl_seconds,
+          },
     status: issue.status,
     type: issue.type,
     title: issue.title,
     description: issue.description,
-    triaged: {
-      timestamp: issue.triaged.timestamp,
-      status: issue.triaged.status,
-      explain: issue.triaged.explain,
+    triage: {
+      expires_at: issue.triage.expires_at,
+      reassess_hint: issue.triage.reassess_hint,
+      last_status: issue.triage.last_status,
+      last_explain: issue.triage.last_explain,
+      ice: {
+        total: issue.triage.ice.total,
+        i: issue.triage.ice.i,
+        c: issue.triage.ice.c,
+        e: issue.triage.ice.e,
+      },
+      history: issue.triage.history.map((h) => ({
+        timestamp: h.timestamp,
+        status: h.status,
+        explain: h.explain,
+        expires_at: h.expires_at,
+        ice: { total: h.ice.total, i: h.ice.i, c: h.ice.c, e: h.ice.e },
+      })),
     },
     ac: issue.ac.map((item) => ({
       check_item_id: item.check_item_id,
@@ -181,8 +226,8 @@ export const ISSUE_ID_REGEX = /^ISS-\d+$/;
  * `danx_issue_create` (worker route), poller orphan-push, and `syncIssue`'s
  * orphan-recovery branch — all funnel through this one function.
  *
- * `dispatch_id` is intentionally omitted — local-only metadata managed by
- * the poller; the tracker abstraction has no place to store it.
+ * `dispatch` is intentionally omitted — local-only metadata managed by the
+ * poller; the tracker abstraction has no place to store it.
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
@@ -195,7 +240,7 @@ export function issueToCreateInput(issue: Issue): CreateCardInput {
     type: issue.type,
     title: issue.title,
     description: issue.description,
-    triaged: { ...issue.triaged },
+    triage: cloneTriage(issue.triage),
     ac: issue.ac.map((a) => ({ title: a.title, checked: a.checked })),
     comments: issue.comments.map((c) => ({ ...c })),
     retro: {
@@ -204,6 +249,23 @@ export function issueToCreateInput(issue: Issue): CreateCardInput {
       action_item_ids: [...issue.retro.action_item_ids],
       commits: [...issue.retro.commits],
     },
+  };
+}
+
+function cloneTriage(t: IssueTriage): IssueTriage {
+  return {
+    expires_at: t.expires_at,
+    reassess_hint: t.reassess_hint,
+    last_status: t.last_status,
+    last_explain: t.last_explain,
+    ice: { total: t.ice.total, i: t.ice.i, c: t.ice.c, e: t.ice.e },
+    history: t.history.map((h) => ({
+      timestamp: h.timestamp,
+      status: h.status,
+      explain: h.explain,
+      expires_at: h.expires_at,
+      ice: { total: h.ice.total, i: h.ice.i, c: h.ice.c, e: h.ice.e },
+    })),
   };
 }
 
@@ -302,12 +364,28 @@ export function validateIssue(value: unknown): ValidateResult {
     else childrenResult = r;
   }
 
-  // dispatch_id
-  if (!("dispatch_id" in v)) {
-    errors.push("missing required field: dispatch_id");
-  } else if (v.dispatch_id !== null && typeof v.dispatch_id !== "string") {
-    errors.push("dispatch_id must be a string or null");
+  // dispatch — required object (or null when no active dispatch). Replaces
+  // the legacy `dispatch_id: string|null` field. Legacy YAMLs that still
+  // carry `dispatch_id` are rejected with a migration pointer — running
+  // `scripts/migrate-issues-to-triage-v3.ts` upgrades every YAML in one
+  // shot. The presence check ALWAYS rejects (even when both fields are
+  // present) so a half-migrated YAML with both legacy + new fields fails
+  // loud instead of silently picking one.
+  if ("dispatch_id" in v) {
+    errors.push(
+      "Legacy `dispatch_id` field is no longer supported — run scripts/migrate-issues-to-triage-v3.ts to convert to the structured `dispatch` block",
+    );
   }
+  let dispatchResult: IssueDispatch | null = null;
+  if ("dispatch" in v) {
+    const r = validateDispatch(v.dispatch);
+    if (typeof r === "string") errors.push(r);
+    else dispatchResult = r;
+  }
+  // Old YAMLs that pre-date both fields parse with dispatch: null —
+  // tolerated here so test fixtures that omit the field don't have to
+  // be rebuilt. Strict callers can pass through `validateIssue` once
+  // and re-emit via `serializeIssue` to get the canonical shape.
 
   // status
   if (!("status" in v)) {
@@ -344,14 +422,25 @@ export function validateIssue(value: unknown): ValidateResult {
     description = v.description;
   }
 
-  // triaged — required.
-  let triaged: IssueTriaged | null = null;
-  if (!("triaged" in v)) {
-    errors.push("missing required field: triaged");
+  // triage — required object. Replaces the legacy flat
+  // `triaged: {timestamp, status, explain}` block. Legacy YAMLs that
+  // still carry `triaged` are rejected with a migration pointer
+  // regardless of whether `triage` is also present, so a half-migrated
+  // YAML with both fields fails loud instead of silently picking one.
+  if ("triaged" in v) {
+    errors.push(
+      "Legacy `triaged` field is no longer supported — run scripts/migrate-issues-to-triage-v3.ts to convert to the structured `triage` block",
+    );
+  }
+  let triageResult: IssueTriage | null = null;
+  if (!("triage" in v)) {
+    if (!("triaged" in v)) {
+      errors.push("missing required field: triage");
+    }
   } else {
-    const r = validateTriaged(v.triaged);
+    const r = validateTriage(v.triage);
     if (typeof r === "string") errors.push(r);
-    else triaged = r;
+    else triageResult = r;
   }
 
   // ac — required.
@@ -415,12 +504,12 @@ export function validateIssue(value: unknown): ValidateResult {
     external_id: v.external_id as string,
     parent_id: v.parent_id as string | null,
     children: childrenResult as string[],
-    dispatch_id: v.dispatch_id as string | null,
+    dispatch: dispatchResult,
     status: v.status as IssueStatus,
     type: v.type as IssueType,
     title: v.title as string,
     description: description as string,
-    triaged: triaged as IssueTriaged,
+    triage: triageResult as IssueTriage,
     ac: acResult as IssueAcItem[],
     comments: commentsResult as IssueComment[],
     retro: retroResult as IssueRetro,
@@ -429,27 +518,130 @@ export function validateIssue(value: unknown): ValidateResult {
   return { ok: true, issue };
 }
 
-function validateTriaged(value: unknown): IssueTriaged | string {
+function validateTriage(value: unknown): IssueTriage | string {
   // null is permitted at the YAML level and means "no triage record yet" —
-  // it normalizes to a fully-empty IssueTriaged.
-  if (value === null) {
-    return { timestamp: "", status: "", explain: "" };
-  }
-  if (!isPlainObject(value)) return "triaged must be a mapping";
+  // it normalizes to a fully-empty IssueTriage.
+  if (value === null) return emptyTriage();
+  if (!isPlainObject(value)) return "triage must be a mapping";
   const v = value as Record<string, unknown>;
-  if (v.timestamp !== undefined && typeof v.timestamp !== "string") {
-    return "triaged.timestamp must be a string";
+  if (v.expires_at !== undefined && typeof v.expires_at !== "string") {
+    return "triage.expires_at must be a string";
   }
-  if (v.status !== undefined && typeof v.status !== "string") {
-    return "triaged.status must be a string";
+  if (v.reassess_hint !== undefined && typeof v.reassess_hint !== "string") {
+    return "triage.reassess_hint must be a string";
   }
-  if (v.explain !== undefined && typeof v.explain !== "string") {
-    return "triaged.explain must be a string";
+  if (v.last_status !== undefined && typeof v.last_status !== "string") {
+    return "triage.last_status must be a string";
+  }
+  if (v.last_explain !== undefined && typeof v.last_explain !== "string") {
+    return "triage.last_explain must be a string";
+  }
+  let ice = emptyIce();
+  if (v.ice !== undefined && v.ice !== null) {
+    const r = validateIce(v.ice, "triage.ice");
+    if (typeof r === "string") return r;
+    ice = r;
+  }
+  let history: IssueTriageHistoryEntry[] = [];
+  if (v.history !== undefined && v.history !== null) {
+    const r = validateTriageHistory(v.history);
+    if (typeof r === "string") return r;
+    history = r;
   }
   return {
-    timestamp: typeof v.timestamp === "string" ? v.timestamp : "",
-    status: typeof v.status === "string" ? v.status : "",
-    explain: typeof v.explain === "string" ? v.explain : "",
+    expires_at: typeof v.expires_at === "string" ? v.expires_at : "",
+    reassess_hint:
+      typeof v.reassess_hint === "string" ? v.reassess_hint : "",
+    last_status: typeof v.last_status === "string" ? v.last_status : "",
+    last_explain:
+      typeof v.last_explain === "string" ? v.last_explain : "",
+    ice,
+    history,
+  };
+}
+
+function validateIce(value: unknown, path: string): IssueIce | string {
+  if (!isPlainObject(value)) return `${path} must be a mapping`;
+  const v = value as Record<string, unknown>;
+  for (const key of ["total", "i", "c", "e"] as const) {
+    if (v[key] !== undefined && typeof v[key] !== "number") {
+      return `${path}.${key} must be a number`;
+    }
+  }
+  return {
+    total: typeof v.total === "number" ? v.total : 0,
+    i: typeof v.i === "number" ? v.i : 0,
+    c: typeof v.c === "number" ? v.c : 0,
+    e: typeof v.e === "number" ? v.e : 0,
+  };
+}
+
+function validateTriageHistory(
+  value: unknown,
+): IssueTriageHistoryEntry[] | string {
+  if (!Array.isArray(value)) return "triage.history must be a list";
+  const out: IssueTriageHistoryEntry[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    if (!isPlainObject(item)) {
+      return `triage.history[${i}] must be a mapping`;
+    }
+    const entry = item as Record<string, unknown>;
+    for (const key of ["timestamp", "status", "explain", "expires_at"] as const) {
+      if (entry[key] !== undefined && typeof entry[key] !== "string") {
+        return `triage.history[${i}].${key} must be a string`;
+      }
+    }
+    let ice = emptyIce();
+    if (entry.ice !== undefined && entry.ice !== null) {
+      const r = validateIce(entry.ice, `triage.history[${i}].ice`);
+      if (typeof r === "string") return r;
+      ice = r;
+    }
+    out.push({
+      timestamp: typeof entry.timestamp === "string" ? entry.timestamp : "",
+      status: typeof entry.status === "string" ? entry.status : "",
+      explain: typeof entry.explain === "string" ? entry.explain : "",
+      expires_at:
+        typeof entry.expires_at === "string" ? entry.expires_at : "",
+      ice,
+    });
+  }
+  // Cap at TRIAGE_HISTORY_CAP — drop oldest entries silently. The triage
+  // agent is supposed to maintain the cap on write, but we tolerate a
+  // legacy YAML with too many entries instead of failing parse.
+  if (out.length > TRIAGE_HISTORY_CAP) {
+    return out.slice(out.length - TRIAGE_HISTORY_CAP);
+  }
+  return out;
+}
+
+function validateDispatch(value: unknown): IssueDispatch | null | string {
+  if (value === null || value === undefined) return null;
+  if (!isPlainObject(value)) return "dispatch must be a mapping or null";
+  const v = value as Record<string, unknown>;
+  if (typeof v.id !== "string" || v.id.length === 0) {
+    return "dispatch.id must be a non-empty string";
+  }
+  if (typeof v.pid !== "number") return "dispatch.pid must be a number";
+  if (typeof v.host !== "string") return "dispatch.host must be a string";
+  if (typeof v.kind !== "string") return "dispatch.kind must be a string";
+  if (!VALID_DISPATCH_KINDS.has(v.kind)) {
+    return `dispatch.kind must be one of [${[...VALID_DISPATCH_KINDS].join(", ")}] (got ${JSON.stringify(v.kind)})`;
+  }
+  if (typeof v.started_at !== "string") {
+    return "dispatch.started_at must be a string";
+  }
+  if (typeof v.ttl_seconds !== "number") {
+    return "dispatch.ttl_seconds must be a number";
+  }
+  return {
+    id: v.id,
+    pid: v.pid,
+    host: v.host,
+    kind: v.kind as "work" | "triage",
+    started_at: v.started_at,
+    ttl_seconds: v.ttl_seconds,
   };
 }
 

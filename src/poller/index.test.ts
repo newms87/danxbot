@@ -251,12 +251,12 @@ const FAKE_ISSUE_FOR_TESTS = {
   external_id: "fake",
   parent_id: null,
   children: [],
-  dispatch_id: null,
+  dispatch: null,
   status: "ToDo" as const,
   type: "Feature" as const,
   title: "fake",
   description: "",
-  triaged: { timestamp: "", status: "", explain: "" },
+  triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
   ac: [],
   comments: [],
   retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -272,7 +272,7 @@ const mockHydrateFromRemote = vi
     ) => ({
       ...FAKE_ISSUE_FOR_TESTS,
       external_id: externalId,
-      dispatch_id: dispatchId,
+      dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
     }),
   );
 const mockLoadLocal = vi.fn().mockReturnValue(null);
@@ -283,7 +283,7 @@ const mockStampDispatchAndWrite = vi
   .mockImplementation(
     (_repo: string, issue: Record<string, unknown>, dispatchId: string) => ({
       ...issue,
-      dispatch_id: dispatchId,
+      dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
     }),
   );
 const mockEnsureIssuesDirs = vi.fn();
@@ -305,12 +305,12 @@ function refToFakeIssue(ref: IssueRef): Issue {
     external_id: ref.external_id,
     parent_id: null,
     children: [],
-    dispatch_id: null,
+    dispatch: null,
     status: ref.status,
     type: "Feature",
     title: ref.title,
     description: "",
-    triaged: { timestamp: "", status: "", explain: "" },
+    triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -496,12 +496,12 @@ const DEFAULT_GET_CARD_ISSUE = {
   external_id: "default-card",
   parent_id: null,
   children: [],
-  dispatch_id: null,
+  dispatch: null,
   status: "Done" as const,
   type: "Feature" as const,
   title: "default",
   description: "",
-  triaged: { timestamp: "", status: "", explain: "" },
+  triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
   ac: [],
   comments: [],
   retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -1723,12 +1723,12 @@ describe("poll — post-dispatch card-progress check", () => {
       external_id: externalId,
       parent_id: null,
       children: [],
-      dispatch_id: null,
+      dispatch: null,
       status,
       type: "Feature" as const,
       title,
       description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -2746,13 +2746,13 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ) => ({
         ...FAKE_ISSUE_FOR_TESTS,
         external_id: externalId,
-        dispatch_id: dispatchId,
+        dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
       }),
     );
     mockStampDispatchAndWrite.mockImplementation(
       (_repo: string, issue: Record<string, unknown>, dispatchId: string) => ({
         ...issue,
-        dispatch_id: dispatchId,
+        dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
       }),
     );
   });
@@ -2808,11 +2808,11 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     expect(writeArgs[0]).toBe(MOCK_REPO_CONTEXT.localPath);
     const writtenIssue = writeArgs[1] as {
       external_id: string;
-      dispatch_id: string;
+      dispatch: { id: string } | null;
     };
     expect(writtenIssue.external_id).toBe("card-uuid-w");
     const dispatchArg = mockDispatch.mock.calls[0][0] as { dispatchId: string };
-    expect(writtenIssue.dispatch_id).toBe(dispatchArg.dispatchId);
+    expect(writtenIssue.dispatch?.id).toBe(dispatchArg.dispatchId);
   });
 
   it("stamps + writes YAML BEFORE dispatch() spawns the agent — ordering invariant", async () => {
@@ -2844,12 +2844,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       external_id: "card-cached",
       parent_id: null,
       children: [],
-      dispatch_id: "old",
+      dispatch: { id: "old", pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
       status: "ToDo",
       type: "Feature",
       title: "Cached",
       description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -3007,12 +3007,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       external_id: "card-uuid-3",
       parent_id: null,
       children: [],
-      dispatch_id: "old-dispatch",
+      dispatch: { id: "old-dispatch", pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
       status: "ToDo",
       type: "Feature",
       title: "Card 3",
       description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -3043,12 +3043,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       external_id: "card-block-1",
       parent_id: null,
       children: [],
-      dispatch_id: null,
+      dispatch: null,
       status: "ToDo",
       type: "Feature",
       title: "Blocked card",
       description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -3087,12 +3087,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       external_id: "card-block-2",
       parent_id: null,
       children: [],
-      dispatch_id: null,
+      dispatch: null,
       status: "ToDo",
       type: "Feature",
       title: "Now-unblocked card",
       description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -3175,12 +3175,22 @@ describe("poll — In Progress sync + orphan resume", () => {
       external_id: externalId,
       parent_id: null,
       children: [],
-      dispatch_id: dispatchId,
+      dispatch:
+        dispatchId === null
+          ? null
+          : {
+              id: dispatchId,
+              pid: 0,
+              host: "",
+              kind: "work" as const,
+              started_at: "",
+              ttl_seconds: 0,
+            },
       status: "In Progress" as const,
       type: "Feature" as const,
       title,
       description: "",
-      triaged: { timestamp: "", status: "", explain: "" },
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
@@ -3205,13 +3215,13 @@ describe("poll — In Progress sync + orphan resume", () => {
       ) => ({
         ...FAKE_ISSUE_FOR_TESTS,
         external_id: externalId,
-        dispatch_id: dispatchId,
+        dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
       }),
     );
     mockStampDispatchAndWrite.mockImplementation(
       (_repo: string, issue: Record<string, unknown>, dispatchId: string) => ({
         ...issue,
-        dispatch_id: dispatchId,
+        dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
       }),
     );
     mockGetActiveJob.mockReset();
@@ -3243,7 +3253,7 @@ describe("poll — In Progress sync + orphan resume", () => {
               ...FAKE_ISSUE_FOR_TESTS,
               external_id: "td-1",
               status: "ToDo",
-              dispatch_id: null,
+              dispatch: null,
             }
           : null,
     );
@@ -3372,7 +3382,12 @@ describe("poll — In Progress sync + orphan resume", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("skips orphan resume when In Progress card has no dispatch_id stamped", async () => {
+  it("orphan path with no dispatch stamp short-circuits before getActiveJob / resolveParentSessionId (resume not attempted, only reset)", async () => {
+    // Sibling of the "no dispatch stamp → reset to ToDo" behavior:
+    // the resume branch should NEVER fire when there's no dispatch.id
+    // to resume against — the helper has nothing to resolve. The
+    // reset-to-ToDo branch handles bookkeeping; this test pins that
+    // we don't waste a session-file lookup.
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("ip-bare", "Bare card", "In Progress"),
     ]);
@@ -3384,7 +3399,18 @@ describe("poll — In Progress sync + orphan resume", () => {
 
     expect(mockGetActiveJob).not.toHaveBeenCalled();
     expect(mockResolveParentSessionId).not.toHaveBeenCalled();
-    expect(mockDispatch).not.toHaveBeenCalled();
+    // Reset → ToDo bubbles into the dispatch pool on the SAME tick;
+    // with no other ToDo card, the bubbled card dispatches as a
+    // fresh (non-resume) dispatch.
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const arg = mockDispatch.mock.calls[0][0] as {
+      apiDispatchMeta: { metadata: { cardId: string } };
+      parentJobId?: string;
+      resumeSessionId?: string;
+    };
+    expect(arg.apiDispatchMeta.metadata.cardId).toBe("ip-bare");
+    expect(arg.parentJobId).toBeUndefined();
+    expect(arg.resumeSessionId).toBeUndefined();
   });
 
   it("resets In Progress → ToDo when the dispatch_id session file is gone, AND dispatches the reset card on the same tick (no resume)", async () => {
@@ -3416,10 +3442,10 @@ describe("poll — In Progress sync + orphan resume", () => {
     expect(reset).toBeDefined();
     const resetIssue = reset![1] as {
       status: string;
-      dispatch_id: string | null;
+      dispatch: { id: string } | null;
     };
     expect(resetIssue.status).toBe("ToDo");
-    expect(resetIssue.dispatch_id).toBeNull();
+    expect(resetIssue.dispatch).toBeNull();
     // The reset card is dispatched on the SAME tick as a fresh ToDo
     // (no resume — the parent session is gone). Single dispatch
     // invariant preserved (only one card was eligible).
@@ -3560,9 +3586,14 @@ describe("poll — In Progress sync + orphan resume", () => {
     expect(arg.parentJobId).toBe("uuid-resume");
   });
 
-  it("falls through to ToDo dispatch when no orphans are eligible", async () => {
+  it("resets In Progress card with no dispatch stamp to ToDo (orphan from agent that died before YAML stamp)", async () => {
+    // ISS-91 reproduction: card stuck in In Progress with `dispatch:
+    // null` (prior agent died before reaching writeIssue). Without the
+    // reset, the card sits in In Progress forever — the orphan-resume
+    // path needs a dispatch.id to resume against, and the ToDo
+    // dispatch path never sees the card.
     mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("ip-bare", "No dispatch_id", "In Progress"),
+      ref("ip-bare", "No dispatch stamp", "In Progress"),
       ref("td-fresh", "Fresh ToDo", "ToDo"),
     ]);
     mockFindByExternalId.mockImplementation(
@@ -3574,13 +3605,54 @@ describe("poll — In Progress sync + orphan resume", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
+    // Tracker move + local YAML reset both fire.
+    expect(mockTracker.moveToStatus).toHaveBeenCalledWith("ip-bare", "ToDo");
+    const writeCall = mockWriteIssueFn.mock.calls.find(
+      (c) => (c[1] as { external_id: string }).external_id === "ip-bare",
+    );
+    expect(writeCall).toBeDefined();
+    expect((writeCall![1] as { status: string }).status).toBe("ToDo");
+
+    // Single-dispatch invariant: pre-existing td-fresh wins this tick.
+    // ip-bare is appended to the dispatch pool and waits for next tick.
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const arg = mockDispatch.mock.calls[0][0] as {
+      apiDispatchMeta: { metadata: { cardId: string } };
       parentJobId?: string;
       resumeSessionId?: string;
     };
+    expect(arg.apiDispatchMeta.metadata.cardId).toBe("td-fresh");
     expect(arg.parentJobId).toBeUndefined();
     expect(arg.resumeSessionId).toBeUndefined();
+  });
+
+  it("does NOT reset In Progress no-dispatch card when dispatches DB shows live host_pid", async () => {
+    // Host-mode safety: a previous agent might still be running on the
+    // host even though it never reached the YAML stamp. The
+    // hasLiveDispatchForCard check prevents racing it.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-live", "No stamp but alive", "In Progress"),
+    ]);
+    mockFindByExternalId.mockReturnValue(
+      inProgressIssue("ISS-91", "ip-live", null),
+    );
+    // Simulate live host_pid via the underlying liveness probe.
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      {
+        id: "no-stamp-but-alive",
+        repoName: "test-repo",
+        trigger: "trello",
+        triggerMetadata: { cardId: "ip-live" },
+        status: "running",
+        hostPid: 99999,
+      },
+    ]);
+    mockIsPidAlive.mockImplementation((pid: number) => pid === 99999);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockTracker.moveToStatus).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
   });
 
   it("aborts the orphan-resume scan when resolveParentSessionId returns no-session-dir (no YAML mutation, no tracker move)", async () => {
@@ -3601,10 +3673,13 @@ describe("poll — In Progress sync + orphan resume", () => {
 
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockTracker.moveToStatus).not.toHaveBeenCalled();
-    // YAML must NOT be rewritten to ToDo / null dispatch_id.
+    // YAML must NOT be rewritten to ToDo / null dispatch.
     const reset = mockWriteIssueFn.mock.calls.find((c) => {
-      const issue = c[1] as { external_id?: string; dispatch_id?: unknown };
-      return issue?.external_id === "ip-nodir" && issue.dispatch_id === null;
+      const issue = c[1] as {
+        external_id?: string;
+        dispatch?: { id: string } | null;
+      };
+      return issue?.external_id === "ip-nodir" && issue.dispatch === null;
     });
     expect(reset).toBeUndefined();
   });
@@ -3858,7 +3933,7 @@ describe("poll — auto-triage spawn gate (ISS-79)", () => {
     expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-ideate");
   });
 
-  it("does NOT spawn triage when every eligible candidate already carries triaged.timestamp", async () => {
+  it("does NOT spawn triage when every eligible candidate already carries a non-empty triage.last_status", async () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
@@ -3867,14 +3942,25 @@ describe("poll — auto-triage spawn gate (ISS-79)", () => {
       ref("rv1", "Already triaged Review", "Review"),
     ]);
     // Both candidates resolve to local YAMLs with non-empty
-    // triaged.timestamp — auto-triage skips them.
+    // triage.last_status — auto-triage skips them.
     mockFindByExternalId.mockImplementation((_repo: string, eid: string) => ({
       ...FAKE_ISSUE_FOR_TESTS,
       external_id: eid,
-      triaged: {
-        timestamp: "2026-05-01T00:00:00Z",
-        status: "Keep",
-        explain: "prior triage",
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "Keep",
+        last_explain: "prior triage",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [
+          {
+            timestamp: "2026-05-01T00:00:00Z",
+            status: "Keep",
+            explain: "prior triage",
+            expires_at: "",
+            ice: { total: 0, i: 0, c: 0, e: 0 },
+          },
+        ],
       },
     }));
 
