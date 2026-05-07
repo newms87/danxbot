@@ -1051,6 +1051,484 @@ language: node
     const rmCalls = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
     expect(rmCalls).not.toContain(operatorPath);
   });
+
+  // Regression: workspace `.claude/rules/` accumulated stale `danx-*`
+  // files when an inject-source rule was retired (Phase 5 retired
+  // `danx-trello-config.md` but live workspaces in `repos/gpt-manager/`
+  // kept loading the stale copy because `mirrorWorkspaceTree` is
+  // write-only). Prune step deletes any `danx-*` entry in a workspace's
+  // `.claude/rules/` or `.claude/skills/` that no longer exists in the
+  // matching inject source. Operator-authored entries (no `danx-`
+  // prefix) survive — exact symmetry with `scrubRepoRootDanxArtifacts`.
+  it("injectDanxWorkspaces prunes stale danx-* files in workspace .claude/rules and .claude/skills (non-danx operator files survive)", async () => {
+    const workspacesSource = "src/poller/inject/workspaces";
+    const demoSource = `${workspacesSource}/demo`;
+    const demoSourceRulesDir = `${demoSource}/.claude/rules`;
+    const demoSourceSkillsDir = `${demoSource}/.claude/skills`;
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
+    const demoTargetRoot = `${workspacesTargetRoot}/demo`;
+    const demoTargetRulesDir = `${demoTargetRoot}/.claude/rules`;
+    const demoTargetSkillsDir = `${demoTargetRoot}/.claude/skills`;
+    const staleRulePath = `${demoTargetRulesDir}/danx-trello-config.md`;
+    const operatorRulePath = `${demoTargetRulesDir}/operator.md`;
+    const staleSkillDir = `${demoTargetSkillsDir}/danx-old-skill`;
+
+    const sourceDirSuffixes = [demoSource];
+    const targetDirExact = new Set<string>([
+      workspacesTargetRoot,
+      demoTargetRoot,
+      `${demoTargetRoot}/.claude`,
+      demoTargetRulesDir,
+      demoTargetSkillsDir,
+      staleSkillDir,
+    ]);
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
+        return true;
+      }
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
+        return true;
+      }
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return ["demo"];
+      // Inject source has only workspace.yml — no static rules / skills,
+      // so every `danx-*` entry in the target is stale.
+      if (path.endsWith(demoSource)) return ["workspace.yml"];
+      if (path.endsWith(demoSourceRulesDir)) return [];
+      if (path.endsWith(demoSourceSkillsDir)) return [];
+      if (path === workspacesTargetRoot) return ["demo"];
+      if (path === demoTargetRoot) return [".claude"];
+      if (path === `${demoTargetRoot}/.claude`) return ["rules", "skills"];
+      if (path === demoTargetRulesDir) {
+        return ["danx-trello-config.md", "operator.md"];
+      }
+      if (path === demoTargetSkillsDir) return ["danx-old-skill"];
+      if (path === staleSkillDir) return [];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        targetDirExact.has(path) ||
+        sourceDirSuffixes.some((suffix) => path.endsWith(suffix));
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml"))
+        return "name: demo\ndescription: demo\n";
+      return "";
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain(staleRulePath);
+    expect(rmPaths).toContain(staleSkillDir);
+    expect(rmPaths).not.toContain(operatorRulePath);
+  });
+
+  // (a) source-shipped passthrough: a `danx-*` rule that is STILL in
+  // the inject source must not be pruned. Without this guard the
+  // prune would nuke every danx-* file on every tick.
+  it("injectDanxWorkspaces does not prune a danx-* rule that still ships from inject source", async () => {
+    const workspacesSource = "src/poller/inject/workspaces";
+    const demoSource = `${workspacesSource}/demo`;
+    const demoSourceRulesDir = `${demoSource}/.claude/rules`;
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
+    const demoTargetRoot = `${workspacesTargetRoot}/demo`;
+    const demoTargetRulesDir = `${demoTargetRoot}/.claude/rules`;
+    const sharedRulePath = `${demoTargetRulesDir}/danx-current.md`;
+
+    const sourceDirSuffixes = [demoSource, demoSourceRulesDir];
+    const targetDirExact = new Set<string>([
+      workspacesTargetRoot,
+      demoTargetRoot,
+      `${demoTargetRoot}/.claude`,
+      demoTargetRulesDir,
+    ]);
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
+        return true;
+      }
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
+        return true;
+      }
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return ["demo"];
+      if (path.endsWith(demoSource)) return ["workspace.yml", ".claude"];
+      if (path.endsWith(`${demoSource}/.claude`)) return ["rules"];
+      if (path.endsWith(demoSourceRulesDir)) return ["danx-current.md"];
+      if (path === workspacesTargetRoot) return ["demo"];
+      if (path === demoTargetRoot) return [".claude"];
+      if (path === `${demoTargetRoot}/.claude`) return ["rules"];
+      if (path === demoTargetRulesDir) return ["danx-current.md"];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        targetDirExact.has(path) ||
+        path.endsWith(`${demoSource}/.claude`) ||
+        sourceDirSuffixes.some((suffix) => path.endsWith(suffix));
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml"))
+        return "name: demo\ndescription: demo\n";
+      if (path.endsWith("danx-current.md")) return "current rule body\n";
+      return "";
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).not.toContain(sharedRulePath);
+  });
+
+  // (b) per-repo render allowlist exemption: filenames written by
+  // `renderPerRepoFilesIntoWorkspaces` (consumed via the
+  // `PER_REPO_RENDER_RULE_NAMES` Set) must not be pruned even when
+  // they are absent from the inject source. The render runs AFTER the
+  // prune; without this exemption every tick would rm the rendered
+  // file and re-write it (or worse — leave the workspace empty if a
+  // future refactor changes ordering).
+  it("injectDanxWorkspaces does not prune per-repo render filenames absent from inject source", async () => {
+    const workspacesSource = "src/poller/inject/workspaces";
+    const demoSource = `${workspacesSource}/demo`;
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
+    const demoTargetRoot = `${workspacesTargetRoot}/demo`;
+    const demoTargetRulesDir = `${demoTargetRoot}/.claude/rules`;
+    const renderedNames = [
+      "danx-repo-config.md",
+      "danx-repo-overview.md",
+      "danx-repo-workflow.md",
+      "danx-tools.md",
+    ];
+
+    const sourceDirSuffixes = [demoSource];
+    const targetDirExact = new Set<string>([
+      workspacesTargetRoot,
+      demoTargetRoot,
+      `${demoTargetRoot}/.claude`,
+      demoTargetRulesDir,
+    ]);
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
+        return true;
+      }
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
+        return true;
+      }
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return ["demo"];
+      if (path.endsWith(demoSource)) return ["workspace.yml"];
+      if (path === workspacesTargetRoot) return ["demo"];
+      if (path === demoTargetRoot) return [".claude"];
+      if (path === `${demoTargetRoot}/.claude`) return ["rules"];
+      if (path === demoTargetRulesDir) return [...renderedNames];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        targetDirExact.has(path) ||
+        sourceDirSuffixes.some((suffix) => path.endsWith(suffix));
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml"))
+        return "name: demo\ndescription: demo\n";
+      return "";
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    for (const name of renderedNames) {
+      expect(rmPaths).not.toContain(`${demoTargetRulesDir}/${name}`);
+    }
+  });
+
+  // (c) tools/ scope guard: a `danx-*` file in `<target>/.claude/tools/`
+  // must NOT be pruned. `tools/` is per-repo render territory
+  // (`copyRepoToolScripts`), and operator-authored scripts there are
+  // not `danx-*`-prefixed by convention — but the contract is "we
+  // touch rules/ and skills/ only", and pinning that contract guards
+  // against a future maintainer adding `tools/` to the prune scope
+  // and silently nuking per-repo tool scripts.
+  it("injectDanxWorkspaces does not prune danx-* entries from .claude/tools/ (out of scope)", async () => {
+    const workspacesSource = "src/poller/inject/workspaces";
+    const demoSource = `${workspacesSource}/demo`;
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
+    const demoTargetRoot = `${workspacesTargetRoot}/demo`;
+    const demoTargetToolsDir = `${demoTargetRoot}/.claude/tools`;
+    const toolsDanxPath = `${demoTargetToolsDir}/danx-tool.sh`;
+
+    const sourceDirSuffixes = [demoSource];
+    const targetDirExact = new Set<string>([
+      workspacesTargetRoot,
+      demoTargetRoot,
+      `${demoTargetRoot}/.claude`,
+      demoTargetToolsDir,
+    ]);
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
+        return true;
+      }
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
+        return true;
+      }
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return ["demo"];
+      if (path.endsWith(demoSource)) return ["workspace.yml"];
+      if (path === workspacesTargetRoot) return ["demo"];
+      if (path === demoTargetRoot) return [".claude"];
+      if (path === `${demoTargetRoot}/.claude`) return ["tools"];
+      if (path === demoTargetToolsDir) return ["danx-tool.sh"];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        targetDirExact.has(path) ||
+        sourceDirSuffixes.some((suffix) => path.endsWith(suffix));
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml"))
+        return "name: demo\ndescription: demo\n";
+      return "";
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).not.toContain(toolsDanxPath);
+  });
+
+  // (d) fail-loud on rm error: per CLAUDE.md "Fail loudly" rule, an
+  // `rm` failure during prune means the agent will load dead config
+  // on the next dispatch — exactly the bug this exists to prevent.
+  // The error must propagate out of `poll()` so the operator sees it
+  // immediately. Pins the docstring's stated invariant against a
+  // future `try/catch log.warn` regression.
+  it("injectDanxWorkspaces propagates an rm failure during prune (fail-loud per CLAUDE.md)", async () => {
+    const workspacesSource = "src/poller/inject/workspaces";
+    const demoSource = `${workspacesSource}/demo`;
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
+    const demoTargetRoot = `${workspacesTargetRoot}/demo`;
+    const demoTargetRulesDir = `${demoTargetRoot}/.claude/rules`;
+    const staleRulePath = `${demoTargetRulesDir}/danx-trello-config.md`;
+
+    const sourceDirSuffixes = [demoSource];
+    const targetDirExact = new Set<string>([
+      workspacesTargetRoot,
+      demoTargetRoot,
+      `${demoTargetRoot}/.claude`,
+      demoTargetRulesDir,
+    ]);
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
+        return true;
+      }
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
+        return true;
+      }
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return ["demo"];
+      if (path.endsWith(demoSource)) return ["workspace.yml"];
+      if (path === workspacesTargetRoot) return ["demo"];
+      if (path === demoTargetRoot) return [".claude"];
+      if (path === `${demoTargetRoot}/.claude`) return ["rules"];
+      if (path === demoTargetRulesDir) return ["danx-trello-config.md"];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        targetDirExact.has(path) ||
+        sourceDirSuffixes.some((suffix) => path.endsWith(suffix));
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml"))
+        return "name: demo\ndescription: demo\n";
+      return "";
+    });
+
+    mockRmSync.mockImplementation((path: unknown) => {
+      if (path === staleRulePath) {
+        throw new Error("EACCES: permission denied");
+      }
+    });
+
+    await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/EACCES/);
+  });
 });
 
 describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; MemoryTracker does not)", () => {

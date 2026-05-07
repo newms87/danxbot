@@ -1299,6 +1299,26 @@ function chmodExecutable(path: string): void {
   }
 }
 
+/**
+ * Names of every `danx-*` rule that `renderPerRepoFilesIntoWorkspaces`
+ * writes into a workspace's `.claude/rules/` every tick. Lives here
+ * alongside the writers so adding a new per-repo rendered rule is a
+ * single-edit change — both the writer below and the
+ * `pruneStaleDanxArtifactsInWorkspace` allowlist consume this set, so
+ * the prune cannot drift out of sync with the render. Adding a new
+ * rendered rule without updating this set would cause the prune to
+ * silently delete it on the next tick.
+ *
+ * Skills directory has no per-repo renders today; if that changes, add
+ * a sibling set + thread it through the prune.
+ */
+export const PER_REPO_RENDER_RULE_NAMES: ReadonlySet<string> = new Set([
+  "danx-repo-config.md",
+  "danx-repo-overview.md",
+  "danx-repo-workflow.md",
+  "danx-tools.md",
+]);
+
 /** Step 1: render danx-repo-config.md from config.yml to the workspace. */
 function writeRepoConfigRule(
   cfg: Record<string, string>,
@@ -1408,8 +1428,9 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
   );
 
   for (const name of sourceNames) {
+    const workspaceSourceDir = resolve(injectWorkspacesDir, name);
     const workspaceDir = resolve(workspacesTargetDir, name);
-    mirrorWorkspaceTree(resolve(injectWorkspacesDir, name), workspaceDir, []);
+    mirrorWorkspaceTree(workspaceSourceDir, workspaceDir, []);
   }
 
   // Phase 5 cleanup (Trello 69f76e8d069eb71dd315d363): the migration
@@ -1420,15 +1441,22 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
   // sibling pattern). See `legacy-trello-worker-scrub.ts`.
   scrubLegacyTrelloWorkerSymlink(workspacesTargetDir);
 
-  // Symlink mcp-servers/ into EVERY workspace present at target, including
-  // repo-authored workspaces (e.g. gpt-manager's schema-builder) that
-  // didn't come through our inject source. Every dispatched agent expects
-  // to find the danxbot mcp-servers tree at `<workspace>/mcp-servers`
-  // regardless of who authored the workspace.
+  // Per-workspace post-mirror steps over EVERY workspace present at
+  // target — both inject-sourced AND operator-authored (e.g.
+  // gpt-manager's schema-builder, trello-worker). Operator-authored
+  // workspaces have no inject source dir, but still receive per-repo
+  // rendered rules from `renderPerRepoFilesIntoWorkspaces` and so are
+  // equally subject to stale `danx-*` rule accumulation. Passing a
+  // non-existent inject source path is handled by the prune fn via
+  // its `existsSync` checks.
   for (const entry of readdirSync(workspacesTargetDir)) {
     const workspaceDir = resolve(workspacesTargetDir, entry);
     if (!statSync(workspaceDir).isDirectory()) continue;
     injectMcpServers(workspaceDir);
+    pruneStaleDanxArtifactsInWorkspace(
+      resolve(injectWorkspacesDir, entry),
+      workspaceDir,
+    );
   }
 }
 
@@ -1496,6 +1524,74 @@ function mirrorWorkspaceTree(
       if (entry.endsWith(".sh") && relSegments.includes("tools")) {
         chmodExecutable(destPath);
       }
+    }
+  }
+}
+
+/**
+ * Prune stale `danx-*` artifacts left behind in a workspace's
+ * `.claude/{rules,skills}/` after `mirrorWorkspaceTree`. The mirror is
+ * write-only — when a `danx-*` rule or skill is RETIRED from the inject
+ * source, the previous tick's copy in the target persists forever and
+ * the dispatched agent keeps loading dead config (Phase 5's
+ * `danx-trello-config.md` lingered in `repos/gpt-manager/.danxbot/workspaces/`
+ * for weeks past its retirement, costing ~200 tokens per dispatch).
+ *
+ * Algorithm: for each direct child of `<target>/.claude/{rules,skills}/`
+ * whose name starts with `danx-`, rm it unless one of:
+ *   1. The matching name exists in `<source>/.claude/<sub>/` (still
+ *      shipped from the static inject tree), OR
+ *   2. The name is in `PER_REPO_RENDER_RULE_NAMES` — the rules
+ *      `renderPerRepoFilesIntoWorkspaces` writes per-tick from
+ *      `RepoContext` AFTER this prune runs. Those don't ship from
+ *      inject; allowlisting prevents the prune from clobbering them.
+ *      The set is co-located with the writers so the prune cannot
+ *      drift out of sync.
+ *
+ * Scope is intentionally narrow — only `rules/` and `skills/`, only
+ * `danx-*` prefix:
+ *   - `tools/` is excluded because `copyRepoToolScripts` legitimately
+ *     writes per-repo, NON-`danx-*`-prefixed scripts there. Pruning
+ *     `danx-*` from `tools/` would be safe today but adds maintenance
+ *     burden for zero current benefit. Diverges from
+ *     `scrubRepoRootDanxArtifacts` (which DOES include `tools/`)
+ *     because the repo-root contract forbids any `danx-*` artifact
+ *     anywhere, while the workspace contract is "danx-* in rules/skills
+ *     ships from danxbot; tools/ is per-repo".
+ *   - Non-`danx-*`-prefixed entries are operator-authored or per-repo
+ *     scripts and survive untouched. If we ever ship a non-prefixed
+ *     workspace rule/skill we'll need a different mechanism — current
+ *     assumption: every danxbot-shipped rule/skill is `danx-*`.
+ *
+ * Fail-loud per CLAUDE.md "Fail loudly" rule: an `rm` failure on a
+ * stale rule means the dispatched agent will load dead config — that's
+ * exactly the bug this exists to prevent. Do not swallow the error.
+ * One bad workspace halts the rest of the tick (operator sees the
+ * failure immediately and can fix it) rather than silently leaving
+ * stale rules in place. Diverges intentionally from
+ * `scrubRepoRootDanxArtifacts` which still uses the older `try/catch
+ * log.warn` pattern; the older sibling is a candidate for a follow-up
+ * unification, but DRYing the two together is out of scope for this
+ * fix.
+ */
+function pruneStaleDanxArtifactsInWorkspace(
+  workspaceSourceDir: string,
+  workspaceTargetDir: string,
+): void {
+  for (const sub of ["rules", "skills"] as const) {
+    const targetSubDir = resolve(workspaceTargetDir, ".claude", sub);
+    if (!existsSync(targetSubDir)) continue;
+
+    const sourceSubDir = resolve(workspaceSourceDir, ".claude", sub);
+    const sourceEntries = existsSync(sourceSubDir)
+      ? new Set(readdirSync(sourceSubDir))
+      : new Set<string>();
+
+    for (const entry of readdirSync(targetSubDir)) {
+      if (!entry.startsWith("danx-")) continue;
+      if (sourceEntries.has(entry)) continue;
+      if (sub === "rules" && PER_REPO_RENDER_RULE_NAMES.has(entry)) continue;
+      rmSync(resolve(targetSubDir, entry), { recursive: true, force: true });
     }
   }
 }
