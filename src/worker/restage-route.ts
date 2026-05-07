@@ -41,7 +41,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
-import { getActiveJob } from "./dispatch.js";
+import { getActiveJob } from "../dispatch/core.js";
 import {
   prepareStagedFiles,
   writeStagedFiles,

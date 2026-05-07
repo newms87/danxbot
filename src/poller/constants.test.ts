@@ -8,6 +8,7 @@ import {
   loadTrelloIds,
   TEAM_PROMPT,
   TRIAGE_AUTO_PROMPT,
+  TRIAGE_CARD_PROMPT,
 } from "./constants.js";
 
 describe("getReposBase", () => {
@@ -156,32 +157,27 @@ describe("agent-mode prompts", () => {
     expect(IDEATOR_PROMPT).toBe("/danx-ideate");
   });
 
-  describe("TRIAGE_AUTO_PROMPT", () => {
-    it("invokes the danx-triage skill in auto mode", () => {
-      // First line MUST be the slash command — Phase 5 spawns this verbatim
-      // and Claude only treats line 0 as the command invocation.
-      expect(TRIAGE_AUTO_PROMPT.split("\n")[0]).toBe("/danx-triage auto");
+  describe("TRIAGE_AUTO_PROMPT (legacy bulk auto-triage prompt)", () => {
+    it("is an empty string — Phase 4 of ISS-90 retired the bulk auto-triage path in favor of per-card dispatches via TRIAGE_CARD_PROMPT", () => {
+      expect(TRIAGE_AUTO_PROMPT).toBe("");
+    });
+  });
+
+  describe("TRIAGE_CARD_PROMPT (per-card triage dispatch — ISS-94)", () => {
+    it("returns a single-line slash-style command containing the issue id", () => {
+      const prompt = TRIAGE_CARD_PROMPT("ISS-7");
+      expect(prompt).toContain("ISS-7");
+      expect(prompt.split("\n")).toHaveLength(1);
     });
 
-    it("emphasizes the Action Items first / Review second priority order", () => {
-      expect(TRIAGE_AUTO_PROMPT).toMatch(/Action Items.*priority 1/);
-      expect(TRIAGE_AUTO_PROMPT).toMatch(/Review.*priority 2/);
+    it("references the danx-triage-card skill so the dispatched agent loads the right per-status decision tree", () => {
+      expect(TRIAGE_CARD_PROMPT("ISS-7")).toContain("danx-triage-card");
     });
 
-    it("lists all five outcome statuses", () => {
-      // Reaching auto mode means every card MUST land on one of these five.
-      // If the skill ever drifts to a sixth, this test trips so the prompt
-      // doc gets updated alongside the skill.
-      for (const status of [
-        "ToDo",
-        "Done",
-        "Cancelled",
-        "Needs Help",
-        "Needs Approval",
-      ]) {
-        expect(TRIAGE_AUTO_PROMPT).toContain(status);
-      }
+    it("interpolates the id verbatim so the agent's first action — danx_issue_get — finds the card", () => {
+      expect(TRIAGE_CARD_PROMPT("ISS-42")).toBe(
+        "Triage card ISS-42 using the danx-triage-card skill.",
+      );
     });
-
   });
 });

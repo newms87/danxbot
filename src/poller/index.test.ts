@@ -108,7 +108,8 @@ vi.mock("./constants.js", () => ({
   REVIEW_MIN_CARDS: 10,
   TEAM_PROMPT: "/danx-next",
   IDEATOR_PROMPT: "/danx-ideate",
-  TRIAGE_AUTO_PROMPT: "/danx-triage auto",
+  TRIAGE_CARD_PROMPT: (id: string) =>
+    `Triage card ${id} using the danx-triage-card skill.`,
 }));
 
 /**
@@ -325,34 +326,30 @@ function _currentOpenCards(): IssueRef[] {
   return last.type === "fulfilled" ? (last.value as IssueRef[]) : [];
 }
 
-const mockListDispatchableYamls = vi.fn(
-  (
-    _repoPath: string,
-    options: { excludeExternalIds?: ReadonlySet<string> } = {},
-  ): Issue[] => {
-    const exclude = options.excludeExternalIds;
-    return _currentOpenCards()
-      .filter((r) => r.status === "ToDo" && r.list_kind !== "action_items")
-      .filter(
-        (r) => !exclude || r.external_id === "" || !exclude.has(r.external_id),
-      )
-      .map(refToFakeIssue);
-  },
-);
+const mockListDispatchableYamls = vi.fn((_repoPath: string): Issue[] => {
+  return _currentOpenCards()
+    .filter((r) => r.status === "ToDo")
+    .map(refToFakeIssue);
+});
 const mockListInProgressYamls = vi.fn((_repoPath: string): Issue[] =>
   _currentOpenCards()
     .filter((r) => r.status === "In Progress")
     .map(refToFakeIssue),
 );
 const mockListBlockedTodoYamls = vi.fn((_repoPath: string): Issue[] => []);
+const mockListTriageDueYamls = vi.fn(
+  (_repoPath: string, _now: number): Issue[] => [],
+);
 
 vi.mock("./local-issues.js", () => ({
   listDispatchableYamls: (...args: unknown[]) =>
-    mockListDispatchableYamls(...(args as [string, { excludeExternalIds?: ReadonlySet<string> }?])),
+    mockListDispatchableYamls(...(args as [string])),
   listInProgressYamls: (...args: unknown[]) =>
     mockListInProgressYamls(...(args as [string])),
   listBlockedTodoYamls: (...args: unknown[]) =>
     mockListBlockedTodoYamls(...(args as [string])),
+  listTriageDueYamls: (...args: unknown[]) =>
+    mockListTriageDueYamls(...(args as [string, number])),
 }));
 
 const mockClearDispatchAndWrite = vi.fn((...args: unknown[]) => {
@@ -3711,21 +3708,24 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
-  it("Action Items list cards (list_kind: action_items) are bulk-synced but not dispatched", async () => {
-    // The Trello tracker tags Action Items cards with `list_kind:
-    // "action_items"`. The poller must bulk-sync them (so blocker
-    // discovery sees them in local YAMLs) but exclude them from
-    // dispatch eligibility — the operator promotes them to the actual
-    // ToDo list when ready.
+  it("Action Items list cards (now hydrated as status: Review) are bulk-synced but not dispatched", async () => {
+    // Phase 4 of ISS-90 collapsed Action Items into status: Review.
+    // The Trello tracker tags Action Items cards with `status: Review`
+    // on hydration. The poller still bulk-syncs them (so blocker
+    // discovery sees them in local YAMLs and the per-card triage agent
+    // can score them) but they're not dispatch-eligible — the
+    // `status === "ToDo"` filter in `listDispatchableYamls` excludes
+    // them naturally.
     mockTracker.fetchOpenCards.mockResolvedValue([
-      { id: "", external_id: "card-ai-1", title: "AI card", status: "ToDo", list_kind: "action_items" },
+      { id: "", external_id: "card-ai-1", title: "AI card", status: "Review" },
     ]);
     mockFindByExternalId.mockReturnValue(null);
 
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockDispatch).not.toHaveBeenCalled();
-    // Bulk-sync still hydrated the Action Items card.
+    // Bulk-sync still hydrated the Action Items card via the Review
+    // branch of the bulk-sync targets list.
     expect(mockHydrateFromRemote).toHaveBeenCalled();
   });
 
@@ -4427,51 +4427,54 @@ describe("poll — In Progress sync + orphan resume", () => {
 });
 
 /**
- * checkAndSpawnTriage (ISS-79 / Phase 5 of the auto-triage epic).
+ * Per-card triage dispatch gate (Phase 4 of ISS-90, ISS-94).
  *
- * Wires the poller's empty-ToDo branch to spawn the triage agent BEFORE
- * the ideator when:
- *   - `autoTriage` is enabled, AND
- *   - at least one Action Items / Review card has not yet been triaged.
- *
- * Single-dispatch invariant: triage spawn preempts ideator spawn — never
- * both in the same tick. Both still preempted by any non-empty ToDo
- * dispatch path.
+ * Replaces the legacy bulk auto-triage path with a single-card dispatch:
+ * one tick fires one `danx-triage-card` agent against one specific YAML.
+ * Wired into the poller's empty-ToDo branch BEFORE the ideator. Single
+ * dispatch per tick: triage spawn preempts ideator; both still preempted
+ * by any non-empty ToDo dispatch path.
  */
-describe("poll — auto-triage spawn gate (ISS-79)", () => {
+describe("poll — per-card triage dispatch (ISS-94)", () => {
+  function triageDueIssue(overrides: Partial<Issue>): Issue {
+    return {
+      ...FAKE_ISSUE_FOR_TESTS,
+      ...overrides,
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+    } as Issue;
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
     resetTrackerMocks();
     mockSpawn.mockReturnValue(createFakeSpawnResult());
     setupRepoConfigMocks();
-    mockIsFeatureEnabled.mockReset();
-    mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) =>
-        (args[1] as string) !== "ideator" &&
-        (args[1] as string) !== "autoTriage",
-    );
-    mockGetIssuePollerPickupPrefix.mockReset();
-    mockGetIssuePollerPickupPrefix.mockReturnValue(null);
+    mockListTriageDueYamls.mockReset();
+    mockListTriageDueYamls.mockReturnValue([]);
+    mockListBlockedTodoYamls.mockReset();
+    mockListBlockedTodoYamls.mockReturnValue([]);
+    mockStampDispatchAndWrite.mockClear();
     mockFindByExternalId.mockReset();
     mockFindByExternalId.mockReturnValue(null);
   });
 
-  function actionItemsRef(external_id: string, title: string): IssueRef {
-    return {
-      id: "",
-      external_id,
-      title,
-      status: "ToDo",
-      list_kind: "action_items",
-    };
-  }
-
-  it("does NOT spawn triage when autoTriage is disabled even with eligible Action Items / Review cards", async () => {
-    // Default mock keeps autoTriage off. Eligible cards are present.
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      actionItemsRef("ai1", "Action Item 1"),
-      ref("rv1", "Review Card", "Review"),
+  it("does NOT spawn triage when autoTriage is disabled even with triage-due cards", async () => {
+    // Default mock keeps autoTriage off (resetTrackerMocks).
+    mockListTriageDueYamls.mockReturnValueOnce([
+      triageDueIssue({
+        id: "ISS-1",
+        external_id: "rv1",
+        status: "Review",
+        title: "Review Card",
+      }),
     ]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -4479,46 +4482,63 @@ describe("poll — auto-triage spawn gate (ISS-79)", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("spawns triage with the auto prompt and trigger=api when autoTriage is on, ToDo is empty, and Action Items has untriaged cards", async () => {
+  it("dispatches the danx-triage-card skill with kind=triage when autoTriage is on and a card is due", async () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      actionItemsRef("ai1", "Action Item 1"),
+    mockListTriageDueYamls.mockReturnValueOnce([
+      triageDueIssue({
+        id: "ISS-7",
+        external_id: "rv7",
+        status: "Review",
+        title: "Review Card",
+      }),
     ]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const call = mockDispatch.mock.calls[0][0];
-    expect(call.task).toContain("/danx-triage auto");
+    expect(call.task).toContain("Triage card ISS-7");
+    expect(call.task).toContain("danx-triage-card");
     expect(call.apiDispatchMeta).toEqual({
       trigger: "api",
       metadata: expect.objectContaining({
-        endpoint: "poller/auto-triage",
+        endpoint: "poller/triage-card",
       }),
     });
-    // No second dispatch — ideator is preempted on the same tick.
-    expect(
-      mockDispatch.mock.calls.some(
-        (c) => typeof c[0]?.task === "string" && c[0].task.includes("/danx-ideate"),
-      ),
-    ).toBe(false);
   });
 
-  it("does NOT spawn triage and falls through to ideator when openCards has no Action Items / Review entries", async () => {
-    // ideator on AND autoTriage on. fetchOpenCards returns NeedsHelp +
-    // In Progress cards only — neither matches the triage candidate
-    // filter (`list_kind === "action_items"` OR `status === "Review"`).
-    // No-candidates branch returns false → ideator runs. Exercises the
-    // candidate-filter path with a non-empty openCards list (an empty
-    // openCards would short-circuit earlier and not exercise the
-    // filter).
-    mockIsFeatureEnabled.mockImplementation(() => true);
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("nh1", "Needs Help card", "Needs Help"),
-      ref("ip1", "In Progress card", "In Progress"),
+  it("stamps dispatch{kind: 'triage'} on the YAML before spawn", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockListTriageDueYamls.mockReturnValueOnce([
+      triageDueIssue({
+        id: "ISS-7",
+        external_id: "rv7",
+        status: "Review",
+        title: "Review Card",
+      }),
     ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockStampDispatchAndWrite).toHaveBeenCalled();
+    const stampCall = mockStampDispatchAndWrite.mock.calls.find(
+      (c) => c[2]?.kind === "triage",
+    );
+    expect(stampCall).toBeDefined();
+    expect(stampCall![2].kind).toBe("triage");
+    expect(stampCall![2].ttl_seconds).toBe(600);
+  });
+
+  it("does NOT spawn triage and falls through to ideator when no triage-due cards", async () => {
+    mockIsFeatureEnabled.mockImplementation(() => true);
+    // Empty triage-due list → triage path returns false → ideator runs.
+    mockListTriageDueYamls.mockReturnValueOnce([]);
+    // Empty Review on the tracker so ideator's threshold gate fires.
+    mockTracker.fetchOpenCards.mockResolvedValue([]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -4526,50 +4546,17 @@ describe("poll — auto-triage spawn gate (ISS-79)", () => {
     expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-ideate");
   });
 
-  it("does NOT spawn triage when every eligible candidate already carries a non-empty triage.last_status", async () => {
-    mockIsFeatureEnabled.mockImplementation(
-      (...args: unknown[]) => (args[1] as string) !== "ideator",
-    );
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      actionItemsRef("ai1", "Already triaged AI"),
-      ref("rv1", "Already triaged Review", "Review"),
-    ]);
-    // Both candidates resolve to local YAMLs with non-empty
-    // triage.last_status — auto-triage skips them.
-    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => ({
-      ...FAKE_ISSUE_FOR_TESTS,
-      external_id: eid,
-      triage: {
-        expires_at: "",
-        reassess_hint: "",
-        last_status: "Keep",
-        last_explain: "prior triage",
-        ice: { total: 0, i: 0, c: 0, e: 0 },
-        history: [
-          {
-            timestamp: "2026-05-01T00:00:00Z",
-            status: "Keep",
-            explain: "prior triage",
-            expires_at: "",
-            ice: { total: 0, i: 0, c: 0, e: 0 },
-          },
-        ],
-      },
-    }));
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockDispatch).not.toHaveBeenCalled();
-  });
-
-  it("does NOT consider triage when ToDo has cards — the existing dispatch path wins", async () => {
-    // ToDo card present (NOT action_items) AND eligible triage candidates
-    // also present. Cards.length > 0 means we never enter the empty-ToDo
-    // branch where checkAndSpawnTriage runs.
+  it("does NOT consider triage when ToDo has cards — the work-ready dispatch path wins", async () => {
     mockIsFeatureEnabled.mockImplementation(() => true);
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("td1", "Real ToDo", "ToDo"),
-      actionItemsRef("ai1", "Action Item — would be eligible"),
+    ]);
+    mockListTriageDueYamls.mockReturnValueOnce([
+      triageDueIssue({
+        id: "ISS-7",
+        external_id: "rv7",
+        status: "Review",
+      }),
     ]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -4577,76 +4564,129 @@ describe("poll — auto-triage spawn gate (ISS-79)", () => {
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const call = mockDispatch.mock.calls[0][0];
     expect(call.task).toContain("/danx-next");
-    expect(call.task).not.toContain("/danx-triage");
+    expect(call.task).not.toContain("Triage card");
   });
 
   it("preserves the single-dispatch invariant: triage runs and ideator is NOT also dispatched in the same tick", async () => {
     mockIsFeatureEnabled.mockImplementation(() => true);
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("rv1", "Review Card", "Review"),
+    mockListTriageDueYamls.mockReturnValueOnce([
+      triageDueIssue({
+        id: "ISS-9",
+        external_id: "rv9",
+        status: "Review",
+      }),
     ]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
-    expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-triage auto");
+    const call = mockDispatch.mock.calls[0][0];
+    expect(call.task).toContain("Triage card ISS-9");
+    expect(call.task).not.toContain("/danx-ideate");
   });
 
-  it("fails CLOSED on findByExternalId throw — corrupt YAML candidate is treated as triaged so a persistently broken file does not respawn every tick", async () => {
+  it("invokes listTriageDueYamls with the current epoch timestamp", async () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      actionItemsRef("ai-corrupt", "Corrupt YAML"),
-    ]);
-    // bulkSyncMissingYamls calls findByExternalId BEFORE the triage gate
-    // does — let the bulk-sync read return null (no local YAML yet) and
-    // throw only on the triage gate's subsequent read for the same id.
-    const seen = new Set<string>();
-    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
-      if (eid === "ai-corrupt") {
-        if (seen.has(eid)) throw new Error("corrupt YAML");
-        seen.add(eid);
-        return null;
-      }
-      return null;
-    });
+    const before = Date.now();
+    mockListTriageDueYamls.mockReturnValueOnce([]);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    // The single candidate raises on the triage-gate read → skipped →
-    // eligible.length === 0 → no spawn. (Ideator is also disabled in this
-    // test, so no fall-through dispatch either.)
-    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockListTriageDueYamls).toHaveBeenCalled();
+    const args = mockListTriageDueYamls.mock.calls[0];
+    expect(args[0]).toBe("/test/repos/test-repo");
+    expect(args[1]).toBeGreaterThanOrEqual(before);
+    expect(args[1]).toBeLessThanOrEqual(Date.now());
   });
 
-  it("spawns triage when at least one candidate is untriaged even though others are already triaged", async () => {
+  it("does NOT call listTriageDueYamls when work-ready cards exist (early-return invariant)", async () => {
+    mockIsFeatureEnabled.mockImplementation(() => true);
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("td1", "Real ToDo", "ToDo"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockListTriageDueYamls).not.toHaveBeenCalled();
+    // And the dispatch was for work, not triage.
+    expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-next");
+  });
+
+  it("dispatches triage for a Needs Help card (blocked == null, status: Needs Help)", async () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      actionItemsRef("ai-old", "Already triaged AI"),
-      ref("rv-new", "Untriaged Review", "Review"),
+    mockListTriageDueYamls.mockReturnValueOnce([
+      triageDueIssue({
+        id: "ISS-11",
+        external_id: "nh1",
+        status: "Needs Help",
+        title: "Stalled human work",
+      }),
     ]);
-    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
-      if (eid === "ai-old") {
-        return {
-          ...FAKE_ISSUE_FOR_TESTS,
-          external_id: eid,
-          triaged: {
-            timestamp: "2026-05-01T00:00:00Z",
-            status: "Keep",
-            explain: "prior",
-          },
-        };
-      }
-      return null;
-    });
 
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
-    expect(mockDispatch.mock.calls[0][0].task).toContain("/danx-triage auto");
+    expect(mockDispatch.mock.calls[0][0].task).toBe(
+      "Triage card ISS-11 using the danx-triage-card skill.",
+    );
+  });
+
+  it("dispatches triage for a Blocked card (blocked != null, worker forces status: ToDo)", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockListTriageDueYamls.mockReturnValueOnce([
+      triageDueIssue({
+        id: "ISS-13",
+        external_id: "blk1",
+        status: "ToDo",
+        title: "Blocked card",
+        blocked: {
+          reason: "Waits for ISS-99",
+          timestamp: "2026-04-01T00:00:00Z",
+          by: ["ISS-99"],
+        },
+      }),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockDispatch.mock.calls[0][0].task).toBe(
+      "Triage card ISS-13 using the danx-triage-card skill.",
+    );
+  });
+
+  it("triage dispatches use trigger=api so the post-dispatch CRITICAL_FAILURE check does not fire (trackedCardId remains null)", async () => {
+    // The post-dispatch card-progress check at handleAgentCompletion
+    // only runs when `state.trackedCardId` is set, and `spawnClaude`
+    // only sets it for `trigger: "trello"` dispatches. Triage uses
+    // `trigger: "api"` so the flag write path stays dormant — a
+    // legitimate triage outcome (card stays in Review / Needs Help /
+    // Blocked) must NOT trip the halt flag.
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockListTriageDueYamls.mockReturnValueOnce([
+      triageDueIssue({
+        id: "ISS-7",
+        external_id: "rv7",
+        status: "Review",
+      }),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const meta = mockDispatch.mock.calls[0][0].apiDispatchMeta;
+    expect(meta.trigger).toBe("api");
+    // Defense-in-depth: the metadata MUST NOT carry a card id field
+    // that any future refactor could pass through.
+    expect((meta.metadata as Record<string, unknown>).cardId).toBeUndefined();
   });
 });
 
@@ -4822,23 +4862,18 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
     expect(arg.apiDispatchMeta.metadata.cardId).toBe("card-older");
   });
 
-  it("passes the action-items external-id Set to listDispatchableYamls so action-items YAMLs are excluded from dispatch", async () => {
-    // Action Items hydrate as full local YAMLs (so they can act as
-    // blockers) but `list_kind` is NOT persisted on disk — the call
-    // site derives the exclude set from the tracker view and passes
-    // it through. Pin the wiring.
+  it("calls listDispatchableYamls with no exclude set — Phase 4 of ISS-90 retired the excludeExternalIds filter (action_items now hydrate as Review)", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
-      { id: "", external_id: "ai-1", title: "AI card", status: "ToDo", list_kind: "action_items" },
+      { id: "", external_id: "ai-1", title: "AI card", status: "Review" },
     ]);
 
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockListDispatchableYamls).toHaveBeenCalled();
     const callArgs = mockListDispatchableYamls.mock.calls[0];
-    const opts = callArgs[1] as
-      | { excludeExternalIds?: ReadonlySet<string> }
-      | undefined;
-    expect(opts?.excludeExternalIds?.has("ai-1")).toBe(true);
+    // Single positional arg now — the second `options` arg was removed.
+    expect(callArgs.length).toBe(1);
+    expect(callArgs[0]).toBe("/test/repos/test-repo");
   });
 });
 

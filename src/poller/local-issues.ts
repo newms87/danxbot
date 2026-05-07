@@ -9,13 +9,27 @@
  * `tracker.fetchOpenCards().filter(status === "ToDo" | "In Progress")`
  * dispatch source. See ISS-67 (epic) and ISS-86 (Phase 1 / Slice A).
  *
- * `list_kind` (the Action-Items vs ToDo distinction) is NOT persisted
- * on the YAML schema — it lives only on the tracker `IssueRef`. To
- * filter Action Items out of the dispatchable set, the call site
- * passes their `external_id`s in via `excludeExternalIds`. Local-only
- * orphans (`external_id === ""`) are always dispatchable: by
- * definition they have not yet been mirrored to the tracker, so they
- * cannot be on the Action Items list.
+ * ## Sort orders
+ *
+ * Two distinct sorts are exported:
+ *
+ *  - **Work-ready** (`listDispatchableYamls`): untriaged cards first
+ *    (`triage.expires_at === ""`), then triaged cards by
+ *    `triage.ice.total` DESC. Within each tier, FIFO mtime. Untriaged
+ *    cards have unknown priority so they get flushed first; among
+ *    triaged cards, the highest ICE total wins (Impact × Confidence ×
+ *    Ease). Phase 4 of ISS-90 introduced the priority sort to replace
+ *    the legacy pure-FIFO order.
+ *
+ *  - **Triage-due** (`listTriageDueYamls`): never-triaged first
+ *    (`triage.expires_at === ""`), then `expires_at` ASC (oldest stale
+ *    first). Within each tier, FIFO mtime tiebreak. The poller dispatches
+ *    a per-card triage agent for the FIRST entry in this list every tick
+ *    that has no work-ready card to dispatch.
+ *
+ * Action Items list cards now hydrate as `status: "Review"` (the Trello
+ * tracker's `listIdToStatus` does that mapping); the legacy
+ * `excludeExternalIds` filter at this layer was retired in Phase 4.
  */
 import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -58,25 +72,16 @@ function walkOpenIssues(repoLocalPath: string): WalkEntry[] {
   return out;
 }
 
+function fifoCompare(a: WalkEntry, b: WalkEntry): number {
+  if (a.mtimeMs !== b.mtimeMs) return a.mtimeMs - b.mtimeMs;
+  return a.issue.id.localeCompare(b.issue.id);
+}
+
 function sortFifo(entries: WalkEntry[]): Issue[] {
   // Oldest mtime first (FIFO across ticks); tiebreak by id ascending so
   // ordering is deterministic when two YAMLs are written in the same ms.
-  entries.sort((a, b) => {
-    if (a.mtimeMs !== b.mtimeMs) return a.mtimeMs - b.mtimeMs;
-    return a.issue.id.localeCompare(b.issue.id);
-  });
+  entries.sort(fifoCompare);
   return entries.map((e) => e.issue);
-}
-
-export interface ListDispatchableOptions {
-  /**
-   * `external_id`s to exclude from the dispatchable set. Used by the
-   * poller to filter out Action Items list cards (`list_kind:
-   * "action_items"` on the tracker `IssueRef`) — that flag is not
-   * persisted on the YAML, so the call site builds the set from the
-   * current tick's `tracker.fetchOpenCards()` view.
-   */
-  excludeExternalIds?: ReadonlySet<string>;
 }
 
 /**
@@ -84,25 +89,35 @@ export interface ListDispatchableOptions {
  * eligible for dispatch this tick:
  *   - `status === "ToDo"`
  *   - `blocked === null`
- *   - `external_id` not in `options.excludeExternalIds`
+ *   - `dispatch === null` (an active dispatch occupies the card)
  *
- * Sorted FIFO by file mtime ascending, tiebreak by id ascending.
+ * Sort order (Phase 4 of ISS-90):
+ *   1. Untriaged cards first — `triage.expires_at === ""` means the
+ *      poller has no priority signal, so flush them before triaged
+ *      siblings. Newly hydrated cards hit this branch by default.
+ *   2. Triaged cards by `triage.ice.total` DESC — highest ICE first.
+ *   3. FIFO mtime tiebreak inside each tier so two cards stamped the
+ *      same priority resolve deterministically.
  */
-export function listDispatchableYamls(
-  repoLocalPath: string,
-  options: ListDispatchableOptions = {},
-): Issue[] {
-  const exclude = options.excludeExternalIds;
+export function listDispatchableYamls(repoLocalPath: string): Issue[] {
   const filtered = walkOpenIssues(repoLocalPath).filter((e) => {
     const i = e.issue;
     if (i.status !== "ToDo") return false;
     if (i.blocked !== null) return false;
-    if (exclude && i.external_id !== "" && exclude.has(i.external_id)) {
-      return false;
-    }
+    if (i.dispatch !== null) return false;
     return true;
   });
-  return sortFifo(filtered);
+  filtered.sort(workReadyCompare);
+  return filtered.map((e) => e.issue);
+}
+
+function workReadyCompare(a: WalkEntry, b: WalkEntry): number {
+  const aUntriaged = a.issue.triage.expires_at === "";
+  const bUntriaged = b.issue.triage.expires_at === "";
+  if (aUntriaged !== bUntriaged) return aUntriaged ? -1 : 1;
+  const iceDelta = b.issue.triage.ice.total - a.issue.triage.ice.total;
+  if (iceDelta !== 0) return iceDelta;
+  return fifoCompare(a, b);
 }
 
 /**
@@ -131,4 +146,70 @@ export function listBlockedTodoYamls(repoLocalPath: string): Issue[] {
     (e) => e.issue.status === "ToDo" && e.issue.blocked !== null,
   );
   return sortFifo(filtered);
+}
+
+/**
+ * Walk `<repo>/.danxbot/issues/open/*.yml` and return every issue that
+ * the per-card triage agent should be dispatched against this tick.
+ *
+ * Eligible if all of:
+ *   - `dispatch === null` (no in-flight dispatch on the card)
+ *   - `triage.expires_at === ""` OR `Date.parse(triage.expires_at) <= now`
+ *   - The card matches one of the three triage paths:
+ *      a. `blocked != null` (regardless of `status`) — Blocked path
+ *      b. `blocked == null` AND `status === "Review"` — Review path
+ *      c. `blocked == null` AND `status === "Needs Help"` — Needs Help path
+ *
+ * Sort (Phase 4 of ISS-90):
+ *   1. Never-triaged first — `triage.expires_at === ""`. These are
+ *      brand-new or post-migration cards; the operator wants priority
+ *      info ASAP so flush them before stale-but-priorited entries.
+ *   2. Then `expires_at` ASC — oldest stale entry first so the poller
+ *      catches up on overdue triage in chronological order.
+ *   3. FIFO mtime tiebreak so two cards expiring the same instant
+ *      resolve deterministically.
+ *
+ * `now` is supplied by the caller (typically `Date.now()`) so tests can
+ * pin the clock without monkey-patching `Date`.
+ */
+export function listTriageDueYamls(
+  repoLocalPath: string,
+  now: number,
+): Issue[] {
+  const filtered = walkOpenIssues(repoLocalPath).filter((e) => {
+    const i = e.issue;
+    if (i.dispatch !== null) return false;
+    if (!isTriageDue(i, now)) return false;
+    return inTriageScope(i);
+  });
+  filtered.sort(triageDueCompare);
+  return filtered.map((e) => e.issue);
+}
+
+function inTriageScope(issue: Issue): boolean {
+  if (issue.blocked !== null) return true;
+  if (issue.status === "Review") return true;
+  if (issue.status === "Needs Help") return true;
+  return false;
+}
+
+function isTriageDue(issue: Issue, now: number): boolean {
+  const expiresAt = issue.triage.expires_at;
+  if (expiresAt === "") return true;
+  const expiresMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiresMs)) return true;
+  return expiresMs <= now;
+}
+
+function triageDueCompare(a: WalkEntry, b: WalkEntry): number {
+  const aNever = a.issue.triage.expires_at === "";
+  const bNever = b.issue.triage.expires_at === "";
+  if (aNever !== bNever) return aNever ? -1 : 1;
+  if (!aNever) {
+    const cmp = a.issue.triage.expires_at.localeCompare(
+      b.issue.triage.expires_at,
+    );
+    if (cmp !== 0) return cmp;
+  }
+  return fifoCompare(a, b);
 }

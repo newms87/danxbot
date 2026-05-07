@@ -111,11 +111,41 @@ export function checkYamlDispatchLiveness(
  *    in gpt-manager. Most card-processing dispatches finish in 10–30
  *    minutes; the 2h budget covers Epic-split runs that fan out into
  *    phase cards.
- *  - `triage`: 600s (10m) — auto-triage is a single-pass scan with
- *    bounded per-card work; 10m is generous for the largest action-item
- *    queues observed in production.
+ *  - `triage`: 600s (10m) — Phase 4 of ISS-90 made triage a per-card
+ *    dispatch (one card per tick via `danx-triage-card`). A single
+ *    decision-tree pass typically takes well under a minute; the 10m
+ *    cap is the worst-case upper bound for the agent's read +
+ *    decision + write turn.
  */
 export const TTL_SECONDS_BY_KIND: Readonly<Record<IssueDispatch["kind"], number>> = {
   work: 7200,
   triage: 600,
 };
+
+/**
+ * Construct the "start stamp" `IssueDispatch` record the poller writes
+ * onto a card's YAML BEFORE the spawn returns. `pid: 0` is the
+ * sentinel — `checkYamlDispatchLiveness` treats it as `dead-pid` so a
+ * crash between the stamp and the post-spawn pid update gets cleared
+ * by the next reattach pass instead of leaving a permanent ghost
+ * dispatch on disk.
+ *
+ * Centralized here (alongside `TTL_SECONDS_BY_KIND`) so every spawn
+ * site that stamps a fresh dispatch — work primary, orphan resume,
+ * triage — uses the identical shape and TTL contract. Any new `kind`
+ * gets the same start-stamp guarantees by construction.
+ */
+export function buildStartStamp(
+  dispatchId: string,
+  kind: IssueDispatch["kind"],
+  host: string,
+): IssueDispatch {
+  return {
+    id: dispatchId,
+    pid: 0,
+    host,
+    kind,
+    started_at: new Date().toISOString(),
+    ttl_seconds: TTL_SECONDS_BY_KIND[kind],
+  };
+}

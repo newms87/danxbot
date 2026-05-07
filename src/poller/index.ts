@@ -20,7 +20,7 @@ import {
   REVIEW_MIN_CARDS,
   TEAM_PROMPT,
   IDEATOR_PROMPT,
-  TRIAGE_AUTO_PROMPT,
+  TRIAGE_CARD_PROMPT,
 } from "./constants.js";
 import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 import {
@@ -54,6 +54,7 @@ import {
   listBlockedTodoYamls,
   listDispatchableYamls,
   listInProgressYamls,
+  listTriageDueYamls,
 } from "./local-issues.js";
 import { isLinkOrFile, isSymlink } from "./fs-probe.js";
 import type { AgentJob } from "../agent/launcher.js";
@@ -72,7 +73,7 @@ import { isPidAlive } from "../agent/host-pid.js";
 import { hasLiveDispatchForCard as hasLiveDispatchForCardImpl } from "./live-dispatch-guard.js";
 import { hostname as osHostname } from "node:os";
 import type { IssueDispatch } from "../issue-tracker/interface.js";
-import { TTL_SECONDS_BY_KIND } from "./dispatch-liveness-yaml.js";
+import { buildStartStamp } from "./dispatch-liveness-yaml.js";
 import { buildReattachPlan } from "./dispatch-reattach.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -82,8 +83,10 @@ const log = createLogger("poller");
 /**
  * Project a local-YAML `Issue` into the `IssueRef` shape the dispatch
  * pipeline downstream consumes. `list_kind` is intentionally undefined
- * for local-derived refs — it's a tracker-only concept (the helper has
- * already filtered out Action Items via `excludeExternalIds`).
+ * for local-derived refs — it's a tracker-only concept and was made
+ * dead weight by the Phase 4 ISS-90 mapping change (Action Items list
+ * cards now hydrate as `status: "Review"` and pass through the normal
+ * status filter, not a parallel taxonomy).
  */
 function localIssueToRef(issue: Issue): IssueRef {
   return {
@@ -520,46 +523,53 @@ async function _poll(repo: RepoContext): Promise<void> {
     return;
   }
   // ISS-86: tracker.fetchOpenCards() is the inbound channel ONLY (new
-  // cards + bulk-sync + Action Items hydration). It NO LONGER decides
-  // what gets dispatched — local YAML is the source of truth. The
-  // tracker-derived ToDo / In Progress / Action Items partitions below
-  // exist solely to drive the inbound mirror (bulkSyncMissingYamls,
-  // pushOrphans, triage). The dispatch + stuck-card scan switch to
-  // listDispatchableYamls / listInProgressYamls AFTER the inbound
-  // mirror runs, so hand-written YAMLs land in dispatch on the same
-  // tick orphan-push stamps their external_id.
-  const trackerToDoRefs = openCards.filter(
-    (c) => c.status === "ToDo" && c.list_kind !== "action_items",
-  );
+  // cards + bulk-sync). It does NOT decide what gets dispatched —
+  // local YAML is the source of truth. The tracker-derived
+  // partitions below exist solely to drive the inbound mirror
+  // (bulkSyncMissingYamls, pushOrphans). The dispatch + stuck-card
+  // scan switch to listDispatchableYamls / listInProgressYamls /
+  // listTriageDueYamls AFTER the inbound mirror runs, so hand-written
+  // YAMLs land in dispatch on the same tick orphan-push stamps their
+  // external_id.
+  //
+  // Phase 4 of ISS-90 retired the `list_kind === "action_items"`
+  // partition: cards on the Trello Action Items list now surface
+  // with `status: "Review"` (see `trello.ts#listIdToStatus`) and are
+  // bulk-synced through the Review branch alongside other Review
+  // cards.
+  const trackerToDoRefs = openCards.filter((c) => c.status === "ToDo");
   const trackerInProgressRefs = openCards.filter(
     (c) => c.status === "In Progress",
   );
-  const actionItemRefs = openCards.filter(
-    (c) => c.list_kind === "action_items",
+  const trackerReviewRefs = openCards.filter((c) => c.status === "Review");
+  const trackerNeedsHelpRefs = openCards.filter(
+    (c) => c.status === "Needs Help",
   );
 
-  // Bulk-sync every ToDo (siblings — `slice(1)` because the
-  // primary ToDo card has its own dedicated hydrate-or-stamp block
-  // below that THROWS on hydrate failure) AND every In Progress card
-  // that lacks a local YAML. The In Progress addition closes a gap:
-  // pre-extension the poller only hydrated ToDo, so a card that moved
-  // to In Progress without a local YAML (e.g. picked up by a prior
-  // worker that died before writing the YAML, or moved manually on
-  // the tracker) stayed invisible to the orphan-resume check below.
-  // Bulk-sync writes still carry `dispatch: null` — the dispatch
-  // primary's record is stamped via `stampDispatchAndWrite` later, and
-  // an In Progress orphan keeps its existing `dispatch` because
-  // `findByExternalId` short-circuits hydration when the YAML
-  // already exists.
-  // Bulk-sync covers: every dispatch-eligible ToDo sibling, every
-  // In Progress card, AND every Action Items card. The Action Items
-  // import is what makes blocker-discovery findable from the agent's
-  // local YAML scan — see the `blocked` field workflow in
-  // `~/.claude/rules/issues.md`.
+  // Bulk-sync every triage-eligible card that lacks a local YAML so
+  // the per-card triage agent has a YAML to load via
+  // `mcp__danx-issue__danx_issue_get`. Coverage:
+  //   - Every dispatchable ToDo sibling (`slice(1)` — the primary has
+  //     its own dedicated hydrate-or-stamp path that THROWS on hydrate
+  //     failure).
+  //   - Every In Progress card (closes the gap where a worker died
+  //     before writing the YAML; the orphan-resume scan below depends
+  //     on a local YAML existing).
+  //   - Every Review card (so the per-card triage agent can read it
+  //     locally) — Phase 4 of ISS-90 added this branch when the
+  //     Action Items list collapsed into `status: "Review"`.
+  //   - Every Needs Help card (same reason as Review — the triage
+  //     agent's Hard Gate audit needs the local YAML).
+  // Bulk-sync writes carry `dispatch: null`; the dispatch primary's
+  // record is stamped via `stampDispatchAndWrite` later, and an
+  // In Progress orphan keeps its existing `dispatch` because
+  // `findByExternalId` short-circuits hydration when the YAML already
+  // exists.
   await bulkSyncMissingYamls(repo, tracker, [
     ...trackerToDoRefs.slice(1),
     ...trackerInProgressRefs,
-    ...actionItemRefs,
+    ...trackerReviewRefs,
+    ...trackerNeedsHelpRefs,
   ]);
 
   // Orphan-push: scan local YAMLs for empty `external_id` and push each
@@ -581,16 +591,13 @@ async function _poll(repo: RepoContext): Promise<void> {
   }
 
   // ISS-86: dispatch source is local YAML, not the tracker fetch above.
-  // Action Items hydrate as full local YAMLs (so they can act as
-  // blockers) but `list_kind` is NOT persisted on disk — derive the
-  // exclude set from the tracker view and pass it through. Orphans
-  // (`external_id === ""`) bypass the exclude set unconditionally.
-  const actionItemExternalIds = new Set(
-    actionItemRefs.map((c) => c.external_id),
+  // Phase 4 of ISS-90 dropped the `excludeExternalIds` filter — Action
+  // Items list cards now hydrate as `status: "Review"` (see
+  // `trello.ts#listIdToStatus`), so the existing `status === "ToDo"`
+  // filter inside `listDispatchableYamls` naturally excludes them.
+  let cards: IssueRef[] = listDispatchableYamls(repo.localPath).map(
+    localIssueToRef,
   );
-  let cards: IssueRef[] = listDispatchableYamls(repo.localPath, {
-    excludeExternalIds: actionItemExternalIds,
-  }).map(localIssueToRef);
   const inProgressCards: IssueRef[] = listInProgressYamls(
     repo.localPath,
   ).map(localIssueToRef);
@@ -649,12 +656,13 @@ async function _poll(repo: RepoContext): Promise<void> {
   }
 
   if (cards.length === 0) {
-    // Auto-triage runs BEFORE the ideator on an empty ToDo tick. When
-    // `autoTriage` is enabled and there are untriaged Action Items / Review
-    // cards, spawn the triage agent and honor the per-tick single-dispatch
-    // invariant. Falls through to the ideator only when triage finds
-    // nothing eligible. See ISS-79 + `.claude/rules/agent-dispatch.md`.
-    if (await checkAndSpawnTriage(repo, openCards)) {
+    // Phase 4 of ISS-90 — single-dispatch-per-tick decision tree.
+    // Order: work-ready (covered above and short-circuits the tick) →
+    // triage-due → idle/ideator. The triage-due path dispatches the
+    // `danx-triage-card` skill against ONE card per tick when an
+    // operator has opted in via `overrides.autoTriage`. Falls through
+    // to the ideator only when no triage is due.
+    if (await tryTriageDispatch(repo)) {
       return;
     }
     log.info(`[${repo.name}] No cards in ToDo — checking if ideator needed`);
@@ -770,17 +778,11 @@ async function _poll(repo: RepoContext): Promise<void> {
   // Pre-stamp the YAML with the dispatch shell BEFORE spawn so a
   // crash between `dispatch()` resolving and the post-spawn pid stamp
   // still leaves a partial record on disk that the next reattach pass
-  // can recover from. `pid: 0` is the sentinel — `dispatch-liveness-yaml`
-  // treats it as dead, so the next tick clears it without spawning a
-  // duplicate. Phase 2 of poller-triage rework (ISS-92).
-  const startStamp: IssueDispatch = {
-    id: dispatchId,
-    pid: 0,
-    host: osHostname(),
-    kind: "work",
-    started_at: new Date().toISOString(),
-    ttl_seconds: TTL_SECONDS_BY_KIND.work,
-  };
+  // can recover from. The `buildStartStamp` helper enforces the
+  // pid:0 + host + ISO + per-kind-TTL invariant in one place. Phase 2
+  // of poller-triage rework (ISS-92), refactored to a helper in
+  // Phase 4 (ISS-94).
+  const startStamp = buildStartStamp(dispatchId, "work", osHostname());
 
   // Reuse the lookup the YAML-based guard above already performed when
   // present — `findByExternalId` is O(N) over the open dir, so paying
@@ -1102,14 +1104,7 @@ async function tryResumeOrphan(
       `[${repo.name}] Resuming orphan In Progress card "${issue.title}" (${issue.id}) — parent dispatch ${dispatchId} session ${resolved.sessionId}`,
     );
     const newDispatchId = randomUUID();
-    const startStamp: IssueDispatch = {
-      id: newDispatchId,
-      pid: 0,
-      host: osHostname(),
-      kind: "work",
-      started_at: new Date().toISOString(),
-      ttl_seconds: TTL_SECONDS_BY_KIND.work,
-    };
+    const startStamp = buildStartStamp(newDispatchId, "work", osHostname());
     const stamped = stampDispatchAndWrite(repo.localPath, issue, startStamp);
     const yamlPath = issuePath(repo.localPath, stamped.id, "open");
     const task =
@@ -2243,43 +2238,96 @@ function formatElapsed(job: AgentJob): string {
 }
 
 /**
- * Auto-triage spawn gate (ISS-79 / Phase 5 of the auto-triage epic).
+ * Per-card triage dispatch gate (Phase 4 of ISS-90). Replaces the
+ * legacy bulk `checkAndSpawnTriage` (one session over every Action
+ * Items + Review card) with a single-card dispatch — one tick fires
+ * one `danx-triage-card` agent against one specific YAML.
  *
  * Invoked from the empty-ToDo branch of `_poll` BEFORE
- * `checkAndSpawnIdeator`. Returns `true` when it spawned the triage
+ * `checkAndSpawnIdeator`. Returns `true` when it spawned a triage
  * agent — the caller honors the per-tick single-dispatch invariant by
  * returning immediately. Returns `false` when:
  *   - `autoTriage` is disabled (env default or operator override), OR
- *   - no untriaged Action Items / Review cards exist.
+ *   - no triage-due card exists.
  *
- * Eligibility:
- *   - Action Items list cards (`list_kind === "action_items"`)
- *   - Review cards (`status === "Review"`)
- * minus any whose local YAML carries non-empty `triage.last_status`
- * (already triaged within the idempotence window — re-triage requires
- * explicit `/danx-triage refresh`). Cards without a local YAML count as
- * untriaged.
+ * Triage-due eligibility (delegated to `listTriageDueYamls`):
+ *   - `dispatch === null` (no in-flight dispatch on the card)
+ *   - `triage.expires_at === ""` OR `Date.parse(expires_at) <= now`
+ *   - `blocked != null` OR `status` ∈ {Review, Needs Help}
+ * Sort: never-triaged first, then `expires_at` ASC.
  *
- * Reuses `openCards` from the caller — the poll tick already paid for
- * one `tracker.fetchOpenCards()` call.
+ * The dispatched agent runs with `kind: "triage"` and TTL 600s
+ * (`TTL_SECONDS_BY_KIND.triage`). Same `dispatchStamp` lifecycle as a
+ * work dispatch — pre-stamp on the YAML, register in
+ * `activeDispatches`, post-spawn pid update, onComplete cleanup.
  */
+async function tryTriageDispatch(repo: RepoContext): Promise<boolean> {
+  // Per-repo runtime toggle. Env default is `false` — operators opt in
+  // via the dashboard Agents tab. See `.claude/rules/settings-file.md`.
+  if (!isFeatureEnabled(repo, "autoTriage")) {
+    log.info(
+      `[${repo.name}] Auto-triage disabled (settings.json override or env default) — skipping`,
+    );
+    return false;
+  }
+
+  const due = listTriageDueYamls(repo.localPath, Date.now());
+  if (due.length === 0) {
+    return false;
+  }
+
+  const target = due[0];
+  log.info(
+    `[${repo.name}] Triage-due: dispatching ${target.id} (status=${target.status}, blocked=${target.blocked ? "yes" : "no"}, expires_at=${target.triage.expires_at || "(never)"})`,
+  );
+
+  const dispatchId = randomUUID();
+  // Stamp the dispatch record on disk BEFORE spawn so a crash between
+  // dispatch() resolving and the post-spawn pid stamp leaves a partial
+  // record the next reattach pass can recover from. Same invariant as
+  // the work-ready dispatch path; the helper centralizes the
+  // pid:0/host/TTL contract across all three spawn sites.
+  const startStamp = buildStartStamp(dispatchId, "triage", osHostname());
+  const stamped = stampDispatchAndWrite(repo.localPath, target, startStamp);
+  const prompt = TRIAGE_CARD_PROMPT(stamped.id);
+
+  await spawnClaude(
+    repo,
+    prompt,
+    {
+      trigger: "api",
+      metadata: {
+        endpoint: "poller/triage-card",
+        callerIp: null,
+        statusUrl: null,
+        initialPrompt: prompt.slice(0, 500),
+      },
+    },
+    dispatchId,
+    undefined,
+    { issueId: stamped.id, startStamp },
+  );
+  return true;
+}
+
 /**
- * Shared spawn shape for poller-driven, non-card API dispatches (ideator,
- * auto-triage, and any future periodic). Wraps the `spawnClaude` call
- * with the metadata block every poller-side `api` trigger needs:
- * `endpoint` slug, `initialPrompt` preview slice, and the null
- * `callerIp` / `statusUrl` fields the Trello-trigger path doesn't apply.
+ * Shared spawn shape for poller-driven, non-card API dispatches
+ * (ideator + any future periodic that does NOT bind to a specific
+ * card YAML). Wraps the `spawnClaude` call with the metadata block
+ * every poller-side `api` trigger needs: `endpoint` slug,
+ * `initialPrompt` preview slice, and the null `callerIp` /
+ * `statusUrl` fields the Trello-trigger path doesn't apply.
  */
 function spawnPollerApiAgent(
   repo: RepoContext,
   prompt: string,
   endpoint: string,
 ): void {
-  // Fire-and-forget: ideator and auto-triage have no per-card YAML
-  // stamp to write post-spawn (no `dispatchStamp` arg), so the only
-  // reason to await `spawnClaude` here would be sequencing — and the
-  // caller (`_poll` empty-ToDo branch) is already at end-of-tick.
-  // Errors surface via the dispatch.catch path inside `spawnClaude`.
+  // Fire-and-forget: ideator has no per-card YAML stamp to write
+  // post-spawn (no `dispatchStamp` arg), so the only reason to await
+  // `spawnClaude` here would be sequencing — and the caller
+  // (`_poll` empty-ToDo branch) is already at end-of-tick. Errors
+  // surface via the dispatch.catch path inside `spawnClaude`.
   void spawnClaude(repo, prompt, {
     trigger: "api",
     metadata: {
@@ -2289,65 +2337,6 @@ function spawnPollerApiAgent(
       initialPrompt: prompt.slice(0, 500),
     },
   });
-}
-
-async function checkAndSpawnTriage(
-  repo: RepoContext,
-  openCards: IssueRef[],
-): Promise<boolean> {
-  // Per-repo runtime toggle. Env default is `false` — operators opt in
-  // via the dashboard Agents tab. Logged on disabled for symmetry with
-  // `checkAndSpawnIdeator`. See `.claude/rules/settings-file.md`.
-  if (!isFeatureEnabled(repo, "autoTriage")) {
-    log.info(
-      `[${repo.name}] Auto-triage disabled (settings.json override or env default) — skipping`,
-    );
-    return false;
-  }
-
-  const candidates = openCards.filter(
-    (c) => c.list_kind === "action_items" || c.status === "Review",
-  );
-  if (candidates.length === 0) {
-    return false;
-  }
-
-  // Skip cards whose local YAML is already triaged. Cards without a
-  // local YAML (findByExternalId returns null) count as untriaged.
-  // A read failure (corrupt YAML) fails CLOSED — treat as triaged so
-  // a persistently broken file doesn't cause a triage spawn every
-  // empty-ToDo tick. The danxbot worker's normal YAML-validation path
-  // surfaces the parse error elsewhere.
-  const eligible = candidates.filter((c) => {
-    let local: Issue | null;
-    try {
-      local = findByExternalId(repo.localPath, c.external_id);
-    } catch (error) {
-      log.warn(
-        `[${repo.name}] auto-triage: findByExternalId failed for ${c.external_id} — skipping (fail closed)`,
-        error,
-      );
-      return false;
-    }
-    // Phase 1 of the poller-triage rework keeps the legacy "has been
-    // triaged at all" semantics by checking `triage.last_status` (set
-    // on the first triage decision). Phase 4 will switch to the
-    // `triage.expires_at` TTL gate so cards re-triage on cadence.
-    return !local || !local.triage.last_status;
-  });
-
-  if (eligible.length === 0) {
-    log.info(
-      `[${repo.name}] Auto-triage: ${candidates.length} candidate${candidates.length > 1 ? "s" : ""} all already triaged — skipping`,
-    );
-    return false;
-  }
-
-  log.info(
-    `[${repo.name}] Auto-triage: ${eligible.length} untriaged card${eligible.length > 1 ? "s" : ""} — spawning triage`,
-  );
-  spawnPollerApiAgent(repo, TRIAGE_AUTO_PROMPT, "poller/auto-triage");
-  return true;
 }
 
 async function checkAndSpawnIdeator(

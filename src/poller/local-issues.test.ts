@@ -14,6 +14,7 @@ import {
   listBlockedTodoYamls,
   listDispatchableYamls,
   listInProgressYamls,
+  listTriageDueYamls,
 } from "./local-issues.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
@@ -105,24 +106,107 @@ describe("local-issues", () => {
       expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
     });
 
-    it("excludes YAMLs whose external_id is in excludeExternalIds", () => {
-      writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "ai" }), 1000);
-      writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "todo" }), 1000);
-      const result = listDispatchableYamls(repoRoot, {
-        excludeExternalIds: new Set(["ai"]),
-      });
+    it("excludes YAMLs that already carry a non-null dispatch (occupied)", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          dispatch: {
+            id: "uuid-1",
+            pid: 1,
+            host: "h",
+            kind: "work",
+            started_at: "2026-01-01T00:00:00Z",
+            ttl_seconds: 7200,
+          },
+        }),
+        1000,
+      );
+      writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
+      const result = listDispatchableYamls(repoRoot);
       expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
     });
 
-    it("keeps orphan YAMLs (external_id === '') even when exclude set is non-empty", () => {
-      writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "" }), 1000);
-      const result = listDispatchableYamls(repoRoot, {
-        excludeExternalIds: new Set(["ai"]),
-      });
-      expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
+    it("sorts untriaged cards (triage.expires_at empty) before triaged cards regardless of mtime", () => {
+      // Triaged with high ICE (mtime 1000) — would win FIFO
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          triage: {
+            expires_at: "2026-09-01T00:00:00Z",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "",
+            ice: { total: 100, i: 5, c: 5, e: 4 },
+            history: [],
+          },
+        }),
+        1000,
+      );
+      // Untriaged (mtime 5000) — should still win because untriaged has no
+      // priority signal yet and the operator wants it flushed first.
+      writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "b" }), 5000);
+      const result = listDispatchableYamls(repoRoot);
+      expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1"]);
     });
 
-    it("sorts by mtime ascending (oldest first), tiebreak by id ascending", () => {
+    it("among triaged cards, sorts by triage.ice.total DESC", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          triage: {
+            expires_at: "2026-09-01T00:00:00Z",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "",
+            ice: { total: 20, i: 5, c: 2, e: 2 },
+            history: [],
+          },
+        }),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-2",
+          external_id: "b",
+          triage: {
+            expires_at: "2026-09-01T00:00:00Z",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "",
+            ice: { total: 100, i: 5, c: 5, e: 4 },
+            history: [],
+          },
+        }),
+        2000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-3",
+          external_id: "c",
+          triage: {
+            expires_at: "2026-09-01T00:00:00Z",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "",
+            ice: { total: 60, i: 4, c: 3, e: 5 },
+            history: [],
+          },
+        }),
+        3000,
+      );
+      const result = listDispatchableYamls(repoRoot);
+      expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-3", "ISS-1"]);
+    });
+
+    it("falls back to FIFO mtime within the same priority tier (untriaged)", () => {
       writeAt(repoRoot, makeIssue({ id: "ISS-3", external_id: "c" }), 3000);
       writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
       writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "b" }), 2000);
@@ -171,13 +255,6 @@ describe("local-issues", () => {
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
-    it("treats an empty excludeExternalIds Set the same as omitting the option", () => {
-      writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
-      const result = listDispatchableYamls(repoRoot, {
-        excludeExternalIds: new Set(),
-      });
-      expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
-    });
   });
 
   describe("listBlockedTodoYamls", () => {
@@ -251,6 +328,212 @@ describe("local-issues", () => {
       );
       const result = listInProgressYamls(repoRoot);
       expect(result.map((i) => i.id)).toEqual(["ISS-3", "ISS-2"]);
+    });
+  });
+
+  describe("listTriageDueYamls", () => {
+    const NOW = Date.parse("2026-05-07T12:00:00Z");
+
+    function withTriage(overrides: Partial<Issue>, expiresAt: string): Issue {
+      return makeIssue({
+        ...overrides,
+        triage: {
+          expires_at: expiresAt,
+          reassess_hint: "",
+          last_status: expiresAt === "" ? "" : "Confirm-Block",
+          last_explain: "",
+          ice: { total: 0, i: 0, c: 0, e: 0 },
+          history: [],
+        },
+      });
+    }
+
+    it("returns Review cards whose triage is due (expires_at empty or <= now)", () => {
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-1", external_id: "a", status: "Review" },
+          "2026-04-01T00:00:00Z", // past — due
+        ),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-2", external_id: "b", status: "Review" },
+          "2026-09-01T00:00:00Z", // future — not due
+        ),
+        2000,
+      );
+      const result = listTriageDueYamls(repoRoot, NOW);
+      expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
+    });
+
+    it("returns Needs Help cards whose triage is due", () => {
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-1", external_id: "a", status: "Needs Help" },
+          "",
+        ),
+        1000,
+      );
+      const result = listTriageDueYamls(repoRoot, NOW);
+      expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
+    });
+
+    it("returns Blocked cards (blocked != null) regardless of status", () => {
+      const blocked: IssueBlocked = {
+        reason: "Waits for ISS-99",
+        timestamp: "2026-04-01T00:00:00Z",
+        by: ["ISS-99"],
+      };
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-1", external_id: "a", status: "ToDo", blocked },
+          "",
+        ),
+        1000,
+      );
+      const result = listTriageDueYamls(repoRoot, NOW);
+      expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
+    });
+
+    it("excludes ToDo cards (blocked == null) — they go through the work path", () => {
+      writeAt(
+        repoRoot,
+        withTriage({ id: "ISS-1", external_id: "a", status: "ToDo" }, ""),
+        1000,
+      );
+      const result = listTriageDueYamls(repoRoot, NOW);
+      expect(result).toEqual([]);
+    });
+
+    it("excludes In Progress / Done / Cancelled / Needs Approval cards", () => {
+      for (const status of [
+        "In Progress",
+        "Done",
+        "Cancelled",
+        "Needs Approval",
+      ] as const) {
+        const dir = resolve(repoRoot, ".danxbot", "issues", "open");
+        rmSync(dir, { recursive: true, force: true });
+        writeAt(
+          repoRoot,
+          withTriage(
+            { id: "ISS-1", external_id: "a", status },
+            "",
+          ),
+          1000,
+        );
+        expect(listTriageDueYamls(repoRoot, NOW)).toEqual([]);
+      }
+    });
+
+    it("excludes cards with an active dispatch (dispatch != null)", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          status: "Review",
+          dispatch: {
+            id: "uuid-1",
+            pid: 1,
+            host: "h",
+            kind: "triage",
+            started_at: "2026-05-07T11:55:00Z",
+            ttl_seconds: 600,
+          },
+        }),
+        1000,
+      );
+      expect(listTriageDueYamls(repoRoot, NOW)).toEqual([]);
+    });
+
+    it("sorts never-triaged (expires_at === '') before stale-triaged", () => {
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-1", external_id: "a", status: "Review" },
+          "2026-04-01T00:00:00Z",
+        ),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-2", external_id: "b", status: "Review" },
+          "",
+        ),
+        5000,
+      );
+      const result = listTriageDueYamls(repoRoot, NOW);
+      expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1"]);
+    });
+
+    it("sorts stale-triaged by expires_at ASC (oldest stale first)", () => {
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-1", external_id: "a", status: "Review" },
+          "2026-03-01T00:00:00Z",
+        ),
+        3000,
+      );
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-2", external_id: "b", status: "Review" },
+          "2026-01-01T00:00:00Z",
+        ),
+        2000,
+      );
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-3", external_id: "c", status: "Review" },
+          "2026-04-01T00:00:00Z",
+        ),
+        1000,
+      );
+      const result = listTriageDueYamls(repoRoot, NOW);
+      expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1", "ISS-3"]);
+    });
+
+    it("FIFO mtime tiebreak when expires_at matches exactly", () => {
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-2", external_id: "b", status: "Review" },
+          "2026-04-01T00:00:00Z",
+        ),
+        2000,
+      );
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-1", external_id: "a", status: "Review" },
+          "2026-04-01T00:00:00Z",
+        ),
+        1000,
+      );
+      const result = listTriageDueYamls(repoRoot, NOW);
+      expect(result.map((i) => i.id)).toEqual(["ISS-1", "ISS-2"]);
+    });
+
+    it("treats a malformed expires_at (non-parseable) as due (fail-open — re-triage will fix the field)", () => {
+      writeAt(
+        repoRoot,
+        withTriage(
+          { id: "ISS-1", external_id: "a", status: "Review" },
+          "not-a-real-date",
+        ),
+        1000,
+      );
+      const result = listTriageDueYamls(repoRoot, NOW);
+      expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
   });
 });

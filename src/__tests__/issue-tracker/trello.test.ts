@@ -78,14 +78,14 @@ describe("TrelloTracker", () => {
         title: "P1",
         status: "Needs Approval",
       },
-      // Action Items list cards surface as ToDo + list_kind: "action_items"
-      // so blocker discovery sees them but the poller dispatch path skips.
+      // Phase 4 of ISS-90: Action Items list cards collapse into
+      // status: Review so the per-card triage agent picks them up
+      // alongside the Review list. The legacy list_kind tag is gone.
       {
         id: "ISS-4",
         external_id: "a1",
         title: "A1",
-        status: "ToDo",
-        list_kind: "action_items",
+        status: "Review",
       },
     ]);
     // Pin the call count so a future regression that drops one of the
@@ -93,6 +93,31 @@ describe("TrelloTracker", () => {
     // Needs Approval, Action Items) gets caught here, even when the
     // dropped list happened to be empty.
     expect(fetchMock).toHaveBeenCalledTimes(6);
+    // Phase 4 of ISS-90 retired the legacy `list_kind: "action_items"`
+    // tag — the Action Items list now collapses into status: Review.
+    // Negatively assert that NO ref carries the legacy tag so a
+    // regression that re-introduces it is caught here.
+    expect(refs.every((r) => r.list_kind !== "action_items")).toBe(true);
+  });
+
+  it("getCard maps a card on the Action Items list to status: Review (Phase 4 of ISS-90)", async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("/cards/ai-card?")) {
+        return jsonResponse({
+          id: "ai-card",
+          name: "#ISS-7: An action item",
+          desc: "Do this later",
+          idList: "list-ai",
+          idLabels: [],
+          checklists: [],
+        });
+      }
+      throw new Error(`unexpected url: ${url}`);
+    });
+    const tracker = new TrelloTracker(TRELLO);
+    const issue = await tracker.getCard("ai-card");
+    expect(issue.status).toBe("Review");
+    expect(issue.id).toBe("ISS-7");
   });
 
   it("getCard hydrates description, status, type, ac (NOT comments — call getComments separately)", async () => {

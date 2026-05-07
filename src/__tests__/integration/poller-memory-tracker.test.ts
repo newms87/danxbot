@@ -194,23 +194,16 @@ function refToFakeIssue(ref: IssueRef): Issue {
   };
 }
 vi.mock("../../poller/local-issues.js", () => ({
-  listDispatchableYamls: (
-    _repoPath: string,
-    options: { excludeExternalIds?: ReadonlySet<string> } = {},
-  ): Issue[] => {
-    const exclude = options.excludeExternalIds;
-    return lastOpenCards.value
-      .filter((r) => r.status === "ToDo" && r.list_kind !== "action_items")
-      .filter(
-        (r) => !exclude || r.external_id === "" || !exclude.has(r.external_id),
-      )
-      .map(refToFakeIssue);
-  },
+  listDispatchableYamls: (_repoPath: string): Issue[] =>
+    lastOpenCards.value
+      .filter((r) => r.status === "ToDo")
+      .map(refToFakeIssue),
   listInProgressYamls: (_repoPath: string): Issue[] =>
     lastOpenCards.value
       .filter((r) => r.status === "In Progress")
       .map(refToFakeIssue),
   listBlockedTodoYamls: (_repoPath: string): Issue[] => [],
+  listTriageDueYamls: (_repoPath: string, _now: number): Issue[] => [],
 }));
 
 // The factory mock returns the real MemoryTracker the test sets up.

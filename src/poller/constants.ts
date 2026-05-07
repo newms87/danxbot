@@ -96,27 +96,34 @@ export const TEAM_PROMPT = "/danx-next";
 export const IDEATOR_PROMPT = "/danx-ideate";
 
 /**
- * Auto-triage prompt — invoked by the poller (Phase 5 / ISS-79) when
- * the ToDo queue is empty and `overrides.autoTriage.enabled` is true.
+ * Per-card triage prompt — invoked by the poller's triage-due path
+ * (Phase 4 of ISS-90) when an open card with `status` ∈
+ * {Review, Needs Help} OR `blocked != null` has `triage.expires_at` in
+ * the past (or empty). One dispatch per tick, one card per dispatch.
  *
- * Drives the `danx-triage` skill in `auto` mode (see
- * `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-triage/SKILL.md`,
- * scope row "/danx-triage auto"). Scope: Action Items list (priority 1)
- * + Review list (priority 2). Every card in scope gets a decision —
- * the skill never skips. Decisions map to one of five YAML statuses:
- * `ToDo`, `Done`, `Cancelled`, `Needs Help`, or `Needs Approval`.
+ * Drives the `danx-triage-card` skill (Phase 3 / ISS-93). The single
+ * Claude session reads the named card via `mcp__danx-issue__danx_issue_get`,
+ * decides per the per-status decision tree, writes the TTL-stamped
+ * `triage{}` block back via `mcp__danx-issue__danx_issue_save`, and
+ * signals completion. Decisions:
+ *   - Review → ICE-score → Keep / Cancel / Approve (status flips)
+ *   - Needs Help → Hard Gate audit → Demote / Confirm
+ *   - Blocked (`blocked != null`) → Re-check `blocked.by[]` → Unblock
+ *     (clear `blocked`) / Confirm (refresh expires_at).
  *
- * Defining the prompt as a constant here keeps the spawn site in
- * `src/poller/index.ts` (Phase 5) small and gives tests one place to
- * assert the auto-mode markers.
+ * The dispatch task is a single command line with the card's id; the
+ * skill description carries the full per-status contract.
  */
-export const TRIAGE_AUTO_PROMPT = [
-  "/danx-triage auto",
-  "",
-  "Scope: Action Items list (priority 1) + Review list (priority 2).",
-  "Every card gets ONE decision — never skip.",
-  "Outcomes map to YAML status: ToDo, Done, Cancelled, Needs Help, or Needs Approval.",
-  "Use `Needs Approval` when uncertain about direction (architectural risk, cross-cutting scope, disruptive refactor).",
-  "Use `Needs Help` ONLY when missing information from a human (creds, ambiguous spec, write-only access).",
-].join("\n");
+export const TRIAGE_CARD_PROMPT = (issueId: string): string =>
+  `Triage card ${issueId} using the danx-triage-card skill.`;
+
+/**
+ * Legacy bulk auto-triage prompt — retired by Phase 4 of ISS-90 in
+ * favor of per-card dispatches via `TRIAGE_CARD_PROMPT`. Kept exported
+ * as a stable empty marker so any skill / fixture that still imports
+ * the symbol gets a deterministic empty string instead of a runtime
+ * `undefined`. Phase 5 (ISS-95) deletes this symbol and the redirect
+ * skill that historically consumed it.
+ */
+export const TRIAGE_AUTO_PROMPT = "";
 

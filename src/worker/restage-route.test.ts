@@ -10,7 +10,7 @@ import {
 
 const mockGetActiveJob = vi.fn();
 
-vi.mock("./dispatch.js", () => ({
+vi.mock("../dispatch/core.js", () => ({
   getActiveJob: (...args: unknown[]) => mockGetActiveJob(...args),
 }));
 

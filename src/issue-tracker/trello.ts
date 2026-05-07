@@ -60,11 +60,14 @@ export class TrelloTracker implements IssueTracker {
   // ---------- Public API ----------
 
   async fetchOpenCards(): Promise<IssueRef[]> {
-    // Cards on the Action Items list surface with `status: "ToDo"` AND
-    // `list_kind: "action_items"`. Importing them into local YAMLs makes
-    // them findable by the agent (blocked-by discovery) without making
-    // them dispatch-eligible — the poller filters dispatch on
-    // `list_kind !== "action_items"`.
+    // Phase 4 of ISS-90 collapsed the Action Items list_kind into
+    // `status: "Review"`: cards on the Trello Action Items list
+    // surface with `status: "Review"` so the per-card triage agent picks
+    // them up alongside Review-list cards. The legacy
+    // `list_kind: "action_items"` distinction (and the poller filter
+    // built on it) is gone — the new triage loop dispatches by status
+    // alone. Phase 5 (ISS-95) deletes the residual `list_kind` field
+    // from `IssueRef` once every consumer is off it.
     const openLists: Array<{
       status: IssueStatus;
       listId: string;
@@ -92,9 +95,9 @@ export class TrelloTracker implements IssueTracker {
         listKind: undefined,
       },
       {
-        status: "ToDo",
+        status: "Review",
         listId: this.trello.actionItemsListId,
-        listKind: "action_items",
+        listKind: undefined,
       },
     ];
     const refs: IssueRef[] = [];
@@ -522,12 +525,13 @@ export class TrelloTracker implements IssueTracker {
     }
     if (listId === this.trello.doneListId) return "Done";
     if (listId === this.trello.cancelledListId) return "Cancelled";
-    // Action Items: a UI-organization-only list (no separate IssueStatus
-    // value). Cards there are imported as `ToDo` so blocker discovery can
-    // see them, while `IssueRef.list_kind === "action_items"` keeps the
-    // poller from dispatching them. Mirror that here so a direct getCard
-    // on an Action Items card returns a sensible status.
-    if (listId === this.trello.actionItemsListId) return "ToDo";
+    // Phase 4 of ISS-90: Action Items list cards collapse into
+    // `status: "Review"` so the per-card triage agent picks them up
+    // alongside the Review list. The list itself stays on the Trello
+    // board (no rename), but the sync layer remaps it on hydration.
+    // Phase 5 (ISS-95) deletes the residual `list_kind` field from
+    // `IssueRef` once every consumer is off it.
+    if (listId === this.trello.actionItemsListId) return "Review";
     throw new Error(`Trello list id ${listId} is not mapped to a status`);
   }
 
