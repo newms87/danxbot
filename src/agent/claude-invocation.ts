@@ -121,8 +121,7 @@ export function buildClaudeInvocation(
     body = `@${promptFile}`;
   }
 
-  const firstMessage =
-    `${DISPATCH_TAG_PREFIX}${options.jobId} --> ${body}${tracking}`;
+  const firstMessage = `${DISPATCH_TAG_PREFIX}${options.jobId} --> ${body}${tracking}`;
 
   // `--strict-mcp-config` is load-bearing for agent isolation. With this
   // flag, claude IGNORES every project-scope and user-scope `.mcp.json` —
@@ -132,10 +131,23 @@ export function buildClaudeInvocation(
   // independently from every danxbot-dispatched agent. Changing or
   // removing this flag re-introduces the cross-contamination bug that
   // the agent-isolation epic (Trello 7ha2CSpc) was created to fix.
+  // `--setting-sources project,local` excludes the `user` settings tier
+  // from the dispatched session. Without this, claude merges the host
+  // user's `~/.claude/settings.json` (hooks, CAVEMAN-style additionalContext
+  // injectors, sound-playing Stop hooks, custom PreToolUse permission
+  // gates) into every dispatched workspace. That cross-contamination
+  // breaks the workspace-isolation contract: a developer's personal
+  // hooks have no business firing in an autonomous schema-builder
+  // dispatch, and slow user-global Stop hooks (e.g. powershell.exe
+  // SoundPlayer.PlaySync stalls in WSL→Windows interop) can hang the
+  // dispatch indefinitely. The workspace's own `--settings <path>` is
+  // still loaded explicitly below; only the user tier is skipped.
   const flags: string[] = [
     "--dangerously-skip-permissions",
     "--strict-mcp-config",
     "--verbose",
+    "--setting-sources",
+    "project,local",
   ];
 
   if (options.resumeSessionId) {
