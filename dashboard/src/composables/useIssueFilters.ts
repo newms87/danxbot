@@ -22,6 +22,23 @@ export function isInScope(
   return i.id === scopedEpicId || i.parent_id === scopedEpicId;
 }
 
+function readBoolPref(key: string): boolean {
+  try {
+    return window.localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeBoolPref(key: string, value: boolean): void {
+  try {
+    if (value) window.localStorage.setItem(key, "1");
+    else window.localStorage.removeItem(key);
+  } catch {
+    /* localStorage disabled — silently no-op */
+  }
+}
+
 function parseTypes(raw: string | null): IssueTypeFilter[] {
   if (!raw) return [];
   const seen = new Set<IssueTypeFilter>();
@@ -46,16 +63,16 @@ export function useIssueFilters(selectedRepo?: Ref<string>) {
   const q = ref<string>("");
   const types = ref<IssueTypeFilter[]>([]);
   const blockedOnly = ref<boolean>(false);
-  const showClosed = ref<boolean>(false);
+  const showClosed = ref<boolean>(readBoolPref("issues.showClosed"));
   const scopedEpicId = ref<string | null>(null);
   const scopeMode = ref<ScopeMode>("highlight");
+  const showEpicChildren = ref<boolean>(readBoolPref("issues.showEpicChildren"));
 
   function readFromUrl(): void {
     const p = new URLSearchParams(window.location.search);
     q.value = p.get("q") ?? "";
     types.value = parseTypes(p.get("type"));
     blockedOnly.value = p.get("blocked") === "1";
-    showClosed.value = p.get("closed") === "1";
     const epic = p.get("epic");
     scopedEpicId.value = epic && epic.length > 0 ? epic : null;
     const m = p.get("mode");
@@ -75,7 +92,9 @@ export function useIssueFilters(selectedRepo?: Ref<string>) {
     if (types.value.length) p.set("type", [...types.value].sort().join(","));
     else p.delete("type");
     if (blockedOnly.value) p.set("blocked", "1"); else p.delete("blocked");
-    if (showClosed.value) p.set("closed", "1"); else p.delete("closed");
+    // showClosed + showEpicChildren persist via localStorage, never URL.
+    p.delete("closed");
+    p.delete("kids");
     if (scopedEpicId.value) {
       p.set("epic", scopedEpicId.value);
       // mode only meaningful when scoped; default "highlight" stays implicit
@@ -109,8 +128,13 @@ export function useIssueFilters(selectedRepo?: Ref<string>) {
     window.removeEventListener("popstate", readFromUrl);
   });
 
-  watch([q, types, blockedOnly, showClosed, scopedEpicId, scopeMode], writeToUrl);
+  watch(
+    [q, types, blockedOnly, showClosed, scopedEpicId, scopeMode, showEpicChildren],
+    writeToUrl,
+  );
   if (selectedRepo) watch(selectedRepo, writeToUrl);
+  watch(showClosed, (v) => writeBoolPref("issues.showClosed", v));
+  watch(showEpicChildren, (v) => writeBoolPref("issues.showEpicChildren", v));
 
   return {
     q,
@@ -119,6 +143,7 @@ export function useIssueFilters(selectedRepo?: Ref<string>) {
     showClosed,
     scopedEpicId,
     scopeMode,
+    showEpicChildren,
     toggleType,
     clearSearch,
   };

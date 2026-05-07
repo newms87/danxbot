@@ -4,13 +4,42 @@ import type { IssueDetail, IssueListItem } from "../../types";
 import DrawerHeader from "./DrawerHeader.vue";
 import OverviewTab from "./OverviewTab.vue";
 import ACTab from "./ACTab.vue";
+import ChildrenTab from "./ChildrenTab.vue";
 import CommentsTab from "./CommentsTab.vue";
 import RetroTab from "./RetroTab.vue";
 import RawTab from "./RawTab.vue";
 import AgentChat from "../chat/AgentChat.vue";
 import { acCounts } from "./acCounts";
 
-type TabId = "overview" | "ac" | "chat" | "comments" | "retro" | "raw";
+type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "retro" | "raw";
+
+const VALID_TABS: ReadonlyArray<TabId> = [
+  "overview", "ac", "children", "chat", "comments", "retro", "raw",
+];
+
+// Two persisted defaults: epic vs non-epic. Different card kinds have
+// different "interesting" tabs (epic → Phases; bug/feature → AC).
+function tabStorageKey(epic: boolean): string {
+  return epic ? "issues.lastTab.epic" : "issues.lastTab.other";
+}
+
+function readTabPref(epic: boolean): TabId {
+  try {
+    const v = window.localStorage.getItem(tabStorageKey(epic));
+    if (v && VALID_TABS.includes(v as TabId)) return v as TabId;
+  } catch {
+    /* localStorage disabled */
+  }
+  return "overview";
+}
+
+function writeTabPref(epic: boolean, value: TabId): void {
+  try {
+    window.localStorage.setItem(tabStorageKey(epic), value);
+  } catch {
+    /* localStorage disabled */
+  }
+}
 
 const props = defineProps<{
   issue: IssueDetail | null;
@@ -43,12 +72,24 @@ const ac = computed(() =>
   props.issue ? acCounts(props.issue.ac) : { done: 0, total: 0 },
 );
 
+const childCount = computed(() => props.issue?.children.length ?? 0);
+const isEpic = computed(() => props.issue?.type === "Epic");
+const childrenLabel = computed(() => {
+  const base = isEpic.value ? "Phases" : "Children";
+  return childCount.value > 0 ? `${base} · ${childCount.value}` : base;
+});
+
 const tabs = computed(() => [
   { id: "overview" as const, label: "Overview", disabled: false },
   {
     id: "ac" as const,
     label: "AC" + (ac.value.total > 0 ? ` · ${ac.value.done}/${ac.value.total}` : ""),
     disabled: ac.value.total === 0,
+  },
+  {
+    id: "children" as const,
+    label: childrenLabel.value,
+    disabled: childCount.value === 0,
   },
   { id: "chat" as const, label: "Chat", disabled: false },
   {
@@ -67,13 +108,18 @@ const tabs = computed(() => [
 watch(
   () => props.issue?.id,
   () => {
-    tab.value = "overview";
+    if (!props.issue) return;
+    const epic = props.issue.type === "Epic";
+    const saved = readTabPref(epic);
+    const t = tabs.value.find((x) => x.id === saved);
+    tab.value = t && !t.disabled ? saved : "overview";
   },
 );
 
 function selectTab(id: TabId, disabled: boolean): void {
   if (disabled) return;
   tab.value = id;
+  if (props.issue) writeTabPref(props.issue.type === "Epic", id);
 }
 </script>
 
@@ -113,6 +159,12 @@ function selectTab(id: TabId, disabled: boolean): void {
           @jump-issue="(id) => emit('jump-issue', id)"
         />
         <ACTab v-else-if="tab === 'ac'" :issue="issue" />
+        <ChildrenTab
+          v-else-if="tab === 'children'"
+          :issue="issue"
+          :all-issues="allIssues"
+          @jump-issue="(id) => emit('jump-issue', id)"
+        />
         <CommentsTab v-else-if="tab === 'comments'" :issue="issue" />
         <RetroTab v-else-if="tab === 'retro'" :issue="issue" />
         <RawTab v-else-if="tab === 'raw'" :issue="issue" />

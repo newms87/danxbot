@@ -26,6 +26,7 @@ const {
   showClosed,
   scopedEpicId,
   scopeMode,
+  showEpicChildren,
   toggleType,
 } = useIssueFilters(selectedRepo);
 
@@ -44,8 +45,15 @@ const scopedEpicTitle = computed<string | null>(() => {
  * Show-closed off: drop Cancelled entirely; let Done flow through so
  * `IssueBoard`'s "Done (Recent)" column can pick the last-24h slice.
  */
+const epicIds = computed<Set<string>>(() => {
+  const out = new Set<string>();
+  for (const i of issues.value) if (i.type === "Epic") out.add(i.id);
+  return out;
+});
+
 const filteredIssues = computed<IssueListItem[]>(() => {
   const needle = q.value.trim().toLowerCase();
+  const epics = epicIds.value;
   return issues.value.filter((i) => {
     if (!showClosed.value && i.status === "Cancelled") return false;
     if (types.value.length > 0 && !types.value.includes(typeToId(i.type))) {
@@ -62,6 +70,14 @@ const filteredIssues = computed<IssueListItem[]>(() => {
       scopedEpicId.value &&
       scopeMode.value === "filter" &&
       !isInScope(i, scopedEpicId.value)
+    ) return false;
+    // Hide every epic-child from the board by default. Drawer's
+    // Children tab is the canonical surface; the toolbar toggle (saved
+    // in localStorage) re-exposes them globally.
+    if (
+      !showEpicChildren.value &&
+      i.parent_id !== null &&
+      epics.has(i.parent_id)
     ) return false;
     return true;
   });
@@ -179,11 +195,13 @@ watch(
         :scoped-epic-id="scopedEpicId"
         :scoped-epic-title="scopedEpicTitle"
         :scope-mode="scopeMode"
+        :show-epic-children="showEpicChildren"
         @update:q="q = $event"
         @toggle-type="toggleType"
         @update:blocked-only="blockedOnly = $event"
         @update:show-closed="showClosed = $event"
         @update:scope-mode="scopeMode = $event"
+        @update:show-epic-children="showEpicChildren = $event"
         @clear-scope="scopedEpicId = null"
         @open-board-chat="boardChatOpen = true"
       />

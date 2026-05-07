@@ -13,6 +13,7 @@ const props = defineProps<{
   scopedEpicId: string | null;
   scopedEpicTitle: string | null;
   scopeMode: ScopeMode;
+  showEpicChildren: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -21,6 +22,7 @@ const emit = defineEmits<{
   "update:blockedOnly": [value: boolean];
   "update:showClosed": [value: boolean];
   "update:scopeMode": [value: ScopeMode];
+  "update:showEpicChildren": [value: boolean];
   "clear-scope": [];
   "open-board-chat": [];
 }>();
@@ -110,6 +112,15 @@ function clearSearch(): void {
           @change="emit('update:showClosed', ($event.target as HTMLInputElement).checked)"
         />
         Show closed
+      </label>
+
+      <label class="closed" data-test="show-epic-children">
+        <input
+          type="checkbox"
+          :checked="props.showEpicChildren"
+          @change="emit('update:showEpicChildren', ($event.target as HTMLInputElement).checked)"
+        />
+        Show children
       </label>
 
       <button
