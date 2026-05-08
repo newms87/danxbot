@@ -37,6 +37,8 @@ Common substitutions you will be tempted to skip:
 
 ## Local Workers
 
+> **STOP — strictly prohibited without explicit per-invocation user authorization.** Every `launch-*` and `deploy*` command starts a danxbot poller / production target that will immediately claim ToDo cards, dispatch agents, mutate YAMLs, and burn tokens. Invoke the `no-unauthorized-worker-launch` skill (in the `danxbot` plugin) BEFORE running ANY of these. Prior-session approvals do NOT carry forward; "I'm sure it's fine" is not authorization. Same prohibition applies to the Deployment table below.
+
 | Command | Purpose |
 |---------|---------|
 | `make launch-worker REPO=<name>` | Start a Docker worker (headless) for a connected repo |
