@@ -19,10 +19,39 @@ import {
   hydrateFromRemote,
   issuePath,
   loadLocal,
+  moveToClosedIfTerminal,
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
-import type { CreateCardInput } from "../issue-tracker/interface.js";
+import type { CreateCardInput, Issue, IssueStatus } from "../issue-tracker/interface.js";
+
+function buildIssueLite(id: string, status: IssueStatus): Issue {
+  return {
+    schema_version: 3,
+    tracker: "memory",
+    id,
+    external_id: "",
+    parent_id: null,
+    children: [],
+    dispatch: null,
+    status,
+    type: "Feature",
+    title: `Title for ${id}`,
+    description: "Body",
+    triage: {
+      expires_at: "",
+      reassess_hint: "",
+      last_status: "",
+      last_explain: "",
+      ice: { total: 0, i: 0, c: 0, e: 0 },
+      history: [],
+    },
+    ac: [],
+    comments: [],
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    blocked: null,
+  };
+}
 
 function defaultCreate(
   overrides: Partial<CreateCardInput> = {},
@@ -464,6 +493,97 @@ describe("yaml-lifecycle", () => {
       const result = clearDispatchAndWrite(repoRoot, original);
       // Same reference — no allocation, no spread.
       expect(result).toBe(original);
+    });
+  });
+
+  describe("moveToClosedIfTerminal (ISS-133, Phase 3 — shared open→closed mover)", () => {
+    it("returns false and does not write when status is non-terminal", () => {
+      const openPath = issuePath(repoRoot, "ISS-1", "open");
+      const closedPath = issuePath(repoRoot, "ISS-1", "closed");
+      const issue = buildIssueLite("ISS-1", "ToDo");
+
+      const moved = moveToClosedIfTerminal(repoRoot, issue);
+
+      expect(moved).toBe(false);
+      // No closed/ write — caller must handle non-terminal persistence.
+      expect(existsSync(closedPath)).toBe(false);
+      // No open/ write either — this helper is the close-mover, not a
+      // generic writer.
+      expect(existsSync(openPath)).toBe(false);
+    });
+
+    it("returns true and writes to closed/ for status=Done, removing open/", () => {
+      ensureIssuesDirs(repoRoot);
+      const issue = buildIssueLite("ISS-2", "Done");
+      writeFileSync(issuePath(repoRoot, "ISS-2", "open"), serializeIssue(issue));
+
+      const moved = moveToClosedIfTerminal(repoRoot, issue);
+
+      expect(moved).toBe(true);
+      expect(existsSync(issuePath(repoRoot, "ISS-2", "open"))).toBe(false);
+      expect(existsSync(issuePath(repoRoot, "ISS-2", "closed"))).toBe(true);
+    });
+
+    it("returns true and writes to closed/ for status=Cancelled, removing open/", () => {
+      ensureIssuesDirs(repoRoot);
+      const issue = buildIssueLite("ISS-3", "Cancelled");
+      writeFileSync(issuePath(repoRoot, "ISS-3", "open"), serializeIssue(issue));
+
+      const moved = moveToClosedIfTerminal(repoRoot, issue);
+
+      expect(moved).toBe(true);
+      expect(existsSync(issuePath(repoRoot, "ISS-3", "open"))).toBe(false);
+      expect(existsSync(issuePath(repoRoot, "ISS-3", "closed"))).toBe(true);
+    });
+
+    it("auto-creates closed/ dir on a fresh repo (no ensureIssuesDirs call needed)", () => {
+      // Pin the contract: caller hands in an Issue + a repo path; the
+      // helper handles `ensureIssuesDirs` internally so heal can run on
+      // a fresh repo (no prior open→closed motion) without crashing.
+      const freshRepo = mkdtempSync(join(tmpdir(), "danxbot-mtcit-fresh-"));
+      try {
+        const issue = buildIssueLite("ISS-4", "Done");
+        const moved = moveToClosedIfTerminal(freshRepo, issue);
+        expect(moved).toBe(true);
+        expect(existsSync(issuePath(freshRepo, "ISS-4", "closed"))).toBe(true);
+      } finally {
+        rmSync(freshRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("is idempotent when open/<id>.yml is absent (writes closed/, no unlink error)", () => {
+      ensureIssuesDirs(repoRoot);
+      // No open/ copy — this is the post-heal idempotency case where
+      // some other path (e.g. an earlier heal tick) already removed
+      // the open file. Re-running must not throw on the missing
+      // unlink.
+      const issue = buildIssueLite("ISS-5", "Done");
+
+      const moved = moveToClosedIfTerminal(repoRoot, issue);
+
+      expect(moved).toBe(true);
+      expect(existsSync(issuePath(repoRoot, "ISS-5", "closed"))).toBe(true);
+      expect(existsSync(issuePath(repoRoot, "ISS-5", "open"))).toBe(false);
+    });
+
+    it("overwrites a stale closed/<id>.yml ('open wins' contract)", () => {
+      ensureIssuesDirs(repoRoot);
+      const stale = buildIssueLite("ISS-6", "Done");
+      stale.title = "Stale closed copy";
+      writeFileSync(issuePath(repoRoot, "ISS-6", "closed"), serializeIssue(stale));
+
+      const fresh = buildIssueLite("ISS-6", "Done");
+      fresh.title = "Fresh open content";
+      writeFileSync(issuePath(repoRoot, "ISS-6", "open"), serializeIssue(fresh));
+
+      const moved = moveToClosedIfTerminal(repoRoot, fresh);
+
+      expect(moved).toBe(true);
+      const reloaded = parseIssue(
+        readFileSync(issuePath(repoRoot, "ISS-6", "closed"), "utf-8"),
+      );
+      expect(reloaded.title).toBe("Fresh open content");
+      expect(existsSync(issuePath(repoRoot, "ISS-6", "open"))).toBe(false);
     });
   });
 

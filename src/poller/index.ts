@@ -51,6 +51,7 @@ import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { pushOrphans } from "./orphan-push.js";
 import { recomputeParentStatuses } from "./epic-status.js";
+import { healLocalYamls } from "./heal.js";
 import {
   listBlockedTodoYamls,
   listDispatchableYamls,
@@ -499,6 +500,25 @@ async function _poll(repo: RepoContext): Promise<void> {
   // without a restart. `syncRepoFiles` is idempotent — see its
   // docstring + the per-workspace render loop inside.
   syncRepoFiles(repo);
+
+  // ISS-133 Phase 3: per-tick self-heal pass for the local YAML dir.
+  // Runs BEFORE every tracker fetch and BEFORE every dispatch decision
+  // so a YAML stuck in `open/` with terminal status (e.g. ISS-95-class
+  // saves where the worker's runSync threw before persistAfterSync
+  // moved the file) auto-recovers without a human `mv`. Tracker-
+  // independent — no Trello call, runs even when creds are dead.
+  // Together with the ISS-98 epic-status auto-derive pass below, the
+  // healer closes the ISS-95/ISS-90 loop: heal moves ISS-95 to
+  // closed/ on this tick; the next tick's auto-derive flips ISS-90's
+  // status from the union of children; the tick after heals ISS-90
+  // too.
+  const healResult = healLocalYamls(repo.localPath, repo.issuePrefix);
+  for (const h of healResult.healed) {
+    log.info(`[${repo.name}] Healed ${h.id}: open/ → closed/ (status: ${h.status})`);
+  }
+  for (const e of healResult.errors) {
+    log.warn(`[${repo.name}] Heal pass skipped malformed YAML at ${e.path}: ${e.message}`);
+  }
 
   // YAML-driven liveness scan (ISS-92, Phase 2). Walks the in-memory
   // `activeDispatches` mirror, re-checks every entry, and evicts any

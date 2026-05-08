@@ -380,6 +380,18 @@ vi.mock("./yaml-lifecycle.js", () => ({
     mockEnsureGitignoreEntry(...args),
   issuePath: (repo: string, id: string, state: string) =>
     `${repo}/.danxbot/issues/${state}/${id}.yml`,
+  moveToClosedIfTerminal: vi.fn().mockReturnValue(false),
+}));
+
+// ISS-133 Phase 3: poller heal pass. Module is mocked so existing
+// tests' fake fs doesn't crash the real readdirSync; the integration
+// test below overrides the implementation to assert call order +
+// arguments.
+const mockHealLocalYamls = vi
+  .fn()
+  .mockReturnValue({ healed: [], errors: [] });
+vi.mock("./heal.js", () => ({
+  healLocalYamls: (...args: unknown[]) => mockHealLocalYamls(...args),
 }));
 
 // Feature-aware default: ideator's env default is `false` (explicit
@@ -5362,6 +5374,63 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
     expect(callArgs.length).toBe(2);
     expect(callArgs[0]).toBe("/test/repos/test-repo");
     expect(callArgs[1]).toBe("ISS");
+  });
+});
+
+describe("poll — heal pass ordering (ISS-133, Phase 3)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockHealLocalYamls.mockReset();
+    mockHealLocalYamls.mockReturnValue({ healed: [], errors: [] });
+  });
+
+  it("calls healLocalYamls BEFORE tracker.fetchOpenCards on every tick (AC #1)", async () => {
+    // Default tracker fetch returns the Review filler — no ToDo cards
+    // means the tick is read-only after the heal pass + tracker fetch.
+    // Both must still fire so the heal pass runs every tick, not only
+    // when a dispatch is queued.
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockHealLocalYamls).toHaveBeenCalledTimes(1);
+    expect(mockHealLocalYamls).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.localPath,
+      MOCK_REPO_CONTEXT.issuePrefix,
+    );
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+
+    const healOrder = mockHealLocalYamls.mock.invocationCallOrder[0];
+    const fetchOrder = mockTracker.fetchOpenCards.mock.invocationCallOrder[0];
+    expect(healOrder).toBeLessThan(fetchOrder);
+  });
+
+  it("end-to-end: an ISS-95-style stuck Done YAML is reported as healed and the result is logged (AC #6)", async () => {
+    // Heal-pass observable: the poller calls into the heal helper,
+    // receives `{healed: [{id, status}], errors: []}`, and continues
+    // the tick. The heal helper itself is unit-tested with real fs in
+    // `heal.test.ts` — this test pins the integration: poller invokes
+    // the helper with the right args and consumes the return value
+    // without crashing the rest of the tick.
+    mockHealLocalYamls.mockReturnValue({
+      healed: [{ id: "ISS-95", status: "Done" }],
+      errors: [],
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Helper called with the tick's repo path + prefix.
+    expect(mockHealLocalYamls).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.localPath,
+      MOCK_REPO_CONTEXT.issuePrefix,
+    );
+    // Tick continued past the heal pass — the rest of the poll body
+    // ran (tracker fetch fired). Without this assertion a regression
+    // that throws on a non-empty `healed[]` would silently abort the
+    // tick.
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
   });
 });
 

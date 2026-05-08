@@ -58,7 +58,11 @@ import {
 } from "../issue-tracker/yaml.js";
 import { nextIssueId } from "../issue-tracker/id-generator.js";
 import { syncIssue } from "../issue-tracker/sync.js";
-import { ensureIssuesDirs, issuePath } from "../poller/yaml-lifecycle.js";
+import {
+  ensureIssuesDirs,
+  issuePath,
+  moveToClosedIfTerminal,
+} from "../poller/yaml-lifecycle.js";
 import type {
   CreateCardInput,
   Issue,
@@ -352,13 +356,14 @@ export function isDispatchSessionTerminal(issue: Issue): boolean {
  *
  * Filename is the issue's internal `id` — the local primary key. The
  * external_id is irrelevant to file layout (some issues have none).
+ *
+ * The terminal-status open→closed move is delegated to
+ * `moveToClosedIfTerminal` (ISS-133, Phase 3) — same helper the poller's
+ * per-tick `healLocalYamls` pass uses, so a YAML stuck in `open/` from a
+ * prior failed sync auto-recovers next tick without diverging from the
+ * worker's persist semantics.
  */
 function persistAfterSync(repoLocalPath: string, issue: Issue): void {
-  ensureIssuesDirs(repoLocalPath);
-  const openPath = issuePath(repoLocalPath, issue.id, "open");
-  const closedPath = issuePath(repoLocalPath, issue.id, "closed");
-  const isTerminal = issue.status === "Done" || issue.status === "Cancelled";
-
   // Clear the dispatch slot on terminal-for-session saves (ISS-92,
   // Phase 2). Mid-session saves with non-null dispatch survive
   // unchanged so the reattach pass + per-tick liveness scan still see
@@ -367,16 +372,16 @@ function persistAfterSync(repoLocalPath: string, issue: Issue): void {
     ? { ...issue, dispatch: null }
     : issue;
 
-  if (isTerminal) {
-    writeFileSync(closedPath, serializeIssue(persisted));
-    if (existsSync(openPath)) unlinkSync(openPath);
-  } else {
-    writeFileSync(openPath, serializeIssue(persisted));
-    // If a stale closed copy lingers from a previous Done save that the
-    // operator manually re-opened, the open copy now wins — leave the
-    // closed file alone. The poller will treat the open copy as
-    // authoritative on the next tick.
-  }
+  if (moveToClosedIfTerminal(repoLocalPath, persisted)) return;
+
+  // Non-terminal save — write to `open/`. If a stale closed copy
+  // lingers from a previous Done save that the operator manually
+  // re-opened, the open copy now wins — leave the closed file alone.
+  // The poller will treat the open copy as authoritative on the next
+  // tick.
+  ensureIssuesDirs(repoLocalPath);
+  const openPath = issuePath(repoLocalPath, persisted.id, "open");
+  writeFileSync(openPath, serializeIssue(persisted));
 }
 
 /** POST /api/issue-create/:dispatchId — synchronous create-card flow. */

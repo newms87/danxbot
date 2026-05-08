@@ -26,6 +26,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -309,6 +310,40 @@ export function clearDispatchAndWrite(
   const updated: Issue = { ...issue, dispatch: null };
   writeIssue(repoLocalPath, updated);
   return updated;
+}
+
+/**
+ * Persist a terminal-status issue to `closed/<id>.yml` and remove
+ * `open/<id>.yml`. Returns `true` when the move ran, `false` when the
+ * status is non-terminal (caller should write to `open/` itself).
+ *
+ * "Open wins" contract: when both `open/<id>.yml` and `closed/<id>.yml`
+ * exist (e.g. operator manually re-opened a Done card by editing the
+ * YAML in `open/` directly), the open copy overwrites the closed copy
+ * on the next terminal save. Same semantics as the inlined block in
+ * `persistAfterSync` before ISS-133 extracted it.
+ *
+ * Used by:
+ *   - `persistAfterSync` (worker, terminal-status save path)
+ *   - `healLocalYamls` (poller, per-tick self-heal pass — ISS-133)
+ *
+ * Caller is responsible for any pre-write mutation (e.g. clearing
+ * `dispatch: null` on terminal-for-session saves) — this helper
+ * persists the issue verbatim. Validation lives upstream in
+ * `parseIssue` / `validateIssue`; if a caller hands in a malformed
+ * Issue, `serializeIssue` throws.
+ */
+export function moveToClosedIfTerminal(
+  repoLocalPath: string,
+  issue: Issue,
+): boolean {
+  if (issue.status !== "Done" && issue.status !== "Cancelled") return false;
+  ensureIssuesDirs(repoLocalPath);
+  const openPath = issuePath(repoLocalPath, issue.id, "open");
+  const closedPath = issuePath(repoLocalPath, issue.id, "closed");
+  writeFileSync(closedPath, serializeIssue(issue));
+  if (existsSync(openPath)) unlinkSync(openPath);
+  return true;
 }
 
 /**
