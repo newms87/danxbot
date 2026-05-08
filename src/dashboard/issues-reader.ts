@@ -305,10 +305,32 @@ export async function listIssues(
   // so the slice is correctness-bound, not cosmetic. The combined `all`
   // is sorted again below to interleave open + closed by mtime.
   closedRaw.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const closedSlice =
-    opts.includeClosed === "all"
-      ? closedRaw
-      : closedRaw.slice(0, DEFAULT_CLOSED_LIMIT);
+  let closedSlice: RawIssue[];
+  if (opts.includeClosed === "all") {
+    closedSlice = closedRaw;
+  } else {
+    // Recent-50 by mtime PLUS every closed card referenced by an open
+    // card's children[] / parent_id / blocked.by[]. Without the
+    // referenced-pull, an Epic with 8 phase children whose 3 oldest
+    // Done phases fall past the 50-cap renders "3 children not in
+    // current view" — operator-visible noise even though the data is
+    // on disk. The board's recency window is preserved (recent-50 still
+    // sets the floor); referenced extras are additive, not a re-sort.
+    const recent = closedRaw.slice(0, DEFAULT_CLOSED_LIMIT);
+    const recentIds = new Set(recent.map((r) => r.issue.id));
+    const referencedIds = new Set<string>();
+    for (const r of openRaw) {
+      for (const cid of r.issue.children) referencedIds.add(cid);
+      if (r.issue.parent_id) referencedIds.add(r.issue.parent_id);
+      if (r.issue.blocked) {
+        for (const id of r.issue.blocked.by) referencedIds.add(id);
+      }
+    }
+    const referencedExtras = closedRaw.filter(
+      (r) => referencedIds.has(r.issue.id) && !recentIds.has(r.issue.id),
+    );
+    closedSlice = [...recent, ...referencedExtras];
+  }
 
   const all = [...openRaw, ...closedSlice];
   // Build an id → Issue map across BOTH open + closed so parents can

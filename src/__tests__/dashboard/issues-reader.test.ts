@@ -498,6 +498,78 @@ describe("listIssues", () => {
     expect(items[49].id).toBe("ISS-11");
   });
 
+  // Regression — operator opens an Epic's Phases tab and sees
+  // "N children not in current view" because some Done phase children
+  // fall past the recent-50 closed cap. Fix: closed cards referenced
+  // by an open card's children[] / parent_id / blocked.by[] are pulled
+  // into the slice on top of the recent-50.
+  it("pulls closed cards referenced by an open card's children[] beyond the 50-cap", async () => {
+    const repo = setupRepo();
+    // 60 unrelated closed cards — fill the cap.
+    for (let i = 1; i <= 60; i++) {
+      writeIssue(
+        repo,
+        "closed",
+        emptyIssue({ id: `ISS-${i}`, status: "Done" }),
+        1_000_000 + i,
+      );
+    }
+    // Three OLD closed phase children (older than every above).
+    writeIssue(repo, "closed", emptyIssue({ id: "ISS-200", status: "Done" }), 500);
+    writeIssue(repo, "closed", emptyIssue({ id: "ISS-201", status: "Done" }), 600);
+    writeIssue(repo, "closed", emptyIssue({ id: "ISS-202", status: "Done" }), 700);
+    // Open epic referencing them.
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-300",
+        type: "Epic",
+        children: ["ISS-200", "ISS-201", "ISS-202"],
+      }),
+      2_000_000,
+    );
+    const items = await listIssues(repo);
+    const ids = new Set(items.map((i) => i.id));
+    // Recent-50 still applies AS A FLOOR (50 newest closed + 1 open).
+    expect(items.length).toBe(50 + 1 + 3);
+    // All three referenced closed cards present.
+    expect(ids.has("ISS-200")).toBe(true);
+    expect(ids.has("ISS-201")).toBe(true);
+    expect(ids.has("ISS-202")).toBe(true);
+    // Epic's children_detail shows zero missing.
+    const epic = items.find((i) => i.id === "ISS-300")!;
+    expect(epic.children_detail.every((c) => !c.missing)).toBe(true);
+  });
+
+  it("pulls closed cards referenced by parent_id beyond the 50-cap", async () => {
+    const repo = setupRepo();
+    for (let i = 1; i <= 60; i++) {
+      writeIssue(
+        repo,
+        "closed",
+        emptyIssue({ id: `ISS-${i}`, status: "Done" }),
+        1_000_000 + i,
+      );
+    }
+    // Old closed parent.
+    writeIssue(
+      repo,
+      "closed",
+      emptyIssue({ id: "ISS-200", type: "Epic", status: "Done" }),
+      500,
+    );
+    // Open child referencing it.
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-300", parent_id: "ISS-200" }),
+      2_000_000,
+    );
+    const ids = new Set((await listIssues(repo)).map((i) => i.id));
+    expect(ids.has("ISS-200")).toBe(true);
+  });
+
   it("returns every closed issue when include_closed=all", async () => {
     const repo = setupRepo();
     for (let i = 1; i <= 60; i++) {
