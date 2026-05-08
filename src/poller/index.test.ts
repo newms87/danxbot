@@ -327,30 +327,38 @@ function _currentOpenCards(): IssueRef[] {
   return last.type === "fulfilled" ? (last.value as IssueRef[]) : [];
 }
 
-const mockListDispatchableYamls = vi.fn((_repoPath: string): Issue[] => {
-  return _currentOpenCards()
-    .filter((r) => r.status === "ToDo")
-    .map(refToFakeIssue);
-});
-const mockListInProgressYamls = vi.fn((_repoPath: string): Issue[] =>
-  _currentOpenCards()
-    .filter((r) => r.status === "In Progress")
-    .map(refToFakeIssue),
+// Mock signatures take (repoPath, prefix) since ISS-100 (prefix-aware
+// issue id helpers); listTriageDueYamls also takes `now` between path
+// and prefix. Production calls supply both args; tests assert on
+// `mock.calls[0][1]` to verify the prefix is forwarded.
+const mockListDispatchableYamls = vi.fn(
+  (_repoPath: string, _prefix?: string): Issue[] =>
+    _currentOpenCards()
+      .filter((r) => r.status === "ToDo")
+      .map(refToFakeIssue),
 );
-const mockListBlockedTodoYamls = vi.fn((_repoPath: string): Issue[] => []);
+const mockListInProgressYamls = vi.fn(
+  (_repoPath: string, _prefix?: string): Issue[] =>
+    _currentOpenCards()
+      .filter((r) => r.status === "In Progress")
+      .map(refToFakeIssue),
+);
+const mockListBlockedTodoYamls = vi.fn(
+  (_repoPath: string, _prefix?: string): Issue[] => [],
+);
 const mockListTriageDueYamls = vi.fn(
-  (_repoPath: string, _now: number): Issue[] => [],
+  (_repoPath: string, _now: number, _prefix?: string): Issue[] => [],
 );
 
 vi.mock("./local-issues.js", () => ({
   listDispatchableYamls: (...args: unknown[]) =>
-    mockListDispatchableYamls(...(args as [string])),
+    mockListDispatchableYamls(...(args as [string, string?])),
   listInProgressYamls: (...args: unknown[]) =>
-    mockListInProgressYamls(...(args as [string])),
+    mockListInProgressYamls(...(args as [string, string?])),
   listBlockedTodoYamls: (...args: unknown[]) =>
-    mockListBlockedTodoYamls(...(args as [string])),
+    mockListBlockedTodoYamls(...(args as [string, string?])),
   listTriageDueYamls: (...args: unknown[]) =>
-    mockListTriageDueYamls(...(args as [string, number])),
+    mockListTriageDueYamls(...(args as [string, number, string?])),
 }));
 
 const mockClearDispatchAndWrite = vi.fn((...args: unknown[]) => {
@@ -2551,6 +2559,477 @@ describe("poll — post-dispatch card-progress check", () => {
     });
 
     expect(mockTracker.getCard).toHaveBeenCalled();
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Triage dispatches don't move the card across lists — a successful
+ * triage just stamps a fresh `triage.expires_at` on the local YAML and
+ * exits. The work-dispatch post-dispatch check (`trackedCardId` →
+ * `tracker.getCard`) cannot guard against a triage agent that completes
+ * without saving — it would re-dispatch the same broken agent every
+ * tick (token-burn loop). ISS-104 adds a parallel post-dispatch guard:
+ * after a triage dispatch exits, re-read the local YAML and verify
+ * `triage.expires_at` advanced past the dispatch's `started_at`. If
+ * not, write the critical-failure flag so the halt gate stops the loop
+ * until an operator acks.
+ */
+describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
+  function triageDueIssue(overrides: Partial<Issue>): Issue {
+    return {
+      ...FAKE_ISSUE_FOR_TESTS,
+      ...overrides,
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+    } as Issue;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockReadFlag.mockReturnValue(null);
+    // autoTriage on, ideator off
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "ideator",
+    );
+    mockListTriageDueYamls.mockReset();
+    mockListBlockedTodoYamls.mockReset();
+    mockListBlockedTodoYamls.mockReturnValue([]);
+    mockLoadLocal.mockReset();
+    mockLoadLocal.mockReturnValue(null);
+    mockStampDispatchAndWrite.mockClear();
+  });
+
+  /**
+   * Drive one triage dispatch through `poll`: capture `onComplete` from
+   * the dispatch mock, fire it with the supplied job shape, and flush
+   * the fire-and-forget completion handler. Sets up
+   * `mockListTriageDueYamls` with the supplied target.
+   */
+  async function runOneTriageDispatch(
+    target: Issue,
+    job: {
+      id: string;
+      status: string;
+      summary?: string;
+      startedAt: Date;
+      completedAt: Date;
+    },
+  ): Promise<void> {
+    mockListTriageDueYamls.mockReturnValueOnce([target]);
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
+    await poll(MOCK_REPO_CONTEXT);
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!(job);
+    await flushAsync();
+    await flushAsync();
+  }
+
+  it("writes the critical-failure flag when the triage YAML still has an empty triage.expires_at after the dispatch exits", async () => {
+    const target = triageDueIssue({
+      id: "ISS-7",
+      external_id: "rv7",
+      status: "Review",
+      title: "Review Card",
+    });
+    // Post-dispatch read: the agent did not save, so the YAML still has
+    // the same stale (empty) triage block.
+    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+      id === "ISS-7" ? target : null,
+    );
+
+    await runOneTriageDispatch(target, {
+      id: "tj1",
+      status: "completed",
+      summary: "Lied — never called danx_issue_save",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+
+    expect(mockWriteFlag).toHaveBeenCalledTimes(1);
+    const [localPath, payload] = mockWriteFlag.mock.calls[0];
+    expect(localPath).toBe(MOCK_REPO_CONTEXT.localPath);
+    expect(payload).toMatchObject({
+      source: "post-dispatch-check",
+      dispatchId: "tj1",
+      cardId: "ISS-7",
+    });
+    expect(payload.reason).toMatch(/triage\.expires_at/);
+  });
+
+  it("writes the flag when triage.expires_at is set but did not advance past started_at (in the past)", async () => {
+    const target = triageDueIssue({
+      id: "ISS-8",
+      external_id: "rv8",
+      status: "Review",
+      title: "Stale Review",
+      triage: {
+        // Set, but BEFORE the dispatch's started_at (2050 vs 1970 — the
+        // mocked started_at from buildStartStamp).
+        expires_at: "1970-01-01T00:00:00.000Z",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+    });
+    // After dispatch the YAML still shows the same stale expiry. (The
+    // agent might have called `danx_issue_save` but did not update the
+    // triage block — same failure mode as not saving at all.)
+    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+      id === "ISS-8" ? target : null,
+    );
+
+    await runOneTriageDispatch(target, {
+      id: "tj2",
+      status: "completed",
+      summary: "saved but did not move triage forward",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+
+    expect(mockWriteFlag).toHaveBeenCalledTimes(1);
+    expect(mockWriteFlag.mock.calls[0][1].cardId).toBe("ISS-8");
+  });
+
+  it("writes the flag even when the agent reported status=failed (failure path also goes through the guard)", async () => {
+    const target = triageDueIssue({
+      id: "ISS-7",
+      external_id: "rv7",
+      status: "Review",
+    });
+    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+      id === "ISS-7" ? target : null,
+    );
+
+    await runOneTriageDispatch(target, {
+      id: "tj3",
+      status: "failed",
+      summary: "MCP danx-issue not loaded",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+
+    expect(mockWriteFlag).toHaveBeenCalled();
+    expect(mockWriteFlag.mock.calls[0][1].cardId).toBe("ISS-7");
+  });
+
+  it("writes the flag when triage.expires_at exactly equals started_at (strict-greater-than boundary — locks against >= regression)", async () => {
+    // The guard uses `expiresAtMs > startedAtMs` not `>=`. A triage
+    // save MUST mint a fresh FUTURE timestamp; an `expires_at` equal
+    // to `started_at` means the agent stamped the dispatch's own start
+    // time as the new expiry, which represents zero forward progress
+    // (and would re-fire on the very next tick once `Date.now() >
+    // started_at`). Lock the strict comparison.
+    const fixedStart = "2026-05-08T01:00:00.000Z";
+    const target = triageDueIssue({
+      id: "ISS-15",
+      external_id: "rv15",
+      status: "Review",
+      triage: {
+        expires_at: fixedStart,
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+    });
+    // Force the dispatch's start_at to match the YAML's expires_at by
+    // stubbing Date.now during the spawn phase.
+    const realDateNow = Date.now;
+    const fixedNow = Date.parse(fixedStart);
+    Date.now = () => fixedNow;
+    try {
+      mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+        id === "ISS-15" ? target : null,
+      );
+      await runOneTriageDispatch(target, {
+        id: "tj-boundary",
+        status: "completed",
+        summary: "stamped exactly started_at",
+        startedAt: new Date(fixedNow),
+        completedAt: new Date(fixedNow),
+      });
+    } finally {
+      Date.now = realDateNow;
+    }
+
+    expect(mockWriteFlag).toHaveBeenCalledTimes(1);
+    expect(mockWriteFlag.mock.calls[0][1].cardId).toBe("ISS-15");
+  });
+
+  it("does NOT write the flag when triage.expires_at advanced past the dispatch's started_at (regression guard for successful triage)", async () => {
+    // Successful triage: the agent saved a new `triage.expires_at` well
+    // into the future. The post-dispatch check sees the advance and
+    // stays silent.
+    const futureExpiry = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+    const dueAtDispatch = triageDueIssue({
+      id: "ISS-9",
+      external_id: "rv9",
+      status: "Review",
+    });
+    const triagedYaml = {
+      ...dueAtDispatch,
+      triage: {
+        ...dueAtDispatch.triage,
+        expires_at: futureExpiry,
+        last_status: "Keep",
+        last_explain: "ICE 60 — keep on board",
+      },
+    };
+    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+      id === "ISS-9" ? triagedYaml : null,
+    );
+
+    await runOneTriageDispatch(dueAtDispatch, {
+      id: "tj4",
+      status: "completed",
+      summary: "triaged",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("does NOT write the flag when the local YAML can no longer be loaded (tolerate read failure — false-negative preferred)", async () => {
+    const target = triageDueIssue({
+      id: "ISS-10",
+      external_id: "rv10",
+      status: "Review",
+    });
+    // loadLocal returns null after the dispatch (YAML moved to closed/,
+    // deleted, etc). The poller can't re-dispatch a missing id, so the
+    // loop self-terminates — no flag needed.
+    mockLoadLocal.mockReturnValue(null);
+
+    await runOneTriageDispatch(target, {
+      id: "tj5",
+      status: "completed",
+      summary: "yaml gone",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("does NOT write the flag when loadLocal throws during the post-dispatch read (symmetric with the work-dispatch tolerance)", async () => {
+    const target = triageDueIssue({
+      id: "ISS-11",
+      external_id: "rv11",
+      status: "Review",
+    });
+    // The spawn path AND `clearActiveDispatch` (first call from
+    // onComplete) both call loadLocal. The triage-progress check is the
+    // SECOND loadLocal call inside onComplete — we only want that one
+    // to throw so the assertion targets the new guard's tolerance for
+    // post-dispatch read failures, not pre-existing call sites.
+    let onCompleteLoadCalls = 0;
+    let postDispatchPhase = false;
+    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+      if (id !== "ISS-11") return null;
+      if (!postDispatchPhase) return target;
+      onCompleteLoadCalls += 1;
+      if (onCompleteLoadCalls >= 2) {
+        throw new Error("Disk read failure");
+      }
+      return target;
+    });
+
+    mockListTriageDueYamls.mockReturnValueOnce([target]);
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
+    await poll(MOCK_REPO_CONTEXT);
+    postDispatchPhase = true;
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!({
+      id: "tj6",
+      status: "completed",
+      summary: "post-dispatch read failed",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+    await flushAsync();
+
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("writes the flag when triage.expires_at is a malformed string (Date.parse → NaN)", async () => {
+    const target = triageDueIssue({
+      id: "ISS-12",
+      external_id: "rv12",
+      status: "Review",
+      triage: {
+        expires_at: "not-a-date",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+    });
+    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+      id === "ISS-12" ? target : null,
+    );
+
+    await runOneTriageDispatch(target, {
+      id: "tj7",
+      status: "completed",
+      summary: "saved garbage in expires_at",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+
+    // Number.isFinite(NaN) is false → advanced=false → flag written.
+    expect(mockWriteFlag).toHaveBeenCalledTimes(1);
+    expect(mockWriteFlag.mock.calls[0][1].cardId).toBe("ISS-12");
+  });
+
+  it("writes the flag when the triage block is missing entirely on the YAML", async () => {
+    const target = triageDueIssue({
+      id: "ISS-13",
+      external_id: "rv13",
+      status: "Review",
+    });
+    // Simulate a YAML where triage was never serialized (forward-compat
+    // contract: a future schema migration that drops the block must
+    // still trip the no-progress guard rather than silently passing).
+    const triageMissing = {
+      ...target,
+      triage: undefined as unknown as Issue["triage"],
+    };
+    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+      id === "ISS-13" ? triageMissing : null,
+    );
+
+    await runOneTriageDispatch(target, {
+      id: "tj8",
+      status: "completed",
+      summary: "no triage block on YAML",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+
+    expect(mockWriteFlag).toHaveBeenCalledTimes(1);
+    expect(mockWriteFlag.mock.calls[0][1].cardId).toBe("ISS-13");
+  });
+
+  it("clears triageTracked after onComplete so a second dispatch's outcome is not double-counted", async () => {
+    // First dispatch: agent succeeds (advances triage.expires_at) → no
+    // flag. Second dispatch on the SAME tracked target with the SAME
+    // job id triggering onComplete a second time must NOT re-write the
+    // flag — the cleanup ran. Without the cleanup, lingering state from
+    // dispatch #1 could trip dispatch #2's flag write.
+    const futureExpiry = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+    const target = triageDueIssue({
+      id: "ISS-14",
+      external_id: "rv14",
+      status: "Review",
+    });
+    const triagedYaml = {
+      ...target,
+      triage: { ...target.triage, expires_at: futureExpiry },
+    };
+    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+      id === "ISS-14" ? triagedYaml : null,
+    );
+    mockListTriageDueYamls.mockReturnValueOnce([target]);
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
+    await poll(MOCK_REPO_CONTEXT);
+    capturedOnComplete!({
+      id: "tj9",
+      status: "completed",
+      summary: "first triage",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+    await flushAsync();
+
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+
+    // Re-fire the same callback with a payload that WOULD trip the flag
+    // if state.triageTracked were still populated. After cleanup it
+    // should be a no-op.
+    capturedOnComplete!({
+      id: "tj9-replay",
+      status: "completed",
+      summary: "second invocation",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+    await flushAsync();
+
+    expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire the triage-progress check on a work-ready (trello-trigger) dispatch", async () => {
+    // Work-ready dispatch path: the existing `checkCardProgressedOrHalt`
+    // owns this flow via tracker.getCard. The triage-progress branch
+    // must stay dormant — its state field is null for non-triage
+    // dispatches.
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("c1", "Real ToDo", "ToDo"),
+    ]);
+    mockTracker.getCard.mockResolvedValue({
+      ...DEFAULT_GET_CARD_ISSUE,
+      status: "Done" as const,
+    });
+    let capturedOnComplete: ((job: unknown) => void) | undefined;
+    mockDispatch.mockImplementation(
+      (opts: { onComplete?: (job: unknown) => void }) => {
+        capturedOnComplete = opts.onComplete;
+        return Promise.resolve({ id: "test-job", status: "running" });
+      },
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+    expect(capturedOnComplete).toBeDefined();
+    capturedOnComplete!({
+      id: "wj1",
+      status: "completed",
+      summary: "moved to Done",
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
+    await flushAsync();
+    await flushAsync();
+
+    // No triage track → no flag and no loadLocal lookup keyed off a
+    // triage id. (loadLocal MAY be called by the work-ready dispatch
+    // path itself — the assertion is on writeFlag.)
     expect(mockWriteFlag).not.toHaveBeenCalled();
   });
 });

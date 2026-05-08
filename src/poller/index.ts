@@ -116,6 +116,20 @@ interface RepoPollerState {
    * don't duplicate it in state.
    */
   trackedCardId: string | null;
+  /**
+   * The triage card the current dispatch targets, paired with the
+   * dispatch's `started_at` for the "did triage advance?" check in
+   * `handleAgentCompletion`. Set in `tryTriageDispatch` BEFORE
+   * `spawnClaude` so the onComplete handler sees it; cleared by
+   * `cleanupAfterAgent`. Distinct from `trackedCardId` because triage
+   * dispatches use `trigger: "api"` and the card never moves out of its
+   * source list — the progress signal is the local YAML's
+   * `triage.expires_at` advancing past `started_at`. Without this
+   * guard, a triage agent that signals `completed` without saving the
+   * YAML produces a token-burn loop (the same broken agent gets
+   * dispatched against the same card every interval). See ISS-104.
+   */
+  triageTracked: { id: string; startedAt: string } | null;
 }
 
 const repoState = new Map<string, RepoPollerState>();
@@ -338,6 +352,7 @@ function getState(repoName: string): RepoPollerState {
       backoffUntil: 0,
       priorTodoCardIds: [],
       trackedCardId: null,
+      triageTracked: null,
     };
     repoState.set(repoName, state);
   }
@@ -2117,6 +2132,16 @@ async function handleAgentCompletion(
     await checkCardProgressedOrHalt(repo, state, job);
   }
 
+  // ISS-104: parallel guard for triage dispatches. A triage agent that
+  // signals `completed` without advancing `triage.expires_at` would be
+  // re-dispatched against the same card on every tick — a token-burn
+  // loop the existing trello-trigger guard does not catch (triage
+  // dispatches use `trigger: "api"` and never move the card across
+  // lists). Same fail-loud halt mechanism via the critical-failure flag.
+  if (state.triageTracked) {
+    checkTriageProgressedOrHalt(repo, state, job);
+  }
+
   cleanupAfterAgent(state);
   log.info(`[${repo.name}] Headless agent finished — resuming polling`);
   poll(repo).catch((err) =>
@@ -2128,6 +2153,7 @@ function cleanupAfterAgent(state: RepoPollerState): void {
   state.teamRunning = false;
   state.priorTodoCardIds = [];
   state.trackedCardId = null;
+  state.triageTracked = null;
 }
 
 /**
@@ -2222,6 +2248,89 @@ async function checkCardProgressedOrHalt(
       `Card ${cardId} (${card.title}) stayed in the ToDo list across dispatch ${job.id} ` +
       `(status=${job.status}, summary=${job.summary || "none"}). ` +
       `Poller halts until this flag is cleared and the underlying environment blocker is fixed.`,
+  });
+}
+
+/**
+ * After a `kind: "triage"` dispatch exits, re-read the target YAML
+ * locally and verify `triage.expires_at` advanced past the dispatch's
+ * `started_at`. If not, the dispatch did zero application-level work —
+ * either the agent forgot to call `mcp__danx-issue__danx_issue_save`
+ * or the save did not update the triage block. Either way the next
+ * tick's `listTriageDueYamls` returns the same card and the same broken
+ * agent gets dispatched again. Write the critical-failure flag so the
+ * halt gate stops the loop.
+ *
+ * Parallels `checkCardProgressedOrHalt` (work-dispatch guard). The
+ * progress signal differs:
+ *   - work dispatch: tracker reports the card moved out of ToDo.
+ *   - triage dispatch: local YAML's `triage.expires_at` parses to a
+ *     timestamp strictly after the dispatch's `started_at`.
+ *
+ * Read failures (loadLocal throws, YAML missing) do NOT trip the flag —
+ * false-negative is safer than false-positive, mirroring the work-
+ * dispatch guard's tolerance for `tracker.getCard` / `findByExternalId`
+ * failures. The next tick reattempts; if the underlying env problem
+ * also breaks the next dispatch, that next dispatch will surface the
+ * signal through its own guard.
+ *
+ * Sync (not async) because everything it does is sync — `loadLocal`
+ * reads the YAML synchronously and `writeFlag` is a synchronous
+ * tmp+rename. Keeping the signature sync avoids gratuitous Promise
+ * plumbing in the completion handler.
+ *
+ * Phase 1 of ISS-104.
+ */
+function checkTriageProgressedOrHalt(
+  repo: RepoContext,
+  state: RepoPollerState,
+  job: AgentJob,
+): void {
+  const tracked = state.triageTracked;
+  if (!tracked) return;
+
+  let issue: Issue | null;
+  try {
+    issue = loadLocal(repo.localPath, tracked.id, repo.issuePrefix);
+  } catch (err) {
+    log.error(
+      `[${repo.name}] Failed to read local YAML for triage target ${tracked.id} after dispatch — skipping triage-progress check`,
+      err,
+    );
+    return;
+  }
+
+  if (!issue) {
+    // YAML disappeared (deleted, renamed to closed/, or never existed).
+    // The poller cannot re-dispatch a missing id, so the loop self-
+    // terminates without a flag.
+    return;
+  }
+
+  const startedAtMs = Date.parse(tracked.startedAt);
+  const expiresAt = issue.triage?.expires_at ?? "";
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
+  const advanced =
+    !!expiresAt && Number.isFinite(expiresAtMs) && expiresAtMs > startedAtMs;
+  if (advanced) {
+    return;
+  }
+
+  log.error(
+    `[${repo.name}] Triage dispatch ${job.id} for ${tracked.id} did not advance triage.expires_at (started_at=${tracked.startedAt}, post=${expiresAt || "(empty)"}) — writing critical-failure flag`,
+  );
+  writeFlag(repo.localPath, {
+    source: "post-dispatch-check",
+    dispatchId: job.id,
+    cardId: tracked.id,
+    reason: `Triage dispatch for ${tracked.id} did not advance triage.expires_at`,
+    detail:
+      `Triage dispatch ${job.id} for ${tracked.id} ` +
+      `(status=${job.status}, summary=${job.summary || "none"}) finished but the local YAML's ` +
+      `triage.expires_at is still "${expiresAt || ""}" (started_at=${tracked.startedAt}). ` +
+      `The next tick would re-dispatch the same broken triage agent — token-burn loop. ` +
+      `Poller halts until the flag is cleared and the underlying issue (agent forgot ` +
+      `to save, MCP danx-issue not loaded, etc.) is fixed.`,
   });
 }
 
@@ -2331,6 +2440,21 @@ async function tryTriageDispatch(repo: RepoContext): Promise<boolean> {
   const startStamp = buildStartStamp(dispatchId, "triage", osHostname());
   const stamped = stampDispatchAndWrite(repo.localPath, target, startStamp);
   const prompt = TRIAGE_CARD_PROMPT(stamped.id);
+
+  // ISS-104: record the triage target + dispatch start timestamp so the
+  // post-dispatch guard in `handleAgentCompletion` can verify the
+  // dispatch actually moved `triage.expires_at` forward. Set BEFORE
+  // `await spawnClaude` so the field is in place by the time
+  // `onComplete` fires. Pre-spawn failures route through spawnClaude's
+  // catch branch which calls `cleanupAfterAgent` directly (without
+  // `handleAgentCompletion`), so the field is cleared without tripping
+  // the guard — correct because no agent ran on the pre-spawn-failure
+  // path.
+  const state = getState(repo.name);
+  state.triageTracked = {
+    id: stamped.id,
+    startedAt: startStamp.started_at,
+  };
 
   await spawnClaude(
     repo,
