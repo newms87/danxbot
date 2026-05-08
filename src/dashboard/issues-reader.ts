@@ -195,18 +195,31 @@ function toListItem(
     rawBy.length > 0 &&
     externalBy.length === 0;
 
-  // Inherited block: an epic with at least one Blocked, In Progress
-  // (Needs Help / Needs Approval / blocked-record) child surfaces on
-  // the board in the Blocked column with a yellow ⏸ "Blocked by"
-  // banner listing those children. The epic's own status field stays
-  // untouched in the YAML — this is purely a read-side projection so
-  // the operator sees the impedance immediately without waiting for
-  // the agent to stamp `blocked` on the epic.
+  // Inherited block: an epic surfaces in the Blocked column ONLY when
+  // at least one child is GENUINELY impeded — not merely waiting on a
+  // sibling. Intra-sibling `blocked.by[]` (every id is another child
+  // of the same epic) is ordering, not impediment: "do this card after
+  // that one"; the epic itself is moving forward in order. Real
+  // impediments:
+  //   - status Needs Help / Needs Approval (operator must intervene)
+  //   - `blocked.by[]` containing ANY id outside the epic's own
+  //     children set (cross-epic dependency)
+  // Schema requires `blocked.by[]` non-empty when `blocked` is set, so
+  // there is no empty-by[] branch.
+  // Missing children (not in byId — closed beyond the 50-cap or
+  // genuinely orphaned) do NOT trigger epic-block: their state is
+  // unknown, not impeded.
+  const isChildImpeded = (child: Issue): boolean => {
+    if (child.status === "Needs Help" || child.status === "Needs Approval") {
+      return true;
+    }
+    if (child.blocked === null) return false;
+    return child.blocked.by.some((id) => !childSet.has(id));
+  };
   const blockedChildIds = isEpic
-    ? childrenDetail
-        .filter((c) =>
-          c.blocked || c.status === "Needs Help" || c.status === "Needs Approval",
-        )
+    ? issue.children
+        .map((cid) => byId.get(cid))
+        .filter((c): c is Issue => c !== undefined && isChildImpeded(c))
         .map((c) => c.id)
     : [];
   const inheritedBlock = isEpic && blockedChildIds.length > 0;

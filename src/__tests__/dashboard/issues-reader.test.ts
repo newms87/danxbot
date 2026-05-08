@@ -99,13 +99,11 @@ describe("listIssues", () => {
       type: "Epic",
       title: "Epic title",
       description: "Epic body markdown",
-      // Both children are missing → projected as blocked, which the
-      // epic inherits → status pulled to Needs Help and blocked_by /
-      // reason derived from the blocked children. The fixture's own
-      // YAML `blocked` (waiting on ISS-2) is masked by the inherited
-      // computation since it was a self-block (epic blocked by its
-      // own child).
-      status: "Needs Help",
+      // Missing children do NOT trigger inherited-block — their state
+      // is unknown, not impeded. The fixture's own YAML `blocked`
+      // (waiting on ISS-2) is intra-sibling self-block, also masked.
+      // Net: epic surfaces with raw status + no projected block.
+      status: "In Progress",
       parent_id: null,
       children: ["ISS-2", "ISS-3"],
       ac_total: 2,
@@ -114,9 +112,9 @@ describe("listIssues", () => {
         { id: "ISS-2", name: "<ISS-2: unknown>", type: "Feature", status: "ToDo", blocked: true, blocked_by_card: false, missing: true },
         { id: "ISS-3", name: "<ISS-3: unknown>", type: "Feature", status: "ToDo", blocked: true, blocked_by_card: false, missing: true },
       ],
-      blocked: true,
-      blocked_reason: "Waiting on 2 blocked children: ISS-2, ISS-3.",
-      blocked_by: ["ISS-2", "ISS-3"],
+      blocked: false,
+      blocked_reason: null,
+      blocked_by: [],
       comments_count: 2,
       has_retro: true,
       updated_at: 1_700_000_000_000,
@@ -246,6 +244,128 @@ describe("listIssues", () => {
     const epic = items.find((i) => i.id === "ISS-1")!;
     expect(epic.children_detail[0].status).toBe("Needs Help");
     expect(epic.children_detail[0].blocked).toBe(false);
+  });
+
+  // Regression — intra-sibling ordering ≠ epic block. Phase children
+  // that wait on each other ("do Phase 2 after Phase 1") are doing
+  // work in order; the epic itself is moving forward, not impeded.
+  // Pre-fix the projection counted any `blocked != null` child as
+  // cause for the epic to surface in the Blocked column with a
+  // "Needs Help" pill — wrong.
+  it("epic NOT blocked when child blocked.by[] is fully intra-sibling", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-2", "ISS-3"],
+      }),
+      3_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-2", status: "In Progress" }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-3",
+        status: "ToDo",
+        blocked: {
+          reason: "wait for ISS-2",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-2"],
+        },
+      }),
+      1_000,
+    );
+    const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
+    expect(epic.blocked).toBe(false);
+    expect(epic.status).toBe("In Progress");
+    expect(epic.blocked_by).toEqual([]);
+  });
+
+  it("epic IS blocked when child has cross-epic external blocker in by[]", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-2"],
+      }),
+      3_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-2",
+        status: "ToDo",
+        blocked: {
+          reason: "waits cross-epic",
+          timestamp: "2026-01-01T00:00:00Z",
+          // ISS-99 is NOT a child of this epic → real external block
+          by: ["ISS-99"],
+        },
+      }),
+      2_000,
+    );
+    const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
+    expect(epic.blocked).toBe(true);
+    expect(epic.status).toBe("Needs Help");
+    expect(epic.blocked_by).toEqual(["ISS-2"]);
+  });
+
+  it("epic IS blocked when child status is Needs Help regardless of by[]", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-2"],
+      }),
+      2_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-2", status: "Needs Help" }),
+      1_000,
+    );
+    const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
+    expect(epic.blocked).toBe(true);
+    expect(epic.status).toBe("Needs Help");
+    expect(epic.blocked_by).toEqual(["ISS-2"]);
+  });
+
+  it("epic NOT blocked by missing children — unknown ≠ impeded", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-99", "ISS-100"],
+      }),
+      1_000,
+    );
+    const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
+    expect(epic.blocked).toBe(false);
+    expect(epic.status).toBe("In Progress");
   });
 
   it("children_detail carries Needs Approval raw + blocked=false", async () => {
