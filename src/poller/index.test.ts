@@ -487,6 +487,7 @@ vi.mock("node:fs", () => ({
   copyFileSync: (...args: unknown[]) => mockCopyFileSync(...args),
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
   rmSync: (...args: unknown[]) => mockRmSync(...args),
+  renameSync: vi.fn(),
   chmodSync: vi.fn(),
   statSync: (...args: unknown[]) => mockStatSync(...args),
   symlinkSync: vi.fn(),
@@ -744,6 +745,43 @@ describe("poll", () => {
       p.startsWith(singularWorkspacePrefix),
     );
     expect(singularTouches).toEqual([]);
+  });
+
+  it("syncRepoFiles invokes injectDanxIssueMcp per repo per tick (DX-201)", async () => {
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes("inject")) return true;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.endsWith("tools.md")) return true;
+      if (path.endsWith("/.danxbot/workspaces")) return true;
+      if (path.endsWith("/.danxbot/workspaces/issue-worker")) return true;
+      return false;
+    });
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/.danxbot/workspaces")) return ["issue-worker"];
+      return [];
+    });
+    mockStatSync.mockReturnValue({ isDirectory: () => true });
+
+    syncRepoFiles(MOCK_REPO_CONTEXT);
+
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    const tmpWrite = writtenPaths.find(
+      (p) => p === "/test/repos/test-repo/.mcp.json.tmp",
+    );
+    expect(tmpWrite).toBeDefined();
+    const writtenContent = mockWriteFileSync.mock.calls.find(
+      (c: unknown[]) => c[0] === "/test/repos/test-repo/.mcp.json.tmp",
+    )?.[1] as string;
+    expect(writtenContent).toContain("danx-issue");
+    expect(writtenContent).toContain("@thehammer/danx-issue-mcp");
   });
 
   it("syncRepoFiles throws and writes nothing when a required config.yml field is missing (fail-loud — Trello `C7W1cEhh`)", () => {

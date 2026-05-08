@@ -50,8 +50,10 @@ import { createLogger } from "../logger.js";
 import { dispatch, getActiveJob } from "../dispatch/core.js";
 import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
+import { injectDanxIssueMcp } from "./inject/inject-root-mcp.js";
 import { pushOrphans } from "./orphan-push.js";
 import { recomputeParentStatuses } from "./epic-status.js";
+import { resolveBlockedCards } from "./blocked-resolver.js";
 import { healLocalYamls } from "./heal.js";
 import { healExternalIds } from "./heal-external-id.js";
 import { drainRetries } from "../issue-tracker/retry-queue.js";
@@ -543,7 +545,8 @@ async function _poll(repo: RepoContext): Promise<void> {
   // too.
   const healResult = healLocalYamls(repo.localPath, repo.issuePrefix);
   for (const h of healResult.healed) {
-    log.info(`[${repo.name}] Healed ${h.id}: open/ → closed/ (status: ${h.status})`);
+    const arrow = h.direction === "open-to-closed" ? "open/ → closed/" : "closed/ → open/";
+    log.info(`[${repo.name}] Healed ${h.id}: ${arrow} (status: ${h.status})`);
   }
   for (const e of healResult.errors) {
     log.warn(`[${repo.name}] Heal pass skipped malformed YAML at ${e.path}: ${e.message}`);
@@ -715,7 +718,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   const parentChanges = recomputeParentStatuses(repo.localPath, repo.issuePrefix);
   for (const change of parentChanges) {
     log.info(
-      `[${repo.name}] Derived ${change.id}: ${change.before} → ${change.after}`,
+      `[${repo.name}] Derived ${change.id}: ${change.before} → ${change.after} (${change.rule})`,
     );
   }
 
@@ -777,13 +780,13 @@ async function _poll(repo: RepoContext): Promise<void> {
   // not-blocked. The unblock-on-terminal path runs over a separate
   // sweep of the blocked ToDo YAMLs: `resolveBlockedCards` clears the
   // record + saves, and the freshly-cleared cards join the dispatchable
-  // pool for this tick. See `resolveBlockedCard` for the contract.
+  // pool for this tick. See `resolveBlockedCards` for the contract.
   const blockedRefs: IssueRef[] = listBlockedTodoYamls(
     repo.localPath,
     repo.issuePrefix,
   ).map(localIssueToRef);
   if (blockedRefs.length > 0) {
-    const cleared = await resolveBlockedCards(repo, blockedRefs);
+    const cleared = resolveBlockedCards(repo, blockedRefs);
     if (cleared.length > 0) cards = [...cards, ...cleared];
   }
 
@@ -1035,71 +1038,10 @@ async function bulkSyncMissingYamls(
   }
 }
 
-/**
- * Filter `cards` by blocked-state. For each card whose local YAML carries
- * a non-null `blocked` record:
- *
- *   - Resolve every id in `blocked.by[]` against the local YAML store.
- *   - If ANY blocker is missing locally OR has a non-terminal status
- *     (anything other than Done / Cancelled), the card stays blocked and
- *     is dropped from the dispatch list.
- *   - If EVERY blocker is terminal, clear `blocked` on the card's YAML,
- *     save, and keep it in the dispatch list.
- *
- * Cards with no local YAML (e.g. ToDo cards the poller hasn't yet
- * hydrated this tick — though bulk-sync should already have covered
- * them) are passed through unchanged. The dispatch path will
- * `findByExternalId` / `hydrateFromRemote` afterward.
- *
- * Read-only on the tracker: every check is a local-YAML lookup. The only
- * side effect is the `writeIssue` when blockers fully clear, which is
- * exactly the state transition the gate exists to record.
- */
-async function resolveBlockedCards(
-  repo: RepoContext,
-  cards: IssueRef[],
-): Promise<IssueRef[]> {
-  const out: IssueRef[] = [];
-  for (const card of cards) {
-    const local = findByExternalId(repo.localPath, card.external_id);
-    if (!local) {
-      out.push(card);
-      continue;
-    }
-    if (!local.blocked) {
-      out.push(card);
-      continue;
-    }
-    const blockers = local.blocked.by;
-    const stillBlocking: string[] = [];
-    for (const blockerId of blockers) {
-      const blocker = loadLocal(repo.localPath, blockerId, repo.issuePrefix);
-      if (!blocker) {
-        stillBlocking.push(`${blockerId}(missing)`);
-        continue;
-      }
-      if (blocker.status !== "Done" && blocker.status !== "Cancelled") {
-        stillBlocking.push(`${blockerId}(${blocker.status})`);
-      }
-    }
-    if (stillBlocking.length > 0) {
-      log.info(
-        `[${repo.name}] ${local.id} still blocked: ${stillBlocking.join(", ")}`,
-      );
-      continue;
-    }
-    // All blockers terminal — clear the record and save. The agent
-    // re-picks the card next tick (or this tick if it's first in `out`).
-    log.info(
-      `[${repo.name}] ${local.id} all blockers terminal — clearing blocked`,
-    );
-    const cleared: Issue = { ...local, blocked: null };
-    const path = issuePath(repo.localPath, cleared.id, "open");
-    writeFileSync(path, serializeIssue(cleared));
-    out.push(card);
-  }
-  return out;
-}
+// `resolveBlockedCards` was extracted to `./blocked-resolver.ts` (DX-147)
+// so the auto-clear path stays testable without paying the env-validation
+// tax of pulling `index.ts` into a unit test. See that file for the
+// full contract.
 
 /**
  * Look at every In Progress card. For the first one whose local YAML
@@ -1914,6 +1856,15 @@ export function syncRepoFiles(repo: RepoContext): void {
   // `<repo>/.danxbot/.trello-retry/` is local-only and must never be
   // committed (entries contain raw upstream tracker error strings).
   ensureGitignoreEntry(repo.localPath, ".trello-retry/");
+
+  // DX-201: ensure the connected repo's root `.mcp.json` advertises the
+  // `danx-issue` MCP server so a host-session `claude` at the repo root
+  // can atomically allocate `ISS-N` ids via `danx_issue_create`. Merge-
+  // only — never clobbers other `mcpServers` entries or top-level keys.
+  const mcpResult = injectDanxIssueMcp({ repoRoot: repo.localPath });
+  if (mcpResult.changed) {
+    log.info(`[${repo.name}] root .mcp.json updated with danx-issue server`);
+  }
 
   copyComposeOverride(
     danxbotConfigDir,

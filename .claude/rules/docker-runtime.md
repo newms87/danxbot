@@ -121,11 +121,23 @@ Merge contract (`deploy/secrets.ts#collectDeploymentSecrets`):
 
 Files are gitignored by default — `.env.*` with `!.env.example` exception so any `.env.example` you commit for documentation stays trackable.
 
-## Interactive CLI — no repo-root MCP exposure
+## Root `.mcp.json` injection contract (DX-201)
 
-The danxbot repo no longer ships a repo-root `.mcp.json`. A developer running bare `claude` at the repo root sees zero MCP servers — only built-in tools. Issue inspection and edits go through the local YAMLs at `<repo>/.danxbot/issues/open/` (Glob + Read + Edit). Backend tracker sync is the worker's responsibility; agents never see it.
+The poller injects exactly ONE MCP server — `danx-issue` — into every connected repo's root `.mcp.json` on every tick. A developer running bare `claude` at the repo root sees the `danx-issue` tool surface (atomic `ISS-N` allocation via `danx_issue_create`, list/get/save/close) and nothing else from danxbot. Worker-only MCPs (Trello, Playwright, context7, ...) still live exclusively inside per-workspace dirs (`<repo>/.danxbot/workspaces/<name>/.mcp.json`); they are NEVER added at the repo root.
 
-If you add a workspace-scoped MCP config in the future, declare it inside the workspace dir (e.g. `<repo>/.danxbot/workspaces/<name>/.mcp.json`) — never at repo root.
+The injection is implemented by `src/poller/inject/inject-root-mcp.ts#injectDanxIssueMcp` and wired into `syncRepoFiles`. Contract:
+
+- ADDS the `danx-issue` entry to `mcpServers` when the key is missing.
+- NEVER deletes, rewrites, or reorders any other `mcpServers` entry — pre-existing servers (operator's own MCPs, playwright in repos that ship one at root, etc.) survive byte-identical.
+- NEVER touches top-level keys outside `mcpServers`.
+- Operator override wins: if `mcpServers["danx-issue"]` already exists with different content, it is left alone.
+- Malformed JSON → log error, no write. The user's file is never overwritten when we can't parse it.
+- Atomic write via `.tmp` + `renameSync`; a poller crash mid-write leaves the original file intact.
+- Idempotent — re-running is a no-op when the key already exists. Safe to run every tick.
+
+Operators can opt out by adding `danx-issue` themselves with different content — the poller leaves whatever exists alone. Operators can also gitignore the file or commit it; danxbot doesn't dictate either way. The poller re-asserts the key on the next tick only when it's missing — files that already contain `danx-issue` are not rewritten.
+
+Workers' per-dispatch MCPs are unchanged — they still come from `<repo>/.danxbot/workspaces/<name>/.mcp.json` merged with the danxbot infrastructure server inside `dispatch()`. The root `.mcp.json` is the dev's interactive surface only; it does not feed worker dispatches.
 
 ### CRITICAL: never put an `.env.local` (or any `.env.{APP_ENV}`) file at the connected repo's root
 
@@ -139,7 +151,7 @@ When wiring up a new connected repo (especially Laravel / any framework with an 
 
 ### Strict isolation from danxbot
 
-Danxbot-dispatched agents (poller, `/api/launch`, Slack) use their own per-dispatch MCP config and env from `<repo>/.danxbot/.env` delivered to the worker container via `env_file: ../.env` in `<repo>/.danxbot/config/compose.yml`. The dev's interactive `claude` sees no MCP servers (no repo-root `.mcp.json`). Zero overlap between dev env and bot env — by design.
+Danxbot-dispatched agents (poller, `/api/launch`, Slack) use their own per-dispatch MCP config and env from `<repo>/.danxbot/.env` delivered to the worker container via `env_file: ../.env` in `<repo>/.danxbot/config/compose.yml`. The dev's interactive `claude` at the repo root only sees the single `danx-issue` MCP server the poller injects (DX-201) — zero overlap with the worker's broader MCP surface (Trello, Playwright, etc.). The worker's own dispatches still source MCP from the workspace dir, never from the repo root.
 
 ### The workspace: dispatched-agent cwd
 
