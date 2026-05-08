@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { TrelloTracker } from "../../issue-tracker/trello.js";
+import {
+  TrelloTracker,
+  formatCardTitle,
+  parseCardTitle,
+} from "../../issue-tracker/trello.js";
 import type { TrelloConfig } from "../../types.js";
 
 const TRELLO: TrelloConfig = {
@@ -824,6 +828,129 @@ describe("TrelloTracker", () => {
   });
 });
 
+
+// ---------- Card-title encode/decode prefix roundtrip (Phase 2 of ISS-99) ----------
+//
+// `parseCardTitle` MUST accept any `^#([A-Z]{2,4}-\d+):\s*(.*)$` so cards
+// from connected repos with prefixes DX / SG / FD parse identically to
+// the legacy `ISS-` shape. `formatCardTitle` is already prefix-agnostic
+// (uses the supplied `id` verbatim); these tests pin that contract so a
+// future refactor can't reintroduce a hardcoded `ISS-` literal.
+
+describe("parseCardTitle / formatCardTitle prefix roundtrip", () => {
+  describe("parseCardTitle accepts any [A-Z]{2,4}-N prefix", () => {
+    it("parses legacy ISS-N", () => {
+      expect(parseCardTitle("#ISS-138: foo")).toEqual({ id: "ISS-138", title: "foo" });
+    });
+
+    it("parses DX-N (danxbot prefix)", () => {
+      expect(parseCardTitle("#DX-12: bar")).toEqual({ id: "DX-12", title: "bar" });
+    });
+
+    it("parses SG-N (gpt-manager prefix)", () => {
+      expect(parseCardTitle("#SG-3: baz")).toEqual({ id: "SG-3", title: "baz" });
+    });
+
+    it("parses FD-N (platform prefix)", () => {
+      expect(parseCardTitle("#FD-99: qux")).toEqual({ id: "FD-99", title: "qux" });
+    });
+
+    it("parses 2-letter prefix at boundary", () => {
+      expect(parseCardTitle("#XX-1: a")).toEqual({ id: "XX-1", title: "a" });
+    });
+
+    it("parses 4-letter prefix at boundary", () => {
+      expect(parseCardTitle("#ABCD-1: a")).toEqual({ id: "ABCD-1", title: "a" });
+    });
+
+    it("preserves the rest of the title verbatim including colons", () => {
+      expect(parseCardTitle("#DX-7: feat: do the thing")).toEqual({
+        id: "DX-7",
+        title: "feat: do the thing",
+      });
+    });
+
+    it("returns id: '' for prefixes outside [A-Z]{2,4}-N shape", () => {
+      // 1-letter prefix: too short
+      expect(parseCardTitle("#X-1: a")).toEqual({ id: "", title: "#X-1: a" });
+      // 5-letter prefix: too long
+      expect(parseCardTitle("#ABCDE-1: a")).toEqual({ id: "", title: "#ABCDE-1: a" });
+      // lowercase: shape requires uppercase
+      expect(parseCardTitle("#dx-1: a")).toEqual({ id: "", title: "#dx-1: a" });
+      // mixed case: shape requires uppercase only
+      expect(parseCardTitle("#Dx-1: a")).toEqual({ id: "", title: "#Dx-1: a" });
+      // numeric prefix: shape requires letters
+      expect(parseCardTitle("#A1-1: a")).toEqual({ id: "", title: "#A1-1: a" });
+    });
+
+    it("returns id: '' for cards without the #<prefix>-N: shape", () => {
+      expect(parseCardTitle("plain title")).toEqual({ id: "", title: "plain title" });
+      expect(parseCardTitle("# missing colon")).toEqual({ id: "", title: "# missing colon" });
+    });
+
+    it("returns id: '' when the title has leading whitespace before the # marker", () => {
+      // The regex is `^#…` — a paste with a leading space falls through
+      // to the no-prefix branch. Pin the behavior so a future tightening
+      // (or accidental loosening to `^\s*#…`) is loud.
+      expect(parseCardTitle(" #DX-1: a")).toEqual({ id: "", title: " #DX-1: a" });
+    });
+
+    it("accepts an empty title body after the colon", () => {
+      // `\s*(.*)$` matches zero characters, so `#DX-1:` and `#DX-1: ` both
+      // parse with `title: ""`. Pin the behavior — the inbound parser is
+      // intentionally permissive, and downstream sync.ts handles empty
+      // titles by leaving the local YAML's title untouched.
+      expect(parseCardTitle("#DX-1:")).toEqual({ id: "DX-1", title: "" });
+      expect(parseCardTitle("#DX-1: ")).toEqual({ id: "DX-1", title: "" });
+    });
+
+    it("accepts a missing space after the colon", () => {
+      // `\s*(.*)$` allows zero whitespace. `#DX-1:foo` parses to title
+      // `"foo"` — operator-error case, not a hard reject.
+      expect(parseCardTitle("#DX-1:foo")).toEqual({ id: "DX-1", title: "foo" });
+    });
+  });
+
+  describe("formatCardTitle is prefix-agnostic via the id arg", () => {
+    it.each([
+      ["ISS-138", "[Danxbot] Do stuff"],
+      ["DX-12", "Phase 2"],
+      ["SG-3", "Backfill"],
+      ["FD-99", "Migration"],
+    ])("formats id=%s into the standard #<id>: <title> shape", (id, title) => {
+      expect(formatCardTitle(id, title)).toBe(`#${id}: ${title}`);
+    });
+
+    it("throws on empty id", () => {
+      expect(() => formatCardTitle("", "x")).toThrow(
+        /formatCardTitle requires a non-empty id/,
+      );
+    });
+
+    it("does NOT throw on empty title (asymmetry with empty-id behavior)", () => {
+      // Pin the asymmetry — only `id` is required. An empty title round-
+      // trips through `parseCardTitle` with `id: "DX-1", title: ""`. Sync
+      // layers handle empty titles by preserving the local YAML title
+      // (the tracker is the mirror, not the source of truth).
+      expect(formatCardTitle("DX-1", "")).toBe("#DX-1: ");
+      expect(parseCardTitle("#DX-1: ")).toEqual({ id: "DX-1", title: "" });
+    });
+  });
+
+  describe("encode -> decode roundtrip across every supported prefix", () => {
+    it.each([
+      ["ISS-138", "[Danxbot] Do stuff"],
+      ["DX-12", "Phase 2"],
+      ["SG-3", "Backfill"],
+      ["FD-99", "Migration"],
+      ["XX-1", "boundary 2-letter"],
+      ["ABCD-1", "boundary 4-letter"],
+    ])("formatCardTitle then parseCardTitle restores id=%s", (id, title) => {
+      const encoded = formatCardTitle(id, title);
+      expect(parseCardTitle(encoded)).toEqual({ id, title });
+    });
+  });
+});
 
 function authQs(): string {
   return "key=k&token=t";

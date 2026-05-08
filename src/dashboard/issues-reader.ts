@@ -6,6 +6,7 @@ import type {
   IssueType,
 } from "../issue-tracker/interface.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
+import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("issues-reader");
@@ -88,7 +89,10 @@ interface RawIssue {
   text: string;
 }
 
-async function readIssueFile(path: string): Promise<RawIssue | null> {
+async function readIssueFile(
+  path: string,
+  expectedPrefix: string,
+): Promise<RawIssue | null> {
   let mtimeMs: number;
   let text: string;
   try {
@@ -108,7 +112,11 @@ async function readIssueFile(path: string): Promise<RawIssue | null> {
     return null;
   }
   try {
-    const issue = parseIssue(text);
+    // Phase 2 of ISS-99: thread the per-repo prefix into the validator so a
+    // DX repo rejects a stale `id: "ISS-N"` YAML (cross-prefix files surface
+    // as "malformed" and skip with the existing warn-once log) instead of
+    // silently rendering it on the wrong dashboard.
+    const issue = parseIssue(text, { expectedPrefix });
     return { issue, mtimeMs, text };
   } catch (err) {
     if (!warnedPaths.has(path)) {
@@ -268,6 +276,13 @@ export async function listIssues(
 ): Promise<IssueListItem[]> {
   const openDir = join(repoCwd, ".danxbot", "issues", "open");
   const closedDir = join(repoCwd, ".danxbot", "issues", "closed");
+  // Resolve the per-repo prefix once per call. `loadIssuePrefix` reads
+  // `<repoCwd>/.danxbot/config/config.yml`; missing config / missing
+  // `issue_prefix` field returns the legacy `"ISS"` default with a
+  // warn-once log. A malformed prefix (shape mismatch) throws — the
+  // dashboard's outer 500 handler surfaces the failure to the operator
+  // instead of silently rendering against the wrong namespace.
+  const expectedPrefix = loadIssuePrefix(repoCwd);
 
   const [openNames, closedNames] = await Promise.all([
     listYamlNames(openDir),
@@ -275,11 +290,11 @@ export async function listIssues(
   ]);
 
   const openRaw = (
-    await Promise.all(openNames.map((n) => readIssueFile(join(openDir, n))))
+    await Promise.all(openNames.map((n) => readIssueFile(join(openDir, n), expectedPrefix)))
   ).filter((r): r is RawIssue => r !== null);
 
   const closedRaw = (
-    await Promise.all(closedNames.map((n) => readIssueFile(join(closedDir, n))))
+    await Promise.all(closedNames.map((n) => readIssueFile(join(closedDir, n), expectedPrefix)))
   ).filter((r): r is RawIssue => r !== null);
 
   // Sort closed by mtime BEFORE slicing — the cap (50) is "newest 50",
@@ -308,9 +323,13 @@ export async function readIssueDetail(
   repoCwd: string,
   id: string,
 ): Promise<IssueDetail | null> {
+  // Resolve the per-repo prefix on detail reads too — required for the
+  // single-id lookup to validate the YAML's `id` field against the
+  // repo's namespace (Phase 2 of ISS-99).
+  const expectedPrefix = loadIssuePrefix(repoCwd);
   for (const sub of ["open", "closed"] as const) {
     const path = join(repoCwd, ".danxbot", "issues", sub, `${id}.yml`);
-    const raw = await readIssueFile(path);
+    const raw = await readIssueFile(path, expectedPrefix);
     if (raw) {
       const issue = applyEpicBlockedProjection(raw.issue);
       return { ...issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };

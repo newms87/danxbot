@@ -124,11 +124,12 @@ export class TrelloTracker implements IssueTracker {
     return {
       schema_version: 3,
       tracker: "trello",
-      // Internal id is parsed from the `#ISS-N: ` title prefix. Cards
-      // pre-dating the id epoch (or human-created without the prefix)
-      // surface here with `id: ""` — sync.ts and higher-level callers
-      // are responsible for handling that case (typically by ignoring or
-      // running the migration script).
+      // Internal id is parsed from the `#<PREFIX>-N: ` title prefix where
+      // PREFIX is any 2-4 uppercase letters (Phase 2 of ISS-99 — supports
+      // DX / SG / FD plus legacy ISS). Cards pre-dating the id epoch (or
+      // human-created without the prefix) surface here with `id: ""` —
+      // sync.ts and higher-level callers are responsible for handling
+      // that case (typically by ignoring or running the migration script).
       id: parsed.id,
       external_id: card.id,
       // `parent_id` and `children` are local-only metadata. Trello has no
@@ -704,13 +705,22 @@ export function formatCardTitle(id: string, title: string): string {
 
 /**
  * Inverse of `formatCardTitle`. Splits a Trello card name into
- * `{ id, title }`. Cards without the `#ISS-N: ` prefix (human-created,
+ * `{ id, title }`. Cards without the `#<PREFIX>-N: ` shape (human-created,
  * pre-migration legacy, etc.) return `id: ""` and the entire name as
  * `title` — sync layers must handle that case explicitly (typically by
  * skipping the card or running the migration script).
+ *
+ * Phase 2 of ISS-99 broadened the prefix from a hardcoded `ISS` to any
+ * 2-4 uppercase ASCII letters so connected repos with prefixes like
+ * `DX` (danxbot), `SG` (gpt-manager), or `FD` (platform) parse identically
+ * to legacy `ISS-` titles. The shape mirrors `ISSUE_PREFIX_SHAPE` in
+ * `src/issue-tracker/yaml.ts`. Per-card prefix validation against the
+ * repo's configured `issue_prefix` happens at YAML parse time
+ * (`parseIssue` with `expectedPrefix`), not here — this function is
+ * the cross-repo inbound parser, so it accepts every valid shape.
  */
 export function parseCardTitle(name: string): { id: string; title: string } {
-  const m = /^#(ISS-\d+):\s*(.*)$/.exec(name);
+  const m = /^#([A-Z]{2,4}-\d+):\s*(.*)$/.exec(name);
   if (!m) return { id: "", title: name };
   return { id: m[1], title: m[2] };
 }

@@ -21,6 +21,14 @@ vi.mock("./issue-route.js", () => ({
   handleIssueSave: vi.fn(),
 }));
 vi.mock("./restart-route.js", () => ({ handleRestart: vi.fn() }));
+// `restage-route.js` transitively imports `src/dispatch/core.ts` →
+// `src/config.ts`, which throws on missing `DANXBOT_DB_USER` at module-
+// load time. The sibling `server.test.ts` mocks the route for the same
+// reason; without this the boot-seed test fails before any assertion
+// with a confusing required-env-var error (see
+// `.claude/rules/danx-repo-workflow.md` "Isolate Pure Helpers From
+// src/poller/index.ts").
+vi.mock("./restage-route.js", () => ({ handleRestage: vi.fn() }));
 
 const mockSeedCooldown = vi
   .fn()

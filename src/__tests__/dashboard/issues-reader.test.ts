@@ -587,3 +587,121 @@ describe("readIssueDetail", () => {
     expect(detail).toBeNull();
   });
 });
+
+// ---------- Per-repo prefix awareness (Phase 2 of ISS-99) ----------
+//
+// The dashboard reader resolves the issue prefix from each repo's
+// `<repoCwd>/.danxbot/config/config.yml` `issue_prefix` field and threads it
+// into `parseIssue` via `expectedPrefix`. A repo with `issue_prefix: DX`
+// parses `DX-N.yml` cards; a repo without `config.yml` keeps the legacy
+// `"ISS"` default so pre-migration repos continue to render. This block
+// pins both halves so a future refactor can't silently regress to a
+// hardcoded default.
+
+function setupRepoWithPrefix(prefix: string): string {
+  const repo = setupRepo();
+  mkdirSync(join(repo, ".danxbot/config"), { recursive: true });
+  writeFileSync(
+    join(repo, ".danxbot/config/config.yml"),
+    `issue_prefix: ${prefix}\n`,
+    "utf-8",
+  );
+  return repo;
+}
+
+describe("listIssues / readIssueDetail per-repo issue_prefix", () => {
+  beforeEach(() => {
+    __resetWarnedPathsForTests();
+  });
+
+  it("listIssues parses DX-N cards in a repo configured with issue_prefix: DX", async () => {
+    const repo = setupRepoWithPrefix("DX");
+    writeIssue(repo, "open", emptyIssue({ id: "DX-1", title: "first" }), 1_000);
+    writeIssue(repo, "open", emptyIssue({ id: "DX-2", title: "second" }), 2_000);
+    const items = await listIssues(repo);
+    const ids = items.map((i) => i.id).sort();
+    expect(ids).toEqual(["DX-1", "DX-2"]);
+  });
+
+  it("listIssues parses SG-N cards in a repo configured with issue_prefix: SG", async () => {
+    const repo = setupRepoWithPrefix("SG");
+    writeIssue(repo, "open", emptyIssue({ id: "SG-7" }), 1_000);
+    const items = await listIssues(repo);
+    expect(items.map((i) => i.id)).toEqual(["SG-7"]);
+  });
+
+  it("listIssues skips ISS-N YAMLs with a warning when the repo prefix is DX", async () => {
+    const repo = setupRepoWithPrefix("DX");
+    writeIssue(repo, "open", emptyIssue({ id: "DX-1", title: "ok" }), 2_000);
+    // Cross-prefix YAML: still loaded by `setupRepoWithPrefix` writer but
+    // contains `id: ISS-1` — must be rejected by the validator under the
+    // DX repo so a stale cross-repo file never silently surfaces on the DX
+    // dashboard.
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-1", title: "stale" }), 1_000);
+    const items = await listIssues(repo);
+    expect(items.map((i) => i.id)).toEqual(["DX-1"]);
+  });
+
+  it("readIssueDetail loads DX-N when the repo prefix is DX", async () => {
+    const repo = setupRepoWithPrefix("DX");
+    writeIssue(repo, "open", emptyIssue({ id: "DX-42", description: "body" }), 1_000);
+    const detail = await readIssueDetail(repo, "DX-42");
+    expect(detail).not.toBeNull();
+    expect(detail!.id).toBe("DX-42");
+    expect(detail!.description).toBe("body");
+  });
+
+  it("readIssueDetail returns null for a cross-prefix id under a DX repo", async () => {
+    const repo = setupRepoWithPrefix("DX");
+    // The file is on disk but its `id` field is `ISS-1` — the DX
+    // validator rejects it, and `readIssueDetail` swallows the parse
+    // error per its existing contract.
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-1" }), 1_000);
+    const detail = await readIssueDetail(repo, "ISS-1");
+    expect(detail).toBeNull();
+  });
+
+  it("falls back to the legacy ISS prefix when config.yml is absent", async () => {
+    // No config.yml — `loadIssuePrefix` returns DEFAULT_ISSUE_PREFIX with a
+    // warn-once log. Existing ISS-N repos continue to render.
+    const repo = setupRepo();
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-9", title: "legacy" }), 1_000);
+    const items = await listIssues(repo);
+    expect(items.map((i) => i.id)).toEqual(["ISS-9"]);
+  });
+
+  it("falls back to ISS when config.yml has no issue_prefix field", async () => {
+    const repo = setupRepo();
+    mkdirSync(join(repo, ".danxbot/config"), { recursive: true });
+    writeFileSync(
+      join(repo, ".danxbot/config/config.yml"),
+      "name: my-repo\n",
+      "utf-8",
+    );
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-3" }), 1_000);
+    const items = await listIssues(repo);
+    expect(items.map((i) => i.id)).toEqual(["ISS-3"]);
+  });
+
+  it("propagates a malformed issue_prefix as a thrown error", async () => {
+    // `loadIssuePrefix` throws on a shape mismatch. The reader does NOT
+    // swallow this — fail-loud is the contract for config-shape bugs.
+    const repo = setupRepoWithPrefix("badShape!");
+    await expect(listIssues(repo)).rejects.toThrow(/Invalid issue_prefix/);
+  });
+
+  it("preserves mtime-desc ordering of valid survivors when a cross-prefix YAML is skipped", async () => {
+    // Validates that the prefix-skip path doesn't disturb the existing
+    // mtime sort. Three valid DX-N files at different mtimes plus one
+    // stale ISS-N (rejected by the validator). Surviving items must
+    // come back ordered by mtime descending — same contract every other
+    // listIssues call obeys.
+    const repo = setupRepoWithPrefix("DX");
+    writeIssue(repo, "open", emptyIssue({ id: "DX-1" }), 1_000);
+    writeIssue(repo, "open", emptyIssue({ id: "DX-2" }), 3_000);
+    writeIssue(repo, "open", emptyIssue({ id: "DX-3" }), 2_000);
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-1" }), 4_000);
+    const items = await listIssues(repo);
+    expect(items.map((i) => i.id)).toEqual(["DX-2", "DX-3", "DX-1"]);
+  });
+});

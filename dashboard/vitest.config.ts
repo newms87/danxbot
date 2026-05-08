@@ -35,9 +35,13 @@ export default defineConfig({
     // danx-ui ships a vendored copy of `yaml` under dist/node_modules/yaml/.
     // Externalized, vite-node loads its browser ESM as CJS → "Named export
     // 'parse' not found". Inlining lets Vite transform danx-ui itself.
+    // Match the full scoped package name (`@thehammer/danx-ui`) — the bare
+    // `"danx-ui"` form does not match the resolved import path and the
+    // externalized build leaked the vendored browser-ESM yaml back into
+    // vite-node's ESM resolver (Phase 2 of ISS-99 root-caused this).
     server: {
       deps: {
-        inline: ["danx-ui"],
+        inline: ["@thehammer/danx-ui"],
       },
     },
   },
