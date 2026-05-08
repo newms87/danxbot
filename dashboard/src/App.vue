@@ -75,6 +75,7 @@ function onAuthExpired(): void {
   handleExpired();
   selectedDispatch.value = null;
   destroy();
+  destroySystemErrors();
 }
 
 async function loadDashboard(): Promise<void> {
@@ -86,6 +87,7 @@ async function loadDashboard(): Promise<void> {
     return;
   }
   initDispatches();
+  void initSystemErrors();
 }
 
 onMounted(async () => {
@@ -99,6 +101,7 @@ onUnmounted(() => {
   window.removeEventListener("auth:expired", onAuthExpired);
   window.removeEventListener("popstate", onPopState);
   destroy();
+  destroySystemErrors();
 });
 
 // Drive dashboard loading off a single source of truth. `immediate: true`
@@ -137,6 +140,11 @@ function selectDispatch(d: Dispatch): void {
         :repos="repos"
         :refreshing="loading"
         @refresh="refresh"
+      />
+
+      <SystemErrorsBanner
+        :errors="systemErrors"
+        @dismiss="dismissSystemError"
       />
 
       <template v-if="activeTab === 'dispatches'">

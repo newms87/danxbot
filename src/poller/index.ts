@@ -616,13 +616,14 @@ async function _poll(repo: RepoContext): Promise<void> {
     // line and becomes a visible alert. Source = "retry-queue", severity
     // is always "error" (max-attempts means we're out of automatic
     // retries).
-    recordSystemError: (message) =>
+    recordSystemError: (message) => {
       recordSystemError({
         source: "retry-queue",
         severity: "error",
         repo: repo.name,
         message,
-      }),
+      });
+    },
   });
   if (
     drainResult.attempted > 0 ||

@@ -430,6 +430,15 @@ vi.mock("../issue-tracker/retry-queue.js", () => ({
   drainRetries: (...args: unknown[]) => mockDrainRetries(...args),
 }));
 
+// DX-134 Phase 4: producer wiring tests for the dashboard system-errors
+// banner. The mock lets us assert that _poll's heal-pass call site and
+// the drainRetries arrow-fn call site translate correctly into structured
+// recordSystemError invocations with the right `source` / `repo` / `severity`.
+const mockRecordSystemError = vi.fn();
+vi.mock("../dashboard/system-errors.js", () => ({
+  recordSystemError: (...args: unknown[]) => mockRecordSystemError(...args),
+}));
+
 // Feature-aware default: ideator's env default is `false` (explicit
 // opt-in via `<repo>/.danxbot/settings.json` overrides). Every other
 // feature defaults to `true` so existing tests that don't care about
@@ -5921,6 +5930,89 @@ describe("poll — heal pass ordering (ISS-133, Phase 3)", () => {
     // that throws on a non-empty `healed[]` would silently abort the
     // tick.
     expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+  });
+
+  it("DX-134 Phase 4: heal pass errors fire recordSystemError for the dashboard banner", async () => {
+    // Producer-wiring test: when the heal pass returns malformed-YAML
+    // errors, `_poll` MUST surface each one to the dashboard via
+    // recordSystemError(source: "healer", severity: "warn", ...).
+    // Without this, malformed-YAML alerts only land in the worker log.
+    mockRecordSystemError.mockClear();
+    mockHealLocalYamls.mockReturnValue({
+      healed: [],
+      errors: [
+        { path: "/tmp/foo/ISS-1.yml", message: "missing required field: id" },
+        { path: "/tmp/foo/ISS-2.yml", message: "schema_version must be 3 or 4" },
+      ],
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const healerCalls = mockRecordSystemError.mock.calls.filter(
+      (c) => (c[0] as { source: string }).source === "healer",
+    );
+    expect(healerCalls).toHaveLength(2);
+    expect(healerCalls[0][0]).toMatchObject({
+      source: "healer",
+      severity: "warn",
+      repo: MOCK_REPO_CONTEXT.name,
+      message: expect.stringContaining("missing required field: id"),
+      details: { path: "/tmp/foo/ISS-1.yml" },
+    });
+    expect(healerCalls[1][0]).toMatchObject({
+      source: "healer",
+      severity: "warn",
+      repo: MOCK_REPO_CONTEXT.name,
+      message: expect.stringContaining("schema_version must be 3 or 4"),
+      details: { path: "/tmp/foo/ISS-2.yml" },
+    });
+  });
+
+  it("DX-134 Phase 4: retry-queue MAX_ATTEMPTS exhaustion fires recordSystemError", async () => {
+    // Producer-wiring test for the drainRetries arrow-fn callback. The
+    // retry-queue tests in retry-queue.test.ts already verify the hook
+    // contract; this test pins that the arrow at _poll's drainRetries
+    // call site translates the string-only callback into the structured
+    // event with the right source/repo/severity.
+    mockRecordSystemError.mockClear();
+    let capturedRecordSystemError:
+      | ((message: string) => void | Promise<void>)
+      | undefined;
+    mockDrainRetries.mockImplementationOnce(
+      async (deps: {
+        recordSystemError?: (message: string) => void | Promise<void>;
+      }) => {
+        capturedRecordSystemError = deps.recordSystemError;
+        return {
+          attempted: 0,
+          succeeded: 0,
+          failed: 0,
+          exhausted: 0,
+          yamlMissing: 0,
+          yamlInvalid: 0,
+          skipped: 0,
+          malformed: 0,
+        };
+      },
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(capturedRecordSystemError).toBeTypeOf("function");
+    capturedRecordSystemError!(
+      "Retry queue: max attempts (24) exceeded for ISS-7; last error: 401 from tracker",
+    );
+
+    const queueCalls = mockRecordSystemError.mock.calls.filter(
+      (c) => (c[0] as { source: string }).source === "retry-queue",
+    );
+    expect(queueCalls).toHaveLength(1);
+    expect(queueCalls[0][0]).toMatchObject({
+      source: "retry-queue",
+      severity: "error",
+      repo: MOCK_REPO_CONTEXT.name,
+      message: expect.stringContaining("max attempts (24) exceeded for ISS-7"),
+    });
   });
 });
 

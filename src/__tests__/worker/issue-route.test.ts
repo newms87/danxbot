@@ -58,6 +58,7 @@ interface TestHarness {
   tracker: MemoryTracker;
   repo: RepoContext;
   recordedErrors: Array<{ dispatchId: string; message: string }>;
+  recordedSystemErrors: string[];
   close: () => Promise<void>;
 }
 
@@ -66,10 +67,14 @@ async function startTestServer(): Promise<TestHarness> {
   const repoLocalPath = mkdtempSync(join(tmpdir(), "danxbot-issue-route-"));
   ensureIssuesDirs(repoLocalPath);
   const recordedErrors: Array<{ dispatchId: string; message: string }> = [];
+  const recordedSystemErrors: string[] = [];
   const deps: IssueRouteDeps = {
     tracker,
     recordError: async (dispatchId, message) => {
       recordedErrors.push({ dispatchId, message });
+    },
+    recordSystemError: (msg) => {
+      recordedSystemErrors.push(msg);
     },
   };
 
@@ -145,6 +150,7 @@ async function startTestServer(): Promise<TestHarness> {
     tracker,
     repo,
     recordedErrors,
+    recordedSystemErrors,
     close: async () => {
       await new Promise<void>((resolveClose) =>
         server.close(() => resolveClose()),
@@ -321,6 +327,54 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     expect(h.recordedErrors[0].dispatchId).toBe("dispatch-fail");
     expect(h.recordedErrors[0].message).toContain("simulated 503 from tracker");
     expect(h.recordedErrors[0].message).toContain("mem-1");
+  });
+
+  it("DX-134 Phase 4: tracker errors fire recordSystemError for the dashboard banner", async () => {
+    await h.tracker.createCard({
+      schema_version: 4,
+      tracker: "memory",
+      id: "ISS-44",
+      parent_id: null,
+      children: [],
+      status: "ToDo",
+      type: "Feature",
+      title: "remote-title",
+      description: "",
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-44", external_id: "mem-1", title: "local-title" }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    h.tracker.failNextWrite(new Error("simulated 401 from tracker"));
+
+    const res = await fetch(`${h.url}/api/issue-save/dispatch-banner-fail`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-44" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json())).toEqual({ saved: true });
+
+    await _drainAsyncWorkForTesting();
+
+    // recordError wires the per-dispatch row's `error` column. The new
+    // recordSystemError wire (DX-134 Phase 4) wires the cross-dispatch
+    // dashboard banner. The runSync catch must fire BOTH — deletion of
+    // the fireAndForgetSystemError call would regress the operator
+    // surface even though recordError still works.
+    expect(h.recordedSystemErrors.length).toBeGreaterThanOrEqual(1);
+    const systemMsg = h.recordedSystemErrors.find((m) =>
+      m.includes("async sync failed"),
+    );
+    expect(systemMsg, "expected 'async sync failed' in recordSystemError").toBeDefined();
+    expect(systemMsg).toContain("mem-1");
+    expect(systemMsg).toContain("simulated 401 from tracker");
   });
 
   it("AC #5: serializes concurrent saves on the same id", async () => {
