@@ -1161,12 +1161,21 @@ function validateRetro(
     if (!Array.isArray(v.commits)) {
       return "retro.commits must be a list of strings";
     }
+    // Coerce numeric / bigint entries to strings — bare git SHAs that
+    // happen to be all digits (e.g. `9828791`) parse as YAML ints. The
+    // canonical on-disk form is a string, but the parser is forgiving
+    // here so a small operator slip doesn't 500 the entire issues list.
+    commits = new Array<string>(v.commits.length);
     for (let i = 0; i < v.commits.length; i++) {
-      if (typeof v.commits[i] !== "string") {
-        return `retro.commits[${i}] must be a string`;
+      const c = v.commits[i];
+      if (typeof c === "string") {
+        commits[i] = c;
+      } else if (typeof c === "number" || typeof c === "bigint") {
+        commits[i] = String(c);
+      } else {
+        return `retro.commits[${i}] must be a string or number (got ${typeof c})`;
       }
     }
-    commits = v.commits as string[];
   }
   return {
     good: typeof v.good === "string" ? v.good : "",
