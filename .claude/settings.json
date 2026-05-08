@@ -13,6 +13,7 @@
     "investigate@newms-plugins": true,
     "dev@newms-plugins": true,
     "pipeline@newms-plugins": true,
+    "human-collaboration@newms-plugins": true,
     "issues@newms-plugins": true,
     "danxbot@newms-plugins": true
   }

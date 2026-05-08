@@ -127,7 +127,7 @@ Needs Help.
 2. **Bug cards (`type: Bug`):** investigate root cause via `Read` / `Grep` / `Bash` before designing the fix.
 3. **Needs Help vs Blocked vs fix-it-yourself:** if the card cannot be done by an agent, route it correctly. Step 10 (Needs Help) ONLY for human-action blockers (credentials, deploy, ambiguous spec needing human decision, architectural ambiguity that changes the goal). Step 10b (Blocked) for waiting on other in-flight work — no human required, the poller auto-unblocks. Anything else → apply Step 1.5 and fix it yourself in this dispatch.
 4. Design the approach in your head. No code yet.
-5. Invoke the `/wow` skill to reload Ways of Working.
+5. Invoke the `/pipe-start` skill to reload pre-implementation rules.
 
 ---
 

@@ -124,11 +124,11 @@ All `make` targets, when to use which, and the production-vs-local invocation co
 
 Per-phase / per-unit-of-work pipeline (project-specific):
 
-0. Invoke `/wow` to reload critical rules into recency
+0. Invoke `/pipe-start` to reload critical rules into recency
 1. **Implement** — write code, run `npx vitest run` and `npx tsc --noEmit`
 2. **Test coverage** — launch the `test-reviewer` subagent, fill all gaps it flags
 3. **Code review** — launch the `code-reviewer` subagent, fix all findings
-4. **Report** — present results, wait for approval, commit via `/flow-commit`
+4. **Report** — present results, wait for approval, commit via `/pipe-commit`
 
 Steps 2 and 3 are mandatory quality gates. Applies to every phase in phased plans and every standalone change >10 lines or touching multiple files.
 
@@ -222,6 +222,8 @@ Board / list / label IDs live in each connected repo's `<repo>/.danxbot/config/t
 | Action Items | Retro action items for future improvement |
 
 ### Card Workflow (Orchestrator)
+
+**Before touching any issue YAML** (read, write, create, save, especially creating an Epic): load `issues:issue-card-workflow` via the Skill tool. The skill's frontmatter is the spec, but the trap that keeps biting host sessions is creating a `type: Epic` card without spawning every phase card in the SAME turn — `children: []` on an epic is never an acceptable end-state. If a user request says "make an epic for X," read it as "epic + every phase card" — that is the unit of work, not two requests.
 
 1. Move approved card from Review → ToDo (human action)
 2. `/danx-start` or `/danx-next` triggers the orchestrator
