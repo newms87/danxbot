@@ -6,7 +6,7 @@ function defaultInput(
   overrides: Partial<CreateCardInput> = {},
 ): CreateCardInput {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -19,6 +19,8 @@ function defaultInput(
     ac: [{ title: "Returns 200", checked: false }],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    blocked: null,
+    waiting_on: null,
     ...overrides,
   };
 }
@@ -80,10 +82,9 @@ describe("MemoryTracker", () => {
     const { external_id } = await tracker.createCard(defaultInput());
     await tracker.setLabels(external_id, {
       type: "Bug",
-      needsHelp: true,
+      blocked: false,
       needsApproval: false,
       triaged: false,
-      blocked: false,
     });
     const card = await tracker.getCard(external_id);
     expect(card.type).toBe("Bug");
@@ -98,27 +99,24 @@ describe("MemoryTracker", () => {
     const initial = await tracker.getCard(external_id);
     expect(initial.labels).toEqual({
       type: "Feature",
-      needsHelp: false,
+      blocked: false,
       needsApproval: false,
       triaged: false,
-      blocked: false,
     });
 
     // After setLabels, the same getCard call reflects the new label state.
     await tracker.setLabels(external_id, {
       type: "Bug",
-      needsHelp: true,
+      blocked: true,
       needsApproval: false,
       triaged: true,
-      blocked: true,
     });
     const updated = await tracker.getCard(external_id);
     expect(updated.labels).toEqual({
       type: "Bug",
-      needsHelp: true,
+      blocked: true,
       needsApproval: false,
       triaged: true,
-      blocked: true,
     });
   });
 
@@ -219,10 +217,9 @@ describe("MemoryTracker", () => {
     await tracker.moveToStatus(external_id, "In Progress");
     await tracker.setLabels(external_id, {
       type: "Bug",
-      needsHelp: true,
+      blocked: false,
       needsApproval: false,
       triaged: true,
-      blocked: false,
     });
     const addedCommentResult = await tracker.addComment(external_id, "hi");
     await tracker.editComment(external_id, addedCommentResult.id, "hi-edited");
@@ -267,7 +264,7 @@ describe("MemoryTracker", () => {
 
     // details payload shape: setLabels carries the labels triple.
     expect(byMethod("setLabels")?.details).toEqual({
-      labels: { type: "Bug", needsHelp: true, needsApproval: false, triaged: true, blocked: false },
+      labels: { type: "Bug", blocked: false, needsApproval: false, triaged: true },
     });
     // moveToStatus carries the target status.
     expect(byMethod("moveToStatus")?.details).toEqual({
@@ -321,7 +318,7 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 3,
+          schema_version: 4,
           tracker: "memory",
           id: "ISS-1",
           external_id: "seed-1",
@@ -337,6 +334,7 @@ describe("MemoryTracker", () => {
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,
+          waiting_on: null,
           history: [],
         },
       ],
@@ -353,7 +351,7 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 3,
+          schema_version: 4,
           tracker: "trello",
           id: "ISS-2",
           external_id: "seed-trello",
@@ -369,6 +367,7 @@ describe("MemoryTracker", () => {
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,
+          waiting_on: null,
           history: [],
         },
       ],

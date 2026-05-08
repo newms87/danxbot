@@ -33,7 +33,7 @@ skill shares it (ISS-135 / ISS-136).
 
 **FORBIDDEN:**
 
-- Waiting for a human to reply (use `status: Needs Help` instead — the
+- Waiting for a human to reply (use `status: Blocked` instead — the
   operator opens the card, answers, moves it back).
 - Waiting for the next card to land (the poller dispatches; you exit when
   this card is done).

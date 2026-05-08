@@ -30,7 +30,7 @@ const isScoped = computed(
 );
 
 const blockedByCard = computed(
-  () => !!props.issue.blocked && props.issue.blocked.by.length > 0,
+  () => !!props.issue.waiting_on && props.issue.waiting_on.by.length > 0,
 );
 </script>
 
@@ -41,7 +41,7 @@ const blockedByCard = computed(
       <TypeBadge :type="issue.type" />
       <span class="status-pill">{{ issue.status }}</span>
       <span
-        v-if="issue.blocked"
+        v-if="issue.waiting_on"
         class="blocked-badge"
         :class="{ 'by-card': blockedByCard }"
       >{{ blockedByCard ? "⏸ Blocked by" : "⛔ Blocked" }}</span>

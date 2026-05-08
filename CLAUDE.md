@@ -26,7 +26,7 @@ Local YAML     → Poller (per-repo)        → dispatch() → spawnAgent (Claud
 HTTP /launch   → Worker dispatch endpoint → dispatch() → spawnAgent (Claude CLI)
 ```
 
-The poller dispatches off `<repo>/.danxbot/issues/open/*.yml` (status: ToDo, blocked: null, list_kind != "action_items"). The Trello tracker is a one-way mirror; the poller never reads Trello to decide what to dispatch. See "Source of Truth" below.
+The poller dispatches off `<repo>/.danxbot/issues/open/*.yml` (status: ToDo, waiting_on: null, list_kind != "action_items"). The Trello tracker is a one-way mirror; the poller never reads Trello to decide what to dispatch. See "Source of Truth" below.
 
 Every dispatched agent (Slack deep-agent, Trello poller, `/api/launch`) takes the same spawned-CLI path. The Slack listener posts the initial "thinking" placeholder, then the dispatched agent itself writes the final reply by calling the `danxbot_slack_reply` MCP tool — a worker HTTP endpoint routes the payload back to the bolt client for the originating repo.
 
@@ -244,7 +244,7 @@ Board / list / label IDs live in each connected repo's `<repo>/.danxbot/config/t
 | Review | New cards awaiting human review |
 | ToDo | Approved cards ready for work |
 | In Progress | Currently being worked on |
-| Needs Help | Blocked on human intervention |
+| Blocked | Card itself can't proceed; `Issue.blocked = {reason, timestamp}` populated. Renamed from "Needs Help" in v4. The Trello list is still named "Needs Help" until operator renames; status `"Blocked"` maps to it via `needsHelpListId`. |
 | Done | Completed |
 | Cancelled | Dropped |
 | Action Items | Retro action items for future improvement |
@@ -256,11 +256,11 @@ Board / list / label IDs live in each connected repo's `<repo>/.danxbot/config/t
 1. Move approved card from Review → ToDo (human action)
 2. `/danx-start` or `/danx-next` triggers the orchestrator
 3. Pick up card → move to In Progress (`position: "top"`) → add Progress checklist
-4. If human intervention needed → add `Needs Help` label → move to Needs Help
+4. If the card itself is blocked from proceeding → set `status: "Blocked"` AND populate `Issue.blocked = {reason, timestamp}` (worker enforces the invariant). Cards waiting on OTHER cards' completion go to `Issue.waiting_on = {reason, timestamp, by[]}` and STAY in `ToDo` — different concept.
 5. Evaluate scope; split into epic + phase cards if 3+ phases
 6. TDD implementation (failing test → implement → verify)
 7. Quality gates: launch Test Reviewer + Code Reviewer subagents in parallel; post results as Trello comments; fix critical findings
 8. Validator subagent only for agent / SDK changes
 9. Commit, move card to Done (`position: "top"`), add retro comment (What went well / What went wrong / Action items / Commits)
-10. Action items → linked cards in the Action Items list. **Action items are a LAST RESORT** — see `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` Step 1.5. Anything required for the current card's ACs is the current card's work, not an action item. Anything small + unrelated should also be done in this session, not deferred. Action items only for large, unrelated, separately-scopeable work that genuinely needs its own card. Same rule applies to Needs Help — last resort, only for true human / external blockers, never as a deferral mechanism for in-scope or small fixes.
+10. Action items → linked cards in the Action Items list. **Action items are a LAST RESORT** — see `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` Step 1.5. Anything required for the current card's ACs is the current card's work, not an action item. Anything small + unrelated should also be done in this session, not deferred. Action items only for large, unrelated, separately-scopeable work that genuinely needs its own card. Same rule applies to setting `status: "Blocked"` — last resort, only for true human / external blockers, never as a deferral mechanism for in-scope or small fixes.
 11. Signal completion via the `danxbot_complete` MCP tool — never exit silently. The worker uses the signal to finalize the dispatch row in MySQL.

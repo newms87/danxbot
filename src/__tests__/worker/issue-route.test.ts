@@ -191,7 +191,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     };
     // Seed the tracker so syncIssue has something to read.
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
@@ -283,7 +283,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #2: tracker errors NEVER surface to the agent — saved:true returned regardless", async () => {
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-4",
       parent_id: null,
@@ -325,7 +325,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #5: serializes concurrent saves on the same id", async () => {
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-5",
       parent_id: null,
@@ -386,7 +386,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #7: saved status Done moves YAML from open/ to closed/ — idempotent", async () => {
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-6",
       parent_id: null,
@@ -436,7 +436,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("Cancelled status also triggers open→closed move", async () => {
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-7",
       parent_id: null,
@@ -474,7 +474,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #5: queue is NOT poisoned when the FIRST sync fails — second still runs", async () => {
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-8",
       parent_id: null,
@@ -523,7 +523,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("AC #5: true-concurrency Promise.all with same content — both saves complete, no drops", async () => {
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-9",
       parent_id: null,
@@ -584,7 +584,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("non-terminal status keeps file in open/", async () => {
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-10",
       parent_id: null,
@@ -621,7 +621,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("status: 'Needs Approval' keeps file in open/ (Phase 1 of auto-triage epic)", async () => {
     // Needs Approval is a non-dispatchable, non-terminal parking status —
-    // distinct from Needs Help. It must NOT trigger the open→closed move
+    // distinct from Blocked. It must NOT trigger the open→closed move
     // (which is reserved for Done / Cancelled). Pin the contract here so a
     // future regression that adds Needs Approval to the terminal set gets
     // caught.
@@ -651,21 +651,23 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     expect(persisted).toContain("status: Needs Approval");
   });
 
-  it("forces status to ToDo on save when blocked is non-null, regardless of agent-written status", async () => {
-    // Worker contract: `blocked != null` and `status != "ToDo"` is a
+  it("forces status to ToDo on save when waiting_on is non-null, regardless of agent-written status", async () => {
+    // Worker contract: `waiting_on != null` and `status != "ToDo"` is a
     // category error. The worker silently normalizes status → ToDo before
     // persisting, before the tracker push, and before the open/closed
-    // file move. Agents must set `blocked` only — they don't separately
-    // move status.
+    // file move. Agents must set `waiting_on` only — they don't separately
+    // move status. Status "Blocked" (the renamed-from-Needs-Help self-block
+    // status) is incompatible with a non-null waiting_on; the worker
+    // resolves the conflict by forcing ToDo.
     const issue: Issue = {
       ...createEmptyIssue({
         id: "ISS-50",
         external_id: "",
-        title: "Blocked normalize test",
+        title: "Waiting on normalize test",
       }),
       tracker: "memory",
-      status: "Needs Help",
-      blocked: {
+      status: "In Progress",
+      waiting_on: {
         reason: "waiting on ISS-99",
         timestamp: "2026-05-04T18:00:00.000Z",
         by: ["ISS-99"],
@@ -684,7 +686,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     await _drainAsyncWorkForTesting();
     const persisted = readYaml(h.repo.localPath, "ISS-50");
     expect(persisted).toContain("status: ToDo");
-    expect(persisted).not.toContain("status: Needs Help");
+    expect(persisted).not.toContain("status: In Progress");
     // File stays in `open/` (ToDo is non-terminal).
     expect(existsSync(issuePath(h.repo.localPath, "ISS-50", "open"))).toBe(true);
     expect(existsSync(issuePath(h.repo.localPath, "ISS-50", "closed"))).toBe(false);
@@ -755,15 +757,19 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     expect(persisted).toContain("dispatch: null");
   });
 
-  it("ISS-92 Phase 2: clears dispatch on Needs Help save (file stays in open/)", async () => {
+  it("ISS-92 Phase 2: clears dispatch on Blocked save (file stays in open/)", async () => {
     const issue: Issue = {
       ...createEmptyIssue({
         id: "ISS-9203",
         external_id: "",
-        title: "Needs Help with dispatch",
+        title: "Blocked with dispatch",
       }),
       tracker: "memory",
-      status: "Needs Help",
+      status: "Blocked",
+      blocked: {
+        reason: "agent self-block reason",
+        timestamp: "2026-05-07T12:00:00.000Z",
+      },
       dispatch: {
         id: "dispatch-uuid-3",
         pid: 9999,
@@ -782,7 +788,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     });
     await _drainAsyncWorkForTesting();
 
-    // Needs Help is non-terminal for the file move (stays in open/) but
+    // Blocked is non-terminal for the file move (stays in open/) but
     // is terminal-for-session — dispatch clears.
     expect(existsSync(issuePath(h.repo.localPath, "ISS-9203", "open"))).toBe(true);
     const persisted = readYaml(h.repo.localPath, "ISS-9203");
@@ -800,7 +806,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       // Agent set status: ToDo with blocked!=null. Worker keeps status as
       // ToDo (forceBlockedToToDo) AND clears dispatch.
       status: "ToDo",
-      blocked: {
+      waiting_on: {
         reason: "waiting on ISS-99",
         timestamp: "2026-05-07T12:00:00.000Z",
         by: ["ISS-99"],
@@ -838,6 +844,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
       tracker: "memory",
       status: "In Progress",
       blocked: null,
+    waiting_on: null,
       dispatch: {
         id: "dispatch-uuid-5",
         pid: 9999,
@@ -866,16 +873,17 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
 
   it("preserves status when blocked is null (no normalization)", async () => {
     // Sanity: forceBlockedToToDo is a no-op when blocked is null. A
-    // legitimate Needs Help save still persists with status: Needs Help.
+    // legitimate Blocked save still persists with status: Blocked.
     const issue: Issue = {
       ...createEmptyIssue({
         id: "ISS-51",
         external_id: "",
-        title: "Real Needs Help",
+        title: "Real Blocked",
       }),
       tracker: "memory",
-      status: "Needs Help",
+      status: "Blocked",
       blocked: null,
+    waiting_on: null,
     };
     writeYaml(h.repo.localPath, issue);
 
@@ -886,7 +894,7 @@ describe("handleIssueSave (POST /api/issue-save/:dispatchId)", () => {
     });
     await _drainAsyncWorkForTesting();
     const persisted = readYaml(h.repo.localPath, "ISS-51");
-    expect(persisted).toContain("status: Needs Help");
+    expect(persisted).toContain("status: Blocked");
   });
 });
 
@@ -1192,7 +1200,7 @@ describe("syncTrackedIssueOnComplete", () => {
 
   it("AC #4: calls syncIssue synchronously for the tracked id", async () => {
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-11",
       parent_id: null,
@@ -1249,11 +1257,18 @@ describe("syncTrackedIssueOnComplete", () => {
 
 describe("DX-146: appendDiffEntries (pure helper)", () => {
   function makeIssue(overrides: Partial<Issue> = {}): Issue {
-    return {
+    const merged: Issue = {
       ...createEmptyIssue({ id: "ISS-1" }),
       tracker: "memory",
       ...overrides,
     };
+    if (merged.status === "Blocked" && merged.blocked === null) {
+      merged.blocked = {
+        reason: "test self-block",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      };
+    }
+    return merged;
   }
 
   it("test plan #1: status change → exactly one status_change entry with from/to/actor", () => {
@@ -1287,7 +1302,7 @@ describe("DX-146: appendDiffEntries (pure helper)", () => {
     const old = makeIssue({ status: "ToDo", blocked: null });
     const next = makeIssue({
       status: "ToDo",
-      blocked: {
+      waiting_on: {
         reason: "wait on phase",
         timestamp: "2026-05-08T10:00:00.000Z",
         by: ["DX-200", "DX-201"],
@@ -1300,14 +1315,14 @@ describe("DX-146: appendDiffEntries (pure helper)", () => {
       actor: "dispatch:dispatch-abc",
       event: "blocked",
       to: "ToDo",
-      note: "Blocked on DX-200, DX-201",
+      note: "Waiting on DX-200, DX-201",
     });
   });
 
   it("test plan #4: blocked record → null → one unblocked entry", () => {
     const old = makeIssue({
       status: "ToDo",
-      blocked: {
+      waiting_on: {
         reason: "wait",
         timestamp: "2026-05-08T09:00:00.000Z",
         by: ["DX-200"],
@@ -1328,7 +1343,7 @@ describe("DX-146: appendDiffEntries (pure helper)", () => {
     const old = makeIssue({ status: "In Progress", blocked: null });
     const next = makeIssue({
       status: "ToDo",
-      blocked: {
+      waiting_on: {
         reason: "wait",
         timestamp: "2026-05-08T10:00:00.000Z",
         by: ["DX-300"],
@@ -1341,7 +1356,7 @@ describe("DX-146: appendDiffEntries (pure helper)", () => {
     expect(history[0].to).toBe("ToDo");
     expect(history[1].event).toBe("blocked");
     expect(history[1].to).toBe("ToDo");
-    expect(history[1].note).toBe("Blocked on DX-300");
+    expect(history[1].note).toBe("Waiting on DX-300");
   });
 
   it("test plan #7: empty dispatchId → actor 'unknown' AND recordSystemError invoked", () => {
@@ -1393,7 +1408,7 @@ describe("DX-146: appendDiffEntries (pure helper)", () => {
     const old = makeIssue({ status: "ToDo", blocked: null });
     const next = makeIssue({
       status: "ToDo",
-      blocked: {
+      waiting_on: {
         reason: "wait",
         timestamp: "2026-05-08T10:00:00.000Z",
         by: longBlockerList,
@@ -1402,7 +1417,7 @@ describe("DX-146: appendDiffEntries (pure helper)", () => {
     const history = appendDiffEntries(old, next, "dispatch-abc", "2026-05-08T10:00:00.000Z");
     expect(history).toHaveLength(1);
     const note = history[0].note ?? "";
-    expect(note.startsWith("Blocked on DX-1000, DX-1001")).toBe(true);
+    expect(note.startsWith("Waiting on DX-1000, DX-1001")).toBe(true);
   });
 });
 
@@ -1461,7 +1476,7 @@ describe("DX-146: runSync / handleIssueSave history append integration", () => {
       ...createEmptyIssue({ id: "ISS-101", external_id: "", title: "unblock flow" }),
       tracker: "memory",
       status: "ToDo",
-      blocked: {
+      waiting_on: {
         reason: "wait",
         timestamp: "2026-05-08T09:00:00.000Z",
         by: ["ISS-999"],
@@ -1477,8 +1492,8 @@ describe("DX-146: runSync / handleIssueSave history append integration", () => {
     });
     await _drainAsyncWorkForTesting();
 
-    // Agent clears blocked.
-    issue.blocked = null;
+    // Agent clears the dep-chain wait (waiting_on, formerly the v3 blocked field).
+    issue.waiting_on = null;
     writeYaml(h.repo.localPath, issue);
 
     await fetch(`${h.url}/api/issue-save/dispatch-unblk-2`, {
@@ -1617,7 +1632,7 @@ describe("DX-146: runSync / handleIssueSave history append integration", () => {
     // `runSync`, which writes to disk BEFORE pushing to the tracker
     // (DX-131). The diff append must ride that first-persist write.
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-410",
       parent_id: null,
@@ -1669,12 +1684,12 @@ describe("DX-146: runSync / handleIssueSave history append integration", () => {
     expect(updates.length).toBeGreaterThan(0);
   });
 
-  it("review-gap fix: forceBlockedToToDo runs BEFORE applyHistoryDiff — agent's stray (Needs Help, blocked != null) emits status_change(In Progress, ToDo)", async () => {
+  it("review-gap fix: forceBlockedToToDo runs BEFORE applyHistoryDiff — agent's stray (Blocked, blocked != null) emits status_change(In Progress, ToDo)", async () => {
     // Pin the contract at issue-route.ts: handleIssueSave applies
     // forceBlockedToToDo, THEN applyHistoryDiff. A regression that
     // swaps those two lines would emit status_change(In Progress,
-    // Needs Help) here — wrong, because the worker forced ToDo and
-    // Needs Help never persists.
+    // Blocked) here — wrong, because the worker forced ToDo and
+    // Blocked never persists.
     const issue: Issue = {
       ...createEmptyIssue({ id: "ISS-420", external_id: "", title: "blocked normalize" }),
       tracker: "memory",
@@ -1690,11 +1705,21 @@ describe("DX-146: runSync / handleIssueSave history append integration", () => {
     });
     await _drainAsyncWorkForTesting();
 
-    // Save 2: agent saves with status: Needs Help + blocked != null.
-    // Worker normalizes status → ToDo. Diff sees (In Progress, ToDo)
-    // for status and (null, record) for blocked.
-    issue.status = "Needs Help";
+    // Save 2: agent saves with status: Blocked AND a non-null waiting_on
+    // (a category error — waiting_on means dep-chain queue, status
+    // should stay ToDo). Worker's `forceWaitingOnToToDo` normalizes
+    // status → ToDo because waiting_on takes precedence. Diff sees
+    // (In Progress, ToDo) for status and (null, record) for waiting_on.
+    // We also populate `blocked` so the YAML obeys the v4 invariant
+    // (status === "Blocked" ⟺ blocked !== null) on its way through the
+    // serializer; the worker normalization is what proves the test —
+    // post-normalization the file lands as ToDo with blocked cleared.
+    issue.status = "Blocked";
     issue.blocked = {
+      reason: "agent's stray Blocked write — should be normalized away",
+      timestamp: "2026-05-08T11:00:00.000Z",
+    };
+    issue.waiting_on = {
       reason: "wait",
       timestamp: "2026-05-08T11:00:00.000Z",
       by: ["ISS-419"],
@@ -1711,9 +1736,9 @@ describe("DX-146: runSync / handleIssueSave history append integration", () => {
     expect(persisted).toContain("event: status_change");
     expect(persisted).toContain("from: In Progress");
     expect(persisted).toContain("to: ToDo");
-    expect(persisted).not.toContain("to: Needs Help");
+    expect(persisted).not.toContain("to: Blocked");
     expect(persisted).toContain("event: blocked");
-    expect(persisted).toContain("note: Blocked on ISS-419");
+    expect(persisted).toContain("note: Waiting on ISS-419");
   });
 
   it("review-gap fix: _resetForTesting clears lastSeenIssueState — first save after reset emits no diff", async () => {
@@ -1977,7 +2002,7 @@ describe("DX-146: syncTrackedIssueOnComplete reuses the same diff helper", () =>
     // (a) entry lands once and (b) tracker push fires once (no
     // double-append from a hypothetical second helper invocation).
     await h.tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-510",
       parent_id: null,

@@ -55,7 +55,7 @@ function writeIssue(
     action_item_ids?: string[];
     comments?: Array<{ author: string; timestamp: string; text: string }>;
     retro_commits?: string[];
-    status?: "ToDo" | "In Progress" | "Done" | "Cancelled" | "Review" | "Needs Help";
+    status?: "ToDo" | "In Progress" | "Done" | "Cancelled" | "Review" | "Blocked";
   },
 ): string {
   const path = join(dir, `${issue.id}.yml`);
@@ -162,10 +162,10 @@ describe("rewriteFreeText", () => {
 });
 
 describe("rewriteIdFields", () => {
-  it("rewrites id, parent_id, children, blocked.by, action_item_ids", () => {
+  it("rewrites id, parent_id, children, waiting_on.by, action_item_ids", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 3,
+        schema_version: 4,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -199,7 +199,8 @@ describe("rewriteIdFields", () => {
           action_item_ids: ["ISS-30"],
           commits: ["abc1234 [ISS-7] subject"],
         },
-        blocked: {
+        blocked: null,
+        waiting_on: {
           reason: "test",
           timestamp: "2026-01-01T00:00:00Z",
           by: ["ISS-2"],
@@ -212,7 +213,7 @@ describe("rewriteIdFields", () => {
     expect(out.id).toBe("DX-7");
     expect(out.parent_id).toBe("DX-1");
     expect(out.children).toEqual(["DX-8", "DX-9"]);
-    expect(out.blocked?.by).toEqual(["DX-2"]);
+    expect(out.waiting_on?.by).toEqual(["DX-2"]);
     expect(out.retro.action_item_ids).toEqual(["DX-30"]);
     expect(out.retro.commits).toEqual(["abc1234 [DX-7] subject"]);
     expect(out.title).toBe("fix DX-7");
@@ -224,7 +225,7 @@ describe("rewriteIdFields", () => {
   it("leaves cross-prefix refs untouched (defensive)", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 3,
+        schema_version: 4,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -247,6 +248,7 @@ describe("rewriteIdFields", () => {
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         blocked: null,
+        waiting_on: null,
         history: [],
       }),
       { expectedPrefix: "ISS" },
@@ -347,7 +349,7 @@ describe("runMigration — happy path", () => {
     );
     expect(dx2.id).toBe("DX-2");
     expect(dx2.parent_id).toBe("DX-1");
-    expect(dx2.blocked?.by).toEqual(["DX-3"]);
+    expect(dx2.waiting_on?.by).toEqual(["DX-3"]);
     expect(dx2.description).toBe("see DX-1 and DX-3");
 
     // Config updated

@@ -93,7 +93,7 @@ function sortFifo(entries: WalkEntry[]): Issue[] {
  * Walk `<repo>/.danxbot/issues/open/*.yml` and return every issue
  * eligible for dispatch this tick:
  *   - `status === "ToDo"`
- *   - `blocked === null`
+ *   - `waiting_on === null`
  *   - `dispatch === null` (an active dispatch occupies the card)
  *
  * Sort order (Phase 4 of ISS-90):
@@ -111,7 +111,7 @@ export function listDispatchableYamls(
   const filtered = walkOpenIssues(repoLocalPath, prefix).filter((e) => {
     const i = e.issue;
     if (i.status !== "ToDo") return false;
-    if (i.blocked !== null) return false;
+    if (i.waiting_on !== null) return false;
     if (i.dispatch !== null) return false;
     // Epics are containers — phase children carry the actual work. The
     // poller dispatches phase cards directly; the dispatched agent reads
@@ -154,18 +154,19 @@ export function listInProgressYamls(
 
 /**
  * Walk `<repo>/.danxbot/issues/open/*.yml` and return every ToDo issue
- * with a non-null `blocked` record. Companion to
- * `listDispatchableYamls` (which filters blocked=null out): the call
- * site feeds these to `resolveBlockedCards` so a card whose blockers
+ * with a non-null `waiting_on` record. Companion to
+ * `listDispatchableYamls` (which filters waiting_on=null out): the call
+ * site feeds these to `resolveWaitingOnCards` so a card whose dependencies
  * just became terminal can be cleared and appended to the dispatchable
- * pool on the same tick.
+ * pool on the same tick. "Blocked" here refers to the old data field name
+ * (now `waiting_on`) — this function name reflects historical terminology.
  */
 export function listBlockedTodoYamls(
   repoLocalPath: string,
   prefix: string = DEFAULT_ISSUE_PREFIX,
 ): Issue[] {
   const filtered = walkOpenIssues(repoLocalPath, prefix).filter(
-    (e) => e.issue.status === "ToDo" && e.issue.blocked !== null,
+    (e) => e.issue.status === "ToDo" && e.issue.waiting_on !== null,
   );
   return sortFifo(filtered);
 }
@@ -178,9 +179,9 @@ export function listBlockedTodoYamls(
  *   - `dispatch === null` (no in-flight dispatch on the card)
  *   - `triage.expires_at === ""` OR `Date.parse(triage.expires_at) <= now`
  *   - The card matches one of the three triage paths:
- *      a. `blocked != null` (regardless of `status`) — Blocked path
- *      b. `blocked == null` AND `status === "Review"` — Review path
- *      c. `blocked == null` AND `status === "Needs Help"` — Needs Help path
+ *      a. `waiting_on != null` (regardless of `status`) — Waiting On path
+ *      b. `waiting_on == null` AND `status === "Review"` — Review path
+ *      c. `waiting_on == null` AND `status === "Blocked"` — Blocked path
  *
  * Sort (Phase 4 of ISS-90):
  *   1. Never-triaged first — `triage.expires_at === ""`. These are
@@ -210,9 +211,9 @@ export function listTriageDueYamls(
 }
 
 function inTriageScope(issue: Issue): boolean {
-  if (issue.blocked !== null) return true;
+  if (issue.waiting_on !== null) return true;
   if (issue.status === "Review") return true;
-  if (issue.status === "Needs Help") return true;
+  if (issue.status === "Blocked") return true;
   return false;
 }
 

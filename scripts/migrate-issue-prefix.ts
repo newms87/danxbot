@@ -149,10 +149,10 @@ export function rewriteIdFields(
     id: swap(issue.id),
     parent_id: issue.parent_id === null ? null : swap(issue.parent_id),
     children: issue.children.map(swap),
-    blocked:
-      issue.blocked === null
+    waiting_on:
+      issue.waiting_on === null
         ? null
-        : { ...issue.blocked, by: issue.blocked.by.map(swap) },
+        : { ...issue.waiting_on, by: issue.waiting_on.by.map(swap) },
     title: rewriteFreeText(issue.title, oldPrefix, newPrefix),
     description: rewriteFreeText(issue.description, oldPrefix, newPrefix),
     comments: issue.comments.map((c) => ({

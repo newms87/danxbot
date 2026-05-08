@@ -41,12 +41,12 @@ Pick exactly one of the following. Do not pause first.
    challenge it later. Reasonable defaults are almost always correct
    here — the operator can revert in seconds; the dispatch costs tokens.
 
-2. **Escalate to Needs Help with the question on the card.** When the
+2. **Escalate to Blocked with the question on the card.** When the
    choice is genuinely irreversible / architectural / requires
    credentials or design intent you don't have, follow Step 10 of
    `danx-next/SKILL.md`:
    - Stop processing.
-   - Set `status: "Needs Help"`.
+   - Set `status: "Blocked"` and populate `blocked: {reason, timestamp}`.
    - Add a `comments[]` entry with the question phrased the way you'd
      have asked the human, every option you considered, and your
      recommended choice with reasoning.

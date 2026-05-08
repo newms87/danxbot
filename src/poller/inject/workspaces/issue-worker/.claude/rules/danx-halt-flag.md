@@ -28,7 +28,7 @@ Rule of thumb: if you tried to do a reasonable thing and the **tool itself**
 ## When to use `status: "failed"` instead
 
 Use `failed` (not `critical_failure`) for card-specific blockers. The
-orchestrator moves the card to Needs Help — it does NOT halt the poller,
+orchestrator moves the card to Blocked — it does NOT halt the poller,
 because other cards might still be processable:
 
 - Card description is ambiguous or incomplete.

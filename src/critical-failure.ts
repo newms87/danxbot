@@ -67,7 +67,7 @@
  * DELIBERATE NON-FEATURES
  * -----------------------
  * - No auto-mitigation on trip: the worker does NOT auto-label the stuck
- *   card "Needs Help" or post a Trello comment. Operator decides.
+ *   card "Blocked" or post a Trello comment. Operator decides.
  * - No automatic retry counter: the post-dispatch check catches a
  *   zero-progress dispatch on the first run, no "3 strikes" logic.
  * - No effect on Slack or `/api/launch`: halt is poller-only by design.

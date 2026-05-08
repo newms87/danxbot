@@ -4,7 +4,7 @@
  * the dispatched session JSONL.
  *
  * AC #6 of the Phase 4 card (Trello LDBhbd61) demands that the full card
- * lifecycle (ToDo → In Progress → Done OR ToDo → In Progress → Needs Help)
+ * lifecycle (ToDo → In Progress → Done OR ToDo → In Progress → Blocked)
  * works against a tracker-agnostic backend. A strict reading would require
  * a Layer 3 system test driven by `make test-system` against a Docker
  * worker booted with `DANXBOT_TRACKER=memory` — but the poller's
@@ -162,10 +162,9 @@ function setIssueTracker(seed: Issue): {
     ...seed,
     labels: {
       type: seed.type,
-      needsHelp: seed.status === "Needs Help",
+      blocked: seed.status === "Blocked",
       needsApproval: seed.status === "Needs Approval",
       triaged: seed.triage.last_status !== "",
-      blocked: seed.blocked !== null,
     },
   };
   tracker.getCard = async (_id: string) => seedWithLabels;
@@ -310,7 +309,7 @@ async function reservePort(): Promise<number> {
 
 function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: "memory",
     id: `ISS-${Math.floor(Math.random() * 9000) + 1000}`,
     external_id: externalId,
@@ -333,6 +332,7 @@ function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
   };
 }
@@ -598,7 +598,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     expect(retroPosts[0].text.startsWith("<!-- danxbot -->\n")).toBe(true);
   }, 30_000);
 
-  it("ToDo → In Progress → Needs Help leaves the YAML in open/, status=Needs Help, ACs unchanged", async () => {
+  it("ToDo → In Progress → Blocked leaves the YAML in open/, status=Blocked, ACs unchanged", async () => {
     const externalId = "mem-yaml-2";
     const seed = buildSeedIssue(externalId, "ToDo");
     setIssueTracker(seed);
@@ -611,14 +611,14 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
 
     process.env.FAKE_CLAUDE_YAML_PATH = yamlOpenPath;
     process.env.FAKE_CLAUDE_EXTERNAL_ID = seed.id;
-    process.env.FAKE_CLAUDE_YAML_FINAL_STATUS = "Needs Help";
+    process.env.FAKE_CLAUDE_YAML_FINAL_STATUS = "Blocked";
 
     const launchRes = await fetch(`http://localhost:${workerPort}/api/launch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         workspace: "issue-worker",
-        task: `Drive the Phase 4 Needs Help branch for ${externalId}`,
+        task: `Drive the Phase 4 Blocked branch for ${externalId}`,
         api_token: "test-token",
         status_url: captureServer.statusUrl,
       }),
@@ -641,14 +641,14 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
 
     await drainIssueRouteAsyncWork();
 
-    // Needs Help is NOT a terminal status for `persistAfterSync` —
+    // Blocked is NOT a terminal status for `persistAfterSync` —
     // file stays in open/.
     expect(existsSync(yamlOpenPath)).toBe(true);
     expect(existsSync(issuePath(repoDir, seed.id, "closed"))).toBe(false);
 
     const persisted = parseIssue(readFileSync(yamlOpenPath, "utf-8"));
-    expect(persisted.status).toBe("Needs Help");
-    // ACs not auto-checked on Needs Help branch.
+    expect(persisted.status).toBe("Blocked");
+    // ACs not auto-checked on Blocked branch.
     expect(persisted.ac.some((a) => !a.checked)).toBe(true);
 
     const entries = readJsonlEntries() as Array<Record<string, unknown>>;
@@ -665,15 +665,15 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     expect(trelloCalls).toEqual([]);
   }, 30_000);
 
-  it("Needs Help → In Progress → Done recovery flips the YAML to Done and closes it (AC #6 linear lifecycle)", async () => {
-    // AC #6 spec lifecycle: ToDo → In Progress → Needs Help → Done. The
-    // first test covers the happy-path Done. The Needs Help test covers
+  it("Blocked → In Progress → Done recovery flips the YAML to Done and closes it (AC #6 linear lifecycle)", async () => {
+    // AC #6 spec lifecycle: ToDo → In Progress → Blocked → Done. The
+    // first test covers the happy-path Done. The Blocked test covers
     // the blocker branch. This third test covers the *recovery* leg —
-    // an agent dispatched against a YAML already at Needs Help (operator
+    // an agent dispatched against a YAML already at Blocked (operator
     // unblocked it) drives it through to Done. Same external_id, same
     // YAML file, second dispatch.
     const externalId = "mem-yaml-3";
-    const seed = buildSeedIssue(externalId, "Needs Help");
+    const seed = buildSeedIssue(externalId, "Blocked");
     setIssueTracker(seed);
 
     // Filename = internal id, NOT external_id. The save handler is also

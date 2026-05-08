@@ -12,8 +12,8 @@ const log = createLogger("issues-reader");
 
 /**
  * Slim child entry on the list shape — child id + title + type + raw
- * status + raw blocked flag + missing flag. The SPA projects
- * `(status, blocked)` into its design-system `done | todo | blocked`
+ * status + raw waiting_on flag + missing flag. The SPA projects
+ * `(status, waiting_on)` into its design-system `done | todo | waiting`
  * palette via `projectChildStatus` in
  * `dashboard/src/components/issues/issuePalette.ts`. `missing` is true
  * when the child id was referenced but no Issue was loaded (e.g. closed
@@ -27,14 +27,14 @@ export interface IssueListChild {
   name: string;
   type: IssueType;
   status: IssueStatus;
-  blocked: boolean;
+  waiting_on: boolean;
   /**
-   * True when the child's `blocked.by[]` is non-empty — i.e. the child
+   * True when the child's `waiting_on.by[]` is non-empty — i.e. the child
    * is waiting on another card, not on a human / external. Drives the
-   * yellow ⏸ glyph variant in the children checklist; plain `blocked`
-   * (no card refs) keeps the red ⛔ variant.
+   * yellow ⏸ glyph variant in the children checklist; plain `waiting_on`
+   * (no card refs) keeps a different variant.
    */
-  blocked_by_card: boolean;
+  waiting_on_by_card: boolean;
   missing: boolean;
 }
 
@@ -59,11 +59,11 @@ export interface IssueListItem {
   ac_done: number;
   /** Detail array for rendering. Empty when `children.length === 0`. SPA derives total/done counts from this. */
   children_detail: IssueListChild[];
-  blocked: boolean;
-  /** Set when `blocked === true`; null otherwise. Surfaces blocker reason on the card without a detail fetch. */
-  blocked_reason: string | null;
-  /** Issue ids (`ISS-N[]`) this card is waiting on. Empty when `blocked === false` OR when the block has no by[] (rare — schema requires `by[]` non-empty when `blocked` set, but defensive default is `[]`). */
-  blocked_by: string[];
+  waiting_on: boolean;
+  /** Set when `waiting_on === true`; null otherwise. Surfaces reason on the card without a detail fetch. */
+  waiting_on_reason: string | null;
+  /** Issue ids (`ISS-N[]`) this card is waiting on. Empty when `waiting_on === false` OR when the record has no by[] (rare — schema requires `by[]` non-empty when `waiting_on` set, but defensive default is `[]`). */
+  waiting_on_by: string[];
   comments_count: number;
   has_retro: boolean;
   updated_at: number;
@@ -155,7 +155,7 @@ function toListItem(
     .map((cid) => {
       const child = byId.get(cid);
       if (!child) {
-        // Surface as blocked so the SPA's projection routes the row
+        // Surface as waiting_on so the SPA's projection routes the row
         // into the red ⛔ chip — visually distinct from a real ToDo
         // child. `missing: true` is the canonical discriminator.
         return {
@@ -163,8 +163,8 @@ function toListItem(
           name: `<${cid}: unknown>`,
           type: "Feature" as IssueType,
           status: "ToDo" as IssueStatus,
-          blocked: true,
-          blocked_by_card: false,
+          waiting_on: true,
+          waiting_on_by_card: false,
           missing: true,
         };
       }
@@ -173,80 +173,78 @@ function toListItem(
         name: child.title,
         type: child.type,
         status: child.status,
-        blocked: child.blocked !== null,
-        blocked_by_card:
-          child.blocked !== null && child.blocked.by.length > 0,
+        waiting_on: child.waiting_on !== null,
+        waiting_on_by_card:
+          child.waiting_on !== null && child.waiting_on.by.length > 0,
         missing: false,
       };
     });
-  // Epics are not "blocked" by their own children — the children ARE
-  // the epic's completion criteria. If every blocker on the epic is
-  // one of its own children, the projection drops the blocked state
-  // entirely so the board doesn't render the epic with a ⛔ pill that
-  // misrepresents the relationship. External blockers (other epics,
+  // Epics are not "waiting on" their own children — the children ARE
+  // the epic's completion criteria. If every dependency on the epic is
+  // one of its own children, the projection drops the waiting_on state
+  // entirely so the board doesn't render the epic with a pill that
+  // misrepresents the relationship. External dependencies (other epics,
   // unrelated cards) still surface as normal.
   const childSet = new Set(issue.children);
   const isEpic = issue.type === "Epic";
-  const rawBy = issue.blocked?.by ?? [];
+  const rawBy = issue.waiting_on?.by ?? [];
   const externalBy = isEpic ? rawBy.filter((id) => !childSet.has(id)) : rawBy;
-  const epicSelfBlocked =
+  const epicSelfWaiting =
     isEpic &&
-    issue.blocked !== null &&
+    issue.waiting_on !== null &&
     rawBy.length > 0 &&
     externalBy.length === 0;
 
-  // Inherited block: an epic surfaces in the Blocked column ONLY when
-  // at least one child is GENUINELY impeded — not merely waiting on a
-  // sibling. Intra-sibling `blocked.by[]` (every id is another child
+  // Inherited waiting: an epic surfaces in the "waiting" state ONLY when
+  // at least one child is GENUINELY waiting on external work — not merely
+  // waiting on a sibling. Intra-sibling `waiting_on.by[]` (every id is another child
   // of the same epic) is ordering, not impediment: "do this card after
-  // that one"; the epic itself is moving forward in order. Real
-  // impediments:
-  //   - status Needs Help / Needs Approval (operator must intervene)
-  //   - `blocked.by[]` containing ANY id outside the epic's own
+  // that one"; the epic itself is moving forward in order. Real waits:
+  //   - status Blocked / Needs Approval (operator must intervene)
+  //   - `waiting_on.by[]` containing ANY id outside the epic's own
   //     children set (cross-epic dependency)
-  // Schema requires `blocked.by[]` non-empty when `blocked` is set, so
+  // Schema requires `waiting_on.by[]` non-empty when `waiting_on` is set, so
   // there is no empty-by[] branch.
   // Missing children (not in byId — closed beyond the 50-cap or
-  // genuinely orphaned) do NOT trigger epic-block: their state is
+  // genuinely orphaned) do NOT trigger epic-waiting: their state is
   // unknown, not impeded.
-  const isChildImpeded = (child: Issue): boolean => {
-    if (child.status === "Needs Help" || child.status === "Needs Approval") {
+  const isChildWaiting = (child: Issue): boolean => {
+    if (child.status === "Blocked" || child.status === "Needs Approval") {
       return true;
     }
-    if (child.blocked === null) return false;
-    return child.blocked.by.some((id) => !childSet.has(id));
+    if (child.waiting_on === null) return false;
+    return child.waiting_on.by.some((id) => !childSet.has(id));
   };
-  const blockedChildIds = isEpic
+  const waitingChildIds = isEpic
     ? issue.children
         .map((cid) => byId.get(cid))
-        .filter((c): c is Issue => c !== undefined && isChildImpeded(c))
+        .filter((c): c is Issue => c !== undefined && isChildWaiting(c))
         .map((c) => c.id)
     : [];
-  const inheritedBlock = isEpic && blockedChildIds.length > 0;
+  const inheritedWaiting = isEpic && waitingChildIds.length > 0;
 
   let projectedStatus: IssueStatus = issue.status;
-  let projectedBlocked = issue.blocked !== null && !epicSelfBlocked;
-  let projectedBlockedReason: string | null = epicSelfBlocked
+  let projectedWaitingOn = issue.waiting_on !== null && !epicSelfWaiting;
+  let projectedWaitingOnReason: string | null = epicSelfWaiting
     ? null
-    : issue.blocked?.reason ?? null;
-  let projectedBlockedBy = externalBy;
-  if (inheritedBlock) {
+    : issue.waiting_on?.reason ?? null;
+  let projectedWaitingOnBy = externalBy;
+  if (inheritedWaiting) {
     // Don't override Done / Cancelled — those are terminal regardless
-    // of stragglers. In Progress / ToDo / Review get pulled to Needs
-    // Help so the epic surfaces in the Blocked column.
+    // of stragglers. In Progress / ToDo / Review get pulled to Blocked so the epic surfaces in a non-dispatchable state.
     if (
       issue.status !== "Done" &&
       issue.status !== "Cancelled" &&
-      issue.status !== "Needs Help"
+      issue.status !== "Blocked"
     ) {
-      projectedStatus = "Needs Help";
+      projectedStatus = "Blocked";
     }
-    projectedBlocked = true;
-    projectedBlockedBy = blockedChildIds;
-    projectedBlockedReason =
-      `Waiting on ${blockedChildIds.length} blocked child` +
-      (blockedChildIds.length === 1 ? "" : "ren") +
-      `: ${blockedChildIds.join(", ")}.`;
+    projectedWaitingOn = true;
+    projectedWaitingOnBy = waitingChildIds;
+    projectedWaitingOnReason =
+      `Waiting on ${waitingChildIds.length} waiting child` +
+      (waitingChildIds.length === 1 ? "" : "ren") +
+      `: ${waitingChildIds.join(", ")}.`;
   }
 
   return {
@@ -260,9 +258,9 @@ function toListItem(
     ac_total: issue.ac.length,
     ac_done: issue.ac.filter((a) => a.checked).length,
     children_detail: childrenDetail,
-    blocked: projectedBlocked,
-    blocked_reason: projectedBlockedReason,
-    blocked_by: projectedBlockedBy,
+    waiting_on: projectedWaitingOn,
+    waiting_on_reason: projectedWaitingOnReason,
+    waiting_on_by: projectedWaitingOnBy,
     comments_count: issue.comments.length,
     has_retro:
       issue.retro.good.length > 0 ||
@@ -310,7 +308,7 @@ export async function listIssues(
     closedSlice = closedRaw;
   } else {
     // Recent-50 by mtime PLUS every closed card referenced by an open
-    // card's children[] / parent_id / blocked.by[]. Without the
+    // card's children[] / parent_id / waiting_on.by[]. Without the
     // referenced-pull, an Epic with 8 phase children whose 3 oldest
     // Done phases fall past the 50-cap renders "3 children not in
     // current view" — operator-visible noise even though the data is
@@ -322,8 +320,8 @@ export async function listIssues(
     for (const r of openRaw) {
       for (const cid of r.issue.children) referencedIds.add(cid);
       if (r.issue.parent_id) referencedIds.add(r.issue.parent_id);
-      if (r.issue.blocked) {
-        for (const id of r.issue.blocked.by) referencedIds.add(id);
+      if (r.issue.waiting_on) {
+        for (const id of r.issue.waiting_on.by) referencedIds.add(id);
       }
     }
     const referencedExtras = closedRaw.filter(
@@ -353,7 +351,7 @@ export async function readIssueDetail(
     const path = join(repoCwd, ".danxbot", "issues", sub, `${id}.yml`);
     const raw = await readIssueFile(path);
     if (raw) {
-      const issue = applyEpicBlockedProjection(raw.issue);
+      const issue = applyEpicWaitingOnProjection(raw.issue);
       return { ...issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };
     }
   }
@@ -361,20 +359,20 @@ export async function readIssueDetail(
 }
 
 /**
- * Strip the `blocked` block from epics that are blocked solely by
+ * Strip the `waiting_on` record from epics that are waiting solely on
  * their own children. Mirrors the projection in `toListItem` so the
- * drawer (which reads the full `Issue` shape) doesn't render a ⛔
- * panel that contradicts the board card.
+ * drawer (which reads the full `Issue` shape) doesn't render a panel
+ * that contradicts the board card.
  */
-function applyEpicBlockedProjection(issue: Issue): Issue {
-  if (issue.type !== "Epic" || issue.blocked === null) return issue;
+function applyEpicWaitingOnProjection(issue: Issue): Issue {
+  if (issue.type !== "Epic" || issue.waiting_on === null) return issue;
   const childSet = new Set(issue.children);
-  const externalBy = issue.blocked.by.filter((id) => !childSet.has(id));
-  if (issue.blocked.by.length > 0 && externalBy.length === 0) {
-    return { ...issue, blocked: null };
+  const externalBy = issue.waiting_on.by.filter((id) => !childSet.has(id));
+  if (issue.waiting_on.by.length > 0 && externalBy.length === 0) {
+    return { ...issue, waiting_on: null };
   }
-  if (externalBy.length !== issue.blocked.by.length) {
-    return { ...issue, blocked: { ...issue.blocked, by: externalBy } };
+  if (externalBy.length !== issue.waiting_on.by.length) {
+    return { ...issue, waiting_on: { ...issue.waiting_on, by: externalBy } };
   }
   return issue;
 }

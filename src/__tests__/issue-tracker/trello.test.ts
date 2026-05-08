@@ -74,7 +74,7 @@ describe("TrelloTracker", () => {
     expect(refs).toEqual([
       { id: "ISS-1", external_id: "r1", title: "R1", status: "Review" },
       { id: "", external_id: "t1", title: "T1", status: "ToDo" },
-      { id: "ISS-3", external_id: "n1", title: "N1", status: "Needs Help" },
+      { id: "ISS-3", external_id: "n1", title: "N1", status: "Blocked" },
       { id: "ISS-9", external_id: "p1", title: "P1", status: "Needs Approval" },
       { id: "ISS-4", external_id: "a1", title: "A1", status: "Review" },
     ]);
@@ -199,7 +199,7 @@ describe("TrelloTracker", () => {
           name: "T",
           desc: "",
           idList: "list-todo",
-          idLabels: ["lbl-bug", "lbl-triaged", "lbl-blocked", "lbl-nh"],
+          idLabels: ["lbl-bug", "lbl-triaged", "lbl-blocked"],
           checklists: [],
         });
       }
@@ -210,10 +210,9 @@ describe("TrelloTracker", () => {
     const issue = await tracker.getCard("c-projection");
     expect(issue.labels).toEqual({
       type: "Bug",
-      needsHelp: true,
+      blocked: true,
       needsApproval: false,
       triaged: true,
-      blocked: true,
     });
     // No second round-trip: getCard reuses card.idLabels in-process.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -266,7 +265,7 @@ describe("TrelloTracker", () => {
 
     const tracker = new TrelloTracker(TRELLO);
     const result = await tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-1",
       parent_id: null,
@@ -279,6 +278,8 @@ describe("TrelloTracker", () => {
       ac: [{ title: "AC1", checked: false }],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      blocked: null,
+      waiting_on: null,
     });
 
     expect(result.external_id).toBe("new-card");
@@ -322,10 +323,9 @@ describe("TrelloTracker", () => {
     const tracker = new TrelloTracker(TRELLO);
     await tracker.setLabels("c1", {
       type: "Feature",
-      needsHelp: true,
+      blocked: false,
       needsApproval: false,
       triaged: false,
-      blocked: false,
     });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
@@ -333,7 +333,7 @@ describe("TrelloTracker", () => {
     const ids = (body.idLabels as string).split(",");
     expect(ids).toContain("lbl-priority"); // preserved
     expect(ids).toContain("lbl-feature"); // new type
-    expect(ids).toContain("lbl-nh"); // needs help
+    expect(ids).not.toContain("lbl-nh"); // needs help label removed in v4
     expect(ids).not.toContain("lbl-bug"); // old type removed
   });
 
@@ -380,10 +380,9 @@ describe("TrelloTracker", () => {
     const tracker = new TrelloTracker(cfg);
     await tracker.setLabels("c1", {
       type: "Bug",
-      needsHelp: false,
+      blocked: false,
       needsApproval: false,
       triaged: true,
-      blocked: false,
     });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
@@ -406,10 +405,9 @@ describe("TrelloTracker", () => {
     await expect(
       tracker.setLabels("c1", {
         type: "Bug",
-        needsHelp: false,
-      needsApproval: false,
-        triaged: true,
         blocked: false,
+        needsApproval: false,
+        triaged: true,
       }),
     ).rejects.toThrow(/Trello board has no Triaged label configured/);
   });
@@ -428,10 +426,9 @@ describe("TrelloTracker", () => {
     await expect(
       tracker.setLabels("c1", {
         type: "Bug",
-        needsHelp: false,
-      needsApproval: false,
-        triaged: false,
         blocked: false,
+        needsApproval: false,
+        triaged: false,
       }),
     ).rejects.toThrow(/Trello board has no Triaged label configured/);
   });
@@ -456,10 +453,9 @@ describe("TrelloTracker", () => {
     const tracker = new TrelloTracker(cfg);
     await tracker.setLabels("c1", {
       type: "Bug",
-      needsHelp: false,
+      blocked: false,
       needsApproval: false,
       triaged: false,
-      blocked: false,
     });
     const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
     if (!putCall) throw new Error("expected PUT");
@@ -503,10 +499,9 @@ describe("TrelloTracker", () => {
       const tracker = new TrelloTracker(TRELLO);
       await tracker.setLabels("c1", {
         type: "Feature",
-        needsHelp: false,
+        blocked: false,
         needsApproval: true,
         triaged: false,
-        blocked: false,
       });
       const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
       if (!putCall) throw new Error("expected PUT");
@@ -529,10 +524,9 @@ describe("TrelloTracker", () => {
       const tracker = new TrelloTracker(cfg);
       await tracker.setLabels("c1", {
         type: "Feature",
-        needsHelp: false,
+        blocked: false,
         needsApproval: true,
         triaged: false,
-        blocked: false,
       });
       const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
       if (!putCall) throw new Error("expected PUT");
@@ -560,10 +554,9 @@ describe("TrelloTracker", () => {
       const tracker = new TrelloTracker(cfg);
       await tracker.setLabels("c1", {
         type: "Bug",
-        needsHelp: false,
+        blocked: false,
         needsApproval: false,
         triaged: false,
-        blocked: false,
       });
       const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
       if (!putCall) throw new Error("expected PUT");
@@ -800,7 +793,7 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(TRELLO);
     await tracker.createCard({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-9",
       parent_id: null,
@@ -813,6 +806,8 @@ describe("TrelloTracker", () => {
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      blocked: null,
+      waiting_on: null,
     });
     const post = fetchMock.mock.calls[0];
     expect(post[0]).toContain(authQs());

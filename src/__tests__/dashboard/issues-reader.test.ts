@@ -11,8 +11,8 @@ import { serializeIssue } from "../../issue-tracker/yaml.js";
 import type { Issue } from "../../issue-tracker/interface.js";
 
 function emptyIssue(overrides: Partial<Issue> = {}): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "memory",
     id: overrides.id ?? "ISS-1",
     external_id: "",
@@ -27,10 +27,18 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-    blocked: null,
+    blocked: overrides.blocked ?? null,
+    waiting_on: overrides.waiting_on ?? null,
     history: [],
     ...overrides,
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 function setupRepo(): string {
@@ -78,11 +86,12 @@ describe("listIssues", () => {
           { author: "x", timestamp: "t1", text: "hi" },
           { author: "y", timestamp: "t2", text: "yo" },
         ],
-        blocked: {
+        waiting_on: {
           reason: "waiting",
           timestamp: "2026-01-01T00:00:00Z",
           by: ["ISS-2"],
         },
+        blocked: null,
         retro: {
           good: "ok",
           bad: "",
@@ -110,12 +119,12 @@ describe("listIssues", () => {
       ac_total: 2,
       ac_done: 1,
       children_detail: [
-        { id: "ISS-2", name: "<ISS-2: unknown>", type: "Feature", status: "ToDo", blocked: true, blocked_by_card: false, missing: true },
-        { id: "ISS-3", name: "<ISS-3: unknown>", type: "Feature", status: "ToDo", blocked: true, blocked_by_card: false, missing: true },
+        { id: "ISS-2", name: "<ISS-2: unknown>", type: "Feature", status: "ToDo", waiting_on: true, waiting_on_by_card: false, missing: true },
+        { id: "ISS-3", name: "<ISS-3: unknown>", type: "Feature", status: "ToDo", waiting_on: true, waiting_on_by_card: false, missing: true },
       ],
-      blocked: false,
-      blocked_reason: null,
-      blocked_by: [],
+      waiting_on: false,
+      waiting_on_reason: null,
+      waiting_on_by: [],
       comments_count: 2,
       has_retro: true,
       updated_at: 1_700_000_000_000,
@@ -174,7 +183,7 @@ describe("listIssues", () => {
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
     expect(epic.children_detail).toEqual([
-      { id: "ISS-2", name: "Phase one shipped", type: "Feature", status: "Done", blocked: false, blocked_by_card: false, missing: false },
+      { id: "ISS-2", name: "Phase one shipped", type: "Feature", status: "Done", waiting_on: false, waiting_on_by_card: false, missing: false },
     ]);
   });
 
@@ -195,7 +204,7 @@ describe("listIssues", () => {
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
     expect(epic.children_detail[0].status).toBe("Cancelled");
-    expect(epic.children_detail[0].blocked).toBe(false);
+    expect(epic.children_detail[0].waiting_on).toBe(false);
   });
 
   it("children_detail carries blocked=true when child has a blocked record (status untouched)", async () => {
@@ -213,21 +222,22 @@ describe("listIssues", () => {
         id: "ISS-2",
         title: "blocked phase",
         status: "ToDo",
-        blocked: {
+        waiting_on: {
           reason: "waiting",
           timestamp: "2026-01-01T00:00:00Z",
           by: ["ISS-3"],
         },
+        blocked: null,
       }),
       1_000,
     );
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
     expect(epic.children_detail[0].status).toBe("ToDo");
-    expect(epic.children_detail[0].blocked).toBe(true);
+    expect(epic.children_detail[0].waiting_on).toBe(true);
   });
 
-  it("children_detail carries Needs Help raw + blocked=false", async () => {
+  it("children_detail carries Blocked raw + blocked=false", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -238,13 +248,13 @@ describe("listIssues", () => {
     writeIssue(
       repo,
       "open",
-      emptyIssue({ id: "ISS-2", title: "help me", status: "Needs Help" }),
+      emptyIssue({ id: "ISS-2", title: "help me", status: "Blocked" }),
       1_000,
     );
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("Needs Help");
-    expect(epic.children_detail[0].blocked).toBe(false);
+    expect(epic.children_detail[0].status).toBe("Blocked");
+    expect(epic.children_detail[0].waiting_on).toBe(false);
   });
 
   // Regression — intra-sibling ordering ≠ epic block. Phase children
@@ -252,7 +262,7 @@ describe("listIssues", () => {
   // work in order; the epic itself is moving forward, not impeded.
   // Pre-fix the projection counted any `blocked != null` child as
   // cause for the epic to surface in the Blocked column with a
-  // "Needs Help" pill — wrong.
+  // "Blocked" pill — wrong.
   it("epic NOT blocked when child blocked.by[] is fully intra-sibling", async () => {
     const repo = setupRepo();
     writeIssue(
@@ -278,18 +288,19 @@ describe("listIssues", () => {
       emptyIssue({
         id: "ISS-3",
         status: "ToDo",
-        blocked: {
+        waiting_on: {
           reason: "wait for ISS-2",
           timestamp: "2026-01-01T00:00:00Z",
           by: ["ISS-2"],
         },
+        blocked: null,
       }),
       1_000,
     );
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
-    expect(epic.blocked).toBe(false);
+    expect(epic.waiting_on).toBe(false);
     expect(epic.status).toBe("In Progress");
-    expect(epic.blocked_by).toEqual([]);
+    expect(epic.waiting_on_by).toEqual([]);
   });
 
   it("epic IS blocked when child has cross-epic external blocker in by[]", async () => {
@@ -311,22 +322,23 @@ describe("listIssues", () => {
       emptyIssue({
         id: "ISS-2",
         status: "ToDo",
-        blocked: {
+        waiting_on: {
           reason: "waits cross-epic",
           timestamp: "2026-01-01T00:00:00Z",
           // ISS-99 is NOT a child of this epic → real external block
           by: ["ISS-99"],
         },
+        blocked: null,
       }),
       2_000,
     );
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
-    expect(epic.blocked).toBe(true);
-    expect(epic.status).toBe("Needs Help");
-    expect(epic.blocked_by).toEqual(["ISS-2"]);
+    expect(epic.waiting_on).toBe(true);
+    expect(epic.status).toBe("Blocked");
+    expect(epic.waiting_on_by).toEqual(["ISS-2"]);
   });
 
-  it("epic IS blocked when child status is Needs Help regardless of by[]", async () => {
+  it("epic IS blocked when child status is Blocked regardless of by[]", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -342,13 +354,13 @@ describe("listIssues", () => {
     writeIssue(
       repo,
       "open",
-      emptyIssue({ id: "ISS-2", status: "Needs Help" }),
+      emptyIssue({ id: "ISS-2", status: "Blocked" }),
       1_000,
     );
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
-    expect(epic.blocked).toBe(true);
-    expect(epic.status).toBe("Needs Help");
-    expect(epic.blocked_by).toEqual(["ISS-2"]);
+    expect(epic.waiting_on).toBe(true);
+    expect(epic.status).toBe("Blocked");
+    expect(epic.waiting_on_by).toEqual(["ISS-2"]);
   });
 
   it("epic NOT blocked by missing children — unknown ≠ impeded", async () => {
@@ -365,7 +377,7 @@ describe("listIssues", () => {
       1_000,
     );
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
-    expect(epic.blocked).toBe(false);
+    expect(epic.waiting_on).toBe(false);
     expect(epic.status).toBe("In Progress");
   });
 
@@ -390,7 +402,7 @@ describe("listIssues", () => {
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
     expect(epic.children_detail[0].status).toBe("Needs Approval");
-    expect(epic.children_detail[0].blocked).toBe(false);
+    expect(epic.children_detail[0].waiting_on).toBe(false);
   });
 
   it("children_detail carries the child's raw type (Bug/Feature/Epic flows through)", async () => {
@@ -437,8 +449,8 @@ describe("listIssues", () => {
       name: "<ISS-99: unknown>",
       type: "Feature",
       status: "ToDo",
-      blocked: true,
-      blocked_by_card: false,
+      waiting_on: true,
+      waiting_on_by_card: false,
       missing: true,
     });
   });
@@ -464,7 +476,7 @@ describe("listIssues", () => {
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
     expect(epic.children_detail[0].status).toBe("In Progress");
-    expect(epic.children_detail[0].blocked).toBe(false);
+    expect(epic.children_detail[0].waiting_on).toBe(false);
   });
 
   it("sorts by updated_at descending across open + closed", async () => {

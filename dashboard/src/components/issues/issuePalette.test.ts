@@ -19,7 +19,7 @@ describe("projectChildStatus", () => {
   });
 
   it("Needs Help → 'blocked'", () => {
-    expect(projectChildStatus("Needs Help", false)).toBe("blocked");
+    expect(projectChildStatus("Blocked", false)).toBe("blocked");
   });
 
   it("Needs Approval → 'blocked'", () => {

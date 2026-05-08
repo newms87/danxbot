@@ -17,7 +17,7 @@ import type {
 
 function defaultCreate(): CreateCardInput {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -30,6 +30,8 @@ function defaultCreate(): CreateCardInput {
     ac: [{ title: "AC1", checked: false }],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    blocked: null,
+    waiting_on: null,
   };
 }
 
@@ -186,7 +188,7 @@ describe("syncIssue", () => {
   describe("orphan recovery (empty external_id → createCard)", () => {
     function orphan(): Issue {
       return {
-        schema_version: 3,
+        schema_version: 4,
         tracker: "memory",
         id: "ISS-1",
         external_id: "",
@@ -202,6 +204,7 @@ describe("syncIssue", () => {
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         blocked: null,
+        waiting_on: null,
         history: [],
       };
     }
@@ -360,12 +363,16 @@ describe("syncIssue", () => {
 
   // ---- Test gap C: setLabels derived-args shape ----
 
-  it("derives needsHelp:true from status='Needs Help' (gap C)", async () => {
+  it("derives blocked:true from status='Blocked' (gap C)", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
-      status: "Needs Help",
+      status: "Blocked",
+      blocked: {
+        reason: "self-blocked",
+        timestamp: "2026-05-04T18:00:00.000Z",
+      },
     };
     tracker.clearRequestLog();
     await syncIssue(tracker, local);
@@ -374,23 +381,22 @@ describe("syncIssue", () => {
       .find((l) => l.method === "setLabels");
     expect(setLabels).toBeDefined();
     expect(
-      (setLabels!.details as { labels: { needsHelp: boolean } }).labels
-        .needsHelp,
+      (setLabels!.details as { labels: { blocked: boolean } }).labels
+        .blocked,
     ).toBe(true);
   });
 
-  it("derives needsHelp:false for non-Needs-Help statuses (gap C)", async () => {
+  it("derives blocked:false for non-Blocked statuses (gap C)", async () => {
     const tracker = new MemoryTracker();
-    // Seed in Needs Help so the diff fires when we move out of it.
+    // Seed in Blocked so the diff fires when we move out of it.
     const { external_id } = await tracker.createCard(defaultCreate());
-    // Move remote to Needs Help so its labels reflect that.
-    await tracker.moveToStatus(external_id, "Needs Help");
+    // Move remote to Blocked so its labels reflect that.
+    await tracker.moveToStatus(external_id, "Blocked");
     await tracker.setLabels(external_id, {
       type: "Feature",
-      needsHelp: true,
+      blocked: true,
       needsApproval: false,
       triaged: false,
-      blocked: false,
     });
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -403,8 +409,8 @@ describe("syncIssue", () => {
       .find((l) => l.method === "setLabels");
     expect(setLabels).toBeDefined();
     expect(
-      (setLabels!.details as { labels: { needsHelp: boolean } }).labels
-        .needsHelp,
+      (setLabels!.details as { labels: { blocked: boolean } }).labels
+        .blocked,
     ).toBe(false);
   });
 
@@ -423,11 +429,11 @@ describe("syncIssue", () => {
     expect(setLabels).toBeDefined();
     const labels = (
       setLabels!.details as {
-        labels: { needsApproval: boolean; needsHelp: boolean };
+        labels: { needsApproval: boolean; blocked: boolean };
       }
     ).labels;
     expect(labels.needsApproval).toBe(true);
-    expect(labels.needsHelp).toBe(false);
+    expect(labels.blocked).toBe(false);
   });
 
   it("derives blocked:true from local.blocked != null and pushes the Blocked label", async () => {
@@ -435,10 +441,10 @@ describe("syncIssue", () => {
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
+      status: "Blocked",
       blocked: {
-        reason: "waiting on prerequisite",
+        reason: "self-blocked",
         timestamp: "2026-05-04T18:00:00.000Z",
-        by: ["ISS-99"],
       },
     };
     tracker.clearRequestLog();
@@ -490,7 +496,7 @@ describe("syncIssue", () => {
     // Build a tracker pre-seeded with a card whose triage record IS set on
     // the server (via seed Issue), then sync a local that has cleared it.
     const seed: Issue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-2",
       external_id: "card-triaged",
@@ -521,6 +527,7 @@ describe("syncIssue", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      waiting_on: null,
       history: [],
     };
     const tracker = new MemoryTracker({ seed: [seed] });
@@ -567,14 +574,14 @@ describe("syncIssue", () => {
       ...(await tracker.getCard(external_id)),
       title: "Local Title",
       description: "Local Desc",
-      status: "Needs Help",
+      status: "Blocked",
       type: "Bug",
     };
     await syncIssue(tracker, local);
     const after = await tracker.getCard(external_id);
     expect(after.title).toBe("Local Title");
     expect(after.description).toBe("Local Desc");
-    expect(after.status).toBe("Needs Help");
+    expect(after.status).toBe("Blocked");
     expect(after.type).toBe("Bug");
   });
 
@@ -606,8 +613,8 @@ describe("syncIssue", () => {
     expect(retroOnly[0].text).toContain("**What went wrong:** hard");
   });
 
-  it("retro renderer is a no-op on non-terminal status (In Progress / Needs Help)", async () => {
-    for (const status of ["In Progress", "Needs Help"] as const) {
+  it("retro renderer is a no-op on non-terminal status (In Progress / Blocked)", async () => {
+    for (const status of ["In Progress", "Blocked"] as const) {
       const tracker = new MemoryTracker();
       const { external_id } = await tracker.createCard(defaultCreate());
       const local: Issue = {
@@ -982,6 +989,7 @@ describe("syncIssue", () => {
         commits: ["abc1234"],
       },
       blocked: null,
+      waiting_on: null,
       history: [],
     };
 
@@ -996,31 +1004,30 @@ describe("syncIssue", () => {
     expect(methods.sort()).toEqual(["getCard", "getComments"]);
   });
 
-  it("blocked label idempotency: blocked.reason / by[] mutations alone produce zero writes (only the boolean is mirrored)", async () => {
+  it("blocked label idempotency: waiting_on.reason / by[] mutations alone produce zero writes (only the blocked status is mirrored)", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
 
-    // First sync flips blocked:true → setLabels write.
+    // First sync flips status to Blocked → setLabels write.
     const blocked: Issue = {
       ...fresh,
+      status: "Blocked",
       blocked: {
-        reason: "Waits on sibling",
+        reason: "Self-blocked",
         timestamp: "2026-05-05T00:00:00Z",
-        by: ["ISS-77"],
       },
     };
     const first = await syncIssue(tracker, blocked);
     expect(first.remoteWriteCount).toBeGreaterThan(0);
 
-    // Re-sync with DIFFERENT reason / by[] but same boolean → zero writes.
+    // Re-sync with DIFFERENT reason but same status → zero writes.
     tracker.clearRequestLog();
     const reworded: Issue = {
       ...first.updatedLocal,
       blocked: {
-        reason: "Different sentence — same blocker semantics",
+        reason: "Different reason — same blocked semantics",
         timestamp: "2026-05-06T00:00:00Z",
-        by: ["ISS-77", "ISS-78"],
       },
     };
     const second = await syncIssue(tracker, reworded);

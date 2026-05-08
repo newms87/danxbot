@@ -13,14 +13,14 @@ defineEmits<{
 }>();
 
 const blockedByCard = computed(
-  () => !!props.issue.blocked && props.issue.blocked.by.length > 0,
+  () => !!props.issue.waiting_on && props.issue.waiting_on.by.length > 0,
 );
 </script>
 
 <template>
   <div class="overview">
     <section
-      v-if="issue.blocked"
+      v-if="issue.waiting_on"
       class="blocked-panel"
       :class="{ 'by-card': blockedByCard }"
     >
@@ -28,10 +28,10 @@ const blockedByCard = computed(
         <span class="glyph">{{ blockedByCard ? "⏸" : "⛔" }}</span>
         {{ blockedByCard ? "Blocked by" : "Blocked" }}
       </div>
-      <div class="blocked-reason">{{ issue.blocked.reason }}</div>
-      <div v-if="issue.blocked.by.length > 0" class="blocked-by">
+      <div class="blocked-reason">{{ issue.waiting_on.reason }}</div>
+      <div v-if="issue.waiting_on.by.length > 0" class="blocked-by">
         <button
-          v-for="bid in issue.blocked.by"
+          v-for="bid in issue.waiting_on.by"
           :key="bid"
           type="button"
           class="blocker-chip"

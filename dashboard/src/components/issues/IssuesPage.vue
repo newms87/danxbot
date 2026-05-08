@@ -60,7 +60,7 @@ const filteredIssues = computed<IssueListItem[]>(() => {
     if (types.value.length > 0 && !types.value.includes(typeToId(i.type))) {
       return false;
     }
-    if (blockedOnly.value && !i.blocked) return false;
+    if (blockedOnly.value && !(i.status === "Blocked" || i.waiting_on)) return false;
     if (needle) {
       const hay = `${i.id} ${i.title} ${i.description}`.toLowerCase();
       if (!hay.includes(needle)) return false;

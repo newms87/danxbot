@@ -34,7 +34,7 @@ const HOLDER_B = {
 
 function defaultCreate(): CreateCardInput {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -47,6 +47,8 @@ function defaultCreate(): CreateCardInput {
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    blocked: null,
+    waiting_on: null,
   };
 }
 

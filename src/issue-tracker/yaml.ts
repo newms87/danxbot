@@ -9,7 +9,8 @@ import {
   type CreateCardInput,
   type Issue,
   type IssueAcItem,
-  type IssueBlocked,
+  type Blocked,
+  type WaitingOn,
   type IssueComment,
   type IssueDispatch,
   type IssueHistoryEntry,
@@ -90,7 +91,7 @@ function emptyTriage(): IssueTriage {
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 3
+ *  - schema_version: 4
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
@@ -114,7 +115,7 @@ export function createEmptyIssue(
   } = {},
 ): Issue {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -129,6 +130,7 @@ export function createEmptyIssue(
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    waiting_on: null,
     blocked: null,
     history: [],
   };
@@ -310,17 +312,28 @@ export function serializeIssue(issue: Issue): string {
       action_item_ids: [...issue.retro.action_item_ids],
       commits: [...issue.retro.commits],
     },
-    // `blocked` carries `null` (default) or a record with reason/timestamp/by[].
+    // `waiting_on` carries `null` (default) or a record with reason/timestamp/by[].
     // Position after `retro` keeps the canonical key order stable for older
-    // YAMLs that omit the field — they parse with `blocked: null` defaulted in
+    // YAMLs that omit the field — they parse with `waiting_on: null` defaulted in
     // and re-serialize at the end of the document.
+    waiting_on:
+      issue.waiting_on === null
+        ? null
+        : {
+            reason: issue.waiting_on.reason,
+            timestamp: issue.waiting_on.timestamp,
+            by: [...issue.waiting_on.by],
+          },
+    // `blocked` is the self-block record. Position after `waiting_on` so a
+    // reader scanning the YAML sees both parking states adjacent. `null`
+    // when the card is not self-blocked. Worker enforces the invariant
+    // `status === "Blocked" ⟺ blocked !== null`.
     blocked:
       issue.blocked === null
         ? null
         : {
             reason: issue.blocked.reason,
             timestamp: issue.blocked.timestamp,
-            by: [...issue.blocked.by],
           },
   };
 
@@ -358,7 +371,7 @@ export interface ParseIssueOptions {
    * Per-repo issue id prefix the validator should enforce. 2-4 uppercase
    * letters; supplied by the caller from `RepoContext.issuePrefix`. The
    * validator builds `^${expectedPrefix}-\d+$` from this value and rejects
-   * any `id` / `parent_id` / `children[i]` / `blocked.by[i]` /
+   * any `id` / `parent_id` / `children[i]` / `waiting_on.by[i]` /
    * `retro.action_item_ids[i]` that doesn't match.
    */
   expectedPrefix?: string;
@@ -445,7 +458,7 @@ export const ISSUE_ID_REGEX = LEGACY_ISS_REGEX;
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -522,18 +535,20 @@ export function validateIssue(
   }
   const v = value as Record<string, unknown>;
 
-  // schema_version — v3 only. Reject older versions with a loud migration
+  // schema_version — v3 or v4. Reject older versions with a loud migration
   // pointer. v1 was retired by `migrate-issues-to-v2`; v2 is retired by
-  // `migrate-issues-to-v3` (adds the required `children: []` field).
+  // `migrate-issues-to-v3` (adds the required `children: []` field). v3 is
+  // migrated to v4 lazily by this validator when reading v3 YAMLs with
+  // `blocked:` field (auto-renamed to `waiting_on:` in the output).
   if (!("schema_version" in v)) {
     errors.push("missing required field: schema_version");
   } else if (v.schema_version === 1 || v.schema_version === 2) {
     errors.push(
       `schema_version ${v.schema_version} is no longer supported — run scripts/migrate-issues-to-v3.ts to upgrade`,
     );
-  } else if (v.schema_version !== 3) {
+  } else if (v.schema_version !== 3 && v.schema_version !== 4) {
     errors.push(
-      `schema_version must be 3 (got ${JSON.stringify(v.schema_version)})`,
+      `schema_version must be 3 or 4 (got ${JSON.stringify(v.schema_version)})`,
     );
   }
 
@@ -616,9 +631,22 @@ export function validateIssue(
   // be rebuilt. Strict callers can pass through `validateIssue` once
   // and re-emit via `serializeIssue` to get the canonical shape.
 
-  // status
+  // status — v3 YAMLs carry `"Needs Help"`; v4 renames to `"Blocked"`.
+  // Auto-migrate on read so existing files round-trip without a separate
+  // migration script. The validator accepts the legacy literal only when
+  // schema_version is 3 (else the file is a half-migrated v4 with stale
+  // status — fail loud). Sets `v3NeedsHelpMigration = true` so the v3
+  // `blocked` synthesis below populates the new self-block field (the
+  // invariant `status === "Blocked" ⟺ blocked !== null` requires it).
+  let v3NeedsHelpMigration = false;
   if (!("status" in v)) {
     errors.push("missing required field: status");
+  } else if (
+    v.status === "Needs Help" &&
+    v.schema_version === 3
+  ) {
+    v.status = "Blocked";
+    v3NeedsHelpMigration = true;
   } else if (!ISSUE_STATUSES.includes(v.status as IssueStatus)) {
     errors.push(
       `status must be one of [${ISSUE_STATUSES.join(", ")}] (got ${JSON.stringify(v.status)})`,
@@ -709,16 +737,81 @@ export function validateIssue(
     else retroResult = r;
   }
 
-  // blocked — optional field. Missing → null. Present must be either YAML
-  // null OR a fully-formed `{reason, timestamp, by[]}` mapping. Tolerating
-  // absence keeps pre-`blocked` YAMLs round-trippable; presence must validate
-  // strictly so a half-written blocked record fails loud instead of silently
-  // un-blocking the card.
-  let blockedResult: IssueBlocked | null = null;
-  if ("blocked" in v) {
-    const r = validateBlocked(v.blocked, idRegex, idShape);
-    if (typeof r === "string") errors.push(r);
-    else blockedResult = r;
+  // waiting_on — dep-chain queue. Optional field. Missing → null. Present
+  // must be either YAML null OR `{reason, timestamp, by[]}`.
+  //
+  // blocked — self-block record. Optional field. Missing → null. Present
+  // must be either YAML null OR `{reason, timestamp}` (NO `by[]` —
+  // distinguishes from v3 schema where `blocked` carried the dep-chain
+  // payload, now renamed to `waiting_on`).
+  //
+  // v3 → v4 auto-migration: in a v3 YAML the `blocked:` key carries the
+  // dep-chain payload (`{reason, timestamp, by[]}`). On read we map it to
+  // `waiting_on` and leave `blocked: null`. v4 YAMLs with the new
+  // self-block shape (`blocked: {reason, timestamp}`) parse straight
+  // through.
+  let waitingOnResult: WaitingOn | null = null;
+  let blockedResult: Blocked | null = null;
+  const isV3 = v.schema_version === 3;
+  if (isV3) {
+    // v3 file: `blocked:` is dep-chain → goes into waiting_on. New
+    // self-block field doesn't exist on v3 files.
+    if ("waiting_on" in v) {
+      errors.push(
+        "schema_version: 3 file carries 'waiting_on:' — set schema_version to 4",
+      );
+    }
+    if ("blocked" in v) {
+      const r = validateWaitingOn(v.blocked, idRegex, idShape);
+      if (typeof r === "string") errors.push(r);
+      else waitingOnResult = r;
+    }
+    // v3 status="Needs Help" → v4 status="Blocked". Synthesize a placeholder
+    // `blocked` self-block record so the invariant
+    // `status === "Blocked" ⟺ blocked !== null` holds. Reason is a
+    // migration marker; timestamp is epoch so reloads stamp deterministically
+    // (next save serializes the synthesized record; subsequent reads round-trip
+    // it byte-stable). Agents can edit the reason on next pickup.
+    if (v3NeedsHelpMigration) {
+      blockedResult = {
+        reason:
+          "(no recorded reason — migrated from legacy v3 'Needs Help' status; agent should overwrite on next pickup)",
+        timestamp: "1970-01-01T00:00:00.000Z",
+      };
+    }
+  } else {
+    // v4 file: `waiting_on:` is dep-chain, `blocked:` is self-block.
+    if ("waiting_on" in v) {
+      const r = validateWaitingOn(v.waiting_on, idRegex, idShape);
+      if (typeof r === "string") errors.push(r);
+      else waitingOnResult = r;
+    }
+    if ("blocked" in v) {
+      const r = validateBlocked(v.blocked);
+      if (typeof r === "string") errors.push(r);
+      else blockedResult = r;
+    }
+  }
+
+  // Invariant: status === "Blocked" ⟺ blocked !== null. Worker write-paths
+  // enforce this on write; the parser enforces it on read so a hand-edited
+  // file with a half-set state fails loud rather than landing in memory.
+  if (
+    typeof v.status === "string" &&
+    ISSUE_STATUSES.includes(v.status as IssueStatus)
+  ) {
+    const statusBlocked = v.status === "Blocked";
+    const fieldBlocked = blockedResult !== null;
+    if (statusBlocked && !fieldBlocked) {
+      errors.push(
+        "status is 'Blocked' but blocked field is null — must populate blocked record",
+      );
+    }
+    if (!statusBlocked && fieldBlocked) {
+      errors.push(
+        `blocked field is non-null but status is '${v.status}' — must set status to 'Blocked'`,
+      );
+    }
   }
 
   // history — optional field. Missing → []. Legacy YAMLs ship without the
@@ -739,7 +832,7 @@ export function validateIssue(
 
   // All required fields present and well-typed; build the validated Issue.
   const issue: Issue = {
-    schema_version: 3,
+    schema_version: 4,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
@@ -754,6 +847,7 @@ export function validateIssue(
     ac: acResult as IssueAcItem[],
     comments: commentsResult as IssueComment[],
     retro: retroResult as IssueRetro,
+    waiting_on: waitingOnResult,
     blocked: blockedResult,
     history: historyResult,
   };
@@ -1064,11 +1158,49 @@ function validateCommentsList(value: unknown): IssueComment[] | string {
   return out;
 }
 
-function validateBlocked(
+function validateWaitingOn(
   value: unknown,
   idRegex: RegExp,
   idShape: string,
-): IssueBlocked | null | string {
+): WaitingOn | null | string {
+  if (value === null || value === undefined) return null;
+  if (!isPlainObject(value)) {
+    return "waiting_on must be a mapping or null";
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.reason !== "string" || v.reason.length === 0) {
+    return "waiting_on.reason must be a non-empty string";
+  }
+  if (typeof v.timestamp !== "string" || v.timestamp.length === 0) {
+    return "waiting_on.timestamp must be a non-empty string";
+  }
+  if (!Array.isArray(v.by)) {
+    return `waiting_on.by must be a list of ${idShape} strings`;
+  }
+  if (v.by.length === 0) {
+    return "waiting_on.by must contain at least one issue id";
+  }
+  const by: string[] = [];
+  for (let i = 0; i < v.by.length; i++) {
+    const item = v.by[i];
+    if (typeof item !== "string") {
+      return `waiting_on.by[${i}] must be a string`;
+    }
+    if (!idRegex.test(item)) {
+      return `waiting_on.by[${i}] must match ${idShape} (got ${JSON.stringify(item)})`;
+    }
+    by.push(item);
+  }
+  return { reason: v.reason, timestamp: v.timestamp, by };
+}
+
+/**
+ * Validate the v4 `blocked` self-block field. Shape: `{reason, timestamp}`.
+ * NO `by[]` (that's `waiting_on.by`). A v3 file's `blocked:` carries a
+ * `by[]` and is mapped to `waiting_on:` upstream — `validateBlocked` is
+ * only called on v4 input.
+ */
+function validateBlocked(value: unknown): Blocked | null | string {
   if (value === null || value === undefined) return null;
   if (!isPlainObject(value)) {
     return "blocked must be a mapping or null";
@@ -1080,24 +1212,10 @@ function validateBlocked(
   if (typeof v.timestamp !== "string" || v.timestamp.length === 0) {
     return "blocked.timestamp must be a non-empty string";
   }
-  if (!Array.isArray(v.by)) {
-    return `blocked.by must be a list of ${idShape} strings`;
+  if ("by" in v) {
+    return "blocked must NOT carry 'by' — use 'waiting_on' for dep-chain queues";
   }
-  if (v.by.length === 0) {
-    return "blocked.by must contain at least one issue id";
-  }
-  const by: string[] = [];
-  for (let i = 0; i < v.by.length; i++) {
-    const item = v.by[i];
-    if (typeof item !== "string") {
-      return `blocked.by[${i}] must be a string`;
-    }
-    if (!idRegex.test(item)) {
-      return `blocked.by[${i}] must match ${idShape} (got ${JSON.stringify(item)})`;
-    }
-    by.push(item);
-  }
-  return { reason: v.reason, timestamp: v.timestamp, by };
+  return { reason: v.reason, timestamp: v.timestamp };
 }
 
 function validateRetro(

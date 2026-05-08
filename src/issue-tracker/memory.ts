@@ -89,7 +89,8 @@ interface StoredCard {
     action_item_ids: string[];
     commits: string[];
   };
-  blocked: { reason: string; timestamp: string; by: string[] } | null;
+  waiting_on: { reason: string; timestamp: string; by: string[] } | null;
+  blocked: { reason: string; timestamp: string } | null;
   labels: ManagedLabels;
 }
 
@@ -154,7 +155,7 @@ export class MemoryTracker implements IssueTracker {
       "Review",
       "ToDo",
       "In Progress",
-      "Needs Help",
+      "Blocked",
       "Needs Approval",
     ]);
     const refs: IssueRef[] = [];
@@ -213,13 +214,13 @@ export class MemoryTracker implements IssueTracker {
         action_item_ids: [...input.retro.action_item_ids],
         commits: [...input.retro.commits],
       },
+      waiting_on: null,
       blocked: null,
       labels: {
         type: input.type,
-        needsHelp: input.status === "Needs Help",
+        blocked: input.status === "Blocked",
         needsApproval: input.status === "Needs Approval",
         triaged: isTriaged(input.triage),
-        blocked: false,
       },
     };
     this.cards.set(externalId, stored);
@@ -384,7 +385,7 @@ export class MemoryTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 3,
+      schema_version: 4,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
@@ -409,10 +410,14 @@ export class MemoryTracker implements IssueTracker {
         action_item_ids: [...card.retro.action_item_ids],
         commits: [...card.retro.commits],
       },
+      waiting_on:
+        card.waiting_on === null
+          ? null
+          : { ...card.waiting_on, by: [...card.waiting_on.by] },
       blocked:
         card.blocked === null
           ? null
-          : { ...card.blocked, by: [...card.blocked.by] },
+          : { reason: card.blocked.reason, timestamp: card.blocked.timestamp },
       // `history` is local-only audit; the tracker abstraction never sees it.
       // MemoryTracker mirrors Trello's contract: always emit [] on read so
       // the local YAML stays authoritative for the audit log.
@@ -447,16 +452,19 @@ export class MemoryTracker implements IssueTracker {
         action_item_ids: [...issue.retro.action_item_ids],
         commits: [...issue.retro.commits],
       },
+      waiting_on:
+        issue.waiting_on === null
+          ? null
+          : { ...issue.waiting_on, by: [...issue.waiting_on.by] },
       blocked:
         issue.blocked === null
           ? null
-          : { ...issue.blocked, by: [...issue.blocked.by] },
+          : { reason: issue.blocked.reason, timestamp: issue.blocked.timestamp },
       labels: {
         type: issue.type,
-        needsHelp: issue.status === "Needs Help",
+        blocked: issue.status === "Blocked",
         needsApproval: issue.status === "Needs Approval",
         triaged: isTriaged(issue.triage),
-        blocked: issue.blocked !== null,
       },
     };
   }

@@ -68,7 +68,7 @@ import {
 import type {
   CreateCardInput,
   Issue,
-  IssueBlocked,
+  WaitingOn,
   IssueHistoryEntry,
   IssueStatus,
   IssueTracker,
@@ -111,7 +111,7 @@ let cachedTracker: IssueTracker | null = null;
 const issueLocks = new Map<string, Promise<void>>();
 
 /**
- * Last-seen `{status, blocked}` per internal id. Populated on every
+ * Last-seen `{status, waiting_on}` per internal id. Populated on every
  * successful save (and `created` on `handleIssueCreate`); read at the
  * start of each save to compute the diff that drives `appendDiffEntries`.
  *
@@ -121,7 +121,7 @@ const issueLocks = new Map<string, Promise<void>>();
  * restart loses the cache, so the first save after restart also has no
  * diff — same fallback. The cache is updated AFTER `appendDiffEntries`
  * is called for the current save so the next save sees the
- * post-normalization state (`forceBlockedToToDo` already applied).
+ * post-normalization state (`forceWaitingOnToToDo` already applied).
  *
  * **Concurrent-save safety on the same id.** `applyHistoryDiff` reads
  * `prior` and writes the new state in straight-line synchronous code
@@ -139,7 +139,7 @@ const issueLocks = new Map<string, Promise<void>>();
  */
 const lastSeenIssueState = new Map<
   string,
-  { status: IssueStatus; blocked: IssueBlocked | null }
+  { status: IssueStatus; waiting_on: WaitingOn | null }
 >();
 
 /**
@@ -219,12 +219,12 @@ function resolveDispatchActor(
  * before `blocked` / `unblocked` so a same-save status flip reads first
  * in the timeline.
  *
- * Both inputs are taken AFTER `forceBlockedToToDo` normalization so an
- * agent's `(status: "Needs Help", blocked: {…})` save — given prior
+ * Both inputs are taken AFTER `forceWaitingOnToToDo` normalization so an
+ * agent's `(status: "Blocked", waiting_on: {…})` save — given prior
  * cached state `In Progress` — emits a proper
  * `status_change(In Progress, ToDo)` plus `blocked` event, not a
  * spurious `(In Progress, Needs Help)` jump that never actually
- * persisted (the worker normalizes status → ToDo whenever blocked is
+ * persisted (the worker normalizes status → ToDo whenever waiting_on is
  * non-null).
  *
  *  - `oldIssue == null` → first save in this worker process for this id.
@@ -242,7 +242,7 @@ function resolveDispatchActor(
  *  - All cap + truncation logic is delegated to `appendHistory` (DX-145).
  */
 export function appendDiffEntries(
-  oldIssue: Pick<Issue, "status" | "blocked"> | null,
+  oldIssue: Pick<Issue, "status" | "waiting_on"> | null,
   newIssue: Issue,
   dispatchId: string,
   nowIso: string,
@@ -264,17 +264,17 @@ export function appendDiffEntries(
     });
   }
 
-  if (oldIssue.blocked === null && newIssue.blocked !== null) {
+  if (oldIssue.waiting_on === null && newIssue.waiting_on !== null) {
     history = appendHistory(history, {
       timestamp: nowIso,
       actor,
       event: "blocked",
       to: newIssue.status,
-      note: `Blocked on ${newIssue.blocked.by.join(", ")}`,
+      note: `Waiting on ${newIssue.waiting_on.by.join(", ")}`,
     });
   }
 
-  if (oldIssue.blocked !== null && newIssue.blocked === null) {
+  if (oldIssue.waiting_on !== null && newIssue.waiting_on === null) {
     history = appendHistory(history, {
       timestamp: nowIso,
       actor,
@@ -293,7 +293,7 @@ export function appendDiffEntries(
  * cache update happens unconditionally so the next save sees this
  * save's post-normalization state.
  *
- * The `forceBlockedToToDo` normalization happens upstream (in
+ * The `forceWaitingOnToToDo` normalization happens upstream (in
  * `handleIssueSave` / `syncTrackedIssueOnComplete`), so `issue` here is
  * already the post-normalized shape per the diff contract.
  *
@@ -317,7 +317,7 @@ function applyHistoryDiff(
   );
   lastSeenIssueState.set(issue.id, {
     status: issue.status,
-    blocked: issue.blocked,
+    waiting_on: issue.waiting_on,
   });
   return updatedHistory === issue.history
     ? issue
@@ -340,7 +340,36 @@ function getDeps(repo: RepoContext, override?: IssueRouteDeps): IssueRouteDeps {
   return {
     tracker: cachedTracker,
     recordError: defaultRecordError,
+    recordSystemError: (message) => defaultRecordSystemError(repo, message),
   };
+}
+
+/**
+ * Default `recordSystemError` for the runSync catch + actor-resolution
+ * gap. Lazy-imports `system-errors` so worker code paths that don't need
+ * the dashboard module don't pay the import cost; the import itself is
+ * cheap (no env validation), but keeping the surface symmetric with
+ * `defaultRecordError` above also makes it trivially mockable in tests.
+ */
+async function defaultRecordSystemError(
+  repo: RepoContext,
+  message: string,
+): Promise<void> {
+  try {
+    const { recordSystemError } = await import("../dashboard/system-errors.js");
+    recordSystemError({
+      source: "tracker",
+      severity: "error",
+      repo: repo.name,
+      message,
+    });
+  } catch (err) {
+    log.warn(
+      `defaultRecordSystemError failed for ${repo.name}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 async function defaultRecordError(
@@ -465,8 +494,8 @@ export async function handleIssueSave(
   // status, and a stray `status: Needs Help` / `Done` paired with a
   // non-null blocked is a category error we silently normalize. The
   // poller's dispatch gate then skips the card while every blocker in
-  // `by[]` is non-terminal. See `forceBlockedToToDo`.
-  issue = forceBlockedToToDo(issue);
+  // `by[]` is non-terminal. See `forceWaitingOnToToDo`.
+  issue = forceWaitingOnToToDo(issue);
 
   // DX-146 / Phase 2: diff against the worker's last-seen state and
   // append history entries BEFORE the first persist, so the on-disk
@@ -557,6 +586,12 @@ export async function runSync(
     }`;
     log.error(msg);
     await deps.recordError?.(dispatchId, msg);
+    // DX-134 Phase 4: surface the same failure to the dashboard's
+    // `system-errors` SSE channel so the operator banner shows it
+    // even when no specific dispatch row is currently open in the UI.
+    // Fire-and-forget — the hook is a no-op when not configured (tests
+    // not wiring the dep) and never blocks the save path.
+    fireAndForgetSystemError(deps, msg);
     // DX-132 Phase 2: persist a retry intent to disk. Phase 1 made the
     // local YAML write happen first (so terminal-status moves are no
     // longer rolled back by tracker errors); this line ensures the
@@ -588,14 +623,14 @@ export async function runSync(
  *
  * Triggers on save:
  *  - terminal status: Done, Cancelled, Needs Help, Needs Approval
- *  - non-terminal status with `blocked != null`: the agent has flipped
- *    the card to Blocked (worker normalizes to ToDo) and is exiting
+ *  - non-terminal status with `waiting_on != null`: the agent has flipped
+ *    the card to waiting (worker normalizes to ToDo) and is exiting
  *    its session. Mid-session saves keep status: ToDo / In Progress
- *    with `blocked: null`, which fall through and preserve the live
+ *    with `waiting_on: null`, which fall through and preserve the live
  *    dispatch record.
  *
  * Without this, a stale `dispatch{}` block survives every Done /
- * Needs Help / Blocked save and falsely re-claims the card on the
+ * Needs Help / Waiting save and falsely re-claims the card on the
  * next poller startup's reattach pass — the symptom that prompted
  * Phase 2 of the poller-triage rework.
  */
@@ -603,12 +638,12 @@ export function isDispatchSessionTerminal(issue: Issue): boolean {
   if (
     issue.status === "Done" ||
     issue.status === "Cancelled" ||
-    issue.status === "Needs Help" ||
+    issue.status === "Blocked" ||
     issue.status === "Needs Approval"
   ) {
     return true;
   }
-  if (issue.blocked !== null) return true;
+  if (issue.waiting_on !== null) return true;
   return false;
 }
 
@@ -857,7 +892,7 @@ export async function handleIssueCreate(
   // divergence between cache and on-disk YAML is a correctness hazard.
   lastSeenIssueState.set(stamped.id, {
     status: stamped.status,
-    blocked: stamped.blocked,
+    waiting_on: stamped.waiting_on,
   });
 
   json(res, 200, {
@@ -868,20 +903,24 @@ export async function handleIssueCreate(
 }
 
 /**
- * Force `status: "ToDo"` whenever the YAML carries a non-null `blocked`
- * record. Returns the original issue unchanged when `blocked === null` or
+ * Force `status: "ToDo"` whenever the YAML carries a non-null `waiting_on`
+ * record. Returns the original issue unchanged when `waiting_on === null` or
  * `status` is already ToDo, so the no-op path doesn't allocate.
  *
  * Why this lives in the worker (not the agent's skill text): if any agent
  * forgets the rule, the worker silently corrects it before persistence and
- * before the tracker push. The pairing is mechanical — `blocked` and
+ * before the tracker push. The pairing is mechanical — `waiting_on` and
  * `status: ToDo` are inseparable — so it belongs at the layer that owns
  * persistence, not at the layer that's easy to forget.
  */
-export function forceBlockedToToDo(issue: Issue): Issue {
-  if (issue.blocked === null) return issue;
-  if (issue.status === "ToDo") return issue;
-  return { ...issue, status: "ToDo" };
+export function forceWaitingOnToToDo(issue: Issue): Issue {
+  if (issue.waiting_on === null) return issue;
+  if (issue.status === "ToDo" && issue.blocked === null) return issue;
+  // waiting_on overrides any self-block + Blocked status — the card is
+  // queued behind deps, not self-blocked. Clear `blocked` along with the
+  // status flip so the v4 invariant `status === "Blocked" ⟺ blocked !== null`
+  // holds post-normalization.
+  return { ...issue, status: "ToDo", blocked: null };
 }
 
 /**
@@ -936,10 +975,10 @@ export async function syncTrackedIssueOnComplete(
     return { ok: false, errors: [msg] };
   }
 
-  // Same blocked → ToDo normalization as `handleIssueSave` (see comment
+  // Same waiting_on → ToDo normalization as `handleIssueSave` (see comment
   // there). Auto-sync on completion goes through this code path when the
   // agent calls `danxbot_complete` without a final explicit save.
-  issue = forceBlockedToToDo(issue);
+  issue = forceWaitingOnToToDo(issue);
 
   // DX-146 / Phase 2: same diff append as `handleIssueSave`. The
   // auto-sync triggered by `danxbot_complete` is a save event from

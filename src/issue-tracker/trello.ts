@@ -79,7 +79,7 @@ export class TrelloTracker implements IssueTracker {
       { status: "Review", listId: this.trello.reviewListId },
       { status: "ToDo", listId: this.trello.todoListId },
       { status: "In Progress", listId: this.trello.inProgressListId },
-      { status: "Needs Help", listId: this.trello.needsHelpListId },
+      { status: "Blocked", listId: this.trello.needsHelpListId },
       { status: "Needs Approval", listId: this.trello.needsApprovalListId },
       { status: "Review", listId: this.trello.actionItemsListId },
     ];
@@ -135,7 +135,7 @@ export class TrelloTracker implements IssueTracker {
     // calls `getComments` itself for the merge step).
     const parsed = parseCardTitle(card.name);
     return {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       // Internal id is parsed from the `#<PREFIX>-N: ` title prefix where
       // PREFIX is any 2-4 uppercase letters (Phase 2 of ISS-99 — supports
@@ -167,10 +167,12 @@ export class TrelloTracker implements IssueTracker {
       ac,
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      // `blocked` is local-only metadata managed by the agent + worker.
-      // Trello has no native field for it; sync.ts diffs the Blocked LABEL
-      // separately. Always emit null on read so the local YAML stays
-      // authoritative for the structured record.
+      // `waiting_on` (dep-chain queue) and `blocked` (self-block reason)
+      // are local-only metadata managed by the agent + worker. Trello has
+      // no native field for either — the Blocked label is derived from
+      // `status === "Blocked"` only. Always emit null on read so the
+      // local YAML stays authoritative for both records.
+      waiting_on: null,
       blocked: null,
       // `history` is local-only audit; Trello has no native field for it.
       // Phase 1 of DX-138 (DX-145) lands the schema; the tracker abstraction
@@ -187,10 +189,9 @@ export class TrelloTracker implements IssueTracker {
     const listId = this.statusToListId(input.status);
     const labelIds = await this.resolveLabelIds({
       type: input.type,
-      needsHelp: input.status === "Needs Help",
+      blocked: input.status === "Blocked",
       needsApproval: input.status === "Needs Approval",
       triaged: isTriaged(input.triage),
-      blocked: false,
     });
     const url = `${TRELLO_BASE}/cards?${this.auth()}`;
     // The Trello card title carries the internal id prefix `#<id>: ` so
@@ -326,12 +327,15 @@ export class TrelloTracker implements IssueTracker {
     const triagedLabelId = await this.resolveTriagedLabelId();
     return {
       type,
-      needsHelp: idLabels.includes(this.trello.needsHelpLabelId),
+      // status === "Blocked" → mapped to the existing Trello "Blocked"
+      // label. The operator-named "Blocked" Trello label / list still
+      // exist on the board for now (operator-renamed later); the data
+      // layer is fully repurposed to the new "Blocked" status name.
+      blocked: idLabels.includes(this.trello.blockedLabelId),
       needsApproval:
         !!this.trello.needsApprovalLabelId &&
         idLabels.includes(this.trello.needsApprovalLabelId),
       triaged: idLabels.includes(triagedLabelId),
-      blocked: idLabels.includes(this.trello.blockedLabelId),
     };
   }
 
@@ -482,7 +486,7 @@ export class TrelloTracker implements IssueTracker {
         return this.trello.todoListId;
       case "In Progress":
         return this.trello.inProgressListId;
-      case "Needs Help":
+      case "Blocked":
         return this.trello.needsHelpListId;
       case "Needs Approval":
         if (!this.trello.needsApprovalListId) {
@@ -502,7 +506,7 @@ export class TrelloTracker implements IssueTracker {
     if (listId === this.trello.reviewListId) return "Review";
     if (listId === this.trello.todoListId) return "ToDo";
     if (listId === this.trello.inProgressListId) return "In Progress";
-    if (listId === this.trello.needsHelpListId) return "Needs Help";
+    if (listId === this.trello.needsHelpListId) return "Blocked";
     if (
       this.trello.needsApprovalListId &&
       listId === this.trello.needsApprovalListId
@@ -538,14 +542,14 @@ export class TrelloTracker implements IssueTracker {
         ids.push(this.trello.featureLabelId);
         break;
     }
-    if (labels.needsHelp) ids.push(this.trello.needsHelpLabelId);
+    // status === "Blocked" → existing Trello "Blocked" label.
+    if (labels.blocked) ids.push(this.trello.blockedLabelId);
     // Apply the Needs Approval label only when the operator has provisioned
     // it. Empty id during rollout → silently skip; the managed-set filter
     // still strips a stale label if the operator removes it later.
     if (labels.needsApproval && this.trello.needsApprovalLabelId) {
       ids.push(this.trello.needsApprovalLabelId);
     }
-    if (labels.blocked) ids.push(this.trello.blockedLabelId);
     if (labels.triaged) ids.push(await this.resolveTriagedLabelId());
     return ids;
   }

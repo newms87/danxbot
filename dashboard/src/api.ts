@@ -8,6 +8,7 @@ import type {
   IssueDetail,
   IssueListItem,
   JsonlBlock,
+  SystemError,
 } from "./types";
 import { useAuth } from "./composables/useAuth";
 import { useStream } from "./composables/useStream";
@@ -86,6 +87,22 @@ export async function fetchAgents(): Promise<AgentSnapshot[]> {
   const res = await fetchWithAuth("/api/agents");
   if (!res.ok) throw new Error(`fetchAgents failed: ${res.status}`);
   return res.json();
+}
+
+export async function fetchSystemErrors(opts: {
+  repo?: string;
+  limit?: number;
+} = {}): Promise<SystemError[]> {
+  const params = new URLSearchParams();
+  if (opts.repo) params.set("repo", opts.repo);
+  if (typeof opts.limit === "number") params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await fetchWithAuth(
+    `/api/system-errors${qs ? `?${qs}` : ""}`,
+  );
+  if (!res.ok) throw new Error(`fetchSystemErrors failed: ${res.status}`);
+  const body = (await res.json()) as { events: SystemError[] };
+  return body.events;
 }
 
 export async function fetchIssues(

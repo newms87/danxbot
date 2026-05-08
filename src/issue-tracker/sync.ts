@@ -263,18 +263,22 @@ export async function syncIssue(
 
   // 4c: labels
   //
-  // The five managed labels — type, needsHelp, needsApproval, triaged,
-  // blocked — are derived from local YAML data (`status`, `type`,
-  // `triage.last_status` / `triage.history`, `blocked`). On Trello, NONE
+  // The four managed labels — type, blocked, needsApproval, triaged —
+  // are derived from local YAML data (`status`, `type`,
+  // `triage.last_status` / `triage.history`). On Trello, NONE
   // of those source fields round-trip through `getCard`'s data shape —
-  // `triage` and `blocked` have no native column, and `type` itself is
-  // derived from labels. So the remote-side diff MUST come from the
-  // actual label state. Trackers project their idLabels onto
-  // `remoteCard.labels` inside `getCard`; we compare local-derived
-  // intent against that projection. Without this, every tick re-wrote
-  // the Triaged / Blocked labels because the data fields the diff used
-  // to compare always read empty on Trello — a real idempotency bug
-  // found by the ISS-88 audit (Slice C).
+  // `triage` has no native column, and `type` itself is derived from
+  // labels. So the remote-side diff MUST come from the actual label state.
+  //
+  // `blocked` mirrors `status === "Blocked"` (the renamed-from-Needs-Help
+  // self-block status). The `Issue.blocked` FIELD carries the reason, but
+  // the label is keyed off status alone — status is the index lookup, the
+  // field is the reason cache, and the worker enforces the field/status
+  // invariant.
+  //
+  // `waiting_on` is NOT a managed label. Cards waiting on dep-chains stay
+  // visually `ToDo`; their state is captured in the YAML and rendered by
+  // the dashboard. No tracker label is auto-applied for waiting_on.
   if (!remoteCard.labels) {
     throw new Error(
       `tracker.getCard returned no labels projection for ${local.external_id} — every IssueTracker implementation must populate Issue.labels`,
@@ -282,7 +286,7 @@ export async function syncIssue(
   }
   const localLabels = {
     type: local.type,
-    needsHelp: local.status === "Needs Help",
+    blocked: local.status === "Blocked",
     needsApproval: local.status === "Needs Approval",
     // The "triaged" label flips on as soon as the triage agent has made
     // any decision on the card — `last_status` is non-empty after the
@@ -291,15 +295,13 @@ export async function syncIssue(
     // STILL be on (the card was triaged in the legacy world; we just
     // re-triage soon).
     triaged: isTriaged(local.triage),
-    blocked: local.blocked !== null,
   };
   const remoteLabels = remoteCard.labels;
   if (
     localLabels.type !== remoteLabels.type ||
-    localLabels.needsHelp !== remoteLabels.needsHelp ||
+    localLabels.blocked !== remoteLabels.blocked ||
     localLabels.needsApproval !== remoteLabels.needsApproval ||
-    localLabels.triaged !== remoteLabels.triaged ||
-    localLabels.blocked !== remoteLabels.blocked
+    localLabels.triaged !== remoteLabels.triaged
   ) {
     await tracker.setLabels(local.external_id, localLabels);
     writes++;

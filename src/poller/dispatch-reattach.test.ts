@@ -10,8 +10,8 @@ function makeIssue(
   dispatch: IssueDispatch | null,
   status: Issue["status"] = "In Progress",
 ): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -34,8 +34,16 @@ function makeIssue(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 function liveDispatch(overrides: Partial<IssueDispatch> = {}): IssueDispatch {

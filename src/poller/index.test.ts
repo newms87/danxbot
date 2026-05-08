@@ -306,7 +306,7 @@ const mockEnsureGitignoreEntry = vi.fn();
  */
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: "trello",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -322,6 +322,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
   };
 }
@@ -2301,7 +2302,7 @@ describe("poll — pickup-name-prefix filter", () => {
     // unrelated "real-1" must NOT be moved to Needs Help even though
     // it's in In Progress.
     const moves = mockTracker.moveToStatus.mock.calls.filter(
-      (c: unknown[]) => c[1] === "Needs Help",
+      (c: unknown[]) => c[1] === "Blocked",
     );
     const movedIds = moves.map((c: unknown[]) => c[0]);
     expect(movedIds).not.toContain("real-1");
@@ -2325,7 +2326,7 @@ describe("poll — Needs Help checking", () => {
   });
 
   it("moves user-responded cards from Needs Help to ToDo", async () => {
-    const nhCard = ref("nh1", "Blocked card", "Needs Help");
+    const nhCard = ref("nh1", "Blocked card", "Blocked");
     // First call (Needs Help check) returns the help card.
     // Second call (_poll's ToDo filter) returns the same card now in ToDo
     // (simulating the move's effect on a subsequent fetch).
@@ -2349,7 +2350,7 @@ describe("poll — Needs Help checking", () => {
 
   it("does not move cards still waiting for user (bot comment is latest)", async () => {
     mockTracker.fetchOpenCards.mockResolvedValueOnce([
-      ref("nh1", "Blocked card", "Needs Help"),
+      ref("nh1", "Blocked card", "Blocked"),
     ]);
     mockTracker.getComments.mockResolvedValue([
       {
@@ -2367,7 +2368,7 @@ describe("poll — Needs Help checking", () => {
 
   it("does not move cards with no comments", async () => {
     mockTracker.fetchOpenCards.mockResolvedValueOnce([
-      ref("nh1", "New error card", "Needs Help"),
+      ref("nh1", "New error card", "Blocked"),
     ]);
     mockTracker.getComments.mockResolvedValue([]);
 
@@ -2378,9 +2379,9 @@ describe("poll — Needs Help checking", () => {
 
   it("only moves user-responded cards in a mixed set", async () => {
     const cards = [
-      ref("nh1", "Bot waiting", "Needs Help"),
-      ref("nh2", "User replied", "Needs Help"),
-      ref("nh3", "No comments", "Needs Help"),
+      ref("nh1", "Bot waiting", "Blocked"),
+      ref("nh2", "User replied", "Blocked"),
+      ref("nh3", "No comments", "Blocked"),
     ];
     mockTracker.fetchOpenCards.mockResolvedValue(cards);
     // Each card has its own comments call. mockTracker.getComments is
@@ -2422,8 +2423,8 @@ describe("poll — Needs Help checking", () => {
   it("handles individual card comment check failure gracefully", async () => {
     mockTracker.fetchOpenCards
       .mockResolvedValueOnce([
-        ref("nh1", "Card 1", "Needs Help"),
-        ref("nh2", "Card 2", "Needs Help"),
+        ref("nh1", "Card 1", "Blocked"),
+        ref("nh2", "Card 2", "Blocked"),
       ])
       .mockResolvedValueOnce([ref("nh2", "Card 2", "ToDo")]);
     mockTracker.getComments
@@ -2440,7 +2441,7 @@ describe("poll — Needs Help checking", () => {
 
   it("spawns team when Needs Help cards are moved and no ToDo cards existed before", async () => {
     mockTracker.fetchOpenCards
-      .mockResolvedValueOnce([ref("nh1", "User replied", "Needs Help")])
+      .mockResolvedValueOnce([ref("nh1", "User replied", "Blocked")])
       .mockResolvedValueOnce([ref("nh1", "User replied", "ToDo")]);
     mockTracker.getComments.mockResolvedValue([
       { id: "a1", author: "user", timestamp: "t", text: "Done" },
@@ -2767,7 +2768,7 @@ describe("poll — post-dispatch card-progress check", () => {
 
   it("does NOT write the flag when the tracked card moved to Needs Help", async () => {
     mockTracker.getCard.mockResolvedValue(
-      issueWithStatus("c1", "Card 1", "Needs Help"),
+      issueWithStatus("c1", "Card 1", "Blocked"),
     );
 
     await runOneDispatch([{ id: "c1", name: "Card 1" }], {
@@ -2859,7 +2860,7 @@ describe("poll — post-dispatch card-progress check", () => {
         return blockedSet
           ? {
               ...issueWithStatus("c1", "Epic card", "ToDo"),
-              blocked: {
+              waiting_on: {
                 reason: "Waiting on ISS-20 to resolve AC #11",
                 timestamp: "2026-05-04T23:48:59.000Z",
                 by: ["ISS-20"],
@@ -3962,7 +3963,7 @@ describe("poll — stuck card recovery on failure", () => {
     });
     await flushAsync();
 
-    expect(mockTracker.moveToStatus).toHaveBeenCalledWith("c1", "Needs Help");
+    expect(mockTracker.moveToStatus).toHaveBeenCalledWith("c1", "Blocked");
     expect(mockTracker.addComment).toHaveBeenCalledWith(
       "c1",
       expect.stringContaining("Agent Failure"),
@@ -4011,10 +4012,10 @@ describe("poll — stuck card recovery on failure", () => {
 
     // Only c1 should be moved (it was in our ToDo list before spawn).
     const moves = mockTracker.moveToStatus.mock.calls.filter(
-      (c: unknown[]) => c[1] === "Needs Help",
+      (c: unknown[]) => c[1] === "Blocked",
     );
     expect(moves).toHaveLength(1);
-    expect(moves[0]).toEqual(["c1", "Needs Help"]);
+    expect(moves[0]).toEqual(["c1", "Blocked"]);
   });
 
   it("does not recover cards on successful completion", async () => {
@@ -4043,7 +4044,7 @@ describe("poll — stuck card recovery on failure", () => {
     // No additional fetchOpenCards call (recovery didn't fire) and
     // no Needs Help moves.
     const nhMoves = mockTracker.moveToStatus.mock.calls.filter(
-      (c: unknown[]) => c[1] === "Needs Help",
+      (c: unknown[]) => c[1] === "Blocked",
     );
     expect(nhMoves).toEqual([]);
   });
@@ -4080,18 +4081,18 @@ describe("poll — stuck card recovery on failure", () => {
     await flushAsync();
 
     const nhMoves = mockTracker.moveToStatus.mock.calls.filter(
-      (c: unknown[]) => c[1] === "Needs Help",
+      (c: unknown[]) => c[1] === "Blocked",
     );
     expect(nhMoves).toHaveLength(2);
     // Filter out dispatch-lock comments — the lock layer posts one on
     // the primary card before dispatch. Stuck-card recovery posts the
-    // remaining two ("Needs Help" explanations).
+    // remaining two ("Blocked" explanations).
     const recoveryComments = mockTracker.addComment.mock.calls.filter(
       (c: unknown[]) => !String(c[1]).includes("danxbot-lock"),
     );
     expect(recoveryComments).toHaveLength(2);
-    expect(nhMoves).toContainEqual(["c1", "Needs Help"]);
-    expect(nhMoves).toContainEqual(["c2", "Needs Help"]);
+    expect(nhMoves).toContainEqual(["c1", "Blocked"]);
+    expect(nhMoves).toContainEqual(["c2", "Blocked"]);
   });
 
   it("recovers stuck cards on agent timeout (not just failure)", async () => {
@@ -4121,7 +4122,7 @@ describe("poll — stuck card recovery on failure", () => {
     });
     await flushAsync();
 
-    expect(mockTracker.moveToStatus).toHaveBeenCalledWith("c1", "Needs Help");
+    expect(mockTracker.moveToStatus).toHaveBeenCalledWith("c1", "Blocked");
     expect(mockTracker.addComment).toHaveBeenCalledWith(
       "c1",
       expect.stringContaining("timed out"),
@@ -4332,7 +4333,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     // again across multiple back-to-back ticks (without
     // `_resetForTesting`).
     mockFindByExternalId.mockReturnValue({
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-100",
       external_id: "card-cached",
@@ -4436,7 +4437,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     // Correct behavior: card moves to ToDo (last comment is from
     // user). Inverted (`comments[0]`) behavior: card stays put.
     mockTracker.fetchOpenCards
-      .mockResolvedValueOnce([ref("nh1", "Blocked", "Needs Help")])
+      .mockResolvedValueOnce([ref("nh1", "Blocked", "Blocked")])
       .mockResolvedValueOnce([ref("nh1", "Blocked", "ToDo")]);
     mockTracker.getComments.mockResolvedValue([
       // Oldest first — the bot comment that put the card in Needs Help.
@@ -4513,7 +4514,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ref("card-uuid-3", "Card 3", "ToDo"),
     ]);
     const existingIssue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-200",
       external_id: "card-uuid-3",
@@ -4553,7 +4554,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ref("card-block-1", "Blocked card", "ToDo"),
     ]);
     const blockedIssue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-300",
       external_id: "card-block-1",
@@ -4568,11 +4569,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      blocked: {
+      waiting_on: {
         reason: "waiting on ISS-99",
         timestamp: "2026-05-04T18:00:00.000Z",
         by: ["ISS-99"],
       },
+      blocked: null,
       history: [],
     };
     mockFindByExternalId.mockReturnValue(blockedIssue);
@@ -4598,7 +4600,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ref("card-block-2", "Now-unblocked card", "ToDo"),
     ]);
     const blockedIssue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-301",
       external_id: "card-block-2",
@@ -4613,11 +4615,12 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      blocked: {
+      waiting_on: {
         reason: "waiting on ISS-99",
         timestamp: "2026-05-04T18:00:00.000Z",
         by: ["ISS-99"],
       },
+      blocked: null,
       history: [],
     };
     mockFindByExternalId.mockReturnValue(blockedIssue);
@@ -5603,7 +5606,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
       triageDueIssue({
         id: "ISS-11",
         external_id: "nh1",
-        status: "Needs Help",
+        status: "Blocked",
         title: "Stalled human work",
       }),
     ]);
@@ -5626,7 +5629,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
         external_id: "blk1",
         status: "ToDo",
         title: "Blocked card",
-        blocked: {
+        waiting_on: {
           reason: "Waits for ISS-99",
           timestamp: "2026-04-01T00:00:00Z",
           by: ["ISS-99"],
@@ -6008,8 +6011,8 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
     host: string,
     kindOverride: "work" | "triage" = "work",
   ): Issue {
-    return {
-      schema_version: 3,
+    const merged: Issue = {
+      schema_version: 4,
       tracker: "memory",
       id,
       external_id: `ext-${id}`,
@@ -6039,8 +6042,16 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    waiting_on: null,
       history: [],
     };
+    if (merged.status === "Blocked" && merged.blocked === null) {
+      merged.blocked = {
+        reason: "test self-block",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      };
+    }
+    return merged;
   }
 
   it("registers same-host alive PIDs in activeDispatches and does NOT clear their YAMLs", async () => {
@@ -6215,7 +6226,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
     host: string,
   ): Promise<Issue> {
     const issue: Issue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id,
       external_id: `ext-${id}`,
@@ -6245,6 +6256,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    waiting_on: null,
       history: [],
     };
     mockReaddirSync.mockReturnValue([`${id}.yml`]);
@@ -6325,7 +6337,7 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const aliveIssue: Issue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-200",
       external_id: "ext-200",
@@ -6355,6 +6367,7 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    waiting_on: null,
       history: [],
     };
 
@@ -6400,7 +6413,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const issue: Issue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-301",
       external_id: "ext-301",
@@ -6430,6 +6443,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    waiting_on: null,
       history: [],
     };
 
@@ -6781,7 +6795,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
 
     // Simulate the boot reattach having already registered this card.
     const aliveYaml: Issue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-501",
       external_id: "card-restart-alive",
@@ -6804,6 +6818,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    waiting_on: null,
       history: [],
     };
 
@@ -6852,7 +6867,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const expiredYaml: Issue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "memory",
       id: "ISS-502",
       external_id: "card-ttl-expired",
@@ -6883,6 +6898,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    waiting_on: null,
       history: [],
     };
 

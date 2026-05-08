@@ -36,6 +36,7 @@ import {
   handleGetIssue,
   handleListIssues,
 } from "./issues-routes.js";
+import { handleListSystemErrors } from "./system-errors-routes.js";
 import {
   handleLogin,
   handleLogout,
@@ -310,6 +311,11 @@ async function route(
 
   if (method === "POST" && url.pathname === "/api/admin/reset") {
     await handleAdminReset(req, res);
+    return true;
+  }
+
+  if (method === "GET" && url.pathname === "/api/system-errors") {
+    handleListSystemErrors(res, url.searchParams);
     return true;
   }
 

@@ -5,3 +5,4 @@ features.md
 settings.json
 .settings.lock
 issues/
+.trello-retry/

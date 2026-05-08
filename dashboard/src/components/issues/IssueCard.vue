@@ -23,8 +23,8 @@ const emit = defineEmits<{
 }>();
 
 const isEpic = computed(() => props.issue.type === "Epic");
-const blocked = computed(() => props.issue.blocked);
-const blockedByIds = computed(() => props.issue.blocked_by ?? []);
+const blocked = computed(() => props.issue.waiting_on);
+const blockedByIds = computed(() => props.issue.waiting_on_by ?? []);
 const blockedByCard = computed(
   () => blocked.value && blockedByIds.value.length > 0,
 );
@@ -69,7 +69,7 @@ function onParentClick(e: MouseEvent): void {
         v-if="blocked"
         class="blocked-badge"
         :class="{ 'blocked-by-card': blockedByCard }"
-        :title="issue.blocked_reason ?? undefined"
+        :title="issue.waiting_on_reason ?? undefined"
       >
         <span class="blocked-glyph">{{ blockedByCard ? '⏸' : '⛔' }}</span>
         {{ blockedLabel }}

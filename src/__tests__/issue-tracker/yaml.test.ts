@@ -14,7 +14,7 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -38,6 +38,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     ],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...overrides,
   };
@@ -72,7 +73,7 @@ describe("serializeIssue / parseIssue", () => {
     expect(parsed.dispatch).toBeNull();
   });
 
-  describe("blocked field", () => {
+  describe("blocked field (self-block)", () => {
     it("round-trips blocked: null (default for unblocked cards)", () => {
       const issue = fullIssue({ blocked: null });
       const yaml = serializeIssue(issue);
@@ -83,10 +84,10 @@ describe("serializeIssue / parseIssue", () => {
 
     it("round-trips a populated blocked record byte-for-byte", () => {
       const issue = fullIssue({
+        status: "Blocked",
         blocked: {
-          reason: "waiting on ISS-99 to ship the migration",
+          reason: "Blocked on external dependency",
           timestamp: "2026-05-04T18:00:00.000Z",
-          by: ["ISS-99", "ISS-100"],
         },
       });
       const yaml = serializeIssue(issue);
@@ -109,29 +110,27 @@ describe("serializeIssue / parseIssue", () => {
     it("rejects a blocked record missing reason", () => {
       const yaml = serializeIssue(fullIssue()).replace(
         "blocked: null\n",
-        "blocked:\n  timestamp: t\n  by:\n    - ISS-1\n",
+        "blocked:\n  timestamp: t\n",
       );
       expect(() => parseIssue(yaml)).toThrow(/blocked\.reason/);
     });
 
-    it("rejects a blocked record with empty by[]", () => {
+    it("rejects a blocked record with unexpected 'by' field (v4 only has reason + timestamp)", () => {
       const yaml = serializeIssue(fullIssue()).replace(
         "blocked: null\n",
-        "blocked:\n  reason: r\n  timestamp: t\n  by: []\n",
+        "blocked:\n  reason: r\n  timestamp: t\n  by:\n    - ISS-1\n",
       );
-      expect(() => parseIssue(yaml)).toThrow(
-        /blocked\.by must contain at least one/,
-      );
+      // v4 invariant: the self-block field has no `by[]` (that's `waiting_on.by`).
+      // Parser fails loud so a half-migrated YAML doesn't silently round-trip.
+      expect(() => parseIssue(yaml)).toThrow(/blocked must NOT carry 'by'/);
     });
 
-    it("rejects a blocked.by entry that is not an ISS-N id", () => {
+    it("rejects a blocked record missing timestamp", () => {
       const yaml = serializeIssue(fullIssue()).replace(
         "blocked: null\n",
-        "blocked:\n  reason: r\n  timestamp: t\n  by:\n    - not-an-iss-id\n",
+        "blocked:\n  reason: r\n",
       );
-      expect(() => parseIssue(yaml)).toThrow(
-        /blocked\.by\[0\] must match ISS-/,
-      );
+      expect(() => parseIssue(yaml)).toThrow(/blocked\.timestamp/);
     });
   });
 
@@ -247,7 +246,7 @@ describe("validateIssue", () => {
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
     return {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-42",
       external_id: "x1",
@@ -451,11 +450,16 @@ describe("validateIssue", () => {
 
   // ---- Test gap E: pin exact validator error wording ----
 
-  it("schema_version: 4 produces the exact error string", () => {
+  it("schema_version: 4 is now the canonical version (v3 auto-migrated to v4)", () => {
     const result = validateIssue(valid({ schema_version: 4 }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("schema_version: 5 produces the exact error string (next unsupported version)", () => {
+    const result = validateIssue(valid({ schema_version: 5 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors).toContain("schema_version must be 3 (got 4)");
+      expect(result.errors).toContain("schema_version must be 3 or 4 (got 5)");
     }
   });
 
@@ -569,7 +573,7 @@ describe("children field (v3 epic → phase linkage)", () => {
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
     return {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-100",
       external_id: "x1",
@@ -706,7 +710,7 @@ describe("createEmptyIssue", () => {
 
   it("uses sensible defaults when no seed fields are provided", () => {
     const issue = createEmptyIssue();
-    expect(issue.schema_version).toBe(3);
+    expect(issue.schema_version).toBe(4);
     expect(issue.tracker).toBe("memory");
     expect(issue.children).toEqual([]);
     expect(issue.status).toBe("ToDo");
@@ -723,7 +727,7 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 3,
+      schema_version: 4,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -754,11 +758,12 @@ describe("serializeIssue byte-stable snapshot", () => {
         commits: ["abc1234"],
       },
       blocked: null,
+      waiting_on: null,
       history: [],
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 3
+      "schema_version: 4
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -805,6 +810,7 @@ describe("serializeIssue byte-stable snapshot", () => {
           - ISS-101
         commits:
           - abc1234
+      waiting_on: null
       blocked: null
       "
     `);
@@ -1339,7 +1345,7 @@ describe("validateIssue with options.expectedPrefix", () => {
     const result = validateIssue(
       valid({
         id: "DX-1",
-        blocked: {
+        waiting_on: {
           reason: "waiting on DX-2",
           timestamp: "2026-05-07T00:00:00Z",
           by: ["DX-2"],
@@ -1348,16 +1354,16 @@ describe("validateIssue with options.expectedPrefix", () => {
       { expectedPrefix: "DX" },
     );
     expect(result.ok).toBe(true);
-    if (result.ok && result.issue.blocked) {
-      expect(result.issue.blocked.by).toEqual(["DX-2"]);
+    if (result.ok && result.issue.waiting_on) {
+      expect(result.issue.waiting_on.by).toEqual(["DX-2"]);
     }
   });
 
-  it("rejects blocked.by[] with mismatched prefix", () => {
+  it("rejects waiting_on.by[] with mismatched prefix", () => {
     const result = validateIssue(
       valid({
         id: "DX-1",
-        blocked: {
+        waiting_on: {
           reason: "x",
           timestamp: "2026-05-07T00:00:00Z",
           by: ["ISS-2"],
@@ -1368,7 +1374,7 @@ describe("validateIssue with options.expectedPrefix", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
-        result.errors.some((e) => /blocked\.by\[0\]/.test(e) && /DX-/.test(e)),
+        result.errors.some((e) => /waiting_on\.by\[0\]/.test(e) && /DX-/.test(e)),
       ).toBe(true);
     }
   });

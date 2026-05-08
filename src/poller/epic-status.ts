@@ -13,8 +13,8 @@
  *  - Cancelled children are excluded from rules 4 + 5 (they don't block
  *    a Done / Review derivation). Rule 6 fires only when EVERY child is
  *    Cancelled — a single non-Cancelled child shifts the answer.
- *  - Parents with `blocked != null` are skipped — the worker normalizes
- *    blocked parents to `status: ToDo` on save, so writing a derived
+ *  - Parents with `waiting_on != null` are skipped — the worker normalizes
+ *    waiting-on parents to `status: ToDo` on save, so writing a derived
  *    status would just churn IO every tick.
  *  - Children may live in `open/` or `closed/`. The walker reads both
  *    via `loadLocal`, which short-circuits on the open/ hit and falls
@@ -89,8 +89,8 @@ export interface DeriveStatusResult {
 export function deriveStatus(children: Issue[]): DeriveStatusResult | null {
   if (children.length === 0) return null;
 
-  if (children.some((c) => c.status === "Needs Help")) {
-    return { status: "Needs Help", rule: "Any child Needs Help — parent Needs Help" };
+  if (children.some((c) => c.status === "Blocked")) {
+    return { status: "Blocked", rule: "Any child Blocked — parent Blocked" };
   }
   if (children.some((c) => c.status === "Needs Approval")) {
     return {
@@ -135,7 +135,7 @@ export function deriveStatus(children: Issue[]): DeriveStatusResult | null {
  * caller can log them.
  *
  * Skips:
- *  - Parents with `blocked != null` (the worker forces those to
+ *  - Parents with `waiting_on != null` (the worker forces those to
  *    `status: ToDo` on save; deriving would churn IO).
  *  - Parents whose every listed child is missing locally (defensive —
  *    `deriveStatus` of an empty resolved set returns null).
@@ -176,7 +176,7 @@ export function recomputeParentStatuses(
     }
 
     if (parent.children.length === 0) continue;
-    if (parent.blocked !== null) continue;
+    if (parent.waiting_on !== null) continue;
 
     // Resolve children. Missing children are silently skipped — the
     // alternative (treat missing as "blocks derivation") would lock a
@@ -218,9 +218,23 @@ export function recomputeParentStatuses(
       to: derived.status,
       note: derived.rule,
     });
+    // Maintain the v4 invariant `status === "Blocked" ⟺ blocked !== null`
+    // when the auto-derive promotes the parent to / from Blocked. The
+    // self-block reason carries the derive-rule string so a reader can
+    // see why the parent was auto-flipped without walking children.
+    let updatedBlocked = parent.blocked;
+    if (derived.status === "Blocked" && parent.blocked === null) {
+      updatedBlocked = {
+        reason: `Auto-derived from children: ${derived.rule}`,
+        timestamp: new Date().toISOString(),
+      };
+    } else if (derived.status !== "Blocked" && parent.blocked !== null) {
+      updatedBlocked = null;
+    }
     const updated: Issue = {
       ...parent,
       status: derived.status,
+      blocked: updatedBlocked,
       history: updatedHistory,
     };
     // Use writeIssue which always writes to open/. Derived statuses of

@@ -62,8 +62,8 @@ function ice(total: number, i = 1, c = 1, e = 1): IssueIce {
 }
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
-  const base: Issue = {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -86,9 +86,17 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
+    ...overrides,
   };
-  return { ...base, ...overrides };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 function writeAt(repoRoot: string, issue: Issue, mtimeSeconds: number): void {
@@ -398,7 +406,7 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
         id: "ISS-1",
         external_id: "a",
         status: "ToDo",
-        blocked: {
+        waiting_on: {
           reason: "Waits for ISS-99",
           timestamp: "2026-04-01T00:00:00Z",
           by: ["ISS-99"],

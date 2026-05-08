@@ -13,8 +13,8 @@ import type { Issue, IssueStatus } from "../issue-tracker/interface.js";
 import { deriveStatus, recomputeParentStatuses } from "./epic-status.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -37,9 +37,17 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...overrides,
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 function child(id: string, status: IssueStatus): Issue {
@@ -59,19 +67,19 @@ describe("deriveStatus", () => {
     expect(deriveStatus([])).toBeNull();
   });
 
-  describe("priority rule 1 — any Needs Help / Needs Approval lifts to parent", () => {
-    it("Needs Help wins over In Progress / ToDo / Review / Done / Cancelled", () => {
+  describe("priority rule 1 — any Blocked / Needs Approval lifts to parent", () => {
+    it("Blocked wins over In Progress / ToDo / Review / Done / Cancelled", () => {
       const result = deriveStatus([
         child("ISS-1", "In Progress"),
         child("ISS-2", "ToDo"),
-        child("ISS-3", "Needs Help"),
+        child("ISS-3", "Blocked"),
         child("ISS-4", "Done"),
       ]);
-      expect(result?.status).toBe("Needs Help");
-      expect(result?.rule).toMatch(/Needs Help/);
+      expect(result?.status).toBe("Blocked");
+      expect(result?.rule).toMatch(/Blocked/);
     });
 
-    it("Needs Approval lifts to parent (preserves distinction from Needs Help)", () => {
+    it("Needs Approval lifts to parent (preserves distinction from Blocked)", () => {
       const result = deriveStatus([
         child("ISS-1", "In Progress"),
         child("ISS-2", "Needs Approval"),
@@ -80,16 +88,16 @@ describe("deriveStatus", () => {
       expect(result?.rule).toMatch(/Needs Approval/);
     });
 
-    it("Needs Help wins over Needs Approval when both present", () => {
+    it("Blocked wins over Needs Approval when both present", () => {
       const result = deriveStatus([
         child("ISS-1", "Needs Approval"),
-        child("ISS-2", "Needs Help"),
+        child("ISS-2", "Blocked"),
       ]);
-      expect(result?.status).toBe("Needs Help");
+      expect(result?.status).toBe("Blocked");
     });
   });
 
-  describe("priority rule 2 — any In Progress (without Needs Help/Approval)", () => {
+  describe("priority rule 2 — any In Progress (without Blocked/Approval)", () => {
     it("In Progress wins over ToDo / Review / Done / Cancelled", () => {
       const result = deriveStatus([
         child("ISS-1", "Done"),
@@ -320,7 +328,7 @@ describe("recomputeParentStatuses (integration)", () => {
         type: "Epic",
         status: "ToDo",
         children: ["ISS-2"],
-        blocked: {
+        waiting_on: {
           reason: "Waits on something external",
           timestamp: "2026-05-01T00:00:00Z",
           by: ["ISS-99"],
@@ -407,7 +415,7 @@ describe("recomputeParentStatuses (integration)", () => {
     expect(loadStatus("ISS-1")).toBe("Done");
   });
 
-  it("propagates Needs Help up an Epic chain on the same call", () => {
+  it("propagates Blocked up an Epic chain on the same call", () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -418,11 +426,11 @@ describe("recomputeParentStatuses (integration)", () => {
       }),
     );
     writeOpen(repoRoot, child("ISS-2", "Done"));
-    writeOpen(repoRoot, child("ISS-3", "Needs Help"));
+    writeOpen(repoRoot, child("ISS-3", "Blocked"));
 
     const changes = recomputeParentStatuses(repoRoot);
     expect(changes).toHaveLength(1);
-    expect(loadStatus("ISS-1")).toBe("Needs Help");
+    expect(loadStatus("ISS-1")).toBe("Blocked");
   });
 
   // ----- DX-147 — history-append on auto-derive -----
@@ -539,7 +547,7 @@ describe("recomputeParentStatuses (integration)", () => {
   // misroutes the rule strings) would slip past the single Done-flip
   // test.
 
-  it("DX-147: rule 1 — Needs Help flip note describes the Needs Help rule", () => {
+  it("DX-147: rule 1 — Blocked flip note describes the Blocked rule", () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -549,11 +557,11 @@ describe("recomputeParentStatuses (integration)", () => {
         children: ["ISS-2"],
       }),
     );
-    writeOpen(repoRoot, child("ISS-2", "Needs Help"));
+    writeOpen(repoRoot, child("ISS-2", "Blocked"));
 
     recomputeParentStatuses(repoRoot);
     const note = loadIssue("ISS-1").history[0].note ?? "";
-    expect(note).toMatch(/Needs Help/);
+    expect(note).toMatch(/Blocked/);
   });
 
   it("DX-147: rule 2 — In Progress flip note describes the In Progress rule", () => {

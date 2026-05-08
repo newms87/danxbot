@@ -65,5 +65,11 @@ export type {
   IssueAcItem,
   IssueComment,
   IssueRetro,
-  IssueBlocked,
+  WaitingOn,
+  Blocked,
 } from "@backend/issue-tracker/interface.js";
+export type {
+  SystemError,
+  SystemErrorSource,
+  SystemErrorSeverity,
+} from "@backend/dashboard/system-errors.js";

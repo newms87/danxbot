@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { serializeIssue } from "../issue-tracker/yaml.js";
-import type { Issue, IssueBlocked } from "../issue-tracker/interface.js";
+import type { Issue, WaitingOn } from "../issue-tracker/interface.js";
 import {
   listBlockedTodoYamls,
   listDispatchableYamls,
@@ -18,8 +18,8 @@ import {
 } from "./local-issues.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -35,9 +35,21 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...overrides,
   };
+  // Auto-populate the self-block record when caller sets status="Blocked"
+  // without an explicit `blocked` override. Keeps the v4 invariant
+  // `status === "Blocked" ⟺ blocked !== null` without forcing every test
+  // call site to repeat the {reason, timestamp} shape.
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 function writeAt(
@@ -79,7 +91,7 @@ describe("local-issues", () => {
       );
       writeAt(
         repoRoot,
-        makeIssue({ id: "ISS-2", external_id: "b", status: "Needs Help" }),
+        makeIssue({ id: "ISS-2", external_id: "b", status: "Blocked" }),
         1000,
       );
       writeAt(
@@ -92,14 +104,14 @@ describe("local-issues", () => {
     });
 
     it("excludes blocked YAMLs", () => {
-      const blocked: IssueBlocked = {
+      const waiting_on: WaitingOn = {
         reason: "Waits for ISS-2",
         timestamp: "2026-01-01T00:00:00Z",
         by: ["ISS-2"],
       };
       writeAt(
         repoRoot,
-        makeIssue({ id: "ISS-1", external_id: "a", blocked }),
+        makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
         1000,
       );
       writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
@@ -274,7 +286,7 @@ describe("local-issues", () => {
   });
 
   describe("listBlockedTodoYamls", () => {
-    const blocked: IssueBlocked = {
+    const waiting_on: WaitingOn = {
       reason: "Waits for ISS-2",
       timestamp: "2026-01-01T00:00:00Z",
       by: ["ISS-2"],
@@ -283,12 +295,12 @@ describe("local-issues", () => {
     it("returns ToDo issues with non-null blocked, sorted FIFO", () => {
       writeAt(
         repoRoot,
-        makeIssue({ id: "ISS-1", external_id: "a", blocked }),
+        makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
         2000,
       );
       writeAt(
         repoRoot,
-        makeIssue({ id: "ISS-2", external_id: "b", blocked }),
+        makeIssue({ id: "ISS-2", external_id: "b", waiting_on }),
         1000,
       );
       const result = listBlockedTodoYamls(repoRoot);
@@ -300,14 +312,14 @@ describe("local-issues", () => {
       expect(listBlockedTodoYamls(repoRoot)).toEqual([]);
     });
 
-    it("excludes In Progress issues even with non-null blocked", () => {
+    it("excludes In Progress issues even with non-null waiting_on", () => {
       writeAt(
         repoRoot,
         makeIssue({
           id: "ISS-1",
           external_id: "a",
           status: "In Progress",
-          blocked,
+          waiting_on,
         }),
         1000,
       );
@@ -385,11 +397,11 @@ describe("local-issues", () => {
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
-    it("returns Needs Help cards whose triage is due", () => {
+    it("returns Blocked cards whose triage is due", () => {
       writeAt(
         repoRoot,
         withTriage(
-          { id: "ISS-1", external_id: "a", status: "Needs Help" },
+          { id: "ISS-1", external_id: "a", status: "Blocked" },
           "",
         ),
         1000,
@@ -398,8 +410,8 @@ describe("local-issues", () => {
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
-    it("returns Blocked cards (blocked != null) regardless of status", () => {
-      const blocked: IssueBlocked = {
+    it("returns Blocked cards (waiting_on != null) regardless of status", () => {
+      const waiting_on: WaitingOn = {
         reason: "Waits for ISS-99",
         timestamp: "2026-04-01T00:00:00Z",
         by: ["ISS-99"],
@@ -407,7 +419,7 @@ describe("local-issues", () => {
       writeAt(
         repoRoot,
         withTriage(
-          { id: "ISS-1", external_id: "a", status: "ToDo", blocked },
+          { id: "ISS-1", external_id: "a", status: "ToDo", waiting_on },
           "",
         ),
         1000,

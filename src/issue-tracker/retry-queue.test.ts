@@ -62,8 +62,8 @@ import { parseIssue, serializeIssue } from "./yaml.js";
 import type { Issue, IssueTracker } from "./interface.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -86,9 +86,17 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...overrides,
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 function writeOpenIssue(repoLocalPath: string, issue: Issue): string {

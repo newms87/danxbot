@@ -14,8 +14,8 @@ import { pushOrphans } from "./orphan-push.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "memory",
     id: "ISS-1",
     external_id: "",
@@ -31,9 +31,17 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...overrides,
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 function writeOrphan(repoRoot: string, issue: Issue): void {

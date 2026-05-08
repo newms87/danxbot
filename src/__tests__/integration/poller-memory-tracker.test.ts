@@ -176,7 +176,7 @@ vi.mock("../../workspace/write-if-changed.js", () => ({
 const lastOpenCards: { value: IssueRef[] } = { value: [] };
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 3,
+    schema_version: 4,
     tracker: "memory",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -192,6 +192,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
   };
 }
@@ -287,7 +288,7 @@ function seedDraft(
   ac: { check_item_id: string }[];
 }> {
   return tracker.createCard({
-    schema_version: 3,
+    schema_version: 4,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -484,7 +485,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
 
     // Card is now in Needs Help.
     const final = await tracker.getCard(cardId);
-    expect(final.status).toBe("Needs Help");
+    expect(final.status).toBe("Blocked");
   });
 
   it("the SAME tracker instance is used across multiple back-to-back ticks (cache invariant)", async () => {

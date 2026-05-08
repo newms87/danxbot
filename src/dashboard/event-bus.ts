@@ -18,6 +18,7 @@
 import type { Dispatch } from "./dispatches.js";
 import type { JsonlBlock } from "./jsonl-reader.js";
 import type { AgentSnapshot } from "./agents-routes.js";
+import type { SystemError } from "./system-errors.js";
 
 /** All first-class topic literals. Wildcard prefix patterns are also valid but
  * callers must supply the exact topic string (e.g. `dispatch:jsonl:${id}`). */
@@ -25,6 +26,7 @@ export type EventTopic =
   | "dispatch:created"
   | "dispatch:updated"
   | "agent:updated"
+  | "system-errors"
   | (string & {}); // open-ended for `dispatch:jsonl:<id>`
 
 export interface DispatchCreatedPayload {
@@ -47,11 +49,17 @@ export interface AgentUpdatedPayload {
   data: AgentSnapshot;
 }
 
+export interface SystemErrorPayload {
+  topic: "system-errors";
+  data: SystemError;
+}
+
 export type BusEvent =
   | DispatchCreatedPayload
   | DispatchUpdatedPayload
   | DispatchJsonlPayload
-  | AgentUpdatedPayload;
+  | AgentUpdatedPayload
+  | SystemErrorPayload;
 
 export type BusEventCallback = (event: BusEvent) => void;
 

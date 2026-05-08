@@ -1,21 +1,21 @@
 /**
- * Blocked-card resolver. Pure-local helper extracted from
+ * Waiting-on-card resolver. Pure-local helper extracted from
  * `src/poller/index.ts` (DX-147). Keeps the auto-clear path testable
  * without paying the env-validation tax of pulling `index.ts` into a
  * test (per `.claude/rules/danx-repo-workflow.md` "Isolate Pure Helpers").
  *
- * Responsibility: filter a list of `IssueRef`s by blocked-state. For
- * each card whose local YAML carries a non-null `blocked` record:
+ * Responsibility: filter a list of `IssueRef`s by waiting-on state. For
+ * each card whose local YAML carries a non-null `waiting_on` record:
  *
- *  - Resolve every id in `blocked.by[]` against the local YAML store.
- *  - If ANY blocker is missing locally OR has a non-terminal status
- *    (anything other than Done / Cancelled), the card stays blocked
+ *  - Resolve every id in `waiting_on.by[]` against the local YAML store.
+ *  - If ANY dependency is missing locally OR has a non-terminal status
+ *    (anything other than Done / Cancelled), the card stays waiting
  *    and is dropped from the dispatch list.
- *  - If EVERY blocker is terminal:
+ *  - If EVERY dependency is terminal:
  *      1. Append one `unblocked` entry to the card's `history[]`
  *         attributed to `worker:auto-derive` with the rule that fired
  *         as the `note` (DX-147 AC #2).
- *      2. Clear `blocked` to null and persist.
+ *      2. Clear `waiting_on` to null and persist.
  *      3. Keep the card in the dispatch list — the poller dispatches
  *         it on this same tick.
  *
@@ -29,14 +29,14 @@ import { appendHistory } from "../issue-tracker/yaml.js";
 import type { Issue, IssueRef } from "../issue-tracker/interface.js";
 import { createLogger } from "../logger.js";
 
-const log = createLogger("blocked-resolver");
+const log = createLogger("waiting-on-resolver");
 
 /**
- * Minimal context shape consumed by `resolveBlockedCards`. Subset of
+ * Minimal context shape consumed by `resolveWaitingOnCards`. Subset of
  * `RepoContext` so callers can pass either the full context or a
  * lightweight test stub.
  */
-export interface BlockedResolverContext {
+export interface WaitingOnResolverContext {
   /** Repo name, used only for log-line attribution. */
   name: string;
   /** Absolute path to the connected repo's worktree. */
@@ -45,8 +45,8 @@ export interface BlockedResolverContext {
   issuePrefix: string;
 }
 
-export function resolveBlockedCards(
-  repo: BlockedResolverContext,
+export function resolveWaitingOnCards(
+  repo: WaitingOnResolverContext,
   cards: IssueRef[],
 ): IssueRef[] {
   const out: IssueRef[] = [];
@@ -56,32 +56,32 @@ export function resolveBlockedCards(
       out.push(card);
       continue;
     }
-    if (!local.blocked) {
+    if (!local.waiting_on) {
       out.push(card);
       continue;
     }
-    const blockers = local.blocked.by;
-    const stillBlocking: string[] = [];
-    for (const blockerId of blockers) {
-      const blocker = loadLocal(repo.localPath, blockerId, repo.issuePrefix);
-      if (!blocker) {
-        stillBlocking.push(`${blockerId}(missing)`);
+    const deps = local.waiting_on.by;
+    const stillWaiting: string[] = [];
+    for (const depId of deps) {
+      const dep = loadLocal(repo.localPath, depId, repo.issuePrefix);
+      if (!dep) {
+        stillWaiting.push(`${depId}(missing)`);
         continue;
       }
-      if (blocker.status !== "Done" && blocker.status !== "Cancelled") {
-        stillBlocking.push(`${blockerId}(${blocker.status})`);
+      if (dep.status !== "Done" && dep.status !== "Cancelled") {
+        stillWaiting.push(`${depId}(${dep.status})`);
       }
     }
-    if (stillBlocking.length > 0) {
+    if (stillWaiting.length > 0) {
       log.info(
-        `[${repo.name}] ${local.id} still blocked: ${stillBlocking.join(", ")}`,
+        `[${repo.name}] ${local.id} still waiting on: ${stillWaiting.join(", ")}`,
       );
       continue;
     }
-    // All blockers terminal — clear the record and save. The agent
+    // All deps terminal — clear the record and save. The agent
     // re-picks the card next tick (or this tick if it's first in `out`).
     log.info(
-      `[${repo.name}] ${local.id} all blockers terminal — clearing blocked`,
+      `[${repo.name}] ${local.id} all deps terminal — clearing waiting_on`,
     );
     // DX-147: stamp the audit-log entry BEFORE the file write so the
     // on-disk YAML carries the unblocked event. `note` lists every id
@@ -91,11 +91,11 @@ export function resolveBlockedCards(
       timestamp: new Date().toISOString(),
       actor: "worker:auto-derive",
       event: "unblocked",
-      note: `All blockers terminal: ${blockers.join(", ")}`,
+      note: `All deps terminal: ${deps.join(", ")}`,
     });
     const cleared: Issue = {
       ...local,
-      blocked: null,
+      waiting_on: null,
       history: updatedHistory,
     };
     writeIssue(repo.localPath, cleared);

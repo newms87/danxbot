@@ -53,10 +53,11 @@ import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js"
 import { injectDanxIssueMcp } from "./inject/inject-root-mcp.js";
 import { pushOrphans } from "./orphan-push.js";
 import { recomputeParentStatuses } from "./epic-status.js";
-import { resolveBlockedCards } from "./blocked-resolver.js";
+import { resolveWaitingOnCards } from "./waiting-on-resolver.js";
 import { healLocalYamls } from "./heal.js";
 import { healExternalIds } from "./heal-external-id.js";
 import { drainRetries } from "../issue-tracker/retry-queue.js";
+import { recordSystemError } from "../dashboard/system-errors.js";
 import {
   listBlockedTodoYamls,
   listDispatchableYamls,
@@ -295,7 +296,7 @@ export function evictDeadDispatches(repo: RepoContext): void {
         // `issue.dispatch`. Keeps the verdict logic in one place
         // without forcing the per-tick scan to re-load every YAML.
         {
-          schema_version: 3,
+          schema_version: 4,
           tracker: "memory",
           id: issueId,
           external_id: "",
@@ -317,6 +318,7 @@ export function evictDeadDispatches(repo: RepoContext): void {
           ac: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+          waiting_on: null,
           blocked: null,
           history: [],
         } as Issue,
@@ -412,7 +414,7 @@ async function checkNeedsHelp(
   let refs: IssueRef[];
   try {
     const all = await tracker.fetchOpenCards();
-    refs = all.filter((c) => c.status === "Needs Help");
+    refs = all.filter((c) => c.status === "Blocked");
   } catch (error) {
     log.error(`[${repo.name}] Error fetching Needs Help cards`, error);
     return 0;
@@ -550,6 +552,17 @@ async function _poll(repo: RepoContext): Promise<void> {
   }
   for (const e of healResult.errors) {
     log.warn(`[${repo.name}] Heal pass skipped malformed YAML at ${e.path}: ${e.message}`);
+    // DX-134 Phase 4: a malformed YAML is operator-visible — surface it
+    // to the system-errors banner so the broken file gets attention
+    // BEFORE it cascades through the rest of the tick (it's already
+    // skipped here, but the next tick will hit it again).
+    recordSystemError({
+      source: "healer",
+      severity: "warn",
+      repo: repo.name,
+      message: `Heal pass skipped malformed YAML at ${e.path}: ${e.message}`,
+      details: { path: e.path },
+    });
   }
 
   // ONE tracker per repo, reused across every tick (see `getRepoTracker`).
@@ -597,6 +610,19 @@ async function _poll(repo: RepoContext): Promise<void> {
     tracker,
     repoLocalPath: repo.localPath,
     prefix: repo.issuePrefix,
+    // DX-134 Phase 4: surface MAX_ATTEMPTS exhaustion to the dashboard's
+    // system-errors banner. Until Phase 4 the hook was a no-op default;
+    // wiring it here means a stuck retry entry stops being a buried log
+    // line and becomes a visible alert. Source = "retry-queue", severity
+    // is always "error" (max-attempts means we're out of automatic
+    // retries).
+    recordSystemError: (message) =>
+      recordSystemError({
+        source: "retry-queue",
+        severity: "error",
+        repo: repo.name,
+        message,
+      }),
   });
   if (
     drainResult.attempted > 0 ||
@@ -661,7 +687,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   );
   const trackerReviewRefs = openCards.filter((c) => c.status === "Review");
   const trackerNeedsHelpRefs = openCards.filter(
-    (c) => c.status === "Needs Help",
+    (c) => c.status === "Blocked",
   );
 
   // Bulk-sync every triage-eligible card that lacks a local YAML so
@@ -775,18 +801,18 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  // Blocked-card gate. `listDispatchableYamls` already filtered out
-  // every YAML with non-null `blocked`, so the input set is exclusively
-  // not-blocked. The unblock-on-terminal path runs over a separate
-  // sweep of the blocked ToDo YAMLs: `resolveBlockedCards` clears the
+  // Waiting-on-card gate. `listDispatchableYamls` already filtered out
+  // every YAML with non-null `waiting_on`, so the input set is exclusively
+  // not-waiting. The unblock-on-terminal path runs over a separate
+  // sweep of the waiting ToDo YAMLs: `resolveWaitingOnCards` clears the
   // record + saves, and the freshly-cleared cards join the dispatchable
-  // pool for this tick. See `resolveBlockedCards` for the contract.
-  const blockedRefs: IssueRef[] = listBlockedTodoYamls(
+  // pool for this tick. See `resolveWaitingOnCards` for the contract.
+  const waitingRefs: IssueRef[] = listBlockedTodoYamls(
     repo.localPath,
     repo.issuePrefix,
   ).map(localIssueToRef);
-  if (blockedRefs.length > 0) {
-    const cleared = resolveBlockedCards(repo, blockedRefs);
+  if (waitingRefs.length > 0) {
+    const cleared = resolveWaitingOnCards(repo, waitingRefs);
     if (cleared.length > 0) cards = [...cards, ...cleared];
   }
 
@@ -1038,7 +1064,7 @@ async function bulkSyncMissingYamls(
   }
 }
 
-// `resolveBlockedCards` was extracted to `./blocked-resolver.ts` (DX-147)
+// `resolveWaitingOnCards` was extracted to `./waiting-on-resolver.ts` (DX-147)
 // so the auto-clear path stays testable without paying the env-validation
 // tax of pulling `index.ts` into a unit test. See that file for the
 // full contract.
@@ -2347,9 +2373,9 @@ async function checkCardProgressedOrHalt(
     );
     return;
   }
-  if (local?.blocked) {
+  if (local?.waiting_on) {
     log.info(
-      `[${repo.name}] Tracked card "${card.title}" (${cardId}) intentionally Blocked by ${local.blocked.by.join(", ")} — skipping critical-failure check`,
+      `[${repo.name}] Tracked card "${card.title}" (${cardId}) intentionally waiting on ${local.waiting_on.by.join(", ")} — skipping critical-failure check`,
     );
     return;
   }
@@ -2478,7 +2504,7 @@ async function recoverStuckCards(
       log.warn(
         `[${repo.name}] Recovering stuck card "${card.title}" → Needs Help`,
       );
-      await tracker.moveToStatus(card.external_id, "Needs Help");
+      await tracker.moveToStatus(card.external_id, "Blocked");
 
       const elapsed = formatElapsed(job);
       const comment = `## Agent Failure — Card Recovery
@@ -2547,7 +2573,7 @@ async function tryTriageDispatch(repo: RepoContext): Promise<boolean> {
 
   const target = due[0];
   log.info(
-    `[${repo.name}] Triage-due: dispatching ${target.id} (status=${target.status}, blocked=${target.blocked ? "yes" : "no"}, expires_at=${target.triage.expires_at || "(never)"})`,
+    `[${repo.name}] Triage-due: dispatching ${target.id} (status=${target.status}, waiting_on=${target.waiting_on ? "yes" : "no"}, expires_at=${target.triage.expires_at || "(never)"})`,
   );
 
   const dispatchId = randomUUID();

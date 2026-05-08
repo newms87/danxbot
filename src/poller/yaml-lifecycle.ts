@@ -299,7 +299,7 @@ export function stampDispatchAndWrite(
  *
  *   - Worker `persistAfterSync` clears whenever the saved status is
  *     terminal-for-session (Done / Cancelled / Needs Help / Needs
- *     Approval) or when `blocked != null`. The agent's session is
+ *     Approval) or when `waiting_on != null`. The agent's session is
  *     done with this card; leaving the stale `dispatch` block on
  *     disk would falsely trip the next poller startup's reattach
  *     into "live" status.

@@ -563,6 +563,15 @@ async function runYamlLifecycleScenario(): Promise<void> {
     if (finalStatus === "Done") {
       next = next.replace(/checked: false/g, "checked: true");
     }
+    // v4 invariant: status === "Blocked" ⟺ blocked !== null. Populate the
+    // self-block record when the scenario flips to Blocked so the worker
+    // parser doesn't reject the YAML on the next save.
+    if (finalStatus === "Blocked") {
+      next = next.replace(
+        /^blocked: null$/m,
+        `blocked:\n  reason: "fake-claude scenario forced Blocked"\n  timestamp: "2026-05-08T00:00:00.000Z"`,
+      );
+    }
     next = next.replace(/^  good: .*/m, `  good: ${JSON.stringify(retroGood)}`);
     next = next.replace(/^  bad: .*/m, `  bad: ${JSON.stringify(retroBad)}`);
     return next;

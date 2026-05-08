@@ -32,7 +32,7 @@ outside this card's scope is the May-7 failure mode (ISS-135 / ISS-136).
 
 **FORBIDDEN:**
 
-- Waiting for a human to reply (use `status: Needs Help` instead — the
+- Waiting for a human to reply (use `status: Blocked` instead — the
   operator opens the card, answers, moves it back).
 - Waiting for the next card to land (the poller dispatches; you exit when
   this card is done).
@@ -52,7 +52,7 @@ re-fire the loop after the dispatch is logically over.
 1. Glob `<repo>/.danxbot/issues/open/*.yml`. Filter where `status: "ToDo"`.
 2. Empty → report "No cards to process" and stop.
 3. Report how many cards are queued + list their titles.
-4. For each YAML, invoke the `/danx-next` workflow (Steps 1-11 from that skill) using the YAML's path + `id`. The first step inside `/danx-next` is the same Resume self-check above — terminal-state cards short-circuit there.
+4. For each YAML, invoke the `/danx-next` workflow (Steps 1-11 from that skill) using the YAML's path + `id`. The first step inside `/danx-next` is the same Resume self-check above — terminal-state cards short-circuit there. Step 10 handles Blocked moves, Step 10b handles Waiting On moves.
 5. After each card, re-glob — epic-splitting may have added phase YAMLs.
 6. Loop until no YAML has `status: ToDo`.
 
@@ -60,9 +60,9 @@ re-fire the loop after the dispatch is logically over.
 
 When all cards processed:
 - Total cards processed
-- Cards completed vs failed vs needs-help (counted by terminal `status`)
+- Cards completed vs failed vs blocked (counted by terminal `status`)
 - Key issues encountered
 
 ## Signal Completion
 
-`danxbot_complete({status: "completed", summary: "Processed N cards — X done, Y needs-help, Z failed"})` at the end.
+`danxbot_complete({status: "completed", summary: "Processed N cards — X done, Y blocked, Z failed"})` at the end.

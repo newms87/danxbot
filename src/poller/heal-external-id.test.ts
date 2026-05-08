@@ -25,8 +25,8 @@ import type { TrelloConfig } from "../types.js";
 function buildIssue(
   overrides: Partial<Issue> & { id: string },
 ): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "trello",
     external_id: "",
     parent_id: null,
@@ -48,9 +48,17 @@ function buildIssue(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...overrides,
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 const TRELLO_CONFIG: TrelloConfig = {
@@ -395,7 +403,7 @@ describe("healExternalIds (DX-150 — per-tick external_id format heal)", () => 
         action_item_ids: ["DX-99"],
         commits: ["abc123"],
       },
-      blocked: {
+      waiting_on: {
         reason: "Waiting on DX-49",
         timestamp: "2026-05-02T00:00:00.000Z",
         by: ["DX-49"],

@@ -16,8 +16,8 @@ import type { Issue, IssueStatus } from "../issue-tracker/interface.js";
 function buildIssue(
   overrides: Partial<Issue> & { id: string; status: IssueStatus },
 ): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "memory",
     external_id: "",
     parent_id: null,
@@ -38,9 +38,17 @@ function buildIssue(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...overrides,
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => {
@@ -131,15 +139,15 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     expect(reloaded.title).toBe("Fresh open copy");
   });
 
-  it("does not touch non-terminal YAMLs (ToDo / In Progress / Needs Help / Needs Approval / blocked)", () => {
+  it("does not touch non-terminal YAMLs (ToDo / In Progress / Blocked / Needs Approval / waiting_on)", () => {
     const todo = buildIssue({ id: "ISS-1", status: "ToDo" });
     const inProgress = buildIssue({ id: "ISS-2", status: "In Progress" });
-    const needsHelp = buildIssue({ id: "ISS-3", status: "Needs Help" });
+    const needsHelp = buildIssue({ id: "ISS-3", status: "Blocked" });
     const needsApproval = buildIssue({ id: "ISS-4", status: "Needs Approval" });
     const blocked = buildIssue({
       id: "ISS-5",
       status: "ToDo",
-      blocked: {
+      waiting_on: {
         reason: "Waiting on ISS-9",
         timestamp: "2026-05-08T00:00:00.000Z",
         by: ["ISS-9"],
@@ -322,14 +330,14 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     // filename-location heuristic falls back to "Done".
     const drifted = buildIssue({
       id: "ISS-60",
-      status: "Needs Help",
+      status: "Blocked",
       history: [],
     });
     writeFileSync(resolve(closedDir, "ISS-60.yml"), serializeIssue(drifted));
 
     const result = healLocalYamls(repoRoot);
     expect(result.healed).toEqual([
-      { id: "ISS-60", status: "Needs Help", direction: "closed-to-open" },
+      { id: "ISS-60", status: "Blocked", direction: "closed-to-open" },
     ]);
 
     const reloaded = parseIssue(
@@ -337,7 +345,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     );
     expect(reloaded.history).toHaveLength(1);
     expect(reloaded.history[0].from).toBe("Done");
-    expect(reloaded.history[0].to).toBe("Needs Help");
+    expect(reloaded.history[0].to).toBe("Blocked");
   });
 
   it("DX-147: closed YAML whose status is still terminal is a no-op (idempotency on the inverse pass)", () => {

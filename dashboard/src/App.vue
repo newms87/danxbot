@@ -4,11 +4,13 @@ import DashboardHeader, { type TabId } from "./components/DashboardHeader.vue";
 import DispatchList from "./components/DispatchList.vue";
 import DispatchFilters from "./components/DispatchFilters.vue";
 import DispatchDetail from "./components/DispatchDetail.vue";
+import SystemErrorsBanner from "./components/SystemErrorsBanner.vue";
 import AgentsPage from "./components/agents/AgentsPage.vue";
 import IssuesPage from "./components/issues/IssuesPage.vue";
 import SettingsPage from "./components/SettingsPage.vue";
 import Login from "./components/auth/Login.vue";
 import { useDispatches } from "./composables/useDispatches";
+import { useSystemErrors } from "./composables/useSystemErrors";
 import { useAuth } from "./composables/useAuth";
 import { fetchRepos, type RepoInfo } from "./api";
 import type { Dispatch } from "./types";
@@ -55,6 +57,13 @@ const {
   init: initDispatches,
   destroy,
 } = useDispatches();
+
+const {
+  visible: systemErrors,
+  dismiss: dismissSystemError,
+  init: initSystemErrors,
+  destroy: destroySystemErrors,
+} = useSystemErrors();
 
 /**
  * Central 401 handler: `api.ts::fetchWithAuth` dispatches `auth:expired`

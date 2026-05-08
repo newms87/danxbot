@@ -45,7 +45,7 @@ const columns = computed<BoardColumn[]>(() => {
   const review = statusColumn("Review");
   const needsApproval = statusColumn("Needs Approval");
   const todo = statusColumn("ToDo");
-  const blocked = statusColumn("Needs Help");
+  const blocked = statusColumn("Blocked");
   const inProgress = statusColumn("In Progress");
 
   if (props.showClosed) {

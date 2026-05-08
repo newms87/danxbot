@@ -38,8 +38,8 @@ import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "memory",
     id: "ISS-1",
     external_id: "ext-1",
@@ -62,9 +62,17 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...overrides,
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 describe("isDispatchSessionTerminal", () => {
@@ -78,8 +86,8 @@ describe("isDispatchSessionTerminal", () => {
     );
   });
 
-  it("returns true for Needs Help", () => {
-    expect(isDispatchSessionTerminal(makeIssue({ status: "Needs Help" }))).toBe(
+  it("returns true for Blocked", () => {
+    expect(isDispatchSessionTerminal(makeIssue({ status: "Blocked" }))).toBe(
       true,
     );
   });
@@ -95,7 +103,7 @@ describe("isDispatchSessionTerminal", () => {
       isDispatchSessionTerminal(
         makeIssue({
           status: "ToDo",
-          blocked: {
+          waiting_on: {
             reason: "Waits on ISS-99",
             timestamp: "2026-05-07T12:00:00Z",
             by: ["ISS-99"],
@@ -105,7 +113,7 @@ describe("isDispatchSessionTerminal", () => {
     ).toBe(true);
   });
 
-  it("returns false for mid-session ToDo (no blocked)", () => {
+  it("returns false for mid-session ToDo (no waiting_on)", () => {
     expect(isDispatchSessionTerminal(makeIssue({ status: "ToDo" }))).toBe(
       false,
     );
@@ -317,7 +325,7 @@ describe("runSync (local-first persist)", () => {
       id: "ISS-105",
       external_id: "ext-105",
       status: "ToDo",
-      blocked: {
+      waiting_on: {
         reason: "Waits on ISS-99",
         timestamp: "2026-05-08T07:00:00Z",
         by: ["ISS-99"],
@@ -342,7 +350,7 @@ describe("runSync (local-first persist)", () => {
     expect(persisted.status).toBe("ToDo");
     // Blocked is treated as session-terminal → dispatch slot cleared.
     expect(persisted.dispatch).toBeNull();
-    expect(persisted.blocked).not.toBeNull();
+    expect(persisted.waiting_on).not.toBeNull();
     expect(recordError).toHaveBeenCalledTimes(1);
   });
 

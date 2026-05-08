@@ -14,12 +14,12 @@ import type {
   IssueRef,
   IssueStatus,
 } from "../issue-tracker/interface.js";
-import { resolveBlockedCards } from "./blocked-resolver.js";
+import { resolveWaitingOnCards } from "./waiting-on-resolver.js";
 
 function buildIssue(overrides: Partial<Issue> & { id: string }): Issue {
   const { id, ...rest } = overrides;
-  return {
-    schema_version: 3,
+  const merged: Issue = {
+    schema_version: 4,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -42,9 +42,17 @@ function buildIssue(overrides: Partial<Issue> & { id: string }): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    waiting_on: null,
     history: [],
     ...rest,
   };
+  if (merged.status === "Blocked" && merged.blocked === null) {
+    merged.blocked = {
+      reason: "test self-block",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return merged;
 }
 
 function writeIssueAt(repoRoot: string, issue: Issue, state: "open" | "closed" = "open"): void {
@@ -62,11 +70,11 @@ function ref(externalId: string, title: string, status: IssueStatus): IssueRef {
   return { id: "", external_id: externalId, title, status };
 }
 
-describe("resolveBlockedCards", () => {
+describe("resolveWaitingOnCards", () => {
   let repoRoot: string;
 
   beforeEach(() => {
-    repoRoot = mkdtempSync(join(tmpdir(), "danxbot-blocked-resolver-"));
+    repoRoot = mkdtempSync(join(tmpdir(), "danxbot-waiting-on-resolver-"));
   });
 
   afterEach(() => {
@@ -81,73 +89,73 @@ describe("resolveBlockedCards", () => {
 
   it("passes through cards with no local YAML (defensive — bulk-sync covers these)", () => {
     const cards = [ref("ext-orphan", "No local YAML yet", "ToDo")];
-    expect(resolveBlockedCards(ctx(repoRoot), cards)).toEqual(cards);
+    expect(resolveWaitingOnCards(ctx(repoRoot), cards)).toEqual(cards);
   });
 
-  it("passes through cards whose local YAML has blocked: null", () => {
-    const issue = buildIssue({ id: "ISS-1", blocked: null });
+  it("passes through cards whose local YAML has waiting_on: null", () => {
+    const issue = buildIssue({ id: "ISS-1", waiting_on: null });
     writeIssueAt(repoRoot, issue);
 
     const cards = [ref(issue.external_id, issue.title, "ToDo")];
-    expect(resolveBlockedCards(ctx(repoRoot), cards)).toEqual(cards);
+    expect(resolveWaitingOnCards(ctx(repoRoot), cards)).toEqual(cards);
 
     // Untouched — no history added.
     expect(loadIssue(repoRoot, "ISS-1").history).toEqual([]);
   });
 
-  it("drops cards whose blockers are still non-terminal — no clear, no history entry", () => {
-    const blocker = buildIssue({ id: "ISS-99", status: "In Progress" });
-    const blocked = buildIssue({
+  it("drops cards whose deps are still non-terminal — no clear, no history entry", () => {
+    const dep = buildIssue({ id: "ISS-99", status: "In Progress" });
+    const waiting = buildIssue({
       id: "ISS-1",
-      blocked: {
+      waiting_on: {
         reason: "Waits on ISS-99",
         timestamp: "2026-05-08T00:00:00.000Z",
         by: ["ISS-99"],
       },
     });
-    writeIssueAt(repoRoot, blocker);
-    writeIssueAt(repoRoot, blocked);
+    writeIssueAt(repoRoot, dep);
+    writeIssueAt(repoRoot, waiting);
 
-    const cards = [ref(blocked.external_id, blocked.title, "ToDo")];
-    const out = resolveBlockedCards(ctx(repoRoot), cards);
+    const cards = [ref(waiting.external_id, waiting.title, "ToDo")];
+    const out = resolveWaitingOnCards(ctx(repoRoot), cards);
     expect(out).toEqual([]);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
-    expect(reloaded.blocked).not.toBeNull();
+    expect(reloaded.waiting_on).not.toBeNull();
     expect(reloaded.history).toEqual([]);
   });
 
   // ----- DX-147 — auto-clear emits worker:auto-derive unblocked entry -----
 
-  it("DX-147: clearing blocked when every blocker is terminal appends ONE worker:auto-derive unblocked entry with the blocker ids in the note", () => {
-    // Two blockers: one Done, one Cancelled — both terminal.
-    const b1 = buildIssue({ id: "ISS-90", status: "Done" });
-    const b2 = buildIssue({ id: "ISS-91", status: "Cancelled" });
-    writeIssueAt(repoRoot, b1, "closed");
-    writeIssueAt(repoRoot, b2, "closed");
+  it("DX-147: clearing waiting_on when every dep is terminal appends ONE worker:auto-derive unblocked entry with the dep ids in the note", () => {
+    // Two deps: one Done, one Cancelled — both terminal.
+    const d1 = buildIssue({ id: "ISS-90", status: "Done" });
+    const d2 = buildIssue({ id: "ISS-91", status: "Cancelled" });
+    writeIssueAt(repoRoot, d1, "closed");
+    writeIssueAt(repoRoot, d2, "closed");
 
-    const blocked = buildIssue({
+    const waiting = buildIssue({
       id: "ISS-1",
-      blocked: {
+      waiting_on: {
         reason: "Waits on ISS-90 + ISS-91",
         timestamp: "2026-05-08T00:00:00.000Z",
         by: ["ISS-90", "ISS-91"],
       },
     });
-    writeIssueAt(repoRoot, blocked);
+    writeIssueAt(repoRoot, waiting);
 
-    const cards = [ref(blocked.external_id, blocked.title, "ToDo")];
-    const out = resolveBlockedCards(ctx(repoRoot), cards);
+    const cards = [ref(waiting.external_id, waiting.title, "ToDo")];
+    const out = resolveWaitingOnCards(ctx(repoRoot), cards);
     expect(out).toEqual(cards);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
-    expect(reloaded.blocked).toBeNull();
+    expect(reloaded.waiting_on).toBeNull();
     expect(reloaded.history).toHaveLength(1);
     const entry = reloaded.history[0];
     expect(entry.actor).toBe("worker:auto-derive");
     expect(entry.event).toBe("unblocked");
-    // Note must reference EVERY blocker id so dashboard readers can
-    // correlate the unblock back to the chain (`note: All blockers
+    // Note must reference EVERY dep id so dashboard readers can
+    // correlate the unblock back to the chain (`note: All deps
     // terminal: ISS-X, ISS-Y` per the spec).
     expect(entry.note).toContain("ISS-90");
     expect(entry.note).toContain("ISS-91");
@@ -155,35 +163,35 @@ describe("resolveBlockedCards", () => {
     expect(Number.isFinite(Date.parse(entry.timestamp))).toBe(true);
   });
 
-  it("DX-147: a missing blocker (no YAML on disk) keeps the card blocked — no clear, no history entry", () => {
-    // `blocked.by` references a never-created blocker. The resolver
-    // treats that as "still blocking" (per the docstring) and drops
+  it("DX-147: a missing dep (no YAML on disk) keeps the card waiting — no clear, no history entry", () => {
+    // `waiting_on.by` references a never-created dep. The resolver
+    // treats that as "still waiting" (per the docstring) and drops
     // the card from the dispatch list. No write to disk, no history
-    // mutation. Pins the missing-blocker branch at
-    // `blocked-resolver.ts:67-70` (`stillBlocking.push(\`${id}(missing)\`)`).
-    const blocked = buildIssue({
+    // mutation. Pins the missing-dep branch at
+    // `waiting-on-resolver.ts:67-70` (`stillWaiting.push(\`${id}(missing)\`)`).
+    const waiting = buildIssue({
       id: "ISS-1",
-      blocked: {
+      waiting_on: {
         reason: "Waits on ISS-99 (does not exist locally)",
         timestamp: "2026-05-08T00:00:00.000Z",
         by: ["ISS-99"],
       },
     });
-    writeIssueAt(repoRoot, blocked);
+    writeIssueAt(repoRoot, waiting);
 
-    const cards = [ref(blocked.external_id, blocked.title, "ToDo")];
-    const out = resolveBlockedCards(ctx(repoRoot), cards);
+    const cards = [ref(waiting.external_id, waiting.title, "ToDo")];
+    const out = resolveWaitingOnCards(ctx(repoRoot), cards);
     expect(out).toEqual([]);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
-    expect(reloaded.blocked).not.toBeNull();
+    expect(reloaded.waiting_on).not.toBeNull();
     expect(reloaded.history).toEqual([]);
   });
 
-  it("DX-147: ANY non-terminal blocker keeps the card blocked even if other blockers are terminal (mixed set)", () => {
-    // Three blockers: two terminal, one In Progress. The "ANY
-    // non-terminal" rule means the card stays blocked. Pins the
-    // existential semantic of `stillBlocking.length > 0`.
+  it("DX-147: ANY non-terminal dep keeps the card waiting even if other deps are terminal (mixed set)", () => {
+    // Three deps: two terminal, one In Progress. The "ANY
+    // non-terminal" rule means the card stays waiting. Pins the
+    // existential semantic of `stillWaiting.length > 0`.
     const done = buildIssue({ id: "ISS-90", status: "Done" });
     const cancelled = buildIssue({ id: "ISS-91", status: "Cancelled" });
     const live = buildIssue({ id: "ISS-92", status: "In Progress" });
@@ -191,48 +199,48 @@ describe("resolveBlockedCards", () => {
     writeIssueAt(repoRoot, cancelled, "closed");
     writeIssueAt(repoRoot, live);
 
-    const blocked = buildIssue({
+    const waiting = buildIssue({
       id: "ISS-1",
-      blocked: {
-        reason: "Waits on three blockers",
+      waiting_on: {
+        reason: "Waits on three deps",
         timestamp: "2026-05-08T00:00:00.000Z",
         by: ["ISS-90", "ISS-91", "ISS-92"],
       },
     });
-    writeIssueAt(repoRoot, blocked);
+    writeIssueAt(repoRoot, waiting);
 
-    const cards = [ref(blocked.external_id, blocked.title, "ToDo")];
-    const out = resolveBlockedCards(ctx(repoRoot), cards);
+    const cards = [ref(waiting.external_id, waiting.title, "ToDo")];
+    const out = resolveWaitingOnCards(ctx(repoRoot), cards);
     expect(out).toEqual([]);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
-    expect(reloaded.blocked).not.toBeNull();
+    expect(reloaded.waiting_on).not.toBeNull();
     expect(reloaded.history).toEqual([]);
   });
 
   it("appends history without losing prior entries (cap + truncation are appendHistory's responsibility)", () => {
-    const b = buildIssue({ id: "ISS-90", status: "Done" });
-    writeIssueAt(repoRoot, b, "closed");
+    const d = buildIssue({ id: "ISS-90", status: "Done" });
+    writeIssueAt(repoRoot, d, "closed");
 
     const prior = {
       timestamp: "2026-05-01T00:00:00.000Z",
       actor: "dispatch:abc",
       event: "blocked" as const,
       to: "ToDo" as IssueStatus,
-      note: "Blocked on ISS-90",
+      note: "Waiting on ISS-90",
     };
-    const blocked = buildIssue({
+    const waiting = buildIssue({
       id: "ISS-1",
-      blocked: {
+      waiting_on: {
         reason: "Waits on ISS-90",
         timestamp: "2026-05-08T00:00:00.000Z",
         by: ["ISS-90"],
       },
       history: [prior],
     });
-    writeIssueAt(repoRoot, blocked);
+    writeIssueAt(repoRoot, waiting);
 
-    resolveBlockedCards(ctx(repoRoot), [ref(blocked.external_id, blocked.title, "ToDo")]);
+    resolveWaitingOnCards(ctx(repoRoot), [ref(waiting.external_id, waiting.title, "ToDo")]);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
     expect(reloaded.history).toHaveLength(2);
