@@ -274,6 +274,7 @@ const REPO: RepoContext = {
   githubToken: "test-github-token",
   trelloEnabled: true,
   workerPort: 5562,
+  issuePrefix: "ISS",
 };
 
 function seedDraft(

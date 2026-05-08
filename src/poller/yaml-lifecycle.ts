@@ -30,8 +30,9 @@ import {
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import {
+  buildIssueIdRegex,
   createEmptyIssue,
-  ISSUE_ID_REGEX,
+  DEFAULT_ISSUE_PREFIX,
   parseIssue,
   serializeIssue,
   validateIssue,
@@ -85,11 +86,12 @@ export function ensureIssuesDirs(repoLocalPath: string): void {
 export function loadLocal(
   repoLocalPath: string,
   id: string,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
 ): Issue | null {
   for (const state of ["open", "closed"] as const) {
     const path = issuePath(repoLocalPath, id, state);
     if (!existsSync(path)) continue;
-    return parseIssue(readFileSync(path, "utf-8"));
+    return parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: prefix });
   }
   return null;
 }
@@ -108,17 +110,21 @@ export function loadLocal(
 export function findByExternalId(
   repoLocalPath: string,
   externalId: string,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
 ): Issue | null {
   if (!externalId) return null;
+  const idRegex = buildIssueIdRegex(prefix);
   for (const state of ["open", "closed"] as const) {
     const dir = resolve(repoLocalPath, ".danxbot", "issues", state);
     if (!existsSync(dir)) continue;
     for (const entry of readdirSync(dir)) {
       if (!entry.endsWith(".yml")) continue;
       const stem = entry.slice(0, -".yml".length);
-      if (!ISSUE_ID_REGEX.test(stem)) continue;
+      if (!idRegex.test(stem)) continue;
       const path = resolve(dir, entry);
-      const issue = parseIssue(readFileSync(path, "utf-8"));
+      const issue = parseIssue(readFileSync(path, "utf-8"), {
+        expectedPrefix: prefix,
+      });
       if (issue.external_id === externalId) return issue;
     }
   }
@@ -169,13 +175,17 @@ export async function hydrateFromRemote(
   externalId: string,
   dispatchId: string | null,
   repoLocalPath: string,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
 ): Promise<Issue> {
   const remote = await tracker.getCard(externalId);
   const remoteComments = await tracker.getComments(externalId);
 
   let id = remote.id;
   if (!id) {
-    id = await nextIssueId(resolve(repoLocalPath, ".danxbot", "issues"));
+    id = await nextIssueId(
+      resolve(repoLocalPath, ".danxbot", "issues"),
+      prefix,
+    );
     // Patch the remote title so the `#<id>: ` prefix is visible on the
     // tracker UI and subsequent polls find the id without re-allocating.
     await tracker.updateCard(externalId, {
@@ -218,7 +228,7 @@ export async function hydrateFromRemote(
     retro: remote.retro,
   };
 
-  const validated = validateIssue(candidate);
+  const validated = validateIssue(candidate, { expectedPrefix: prefix });
   if (!validated.ok) {
     throw new Error(
       `hydrateFromRemote: validation failed for ${externalId}:\n  - ${validated.errors.join("\n  - ")}`,

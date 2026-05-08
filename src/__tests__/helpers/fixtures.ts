@@ -87,6 +87,7 @@ export function makeRepoContext(overrides?: Partial<RepoContext>): RepoContext {
     },
     githubToken: "test-github-token",
     workerPort: 5562,
+    issuePrefix: "ISS",
     ...overrides,
   };
 }

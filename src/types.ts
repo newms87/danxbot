@@ -169,6 +169,15 @@ export interface RepoContext {
   db: RepoDatabaseConfig;
   githubToken: string;
   workerPort: number;
+  /**
+   * Per-repo issue id namespace prefix (`DX`, `SG`, `FD`, …). Loaded from
+   * `<repo>/.danxbot/config/config.yml` `issue_prefix` field; validated
+   * against `^[A-Z]{2,4}$`. Defaults to `"ISS"` (one warn-once log) when
+   * the field is missing — Phase 1 of ISS-99 keeps the legacy default so
+   * existing repos continue to parse + dispatch unchanged. Phase 4 will
+   * drop the fallback once every connected repo has the field set.
+   */
+  issuePrefix: string;
 }
 
 export interface AgentResponse {

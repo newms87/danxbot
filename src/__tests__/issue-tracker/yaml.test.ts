@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildIssueIdRegex,
   createEmptyIssue,
+  ISSUE_ID_REGEX,
   IssueParseError,
+  LEGACY_ISS_REGEX,
   parseIssue,
   serializeIssue,
   validateIssue,
@@ -133,7 +136,7 @@ describe("serializeIssue / parseIssue", () => {
 
   it("preserves string parent_id and dispatch record", () => {
     const issue = fullIssue({
-      parent_id: "epic-100",
+      parent_id: "ISS-100",
       dispatch: {
         id: "abc-uuid",
         pid: 12345,
@@ -145,8 +148,22 @@ describe("serializeIssue / parseIssue", () => {
     });
     const yaml = serializeIssue(issue);
     const parsed = parseIssue(yaml);
-    expect(parsed.parent_id).toBe("epic-100");
+    expect(parsed.parent_id).toBe("ISS-100");
     expect(parsed.dispatch).toEqual(issue.dispatch);
+  });
+
+  it("rejects parent_id that does not match the expected prefix shape", () => {
+    // ISS-99 Phase 1: the validator now enforces the per-repo `<PREFIX>-<N>`
+    // shape on parent_id, same as id / children / blocked.by /
+    // retro.action_item_ids. Foreign-prefix or free-text parent_ids would
+    // silently break Phase 2's threading of `expectedPrefix` if not caught
+    // here.
+    const issue = fullIssue();
+    const result = validateIssue({ ...issue, parent_id: "epic-100" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => /parent_id/.test(e))).toBe(true);
+    }
   });
 
   it("omits id field for local-only comments and preserves it for tracker-known comments", () => {
@@ -1168,5 +1185,298 @@ describe("isTriaged helper", () => {
         }),
       ),
     ).toBe(true);
+  });
+});
+
+// ---- ISS-99 Phase 1: prefix-aware id validation ----
+
+describe("buildIssueIdRegex", () => {
+  it("matches DX-12 with prefix DX", () => {
+    expect(buildIssueIdRegex("DX").test("DX-12")).toBe(true);
+  });
+
+  it("matches SG-1 with prefix SG", () => {
+    expect(buildIssueIdRegex("SG").test("SG-1")).toBe(true);
+  });
+
+  it("matches FD-9999 with prefix FD", () => {
+    expect(buildIssueIdRegex("FD").test("FD-9999")).toBe(true);
+  });
+
+  it("matches ISS-1 with prefix ISS (legacy default)", () => {
+    expect(buildIssueIdRegex("ISS").test("ISS-1")).toBe(true);
+  });
+
+  it("rejects DX-12 with prefix SG (cross-repo mismatch)", () => {
+    expect(buildIssueIdRegex("SG").test("DX-12")).toBe(false);
+  });
+
+  it("rejects ISS-12 with prefix DX (pre-migration filename)", () => {
+    expect(buildIssueIdRegex("DX").test("ISS-12")).toBe(false);
+  });
+
+  it("rejects malformed ids regardless of prefix", () => {
+    const r = buildIssueIdRegex("DX");
+    expect(r.test("dx-12")).toBe(false);
+    expect(r.test("DX12")).toBe(false);
+    expect(r.test("DX-")).toBe(false);
+    expect(r.test("DX-abc")).toBe(false);
+    expect(r.test("")).toBe(false);
+  });
+});
+
+describe("LEGACY_ISS_REGEX", () => {
+  it("equals the historical /^ISS-\\d+$/ literal", () => {
+    expect(LEGACY_ISS_REGEX.source).toBe("^ISS-\\d+$");
+    expect(LEGACY_ISS_REGEX.test("ISS-1")).toBe(true);
+    expect(LEGACY_ISS_REGEX.test("DX-1")).toBe(false);
+  });
+
+  it("ISSUE_ID_REGEX is preserved as a name-only alias to LEGACY_ISS_REGEX (deprecated)", () => {
+    expect(ISSUE_ID_REGEX).toBe(LEGACY_ISS_REGEX);
+  });
+});
+
+describe("validateIssue with options.expectedPrefix", () => {
+  function valid(overrides: Partial<Issue> = {}): Record<string, unknown> {
+    const base = JSON.parse(JSON.stringify(fullIssue(overrides))) as Record<
+      string,
+      unknown
+    >;
+    return base;
+  }
+
+  it("accepts a DX-prefixed id when expectedPrefix is DX", () => {
+    const result = validateIssue(valid({ id: "DX-12" }), {
+      expectedPrefix: "DX",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.issue.id).toBe("DX-12");
+  });
+
+  it("rejects an ISS-prefixed id when expectedPrefix is DX", () => {
+    const result = validateIssue(valid({ id: "ISS-12" }), {
+      expectedPrefix: "DX",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => /DX-/.test(e))).toBe(true);
+    }
+  });
+
+  it("accepts an SG-prefixed id when expectedPrefix is SG", () => {
+    const result = validateIssue(valid({ id: "SG-7" }), {
+      expectedPrefix: "SG",
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts an FD-prefixed id when expectedPrefix is FD", () => {
+    const result = validateIssue(valid({ id: "FD-100" }), {
+      expectedPrefix: "FD",
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("validates parent_id against the expected prefix", () => {
+    const result = validateIssue(
+      valid({ id: "DX-1", parent_id: "DX-99" }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.issue.parent_id).toBe("DX-99");
+  });
+
+  it("rejects parent_id with mismatched prefix", () => {
+    const result = validateIssue(
+      valid({ id: "DX-1", parent_id: "ISS-99" }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => /parent_id/.test(e) && /DX-/.test(e)),
+      ).toBe(true);
+    }
+  });
+
+  it("accepts parent_id: null with any prefix", () => {
+    const result = validateIssue(
+      valid({ id: "DX-1", parent_id: null }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("validates children[] against the expected prefix", () => {
+    const result = validateIssue(
+      valid({ id: "DX-1", children: ["DX-2", "DX-3"] }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.children).toEqual(["DX-2", "DX-3"]);
+    }
+  });
+
+  it("rejects children[] entries with the wrong prefix", () => {
+    const result = validateIssue(
+      valid({ id: "DX-1", children: ["SG-2"] }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => /children\[0\]/.test(e) && /DX-/.test(e)),
+      ).toBe(true);
+    }
+  });
+
+  it("validates blocked.by[] against the expected prefix", () => {
+    const result = validateIssue(
+      valid({
+        id: "DX-1",
+        blocked: {
+          reason: "waiting on DX-2",
+          timestamp: "2026-05-07T00:00:00Z",
+          by: ["DX-2"],
+        },
+      }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok && result.issue.blocked) {
+      expect(result.issue.blocked.by).toEqual(["DX-2"]);
+    }
+  });
+
+  it("rejects blocked.by[] with mismatched prefix", () => {
+    const result = validateIssue(
+      valid({
+        id: "DX-1",
+        blocked: {
+          reason: "x",
+          timestamp: "2026-05-07T00:00:00Z",
+          by: ["ISS-2"],
+        },
+      }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) => /blocked\.by\[0\]/.test(e) && /DX-/.test(e)),
+      ).toBe(true);
+    }
+  });
+
+  it("validates retro.action_item_ids[] against the expected prefix", () => {
+    const result = validateIssue(
+      valid({
+        id: "DX-1",
+        retro: {
+          good: "",
+          bad: "",
+          action_item_ids: ["DX-9", "DX-10"],
+          commits: [],
+        },
+      }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.retro.action_item_ids).toEqual(["DX-9", "DX-10"]);
+    }
+  });
+
+  it("rejects retro.action_item_ids[] with mismatched prefix", () => {
+    const result = validateIssue(
+      valid({
+        id: "DX-1",
+        retro: {
+          good: "",
+          bad: "",
+          action_item_ids: ["SG-9"],
+          commits: [],
+        },
+      }),
+      { expectedPrefix: "DX" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some(
+          (e) => /retro\.action_item_ids\[0\]/.test(e) && /DX-/.test(e),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("defaults expectedPrefix to ISS when options is omitted (backward compat)", () => {
+    const result = validateIssue(valid({ id: "ISS-1" }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("defaults expectedPrefix to ISS when options.expectedPrefix is undefined", () => {
+    const result = validateIssue(valid({ id: "ISS-1" }), {});
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("parseIssue with options.expectedPrefix", () => {
+  it("parses a DX-prefixed YAML body when expectedPrefix is DX", () => {
+    const issue = createEmptyIssue({ id: "DX-1", title: "Prefixed" });
+    issue.children = ["DX-2"];
+    const yaml = serializeIssue(issue);
+    const parsed = parseIssue(yaml, { expectedPrefix: "DX" });
+    expect(parsed.id).toBe("DX-1");
+    expect(parsed.children).toEqual(["DX-2"]);
+  });
+
+  it("rejects an ISS-prefixed body when expectedPrefix is DX", () => {
+    const issue = createEmptyIssue({ id: "ISS-1", title: "Prefixed" });
+    const yaml = serializeIssue(issue);
+    expect(() => parseIssue(yaml, { expectedPrefix: "DX" })).toThrow(
+      /DX-/,
+    );
+  });
+
+  it("error message pins the resolved <PREFIX>-<positive integer> shape", () => {
+    const issue = createEmptyIssue({ id: "ISS-1", title: "Prefixed" });
+    const yaml = serializeIssue(issue);
+    expect(() => parseIssue(yaml, { expectedPrefix: "DX" })).toThrow(
+      /DX-<positive integer>/,
+    );
+  });
+});
+
+describe("buildIssueIdRegex shape validation (fail-loud)", () => {
+  it("throws on a lowercase prefix", () => {
+    expect(() => buildIssueIdRegex("dx")).toThrow(
+      /buildIssueIdRegex: invalid prefix "dx"/,
+    );
+  });
+
+  it("throws on a 1-letter prefix", () => {
+    expect(() => buildIssueIdRegex("D")).toThrow(/invalid prefix "D"/);
+  });
+
+  it("throws on a 5-letter prefix", () => {
+    expect(() => buildIssueIdRegex("ABCDE")).toThrow(/invalid prefix "ABCDE"/);
+  });
+
+  it("accepts the boundary shapes XX (2 letters) and ABCD (4 letters)", () => {
+    expect(buildIssueIdRegex("XX").test("XX-1")).toBe(true);
+    expect(buildIssueIdRegex("ABCD").test("ABCD-9999")).toBe(true);
+  });
+});
+
+describe("issue-tracker barrel re-exports (ISS-99 Phase 1 surface)", () => {
+  it("re-exports buildIssueIdRegex, LEGACY_ISS_REGEX, ParseIssueOptions from issue-tracker/index", async () => {
+    const mod = await import("../../issue-tracker/index.js");
+    expect(typeof mod.buildIssueIdRegex).toBe("function");
+    expect(mod.LEGACY_ISS_REGEX).toBeInstanceOf(RegExp);
+    expect(mod.LEGACY_ISS_REGEX.test("ISS-1")).toBe(true);
+    expect(mod.buildIssueIdRegex("DX")).toBeInstanceOf(RegExp);
   });
 });

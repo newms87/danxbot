@@ -35,14 +35,20 @@ vi.mock("./config.js", () => ({
 
 vi.mock("node:fs", () => ({
   existsSync: vi.fn(),
+  readFileSync: vi.fn(),
 }));
 
 import { parseEnvFile } from "./env-file.js";
-import { existsSync } from "node:fs";
-import { loadRepoContext } from "./repo-context.js";
+import { existsSync, readFileSync } from "node:fs";
+import {
+  DEFAULT_ISSUE_PREFIX,
+  loadIssuePrefix,
+  loadRepoContext,
+} from "./repo-context.js";
 
 const mockParseEnvFile = vi.mocked(parseEnvFile);
 const mockExistsSync = vi.mocked(existsSync);
+const mockReadFileSync = vi.mocked(readFileSync);
 
 // Identity-only stub — `loadRepoContext` reads workerPort from the
 // repo's `.danxbot/.env` (via `readWorkerPort`), not from the input
@@ -189,5 +195,147 @@ describe("loadRepoContext — workerPort", () => {
       DANXBOT_WORKER_PORT: "5561.5",
     });
     expect(() => loadRepoContext(TEST_REPO)).toThrow(/DANXBOT_WORKER_PORT/);
+  });
+});
+
+describe("loadIssuePrefix", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it(`returns "${DEFAULT_ISSUE_PREFIX}" when config.yml is missing`, () => {
+    mockExistsSync.mockReturnValue(false);
+    expect(loadIssuePrefix("/repo/missing")).toBe(DEFAULT_ISSUE_PREFIX);
+  });
+
+  it(`returns "${DEFAULT_ISSUE_PREFIX}" when config.yml has no issue_prefix field`, () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("name: example\nurl: https://x\n");
+    expect(loadIssuePrefix("/repo/example")).toBe(DEFAULT_ISSUE_PREFIX);
+  });
+
+  it("returns DX when config.yml carries issue_prefix: DX", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: DX\n");
+    expect(loadIssuePrefix("/repo/danxbot")).toBe("DX");
+  });
+
+  it("returns SG for gpt-manager", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: SG\n");
+    expect(loadIssuePrefix("/repo/gpt-manager")).toBe("SG");
+  });
+
+  it("returns FD for platform", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: FD\n");
+    expect(loadIssuePrefix("/repo/platform")).toBe("FD");
+  });
+
+  it("accepts a quoted issue_prefix value (parser strips the quotes)", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue('issue_prefix: "DX"\n');
+    expect(loadIssuePrefix("/repo/danxbot")).toBe("DX");
+  });
+
+  it("trims whitespace around the prefix value", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix:    DX   \n");
+    expect(loadIssuePrefix("/repo/danxbot")).toBe("DX");
+  });
+
+  it("throws when issue_prefix is lowercase", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: dx\n");
+    expect(() => loadIssuePrefix("/repo/danxbot")).toThrow(
+      /Invalid issue_prefix "dx"/,
+    );
+  });
+
+  it("throws when issue_prefix contains digits", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: DX1\n");
+    expect(() => loadIssuePrefix("/repo/danxbot")).toThrow(
+      /Invalid issue_prefix "DX1"/,
+    );
+  });
+
+  it("throws when issue_prefix is too short (1 letter)", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: D\n");
+    expect(() => loadIssuePrefix("/repo/danxbot")).toThrow(
+      /Invalid issue_prefix "D"/,
+    );
+  });
+
+  it("throws when issue_prefix is too long (5 letters)", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: TOOLONG\n");
+    expect(() => loadIssuePrefix("/repo/danxbot")).toThrow(
+      /Invalid issue_prefix "TOOLONG"/,
+    );
+  });
+
+  it("returns default when issue_prefix is empty string", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix:\n");
+    expect(loadIssuePrefix("/repo/danxbot")).toBe(DEFAULT_ISSUE_PREFIX);
+  });
+
+  it("returns default and does NOT throw when readFileSync throws (unreadable config)", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockImplementation(() => {
+      const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+      err.code = "EACCES";
+      throw err;
+    });
+    expect(loadIssuePrefix("/repo/locked")).toBe(DEFAULT_ISSUE_PREFIX);
+  });
+
+  it("accepts the boundary shape XX (2 letters)", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: XX\n");
+    expect(loadIssuePrefix("/repo/example")).toBe("XX");
+  });
+
+  it("accepts the boundary shape ABCD (4 letters)", () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue("issue_prefix: ABCD\n");
+    expect(loadIssuePrefix("/repo/example")).toBe("ABCD");
+  });
+});
+
+describe("loadRepoContext — issuePrefix", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setupEnvFileExists();
+    delete process.env.DANXBOT_WORKER_PORT;
+  });
+
+  it(`defaults issuePrefix to "${DEFAULT_ISSUE_PREFIX}" when config.yml is missing`, () => {
+    mockParseEnvFile.mockReturnValue({ ...MINIMUM_ENV });
+    const ctx = loadRepoContext(TEST_REPO);
+    expect(ctx.issuePrefix).toBe(DEFAULT_ISSUE_PREFIX);
+  });
+
+  it("threads a valid issue_prefix from config.yml into RepoContext", () => {
+    mockExistsSync.mockImplementation((p) => {
+      const s = String(p);
+      return s.endsWith(".danxbot/.env") || s.endsWith("config.yml");
+    });
+    mockReadFileSync.mockReturnValue("issue_prefix: DX\n");
+    mockParseEnvFile.mockReturnValue({ ...MINIMUM_ENV });
+    const ctx = loadRepoContext(TEST_REPO);
+    expect(ctx.issuePrefix).toBe("DX");
+  });
+
+  it("propagates a bad issue_prefix shape as a fatal error", () => {
+    mockExistsSync.mockImplementation((p) => {
+      const s = String(p);
+      return s.endsWith(".danxbot/.env") || s.endsWith("config.yml");
+    });
+    mockReadFileSync.mockReturnValue("issue_prefix: dx-1\n");
+    mockParseEnvFile.mockReturnValue({ ...MINIMUM_ENV });
+    expect(() => loadRepoContext(TEST_REPO)).toThrow(/Invalid issue_prefix/);
   });
 });

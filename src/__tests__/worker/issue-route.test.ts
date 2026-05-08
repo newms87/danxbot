@@ -112,6 +112,7 @@ async function startTestServer(): Promise<TestHarness> {
       database: "",
       enabled: false,
     },
+    issuePrefix: "ISS",
   };
 
   const server = createServer(

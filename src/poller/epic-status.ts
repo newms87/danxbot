@@ -52,7 +52,8 @@ import { loadLocal, writeIssue } from "./yaml-lifecycle.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  ISSUE_ID_REGEX,
+  buildIssueIdRegex,
+  DEFAULT_ISSUE_PREFIX,
   IssueParseError,
   parseIssue,
 } from "../issue-tracker/yaml.js";
@@ -113,21 +114,23 @@ export function deriveStatus(children: Issue[]): IssueStatus | null {
  */
 export function recomputeParentStatuses(
   repoLocalPath: string,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
 ): ParentStatusChange[] {
   const dir = resolve(repoLocalPath, ".danxbot", "issues", "open");
   if (!existsSync(dir)) return [];
 
+  const idRegex = buildIssueIdRegex(prefix);
   const changes: ParentStatusChange[] = [];
 
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith(".yml")) continue;
     const stem = entry.slice(0, -".yml".length);
-    if (!ISSUE_ID_REGEX.test(stem)) continue;
+    if (!idRegex.test(stem)) continue;
 
     const path = resolve(dir, entry);
     let parent: Issue;
     try {
-      parent = parseIssue(readFileSync(path, "utf-8"));
+      parent = parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: prefix });
     } catch (err) {
       // Malformed YAML — skip (the local-issues walker logs it on the
       // same tick, no need to double-log). Surface unexpected non-parse
@@ -151,7 +154,7 @@ export function recomputeParentStatuses(
     const resolved: Issue[] = [];
     for (const childId of parent.children) {
       try {
-        const child = loadLocal(repoLocalPath, childId);
+        const child = loadLocal(repoLocalPath, childId, prefix);
         if (child) resolved.push(child);
       } catch (err) {
         if (err instanceof IssueParseError) continue;

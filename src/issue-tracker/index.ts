@@ -19,7 +19,17 @@ export type {
   CreateCardInput,
 } from "./interface.js";
 export { ISSUE_STATUSES, ISSUE_TYPES } from "./interface.js";
-export { IssueParseError, ISSUE_ID_REGEX, createEmptyIssue, parseIssue, serializeIssue, validateIssue } from "./yaml.js";
+export {
+  IssueParseError,
+  ISSUE_ID_REGEX,
+  LEGACY_ISS_REGEX,
+  buildIssueIdRegex,
+  createEmptyIssue,
+  parseIssue,
+  serializeIssue,
+  validateIssue,
+} from "./yaml.js";
+export type { ParseIssueOptions } from "./yaml.js";
 export { maxIssueNumber, nextIssueId } from "./id-generator.js";
 export { syncIssue } from "./sync.js";
 export { MemoryTracker } from "./memory.js";

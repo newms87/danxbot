@@ -8,9 +8,82 @@
 import type { RepoConfig, RepoContext } from "./types.js";
 import { getReposBase, loadTrelloIds } from "./poller/constants.js";
 import { parseEnvFile } from "./env-file.js";
+import { parseSimpleYaml } from "./poller/parse-yaml.js";
+import {
+  DEFAULT_ISSUE_PREFIX,
+  ISSUE_PREFIX_SHAPE,
+} from "./issue-tracker/yaml.js";
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { repos, isWorkerMode, workerRepoName, config } from "./config.js";
+import { createLogger } from "./logger.js";
+
+const log = createLogger("repo-context");
+
+// Re-export the prefix constants so existing callers (and tests) that
+// import them from `repo-context.js` keep compiling. Single source lives
+// in `issue-tracker/yaml.ts` (see ISS-99 Phase 1 review feedback).
+export { DEFAULT_ISSUE_PREFIX, ISSUE_PREFIX_SHAPE };
+
+const warnedPrefixPaths = new Set<string>();
+
+function warnMissingIssuePrefix(configPath: string): void {
+  if (warnedPrefixPaths.has(configPath)) return;
+  warnedPrefixPaths.add(configPath);
+  log.warn(
+    `[issue-prefix] ${configPath} has no issue_prefix — defaulting to "${DEFAULT_ISSUE_PREFIX}". Add issue_prefix: <2-4 uppercase letters> to silence (ISS-99).`,
+  );
+}
+
+/**
+ * Reset the module-level warn-once dedup state for missing/unreadable
+ * `config.yml` paths. Tests use this to keep log assertions
+ * deterministic across cases; production code never calls it.
+ */
+export function _resetWarnedPrefixPaths(): void {
+  warnedPrefixPaths.clear();
+}
+
+/**
+ * Resolve the per-repo `issue_prefix` from `<repo>/.danxbot/config/config.yml`.
+ *
+ * Behavior contract (Phase 1 of ISS-99):
+ *   - Field present + matches `ISSUE_PREFIX_SHAPE` → returned verbatim.
+ *   - Field present + violates the shape → throws (fail-loud config bug).
+ *   - Field absent / config.yml missing / unreadable → returns
+ *     `DEFAULT_ISSUE_PREFIX` (`"ISS"`) and warns once per config path.
+ *
+ * Reads through `parseSimpleYaml`, which already underpins the poller's
+ * config loader — keeps the parse path consistent across the worker.
+ */
+export function loadIssuePrefix(repoLocalPath: string): string {
+  const configPath = resolve(repoLocalPath, ".danxbot/config/config.yml");
+  if (!existsSync(configPath)) {
+    warnMissingIssuePrefix(configPath);
+    return DEFAULT_ISSUE_PREFIX;
+  }
+  let content: string;
+  try {
+    content = readFileSync(configPath, "utf-8");
+  } catch (err) {
+    log.warn(
+      `[issue-prefix] Failed to read ${configPath}: ${err instanceof Error ? err.message : String(err)} — defaulting to "${DEFAULT_ISSUE_PREFIX}".`,
+    );
+    return DEFAULT_ISSUE_PREFIX;
+  }
+  const cfg = parseSimpleYaml(content);
+  const raw = (cfg.issue_prefix ?? "").trim();
+  if (raw.length === 0) {
+    warnMissingIssuePrefix(configPath);
+    return DEFAULT_ISSUE_PREFIX;
+  }
+  if (!ISSUE_PREFIX_SHAPE.test(raw)) {
+    throw new Error(
+      `Invalid issue_prefix "${raw}" in ${configPath} — must match ${ISSUE_PREFIX_SHAPE} (2-4 uppercase ASCII letters)`,
+    );
+  }
+  return raw;
+}
 
 /**
  * Resolve DANXBOT_WORKER_PORT. Production (deploy): compose injects it from
@@ -139,6 +212,7 @@ export function loadRepoContext(
     },
     githubToken: optEnv("DANX_GITHUB_TOKEN", ""),
     workerPort: readWorkerPort(env, envPath),
+    issuePrefix: loadIssuePrefix(repo.localPath),
   };
 }
 

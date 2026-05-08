@@ -57,6 +57,7 @@ function buildRepo(): RepoContext {
       database: "",
       enabled: false,
     },
+    issuePrefix: "ISS",
   };
 }
 

@@ -34,7 +34,8 @@
 import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  ISSUE_ID_REGEX,
+  buildIssueIdRegex,
+  DEFAULT_ISSUE_PREFIX,
   IssueParseError,
   parseIssue,
 } from "../issue-tracker/yaml.js";
@@ -48,18 +49,22 @@ interface WalkEntry {
   mtimeMs: number;
 }
 
-function walkOpenIssues(repoLocalPath: string): WalkEntry[] {
+function walkOpenIssues(
+  repoLocalPath: string,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
+): WalkEntry[] {
   const dir = resolve(repoLocalPath, ".danxbot", "issues", "open");
   if (!existsSync(dir)) return [];
+  const idRegex = buildIssueIdRegex(prefix);
   const out: WalkEntry[] = [];
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith(".yml")) continue;
     const stem = entry.slice(0, -".yml".length);
-    if (!ISSUE_ID_REGEX.test(stem)) continue;
+    if (!idRegex.test(stem)) continue;
     const path = resolve(dir, entry);
     let issue: Issue;
     try {
-      issue = parseIssue(readFileSync(path, "utf-8"));
+      issue = parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: prefix });
     } catch (err) {
       // Malformed YAML on disk is a real fault — skip it but log loudly so
       // the poller doesn't silently drop a card. The next tick re-tries.
@@ -99,8 +104,11 @@ function sortFifo(entries: WalkEntry[]): Issue[] {
  *   3. FIFO mtime tiebreak inside each tier so two cards stamped the
  *      same priority resolve deterministically.
  */
-export function listDispatchableYamls(repoLocalPath: string): Issue[] {
-  const filtered = walkOpenIssues(repoLocalPath).filter((e) => {
+export function listDispatchableYamls(
+  repoLocalPath: string,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
+): Issue[] {
+  const filtered = walkOpenIssues(repoLocalPath, prefix).filter((e) => {
     const i = e.issue;
     if (i.status !== "ToDo") return false;
     if (i.blocked !== null) return false;
@@ -126,8 +134,11 @@ function workReadyCompare(a: WalkEntry, b: WalkEntry): number {
  * FIFO ordering as `listDispatchableYamls` — oldest first so the
  * longest-running orphan is reconciled first.
  */
-export function listInProgressYamls(repoLocalPath: string): Issue[] {
-  const filtered = walkOpenIssues(repoLocalPath).filter(
+export function listInProgressYamls(
+  repoLocalPath: string,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
+): Issue[] {
+  const filtered = walkOpenIssues(repoLocalPath, prefix).filter(
     (e) => e.issue.status === "In Progress",
   );
   return sortFifo(filtered);
@@ -141,8 +152,11 @@ export function listInProgressYamls(repoLocalPath: string): Issue[] {
  * just became terminal can be cleared and appended to the dispatchable
  * pool on the same tick.
  */
-export function listBlockedTodoYamls(repoLocalPath: string): Issue[] {
-  const filtered = walkOpenIssues(repoLocalPath).filter(
+export function listBlockedTodoYamls(
+  repoLocalPath: string,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
+): Issue[] {
+  const filtered = walkOpenIssues(repoLocalPath, prefix).filter(
     (e) => e.issue.status === "ToDo" && e.issue.blocked !== null,
   );
   return sortFifo(filtered);
@@ -175,8 +189,9 @@ export function listBlockedTodoYamls(repoLocalPath: string): Issue[] {
 export function listTriageDueYamls(
   repoLocalPath: string,
   now: number,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
 ): Issue[] {
-  const filtered = walkOpenIssues(repoLocalPath).filter((e) => {
+  const filtered = walkOpenIssues(repoLocalPath, prefix).filter((e) => {
     const i = e.issue;
     if (i.dispatch !== null) return false;
     if (!isTriageDue(i, now)) return false;

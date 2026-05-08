@@ -42,6 +42,7 @@ const MOCK_REPO_CONTEXT: RepoContext = {
   githubToken: "test-github-token",
   trelloEnabled: true,
   workerPort: 5562,
+  issuePrefix: "ISS",
 };
 
 // Mock dependencies before importing module under test
@@ -2485,6 +2486,7 @@ describe("poll — post-dispatch card-progress check", () => {
     expect(mockFindByExternalId).toHaveBeenCalledWith(
       MOCK_REPO_CONTEXT.localPath,
       "c1",
+      "ISS",
     );
     expect(mockWriteFlag).not.toHaveBeenCalled();
   });
@@ -3361,6 +3363,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       "card-uuid-2",
       dispatchArg.dispatchId,
       expect.any(String),
+      "ISS",
     );
   });
 
@@ -4818,7 +4821,10 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockListInProgressYamls).toHaveBeenCalledWith("/test/repos/test-repo");
+    expect(mockListInProgressYamls).toHaveBeenCalledWith(
+      "/test/repos/test-repo",
+      "ISS",
+    );
   });
 
   it("still calls tracker.fetchOpenCards each tick (Slice B inbound channel) — AC5", async () => {
@@ -4871,9 +4877,12 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
 
     expect(mockListDispatchableYamls).toHaveBeenCalled();
     const callArgs = mockListDispatchableYamls.mock.calls[0];
-    // Single positional arg now — the second `options` arg was removed.
-    expect(callArgs.length).toBe(1);
+    // (path, prefix) — the legacy `options` arg was retired. Phase 1 of
+    // ISS-99 added the per-repo `prefix` so the walker filters to
+    // `<prefix>-N.yml` only.
+    expect(callArgs.length).toBe(2);
     expect(callArgs[0]).toBe("/test/repos/test-repo");
+    expect(callArgs[1]).toBe("ISS");
   });
 });
 

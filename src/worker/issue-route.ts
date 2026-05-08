@@ -218,7 +218,9 @@ export async function handleIssueSave(
 
   let issue: Issue;
   try {
-    issue = parseIssue(readFileSync(sourcePath, "utf-8"));
+    issue = parseIssue(readFileSync(sourcePath, "utf-8"), {
+      expectedPrefix: repo.issuePrefix,
+    });
   } catch (err) {
     const msg = err instanceof IssueParseError ? err.message : String(err);
     json(res, 200, { saved: false, errors: [msg] });
@@ -263,13 +265,16 @@ export async function handleIssueSave(
 function loadActionItemTitles(
   repoLocalPath: string,
   ids: readonly string[],
+  prefix: string,
 ): Map<string, string> {
   const out = new Map<string, string>();
   for (const id of ids) {
     const path = locateIssueFile(repoLocalPath, id);
     if (!path) continue;
     try {
-      const linked = parseIssue(readFileSync(path, "utf-8"));
+      const linked = parseIssue(readFileSync(path, "utf-8"), {
+        expectedPrefix: prefix,
+      });
       out.set(id, linked.title);
     } catch (err) {
       // Don't kill the parent sync over a malformed linked YAML — leave
@@ -294,6 +299,7 @@ async function runSync(
     const actionItemTitles = loadActionItemTitles(
       repo.localPath,
       issue.retro.action_item_ids,
+      repo.issuePrefix,
     );
     const { updatedLocal } = await syncIssue(deps.tracker, issue, {
       actionItemTitles,
@@ -468,10 +474,12 @@ export async function handleIssueCreate(
     return;
   }
 
-  // Allocate the next ISS-N before parsing so the strict validator
-  // accepts the draft as a fully-formed v3 issue.
+  // Allocate the next `<PREFIX>-N` (per `repo.issuePrefix`) before
+  // parsing so the strict validator accepts the draft as a fully-formed
+  // v3 issue.
   const newId = await nextIssueId(
     path.join(repo.localPath, ".danxbot", "issues"),
+    repo.issuePrefix,
   );
   draftMap.id = newId;
   // `parseIssue` requires schema_version: 3 — auto-fill if the agent
@@ -513,7 +521,9 @@ export async function handleIssueCreate(
   try {
     // Re-validate via the strict path so every other field is checked.
     const yaml = await import("yaml");
-    draft = parseIssue(yaml.stringify(draftMap));
+    draft = parseIssue(yaml.stringify(draftMap), {
+      expectedPrefix: repo.issuePrefix,
+    });
   } catch (err) {
     const msg = err instanceof IssueParseError ? err.message : String(err);
     json(res, 200, { created: false, errors: [msg] });
@@ -618,7 +628,9 @@ export async function syncTrackedIssueOnComplete(
 
   let issue: Issue;
   try {
-    issue = parseIssue(readFileSync(sourcePath, "utf-8"));
+    issue = parseIssue(readFileSync(sourcePath, "utf-8"), {
+      expectedPrefix: repo.issuePrefix,
+    });
   } catch (err) {
     const msg = err instanceof IssueParseError ? err.message : String(err);
     await deps.recordError?.(

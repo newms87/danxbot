@@ -31,7 +31,8 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  ISSUE_ID_REGEX,
+  buildIssueIdRegex,
+  DEFAULT_ISSUE_PREFIX,
   issueToCreateInput,
   parseIssue,
 } from "../issue-tracker/yaml.js";
@@ -95,23 +96,25 @@ function sortParentsFirst(orphans: Issue[]): Issue[] {
 export async function pushOrphans(
   repoLocalPath: string,
   tracker: IssueTracker,
+  prefix: string = DEFAULT_ISSUE_PREFIX,
 ): Promise<OrphanPushResult> {
   const openDir = resolve(repoLocalPath, ".danxbot", "issues", "open");
   if (!existsSync(openDir)) {
     return { pushed: 0, errors: [] };
   }
 
+  const idRegex = buildIssueIdRegex(prefix);
   const orphans: Issue[] = [];
   const errors: OrphanPushError[] = [];
 
   for (const entry of readdirSync(openDir)) {
     if (!entry.endsWith(".yml")) continue;
     const stem = entry.slice(0, -".yml".length);
-    if (!ISSUE_ID_REGEX.test(stem)) continue;
+    if (!idRegex.test(stem)) continue;
     const path = resolve(openDir, entry);
     let issue: Issue;
     try {
-      issue = parseIssue(readFileSync(path, "utf-8"));
+      issue = parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: prefix });
     } catch (err) {
       // One malformed YAML in `open/` must not block the rest of the
       // scan — the poller keeps running while the operator fixes it.

@@ -160,6 +160,7 @@ runtime: docker  # or "local"
 language: php    # or node, go, python, ruby, rust
 framework: laravel  # or express, vue, django, rails, etc.
 git_mode: auto-merge  # or "pr"
+issue_prefix: <2-4-uppercase-letters>  # e.g. DX, SG, FD — see "issue_prefix" below
 
 commands:
   test: "php artisan test"
@@ -178,6 +179,8 @@ paths:
 ```
 
 Adjust the structure based on what was actually detected. If no Docker setup, omit the `docker` section and set `runtime: local`.
+
+**`issue_prefix`** (ISS-99 Phase 1 onwards): per-repo issue id namespace, 2-4 uppercase ASCII letters, validated against `^[A-Z]{2,4}$`. Each connected repo gets its own prefix so card ids are unambiguous across repos in logs / Slack / comments — `DX-12` is unmistakably danxbot, `SG-12` is unmistakably gpt-manager, even though both repos number from 1. Common values: `DX` (danxbot), `SG` (gpt-manager), `FD` (platform). Pick something derived from the repo name that's distinctive within your org. The field is currently optional and defaults to `ISS` (with one warn-once log) if absent — Phase 4 of ISS-99 will require it. Set it on every new repo you onboard so the deprecation lands silently.
 
 ### 8b: Write `.danxbot/config/trello.yml`
 

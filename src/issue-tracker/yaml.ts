@@ -183,6 +183,43 @@ export function serializeIssue(issue: Issue): string {
 }
 
 /**
+ * Single source of truth for the legacy default issue id prefix. Used by
+ * the `parseIssue`/`validateIssue` `expectedPrefix` fallback, the
+ * `nextIssueId`/`maxIssueNumber` `prefix` fallback, and `loadIssuePrefix`'s
+ * absent-config fallback. Exported so Phase 4 of ISS-99 only has to grep
+ * one symbol when dropping the legacy compat path.
+ */
+export const DEFAULT_ISSUE_PREFIX = "ISS";
+
+/**
+ * Allowed shape for any per-repo `issue_prefix` value: 2-4 uppercase ASCII
+ * letters. Long enough to be visually distinct between repos
+ * (`DX`/`SG`/`FD`), short enough that prefixed ids stay scannable. Lives
+ * here (not in `repo-context.ts`) so `id-generator.ts` and `yaml.ts` can
+ * validate prefixes without taking a dep on the env-heavy config chain.
+ */
+export const ISSUE_PREFIX_SHAPE = /^[A-Z]{2,4}$/;
+
+/**
+ * Optional knobs accepted by `parseIssue` and `validateIssue`. Phase 1 of
+ * ISS-99 introduced the `expectedPrefix` knob so the validator can enforce
+ * a per-repo `<PREFIX>-<N>` id shape (e.g. `DX-12`, `SG-7`) instead of the
+ * historical `ISS-` literal. Defaults to `DEFAULT_ISSUE_PREFIX` so every
+ * existing caller keeps the legacy behavior until the consumer threads its
+ * real prefix.
+ */
+export interface ParseIssueOptions {
+  /**
+   * Per-repo issue id prefix the validator should enforce. 2-4 uppercase
+   * letters; supplied by the caller from `RepoContext.issuePrefix`. The
+   * validator builds `^${expectedPrefix}-\d+$` from this value and rejects
+   * any `id` / `parent_id` / `children[i]` / `blocked.by[i]` /
+   * `retro.action_item_ids[i]` that doesn't match.
+   */
+  expectedPrefix?: string;
+}
+
+/**
  * Parse YAML text into an Issue, throwing IssueParseError with a useful
  * message on either malformed YAML or schema violations.
  *
@@ -191,8 +228,11 @@ export function serializeIssue(issue: Issue): string {
  * separate "draft" parse mode — the v1 `parseDraftIssue` is gone. The
  * primary id (`id`) is the strict required-non-empty field. v3 adds the
  * `children: string[]` field for two-way epic ↔ phase linkage.
+ *
+ * `options.expectedPrefix` (optional, defaults to `"ISS"`) controls the
+ * per-repo id shape — Phase 1 of ISS-99.
  */
-export function parseIssue(text: string): Issue {
+export function parseIssue(text: string, options?: ParseIssueOptions): Issue {
   let raw: unknown;
   try {
     raw = parseYamlText(text);
@@ -202,7 +242,7 @@ export function parseIssue(text: string): Issue {
     }
     throw new IssueParseError(`Malformed YAML: ${String(err)}`);
   }
-  const result = validateIssue(raw);
+  const result = validateIssue(raw, options);
   if (!result.ok) {
     throw new IssueParseError(
       `Invalid Issue YAML:\n  - ${result.errors.join("\n  - ")}`,
@@ -212,11 +252,40 @@ export function parseIssue(text: string): Issue {
 }
 
 /**
- * Format check for an internal issue id. The id-generator emits this format
- * exclusively (`ISS-<positive-integer>`); the validator enforces it so a
- * typo'd or hand-written id is rejected at YAML parse time.
+ * Build the per-repo issue-id regex `^<prefix>-\d+$`. The prefix MUST
+ * be 2-4 uppercase ASCII letters; this function asserts that contract
+ * via `ISSUE_PREFIX_SHAPE` and throws on violation rather than
+ * silently producing a broken regex (e.g. `^DX-evil-\d+$` from a
+ * caller that forgot to validate). Returns a fresh RegExp on every
+ * call — callers that hot-loop over many ids should cache the result
+ * themselves.
  */
-export const ISSUE_ID_REGEX = /^ISS-\d+$/;
+export function buildIssueIdRegex(prefix: string): RegExp {
+  if (!ISSUE_PREFIX_SHAPE.test(prefix)) {
+    throw new Error(
+      `buildIssueIdRegex: invalid prefix "${prefix}" — must match ${ISSUE_PREFIX_SHAPE} (2-4 uppercase ASCII letters)`,
+    );
+  }
+  return new RegExp(`^${prefix}-\\d+$`);
+}
+
+/**
+ * Legacy literal for the `ISS-<N>` id shape. Retained as a named
+ * constant for one release — Phase 3 of ISS-99 (the migration script)
+ * uses it to identify pre-migration filenames, and any future code that
+ * needs to detect "old-style ids" goes through this constant rather
+ * than re-introducing a literal `/^ISS-\d+$/` regex.
+ */
+export const LEGACY_ISS_REGEX = /^ISS-\d+$/;
+
+/**
+ * @deprecated Use `buildIssueIdRegex(prefix)` with the active repo's
+ * prefix from `RepoContext.issuePrefix`. Kept as a name-only alias for
+ * one release so legacy import sites compile while Phase 1 of ISS-99
+ * threads the prefix through every consumer. Equivalent to
+ * `LEGACY_ISS_REGEX` and `buildIssueIdRegex("ISS")`.
+ */
+export const ISSUE_ID_REGEX = LEGACY_ISS_REGEX;
 
 /**
  * Project an `Issue` into the `CreateCardInput` shape the tracker accepts.
@@ -294,8 +363,14 @@ type ValidateResult =
  *    NO runtime backwards-compat shim. Run `scripts/migrate-issues-to-v3.ts`
  *    once on each repo to upgrade.
  */
-export function validateIssue(value: unknown): ValidateResult {
+export function validateIssue(
+  value: unknown,
+  options?: ParseIssueOptions,
+): ValidateResult {
   const errors: string[] = [];
+  const expectedPrefix = options?.expectedPrefix ?? DEFAULT_ISSUE_PREFIX;
+  const idRegex = buildIssueIdRegex(expectedPrefix);
+  const idShape = `${expectedPrefix}-<positive integer>`;
 
   if (!isPlainObject(value)) {
     return { ok: false, errors: ["Issue must be a YAML mapping"] };
@@ -324,18 +399,18 @@ export function validateIssue(value: unknown): ValidateResult {
     errors.push("tracker must be a non-empty string");
   }
 
-  // id — internal primary id, always non-empty, must match ISS-N format.
+  // id — internal primary id, always non-empty, must match <PREFIX>-N format.
   if (!("id" in v)) {
     errors.push("missing required field: id");
   } else if (typeof v.id !== "string") {
     errors.push("id must be a string");
   } else if (v.id.length === 0) {
     errors.push(
-      "id must be a non-empty string (format: ISS-<positive integer>)",
+      `id must be a non-empty string (format: ${idShape})`,
     );
-  } else if (!ISSUE_ID_REGEX.test(v.id)) {
+  } else if (!idRegex.test(v.id)) {
     errors.push(
-      `id must match ISS-<positive integer> (got ${JSON.stringify(v.id)})`,
+      `id must match ${idShape} (got ${JSON.stringify(v.id)})`,
     );
   }
 
@@ -347,19 +422,28 @@ export function validateIssue(value: unknown): ValidateResult {
     errors.push("external_id must be a string");
   }
 
-  // parent_id
+  // parent_id — null OR a `<PREFIX>-N` string. Phase 1 of ISS-99 added the
+  // prefix-shape check so a `DX` repo can't end up with `parent_id: "ISS-99"`
+  // pointing at a sibling repo's id space — the same mistake `id` /
+  // `children[]` / `blocked.by[]` / `retro.action_item_ids[]` already
+  // reject. Existing well-formed YAMLs (parent_id is either null or a
+  // same-prefix `<PREFIX>-<N>`) are unaffected.
   if (!("parent_id" in v)) {
     errors.push("missing required field: parent_id");
   } else if (v.parent_id !== null && typeof v.parent_id !== "string") {
     errors.push("parent_id must be a string or null");
+  } else if (typeof v.parent_id === "string" && !idRegex.test(v.parent_id)) {
+    errors.push(
+      `parent_id must be null or match ${idShape} (got ${JSON.stringify(v.parent_id)})`,
+    );
   }
 
-  // children — required array of `ISS-N` strings (may be empty).
+  // children — required array of `<PREFIX>-N` strings (may be empty).
   let childrenResult: string[] | null = null;
   if (!("children" in v)) {
     errors.push("missing required field: children");
   } else {
-    const r = validateChildrenList(v.children);
+    const r = validateChildrenList(v.children, idRegex, idShape);
     if (typeof r === "string") errors.push(r);
     else childrenResult = r;
   }
@@ -475,7 +559,7 @@ export function validateIssue(value: unknown): ValidateResult {
   if (!("retro" in v)) {
     errors.push("missing required field: retro");
   } else {
-    const r = validateRetro(v.retro);
+    const r = validateRetro(v.retro, idRegex, idShape);
     if (typeof r === "string") errors.push(r);
     else retroResult = r;
   }
@@ -487,7 +571,7 @@ export function validateIssue(value: unknown): ValidateResult {
   // un-blocking the card.
   let blockedResult: IssueBlocked | null = null;
   if ("blocked" in v) {
-    const r = validateBlocked(v.blocked);
+    const r = validateBlocked(v.blocked, idRegex, idShape);
     if (typeof r === "string") errors.push(r);
     else blockedResult = r;
   }
@@ -645,19 +729,25 @@ function validateDispatch(value: unknown): IssueDispatch | null | string {
   };
 }
 
-function validateChildrenList(value: unknown): string[] | string {
+function validateChildrenList(
+  value: unknown,
+  idRegex: RegExp,
+  idShape: string,
+): string[] | string {
   // null normalizes to empty list (yaml has no native "empty array" sigil
   // distinct from null when the key is present with no value).
   if (value === null) return [];
-  if (!Array.isArray(value)) return "children must be a list of ISS-N strings";
+  if (!Array.isArray(value)) {
+    return `children must be a list of ${idShape} strings`;
+  }
   const out: string[] = [];
   for (let i = 0; i < value.length; i++) {
     const item = value[i];
     if (typeof item !== "string") {
       return `children[${i}] must be a string`;
     }
-    if (!ISSUE_ID_REGEX.test(item)) {
-      return `children[${i}] must match ISS-<positive integer> (got ${JSON.stringify(item)})`;
+    if (!idRegex.test(item)) {
+      return `children[${i}] must match ${idShape} (got ${JSON.stringify(item)})`;
     }
     out.push(item);
   }
@@ -723,7 +813,11 @@ function validateCommentsList(value: unknown): IssueComment[] | string {
   return out;
 }
 
-function validateBlocked(value: unknown): IssueBlocked | null | string {
+function validateBlocked(
+  value: unknown,
+  idRegex: RegExp,
+  idShape: string,
+): IssueBlocked | null | string {
   if (value === null || value === undefined) return null;
   if (!isPlainObject(value)) {
     return "blocked must be a mapping or null";
@@ -736,7 +830,7 @@ function validateBlocked(value: unknown): IssueBlocked | null | string {
     return "blocked.timestamp must be a non-empty string";
   }
   if (!Array.isArray(v.by)) {
-    return "blocked.by must be a list of ISS-N strings";
+    return `blocked.by must be a list of ${idShape} strings`;
   }
   if (v.by.length === 0) {
     return "blocked.by must contain at least one issue id";
@@ -747,15 +841,19 @@ function validateBlocked(value: unknown): IssueBlocked | null | string {
     if (typeof item !== "string") {
       return `blocked.by[${i}] must be a string`;
     }
-    if (!ISSUE_ID_REGEX.test(item)) {
-      return `blocked.by[${i}] must match ISS-<positive integer> (got ${JSON.stringify(item)})`;
+    if (!idRegex.test(item)) {
+      return `blocked.by[${i}] must match ${idShape} (got ${JSON.stringify(item)})`;
     }
     by.push(item);
   }
   return { reason: v.reason, timestamp: v.timestamp, by };
 }
 
-function validateRetro(value: unknown): IssueRetro | string {
+function validateRetro(
+  value: unknown,
+  idRegex: RegExp,
+  idShape: string,
+): IssueRetro | string {
   if (value === null) {
     return { good: "", bad: "", action_item_ids: [], commits: [] };
   }
@@ -794,15 +892,15 @@ function validateRetro(value: unknown): IssueRetro | string {
   let actionItemIds: string[] = [];
   if (v.action_item_ids !== undefined) {
     if (!Array.isArray(v.action_item_ids)) {
-      return "retro.action_item_ids must be a list of ISS-N strings";
+      return `retro.action_item_ids must be a list of ${idShape} strings`;
     }
     for (let i = 0; i < v.action_item_ids.length; i++) {
       const item = v.action_item_ids[i];
       if (typeof item !== "string") {
         return `retro.action_item_ids[${i}] must be a string`;
       }
-      if (!ISSUE_ID_REGEX.test(item)) {
-        return `retro.action_item_ids[${i}] must match ISS-<positive integer> (got ${JSON.stringify(item)}). Create the action-item card via danx_issue_create first, then reference its ISS-N here.`;
+      if (!idRegex.test(item)) {
+        return `retro.action_item_ids[${i}] must match ${idShape} (got ${JSON.stringify(item)}). Create the action-item card via danx_issue_create first, then reference its ${idShape} here.`;
       }
     }
     actionItemIds = v.action_item_ids as string[];

@@ -182,7 +182,7 @@ function readOpenIssuesWithDispatch(
       // semantics as `loadLocal` here — a YAML that survived the disk
       // write but parses as garbage indicates corruption that
       // observability should surface.
-      const issue = loadLocal(repo.localPath, stem);
+      const issue = loadLocal(repo.localPath, stem, repo.issuePrefix);
       if (issue && issue.dispatch !== null) {
         out.push(issue);
       }
@@ -311,7 +311,7 @@ export function evictDeadDispatches(repo: RepoContext): void {
       log.warn(
         `[${repo.name}] liveness: evicting ${issueId} (verdict=${action.verdict.kind}, dispatch=${dispatchBlock.id})`,
       );
-      const issue = loadLocal(repo.localPath, issueId);
+      const issue = loadLocal(repo.localPath, issueId, repo.issuePrefix);
       if (issue) {
         try {
           clearDispatchAndWrite(repo.localPath, issue);
@@ -579,7 +579,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   // phase children) without going through `danx_issue_create` — those
   // YAMLs would otherwise stay invisible on the tracker forever.
   // Failures per card are non-fatal: logged + tick continues.
-  const orphanPush = await pushOrphans(repo.localPath, tracker);
+  const orphanPush = await pushOrphans(repo.localPath, tracker, repo.issuePrefix);
   if (orphanPush.pushed > 0) {
     log.info(
       `[${repo.name}] Pushed ${orphanPush.pushed} local orphan${orphanPush.pushed > 1 ? "s" : ""} to tracker`,
@@ -598,7 +598,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   // (because a child did) is non-dispatchable on this tick. Pure-local
   // — outbound mirror to the tracker happens via `syncIssue` on the
   // parent's next reconcile.
-  const parentChanges = recomputeParentStatuses(repo.localPath);
+  const parentChanges = recomputeParentStatuses(repo.localPath, repo.issuePrefix);
   for (const change of parentChanges) {
     log.info(
       `[${repo.name}] Derived ${change.id}: ${change.before} → ${change.after}`,
@@ -610,11 +610,13 @@ async function _poll(repo: RepoContext): Promise<void> {
   // Items list cards now hydrate as `status: "Review"` (see
   // `trello.ts#listIdToStatus`), so the existing `status === "ToDo"`
   // filter inside `listDispatchableYamls` naturally excludes them.
-  let cards: IssueRef[] = listDispatchableYamls(repo.localPath).map(
-    localIssueToRef,
-  );
+  let cards: IssueRef[] = listDispatchableYamls(
+    repo.localPath,
+    repo.issuePrefix,
+  ).map(localIssueToRef);
   const inProgressCards: IssueRef[] = listInProgressYamls(
     repo.localPath,
+    repo.issuePrefix,
   ).map(localIssueToRef);
 
   // Orphan-resume check. Runs BEFORE the ToDo dispatch path so a
@@ -662,9 +664,10 @@ async function _poll(repo: RepoContext): Promise<void> {
   // sweep of the blocked ToDo YAMLs: `resolveBlockedCards` clears the
   // record + saves, and the freshly-cleared cards join the dispatchable
   // pool for this tick. See `resolveBlockedCard` for the contract.
-  const blockedRefs: IssueRef[] = listBlockedTodoYamls(repo.localPath).map(
-    localIssueToRef,
-  );
+  const blockedRefs: IssueRef[] = listBlockedTodoYamls(
+    repo.localPath,
+    repo.issuePrefix,
+  ).map(localIssueToRef);
   if (blockedRefs.length > 0) {
     const cleared = await resolveBlockedCards(repo, blockedRefs);
     if (cleared.length > 0) cards = [...cards, ...cleared];
@@ -733,6 +736,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   const existingForGuard = findByExternalId(
     repo.localPath,
     primary.external_id,
+    repo.issuePrefix,
   );
   if (
     existingForGuard &&
@@ -803,7 +807,8 @@ async function _poll(repo: RepoContext): Promise<void> {
   // present — `findByExternalId` is O(N) over the open dir, so paying
   // it twice would burn CPU on every dispatch tick.
   const existing =
-    existingForGuard ?? findByExternalId(repo.localPath, primary.external_id);
+    existingForGuard ??
+    findByExternalId(repo.localPath, primary.external_id, repo.issuePrefix);
   let resolvedIssue: Issue;
   if (existing) {
     resolvedIssue = stampDispatchAndWrite(repo.localPath, existing, startStamp);
@@ -813,6 +818,7 @@ async function _poll(repo: RepoContext): Promise<void> {
       primary.external_id,
       dispatchId,
       repo.localPath,
+      repo.issuePrefix,
     );
     // hydrateFromRemote stamps the placeholder dispatch shape (pid:0,
     // host:"", started_at:"", ttl_seconds:0). Overwrite with the
@@ -876,13 +882,17 @@ async function bulkSyncMissingYamls(
   targets: IssueRef[],
 ): Promise<void> {
   for (const card of targets) {
-    if (findByExternalId(repo.localPath, card.external_id)) continue;
+    if (
+      findByExternalId(repo.localPath, card.external_id, repo.issuePrefix)
+    )
+      continue;
     try {
       const hydrated = await hydrateFromRemote(
         tracker,
         card.external_id,
         null,
         repo.localPath,
+        repo.issuePrefix,
       );
       writeIssue(repo.localPath, hydrated);
       log.info(
@@ -922,7 +932,11 @@ async function resolveBlockedCards(
 ): Promise<IssueRef[]> {
   const out: IssueRef[] = [];
   for (const card of cards) {
-    const local = findByExternalId(repo.localPath, card.external_id);
+    const local = findByExternalId(
+      repo.localPath,
+      card.external_id,
+      repo.issuePrefix,
+    );
     if (!local) {
       out.push(card);
       continue;
@@ -934,7 +948,7 @@ async function resolveBlockedCards(
     const blockers = local.blocked.by;
     const stillBlocking: string[] = [];
     for (const blockerId of blockers) {
-      const blocker = loadLocal(repo.localPath, blockerId);
+      const blocker = loadLocal(repo.localPath, blockerId, repo.issuePrefix);
       if (!blocker) {
         stillBlocking.push(`${blockerId}(missing)`);
         continue;
@@ -999,7 +1013,11 @@ async function tryResumeOrphan(
 ): Promise<OrphanScanResult> {
   const resetToToDo: IssueRef[] = [];
   for (const ref of inProgressRefs) {
-    const issue = findByExternalId(repo.localPath, ref.external_id);
+    const issue = findByExternalId(
+      repo.localPath,
+      ref.external_id,
+      repo.issuePrefix,
+    );
     // No local YAML — bulk-sync runs immediately before this so a
     // missing YAML means hydration failed; warning already logged
     // upstream. Skip and let the next sync attempt fix it.
@@ -1966,7 +1984,11 @@ async function spawnClaude(
         ...dispatchStamp.startStamp,
         pid,
       };
-      const issue = loadLocal(repo.localPath, dispatchStamp.issueId);
+      const issue = loadLocal(
+        repo.localPath,
+        dispatchStamp.issueId,
+        repo.issuePrefix,
+      );
       if (issue) {
         try {
           stampDispatchAndWrite(repo.localPath, issue, enrichedStamp);
@@ -1996,7 +2018,11 @@ async function spawnClaude(
       // the YAML pointing at a dispatch that never started. Clear so
       // the next tick sees a clean slate; the regular ToDo dispatch
       // path will re-pick the card up with a fresh dispatchId.
-      const issue = loadLocal(repo.localPath, dispatchStamp.issueId);
+      const issue = loadLocal(
+        repo.localPath,
+        dispatchStamp.issueId,
+        repo.issuePrefix,
+      );
       if (issue) {
         try {
           clearDispatchAndWrite(repo.localPath, issue);
@@ -2026,7 +2052,7 @@ async function spawnClaude(
 function clearActiveDispatch(repo: RepoContext, issueId: string): void {
   const map = getActiveDispatches(repo.name);
   map.delete(issueId);
-  const issue = loadLocal(repo.localPath, issueId);
+  const issue = loadLocal(repo.localPath, issueId, repo.issuePrefix);
   if (issue && issue.dispatch !== null) {
     try {
       clearDispatchAndWrite(repo.localPath, issue);
@@ -2168,7 +2194,7 @@ async function checkCardProgressedOrHalt(
   // (false-negative, never false-positive).
   let local;
   try {
-    local = findByExternalId(repo.localPath, cardId);
+    local = findByExternalId(repo.localPath, cardId, repo.issuePrefix);
   } catch (err) {
     log.error(
       `[${repo.name}] Failed to read local YAML for ${cardId} during post-dispatch check — skipping flag`,
@@ -2216,7 +2242,7 @@ async function recoverStuckCards(
     // the local YAML, not tracker.fetchOpenCards. Match by external_id
     // so the priorTodoCardIds set (recorded before dispatch from the
     // tracker view) keys correctly into the local-derived list.
-    const stuckCards = listInProgressYamls(repo.localPath)
+    const stuckCards = listInProgressYamls(repo.localPath, repo.issuePrefix)
       .map(localIssueToRef)
       .filter((card) => state.priorTodoCardIds.includes(card.external_id));
 
@@ -2286,7 +2312,7 @@ async function tryTriageDispatch(repo: RepoContext): Promise<boolean> {
     return false;
   }
 
-  const due = listTriageDueYamls(repo.localPath, Date.now());
+  const due = listTriageDueYamls(repo.localPath, Date.now(), repo.issuePrefix);
   if (due.length === 0) {
     return false;
   }
