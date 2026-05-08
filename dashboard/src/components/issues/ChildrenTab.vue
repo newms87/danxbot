@@ -40,6 +40,7 @@ const missingCount = computed(
         v-for="child in childCards"
         :key="child.id"
         :issue="child"
+        show-status
         @select="(i) => emit('jump-issue', i.id)"
         @parent-click="(pid) => emit('jump-issue', pid)"
       />
