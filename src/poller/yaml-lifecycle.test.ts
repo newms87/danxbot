@@ -50,6 +50,7 @@ function buildIssueLite(id: string, status: IssueStatus): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    history: [],
   };
 }
 

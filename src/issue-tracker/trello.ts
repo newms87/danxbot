@@ -159,6 +159,10 @@ export class TrelloTracker implements IssueTracker {
       // separately. Always emit null on read so the local YAML stays
       // authoritative for the structured record.
       blocked: null,
+      // `history` is local-only audit; Trello has no native field for it.
+      // Phase 1 of DX-138 (DX-145) lands the schema; the tracker abstraction
+      // never sees history, so `getCard` always emits [] here.
+      history: [],
       labels,
     };
   }

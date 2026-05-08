@@ -314,6 +314,7 @@ export function evictDeadDispatches(repo: RepoContext): void {
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,
+          history: [],
         } as Issue,
       ],
       { currentHost, now, isPidAlive },

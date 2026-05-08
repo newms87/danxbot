@@ -389,6 +389,10 @@ export class MemoryTracker implements IssueTracker {
         card.blocked === null
           ? null
           : { ...card.blocked, by: [...card.blocked.by] },
+      // `history` is local-only audit; the tracker abstraction never sees it.
+      // MemoryTracker mirrors Trello's contract: always emit [] on read so
+      // the local YAML stays authoritative for the audit log.
+      history: [],
       labels: { ...card.labels },
     };
   }

@@ -12,6 +12,8 @@ import {
   type IssueBlocked,
   type IssueComment,
   type IssueDispatch,
+  type IssueHistoryEntry,
+  type IssueHistoryEvent,
   type IssueIce,
   type IssueRetro,
   type IssueStatus,
@@ -22,6 +24,49 @@ import {
 
 const TRIAGE_HISTORY_CAP = 10;
 const VALID_DISPATCH_KINDS: ReadonlySet<string> = new Set(["work", "triage"]);
+
+/**
+ * Maximum number of `IssueHistoryEntry`s retained on an Issue. Enforced both
+ * on parse (a legacy YAML carrying more than this drops oldest silently) and
+ * on `appendHistory` (push past the cap shifts the oldest off the head).
+ * Phase 1 of DX-138 — see DX-145 description for sizing rationale (1000
+ * transitions on a single card means the card is mis-scoped, not that
+ * history is wrong).
+ */
+export const HISTORY_CAP = 1000;
+
+/**
+ * Maximum length of `IssueHistoryEntry.note`. Enforced ONLY at append time
+ * by `appendHistory` — the validator tolerates longer existing entries so
+ * legacy YAMLs round-trip. A note longer than `HISTORY_NOTE_CAP` is
+ * truncated to `HISTORY_NOTE_CAP - 1` chars + `…` ellipsis (single-char
+ * Unicode ellipsis, not three dots) so the resulting string is exactly
+ * `HISTORY_NOTE_CAP` chars long.
+ */
+export const HISTORY_NOTE_CAP = 200;
+
+const VALID_HISTORY_EVENTS: ReadonlySet<string> = new Set([
+  "created",
+  "status_change",
+  "blocked",
+  "unblocked",
+]);
+
+/**
+ * Actor-format guard for `appendHistory`. The interface JSDoc on
+ * `IssueHistoryEntry.actor` promises that format enforcement happens at
+ * append-time (NOT parse-time, so legacy YAMLs with future actor prefixes
+ * round-trip). This regex is the load-bearing implementation of that
+ * promise — Phase 2/3 callers fail loud here when they accidentally drop
+ * the `:` separator or pass an empty actor.
+ *
+ * Accepts:
+ *  - `<source>:<id>` — non-empty source, non-empty id, separated by exactly
+ *    one `:`. Source/id may contain `:`; the FIRST `:` is the separator.
+ *  - bare `setup` and bare `unknown` — the two grandfathered formats from
+ *    the canonical actor-source table in DX-138's description.
+ */
+const HISTORY_ACTOR_FORMAT = /^([^:]+:.+|setup|unknown)$/;
 
 function emptyIce(): IssueIce {
   return { total: 0, i: 0, c: 0, e: 0 };
@@ -85,6 +130,91 @@ export function createEmptyIssue(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    history: [],
+  };
+}
+
+export class IssueHistoryAppendError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IssueHistoryAppendError";
+  }
+}
+
+/**
+ * Push a new entry onto an Issue's `history[]` and apply both the rolling
+ * cap and the note truncation. Pure — never mutates the input array.
+ *
+ *  - **Actor format**: throws `IssueHistoryAppendError` when `entry.actor`
+ *    does not match `<source>:<id>` (or bare `setup` / `unknown`). The
+ *    interface contract documents this as the only enforcement point —
+ *    `validateHistory` (parse-time) is intentionally permissive so legacy
+ *    YAMLs with future actor prefixes round-trip.
+ *  - **Per-event field invariants**: throws when the event-required fields
+ *    are missing. `status_change` requires both `from` and `to`;
+ *    `created` / `blocked` require `to`; `unblocked` has no required
+ *    transition fields. Same parse-time/append-time split as actor.
+ *  - `HISTORY_CAP` rolling window: pushing past the cap drops the oldest
+ *    entry (FIFO).
+ *  - `HISTORY_NOTE_CAP` truncation: an entry whose `note` exceeds the cap
+ *    is rewritten with `note = first (CAP - 1) chars + "…"`. Entries
+ *    without a note pass through unchanged.
+ *
+ * Phase 2 (worker `runSync` diff) and Phase 3 (auto-derive / heal / Trello
+ * hydrate) consume this helper so the cap + truncation + format logic
+ * lives in exactly one place.
+ */
+export function appendHistory(
+  history: IssueHistoryEntry[],
+  entry: IssueHistoryEntry,
+): IssueHistoryEntry[] {
+  assertHistoryEntry(entry);
+  const truncated = truncateHistoryNote(entry);
+  const next = [...history, truncated];
+  if (next.length > HISTORY_CAP) {
+    return next.slice(next.length - HISTORY_CAP);
+  }
+  return next;
+}
+
+function assertHistoryEntry(entry: IssueHistoryEntry): void {
+  if (!HISTORY_ACTOR_FORMAT.test(entry.actor)) {
+    throw new IssueHistoryAppendError(
+      `appendHistory: actor must match <source>:<id> or be bare "setup"/"unknown" (got ${JSON.stringify(entry.actor)})`,
+    );
+  }
+  switch (entry.event) {
+    case "status_change":
+      if (entry.from === undefined || entry.to === undefined) {
+        throw new IssueHistoryAppendError(
+          `appendHistory: event=status_change requires both from and to (got from=${JSON.stringify(entry.from)} to=${JSON.stringify(entry.to)})`,
+        );
+      }
+      break;
+    case "created":
+    case "blocked":
+      if (entry.to === undefined) {
+        throw new IssueHistoryAppendError(
+          `appendHistory: event=${entry.event} requires to`,
+        );
+      }
+      break;
+    case "unblocked":
+      // `unblocked` has no required transition fields per the interface
+      // contract — the act of clearing `blocked` carries no status delta
+      // (worker forces ToDo while blocked is set, so the post-unblock
+      // status is whatever the YAML now holds, not derivable from the
+      // event itself).
+      break;
+  }
+}
+
+function truncateHistoryNote(entry: IssueHistoryEntry): IssueHistoryEntry {
+  if (entry.note === undefined) return entry;
+  if (entry.note.length <= HISTORY_NOTE_CAP) return entry;
+  return {
+    ...entry,
+    note: entry.note.slice(0, HISTORY_NOTE_CAP - 1) + "…",
   };
 }
 
@@ -157,6 +287,21 @@ export function serializeIssue(issue: Issue): string {
       out.author = c.author;
       out.timestamp = c.timestamp;
       out.text = c.text;
+      return out;
+    }),
+    history: issue.history.map((h) => {
+      // Drop optional `from` / `to` / `note` when undefined so legacy entries
+      // and entries that don't carry the field round-trip without growing
+      // synthetic null keys (which would diverge from the byte-stable form
+      // the rest of the schema commits to).
+      const out: Record<string, unknown> = {
+        timestamp: h.timestamp,
+        actor: h.actor,
+        event: h.event,
+      };
+      if (h.from !== undefined) out.from = h.from;
+      if (h.to !== undefined) out.to = h.to;
+      if (h.note !== undefined) out.note = h.note;
       return out;
     }),
     retro: {
@@ -576,6 +721,18 @@ export function validateIssue(
     else blockedResult = r;
   }
 
+  // history — optional field. Missing → []. Legacy YAMLs ship without the
+  // field (DX-138 Phase 1 lands the schema). Present must be a list (or YAML
+  // null which normalizes to []); each entry strictly validated so a
+  // half-written entry fails loud rather than silently corrupting the audit
+  // log.
+  let historyResult: IssueHistoryEntry[] = [];
+  if ("history" in v) {
+    const r = validateHistory(v.history);
+    if (typeof r === "string") errors.push(r);
+    else historyResult = r;
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -598,8 +755,102 @@ export function validateIssue(
     comments: commentsResult as IssueComment[],
     retro: retroResult as IssueRetro,
     blocked: blockedResult,
+    history: historyResult,
   };
   return { ok: true, issue };
+}
+
+function validateHistory(value: unknown): IssueHistoryEntry[] | string {
+  // Accept YAML null as "no entries" (parallel to children/comments/triage)
+  // so a hand-edited file with `history: null` rather than `history: []`
+  // still parses cleanly.
+  if (value === null || value === undefined) return [];
+  if (!Array.isArray(value)) return "history must be a list";
+  const out: IssueHistoryEntry[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const item = value[i];
+    if (!isPlainObject(item)) {
+      return `history[${i}] must be a mapping`;
+    }
+    const entry = item as Record<string, unknown>;
+
+    if (typeof entry.timestamp !== "string") {
+      return `history[${i}].timestamp must be a string`;
+    }
+
+    if (typeof entry.actor !== "string" || entry.actor.length === 0) {
+      return `history[${i}].actor must be a non-empty string`;
+    }
+
+    if (typeof entry.event !== "string") {
+      return `history[${i}].event must be a string`;
+    }
+    if (!VALID_HISTORY_EVENTS.has(entry.event)) {
+      return `history[${i}].event must be one of [${[...VALID_HISTORY_EVENTS].join(", ")}] (got ${JSON.stringify(entry.event)})`;
+    }
+
+    if (entry.from !== undefined && entry.from !== null) {
+      if (
+        typeof entry.from !== "string" ||
+        !ISSUE_STATUSES.includes(entry.from as IssueStatus)
+      ) {
+        return `history[${i}].from must be one of [${ISSUE_STATUSES.join(", ")}] (got ${JSON.stringify(entry.from)})`;
+      }
+    }
+
+    if (entry.to !== undefined && entry.to !== null) {
+      if (
+        typeof entry.to !== "string" ||
+        !ISSUE_STATUSES.includes(entry.to as IssueStatus)
+      ) {
+        return `history[${i}].to must be one of [${ISSUE_STATUSES.join(", ")}] (got ${JSON.stringify(entry.to)})`;
+      }
+    }
+
+    if (entry.note !== undefined && entry.note !== null) {
+      if (typeof entry.note !== "string") {
+        return `history[${i}].note must be a string`;
+      }
+    }
+
+    const built: IssueHistoryEntry = {
+      timestamp: entry.timestamp,
+      actor: entry.actor,
+      event: entry.event as IssueHistoryEvent,
+    };
+    if (typeof entry.from === "string") built.from = entry.from as IssueStatus;
+    if (typeof entry.to === "string") built.to = entry.to as IssueStatus;
+    if (typeof entry.note === "string") built.note = entry.note;
+
+    // Per-event field invariants — same enforcement as `appendHistory`'s
+    // assertHistoryEntry, but at parse time too. Asymmetric leniency between
+    // the parse path and the append path would mean a Phase 2/3 bug that
+    // emits an invalid entry could land on disk via a non-appendHistory
+    // write path and then round-trip cleanly forever. Both paths reject so
+    // the contract has exactly one shape.
+    if (built.event === "status_change") {
+      if (built.from === undefined || built.to === undefined) {
+        return `history[${i}] event=status_change requires both from and to`;
+      }
+    } else if (built.event === "created" || built.event === "blocked") {
+      if (built.to === undefined) {
+        return `history[${i}] event=${built.event} requires to`;
+      }
+    }
+
+    out.push(built);
+  }
+  // Cap on parse — drop oldest silently. Same idiom as TRIAGE_HISTORY_CAP
+  // (cap-and-slice), but `validateHistory` is strict on required fields
+  // (timestamp / actor / event) where `validateTriageHistory` defaults
+  // missing strings to "" — audit-log entries shouldn't have empty
+  // identifiers, so the asymmetry is intentional. The append-time helper
+  // applies the same cap; both paths agree so the post-cap slice is
+  // whichever wrote last.
+  if (out.length > HISTORY_CAP) {
+    return out.slice(out.length - HISTORY_CAP);
+  }
+  return out;
 }
 
 function validateTriage(value: unknown): IssueTriage | string {

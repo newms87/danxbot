@@ -38,6 +38,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     ],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    history: [],
     ...overrides,
   };
 }
@@ -753,6 +754,7 @@ describe("serializeIssue byte-stable snapshot", () => {
         commits: ["abc1234"],
       },
       blocked: null,
+      history: [],
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
@@ -794,6 +796,7 @@ describe("serializeIssue byte-stable snapshot", () => {
           author: alice
           timestamp: 2026-05-01T12:00:00Z
           text: first comment
+      history: []
       retro:
         good: we shipped
         bad: took longer than expected

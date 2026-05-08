@@ -86,6 +86,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    history: [],
   };
   return { ...base, ...overrides };
 }

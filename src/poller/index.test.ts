@@ -318,6 +318,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    history: [],
   };
 }
 
@@ -4366,6 +4367,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
         timestamp: "2026-05-04T18:00:00.000Z",
         by: ["ISS-99"],
       },
+      history: [],
     };
     mockFindByExternalId.mockReturnValue(blockedIssue);
     mockLoadLocal.mockImplementation((_repo: string, id: string) => {
@@ -4410,6 +4412,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
         timestamp: "2026-05-04T18:00:00.000Z",
         by: ["ISS-99"],
       },
+      history: [],
     };
     mockFindByExternalId.mockReturnValue(blockedIssue);
     mockLoadLocal.mockImplementation((_repo: string, id: string) => {
@@ -5766,6 +5769,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      history: [],
     };
   }
 
@@ -5971,6 +5975,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      history: [],
     };
     mockReaddirSync.mockReturnValue([`${id}.yml`]);
     mockLoadLocal.mockImplementation(
@@ -6080,6 +6085,7 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      history: [],
     };
 
     mockReaddirSync.mockReturnValue(["ISS-201.yml", "ISS-200.yml"]);
@@ -6154,6 +6160,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      history: [],
     };
 
     // Seed alive entry.
@@ -6508,6 +6515,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      history: [],
     };
 
     mockReaddirSync.mockReturnValue(["ISS-501.yml"]);
@@ -6586,6 +6594,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      history: [],
     };
 
     mockReaddirSync.mockReturnValue(["ISS-502.yml"]);

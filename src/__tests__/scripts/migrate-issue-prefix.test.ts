@@ -204,6 +204,7 @@ describe("rewriteIdFields", () => {
           timestamp: "2026-01-01T00:00:00Z",
           by: ["ISS-2"],
         },
+        history: [],
       }),
       { expectedPrefix: "ISS" },
     );
@@ -246,6 +247,7 @@ describe("rewriteIdFields", () => {
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         blocked: null,
+        history: [],
       }),
       { expectedPrefix: "ISS" },
     );

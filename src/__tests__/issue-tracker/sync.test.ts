@@ -202,6 +202,7 @@ describe("syncIssue", () => {
         comments: [],
         retro: { good: "", bad: "", action_item_ids: [], commits: [] },
         blocked: null,
+        history: [],
       };
     }
 
@@ -457,6 +458,7 @@ describe("syncIssue", () => {
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
       blocked: null,
+      history: [],
     };
     tracker.clearRequestLog();
     await syncIssue(tracker, local);
@@ -519,6 +521,7 @@ describe("syncIssue", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      history: [],
     };
     const tracker = new MemoryTracker({ seed: [seed] });
     const local: Issue = {
@@ -979,6 +982,7 @@ describe("syncIssue", () => {
         commits: ["abc1234"],
       },
       blocked: null,
+      history: [],
     };
 
     const first = await syncIssue(tracker, local);

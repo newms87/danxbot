@@ -170,6 +170,54 @@ export interface IssueDispatch {
   ttl_seconds: number;
 }
 
+/**
+ * Append-only audit log of `status` / `blocked` transitions and the `created`
+ * event. Maintained by the worker write-paths (Phase 2 of DX-138) and the
+ * auto-mutation paths (Phase 3 of DX-138). Phase 1 (this card) lands the
+ * on-disk shape only — no write-paths populate `history[]` yet.
+ *
+ * `event` enum:
+ *  - `created` — exactly one entry per card. Pushed by `danx_issue_create`
+ *    (worker route) and by inbound tracker hydrate (`bulkSyncMissingYamls`).
+ *  - `status_change` — `status` changed between the loaded YAML and the saved
+ *    YAML. `from` + `to` both required.
+ *  - `blocked` — `blocked` transitioned `null → record`. `to` carries the
+ *    forced `ToDo` status the worker imposes; `from` may be omitted.
+ *  - `unblocked` — `blocked` transitioned `record → null`. Worker auto-clears
+ *    on all blockers terminal.
+ *
+ * `actor` is the audit identity that performed the mutation. Format
+ * `<source>:<id>` — canonical sources today: `dispatch:<uuid>`,
+ * `dashboard:<username>`, `worker:<reason>` (e.g. `worker:auto-derive`,
+ * `worker:heal`), `tracker:<name>` (e.g. `tracker:trello`). Bare `setup`
+ * and `unknown` are also accepted. The validator does NOT enforce the
+ * format on parse — historical entries with future actor prefixes must
+ * round-trip — the format check lives at append-time only.
+ */
+export type IssueHistoryEvent =
+  | "created"
+  | "status_change"
+  | "blocked"
+  | "unblocked";
+
+export interface IssueHistoryEntry {
+  /** ISO 8601, server-side wall clock. Validator does NOT parse the format. */
+  timestamp: string;
+  /** Required, non-empty. Format `<source>:<id>` OR bare `setup` / `unknown`. */
+  actor: string;
+  event: IssueHistoryEvent;
+  /** Required for `status_change`. Optional for `blocked`/`unblocked`/`created`. */
+  from?: IssueStatus;
+  /** Required for every event except (optionally) `unblocked`. */
+  to?: IssueStatus;
+  /**
+   * Optional human-readable note. Capped at 200 chars on append (truncated to
+   * 197 chars + `…` ellipsis). Validator tolerates longer existing entries
+   * so legacy YAMLs round-trip; truncation is enforced on `appendHistory`.
+   */
+  note?: string;
+}
+
 export interface IssueRetro {
   good: string;
   bad: string;
@@ -289,6 +337,16 @@ export interface Issue {
    * `blocked` and resumes dispatch. See `IssueBlocked` for the invariants.
    */
   blocked: IssueBlocked | null;
+  /**
+   * Append-only audit log of `status` / `blocked` transitions plus the
+   * `created` event. Maintained by Phase 2/3 worker write-paths (DX-138);
+   * Phase 1 (DX-145) lands the on-disk shape only. Capped at 1000 entries —
+   * oldest dropped on overflow. Empty `history: []` is the legacy default;
+   * existing YAMLs ship with no entries and acquire them as future
+   * mutations land. Position in `serializeIssue`: AFTER `comments`, BEFORE
+   * `retro`.
+   */
+  history: IssueHistoryEntry[];
   /**
    * TRANSIENT, tracker-derived projection of the card's managed labels.
    * Populated by `tracker.getCard()` so `syncIssue`'s outbound label diff
