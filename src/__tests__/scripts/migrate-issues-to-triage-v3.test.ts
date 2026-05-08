@@ -262,7 +262,7 @@ describe("migrate-issues-to-triage-v3", () => {
         }),
       );
       runMigration({ staggerMs: 0, repoRoots: [repo.root] });
-      const migrated = parseIssue(readFileSync(filePath, "utf-8"));
+      const migrated = parseIssue(readFileSync(filePath, "utf-8"), { expectedPrefix: "ISS" });
       expect(migrated.id).toBe("ISS-40");
       expect(migrated.triage.last_status).toBe("Keep");
       expect(migrated.dispatch?.id).toBe("uuid-1");

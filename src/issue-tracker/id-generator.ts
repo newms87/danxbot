@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-import { buildIssueIdRegex, DEFAULT_ISSUE_PREFIX } from "./yaml.js";
+import { buildIssueIdRegex } from "./yaml.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("id-generator");
@@ -48,7 +48,7 @@ const ANY_PREFIXED_ID_REGEX = /^[A-Z]{2,4}-\d+$/;
  */
 export async function nextIssueId(
   issuesRoot: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Promise<string> {
   const max = await maxIssueNumber(issuesRoot, prefix);
   return `${prefix}-${max + 1}`;
@@ -63,7 +63,7 @@ export async function nextIssueId(
  */
 export async function maxIssueNumber(
   issuesRoot: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Promise<number> {
   // Capturing variant of the per-repo id regex — runs once at the top
   // of the scan instead of recompiling per file (review feedback on

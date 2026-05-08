@@ -72,7 +72,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     const issue = buildIssue({ id: "ISS-95", status: "Done" });
     writeFileSync(resolve(openDir, "ISS-95.yml"), serializeIssue(issue));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     expect(result.healed).toEqual([
       { id: "ISS-95", status: "Done", direction: "open-to-closed" },
@@ -86,7 +86,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     // "Done" trips this expectation.
     const cancelled = buildIssue({ id: "ISS-96", status: "Cancelled" });
     writeFileSync(resolve(openDir, "ISS-96.yml"), serializeIssue(cancelled));
-    const second = healLocalYamls(repoRoot);
+    const second = healLocalYamls(repoRoot, "ISS");
     expect(second.healed).toEqual([
       { id: "ISS-96", status: "Cancelled", direction: "open-to-closed" },
     ]);
@@ -99,7 +99,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     const issue = buildIssue({ id: "ISS-77", status: "Done" });
     writeFileSync(resolve(closedDir, "ISS-77.yml"), serializeIssue(issue));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     // Heal scans `open/`; nothing eligible there. Closed/ is untouched.
     expect(result.healed).toEqual([]);
@@ -127,7 +127,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     });
     writeFileSync(resolve(openDir, "ISS-50.yml"), serializeIssue(fresh));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     expect(result.healed).toEqual([
       { id: "ISS-50", status: "Done", direction: "open-to-closed" },
@@ -135,6 +135,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     expect(existsSync(resolve(openDir, "ISS-50.yml"))).toBe(false);
     const reloaded = parseIssue(
       readFileSync(resolve(closedDir, "ISS-50.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
     );
     expect(reloaded.title).toBe("Fresh open copy");
   });
@@ -158,7 +159,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
       writeFileSync(resolve(openDir, `${issue.id}.yml`), serializeIssue(issue));
     }
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     expect(result.healed).toEqual([]);
     expect(result.errors).toEqual([]);
@@ -185,7 +186,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     const healthy = buildIssue({ id: "ISS-67", status: "Done" });
     writeFileSync(resolve(openDir, "ISS-67.yml"), serializeIssue(healthy));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     // Healthy sibling moved.
     expect(result.healed).toEqual([
@@ -223,13 +224,14 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     });
     writeFileSync(resolve(openDir, "ISS-95.yml"), serializeIssue(issue));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     expect(result.healed).toEqual([
       { id: "ISS-95", status: "Done", direction: "open-to-closed" },
     ]);
     const reloaded = parseIssue(
       readFileSync(resolve(closedDir, "ISS-95.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
     );
     expect(reloaded.dispatch).toBeNull();
   });
@@ -241,7 +243,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     writeFileSync(resolve(openDir, ".swp"), "");
     writeFileSync(resolve(openDir, "README.md"), "ignore me");
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     // No errors (we never tried to parse them) and no healed entries.
     expect(result).toEqual({ healed: [], errors: [] });
@@ -251,7 +253,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
   it("returns empty result when the open/ dir does not exist (fresh repo)", () => {
     rmSync(openDir, { recursive: true, force: true });
     rmSync(closedDir, { recursive: true, force: true });
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
     expect(result).toEqual({ healed: [], errors: [] });
   });
 
@@ -264,13 +266,14 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     const issue = buildIssue({ id: "ISS-77", status: "Done" });
     writeFileSync(resolve(openDir, "ISS-77.yml"), serializeIssue(issue));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
     expect(result.healed).toEqual([
       { id: "ISS-77", status: "Done", direction: "open-to-closed" },
     ]);
 
     const reloaded = parseIssue(
       readFileSync(resolve(closedDir, "ISS-77.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
     );
     expect(reloaded.history).toEqual([]);
   });
@@ -298,7 +301,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     });
     writeFileSync(resolve(closedDir, "ISS-50.yml"), serializeIssue(drifted));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
     expect(result.healed).toEqual([
       { id: "ISS-50", status: "ToDo", direction: "closed-to-open" },
     ]);
@@ -312,6 +315,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     // `worker:heal` status_change.
     const reloaded = parseIssue(
       readFileSync(resolve(openDir, "ISS-50.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
     );
     expect(reloaded.history).toHaveLength(2);
     const healEntry = reloaded.history[1];
@@ -335,13 +339,14 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     });
     writeFileSync(resolve(closedDir, "ISS-60.yml"), serializeIssue(drifted));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
     expect(result.healed).toEqual([
       { id: "ISS-60", status: "Blocked", direction: "closed-to-open" },
     ]);
 
     const reloaded = parseIssue(
       readFileSync(resolve(openDir, "ISS-60.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
     );
     expect(reloaded.history).toHaveLength(1);
     expect(reloaded.history[0].from).toBe("Done");
@@ -354,11 +359,12 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     const issue = buildIssue({ id: "ISS-200", status: "Done" });
     writeFileSync(resolve(closedDir, "ISS-200.yml"), serializeIssue(issue));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
     expect(result.healed).toEqual([]);
 
     const reloaded = parseIssue(
       readFileSync(resolve(closedDir, "ISS-200.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
     );
     expect(reloaded.history).toEqual([]);
   });
@@ -383,10 +389,11 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     });
     writeFileSync(resolve(closedDir, "ISS-70.yml"), serializeIssue(drifted));
 
-    healLocalYamls(repoRoot);
+    healLocalYamls(repoRoot, "ISS");
 
     const reloaded = parseIssue(
       readFileSync(resolve(openDir, "ISS-70.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
     );
     expect(reloaded.history).toHaveLength(2);
     const healEntry = reloaded.history[1];
@@ -408,7 +415,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     const drifted = buildIssue({ id: "ISS-81", status: "ToDo" });
     writeFileSync(resolve(closedDir, "ISS-81.yml"), serializeIssue(drifted));
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     expect(result.healed).toEqual([
       { id: "ISS-81", status: "ToDo", direction: "closed-to-open" },
@@ -429,7 +436,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     writeFileSync(resolve(closedDir, "draft-card.yml"), "{}");
     writeFileSync(resolve(closedDir, ".swp"), "");
 
-    const result = healLocalYamls(repoRoot);
+    const result = healLocalYamls(repoRoot, "ISS");
 
     expect(result).toEqual({ healed: [], errors: [] });
     expect(existsSync(resolve(closedDir, "draft-card.yml"))).toBe(true);

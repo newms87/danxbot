@@ -294,7 +294,7 @@ describe("retry-queue", () => {
       expect(result.succeeded).toBe(1);
       // Local YAML now reflects the tracker-stamped ids (read it back).
       const yamlPath = issuePath(tmpDir, "ISS-300", "open");
-      const reread = parseIssue(readFileSync(yamlPath, "utf-8"));
+      const reread = parseIssue(readFileSync(yamlPath, "utf-8"), { expectedPrefix: "ISS" });
       expect(reread.external_id).toBe("ext-newly-allocated");
       expect(reread.ac[0]!.check_item_id).toBe("ci-stamped");
     });

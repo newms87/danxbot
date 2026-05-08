@@ -33,7 +33,7 @@ import { resolve, dirname } from "node:path";
 import {
   appendHistory,
   createEmptyIssue,
-  DEFAULT_ISSUE_PREFIX,
+
   parseIssue,
   serializeIssue,
   validateIssue,
@@ -61,7 +61,7 @@ import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
 export function loadLocal(
   repoLocalPath: string,
   id: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Issue | null {
   for (const state of ["open", "closed"] as const) {
     const path = issuePath(repoLocalPath, id, state);
@@ -164,7 +164,7 @@ export async function hydrateFromRemote(
   externalId: string,
   dispatchId: string | null,
   repoLocalPath: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Promise<Issue> {
   const remote = await tracker.getCard(externalId);
   const remoteComments = await tracker.getComments(externalId);

@@ -44,7 +44,7 @@ export const FIXTURE_BOARD_SESSIONS: ChatSession[] = [
     title: "What's blocking the platform epic?",
     repo: "platform",
     lastMessage:
-      "Two issues are blocking — ISS-105 (alerting routing decision) and ISS-310 (heartbeat design).",
+      "Two issues are blocking — DX-105 (alerting routing decision) and DX-310 (heartbeat design).",
     turns: 6,
     toolCalls: 14,
     startedAt: NOW - 2 * 3600_000,
@@ -56,7 +56,7 @@ export const FIXTURE_BOARD_SESSIONS: ChatSession[] = [
     title: "Triage backlog: which 3 issues should ship next?",
     repo: "platform",
     lastMessage:
-      "Recommend ISS-104 (low effort, unblocks ISS-105), ISS-110, ISS-111 in that order.",
+      "Recommend DX-104 (low effort, unblocks DX-105), DX-110, DX-111 in that order.",
     turns: 4,
     toolCalls: 8,
     startedAt: NOW - 18 * 3600_000,
@@ -68,7 +68,7 @@ export const FIXTURE_BOARD_SESSIONS: ChatSession[] = [
     title: "Are any in-flight issues at risk?",
     repo: "gpt-manager",
     lastMessage:
-      "ISS-203 (auth migration) hit a fixture-update snag; ISS-204 still blocked on the duplicate-warning decision.",
+      "DX-203 (auth migration) hit a fixture-update snag; DX-204 still blocked on the duplicate-warning decision.",
     turns: 9,
     toolCalls: 22,
     startedAt: NOW - 3 * 86_400_000,
@@ -78,7 +78,7 @@ export const FIXTURE_BOARD_SESSIONS: ChatSession[] = [
 ];
 
 export const FIXTURE_ISSUE_SESSIONS: Record<string, ChatSession> = {
-  "ISS-102": {
+  "DX-102": {
     id: "sess_iss102_run",
     title: "Original implementation run",
     dispatchId: "b82041ce-1fed",
@@ -99,7 +99,7 @@ export const FIXTURE_ISSUE_SESSIONS: Record<string, ChatSession> = {
     timeline: [
       {
         type: "user",
-        text: "Trello rate-limit backoff isn't honoring Retry-After header. Reproed at 14:01 — see ISS-102. Fix it.",
+        text: "Trello rate-limit backoff isn't honoring Retry-After header. Reproed at 14:01 — see DX-102. Fix it.",
       },
       {
         type: "thinking",
@@ -183,11 +183,11 @@ export const FIXTURE_ISSUE_SESSIONS: Record<string, ChatSession> = {
       },
       {
         type: "assistant_text",
-        text: "Done. ISS-102 is ready for review:\n\n• `parseRetryAfter()` handles both seconds-as-number and HTTP-date\n• Capped at 5min\n• 4 new unit tests, all passing\n\nCommits: 3a91c2 (impl), f02bb1 (tests).",
+        text: "Done. DX-102 is ready for review:\n\n• `parseRetryAfter()` handles both seconds-as-number and HTTP-date\n• Capped at 5min\n• 4 new unit tests, all passing\n\nCommits: 3a91c2 (impl), f02bb1 (tests).",
       },
     ],
   },
-  "ISS-101": {
+  "DX-101": {
     id: "sess_iss101_planning",
     title: "Epic planning: poller resilience",
     dispatchId: "epic-101-planning",
@@ -239,7 +239,7 @@ export const FIXTURE_ISSUE_SESSIONS: Record<string, ChatSession> = {
       },
       {
         type: "assistant_text",
-        text: "Drafted the epic with 4 phases:\n\n1. Spike: reproduce retry storm\n2. Honor Retry-After header\n3. Backoff queue + drop policy\n4. Metrics + alerting\n\nWrote it to `.danxbot/issues/open/ISS-101.yml` with child issues ISS-102 through ISS-105.",
+        text: "Drafted the epic with 4 phases:\n\n1. Spike: reproduce retry storm\n2. Honor Retry-After header\n3. Backoff queue + drop policy\n4. Metrics + alerting\n\nWrote it to `.danxbot/issues/open/DX-101.yml` with child issues DX-102 through DX-105.",
       },
     ],
   },

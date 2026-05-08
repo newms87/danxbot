@@ -94,7 +94,7 @@ describe("Issue.history round-trip", () => {
     ];
     const issue = fullIssue({ history: entries });
     const yaml1 = serializeIssue(issue);
-    const parsed = parseIssue(yaml1);
+    const parsed = parseIssue(yaml1, { expectedPrefix: "ISS" });
     expect(parsed.history).toEqual(entries);
     const yaml2 = serializeIssue(parsed);
     expect(yaml2).toBe(yaml1);
@@ -106,7 +106,7 @@ describe("Issue.history round-trip", () => {
       "\n",
     );
     expect(yamlNoHistory).not.toMatch(/^history:/m);
-    const parsed = parseIssue(yamlNoHistory);
+    const parsed = parseIssue(yamlNoHistory, { expectedPrefix: "ISS" });
     expect(parsed.history).toEqual([]);
   });
 
@@ -135,7 +135,7 @@ describe("validateIssue history field", () => {
         "    to: ToDo",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(/history\[0\]\.actor/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/history\[0\]\.actor/);
   });
 
   it("rejects an entry with empty actor string", () => {
@@ -152,7 +152,7 @@ describe("validateIssue history field", () => {
         "    to: ToDo",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(/history\[0\]\.actor/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/history\[0\]\.actor/);
   });
 
   it("rejects an entry with unknown event", () => {
@@ -169,7 +169,7 @@ describe("validateIssue history field", () => {
         "    to: ToDo",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(/history\[0\]\.event/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/history\[0\]\.event/);
   });
 
   it("rejects an entry with non-string timestamp", () => {
@@ -186,7 +186,7 @@ describe("validateIssue history field", () => {
         "    to: ToDo",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(/history\[0\]\.timestamp/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/history\[0\]\.timestamp/);
   });
 
   it("rejects an entry with non-IssueStatus value in `to`", () => {
@@ -203,7 +203,7 @@ describe("validateIssue history field", () => {
         "    to: NotAStatus",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(/history\[0\]\.to/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/history\[0\]\.to/);
   });
 
   it("rejects an entry with non-IssueStatus value in `from`", () => {
@@ -221,7 +221,7 @@ describe("validateIssue history field", () => {
         "    to: ToDo",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(/history\[0\]\.from/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/history\[0\]\.from/);
   });
 
   it("rejects history field that is neither a list nor null", () => {
@@ -252,7 +252,7 @@ describe("validateIssue history field", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       history: "not-a-list",
-    });
+    }, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("history must be a list");
@@ -277,7 +277,7 @@ describe("validateIssue history field", () => {
         "    note: null",
       ].join("\n"),
     );
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.history.length).toBe(1);
     expect(parsed.history[0].from).toBeUndefined();
     expect(parsed.history[0].to).toBeUndefined();
@@ -295,7 +295,7 @@ describe("validateIssue history field", () => {
         "    to: ToDo",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
       /event=status_change requires both from and to/,
     );
   });
@@ -311,7 +311,7 @@ describe("validateIssue history field", () => {
         "    from: ToDo",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
       /event=status_change requires both from and to/,
     );
   });
@@ -326,7 +326,7 @@ describe("validateIssue history field", () => {
         "    event: created",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(/event=created requires to/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/event=created requires to/);
   });
 
   it("rejects blocked entry missing `to`", () => {
@@ -339,7 +339,7 @@ describe("validateIssue history field", () => {
         "    event: blocked",
       ].join("\n"),
     );
-    expect(() => parseIssue(yaml)).toThrow(/event=blocked requires to/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/event=blocked requires to/);
   });
 
   it("accepts unblocked entry without `to` (no required transition fields)", () => {
@@ -352,7 +352,7 @@ describe("validateIssue history field", () => {
         "    event: unblocked",
       ].join("\n"),
     );
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.history[0].event).toBe("unblocked");
     expect(parsed.history[0].to).toBeUndefined();
   });
@@ -366,7 +366,7 @@ describe("validateIssue history field", () => {
       /^history: \[\]$/m,
       "history: null",
     );
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.history).toEqual([]);
   });
 });
@@ -410,7 +410,7 @@ describe("history parse-side cap (rolling window)", () => {
     const issue = fullIssue();
     issue.history = entries;
     const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.history.length).toBe(HISTORY_CAP);
     expect(parsed.history[0].timestamp).toBe("t-0");
     expect(parsed.history.at(-1)?.timestamp).toBe(`t-${HISTORY_CAP - 1}`);
@@ -426,7 +426,7 @@ describe("history parse-side cap (rolling window)", () => {
     const issue = fullIssue();
     issue.history = entries;
     const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.history.length).toBe(HISTORY_CAP);
     // Oldest dropped: index 0 was `t-0`; after one-entry slice, index 0 is `t-1`.
     expect(parsed.history[0].timestamp).toBe("t-1");
@@ -449,7 +449,7 @@ describe("history parse-side cap (rolling window)", () => {
     const issue = fullIssue();
     issue.history = entries;
     const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.history.length).toBe(HISTORY_CAP);
     // Oldest dropped, newest kept.
     expect(parsed.history[0].timestamp).toBe(
@@ -783,7 +783,7 @@ describe("legacy YAML migration side-effect", () => {
       "",
     ].join("\n");
     expect(legacyYaml).not.toMatch(/^history:/m);
-    const parsed = parseIssue(legacyYaml);
+    const parsed = parseIssue(legacyYaml, { expectedPrefix: "ISS" });
     expect(parsed.history).toEqual([]);
     const reSerialized = serializeIssue(parsed);
     // The one-shot diff: history: [] now appears between comments: and retro:.
@@ -798,7 +798,7 @@ describe("createEmptyIssue history default", () => {
     // `history` invariant breaks orphan adoption. Cheap insurance.
     const issue = createEmptyIssue({ id: "ISS-1", title: "T" });
     expect(issue.history).toEqual([]);
-    const result = validateIssue(issue as unknown as Record<string, unknown>);
+    const result = validateIssue(issue as unknown as Record<string, unknown>, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(true);
   });
 });

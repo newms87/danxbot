@@ -5,6 +5,7 @@ import {
   fetchAgent,
   fetchAgents,
   patchToggle,
+  putIssuePrefix,
   type ToggleError,
 } from "../api";
 import {
@@ -22,6 +23,7 @@ export interface UseAgents {
   error: Ref<string | null>;
   toggle: (repo: string, feature: Feature, enabled: boolean | null) => Promise<void>;
   clearCriticalFailure: (repo: string) => Promise<void>;
+  saveIssuePrefix: (repo: string, prefix: string) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -292,5 +294,41 @@ export function useAgents(): UseAgents {
     }
   }
 
-  return { agents, loading, error, toggle, clearCriticalFailure, refresh: hydrate };
+  /**
+   * DX-103: PUT a repo's `issue_prefix` and refresh that repo's
+   * snapshot so the input + Issues tab pick up the new value. The
+   * `issue-prefix:changed` SSE event also broadcasts to other clients
+   * — `useStream` already routes that into `agent:updated` if the
+   * backend re-emits a snapshot; on this client we re-fetch directly
+   * to keep the round-trip deterministic.
+   */
+  async function saveIssuePrefix(repo: string, prefix: string): Promise<void> {
+    try {
+      await putIssuePrefix(repo, prefix);
+      const refreshed = await fetchAgent(repo);
+      const idx = agents.value.findIndex((a) => a.name === repo);
+      if (idx !== -1) {
+        agents.value = [
+          ...agents.value.slice(0, idx),
+          refreshed,
+          ...agents.value.slice(idx + 1),
+        ];
+      }
+      error.value = null;
+    } catch (err) {
+      const te = err as ToggleError;
+      error.value =
+        te?.serverMessage ?? te?.message ?? "Save issue prefix failed.";
+    }
+  }
+
+  return {
+    agents,
+    loading,
+    error,
+    toggle,
+    clearCriticalFailure,
+    saveIssuePrefix,
+    refresh: hydrate,
+  };
 }

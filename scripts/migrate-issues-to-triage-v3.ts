@@ -43,7 +43,17 @@ import {
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
-import { parseIssue, ISSUE_ID_REGEX } from "../src/issue-tracker/yaml.js";
+import { parseIssue } from "../src/issue-tracker/yaml.js";
+
+/**
+ * v1/v2 YAMLs always carried the literal `ISS-<N>` id shape — the
+ * per-repo `issue_prefix` knob (DX-99) post-dates this migration. Locally
+ * scoped here so the script doesn't take a runtime dep on a constant
+ * that no longer ships in `src/issue-tracker/yaml.ts` (Phase 4 of DX-99
+ * retired `ISSUE_ID_REGEX`).
+ */
+const LEGACY_ISS_REGEX = /^ISS-\d+$/;
+const LEGACY_PREFIX = "ISS";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -271,7 +281,7 @@ function migrateOne(
   let yamlText: string;
   try {
     yamlText = stringify(next, { lineWidth: 0 });
-    parseIssue(yamlText);
+    parseIssue(yamlText, { expectedPrefix: LEGACY_PREFIX });
   } catch (err) {
     return {
       path: filePath,
@@ -319,7 +329,7 @@ function applyStagger(
     let yamlText: string;
     try {
       yamlText = stringify(map, { lineWidth: 0 });
-      parseIssue(yamlText);
+      parseIssue(yamlText, { expectedPrefix: LEGACY_PREFIX });
     } catch (err) {
       results.push({
         path: filePath,
@@ -394,7 +404,7 @@ function migrateV1(
 ): V1MigrationResult {
   const repoRoot = resolve(filePath, "..", "..", "..", ".."); // .yml → state → issues → .danxbot → repo
   const id = allocateId(repoRoot);
-  if (!ISSUE_ID_REGEX.test(id)) {
+  if (!LEGACY_ISS_REGEX.test(id)) {
     return {
       status: "error",
       message: `Allocated id ${JSON.stringify(id)} does not match ISS-N`,

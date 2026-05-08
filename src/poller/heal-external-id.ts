@@ -57,7 +57,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   buildIssueIdRegex,
-  DEFAULT_ISSUE_PREFIX,
+
   IssueParseError,
   parseIssue,
   serializeIssue,
@@ -114,7 +114,7 @@ export interface HealExternalIdResult {
 export function healExternalIds(
   repoLocalPath: string,
   tracker: IssueTracker,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
   now: () => string = () => new Date().toISOString(),
 ): HealExternalIdResult {
   const result: HealExternalIdResult = { healed: [], errors: [] };

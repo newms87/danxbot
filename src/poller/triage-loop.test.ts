@@ -126,10 +126,10 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
       makeIssue({ id: "ISS-1", external_id: "a", status: "ToDo" }),
       1000,
     );
-    expect(listDispatchableYamls(repoRoot).map((i) => i.id)).toEqual([
+    expect(listDispatchableYamls(repoRoot, "ISS").map((i) => i.id)).toEqual([
       "ISS-1",
     ]);
-    expect(listTriageDueYamls(repoRoot, NOW)).toEqual([]);
+    expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
   });
 
   it("Case 2 — tick with 0 work-ready, 1 triage-due Review → triage path picks the Review card", () => {
@@ -150,8 +150,8 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
       }),
       1000,
     );
-    expect(listDispatchableYamls(repoRoot)).toEqual([]);
-    expect(listTriageDueYamls(repoRoot, NOW).map((i) => i.id)).toEqual([
+    expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
+    expect(listTriageDueYamls(repoRoot, NOW, "ISS").map((i) => i.id)).toEqual([
       "ISS-1",
     ]);
   });
@@ -209,7 +209,7 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
       makeIssue({ id: "ISS-202", external_id: "u2", status: "ToDo" }),
       4000,
     );
-    const result = listDispatchableYamls(repoRoot);
+    const result = listDispatchableYamls(repoRoot, "ISS");
     expect(result.map((i) => i.id)).toEqual([
       // Untriaged tier first, FIFO oldest mtime
       "ISS-201",
@@ -242,7 +242,7 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
     writeAt(repoRoot, triagedToDo("ISS-403", 40), 3000);
     writeAt(repoRoot, triagedToDo("ISS-404", 20), 4000);
     writeAt(repoRoot, triagedToDo("ISS-405", 10), 5000);
-    const result = listDispatchableYamls(repoRoot);
+    const result = listDispatchableYamls(repoRoot, "ISS");
     expect(result.map((i) => i.id)).toEqual([
       "ISS-401",
       "ISS-402",
@@ -291,8 +291,8 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
       }),
       2000,
     );
-    expect(listDispatchableYamls(repoRoot)).toEqual([]);
-    expect(listTriageDueYamls(repoRoot, NOW)).toEqual([]);
+    expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
+    expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
   });
 
   it("Case 6 — In Progress orphan with stamped dispatch is reattached; the helpers do not surface it as work-ready", () => {
@@ -316,9 +316,9 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
       }),
       1000,
     );
-    expect(listDispatchableYamls(repoRoot)).toEqual([]);
-    expect(listInProgressYamls(repoRoot).map((i) => i.id)).toEqual(["ISS-1"]);
-    expect(listTriageDueYamls(repoRoot, NOW)).toEqual([]);
+    expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
+    expect(listInProgressYamls(repoRoot, "ISS").map((i) => i.id)).toEqual(["ISS-1"]);
+    expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
   });
 
   it("Case 7 — idle-loop guard: a triage agent that previously crashed leaves a short TTL on the card; the next tick sees the YAML as not-yet-due and skips it", () => {
@@ -345,10 +345,10 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
       }),
       1000,
     );
-    expect(listTriageDueYamls(repoRoot, NOW)).toEqual([]);
+    expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
     // Once 5 minutes pass, the same YAML appears in the triage-due set.
     expect(
-      listTriageDueYamls(repoRoot, NOW + 6 * 60 * 1000).map((i) => i.id),
+      listTriageDueYamls(repoRoot, NOW + 6 * 60 * 1000, "ISS").map((i) => i.id),
     ).toEqual(["ISS-1"]);
   });
 
@@ -385,7 +385,7 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
       }),
       3000,
     );
-    const due = listTriageDueYamls(repoRoot, NOW);
+    const due = listTriageDueYamls(repoRoot, NOW, "ISS");
     expect(due.length).toBe(3);
     // First entry is the FIFO-oldest among never-triaged. The
     // dispatcher fires that one and returns; the rest wait for the
@@ -414,9 +414,9 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
       }),
       1000,
     );
-    expect(listDispatchableYamls(repoRoot)).toEqual([]);
-    expect(listBlockedTodoYamls(repoRoot).map((i) => i.id)).toEqual(["ISS-1"]);
-    expect(listTriageDueYamls(repoRoot, NOW).map((i) => i.id)).toEqual([
+    expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
+    expect(listBlockedTodoYamls(repoRoot, "ISS").map((i) => i.id)).toEqual(["ISS-1"]);
+    expect(listTriageDueYamls(repoRoot, NOW, "ISS").map((i) => i.id)).toEqual([
       "ISS-1",
     ]);
   });

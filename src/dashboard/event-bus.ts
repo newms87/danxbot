@@ -26,6 +26,7 @@ export type EventTopic =
   | "dispatch:created"
   | "dispatch:updated"
   | "agent:updated"
+  | "issue-prefix:changed"
   | "system-errors"
   | (string & {}); // open-ended for `dispatch:jsonl:<id>`
 
@@ -54,12 +55,28 @@ export interface SystemErrorPayload {
   data: SystemError;
 }
 
+/**
+ * DX-103: emitted by `PUT /api/agents/:repo/issue-prefix` after a
+ * successful migration. SPA listeners refresh the Issues tab so the
+ * new prefix's chips render without a full page reload.
+ */
+export interface IssuePrefixChangedPayload {
+  topic: "issue-prefix:changed";
+  data: {
+    repo: string;
+    oldPrefix: string;
+    newPrefix: string;
+    migratedFiles: number;
+  };
+}
+
 export type BusEvent =
   | DispatchCreatedPayload
   | DispatchUpdatedPayload
   | DispatchJsonlPayload
   | AgentUpdatedPayload
-  | SystemErrorPayload;
+  | SystemErrorPayload
+  | IssuePrefixChangedPayload;
 
 export type BusEventCallback = (event: BusEvent) => void;
 

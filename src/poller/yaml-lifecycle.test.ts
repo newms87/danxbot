@@ -136,7 +136,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         dispatchId,
-        repoRoot,
+        repoRoot, "ISS",
       );
 
       expect(issue.id).toBe("ISS-77");
@@ -163,7 +163,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
       expect(issue.id).toMatch(/^ISS-\d+$/);
     });
@@ -184,14 +184,14 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         null,
-        repoRoot,
+        repoRoot, "ISS",
       );
       expect(issue.dispatch).toBeNull();
 
       // Round-trip through writeIssue + the strict parseIssue validator
       // — null dispatch MUST survive serialization.
       writeIssue(repoRoot, issue);
-      const reloaded = loadLocal(repoRoot, issue.id);
+      const reloaded = loadLocal(repoRoot, issue.id, "ISS");
       expect(reloaded?.dispatch).toBeNull();
     });
 
@@ -206,7 +206,7 @@ describe("yaml-lifecycle", () => {
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-200" }),
       );
-      const issue = await hydrateFromRemote(tracker, external_id, null, repoRoot);
+      const issue = await hydrateFromRemote(tracker, external_id, null, repoRoot, "ISS");
 
       // Every required field is populated with the expected value
       // (not just well-typed) so a hydration regression that drops a
@@ -247,7 +247,7 @@ describe("yaml-lifecycle", () => {
       // strict parseIssue). Any missing required field would throw
       // here.
       writeIssue(repoRoot, issue);
-      const reloaded = loadLocal(repoRoot, issue.id);
+      const reloaded = loadLocal(repoRoot, issue.id, "ISS");
       expect(reloaded).not.toBeNull();
       expect(reloaded?.external_id).toBe(external_id);
     });
@@ -264,7 +264,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
       expect(issue.comments).toHaveLength(2);
       expect(issue.comments[0].text).toContain("first comment");
@@ -284,7 +284,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         null,
-        repoRoot,
+        repoRoot, "ISS",
       );
 
       expect(issue.history).toHaveLength(1);
@@ -305,7 +305,7 @@ describe("yaml-lifecycle", () => {
       // Round-trip survival: the freshly hydrated Issue + its `created`
       // entry MUST round-trip through the strict validator unchanged.
       writeIssue(repoRoot, issue);
-      const reloaded = loadLocal(repoRoot, issue.id);
+      const reloaded = loadLocal(repoRoot, issue.id, "ISS");
       expect(reloaded?.history).toHaveLength(1);
       expect(reloaded?.history[0].actor).toBe(entry.actor);
       expect(reloaded?.history[0].event).toBe("created");
@@ -323,12 +323,12 @@ describe("yaml-lifecycle", () => {
         defaultCreate({ id: "ISS-400" }),
       );
 
-      const first = await hydrateFromRemote(tracker, external_id, null, repoRoot);
+      const first = await hydrateFromRemote(tracker, external_id, null, repoRoot, "ISS");
       expect(first.history).toHaveLength(1);
       expect(first.history[0].event).toBe("created");
 
       writeIssue(repoRoot, first);
-      const reloaded = loadLocal(repoRoot, first.id);
+      const reloaded = loadLocal(repoRoot, first.id, "ISS");
       // Round-trip is byte-stable: parsed history matches the hydrate
       // output exactly. No second entry was appended during
       // serialize/parse, and the parse path leaves `history` alone.
@@ -347,7 +347,7 @@ describe("yaml-lifecycle", () => {
         defaultCreate({ id: "" }),
       );
 
-      const issue = await hydrateFromRemote(tracker, external_id, "did-1", repoRoot);
+      const issue = await hydrateFromRemote(tracker, external_id, "did-1", repoRoot, "ISS");
       expect(issue.id).toMatch(/^ISS-\d+$/);
       expect(issue.history).toHaveLength(1);
       expect(issue.history[0].event).toBe("created");
@@ -359,7 +359,7 @@ describe("yaml-lifecycle", () => {
   describe("loadLocal", () => {
     it("returns null when no file exists in open/ or closed/", () => {
       ensureIssuesDirs(repoRoot);
-      expect(loadLocal(repoRoot, "ISS-9999")).toBeNull();
+      expect(loadLocal(repoRoot, "ISS-9999", "ISS")).toBeNull();
     });
 
     it("returns the parsed Issue from open/ when present", async () => {
@@ -371,11 +371,11 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
       writeIssue(repoRoot, issue);
 
-      const loaded = loadLocal(repoRoot, "ISS-10");
+      const loaded = loadLocal(repoRoot, "ISS-10", "ISS");
       expect(loaded).not.toBeNull();
       expect(loaded?.id).toBe("ISS-10");
       expect(loaded?.external_id).toBe(external_id);
@@ -391,7 +391,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
       ensureIssuesDirs(repoRoot);
       writeFileSync(
@@ -399,7 +399,7 @@ describe("yaml-lifecycle", () => {
         serializeIssue(issue),
       );
 
-      const loaded = loadLocal(repoRoot, "ISS-11");
+      const loaded = loadLocal(repoRoot, "ISS-11", "ISS");
       expect(loaded?.id).toBe("ISS-11");
     });
 
@@ -409,7 +409,7 @@ describe("yaml-lifecycle", () => {
         issuePath(repoRoot, "ISS-99", "open"),
         "not: valid: yaml: at: all\n  - broken",
       );
-      expect(() => loadLocal(repoRoot, "ISS-99")).toThrow();
+      expect(() => loadLocal(repoRoot, "ISS-99", "ISS")).toThrow();
     });
   });
 
@@ -419,7 +419,7 @@ describe("yaml-lifecycle", () => {
       const { external_id: ext } = await tracker.createCard(
         defaultCreate({ id: "ISS-50" }),
       );
-      const issue = await hydrateFromRemote(tracker, ext, "did-1", repoRoot);
+      const issue = await hydrateFromRemote(tracker, ext, "did-1", repoRoot, "ISS");
       writeIssue(repoRoot, issue);
 
       const found = findByExternalId(repoRoot, ext);
@@ -505,14 +505,14 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
 
       writeIssue(repoRoot, issue);
 
       const path = issuePath(repoRoot, "ISS-12", "open");
       expect(existsSync(path)).toBe(true);
-      const roundTripped = parseIssue(readFileSync(path, "utf-8"));
+      const roundTripped = parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: "ISS" });
       expect(roundTripped.id).toBe("ISS-12");
       expect(roundTripped.external_id).toBe(external_id);
       expect(roundTripped.dispatch?.id).toBe("did-1");
@@ -529,14 +529,14 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
       writeIssue(repoRoot, original);
 
       const updated = stampDispatchAndWrite(repoRoot, original, "did-2");
       expect(updated.dispatch?.id).toBe("did-2");
 
-      const reloaded = loadLocal(repoRoot, "ISS-13");
+      const reloaded = loadLocal(repoRoot, "ISS-13", "ISS");
       expect(reloaded?.dispatch?.id).toBe("did-2");
     });
 
@@ -549,7 +549,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
       writeIssue(repoRoot, original);
 
@@ -573,7 +573,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
       writeIssue(repoRoot, original);
 
@@ -594,7 +594,7 @@ describe("yaml-lifecycle", () => {
         ttl_seconds: 7200,
       });
 
-      const reloaded = loadLocal(repoRoot, "ISS-15");
+      const reloaded = loadLocal(repoRoot, "ISS-15", "ISS");
       expect(reloaded?.dispatch?.pid).toBe(4321);
       expect(reloaded?.dispatch?.host).toBe("danxbot-host-a");
       expect(reloaded?.dispatch?.started_at).toBe("2026-05-07T12:00:00.000Z");
@@ -612,7 +612,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         "did-1",
-        repoRoot,
+        repoRoot, "ISS",
       );
       const stamped = stampDispatchAndWrite(repoRoot, original, {
         id: "did-1",
@@ -627,7 +627,7 @@ describe("yaml-lifecycle", () => {
       const cleared = clearDispatchAndWrite(repoRoot, stamped);
       expect(cleared.dispatch).toBeNull();
 
-      const reloaded = loadLocal(repoRoot, "ISS-16");
+      const reloaded = loadLocal(repoRoot, "ISS-16", "ISS");
       expect(reloaded?.dispatch).toBeNull();
     });
 
@@ -640,7 +640,7 @@ describe("yaml-lifecycle", () => {
         tracker,
         external_id,
         null,
-        repoRoot,
+        repoRoot, "ISS",
       );
       writeIssue(repoRoot, original);
       expect(original.dispatch).toBeNull();
@@ -736,6 +736,7 @@ describe("yaml-lifecycle", () => {
       expect(moved).toBe(true);
       const reloaded = parseIssue(
         readFileSync(issuePath(repoRoot, "ISS-6", "closed"), "utf-8"),
+        { expectedPrefix: "ISS" },
       );
       expect(reloaded.title).toBe("Fresh open content");
       expect(existsSync(issuePath(repoRoot, "ISS-6", "open"))).toBe(false);

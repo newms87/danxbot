@@ -173,7 +173,7 @@ function onSelect(issue: IssueListItem): void {
 }
 
 function onJumpIssue(id: string): void {
-  // Issue ids are scoped per-repo (ISS-N collides across repos), so any
+  // Issue ids are scoped per-repo (<PREFIX>-N collides across repos), so any
   // chip in this drawer references a card in `selectedRepo` by data-model
   // invariant. If a future global-id model lands, branch here to switch
   // `selectedRepo` before opening.

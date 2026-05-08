@@ -8,30 +8,20 @@
 import type { RepoConfig, RepoContext } from "./types.js";
 import { getReposBase, loadTrelloIds } from "./poller/constants.js";
 import { parseEnvFile } from "./env-file.js";
-import {
-  DEFAULT_ISSUE_PREFIX,
-  ISSUE_PREFIX_SHAPE,
-} from "./issue-tracker/yaml.js";
-import {
-  loadIssuePrefix,
-  _resetWarnedPrefixPaths,
-} from "./issue-tracker/load-issue-prefix.js";
+import { ISSUE_PREFIX_SHAPE } from "./issue-tracker/yaml.js";
+import { loadIssuePrefix } from "./issue-tracker/load-issue-prefix.js";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { repos, isWorkerMode, workerRepoName, config } from "./config.js";
 
-// Re-export the prefix constants and loader so existing callers (and
-// tests) that import them from `repo-context.js` keep compiling. Single
-// source for the constants lives in `issue-tracker/yaml.ts`; the loader
-// itself moved to `issue-tracker/load-issue-prefix.ts` in Phase 2 of
-// ISS-99 so leaf consumers (the dashboard reader) can import it without
-// transitively pulling `src/config.ts`'s required-env-var checks.
-export {
-  DEFAULT_ISSUE_PREFIX,
-  ISSUE_PREFIX_SHAPE,
-  loadIssuePrefix,
-  _resetWarnedPrefixPaths,
-};
+// Re-export the prefix shape + loader so existing callers (and tests) that
+// import them from `repo-context.js` keep compiling. Single source for the
+// shape lives in `issue-tracker/yaml.ts`; the loader itself moved to
+// `issue-tracker/load-issue-prefix.ts` in Phase 2 of DX-99 so leaf consumers
+// (the dashboard reader) can import it without transitively pulling
+// `src/config.ts`'s required-env-var checks. Phase 4 of DX-99 retired the
+// `DEFAULT_ISSUE_PREFIX` constant + the warn-once-default fallback.
+export { ISSUE_PREFIX_SHAPE, loadIssuePrefix };
 
 /**
  * Resolve DANXBOT_WORKER_PORT. Production (deploy): compose injects it from

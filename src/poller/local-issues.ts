@@ -35,7 +35,7 @@ import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   buildIssueIdRegex,
-  DEFAULT_ISSUE_PREFIX,
+
   IssueParseError,
   parseIssue,
 } from "../issue-tracker/yaml.js";
@@ -51,7 +51,7 @@ interface WalkEntry {
 
 function walkOpenIssues(
   repoLocalPath: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): WalkEntry[] {
   const dir = resolve(repoLocalPath, ".danxbot", "issues", "open");
   if (!existsSync(dir)) return [];
@@ -106,7 +106,7 @@ function sortFifo(entries: WalkEntry[]): Issue[] {
  */
 export function listDispatchableYamls(
   repoLocalPath: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Issue[] {
   const filtered = walkOpenIssues(repoLocalPath, prefix).filter((e) => {
     const i = e.issue;
@@ -144,7 +144,7 @@ function workReadyCompare(a: WalkEntry, b: WalkEntry): number {
  */
 export function listInProgressYamls(
   repoLocalPath: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Issue[] {
   const filtered = walkOpenIssues(repoLocalPath, prefix).filter(
     (e) => e.issue.status === "In Progress",
@@ -163,7 +163,7 @@ export function listInProgressYamls(
  */
 export function listBlockedTodoYamls(
   repoLocalPath: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Issue[] {
   const filtered = walkOpenIssues(repoLocalPath, prefix).filter(
     (e) => e.issue.status === "ToDo" && e.issue.waiting_on !== null,
@@ -198,7 +198,7 @@ export function listBlockedTodoYamls(
 export function listTriageDueYamls(
   repoLocalPath: string,
   now: number,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Issue[] {
   const filtered = walkOpenIssues(repoLocalPath, prefix).filter((e) => {
     const i = e.issue;

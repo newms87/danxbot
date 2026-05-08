@@ -96,6 +96,7 @@ function snap(
     },
     worker: { reachable: true, lastSeenMs: Date.now() },
     criticalFailure: null,
+    issuePrefix: "ISS",
   } as AgentSnapshot;
 }
 

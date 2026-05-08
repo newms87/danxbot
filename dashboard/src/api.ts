@@ -218,6 +218,43 @@ export async function patchToggle(
   return res.json();
 }
 
+export interface IssuePrefixResult {
+  prefix: string;
+  migratedFiles: number;
+}
+
+/**
+ * PUT /api/agents/:repo/issue-prefix — DX-103. Operator flips a repo's
+ * `issue_prefix`; backend runs the file-rename + content-rewrite
+ * migration synchronously and returns `{prefix, migratedFiles}`. Errors
+ * surface as a `ToggleError` with the server's `error` string for
+ * direct rendering.
+ */
+export async function putIssuePrefix(
+  repo: string,
+  prefix: string,
+): Promise<IssuePrefixResult> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/issue-prefix`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prefix }),
+    },
+  );
+  if (!res.ok) {
+    let message: string | undefined;
+    try {
+      const body = await res.json();
+      if (body && typeof body.error === "string") message = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw toggleError(res.status, message);
+  }
+  return res.json();
+}
+
 export interface ResetAllDataResult {
   tablesCleared: string[];
   rowsDeleted: number;

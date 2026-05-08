@@ -8,6 +8,7 @@ These rule files are auto-loaded; the pointers below exist so a fresh agent know
 
 | If you're touching… | Read first |
 |---|---|
+| **About to run `make launch-worker*`, `make launch-all-workers`, `make launch-infra`, `make launch-dashboard-host`, `make deploy*`, or any other command that starts a danxbot poller / worker / production target** | Skill `no-unauthorized-worker-launch` (in the `danxbot` plugin — STRICTLY PROHIBITED without explicit per-invocation user authorization, no exceptions) |
 | `src/agent/launcher.ts`, `terminal.ts`, `session-log-watcher.ts`, `stall-detector.ts`, `laravel-forwarder.ts`, `mcp/danxbot-server.ts`, `worker/dispatch.ts` | `.claude/rules/agent-dispatch.md` (single-fork, JSONL-only monitoring, completion signaling) |
 | Anything that builds the host-mode bash dispatch script | `.claude/rules/host-mode-interactive.md` (`claude -p` is FORBIDDEN in host mode) |
 | `<repo>/.danxbot/settings.json` ownership / feature toggles | `.claude/rules/settings-file.md` |
@@ -213,7 +214,7 @@ Outbound (every tick): every YAML field — title, description, status, AC, phas
 
 | What | Where it lives | When Trello is involved |
 |---|---|---|
-| `danx_issue_create` | MCP server, default `tracker: "memory"` | NEVER. Allocates `ISS-N` + writes YAML. Returns immediately. |
+| `danx_issue_create` | MCP server, default `tracker: "memory"` | NEVER. Allocates `<PREFIX>-N` + writes YAML. Returns immediately. |
 | `danx_issue_save` | MCP server, default `tracker: "memory"` | NEVER. Validates YAML + writes to disk. Returns immediately. |
 | `danx_issue_get` / `danx_issue_list` / `danx_issue_close` | MCP server | NEVER. Pure local YAML ops. |
 | YAML → Trello mirror | Worker poller (`src/poller/index.ts`, `src/poller/orphan-push.ts`) | EVERY tick (~60s). Async, batched, retried. |

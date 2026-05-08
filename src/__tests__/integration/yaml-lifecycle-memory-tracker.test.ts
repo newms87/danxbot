@@ -544,7 +544,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     expect(existsSync(yamlClosedPath)).toBe(true);
     expect(existsSync(yamlOpenPath)).toBe(false);
 
-    const persisted = parseIssue(readFileSync(yamlClosedPath, "utf-8"));
+    const persisted = parseIssue(readFileSync(yamlClosedPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.status).toBe("Done");
     expect(persisted.ac.every((a) => a.checked)).toBe(true);
 
@@ -646,7 +646,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     expect(existsSync(yamlOpenPath)).toBe(true);
     expect(existsSync(issuePath(repoDir, seed.id, "closed"))).toBe(false);
 
-    const persisted = parseIssue(readFileSync(yamlOpenPath, "utf-8"));
+    const persisted = parseIssue(readFileSync(yamlOpenPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.status).toBe("Blocked");
     // ACs not auto-checked on Blocked branch.
     expect(persisted.ac.some((a) => !a.checked)).toBe(true);
@@ -718,7 +718,7 @@ describe("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6)", () => {
     expect(existsSync(yamlClosedPath)).toBe(true);
     expect(existsSync(yamlOpenPath)).toBe(false);
 
-    const persisted = parseIssue(readFileSync(yamlClosedPath, "utf-8"));
+    const persisted = parseIssue(readFileSync(yamlClosedPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.status).toBe("Done");
     expect(persisted.ac.every((a) => a.checked)).toBe(true);
 

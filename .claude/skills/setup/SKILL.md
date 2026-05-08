@@ -180,7 +180,9 @@ paths:
 
 Adjust the structure based on what was actually detected. If no Docker setup, omit the `docker` section and set `runtime: local`.
 
-**`issue_prefix`** (ISS-99 Phase 1 onwards): per-repo issue id namespace, 2-4 uppercase ASCII letters, validated against `^[A-Z]{2,4}$`. Each connected repo gets its own prefix so card ids are unambiguous across repos in logs / Slack / comments — `DX-12` is unmistakably danxbot, `SG-12` is unmistakably gpt-manager, even though both repos number from 1. Common values: `DX` (danxbot), `SG` (gpt-manager), `FD` (platform). Pick something derived from the repo name that's distinctive within your org. The field is currently optional and defaults to `ISS` (with one warn-once log) if absent — Phase 4 of ISS-99 will require it. Set it on every new repo you onboard so the deprecation lands silently.
+**`issue_prefix`** (REQUIRED — Phase 4 of DX-99 retired the legacy default): per-repo issue id namespace, 2-4 uppercase ASCII letters, validated against `^[A-Z]{2,4}$`. Each connected repo gets its own prefix so card ids are unambiguous across repos in logs / Slack / comments — `DX-12` is unmistakably danxbot, `SG-12` is unmistakably gpt-manager, even though both repos number from 1. Common values: `DX` (danxbot), `SG` (gpt-manager), `FD` (platform). Pick something derived from the repo name that's distinctive within your org.
+
+**Prompt the operator** for `issue_prefix` before writing `config.yml`: ask "Issue prefix (2-4 uppercase letters, e.g. DX, SG, FD):"; reject any input that does not match `^[A-Z]{2,4}$` and re-prompt until valid. Do NOT default to `ISS` — every connected repo must declare its own prefix. The worker fails loud at startup if `issue_prefix` is missing or malformed.
 
 ### 8b: Write `.danxbot/config/trello.yml`
 

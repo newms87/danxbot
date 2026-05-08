@@ -60,7 +60,7 @@ re-fire the loop after the dispatch is logically over.
    - Checks `<repo>/.danxbot/issues/open/*.yml` for duplicates (search by title / keywords).
    - Generates 3-5 prioritized feature drafts.
    - For each draft, writes a YAML at `<repo>/.danxbot/issues/open/<filename>.yml` with:
-     - `id: ""` (worker assigns the next `ISS-N` — drafts with non-empty `id` are REJECTED)
+     - `id: ""` (worker assigns the next `<PREFIX>-N` — drafts with non-empty `id` are REJECTED)
      - `parent_id: null`
      - `children: []`
      - `dispatch: null`
@@ -73,7 +73,7 @@ re-fire the loop after the dispatch is logically over.
      - `retro: {good: "", bad: "", action_item_ids: [], commits: []}`
      - `schema_version: 3`
      - `tracker: "memory"` (or whichever tracker the repo uses — leave the value the parent YAML carries)
-   - Calls `danx_issue_create({filename: "<filename>"})` for each draft. The worker validates, allocates the next `ISS-N`, stamps it back into the YAML, and renames the file to `<id>.yml`. Captures the returned `id`.
+   - Calls `danx_issue_create({filename: "<filename>"})` for each draft. The worker validates, allocates the next `<PREFIX>-N`, stamps it back into the YAML, and renames the file to `<id>.yml`. Captures the returned `id`.
    - Saves discoveries back to `docs/features.md`.
 
 3. Report what the ideator produced:

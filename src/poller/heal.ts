@@ -53,7 +53,7 @@ import { resolve } from "node:path";
 import {
   appendHistory,
   buildIssueIdRegex,
-  DEFAULT_ISSUE_PREFIX,
+
   IssueParseError,
   parseIssue,
   serializeIssue,
@@ -109,7 +109,7 @@ export interface HealResult {
  */
 export function healLocalYamls(
   repoLocalPath: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): HealResult {
   const result: HealResult = { healed: [], errors: [] };
 

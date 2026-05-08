@@ -4,8 +4,15 @@ import type { Feature } from "../../types";
 import { useAgents } from "../../composables/useAgents";
 import RepoCard from "./RepoCard.vue";
 
-const { agents, loading, error, toggle, clearCriticalFailure, refresh } =
-  useAgents();
+const {
+  agents,
+  loading,
+  error,
+  toggle,
+  clearCriticalFailure,
+  saveIssuePrefix,
+  refresh,
+} = useAgents();
 
 // Track which feature is currently mid-PATCH on each repo, so we can
 // disable that specific toggle while it's in flight without freezing the
@@ -14,6 +21,8 @@ const busy = ref<Record<string, Feature | null>>({});
 // Per-repo "clearing flag" flag — disables the Clear button while the
 // DELETE round-trip is in flight so operators don't double-click.
 const clearing = ref<Record<string, boolean>>({});
+// Per-repo "saving prefix" flag — disables Save while PUT is in flight.
+const savingPrefix = ref<Record<string, boolean>>({});
 
 async function onToggle(
   repo: string,
@@ -34,6 +43,15 @@ async function onClearCriticalFailure(repo: string): Promise<void> {
     await clearCriticalFailure(repo);
   } finally {
     clearing.value = { ...clearing.value, [repo]: false };
+  }
+}
+
+async function onSaveIssuePrefix(repo: string, prefix: string): Promise<void> {
+  savingPrefix.value = { ...savingPrefix.value, [repo]: true };
+  try {
+    await saveIssuePrefix(repo, prefix);
+  } finally {
+    savingPrefix.value = { ...savingPrefix.value, [repo]: false };
   }
 }
 </script>
@@ -59,8 +77,10 @@ async function onClearCriticalFailure(repo: string): Promise<void> {
         :agent="agent"
         :busy-feature="busy[agent.name] ?? null"
         :clearing-critical-failure="clearing[agent.name] ?? false"
+        :saving-issue-prefix="savingPrefix[agent.name] ?? false"
         @toggle="onToggle"
         @clear-critical-failure="onClearCriticalFailure"
+        @save-issue-prefix="onSaveIssuePrefix"
       />
     </div>
   </section>

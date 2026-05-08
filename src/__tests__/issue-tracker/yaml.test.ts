@@ -2,13 +2,24 @@ import { describe, it, expect } from "vitest";
 import {
   buildIssueIdRegex,
   createEmptyIssue,
-  ISSUE_ID_REGEX,
   IssueParseError,
-  LEGACY_ISS_REGEX,
-  parseIssue,
+  parseIssue as parseIssueRaw,
   serializeIssue,
-  validateIssue,
+  validateIssue as validateIssueRaw,
 } from "../../issue-tracker/yaml.js";
+import type { ParseIssueOptions } from "../../issue-tracker/yaml.js";
+
+// Phase 4 of DX-99 made `expectedPrefix` required on every parse /
+// validate call. The fixtures in this file are all `ISS-N`-shaped
+// (legacy literal), so default the helper to `"ISS"` and let the few
+// non-ISS tests pass an override.
+const ISS_OPTS: ParseIssueOptions = { expectedPrefix: "ISS" };
+function parseIssue(text: string, options: ParseIssueOptions = ISS_OPTS) {
+  return parseIssueRaw(text, options);
+}
+function validateIssue(value: unknown, options: ParseIssueOptions = ISS_OPTS) {
+  return validateIssueRaw(value, options);
+}
 import { isTriaged } from "../../issue-tracker/interface.js";
 import type { Issue } from "../../issue-tracker/interface.js";
 
@@ -48,7 +59,7 @@ describe("serializeIssue / parseIssue", () => {
   it("round-trips a full issue with byte-identical output", () => {
     const issue = fullIssue();
     const yaml1 = serializeIssue(issue);
-    const parsed = parseIssue(yaml1);
+    const parsed = parseIssue(yaml1, { expectedPrefix: "ISS" });
     expect(parsed).toEqual(issue);
     const yaml2 = serializeIssue(parsed);
     expect(yaml2).toBe(yaml1);
@@ -60,7 +71,7 @@ describe("serializeIssue / parseIssue", () => {
     // can't silently drop the value.
     const issue = fullIssue({ status: "Needs Approval" });
     const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.status).toBe("Needs Approval");
     expect(serializeIssue(parsed)).toBe(yaml);
   });
@@ -68,7 +79,7 @@ describe("serializeIssue / parseIssue", () => {
   it("preserves null parent_id and dispatch through round-trip", () => {
     const issue = fullIssue({ parent_id: null, dispatch: null });
     const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.parent_id).toBeNull();
     expect(parsed.dispatch).toBeNull();
   });
@@ -77,7 +88,7 @@ describe("serializeIssue / parseIssue", () => {
     it("round-trips blocked: null (default for unblocked cards)", () => {
       const issue = fullIssue({ blocked: null });
       const yaml = serializeIssue(issue);
-      const parsed = parseIssue(yaml);
+      const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
       expect(parsed.blocked).toBeNull();
       expect(serializeIssue(parsed)).toBe(yaml);
     });
@@ -91,7 +102,7 @@ describe("serializeIssue / parseIssue", () => {
         },
       });
       const yaml = serializeIssue(issue);
-      const parsed = parseIssue(yaml);
+      const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
       expect(parsed.blocked).toEqual(issue.blocked);
       expect(serializeIssue(parsed)).toBe(yaml);
     });
@@ -103,7 +114,7 @@ describe("serializeIssue / parseIssue", () => {
       );
       // Sanity: stripped form really lacks the field.
       expect(yamlNoBlocked).not.toContain("blocked:");
-      const parsed = parseIssue(yamlNoBlocked);
+      const parsed = parseIssue(yamlNoBlocked, { expectedPrefix: "ISS" });
       expect(parsed.blocked).toBeNull();
     });
 
@@ -112,7 +123,7 @@ describe("serializeIssue / parseIssue", () => {
         "blocked: null\n",
         "blocked:\n  timestamp: t\n",
       );
-      expect(() => parseIssue(yaml)).toThrow(/blocked\.reason/);
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/blocked\.reason/);
     });
 
     it("rejects a blocked record with unexpected 'by' field (v4 only has reason + timestamp)", () => {
@@ -147,7 +158,7 @@ describe("serializeIssue / parseIssue", () => {
       },
     });
     const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.parent_id).toBe("ISS-100");
     expect(parsed.dispatch).toEqual(issue.dispatch);
   });
@@ -159,7 +170,7 @@ describe("serializeIssue / parseIssue", () => {
     // silently break Phase 2's threading of `expectedPrefix` if not caught
     // here.
     const issue = fullIssue();
-    const result = validateIssue({ ...issue, parent_id: "epic-100" });
+    const result = validateIssue({ ...issue, parent_id: "epic-100" }, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some((e) => /parent_id/.test(e))).toBe(true);
@@ -174,24 +185,24 @@ describe("serializeIssue / parseIssue", () => {
       ],
     });
     const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.comments[0].id).toBe("remote-1");
     expect(parsed.comments[1].id).toBeUndefined();
   });
 
   it("throws IssueParseError on malformed YAML", () => {
-    expect(() => parseIssue(":\n  -\n :::")).toThrow(IssueParseError);
+    expect(() => parseIssue(":\n  -\n :::", { expectedPrefix: "ISS" })).toThrow(IssueParseError);
   });
 
   it("throws IssueParseError when required fields are missing", () => {
     const yaml = "schema_version: 3\ntracker: trello\n";
-    expect(() => parseIssue(yaml)).toThrow(IssueParseError);
-    expect(() => parseIssue(yaml)).toThrow(/external_id/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(IssueParseError);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/external_id/);
   });
 
   it("rejects schema_version 1 with a migration pointer", () => {
     const yaml = "schema_version: 1\ntracker: trello\n";
-    expect(() => parseIssue(yaml)).toThrow(/migrate-issues-to-v3/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/migrate-issues-to-v3/);
   });
 
   it("tolerates a legacy phases: [...] key on read and drops it on re-serialize (ISS-81)", () => {
@@ -224,7 +235,7 @@ describe("serializeIssue / parseIssue", () => {
     ].join("\n");
 
     // Parse must succeed — legacy field is silently ignored.
-    const issue = parseIssue(legacyYaml);
+    const issue = parseIssue(legacyYaml, { expectedPrefix: "ISS" });
     expect(issue.id).toBe("ISS-1");
     // The Issue type no longer carries `phases`; assertion confirms it
     // never lands on the parsed object.
@@ -234,7 +245,7 @@ describe("serializeIssue / parseIssue", () => {
     const out = serializeIssue(issue);
     expect(out).not.toMatch(/^phases:/m);
     // Re-parse round-trips clean.
-    expect(() => parseIssue(out)).not.toThrow();
+    expect(() => parseIssue(out, { expectedPrefix: "ISS" })).not.toThrow();
   });
 });
 
@@ -266,7 +277,7 @@ describe("validateIssue", () => {
   }
 
   it("succeeds on a minimal fully-populated issue", () => {
-    const result = validateIssue(valid());
+    const result = validateIssue(valid(), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.issue.ac).toEqual([]);
@@ -281,7 +292,7 @@ describe("validateIssue", () => {
   });
 
   it("reports every missing required field one-per-defect (strict)", () => {
-    const result = validateIssue({});
+    const result = validateIssue({}, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       // After Fix 1 description, triage, ac, comments, retro are ALL
@@ -314,7 +325,7 @@ describe("validateIssue", () => {
   it("rejects missing description specifically", () => {
     const input = valid();
     delete input.description;
-    const result = validateIssue(input);
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("missing required field: description");
@@ -324,7 +335,7 @@ describe("validateIssue", () => {
   it("rejects missing triage specifically", () => {
     const input = valid();
     delete input.triage;
-    const result = validateIssue(input);
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("missing required field: triage");
@@ -339,7 +350,7 @@ describe("validateIssue", () => {
       status: "ToDo",
       explain: "legacy",
     };
-    const result = validateIssue(input);
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.join("\n")).toContain(
@@ -354,7 +365,7 @@ describe("validateIssue", () => {
   it("rejects a YAML carrying the legacy `dispatch_id` field with a migration pointer", () => {
     const input = valid();
     (input as Record<string, unknown>).dispatch_id = "abc";
-    const result = validateIssue(input);
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.join("\n")).toContain(
@@ -369,7 +380,7 @@ describe("validateIssue", () => {
   it("rejects missing ac specifically", () => {
     const input = valid();
     delete input.ac;
-    const result = validateIssue(input);
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("missing required field: ac");
@@ -380,7 +391,7 @@ describe("validateIssue", () => {
   it("rejects missing comments specifically", () => {
     const input = valid();
     delete input.comments;
-    const result = validateIssue(input);
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("missing required field: comments");
@@ -390,7 +401,7 @@ describe("validateIssue", () => {
   it("rejects missing retro specifically", () => {
     const input = valid();
     delete input.retro;
-    const result = validateIssue(input);
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("missing required field: retro");
@@ -398,12 +409,12 @@ describe("validateIssue", () => {
   });
 
   it("accepts empty external_id (memory tracker / pre-create draft)", () => {
-    const result = validateIssue(valid({ external_id: "" }));
+    const result = validateIssue(valid({ external_id: "" }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(true);
   });
 
   it("rejects empty id", () => {
-    const result = validateIssue(valid({ id: "" }));
+    const result = validateIssue(valid({ id: "" }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some((e) => /id/.test(e))).toBe(true);
@@ -411,7 +422,7 @@ describe("validateIssue", () => {
   });
 
   it("rejects malformed id (wrong format)", () => {
-    const result = validateIssue(valid({ id: "iss-1" })); // wrong case
+    const result = validateIssue(valid({ id: "iss-1" }), { expectedPrefix: "ISS" }); // wrong case
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some((e) => /ISS-/.test(e))).toBe(true);
@@ -419,7 +430,7 @@ describe("validateIssue", () => {
   });
 
   it("rejects invalid status enum", () => {
-    const result = validateIssue(valid({ status: "Open" }));
+    const result = validateIssue(valid({ status: "Open" }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some((e) => /status/.test(e))).toBe(true);
@@ -427,7 +438,7 @@ describe("validateIssue", () => {
   });
 
   it("rejects invalid type enum", () => {
-    const result = validateIssue(valid({ type: "Saga" }));
+    const result = validateIssue(valid({ type: "Saga" }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some((e) => /type/.test(e))).toBe(true);
@@ -436,12 +447,12 @@ describe("validateIssue", () => {
 
 
   it("rejects wrong types (array where string expected)", () => {
-    const result = validateIssue(valid({ title: ["not", "a", "string"] }));
+    const result = validateIssue(valid({ title: ["not", "a", "string"] }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
   });
 
   it("rejects ac as a string instead of list", () => {
-    const result = validateIssue(valid({ ac: "nope" }));
+    const result = validateIssue(valid({ ac: "nope" }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some((e) => /ac/.test(e))).toBe(true);
@@ -464,7 +475,7 @@ describe("validateIssue", () => {
   });
 
   it("schema_version: 1 produces the migration-pointer error string", () => {
-    const result = validateIssue(valid({ schema_version: 1 }));
+    const result = validateIssue(valid({ schema_version: 1 }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
@@ -474,7 +485,7 @@ describe("validateIssue", () => {
   });
 
   it("schema_version: 2 produces the migration-pointer error string", () => {
-    const result = validateIssue(valid({ schema_version: 2 }));
+    const result = validateIssue(valid({ schema_version: 2 }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
@@ -484,7 +495,7 @@ describe("validateIssue", () => {
   });
 
   it("empty tracker produces the exact error string", () => {
-    const result = validateIssue(valid({ tracker: "" }));
+    const result = validateIssue(valid({ tracker: "" }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("tracker must be a non-empty string");
@@ -492,7 +503,7 @@ describe("validateIssue", () => {
   });
 
   it("parent_id: 42 (number) produces the exact error string", () => {
-    const result = validateIssue(valid({ parent_id: 42 }));
+    const result = validateIssue(valid({ parent_id: 42 }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("parent_id must be a string or null");
@@ -500,7 +511,7 @@ describe("validateIssue", () => {
   });
 
   it("comments: [42] (non-object) produces the exact error string", () => {
-    const result = validateIssue(valid({ comments: [42] }));
+    const result = validateIssue(valid({ comments: [42] }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("comments[0] must be a mapping");
@@ -595,7 +606,7 @@ describe("children field (v3 epic → phase linkage)", () => {
   it("requires the children field", () => {
     const input = valid();
     delete input.children;
-    const result = validateIssue(input);
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("missing required field: children");
@@ -603,7 +614,7 @@ describe("children field (v3 epic → phase linkage)", () => {
   });
 
   it("accepts an empty children list", () => {
-    const result = validateIssue(valid({ children: [] }));
+    const result = validateIssue(valid({ children: [] }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.issue.children).toEqual([]);
   });
@@ -619,7 +630,7 @@ describe("children field (v3 epic → phase linkage)", () => {
   });
 
   it("rejects children containing a non-string entry", () => {
-    const result = validateIssue(valid({ children: ["ISS-101", 42] }));
+    const result = validateIssue(valid({ children: ["ISS-101", 42] }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors.some((e) => /children\[1\]/.test(e))).toBe(true);
@@ -627,7 +638,7 @@ describe("children field (v3 epic → phase linkage)", () => {
   });
 
   it("rejects children containing a malformed id", () => {
-    const result = validateIssue(valid({ children: ["iss-1"] }));
+    const result = validateIssue(valid({ children: ["iss-1"] }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
@@ -637,7 +648,7 @@ describe("children field (v3 epic → phase linkage)", () => {
   });
 
   it("rejects children as a string instead of a list", () => {
-    const result = validateIssue(valid({ children: "ISS-1" }));
+    const result = validateIssue(valid({ children: "ISS-1" }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
   });
 
@@ -647,7 +658,7 @@ describe("children field (v3 epic → phase linkage)", () => {
     // the validator MUST collapse null → empty array. Without this
     // branch every freshly-migrated YAML would re-trip the
     // missing-required-field error path.
-    const result = validateIssue(valid({ children: null }));
+    const result = validateIssue(valid({ children: null }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.issue.children).toEqual([]);
@@ -659,7 +670,7 @@ describe("children field (v3 epic → phase linkage)", () => {
     issue.type = "Epic";
     issue.children = ["ISS-2", "ISS-3"];
     const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.children).toEqual(["ISS-2", "ISS-3"]);
   });
 });
@@ -667,7 +678,7 @@ describe("children field (v3 epic → phase linkage)", () => {
 describe("schema_version 3 contract", () => {
   it("rejects schema_version 2 (must migrate)", () => {
     const yaml = "schema_version: 2\ntracker: trello\n";
-    expect(() => parseIssue(yaml)).toThrow(/migrate-issues-to-v3/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/migrate-issues-to-v3/);
   });
 });
 
@@ -830,7 +841,7 @@ describe("validateIssue dispatch", () => {
   }
 
   it("accepts dispatch: null explicitly", () => {
-    const result = validateIssue(withDispatch(null));
+    const result = validateIssue(withDispatch(null), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(true);
   });
 
@@ -971,7 +982,7 @@ describe("validateIssue dispatch", () => {
   });
 
   it("rejects empty dispatch object (missing required fields)", () => {
-    const result = validateIssue(withDispatch({}));
+    const result = validateIssue(withDispatch({}), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       // First missing field surfaces; subsequent checks short-circuit on
@@ -981,7 +992,7 @@ describe("validateIssue dispatch", () => {
   });
 
   it("rejects dispatch as a non-mapping (e.g. string)", () => {
-    const result = validateIssue(withDispatch("not-an-object"));
+    const result = validateIssue(withDispatch("not-an-object"), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("dispatch must be a mapping or null");
@@ -1000,7 +1011,7 @@ describe("validateIssue triage", () => {
   }
 
   it("normalizes triage: null to a fully-empty IssueTriage", () => {
-    const result = validateIssue(withTriage(null));
+    const result = validateIssue(withTriage(null), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.issue.triage).toEqual({
@@ -1015,7 +1026,7 @@ describe("validateIssue triage", () => {
   });
 
   it("rejects triage as a non-mapping", () => {
-    const result = validateIssue(withTriage("not-an-object"));
+    const result = validateIssue(withTriage("not-an-object"), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors).toContain("triage must be a mapping");
@@ -1144,7 +1155,7 @@ describe("validateIssue triage", () => {
       },
     });
     const yaml = serializeIssue(populated);
-    const parsed = parseIssue(yaml);
+    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed).toEqual(populated);
   });
 });
@@ -1231,18 +1242,6 @@ describe("buildIssueIdRegex", () => {
     expect(r.test("DX-")).toBe(false);
     expect(r.test("DX-abc")).toBe(false);
     expect(r.test("")).toBe(false);
-  });
-});
-
-describe("LEGACY_ISS_REGEX", () => {
-  it("equals the historical /^ISS-\\d+$/ literal", () => {
-    expect(LEGACY_ISS_REGEX.source).toBe("^ISS-\\d+$");
-    expect(LEGACY_ISS_REGEX.test("ISS-1")).toBe(true);
-    expect(LEGACY_ISS_REGEX.test("DX-1")).toBe(false);
-  });
-
-  it("ISSUE_ID_REGEX is preserved as a name-only alias to LEGACY_ISS_REGEX (deprecated)", () => {
-    expect(ISSUE_ID_REGEX).toBe(LEGACY_ISS_REGEX);
   });
 });
 
@@ -1421,13 +1420,12 @@ describe("validateIssue with options.expectedPrefix", () => {
     }
   });
 
-  it("defaults expectedPrefix to ISS when options is omitted (backward compat)", () => {
-    const result = validateIssue(valid({ id: "ISS-1" }));
-    expect(result.ok).toBe(true);
-  });
-
-  it("defaults expectedPrefix to ISS when options.expectedPrefix is undefined", () => {
-    const result = validateIssue(valid({ id: "ISS-1" }), {});
+  it("requires expectedPrefix at the type level (Phase 4 of DX-99 — no default)", () => {
+    // Compile-time check: passing only the value should be a type error.
+    // Runtime check: passing an explicit ISS prefix still validates.
+    const result = validateIssueRaw(valid({ id: "ISS-1" }), {
+      expectedPrefix: "ISS",
+    });
     expect(result.ok).toBe(true);
   });
 });
@@ -1480,12 +1478,11 @@ describe("buildIssueIdRegex shape validation (fail-loud)", () => {
   });
 });
 
-describe("issue-tracker barrel re-exports (ISS-99 Phase 1 surface)", () => {
-  it("re-exports buildIssueIdRegex, LEGACY_ISS_REGEX, ParseIssueOptions from issue-tracker/index", async () => {
+describe("issue-tracker barrel re-exports (DX-99 Phase 4 surface)", () => {
+  it("re-exports buildIssueIdRegex + ISSUE_PREFIX_SHAPE from issue-tracker/index", async () => {
     const mod = await import("../../issue-tracker/index.js");
     expect(typeof mod.buildIssueIdRegex).toBe("function");
-    expect(mod.LEGACY_ISS_REGEX).toBeInstanceOf(RegExp);
-    expect(mod.LEGACY_ISS_REGEX.test("ISS-1")).toBe(true);
+    expect(mod.ISSUE_PREFIX_SHAPE).toBeInstanceOf(RegExp);
     expect(mod.buildIssueIdRegex("DX")).toBeInstanceOf(RegExp);
   });
 });

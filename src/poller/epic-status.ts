@@ -54,7 +54,7 @@ import { resolve } from "node:path";
 import {
   appendHistory,
   buildIssueIdRegex,
-  DEFAULT_ISSUE_PREFIX,
+
   IssueParseError,
   parseIssue,
 } from "../issue-tracker/yaml.js";
@@ -147,7 +147,7 @@ export function deriveStatus(children: Issue[]): DeriveStatusResult | null {
  */
 export function recomputeParentStatuses(
   repoLocalPath: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): ParentStatusChange[] {
   const dir = resolve(repoLocalPath, ".danxbot", "issues", "open");
   if (!existsSync(dir)) return [];

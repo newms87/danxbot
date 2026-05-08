@@ -63,7 +63,7 @@ function writeIssueAt(repoRoot: string, issue: Issue, state: "open" | "closed" =
 
 function loadIssue(repoRoot: string, id: string, state: "open" | "closed" = "open"): Issue {
   const path = resolve(repoRoot, ".danxbot", "issues", state, `${id}.yml`);
-  return parseIssue(readFileSync(path, "utf-8"));
+  return parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: "ISS" });
 }
 
 function ref(externalId: string, title: string, status: IssueStatus): IssueRef {

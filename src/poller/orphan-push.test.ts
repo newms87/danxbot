@@ -50,7 +50,7 @@ function writeOrphan(repoRoot: string, issue: Issue): void {
 }
 
 function readYaml(repoRoot: string, id: string): Issue {
-  return parseIssue(readFileSync(issuePath(repoRoot, id, "open"), "utf-8"));
+  return parseIssue(readFileSync(issuePath(repoRoot, id, "open"), "utf-8"), { expectedPrefix: "ISS" });
 }
 
 describe("pushOrphans", () => {
@@ -78,7 +78,7 @@ describe("pushOrphans", () => {
       }),
     );
 
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
 
     expect(result.pushed).toBe(1);
     expect(result.errors).toEqual([]);
@@ -92,7 +92,7 @@ describe("pushOrphans", () => {
       repoRoot,
       makeIssue({ id: "ISS-1", external_id: "mem-xyz" }),
     );
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
     expect(result.pushed).toBe(0);
     expect(result.errors).toEqual([]);
     // YAML untouched.
@@ -111,7 +111,7 @@ describe("pushOrphans", () => {
       serializeIssue(closedIssue),
     );
 
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
     expect(result.pushed).toBe(0);
   });
 
@@ -129,7 +129,7 @@ describe("pushOrphans", () => {
       makeIssue({ id: "ISS-2", title: "Parent" }),
     );
 
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
     expect(result.pushed).toBe(2);
 
     // Verify ordering by tracker call log: parent (ISS-2) MUST be createCard'd
@@ -153,7 +153,7 @@ describe("pushOrphans", () => {
     // `failNextWrite` consumes one rejection on the next mutating call.
     tracker.failNextWrite(new Error("simulated tracker outage"));
 
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
 
     expect(result.pushed).toBe(1);
     expect(result.errors).toHaveLength(1);
@@ -167,10 +167,10 @@ describe("pushOrphans", () => {
 
   it("subsequent invocation is a no-op (idempotent)", async () => {
     writeOrphan(repoRoot, makeIssue({ id: "ISS-1", title: "Once" }));
-    const first = await pushOrphans(repoRoot, tracker);
+    const first = await pushOrphans(repoRoot, tracker, "ISS");
     expect(first.pushed).toBe(1);
 
-    const second = await pushOrphans(repoRoot, tracker);
+    const second = await pushOrphans(repoRoot, tracker, "ISS");
     expect(second.pushed).toBe(0);
   });
 
@@ -193,7 +193,7 @@ describe("pushOrphans", () => {
         title: "Child",
       }),
     );
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
     expect(result.pushed).toBe(1);
     expect(readYaml(repoRoot, "ISS-2").external_id).not.toBe("");
   });
@@ -207,7 +207,7 @@ describe("pushOrphans", () => {
         title: "Stale parent ref",
       }),
     );
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
     expect(result.pushed).toBe(1);
   });
 
@@ -220,11 +220,11 @@ describe("pushOrphans", () => {
       repoRoot,
       makeIssue({ id: "ISS-2", parent_id: "ISS-1", title: "B" }),
     );
-    await expect(pushOrphans(repoRoot, tracker)).rejects.toThrow(/cycle/i);
+    await expect(pushOrphans(repoRoot, tracker, "ISS")).rejects.toThrow(/cycle/i);
   });
 
   it("returns {pushed:0,errors:[]} when open/ does not exist", async () => {
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
     expect(result).toEqual({ pushed: 0, errors: [] });
   });
 
@@ -237,7 +237,7 @@ describe("pushOrphans", () => {
     );
     writeOrphan(repoRoot, makeIssue({ id: "ISS-1", title: "Real" }));
 
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
     expect(result.pushed).toBe(1);
     expect(result.errors).toEqual([]);
   });
@@ -250,7 +250,7 @@ describe("pushOrphans", () => {
     );
     writeOrphan(repoRoot, makeIssue({ id: "ISS-1", title: "Healthy" }));
 
-    const result = await pushOrphans(repoRoot, tracker);
+    const result = await pushOrphans(repoRoot, tracker, "ISS");
     expect(result.pushed).toBe(1);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].id).toBe("ISS-7");
@@ -276,7 +276,7 @@ describe("pushOrphans", () => {
         ],
       }),
     );
-    const result = await pushOrphans(repoRoot, stubTracker);
+    const result = await pushOrphans(repoRoot, stubTracker, "ISS");
     expect(result.pushed).toBe(0);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].message).toMatch(/ac items|expected/i);

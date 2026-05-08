@@ -341,15 +341,6 @@ export function serializeIssue(issue: Issue): string {
 }
 
 /**
- * Single source of truth for the legacy default issue id prefix. Used by
- * the `parseIssue`/`validateIssue` `expectedPrefix` fallback, the
- * `nextIssueId`/`maxIssueNumber` `prefix` fallback, and `loadIssuePrefix`'s
- * absent-config fallback. Exported so Phase 4 of ISS-99 only has to grep
- * one symbol when dropping the legacy compat path.
- */
-export const DEFAULT_ISSUE_PREFIX = "ISS";
-
-/**
  * Allowed shape for any per-repo `issue_prefix` value: 2-4 uppercase ASCII
  * letters. Long enough to be visually distinct between repos
  * (`DX`/`SG`/`FD`), short enough that prefixed ids stay scannable. Lives
@@ -359,22 +350,21 @@ export const DEFAULT_ISSUE_PREFIX = "ISS";
 export const ISSUE_PREFIX_SHAPE = /^[A-Z]{2,4}$/;
 
 /**
- * Optional knobs accepted by `parseIssue` and `validateIssue`. Phase 1 of
- * ISS-99 introduced the `expectedPrefix` knob so the validator can enforce
- * a per-repo `<PREFIX>-<N>` id shape (e.g. `DX-12`, `SG-7`) instead of the
- * historical `ISS-` literal. Defaults to `DEFAULT_ISSUE_PREFIX` so every
- * existing caller keeps the legacy behavior until the consumer threads its
- * real prefix.
+ * Required knobs accepted by `parseIssue` and `validateIssue`. The
+ * `expectedPrefix` knob enforces a per-repo `<PREFIX>-<N>` id shape (e.g.
+ * `DX-12`, `SG-7`). Phase 4 of DX-99 made this required — there is no
+ * legacy `"ISS"` default. Every caller MUST supply the active repo's
+ * prefix (typically from `RepoContext.issuePrefix`).
  */
 export interface ParseIssueOptions {
   /**
-   * Per-repo issue id prefix the validator should enforce. 2-4 uppercase
+   * Per-repo issue id prefix the validator enforces. 2-4 uppercase
    * letters; supplied by the caller from `RepoContext.issuePrefix`. The
    * validator builds `^${expectedPrefix}-\d+$` from this value and rejects
    * any `id` / `parent_id` / `children[i]` / `waiting_on.by[i]` /
    * `retro.action_item_ids[i]` that doesn't match.
    */
-  expectedPrefix?: string;
+  expectedPrefix: string;
 }
 
 /**
@@ -387,10 +377,11 @@ export interface ParseIssueOptions {
  * primary id (`id`) is the strict required-non-empty field. v3 adds the
  * `children: string[]` field for two-way epic ↔ phase linkage.
  *
- * `options.expectedPrefix` (optional, defaults to `"ISS"`) controls the
- * per-repo id shape — Phase 1 of ISS-99.
+ * `options.expectedPrefix` is required (Phase 4 of DX-99 dropped the legacy
+ * `"ISS"` default). Pass the active repo's prefix from
+ * `RepoContext.issuePrefix`.
  */
-export function parseIssue(text: string, options?: ParseIssueOptions): Issue {
+export function parseIssue(text: string, options: ParseIssueOptions): Issue {
   let raw: unknown;
   try {
     raw = parseYamlText(text);
@@ -426,24 +417,6 @@ export function buildIssueIdRegex(prefix: string): RegExp {
   }
   return new RegExp(`^${prefix}-\\d+$`);
 }
-
-/**
- * Legacy literal for the `ISS-<N>` id shape. Retained as a named
- * constant for one release — Phase 3 of ISS-99 (the migration script)
- * uses it to identify pre-migration filenames, and any future code that
- * needs to detect "old-style ids" goes through this constant rather
- * than re-introducing a literal `/^ISS-\d+$/` regex.
- */
-export const LEGACY_ISS_REGEX = /^ISS-\d+$/;
-
-/**
- * @deprecated Use `buildIssueIdRegex(prefix)` with the active repo's
- * prefix from `RepoContext.issuePrefix`. Kept as a name-only alias for
- * one release so legacy import sites compile while Phase 1 of ISS-99
- * threads the prefix through every consumer. Equivalent to
- * `LEGACY_ISS_REGEX` and `buildIssueIdRegex("ISS")`.
- */
-export const ISSUE_ID_REGEX = LEGACY_ISS_REGEX;
 
 /**
  * Project an `Issue` into the `CreateCardInput` shape the tracker accepts.
@@ -523,10 +496,10 @@ type ValidateResult =
  */
 export function validateIssue(
   value: unknown,
-  options?: ParseIssueOptions,
+  options: ParseIssueOptions,
 ): ValidateResult {
   const errors: string[] = [];
-  const expectedPrefix = options?.expectedPrefix ?? DEFAULT_ISSUE_PREFIX;
+  const expectedPrefix = options.expectedPrefix;
   const idRegex = buildIssueIdRegex(expectedPrefix);
   const idShape = `${expectedPrefix}-<positive integer>`;
 

@@ -32,7 +32,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   buildIssueIdRegex,
-  DEFAULT_ISSUE_PREFIX,
+
   issueToCreateInput,
   parseIssue,
 } from "../issue-tracker/yaml.js";
@@ -96,7 +96,7 @@ function sortParentsFirst(orphans: Issue[]): Issue[] {
 export async function pushOrphans(
   repoLocalPath: string,
   tracker: IssueTracker,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
+  prefix: string,
 ): Promise<OrphanPushResult> {
   const openDir = resolve(repoLocalPath, ".danxbot", "issues", "open");
   if (!existsSync(openDir)) {

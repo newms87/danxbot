@@ -40,11 +40,7 @@ vi.mock("node:fs", () => ({
 
 import { parseEnvFile } from "./env-file.js";
 import { existsSync, readFileSync } from "node:fs";
-import {
-  DEFAULT_ISSUE_PREFIX,
-  loadIssuePrefix,
-  loadRepoContext,
-} from "./repo-context.js";
+import { loadIssuePrefix, loadRepoContext } from "./repo-context.js";
 
 const mockParseEnvFile = vi.mocked(parseEnvFile);
 const mockExistsSync = vi.mocked(existsSync);
@@ -69,8 +65,15 @@ const MINIMUM_ENV = {
 function setupEnvFileExists(): void {
   mockExistsSync.mockImplementation((path) => {
     const s = String(path);
-    return s.endsWith(".danxbot/.env");
+    return s.endsWith(".danxbot/.env") || s.endsWith("config.yml");
   });
+  // Phase 4 of DX-99 made `loadIssuePrefix` fail-loud on a missing
+  // config.yml. The trelloEnabled / workerPort suites don't care about
+  // the prefix specifically — they just need the loader not to throw —
+  // so default `readFileSync` to a config.yml stub carrying a valid
+  // `issue_prefix: ISS`. Tests that EXERCISE the prefix-loading path
+  // override this with their own mockReturnValue.
+  mockReadFileSync.mockReturnValue("issue_prefix: ISS\n");
 }
 
 describe("loadRepoContext — trelloEnabled", () => {
@@ -203,15 +206,19 @@ describe("loadIssuePrefix", () => {
     vi.clearAllMocks();
   });
 
-  it(`returns "${DEFAULT_ISSUE_PREFIX}" when config.yml is missing`, () => {
+  it("throws when config.yml is missing (Phase 4 of DX-99 — fail-loud, no fallback)", () => {
     mockExistsSync.mockReturnValue(false);
-    expect(loadIssuePrefix("/repo/missing")).toBe(DEFAULT_ISSUE_PREFIX);
+    expect(() => loadIssuePrefix("/repo/missing")).toThrow(
+      /not found; cannot resolve issue_prefix/,
+    );
   });
 
-  it(`returns "${DEFAULT_ISSUE_PREFIX}" when config.yml has no issue_prefix field`, () => {
+  it("throws when config.yml has no issue_prefix field", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockReturnValue("name: example\nurl: https://x\n");
-    expect(loadIssuePrefix("/repo/example")).toBe(DEFAULT_ISSUE_PREFIX);
+    expect(() => loadIssuePrefix("/repo/example")).toThrow(
+      /missing required field issue_prefix/,
+    );
   });
 
   it("returns DX when config.yml carries issue_prefix: DX", () => {
@@ -276,20 +283,24 @@ describe("loadIssuePrefix", () => {
     );
   });
 
-  it("returns default when issue_prefix is empty string", () => {
+  it("throws when issue_prefix is empty string", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockReturnValue("issue_prefix:\n");
-    expect(loadIssuePrefix("/repo/danxbot")).toBe(DEFAULT_ISSUE_PREFIX);
+    expect(() => loadIssuePrefix("/repo/danxbot")).toThrow(
+      /missing required field issue_prefix/,
+    );
   });
 
-  it("returns default and does NOT throw when readFileSync throws (unreadable config)", () => {
+  it("throws when readFileSync errors (unreadable config)", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockImplementation(() => {
       const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
       err.code = "EACCES";
       throw err;
     });
-    expect(loadIssuePrefix("/repo/locked")).toBe(DEFAULT_ISSUE_PREFIX);
+    expect(() => loadIssuePrefix("/repo/locked")).toThrow(
+      /Failed to read.*EACCES/,
+    );
   });
 
   it("accepts the boundary shape XX (2 letters)", () => {
@@ -312,10 +323,16 @@ describe("loadRepoContext — issuePrefix", () => {
     delete process.env.DANXBOT_WORKER_PORT;
   });
 
-  it(`defaults issuePrefix to "${DEFAULT_ISSUE_PREFIX}" when config.yml is missing`, () => {
+  it("loadRepoContext throws when the repo's config.yml is missing (Phase 4 of DX-99)", () => {
+    // Override the default `setupEnvFileExists` config.yml stub so this
+    // test exercises the fail-loud branch.
+    mockExistsSync.mockImplementation((p) =>
+      String(p).endsWith(".danxbot/.env"),
+    );
     mockParseEnvFile.mockReturnValue({ ...MINIMUM_ENV });
-    const ctx = loadRepoContext(TEST_REPO);
-    expect(ctx.issuePrefix).toBe(DEFAULT_ISSUE_PREFIX);
+    expect(() => loadRepoContext(TEST_REPO)).toThrow(
+      /not found; cannot resolve issue_prefix/,
+    );
   });
 
   it("threads a valid issue_prefix from config.yml into RepoContext", () => {

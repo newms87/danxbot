@@ -56,7 +56,7 @@ Pick exactly one of the following. Do not pause first.
 
 3. **Block on another card.** If the question is "should we do X first?"
    and X is real work tracked on another card, use Step 10b (Blocked)
-   instead — set `blocked.by` to the dependency's ISS-N. Don't ask, don't
+   instead — set `blocked.by` to the dependency's `<PREFIX>-N`. Don't ask, don't
    wait for an answer, don't sit idle.
 
 That's the entire menu. There is no fourth option that involves waiting.

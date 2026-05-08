@@ -28,6 +28,7 @@ import {
 } from "./playwright-proxy.js";
 import {
   handleClearAgentCriticalFailure,
+  handlePutIssuePrefix,
   handleGetAgent,
   handleListAgents,
   handlePatchToggle,
@@ -234,6 +235,23 @@ async function route(
       req,
       res,
       decodeURIComponent(agentCriticalFailureMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // PUT /api/agents/:repo/issue-prefix — DX-103. Operator-driven prefix
+  // flip + in-process migration. Matched ahead of the blanket /api/* gate
+  // so the handler's own `requireUser` produces the 401 (mirrors the
+  // PATCH/DELETE handlers above).
+  const agentIssuePrefixMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/issue-prefix$/,
+  );
+  if (method === "PUT" && agentIssuePrefixMatch) {
+    await handlePutIssuePrefix(
+      req,
+      res,
+      decodeURIComponent(agentIssuePrefixMatch[1]),
       dispatchDeps,
     );
     return true;

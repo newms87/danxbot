@@ -220,7 +220,7 @@ describe("recomputeParentStatuses (integration)", () => {
 
   function loadStatus(id: string, state: "open" | "closed" = "open"): IssueStatus {
     const path = resolve(repoRoot, ".danxbot", "issues", state, `${id}.yml`);
-    return parseIssue(readFileSync(path, "utf-8")).status;
+    return parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: "ISS" }).status;
   }
 
   it("writes parent only when derived status differs", () => {
@@ -236,7 +236,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
     writeOpen(repoRoot, child("ISS-3", "ToDo"));
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({
       id: "ISS-1",
@@ -258,7 +258,7 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toEqual([]);
     expect(loadStatus("ISS-1")).toBe("In Progress");
   });
@@ -285,7 +285,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"));
     writeOpen(repoRoot, child("ISS-4", "In Progress"));
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     const ids = changes.map((c) => c.id).sort();
     expect(ids).toEqual(["ISS-1", "ISS-3"]);
     expect(loadStatus("ISS-1")).toBe("Done");
@@ -306,7 +306,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"), "open");
     writeOpen(repoRoot, child("ISS-3", "Done"), "closed");
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Done");
   });
@@ -316,7 +316,7 @@ describe("recomputeParentStatuses (integration)", () => {
       repoRoot,
       makeIssue({ id: "ISS-1", type: "Feature", status: "ToDo", children: [] }),
     );
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toEqual([]);
   });
 
@@ -337,7 +337,7 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toEqual([]);
     expect(loadStatus("ISS-1")).toBe("ToDo");
   });
@@ -355,7 +355,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"));
     // ISS-99 is referenced in children[] but has no YAML on disk.
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Done");
   });
@@ -383,7 +383,7 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeFileSync(badPath, "not: a: valid: issue:\n  yaml here");
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("In Progress");
   });
@@ -410,7 +410,7 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeFileSync(badPath, "not: a: valid: issue:\n  yaml here");
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Done");
   });
@@ -428,7 +428,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"));
     writeOpen(repoRoot, child("ISS-3", "Blocked"));
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Blocked");
   });
@@ -437,7 +437,7 @@ describe("recomputeParentStatuses (integration)", () => {
 
   function loadIssue(id: string, state: "open" | "closed" = "open"): Issue {
     const path = resolve(repoRoot, ".danxbot", "issues", state, `${id}.yml`);
-    return parseIssue(readFileSync(path, "utf-8"));
+    return parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: "ISS" });
   }
 
   it("DX-147: derive flip appends exactly one worker:auto-derive status_change entry with rule note", () => {
@@ -458,7 +458,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"));
     writeOpen(repoRoot, child("ISS-3", "Done"));
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({
       id: "ISS-1",
@@ -501,7 +501,7 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toEqual([]);
 
     const reloaded = loadIssue("ISS-1");
@@ -532,7 +532,7 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "Done"));
 
-    const changes = recomputeParentStatuses(repoRoot);
+    const changes = recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
 
     const reloaded = loadIssue("ISS-1");
@@ -559,7 +559,7 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "Blocked"));
 
-    recomputeParentStatuses(repoRoot);
+    recomputeParentStatuses(repoRoot, "ISS");
     const note = loadIssue("ISS-1").history[0].note ?? "";
     expect(note).toMatch(/Blocked/);
   });
@@ -579,7 +579,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
     writeOpen(repoRoot, child("ISS-3", "ToDo"));
 
-    recomputeParentStatuses(repoRoot);
+    recomputeParentStatuses(repoRoot, "ISS");
     const note = loadIssue("ISS-1").history[0].note ?? "";
     expect(note).toMatch(/In Progress/);
   });
@@ -597,7 +597,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Review"));
     writeOpen(repoRoot, child("ISS-3", "Review"));
 
-    recomputeParentStatuses(repoRoot);
+    recomputeParentStatuses(repoRoot, "ISS");
     const note = loadIssue("ISS-1").history[0].note ?? "";
     expect(note).toMatch(/Review/);
   });
@@ -615,7 +615,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Cancelled"));
     writeOpen(repoRoot, child("ISS-3", "Cancelled"));
 
-    recomputeParentStatuses(repoRoot);
+    recomputeParentStatuses(repoRoot, "ISS");
     const note = loadIssue("ISS-1").history[0].note ?? "";
     expect(note).toMatch(/Cancelled/);
   });

@@ -79,7 +79,7 @@ describe("local-issues", () => {
   describe("listDispatchableYamls", () => {
     it("returns ToDo + blocked=null issues", () => {
       writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
@@ -99,7 +99,7 @@ describe("local-issues", () => {
         makeIssue({ id: "ISS-3", external_id: "c", status: "ToDo" }),
         1000,
       );
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-3"]);
     });
 
@@ -115,7 +115,7 @@ describe("local-issues", () => {
         1000,
       );
       writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
     });
 
@@ -137,7 +137,7 @@ describe("local-issues", () => {
         1000,
       );
       writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
     });
 
@@ -152,7 +152,7 @@ describe("local-issues", () => {
         makeIssue({ id: "ISS-2", external_id: "b", type: "Feature" }),
         1000,
       );
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
     });
 
@@ -177,7 +177,7 @@ describe("local-issues", () => {
       // Untriaged (mtime 5000) — should still win because untriaged has no
       // priority signal yet and the operator wants it flushed first.
       writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "b" }), 5000);
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1"]);
     });
 
@@ -230,7 +230,7 @@ describe("local-issues", () => {
         }),
         3000,
       );
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-3", "ISS-1"]);
     });
 
@@ -239,7 +239,7 @@ describe("local-issues", () => {
       writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
       writeAt(repoRoot, makeIssue({ id: "ISS-2", external_id: "b" }), 2000);
       writeAt(repoRoot, makeIssue({ id: "ISS-10", external_id: "d" }), 1000);
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual([
         "ISS-1",
         "ISS-10",
@@ -249,7 +249,7 @@ describe("local-issues", () => {
     });
 
     it("returns [] when issues dir is missing", () => {
-      expect(listDispatchableYamls(repoRoot)).toEqual([]);
+      expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
     });
 
     it("ignores non-yml + non-ISS-N files", () => {
@@ -258,7 +258,7 @@ describe("local-issues", () => {
       writeFileSync(join(dir, "README.md"), "x");
       writeFileSync(join(dir, "scratch.yml"), "");
       writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
@@ -267,7 +267,7 @@ describe("local-issues", () => {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "ISS-9.yml"), "schema_version: !!! invalid yaml");
       writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
@@ -279,7 +279,7 @@ describe("local-issues", () => {
         serializeIssue(makeIssue({ id: "ISS-9", external_id: "z" })),
       );
       writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
-      const result = listDispatchableYamls(repoRoot);
+      const result = listDispatchableYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
@@ -303,13 +303,13 @@ describe("local-issues", () => {
         makeIssue({ id: "ISS-2", external_id: "b", waiting_on }),
         1000,
       );
-      const result = listBlockedTodoYamls(repoRoot);
+      const result = listBlockedTodoYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1"]);
     });
 
     it("excludes ToDo issues whose blocked is null", () => {
       writeAt(repoRoot, makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
-      expect(listBlockedTodoYamls(repoRoot)).toEqual([]);
+      expect(listBlockedTodoYamls(repoRoot, "ISS")).toEqual([]);
     });
 
     it("excludes In Progress issues even with non-null waiting_on", () => {
@@ -323,7 +323,7 @@ describe("local-issues", () => {
         }),
         1000,
       );
-      expect(listBlockedTodoYamls(repoRoot)).toEqual([]);
+      expect(listBlockedTodoYamls(repoRoot, "ISS")).toEqual([]);
     });
   });
 
@@ -354,7 +354,7 @@ describe("local-issues", () => {
         }),
         1500,
       );
-      const result = listInProgressYamls(repoRoot);
+      const result = listInProgressYamls(repoRoot, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-3", "ISS-2"]);
     });
   });
@@ -393,7 +393,7 @@ describe("local-issues", () => {
         ),
         2000,
       );
-      const result = listTriageDueYamls(repoRoot, NOW);
+      const result = listTriageDueYamls(repoRoot, NOW, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
@@ -406,7 +406,7 @@ describe("local-issues", () => {
         ),
         1000,
       );
-      const result = listTriageDueYamls(repoRoot, NOW);
+      const result = listTriageDueYamls(repoRoot, NOW, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
@@ -424,7 +424,7 @@ describe("local-issues", () => {
         ),
         1000,
       );
-      const result = listTriageDueYamls(repoRoot, NOW);
+      const result = listTriageDueYamls(repoRoot, NOW, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
@@ -434,7 +434,7 @@ describe("local-issues", () => {
         withTriage({ id: "ISS-1", external_id: "a", status: "ToDo" }, ""),
         1000,
       );
-      const result = listTriageDueYamls(repoRoot, NOW);
+      const result = listTriageDueYamls(repoRoot, NOW, "ISS");
       expect(result).toEqual([]);
     });
 
@@ -455,7 +455,7 @@ describe("local-issues", () => {
           ),
           1000,
         );
-        expect(listTriageDueYamls(repoRoot, NOW)).toEqual([]);
+        expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
       }
     });
 
@@ -477,7 +477,7 @@ describe("local-issues", () => {
         }),
         1000,
       );
-      expect(listTriageDueYamls(repoRoot, NOW)).toEqual([]);
+      expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
     });
 
     it("sorts never-triaged (expires_at === '') before stale-triaged", () => {
@@ -497,7 +497,7 @@ describe("local-issues", () => {
         ),
         5000,
       );
-      const result = listTriageDueYamls(repoRoot, NOW);
+      const result = listTriageDueYamls(repoRoot, NOW, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1"]);
     });
 
@@ -526,7 +526,7 @@ describe("local-issues", () => {
         ),
         1000,
       );
-      const result = listTriageDueYamls(repoRoot, NOW);
+      const result = listTriageDueYamls(repoRoot, NOW, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1", "ISS-3"]);
     });
 
@@ -547,7 +547,7 @@ describe("local-issues", () => {
         ),
         1000,
       );
-      const result = listTriageDueYamls(repoRoot, NOW);
+      const result = listTriageDueYamls(repoRoot, NOW, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1", "ISS-2"]);
     });
 
@@ -560,7 +560,7 @@ describe("local-issues", () => {
         ),
         1000,
       );
-      const result = listTriageDueYamls(repoRoot, NOW);
+      const result = listTriageDueYamls(repoRoot, NOW, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
   });

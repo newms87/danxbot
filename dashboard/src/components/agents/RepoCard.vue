@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import type { AgentSnapshot, Feature } from "../../types";
 import FeatureToggle from "./FeatureToggle.vue";
 import ConfigTable from "./ConfigTable.vue";
@@ -9,12 +9,37 @@ const props = defineProps<{
   agent: AgentSnapshot;
   busyFeature: Feature | null;
   clearingCriticalFailure?: boolean;
+  savingIssuePrefix?: boolean;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   toggle: [repo: string, feature: Feature, enabled: boolean | null];
   clearCriticalFailure: [repo: string];
+  saveIssuePrefix: [repo: string, prefix: string];
 }>();
+
+// DX-103: per-repo issue prefix editor. Local-state input; live regex
+// validation against ISSUE_PREFIX_SHAPE (2-4 uppercase ASCII letters);
+// Save button enabled only when dirty + valid.
+const ISSUE_PREFIX_REGEX = /^[A-Z]{2,4}$/;
+const prefixInput = ref<string>(props.agent.issuePrefix ?? "");
+watch(
+  () => props.agent.issuePrefix,
+  (next) => {
+    prefixInput.value = next ?? "";
+  },
+);
+const prefixDirty = computed(
+  () => prefixInput.value !== (props.agent.issuePrefix ?? ""),
+);
+const prefixValid = computed(() => ISSUE_PREFIX_REGEX.test(prefixInput.value));
+const prefixSaveDisabled = computed(
+  () => !prefixDirty.value || !prefixValid.value || !!props.savingIssuePrefix,
+);
+function onSavePrefix(): void {
+  if (prefixSaveDisabled.value) return;
+  emit("saveIssuePrefix", props.agent.name, prefixInput.value);
+}
 
 // The env default each feature falls back to when the override is null.
 // For slack, configured === slack.enabled on the backend. For
@@ -166,6 +191,56 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         :busy="busyFeature === 'autoTriage'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
       />
+    </div>
+
+    <div class="mt-4 flex items-end gap-3 flex-wrap rounded-md border border-gray-200 dark:border-gray-700 p-3">
+      <div class="flex flex-col">
+        <label
+          :for="`issue-prefix-${agent.name}`"
+          class="text-xs font-medium text-gray-700 dark:text-gray-300"
+        >
+          Issue prefix
+        </label>
+        <input
+          :id="`issue-prefix-${agent.name}`"
+          v-model="prefixInput"
+          type="text"
+          maxlength="4"
+          pattern="[A-Z]{2,4}"
+          autocomplete="off"
+          spellcheck="false"
+          class="mt-1 w-24 rounded-md border bg-white dark:bg-gray-900 dark:text-gray-100 px-2 py-1 text-sm font-mono uppercase tracking-wider"
+          :class="
+            prefixDirty && !prefixValid
+              ? 'border-red-500 dark:border-red-500'
+              : 'border-gray-300 dark:border-gray-600'
+          "
+          :disabled="!!savingIssuePrefix"
+        />
+        <span class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          2-4 uppercase letters
+        </span>
+      </div>
+      <button
+        type="button"
+        class="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        :disabled="prefixSaveDisabled"
+        @click="onSavePrefix"
+      >
+        {{ savingIssuePrefix ? "Saving…" : "Save prefix" }}
+      </button>
+      <span
+        v-if="prefixDirty && !prefixValid"
+        class="text-xs text-red-600 dark:text-red-400"
+      >
+        Invalid — must be 2-4 uppercase letters.
+      </span>
+      <span
+        v-else-if="!agent.issuePrefix"
+        class="text-xs text-amber-600 dark:text-amber-400"
+      >
+        No issue_prefix configured — set one to enable issue tracking.
+      </span>
     </div>
 
     <ConfigTable :display="agent.settings.display" />

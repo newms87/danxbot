@@ -185,7 +185,7 @@ describe("runSync (local-first persist)", () => {
     const openPath = issuePath(tmpDir, "ISS-100", "open");
     expect(existsSync(closedPath)).toBe(true);
     expect(existsSync(openPath)).toBe(false);
-    const persisted = parseIssue(readFileSync(closedPath, "utf-8"));
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.status).toBe("Done");
     expect(persisted.id).toBe("ISS-100");
     expect(recordError).toHaveBeenCalledTimes(1);
@@ -223,7 +223,7 @@ describe("runSync (local-first persist)", () => {
 
     const closedPath = issuePath(tmpDir, "ISS-101", "closed");
     expect(existsSync(closedPath)).toBe(true);
-    const persisted = parseIssue(readFileSync(closedPath, "utf-8"));
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.external_id).toBe("ext-new-from-tracker");
     expect(persisted.ac.map((a) => a.check_item_id)).toEqual(["ci-1", "ci-2"]);
     expect(recordError).not.toHaveBeenCalled();
@@ -244,7 +244,7 @@ describe("runSync (local-first persist)", () => {
     const closedPath = issuePath(tmpDir, "ISS-102", "closed");
     expect(existsSync(openPath)).toBe(true);
     expect(existsSync(closedPath)).toBe(false);
-    const persisted = parseIssue(readFileSync(openPath, "utf-8"));
+    const persisted = parseIssue(readFileSync(openPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.status).toBe("ToDo");
     expect(persisted.external_id).toBe("ext-102");
     expect(recordError).toHaveBeenCalledTimes(1);
@@ -279,7 +279,7 @@ describe("runSync (local-first persist)", () => {
     const closedPath = issuePath(tmpDir, "ISS-103", "closed");
     expect(existsSync(closedPath)).toBe(true);
     const firstBytes = readFileSync(closedPath);
-    const persisted = parseIssue(firstBytes.toString("utf-8"));
+    const persisted = parseIssue(firstBytes.toString("utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.id).toBe("ISS-103");
     expect(persisted.external_id).toBe("ext-103");
     expect(persisted.status).toBe("Done");
@@ -308,7 +308,7 @@ describe("runSync (local-first persist)", () => {
     const openPath = issuePath(tmpDir, "ISS-104", "open");
     expect(existsSync(closedPath)).toBe(true);
     expect(existsSync(openPath)).toBe(false);
-    const persisted = parseIssue(readFileSync(closedPath, "utf-8"));
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.status).toBe("Cancelled");
     expect(recordError).toHaveBeenCalledTimes(1);
   });
@@ -346,7 +346,7 @@ describe("runSync (local-first persist)", () => {
     const closedPath = issuePath(tmpDir, "ISS-105", "closed");
     expect(existsSync(openPath)).toBe(true);
     expect(existsSync(closedPath)).toBe(false);
-    const persisted = parseIssue(readFileSync(openPath, "utf-8"));
+    const persisted = parseIssue(readFileSync(openPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.status).toBe("ToDo");
     // Blocked is treated as session-terminal → dispatch slot cleared.
     expect(persisted.dispatch).toBeNull();

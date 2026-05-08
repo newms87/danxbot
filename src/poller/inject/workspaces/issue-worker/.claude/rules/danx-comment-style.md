@@ -10,7 +10,7 @@
 - **Lists** — `-` for unordered, `1.` for ordered when sequence matters.
 - **Tables** for any 2D data (column headers + rows). The drawer renderer handles GFM tables.
 - **Bold** (`**…**`) for emphasis on the *one* thing the reader must not miss. Don't bold-spam.
-- **Links** — `[label](https://…)` for external refs. Internal issue refs go as plain `ISS-N` text; the drawer auto-links.
+- **Links** — `[label](https://…)` for external refs. Internal issue refs go as plain `<PREFIX>-N` text; the drawer auto-links.
 
 ## Never do
 

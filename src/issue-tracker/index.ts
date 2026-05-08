@@ -21,8 +21,7 @@ export type {
 export { ISSUE_STATUSES, ISSUE_TYPES } from "./interface.js";
 export {
   IssueParseError,
-  ISSUE_ID_REGEX,
-  LEGACY_ISS_REGEX,
+  ISSUE_PREFIX_SHAPE,
   buildIssueIdRegex,
   createEmptyIssue,
   parseIssue,
