@@ -283,6 +283,160 @@ describe("local-issues", () => {
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
 
+    // Ancestor-block contract: a card whose own waiting_on/blocked are
+    // null is still NOT dispatchable when any ancestor up the parent_id
+    // chain has a non-null waiting_on or blocked record. The blocking
+    // signal lives on the ancestor — descendants do NOT mirror it.
+    it("excludes child whose parent has waiting_on != null", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          type: "Epic",
+          status: "ToDo",
+          waiting_on: {
+            reason: "waits external",
+            timestamp: "2026-01-01T00:00:00Z",
+            by: ["ISS-99"],
+          },
+        }),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-2", external_id: "b", parent_id: "ISS-1" }),
+        2000,
+      );
+      const result = listDispatchableYamls(repoRoot, "ISS");
+      expect(result.map((i) => i.id)).toEqual([]);
+    });
+
+    it("excludes child whose parent has blocked != null", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          type: "Epic",
+          status: "Blocked",
+        }),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-2", external_id: "b", parent_id: "ISS-1" }),
+        2000,
+      );
+      const result = listDispatchableYamls(repoRoot, "ISS");
+      expect(result.map((i) => i.id)).toEqual([]);
+    });
+
+    it("excludes grandchild whose grandparent has waiting_on != null (full chain walk)", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          type: "Epic",
+          status: "ToDo",
+          waiting_on: {
+            reason: "waits external",
+            timestamp: "2026-01-01T00:00:00Z",
+            by: ["ISS-99"],
+          },
+        }),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-2",
+          external_id: "b",
+          type: "Epic",
+          parent_id: "ISS-1",
+        }),
+        2000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-3", external_id: "c", parent_id: "ISS-2" }),
+        3000,
+      );
+      const result = listDispatchableYamls(repoRoot, "ISS");
+      expect(result.map((i) => i.id)).toEqual([]);
+    });
+
+    it("includes child when ancestor chain is clean", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-1", external_id: "a", type: "Epic" }),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-2", external_id: "b", parent_id: "ISS-1" }),
+        2000,
+      );
+      const result = listDispatchableYamls(repoRoot, "ISS");
+      expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+    });
+
+    it("treats closed (Done/Cancelled) ancestors as non-blocking — not in open map", () => {
+      // Parent ISS-1 lives in closed/. Child ISS-2 should still dispatch.
+      const closedDir = resolve(repoRoot, ".danxbot", "issues", "closed");
+      mkdirSync(closedDir, { recursive: true });
+      writeFileSync(
+        join(closedDir, "ISS-1.yml"),
+        serializeIssue(
+          makeIssue({
+            id: "ISS-1",
+            external_id: "a",
+            type: "Epic",
+            status: "Done",
+          }),
+        ),
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-2", external_id: "b", parent_id: "ISS-1" }),
+        2000,
+      );
+      const result = listDispatchableYamls(repoRoot, "ISS");
+      expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+    });
+
+    it("safe under cyclic parent_id (does not infinite-loop)", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          type: "Epic",
+          parent_id: "ISS-2",
+        }),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({
+          id: "ISS-2",
+          external_id: "b",
+          type: "Epic",
+          parent_id: "ISS-1",
+        }),
+        2000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-3", external_id: "c", parent_id: "ISS-1" }),
+        3000,
+      );
+      const result = listDispatchableYamls(repoRoot, "ISS");
+      // ISS-3 dispatches because the cycle has no waiting_on/blocked
+      // anywhere; the walk terminates via the seen-set guard.
+      expect(result.map((i) => i.id)).toEqual(["ISS-3"]);
+    });
   });
 
   describe("listBlockedTodoYamls", () => {

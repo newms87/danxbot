@@ -94,7 +94,16 @@ function sortFifo(entries: WalkEntry[]): Issue[] {
  * eligible for dispatch this tick:
  *   - `status === "ToDo"`
  *   - `waiting_on === null`
+ *   - `blocked === null`
  *   - `dispatch === null` (an active dispatch occupies the card)
+ *   - No ancestor (parent, grandparent, …) has `waiting_on !== null`
+ *     OR `blocked !== null`. A blocked / waiting parent transitively
+ *     blocks every descendant — the entire subtree is held until the
+ *     ancestor's impediment clears. Cards do NOT need to repeat the
+ *     ancestor's `waiting_on.by[]` on themselves; the relationship is
+ *     resolved at dispatch time by walking `parent_id`. Closed
+ *     ancestors (Done / Cancelled) are not in the open map and are
+ *     treated as non-blocking by definition.
  *
  * Sort order (Phase 4 of ISS-90):
  *   1. Untriaged cards first — `triage.expires_at === ""` means the
@@ -108,10 +117,14 @@ export function listDispatchableYamls(
   repoLocalPath: string,
   prefix: string,
 ): Issue[] {
-  const filtered = walkOpenIssues(repoLocalPath, prefix).filter((e) => {
+  const all = walkOpenIssues(repoLocalPath, prefix);
+  const byId = new Map<string, Issue>();
+  for (const e of all) byId.set(e.issue.id, e.issue);
+  const filtered = all.filter((e) => {
     const i = e.issue;
     if (i.status !== "ToDo") return false;
     if (i.waiting_on !== null) return false;
+    if (i.blocked !== null) return false;
     if (i.dispatch !== null) return false;
     // Epics are containers — phase children carry the actual work. The
     // poller dispatches phase cards directly; the dispatched agent reads
@@ -121,10 +134,32 @@ export function listDispatchableYamls(
     // the epic itself produces a false-positive critical-failure flag
     // when a phase succeeds but the epic legitimately stays ToDo.
     if (i.type === "Epic") return false;
+    if (ancestorBlocks(i, byId)) return false;
     return true;
   });
   filtered.sort(workReadyCompare);
   return filtered.map((e) => e.issue);
+}
+
+/**
+ * Walk the `parent_id` chain. Return true when ANY ancestor has a
+ * non-null `waiting_on` or `blocked` record. Cycle-safe via a `seen`
+ * set; closed ancestors (not in the open map) are treated as
+ * non-blocking. The card's OWN waiting_on / blocked are NOT checked
+ * here — caller (`listDispatchableYamls`) already filtered those.
+ */
+function ancestorBlocks(issue: Issue, byId: Map<string, Issue>): boolean {
+  const seen = new Set<string>();
+  let parentId = issue.parent_id;
+  while (parentId !== null && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) return false;
+    if (parent.waiting_on !== null) return true;
+    if (parent.blocked !== null) return true;
+    parentId = parent.parent_id;
+  }
+  return false;
 }
 
 function workReadyCompare(a: WalkEntry, b: WalkEntry): number {
