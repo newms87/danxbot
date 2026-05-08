@@ -1,7 +1,7 @@
 /**
  * Render + upload the shared-infra prod compose file to the instance.
  * Replaces gpt-manager's RemoteHost.uploadComposeFile with a dedicated
- * module so flytebot's multi-service infra (dashboard + mysql + playwright)
+ * module so flytebot's multi-service infra (dashboard + postgres + playwright)
  * lives in one obvious place.
  */
 
@@ -50,16 +50,16 @@ export function renderProdCompose(
  *
  * `image prune -a` — removes images NOT referenced by any container; `-f` —
  * skip the confirmation prompt. The 5 long-running containers on the prod
- * box (dashboard, mysql, playwright, two workers) all hold their current
+ * box (dashboard, postgres, playwright, two workers) all hold their current
  * images, so this only touches stale layers from prior deploys.
  *
  * Why this is safe and `system prune` is NOT:
  *   - `system prune` would also remove unused NETWORKS — including
- *     `danxbot-net`, the bridge that the dashboard, mysql, and both workers
+ *     `danxbot-net`, the bridge that the dashboard, postgres, and both workers
  *     share. Removing it mid-deploy disconnects every container from every
  *     other one. Tests in compose-infra.test.ts lock against this regression.
  *   - `--volumes` would remove unused volumes — the MySQL data volume
- *     becomes "unused" the instant `docker compose down` kills the mysql
+ *     becomes "unused" the instant `docker compose down` kills the postgres
  *     container, and the next deploy would silently truncate the database.
  *
  * Exported so tests can assert the exact command shape, and so the wiring

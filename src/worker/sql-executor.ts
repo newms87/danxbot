@@ -1,6 +1,5 @@
 import { getPlatformPool, PlatformPoolUnavailableError } from "../db/connection.js";
 import { createLogger } from "../logger.js";
-import type { FieldPacket } from "mysql2/promise";
 
 const log = createLogger("sql-executor");
 
@@ -30,7 +29,9 @@ export interface QueryResult {
   errorKind?: QueryErrorKind;
 }
 
-const TIMEOUT_CODE_PATTERN = /^(PROTOCOL_SEQUENCE_TIMEOUT|ER_QUERY_TIMEOUT|ETIMEDOUT)$/;
+// PG SQLSTATE 57014 is `query_canceled` — emitted when statement_timeout
+// fires. Legacy MySQL codes kept for fixtures still referencing them.
+const TIMEOUT_CODE_PATTERN = /^(57014|PROTOCOL_SEQUENCE_TIMEOUT|ER_QUERY_TIMEOUT|ETIMEDOUT)$/;
 const TIMEOUT_MESSAGE_PATTERN = /\btimed?\s*out\b/i;
 
 function classifyError(error: unknown): QueryErrorKind {
@@ -187,14 +188,14 @@ export function formatResultsAsTable(
  * opaque string.
  */
 export async function executeQuery(query: string): Promise<QueryResult> {
+  let client: import("pg").PoolClient | null = null;
   try {
     const pool = getPlatformPool();
-    const [rows, fields] = await pool.query({ sql: query, timeout: QUERY_TIMEOUT_MS }) as [
-      Record<string, unknown>[],
-      FieldPacket[],
-    ];
-
-    const columns = fields.map((f) => f.name);
+    client = await pool.connect();
+    await client.query(`SET LOCAL statement_timeout = ${QUERY_TIMEOUT_MS}`);
+    const result = await client.query<Record<string, unknown>>(query);
+    const rows = result.rows;
+    const columns = result.fields.map((f) => f.name);
     const totalRows = rows.length;
     const truncated = rows.slice(0, MAX_ROWS);
 
@@ -219,6 +220,8 @@ export async function executeQuery(query: string): Promise<QueryResult> {
       error: error instanceof Error ? error.message : String(error),
       errorKind,
     };
+  } finally {
+    if (client) client.release();
   }
 }
 

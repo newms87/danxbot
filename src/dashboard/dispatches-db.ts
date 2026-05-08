@@ -1,5 +1,4 @@
-import type { ResultSetHeader } from "mysql2/promise";
-import { getPool } from "../db/connection.js";
+import { getPool, query } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 import {
   TERMINAL_STATUSES,
@@ -17,11 +16,11 @@ const log = createLogger("dispatches-db");
 
 const DEFAULT_LIST_LIMIT = 500;
 
-/** Reserved SQL words in our `dispatches` schema that need backtick escaping. */
+/** Reserved SQL words in our `dispatches` schema that need PG quoting. */
 const RESERVED_COLUMNS = new Set(["trigger", "status", "error"]);
 
 function escapeColumn(raw: string): string {
-  return RESERVED_COLUMNS.has(raw) ? `\`${raw}\`` : raw;
+  return RESERVED_COLUMNS.has(raw) ? `"${raw}"` : raw;
 }
 
 /** Ordered map: camelCase Dispatch field -> snake_case DB column. */
@@ -127,14 +126,11 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     summary: row.summary,
     error: row.error,
     runtimeMode: row.runtime_mode as RuntimeMode,
-    // Loose `==` on purpose: catches both DB `NULL` (mysql2 returns
+    // Loose `==` on purpose: catches both DB `NULL` (driver returns
     // null) and missing-column / pre-migration test fixtures (undefined).
     // Do NOT "fix" to `===` — that would let `Number(undefined)` produce
     // NaN and silently corrupt every consumer of `hostPid`.
     hostPid: row.host_pid == null ? null : Number(row.host_pid),
-    // Same loose-equality reasoning as `hostPid` — pre-migration-015
-    // test fixtures emit row objects without these keys, and the rules
-    // for handling that case must match.
     hostPidAt: row.host_pid_at == null ? null : Number(row.host_pid_at),
     pidTerminatedAt:
       row.pid_terminated_at == null ? null : Number(row.pid_terminated_at),
@@ -153,12 +149,11 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
 const INSERT_COLUMNS = ORDERED_KEYS.map((k) =>
   escapeColumn(COLUMN_MAP[k]),
 ).join(", ");
-const INSERT_PLACEHOLDERS = ORDERED_KEYS.map(() => "?").join(", ");
+const INSERT_PLACEHOLDERS = ORDERED_KEYS.map((_, i) => `$${i + 1}`).join(", ");
 const INSERT_SQL = `INSERT INTO dispatches (${INSERT_COLUMNS}) VALUES (${INSERT_PLACEHOLDERS})`;
 
 export async function insertDispatch(d: Dispatch): Promise<void> {
-  const pool = getPool();
-  await pool.execute(INSERT_SQL, dispatchToInsertParams(d));
+  await query(INSERT_SQL, dispatchToInsertParams(d));
 }
 
 export async function updateDispatch(
@@ -173,29 +168,26 @@ export async function updateDispatch(
   >) {
     const column = COLUMN_MAP[key];
     if (!column) continue;
-    setClauses.push(`${escapeColumn(column)} = ?`);
     params.push(toDbValue(key, value));
+    setClauses.push(`${escapeColumn(column)} = $${params.length}`);
   }
 
   if (setClauses.length === 0) return;
 
   params.push(id);
-  const pool = getPool();
-  await pool.execute(
-    `UPDATE dispatches SET ${setClauses.join(", ")} WHERE id = ?`,
+  await query(
+    `UPDATE dispatches SET ${setClauses.join(", ")} WHERE id = $${params.length}`,
     params,
   );
 }
 
 export async function getDispatchById(id: string): Promise<Dispatch | null> {
-  const pool = getPool();
-  const [rows] = await pool.execute(
-    "SELECT * FROM dispatches WHERE id = ?",
+  const rows = await query<DispatchRow>(
+    "SELECT * FROM dispatches WHERE id = $1",
     [id],
   );
-  const dbRows = rows as DispatchRow[];
-  if (dbRows.length === 0) return null;
-  return rowToDispatch(dbRows[0]);
+  if (rows.length === 0) return null;
+  return rowToDispatch(rows[0]);
 }
 
 /**
@@ -203,27 +195,18 @@ export async function getDispatchById(id: string): Promise<Dispatch | null> {
  * or `null` if no such row exists. Used by the Slack listener to decide
  * whether a follow-up message should resume the prior dispatch's Claude
  * session via `resumeSessionId`.
- *
- * Filters to `status = 'completed'` deliberately. Running dispatches cannot
- * be resumed (the session is still active) and failed/cancelled dispatches
- * carry an incomplete or poisoned session that would surface the prior
- * failure rather than a usable conversation — better to start a fresh
- * session than to chain a broken one.
- *
- * Uses the indexed `slack_thread_ts` column so the lookup is O(log n)
- * regardless of how many dispatches exist for the repo.
  */
 export async function findLatestDispatchBySlackThread(
   threadTs: string,
 ): Promise<Dispatch | null> {
-  const pool = getPool();
-  const [rows] = await pool.execute(
-    "SELECT * FROM dispatches WHERE slack_thread_ts = ? AND `status` = 'completed' ORDER BY started_at DESC LIMIT 1",
+  const rows = await query<DispatchRow>(
+    `SELECT * FROM dispatches
+     WHERE slack_thread_ts = $1 AND "status" = 'completed'
+     ORDER BY started_at DESC LIMIT 1`,
     [threadTs],
   );
-  const dbRows = rows as DispatchRow[];
-  if (dbRows.length === 0) return null;
-  return rowToDispatch(dbRows[0]);
+  if (rows.length === 0) return null;
+  return rowToDispatch(rows[0]);
 }
 
 export async function listDispatches(
@@ -234,24 +217,24 @@ export async function listDispatches(
   const params: unknown[] = [];
 
   if (filters.trigger) {
-    whereClauses.push("`trigger` = ?");
     params.push(filters.trigger);
+    whereClauses.push(`"trigger" = $${params.length}`);
   }
   if (filters.repo) {
-    whereClauses.push("repo_name = ?");
     params.push(filters.repo);
+    whereClauses.push(`repo_name = $${params.length}`);
   }
   if (filters.status) {
-    whereClauses.push("`status` = ?");
     params.push(filters.status);
+    whereClauses.push(`"status" = $${params.length}`);
   }
   if (filters.since !== undefined) {
-    whereClauses.push("started_at >= ?");
     params.push(filters.since);
+    whereClauses.push(`started_at >= $${params.length}`);
   }
   if (filters.q) {
-    whereClauses.push("summary LIKE ?");
     params.push(`%${filters.q}%`);
+    whereClauses.push(`summary LIKE $${params.length}`);
   }
 
   const whereSql = whereClauses.length > 0
@@ -259,11 +242,9 @@ export async function listDispatches(
     : "";
 
   params.push(limit);
-
-  const sql = `SELECT * FROM dispatches${whereSql} ORDER BY started_at DESC LIMIT ?`;
-  const pool = getPool();
-  const [rows] = await pool.query(sql, params);
-  return (rows as DispatchRow[]).map(rowToDispatch);
+  const sql = `SELECT * FROM dispatches${whereSql} ORDER BY started_at DESC LIMIT $${params.length}`;
+  const rows = await query<DispatchRow>(sql, params);
+  return rows.map(rowToDispatch);
 }
 
 const TERMINAL_LIST = TERMINAL_STATUSES.map((s) => `'${s}'`).join(", ");
@@ -273,12 +254,6 @@ export interface DeletedDispatch {
   jsonlPath: string | null;
 }
 
-/**
- * Delete dispatches older than `maxAgeMs` that are in a terminal state.
- * Returns the deleted rows' ids + jsonl paths so the caller can unlink
- * the corresponding JSONL files. Non-terminal dispatches (queued, running)
- * are preserved regardless of age.
- */
 export interface DispatchCountsByTrigger {
   total: number;
   slack: number;
@@ -294,11 +269,7 @@ export interface RepoDispatchCounts {
 
 /**
  * Count dispatches per repo, broken out by trigger type across three time
- * windows (all time / last 24h / since midnight UTC today). Used by the
- * Agents tab API to render dispatch activity on each repo card.
- *
- * One SQL round-trip per call regardless of repo count — the CASE/SUM
- * pattern keeps each window in the same group.
+ * windows (all time / last 24h / since midnight UTC today).
  */
 export async function countDispatchesByRepo(): Promise<
   Record<string, RepoDispatchCounts>
@@ -309,29 +280,26 @@ export async function countDispatchesByRepo(): Promise<
   midnightToday.setUTCHours(0, 0, 0, 0);
   const cutoffToday = midnightToday.getTime();
 
-  const pool = getPool();
-  const [rows] = await pool.query(
-    `SELECT
-      repo_name,
-      \`trigger\`,
-      COUNT(*) AS total,
-      SUM(CASE WHEN started_at >= ? THEN 1 ELSE 0 END) AS last_24h,
-      SUM(CASE WHEN started_at >= ? THEN 1 ELSE 0 END) AS today
-    FROM dispatches
-    GROUP BY repo_name, \`trigger\``,
-    [cutoff24h, cutoffToday],
-  );
-
-  const typed = rows as Array<{
+  const rows = await query<{
     repo_name: string;
     trigger: string;
     total: number | string;
     last_24h: number | string;
     today: number | string;
-  }>;
+  }>(
+    `SELECT
+      repo_name,
+      "trigger",
+      COUNT(*) AS total,
+      SUM(CASE WHEN started_at >= $1 THEN 1 ELSE 0 END) AS last_24h,
+      SUM(CASE WHEN started_at >= $2 THEN 1 ELSE 0 END) AS today
+    FROM dispatches
+    GROUP BY repo_name, "trigger"`,
+    [cutoff24h, cutoffToday],
+  );
 
   const out: Record<string, RepoDispatchCounts> = {};
-  for (const r of typed) {
+  for (const r of rows) {
     const entry =
       out[r.repo_name] ??
       (out[r.repo_name] = {
@@ -357,21 +325,18 @@ export async function countDispatchesByRepo(): Promise<
 
 /**
  * Return every non-terminal dispatch row for `repoName` — `queued` and
- * `running`. Caller decides what to do with each: worker startup
- * reconciliation marks rows whose `host_pid` is dead as `failed`; the
- * poller pre-claim DB guard skips Trello cards whose row's PID is alive.
- *
- * Sorted oldest-first so the worker's reconcile log reads in spawn order.
+ * `running`. Sorted oldest-first.
  */
 export async function findNonTerminalDispatches(
   repoName: string,
 ): Promise<Dispatch[]> {
-  const pool = getPool();
-  const [rows] = await pool.execute(
-    "SELECT * FROM dispatches WHERE repo_name = ? AND `status` IN ('queued', 'running') ORDER BY started_at ASC",
+  const rows = await query<DispatchRow>(
+    `SELECT * FROM dispatches
+     WHERE repo_name = $1 AND "status" IN ('queued', 'running')
+     ORDER BY started_at ASC`,
     [repoName],
   );
-  return (rows as DispatchRow[]).map(rowToDispatch);
+  return rows.map(rowToDispatch);
 }
 
 export async function deleteOldDispatches(
@@ -380,19 +345,19 @@ export async function deleteOldDispatches(
   const cutoff = Date.now() - maxAgeMs;
   const pool = getPool();
 
-  const [rows] = await pool.query(
-    `SELECT id, jsonl_path FROM dispatches WHERE started_at < ? AND \`status\` IN (${TERMINAL_LIST})`,
+  const sel = await pool.query<{ id: string; jsonl_path: string | null }>(
+    `SELECT id, jsonl_path FROM dispatches WHERE started_at < $1 AND "status" IN (${TERMINAL_LIST})`,
     [cutoff],
   );
-  const dbRows = rows as Array<{ id: string; jsonl_path: string | null }>;
+  const dbRows = sel.rows;
 
   if (dbRows.length === 0) return [];
 
-  const [result] = await pool.execute(
-    `DELETE FROM dispatches WHERE started_at < ? AND \`status\` IN (${TERMINAL_LIST})`,
+  const del = await pool.query(
+    `DELETE FROM dispatches WHERE started_at < $1 AND "status" IN (${TERMINAL_LIST})`,
     [cutoff],
   );
-  const affected = (result as ResultSetHeader).affectedRows;
+  const affected = del.rowCount ?? 0;
   log.info(`Deleted ${affected} old dispatch row(s)`);
 
   return dbRows.map((r) => ({ id: r.id, jsonlPath: r.jsonl_path }));

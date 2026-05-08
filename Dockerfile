@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     openssh-client \
-    mysql-client \
+    postgresql-client \
     gnupg2 \
     && rm -rf /var/lib/apt/lists/*
 

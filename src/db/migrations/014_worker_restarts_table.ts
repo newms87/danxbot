@@ -1,4 +1,4 @@
-import type { Pool } from "mysql2/promise";
+import type { PoolClient } from "pg";
 
 /**
  * Audit table for `POST /api/restart/:dispatchId` (ISS-71).
@@ -14,14 +14,14 @@ import type { Pool } from "mysql2/promise";
  * restart-then-restart-again attempt that would otherwise bypass the
  * 30s window.
  */
-export async function up(pool: Pool): Promise<void> {
-  await pool.query(`
+export async function up(client: PoolClient): Promise<void> {
+  await client.query(`
     CREATE TABLE IF NOT EXISTS worker_restarts (
-      id INT AUTO_INCREMENT PRIMARY KEY,
+      id SERIAL PRIMARY KEY,
       requesting_dispatch_id VARCHAR(255) NOT NULL,
       repo VARCHAR(255) NOT NULL,
       reason TEXT NOT NULL,
-      outcome ENUM(
+      outcome TEXT NOT NULL CHECK (outcome IN (
         'started',
         'success',
         'cooldown',
@@ -29,18 +29,24 @@ export async function up(pool: Pool): Promise<void> {
         'docker_self',
         'spawn_failed',
         'health_timeout'
-      ) NOT NULL,
+      )),
       old_pid INT NULL,
       new_pid INT NULL,
-      started_at DATETIME NOT NULL,
-      completed_at DATETIME NULL,
-      duration_ms INT NULL,
-      INDEX idx_worker_restarts_repo_outcome (repo, outcome),
-      INDEX idx_worker_restarts_started (started_at)
+      started_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ NULL,
+      duration_ms INT NULL
     )
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_worker_restarts_repo_outcome
+    ON worker_restarts (repo, outcome)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS idx_worker_restarts_started
+    ON worker_restarts (started_at)
   `);
 }
 
-export async function down(pool: Pool): Promise<void> {
-  await pool.query("DROP TABLE IF EXISTS worker_restarts");
+export async function down(client: PoolClient): Promise<void> {
+  await client.query("DROP TABLE IF EXISTS worker_restarts");
 }

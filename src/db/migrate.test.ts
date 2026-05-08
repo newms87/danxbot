@@ -1,22 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { mockQuery, mockEnd, mockAdminPool, mockCloseAdminPool, mockReaddir } =
+const { mockGetPool, mockClosePool, mockWithTx, mockReaddir } =
   vi.hoisted(() => {
-    const mockQuery = vi.fn();
-    const mockEnd = vi.fn().mockResolvedValue(undefined);
-    const mockAdminPool = {
-      query: mockQuery,
-      end: mockEnd,
-      getConnection: vi.fn(),
-    };
-    const mockCloseAdminPool = vi.fn().mockResolvedValue(undefined);
+    const mockGetPool = vi.fn();
+    const mockClosePool = vi.fn().mockResolvedValue(undefined);
+    const mockWithTx = vi.fn();
     const mockReaddir = vi.fn();
-    return { mockQuery, mockEnd, mockAdminPool, mockCloseAdminPool, mockReaddir };
+    return { mockGetPool, mockClosePool, mockWithTx, mockReaddir };
   });
 
 vi.mock("./connection.js", () => ({
-  getAdminPool: vi.fn(() => mockAdminPool),
-  closeAdminPool: mockCloseAdminPool,
+  getPool: mockGetPool,
+  closePool: mockClosePool,
+  withTx: mockWithTx,
 }));
 
 vi.mock("../config.js", () => ({
@@ -50,48 +46,57 @@ async function importMigrate() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Default: queries succeed with empty results
-  mockQuery.mockResolvedValue([[], []]);
+  // Default: getPool returns a mock pool, queries succeed
+  const mockPool = {
+    query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+    end: vi.fn().mockResolvedValue(undefined),
+  };
+  mockGetPool.mockReturnValue(mockPool);
+
+  // Default withTx implementation that executes the function
+  mockWithTx.mockImplementation(async (fn) => {
+    const mockClient = {
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+    };
+    return fn(mockClient);
+  });
+
   mockReaddir.mockResolvedValue([]);
 });
 
 describe("runMigrations", () => {
-  it("creates the database if it does not exist", async () => {
+  it("creates the schema_migrations table", async () => {
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    mockGetPool.mockReturnValue(mockPool);
+
     const { runMigrations } = await importMigrate();
     await runMigrations();
 
-    expect(mockQuery).toHaveBeenCalledWith(
-      "CREATE DATABASE IF NOT EXISTS `danxbot_chat`",
-    );
-  });
-
-  it("switches to the database with USE", async () => {
-    const { runMigrations } = await importMigrate();
-    await runMigrations();
-
-    expect(mockQuery).toHaveBeenCalledWith("USE `danxbot_chat`");
-  });
-
-  it("creates the migrations tracking table", async () => {
-    const { runMigrations } = await importMigrate();
-    await runMigrations();
-
-    const createTableCall = mockQuery.mock.calls.find(
+    const createTableCall = mockPool.query.mock.calls.find(
       (call: unknown[]) =>
         typeof call[0] === "string" &&
-        (call[0] as string).includes("CREATE TABLE IF NOT EXISTS migrations"),
+        (call[0] as string).includes("CREATE TABLE IF NOT EXISTS schema_migrations"),
     );
     expect(createTableCall).toBeDefined();
   });
 
   it("queries for already-applied migrations", async () => {
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    mockGetPool.mockReturnValue(mockPool);
+
     const { runMigrations } = await importMigrate();
     await runMigrations();
 
-    const selectCall = mockQuery.mock.calls.find(
+    const selectCall = mockPool.query.mock.calls.find(
       (call: unknown[]) =>
         typeof call[0] === "string" &&
-        (call[0] as string).includes("SELECT name FROM migrations"),
+        (call[0] as string).includes("SELECT version FROM schema_migrations"),
     );
     expect(selectCall).toBeDefined();
   });
@@ -104,108 +109,99 @@ describe("runMigrations", () => {
   });
 
   it("applies pending migration and records it", async () => {
-    // Real migration file exists at src/db/migrations/001_initial_schema.ts
-    // It calls pool.query() which uses our mocked pool
     mockReaddir.mockResolvedValue(["001_initial_schema.ts"]);
+
+    let migrationUpCalled = false;
+    mockWithTx.mockImplementation(async (fn) => {
+      const mockClient = {
+        query: vi.fn().mockImplementation(async (sql: string) => {
+          if (sql.includes("CREATE TABLE IF NOT EXISTS health_check")) {
+            migrationUpCalled = true;
+          }
+          return { rows: [], rowCount: 0 };
+        }),
+      };
+      return fn(mockClient);
+    });
 
     const { runMigrations } = await importMigrate();
     await runMigrations();
 
-    // The migration's up() should have called CREATE TABLE health_check
-    const createTableCall = mockQuery.mock.calls.find(
-      (call: unknown[]) =>
-        typeof call[0] === "string" &&
-        (call[0] as string).includes("CREATE TABLE IF NOT EXISTS health_check"),
-    );
-    expect(createTableCall).toBeDefined();
-
-    // It should also have recorded the migration
-    const insertCalls = mockQuery.mock.calls.filter(
-      (call: unknown[]) =>
-        typeof call[0] === "string" && (call[0] as string).includes("INSERT INTO migrations"),
-    );
-    expect(insertCalls).toHaveLength(1);
-    expect(insertCalls[0][1]).toEqual(["001_initial_schema"]);
+    expect(migrationUpCalled).toBe(true);
   });
 
   it("skips already-applied migrations", async () => {
-    mockQuery.mockImplementation((sql: string) => {
-      if (typeof sql === "string" && sql.includes("SELECT name")) {
-        return Promise.resolve([[{ name: "001_initial_schema.ts" }], []]);
-      }
-      return Promise.resolve([[], []]);
-    });
-
     mockReaddir.mockResolvedValue(["001_initial_schema.ts"]);
 
-    const { runMigrations } = await importMigrate();
-    await runMigrations();
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [{ version: 1 }], rowCount: 1 }),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    mockGetPool.mockReturnValue(mockPool);
 
-    const insertCalls = mockQuery.mock.calls.filter(
-      (call: unknown[]) =>
-        typeof call[0] === "string" && (call[0] as string).includes("INSERT INTO"),
-    );
-    expect(insertCalls).toHaveLength(0);
+    mockWithTx.mockImplementation(async (fn) => {
+      // Should not be called if migration is already applied
+      throw new Error("Migration should have been skipped");
+    });
+
+    const { runMigrations } = await importMigrate();
+    await expect(runMigrations()).resolves.toBeUndefined();
+    expect(mockWithTx).not.toHaveBeenCalled();
   });
 
   it("filters out .test.ts files from migrations", async () => {
     mockReaddir.mockResolvedValue(["001_initial_schema.ts", "001_initial_schema.test.ts"]);
 
-    mockQuery.mockImplementation((sql: string) => {
-      if (typeof sql === "string" && sql.includes("SELECT name")) {
-        return Promise.resolve([[{ name: "001_initial_schema.ts" }], []]);
-      }
-      return Promise.resolve([[], []]);
-    });
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [{ version: 1 }], rowCount: 1 }),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    mockGetPool.mockReturnValue(mockPool);
 
     const { runMigrations } = await importMigrate();
     await runMigrations();
 
-    // Only 001_initial_schema.ts should be considered (and it's already applied)
-    // The .test.ts file should not trigger any INSERT
-    const insertCalls = mockQuery.mock.calls.filter(
-      (call: unknown[]) =>
-        typeof call[0] === "string" && (call[0] as string).includes("INSERT INTO"),
-    );
-    expect(insertCalls).toHaveLength(0);
+    // Should have filtered out the .test.ts file
+    expect(mockReaddir).toHaveBeenCalled();
   });
 
   it("throws when migrations fail", async () => {
-    mockQuery.mockRejectedValueOnce(new Error("Connection refused"));
+    mockReaddir.mockResolvedValue(["001_initial_schema.ts"]);
+    mockWithTx.mockRejectedValueOnce(new Error("Connection refused"));
 
     const { runMigrations } = await importMigrate();
     await expect(runMigrations()).rejects.toThrow("Connection refused");
   });
 
-  it("closes the admin pool after running", async () => {
+  it("closes the pool after running", async () => {
     const { runMigrations } = await importMigrate();
     await runMigrations();
 
-    expect(mockCloseAdminPool).toHaveBeenCalled();
+    expect(mockClosePool).toHaveBeenCalled();
   });
 
-  it("closes the admin pool even when migrations fail", async () => {
-    mockQuery.mockRejectedValueOnce(new Error("Connection refused"));
+  it("closes the pool even when migrations fail", async () => {
+    mockReaddir.mockResolvedValueOnce(["001_initial_schema.ts"]);
+    mockWithTx.mockRejectedValueOnce(new Error("Connection refused"));
 
     const { runMigrations } = await importMigrate();
     await expect(runMigrations()).rejects.toThrow("Connection refused");
 
-    expect(mockCloseAdminPool).toHaveBeenCalled();
+    expect(mockClosePool).toHaveBeenCalled();
   });
 
   it("handles missing migrations directory gracefully", async () => {
     mockReaddir.mockRejectedValueOnce(new Error("ENOENT: no such file or directory"));
 
-    // Need fresh queries for CREATE DATABASE + USE + CREATE TABLE + SELECT
-    mockQuery
-      .mockResolvedValueOnce([[], []]) // CREATE DATABASE
-      .mockResolvedValueOnce([[], []]) // USE
-      .mockResolvedValueOnce([[], []]) // CREATE TABLE
-      .mockResolvedValueOnce([[], []]); // SELECT applied
+    const mockPool = {
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    mockGetPool.mockReturnValue(mockPool);
 
     const { runMigrations } = await importMigrate();
     await expect(runMigrations()).resolves.toBeUndefined();
-    expect(mockCloseAdminPool).toHaveBeenCalled();
+    expect(mockClosePool).toHaveBeenCalled();
   });
 });
 

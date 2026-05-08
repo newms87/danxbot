@@ -1,13 +1,12 @@
-import type { Pool } from "mysql2/promise";
+import type { PoolClient } from "pg";
 
-export async function up(pool: Pool): Promise<void> {
-  await pool.query(`
+export async function up(client: PoolClient): Promise<void> {
+  await client.query(`
     ALTER TABLE events
     ADD COLUMN router_complexity VARCHAR(10) NULL
-    AFTER router_needs_agent
   `);
 }
 
-export async function down(pool: Pool): Promise<void> {
-  await pool.query("ALTER TABLE events DROP COLUMN router_complexity");
+export async function down(client: PoolClient): Promise<void> {
+  await client.query("ALTER TABLE events DROP COLUMN router_complexity");
 }

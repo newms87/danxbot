@@ -1,7 +1,6 @@
 import { randomBytes, createHash } from "crypto";
 import bcrypt from "bcrypt";
-import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import { getPool } from "../db/connection.js";
+import { getPool, query } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("auth-db");
@@ -34,14 +33,13 @@ export function hashToken(raw: string): string {
 // a raw token it already forgot. Phase 2 middleware surfaces this as a
 // 401 / "signed in from another session" on the losing tab.
 async function issueFreshToken(userId: number): Promise<string> {
-  const pool = getPool();
-  await pool.execute(
-    "UPDATE api_tokens SET revoked_at = NOW() WHERE user_id = ? AND revoked_at IS NULL",
+  await query(
+    "UPDATE api_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
     [userId],
   );
   const rawToken = generateRawToken();
-  await pool.execute(
-    "INSERT INTO api_tokens (user_id, token_hash) VALUES (?, ?)",
+  await query(
+    "INSERT INTO api_tokens (user_id, token_hash) VALUES ($1, $2)",
     [userId, hashToken(rawToken)],
   );
   return rawToken;
@@ -51,21 +49,20 @@ export async function upsertDashboardUser(
   username: string,
   plainPassword: string,
 ): Promise<{ userId: number; rawToken: string }> {
-  const pool = getPool();
   const passwordHash = await hashPassword(plainPassword);
 
-  await pool.execute(
+  await query(
     `INSERT INTO users (username, password_hash)
-     VALUES (?, ?)
-     ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash)`,
+     VALUES ($1, $2)
+     ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash`,
     [username, passwordHash],
   );
 
-  const [rows] = await pool.query<RowDataPacket[]>(
-    "SELECT id FROM users WHERE username = ?",
+  const rows = await query<{ id: number }>(
+    "SELECT id FROM users WHERE username = $1",
     [username],
   );
-  const userId = (rows[0] as { id: number } | undefined)?.id;
+  const userId = rows[0]?.id;
   if (typeof userId !== "number") {
     throw new Error(`upsertDashboardUser: no id returned for username "${username}"`);
   }
@@ -87,14 +84,11 @@ export async function ensureDashboardUser(
   username: string,
   plainPassword: string,
 ): Promise<EnsureUserResult> {
-  const pool = getPool();
-  const [rows] = await pool.query<RowDataPacket[]>(
-    "SELECT id, password_hash FROM users WHERE username = ?",
+  const rows = await query<{ id: number; password_hash: string | null }>(
+    "SELECT id, password_hash FROM users WHERE username = $1",
     [username],
   );
-  const existing = rows[0] as
-    | { id: number; password_hash: string | null }
-    | undefined;
+  const existing = rows[0];
 
   if (existing && existing.password_hash) {
     const ok = await verifyPassword(plainPassword, existing.password_hash);
@@ -116,12 +110,11 @@ export async function loginDashboardUser(
   username: string,
   plainPassword: string,
 ): Promise<{ userId: number; rawToken: string } | null> {
-  const pool = getPool();
-  const [rows] = await pool.query<RowDataPacket[]>(
-    "SELECT id, password_hash FROM users WHERE username = ?",
+  const rows = await query<{ id: number; password_hash: string | null }>(
+    "SELECT id, password_hash FROM users WHERE username = $1",
     [username],
   );
-  const row = rows[0] as { id: number; password_hash: string | null } | undefined;
+  const row = rows[0];
   if (!row || !row.password_hash) return null;
 
   const ok = await verifyPassword(plainPassword, row.password_hash);
@@ -136,21 +129,20 @@ export async function validateToken(
 ): Promise<{ userId: number; username: string } | null> {
   if (!rawToken) return null;
 
-  const pool = getPool();
   const tokenHash = hashToken(rawToken);
 
-  const [rows] = await pool.query<RowDataPacket[]>(
+  const rows = await query<{ user_id: number; username: string }>(
     `SELECT api_tokens.user_id AS user_id, users.username AS username
      FROM api_tokens
      JOIN users ON users.id = api_tokens.user_id
-     WHERE api_tokens.token_hash = ? AND api_tokens.revoked_at IS NULL`,
+     WHERE api_tokens.token_hash = $1 AND api_tokens.revoked_at IS NULL`,
     [tokenHash],
   );
-  const row = rows[0] as { user_id: number; username: string } | undefined;
+  const row = rows[0];
   if (!row) return null;
 
-  await pool.execute(
-    "UPDATE api_tokens SET last_used_at = NOW() WHERE token_hash = ?",
+  await query(
+    "UPDATE api_tokens SET last_used_at = NOW() WHERE token_hash = $1",
     [tokenHash],
   );
 
@@ -159,9 +151,9 @@ export async function validateToken(
 
 export async function revokeAllTokensForUser(userId: number): Promise<void> {
   const pool = getPool();
-  const [result] = await pool.execute<ResultSetHeader>(
-    "UPDATE api_tokens SET revoked_at = NOW() WHERE user_id = ? AND revoked_at IS NULL",
+  const result = await pool.query(
+    "UPDATE api_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
     [userId],
   );
-  log.info(`Revoked ${result.affectedRows} token(s) for user id=${userId}`);
+  log.info(`Revoked ${result.rowCount ?? 0} token(s) for user id=${userId}`);
 }

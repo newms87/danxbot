@@ -365,18 +365,18 @@ describe("runtime detection", () => {
 });
 
 describe("required DB config", () => {
-  it("derives db.host — docker uses mysql, host uses 127.0.0.1", async () => {
+  it("derives db.host — docker uses postgres, host uses 127.0.0.1", async () => {
     mockDockerenvExists = true;
     const mod = await importConfig({});
-    expect(mod.config.db.host).toBe("mysql");
-    expect(mod.config.db.port).toBe(3306);
+    expect(mod.config.db.host).toBe("postgres");
+    expect(mod.config.db.port).toBe(5432);
   });
 
   it("derives db.host as 127.0.0.1 in host mode", async () => {
     mockDockerenvExists = false;
     const mod = await importConfig({});
     expect(mod.config.db.host).toBe("127.0.0.1");
-    expect(mod.config.db.port).toBe(3308);
+    expect(mod.config.db.port).toBe(5433);
   });
 
   it("throws when DANXBOT_DB_USER is missing", async () => {

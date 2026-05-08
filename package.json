@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
+    "start": "tsx watch src/index.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -20,12 +20,13 @@
     "@anthropic-ai/sdk": "^0.74.0",
     "@slack/bolt": "^4.1.0",
     "bcrypt": "^6.0.0",
-    "mysql2": "^3.17.1",
+    "pg": "^8.20.0",
     "yaml": "^2.3.4"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.20.0",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "vitest": "^4.0.18"

@@ -22,7 +22,7 @@ aws:
 instance:
   type: t3.small          # new minimum default; bump per deployment as needed
   volume_size: 30         # root volume (GB) — OS + Docker layers
-  data_volume_size: 100   # data volume (GB) — repos, mysql, logs; default is generous
+  data_volume_size: 100   # data volume (GB) — repos, postgres, logs; default is generous
   ssh_key: ""             # empty = auto-generate and save to ~/.ssh/<name>-key.pem
   ssh_allowed_cidrs:
     - "0.0.0.0/0"         # restrict to your IP in real deployments

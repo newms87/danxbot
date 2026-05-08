@@ -66,7 +66,7 @@ ssh -i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 make deploy-ssh TARGET=gpt
 ```
 
-From inside the instance, the entire worker container is reachable: `docker exec danxbot-worker-gpt-manager ...` for `mysql` queries against the dispatches DB, file reads on `~/.claude/projects/...` (claude session JSONLs live there), or any diagnostic shell.
+From inside the instance, the entire worker container is reachable: `docker exec danxbot-worker-gpt-manager ...` for `psql` queries against the dispatches DB, file reads on `~/.claude/projects/...` (claude session JSONLs live there), or any diagnostic shell.
 
 ### 4. SSM + Terraform state for infra questions
 
@@ -83,7 +83,7 @@ aws --profile gpt ssm get-parameters-by-path --path /danxbot-gpt/ --recursive --
 
 **"Is worker X alive?"** → `make deploy-status TARGET=<target>` (health probe).
 
-**"What's in the dispatches DB?"** → SSH + `docker exec danxbot-mysql mysql ...` (never delete rows — read-only queries only unless the user explicitly asks).
+**"What's in the dispatches DB?"** → SSH + `docker exec danxbot-postgres psql ...` (never delete rows — read-only queries only unless the user explicitly asks).
 
 ## Forbidden
 

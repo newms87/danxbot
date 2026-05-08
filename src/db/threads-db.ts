@@ -1,49 +1,43 @@
-import type { ResultSetHeader } from "mysql2/promise";
-import { getPool } from "./connection.js";
+import { getPool, query } from "./connection.js";
 import type { ThreadState, ThreadMessage } from "../types.js";
 
 interface ThreadRow {
   thread_ts: string;
   channel_id: string;
   session_id: string | null;
-  messages: string | ThreadMessage[];
+  messages: ThreadMessage[];
   created_at: Date;
   updated_at: Date;
 }
 
 function rowToThread(row: ThreadRow): ThreadState {
-  const messages =
-    typeof row.messages === "string" ? JSON.parse(row.messages) : row.messages;
   return {
     threadTs: row.thread_ts,
     channelId: row.channel_id,
     sessionId: row.session_id,
-    messages,
+    messages: row.messages,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
 }
 
 export async function loadThreadFromDb(threadTs: string): Promise<ThreadState | null> {
-  const pool = getPool();
-  const [rows] = await pool.execute(
-    "SELECT * FROM threads WHERE thread_ts = ?",
+  const rows = await query<ThreadRow>(
+    "SELECT * FROM threads WHERE thread_ts = $1",
     [threadTs],
   );
-  const dbRows = rows as ThreadRow[];
-  if (dbRows.length === 0) return null;
-  return rowToThread(dbRows[0]);
+  if (rows.length === 0) return null;
+  return rowToThread(rows[0]);
 }
 
 export async function saveThreadToDb(thread: ThreadState): Promise<void> {
-  const pool = getPool();
-  await pool.execute(
+  await query(
     `INSERT INTO threads (thread_ts, channel_id, session_id, messages)
-     VALUES (?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       channel_id = VALUES(channel_id),
-       session_id = VALUES(session_id),
-       messages = VALUES(messages)`,
+     VALUES ($1, $2, $3, $4::jsonb)
+     ON CONFLICT (thread_ts) DO UPDATE SET
+       channel_id = EXCLUDED.channel_id,
+       session_id = EXCLUDED.session_id,
+       messages = EXCLUDED.messages`,
     [
       thread.threadTs,
       thread.channelId,
@@ -56,11 +50,11 @@ export async function saveThreadToDb(thread: ThreadState): Promise<void> {
 export async function deleteOldThreadsFromDb(maxAgeMs: number): Promise<number> {
   const pool = getPool();
   const maxAgeSeconds = Math.floor(maxAgeMs / 1000);
-  const [result] = await pool.execute(
-    "DELETE FROM threads WHERE updated_at < NOW() - INTERVAL ? SECOND",
+  const result = await pool.query(
+    `DELETE FROM threads WHERE updated_at < NOW() - ($1::int * INTERVAL '1 second')`,
     [maxAgeSeconds],
   );
-  return (result as ResultSetHeader).affectedRows;
+  return result.rowCount ?? 0;
 }
 
 export async function isBotInThread(threadTs: string): Promise<boolean | null> {

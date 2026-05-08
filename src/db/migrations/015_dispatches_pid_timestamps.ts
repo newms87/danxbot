@@ -1,4 +1,4 @@
-import type { Pool } from "mysql2/promise";
+import type { PoolClient } from "pg";
 
 /**
  * Phase 1 of the DB-as-dispatch-registry epic (DX-139 / DX-140). Add two
@@ -25,16 +25,16 @@ import type { Pool } from "mysql2/promise";
  * per database — no IF NOT EXISTS guards needed. See DX-140 for the
  * paired-write design that motivates these columns.
  */
-export async function up(pool: Pool): Promise<void> {
-  await pool.query(`
+export async function up(client: PoolClient): Promise<void> {
+  await client.query(`
     ALTER TABLE dispatches
-    ADD COLUMN host_pid_at BIGINT NULL AFTER host_pid,
-    ADD COLUMN pid_terminated_at BIGINT NULL AFTER host_pid_at
+    ADD COLUMN host_pid_at BIGINT NULL,
+    ADD COLUMN pid_terminated_at BIGINT NULL
   `);
 }
 
-export async function down(pool: Pool): Promise<void> {
-  await pool.query(`
+export async function down(client: PoolClient): Promise<void> {
+  await client.query(`
     ALTER TABLE dispatches
     DROP COLUMN pid_terminated_at,
     DROP COLUMN host_pid_at

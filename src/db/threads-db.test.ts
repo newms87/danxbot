@@ -1,14 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const mockQuery = vi.fn();
-const mockExecute = vi.fn();
-const mockGetPool = vi.fn(() => ({
-  query: mockQuery,
-  execute: mockExecute,
-}));
+const { mockQuery, mockGetPool } = vi.hoisted(() => {
+  const mockQuery = vi.fn();
+  const mockGetPool = vi.fn(() => ({
+    query: mockQuery,
+  }));
+  return { mockQuery, mockGetPool };
+});
 
 vi.mock("./connection.js", () => ({
-  getPool: () => mockGetPool(),
+  getPool: mockGetPool,
+  query: mockQuery,
 }));
 
 const mockLogError = vi.fn();
@@ -45,25 +47,21 @@ function makeThread(overrides: Partial<ThreadState> = {}): ThreadState {
 describe("threads-db", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockExecute.mockResolvedValue([[], []]);
-    mockQuery.mockResolvedValue([[], []]);
+    mockQuery.mockResolvedValue([]);
   });
 
   describe("loadThreadFromDb", () => {
     it("returns parsed ThreadState when row exists", async () => {
       const messages = [{ user: "U1", text: "hi", ts: "1", isBot: false }];
-      mockExecute.mockResolvedValueOnce([
-        [
-          {
-            thread_ts: "1234.5678",
-            channel_id: "C123",
-            session_id: "sess-1",
-            messages: JSON.stringify(messages),
-            created_at: new Date("2026-01-01"),
-            updated_at: new Date("2026-01-02"),
-          },
-        ],
-        [],
+      mockQuery.mockResolvedValueOnce([
+        {
+          thread_ts: "1234.5678",
+          channel_id: "C123",
+          session_id: "sess-1",
+          messages,  // DB returns JSONB as parsed object
+          created_at: new Date("2026-01-01"),
+          updated_at: new Date("2026-01-02"),
+        },
       ]);
 
       const result = await loadThreadFromDb("1234.5678");
@@ -73,14 +71,14 @@ describe("threads-db", () => {
       expect(result!.channelId).toBe("C123");
       expect(result!.sessionId).toBe("sess-1");
       expect(result!.messages).toEqual(messages);
-      expect(mockExecute).toHaveBeenCalledWith(
+      expect(mockQuery).toHaveBeenCalledWith(
         expect.stringContaining("SELECT"),
         ["1234.5678"],
       );
     });
 
     it("returns null when no row exists", async () => {
-      mockExecute.mockResolvedValueOnce([[], []]);
+      mockQuery.mockResolvedValueOnce([]);
 
       const result = await loadThreadFromDb("nonexistent");
 
@@ -88,25 +86,22 @@ describe("threads-db", () => {
     });
 
     it("throws when DB fails", async () => {
-      mockExecute.mockRejectedValueOnce(new Error("connection refused"));
+      mockQuery.mockRejectedValueOnce(new Error("connection refused"));
 
       await expect(loadThreadFromDb("1234.5678")).rejects.toThrow("connection refused");
     });
 
-    it("handles messages stored as already-parsed object", async () => {
+    it("handles messages stored as array", async () => {
       const messages = [{ user: "U1", text: "hi", ts: "1", isBot: false }];
-      mockExecute.mockResolvedValueOnce([
-        [
-          {
-            thread_ts: "1234.5678",
-            channel_id: "C123",
-            session_id: null,
-            messages,
-            created_at: new Date("2026-01-01"),
-            updated_at: new Date("2026-01-02"),
-          },
-        ],
-        [],
+      mockQuery.mockResolvedValueOnce([
+        {
+          thread_ts: "1234.5678",
+          channel_id: "C123",
+          session_id: null,
+          messages,
+          created_at: new Date("2026-01-01"),
+          updated_at: new Date("2026-01-02"),
+        },
       ]);
 
       const result = await loadThreadFromDb("1234.5678");
@@ -125,10 +120,10 @@ describe("threads-db", () => {
 
       await saveThreadToDb(thread);
 
-      expect(mockExecute).toHaveBeenCalledTimes(1);
-      const [sql, params] = mockExecute.mock.calls[0];
+      expect(mockQuery).toHaveBeenCalledTimes(1);
+      const [sql, params] = mockQuery.mock.calls[0];
       expect(sql).toContain("INSERT INTO threads");
-      expect(sql).toContain("ON DUPLICATE KEY UPDATE");
+      expect(sql).toContain("ON CONFLICT");
       expect(params).toContain("1234.5678");
       expect(params).toContain("C123");
       expect(params).toContain("sess-abc");
@@ -140,32 +135,35 @@ describe("threads-db", () => {
 
       await saveThreadToDb(thread);
 
-      const [, params] = mockExecute.mock.calls[0];
+      const [, params] = mockQuery.mock.calls[0];
       expect(params).toContain(JSON.stringify(messages));
     });
 
     it("throws when DB fails", async () => {
-      mockExecute.mockRejectedValueOnce(new Error("connection refused"));
+      mockQuery.mockRejectedValueOnce(new Error("connection refused"));
 
       await expect(saveThreadToDb(makeThread())).rejects.toThrow("connection refused");
     });
   });
 
   describe("deleteOldThreadsFromDb", () => {
-    it("returns affected row count", async () => {
-      mockExecute.mockResolvedValueOnce([{ affectedRows: 5 }, []]);
+    it("returns affected row count from pool.query", async () => {
+      // deleteOldThreadsFromDb calls getPool().query directly, not the query() wrapper
+      const mockPoolQuery = vi.fn().mockResolvedValueOnce({ rows: [], rowCount: 5 });
+      mockGetPool.mockReturnValueOnce({ query: mockPoolQuery });
 
       const result = await deleteOldThreadsFromDb(7 * 24 * 60 * 60 * 1000);
 
       expect(result).toBe(5);
-      expect(mockExecute).toHaveBeenCalledWith(
+      expect(mockPoolQuery).toHaveBeenCalledWith(
         expect.stringContaining("DELETE"),
         expect.any(Array),
       );
     });
 
     it("returns 0 when no rows are deleted", async () => {
-      mockExecute.mockResolvedValueOnce([{ affectedRows: 0 }, []]);
+      const mockPoolQuery = vi.fn().mockResolvedValueOnce({ rows: [], rowCount: 0 });
+      mockGetPool.mockReturnValueOnce({ query: mockPoolQuery });
 
       const result = await deleteOldThreadsFromDb(7 * 24 * 60 * 60 * 1000);
 
@@ -173,7 +171,8 @@ describe("threads-db", () => {
     });
 
     it("throws when DB fails", async () => {
-      mockExecute.mockRejectedValueOnce(new Error("connection refused"));
+      const mockPoolQuery = vi.fn().mockRejectedValueOnce(new Error("connection refused"));
+      mockGetPool.mockReturnValueOnce({ query: mockPoolQuery });
 
       await expect(deleteOldThreadsFromDb(7 * 24 * 60 * 60 * 1000)).rejects.toThrow("connection refused");
     });
@@ -185,18 +184,15 @@ describe("threads-db", () => {
         { user: "U1", text: "hi", ts: "1", isBot: false },
         { user: "B1", text: "hello", ts: "2", isBot: true },
       ];
-      mockExecute.mockResolvedValueOnce([
-        [
-          {
-            thread_ts: "1234.5678",
-            channel_id: "C123",
-            session_id: null,
-            messages: JSON.stringify(messages),
-            created_at: new Date("2026-01-01"),
-            updated_at: new Date("2026-01-02"),
-          },
-        ],
-        [],
+      mockQuery.mockResolvedValueOnce([
+        {
+          thread_ts: "1234.5678",
+          channel_id: "C123",
+          session_id: null,
+          messages,  // DB returns JSONB as parsed object
+          created_at: new Date("2026-01-01"),
+          updated_at: new Date("2026-01-02"),
+        },
       ]);
 
       const result = await isBotInThread("1234.5678");
@@ -206,18 +202,15 @@ describe("threads-db", () => {
 
     it("returns false when thread has no bot messages", async () => {
       const messages = [{ user: "U1", text: "hi", ts: "1", isBot: false }];
-      mockExecute.mockResolvedValueOnce([
-        [
-          {
-            thread_ts: "1234.5678",
-            channel_id: "C123",
-            session_id: null,
-            messages: JSON.stringify(messages),
-            created_at: new Date("2026-01-01"),
-            updated_at: new Date("2026-01-02"),
-          },
-        ],
-        [],
+      mockQuery.mockResolvedValueOnce([
+        {
+          thread_ts: "1234.5678",
+          channel_id: "C123",
+          session_id: null,
+          messages,  // DB returns JSONB as parsed object
+          created_at: new Date("2026-01-01"),
+          updated_at: new Date("2026-01-02"),
+        },
       ]);
 
       const result = await isBotInThread("1234.5678");
@@ -226,7 +219,7 @@ describe("threads-db", () => {
     });
 
     it("returns null when thread not found", async () => {
-      mockExecute.mockResolvedValueOnce([[], []]);
+      mockQuery.mockResolvedValueOnce([]);
 
       const result = await isBotInThread("nonexistent");
 

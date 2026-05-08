@@ -1,12 +1,24 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const mockQuery = vi.fn();
-const mockGetPool = vi.fn(() => ({
-  query: mockQuery,
+const { mockPool, MockPoolCtor, mockQuery } = vi.hoisted(() => {
+  const mockPool = {
+    query: vi.fn(),
+    connect: vi.fn(),
+    end: vi.fn().mockResolvedValue(undefined),
+  };
+  const MockPoolCtor = vi.fn().mockImplementation(() => mockPool);
+  const mockQuery = vi.fn();
+  return { mockPool, MockPoolCtor, mockQuery };
+});
+
+vi.mock("pg", () => ({
+  Pool: MockPoolCtor,
+  types: { setTypeParser: vi.fn() },
 }));
 
 vi.mock("../db/connection.js", () => ({
-  getPool: () => mockGetPool(),
+  getPool: () => mockPool,
+  query: mockQuery,
 }));
 
 vi.mock("../logger.js", () => ({
@@ -28,7 +40,7 @@ import { resetAllData, TABLES_TO_WIPE } from "./reset-data.js";
 
 describe("resetAllData", () => {
   beforeEach(() => {
-    mockQuery.mockReset();
+    vi.clearAllMocks();
     mockClearSnapshotCache.mockReset();
   });
 
@@ -42,8 +54,8 @@ describe("resetAllData", () => {
 
   it("truncates exactly the allowlisted tables in order", async () => {
     mockQuery.mockImplementation(async (sql: string) => {
-      if (sql.startsWith("SELECT COUNT")) return [[{ n: 0 }], []];
-      return [{}, []];
+      if (sql.startsWith("SELECT COUNT")) return [{ n: 0 }];
+      return [];
     });
 
     const result = await resetAllData();
@@ -65,8 +77,8 @@ describe("resetAllData", () => {
 
   it("never queries users or api_tokens", async () => {
     mockQuery.mockImplementation(async (sql: string) => {
-      if (sql.startsWith("SELECT COUNT")) return [[{ n: 0 }], []];
-      return [{}, []];
+      if (sql.startsWith("SELECT COUNT")) return [{ n: 0 }];
+      return [];
     });
 
     await resetAllData();
@@ -88,9 +100,9 @@ describe("resetAllData", () => {
       if (sql.startsWith("SELECT COUNT")) {
         const m = sql.match(/FROM (\w+)/);
         const table = m ? m[1] : "";
-        return [[{ n: counts[table] ?? 0 }], []];
+        return [{ n: counts[table] ?? 0 }];
       }
-      return [{}, []];
+      return [];
     });
 
     const result = await resetAllData();
@@ -101,8 +113,8 @@ describe("resetAllData", () => {
 
   it("clears the dispatch snapshot cache after truncating so SSE state is not stale", async () => {
     mockQuery.mockImplementation(async (sql: string) => {
-      if (sql.startsWith("SELECT COUNT")) return [[{ n: 0 }], []];
-      return [{}, []];
+      if (sql.startsWith("SELECT COUNT")) return [{ n: 0 }];
+      return [];
     });
 
     await resetAllData();
@@ -114,8 +126,8 @@ describe("resetAllData", () => {
     const ops: string[] = [];
     mockQuery.mockImplementation(async (sql: string) => {
       ops.push(sql);
-      if (sql.startsWith("SELECT COUNT")) return [[{ n: 1 }], []];
-      return [{}, []];
+      if (sql.startsWith("SELECT COUNT")) return [{ n: 1 }];
+      return [];
     });
 
     await resetAllData();

@@ -1,0 +1,173 @@
+schema_version: 4
+tracker: trello
+id: DX-163
+external_id: 69fe2625ad72041fdb379cd4
+parent_id: DX-152
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "Issues DB Mirror > Phase 1.1: Postgres compose service + pg deps + connection.ts/migrate.ts on pg.Pool"
+description: |-
+  ## Context
+
+  First sub-phase of DX-152 (Phase 1 of the Issues DB Mirror epic, DX-151). The originally-scoped DX-152 was promoted to Epic and split into four sub-phases because the total surface (~5000 lines, ~40 files, 4 distinct domains) exceeds Step 3's split criteria. Read the parent epic (DX-152) for the full split rationale + sub-phase table.
+
+  This sub-phase establishes the Postgres foundation:
+
+  - `danxbot-postgres` compose service (additive — `danxbot-mysql` stays running so existing tests / dev / dispatches keep working).
+  - `pg` + `@types/pg` dependencies installed.
+  - `src/db/connection.ts` rewritten on `pg.Pool` with new helpers (`query()`, `withTx()`, `DbError`).
+  - `src/db/migrate.ts` rewritten with `schema_migrations` tracking. The runner enumerates `migrations/*.ts` files but does NOT run them yet (migrations get re-authored in Phase 1.2 — running the existing MySQL-flavored ones against PG would explode immediately).
+  - `src/db/connection.test.ts` and `src/db/migrate.test.ts` rewritten to mock `pg` and assert PG behavior.
+
+  After this phase the codebase has BOTH engines wired up. Consumer modules (`users-db`, `threads-db`, `auth-db`, `dispatches-db`, `worker-restarts-db`, `sql-executor`, `fake-platform-pool`) are NOT touched here — they keep importing the existing helpers, but those helpers are now PG-shaped, so consumer-level tests will start failing. That breakage is expected; Phase 1.3 fixes it. Until Phase 1.3 lands, only the foundation tests (`connection.test.ts`, `migrate.test.ts`, `health.test.ts`) are required to pass.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-issues-db-mirror-design.md`.
+
+  ## Approach
+
+  1. **`docker-compose.yml`** — add the new `danxbot-postgres` service:
+      - Image `postgres:16-alpine`.
+      - Port `5433:5432` (avoid colliding with any host PG; the `5432` MySQL doesn't share a port either, but pick a distinct host port for clarity).
+      - Named volume `danxbot-postgres-data`.
+      - Healthcheck `pg_isready -U $$DANXBOT_DB_USER -d $$DANXBOT_DB_NAME`.
+      - Network `danxbot-net`.
+      - Env: `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` from `${DANXBOT_DB_USER}` / `${DANXBOT_DB_PASSWORD}` / `${DANXBOT_DB_NAME}`.
+      - Leave `danxbot-mysql` service in place.
+  2. **`package.json`** — add `pg` (latest stable, currently `^8.x`) and `@types/pg` (latest stable). Run `npm install`. Keep `mysql2` for now.
+  3. **`src/db/connection.ts` rewrite** — replace `import mysql from "mysql2/promise"` with `import { Pool, PoolClient, PoolConfig } from "pg"`. Replace `mysql.createPool({...})` with `new Pool({...})`. Add three new exports:
+      - `query<T>(sql: string, params?: unknown[]): Promise<T[]>` — wraps `pool.query()` and returns the `rows` array directly so callers don't have to destructure.
+      - `withTx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T>` — uses `pool.connect()` + `BEGIN` / `COMMIT` / `ROLLBACK`.
+      - `class DbError extends Error { code: string; cause?: unknown }` — normalize PG SQLSTATE codes (`23505` → `code: "duplicate_entry"`, `23503` → `code: "foreign_key_violation"`, etc.) so call sites don't engine-couple. Keep the historic `errno` for the small set of MySQL-coded paths in tests until Phase 1.3 ports them.
+      Existing exported function names (`getPool`, `getAdminPool`, `getPlatformPool`, etc.) stay byte-identical — only the underlying type and `createPool` call change.
+  4. **`src/db/migrate.ts` rewrite** — track applied migrations in `schema_migrations(version int primary key, applied_at timestamptz default now())`. Each migration file's `up` signature becomes `(client: pg.PoolClient) => Promise<void>`. The runner:
+      - Connects via `withTx` (each migration is its own transaction; if it throws, the version is not recorded).
+      - Reads the `schema_migrations` table on boot.
+      - Enumerates `src/db/migrations/*.ts` files, parses the leading number from the filename.
+      - Runs anything not yet recorded, in numeric order.
+      - Inserts the version + `now()` after `up` completes successfully.
+      - Phase 1.2 actually re-authors the migration files — until then the runner has nothing to safely run, but the test in `migrate.test.ts` validates the runner's behavior with stub migrations.
+  5. **`src/db/connection.test.ts`** — replace `vi.mock("mysql2/promise", …)` with `vi.mock("pg", …)`. Cover: pool creation, `query()` happy path, `withTx()` happy + rollback paths, `DbError` translation for `23505` and `23503`, `getAdminPool` vs `getPlatformPool` vs `getPool` exports.
+  6. **`src/db/migrate.test.ts`** — set up an in-memory mock pool (or a docker `pg-mem`-style harness) and verify: empty DB applies all migrations in order; partial DB applies only missing ones; failed migration leaves `schema_migrations` row untouched (no half-applied state); idempotent boot is a no-op.
+  7. **`src/db/health.ts`** — `SELECT 1` works on PG; verify the existing test still passes (mock surface may need updating).
+
+  ## Files
+
+  Modify:
+
+  - `docker-compose.yml`
+  - `package.json`
+  - `package-lock.json` (regenerated by `npm install`)
+  - `src/db/connection.ts`
+  - `src/db/connection.test.ts`
+  - `src/db/migrate.ts`
+  - `src/db/migrate.test.ts`
+  - `src/db/health.ts` (likely no changes; verify)
+  - `src/db/health.test.ts` (mock surface update if needed)
+
+  ## Acceptance
+
+  - `make launch-infra` brings up `danxbot-postgres` (healthcheck green) alongside `danxbot-mysql`.
+  - `package.json` has `pg` and `@types/pg`; `npm install` is clean (no peer-dep warnings, no audit errors that block).
+  - `src/db/connection.ts` exports the same function names as before but typed for `pg.Pool`. `query()`, `withTx()`, and `DbError` are exported.
+  - `src/db/migrate.ts` uses a `schema_migrations` table; new tests in `migrate.test.ts` cover empty / partial / failed / idempotent boot scenarios.
+  - `npx vitest run src/db/connection.test src/db/migrate.test src/db/health.test` is green.
+  - The new pool is reachable end-to-end: a manual smoke `node --import tsx -e "import('./src/db/connection.ts').then(m => m.query('SELECT 1 AS one').then(r => { console.log(r); process.exit(0); }))"` returns `[ { one: 1 } ]`.
+
+  ## Out of scope
+
+  - Re-authoring any of the 15 migration files (Phase 1.2).
+  - Porting any `*-db.ts` consumer module or test helper (Phase 1.3).
+  - Removing `mysql2` from `package.json` or `danxbot-mysql` from compose (Phase 1.4).
+  - End-to-end operator verification — `make launch-worker`, `make create-user`, dashboard login, `make test-system-*` (Phase 1.4).
+
+  ## Notes for the agent
+
+  - Pick a sensible `pg.Pool` config: `max: 10` matches today's mysql2 default; `idleTimeoutMillis: 30_000`; `connectionTimeoutMillis: 5_000`.
+  - The PG client returns `Date` objects for `timestamptz` by default; mysql2 returns string. Phase 1.3 deals with consumer-side normalization — DON'T add string-coercion in `connection.ts`. Keep it canonical.
+  - The PG client returns `Buffer` for `bytea` and parses `int8` (`bigint`) as string by default. We don't currently use `bytea`; we DO use `bigint` (`BIGINT UNSIGNED AUTO_INCREMENT` ids). Set `pg.types.setTypeParser(20, parseInt)` in `connection.ts` so `bigint` rows surface as `number` like mysql2 did. Document the assumption (numbers comfortably under 2^53 — true for our id columns).
+  - Keep `query()` lean — no logging, no retry. Consumer modules layer logging if needed. The current mysql2 path is also unwrapped; preserve that simplicity.
+  - Phase 1.2 will need access to `withTx` — make sure it's exported.
+
+  ## Forbidden patterns
+
+  - Running the existing MySQL-flavored migration files against the new PG pool. They'll fail immediately on syntax (`AUTO_INCREMENT`, `LONGTEXT`, etc.). The runner enumerates files but the actual `up()` calls don't make sense until Phase 1.2 re-authors them.
+  - Changing any `*-db.ts` consumer module here. Phase 1.3 is the big-bang switch — leave them untouched in this phase.
+  - Adding a mysql2-compat wrapper around pg. The card explicitly says drop mysql2; a compat layer would survive into prod and rot.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe262681af949af0ecc0d2
+    title: docker-compose.yml has danxbot-postgres service (postgres:16-alpine, named volume danxbot-postgres-data, pg_isready healthcheck, danxbot-net)
+    checked: true
+  - check_item_id: 69fe2626e8dec8d0152deaad
+    title: package.json has pg and @types/pg dependencies; npm install completes clean
+    checked: true
+  - check_item_id: 69fe26275b2790c1a4be0cb0
+    title: src/db/connection.ts rewritten on pg.Pool; getPool/getAdminPool/getPlatformPool function names unchanged; query() + withTx() + DbError exported
+    checked: true
+  - check_item_id: 69fe26283b4c358e65dbbfc5
+    title: src/db/migrate.ts uses schema_migrations(version int primary key, applied_at timestamptz) to track applied versions
+    checked: true
+  - check_item_id: 69fe262888a937be79ef7fc4
+    title: Each migration file's up signature is (client pg.PoolClient) returning Promise void (file bodies still rewritten in Phase 1.2)
+    checked: true
+  - check_item_id: 69fe26289bfb798397290323
+    title: src/db/connection.test.ts mocks pg (not mysql2); covers query() happy path, withTx() commit + rollback, DbError translation for 23505 and 23503
+    checked: true
+  - check_item_id: 69fe2629707402c7add7a8d1
+    title: src/db/migrate.test.ts covers empty/partial/failed/idempotent boot scenarios; failed migration leaves schema_migrations untouched
+    checked: true
+  - check_item_id: 69fe26295a35ae17bedc8839
+    title: npx vitest run src/db/connection.test src/db/migrate.test src/db/health.test green
+    checked: true
+  - check_item_id: 69fe262a43976c83dd85b5e2
+    title: make launch-infra brings up danxbot-postgres healthcheck green alongside danxbot-mysql
+    checked: true
+  - check_item_id: 69fe262a94b213b547f1c5bb
+    title: "Smoke test: tsx import of src/db/connection.ts can SELECT 1 AS one and return [{one 1}] from the new pool"
+    checked: true
+comments: []
+history:
+  - timestamp: 2026-05-08T18:06:35.735Z
+    actor: dispatch:97e69136-2681-4b00-a22a-a6122f8f2bd6
+    event: created
+    to: ToDo
+retro:
+  good: |
+    All 15 numbered migrations apply cleanly to a fresh Postgres 16 container.
+    SELECT 1 + every consumer module (auth-db, dispatches-db, threads-db,
+    users-db, worker-restarts-db, sql-executor, fake-platform-pool) returns
+    PG-shape rows. Full suite — 3484 backend tests + 188 dashboard tests +
+    tsc + vue-tsc — green. Phase scope was deliberately expanded to
+    Phase 1.2 + 1.3 + 1.4 in one pass per operator instruction
+    "ALL PROBLEMS ARE IN SCOPE".
+  bad: |
+    `pg` rejects MySQL-isms differently than mysql2: `LIMIT ?, ?` →
+    `LIMIT $N OFFSET $M`, `INSERT … ON DUPLICATE KEY` → `ON CONFLICT (col)
+    DO UPDATE SET col = EXCLUDED.col`, `JSON_EXTRACT(col, '$.x')` →
+    `col->>'x'`, `RETURNING id` for surrogate-id capture, `NOW() - INTERVAL
+    '$1 second'` is invalid — must be `NOW() - ($1::int * INTERVAL '1
+    second')`. Each is a footgun if you forget. ON UPDATE
+    CURRENT_TIMESTAMP requires a per-table BEFORE UPDATE trigger calling a
+    bootstrap `set_updated_at()` function (added in 001). `bigint` type
+    parsing in pg defaults to string — coerced to number via
+    `pg.types.setTypeParser(20, parseInt)` so consumer modules don't see
+    string ids. `pool.query` returns a result OBJECT not a tuple — every
+    `[rows] =` destructure had to be rewritten. Migration tests that
+    snapshotted MySQL DDL strings (002, 004, 011, 015) were deleted as
+    redundant once the runner's behavior is integration-tested.
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

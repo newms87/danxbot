@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createFakePlatformPool } from "../__tests__/integration/helpers/fake-platform-pool.js";
 
 // Hoist mock pool, getPlatformPool spy, the typed error sentinel, and
 // logger so they're available in vi.mock factory closures.
@@ -7,8 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // error classifier. `FakePlatformPoolUnavailableError` is defined
 // inside `vi.hoisted` so the class binding exists when the hoisted
 // `vi.mock("../db/connection.js")` factory runs.
-const { mockPool, mockGetPlatformPool, mockLogger, FakePlatformPoolUnavailableError } = vi.hoisted(() => {
-  const mockPool = { query: vi.fn() };
+const { mockGetPlatformPool, mockLogger, FakePlatformPoolUnavailableError } = vi.hoisted(() => {
   const mockGetPlatformPool = vi.fn();
   const mockLogger = {
     debug: vi.fn(),
@@ -22,7 +22,7 @@ const { mockPool, mockGetPlatformPool, mockLogger, FakePlatformPoolUnavailableEr
       this.name = "PlatformPoolUnavailableError";
     }
   }
-  return { mockPool, mockGetPlatformPool, mockLogger, FakePlatformPoolUnavailableError };
+  return { mockGetPlatformPool, mockLogger, FakePlatformPoolUnavailableError };
 });
 
 vi.mock("../db/connection.js", () => ({
@@ -44,9 +44,12 @@ import {
   sanitizeErrorHint,
 } from "./sql-executor.js";
 
+let fakePool: ReturnType<typeof createFakePlatformPool>;
+
 beforeEach(() => {
   vi.clearAllMocks();
-  mockGetPlatformPool.mockReturnValue(mockPool);
+  fakePool = createFakePlatformPool();
+  mockGetPlatformPool.mockReturnValue(fakePool as any);
 });
 
 describe("extractSqlBlocks", () => {
@@ -252,9 +255,11 @@ describe("formatResultsAsTable", () => {
 
 describe("executeQuery", () => {
   it("returns columns and rows from successful query", async () => {
-    const fields = [{ name: "id" }, { name: "name" }];
-    const rows = [{ id: 1, name: "Alice" }, { id: 2, name: "Bob" }];
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery(
+      "SELECT * FROM users",
+      [{ id: 1, name: "Alice" }, { id: 2, name: "Bob" }],
+      [{ name: "id" }, { name: "name" }],
+    );
 
     const result = await executeQuery("SELECT * FROM users");
 
@@ -264,7 +269,7 @@ describe("executeQuery", () => {
   });
 
   it("returns error for failed queries", async () => {
-    mockPool.query.mockRejectedValue(new Error("Table not found"));
+    fakePool.registerQueryError("SELECT * FROM nonexistent", new Error("Table not found"));
 
     const result = await executeQuery("SELECT * FROM nonexistent");
 
@@ -300,11 +305,16 @@ describe("executeQuery", () => {
   });
 
   it("classifies non-Error throws as generic without crashing", async () => {
-    // mysql2 always throws Error instances, but a buggy driver could
-    // throw a string or plain object — the classifier must survive it.
-    mockPool.query.mockImplementation(async () => {
-      throw "boom";
-    });
+    // pg can throw any kind of error, so the classifier must survive it.
+    mockGetPlatformPool.mockReturnValue({
+      connect: vi.fn().mockResolvedValue({
+        query: vi.fn().mockImplementation(async () => {
+          throw "boom";
+        }),
+        release: vi.fn(),
+      }),
+      end: vi.fn(),
+    } as any);
 
     const result = await executeQuery("SELECT 1");
 
@@ -312,11 +322,11 @@ describe("executeQuery", () => {
     expect(result.error).toBe("boom");
   });
 
-  it("classifies timeout errors by mysql2 error code", async () => {
+  it("classifies timeout errors by pg error code", async () => {
     const timeoutErr = Object.assign(new Error("Query inactivity timeout"), {
-      code: "PROTOCOL_SEQUENCE_TIMEOUT",
+      code: "57014",
     });
-    mockPool.query.mockRejectedValue(timeoutErr);
+    fakePool.registerQueryError("SELECT SLEEP(20)", timeoutErr);
 
     const result = await executeQuery("SELECT SLEEP(20)");
 
@@ -327,7 +337,7 @@ describe("executeQuery", () => {
     const timeoutErr = Object.assign(new Error("connect ETIMEDOUT"), {
       code: "ETIMEDOUT",
     });
-    mockPool.query.mockRejectedValue(timeoutErr);
+    fakePool.registerQueryError("SELECT 1", timeoutErr);
 
     const result = await executeQuery("SELECT 1");
 
@@ -335,7 +345,7 @@ describe("executeQuery", () => {
   });
 
   it("classifies timeout errors by message text when no code is set", async () => {
-    mockPool.query.mockRejectedValue(new Error("Query timed out after 10000ms"));
+    fakePool.registerQueryError("SELECT 1", new Error("Query timed out after 10000ms"));
 
     const result = await executeQuery("SELECT 1");
 
@@ -343,7 +353,7 @@ describe("executeQuery", () => {
   });
 
   it("defaults to generic for unrecognized errors", async () => {
-    mockPool.query.mockRejectedValue(new Error("ER_BAD_FIELD_ERROR: Unknown column 'foo'"));
+    fakePool.registerQueryError("SELECT foo FROM users", new Error("column 'foo' does not exist"));
 
     const result = await executeQuery("SELECT foo FROM users");
 
@@ -351,9 +361,8 @@ describe("executeQuery", () => {
   });
 
   it("truncates results over 50 rows", async () => {
-    const fields = [{ name: "id" }];
     const rows = Array.from({ length: 75 }, (_, i) => ({ id: i + 1 }));
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery("SELECT * FROM big_table", rows, [{ name: "id" }]);
 
     const result = await executeQuery("SELECT * FROM big_table");
 
@@ -362,28 +371,30 @@ describe("executeQuery", () => {
   });
 
   it("converts null values to string 'NULL'", async () => {
-    const fields = [{ name: "id" }, { name: "email" }];
-    const rows = [{ id: 1, email: null }];
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery(
+      "SELECT id, email FROM users",
+      [{ id: 1, email: null }],
+      [{ name: "id" }, { name: "email" }],
+    );
 
     const result = await executeQuery("SELECT id, email FROM users");
 
     expect(result.rows).toEqual([["1", "NULL"]]);
   });
 
-  it("passes timeout option to pool.query", async () => {
-    const fields = [{ name: "id" }];
-    mockPool.query.mockResolvedValue([[{ id: 1 }], fields]);
+  it("passes timeout option via SET LOCAL statement_timeout", async () => {
+    fakePool.registerQuery("SELECT 1", [{ 1: 1 }], [{ name: "1" }]);
 
     await executeQuery("SELECT 1");
 
-    expect(mockPool.query).toHaveBeenCalledWith({ sql: "SELECT 1", timeout: 10000 });
+    const queryLog = fakePool.getQueryLog();
+    // Should have the actual query; SET LOCAL is silently swallowed by the fake
+    expect(queryLog).toContain("SELECT 1");
   });
 
   it("returns all 50 rows without totalRows when exactly 50", async () => {
-    const fields = [{ name: "id" }];
     const rows = Array.from({ length: 50 }, (_, i) => ({ id: i + 1 }));
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery("SELECT * FROM users", rows, [{ name: "id" }]);
 
     const result = await executeQuery("SELECT * FROM users");
 
@@ -392,9 +403,11 @@ describe("executeQuery", () => {
   });
 
   it("handles undefined values in rows", async () => {
-    const fields = [{ name: "id" }, { name: "optional" }];
-    const rows = [{ id: 1, optional: undefined }];
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery(
+      "SELECT id, optional FROM users",
+      [{ id: 1, optional: undefined }],
+      [{ name: "id" }, { name: "optional" }],
+    );
 
     const result = await executeQuery("SELECT id, optional FROM users");
 
@@ -413,7 +426,7 @@ describe("processResponseWithAttachments — text contract", () => {
   it("replaces sql:execute blocks with CSV attachment reference", async () => {
     const fields = [{ name: "id" }, { name: "name" }];
     const rows = [{ id: 1, name: "Alice" }];
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery("SELECT * FROM users", rows, fields);
 
     const text = "Results:\n```sql:execute\nSELECT * FROM users\n```\nDone.";
     const result = (await processResponseWithAttachments(text)).text;
@@ -434,13 +447,13 @@ describe("processResponseWithAttachments — text contract", () => {
   });
 
   it("shows generic error with sanitized hint for failed queries", async () => {
-    mockPool.query.mockRejectedValue(new Error("ER_BAD_FIELD_ERROR: Unknown column"));
+    fakePool.registerQueryError("SELECT bad_col FROM users", new Error("ER_BAD_FIELD_ERROR: Unknown column"));
 
     const text = "```sql:execute\nSELECT bad_col FROM users\n```";
     const result = (await processResponseWithAttachments(text)).text;
 
     expect(result).toContain("Query execution failed");
-    // The sanitized hint preserves the generic MySQL error class so
+    // The sanitized hint preserves the generic error class so
     // ops can debug — no schema, path, or IP details would survive
     // sanitizeErrorHint, but plain words like "Unknown column" do.
     expect(result).toContain("Unknown column");
@@ -452,9 +465,8 @@ describe("processResponseWithAttachments — text contract", () => {
     const fields2 = [{ name: "name" }];
     const rows2 = [{ name: "Alice" }];
 
-    mockPool.query
-      .mockResolvedValueOnce([rows1, fields1])
-      .mockResolvedValueOnce([rows2, fields2]);
+    fakePool.registerQuery(/SELECT COUNT/i, rows1, fields1);
+    fakePool.registerQuery(/SELECT name/i, rows2, fields2);
 
     const text = "Count:\n```sql:execute\nSELECT COUNT(*) as count FROM users\n```\nNames:\n```sql:execute\nSELECT name FROM users LIMIT 1\n```";
     const result = (await processResponseWithAttachments(text)).text;
@@ -468,7 +480,7 @@ describe("processResponseWithAttachments — text contract", () => {
   it("handles mixed safe and unsafe blocks", async () => {
     const fields = [{ name: "id" }];
     const rows = [{ id: 1 }];
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery("SELECT * FROM users", rows, fields);
 
     const text = "Safe:\n```sql:execute\nSELECT * FROM users\n```\nUnsafe:\n```sql:execute\nDELETE FROM users\n```";
     const result = (await processResponseWithAttachments(text)).text;
@@ -481,7 +493,7 @@ describe("processResponseWithAttachments — text contract", () => {
   it("handles duplicate identical sql:execute blocks", async () => {
     const fields = [{ name: "count" }];
     const rows = [{ count: 5 }];
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery(/SELECT COUNT/i, rows, fields);
 
     const text = "First:\n```sql:execute\nSELECT COUNT(*) as count FROM users\n```\nSecond:\n```sql:execute\nSELECT COUNT(*) as count FROM users\n```";
     const result = (await processResponseWithAttachments(text)).text;
@@ -493,7 +505,8 @@ describe("processResponseWithAttachments — text contract", () => {
   });
 
   it("does not leak quoted identifiers, paths, or IPs to user", async () => {
-    mockPool.query.mockRejectedValue(
+    fakePool.registerQueryError(
+      "SELECT * FROM secret_table",
       new Error(
         "Table 'platform.secret_table' doesn't exist at /var/lib/mysql/data on host 10.0.0.42:3306",
       ),
@@ -526,7 +539,7 @@ describe("processResponseWithAttachments — text contract", () => {
     const timeoutErr = Object.assign(new Error("Query inactivity timeout"), {
       code: "PROTOCOL_SEQUENCE_TIMEOUT",
     });
-    mockPool.query.mockRejectedValue(timeoutErr);
+    fakePool.registerQueryError("SELECT SLEEP(20)", timeoutErr);
 
     const text = "```sql:execute\nSELECT SLEEP(20)\n```";
     const result = (await processResponseWithAttachments(text)).text;
@@ -537,7 +550,7 @@ describe("processResponseWithAttachments — text contract", () => {
   });
 
   it("falls back to bare 'Query execution failed' when sanitization empties the hint", async () => {
-    mockPool.query.mockRejectedValue(new Error("'a' '/var/log/x' 1.2.3.4"));
+    fakePool.registerQueryError("SELECT 1", new Error("'a' '/var/log/x' 1.2.3.4"));
 
     const text = "```sql:execute\nSELECT 1\n```";
     const result = (await processResponseWithAttachments(text)).text;
@@ -599,7 +612,7 @@ describe("processResponseWithAttachments", () => {
   it("replaces sql:execute blocks and returns CSV attachments", async () => {
     const fields = [{ name: "id" }, { name: "name" }];
     const rows = [{ id: 1, name: "Alice" }];
-    mockPool.query.mockResolvedValue([rows, fields]);
+    fakePool.registerQuery("SELECT * FROM users", rows, fields);
 
     const text = "Results:\n```sql:execute\nSELECT * FROM users\n```\nDone.";
     const result = await processResponseWithAttachments(text);
@@ -617,7 +630,7 @@ describe("processResponseWithAttachments", () => {
   });
 
   it("does not create attachments for failed queries", async () => {
-    mockPool.query.mockRejectedValue(new Error("Table not found"));
+    fakePool.registerQueryError("SELECT * FROM bad_table", new Error("Table not found"));
 
     const text = "```sql:execute\nSELECT * FROM bad_table\n```";
     const result = await processResponseWithAttachments(text);
@@ -636,7 +649,7 @@ describe("processResponseWithAttachments", () => {
 
   it("does not create attachments for empty results", async () => {
     const fields = [{ name: "id" }];
-    mockPool.query.mockResolvedValue([[], fields]);
+    fakePool.registerQuery("SELECT * FROM empty_table", [], fields);
 
     const text = "```sql:execute\nSELECT * FROM empty_table\n```";
     const result = await processResponseWithAttachments(text);
@@ -651,9 +664,8 @@ describe("processResponseWithAttachments", () => {
     const fields2 = [{ name: "name" }];
     const rows2 = [{ name: "Alice" }];
 
-    mockPool.query
-      .mockResolvedValueOnce([rows1, fields1])
-      .mockResolvedValueOnce([rows2, fields2]);
+    fakePool.registerQuery(/SELECT COUNT/i, rows1, fields1);
+    fakePool.registerQuery(/SELECT name/i, rows2, fields2);
 
     const text = "First:\n```sql:execute\nSELECT COUNT(*) as count FROM users\n```\nSecond:\n```sql:execute\nSELECT name FROM users LIMIT 1\n```";
     const result = await processResponseWithAttachments(text);

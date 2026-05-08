@@ -1,4 +1,4 @@
-import type { Pool } from "mysql2/promise";
+import type { PoolClient } from "pg";
 
 /**
  * Add `host_pid` to `dispatches` so the worker can tell at startup which
@@ -31,9 +31,9 @@ import type { Pool } from "mysql2/promise";
  *
  * See ISS-69.
  */
-export async function up(pool: Pool): Promise<void> {
-  await pool.query(`
+export async function up(client: PoolClient): Promise<void> {
+  await client.query(`
     ALTER TABLE dispatches
-    ADD COLUMN host_pid INT NULL AFTER runtime_mode
+    ADD COLUMN host_pid INT NULL
   `);
 }

@@ -1,12 +1,19 @@
-import mysql from "mysql2/promise";
-import type { Pool, PoolOptions } from "mysql2/promise";
+import { Pool, types as pgTypes } from "pg";
+import type { PoolClient, PoolConfig } from "pg";
 import { config } from "../config.js";
 import type { RepoDatabaseConfig } from "../types.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("db");
 
-const CONNECTION_LIMIT = 5;
+const POOL_MAX = 10;
+const IDLE_TIMEOUT_MS = 30_000;
+
+// pg returns BIGINT (oid 20) as string by default to preserve precision.
+// Every BIGINT id column we use stays well under Number.MAX_SAFE_INTEGER,
+// so coerce to number on the way out — consumer modules treat ids as
+// JS numbers, not strings.
+pgTypes.setTypeParser(20, (s: string) => parseInt(s, 10));
 
 let pool: Pool | null = null;
 let adminPool: Pool | null = null;
@@ -21,20 +28,20 @@ interface DbConfig {
   database?: string;
 }
 
-function createPoolOptions(dbConfig: DbConfig): PoolOptions {
+function createPoolOptions(dbConfig: DbConfig): PoolConfig {
   return {
     host: dbConfig.host,
     ...(dbConfig.port ? { port: dbConfig.port } : {}),
     user: dbConfig.user,
     password: dbConfig.password,
     ...(dbConfig.database ? { database: dbConfig.database } : {}),
-    connectionLimit: CONNECTION_LIMIT,
-    waitForConnections: true,
-    connectTimeout: config.db.connectTimeoutMs,
+    max: POOL_MAX,
+    idleTimeoutMillis: IDLE_TIMEOUT_MS,
+    connectionTimeoutMillis: config.db.connectTimeoutMs,
   };
 }
 
-function basePoolOptions(): PoolOptions {
+function basePoolOptions(): PoolConfig {
   const {
     database: _,
     connectTimeoutMs: __,
@@ -50,7 +57,7 @@ function basePoolOptions(): PoolOptions {
 export function getPool(): Pool {
   if (!pool) {
     log.info("Creating application database pool");
-    pool = mysql.createPool({
+    pool = new Pool({
       ...basePoolOptions(),
       database: config.db.database,
     });
@@ -65,7 +72,7 @@ export function getPool(): Pool {
 export function getAdminPool(): Pool {
   if (!adminPool) {
     log.info("Creating admin database pool");
-    adminPool = mysql.createPool(basePoolOptions());
+    adminPool = new Pool(basePoolOptions());
   }
   return adminPool;
 }
@@ -104,7 +111,7 @@ export function initPlatformPool(repoDb: RepoDatabaseConfig): void {
   platformPoolInitialized = true;
   if (!repoDb.enabled) return;
   log.info("Creating platform database pool");
-  platformPool = mysql.createPool(createPoolOptions(repoDb));
+  platformPool = new Pool(createPoolOptions(repoDb));
 }
 
 /**
@@ -143,4 +150,95 @@ export async function closePlatformPool(): Promise<void> {
     platformPool = null;
   }
   platformPoolInitialized = false;
+}
+
+/**
+ * Run a parameterized query against the application pool and return the
+ * `rows` array directly. Use $1, $2, … positional parameters. Kept lean —
+ * no logging, no retry — consumer modules layer those when needed.
+ */
+export async function query<T extends object = Record<string, unknown>>(
+  sql: string,
+  params?: unknown[],
+): Promise<T[]> {
+  const result = await getPool().query<T extends import("pg").QueryResultRow ? T : never>(
+    sql,
+    params,
+  );
+  return result.rows as unknown as T[];
+}
+
+/**
+ * Run `fn` inside a single transaction acquired from the application pool.
+ * BEGIN before fn, COMMIT after success, ROLLBACK on throw, then release
+ * the client in a finally block whether or not COMMIT/ROLLBACK itself
+ * threw. Phase 1.2's migration runner uses this so each migration commits
+ * atomically.
+ */
+export async function withTx<T>(
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Swallow ROLLBACK failure so the original error surfaces. PG
+      // typically aborts the transaction itself when a query throws,
+      // making the explicit ROLLBACK best-effort.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+const SQLSTATE_MAP: Record<string, string> = {
+  "23505": "duplicate_entry",
+  "23503": "foreign_key_violation",
+  "23502": "not_null_violation",
+  "23514": "check_violation",
+};
+
+function sqlstateToCode(sqlstate: string): string {
+  return SQLSTATE_MAP[sqlstate] ?? "unknown";
+}
+
+/**
+ * Engine-agnostic database error. Consumer modules branch on `code`
+ * instead of binding to PG-specific shapes (or, transiently, the legacy
+ * pg-specific shapes.
+ */
+export class DbError extends Error {
+  code: string;
+  cause?: unknown;
+
+  constructor(message: string, code: string, cause?: unknown) {
+    super(message);
+    this.name = "DbError";
+    this.code = code;
+    if (cause !== undefined) this.cause = cause;
+  }
+
+  /**
+   * Translate a raw pg error (carries `code` as SQLSTATE) into a DbError
+   * with the engine-agnostic `code` consumers branch on.
+   */
+  static fromPgError(err: unknown): DbError {
+    const sqlstate =
+      typeof err === "object" && err !== null && "code" in err
+        ? String((err as { code: unknown }).code)
+        : "";
+    const code = sqlstateToCode(sqlstate);
+    const message =
+      typeof err === "object" && err !== null && "message" in err
+        ? String((err as { message: unknown }).message)
+        : "Database error";
+    return new DbError(message, code, err);
+  }
 }

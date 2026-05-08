@@ -18,7 +18,7 @@
  * updated to not-exist".
  */
 
-import { getPool } from "../db/connection.js";
+import { query } from "../db/connection.js";
 import { createLogger } from "../logger.js";
 import { clearDispatchSnapshotCache } from "./dispatch-stream.js";
 
@@ -43,24 +43,20 @@ export interface ResetAllDataResult {
 }
 
 export async function resetAllData(): Promise<ResetAllDataResult> {
-  const pool = getPool();
   const perTable: Record<string, number> = {};
   let total = 0;
 
   for (const table of TABLES_TO_WIPE) {
-    const [rows] = await pool.query(`SELECT COUNT(*) AS n FROM ${table}`);
-    const typed = rows as Array<{ n: number | string }>;
-    if (typed.length === 0) {
-      // `SELECT COUNT(*)` without a WHERE always returns exactly one row.
-      // Zero rows here means the driver handed us a malformed result set —
-      // fail loud instead of silently reporting `0 rows deleted` and
-      // truncating anyway.
+    const rows = await query<{ n: number | string }>(
+      `SELECT COUNT(*) AS n FROM ${table}`,
+    );
+    if (rows.length === 0) {
       throw new Error(`COUNT query returned no row for table ${table}`);
     }
-    const count = Number(typed[0].n);
+    const count = Number(rows[0].n);
     perTable[table] = count;
     total += count;
-    await pool.query(`TRUNCATE TABLE ${table}`);
+    await query(`TRUNCATE TABLE ${table}`);
   }
 
   clearDispatchSnapshotCache();

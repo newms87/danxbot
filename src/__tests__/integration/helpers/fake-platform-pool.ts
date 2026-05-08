@@ -1,24 +1,28 @@
 /**
- * Fake `mysql2/promise` Pool double — minimal surface to satisfy
- * `getPlatformPool()` consumers without standing up a real MySQL.
+ * Fake `pg` Pool double — minimal surface to satisfy `getPlatformPool()`
+ * consumers without standing up a real Postgres.
  *
  * The only consumer in production is `src/worker/sql-executor.ts`'s
  * `executeQuery`, which calls:
  *
  *     const pool = getPlatformPool();
- *     const [rows, fields] = await pool.query({ sql: query, timeout: ... });
+ *     const client = await pool.connect();
+ *     await client.query("SET LOCAL statement_timeout = ...");
+ *     const result = await client.query<...>(query);
+ *     // result.rows + result.fields[].name
+ *     client.release();
  *
- * That's the entire surface — `query` returning a `[rows, fields]` tuple.
- * The fake adds:
+ * The fake provides:
  *
+ *   - `connect()` returning a fake client whose `query()` honors fixtures.
  *   - `registerQuery(matcher, rows, fields?)` for canned happy responses.
  *   - `registerQueryError(matcher, err)` for canned failures.
  *   - `getQueryLog()` so tests can assert exactly which SQL ran.
  *   - `reset()` to clear fixtures + log between tests.
  *
- * Unmatched queries throw a loud "no canned result for query: <sql>" error
- * — the WHOLE point of the fake is to make missing fixtures fail loud
- * instead of silently returning empty rows (the K2zQYIdX class of bug).
+ * Unmatched queries throw a loud "no canned result for query: <sql>" error.
+ * The fake silently swallows `SET LOCAL` statements so per-call
+ * statement_timeout configuration in production code never needs a fixture.
  */
 
 import { vi, type Mock } from "vitest";
@@ -30,9 +34,6 @@ type Matcher =
 
 interface Fixture {
   matcher: Matcher;
-  // EITHER `rows` (success) OR `error` (failure). The fixture types are
-  // separated by the `kind` discriminator so a malformed registration
-  // can't smuggle both into the same fixture.
   kind: "ok" | "error";
   rows?: Record<string, unknown>[];
   fields?: { name: string }[];
@@ -40,29 +41,30 @@ interface Fixture {
 }
 
 export interface FakePlatformPool {
-  /** Mirrors `Pool.query`: accepts a string OR an `{sql, timeout?}` object. */
-  query: Mock<
-    (
-      arg: string | { sql: string; timeout?: number },
-    ) => Promise<[Record<string, unknown>[], { name: string }[]]>
-  >;
+  connect: Mock<() => Promise<FakePoolClient>>;
   end: Mock<() => Promise<void>>;
-  /** Register a canned `[rows, fields]` response for queries matching `matcher`. */
   registerQuery: (
     matcher: Matcher,
     rows: Record<string, unknown>[],
     fields?: { name: string }[],
   ) => void;
-  /** Register a canned thrown Error for queries matching `matcher`. */
   registerQueryError: (matcher: Matcher, err: Error) => void;
-  /** Every SQL string the pool has been asked to run, in invocation order. */
   getQueryLog: () => string[];
-  /** Clear fixtures + log so a follow-up test sees a clean slate. */
   reset: () => void;
 }
 
-function extractSql(arg: string | { sql: string; timeout?: number }): string {
-  return typeof arg === "string" ? arg : arg.sql;
+export interface FakePoolClient {
+  query: Mock<
+    (
+      sql: string,
+      params?: unknown[],
+    ) => Promise<{
+      rows: Record<string, unknown>[];
+      fields: { name: string }[];
+      rowCount: number;
+    }>
+  >;
+  release: Mock<() => void>;
 }
 
 function matches(matcher: Matcher, sql: string): boolean {
@@ -71,12 +73,6 @@ function matches(matcher: Matcher, sql: string): boolean {
   return matcher(sql);
 }
 
-/**
- * Synthesize a `FieldPacket`-shaped array from the union of keys across `rows`,
- * preserving first-appearance order. `mysql2` returns one `FieldPacket` per
- * column in the SELECT list; for fakes, the union of row keys is the closest
- * truthful approximation.
- */
 function deriveFields(
   rows: Record<string, unknown>[],
 ): { name: string }[] {
@@ -97,9 +93,13 @@ export function createFakePlatformPool(): FakePlatformPool {
   const fixtures: Fixture[] = [];
   const queryLog: string[] = [];
 
-  const query = vi.fn(
-    async (arg: string | { sql: string; timeout?: number }) => {
-      const sql = extractSql(arg);
+  function makeClient(): FakePoolClient {
+    const query = vi.fn(async (sql: string) => {
+      // SET LOCAL statement_timeout is sql-executor's per-call timeout
+      // configuration — silently swallow so tests don't need a fixture.
+      if (/^\s*SET\s+LOCAL\s+/i.test(sql)) {
+        return { rows: [], fields: [], rowCount: 0 };
+      }
       queryLog.push(sql);
 
       const fixture = fixtures.find((f) => matches(f.matcher, sql));
@@ -114,14 +114,17 @@ export function createFakePlatformPool(): FakePlatformPool {
       }
       const rows = fixture.rows!;
       const fields = fixture.fields ?? deriveFields(rows);
-      return [rows, fields] as [Record<string, unknown>[], { name: string }[]];
-    },
-  );
+      return { rows, fields, rowCount: rows.length };
+    });
+    const release = vi.fn(() => undefined);
+    return { query, release };
+  }
 
+  const connect = vi.fn(async () => makeClient());
   const end = vi.fn(async () => undefined);
 
   return {
-    query,
+    connect,
     end,
     registerQuery(matcher, rows, fields) {
       fixtures.push({ matcher, kind: "ok", rows, fields });
@@ -135,7 +138,7 @@ export function createFakePlatformPool(): FakePlatformPool {
     reset() {
       fixtures.length = 0;
       queryLog.length = 0;
-      query.mockClear();
+      connect.mockClear();
       end.mockClear();
     },
   };

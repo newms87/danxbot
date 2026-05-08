@@ -1,14 +1,24 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const mockQuery = vi.fn();
-const mockExecute = vi.fn();
-const mockGetPool = vi.fn(() => ({
-  query: mockQuery,
-  execute: mockExecute,
+const { mockPool, MockPoolCtor, mockQuery } = vi.hoisted(() => {
+  const mockPool = {
+    query: vi.fn(),
+    connect: vi.fn(),
+    end: vi.fn().mockResolvedValue(undefined),
+  };
+  const MockPoolCtor = vi.fn().mockImplementation(() => mockPool);
+  const mockQuery = vi.fn();
+  return { mockPool, MockPoolCtor, mockQuery };
+});
+
+vi.mock("pg", () => ({
+  Pool: MockPoolCtor,
+  types: { setTypeParser: vi.fn() },
 }));
 
 vi.mock("../db/connection.js", () => ({
-  getPool: () => mockGetPool(),
+  getPool: () => mockPool,
+  query: mockQuery,
 }));
 
 vi.mock("../logger.js", () => ({
@@ -112,8 +122,6 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockExecute.mockResolvedValue([[], []]);
-  mockQuery.mockResolvedValue([[], []]);
 });
 
 describe("dispatchToInsertParams", () => {
@@ -310,14 +318,14 @@ describe("rowToDispatch", () => {
 });
 
 describe("insertDispatch", () => {
-  it("inserts with backticked reserved columns (trigger, status, error)", async () => {
+  it("inserts with double-quoted reserved columns (trigger, status, error)", async () => {
     await insertDispatch(makeDispatch({ trigger: "api" }));
-    expect(mockExecute).toHaveBeenCalledOnce();
-    const sql = mockExecute.mock.calls[0][0] as string;
+    expect(mockQuery).toHaveBeenCalledOnce();
+    const sql = mockQuery.mock.calls[0][0] as string;
     expect(sql).toContain("INSERT INTO dispatches");
-    expect(sql).toContain("`trigger`");
-    expect(sql).toContain("`status`");
-    expect(sql).toContain("`error`");
+    expect(sql).toContain('"trigger"');
+    expect(sql).toContain('"status"');
+    expect(sql).toContain('"error"');
     // Order: id first
     expect(sql.indexOf("id")).toBeLessThan(sql.indexOf("repo_name"));
   });
@@ -329,7 +337,7 @@ describe("insertDispatch", () => {
       triggerMetadata: makeTrelloMeta(),
     });
     await insertDispatch(d);
-    const params = mockExecute.mock.calls[0][1] as unknown[];
+    const params = mockQuery.mock.calls[0][1] as unknown[];
     expect(params[0]).toBe("job-42");
     expect(params[2]).toBe("trello"); // trigger
     expect(typeof params[3]).toBe("string");
@@ -344,27 +352,27 @@ describe("updateDispatch", () => {
       jsonlPath: "/tmp/new.jsonl",
     });
 
-    expect(mockExecute).toHaveBeenCalledOnce();
-    const sql = mockExecute.mock.calls[0][0] as string;
-    const params = mockExecute.mock.calls[0][1] as unknown[];
+    expect(mockQuery).toHaveBeenCalledOnce();
+    const sql = mockQuery.mock.calls[0][0] as string;
+    const params = mockQuery.mock.calls[0][1] as unknown[];
 
     expect(sql).toContain("UPDATE dispatches SET");
-    expect(sql).toContain("session_uuid = ?");
-    expect(sql).toContain("jsonl_path = ?");
-    expect(sql).toContain("WHERE id = ?");
+    expect(sql).toContain("session_uuid = $1");
+    expect(sql).toContain("jsonl_path = $2");
+    expect(sql).toContain("WHERE id = $3");
     expect(params).toEqual(["sess-new", "/tmp/new.jsonl", "job-1"]);
   });
 
-  it("backticks reserved columns in UPDATE", async () => {
+  it("double-quotes reserved columns in UPDATE", async () => {
     await updateDispatch("job-1", { status: "failed", error: "boom" });
-    const sql = mockExecute.mock.calls[0][0] as string;
-    expect(sql).toContain("`status` = ?");
-    expect(sql).toContain("`error` = ?");
+    const sql = mockQuery.mock.calls[0][0] as string;
+    expect(sql).toContain('"status" = $1');
+    expect(sql).toContain('"error" = $2');
   });
 
   it("does not issue SQL when no known fields are provided", async () => {
     await updateDispatch("job-1", {});
-    expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 
   it("JSON-stringifies triggerMetadata when updated", async () => {
@@ -372,7 +380,7 @@ describe("updateDispatch", () => {
     await updateDispatch("job-1", {
       triggerMetadata: meta,
     });
-    const params = mockExecute.mock.calls[0][1] as unknown[];
+    const params = mockQuery.mock.calls[0][1] as unknown[];
     expect(typeof params[0]).toBe("string");
     expect(JSON.parse(params[0] as string)).toEqual(meta);
   });
@@ -380,14 +388,13 @@ describe("updateDispatch", () => {
 
 describe("getDispatchById", () => {
   it("returns null when no row found", async () => {
-    mockExecute.mockResolvedValueOnce([[], []]);
+    mockQuery.mockResolvedValueOnce([]);
     const result = await getDispatchById("missing");
     expect(result).toBeNull();
   });
 
   it("parses and returns the Dispatch when row exists", async () => {
-    mockExecute.mockResolvedValueOnce([
-      [
+    mockQuery.mockResolvedValueOnce([
         {
           id: "job-xyz",
           repo_name: "danxbot",
@@ -411,9 +418,7 @@ describe("getDispatchById", () => {
           nudge_count: 0,
           danxbot_commit: null,
         },
-      ],
-      [],
-    ]);
+      ]);
     const result = await getDispatchById("job-xyz");
     expect(result).not.toBeNull();
     expect(result!.id).toBe("job-xyz");
@@ -453,13 +458,13 @@ describe("findLatestDispatchBySlackThread", () => {
   }
 
   it("returns null when no completed dispatch exists for the thread", async () => {
-    mockExecute.mockResolvedValueOnce([[], []]);
+    mockQuery.mockResolvedValueOnce([]);
     const result = await findLatestDispatchBySlackThread("nonexistent.thread");
     expect(result).toBeNull();
   });
 
   it("returns the most recent completed dispatch for the thread", async () => {
-    mockExecute.mockResolvedValueOnce([[makeSlackRow()], []]);
+    mockQuery.mockResolvedValueOnce([makeSlackRow()]);
     const result = await findLatestDispatchBySlackThread("1234.5678");
     expect(result).not.toBeNull();
     expect(result!.id).toBe("job-slack-abc");
@@ -468,14 +473,14 @@ describe("findLatestDispatchBySlackThread", () => {
   });
 
   it("filters to status = 'completed' and orders by started_at DESC", async () => {
-    mockExecute.mockResolvedValueOnce([[], []]);
+    mockQuery.mockResolvedValueOnce([]);
     await findLatestDispatchBySlackThread("1234.5678");
-    const sql = mockExecute.mock.calls[0][0] as string;
-    expect(sql).toContain("WHERE slack_thread_ts = ?");
-    expect(sql).toContain("`status` = 'completed'");
+    const sql = mockQuery.mock.calls[0][0] as string;
+    expect(sql).toContain("WHERE slack_thread_ts = $1");
+    expect(sql).toContain('"status" = \'completed\'');
     expect(sql).toContain("ORDER BY started_at DESC");
     expect(sql).toContain("LIMIT 1");
-    const params = mockExecute.mock.calls[0][1] as unknown[];
+    const params = mockQuery.mock.calls[0][1] as unknown[];
     expect(params).toEqual(["1234.5678"]);
   });
 
@@ -483,12 +488,12 @@ describe("findLatestDispatchBySlackThread", () => {
 
 describe("findNonTerminalDispatches", () => {
   it("queries by repo_name with status IN (queued, running) and oldest-first ordering", async () => {
-    mockExecute.mockResolvedValueOnce([[], []]);
+    mockQuery.mockResolvedValueOnce([]);
     await findNonTerminalDispatches("danxbot");
-    const sql = mockExecute.mock.calls[0][0] as string;
-    const params = mockExecute.mock.calls[0][1] as unknown[];
+    const sql = mockQuery.mock.calls[0][0] as string;
+    const params = mockQuery.mock.calls[0][1] as unknown[];
     expect(sql).toContain("FROM dispatches");
-    expect(sql).toContain("repo_name = ?");
+    expect(sql).toContain("repo_name = $1");
     expect(sql).toContain("'queued'");
     expect(sql).toContain("'running'");
     expect(sql).toMatch(/ORDER BY started_at ASC/i);
@@ -496,8 +501,7 @@ describe("findNonTerminalDispatches", () => {
   });
 
   it("hydrates rows via rowToDispatch (host_pid round-trips)", async () => {
-    mockExecute.mockResolvedValueOnce([
-      [
+    mockQuery.mockResolvedValueOnce(      [
         {
           id: "alive-1",
           repo_name: "danxbot",
@@ -527,9 +531,7 @@ describe("findNonTerminalDispatches", () => {
           nudge_count: 0,
           danxbot_commit: null,
         },
-      ],
-      [],
-    ]);
+      ]);
     const rows = await findNonTerminalDispatches("danxbot");
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe("alive-1");
@@ -539,7 +541,7 @@ describe("findNonTerminalDispatches", () => {
 
 describe("listDispatches", () => {
   it("selects all rows ordered by started_at DESC with default limit", async () => {
-    mockQuery.mockResolvedValueOnce([[], []]);
+    mockQuery.mockResolvedValueOnce([]);
     await listDispatches({});
 
     const sql = mockQuery.mock.calls[0][0] as string;
@@ -548,49 +550,53 @@ describe("listDispatches", () => {
     expect(sql).toContain("LIMIT");
   });
 
-  it("adds trigger filter using backticked column", async () => {
+  it("adds trigger filter using double-quoted column", async () => {
+    mockQuery.mockResolvedValueOnce([]);
     await listDispatches({ trigger: "slack" });
     const sql = mockQuery.mock.calls[0][0] as string;
     const params = mockQuery.mock.calls[0][1] as unknown[];
-    expect(sql).toContain("`trigger` = ?");
+    expect(sql).toContain('"trigger" = $1');
     expect(params).toContain("slack");
   });
 
   it("adds repo filter", async () => {
+    mockQuery.mockResolvedValueOnce([]);
     await listDispatches({ repo: "platform" });
     const sql = mockQuery.mock.calls[0][0] as string;
     const params = mockQuery.mock.calls[0][1] as unknown[];
-    expect(sql).toContain("repo_name = ?");
+    expect(sql).toContain("repo_name = $1");
     expect(params).toContain("platform");
   });
 
-  it("adds status filter using backticked column", async () => {
+  it("adds status filter using double-quoted column", async () => {
+    mockQuery.mockResolvedValueOnce([]);
     await listDispatches({ status: "failed" });
     const sql = mockQuery.mock.calls[0][0] as string;
     const params = mockQuery.mock.calls[0][1] as unknown[];
-    expect(sql).toContain("`status` = ?");
+    expect(sql).toContain('"status" = $1');
     expect(params).toContain("failed");
   });
 
   it("adds since filter", async () => {
+    mockQuery.mockResolvedValueOnce([]);
     await listDispatches({ since: 1_700_000_000_000 });
     const sql = mockQuery.mock.calls[0][0] as string;
     const params = mockQuery.mock.calls[0][1] as unknown[];
-    expect(sql).toContain("started_at >= ?");
+    expect(sql).toContain("started_at >= $1");
     expect(params).toContain(1_700_000_000_000);
   });
 
   it("adds full-text search on summary using LIKE", async () => {
+    mockQuery.mockResolvedValueOnce([]);
     await listDispatches({ q: "deploy fix" });
     const sql = mockQuery.mock.calls[0][0] as string;
     const params = mockQuery.mock.calls[0][1] as unknown[];
-    expect(sql).toContain("summary LIKE ?");
+    expect(sql).toContain("summary LIKE $");
     expect(params).toContain("%deploy fix%");
   });
 
   it("returns parsed dispatches from result rows", async () => {
-    mockQuery.mockResolvedValueOnce([
-      [
+    mockQuery.mockResolvedValueOnce(      [
         {
           id: "j1",
           repo_name: "r1",
@@ -614,9 +620,7 @@ describe("listDispatches", () => {
           nudge_count: 0,
           danxbot_commit: null,
         },
-      ],
-      [],
-    ]);
+      ]);
     const result = await listDispatches({});
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe("j1");
@@ -625,28 +629,28 @@ describe("listDispatches", () => {
 
 describe("deleteOldDispatches", () => {
   it("selects terminal dispatches older than cutoff and deletes them", async () => {
-    mockQuery.mockResolvedValueOnce([
-      [
+    mockPool.query.mockClear();
+    mockPool.query.mockResolvedValueOnce({
+      rows: [
         { id: "old1", jsonl_path: "/tmp/j1.jsonl" },
         { id: "old2", jsonl_path: "/tmp/j2.jsonl" },
-      ],
-      [],
-    ]);
-    mockExecute.mockResolvedValueOnce([{ affectedRows: 2 }, []]);
+      ], rowCount: 0 });
+    mockPool.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
 
     const result = await deleteOldDispatches(1_000);
 
-    // SELECT and DELETE both issued
-    const selectSql = mockQuery.mock.calls[0][0] as string;
-    const deleteSql = mockExecute.mock.calls[0][0] as string;
+    // SELECT and DELETE both issued via getPool().query
+    expect(mockPool.query.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const selectSql = mockPool.query.mock.calls[0][0] as string;
+    const deleteSql = mockPool.query.mock.calls[1][0] as string;
 
     expect(selectSql).toContain("SELECT");
-    expect(selectSql).toContain("started_at <");
-    expect(selectSql).toContain("`status` IN");
+    expect(selectSql).toContain("started_at < $1");
+    expect(selectSql).toContain('"status" IN');
 
     expect(deleteSql).toContain("DELETE FROM dispatches");
-    expect(deleteSql).toContain("started_at <");
-    expect(deleteSql).toContain("`status` IN");
+    expect(deleteSql).toContain("started_at < $1");
+    expect(deleteSql).toContain('"status" IN');
 
     expect(result).toHaveLength(2);
     expect(result[0].id).toBe("old1");
@@ -654,8 +658,10 @@ describe("deleteOldDispatches", () => {
   });
 
   it("skips dispatches in non-terminal states (queued, running)", async () => {
+    mockPool.query.mockClear();
+    mockPool.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     await deleteOldDispatches(1_000);
-    const sql = mockQuery.mock.calls[0][0] as string;
+    const sql = mockPool.query.mock.calls[0][0] as string;
     // Only completed/failed/cancelled should be deletable
     expect(sql).toContain("'completed'");
     expect(sql).toContain("'failed'");
@@ -665,19 +671,19 @@ describe("deleteOldDispatches", () => {
   });
 
   it("returns empty array when no old dispatches found", async () => {
-    mockQuery.mockResolvedValueOnce([[], []]);
+    mockPool.query.mockClear();
+    mockPool.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
     const result = await deleteOldDispatches(1_000);
     expect(result).toEqual([]);
     // No DELETE issued when nothing to delete
-    expect(mockExecute).not.toHaveBeenCalled();
+    expect(mockPool.query).toHaveBeenCalledOnce();
   });
 
   it("handles null jsonl_path entries gracefully", async () => {
-    mockQuery.mockResolvedValueOnce([
-      [{ id: "old1", jsonl_path: null }],
-      [],
-    ]);
-    mockExecute.mockResolvedValueOnce([{ affectedRows: 1 }, []]);
+    mockPool.query.mockClear();
+    mockPool.query.mockResolvedValueOnce({
+      rows: [{ id: "old1", jsonl_path: null }], rowCount: 0 });
+    mockPool.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
 
     const result = await deleteOldDispatches(1_000);
     expect(result[0].jsonlPath).toBeNull();
