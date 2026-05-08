@@ -1,17 +1,17 @@
 ---
 name: danx-triage-card
 description: 'Per-card triage agent. Single Claude session reads ONE card via mcp__danx-issue__danx_issue_get, decides per status (Review / Blocked / Waiting On), writes back via mcp__danx-issue__danx_issue_save with TTL-stamped triage{} block. Dispatched 1-card-per-tick by the poller (Phase 4 / ISS-94). Replaces the bulk-triage orchestrator.'
-argument-hint: <ISS-N card id>
+argument-hint: <PREFIX>-N card id
 ---
 
 # Danx Triage Card
 
 You triage **ONE** card per dispatch. No orchestrator, no sub-agents. You:
 
-1. `mcp__danx-issue__danx_issue_get({id: "<ISS-N>"})` — load the YAML.
+1. `mcp__danx-issue__danx_issue_get({id: "<PREFIX>-N"})` — load the YAML.
 2. Decide per `status` (Review / Blocked / Waiting On) — apply the per-status decision tree below.
 3. Edit the YAML's `triage{}` block (always) + `status` / `blocked` fields when the decision is terminal.
-4. `mcp__danx-issue__danx_issue_save({id: "<ISS-N>"})` — persist. Returns `{saved: true}` or `{saved: false, errors}`.
+4. `mcp__danx-issue__danx_issue_save({id: "<PREFIX>-N"})` — persist. Returns `{saved: true}` or `{saved: false, errors}`.
 5. `danxbot_complete({status: "completed", summary: "..."})` — signal done.
 
 You read, edit, and save the YAML through the `danx-issue` MCP server. You do NOT make tracker calls — `danx_issue_save` syncs the tracker for you.
@@ -138,7 +138,7 @@ Decide one of three outcomes:
 
 **Before emitting `Approve`:** read `<repo>/.danxbot/config/trello.yml` and verify `lists.needs_approval` is non-empty. If empty, fall back to `Cancel` is wrong — instead, **do not save Approve** and append a one-line note in `triage.last_explain`: `"Direction approval needed; Trello board not yet provisioned for Needs Approval — leaving in Review until operator provisions the list."` Stamp `triage.expires_at = now + 24h` and save with `last_status: ""`.
 
-Distinguishing `Approve` vs `Cancel` vs `Keep` — apply the rule from `claude-plugins/issues/skills/issue-card-workflow/SKILL.md` "Needs Approval vs Needs Help":
+Distinguishing `Approve` vs `Cancel` vs `Keep` — apply the rule from `claude-plugins/issues/skills/issue-card-workflow/SKILL.md` "Needs Approval vs Blocked":
 
 - Could a competent agent finish the card without ever asking the human a question? → **Keep**.
 - Card is implementable but the chosen direction needs sanity-check? → **Approve**.
@@ -180,8 +180,8 @@ A card with `waiting_on != null` is parked waiting on other in-flight cards. You
 
 Procedure:
 
-1. Read `waiting_on.by[]` from the YAML. For each `<ISS-N>`:
-   - `mcp__danx-issue__danx_issue_get({id: "<ISS-N>"})` to read the blocker.
+1. Read `waiting_on.by[]` from the YAML. For each `<PREFIX>-N`:
+   - `mcp__danx-issue__danx_issue_get({id: "<PREFIX>-N"})` to read the blocker.
    - Note its `status`. Terminal = `Done` or `Cancelled`. Non-terminal = anything else.
 2. Decide:
 
@@ -192,7 +192,7 @@ Procedure:
 
 `triage.expires_at = now + 1h` on every Waiting On save. The 1h cadence is intentionally short — a phase sibling can move from In Progress to Done at any minute, and we want the dependent card dispatched as soon as possible.
 
-**Edge case — blocker not found.** If `mcp__danx-issue__danx_issue_get` returns `{error: "..."}` for a blocker id (file missing on disk and not in tracker), treat that blocker as **Cancelled** (a non-existent card cannot block) and proceed with the rest. Note in `last_explain`: `"Blocker <ISS-N> not found — treated as Cancelled."`
+**Edge case — blocker not found.** If `mcp__danx-issue__danx_issue_get` returns `{error: "..."}` for a blocker id (file missing on disk and not in tracker), treat that blocker as **Cancelled** (a non-existent card cannot block) and proceed with the rest. Note in `last_explain`: `"Blocker <PREFIX>-N not found — treated as Cancelled."`
 
 ### Out-of-scope cards
 
@@ -246,7 +246,7 @@ One comment per triage. Don't append more than one comment per dispatch.
 
 When verifying the agent against the live wiring:
 
-1. Pick one card per in-scope status and dispatch the agent (`/api/launch` with `workspace: "issue-worker"`, `task: "Triage card <ISS-N> using the danx-triage-card skill."`).
+1. Pick one card per in-scope status and dispatch the agent (`/api/launch` with `workspace: "issue-worker"`, `task: "Triage card <PREFIX>-N using the danx-triage-card skill."`).
 2. After dispatch finishes (`status: completed`), re-read the YAML:
    - `triage.expires_at` is a future ISO 8601 timestamp (within ±30s of `now + status_ttl`).
    - `triage.history[]` gained exactly one new entry with matching `expires_at`, `status`, `explain`.
@@ -261,7 +261,7 @@ Any mismatch on the above is a skill-body bug; file as a follow-up issue and sur
 
 ## Failure handling
 
-- YAML parse error / `danx_issue_get` returns `{error: ...}` → `danxbot_complete({status: "failed", summary: "Failed to load <ISS-N>: <error>"})`. Do NOT save.
+- YAML parse error / `danx_issue_get` returns `{error: ...}` → `danxbot_complete({status: "failed", summary: "Failed to load <PREFIX>-N: <error>"})`. Do NOT save.
 - `danx_issue_save` returns `{saved: false, errors: [...]}` → fix the YAML, retry once. If it fails again, `danxbot_complete({status: "failed", summary: "..."})` with the validation error.
 - MCP tool itself errors (server unreachable, tool not registered) → `danxbot_complete({status: "critical_failure", summary: "mcp__danx-issue__* tools not available — workspace .mcp.json wiring broken"})` per `claude-plugins/issue-worker/skills/halt-flag/SKILL.md`.
 

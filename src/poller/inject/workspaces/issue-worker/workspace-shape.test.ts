@@ -128,11 +128,7 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
   // revert the ICE scale, or drop the `blocked != null FIRST` routing rule
   // without a failing test. Each anchor below is a load-bearing AC from
   // ISS-93.
-  it.skip("`danx-triage-card/SKILL.md` ships with the per-status TTL contract + ICE rubric + decision enum", () => {
-    // SKIP: claude-plugins/ marketplace mirror is a separate cross-repo
-    // commit; in-repo skill is updated for v4 schema. The mirror test will
-    // fail until the operator pushes the matching plugin commit. Re-enable
-    // after the marketplace push.
+  it("`danx-triage-card/SKILL.md` ships with the per-status TTL contract + ICE rubric + decision enum", () => {
     const path = resolve(
       HERE,
       ".claude/skills/danx-triage-card/SKILL.md",
@@ -143,8 +139,8 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     // decision logic.
     expect(body).toMatch(/name:\s*danx-triage-card/);
     expect(body).toMatch(/Review[^|]*\|\s*24h/);
-    expect(body).toMatch(/Needs Help[^|]*\|\s*3h/);
-    expect(body).toMatch(/Blocked[^|]*\|\s*1h/);
+    expect(body).toMatch(/Blocked[^|]*\|\s*3h/);
+    expect(body).toMatch(/Waiting On[^|]*\|\s*1h/);
     // Decision-outcome enum — every `triage.last_status` value the schema
     // accepts must be documented somewhere in the body. A regression that
     // deleted (e.g.) the Needs Help "Demote" path would slip past the TTL
@@ -249,11 +245,7 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
   // agent loads from. Pin byte-identical content. Skipped if the
   // claude-plugins repo is not mounted at the expected dev path (CI, prod
   // deploys, anyone who hasn't cloned the marketplace locally).
-  it.skip("`danx-triage-card/SKILL.md` matches the claude-plugins marketplace mirror byte-for-byte", () => {
-    // SKIP: claude-plugins/ marketplace mirror is a separate cross-repo
-    // commit; in-repo skill is updated for v4 schema. The mirror test will
-    // fail until the operator pushes the matching plugin commit. Re-enable
-    // after the marketplace push.
+  it("`danx-triage-card/SKILL.md` matches the claude-plugins marketplace mirror byte-for-byte", () => {
     const injectPath = resolve(
       HERE,
       ".claude/skills/danx-triage-card/SKILL.md",
