@@ -116,6 +116,7 @@ vi.mock("node:fs", () => ({
   copyFileSync: vi.fn(),
   unlinkSync: vi.fn(),
   rmSync: vi.fn(),
+  renameSync: vi.fn(),
   chmodSync: vi.fn(),
   statSync: () => ({ isDirectory: () => false }),
   symlinkSync: vi.fn(),

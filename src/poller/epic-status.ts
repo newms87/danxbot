@@ -52,6 +52,7 @@ import { loadLocal, writeIssue } from "./yaml-lifecycle.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  appendHistory,
   buildIssueIdRegex,
   DEFAULT_ISSUE_PREFIX,
   IssueParseError,
@@ -65,29 +66,61 @@ export interface ParentStatusChange {
   id: string;
   before: IssueStatus;
   after: IssueStatus;
+  /**
+   * Human-readable description of the priority rule that produced
+   * `after`. Threaded onto the parent's `history[]` as the `note` of the
+   * `worker:auto-derive` `status_change` entry — DX-147 AC #1.
+   */
+  rule: string;
 }
 
-export function deriveStatus(children: Issue[]): IssueStatus | null {
+/**
+ * Result of `deriveStatus` — the derived parent status PLUS the rule
+ * that produced it. The rule string is consumed by `recomputeParentStatuses`
+ * as the `note` on the appended `worker:auto-derive` `status_change`
+ * history entry (DX-147), so the dashboard can correlate parent flips
+ * back to the priority rule that fired without re-running the derivation.
+ */
+export interface DeriveStatusResult {
+  status: IssueStatus;
+  rule: string;
+}
+
+export function deriveStatus(children: Issue[]): DeriveStatusResult | null {
   if (children.length === 0) return null;
 
-  if (children.some((c) => c.status === "Needs Help")) return "Needs Help";
-  if (children.some((c) => c.status === "Needs Approval")) {
-    return "Needs Approval";
+  if (children.some((c) => c.status === "Needs Help")) {
+    return { status: "Needs Help", rule: "Any child Needs Help — parent Needs Help" };
   }
-  if (children.some((c) => c.status === "In Progress")) return "In Progress";
-  if (children.some((c) => c.status === "ToDo")) return "ToDo";
+  if (children.some((c) => c.status === "Needs Approval")) {
+    return {
+      status: "Needs Approval",
+      rule: "Any child Needs Approval — parent Needs Approval",
+    };
+  }
+  if (children.some((c) => c.status === "In Progress")) {
+    return { status: "In Progress", rule: "Any child In Progress — parent In Progress" };
+  }
+  if (children.some((c) => c.status === "ToDo")) {
+    return { status: "ToDo", rule: "Any child ToDo — parent ToDo" };
+  }
 
   // Rules 4 + 5: terminal-or-review derivation excludes Cancelled
   // children (they don't block a Done/Review parent).
   const nonCancelled = children.filter((c) => c.status !== "Cancelled");
   const hasNonCancelled = nonCancelled.length > 0;
   if (hasNonCancelled && nonCancelled.every((c) => c.status === "Review")) {
-    return "Review";
+    return {
+      status: "Review",
+      rule: "All non-cancelled children Review — parent Review",
+    };
   }
   if (hasNonCancelled && nonCancelled.every((c) => c.status === "Done")) {
-    return "Done";
+    return { status: "Done", rule: "All non-cancelled children Done — parent Done" };
   }
-  if (!hasNonCancelled) return "Cancelled";
+  if (!hasNonCancelled) {
+    return { status: "Cancelled", rule: "All children Cancelled — parent Cancelled" };
+  }
 
   // Mixed terminal states (e.g. Review + Done) — caller leaves the
   // parent's current status untouched.
@@ -169,16 +202,33 @@ export function recomputeParentStatuses(
 
     const derived = deriveStatus(resolved);
     if (derived === null) continue;
-    if (derived === parent.status) continue;
+    if (derived.status === parent.status) continue;
 
     const before = parent.status;
-    const updated: Issue = { ...parent, status: derived };
+    // DX-147: every auto-derive flip leaves an audit-log entry on the
+    // parent attributing the change to `worker:auto-derive` with the
+    // priority-rule string as the `note`. The writer KNOWS what it
+    // changed (deterministic, single source) so we call `appendHistory`
+    // directly rather than rerunning a diff against a cached snapshot.
+    const updatedHistory = appendHistory(parent.history, {
+      timestamp: new Date().toISOString(),
+      actor: "worker:auto-derive",
+      event: "status_change",
+      from: before,
+      to: derived.status,
+      note: derived.rule,
+    });
+    const updated: Issue = {
+      ...parent,
+      status: derived.status,
+      history: updatedHistory,
+    };
     // Use writeIssue which always writes to open/. Derived statuses of
     // Done / Cancelled WILL leave the parent in open/ until the next
     // agent save triggers worker's open/→closed/ move; that's fine —
     // the file is still authoritative and the next save reconciles.
     writeIssue(repoLocalPath, updated);
-    changes.push({ id: parent.id, before, after: derived });
+    changes.push({ id: parent.id, before, after: derived.status, rule: derived.rule });
   }
 
   return changes;

@@ -66,7 +66,9 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
 
     const result = healLocalYamls(repoRoot);
 
-    expect(result.healed).toEqual([{ id: "ISS-95", status: "Done" }]);
+    expect(result.healed).toEqual([
+      { id: "ISS-95", status: "Done", direction: "open-to-closed" },
+    ]);
     expect(result.errors).toEqual([]);
     expect(existsSync(resolve(openDir, "ISS-95.yml"))).toBe(false);
     expect(existsSync(resolve(closedDir, "ISS-95.yml"))).toBe(true);
@@ -77,7 +79,9 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     const cancelled = buildIssue({ id: "ISS-96", status: "Cancelled" });
     writeFileSync(resolve(openDir, "ISS-96.yml"), serializeIssue(cancelled));
     const second = healLocalYamls(repoRoot);
-    expect(second.healed).toEqual([{ id: "ISS-96", status: "Cancelled" }]);
+    expect(second.healed).toEqual([
+      { id: "ISS-96", status: "Cancelled", direction: "open-to-closed" },
+    ]);
     expect(existsSync(resolve(openDir, "ISS-96.yml"))).toBe(false);
     expect(existsSync(resolve(closedDir, "ISS-96.yml"))).toBe(true);
   });
@@ -117,7 +121,9 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
 
     const result = healLocalYamls(repoRoot);
 
-    expect(result.healed).toEqual([{ id: "ISS-50", status: "Done" }]);
+    expect(result.healed).toEqual([
+      { id: "ISS-50", status: "Done", direction: "open-to-closed" },
+    ]);
     expect(existsSync(resolve(openDir, "ISS-50.yml"))).toBe(false);
     const reloaded = parseIssue(
       readFileSync(resolve(closedDir, "ISS-50.yml"), "utf-8"),
@@ -174,7 +180,9 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     const result = healLocalYamls(repoRoot);
 
     // Healthy sibling moved.
-    expect(result.healed).toEqual([{ id: "ISS-67", status: "Done" }]);
+    expect(result.healed).toEqual([
+      { id: "ISS-67", status: "Done", direction: "open-to-closed" },
+    ]);
     expect(existsSync(resolve(openDir, "ISS-67.yml"))).toBe(false);
     expect(existsSync(resolve(closedDir, "ISS-67.yml"))).toBe(true);
 
@@ -209,7 +217,9 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
 
     const result = healLocalYamls(repoRoot);
 
-    expect(result.healed).toEqual([{ id: "ISS-95", status: "Done" }]);
+    expect(result.healed).toEqual([
+      { id: "ISS-95", status: "Done", direction: "open-to-closed" },
+    ]);
     const reloaded = parseIssue(
       readFileSync(resolve(closedDir, "ISS-95.yml"), "utf-8"),
     );
@@ -235,5 +245,185 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     rmSync(closedDir, { recursive: true, force: true });
     const result = healLocalYamls(repoRoot);
     expect(result).toEqual({ healed: [], errors: [] });
+  });
+
+  // ----- DX-147 — history-append on real status delta only -----
+
+  it("DX-147: typical open → closed move on a terminal YAML appends ZERO history entries (no fake state delta)", () => {
+    // Status is already terminal — heal moves the file but doesn't
+    // change the issue's state, so no `worker:heal` history entry
+    // should be written. Per AC #3: "no filesystem-noise entries".
+    const issue = buildIssue({ id: "ISS-77", status: "Done" });
+    writeFileSync(resolve(openDir, "ISS-77.yml"), serializeIssue(issue));
+
+    const result = healLocalYamls(repoRoot);
+    expect(result.healed).toEqual([
+      { id: "ISS-77", status: "Done", direction: "open-to-closed" },
+    ]);
+
+    const reloaded = parseIssue(
+      readFileSync(resolve(closedDir, "ISS-77.yml"), "utf-8"),
+    );
+    expect(reloaded.history).toEqual([]);
+  });
+
+  it("DX-147: closed → open inverse heal (operator drifted status to ToDo) appends ONE worker:heal status_change entry", () => {
+    // The card was once Done (now in closed/) but its status drifted
+    // back to ToDo (operator manually edited or a stale write). Heal
+    // must move it back to open/ AND record the reverse transition
+    // attributed to `worker:heal`.
+    const drifted = buildIssue({
+      id: "ISS-50",
+      status: "ToDo",
+      // Prior status_change to Done lives in history — the inferred
+      // `from` for the inverse-heal entry should pick this up rather
+      // than blindly defaulting to "Done".
+      history: [
+        {
+          timestamp: "2026-05-01T00:00:00.000Z",
+          actor: "dispatch:abc",
+          event: "status_change",
+          from: "In Progress",
+          to: "Done",
+        },
+      ],
+    });
+    writeFileSync(resolve(closedDir, "ISS-50.yml"), serializeIssue(drifted));
+
+    const result = healLocalYamls(repoRoot);
+    expect(result.healed).toEqual([
+      { id: "ISS-50", status: "ToDo", direction: "closed-to-open" },
+    ]);
+    expect(result.errors).toEqual([]);
+
+    // File moved back: present in open/, absent from closed/.
+    expect(existsSync(resolve(openDir, "ISS-50.yml"))).toBe(true);
+    expect(existsSync(resolve(closedDir, "ISS-50.yml"))).toBe(false);
+
+    // History carries the prior dispatch entry plus a fresh
+    // `worker:heal` status_change.
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-50.yml"), "utf-8"),
+    );
+    expect(reloaded.history).toHaveLength(2);
+    const healEntry = reloaded.history[1];
+    expect(healEntry.actor).toBe("worker:heal");
+    expect(healEntry.event).toBe("status_change");
+    expect(healEntry.from).toBe("Done");
+    expect(healEntry.to).toBe("ToDo");
+    expect(healEntry.note).toMatch(/closed/);
+    expect(healEntry.note).toMatch(/open/);
+    expect(Number.isFinite(Date.parse(healEntry.timestamp))).toBe(true);
+  });
+
+  it("DX-147: closed → open inverse heal defaults `from` to Done when history carries no prior terminal status", () => {
+    // Legacy YAML — history is empty; we still need to satisfy
+    // `appendHistory`'s status_change requires-from invariant. The
+    // filename-location heuristic falls back to "Done".
+    const drifted = buildIssue({
+      id: "ISS-60",
+      status: "Needs Help",
+      history: [],
+    });
+    writeFileSync(resolve(closedDir, "ISS-60.yml"), serializeIssue(drifted));
+
+    const result = healLocalYamls(repoRoot);
+    expect(result.healed).toEqual([
+      { id: "ISS-60", status: "Needs Help", direction: "closed-to-open" },
+    ]);
+
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-60.yml"), "utf-8"),
+    );
+    expect(reloaded.history).toHaveLength(1);
+    expect(reloaded.history[0].from).toBe("Done");
+    expect(reloaded.history[0].to).toBe("Needs Help");
+  });
+
+  it("DX-147: closed YAML whose status is still terminal is a no-op (idempotency on the inverse pass)", () => {
+    // Closed/ YAML with status: Done — file is in the right bucket.
+    // The inverse pass must NOT touch it (no move, no history entry).
+    const issue = buildIssue({ id: "ISS-200", status: "Done" });
+    writeFileSync(resolve(closedDir, "ISS-200.yml"), serializeIssue(issue));
+
+    const result = healLocalYamls(repoRoot);
+    expect(result.healed).toEqual([]);
+
+    const reloaded = parseIssue(
+      readFileSync(resolve(closedDir, "ISS-200.yml"), "utf-8"),
+    );
+    expect(reloaded.history).toEqual([]);
+  });
+
+  it("DX-147: closed → open inverse heal infers `from: Cancelled` from prior history", () => {
+    // The most-recent-terminal walker has both Done and Cancelled
+    // arms. Without a per-Cancelled test, a regression that hardcodes
+    // `Done` everywhere ships silently. Pin the Cancelled arm with a
+    // YAML whose only terminal `status_change` was to Cancelled.
+    const drifted = buildIssue({
+      id: "ISS-70",
+      status: "ToDo",
+      history: [
+        {
+          timestamp: "2026-04-01T00:00:00.000Z",
+          actor: "dispatch:def",
+          event: "status_change",
+          from: "In Progress",
+          to: "Cancelled",
+        },
+      ],
+    });
+    writeFileSync(resolve(closedDir, "ISS-70.yml"), serializeIssue(drifted));
+
+    healLocalYamls(repoRoot);
+
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-70.yml"), "utf-8"),
+    );
+    expect(reloaded.history).toHaveLength(2);
+    const healEntry = reloaded.history[1];
+    expect(healEntry.actor).toBe("worker:heal");
+    expect(healEntry.from).toBe("Cancelled");
+    expect(healEntry.to).toBe("ToDo");
+  });
+
+  it("DX-147: malformed YAML in closed/ is reported via errors[] and the inverse pass continues for healthy siblings", () => {
+    // Drop one malformed and one drifted-status YAML in closed/. The
+    // inverse pass must skip the bad file (push to `errors[]`) and
+    // still recover the healthy sibling. Mirrors the open/ malformed
+    // test at line 169.
+    writeFileSync(
+      resolve(closedDir, "ISS-80.yml"),
+      "this: is: not: valid: yaml\n  - completely broken\n",
+    );
+
+    const drifted = buildIssue({ id: "ISS-81", status: "ToDo" });
+    writeFileSync(resolve(closedDir, "ISS-81.yml"), serializeIssue(drifted));
+
+    const result = healLocalYamls(repoRoot);
+
+    expect(result.healed).toEqual([
+      { id: "ISS-81", status: "ToDo", direction: "closed-to-open" },
+    ]);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].path).toBe(resolve(closedDir, "ISS-80.yml"));
+    expect(result.errors[0].message.length).toBeGreaterThan(0);
+
+    expect(existsSync(resolve(closedDir, "ISS-80.yml"))).toBe(true);
+    expect(existsSync(resolve(openDir, "ISS-81.yml"))).toBe(true);
+    expect(existsSync(resolve(closedDir, "ISS-81.yml"))).toBe(false);
+  });
+
+  it("DX-147: inverse heal in closed/ ignores filenames outside the ISS-N regex", () => {
+    // Mirrors the open/ regex-skip test at line 219. Slug-shaped
+    // drafts and dotfiles in closed/ must not be touched by the
+    // inverse pass — same `idRegex.test(stem)` guard.
+    writeFileSync(resolve(closedDir, "draft-card.yml"), "{}");
+    writeFileSync(resolve(closedDir, ".swp"), "");
+
+    const result = healLocalYamls(repoRoot);
+
+    expect(result).toEqual({ healed: [], errors: [] });
+    expect(existsSync(resolve(closedDir, "draft-card.yml"))).toBe(true);
   });
 });

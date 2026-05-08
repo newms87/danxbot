@@ -263,6 +263,89 @@ describe("yaml-lifecycle", () => {
       expect(issue.comments[1].text).toContain("second comment");
       expect(issue.comments[0].id).toBeDefined();
     });
+
+    // ----- DX-147 — tracker:<name> 'created' entry on first hydrate -----
+
+    it("DX-147: appends exactly one tracker:<name> 'created' entry referencing external_id when history is empty", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-300" }),
+      );
+
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        null,
+        repoRoot,
+      );
+
+      expect(issue.history).toHaveLength(1);
+      const entry = issue.history[0];
+      // Actor uses the dynamic tracker name — MemoryTracker's
+      // `tracker` field is `"memory"`, so the actor is
+      // `tracker:memory`. In production with TrelloTracker the actor
+      // would be `tracker:trello` (per the canonical actor table on
+      // DX-138).
+      expect(entry.actor).toBe(`tracker:${issue.tracker}`);
+      expect(entry.event).toBe("created");
+      expect(entry.to).toBe(issue.status);
+      // Note must reference the external_id so dashboard readers can
+      // correlate the audit entry back to the tracker card.
+      expect(entry.note).toContain(external_id);
+      expect(Number.isFinite(Date.parse(entry.timestamp))).toBe(true);
+
+      // Round-trip survival: the freshly hydrated Issue + its `created`
+      // entry MUST round-trip through the strict validator unchanged.
+      writeIssue(repoRoot, issue);
+      const reloaded = loadLocal(repoRoot, issue.id);
+      expect(reloaded?.history).toHaveLength(1);
+      expect(reloaded?.history[0].actor).toBe(entry.actor);
+      expect(reloaded?.history[0].event).toBe("created");
+    });
+
+    it("DX-147: 'created' entry survives writeIssue + loadLocal round-trip without growing a second entry", async () => {
+      // Hydrate is the SOLE entry point for the `created` event —
+      // bulk-sync's caller (`src/poller/index.ts#bulkSyncMissingYamls`)
+      // gates on `findByExternalId`, so a card with a local YAML never
+      // re-enters hydrate. Verifying exactly-once means showing the
+      // entry survives the round-trip path (write → parse) used by
+      // every later worker / poller code path that consumes the YAML.
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-400" }),
+      );
+
+      const first = await hydrateFromRemote(tracker, external_id, null, repoRoot);
+      expect(first.history).toHaveLength(1);
+      expect(first.history[0].event).toBe("created");
+
+      writeIssue(repoRoot, first);
+      const reloaded = loadLocal(repoRoot, first.id);
+      // Round-trip is byte-stable: parsed history matches the hydrate
+      // output exactly. No second entry was appended during
+      // serialize/parse, and the parse path leaves `history` alone.
+      expect(reloaded?.history).toEqual(first.history);
+    });
+
+    it("DX-147: allocate-new-ISS-N hydrate path also stamps exactly one tracker:<name> 'created' entry", async () => {
+      // The branch at `yaml-lifecycle.ts:171` (no `remote.id` — legacy
+      // / human-created card) calls `nextIssueId` then `tracker.updateCard`
+      // before falling through to the validate-and-append block. Pin
+      // that the post-allocation path still emits the `created` entry
+      // — a regression that early-returns inside the allocate branch
+      // would otherwise ship without a created entry.
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "" }),
+      );
+
+      const issue = await hydrateFromRemote(tracker, external_id, "did-1", repoRoot);
+      expect(issue.id).toMatch(/^ISS-\d+$/);
+      expect(issue.history).toHaveLength(1);
+      expect(issue.history[0].event).toBe("created");
+      expect(issue.history[0].actor).toBe(`tracker:${issue.tracker}`);
+      expect(issue.history[0].note).toContain(external_id);
+    });
   });
 
   describe("loadLocal", () => {

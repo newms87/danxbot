@@ -67,7 +67,8 @@ describe("deriveStatus", () => {
         child("ISS-3", "Needs Help"),
         child("ISS-4", "Done"),
       ]);
-      expect(result).toBe("Needs Help");
+      expect(result?.status).toBe("Needs Help");
+      expect(result?.rule).toMatch(/Needs Help/);
     });
 
     it("Needs Approval lifts to parent (preserves distinction from Needs Help)", () => {
@@ -75,7 +76,8 @@ describe("deriveStatus", () => {
         child("ISS-1", "In Progress"),
         child("ISS-2", "Needs Approval"),
       ]);
-      expect(result).toBe("Needs Approval");
+      expect(result?.status).toBe("Needs Approval");
+      expect(result?.rule).toMatch(/Needs Approval/);
     });
 
     it("Needs Help wins over Needs Approval when both present", () => {
@@ -83,7 +85,7 @@ describe("deriveStatus", () => {
         child("ISS-1", "Needs Approval"),
         child("ISS-2", "Needs Help"),
       ]);
-      expect(result).toBe("Needs Help");
+      expect(result?.status).toBe("Needs Help");
     });
   });
 
@@ -95,7 +97,8 @@ describe("deriveStatus", () => {
         child("ISS-3", "In Progress"),
         child("ISS-4", "Review"),
       ]);
-      expect(result).toBe("In Progress");
+      expect(result?.status).toBe("In Progress");
+      expect(result?.rule).toMatch(/In Progress/);
     });
   });
 
@@ -107,7 +110,7 @@ describe("deriveStatus", () => {
         child("ISS-3", "ToDo"),
         child("ISS-4", "Cancelled"),
       ]);
-      expect(result).toBe("ToDo");
+      expect(result?.status).toBe("ToDo");
     });
   });
 
@@ -117,7 +120,8 @@ describe("deriveStatus", () => {
         child("ISS-1", "Review"),
         child("ISS-2", "Review"),
       ]);
-      expect(result).toBe("Review");
+      expect(result?.status).toBe("Review");
+      expect(result?.rule).toMatch(/Review/);
     });
 
     it("returns Review when all non-cancelled are Review (cancelled excluded)", () => {
@@ -126,7 +130,7 @@ describe("deriveStatus", () => {
         child("ISS-2", "Cancelled"),
         child("ISS-3", "Review"),
       ]);
-      expect(result).toBe("Review");
+      expect(result?.status).toBe("Review");
     });
   });
 
@@ -136,7 +140,8 @@ describe("deriveStatus", () => {
         child("ISS-1", "Done"),
         child("ISS-2", "Done"),
       ]);
-      expect(result).toBe("Done");
+      expect(result?.status).toBe("Done");
+      expect(result?.rule).toMatch(/Done/);
     });
 
     it("returns Done when all non-cancelled are Done (cancelled excluded)", () => {
@@ -145,7 +150,7 @@ describe("deriveStatus", () => {
         child("ISS-2", "Cancelled"),
         child("ISS-3", "Done"),
       ]);
-      expect(result).toBe("Done");
+      expect(result?.status).toBe("Done");
     });
   });
 
@@ -155,7 +160,8 @@ describe("deriveStatus", () => {
         child("ISS-1", "Cancelled"),
         child("ISS-2", "Cancelled"),
       ]);
-      expect(result).toBe("Cancelled");
+      expect(result?.status).toBe("Cancelled");
+      expect(result?.rule).toMatch(/Cancelled/);
     });
 
     it("does NOT return Cancelled when at least one child is non-Cancelled (rule 5 fires for Done)", () => {
@@ -163,7 +169,7 @@ describe("deriveStatus", () => {
         child("ISS-1", "Cancelled"),
         child("ISS-2", "Done"),
       ]);
-      expect(result).toBe("Done");
+      expect(result?.status).toBe("Done");
     });
   });
 
@@ -179,7 +185,7 @@ describe("deriveStatus", () => {
 
     it("treats single Cancelled child as rule 6", () => {
       const result = deriveStatus([child("ISS-1", "Cancelled")]);
-      expect(result).toBe("Cancelled");
+      expect(result?.status).toBe("Cancelled");
     });
 
     it("Done + Cancelled mix excludes Cancelled and returns Done", () => {
@@ -188,7 +194,7 @@ describe("deriveStatus", () => {
         child("ISS-2", "Cancelled"),
         child("ISS-3", "Done"),
       ]);
-      expect(result).toBe("Done");
+      expect(result?.status).toBe("Done");
     });
   });
 });
@@ -417,5 +423,192 @@ describe("recomputeParentStatuses (integration)", () => {
     const changes = recomputeParentStatuses(repoRoot);
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Needs Help");
+  });
+
+  // ----- DX-147 — history-append on auto-derive -----
+
+  function loadIssue(id: string, state: "open" | "closed" = "open"): Issue {
+    const path = resolve(repoRoot, ".danxbot", "issues", state, `${id}.yml`);
+    return parseIssue(readFileSync(path, "utf-8"));
+  }
+
+  it("DX-147: derive flip appends exactly one worker:auto-derive status_change entry with rule note", () => {
+    // Parent is In Progress; all children flip to Done; derivation
+    // resolves to Done (rule 5). The parent's history must record one
+    // status_change entry attributed to `worker:auto-derive` with a
+    // `note` string describing the rule that fired.
+    writeOpen(
+      repoRoot,
+      makeIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-2", "ISS-3"],
+        history: [],
+      }),
+    );
+    writeOpen(repoRoot, child("ISS-2", "Done"));
+    writeOpen(repoRoot, child("ISS-3", "Done"));
+
+    const changes = recomputeParentStatuses(repoRoot);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      id: "ISS-1",
+      before: "In Progress",
+      after: "Done",
+    });
+    expect(changes[0].rule).toMatch(/Done/);
+
+    const reloaded = loadIssue("ISS-1");
+    expect(reloaded.history).toHaveLength(1);
+    const entry = reloaded.history[0];
+    expect(entry.actor).toBe("worker:auto-derive");
+    expect(entry.event).toBe("status_change");
+    expect(entry.from).toBe("In Progress");
+    expect(entry.to).toBe("Done");
+    // The `note` MUST describe the rule that fired (per AC #1) — not
+    // an empty string and not a generic "auto-derive" placeholder.
+    expect(entry.note).toBeTruthy();
+    expect(entry.note!.length).toBeGreaterThan(5);
+    expect(entry.note).toMatch(/Done/);
+    // ISO-8601 timestamp surface check (the cap/format details are
+    // exercised in `appendHistory`'s own tests; we just want to know
+    // we passed something parseable through).
+    expect(Number.isFinite(Date.parse(entry.timestamp))).toBe(true);
+  });
+
+  it("DX-147: no flip means zero history entries appended (idempotent steady state)", () => {
+    // Parent already In Progress; derived status is also In Progress —
+    // recomputeParentStatuses must skip the write AND leave the YAML's
+    // history empty (no fake state-delta entries for janitorial passes).
+    writeOpen(
+      repoRoot,
+      makeIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-2"],
+        history: [],
+      }),
+    );
+    writeOpen(repoRoot, child("ISS-2", "In Progress"));
+
+    const changes = recomputeParentStatuses(repoRoot);
+    expect(changes).toEqual([]);
+
+    const reloaded = loadIssue("ISS-1");
+    expect(reloaded.history).toEqual([]);
+  });
+
+  it("DX-147: derive flip preserves any prior history entries — append, not replace", () => {
+    // Parent carries a prior dispatch-driven status_change in history.
+    // The auto-derive flip must APPEND to that history, not overwrite
+    // it — confirms `appendHistory`'s pure-array semantics survive the
+    // recomputeParentStatuses spread.
+    const prior = {
+      timestamp: "2026-05-01T00:00:00.000Z",
+      actor: "dispatch:abc",
+      event: "status_change" as const,
+      from: "ToDo" as IssueStatus,
+      to: "In Progress" as IssueStatus,
+    };
+    writeOpen(
+      repoRoot,
+      makeIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-2"],
+        history: [prior],
+      }),
+    );
+    writeOpen(repoRoot, child("ISS-2", "Done"));
+
+    const changes = recomputeParentStatuses(repoRoot);
+    expect(changes).toHaveLength(1);
+
+    const reloaded = loadIssue("ISS-1");
+    expect(reloaded.history).toHaveLength(2);
+    expect(reloaded.history[0]).toMatchObject(prior);
+    expect(reloaded.history[1].actor).toBe("worker:auto-derive");
+    expect(reloaded.history[1].event).toBe("status_change");
+  });
+
+  // Per-rule note accuracy — one assertion per priority rule. A
+  // regression that hardcodes the same note for every rule (or that
+  // misroutes the rule strings) would slip past the single Done-flip
+  // test.
+
+  it("DX-147: rule 1 — Needs Help flip note describes the Needs Help rule", () => {
+    writeOpen(
+      repoRoot,
+      makeIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-2"],
+      }),
+    );
+    writeOpen(repoRoot, child("ISS-2", "Needs Help"));
+
+    recomputeParentStatuses(repoRoot);
+    const note = loadIssue("ISS-1").history[0].note ?? "";
+    expect(note).toMatch(/Needs Help/);
+  });
+
+  it("DX-147: rule 2 — In Progress flip note describes the In Progress rule", () => {
+    // Parent at ToDo, mixed children with one In Progress → rule 2
+    // fires.
+    writeOpen(
+      repoRoot,
+      makeIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "ToDo",
+        children: ["ISS-2", "ISS-3"],
+      }),
+    );
+    writeOpen(repoRoot, child("ISS-2", "In Progress"));
+    writeOpen(repoRoot, child("ISS-3", "ToDo"));
+
+    recomputeParentStatuses(repoRoot);
+    const note = loadIssue("ISS-1").history[0].note ?? "";
+    expect(note).toMatch(/In Progress/);
+  });
+
+  it("DX-147: rule 4 — Review flip note describes the Review rule", () => {
+    writeOpen(
+      repoRoot,
+      makeIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "ToDo",
+        children: ["ISS-2", "ISS-3"],
+      }),
+    );
+    writeOpen(repoRoot, child("ISS-2", "Review"));
+    writeOpen(repoRoot, child("ISS-3", "Review"));
+
+    recomputeParentStatuses(repoRoot);
+    const note = loadIssue("ISS-1").history[0].note ?? "";
+    expect(note).toMatch(/Review/);
+  });
+
+  it("DX-147: rule 6 — Cancelled flip note describes the Cancelled rule (every child Cancelled)", () => {
+    writeOpen(
+      repoRoot,
+      makeIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "In Progress",
+        children: ["ISS-2", "ISS-3"],
+      }),
+    );
+    writeOpen(repoRoot, child("ISS-2", "Cancelled"));
+    writeOpen(repoRoot, child("ISS-3", "Cancelled"));
+
+    recomputeParentStatuses(repoRoot);
+    const note = loadIssue("ISS-1").history[0].note ?? "";
+    expect(note).toMatch(/Cancelled/);
   });
 });

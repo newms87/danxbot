@@ -31,6 +31,7 @@ import {
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import {
+  appendHistory,
   createEmptyIssue,
   DEFAULT_ISSUE_PREFIX,
   parseIssue,
@@ -222,7 +223,30 @@ export async function hydrateFromRemote(
       `hydrateFromRemote: validation failed for ${externalId}:\n  - ${validated.errors.join("\n  - ")}`,
     );
   }
-  return validated.issue;
+
+  // DX-147: stamp exactly one `tracker:<name>` `created` entry on a
+  // freshly-hydrated issue. Actor uses the dynamic `issue.tracker`
+  // value (e.g. `tracker:trello`, `tracker:memory`) so the audit log
+  // accurately attributes the source. `hydrateFromRemote` is the SOLE
+  // entry point for the `created` event — the bulk-sync caller in
+  // `src/poller/index.ts#bulkSyncMissingYamls` skips cards that already
+  // have a local YAML via `findByExternalId`, so this function only
+  // ever runs against a tracker-born card with no prior local state.
+  // Tracker implementations (`MemoryTracker`, `TrelloTracker`) always
+  // return `history: []` on `getCard` — history is local-only audit.
+  // That's why no idempotency guard is needed here: the candidate's
+  // history is always empty, and re-hydration of an existing card
+  // never happens.
+  return {
+    ...validated.issue,
+    history: appendHistory(validated.issue.history, {
+      timestamp: new Date().toISOString(),
+      actor: `tracker:${validated.issue.tracker}`,
+      event: "created",
+      to: validated.issue.status,
+      note: `Hydrated from tracker external_id ${externalId}`,
+    }),
+  };
 }
 
 /**
