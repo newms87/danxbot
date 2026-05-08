@@ -50,6 +50,7 @@ import { dispatch, getActiveJob } from "../dispatch/core.js";
 import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { pushOrphans } from "./orphan-push.js";
+import { recomputeParentStatuses } from "./epic-status.js";
 import {
   listBlockedTodoYamls,
   listDispatchableYamls,
@@ -587,6 +588,20 @@ async function _poll(repo: RepoContext): Promise<void> {
   for (const err of orphanPush.errors) {
     log.error(
       `[${repo.name}] orphan-push failed for ${err.id}: ${err.message}`,
+    );
+  }
+
+  // ISS-98: derive parent (Epic + non-epic) statuses from the union of
+  // children. Runs AFTER `bulkSyncMissingYamls` so freshly hydrated
+  // children participate in the same tick's derivation, and BEFORE
+  // dispatch decisions so an Epic that just turned `Needs Help`
+  // (because a child did) is non-dispatchable on this tick. Pure-local
+  // — outbound mirror to the tracker happens via `syncIssue` on the
+  // parent's next reconcile.
+  const parentChanges = recomputeParentStatuses(repo.localPath);
+  for (const change of parentChanges) {
+    log.info(
+      `[${repo.name}] Derived ${change.id}: ${change.before} → ${change.after}`,
     );
   }
 
