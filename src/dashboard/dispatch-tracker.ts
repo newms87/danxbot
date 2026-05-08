@@ -104,12 +104,16 @@ export async function startDispatchTracking(
     summary: null,
     error: null,
     runtimeMode: args.runtimeMode,
-    // `process.pid` is the worker's PID. In host mode the spawned claude
-    // is reparented to PID 1 by `script -q -f`, so the worker's PID is
-    // the only process whose lifetime we can use as a "this dispatch is
-    // owned by a still-running worker" signal at restart time. See
-    // ISS-69 + the `host_pid` docstring on `Dispatch`.
-    hostPid: process.pid,
+    // Stamped to NULL at insert time. The agent's PID is not yet
+    // resolved at this point (the runtime fork hasn't run); `spawnAgent`
+    // calls `pairedWriteHostPid` AFTER the runtime fork resolves the PID
+    // so the DB row's `host_pid` and the YAML's `dispatch.pid` carry the
+    // same value. See DX-140 — the prior "stamp worker PID at insert"
+    // semantics gave divergent reconcile/reattach verdicts when the
+    // worker died but the agent script (parented to PID 1) survived.
+    hostPid: null,
+    hostPidAt: null,
+    pidTerminatedAt: null,
     tokensTotal: 0,
     tokensIn: 0,
     tokensOut: 0,
@@ -188,6 +192,11 @@ export async function startDispatchTracking(
           summary: fields.summary ?? null,
           error: fields.error ?? null,
           completedAt,
+          // The `host_pid` value is preserved as historical context;
+          // `pid_terminated_at` records WHEN that PID stopped owning the
+          // dispatch. Single source of truth for "what process used to
+          // run this row" + "when did it die." See DX-140.
+          pidTerminatedAt: completedAt,
           tokensIn: fields.tokens.tokensIn,
           tokensOut: fields.tokens.tokensOut,
           cacheRead: fields.tokens.cacheRead,

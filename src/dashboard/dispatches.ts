@@ -86,19 +86,46 @@ export interface Dispatch {
   error: string | null;
   runtimeMode: RuntimeMode;
   /**
-   * OS process id of the worker that spawned this dispatch (`process.pid`
-   * at row-insert time). Stays populated for the row's lifetime — never
-   * rewritten on restart.
+   * OS process id of the spawned claude/script-q-f process. Stamped via
+   * `pairedWriteHostPid` AFTER the runtime fork resolves the agent PID
+   * — paired with the YAML's `dispatch.pid` so both records carry the
+   * same value (DX-140). `null` until the paired-write fires; cleared
+   * back to `null` on rollback or termination.
    *
    * Worker startup uses it to distinguish "claude still running across a
    * restart" (PID alive → leave alone) from "orphaned row, owning worker
    * gone" (PID dead OR `null` → mark failed). The poller's pre-claim DB
    * guard reads it to skip cards whose existing dispatch is still live.
    *
+   * Pre-DX-140 the column held the worker's `process.pid`. The semantics
+   * change matters: under host mode the agent script (parented to PID 1
+   * by `script -q -f`) survives every worker restart, so a row whose
+   * `host_pid` is the agent PID is still alive after restart even though
+   * the worker that spawned it is gone. The original meaning gave
+   * divergent verdicts (reconcile saw dead worker PID, poller-reattach
+   * saw alive agent PID) — the May-7 incident.
+   *
    * `null` for rows inserted before migration 013 lands (legacy rows are
    * treated as orphaned by the first reconciliation after upgrade).
    */
   hostPid: number | null;
+  /**
+   * Millisecond epoch when `hostPid` was stamped. `null` while the spawn
+   * is still in flight, after a paired-write rollback, and on legacy
+   * pre-migration-015 rows. See DX-140 for the paired-write contract.
+   */
+  hostPidAt: number | null;
+  /**
+   * Millisecond epoch when termination of `hostPid` was confirmed.
+   * Stamped by:
+   *   - `danxbot_complete` stop handler (agent self-terminated).
+   *   - `reconcileOrphanedDispatches` when sweeping a dead PID.
+   *   - `cancelJob` (user-initiated cancel).
+   * `null` while the row is non-terminal. Together with `hostPidAt` this
+   * gives operators the PID's full lifecycle without losing the
+   * historical pid value (`hostPid` is not cleared on termination).
+   */
+  pidTerminatedAt: number | null;
   tokensTotal: number;
   tokensIn: number;
   tokensOut: number;

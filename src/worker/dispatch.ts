@@ -915,10 +915,16 @@ async function handleStopFromDb(
     // Same asymmetry as the in-memory path: response advertises
     // critical_failure while the DB row is finalized as `failed` (the
     // halt signal lives in the flag file, not the dispatch status).
+    const terminatedAt = Date.now();
     await updateDispatch(jobId, {
       status: mapCompleteToDispatchStatus(status),
       summary,
-      completedAt: Date.now(),
+      completedAt: terminatedAt,
+      // Stamp pid_terminated_at so the row carries a proper end-of-life
+      // timestamp. The agent self-signaled termination, so this is the
+      // canonical moment the dispatched PID stopped owning the row
+      // (DX-140 — completes the lifecycle started by `pairedWriteHostPid`).
+      pidTerminatedAt: terminatedAt,
     });
     json(res, 200, { status });
     return;
@@ -927,10 +933,13 @@ async function handleStopFromDb(
   // Non-critical terminal: sync the tracked YAML before marking the row
   // terminal, mirroring the in-memory path's ordering.
   await autoSyncTrackedIssue(jobId, repo);
+  const terminatedAt = Date.now();
   await updateDispatch(jobId, {
     status: mapCompleteToDispatchStatus(status),
     summary,
-    completedAt: Date.now(),
+    completedAt: terminatedAt,
+    // Same DX-140 lifecycle stamp as the critical_failure branch above.
+    pidTerminatedAt: terminatedAt,
   });
   json(res, 200, { status });
 }

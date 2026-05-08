@@ -863,6 +863,12 @@ describe("handleStop", () => {
       expect(updates.status).toBe("completed");
       expect(updates.summary).toBe("ok across restart");
       expect(typeof updates.completedAt).toBe("number");
+      // DX-140: every danxbot_complete-driven terminal stamp also closes
+      // the host_pid lifecycle by setting pid_terminated_at to the same
+      // timestamp as completedAt. Without it, an operator sees "PID was
+      // bound at T" in the row but no end-of-life timestamp.
+      expect(typeof updates.pidTerminatedAt).toBe("number");
+      expect(updates.pidTerminatedAt).toBe(updates.completedAt);
     });
 
     it("falls back to DB and finalizes as failed when status=failed", async () => {

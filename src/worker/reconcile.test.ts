@@ -50,6 +50,8 @@ function makeRow(overrides: Partial<Dispatch> = {}): Dispatch {
     error: null,
     runtimeMode: "host",
     hostPid: 12345,
+    hostPidAt: null,
+    pidTerminatedAt: null,
     tokensTotal: 0,
     tokensIn: 0,
     tokensOut: 0,
@@ -139,6 +141,27 @@ describe("reconcileOrphanedDispatches", () => {
     const result = await reconcileOrphanedDispatches("danxbot");
     expect(mockUpdateDispatch).not.toHaveBeenCalled();
     expect(result).toEqual({ scanned: 0, orphaned: [], alive: [] });
+  });
+
+  it("stamps pid_terminated_at alongside completedAt when sweeping a dead PID (DX-140)", async () => {
+    // The PID's lifecycle has two timestamps: `host_pid_at` (when the
+    // PID was bound, set by paired-write at spawn) and `pid_terminated_at`
+    // (when the PID was confirmed dead, stamped here OR by
+    // danxbot_complete). The reconcile dead-pid sweep is one of the two
+    // canonical writers — without this stamp the row would carry "PID
+    // X was bound at T" but no end-of-life timestamp, breaking the
+    // operator's view of the dispatch's PID history.
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      makeRow({ id: "dead-with-stamp", hostPid: 999_888, hostPidAt: 1000 }),
+    ]);
+    mockIsPidAlive.mockReturnValue(false);
+
+    await reconcileOrphanedDispatches("danxbot");
+
+    expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
+    const [, fields] = mockUpdateDispatch.mock.calls[0];
+    expect(typeof fields.pidTerminatedAt).toBe("number");
+    expect(fields.pidTerminatedAt).toBe(fields.completedAt);
   });
 
   it("partitions a mixed batch into alive vs orphaned without aborting on a single update failure", async () => {

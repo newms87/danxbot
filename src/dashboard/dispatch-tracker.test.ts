@@ -124,13 +124,14 @@ describe("startDispatchTracking", () => {
     expect(inserted.parentJobId).toBeNull();
   });
 
-  it("stamps the worker's host_pid on the inserted row (ISS-69 startup reconciliation key)", async () => {
-    // Worker startup distinguishes "claude still running across a restart"
-    // (PID alive) from "orphaned row, owning worker gone" (PID dead /
-    // null) by comparing this column to the live PID table. The poller's
-    // pre-claim DB guard reads the same column to skip re-dispatching a
-    // card whose existing dispatch is still live. A refactor that
-    // dropped this field would silently regress both paths.
+  it("inserts the row with host_pid + host_pid_at + pid_terminated_at all NULL (DX-140 paired-write fills them post-spawn)", async () => {
+    // Pre-DX-140 the row was inserted with `hostPid: process.pid` (the
+    // worker's PID). DX-140 retired that contract — `host_pid` now
+    // means "the agent script PID" (the only process whose lifetime
+    // outlives the worker via PID-1 reparenting). The agent PID is
+    // not yet resolved at insert time; `spawnAgent` calls
+    // `pairedWriteHostPid` AFTER the runtime fork resolves it. Until
+    // that fires, all three lifecycle columns stay NULL.
     const watcher = makeMockWatcher();
     await startDispatchTracking({
       jobId: "pid-stamp-job",
@@ -141,7 +142,9 @@ describe("startDispatchTracking", () => {
       watcher: watcher as never,
     });
     const inserted = mockInsertDispatch.mock.calls[0][0];
-    expect(inserted.hostPid).toBe(process.pid);
+    expect(inserted.hostPid).toBeNull();
+    expect(inserted.hostPidAt).toBeNull();
+    expect(inserted.pidTerminatedAt).toBeNull();
   });
 
   it("denormalizes slack thread + channel into dedicated columns when trigger is slack (Phase 1 of kMQ170Ea)", async () => {
@@ -406,6 +409,47 @@ describe("startDispatchTracking", () => {
     expect(args.tokensOut).toBe(40);
     expect(args.cacheRead).toBe(200);
     expect(args.cacheWrite).toBe(20);
+  });
+
+  it("finalize stamps pidTerminatedAt equal to completedAt on every terminal status (DX-140 lifecycle close)", async () => {
+    // The finalize() path is the in-memory writer for `pid_terminated_at`
+    // — every successful agent exit, every job.stop("completed"|"failed"),
+    // every cancelJob() flows through here. Without this assertion a
+    // refactor that drops the stamp passes every other test.
+    const watcher = makeMockWatcher();
+    const trackerCompleted = await startDispatchTracking({
+      jobId: "job-pid-term-completed",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+    await trackerCompleted.finalize("completed", {
+      summary: "ok",
+      tokens: noTokens,
+    });
+    const completedArgs = mockUpdateDispatch.mock.calls.at(-1)![1];
+    expect(typeof completedArgs.pidTerminatedAt).toBe("number");
+    expect(completedArgs.pidTerminatedAt).toBe(completedArgs.completedAt);
+
+    // Same stamp on the failed branch — `pidTerminatedAt` records the
+    // moment the PID stopped owning the row, not the completion outcome.
+    const trackerFailed = await startDispatchTracking({
+      jobId: "job-pid-term-failed",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+    await trackerFailed.finalize("failed", {
+      error: "boom",
+      tokens: noTokens,
+    });
+    const failedArgs = mockUpdateDispatch.mock.calls.at(-1)![1];
+    expect(typeof failedArgs.pidTerminatedAt).toBe("number");
+    expect(failedArgs.pidTerminatedAt).toBe(failedArgs.completedAt);
   });
 
   it("finalize uses failed status with error string", async () => {

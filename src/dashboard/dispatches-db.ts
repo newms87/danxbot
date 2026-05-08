@@ -42,6 +42,8 @@ const COLUMN_MAP: Readonly<Record<keyof Dispatch, string>> = {
   error: "error",
   runtimeMode: "runtime_mode",
   hostPid: "host_pid",
+  hostPidAt: "host_pid_at",
+  pidTerminatedAt: "pid_terminated_at",
   tokensTotal: "tokens_total",
   tokensIn: "tokens_in",
   tokensOut: "tokens_out",
@@ -83,6 +85,8 @@ export interface DispatchRow {
   error: string | null;
   runtime_mode: string;
   host_pid: number | null;
+  host_pid_at: number | null;
+  pid_terminated_at: number | null;
   tokens_total: number;
   tokens_in: number;
   tokens_out: number;
@@ -128,6 +132,12 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     // Do NOT "fix" to `===` — that would let `Number(undefined)` produce
     // NaN and silently corrupt every consumer of `hostPid`.
     hostPid: row.host_pid == null ? null : Number(row.host_pid),
+    // Same loose-equality reasoning as `hostPid` — pre-migration-015
+    // test fixtures emit row objects without these keys, and the rules
+    // for handling that case must match.
+    hostPidAt: row.host_pid_at == null ? null : Number(row.host_pid_at),
+    pidTerminatedAt:
+      row.pid_terminated_at == null ? null : Number(row.pid_terminated_at),
     tokensTotal: Number(row.tokens_total),
     tokensIn: Number(row.tokens_in),
     tokensOut: Number(row.tokens_out),

@@ -13,6 +13,7 @@ import type { AgentHandle } from "./agent-handle.js";
 import type { SessionLogWatcher } from "./session-log-watcher.js";
 import type { DispatchTracker } from "../dashboard/dispatch-tracker.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
+import type { YamlPairedWrite } from "./paired-host-pid-write.js";
 
 export interface AgentUsage {
   input_tokens: number;
@@ -216,6 +217,14 @@ export interface SpawnAgentOptions {
    * lineage, so spawnAgent throws when parentJobId is set without dispatch.
    */
   parentJobId?: string | null;
+  /**
+   * YAML write/clear pair invoked by `pairedWriteHostPid` after the runtime
+   * fork resolves the agent PID. Set only by the poller path (it owns the
+   * per-issue YAML); Slack and `/api/launch` omit this and only get the
+   * DB-side stamp. See `paired-host-pid-write.ts` and DX-140 for the
+   * paired-write contract.
+   */
+  pairedWriteYaml?: YamlPairedWrite;
 }
 
 /**

@@ -29,6 +29,8 @@ function makeRow(overrides: Partial<Dispatch> = {}): Dispatch {
     error: null,
     runtimeMode: "host",
     hostPid: 4242,
+    hostPidAt: null,
+    pidTerminatedAt: null,
     tokensTotal: 0,
     tokensIn: 0,
     tokensOut: 0,

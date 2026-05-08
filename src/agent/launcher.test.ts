@@ -164,6 +164,33 @@ vi.mock("./host-pid.js", () => ({
   killHostPid: (...args: unknown[]) => mockKillHostPid(...args),
 }));
 
+// DX-140: paired host_pid write fires after the runtime fork. The launcher
+// gates on `options.dispatch && job.handle`, so most launcher tests (which
+// omit `dispatch`) never trigger this code path. The few tests below that
+// DO pass `options.dispatch` need both the helper itself and the
+// dispatch-tracker mocked so spawnAgent doesn't try to talk to a real DB.
+const mockPairedWriteHostPid = vi.fn().mockResolvedValue(undefined);
+vi.mock("./paired-host-pid-write.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("./paired-host-pid-write.js")
+  >("./paired-host-pid-write.js");
+  return {
+    ...actual,
+    pairedWriteHostPid: (...args: unknown[]) => mockPairedWriteHostPid(...args),
+  };
+});
+
+const mockDispatchTrackerFinalize = vi.fn().mockResolvedValue(undefined);
+const mockStartDispatchTracking = vi.fn().mockResolvedValue({
+  finalize: mockDispatchTrackerFinalize,
+  recordNudge: vi.fn().mockResolvedValue(undefined),
+});
+vi.mock("../dashboard/dispatch-tracker.js", () => ({
+  startDispatchTracking: (...args: unknown[]) =>
+    mockStartDispatchTracking(...args),
+  extractSessionUuidFromPath: vi.fn().mockReturnValue(null),
+}));
+
 import {
   spawnAgent,
   cancelJob,
@@ -3069,5 +3096,124 @@ describe("terminateWithGrace", () => {
     expect(handle.kill).toHaveBeenCalledWith("SIGTERM");
     // Process exited cleanly during the grace — no SIGKILL needed.
     expect(handle.kill).not.toHaveBeenCalledWith("SIGKILL");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// DX-140 paired-write rollback in spawnAgent
+//
+// When `pairedWriteHostPid` rejects (DB or YAML half failed and rollback
+// completed), `spawnAgent` must:
+//   1. SIGTERM the spawned agent process so it doesn't keep running
+//      unmonitored after we declared the dispatch failed.
+//   2. Set `job.status = "failed"` + summary BEFORE the throw so the
+//      cleanup chain's `dispatchTracker.finalize` records the right
+//      terminal record.
+//   3. Run cleanup (fire-and-forget) so watcher / heartbeat / temp dirs
+//      are released.
+//   4. Rethrow the underlying `PairedHostPidWriteError` to the caller.
+//
+// Without this catch path the agent would silently outlive its own row
+// — the exact orphan shape DX-140 + the Phase 3 process-table scan exist
+// to prevent.
+// ─────────────────────────────────────────────────────────────────────────
+describe("spawnAgent — DX-140 paired host_pid write failure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    mockWatcherEntryCallbacks.length = 0;
+    mockWatcherCallOrder.length = 0;
+    // Default: paired-write succeeds. Individual tests override.
+    mockPairedWriteHostPid.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("SIGTERMs the spawned agent and rethrows when pairedWriteHostPid rejects", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const pairedErr = new Error("paired-write rolled back");
+    mockPairedWriteHostPid.mockRejectedValueOnce(pairedErr);
+
+    await expect(
+      spawnAgent({
+        prompt: "/danx-next",
+        repoName: "platform",
+        timeoutMs: 300_000,
+        cwd: "/tmp/test-workspace",
+        // `dispatch` triggers `startDispatchTracking` (mocked) AND the
+        // launcher's paired-write call.
+        dispatch: {
+          trigger: "api",
+          metadata: {
+            endpoint: "/api/launch",
+            callerIp: null,
+            statusUrl: null,
+            initialPrompt: "/danx-next",
+          },
+        },
+      }),
+    ).rejects.toBe(pairedErr);
+
+    // SIGTERM landed on the spawned child.
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("does NOT call pairedWriteHostPid when options.dispatch is omitted", async () => {
+    // Slack router-only / non-tracked paths skip paired-write. Without
+    // this guard we'd touch the DB on every spawn including the ones
+    // that intentionally don't appear in the dispatches history.
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
+      // No `dispatch` field
+    });
+
+    expect(mockPairedWriteHostPid).not.toHaveBeenCalled();
+  });
+
+  it("forwards options.pairedWriteYaml verbatim into pairedWriteHostPid", async () => {
+    // Wires the poller's YamlPairedWrite pair end-to-end through
+    // SpawnAgentOptions → pairedWriteHostPid.
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const yamlPair = {
+      write: vi.fn(),
+      clear: vi.fn(),
+    };
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      cwd: "/tmp/test-workspace",
+      dispatch: {
+        trigger: "trello",
+        metadata: {
+          cardId: "c",
+          cardName: "n",
+          cardUrl: "",
+          listId: "",
+          listName: "",
+        },
+      },
+      pairedWriteYaml: yamlPair,
+    });
+
+    expect(mockPairedWriteHostPid).toHaveBeenCalledTimes(1);
+    const callArg = mockPairedWriteHostPid.mock.calls[0][0] as {
+      dispatchId: string;
+      pid: number;
+      yaml?: typeof yamlPair;
+    };
+    expect(callArg.pid).toBe(child.pid);
+    expect(callArg.yaml).toBe(yamlPair);
   });
 });

@@ -68,10 +68,18 @@ export async function reconcileOrphanedDispatches(
     const pid = row.hostPid;
     if (isDispatchOrphaned(row, isPidAlive)) {
       try {
+        const terminatedAt = Date.now();
         await updateDispatch(row.id, {
           status: "failed",
           summary: ORPHAN_SUMMARY,
-          completedAt: Date.now(),
+          completedAt: terminatedAt,
+          // Stamp pid_terminated_at so the row's PID lifecycle has a
+          // proper end timestamp matching `host_pid_at` (DX-140). Without
+          // this the operator can see "pid X was stamped at T" but never
+          // "pid X was confirmed dead at T'." Same Date.now() as
+          // completedAt — the dead-pid sweep is the moment we observed
+          // termination, even if the actual exit happened earlier.
+          pidTerminatedAt: terminatedAt,
         });
         result.orphaned.push(row.id);
         log.info(

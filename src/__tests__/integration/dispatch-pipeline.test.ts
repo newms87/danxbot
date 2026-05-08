@@ -109,6 +109,25 @@ vi.mock("../../slack/listener.js", () => ({
   getSlackClientForRepo: vi.fn(),
 }));
 
+// Stub dispatches-db so the launcher's `pairedWriteHostPid` (DX-140)
+// doesn't try to talk to a real MySQL pool. The HTTP+JSONL pipeline
+// these tests exercise has nothing to do with the dispatch row's
+// host_pid stamp; treating the DB as a no-op here matches the
+// pre-existing pattern (`startDispatchTracking`'s `insertDispatch` call
+// is also a no-op in this suite — it's swallowed by the tracker's
+// internal try/catch). Without this mock the paired-write throws on
+// every spawn and `handleLaunch` returns 500 instead of 200.
+vi.mock("../../dashboard/dispatches-db.js", () => ({
+  insertDispatch: vi.fn().mockResolvedValue(undefined),
+  updateDispatch: vi.fn().mockResolvedValue(undefined),
+  getDispatchById: vi.fn().mockResolvedValue(null),
+  findNonTerminalDispatches: vi.fn().mockResolvedValue([]),
+  findLatestDispatchBySlackThread: vi.fn().mockResolvedValue(null),
+  listDispatches: vi.fn().mockResolvedValue([]),
+  deleteOldDispatches: vi.fn().mockResolvedValue([]),
+  countDispatchesByRepo: vi.fn().mockResolvedValue({}),
+}));
+
 // --- Real imports (the pipeline under test) ---
 
 import { spawnAgent, cancelJob, type AgentJob } from "../../agent/launcher.js";

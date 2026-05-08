@@ -40,6 +40,7 @@ import { attachUsageAccumulator } from "./usage-accumulator.js";
 import { buildCleanup } from "./agent-cleanup.js";
 import { buildJobStopHandler } from "./agent-stop.js";
 import { runSpawnPreflight } from "./spawn-preflight.js";
+import { pairedWriteHostPid } from "./paired-host-pid-write.js";
 import {
   type AgentJob,
   type SpawnAgentOptions,
@@ -268,6 +269,50 @@ export async function spawnAgent(
       apiToken: options.apiToken,
       onComplete: options.onComplete,
     });
+  }
+
+  // Phase 1 of the DB-as-dispatch-registry epic (DX-140) — atomic paired
+  // write of `host_pid` + `dispatch.pid`. The runtime fork has resolved
+  // `job.handle.pid` (host: `script -q -f` wrapper PID; docker: claude
+  // child PID). Stamp it onto the DB row AND the YAML in one operation
+  // so reconcile + reattach both see the same value.
+  //
+  // Skipped when the dispatch is not tracked (no DB row to update) or
+  // when the runtime fork failed to set a handle. The latter is already
+  // a fatal spawn failure: `runHostModeFork` will throw and `spawnAgent`
+  // unwinds before we reach here. The defensive guard exists for tests
+  // that inject a mocked runtime fork without setting `job.handle`.
+  if (options.dispatch && job.handle) {
+    try {
+      await pairedWriteHostPid({
+        dispatchId: jobId,
+        pid: job.handle.pid,
+        yaml: options.pairedWriteYaml,
+      });
+    } catch (pairedErr) {
+      // Paired-write rolled back. The dispatch row is already marked
+      // failed (with summary "Paired host_pid write rolled back"). Tear
+      // down the spawned agent — it has no monitoring contract on the
+      // worker side anymore — and unwind cleanly so the caller sees the
+      // failure instead of a silently-orphaned process.
+      log.error(
+        `[Job ${jobId}] paired host_pid write failed; tearing down agent`,
+        pairedErr,
+      );
+      job.status = "failed";
+      job.summary = "Paired host_pid write rolled back";
+      job.completedAt = new Date();
+      try {
+        job.handle.kill("SIGTERM");
+      } catch (killErr) {
+        log.error(
+          `[Job ${jobId}] failed to SIGTERM after paired-write rollback`,
+          killErr,
+        );
+      }
+      void cleanup();
+      throw pairedErr;
+    }
   }
 
   return job;

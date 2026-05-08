@@ -1954,15 +1954,21 @@ async function spawnClaude(
   dispatchId?: string,
   resumeOpts?: { resumeSessionId: string; parentJobId: string },
   /**
-   * When set, the dispatch is bound to a per-card YAML. After
-   * `dispatch()` returns the spawned `AgentJob`, the poller stamps the
-   * agent's real PID into the YAML's `dispatch.pid` AND registers the
-   * card in `activeDispatches`. The completion callback later clears
-   * `dispatch: null` and drops the in-memory entry. Ideator / auto-
-   * triage paths omit this — there is no card-bound dispatch slot for
-   * those (auto-triage runs across many cards as one session).
+   * When set, the dispatch is bound to a per-card YAML. The poller
+   * builds a `YamlPairedWrite` callback pair from this and threads it
+   * through `dispatch()` to the launcher; the launcher invokes
+   * `pairedWriteHostPid` AFTER the runtime fork resolves the agent
+   * PID, stamping the DB row's `host_pid` and the YAML's
+   * `dispatch.pid` atomically. The `write` callback also registers
+   * the card in `activeDispatches`; the completion callback later
+   * clears `dispatch: null` and drops the in-memory entry. Ideator /
+   * auto-triage paths omit this — there is no card-bound dispatch
+   * slot for those (auto-triage runs across many cards as one
+   * session).
    *
-   * ISS-92, Phase 2 of the poller-triage rework.
+   * Originally ISS-92, Phase 2 of the poller-triage rework. DX-140
+   * moved the post-spawn stamping inside the launcher under the
+   * paired-write contract.
    */
   dispatchStamp?: { issueId: string; startStamp: IssueDispatch },
 ): Promise<void> {
@@ -2017,12 +2023,73 @@ async function spawnClaude(
   // through `onComplete`. See `.claude/rules/agent-dispatch.md`.
   //
   // Awaited (not fire-and-forget): the post-spawn YAML PID stamp
-  // requires the AgentJob's PID, which is only known once `dispatch()`
-  // resolves. Awaiting blocks the poll tick for the spawn duration
-  // (~1–3s in practice). The runtime agent execution is still async
-  // via `onComplete` — we only sequence the spawn itself.
+  // (DX-140 paired write) runs INSIDE `spawnAgent` after the runtime
+  // fork resolves the agent's PID. Awaiting `dispatch()` blocks the
+  // poll tick for the spawn duration (~1–3s in practice). The runtime
+  // agent execution is still async via `onComplete` — we only sequence
+  // the spawn itself.
+  //
+  // Phase 1 of DB-as-dispatch-registry (DX-140) — when the dispatch is
+  // bound to a per-card YAML, build a `YamlPairedWrite` pair and pass
+  // it through `pairedWriteYaml`. The launcher invokes
+  // `pairedWriteHostPid` AFTER the runtime fork resolves the agent
+  // PID; both the DB row's `host_pid` and the YAML's `dispatch.pid`
+  // are stamped in one logical operation with mutual rollback.
+  // Replaces the old "stamp YAML pid post-dispatch in the poller"
+  // path which left a window where DB + YAML carried divergent values.
+  const pairedWriteYaml = dispatchStamp
+    ? {
+        write: (pid: number) => {
+          const enrichedStamp: IssueDispatch = {
+            ...dispatchStamp.startStamp,
+            pid,
+          };
+          const issue = loadLocal(
+            repo.localPath,
+            dispatchStamp.issueId,
+            repo.issuePrefix,
+          );
+          // Fail loud — if the YAML disappeared between dispatch start
+          // and PID resolution (concurrent close/move, operator
+          // intervention, broken inject pipeline) silently skipping the
+          // YAML stamp would leave the DB row carrying `host_pid` while
+          // the YAML carries nothing. That recreates the divergent
+          // half-stamped state the paired write exists to prevent.
+          // Throwing routes the helper into its YAML-fail rollback
+          // branch (DB stamp UPDATE never runs because YAML write is
+          // first; if it had run, the DB rollback fires).
+          if (!issue) {
+            throw new Error(
+              `paired-write: YAML for ${dispatchStamp.issueId} disappeared during dispatch — cannot stamp pid ${pid}`,
+            );
+          }
+          stampDispatchAndWrite(repo.localPath, issue, enrichedStamp);
+          // Mirror into the in-memory active map for the per-tick liveness
+          // probe — keeps the poller's existing reattach logic functional.
+          getActiveDispatches(repo.name).set(
+            dispatchStamp.issueId,
+            enrichedStamp,
+          );
+        },
+        clear: () => {
+          // Rollback path — DB UPDATE failed after we wrote the YAML.
+          // Clear the YAML's `dispatch{}` and drop the in-memory entry
+          // so the next tick sees a clean slate.
+          const issue = loadLocal(
+            repo.localPath,
+            dispatchStamp.issueId,
+            repo.issuePrefix,
+          );
+          if (issue && issue.dispatch !== null) {
+            clearDispatchAndWrite(repo.localPath, issue);
+          }
+          getActiveDispatches(repo.name).delete(dispatchStamp.issueId);
+        },
+      }
+    : undefined;
+
   try {
-    const result = await dispatch({
+    await dispatch({
       repo,
       task: prompt,
       workspace: "issue-worker",
@@ -2044,6 +2111,7 @@ async function spawnClaude(
       dispatchId,
       resumeSessionId: resumeOpts?.resumeSessionId,
       parentJobId: resumeOpts?.parentJobId,
+      pairedWriteYaml,
       onComplete: (job) => {
         // ISS-92 Phase 2: dispatch end clears the YAML's `dispatch{}`
         // and drops the in-memory entry. Runs BEFORE the failure-
@@ -2058,39 +2126,6 @@ async function spawnClaude(
         );
       },
     });
-
-    // Post-spawn stamping (ISS-92, Phase 2). The dispatch returned the
-    // spawned `AgentJob`; its `handle.pid` is the OS PID we stamp into
-    // the YAML's `dispatch.pid` and mirror in `activeDispatches`. A
-    // missing handle (test mock that bypasses the runtime fork) is
-    // tolerated — the YAML keeps `pid: 0`, and the next reattach pass
-    // clears it as a placeholder.
-    if (dispatchStamp) {
-      const pid = result?.job?.handle?.pid ?? 0;
-      const enrichedStamp: IssueDispatch = {
-        ...dispatchStamp.startStamp,
-        pid,
-      };
-      const issue = loadLocal(
-        repo.localPath,
-        dispatchStamp.issueId,
-        repo.issuePrefix,
-      );
-      if (issue) {
-        try {
-          stampDispatchAndWrite(repo.localPath, issue, enrichedStamp);
-        } catch (err) {
-          log.error(
-            `[${repo.name}] post-spawn YAML pid stamp failed for ${dispatchStamp.issueId}`,
-            err,
-          );
-        }
-      }
-      getActiveDispatches(repo.name).set(
-        dispatchStamp.issueId,
-        enrichedStamp,
-      );
-    }
   } catch (err) {
     // Pre-spawn failures (workspace resolution error, OS spawn error, MCP probe
     // failure) deliberately skip the exponential-backoff escalator:

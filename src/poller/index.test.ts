@@ -6272,31 +6272,39 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     });
   });
 
-  it("post-spawn stamps the real PID when result.job.handle.pid is set", async () => {
+  it("post-spawn stamps the real PID when paired-write callback fires (DX-140)", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("card-pid-real", "Card PID Real", "ToDo"),
     ]);
-    mockDispatch.mockResolvedValue({
-      dispatchId: "did-1",
-      job: {
-        id: "job-1",
-        status: "running",
-        summary: "",
-        startedAt: new Date(),
-        handle: { pid: 65432 },
-        usage: {
-          input_tokens: 0,
-          output_tokens: 0,
-          cache_read_input_tokens: 0,
-          cache_creation_input_tokens: 0,
-        },
-        stop: async () => {},
+    // DX-140: the launcher invokes `pairedWriteYaml.write(pid)` after
+    // its runtime fork resolves the agent PID. The poller's mock
+    // `dispatch()` here simulates that callback with the resolved pid
+    // = 65432 — same effect as the real launcher's paired-write firing.
+    mockDispatch.mockImplementation(
+      (opts: { pairedWriteYaml?: { write: (pid: number) => void } }) => {
+        opts.pairedWriteYaml?.write(65432);
+        return Promise.resolve({
+          dispatchId: "did-1",
+          job: {
+            id: "job-1",
+            status: "running",
+            summary: "",
+            startedAt: new Date(),
+            handle: { pid: 65432 },
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+            stop: async () => {},
+          },
+        });
       },
-    });
+    );
 
-    // After hydration, loadLocal is consulted on the post-spawn enrichment
-    // path so the YAML can be re-stamped with the real PID. Return a
-    // synthetic Issue.
+    // The pairedWriteYaml.write callback consults loadLocal to read the
+    // current Issue before re-stamping the YAML with the real PID.
     mockLoadLocal.mockImplementation((_repo: string, id: string) => {
       if (id !== "ISS-FAKE") return null;
       return {
@@ -6315,7 +6323,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
 
     await poll(MOCK_REPO_CONTEXT);
 
-    // The post-spawn stamp call carries pid: 65432.
+    // The paired-write stamp call carries pid: 65432.
     const stampCalls = mockStampDispatchAndWrite.mock.calls;
     const postSpawn = stampCalls.find((call) => {
       const stamp = call[2] as { pid?: number };
@@ -6327,11 +6335,16 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     expect(map.get("ISS-FAKE")?.pid).toBe(65432);
   });
 
-  it("post-spawn falls back to pid: 0 when result.job.handle is missing (test-mock tolerance)", async () => {
+  it("paired-write that never fires leaves the in-memory map empty (no fallback to pid:0)", async () => {
+    // DX-140 retired the implicit `pid: 0` fallback. The launcher's
+    // `pairedWriteYaml.write` callback runs ONLY after a successful
+    // runtime fork; if dispatch returns without invoking it (test mock
+    // that bypasses paired-write, e.g. dispatch()-throws path), the map
+    // stays empty. Replaces the pre-DX-140 contract where the poller
+    // post-stamped pid:0 unconditionally.
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("card-no-handle", "Card No Handle", "ToDo"),
     ]);
-    // No `handle` on the returned job — exercises the `?? 0` fallback.
     mockDispatch.mockResolvedValue({
       dispatchId: "did-2",
       job: {
@@ -6367,8 +6380,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
-    expect(map.has("ISS-FAKE")).toBe(true);
-    expect(map.get("ISS-FAKE")?.pid).toBe(0);
+    expect(map.has("ISS-FAKE")).toBe(false);
   });
 
   it("clears YAML + drops in-memory entry on pre-spawn failure (rollback invariant)", async () => {
@@ -6410,8 +6422,15 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     ]);
     let capturedOnComplete: ((job: unknown) => void) | undefined;
     mockDispatch.mockImplementation(
-      (opts: { onComplete?: (job: unknown) => void }) => {
+      (opts: {
+        onComplete?: (job: unknown) => void;
+        pairedWriteYaml?: { write: (pid: number) => void };
+      }) => {
         capturedOnComplete = opts.onComplete;
+        // DX-140: simulate the launcher invoking paired-write after PID
+        // resolution so the in-memory `activeDispatches` map gets
+        // populated — the test's mid-test assertion depends on it.
+        opts.pairedWriteYaml?.write(4242);
         return Promise.resolve({
           dispatchId: "did-timeout",
           job: {

@@ -32,6 +32,8 @@ function createdEvent(id = "job-1"): BusEvent {
       error: null,
       runtimeMode: "docker",
       hostPid: process.pid,
+      hostPidAt: null,
+      pidTerminatedAt: null,
       tokensTotal: 0,
       tokensIn: 0,
       tokensOut: 0,

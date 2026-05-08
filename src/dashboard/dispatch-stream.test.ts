@@ -72,6 +72,8 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     error: null,
     runtimeMode: "docker",
     hostPid: process.pid,
+    hostPidAt: null,
+    pidTerminatedAt: null,
     tokensTotal: 0,
     tokensIn: 0,
     tokensOut: 0,

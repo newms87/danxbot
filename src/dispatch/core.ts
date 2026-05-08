@@ -41,6 +41,7 @@ import {
   terminateWithGrace,
   type AgentJob,
 } from "../agent/launcher.js";
+import type { YamlPairedWrite } from "../agent/paired-host-pid-write.js";
 import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
 import { StallDetector } from "../agent/stall-detector.js";
 import {
@@ -283,6 +284,16 @@ export interface DispatchInput {
    * `StagedFilesError("write")` — neither path leaves files on disk.
    */
   stagedFiles?: readonly StagedFileInput[];
+  /**
+   * YAML write/clear pair for the paired host_pid stamp (DX-140). Set
+   * only by the poller path — it's the only caller that owns a
+   * per-dispatch YAML. `spawnAgent` invokes
+   * `pairedWriteHostPid({yaml: input.pairedWriteYaml, ...})` after the
+   * runtime fork resolves the agent PID; both stamps land atomically or
+   * roll back together. Slack and `/api/launch` omit this and only get
+   * the DB-side stamp.
+   */
+  pairedWriteYaml?: YamlPairedWrite;
 }
 
 export interface DispatchResult {
@@ -447,6 +458,15 @@ async function runResolved(
         dispatch: isRespawn ? undefined : input.apiDispatchMeta,
         resumeSessionId: input.resumeSessionId,
         parentJobId: input.parentJobId,
+        // Paired host_pid write — only the initial spawn does this, and
+        // only when the caller supplies a YAML pair. Stall-recovery
+        // respawns reuse the existing dispatch row, so re-stamping
+        // `host_pid` would race with the pre-existing record. The
+        // launcher tolerates `pairedWriteYaml === undefined` and falls
+        // back to a DB-only stamp; respawns explicitly skip even that
+        // because the row already carries the prior PID's stamp +
+        // `host_pid_at` from the initial spawn.
+        pairedWriteYaml: isRespawn ? undefined : input.pairedWriteYaml,
         onComplete: (completedJob) => {
           // See `DispatchInput.onComplete` — cleanup runs before the
           // caller callback (the ordering guarantee is load-bearing).
