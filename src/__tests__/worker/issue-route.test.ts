@@ -35,6 +35,7 @@ import type { AddressInfo } from "node:net";
 import {
   _drainAsyncWorkForTesting,
   _resetForTesting,
+  appendDiffEntries,
   handleIssueCreate,
   handleIssueSave,
   syncTrackedIssueOnComplete,
@@ -1237,5 +1238,806 @@ describe("syncTrackedIssueOnComplete", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.errors[0]).toMatch(/No YAML file found at \.danxbot\/issues/);
+  });
+});
+
+// DX-146 / Phase 2 — appendDiffEntries pure helper + worker write-path
+// integration. Pairs DX-145's appendHistory schema with the agent-driven
+// `runSync` + `handleIssueCreate` flows. The 10 tests below mirror the test
+// plan in the card description; a missing assertion against the test plan
+// is the AC failing, not a test omission.
+
+describe("DX-146: appendDiffEntries (pure helper)", () => {
+  function makeIssue(overrides: Partial<Issue> = {}): Issue {
+    return {
+      ...createEmptyIssue({ id: "ISS-1" }),
+      tracker: "memory",
+      ...overrides,
+    };
+  }
+
+  it("test plan #1: status change → exactly one status_change entry with from/to/actor", () => {
+    const old = makeIssue({ status: "ToDo" });
+    const next = makeIssue({ status: "In Progress" });
+    const recordedSystemErrors: string[] = [];
+    const history = appendDiffEntries(old, next, "dispatch-abc", "2026-05-08T10:00:00.000Z", {
+      recordSystemError: (msg) => {
+        recordedSystemErrors.push(msg);
+      },
+    });
+    expect(history).toHaveLength(1);
+    expect(history[0]).toEqual({
+      timestamp: "2026-05-08T10:00:00.000Z",
+      actor: "dispatch:dispatch-abc",
+      event: "status_change",
+      from: "ToDo",
+      to: "In Progress",
+    });
+    expect(recordedSystemErrors).toEqual([]);
+  });
+
+  it("test plan #2: no status change → zero entries appended", () => {
+    const old = makeIssue({ status: "ToDo" });
+    const next = makeIssue({ status: "ToDo" });
+    const history = appendDiffEntries(old, next, "dispatch-abc", "2026-05-08T10:00:00.000Z");
+    expect(history).toEqual([]);
+  });
+
+  it("test plan #3: blocked null → record → one blocked entry with note listing blocker ids", () => {
+    const old = makeIssue({ status: "ToDo", blocked: null });
+    const next = makeIssue({
+      status: "ToDo",
+      blocked: {
+        reason: "wait on phase",
+        timestamp: "2026-05-08T10:00:00.000Z",
+        by: ["DX-200", "DX-201"],
+      },
+    });
+    const history = appendDiffEntries(old, next, "dispatch-abc", "2026-05-08T10:00:00.000Z");
+    expect(history).toHaveLength(1);
+    expect(history[0]).toEqual({
+      timestamp: "2026-05-08T10:00:00.000Z",
+      actor: "dispatch:dispatch-abc",
+      event: "blocked",
+      to: "ToDo",
+      note: "Blocked on DX-200, DX-201",
+    });
+  });
+
+  it("test plan #4: blocked record → null → one unblocked entry", () => {
+    const old = makeIssue({
+      status: "ToDo",
+      blocked: {
+        reason: "wait",
+        timestamp: "2026-05-08T09:00:00.000Z",
+        by: ["DX-200"],
+      },
+    });
+    const next = makeIssue({ status: "ToDo", blocked: null });
+    const history = appendDiffEntries(old, next, "dispatch-abc", "2026-05-08T10:00:00.000Z");
+    expect(history).toHaveLength(1);
+    expect(history[0]).toEqual({
+      timestamp: "2026-05-08T10:00:00.000Z",
+      actor: "dispatch:dispatch-abc",
+      event: "unblocked",
+      to: "ToDo",
+    });
+  });
+
+  it("test plan #5: status change AND blocked transition → both entries (status_change first)", () => {
+    const old = makeIssue({ status: "In Progress", blocked: null });
+    const next = makeIssue({
+      status: "ToDo",
+      blocked: {
+        reason: "wait",
+        timestamp: "2026-05-08T10:00:00.000Z",
+        by: ["DX-300"],
+      },
+    });
+    const history = appendDiffEntries(old, next, "dispatch-abc", "2026-05-08T10:00:00.000Z");
+    expect(history).toHaveLength(2);
+    expect(history[0].event).toBe("status_change");
+    expect(history[0].from).toBe("In Progress");
+    expect(history[0].to).toBe("ToDo");
+    expect(history[1].event).toBe("blocked");
+    expect(history[1].to).toBe("ToDo");
+    expect(history[1].note).toBe("Blocked on DX-300");
+  });
+
+  it("test plan #7: empty dispatchId → actor 'unknown' AND recordSystemError invoked", () => {
+    const old = makeIssue({ status: "ToDo" });
+    const next = makeIssue({ status: "Done" });
+    const recorded: string[] = [];
+    const history = appendDiffEntries(old, next, "", "2026-05-08T10:00:00.000Z", {
+      recordSystemError: (msg) => {
+        recorded.push(msg);
+      },
+    });
+    expect(history).toHaveLength(1);
+    expect(history[0].actor).toBe("unknown");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatch(/missing dispatch id/);
+  });
+
+  it("first save (no prior state) → no entries appended; new history preserved", () => {
+    const next = makeIssue({ status: "ToDo" });
+    const history = appendDiffEntries(null, next, "dispatch-abc", "2026-05-08T10:00:00.000Z");
+    expect(history).toEqual([]);
+  });
+
+  it("preserves and appends to existing history entries (does not clobber)", () => {
+    const existing = [
+      {
+        timestamp: "2026-05-07T00:00:00.000Z",
+        actor: "dispatch:earlier",
+        event: "created" as const,
+        to: "ToDo" as const,
+      },
+    ];
+    const old = makeIssue({ status: "ToDo", history: existing });
+    const next = makeIssue({ status: "Done", history: existing });
+    const history = appendDiffEntries(old, next, "dispatch-abc", "2026-05-08T10:00:00.000Z");
+    expect(history).toHaveLength(2);
+    expect(history[0]).toEqual(existing[0]);
+    expect(history[1].event).toBe("status_change");
+  });
+
+  it("blocked note carries the joined blocker ids and survives appendHistory truncation (single entry)", () => {
+    // DX-146's contract at the diff site is "build the right note string
+    // from `blocked.by[]` and hand it off cleanly to appendHistory" — the
+    // 200-char cap + ellipsis truncation belong to DX-145
+    // (yaml-history.test.ts). What we pin here: ONE blocked entry, note
+    // prefix is `Blocked on `, the first few blocker ids show up, and
+    // the long-list path doesn't crash.
+    const longBlockerList = Array.from({ length: 50 }, (_, i) => `DX-${i + 1000}`);
+    const old = makeIssue({ status: "ToDo", blocked: null });
+    const next = makeIssue({
+      status: "ToDo",
+      blocked: {
+        reason: "wait",
+        timestamp: "2026-05-08T10:00:00.000Z",
+        by: longBlockerList,
+      },
+    });
+    const history = appendDiffEntries(old, next, "dispatch-abc", "2026-05-08T10:00:00.000Z");
+    expect(history).toHaveLength(1);
+    const note = history[0].note ?? "";
+    expect(note.startsWith("Blocked on DX-1000, DX-1001")).toBe(true);
+  });
+});
+
+describe("DX-146: runSync / handleIssueSave history append integration", () => {
+  let h: TestHarness;
+
+  beforeEach(async () => {
+    _resetForTesting();
+    h = await startTestServer();
+  });
+
+  afterEach(async () => {
+    await _drainAsyncWorkForTesting();
+    await h.close();
+  });
+
+  it("test plan #1 integration: status change between two saves appends one status_change entry", async () => {
+    // No external_id → skip tracker push and exercise the local-only
+    // persist path. The diff still happens; the cache populates from
+    // the first save, and the second save produces the entry.
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-100", external_id: "", title: "claim flow" }),
+      tracker: "memory",
+      status: "ToDo",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    // Save 1: ToDo (cache populates with ToDo; no diff yet)
+    await fetch(`${h.url}/api/issue-save/dispatch-claim-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-100" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Agent edits status to In Progress on disk and saves again.
+    issue.status = "In Progress";
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-claim-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-100" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const persisted = readYaml(h.repo.localPath, "ISS-100");
+    expect(persisted).toContain("event: status_change");
+    expect(persisted).toContain("from: ToDo");
+    expect(persisted).toContain("to: In Progress");
+    expect(persisted).toContain("actor: dispatch:dispatch-claim-2");
+  });
+
+  it("test plan #4 integration: blocked record → null between two saves appends an 'unblocked' entry", async () => {
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-101", external_id: "", title: "unblock flow" }),
+      tracker: "memory",
+      status: "ToDo",
+      blocked: {
+        reason: "wait",
+        timestamp: "2026-05-08T09:00:00.000Z",
+        by: ["ISS-999"],
+      },
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    // Save 1: blocked (cache populates with blocked != null)
+    await fetch(`${h.url}/api/issue-save/dispatch-unblk-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-101" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Agent clears blocked.
+    issue.blocked = null;
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-unblk-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-101" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const persisted = readYaml(h.repo.localPath, "ISS-101");
+    expect(persisted).toContain("event: unblocked");
+    expect(persisted).toContain("actor: dispatch:dispatch-unblk-2");
+  });
+
+  it("test plan #7 integration: empty dispatchId on /api/issue-save → actor 'unknown' and recordSystemError invoked", async () => {
+    const recordedSystemErrors: string[] = [];
+    const customDeps: IssueRouteDeps = {
+      tracker: h.tracker,
+      recordError: async (dispatchId, message) => {
+        h.recordedErrors.push({ dispatchId, message });
+      },
+      recordSystemError: (msg) => {
+        recordedSystemErrors.push(msg);
+      },
+    };
+    // Stand up a parallel HTTP server bound to the SAME repo dir so we
+    // can inject the custom deps. The harness's own server keeps running
+    // (and drains in afterEach); they don't conflict because each test
+    // owns a fresh mkdtemp.
+    const server = createServer(
+      async (req: IncomingMessage, res: ServerResponse) => {
+        const url = req.url ?? "/";
+        const saveMatch = url.match(/^\/api\/issue-save\/?([^/?]*)/);
+        if (req.method === "POST" && saveMatch) {
+          await handleIssueSave(req, res, saveMatch[1] ?? "", h.repo, customDeps);
+          return;
+        }
+        res.writeHead(404).end();
+      },
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}`;
+
+    try {
+      const issue: Issue = {
+        ...createEmptyIssue({ id: "ISS-200", external_id: "", title: "no dispatch" }),
+        tracker: "memory",
+        status: "ToDo",
+      };
+      writeYaml(h.repo.localPath, issue);
+
+      // First save with valid dispatchId to populate cache.
+      await fetch(`${url}/api/issue-save/seed-dispatch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "ISS-200" }),
+      });
+      await _drainAsyncWorkForTesting();
+
+      // Agent flips status; save with EMPTY dispatchId.
+      issue.status = "Done";
+      writeYaml(h.repo.localPath, issue);
+
+      await fetch(`${url}/api/issue-save/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "ISS-200" }),
+      });
+      await _drainAsyncWorkForTesting();
+
+      // Done → moved to closed/. Read from there.
+      const persisted = readYaml(h.repo.localPath, "ISS-200", "closed");
+      expect(persisted).toContain("event: status_change");
+      expect(persisted).toContain("actor: unknown");
+      expect(recordedSystemErrors.length).toBeGreaterThanOrEqual(1);
+      expect(recordedSystemErrors[0]).toMatch(/missing dispatch id/);
+    } finally {
+      await new Promise<void>((resolve) =>
+        server.close(() => resolve()),
+      );
+    }
+  });
+
+  it("test plan #9: rolling cap enforced — appending past 1000 entries drops oldest", async () => {
+    // Pre-populate history at exactly 1000 valid entries, then trigger
+    // a status_change to verify the cap holds at 1000 (oldest dropped).
+    const seedEntries: import("../../issue-tracker/interface.js").IssueHistoryEntry[] =
+      Array.from({ length: 1000 }, (_, i) => ({
+        timestamp: `2026-05-01T00:00:${String(i % 60).padStart(2, "0")}.000Z`,
+        actor: `dispatch:seed-${i}`,
+        event: "created" as const,
+        to: "ToDo" as const,
+      }));
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-300", external_id: "", title: "cap" }),
+      tracker: "memory",
+      status: "ToDo",
+      history: seedEntries,
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    // First save populates cache; on-disk history stays at 1000.
+    await fetch(`${h.url}/api/issue-save/cap-seed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-300" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Status change triggers an append; cap drops oldest, length stays 1000.
+    issue.status = "In Progress";
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/cap-trigger`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-300" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const persisted = readYaml(h.repo.localPath, "ISS-300");
+    // First seed entry's actor (`dispatch:seed-0`) was dropped.
+    expect(persisted).not.toContain("actor: dispatch:seed-0\n");
+    // Last seed entry survives.
+    expect(persisted).toContain("actor: dispatch:seed-999");
+    // The new status_change rides at the tail.
+    expect(persisted).toContain("event: status_change");
+    expect(persisted).toContain("actor: dispatch:cap-trigger");
+  });
+
+  it("review-gap fix: tracker-bound branch (external_id != \"\") appends history entries during runSync's local-first persist", async () => {
+    // Every other DX-146 integration test exercises the
+    // `external_id == ""` branch (chainOnIssueLock → persistAfterSync).
+    // The production path for any tracker-bound card runs through
+    // `runSync`, which writes to disk BEFORE pushing to the tracker
+    // (DX-131). The diff append must ride that first-persist write.
+    await h.tracker.createCard({
+      schema_version: 3,
+      tracker: "memory",
+      id: "ISS-410",
+      parent_id: null,
+      children: [],
+      status: "ToDo",
+      type: "Feature",
+      title: "tracker-bound diff",
+      description: "",
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-410", external_id: "mem-1", title: "tracker-bound" }),
+      tracker: "memory",
+      status: "ToDo",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    // Save 1: populates cache.
+    await fetch(`${h.url}/api/issue-save/dispatch-tb-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-410" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Save 2: tracker-bound diff append must land on disk.
+    issue.status = "In Progress";
+    writeYaml(h.repo.localPath, issue);
+    await fetch(`${h.url}/api/issue-save/dispatch-tb-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-410" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const persisted = readYaml(h.repo.localPath, "ISS-410");
+    expect(persisted).toContain("event: status_change");
+    expect(persisted).toContain("from: ToDo");
+    expect(persisted).toContain("to: In Progress");
+    expect(persisted).toContain("actor: dispatch:dispatch-tb-2");
+    // Tracker push happened (proves runSync ran end-to-end, not just the
+    // local-only branch).
+    const updates = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "updateCard");
+    expect(updates.length).toBeGreaterThan(0);
+  });
+
+  it("review-gap fix: forceBlockedToToDo runs BEFORE applyHistoryDiff — agent's stray (Needs Help, blocked != null) emits status_change(In Progress, ToDo)", async () => {
+    // Pin the contract at issue-route.ts: handleIssueSave applies
+    // forceBlockedToToDo, THEN applyHistoryDiff. A regression that
+    // swaps those two lines would emit status_change(In Progress,
+    // Needs Help) here — wrong, because the worker forced ToDo and
+    // Needs Help never persists.
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-420", external_id: "", title: "blocked normalize" }),
+      tracker: "memory",
+      status: "In Progress",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    // Save 1: cache populates with {status: In Progress, blocked: null}.
+    await fetch(`${h.url}/api/issue-save/dispatch-bn-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-420" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Save 2: agent saves with status: Needs Help + blocked != null.
+    // Worker normalizes status → ToDo. Diff sees (In Progress, ToDo)
+    // for status and (null, record) for blocked.
+    issue.status = "Needs Help";
+    issue.blocked = {
+      reason: "wait",
+      timestamp: "2026-05-08T11:00:00.000Z",
+      by: ["ISS-419"],
+    };
+    writeYaml(h.repo.localPath, issue);
+    await fetch(`${h.url}/api/issue-save/dispatch-bn-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-420" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const persisted = readYaml(h.repo.localPath, "ISS-420");
+    expect(persisted).toContain("event: status_change");
+    expect(persisted).toContain("from: In Progress");
+    expect(persisted).toContain("to: ToDo");
+    expect(persisted).not.toContain("to: Needs Help");
+    expect(persisted).toContain("event: blocked");
+    expect(persisted).toContain("note: Blocked on ISS-419");
+  });
+
+  it("review-gap fix: _resetForTesting clears lastSeenIssueState — first save after reset emits no diff", async () => {
+    // Pin the cache-clear behavior of _resetForTesting. A regression
+    // that drops the `lastSeenIssueState.clear()` call (or moves it
+    // outside the helper) would silently leak state across tests and
+    // produce order-dependent flakes.
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-430", external_id: "", title: "reset test" }),
+      tracker: "memory",
+      status: "ToDo",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    // Save 1: populates cache with {status: ToDo, blocked: null}.
+    await fetch(`${h.url}/api/issue-save/dispatch-rs-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-430" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Reset clears the cache.
+    _resetForTesting();
+
+    // Save 2: agent flips status. Cache miss → no diff → no entries
+    // appended (acceptable trade-off for the cache-miss path; pinned
+    // by appendDiffEntries' `if (!oldIssue) return` short-circuit).
+    issue.status = "In Progress";
+    writeYaml(h.repo.localPath, issue);
+    await fetch(`${h.url}/api/issue-save/dispatch-rs-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-430" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const persisted = readYaml(h.repo.localPath, "ISS-430");
+    // History stays empty: cache was cleared, so save 2 has no prior
+    // reference and emits zero entries. The status_change(ToDo →
+    // In Progress) transition is intentionally lost — that's the
+    // documented cache-miss semantics.
+    expect(persisted).not.toContain("event: status_change");
+  });
+});
+
+describe("DX-146: handleIssueCreate appends 'created' entry", () => {
+  let h: TestHarness;
+
+  beforeEach(async () => {
+    _resetForTesting();
+    h = await startTestServer();
+  });
+
+  afterEach(async () => {
+    await _drainAsyncWorkForTesting();
+    await h.close();
+  });
+
+  it("test plan #6: fresh card → exactly one 'created' entry with actor dispatch:<id> and to: <draft.status>", async () => {
+    const draft: Issue = {
+      ...createEmptyIssue({ id: "", external_id: "", title: "fresh card" }),
+      tracker: "memory",
+      status: "ToDo",
+    };
+    writeFileSync(
+      issuePath(h.repo.localPath, "fresh-card", "open"),
+      serializeIssue(draft),
+    );
+
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-create-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "fresh-card" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(true);
+
+    const stamped = readYaml(h.repo.localPath, body.id);
+    expect(stamped).toContain("event: created");
+    expect(stamped).toContain("actor: dispatch:dispatch-create-1");
+    expect(stamped).toContain("to: ToDo");
+  });
+
+  it("test plan #8: handleIssueCreate with empty dispatchId → actor 'unknown' AND recordSystemError invoked", async () => {
+    const recordedSystemErrors: string[] = [];
+    const customDeps: IssueRouteDeps = {
+      tracker: h.tracker,
+      recordSystemError: (msg) => {
+        recordedSystemErrors.push(msg);
+      },
+    };
+    const server = createServer(
+      async (req: IncomingMessage, res: ServerResponse) => {
+        const url = req.url ?? "/";
+        const createMatch = url.match(/^\/api\/issue-create\/?([^/?]*)/);
+        if (req.method === "POST" && createMatch) {
+          await handleIssueCreate(req, res, createMatch[1] ?? "", h.repo, customDeps);
+          return;
+        }
+        res.writeHead(404).end();
+      },
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}`;
+
+    try {
+      const draft: Issue = {
+        ...createEmptyIssue({ id: "", external_id: "", title: "no dispatch create" }),
+        tracker: "memory",
+        status: "ToDo",
+      };
+      writeFileSync(
+        issuePath(h.repo.localPath, "no-dispatch-create", "open"),
+        serializeIssue(draft),
+      );
+
+      const res = await fetch(`${url}/api/issue-create/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "no-dispatch-create" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.created).toBe(true);
+
+      const stamped = readYaml(h.repo.localPath, body.id);
+      expect(stamped).toContain("event: created");
+      expect(stamped).toContain("actor: unknown");
+      expect(recordedSystemErrors.length).toBeGreaterThanOrEqual(1);
+      expect(recordedSystemErrors[0]).toMatch(/missing dispatch id/);
+    } finally {
+      await new Promise<void>((resolve) =>
+        server.close(() => resolve()),
+      );
+    }
+  });
+
+  it("review-gap fix: handleIssueCreate seeds the diff cache — agent's first follow-up save mints status_change(ToDo, In Progress)", async () => {
+    // The cache seed at issue-route.ts is the load-bearing line for
+    // the next save's diff: without it, the agent's claim save (the
+    // very first transition after card creation) would miss the
+    // ToDo → In Progress status_change entry. Pin it.
+    const draft: Issue = {
+      ...createEmptyIssue({ id: "", external_id: "", title: "create then claim" }),
+      tracker: "memory",
+      status: "ToDo",
+    };
+    writeFileSync(
+      issuePath(h.repo.localPath, "create-claim", "open"),
+      serializeIssue(draft),
+    );
+
+    const createRes = await fetch(`${h.url}/api/issue-create/dispatch-cc-1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "create-claim" }),
+    });
+    const createBody = await createRes.json();
+    expect(createBody.created).toBe(true);
+    const newId = createBody.id;
+
+    // Read the just-created YAML to mutate it for the claim save.
+    const stamped = readYaml(h.repo.localPath, newId);
+    // Sanity: the `created` entry landed.
+    expect(stamped).toContain("event: created");
+
+    // Agent claims the card: status: ToDo → In Progress.
+    const issue: Issue = {
+      ...createEmptyIssue({ id: newId, external_id: createBody.external_id, title: "create then claim" }),
+      tracker: "memory",
+      status: "In Progress",
+      // Preserve the created entry so the diff path appends to it.
+      history: [
+        {
+          timestamp: new Date().toISOString(),
+          actor: "dispatch:dispatch-cc-1",
+          event: "created",
+          to: "ToDo",
+        },
+      ],
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await fetch(`${h.url}/api/issue-save/dispatch-cc-2`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: newId }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const claimed = readYaml(h.repo.localPath, newId);
+    // Both the created entry AND the status_change must coexist —
+    // proves the cache was seeded by handleIssueCreate (otherwise
+    // save 1 = cache miss → no status_change appended).
+    expect(claimed).toContain("event: created");
+    expect(claimed).toContain("event: status_change");
+    expect(claimed).toContain("from: ToDo");
+    expect(claimed).toContain("to: In Progress");
+    expect(claimed).toContain("actor: dispatch:dispatch-cc-2");
+  });
+});
+
+describe("DX-146: syncTrackedIssueOnComplete reuses the same diff helper", () => {
+  let h: TestHarness;
+
+  beforeEach(async () => {
+    _resetForTesting();
+    h = await startTestServer();
+  });
+
+  afterEach(async () => {
+    await _drainAsyncWorkForTesting();
+    await h.close();
+  });
+
+  it("test plan #10: status change on auto-sync (no prior explicit save) appends entry via the same path", async () => {
+    // Seed: explicit save first to populate cache with status: ToDo.
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-310", external_id: "", title: "auto-sync flow" }),
+      tracker: "memory",
+      status: "ToDo",
+    };
+    writeYaml(h.repo.localPath, issue);
+    await fetch(`${h.url}/api/issue-save/dispatch-pre-complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-310" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    // Agent flips to Done on disk; never saves explicitly. Auto-sync via
+    // syncTrackedIssueOnComplete must append the status_change entry.
+    issue.status = "Done";
+    writeYaml(h.repo.localPath, issue);
+
+    const result = await syncTrackedIssueOnComplete(
+      "dispatch-complete",
+      h.repo,
+      "ISS-310",
+      { tracker: h.tracker, recordError: async () => {} },
+    );
+    expect(result.ok).toBe(true);
+    await _drainAsyncWorkForTesting();
+
+    // Done → moved to closed/. Read from there.
+    const persisted = readYaml(h.repo.localPath, "ISS-310", "closed");
+    expect(persisted).toContain("event: status_change");
+    expect(persisted).toContain("from: ToDo");
+    expect(persisted).toContain("to: Done");
+    expect(persisted).toContain("actor: dispatch:dispatch-complete");
+  });
+
+  it("review-gap fix: tracker-bound auto-sync (external_id != \"\") appends entry once and pushes once", async () => {
+    // The single Test #10 case uses external_id = "" — the local-only
+    // branch. Cover the production path: tracker-bound card, agent
+    // flips status on disk without saving, danxbot_complete fires,
+    // syncTrackedIssueOnComplete picks up the diff via runSync. Pin
+    // (a) entry lands once and (b) tracker push fires once (no
+    // double-append from a hypothetical second helper invocation).
+    await h.tracker.createCard({
+      schema_version: 3,
+      tracker: "memory",
+      id: "ISS-510",
+      parent_id: null,
+      children: [],
+      status: "ToDo",
+      type: "Feature",
+      title: "tb-complete",
+      description: "",
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({ id: "ISS-510", external_id: "mem-1", title: "tb-complete" }),
+      tracker: "memory",
+      status: "ToDo",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    // Seed save populates cache.
+    await fetch(`${h.url}/api/issue-save/dispatch-tbc-seed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "ISS-510" }),
+    });
+    await _drainAsyncWorkForTesting();
+
+    const moveCountAfterSeed = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "moveToStatus").length;
+
+    // Agent flips status to Done on disk; danxbot_complete triggers auto-sync.
+    issue.status = "Done";
+    writeYaml(h.repo.localPath, issue);
+
+    const result = await syncTrackedIssueOnComplete(
+      "dispatch-tbc-complete",
+      h.repo,
+      "ISS-510",
+      { tracker: h.tracker, recordError: async () => {} },
+    );
+    expect(result.ok).toBe(true);
+    await _drainAsyncWorkForTesting();
+
+    // Entry lands ONCE on disk (in closed/ since Done).
+    const persisted = readYaml(h.repo.localPath, "ISS-510", "closed");
+    const statusChangeMatches = persisted.match(/event: status_change/g) ?? [];
+    expect(statusChangeMatches).toHaveLength(1);
+    expect(persisted).toContain("from: ToDo");
+    expect(persisted).toContain("to: Done");
+    expect(persisted).toContain("actor: dispatch:dispatch-tbc-complete");
+
+    // Tracker move-to-status fired exactly once for the auto-sync
+    // (the status_change ToDo → Done routes through `moveToStatus`,
+    // not `updateCard`). Proves runSync ran through the shared diff
+    // helper end-to-end, not a parallel code path that would double-push.
+    const movesNow = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "moveToStatus").length;
+    expect(movesNow - moveCountAfterSeed).toBe(1);
   });
 });

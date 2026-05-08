@@ -51,6 +51,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { json, parseBody } from "../http/helpers.js";
 import {
+  appendHistory,
   IssueParseError,
   issueToCreateInput,
   parseIssue,
@@ -67,6 +68,9 @@ import {
 import type {
   CreateCardInput,
   Issue,
+  IssueBlocked,
+  IssueHistoryEntry,
+  IssueStatus,
   IssueTracker,
 } from "../issue-tracker/interface.js";
 import { createIssueTracker } from "../issue-tracker/index.js";
@@ -84,6 +88,15 @@ export interface IssueRouteDeps {
    * detector turns into an SSE `dispatch:updated` event for the dashboard.
    */
   recordError?: (dispatchId: string, error: string) => Promise<void>;
+  /**
+   * Surface a worker-internal anomaly to the dashboard's `system_errors`
+   * stream. Today the only invocation site is the actor-resolution gap
+   * on save / create when `dispatchId` is empty (DX-146 / Phase 2). The
+   * dashboard's analytics pipe (DX-134 / future Phase 4) is the eventual
+   * consumer; until then the hook is a no-op in production. Tests inject
+   * a recorder to assert the gap is loud, not silent.
+   */
+  recordSystemError?: (message: string) => void | Promise<void>;
 }
 
 /**
@@ -96,6 +109,220 @@ let cachedTracker: IssueTracker | null = null;
 
 /** Per-issue mutex — serializes async sync calls on the same internal id. */
 const issueLocks = new Map<string, Promise<void>>();
+
+/**
+ * Last-seen `{status, blocked}` per internal id. Populated on every
+ * successful save (and `created` on `handleIssueCreate`); read at the
+ * start of each save to compute the diff that drives `appendDiffEntries`.
+ *
+ * This is the only place the worker carries cross-save state for an
+ * issue. Cache miss = first save in this worker process for that id =
+ * no diff (intentional; we have no prior reference state). Worker
+ * restart loses the cache, so the first save after restart also has no
+ * diff — same fallback. The cache is updated AFTER `appendDiffEntries`
+ * is called for the current save so the next save sees the
+ * post-normalization state (`forceBlockedToToDo` already applied).
+ *
+ * **Concurrent-save safety on the same id.** `applyHistoryDiff` reads
+ * `prior` and writes the new state in straight-line synchronous code
+ * (no `await` between the `.get` and the `.set`). Two concurrent
+ * `handleIssueSave` calls on the same id can interleave at the
+ * application level, but inside `applyHistoryDiff` each save observes
+ * a coherent snapshot of `prior`. The "last save wins" outcome is the
+ * intended semantic — B's post-normalization state IS the correct
+ * reference for whatever save lands next, regardless of which call
+ * arrived first at the cache.
+ *
+ * NOT a substitute for the on-disk YAML — the YAML remains the only
+ * persisted source of truth. The cache is purely a diff-source for the
+ * append-only `history[]` audit log.
+ */
+const lastSeenIssueState = new Map<
+  string,
+  { status: IssueStatus; blocked: IssueBlocked | null }
+>();
+
+/**
+ * Fire-and-forget invocation of an optional `recordSystemError` hook.
+ * The hook is `void | Promise<void>` per `IssueRouteDeps`, so a
+ * synchronous throw OR an async rejection both need containment — a
+ * naked `void Promise.resolve(hook())` adopts a rejected return value
+ * without attaching `.catch`, surfacing as `UnhandledPromiseRejection`
+ * (and on `--unhandled-rejections=strict`, exiting the worker).
+ *
+ * Mirrors the `try { await … } catch { log.warn(…) }` shape used by
+ * `src/issue-tracker/retry-queue.ts:433` so the worker has exactly one
+ * way to call instrumentation hooks. We do not block the save path on
+ * the hook — the dashboard SSE consumer (DX-134, future) is best-effort
+ * instrumentation, never a save gate.
+ */
+function fireAndForgetSystemError(
+  deps: Pick<IssueRouteDeps, "recordSystemError"> | undefined,
+  message: string,
+): void {
+  const hook = deps?.recordSystemError;
+  if (!hook) return;
+  let result: void | Promise<void>;
+  try {
+    result = hook(message);
+  } catch (err) {
+    log.warn(
+      `recordSystemError hook threw synchronously: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return;
+  }
+  if (
+    result &&
+    typeof (result as Promise<unknown>).then === "function"
+  ) {
+    (result as Promise<unknown>).catch((err) => {
+      log.warn(
+        `recordSystemError hook rejected: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
+}
+
+/**
+ * Resolve the actor identity for a save / create event. Empty
+ * `dispatchId` is a worker bug we want surfaced to the dashboard,
+ * not silenced — the bare `"unknown"` actor is grandfathered through
+ * `appendHistory`'s format check, so the entry still lands on disk
+ * (operator can chase the gap), but the `recordSystemError` hook
+ * fires so the dashboard `system_errors` stream surfaces it.
+ *
+ * Single source of truth for both `appendDiffEntries` (save path) and
+ * `handleIssueCreate` (create path). The `context` literal is folded
+ * into the diagnostic message so logs distinguish save vs create.
+ */
+function resolveDispatchActor(
+  dispatchId: string,
+  context: "save" | "create",
+  deps: Pick<IssueRouteDeps, "recordSystemError"> | undefined,
+): string {
+  if (dispatchId) return `dispatch:${dispatchId}`;
+  fireAndForgetSystemError(
+    deps,
+    `missing dispatch id on issue ${context} — actor falls back to 'unknown'`,
+  );
+  return "unknown";
+}
+
+/**
+ * Pure helper: compute the new history array for a save by diffing the
+ * agent's saved state against the worker's last-seen state, then
+ * appending one entry per detected transition. Order: `status_change`
+ * before `blocked` / `unblocked` so a same-save status flip reads first
+ * in the timeline.
+ *
+ * Both inputs are taken AFTER `forceBlockedToToDo` normalization so an
+ * agent's `(status: "Needs Help", blocked: {…})` save — given prior
+ * cached state `In Progress` — emits a proper
+ * `status_change(In Progress, ToDo)` plus `blocked` event, not a
+ * spurious `(In Progress, Needs Help)` jump that never actually
+ * persisted (the worker normalizes status → ToDo whenever blocked is
+ * non-null).
+ *
+ *  - `oldIssue == null` → first save in this worker process for this id.
+ *    Returns `newIssue.history` unchanged (by reference, so the upstream
+ *    identity check in `applyHistoryDiff` can avoid the spread). The
+ *    first transition is intentionally unrecorded; the
+ *    `recordSystemError` hook is also NOT fired on this branch — no
+ *    `"unknown"` entry was actually written, so there is nothing for
+ *    the operator to chase.
+ *  - Empty `dispatchId` with at least one transition detected → actor
+ *    falls back to bare `"unknown"` AND `recordSystemError` is invoked
+ *    once. The dashboard's `system_errors` stream (DX-134, future)
+ *    surfaces these gaps so the operator can chase the missing actor at
+ *    the source.
+ *  - All cap + truncation logic is delegated to `appendHistory` (DX-145).
+ */
+export function appendDiffEntries(
+  oldIssue: Pick<Issue, "status" | "blocked"> | null,
+  newIssue: Issue,
+  dispatchId: string,
+  nowIso: string,
+  deps?: Pick<IssueRouteDeps, "recordSystemError">,
+): IssueHistoryEntry[] {
+  if (!oldIssue) return newIssue.history;
+
+  const actor = resolveDispatchActor(dispatchId, "save", deps);
+
+  let history = newIssue.history;
+
+  if (oldIssue.status !== newIssue.status) {
+    history = appendHistory(history, {
+      timestamp: nowIso,
+      actor,
+      event: "status_change",
+      from: oldIssue.status,
+      to: newIssue.status,
+    });
+  }
+
+  if (oldIssue.blocked === null && newIssue.blocked !== null) {
+    history = appendHistory(history, {
+      timestamp: nowIso,
+      actor,
+      event: "blocked",
+      to: newIssue.status,
+      note: `Blocked on ${newIssue.blocked.by.join(", ")}`,
+    });
+  }
+
+  if (oldIssue.blocked !== null && newIssue.blocked === null) {
+    history = appendHistory(history, {
+      timestamp: nowIso,
+      actor,
+      event: "unblocked",
+      to: newIssue.status,
+    });
+  }
+
+  return history;
+}
+
+/**
+ * Apply the diff-driven history append AND update the last-seen cache
+ * in one place. Called by every save path BEFORE the first
+ * `persistAfterSync` so the on-disk YAML carries the new entries. The
+ * cache update happens unconditionally so the next save sees this
+ * save's post-normalization state.
+ *
+ * The `forceBlockedToToDo` normalization happens upstream (in
+ * `handleIssueSave` / `syncTrackedIssueOnComplete`), so `issue` here is
+ * already the post-normalized shape per the diff contract.
+ *
+ * **Allocation:** when no transitions were detected, `appendDiffEntries`
+ * returns `issue.history` by reference; the identity check below short-
+ * circuits the spread so steady-state mid-session saves do not pay an
+ * issue-clone allocation per call.
+ */
+function applyHistoryDiff(
+  issue: Issue,
+  dispatchId: string,
+  deps: IssueRouteDeps,
+): Issue {
+  const prior = lastSeenIssueState.get(issue.id) ?? null;
+  const updatedHistory = appendDiffEntries(
+    prior,
+    issue,
+    dispatchId,
+    new Date().toISOString(),
+    deps,
+  );
+  lastSeenIssueState.set(issue.id, {
+    status: issue.status,
+    blocked: issue.blocked,
+  });
+  return updatedHistory === issue.history
+    ? issue
+    : { ...issue, history: updatedHistory };
+}
 
 /**
  * In-flight task set. Each scheduled async sync registers itself here
@@ -142,6 +369,7 @@ export function _resetForTesting(): void {
   cachedTracker = null;
   issueLocks.clear();
   inFlight.clear();
+  lastSeenIssueState.clear();
 }
 
 /**
@@ -239,6 +467,13 @@ export async function handleIssueSave(
   // poller's dispatch gate then skips the card while every blocker in
   // `by[]` is non-terminal. See `forceBlockedToToDo`.
   issue = forceBlockedToToDo(issue);
+
+  // DX-146 / Phase 2: diff against the worker's last-seen state and
+  // append history entries BEFORE the first persist, so the on-disk
+  // YAML carries the new audit-log rows from this save onward. Both
+  // the local-only and tracker-bound branches go through the same
+  // `applyHistoryDiff` helper — single code path, single cache.
+  issue = applyHistoryDiff(issue, dispatchId, deps);
 
   // Sync validation passed — return `saved: true` immediately. Tracker
   // errors must NEVER surface to the agent (AC #2). The async branch runs
@@ -417,7 +652,7 @@ function persistAfterSync(repoLocalPath: string, issue: Issue): void {
 export async function handleIssueCreate(
   req: IncomingMessage,
   res: ServerResponse,
-  _dispatchId: string,
+  dispatchId: string,
   repo: RepoContext,
   override?: IssueRouteDeps,
 ): Promise<void> {
@@ -580,13 +815,31 @@ export async function handleIssueCreate(
     return;
   }
 
-  const stamped: Issue = {
+  const partiallyStamped: Issue = {
     ...draft,
     external_id: result.external_id,
     ac: draft.ac.map((a, i) => ({
       ...a,
       check_item_id: result.ac[i]?.check_item_id ?? a.check_item_id,
     })),
+  };
+
+  // DX-146 / Phase 2: every freshly-created card gets exactly one
+  // `created` history entry. Empty `dispatchId` falls back to the bare
+  // `unknown` actor and emits a `system_errors` event (same contract
+  // as the save path's actor resolution — both go through
+  // `resolveDispatchActor`). Append happens BEFORE the first
+  // writeFileSync so the entry rides on disk from the very first
+  // persisted byte.
+  const actor = resolveDispatchActor(dispatchId, "create", deps);
+  const stamped: Issue = {
+    ...partiallyStamped,
+    history: appendHistory(partiallyStamped.history, {
+      timestamp: new Date().toISOString(),
+      actor,
+      event: "created",
+      to: partiallyStamped.status,
+    }),
   };
 
   ensureIssuesDirs(repo.localPath);
@@ -597,6 +850,15 @@ export async function handleIssueCreate(
   if (sourcePath !== targetPath && existsSync(sourcePath)) {
     unlinkSync(sourcePath);
   }
+
+  // Seed the diff cache AFTER `writeFileSync` so a failed persist does
+  // not leave the cache holding a snapshot of an issue that does not
+  // exist on disk. The cache is the next save's reference state — any
+  // divergence between cache and on-disk YAML is a correctness hazard.
+  lastSeenIssueState.set(stamped.id, {
+    status: stamped.status,
+    blocked: stamped.blocked,
+  });
 
   json(res, 200, {
     created: true,
@@ -678,6 +940,12 @@ export async function syncTrackedIssueOnComplete(
   // there). Auto-sync on completion goes through this code path when the
   // agent calls `danxbot_complete` without a final explicit save.
   issue = forceBlockedToToDo(issue);
+
+  // DX-146 / Phase 2: same diff append as `handleIssueSave`. The
+  // auto-sync triggered by `danxbot_complete` is a save event from
+  // history's perspective — flipping a phase to Done by walking off
+  // without an explicit save still mints the status_change entry.
+  issue = applyHistoryDiff(issue, dispatchId, deps);
 
   // Skip the tracker push entirely when no external_id is set (memory
   // tracker, drafts that never made it to create). Persist the local
