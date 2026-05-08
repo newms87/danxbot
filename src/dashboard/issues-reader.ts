@@ -6,7 +6,6 @@ import type {
   IssueType,
 } from "../issue-tracker/interface.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
-import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("issues-reader");
@@ -89,10 +88,9 @@ interface RawIssue {
   text: string;
 }
 
-async function readIssueFile(
-  path: string,
-  expectedPrefix: string,
-): Promise<RawIssue | null> {
+const STEM_SHAPE = /^([A-Z]{2,4})-\d+$/;
+
+async function readIssueFile(path: string): Promise<RawIssue | null> {
   let mtimeMs: number;
   let text: string;
   try {
@@ -101,32 +99,32 @@ async function readIssueFile(
     text = await readFile(path, "utf-8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    // ENOENT is the normal "no such issue" path for detail lookups; do not
-    // pollute logs with it. Anything else (EACCES, EIO, etc.) is real.
-    if (code !== "ENOENT" && !warnedPaths.has(path)) {
-      warnedPaths.add(path);
-      log.warn(
-        `Failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    return null;
+    // ENOENT is the normal "no such issue" path for detail lookups —
+    // surface as null. Anything else (EACCES, EIO, ENOTDIR) is a real
+    // disk anomaly and propagates: the route's 500 handler turns it
+    // into an operator-visible error rather than a silently empty list.
+    if (code === "ENOENT") return null;
+    throw err;
   }
-  try {
-    // Phase 2 of ISS-99: thread the per-repo prefix into the validator so a
-    // DX repo rejects a stale `id: "ISS-N"` YAML (cross-prefix files surface
-    // as "malformed" and skip with the existing warn-once log) instead of
-    // silently rendering it on the wrong dashboard.
-    const issue = parseIssue(text, { expectedPrefix });
-    return { issue, mtimeMs, text };
-  } catch (err) {
-    if (!warnedPaths.has(path)) {
-      warnedPaths.add(path);
-      log.warn(
-        `Skipping malformed issue YAML ${path}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    return null;
+  // Derive expectedPrefix from the filename stem, not from a per-repo
+  // config field. `external_id`/`id` are stable across the tracker; the
+  // file's own stem is the canonical prefix for THAT card. This makes
+  // the reader robust to mixed-prefix repos AND to stale cached
+  // `loadIssuePrefix` values inside long-running dashboard processes.
+  // A rogue filename (no stem-shape match) is a real disk anomaly →
+  // throw, no silent skip.
+  const stem = path.split("/").pop()!.replace(/\.yml$/, "");
+  const match = STEM_SHAPE.exec(stem);
+  if (!match) {
+    throw new Error(
+      `readIssueFile: rogue filename "${stem}.yml" at ${path} — stem must match ${STEM_SHAPE}.`,
+    );
   }
+  // parseIssue throws on schema / id-shape / prefix mismatch. Let it
+  // propagate — corrupt YAML in the issues tree is operator-fix
+  // territory, never silent-skip territory.
+  const issue = parseIssue(text, { expectedPrefix: match[1]! });
+  return { issue, mtimeMs, text };
 }
 
 async function listYamlNames(dir: string): Promise<string[]> {
@@ -276,13 +274,6 @@ export async function listIssues(
 ): Promise<IssueListItem[]> {
   const openDir = join(repoCwd, ".danxbot", "issues", "open");
   const closedDir = join(repoCwd, ".danxbot", "issues", "closed");
-  // Resolve the per-repo prefix once per call. `loadIssuePrefix` reads
-  // `<repoCwd>/.danxbot/config/config.yml`; missing config / missing
-  // `issue_prefix` field returns the legacy `"ISS"` default with a
-  // warn-once log. A malformed prefix (shape mismatch) throws — the
-  // dashboard's outer 500 handler surfaces the failure to the operator
-  // instead of silently rendering against the wrong namespace.
-  const expectedPrefix = loadIssuePrefix(repoCwd);
 
   const [openNames, closedNames] = await Promise.all([
     listYamlNames(openDir),
@@ -290,11 +281,11 @@ export async function listIssues(
   ]);
 
   const openRaw = (
-    await Promise.all(openNames.map((n) => readIssueFile(join(openDir, n), expectedPrefix)))
+    await Promise.all(openNames.map((n) => readIssueFile(join(openDir, n))))
   ).filter((r): r is RawIssue => r !== null);
 
   const closedRaw = (
-    await Promise.all(closedNames.map((n) => readIssueFile(join(closedDir, n), expectedPrefix)))
+    await Promise.all(closedNames.map((n) => readIssueFile(join(closedDir, n))))
   ).filter((r): r is RawIssue => r !== null);
 
   // Sort closed by mtime BEFORE slicing — the cap (50) is "newest 50",
@@ -323,13 +314,9 @@ export async function readIssueDetail(
   repoCwd: string,
   id: string,
 ): Promise<IssueDetail | null> {
-  // Resolve the per-repo prefix on detail reads too — required for the
-  // single-id lookup to validate the YAML's `id` field against the
-  // repo's namespace (Phase 2 of ISS-99).
-  const expectedPrefix = loadIssuePrefix(repoCwd);
   for (const sub of ["open", "closed"] as const) {
     const path = join(repoCwd, ".danxbot", "issues", sub, `${id}.yml`);
-    const raw = await readIssueFile(path, expectedPrefix);
+    const raw = await readIssueFile(path);
     if (raw) {
       const issue = applyEpicBlockedProjection(raw.issue);
       return { ...issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };
