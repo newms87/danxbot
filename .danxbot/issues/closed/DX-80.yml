@@ -1,0 +1,279 @@
+schema_version: 4
+tracker: trello
+id: DX-80
+external_id: 69fa49f77ca61c3d4f849a3b
+parent_id: null
+children: []
+dispatch:
+  id: 5da91276-d437-4559-94a6-3e1cf27e5b27
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Bug
+title: "Fix: dashboard vitest yaml CJS import breaks 43 tests"
+description: |-
+  ## Problem
+
+  After commit `a263ddf` (`[Dashboard > Issues] MarkdownEditor + CodeViewer
+  in drawer; AC tab`), running the full dashboard test suite
+  (`cd dashboard && npx vitest run`) reports `3 failed | 17 passed (20)` /
+  `43 failed | 132 passed (175)`. Backend suite + tsc + vue-tsc are clean.
+  Failures all share the same root error:
+
+  ```
+  SyntaxError: Named export 'parse' not found. The requested module
+  '../../node_modules/yaml/browser/dist/public-api.js' is a CommonJS
+  module, which may not support all module.exports as named exports.
+  ```
+
+  Affected test files (none touched by recent feature work):
+  - `dashboard/src/components/SettingsPage.test.ts` (entire suite fails)
+  - `dashboard/src/App.test.ts` (5 cases)
+  - `dashboard/src/composables/useStream.test.ts` (~37 cases)
+
+  ## Root Cause (TBD — needs verification)
+
+  `yaml` package has dual exports (`node` ESM + `default` browser CJS-ish).
+  Vitest in `happy-dom` env resolves `default` → CJS bundle → ESM consumers
+  cannot use named `parse` import. Transitive: `@backend/dashboard/issues-reader.js`
+  → `../issue-tracker/yaml.js` (`import { parse } from "yaml"`) — pulled
+  into the dashboard test graph by issues-tab components that import types
+  from `@backend/dashboard/issues-reader.js`. New imports added in
+  `a263ddf` widened the import surface enough to trigger the resolution.
+
+  ## Solution
+
+  Likely fix in `dashboard/vitest.config.ts`:
+
+  ```ts
+  resolve: {
+    alias: { "@backend": resolve(__dirname, "../src") },
+    conditions: ["node"],   // prefer Node ESM over browser CJS
+  },
+  ```
+
+  Verify with: `cd dashboard && npx vitest run` → expect 175/175 passing.
+  If `conditions` doesn't suffice, alias `yaml` directly to its Node entry
+  (`yaml: resolve(__dirname, "../node_modules/yaml/dist/index.js")`).
+
+  ## Out of scope
+
+  - Refactor of issues-reader / drawer code — this is purely a test-config
+    regression.
+
+  ## Key Files
+
+  - `dashboard/vitest.config.ts`
+  - `dashboard/src/App.test.ts`
+  - `dashboard/src/components/SettingsPage.test.ts`
+  - `dashboard/src/composables/useStream.test.ts`
+  - `node_modules/yaml/package.json` (reference only — read its `exports`)
+
+  ## Verify
+
+  - `cd dashboard && npx vitest run` exits 0 with all suites passing.
+  - `cd dashboard && npx vue-tsc --noEmit` still clean.
+  - No regressions to backend suite or `npx tsc --noEmit`.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa49f9a160df9c371dd7c2
+    title: cd dashboard && npx vitest run reports 0 failures
+    checked: true
+  - check_item_id: 69fa49f989a2ad08c4264c71
+    title: vue-tsc --noEmit still clean
+    checked: true
+  - check_item_id: 69fa49f9002bf82f304d6c5d
+    title: Backend full suite + tsc still clean
+    checked: true
+comments:
+  - id: 69fa4e29320873ea94878229
+    author: newms87
+    timestamp: 2026-05-05T20:08:09.751Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `5da91276-d437-4559-94a6-3e1cf27e5b27` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T20:08:10.310Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T22:08:10.310Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '5da91276-d437-4559-94a6-3e1cf27e5b27' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa51427bff37d621fa5c49
+    author: danxbot
+    timestamp: 2026-05-05T20:21:22.273Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Bug Diagnosis
+
+      **Problem:** `cd dashboard && npx vitest run` exits 1. Two
+      independent failure modes accounted for all 43 reported
+      failures:
+
+      1. `SyntaxError: Named export 'parse' not found` against
+         `node_modules/yaml/browser/dist/public-api.js` — broke
+         `SettingsPage.test.ts` (suite-level fail, 0 tests run) and
+         all 5 cases in `App.test.ts`.
+      2. Every test in `useStream.test.ts` (38) reported as failed.
+
+      **Root Cause:**
+
+      1. `danx-ui` ships a vendored copy of `yaml` at
+         `dashboard/node_modules/danx-ui/dist/node_modules/yaml/`.
+         There is no `package.json` inside the vendored dir, so
+         vite-node walks up to danx-ui's `package.json` (which is
+         `"type": "module"`) — but vite-node's externalization /
+         CJS-interop path still flagged the `browser/dist/*.js`
+         files as CJS, which broke the named ESM `import { parse }
+         from "yaml"` chain reaching them through `SettingsPage.vue`
+         → `danx-ui` → vendored yaml. Verified by grepping the
+         danx-ui dist tree.
+      2. Vitest 4.1.4's default `useFakeTimers()` toFake set hangs
+         `vi.useRealTimers()` inside `afterEach`. Verified with a
+         minimal repro: empty test, `beforeEach(() => vi.useFakeTimers())`,
+         `afterEach(() => vi.useRealTimers())` — afterEach reports
+         `Hook timed out in 10000ms`. Pinning toFake to the standard
+         set resolves it. Independently confirmed the useStream
+         suite was broken at commit `313bb3e` (3 commits before
+         `a263ddf`) via worktree, ruling out an a263ddf regression
+         for that half.
+
+      **Solution:** Add two blocks to `dashboard/vitest.config.ts`:
+
+      - `test.server.deps.inline: ["danx-ui"]` — Vite transforms
+        danx-ui through its own pipeline, sidestepping the CJS-as-ESM
+        misclassification.
+      - `test.fakeTimers.toFake: [<standard list>]` — explicit set
+        excludes whatever new vitest-4 default entry breaks teardown.
+
+      Verification: dashboard `vitest run` 179/179, `vue-tsc` clean,
+      backend `vitest run` 2873/2873, backend `tsc` clean.
+  - id: 69fa51422daf4c0763c97564
+    author: code-reviewer
+    timestamp: 2026-05-05T20:21:22.649Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      No SOLID / DRY violations; both fixes target the actual root
+      cause (transform pipeline, timer install set), not symptoms.
+
+      Findings (both addressed in same edit):
+
+      - `fakeTimers.toFake` block lacked anchor context for future
+        readers — a maintainer could "simplify" by deleting the
+        explicit list, breaking 38 tests on the next dev's machine.
+        → Added a 2-line comment naming the symptom and the
+        verification path (`useStream.test.ts`).
+      - `server.deps.inline: ["danx-ui"]` lacked the same anchor
+        context — a future dep-bump on `danx-ui` may render the
+        workaround unnecessary. → Added a 2-line comment naming the
+        vendored-yaml ESM/CJS issue so the next reader knows when to
+        retest removal.
+
+      Both notes preserve "WHY is non-obvious" without describing
+      what the code does.
+  - id: 69fa5185270a4bc140f1183b
+    author: danxbot
+    timestamp: 2026-05-05T20:22:29.879Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Commit
+
+      **Commit:** 3e5eb69
+      **Completed:**
+      - `cd dashboard && npx vitest run` reports 0 failures (179/179)
+      - `vue-tsc --noEmit` still clean
+      - Backend full suite + tsc still clean (2873/2873)
+  - id: 69fa518600ae2dd6e4414e88
+    author: danxbot
+    timestamp: 2026-05-05T20:22:30.281Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Reproduced both root causes with minimal repros before changing
+        production config — a vitest-only smoke test for the
+        `useFakeTimers` + `useRealTimers` afterEach hang, and a fresh
+        `git worktree` at 313bb3e to confirm useStream tests had been
+        broken since their introduction (not a regression caused by
+        `a263ddf`).
+      - Single-file fix to `dashboard/vitest.config.ts` — no app code
+        changed. Whole dashboard suite (179) + backend suite (2873)
+        green; vue-tsc + tsc clean.
+
+      **What went wrong:** - Card description bounded the bug to "yaml CJS import" (43
+        failures expected), but the suite had a second pre-existing
+        defect masked behind the yaml import error: vitest 4.1.4's
+        default `useFakeTimers()` toFake list hangs `vi.useRealTimers()`
+        in afterEach. Fixing the yaml import unmasked 38 useStream test
+        failures. Step 1.5 / AC #1 ("0 failures") forced the second fix
+        in-session.
+      - First two yaml fix attempts (`resolve.conditions: ["node"]`,
+        direct `yaml` alias) didn't work — the bundled
+        `danx-ui/dist/node_modules/yaml/browser/dist/` path bypasses
+        both. Took finding the vendored copy via grep before the
+        `server.deps.inline: ["danx-ui"]` form clicked.
+
+      **Action items:** Nothing
+      **Commits:** 3e5eb69
+history: []
+retro:
+  good: |
+    - Reproduced both root causes with minimal repros before changing
+      production config — a vitest-only smoke test for the
+      `useFakeTimers` + `useRealTimers` afterEach hang, and a fresh
+      `git worktree` at 313bb3e to confirm useStream tests had been
+      broken since their introduction (not a regression caused by
+      `a263ddf`).
+    - Single-file fix to `dashboard/vitest.config.ts` — no app code
+      changed. Whole dashboard suite (179) + backend suite (2873)
+      green; vue-tsc + tsc clean.
+  bad: |
+    - Card description bounded the bug to "yaml CJS import" (43
+      failures expected), but the suite had a second pre-existing
+      defect masked behind the yaml import error: vitest 4.1.4's
+      default `useFakeTimers()` toFake list hangs `vi.useRealTimers()`
+      in afterEach. Fixing the yaml import unmasked 38 useStream test
+      failures. Step 1.5 / AC #1 ("0 failures") forced the second fix
+      in-session.
+    - First two yaml fix attempts (`resolve.conditions: ["node"]`,
+      direct `yaml` alias) didn't work — the bundled
+      `danx-ui/dist/node_modules/yaml/browser/dist/` path bypasses
+      both. Took finding the vendored copy via grep before the
+      `server.deps.inline: ["danx-ui"]` form clicked.
+  action_item_ids: []
+  commits:
+    - 3e5eb69
+waiting_on: null
+blocked: null

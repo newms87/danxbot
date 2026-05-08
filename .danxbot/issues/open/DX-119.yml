@@ -1,0 +1,49 @@
+schema_version: 4
+tracker: trello
+id: DX-119
+external_id: 69df2751f06ebee25bed3316
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: "[Danxbot > Poller] Route auto-generated error cards to Review list"
+description: |-
+  **Context:** `notifyError` in `src/errors/trello-notifier.ts` creates Trello cards in the `todoListId` by default. The ToDo list is processed by autonomous agents — so auto-generated bug cards (agent timeouts, router errors, handler crashes) get picked up as work items. Agents cannot fix these errors themselves; the cards just create noise and waste agent cycles.
+
+  **Solution:** Change the default target list in `notifyError` to `reviewListId` so auto-generated error cards land in Review for human triage rather than ToDo for agent processing. Operational errors (billing/credit issues) are already sent to the Needs Help list via an explicit override — that path is unaffected.
+
+  **ICE Score:** 567 = 7 × 9 × 9 (I: 7 — prevents agents from picking up unfixable error cards and wasting budget; keeps the workflow clean. C: 9 — single-line default change with very clear path. E: 9 — isolated to one file, under 5 lines changed.)
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69df2793926f243b5308e687
+    title: Change the default targetListId in notifyError to reviewListId instead of todoListId
+    checked: false
+  - check_item_id: 69df279383b9ef21c91fa4ab
+    title: Verify operational errors (isOperational=true) still route to needsHelpListId via explicit override
+    checked: false
+  - check_item_id: 69df2794579f649a212c9827
+    title: Verify a simulated router error creates a card in the Review list, not ToDo
+    checked: false
+  - check_item_id: 69df27958f406639ad6d685c
+    title: Add or update unit test in trello-notifier.test.ts to assert the default list is reviewListId
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

@@ -1,0 +1,96 @@
+schema_version: 4
+tracker: trello
+id: DX-50
+external_id: 69eb90bc8a6bc2668d81ebd5
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot > Agent] Sync .claude/agents/ into connected repos via poller inject pipeline"
+description: |-
+  ## Context
+
+  During Card 183 (Internal Playwright MCP server, commit `a0d98a7`) the plan called for editing every sub-agent file in `src/poller/inject/agents/*.md` to add `mcp__playwright__*` to each sub-agent's `tools:` frontmatter. That directory does not exist — the poller inject pipeline in `src/poller/index.ts#syncRepoFiles` currently syncs three categories into each connected repo's `<repo>/.danxbot/workspace/.claude/` tree: `rules/`, `skills/`, and `tools/`. Sub-agent definitions (e.g. `.claude/agents/ideator.md`, `code-reviewer.md`, `test-reviewer.md`, `validator.md`) live in each connected repo's own `.claude/agents/` dir, developer-maintained per-repo.
+
+  This means that when a sub-agent role needs a new tool (e.g. Playwright, a future vision model, a new MCP server), each connected repo's `.claude/agents/*.md` must be updated independently by hand. Drift is guaranteed over time — one repo gets the update, another doesn't, and the orchestrator ends up dispatching sub-agents that cannot complete the task.
+
+  ## Solution
+
+  Add a fourth inject category: `src/poller/inject/agents/*.md` → `<repo>/.danxbot/workspace/.claude/agents/*.md`. Mirror the existing `injectDanxRules` / `injectDanxSkills` / `injectDanxTools` functions in `src/poller/index.ts`. Authoritative sync with pruning: if a file is removed from `src/poller/inject/agents/`, the corresponding file in every connected repo's workspace is removed on the next poll tick. Filename prefix convention: `danx-*.md` so operator-authored sub-agents in the same dir aren't clobbered — but since the workspace `.claude/agents/` dir is entirely danxbot-owned (it's inside `.danxbot/workspace/`, not the repo root), the prefix is belt-and-suspenders.
+
+  Once the pipeline exists, migrate the four standard danxbot sub-agents (`ideator`, `code-reviewer`, `test-reviewer`, `validator`) from their current per-repo locations into `src/poller/inject/agents/` as `danx-ideator.md`, `danx-code-reviewer.md`, `danx-test-reviewer.md`, `danx-validator.md`. Each file's `tools:` frontmatter lists the exact tool surface the agent needs — at minimum Read/Glob/Grep; orchestrator role additions include Edit/Write/Bash/TodoWrite. Playwright (`mcp__playwright__playwright_screenshot`, `mcp__playwright__playwright_html`) goes into every agent that might verify a rendered page.
+
+  ## Key Files
+
+  - `src/poller/index.ts` — add `injectDanxAgents(target)` mirroring the existing three inject helpers; call it from `syncRepoFiles`.
+  - `src/poller/inject/agents/` — new directory with the four canonical sub-agent definitions.
+  - `src/poller/index.test.ts` — extend the existing assertion that zero writes land outside `<repo>/.danxbot/workspace/.claude/` so it also asserts the new agents subtree is populated.
+  - Each connected repo's existing `.claude/agents/*.md` — deleted after the inject pipeline takes over, OR kept as developer-authored extensions that the inject pipeline won't touch (need to decide).
+
+  ## Verification
+
+  After implementing, poll tick should produce the expected files in each connected repo's `<repo>/.danxbot/workspace/.claude/agents/` dir. Dispatch a test agent whose skill uses Task to spawn a sub-agent with `mcp__playwright__playwright_screenshot` — the sub-agent's tool frontmatter must permit it.
+
+  ## Why this is an Action Item, not a phase of Card 183
+
+  Card 183's scope was the MCP server itself + registry wiring. Adding a new inject pipeline is net-new architecture (new directory convention, new ownership contract with connected repos, new sync semantics to test). Keeping Card 183 tight avoids mixing two concerns in one commit.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments:
+  - id: 69f175cd33bdd8fbec042704
+    author: newms87
+    timestamp: 2026-04-29T03:06:53.170Z
+    text: |-
+      ## Triage — 2026-04-28
+
+      **State:** Keep
+
+      **Evidence**
+
+      - `src/poller/index.ts` — `syncRepoFiles` (line 782) calls `injectDanxSkills`, `injectDanxRules`, `injectDanxTools`, `injectDanxWorkspaces`. No `injectDanxAgents` and no helper for `.claude/agents/`. Inject helper definitions: lines 534, 551, 564.
+      - `src/poller/inject/` contents: `rules/`, `tools/`, `workspaces/` only. No `agents/` source dir.
+      - `find src/poller/inject/workspaces -name agents -type d` returns nothing — no workspace ships sub-agent definitions today either.
+      - Connected repos under `repos/*/.danxbot/workspace/.claude/agents/` are empty dirs (gpt-manager, platform).
+      - Repo-root `.claude/agents/` (developer-owned, danxbot territory excluded) contains the four canonical files: `ideator.md`, `code-reviewer.md`, `test-reviewer.md`, `validator.md`.
+      - git log since `a0d98a7` (Card 183, Internal Playwright MCP) shows no follow-up commit shipping sub-agent inject. Card's premise is current.
+
+      **Architecture note (card description partially stale)**
+
+      The card was written before the workspace-dispatch epic (commit `1f0d375`+, Trello `7ha2CSpc`). Today's correct injection path is per-workspace, not a global `inject/agents/` directory:
+
+      - Drop `danx-*.md` files under `src/poller/inject/workspaces/<workspace>/.claude/agents/` (e.g. `trello-worker/.claude/agents/danx-code-reviewer.md`).
+      - `mirrorWorkspaceTree` (line 705) already recursively copies arbitrary subtrees including `.claude/agents/*.md` — no new helper needed.
+      - The poller-relevant workspace is `trello-worker`. `slack-worker` doesn't dispatch sub-agents today. `system-test` is a smoke fixture and doesn't need them.
+
+      Net implementation: copy the four agent files into `src/poller/inject/workspaces/trello-worker/.claude/agents/danx-*.md`, add a test asserting the inject pipeline materializes them at `<repo>/.danxbot/workspaces/trello-worker/.claude/agents/`, and (separately) decide what to do with the repo-root `.claude/agents/` files (developer-owned per agent-isolation Phase 5 invariant — almost certainly leave them alone; they're for the developer's interactive `claude` only). Updating the card description to match the workspace-dispatch reality is part of pickup.
+
+      **ICE: 280**
+
+      - **Impact (5):** Sub-agent drift is real but only bites when dispatched agents actually invoke sub-agents. Current trello-worker dispatched agents do call `code-reviewer` / `test-reviewer` per `danx-next`; without files in the workspace those Task calls fall back to inline, which is what happens today and has not surfaced as a blocker. Medium.
+      - **Confidence (8):** The mechanism (`mirrorWorkspaceTree` + per-workspace `.claude/agents/`) already exists and is exercised. No architectural risk; just files to author and a test to add.
+      - **Ease (7):** Four agent files × tools-frontmatter audit + one test. Single-session work.
+
+      **Deps:** None active. Card 183 (Internal Playwright MCP, `a0d98a7`) is shipped. No explicit blockers.
+
+      **Recommendation:** Keep in Action Items. Pickup should rewrite the description to target the per-workspace path (drop the "fourth inject category" framing; it's already there via `mirrorWorkspaceTree`) and scope the migration to `trello-worker` only.
+
+      <!-- danxbot-triage -->
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

@@ -1,0 +1,83 @@
+schema_version: 4
+tracker: trello
+id: DX-110
+external_id: 69e86463cfa3e5a6c3cfa74b
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot] Agent isolation > Phase 1: Workspace dir + boot-time config generation"
+description: |-
+  ## Context
+
+  Part of the "Agent isolation" epic. See the epic card for the full architecture. This phase lays the foundation: create a `.danxbot/workspace/` directory per connected repo, owned entirely by danxbot, and generate its contents at worker boot. No spawn changes yet — that's Phase 3. No profile logic yet — that's Phase 2.
+
+  What exists today: `.danxbot/settings.json` is generated at worker boot by `syncSettingsFileOnBoot` in `src/settings-file.ts`. Workers read `<repo>/.danxbot/.env` via `env_file` and have all `DANX_*` vars in process env. The poller injects rules/subagents/skills into `<repo>/.claude/` via `src/poller/inject/`.
+
+  ## Solution
+
+  Extend boot-time sync to also build `.danxbot/workspace/`. Write three files:
+
+  1. `.danxbot/workspace/.mcp.json` — danxbot-owned MCP server declarations with `${DANX_TRELLO_API_KEY}`, `${DANX_TRELLO_API_TOKEN}`, and the board ID from `.danxbot/config/trello.yml`. Commands match prod (`npx -y @thehammer/mcp-server-trello`).
+  2. `.danxbot/workspace/.claude/settings.json` — danxbot-owned permissions, hooks list, subagent refs.
+  3. `.danxbot/workspace/CLAUDE.md` — danxbot-specific system prompt derived from `.danxbot/config/overview.md` + `workflow.md` + `tools.md`.
+
+  Boot is the authoritative build step — files overwrite on every worker start. Content derives from `.danxbot/config/` + `RepoContext`. No operator-toggle content (`overrides.*`) lives in these files — those stay in `<repo>/.danxbot/settings.json`.
+
+  The poller's inject pipeline is unchanged in this phase — it still writes to `<repo>/.claude/`. The switch to workspace happens in Phase 5.
+
+  Add `.danxbot/workspace/` to the connected repo's `.gitignore` (the poller's `.danxbot/.gitignore` sync step is the right place, or add a `.danxbot/.gitignore` manually for now).
+
+  ## Key Files
+
+  - `src/settings-file.ts` — extend `syncSettingsFileOnBoot`
+  - `src/worker/boot.ts` (or wherever boot is wired)
+  - `src/poller/inject/` — read-only in this phase
+  - Tests under `src/__tests__/`
+
+  ## How to Verify
+
+  Start a worker for any connected repo. Observe `.danxbot/workspace/` exists with the expected files. Delete it, restart worker, verify regenerated identically. Confirm `<repo>/.claude/` is untouched by this phase. `make test` and `npx tsc --noEmit` green.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69e865116635a81dd99418c2
+    title: "`.danxbot/workspace/.mcp.json` generated at boot with `${DANX_TRELLO_API_KEY}` / `${DANX_TRELLO_API_TOKEN}` interpolation"
+    checked: false
+  - check_item_id: 69e8651329c9b1ff33863839
+    title: "`.danxbot/workspace/.claude/settings.json` generated at boot with danxbot permissions"
+    checked: false
+  - check_item_id: 69e865152e95fabd0a747533
+    title: "`.danxbot/workspace/CLAUDE.md` generated at boot from `.danxbot/config/` sources"
+    checked: false
+  - check_item_id: 69e86516d80c1be0e1553b98
+    title: Boot is idempotent — re-boot produces byte-identical files
+    checked: false
+  - check_item_id: 69e8651873b0293e7a16f7a4
+    title: Generated files live under `.danxbot/workspace/` only; `<repo>/.claude/` untouched this phase
+    checked: false
+  - check_item_id: 69e86519bca55503bb1262d9
+    title: "Unit tests: boot creates files, regenerates after deletion, missing `.danxbot/.env` fails loud"
+    checked: false
+  - check_item_id: 69e8651abb7fb648390db636
+    title: "`.danxbot/workspace/` added to connected repo's `.gitignore`"
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

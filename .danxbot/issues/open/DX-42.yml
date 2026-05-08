@@ -1,0 +1,66 @@
+schema_version: 4
+tracker: trello
+id: DX-42
+external_id: 69ec47e229d27cfa1c45de3e
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Lint guard: catch ${VAR:-} compose env that overrides image-baked ENV"
+description: |-
+  Action item from Trello auX4nTRk. While fixing the danxbot_commit NULL bug, I introduced a regression that the code-reviewer caught: adding `DANXBOT_COMMIT: ${DANXBOT_COMMIT:-}` to the worker compose `environment:` block silently overrides the image-baked `ENV DANXBOT_COMMIT=<sha>` with empty whenever the host shell doesn't export the var. Same trap could bite any future env baked at image-build time (eg. `BUILD_VERSION`, `RELEASE_TAG`, `GIT_REV`).
+
+  Possible shape:
+  - A vitest unit test in `src/__tests__/unit/` that walks every `compose.yml` in the repo, parses the `environment:` block, and warns when any `${VAR:-}` empty-default key is also declared as `ENV VAR` in the corresponding Dockerfile.
+  - OR a pre-commit hook / `make lint` step that runs the same check.
+  - OR a single regression test guarding only the keys we know are image-baked (DANXBOT_COMMIT today; extend as needed).
+
+  Out of scope for the original card — purely defensive tooling. Low priority but cheap to write.
+
+  Reference: Trello auX4nTRk's "Review Fixes (round 2)" comment + `worker-compose-mounts.test.ts`'s "does not override the baked DANXBOT_COMMIT" test as the prior-art shape.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments:
+  - id: 69f1741412b3c3a6116e90a6
+    author: newms87
+    timestamp: 2026-04-29T02:59:32.330Z
+    text: |-
+      <!-- danxbot-triage -->
+      ## Triage — 2026-04-28
+
+      **State:** Keep
+
+      **Evidence:**
+      - `git log --since="2026-04-23"`: no commit mentions a generic lint guard for `${VAR:-}`-overrides-baked-ENV. Closest commit is `e402f4c` (2026-04-22) which originated this card by baking `DANXBOT_COMMIT` and adding the keyed test.
+      - `src/__tests__/unit/worker-compose-mounts.test.ts` contains only the single-key guard (`describe("worker compose.yml does not override the baked DANXBOT_COMMIT")`), grep-confirmed: regex is `^\s*DANXBOT_COMMIT:\s` — hardcoded to this var. No generic intersect-with-Dockerfile-ENV walker exists anywhere under `src/__tests__/` or `deploy/`.
+      - `package.json` has only `"typecheck": "tsc --noEmit"` — no `lint` script and no pre-commit hook covering this pattern.
+
+      The defensive tooling described in the card body (vitest unit walking every `compose.yml` and intersecting with the matching Dockerfile's `ENV` decls) is not present. Card is still a valid, untaken work item.
+
+      **ICE:** 192 (I=3, C=8, E=8)
+      - **Impact 3** — Defensive only; prevents a single regression class with narrow blast radius (compose env vs Dockerfile-baked ENV). The known instance was caught by code review without this guard.
+      - **Confidence 8** — Concrete approach with prior art (the keyed test) showing the regex shape and the AST-free YAML/Dockerfile parsing pattern works.
+      - **Ease 8** — One vitest file, ~50-100 LOC, no runtime infra. Card author called it "cheap to write".
+
+      **Dependencies:** None blocking. Card cites `auX4nTRk` as origin context only (that fix shipped in `e402f4c`). No explicit or inferred upstream blockers.
+
+      **Epic:** No.
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

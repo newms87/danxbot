@@ -1,0 +1,285 @@
+schema_version: 4
+tracker: trello
+id: DX-71
+external_id: 69f9ee4957b2318b4331a700
+parent_id: DX-70
+children: []
+dispatch:
+  id: 84710e90-435e-487f-a4da-c6a625d22c30
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Autonomous worker restart > Phase 1: Worker-side restart route + orchestration"
+description: |-
+  ## Goal
+
+  Ship the server-side half of `mcp__danxbot__danxbot_restart_worker`:
+  a `POST /api/restart/:dispatchId` route on the worker that an
+  operator (or, after Phase 2, a dispatched agent) can call to make
+  the worker daemon for `<repo>` self-restart. All safeguards land in
+  this phase. The MCP tool that fronts this route ships in Phase 2
+  (parent epic DX-70).
+
+  This phase is fully callable with curl after merge — it is NOT
+  stopgap scaffolding waiting on a future capability.
+
+  ## Architecture
+
+  Two new artifacts:
+
+  - `src/worker/restart.ts` — pure orchestration (no HTTP). Exports
+    `restartWorker(input, deps): Promise<RestartResult>`. `deps` is a
+    factory hook that lets tests substitute `spawn` (re-exec target),
+    `now`, `fetch` (the /health poller), the cooldown clock, the
+    PID source, and the audit row writer. Same pattern as
+    `src/worker/dispatch.ts`'s testable seams.
+  - `src/worker/server.ts` — register `POST /api/restart/:dispatchId`
+    body `{repo, reason, drainInFlight?, timeoutMs?}`. Resolves the
+    requesting dispatch row via `dispatches-db` (cross-repo guard)
+    and forwards to `restartWorker`.
+
+  And one DB artifact:
+
+  - New table `worker_restarts` (id, requesting_dispatch_id, repo,
+    reason, old_pid, new_pid, started_at, completed_at,
+    duration_ms, outcome `'success' | 'cooldown' | 'cross_repo' |
+    'docker_self' | 'spawn_failed' | 'health_timeout'`). Migration
+    in the existing `src/dashboard/migrations/` directory; written-to
+    by `restart.ts` via a small repository helper added alongside
+    `src/dashboard/dispatches-db.ts` (or extending it — pick whichever
+    is more honest about the read/write surface).
+
+  ## Guard order (mechanical — implement exactly)
+
+  1. `repo` field present + non-empty → 400 if not.
+  2. `reason` field present + non-empty → 400 if not.
+  3. Cross-repo: requested `repo` != `RepoContext.name` of this worker
+     → audit `cross_repo`, return 403.
+  4. Docker-mode self-restart: `config.runtime === "docker"` AND
+     requested repo == own repo → audit `docker_self`, return 409.
+  5. Cooldown: in-memory `Map<repo, lastRestartAt>` plus seed-from-DB
+     on first call after worker boot. If `now - lastRestartAt < 30s`
+     (default; configurable) → audit `cooldown`, return 429.
+  6. PID sanity: read `process.pid`, sanity-check it owns the expected
+     port (best-effort `lsof -i :<port>` — fall back to skipping check
+     if `lsof` not available rather than failing the restart).
+  7. Audit `started_at` row.
+  8. Spawn detached re-launcher (host: `make launch-worker-host
+     REPO=<repo>`; docker would have been blocked by guard 4).
+     Detached + `unref()` so the parent SIGTERM doesn't kill it.
+  9. Send SIGTERM to `process.pid`. The HTTP response is flushed
+     BEFORE the SIGTERM fires (`res.end()` followed by
+     `setImmediate(() => process.kill(process.pid, "SIGTERM"))`).
+  10. Detached re-launcher polls `/health` until 200 or
+      `timeoutMs - reservedRespawnMs` exceeded, then writes the
+      `completed_at`, `new_pid`, `duration_ms`, `outcome` columns to
+      `worker_restarts` for the row started at step 7.
+
+  Note: the API caller does NOT see `newPid` or `durationMs` in the
+  HTTP response — by the time those exist, the original worker
+  process is gone. The audit row IS the post-restart record. Phase 2's
+  MCP tool can return the audit row id so the agent can poll for
+  completion if needed; today's response is `{started: true,
+  oldPid, restartId, outcome: "started"}`.
+
+  ## /health poll detail
+
+  `/health` already exists in `src/worker/health.ts`. The poll is a
+  loop: every 1s, `fetch(http://localhost:<port>/health)`, return
+  on first 200, give up at `deadline`. Total wait capped by
+  `timeoutMs - reservedRespawnMs` (default 60_000 - 5_000 = 55_000ms).
+
+  ## Cross-repo guard
+
+  Worker only knows its own `RepoContext.name`. If `body.repo !=
+  ctx.name`, refuse. No cross-worker proxying — each repo's agents
+  hit their own worker's `/api/restart` directly. (Future: dashboard
+  proxy could add cross-worker routing; out of scope for this card.)
+
+  ## Cooldown source of truth
+
+  Primary: in-memory map. Re-seed on worker startup from the
+  `worker_restarts` table — query the latest `success` row's
+  `completed_at` per repo. This survives restart-then-restart-again
+  attempts that would otherwise bypass the cooldown.
+
+  ## Audit table fields
+
+  | column | type | notes |
+  |---|---|---|
+  | id | INT auto | PK |
+  | requesting_dispatch_id | VARCHAR | dispatch that called the route |
+  | repo | VARCHAR | target repo |
+  | reason | TEXT | non-empty per request |
+  | outcome | ENUM | success / cooldown / cross_repo / docker_self / spawn_failed / health_timeout |
+  | old_pid | INT NULL | populated for outcomes that reach SIGTERM |
+  | new_pid | INT NULL | populated by the detached re-launcher |
+  | started_at | DATETIME | request received |
+  | completed_at | DATETIME NULL | populated when /health returns 200 OR timeout |
+  | duration_ms | INT NULL | completed_at - started_at, set with completed_at |
+
+  ## Tests (must all land green this phase)
+
+  `src/worker/restart.test.ts`:
+  - resolves `repo` to current worker's port
+  - cross-repo restart attempt → 403, audit row outcome=cross_repo
+  - cooldown within 30s → 429, audit row outcome=cooldown
+  - cooldown rehydrates from DB on cold worker start
+  - docker-mode self-restart → 409, audit row outcome=docker_self
+  - happy path: spawns detached re-launcher (mocked `spawn`),
+    SIGTERMs `process.pid` (mocked), writes audit row
+  - /health poll returns on first 200
+  - /health poll times out after `timeoutMs - reservedRespawnMs`
+  - audit row captures requesting_dispatch_id + repo + reason +
+    old_pid + new_pid + duration_ms
+
+  `src/worker/server.test.ts`:
+  - `POST /api/restart/:dispatchId` 400s on missing repo
+  - `POST /api/restart/:dispatchId` 400s on missing reason
+  - returns `{started:true, oldPid, restartId}` on success
+  - flushes response BEFORE SIGTERM fires (response complete check)
+
+  ## Key files
+
+  - `src/worker/restart.ts` (new)
+  - `src/worker/restart.test.ts` (new)
+  - `src/worker/server.ts` (route registration, +20 lines)
+  - `src/worker/server.test.ts` (route tests, +50 lines)
+  - `src/dashboard/migrations/<next>_create_worker_restarts_table.sql` (new)
+  - `src/dashboard/worker-restarts-db.ts` (new — small repo helper)
+  - `src/dashboard/worker-restarts-db.test.ts` (new)
+
+  ## Live validation
+
+  Cannot be performed in the dispatch implementing this phase (would
+  kill the agent's own worker). The /health-poll, SIGTERM, and
+  re-exec branches are unit-tested with mocked `spawn` + fake fetch.
+  Live exercise lands on the next danxbot dispatch after Phase 2,
+  whose explicit purpose is "agent calls the restart tool to validate
+  its own change".
+
+  ## Out of scope
+
+  - MCP tool registration / advertise filter / URL injection — Phase 2.
+  - Dashboard cross-worker proxy — future card.
+  - Restarting a worker for a DIFFERENT repo from this worker — future
+    card; this phase rejects all cross-repo callers.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9ee4a528a219a6b84413a
+    title: Worker port resolved from RepoContext.workerPort + best-effort lsof PID-owns-port sanity check
+    checked: true
+  - check_item_id: 69f9ee4ae0116914eed6e9ea
+    title: POST /api/restart/:dispatchId route registered on the worker; returns {started, oldPid, restartId}
+    checked: true
+  - check_item_id: 69f9ee4bd5f85703043acc13
+    title: SIGTERM + detached re-exec sequence implemented; HTTP response flushed before SIGTERM
+    checked: true
+  - check_item_id: 69f9ee4beb21918be72a7e74
+    title: /health poll waits up to timeoutMs - reservedRespawnMs for new worker readiness
+    checked: true
+  - check_item_id: 69f9ee4c7d297bcfde5eb065
+    title: Cross-repo restart attempts rejected with 403 + audit outcome=cross_repo
+    checked: true
+  - check_item_id: 69f9ee4ceac29d39b044a8a0
+    title: Cooldown enforced per repo (default 30s); rehydrates from DB on cold start
+    checked: true
+  - check_item_id: 69f9ee4c814103cd80427c30
+    title: Docker-mode self-restart refused with 409 + audit outcome=docker_self
+    checked: true
+  - check_item_id: 69f9ee4d9866c425f25fa08d
+    title: worker_restarts table + migration created; row captures dispatch_id + repo + reason + PIDs + duration + outcome
+    checked: true
+  - check_item_id: 69f9ee4d28bf07e42b959db5
+    title: Test coverage for every guard branch + happy path + /health poll timeout + audit fields
+    checked: true
+comments:
+  - id: 69f9eed8ba3d05ed80fbc43e
+    author: newms87
+    timestamp: 2026-05-05T13:21:28.471Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `84710e90-435e-487f-a4da-c6a625d22c30` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T13:21:28.467Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T15:21:28.467Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '84710e90-435e-487f-a4da-c6a625d22c30' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69f9f422d41df9d9f27feed3
+    author: danxbot
+    timestamp: 2026-05-05T13:44:02.364Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Deps-injected orchestration in restart.ts kept guards, audit, spawn, and
+      SIGTERM unit-testable without real forks or kills — every guard branch
+      plus the postFlush ordering invariant is covered by mocks.
+      spawn_failed now writes a real spawn_failed audit row (not just a stuck
+      'started' row) — caught by code review and fixed in-session per Step 1.5.
+      lsof helper extracted to src/worker/lsof-pid.ts so the route's old-PID
+      guard and the finalizer's new-PID resolution share one impl. Full backend
+      suite green: 2849 tests, type check clean.
+      **What went wrong:** Card description pointed at src/dashboard/migrations/ but the real
+      migration dir is src/db/migrations/ — fixed in commit. Initial pass
+      skipped the spawn_failed audit transition (deferred behavior comment in
+      code) — code-reviewer correctly flagged it as audit dishonesty; addressed
+      by adding a completeRestart call in the spawn-throw branch. Tests across
+      sibling describe blocks shared mock state (mockInsertRestart) — ate one
+      re-run before adding an explicit reset in the seed→cooldown chain test.
+      **Action items:** Nothing
+      **Commits:** 09b6b53
+history: []
+retro:
+  good: |-
+    Deps-injected orchestration in restart.ts kept guards, audit, spawn, and
+    SIGTERM unit-testable without real forks or kills — every guard branch
+    plus the postFlush ordering invariant is covered by mocks.
+    spawn_failed now writes a real spawn_failed audit row (not just a stuck
+    'started' row) — caught by code review and fixed in-session per Step 1.5.
+    lsof helper extracted to src/worker/lsof-pid.ts so the route's old-PID
+    guard and the finalizer's new-PID resolution share one impl. Full backend
+    suite green: 2849 tests, type check clean.
+  bad: |-
+    Card description pointed at src/dashboard/migrations/ but the real
+    migration dir is src/db/migrations/ — fixed in commit. Initial pass
+    skipped the spawn_failed audit transition (deferred behavior comment in
+    code) — code-reviewer correctly flagged it as audit dishonesty; addressed
+    by adding a completeRestart call in the spawn-throw branch. Tests across
+    sibling describe blocks shared mock state (mockInsertRestart) — ate one
+    re-run before adding an explicit reset in the seed→cooldown chain test.
+  action_item_ids: []
+  commits:
+    - 09b6b53
+waiting_on: null
+blocked: null

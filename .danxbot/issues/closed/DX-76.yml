@@ -1,0 +1,235 @@
+schema_version: 4
+tracker: trello
+id: DX-76
+external_id: 69fa272cecc946ff73d5dc54
+parent_id: DX-74
+children: []
+dispatch:
+  id: e7570aab-57dc-4546-bfc5-64c5c4b08666
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Auto-triage Epic > Phase 2: Rename trelloPoller → issuePoller"
+description: |-
+  ## Context
+
+  Parent epic: DX-74. Per DX-67 the tracker (Trello today, possibly
+  others later) is a one-way mirror; the local YAML is canonical. The
+  per-repo settings key + dashboard label still call the loop "trello
+  poller", which is misleading — it is the **issue poller** that
+  dispatches off local YAML and pushes / pulls to whatever tracker is
+  wired up.
+
+  This card renames the user-facing names without changing behavior.
+
+  ## Solution
+
+  ### Settings file (`src/settings-file.ts`)
+
+  - `Feature` union: replace `"trelloPoller"` with `"issuePoller"`.
+  - `FEATURES` array updated.
+  - `SettingsOverrides.trelloPoller` → `SettingsOverrides.issuePoller`.
+    `TrelloPollerOverride` → `IssuePollerOverride` (keep the
+    `pickupNamePrefix` slot — same semantics, tracker-agnostic name).
+  - `WriteSettingsPatchOverrides` updated.
+  - `defaultSettings()` updated.
+  - `normalizeOverrides`: read from new key first; **fall back to legacy
+    `trelloPoller` key when present**, copying its value into the
+    `issuePoller` slot. Next write canonicalizes (write-side never
+    emits the legacy key).
+  - `getTrelloPollerPickupPrefix` → `getIssuePollerPickupPrefix`.
+    Update all call sites (`src/poller/index.ts`).
+  - `envDefault`: case `"issuePoller"` → `ctx.trelloEnabled` (env var
+    name unchanged for now — operators don't need a forced rotation).
+
+  ### Dashboard
+
+  - `dashboard/src/components/agents/RepoCard.vue`: FeatureToggle
+    `feature="trelloPoller"` → `feature="issuePoller"`, `label="Issue
+    poller"` (replaces "Trello poller").
+  - `dashboard/src/composables/useAgents.ts` + tests: rename type slot
+    + key references.
+  - `src/dashboard/server.ts` + agents API: any explicit `"trelloPoller"`
+    string literal updated.
+
+  ### Tests
+
+  - `settings-file.test.ts`: round-trip writes use new key; legacy-key
+    read → migrated into `issuePoller` slot; default settings shape.
+  - `useAgents.test.ts`: toggle key + label.
+  - Snapshot / fixture JSON in tests must not contain raw
+    `"trelloPoller"` after this card lands.
+
+  ### Docs
+
+  - `~/.claude/rules/issues.md` — already uses generic "tracker"
+    language, no change expected (audit).
+  - `.claude/rules/settings-file.md` — schema block + writer table:
+    rename to `issuePoller`. Add a one-paragraph note: "Read-side
+    accepts legacy `trelloPoller` key for one release; write-side
+    always emits `issuePoller`."
+  - `CLAUDE.md` (project root) — any `trelloPoller` references in the
+    feature-toggle list / dashboard description.
+
+  ## Out of scope
+
+  - Renaming `DANX_TRELLO_ENABLED` env var (keep — would force an
+    operator rotation).
+  - Renaming the `Trello` MCP server, the `trello.yml` config file, or
+    the `IssueTracker` Trello implementation. Those are tracker-specific
+    and correctly named.
+  - Removing the legacy-key read fallback. Leave the fallback in place
+    until a follow-up card explicitly retires it.
+
+  ## Key Files
+
+  - `src/settings-file.ts` + `src/settings-file.test.ts`
+  - `src/poller/index.ts` (call site of `getTrelloPollerPickupPrefix`)
+  - `dashboard/src/components/agents/RepoCard.vue`
+  - `dashboard/src/composables/useAgents.ts` + `useAgents.test.ts`
+  - `src/dashboard/server.ts` + agents-route tests
+  - `.claude/rules/settings-file.md`
+  - `CLAUDE.md`
+
+  ## Verify
+
+  - `grep -RIn '"trelloPoller"' src dashboard` → only present inside
+    the legacy-key migration block in `normalizeOverrides`.
+  - Dashboard renders "Issue poller" toggle, behavior identical.
+  - Existing settings.json files in dev repos with the legacy key
+    still load and toggle correctly; next write emits `issuePoller`.
+  - `npx vitest run` + `cd dashboard && npx vitest run` + `npx tsc
+    --noEmit` + `cd dashboard && npx vue-tsc --noEmit` clean.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa272e2dc4422b8a656acd
+    title: Feature union, FEATURES, defaults, override types renamed to issuePoller
+    checked: true
+  - check_item_id: 69fa272e177d05f01d4ee968
+    title: normalizeOverrides reads legacy trelloPoller key into issuePoller slot; write side emits only issuePoller
+    checked: true
+  - check_item_id: 69fa272e945f497982874c37
+    title: getTrelloPollerPickupPrefix renamed to getIssuePollerPickupPrefix; poller call sites updated
+    checked: true
+  - check_item_id: 69fa272f2879113f45cc1a99
+    title: Dashboard FeatureToggle uses issuePoller / 'Issue poller' label
+    checked: true
+  - check_item_id: 69fa272f9af658624f1ab73a
+    title: settings-file.md + CLAUDE.md docs updated
+    checked: true
+  - check_item_id: 69fa2730979824be7d62b5e6
+    title: All four type-checks + test suites clean (backend + dashboard)
+    checked: true
+comments:
+  - id: 69fa55561af4bf28f0bff8f1
+    author: danxbot
+    timestamp: 2026-05-05T20:38:46.863Z
+    text: |
+      <!-- danxbot -->
+
+      ## Phase 2 Commit
+
+      **Commit:** 4b16fc5
+      **Completed:** all 6 ACs.
+
+      Renamed across backend (`Feature` union, `FEATURES`, `SettingsOverrides`,
+      `IssuePollerOverride`, `defaultSettings`, `envDefault`,
+      `getIssuePollerPickupPrefix`), workspace gate predicate
+      (`settings.issuePoller.enabled ≠ false`), inject + fixture
+      workspace.yml, dashboard FeatureToggle key + label "Issue poller",
+      tests, docs (`.claude/rules/settings-file.md`, `CLAUDE.md`,
+      `docs/superpowers/specs/2026-04-20-agents-tab-design.md`),
+      system-test isolation script.
+
+      Read-side `normalize` accepts legacy `trelloPoller` and migrates
+      it into the `issuePoller` slot (preserves `enabled` +
+      `pickupNamePrefix`). Write-side never emits the legacy key. Three
+      new tests pin the migration: legacy → new on read, prefer-new
+      when both keys present, write canonicalizes after migration.
+      Plus an `agents-routes.test.ts` test rejecting legacy
+      `trelloPoller` in PATCH bodies.
+
+      Verified clean: backend `npx tsc --noEmit`, `cd dashboard && npx
+      vue-tsc --noEmit`, full backend `npx vitest run` (one pre-existing
+      parallelism flake in `src/cli/list-target-repos.test.ts` —
+      passes in isolation, unrelated), full dashboard `cd dashboard &&
+      npx vitest run` (179 pass).
+  - id: 69fa5225b3d384411799152a
+    author: newms87
+    timestamp: 2026-05-05T20:25:09.550Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `e7570aab-57dc-4546-bfc5-64c5c4b08666` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T20:25:09.234Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T22:25:09.234Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l 'e7570aab-57dc-4546-bfc5-64c5c4b08666' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa5557c21a682a86fc6a85
+    author: danxbot
+    timestamp: 2026-05-05T20:38:47.230Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Bulk `replace_all` Edit collapsed the 19-file rename into a
+        handful of calls without manual find-and-replace.
+      - Tests-first migration block in `normalize` plus the dedicated
+        legacy-fallback test pinned the one-release migration contract.
+      - Backend tsc + vue-tsc + both vitest suites clean on the first
+        pass; no follow-up fixes needed.
+
+      **What went wrong:** - One transient parallelism flake in `src/cli/list-target-repos.test.ts`
+        during the full backend run (passes in isolation, unrelated to
+        this card — pre-existing).
+
+      **Action items:** Nothing
+      **Commits:** 4b16fc5
+history: []
+retro:
+  good: |
+    - Bulk `replace_all` Edit collapsed the 19-file rename into a
+      handful of calls without manual find-and-replace.
+    - Tests-first migration block in `normalize` plus the dedicated
+      legacy-fallback test pinned the one-release migration contract.
+    - Backend tsc + vue-tsc + both vitest suites clean on the first
+      pass; no follow-up fixes needed.
+  bad: |
+    - One transient parallelism flake in `src/cli/list-target-repos.test.ts`
+      during the full backend run (passes in isolation, unrelated to
+      this card — pre-existing).
+  action_item_ids: []
+  commits:
+    - 4b16fc5
+waiting_on: null
+blocked: null

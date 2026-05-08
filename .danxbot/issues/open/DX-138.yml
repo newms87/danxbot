@@ -1,0 +1,329 @@
+schema_version: 4
+tracker: trello
+id: DX-138
+external_id: 69fd5b3b44784cc1e04cf502
+parent_id: null
+children:
+  - DX-145
+  - DX-146
+  - DX-147
+  - DX-148
+dispatch: null
+status: ToDo
+type: Epic
+title: "[Dashboard] Card history — status + blocked transitions with actor + dispatch id, plus History tab"
+description: |-
+  ## Context
+
+  Today the YAML schema records the **current** state of a card (status, blocked, dispatch) but loses every prior transition. When a card moves Review → ToDo → In Progress → Needs Help → ToDo → In Progress → Done, only the last state is on disk. Operators auditing "why did this card flip back and forth" or "who marked this Needs Help last week" have to grep worker logs (rotated, partial) or open Trello's audit trail (incomplete + Trello-only).
+
+  Worse — there is no record of WHO did what. A status change can come from:
+
+  - A dashboard operator clicking a toggle.
+  - A dispatched agent's `danx_issue_save` call.
+  - The poller's auto-derive (`epic-status.ts` — DX-98) computing parent status from children.
+  - The worker's healer pass (Phase 3 of DX-130 — once shipped).
+  - The setup skill seeding initial state.
+  - Inbound Trello hydrate (`bulkSyncMissingYamls` adopting a tracker-born card).
+  - A human editing the YAML directly on disk.
+
+  All of those land as identical-looking writes. There is no audit trail and no actor identification.
+
+  ## Solution
+
+  Add an append-only `history[]` field to the `Issue` schema. Every mutation that changes `status`, `blocked`, or creates the card pushes an entry. Each entry identifies the actor with a structured prefix so the dashboard can render it usefully.
+
+  ### Schema
+
+  ```yaml
+  history:
+    - timestamp: 2026-05-08T03:14:22.500Z
+      actor: dispatch:5b079a93-f937-4ada-8867-0b741ffcac09
+      event: created
+      to: ToDo
+    - timestamp: 2026-05-08T03:20:11.812Z
+      actor: dispatch:5b079a93-f937-4ada-8867-0b741ffcac09
+      event: status_change
+      from: ToDo
+      to: In Progress
+    - timestamp: 2026-05-08T03:42:01.144Z
+      actor: worker:auto-derive
+      event: status_change
+      from: In Progress
+      to: Done
+      note: All children Done — derived per DX-98
+    - timestamp: 2026-05-08T04:01:18.000Z
+      actor: dashboard:dan
+      event: blocked
+      to: ToDo
+      note: Blocked on DX-200
+  ```
+
+  Field rules:
+
+  - `timestamp` — ISO 8601, server-side wall clock.
+  - `actor` — required. Format: `<source>:<id>`. Sources defined below.
+  - `event` — `created` | `status_change` | `blocked` | `unblocked`.
+  - `from` / `to` — for `status_change`: previous + new status. For `blocked` / `unblocked`: the status the card holds (always `ToDo` per worker invariant). For `created`: only `to` is set.
+  - `dispatch_id` — DEPRECATED before it ships; the dispatch id lives inside `actor` as `dispatch:<uuid>`. Don't duplicate.
+  - `note` — optional human-readable. Use for derive reasons, healer reasons, blocker `by[]` summary on `blocked`, etc. Capped at 200 chars; longer → truncate + ellipsis.
+
+  ### Actor sources (canonical list)
+
+  | Source prefix | Examples | Set by |
+  |---|---|---|
+  | `dispatch:<uuid>` | `dispatch:5b079a93-...` | Worker `runSync` when the save originated from an agent dispatch |
+  | `dashboard:<username>` | `dashboard:dan` | Dashboard write-paths (Agents tab today; future card-edit endpoints) |
+  | `worker:<reason>` | `worker:auto-derive`, `worker:heal`, `worker:retry-queue`, `worker:reconcile` | Worker auto-mutations not tied to a single dispatch |
+  | `tracker:<name>` | `tracker:trello` | Inbound hydrate / new-card adoption |
+  | `setup` | `setup` | Install / setup skill seeding |
+  | `unknown` | `unknown` | Last-resort fallback when an actor cannot be determined; emits a `system_errors` event so the gap is visible |
+
+  Adding a new source prefix is a deliberate decision — extend this table in this file's history (recursion intended) and the rendering logic together. No silently-introduced prefixes.
+
+  ### Append rules
+
+  - `created` — exactly one entry per card. Pushed by `danx_issue_create` (worker route) and by `bulkSyncMissingYamls` (Trello inbound hydrate).
+  - `status_change` — push when `status` changes between the loaded YAML and the saved YAML. Worker `runSync` compares before/after. Auto-derive (`epic-status.ts`) uses `worker:auto-derive`.
+  - `blocked` — push when `blocked` transitions from `null` to a record. Actor = whoever made the save.
+  - `unblocked` — push when `blocked` transitions from a record to `null`. Worker auto-clears on all blockers terminal → actor `worker:auto-derive` or `worker:heal` depending on path.
+  - Append-only. Never edit existing entries. Never reorder. Truncate at 1000 entries (rolling window — drop oldest); 1000 transitions on a single card means the card is mis-scoped, not that history is wrong.
+  - Migration: existing YAMLs ship with empty `history: []`. No retroactive synthesis.
+
+  ### Worker integration points
+
+  - `src/worker/issue-route.ts` — `runSync` (Phase 1 of DX-130 will have already moved persist before sync; history append happens INSIDE `persistAfterSync` since that's the canonical local-write step). Diff old/new issue, build entries, append before write.
+  - `src/worker/issue-route.ts` — `handleIssueCreate` adds the `created` entry before the first `persistAfterSync`.
+  - `src/poller/epic-status.ts` — when derive flips parent status, append `worker:auto-derive` entry.
+  - `src/poller/index.ts` — `healLocalYamls` (Phase 3) appends `worker:heal` entry on every move.
+  - `src/issue-tracker/trello.ts` (or wherever `bulkSyncMissingYamls` writes hydrated YAMLs) — `tracker:trello` `created` entry.
+  - Dashboard write-paths that mutate status/blocked — pass actor `dashboard:<username>` from the auth-resolved user.
+
+  ### Actor resolution at the worker route
+
+  `runSync` already receives `dispatchId`. The actor is derived: if the request came from an agent dispatch (which is every `danx_issue_save` call), actor = `dispatch:${dispatchId}`. Dashboard-driven saves go through different routes (the existing Agents-tab toggle endpoint already authenticates via `DASHBOARD_PREFIX`); pass that prefix as the actor on those routes. No actor available → `unknown` + system_errors event.
+
+  ### Dashboard surface
+
+  New "History" tab in the card drawer (`dashboard/src/components/IssueDrawer.vue` or the equivalent — locate the existing tab strip with "Description" / "AC" / "Comments" / "Children"). Tab shows entries reverse-chronological with:
+
+  - Relative timestamp (e.g. "2 minutes ago", "yesterday at 4:13 PM"; tooltip = full ISO).
+  - Event icon + label (e.g. ⇄ for status_change, ⛔ for blocked, ✅ for unblocked, ＋ for created).
+  - Actor pill: `dispatch:<short>` rendered as a clickable pill linking to the dispatches view; `dashboard:<user>` renders the username with an avatar; `worker:*` renders a robot icon + the reason; `tracker:trello` renders the Trello logo.
+  - From → To diff for status_change.
+  - Note line below if present.
+
+  Empty history (legacy cards) → "No history recorded — card predates the history schema (or was created before this feature shipped)."
+
+  ## Files
+
+  - `src/issue-tracker/interface.ts` — extend `Issue` type with `history: HistoryEntry[]`
+  - `src/issue-tracker/parse.ts` (or wherever YAML parse lives) — accept `history`; default to `[]`; validate each entry
+  - `src/issue-tracker/serialize.ts` — round-trip `history` in YAML output (ordered after `comments`, before `retro`)
+  - `src/worker/issue-route.ts` — diff old/new on `runSync`, append `created` on `handleIssueCreate`, push entries
+  - `src/poller/epic-status.ts` — `worker:auto-derive` append on parent flip
+  - `src/poller/index.ts` — `worker:heal` append in Phase 3 healer (when that lands; until then, this card adds a TODO comment in the right place)
+  - `src/issue-tracker/trello.ts` — `tracker:trello` `created` append on hydrate
+  - `dashboard/src/components/IssueDrawer.vue` (or actual tab-host) — new History tab
+  - `dashboard/src/components/HistoryTab.vue` (new) — entry rendering
+  - `src/issue-tracker/__tests__/history.test.ts` (or sibling) — round-trip + diff + actor format tests
+
+  ## Test plan (TDD)
+
+  1. YAML round-trip preserves `history[]` exactly (order + fields).
+  2. Parse rejects an entry with missing `actor` or unknown `event`.
+  3. `runSync` appends `status_change` when status differs; no append when status unchanged.
+  4. `runSync` appends `blocked` when transitioning null → record; `unblocked` when record → null.
+  5. `handleIssueCreate` appends exactly one `created` entry.
+  6. `epic-status.ts` derive append uses actor `worker:auto-derive` and includes a `note` describing the rule that fired.
+  7. History over 1000 entries → oldest dropped (rolling cap).
+  8. Unknown actor scenario → `unknown` actor + `system_errors` event emitted.
+
+  Frontend: per CLAUDE.md exemption, dashboard SFCs don't require tests. Type-check + manual smoke verify.
+
+  ## Acceptance
+
+  - `Issue.history` field exists, parses, serializes, round-trips through YAML.
+  - All worker write-paths that mutate `status` / `blocked` push a history entry.
+  - All worker auto-mutations (auto-derive, heal, retry-queue, reconcile mismatch) push a history entry with the right `worker:*` actor.
+  - `created` entries are pushed by `danx_issue_create` AND inbound Trello hydrate.
+  - Dashboard renders a History tab on every card with at least one entry; empty-state message for legacy cards.
+  - 8 backend tests pass; tsc + vue-tsc clean; no existing tests regressed.
+  - Manual smoke: create a card via the dashboard, dispatch it, watch it move ToDo → In Progress → Done, see all 3 entries appear in the History tab with correct actors.
+
+  ## Out of scope
+
+  - History on `description`, `ac[]`, `comments[]`, `retro` edits — only status + blocked + create. Comment + AC mutation history is a separate larger feature; punt.
+  - Diffing the prior YAML at every other field for richer audit — out of scope for this card.
+  - Backfilling history for existing closed cards — they ship empty.
+  - Dashboard UI for filtering / searching history — list view only for v1.
+  - Pushing history to the Trello tracker — Trello has its own audit trail; the YAML history is the canonical record and stays local.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd5b3cbf17b1938dc265ce
+    title: Issue.history field added to schema; YAML parse + serialize round-trips it
+    checked: false
+  - check_item_id: 69fd5b3d5d681f994d81a261
+    title: runSync appends status_change entry when status differs; no append when unchanged
+    checked: false
+  - check_item_id: 69fd5b3d0e34437cb8bc44d7
+    title: runSync appends blocked / unblocked entries on null↔record transitions
+    checked: false
+  - check_item_id: 69fd5b3e559fda65ae09fc60
+    title: handleIssueCreate appends a single 'created' entry with actor dispatch:<id>
+    checked: false
+  - check_item_id: 69fd5b3e4a99bc7ce9635f34
+    title: epic-status.ts auto-derive appends worker:auto-derive with note explaining rule
+    checked: true
+  - check_item_id: 69fd5b3ffb47a029ba2182ff
+    title: Inbound Trello hydrate appends tracker:trello 'created' entry
+    checked: true
+  - check_item_id: 69fd5b3f90f8704b70b38f05
+    title: History capped at 1000 entries (oldest dropped on overflow)
+    checked: false
+  - check_item_id: 69fd5b3f8e64fa122a4d8833
+    title: Unknown actor scenario emits unknown + system_errors event
+    checked: false
+  - check_item_id: 69fd5b4062870395681791a1
+    title: Dashboard History tab renders all events reverse-chronological with actor pills + relative timestamps + from/to diff
+    checked: false
+  - check_item_id: 69fd5b4050918ee3865a798f
+    title: Empty-history legacy card shows the empty-state message instead of a blank tab
+    checked: false
+  - check_item_id: 69fd5b416f778dcfca2b8a51
+    title: 8 backend tests pass; tsc + vue-tsc clean; no existing tests regressed
+    checked: false
+  - check_item_id: 69fd5b41961348ade47a2b64
+    title: Manual smoke — create card via dashboard, dispatch it, watch ToDo → In Progress → Done; all 3 entries appear with correct actors
+    checked: false
+comments:
+  - id: 69fd7721ea97d41a2e33d224
+    author: danxbot
+    timestamp: 2026-05-08T05:39:45.615Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Epic Split
+
+      Promoted from `Feature` to `Epic` and split into 4 serial phases. The work spans two domains (backend schema + worker write-paths + poller derive paths, then dashboard SPA) and ~700-1000 LOC, well past the single-card threshold.
+
+      ### Phase plan
+
+      | # | Phase | Scope |
+      |---|-------|-------|
+      | 1 | Schema | `IssueHistoryEntry` type, parse/serialize round-trip, validation, 1000-entry rolling cap. Lays the on-disk shape every other phase appends to. |
+      | 2 | Worker write-paths | `runSync` diff old/new for status_change + blocked/unblocked, `handleIssueCreate` `created` entry, actor resolution `dispatch:<id>`, `unknown` fallback + `system_errors` event. |
+      | 3 | Auto-mutation appends | `epic-status.ts` `worker:auto-derive` with note, `heal.ts` `worker:heal`, Trello hydrate (`bulkSyncMissingYamls`) `tracker:trello` `created`. |
+      | 4 | Dashboard History tab | `HistoryTab.vue` + tab strip wiring in `IssueDetailView.vue`, actor pills, relative timestamps, from→to diff, empty-state for legacy cards. Backend type extension on `IssueDetail`. |
+
+      ### Phase ordering
+
+      Serial. P2 needs P1's schema. P3 also needs P1 (and the diff helpers from P2 for shape consistency). P4 needs P1 (data shape) plus populated entries from P2/P3. Each phase is `blocked.by` the previous one.
+
+      ### AC mapping
+
+      - P1: AC #1, #7
+      - P2: AC #2, #3, #4, #8
+      - P3: AC #5, #6
+      - P4: AC #9, #10, #12 (dashboard) and #11 (final tsc + vue-tsc + test count gate)
+  - id: 69fd9de2e1a5cb400f796181
+    author: danxbot
+    timestamp: 2026-05-08T08:25:06.446Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Phase 1 Handoff (DX-145 → DX-146)
+
+      **Built:** Schema-only landing of `Issue.history[]`. Commit `4476b6a`. AC #1 + AC #7 of this epic now mechanically achievable by the worker phases. 43 dedicated tests + 3343 backend tests pass; tsc clean.
+
+      **Discoveries:**
+
+      - Code reviewer caught two contract-drift findings during review — the JSDoc on `IssueHistoryEntry.actor` (and on optional `from`/`to`) promised enforcement that no code performed. Closed in this phase: `appendHistory` now throws `IssueHistoryAppendError` on malformed actor or missing per-event fields. `validateHistory` mirrors the per-event check on the parse path so a non-`appendHistory` writer can't sneak a malformed entry through.
+      - The actor format is `^([^:]+:.+|setup|unknown)$` — matches `dispatch:<uuid>`, `dashboard:<user>`, `worker:<reason>`, `tracker:<name>`, plus bare `setup` and `unknown`. Anything else is a `IssueHistoryAppendError` at append-time.
+      - Per-event field invariants now enforced at BOTH parse-time (`validateHistory` returns error string) and append-time (`appendHistory` throws). `status_change` requires both `from` + `to`; `created` / `blocked` require `to`; `unblocked` has no required transition fields.
+      - `HISTORY_CAP = 1000` and `HISTORY_NOTE_CAP = 200` are exported from `src/issue-tracker/yaml.ts`. Phase 2 + 3 callers: import them, don't redefine.
+      - Legacy YAMLs (no `history:` line) parse with `history: []` defaulted in. First post-Phase-1 save adds the line between `comments:` and `retro:` — one-shot diff per existing card. Documented in the legacy-migration test.
+
+      **Corrections:** Updated the validator cap comment on `validateHistory` to note the strictness divergence from `validateTriageHistory` (the latter is lenient on missing strings; the former rejects).
+
+      **Next-agent (DX-146 / Phase 2) context:**
+
+      - `appendHistory(history, entry)` is the ONLY append entry point. It applies the rolling cap + note truncation + actor format + per-event invariants. Phase 2 callers in `src/worker/issue-route.ts` MUST use it — never push directly into `issue.history`.
+      - The worker's `runSync` already runs INSIDE `chainOnIssueLock` AFTER `parseIssue` of the on-disk YAML. The "old" issue (pre-existing on-disk) and "new" issue (saved body) are both available before `forceBlockedToToDo` normalization. Per the description, take the diff AFTER normalization so a `blocked: {…}, status: Needs Help` save doesn't double-count.
+      - Three diff rules (each independent — multiple events can append for one save):
+        - `old.status !== new.status` → `status_change` with `from`/`to`.
+        - `null → record` on blocked → `blocked` event with `to: new.status` (forced ToDo). `note` carries blocker `by[]` summary.
+        - `record → null` on blocked → `unblocked`. Optional note.
+      - For `handleIssueCreate`: append exactly ONE `created` entry AFTER `tracker.createCard` succeeds, BEFORE `writeFileSync(targetPath, serializeIssue(stamped))`. Use `actor: \`dispatch:${dispatchId}\``. Note: `_dispatchId` is currently underscore-prefixed (unused) — remove the underscore to thread it through.
+      - Actor for `runSync` is `dispatch:${dispatchId}`. The worker route already receives `dispatchId` from the URL path.
+      - Unknown-actor scenario (AC #8 of the epic): if no actor is resolvable, push with `actor: "unknown"` and emit a `system_errors` event (track at `src/dashboard/events.ts` — search for `recordSystemError`). The bare `unknown` actor is grandfathered through `appendHistory`'s format check.
+  - id: 69fe316fb006ceb263d99a32
+    author: danxbot
+    timestamp: 2026-05-08T18:54:39.304Z
+    text: |
+      <!-- danxbot -->
+
+      ## Phase 3 Handoff (DX-147 → DX-148)
+
+      **Built:** Auto-mutation history appends. Commit `be94d96`. AC #5 + AC #6 of this epic now mechanically achievable. 32 new tests (epic-status +6, blocked-resolver +7, heal +7, yaml-lifecycle +2); full backend suite 3476/3476 green; tsc clean.
+
+      ### Coverage of the four non-dispatch write paths
+
+      | Path | Actor | Event | Note format |
+      |---|---|---|---|
+      | `recomputeParentStatuses` (epic-status auto-derive) | `worker:auto-derive` | `status_change` | Priority-rule string (e.g. `"All non-cancelled children Done — parent Done"`) |
+      | `resolveBlockedCards` (auto-clear when all blockers terminal) | `worker:auto-derive` | `unblocked` | `"All blockers terminal: ISS-X, ISS-Y"` |
+      | `healLocalYamls` inverse pass (closed/ → open/ on status drift) | `worker:heal` | `status_change` | `"Healer moved closed → open to match status"` |
+      | `hydrateFromRemote` (Trello / MemoryTracker first hydrate) | `tracker:<name>` (dynamic) | `created` | `"Hydrated from tracker external_id <id>"` |
+
+      The typical `open/` → `closed/` heal move emits NO history (no real status delta — janitorial filesystem fix). Per AC #3 of DX-147 ("no filesystem-noise entries").
+
+      **Discoveries:**
+
+      - `resolveBlockedCards` was inline in `src/poller/index.ts` and not exported. Extracted to `src/poller/blocked-resolver.ts` so the auto-clear path is testable without paying the env-validation tax of pulling `index.ts` into a unit test (per `.claude/rules/danx-repo-workflow.md` "Isolate Pure Helpers"). Phase 4 dashboard rendering should NOT need to touch this — read history entries via the standard YAML parse.
+      - The hydrate idempotency guard `if (history.length === 0)` was unreachable in the current code (every tracker returns `history: []` from `getCard`; bulk-sync gates on `findByExternalId`). Removed per Rule 3 (no dead code). If a future card threads `remote.history` through trackers, the guard returns alongside that change.
+      - `deriveStatus` refactored to return `{status, rule}` instead of `IssueStatus | null`. The `rule` string is what the dashboard's History tab renders as the `note` for an auto-derive entry — same string flows into the poller's per-flip log line at `src/poller/index.ts:721` for log-correlated debugging.
+      - Heal's `closed/` → `open/` inverse pass needed a `from` value for the `status_change` entry. Implemented `inferPriorTerminalStatus`: walks history for the most recent terminal status, falls back to `"Done"` for legacy YAMLs (Phase 4 should surface this distinction in the History tab — either render the entry as inferred-from-history or inferred-from-default so a stale audit entry doesn't read as ground truth).
+      - Mid-session, another agent committed DX-201 (commit `9828791`) which wired `injectDanxIssueMcp` into `_poll`. That helper uses `node:fs#renameSync`, but the integration test `src/__tests__/integration/poller-memory-tracker.test.ts` mocks `node:fs` without `renameSync`. Picked up the failure during the gap-fix-pass full-suite run; one-line fix added `renameSync: vi.fn()` to that mock.
+
+      **Corrections:** None to the epic description or other phase cards.
+
+      **Next-agent (DX-148 / Phase 4) context:**
+
+      - Backend type: `IssueHistoryEntry` is the canonical shape (`src/issue-tracker/interface.ts`). Re-export to the dashboard via the existing `src/dashboard/issue-detail.ts` (or sibling) projection so the SPA reads the same type the worker writes.
+      - Dashboard tab placement: the Issues drawer already renders a tab strip with Description / AC / Comments / Children. Add `History` AFTER `Comments` (so legacy users find it where the Trello audit-trail link sat). Empty-state rendering for legacy cards (every existing pre-Phase-1 YAML has `history: []`) — show "No history recorded — card predates the history schema" rather than a blank tab.
+      - Actor-pill rendering: each `actor` is a `<source>:<id>` string per the canonical actor table on this epic's description. Render:
+        - `dispatch:<uuid>` → short uuid pill, click opens dispatches tab filtered by job_id.
+        - `dashboard:<username>` → username + avatar pill.
+        - `worker:<reason>` → robot icon + reason (e.g. `worker:auto-derive` shows ⚙️ + "auto-derived").
+        - `worker:heal` specifically — render note "Healer moved closed → open to match status" verbatim; the inferred-from-history vs default-`Done` distinction is in the prose only for now (see Discoveries — improve in a future card).
+        - `tracker:<name>` → tracker logo + name.
+        - `setup` / `unknown` → bare label.
+      - Relative-time rendering: existing dashboard utilities (search `formatRelative` in `dashboard/src/utils/`) — reuse, don't reimplement.
+      - From-To diff: status names render as colored chips matching the dashboard's existing status palette. Look at how `IssueDetail.vue` renders the current status pill and reuse the component.
+      - Per CLAUDE.md exemption, dashboard SFCs do NOT require unit tests. `vue-tsc --noEmit` is still required.
+      - Backend smoke for AC #11: a 4-tick poller run that walks Review → ToDo → In Progress → Done should produce a card with at least 4 history entries (created from hydrate, status_change ToDo→In Progress from dispatch, status_change In Progress→Done from dispatch, then auto-derive on the parent epic). The integration test `src/__tests__/integration/poller-memory-tracker.test.ts` is the right harness; extend it with a history-readback assertion.
+history:
+  - timestamp: 2026-05-08T23:16:55.910Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: In Progress
+    note: Any child In Progress — parent In Progress
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

@@ -1,0 +1,63 @@
+schema_version: 4
+tracker: trello
+id: DX-37
+external_id: 69ef7fa678a0cdcba10bf8c4
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: Backfill historical dispatches table — token counts inflated 2-5×
+description: |-
+  ## Problem
+
+  Every dispatch row in `dispatches` (MySQL) currently carries `input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` inflated 2-5× by the multi-block-msg-id over-count fixed in commit `d11b63d` ([Danxbot] Fix: dedup usage by message.id...). The dashboard reads from this table for the Tokens panel, the Cost panel (when computed), and analytics — all of which display wrong numbers for every historical dispatch.
+
+  ## Solution
+
+  One-shot incremental backfill script. The JSONL session files are still on disk under each repo's `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`, so the deduped values are recoverable.
+
+  Algorithm:
+  1. Iterate `dispatches WHERE started_at < <fix-deploy-time>` (incremental — never reprocess fixed rows).
+  2. For each row, locate the JSONL by repo + dispatch tag (the `<!-- danxbot-dispatch:<jobId> -->` marker that `SessionLogWatcher` uses).
+  3. Re-aggregate using the new dedup-aware `parseJsonlContent` from `src/dashboard/jsonl-reader.ts`.
+  4. Update the row only if the deduped values DIFFER from the stored values (idempotent).
+  5. Store a high-water mark `started_at` after each batch — re-runs only process new pre-fix rows since the last mark.
+
+  ## Verification
+
+  - Pick 5 historical rows with known reproduction (gpt-manager `830cbd99` is one — real `200,956 → 100,478`); run the backfill in dry-run mode and confirm the recomputed values match the JSONL's `parseJsonlContent` totals.
+  - Compare 10th-run cost vs 1st-run cost: must be identical for the recurring case (just rescans the high-water mark) and vastly cheaper for the one-shot pass.
+  - After full backfill, re-query gpt-manager `830cbd99` via `/api/status` — expect `input_tokens=6, output_tokens=110, cache_creation_input_tokens=100,362`.
+
+  ## Key Files
+
+  - `src/dashboard/jsonl-reader.ts#parseJsonlContent` — the deduped aggregator (already shipped in `d11b63d`)
+  - `src/dashboard/dispatches-db.ts` — the row updater
+  - New: `scripts/backfill-dispatches-tokens.ts` — entry point
+  - `dispatches.started_at` index — verify it exists for the incremental cursor
+
+  ## Reference
+
+  Discovered during gpt-manager production verification (gpt-manager job `830cbd99`). The fix in `d11b63d` corrects new dispatches; without backfill, all pre-d11b63d rows remain wrong. Cost analytics, throughput dashboards, and any rate-limit decisions made off historical numbers are 2-5× too high.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

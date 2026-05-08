@@ -1,0 +1,181 @@
+schema_version: 4
+tracker: trello
+id: DX-132
+external_id: 69fd5b2659f5cd381d6b8fce
+parent_id: DX-130
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "[Trello decouple > Phase 2] Trello retry queue on disk + drain on tick"
+description: |-
+  ## Context
+
+  Phase 1 made local persist tracker-independent. Tracker push failures are now logged + `recordError`'d but otherwise dropped on the floor. When Trello recovers, the YAML's last state is correctly mirrored by the next save (which re-pushes everything via `syncIssue`), but interim saves are lost from Trello's perspective. Net effect today is acceptable for status but not for comments — a comment appended during a Trello outage is invisible until ANOTHER save fires, which may be hours later.
+
+  ## Solution
+
+  On-disk retry queue: `<repo>/.danxbot/.trello-retry/<dispatch_id>-<seq>.json` containing `{issueId, attempt, lastErr, queuedAt, payload?}`. The poller drains the queue at the top of every tick before list fetches. Backoff: attempt 1 → 30s, 2 → 2min, 3 → 10min, 4+ → 1h, max 24 attempts then surface as persistent failure (Phase 4 dashboard event).
+
+  ### What goes on the queue
+
+  Queue entries are `{issueId}` only — at drain time, re-read the YAML and call `syncIssue` fresh. Avoids stale-payload class of bugs (queue entry promised state X, YAML now reflects state Y, push happens on stale snapshot). The cost is one extra file read per drain — negligible.
+
+  ### Drain ordering
+
+  FIFO by `queuedAt`. Successful drain → unlink the queue file. Failure → bump `attempt`, rewrite the file, schedule next attempt by backoff table. Single drain pass per tick to avoid hammering Trello during recovery.
+
+  ### Where the enqueue happens
+
+  `runSync` catch branch (Phase 1) — after `recordError`, write the queue file. New module `src/issue-tracker/retry-queue.ts` exports `enqueueRetry` + `drainRetries`. Poller calls `drainRetries` first thing in `_poll`.
+
+  ## Files
+
+  - `src/issue-tracker/retry-queue.ts` (new)
+  - `src/issue-tracker/retry-queue.test.ts` (new)
+  - `src/worker/issue-route.ts` — call `enqueueRetry` in catch branch
+  - `src/poller/index.ts` — call `drainRetries` at top of `_poll`
+  - `.gitignore` — already covers `.danxbot/` so `.trello-retry/` is auto-gitignored
+
+  ## Test plan (TDD)
+
+  1. `enqueueRetry({issueId})` writes a JSON file under `.danxbot/.trello-retry/`. Filename uses `Date.now()` + UUID for FIFO ordering.
+  2. `drainRetries(tracker)` reads queue files in mtime order, calls `syncIssue` on each, unlinks on success.
+  3. `drainRetries` on failure increments `attempt`, sets next eligibility per backoff table, rewrites file. Subsequent drain before backoff window is a no-op.
+  4. Max 24 attempts → file deleted + persistent failure event emitted (mock `recordSystemError`).
+  5. Drain reads YAML fresh — if YAML was deleted between enqueue and drain, drain unlinks queue entry without a tracker call.
+  6. Concurrent enqueue during drain doesn't double-process (drain takes a snapshot of files at start).
+
+  ## Acceptance
+
+  - On-disk queue at `<repo>/.danxbot/.trello-retry/` survives worker restarts.
+  - Poller drains at the top of every tick with backoff.
+  - 6 new tests pass; no existing tests regressed.
+  - Manual smoke: kill Trello creds, save several YAMLs, verify queue files appear, restore creds, observe queue drained on next tick.
+
+  ## Out of scope
+
+  - Dashboard surface for the queue depth (Phase 4 ties this in).
+  - Retry on non-Trello tracker errors (memory tracker doesn't fail like this).
+  - Compacting queue across restarts (single drain pass per tick is plenty).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd5b2750ef07bb966c4a56
+    title: enqueueRetry writes JSON file under <repo>/.danxbot/.trello-retry/ on tracker failure
+    checked: true
+  - check_item_id: 69fd5b2817680679ecbb989b
+    title: drainRetries reads FIFO, re-fetches YAML, calls syncIssue, unlinks on success
+    checked: true
+  - check_item_id: 69fd5b28f7b94290dded3e94
+    title: Backoff table enforced (30s / 2min / 10min / 1h / max 24 attempts)
+    checked: true
+  - check_item_id: 69fd5b280de0d4ffda3e96e2
+    title: Max-attempts → queue file removed and persistent-failure event emitted
+    checked: true
+  - check_item_id: 69fd5b2938f932e0a1f8effa
+    title: Queue file for a deleted YAML is unlinked without a tracker call
+    checked: true
+  - check_item_id: 69fd5b2956e64f2c527044f5
+    title: 6 new unit tests pass; no existing tests regressed; tsc clean
+    checked: true
+comments:
+  - id: 69fd968740b805be31b85343
+    author: danxbot
+    timestamp: 2026-05-08T07:53:43.015Z
+    text: |
+      <!-- danxbot -->
+
+      ## Notes from Phase 1 (DX-131, commit `a61f4aa`)
+
+      Phase 1 shipped — `runSync` in `src/worker/issue-route.ts` now persists locally before the tracker push. Hook points for this phase:
+
+      - **Where to enqueue.** `runSync`'s catch branch is at `src/worker/issue-route.ts:355-360`. After the existing `log.error` + `await deps.recordError?.(dispatchId, msg)`, add the `enqueueRetry({issueId: issue.id})` call. Both `dispatchId` and `issue.id` are already in scope.
+
+      - **`runSync` is exported now.** It's used by `handleIssueSave` (line 258) and `syncTrackedIssueOnComplete` (line ~698). DO NOT call `runSync` from the retry-queue drain path. The local YAML is already authoritative when the drain fires — only the tracker side is behind. `drainRetries` should read the YAML directly, call `syncIssue` itself, and persist `updatedLocal` only if it differs from the input issue (matching `runSync`'s second-persist contract).
+
+      - **`_poll` already has a top-level try/catch** (DX-149, commit `372f6c0`). Calling `drainRetries` at the top of `_poll`'s body is fine — a throw inside drain will be caught by the outer wrapper and logged as a clean return. Don't add a redundant inner try/catch.
+
+      - **`recordError` poller helper still doesn't exist.** Phase 4 (DX-134) wires the dashboard `system_errors` SSE channel. For Phase 2, "max attempts exceeded" → `log.error` only is acceptable; a follow-up ties the persistent-failure event to the dashboard once Phase 4 lands.
+
+      - **Test pattern.** `src/worker/issue-route.test.ts`'s `runSync (local-first persist)` describe block uses `mkdtempSync` per-test + `rmSync` in `afterEach` for filesystem isolation. `vi.mock("../issue-tracker/sync.js")` for `syncIssue`. Mirror this in `retry-queue.test.ts` — fresh tmpdir per test, mocked tracker.
+
+      - **Idempotency invariant from Phase 1 carries forward.** `persistAfterSync` is safe to call repeatedly with the same input. If the drain succeeds and you persist `updatedLocal`, doing so a second time on a subsequent retry is a no-op.
+
+      Baseline: full suite 3298 pass; tsc clean.
+  - id: 69fdb6802b89f82b6415a934
+    author: danxbot
+    timestamp: 2026-05-08T10:10:08.519Z
+    text: |
+      <!-- danxbot -->
+
+      ## Phase 2 Handoff (DX-132 → next phase agent)
+
+      **Built:** Disk-backed Trello retry queue at `<repo>/.danxbot/.trello-retry/<paddedQueuedAtMs>-<rand>.json`. Failed `runSync` pushes enqueue (after `recordError`); drain runs at the top of `_poll` after both heal passes and before list fetches, inside the existing DX-149 outer try/catch. Backoff: attempt 1 → 30s, 2 → 2min, 3 → 10min, 4+ → 1h; 24-attempt cap. Commit `ff69814`.
+
+      **Discoveries affecting remaining phases:**
+
+      1. **`recordSystemError` hook seam is in place.** `drainRetries` accepts an optional `recordSystemError(message)` dep and fires it on the exhaustion branch (after `MAX_ATTEMPTS` failures). Phase 4 / DX-134 wires this into the dashboard `system_errors` SSE channel — the call site is ready, just inject from the worker boot path. Until then, exhaustion logs at `error` level only. Same hook is also fed by `runSync` failures via `recordError` (separate dep — Phase 1's existing dispatch-row updater).
+
+      2. **`DrainResult` shape.** `{attempted, succeeded, failed, exhausted, yamlMissing, yamlInvalid, skipped, malformed}` — distinct counters for Done-was-deleted (`yamlMissing`), corrupt-on-disk (`yamlInvalid`), still-in-backoff-window (`skipped`), and unparseable-queue-file (`malformed`). Phase 4's banner can pivot on any subset; the per-tick log line in `poller/index.ts:~610` already emits all of them. `skipped`-only ticks are intentionally suppressed from the log (no-op-by-definition).
+
+      3. **Refactor performed mid-phase (refactor-first per zero-debt):**
+         - `issuePath` / `ensureIssuesDirs` / `IssueState` moved to `src/issue-tracker/paths.ts`. `src/poller/yaml-lifecycle.ts` re-exports them for caller compatibility. Tracker-side modules (`sync.ts`, `retry-queue.ts`) now import paths without an upward dep into the poller.
+         - `loadActionItemTitles` hoisted from `worker/issue-route.ts` into `src/issue-tracker/sync.ts` and used by both call sites (worker-driven syncs + poller's drainRetries). Single canonical helper; logger is now an injected param defaulting to `createLogger("sync")`.
+
+      4. **Reviewer-driven coverage additions** (kept as load-bearing tests for future phases):
+         - `retry-queue.test.ts` "drain reads YAML fresh" pins the Phase 2 contract — agent edits between enqueue and drain are observed by the drain.
+         - `retry-queue.test.ts` "MAX_ATTEMPTS-1 → still queued, NOT exhausted" pins the `>` vs `>=` boundary.
+         - `retry-queue.test.ts` "actionItemTitles wiring" pins parity with worker-side retro rendering.
+         - `worker/issue-route.test.ts` "EROFS does not shadow tracker error" pins fail-loud-on-the-right-error containment.
+
+      **Corrections to remaining phase descriptions:** none. DX-133 (Phase 3 / heal pass) shipped earlier as ISS-133, already merged. DX-134 (Phase 4) needs the `recordSystemError` callsite — already present in `drainRetries` + `runSync`. DX-135/6 (resume + `/loop` skill rules) are agent-skill changes orthogonal to this phase. DX-150 (external_id heal) shipped (commit `675de2a`); DX-149 (`_poll` outer catch) shipped earlier and the new drain throw is correctly contained by it (verified by the wiring test "a drainRetries throw is caught by the outer DX-149 wrap").
+
+      **Next-agent context (DX-134 / Phase 4 specifically):**
+      - `drainRetries` already takes `recordSystemError?: (message: string) => void | Promise<void>`. Inject from the worker boot path (or wherever `getRepoTracker` first runs) — no changes to `retry-queue.ts` needed.
+      - The poller log line at `src/poller/index.ts:~610` is the natural place to also fire `recordSystemError` for non-exhaustion outcomes (e.g. `yamlInvalid > 0`) if the dashboard wants those surfaced. Today only the exhaustion branch fires the hook.
+      - `runSync`'s catch branch in `worker/issue-route.ts:~360` already calls `recordError(dispatchId, msg)` which feeds the dispatch-row error column. Phase 4's "system_errors banner" should aggregate from BOTH the dispatch-row column AND the new `recordSystemError` channel.
+      - Full suite + tsc baseline: 3417 pass; type-check clean.
+  - id: 69fdb680cc5983f1cc478255
+    author: danxbot
+    timestamp: 2026-05-08T10:10:08.943Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Refactor-first paid off — extracting `issuePath` to `src/issue-tracker/paths.ts` and hoisting `loadActionItemTitles` to `sync.ts` removed the only two cross-layer warts (issue-tracker importing upward into poller; duplicated linked-YAML loader) before Phase 2 piled on top.
+      - Reviewer agents (test + code) caught 4 distinct gaps the implementation had missed: gitignore claim was false, `result.yamlMissing` overcounted, MAX_ATTEMPTS-1 boundary wasn't pinned, drain-reads-fresh semantic wasn't tested. All addressed pre-commit.
+      - 25 retry-queue unit tests with `mkdtempSync` + `now`/`random` injection give deterministic fast (~150ms) coverage; no flakes, no real-time waits.
+      - Per-tick gitignore install is one-line via the existing `ensureGitignoreEntry` helper — no new sync stage.
+      **What went wrong:** - First attempt at the test file used non-numeric ids (`ISS-A` / `ISS-B`) which the prefix validator rejected with a confusing failure mode. Cost ~5min before realizing the regex is `^ISS-\d+$`.
+      - `result.attempted` was being incremented before the YAML lookup, so missing-YAML drains showed `attempted: 1, yamlMissing: 1` instead of `attempted: 0`. Fixed by moving the increment past the lookup.
+      - Initial gitignore claim ("via `.danxbot/`'s blanket rule") was wrong — there's no such rule and the per-repo `.danxbot/.gitignore` files don't include `.trello-retry/`. Caught by code reviewer; fix is a one-line `ensureGitignoreEntry` call.
+      **Action items:** Nothing
+      **Commits:** ff69814
+history: []
+retro:
+  good: |-
+    - Refactor-first paid off — extracting `issuePath` to `src/issue-tracker/paths.ts` and hoisting `loadActionItemTitles` to `sync.ts` removed the only two cross-layer warts (issue-tracker importing upward into poller; duplicated linked-YAML loader) before Phase 2 piled on top.
+    - Reviewer agents (test + code) caught 4 distinct gaps the implementation had missed: gitignore claim was false, `result.yamlMissing` overcounted, MAX_ATTEMPTS-1 boundary wasn't pinned, drain-reads-fresh semantic wasn't tested. All addressed pre-commit.
+    - 25 retry-queue unit tests with `mkdtempSync` + `now`/`random` injection give deterministic fast (~150ms) coverage; no flakes, no real-time waits.
+    - Per-tick gitignore install is one-line via the existing `ensureGitignoreEntry` helper — no new sync stage.
+  bad: |-
+    - First attempt at the test file used non-numeric ids (`ISS-A` / `ISS-B`) which the prefix validator rejected with a confusing failure mode. Cost ~5min before realizing the regex is `^ISS-\d+$`.
+    - `result.attempted` was being incremented before the YAML lookup, so missing-YAML drains showed `attempted: 1, yamlMissing: 1` instead of `attempted: 0`. Fixed by moving the increment past the lookup.
+    - Initial gitignore claim ("via `.danxbot/`'s blanket rule") was wrong — there's no such rule and the per-repo `.danxbot/.gitignore` files don't include `.trello-retry/`. Caught by code reviewer; fix is a one-line `ensureGitignoreEntry` call.
+  action_item_ids: []
+  commits:
+    - ff69814
+waiting_on: null
+blocked: null

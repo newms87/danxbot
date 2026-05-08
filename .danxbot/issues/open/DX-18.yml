@@ -1,0 +1,61 @@
+schema_version: 4
+tracker: trello
+id: DX-18
+external_id: 69f231be91af5198c196bb7e
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Followup: collapse RepoConfig.workerPort + DANXBOT_WORKER_PORT into one source of truth"
+description: |-
+  ## Context
+
+  After the REPOS_JSON unification (Trello `Ww60zpmx` / commit `9147b28`), the worker port for each connected repo lives in TWO places:
+
+  1. **REPOS_JSON[].workerPort** — read by the dashboard for proxying `/api/launch` to the right worker container.
+  2. **`<repo>/.danxbot/.env DANXBOT_WORKER_PORT`** — read by `repo-context.ts::readWorkerPort` (and by docker-compose interpolation in `<repo>/.danxbot/config/compose.yml`) for the worker container's own bind/port.
+
+  If these drift (operator updates one but not the other), dispatches succeed at the dashboard but the worker either fails to bind (port taken) or binds the wrong port (proxy 502s on every request). Same desync class as the original REPOS / REPO_WORKER_PORTS pair — just at smaller scale.
+
+  ## Why kept out of the original card
+
+  `Ww60zpmx` was scoped specifically to the dashboard-side parallel env vars; touching the per-worker compose interpolation contract would have ballooned the blast radius (`compose.yml` files in every connected repo, `worker-env.sh`, `entrypoint.sh`).
+
+  ## Acceptance
+
+  - Worker boot reads its own port from `REPOS_JSON[N].workerPort` (where `N` matches `DANXBOT_REPO_NAME`), NOT from `<repo>/.danxbot/.env DANXBOT_WORKER_PORT`.
+  - `<repo>/.danxbot/config/compose.yml` interpolates the port from REPOS_JSON (or a derived export) — no separate env var.
+  - `worker-env.sh` either disappears or pivots to extracting the port via jq from REPOS_JSON.
+  - `DANXBOT_WORKER_PORT` is removed from every connected repo's `<repo>/.danxbot/.env` and from `.env.example`.
+  - Tests cover the new single-source path (worker mode picks port up from REPOS_JSON given DANXBOT_REPO_NAME).
+  - Coordinated `deploy-secrets-push` + `deploy` against gpt, smoke-tested.
+
+  ## Key files
+
+  - `src/repo-context.ts::readWorkerPort` (delete or rewrite)
+  - `src/config.ts` (worker-mode synthetic fallback now needs port too)
+  - `<repo>/.danxbot/config/compose.yml` (interpolation source)
+  - `scripts/worker-env.sh` (pivot or delete)
+  - `src/repo-context.test.ts`, `src/__tests__/integration/launch-all-workers.test.ts`
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

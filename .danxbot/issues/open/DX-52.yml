@@ -1,0 +1,79 @@
+schema_version: 4
+tracker: trello
+id: DX-52
+external_id: 69e82f9d71a2c89bc8fc6b30
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: "Fix: gitignore or delete stale .danxbot/card-status.md handoff notes"
+description: |-
+  ## Context
+
+  `.danxbot/card-status.md` was written by an earlier session as a blocked-work handoff note. Its content was specific to one session's blockers (Docker EACCES, MCP Trello path mount) and is no longer current — subsequent commits resolved both issues. The file has been untracked in git for multiple sessions and keeps showing up in every `git status` output, adding noise.
+
+  ## Problem
+
+  - Untracked stale file clutters every session's `git status` and session-start snapshot
+  - Its content is misleading — claims "Implementation COMPLETE — blocked on X" for things that landed hours ago
+  - Sessions occasionally trip over it trying to figure out what state the repo is in
+
+  ## Proposed fix
+
+  Add `/.danxbot/card-status.md` (or generalize to `/.danxbot/*.md` if other such handoff files are anticipated) to `.gitignore`. Delete the current file. Ephemeral agent-to-agent handoff already has a proper home (Trello card comments; see `trello.md::Update the next phase card before ending the session`).
+
+  ## Key files
+
+  - `.gitignore` — add ignore path
+  - `.danxbot/card-status.md` — delete
+
+  ## How to verify
+
+  - `git status` after the fix shows no reference to this file
+  - Future sessions that write a handoff file at that path also get gitignored automatically
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments:
+  - id: 69f1767d66c0cc0d905e2c9c
+    author: newms87
+    timestamp: 2026-04-29T03:09:49.856Z
+    text: |-
+      ## Triage — 2026-04-28
+
+      **State:** Partial
+
+      **Evidence:**
+      - `find . -name card-status.md` returns nothing — the stale file was already deleted in a prior session.
+      - `git status` shows no `card-status.md` reference; the noise complaint in the description is no longer reproducible.
+      - However, `.gitignore` (root) and `.danxbot/.gitignore` do NOT contain a `card-status.md` or `*.md` entry. Root .gitignore has `.danxbot/CRITICAL_FAILURE` and `.danxbot/workspaces/` but nothing matching `card-status`. `.danxbot/.gitignore` lists only `features.md`, `.env`, `.env.*`, `!.env.example`, `settings.json`, `.settings.lock`.
+      - Net: half (a) "delete the current file" is done. Half (b) "future sessions that write a handoff file at that path also get gitignored automatically" is NOT done — a future session recreating `.danxbot/card-status.md` would untrack-clutter `git status` again exactly as before.
+      - No git log commits mention `card-status` or `handoff`.
+
+      **ICE:**
+      - I=2 — Cosmetic; only fires if a session ever recreates this exact filename (rare, observed once historically).
+      - C=9 — Single-line `.gitignore` edit, behavior is well-understood.
+      - E=9 — Trivial; ~30 seconds of work.
+      - **Total: 162**
+
+      **Deps:** None.
+
+      **Recommended scope when picked up:** Add `card-status.md` (or generalize to `*-status.md` / pattern matching observed handoff filenames) to `.danxbot/.gitignore` only. No file to delete. Verify via `touch .danxbot/card-status.md && git status` showing it ignored.
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

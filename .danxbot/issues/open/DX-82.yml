@@ -1,0 +1,114 @@
+schema_version: 4
+tracker: trello
+id: DX-82
+external_id: 69fa81747c0bad3d82ecc936
+parent_id: null
+children:
+  - DX-83
+  - DX-84
+dispatch: null
+status: Review
+type: Epic
+title: "[Dashboard > Issues] Agent Chat (per-card + per-board)"
+description: |-
+  ## Context
+
+  Claude Design handed off a UI bundle adding two new chat surfaces to the Issues tab:
+
+  1. **Per-card chat** — new `Chat` tab inside the issue drawer. Resumes the original Claude Code dispatch that implemented the card so the operator can ask follow-up questions with full context already loaded. Falls back to "start new session" when no dispatch exists.
+  2. **Per-board chat** — new `💬 Chat with danxbot` button on the issues toolbar. Opens a 640px right-side drawer with a session picker (recent board chats for the current repo) plus a `+ New chat` action. Used to triage / plan / ask questions about the whole board.
+
+  Both surfaces use a single `AgentChat` Vue component rendering the same JSONL block vocabulary the dispatch detail panel already uses (user, thinking, tool_use+tool_result paired, assistant_text). Chat resumes the live Claude Code session — operator sees thinking, tool calls, partial output stream as it lands, identical to dispatch detail.
+
+  ## Solution
+
+  Ship in 2 phases as separate cards.
+
+  - **Phase 1 (DX-83) — UI shell.** Vue port of the design's `AgentChat.jsx` + `BoardChatOverlay.jsx`. New `Chat` tab on `IssueDrawer.vue`. New chat button on `FilterToolbar.vue`. Drawer width 560 → 640. Fixtures-only — no backend wiring yet. Lets us validate the visual design without touching dispatch infra.
+  - **Phase 2 (DX-84) — JSONL stream + resume backend.** Issue→dispatch lookup endpoint, JSONL timeline endpoint (already partly available via `src/dashboard/jsonl-reader.ts`), per-dispatch SSE channel for live tail, `POST /api/sessions/:id/resume` that wraps `/api/resume`, board-chat workspace skeleton, and Send/Stop wiring on the frontend.
+
+  ## JSONL Integration Approach (informs Phase 2)
+
+  Chat is NOT a new dispatch shape — it is a thin viewer + resume around the existing single-fork JSONL pipeline:
+
+  - Claude Code writes every session (headless or interactive) to `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`. `SessionLogWatcher` (`src/agent/session-log-watcher.ts`) is the ONLY monitoring source. `src/dashboard/jsonl-reader.ts` already parses the file into block arrays for the dispatch detail panel — chat reuses the same parser.
+  - Resuming a dispatch = `POST /api/resume {repo, job_id, task}`. Worker resolves parent's session UUID via `findSessionFileByDispatchId` (scans for the dispatch tag), spawns fresh claude with `--resume <sessionId>` + a fresh dispatch tag. New turns append to the SAME JSONL file. Tag disambiguates this spawn's slice within the shared JSONL — see `.claude/rules/agent-dispatch.md` "Resume" section.
+  - For chat live-tail: subscribe a per-dispatch SSE channel that forwards `SessionLogWatcher` entries to the frontend. Existing `src/dashboard/events.ts` already broadcasts dispatch events — extend with a per-dispatch JSONL stream OR have the frontend subscribe to the watcher's emitter directly via a new SSE route keyed by dispatch_id.
+  - Multi-block dedupe: any consumer accumulating `usage` MUST dedupe by `message.id` (see `agent-dispatch.md` "Multi-block assistant turns"). Token meter on the chat header consumes the same dedupe path.
+  - Token / Stop chips on the chat header back onto the existing live-running dispatch row. Stop = `POST /api/cancel/:dispatchId`.
+  - For per-issue chat resume, the dispatches table needs `issue_id` (verify schema; if missing, this becomes a Phase 2 sub-task — backfill is non-trivial since it requires walking past dispatches' prompts for the `[ISS-N]` tag).
+  - For per-board chat: a fresh `/api/launch` against a new `board-chat` workspace (needs `<repo>/.danxbot/workspaces/board-chat/` injected from `src/poller/inject/workspaces/board-chat/`). Each chat session = one dispatch chain (initial launch + N resumes). Workspace prompt: "you are danxbot, the operator wants to chat about the <repo> board, here are open issues, here's `danx_issue_save` etc."
+
+  ## Acceptance Criteria
+
+  - DX-83 (UI Phase) reaches Done.
+  - DX-84 (Backend Phase) reaches Done.
+  - Both surfaces render live JSONL blocks (thinking + tool_use + assistant_text) identical in shape to dispatch detail.
+  - Operator can stop a streaming chat reply from the chat header.
+  - Token meter on the chat header sums input/output/cache and shows context-window fill percent, deduped by `message.id`.
+  - Per-issue Chat tab label reads `Chat · resume` when a dispatch exists for the issue, `Chat` otherwise.
+  - No backwards-compat shims — when Phase 2 lands, the fixtures path from Phase 1 is deleted, not toggled.
+
+  ## Out of scope
+
+  - Multi-user concurrent chat on the same dispatch (two operators chatting at once into one session). One operator per dispatch — second open shows a read-only state. Future work.
+  - Chat history search.
+  - Slack-side chat (different surface; this is dashboard-only).
+
+  ## Key Files
+
+  - `dashboard/src/components/issues/IssueDrawer.vue`
+  - `dashboard/src/components/issues/FilterToolbar.vue`
+  - `dashboard/src/components/issues/IssuesPage.vue`
+  - `dashboard/src/components/chat/AgentChat.vue` (new)
+  - `dashboard/src/components/chat/BoardChatOverlay.vue` (new)
+  - `dashboard/src/components/chat/ChatTimeline.vue` (new)
+  - `dashboard/src/components/chat/ChatComposer.vue` (new)
+  - `dashboard/src/components/chat/SessionContextBar.vue` (new)
+  - `dashboard/src/components/chat/TokenMeter.vue` (new)
+  - `src/dashboard/server.ts` — new chat-session routes
+  - `src/dashboard/jsonl-reader.ts` — reused
+  - `src/agent/session-log-watcher.ts` — reused
+  - `src/dashboard/events.ts` — extend for per-dispatch SSE channel
+  - `src/poller/inject/workspaces/board-chat/` (new workspace dir)
+
+  Reference: `/tmp/design_pkg/danxbot-design-system/project/ui_kits/dashboard/AgentChat.jsx`, `IssueDrawer.jsx`, `IssueBoard.jsx`. Original handoff: `/tmp/design_pkg/danxbot-design-system/chats/chat1.md`.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa81743ef5ee9dbb2f02d6
+    title: ISS-83 UI Phase reaches Done
+    checked: false
+  - check_item_id: 69fa8175e2ae5b46f1518661
+    title: ISS-84 Backend Phase reaches Done
+    checked: false
+  - check_item_id: 69fa81755ff8623ecf366129
+    title: Per-card Chat tab streams JSONL blocks live (thinking + tool_use + assistant_text)
+    checked: false
+  - check_item_id: 69fa8176b1d30b8a83a6a8b4
+    title: Per-board chat overlay streams JSONL blocks live
+    checked: false
+  - check_item_id: 69fa8176f0e1bd220419ded9
+    title: Stop button cancels streaming reply via /api/cancel
+    checked: false
+  - check_item_id: 69fa8177b23a9aa5e600ab9e
+    title: Token meter dedupes usage by message.id and shows context-window fill
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

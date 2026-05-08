@@ -1,0 +1,222 @@
+schema_version: 4
+tracker: trello
+id: DX-209
+external_id: 69fe5163e15cf841ee5b9abc
+parent_id: DX-141
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "[DB registry > Phase 2c] reattach.ts — DB-driven full-stack reattach for alive PIDs"
+description: |-
+  ## Context
+
+  Sub-phase 2c of `DX-141` (DB-driven full-stack reattach). Builds on
+  Phase 2a (`mcp_settings_path` column) and Phase 2b
+  (`attachMonitoringStack` helper). Replaces
+  `reconcileOrphanedDispatches` with a pass that BOTH resolves dead
+  PIDs AND fully reattaches alive ones — `activeJobs` entry +
+  SessionLogWatcher + StallDetector + heartbeat + completion
+  routing.
+
+  Until Phase 2c lands, every alive non-terminal dispatch surviving
+  a worker restart is functionally an orphan from the worker's
+  runtime perspective: status queries return "no such job", cancel
+  no-ops, no usage tracking, no event forwarding, no stall
+  detection.
+
+  ## Solution
+
+  New `src/worker/reattach.ts` exporting
+  `reattachOrResolveDispatches(repoName)`. Per non-terminal row:
+
+  1. Probe liveness via `isPidAlive(host_pid)`.
+  2. **Dead PID** — same as today: `pid_terminated_at = NOW`,
+     `status = failed`, summary = `ORPHAN_SUMMARY`.
+  3. **Alive PID** — full reattach:
+     - Locate JSONL via `findSessionFileByDispatchId(sessionDir,
+       dispatchId)` (already exists).
+     - Build a reattach `AgentHandle` shim that wraps the existing
+       PID — `kill(signal)` calls `process.kill(pid, signal)`,
+       `isAlive()` calls `isPidAlive(pid)`, `pid` getter returns
+       the row's `host_pid`. Emits no `onExit` until the host
+       process actually exits (poll-based, same TTL as the host-
+       mode handle).
+     - Construct a partially-populated `AgentJob` with id =
+       dispatchId, status = "running", startedAt = row's
+       `started_at`, the shim handle, and zero usage (the watcher
+       will accumulate from EOF onwards).
+     - Call `attachMonitoringStack` (Phase 2b) with the shim job.
+     - Force the SessionLogWatcher to start at EOF — only NEW
+       entries from this point forward. Add an option to the
+       watcher's start (or pass `{ skipExistingEntries: true }`) so
+       reattach doesn't replay history into the usage accumulator.
+     - Insert into the worker's `activeJobs` map under the
+       dispatchId so `/api/status`, `/api/cancel`, `/api/stop`,
+       `/api/jobs` all observe parity with newly-spawned jobs.
+     - Attach `StallDetector` (mirroring `setupStallDetection` in
+       `dispatch/core.ts` — mode-aware, only when host runtime).
+     - If the row has `mcp_settings_path` AND the file's stored
+       `DANXBOT_STOP_URL` differs from the current worker port,
+       rewrite the file in place. Atomic via tmp+rename.
+     - Reuse the existing `dispatchTracker` row by passing it
+       through the helper (NEW: `attachMonitoringStack` accepts an
+       `existingDispatchTracker`).
+
+  4. **JSONL not found** (rare — claude session log was cleaned up):
+     mark row failed with summary "session log gone after worker
+     restart"; same pid_terminated_at stamp.
+
+  ## Boot flow change
+
+  In `src/index.ts`:
+    - Replace `reconcileOrphanedDispatches(repo.name)` with
+      `reattachOrResolveDispatches(repo.name, { activeJobs,
+      currentWorkerPort })`.
+    - Keep `reconcile.ts` as a thin re-export of the new module's
+      dead-PID branch, OR delete it entirely once no consumer
+      references it. Single behaviour, single module.
+
+  Poller's `runStartupReattach` becomes redundant for issue-card
+  dispatches (the DB pass already handled them) but stays as a
+  defense-in-depth + the source of truth for `activeDispatches`
+  map (which guards same-card duplicate dispatch). The two passes
+  coexist: DB-pass wires the runtime monitoring; YAML-pass wires
+  the per-card claim-token map.
+
+  ## Files
+
+  - `src/worker/reattach.ts` (new) — the pass.
+  - `src/worker/reattach-handle.ts` (new) — the shim AgentHandle
+    that wraps an existing PID. (Sibling to `agent-handle.ts`.)
+  - `src/worker/mcp-settings-rewrite.ts` (new) — atomic
+    DANXBOT_STOP_URL rewrite if port differs.
+  - `src/agent/attach-monitoring-stack.ts` — accept new optional
+    `existingDispatchTracker` parameter (or `skipExistingEntries`
+    for the watcher).
+  - `src/agent/session-log-watcher.ts` — add `start({ fromEof:
+    true })` mode (or equivalent option).
+  - `src/index.ts` — replace reconcile call with reattach call.
+  - `src/worker/reconcile.ts` — delete OR slim to re-export.
+  - `src/worker/reattach.test.ts` (new) — unit tests.
+  - `src/worker/reattach-handle.test.ts` (new) — handle shim tests.
+  - `src/worker/mcp-settings-rewrite.test.ts` (new) — rewrite tests.
+  - `src/__tests__/integration/reattach-lifecycle.test.ts` (new) —
+    integration test exercising the alive-PID reattach end-to-end.
+
+  ## Test plan (TDD)
+
+  1. Worker restart with non-terminal row + alive PID →
+     `getJobStatus(dispatchId)` returns the active job; watcher is
+     attached; activeJobs map has the entry.
+  2. Worker restart with non-terminal row + dead PID → row marked
+     failed + `pid_terminated_at` stamped (regression-equivalent of
+     today's reconcile behaviour).
+  3. Reattach for a Slack dispatch (no issue-card YAML) →
+     activeJobs registered correctly.
+  4. Reattach for an /api/launch dispatch → statusUrl heartbeat
+     resumes; external caller sees fresh status.
+  5. JSONL-not-found case → row marked failed with distinct summary
+     "session log gone after worker restart".
+  6. Same-port worker restart → `mcp_settings_path` file is NOT
+     rewritten.
+  7. Different-port restart → `mcp_settings_path` file IS rewritten
+     atomically (tmp + rename).
+  8. Reattached job is cancellable via /api/cancel/:id → SIGTERM
+     reaches the existing PID; cleanup chain runs end-to-end.
+
+  ## Acceptance
+
+  - `reattachOrResolveDispatches` replaces
+    `reconcileOrphanedDispatches` as the boot pass.
+  - Every non-terminal alive dispatch is registered with full
+    monitoring stack post-restart.
+  - Works for Slack + /api/launch + poller dispatches.
+  - Per-dispatch MCP settings file is rewritten only when port
+    differs.
+  - Reattached jobs cancellable + status-queryable via existing
+    routes.
+  - 8 new unit tests pass; no existing tests regressed; tsc clean.
+
+  ## Out of scope
+
+  - Process-table scan (Phase 3 = `DX-142`).
+  - Cross-host reattach.
+  - Replacing per-dispatch MCP settings with a runtime-config
+    endpoint.
+
+  ## Manual verification (cannot be automated in this card's tests)
+
+  Verifying AC #2 end-to-end requires killing the worker mid-
+  dispatch and observing that the agent's next `danxbot_complete`
+  reaches the new worker. Document the procedure in the retro:
+
+  ```
+  1. Dispatch a long-running card.
+  2. While running: docker kill -s 9 danxbot-worker-<repo>
+  3. make launch-worker REPO=<repo>
+  4. Watch logs for `reattach: <dispatchId> alive (pid=<N>) →
+     monitoring stack attached`.
+  5. Wait for agent to call danxbot_complete; observe HTTP 200 +
+     row finalized.
+  6. Confirm /api/status/:id and /api/cancel/:id work against the
+     reattached job.
+  ```
+
+  Action item if smoke fails — file under DX-139's retro, not as a
+  blocker for this card's Done state.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe5163ec865c2b0cda0851
+    title: reattachOrResolveDispatches replaces reconcileOrphanedDispatches; alive PIDs get full monitoring stack registered
+    checked: false
+  - check_item_id: 69fe516499de66d094a236d2
+    title: After restart, every non-terminal alive dispatch has activeJobs + SessionLogWatcher + StallDetector (+ heartbeat where applicable)
+    checked: false
+  - check_item_id: 69fe51651cc716efbc3d7771
+    title: Reattach works for Slack + /api/launch dispatches (no issue-card YAML required)
+    checked: false
+  - check_item_id: 69fe5165e28b4338df50522f
+    title: Per-dispatch MCP settings file rewritten if and only if worker restarts on different port
+    checked: false
+  - check_item_id: 69fe51661073a3484fff584b
+    title: Reattached jobs cancellable + status-queryable via existing /api/cancel + /api/status routes
+    checked: false
+  - check_item_id: 69fe5166879bdc8ada3a3c0e
+    title: 8 new unit tests pass; no existing tests regressed; tsc clean
+    checked: false
+  - check_item_id: 69fe5167892c716dbdf73c01
+    title: Manual smoke procedure documented in retro (kill-worker + restart + agent-recovers)
+    checked: false
+comments: []
+history:
+  - timestamp: 2026-05-08T21:11:03.891Z
+    actor: dispatch:3ecfde68-c199-415f-b265-5480e68e5b74
+    event: created
+    to: ToDo
+  - timestamp: 2026-05-08T21:12:42.994Z
+    actor: dispatch:3ecfde68-c199-415f-b265-5480e68e5b74
+    event: blocked
+    to: ToDo
+    note: Waiting on DX-208
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Waits for DX-208 (attachMonitoringStack helper) to land — reattach calls the extracted helper to wire watcher / heartbeat / cleanup onto the shim AgentJob; without it, reattach has no clean seam to share with spawnAgent. Transitively also waits for DX-207 (column DX-208 itself blocks on).
+  timestamp: 2026-05-08T21:11:14.661Z
+  by:
+    - DX-208
+blocked: null

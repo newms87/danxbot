@@ -1,0 +1,109 @@
+schema_version: 4
+tracker: trello
+id: DX-116
+external_id: 69e27cc33204da2502085f08
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Dispatch viewer > Phase 1: Data model + legacy purge"
+description: |-
+  Part of epic #83 — `[Danxbot > Dashboard] Dispatch tracking + session history viewer` (https://trello.com/c/DAdy3itc).
+
+  ## Context
+
+  Today the dashboard tracks only Slack `MessageEvent` rows (`src/dashboard/events.ts`, `events-db.ts`). The whole stack — plus the shadow timeline built from `agentLog`, `heartbeatSnapshots`, `parsedAgentLog`, and `buildFullParsedLog()` in `src/agent/log-parser.ts` — duplicates data that Claude Code already writes to `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. The epic replaces everything with a single `dispatches` table + the JSONL on disk. Phase 1 is the tear-down: drop the old schema, delete the old code, land the new table. No dashboard UI survives this phase — Phases 5-6 restore it.
+
+  Nothing external consumes the current `events` schema or `MessageEvent` — per the epic description we are free to delete without migration or compatibility shims.
+
+  ## Solution
+
+  1. DB migration that DROPS `events` and CREATES `dispatches` with the full schema (see the epic description for the column list — copy verbatim). Columns: `id` TEXT PK, `repo_name`, `trigger`, `trigger_metadata` JSON, `session_uuid`, `jsonl_path`, `status`, `started_at` / `completed_at`, `summary`, `error`, `runtime_mode`, `tokens_total`, `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, `tool_call_count`, `subagent_count`, `nudge_count`, `danxbot_commit`.
+  2. Delete the legacy source files listed below.
+  3. Strip all legacy type references from `src/types.ts` (`MessageEvent`, `AgentLogEntry`, `ApiCallUsage`, `AgentUsageSummary`, `ComplexityLevel`, `TimestampedHeartbeatSnapshot`). Anything that imported them gets its import removed or the file itself gets deleted in this phase.
+  4. `npx tsc --noEmit` must pass at end of phase. `npx vitest run` will be red because tests reference deleted types — delete those tests along with their sources (no orphan tests).
+
+  ## Key Files
+
+  **Delete entirely:**
+  - `src/dashboard/events.ts` + any co-located test
+  - `src/dashboard/events-db.ts` + test
+  - `src/dashboard/events-persistence.test.ts`
+  - `src/dashboard/export.ts` + test
+  - `src/dashboard/perf-stats.ts` + test
+  - `src/agent/log-parser.ts` + test
+  - `dashboard/src/composables/useEvents.ts`
+  - `dashboard/src/components/MessagesTable.vue`
+  - `dashboard/src/components/DetailPanel.vue`
+  - `dashboard/src/components/DetailTimeline.vue`
+  - `dashboard/src/components/DetailResponses.vue`
+  - `dashboard/src/components/DetailExpandable.vue`
+  - `dashboard/src/components/DetailMetadata.vue`
+  - `dashboard/src/components/LlmConversation.vue`
+  - `dashboard/src/components/AgentLogTable.vue`
+  - `dashboard/src/components/AnalyticsCards.vue`
+  - `dashboard/src/components/PerfBreakdown.vue`
+  - `dashboard/src/components/CostBreakdown.vue`
+  - `dashboard/src/components/conversation/` (entire directory)
+
+  **Modify:**
+  - `src/types.ts` — remove the six legacy types. Leave the file importable.
+  - `src/agent/launcher.ts` — strip every `createEvent` / `updateEvent` / `MessageEvent` / `agentLog` / `heartbeatSnapshots` / `parsedAgentLog` reference. Launcher will temporarily produce no dashboard data. Phase 2 adds the dispatch lifecycle.
+  - `src/slack/listener.ts` — remove `createEvent` / `updateEvent` calls. The Slack flow will still route + reply — just without dashboard writes. Phase 2 re-adds dispatch writes at the spawn call.
+  - `dashboard/src/App.vue` — remove references to deleted components. Can temporarily show an empty shell or a placeholder. Phases 5-6 wire in `DispatchList` / `DispatchDetail`.
+  - Migration infrastructure under `src/dashboard/` (wherever the events table is created) — add new migration for drop + create.
+
+  ## How to verify
+
+  - `npx tsc --noEmit` clean
+  - `grep -rn "MessageEvent\|events.ts\|events-db\|log-parser\|agentLog\|heartbeatSnapshots\|parsedAgentLog\|buildFullParsedLog\|useEvents\|MessagesTable\|DetailPanel\|AnalyticsCards\|PerfBreakdown\|CostBreakdown" src/ dashboard/src/` returns nothing
+  - Running the migration creates the `dispatches` table with exactly the columns from the epic description, and drops `events`
+  - Deleted tests are gone; surviving tests pass (`npx vitest run`). Dashboard UI tests will be deleted alongside their deleted components — this is expected for this phase.
+
+  ## Gotchas
+
+  - Some legacy files likely have imports into `src/agent/launcher.ts` — track them down with tsc errors and remove cleanly rather than leaving dangling calls.
+  - Keep the dispatch tag mechanism (`<!-- danxbot-dispatch:<jobId> -->`) in the spawn path — Phase 2 depends on it. Only dashboard-writing code is removed here.
+  - `SessionLogWatcher` is NOT deleted. It stays exactly as-is. Phase 2 wires it to dispatch row updates.
+  - Dashboard UI being temporarily broken is acceptable for Phase 1 only. If the dashboard is currently serving production traffic and a visible UI is required at all times, split this phase differently (raise with user first).
+
+  ## Out of scope for this phase
+
+  - Any new code that belongs in Phases 2-6 (dispatch CRUD, JSONL reader, API routes, UI components).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69e27dcbf2faee6516662e29
+    title: Migration drops `events` table and creates `dispatches` with all 19 columns per epic schema
+    checked: false
+  - check_item_id: 69e27dcde61ace8aae3ddbf3
+    title: All listed legacy source files deleted (events.ts, events-db.ts, log-parser.ts, export.ts, perf-stats.ts, useEvents.ts, all legacy Vue components)
+    checked: false
+  - check_item_id: 69e27dd0d85c6c619c7ae0a3
+    title: "`src/types.ts` has no legacy types (MessageEvent, AgentLogEntry, ApiCallUsage, AgentUsageSummary, ComplexityLevel, TimestampedHeartbeatSnapshot)"
+    checked: false
+  - check_item_id: 69e27dd06a04fb0026c6f92a
+    title: "`npx tsc --noEmit` clean"
+    checked: false
+  - check_item_id: 69e27dd2839e4b2921bb4676
+    title: '`grep -rn "MessageEvent\|events-db\|log-parser\|buildFullParsedLog\|agentLog\|useEvents\|MessagesTable" src/ dashboard/src/` returns nothing'
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

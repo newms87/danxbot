@@ -1,0 +1,48 @@
+schema_version: 4
+tracker: trello
+id: DX-19
+external_id: 69f2275e61645cb69bd13025
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Refactor: Extract `parseTrimmedString` helper from deploy/config.ts repo-field validators"
+description: |-
+  ## Context
+
+  `deploy/config.ts` now has three near-identical validator blocks for repo-level optional string fields: `app_env_subpath`, `worker_host`, `branch`. Each does the same shape: type-check → trim → reject empty → reject whitespace (or extra rules) → assign.
+
+  Action item from card `gxYOlv5M` ("Fix: Deploy CLI hardcodes `origin/main` branch in clone/pull"). Worth extracting if a fourth optional repo field lands; today's three is borderline acceptable duplication.
+
+  ## Acceptance
+
+  - A small helper in `deploy/config.ts` (or a sibling module) replaces the three blocks
+  - Tests still pass
+  - The helper accepts custom rules per field (e.g. `app_env_subpath` has `..`/absolute-path checks; `branch` and `worker_host` only have whitespace checks)
+  - No silent fallbacks — every config-key error must still bubble through the existing `errors.push` aggregator
+
+  ## Why deferred
+
+  The current 3-way duplication is acceptable per the original code-reviewer audit on `gxYOlv5M`. Defer until a fourth optional repo field actually lands; introducing the helper for 3 instances right now is borderline premature.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

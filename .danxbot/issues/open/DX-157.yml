@@ -1,0 +1,169 @@
+schema_version: 4
+tracker: trello
+id: DX-157
+external_id: 69fe1ec0f72bd81a75d92b81
+parent_id: DX-151
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Issues DB Mirror > Phase 6: Retire danx_issue_save MCP tool + full system-test validation"
+description: |-
+  ## Context
+
+  Phase 6 — final phase of the Issues DB Mirror epic (DX-151). Phases 1-5 land Postgres + the mirror engine + every internal reader. This phase removes the `danx_issue_save` MCP tool now that the watcher reliably mirrors every YAML write — no separate "save" verb is needed. The agent's contract becomes: edit the YAML with `Edit` / `Write`, and the watcher takes care of DB + tracker sync.
+
+  `danx_issue_create` STAYS — it allocates the next `DX-N` id atomically, which the filesystem alone can't do. Only `danx_issue_save` is retired here.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-issues-db-mirror-design.md`. Read the "Write pipeline" section before starting.
+
+  ## What `danx_issue_save` does today (and where it lives)
+
+  Inventory:
+
+  - **MCP tool definition** — the danxbot MCP server (`src/mcp/danxbot-server.ts`) advertises `danx_issue_save` when `DANXBOT_ISSUE_SAVE_URL` is present in the per-dispatch overlay. The tool POSTs `{id}` to that URL.
+  - **Worker route** — `src/worker/issue-route.ts` implements `POST /api/issue-save/:dispatchId`. The route reads the YAML, validates schema, optionally calls `tracker.createCard()` for orphans, and pushes outbound updates to the tracker.
+  - **URL injection** — `src/dispatch/core.ts` auto-injects `DANXBOT_ISSUE_SAVE_URL = http://localhost:<workerPort>/api/issue-save/<dispatchId>` into the per-dispatch overlay.
+  - **Workspace skill consumers** — every workspace skill that calls `mcp__danx-issue__danx_issue_save({id})`. Located under `src/poller/inject/workspaces/<name>/.claude/skills/`. Audit with: `grep -rn "danx_issue_save\|danx-issue__danx_issue_save" src/poller/inject/`.
+  - **Poller-side outbound mirror** — already independent of `danx_issue_save`; the poller's per-tick mirror handles the tracker push regardless. Important: this stays as-is. The lossy bit when `danx_issue_save` goes away is the **synchronous tracker push** the route did right after the agent's edit. After this phase, the tracker can lag up to one poller tick (~30-60s) behind a YAML edit. The brainstorm explicitly accepts this trade-off.
+
+  ## Solution
+
+  ### Code removal
+
+  1. **MCP server.** `src/mcp/danxbot-server.ts`:
+     - Remove the `danx_issue_save` entry from the tool definitions / dispatcher.
+     - Remove the `DANXBOT_ISSUE_SAVE_URL` field from the `DanxbotToolUrls` type (`src/agent/mcp-types.ts`) and `McpFactoryOptions`.
+     - Remove the URL from `buildActiveTools` filtering logic.
+     - Remove the URL from `mcp-registry.ts` injection.
+  2. **Worker route.** `src/worker/issue-route.ts` + `issue-route.test.ts` — delete entirely. Remove its registration in `src/worker/server.ts`.
+  3. **Per-dispatch URL injection.** `src/dispatch/core.ts` — remove `DANXBOT_ISSUE_SAVE_URL` from the auto-injected overlay map.
+  4. **Workspace skills.** Every skill markdown / instruction file under `src/poller/inject/workspaces/` that documents `danx_issue_save` gets rewritten to: "Edit the YAML at `<repo>/.danxbot/issues/{open,closed}/<id>.yml` with the `Edit` tool. The worker mirrors the change automatically — no save verb needed." Audit + edit. The poller's inject pipeline already syncs these into every consuming repo on the next tick, so a single source-of-truth edit propagates to every connected repo.
+  5. **Issue card workflow skill.** `~/.claude/plugins/cache/newms-plugins/issues/.../SKILL.md` (the file loaded by `issues:issue-card-workflow`) — find the `danx_issue_save` rows in the MCP tool table and the "Save semantics" prose, edit them out. This file lives in the plugin source repo, not danxbot. Coordinate the edit OR file a follow-up action item card to update the plugin (recommended: file the action item — keeps this card scoped to the danxbot repo).
+
+  ### Tests to update
+
+  - Drop the test file `src/worker/issue-route.test.ts`.
+  - Drop any test referencing `DANXBOT_ISSUE_SAVE_URL` (search via grep).
+  - Update `src/dispatch/core.test.ts` if it asserts on the auto-injected URLs.
+  - Verify `src/mcp/danxbot-server.test.ts` no longer expects `danx_issue_save` advertisement.
+
+  ### Documentation sweep
+
+  - `CLAUDE.md` — find every `danx_issue_save` mention, replace with "edit the YAML directly" guidance.
+  - `.claude/rules/agent-dispatch.md` — the per-dispatch URL table loses one row.
+  - The DB-mirror spec doc (commit `53864c3`) — already says "retire danx_issue_save"; no update needed there.
+
+  ## End-to-end validation
+
+  After all removals:
+
+  1. `grep -rn "danx_issue_save\|DANXBOT_ISSUE_SAVE_URL\|/api/issue-save" src .claude` — ZERO matches.
+  2. `npx vitest run > /tmp/vitest.log 2>&1` — green.
+  3. `npx tsc --noEmit` + `cd dashboard && npx vue-tsc --noEmit` — clean.
+  4. `make test` (Layer 1) — green.
+  5. `make launch-infra` + `make launch-worker REPO=danxbot` — boots clean.
+  6. `make test-system` (Layer 3) — full system pass. Costs ~$1; budget once. `make test-system-poller` is the most relevant scenario.
+  7. `make deploy-smoke TARGET=gpt` — verifies a real deployed worker can ingest a dispatch end-to-end.
+  8. Manual integration test on the local danxbot worker:
+     - Pick a real card in `<repo>/.danxbot/issues/open/`, edit a comment in via `Edit`, observe the next poller tick mirrors the change to the tracker. Verify the timestamp on the comment in Trello shows up within ~60s.
+     - Create a NEW orphan card (write a fresh YAML with `external_id: ""`) — observe that the existing orphan-push pipeline mints a real Trello id on the next tick. (`danx_issue_create` is the only sanctioned creation path for agents; this manual test is just to prove the orphan-recovery path still works.)
+  9. Mark the epic (DX-151) Done by checking off its remaining ACs.
+
+  ## Files
+
+  Delete:
+
+  - `src/worker/issue-route.ts`
+  - `src/worker/issue-route.test.ts`
+
+  Modify:
+
+  - `src/mcp/danxbot-server.ts`
+  - `src/agent/mcp-types.ts`
+  - `src/agent/mcp-registry.ts`
+  - `src/dispatch/core.ts`
+  - `src/dispatch/core.test.ts`
+  - `src/worker/server.ts`
+  - `src/mcp/danxbot-server.test.ts`
+  - `src/poller/inject/workspaces/<name>/.claude/skills/<skill>/SKILL.md` (every skill referencing danx_issue_save)
+  - `CLAUDE.md`
+  - `.claude/rules/agent-dispatch.md`
+
+  ## Acceptance
+
+  - `grep -rn "danx_issue_save\|DANXBOT_ISSUE_SAVE_URL\|/api/issue-save" src .claude` returns ZERO matches.
+  - `src/worker/issue-route.ts` deleted.
+  - `make test` green; `make test-system` green (or expected-skip behavior documented); `make deploy-smoke TARGET=gpt` green.
+  - `npx tsc --noEmit` + `vue-tsc --noEmit` clean.
+  - Manual smoke: editing a YAML via `Edit` and waiting one poller tick produces the corresponding Trello update.
+  - Action item card filed if the plugin-side `issues:issue-card-workflow` skill needs an upstream edit (not blocking this card's Done).
+  - Epic DX-151 has every AC checkable; the operator (or this card's flow) flips DX-151 to Done.
+
+  ## Out of scope
+
+  - Replacing the per-tick outbound tracker mirror with a watcher-driven push — explicitly out per the spec.
+  - Touching `danx_issue_create` — stays.
+  - Building any new dashboard UI feature on top of `issue_history` — separate card.
+  - The multi-worker dispatch epic — separate spec, picks up after this epic ships.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe1ec22ee50519a9cdf54c
+    title: src/worker/issue-route.ts + .test.ts deleted; route registration removed from src/worker/server.ts
+    checked: false
+  - check_item_id: 69fe1ec28fba718f83ca4036
+    title: src/mcp/danxbot-server.ts — danx_issue_save tool definition + dispatcher case + advertise filter all removed
+    checked: false
+  - check_item_id: 69fe1ec350b2384f559fdcc8
+    title: DANXBOT_ISSUE_SAVE_URL removed from DanxbotToolUrls / McpFactoryOptions / mcp-registry / dispatch/core.ts overlay
+    checked: false
+  - check_item_id: 69fe1ec36fe583bbc7742416
+    title: Every workspace skill that referenced danx_issue_save rewritten to use Edit / Write directly; poller inject sync verified
+    checked: false
+  - check_item_id: 69fe1ec3058d63b654de430e
+    title: CLAUDE.md + .claude/rules/agent-dispatch.md sweeps complete
+    checked: false
+  - check_item_id: 69fe1ec4c2d7a047f37183cd
+    title: grep -rn 'danx_issue_save|DANXBOT_ISSUE_SAVE_URL|/api/issue-save' src .claude returns zero matches
+    checked: false
+  - check_item_id: 69fe1ec428647a1209dc031f
+    title: make test green; tsc + vue-tsc clean
+    checked: false
+  - check_item_id: 69fe1ec5e997b676dd4e0885
+    title: make test-system green (full Layer 3 pass)
+    checked: false
+  - check_item_id: 69fe1ec56359eeb23415143e
+    title: make deploy-smoke TARGET=gpt green against deployed worker
+    checked: false
+  - check_item_id: 69fe1ec50b3e89ebc8766845
+    title: Manual smoke — YAML Edit propagates to Trello within one poller tick (~60s)
+    checked: false
+  - check_item_id: 69fe1ec66cbf7e872d639a06
+    title: Action item filed (or upstream plugin edit complete) for issues:issue-card-workflow skill MCP-table entry
+    checked: false
+  - check_item_id: 69fe1ec6b98111218afd7098
+    title: Epic DX-151 every AC checked; epic flipped to Done by operator/automation on terminal save
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Sequential phase ordering — agents must already have a working watcher-driven mirror (Phase 3 / DX-154) before the explicit save MCP can be removed. Also benefits from Phase 5 (DX-156) shaking out reader bugs first.
+  timestamp: 2026-05-08T12:00:00.000Z
+  by:
+    - DX-156
+blocked: null

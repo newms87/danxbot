@@ -1,0 +1,221 @@
+schema_version: 4
+tracker: trello
+id: DX-86
+external_id: 69fa9ea456bcc7b7d5caeb5c
+parent_id: DX-67
+children: []
+dispatch:
+  id: 913b559b-cdff-42a7-9cee-1a882d2e5250
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Fix: poller dispatch decision must read local YAML, not Trello > Phase 1: Slice A — listDispatchableYamls + flip dispatch source to local YAML"
+description: |-
+  ## Context
+
+  Parent epic: DX-67. Today the poller decides what to dispatch by
+  reading `tracker.fetchOpenCards()` and filtering to
+  `status === "ToDo"` (`src/poller/index.ts` ~line 283-285). Local
+  `<repo>/.danxbot/issues/open/*.yml` files are hydrated FROM that
+  tracker view via `bulkSyncMissingYamls` + `pushOrphans`. This makes
+  the tracker the de facto dispatch source — wrong per the
+  Source-of-Truth contract documented in
+  `~/.claude/rules/issues.md` and `<repo>/CLAUDE.md`.
+
+  Symptom: hand-written YAMLs land in `.danxbot/issues/open/` with
+  `status: ToDo` but stay invisible to dispatch until orphan-push
+  side-effects on a later tick.
+
+  ## Solution
+
+  Replace the dispatch source. Tracker fetch keeps running each tick
+  — Slice B (Phase 2) still needs it for inbound. But it no longer
+  drives dispatch decisions.
+
+  ### Steps
+
+  1. Add `src/poller/local-issues.ts` exporting
+     `listDispatchableYamls(repoPath: string): Issue[]`. Walk
+     `<repo>/.danxbot/issues/open/*.yml`, parse each via the existing
+     `parseIssue` helper, filter to:
+     - `status === "ToDo"`
+     - `blocked === null`
+     - `list_kind !== "action_items"` (action-items items hydrate
+       with `list_kind: "action_items"` so they're discoverable as
+       blockers but not dispatchable)
+     Sort deterministically: by file `mtime` ascending (oldest first
+     = FIFO), tiebreak by `id` ascending.
+
+  2. Add `listInProgressYamls(repoPath: string): Issue[]` in the
+     same file. Same walk, filters to `status === "In Progress"`.
+     This drives stuck-card / orphan-resume recovery.
+
+  3. Edit `src/poller/index.ts#_poll`:
+     - Keep `tracker.fetchOpenCards()` running (Slice B uses it).
+     - Replace `cards = openCards.filter(c => c.status === "ToDo" && c.list_kind !== "action_items")`
+       with the local-YAML-derived list. The downstream code expects
+       `IssueRef[]`-shaped objects in `cards`; the helper returns
+       full `Issue[]`. Either (a) return a subset shape from
+       `listDispatchableYamls` matching what `_poll` consumes, or
+       (b) project `Issue → IssueRef` at the call site. Pick the
+       cleaner one based on actual call sites (likely ~5 fields:
+       `external_id`, `id`, `title`, `status`, `list_kind`).
+     - Replace `inProgressCards = openCards.filter(c => c.status === "In Progress")`
+       with `listInProgressYamls(repo.localPath)` (same shape concern).
+     - The pickup-prefix filter
+       (`getTrelloPollerPickupPrefix` / `pickupNamePrefix`) keeps
+       operating, but now on the local-YAML-derived list.
+
+  4. Rewrite the affected poller tests under
+     `src/__tests__/poller/` (and `src/poller/index.test.ts`). New
+     dispatch-decision tests cover:
+     - YAML on disk with `status: ToDo`, `external_id: ""`, no
+       Trello card → dispatched on next tick.
+     - YAML with `blocked: {...}` → NOT dispatched.
+     - YAML with `list_kind: "action_items"` → NOT dispatched.
+     - Tracker has a ToDo card whose YAML has `status: "In Progress"`
+       locally → dispatch reads "In Progress" (local wins).
+     - Sort order: two YAMLs both ToDo with different mtimes →
+       older wins.
+     - Pickup-prefix filter still applied.
+
+  ## Out of Scope (this phase)
+
+  - Slice B: inbound channel hardening (Phase 2).
+  - Slice C: outbound mirror audit (Phase 3).
+  - Multi-repo combined dispatch.
+
+  ## Key Files
+
+  - `src/poller/local-issues.ts` (new)
+  - `src/poller/local-issues.test.ts` (new)
+  - `src/poller/index.ts` — flip dispatch + stuck-card sources
+  - `src/poller/index.test.ts` — rewrite affected dispatch tests
+  - `src/__tests__/poller/*` — any existing dispatch decision tests
+
+  ## Verify
+
+  - `npx vitest run` clean (full suite, not just poller)
+  - `npx tsc --noEmit` clean
+  - Manual: hand-write a YAML at `.danxbot/issues/open/ISS-N.yml`
+    with `status: ToDo`, `external_id: ""`. Within one poll tick the
+    poller dispatches it (orphan-push from Slice C still creates the
+    Trello card on the same tick or next).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa9ea6fb4312ae12419120
+    title: src/poller/local-issues.ts exports listDispatchableYamls(repoPath) returning Issue[] filtered to status=ToDo AND blocked=null AND list_kind!=action_items, sorted by mtime asc then id asc
+    checked: true
+  - check_item_id: 69fa9ea67b4109f8020795fd
+    title: src/poller/local-issues.ts exports listInProgressYamls(repoPath) returning Issue[] filtered to status=In Progress
+    checked: true
+  - check_item_id: 69fa9ea671abdc4cdb730f20
+    title: "_poll dispatch source replaced: cards-to-dispatch list comes from listDispatchableYamls, not from tracker.fetchOpenCards filtering"
+    checked: true
+  - check_item_id: 69fa9ea7614760d0a8a55c64
+    title: _poll stuck-card / orphan-resume reads inProgressCards from listInProgressYamls, not from tracker.fetchOpenCards
+    checked: true
+  - check_item_id: 69fa9ea7fb4312ae1241956e
+    title: tracker.fetchOpenCards() still runs each tick (kept for Slice B inbound channel) but its result no longer drives dispatch
+    checked: true
+  - check_item_id: 69fa9ea8bb75f9ff6df7cdb9
+    title: Pickup-prefix filter (pickupNamePrefix) operates on the local-YAML-derived list
+    checked: true
+  - check_item_id: 69fa9ea8ddd1092c2f25ce13
+    title: "New tests cover: hand-written ToDo YAML dispatches; blocked YAML skipped; action_items YAML skipped; local status wins over tracker; mtime sort; prefix filter"
+    checked: true
+  - check_item_id: 69fa9ea974ae3076ee06374b
+    title: npx vitest run clean (full suite); npx tsc --noEmit clean
+    checked: true
+comments:
+  - id: 69faa5280e747675973fb4b4
+    author: danxbot
+    timestamp: 2026-05-06T02:19:20.578Z
+    text: |
+      <!-- danxbot -->
+
+      ## Phase 1 Commit
+
+      **Commit:** 76618fe
+      **Completed:** all 8 ACs.
+
+      Helper `src/poller/local-issues.ts` (3 walkers + 16 tests). `_poll`
+      cutover routes dispatchable + In-Progress lists through the local
+      walker. Tracker `fetchOpenCards` still drives inbound mirror.
+      `recoverStuckCards` (out-of-`_poll` failure path) also moved to
+      local-YAML source so the cutover is complete.
+  - id: 69fa9f0edce09c003a949804
+    author: newms87
+    timestamp: 2026-05-06T01:53:18.512Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `913b559b-cdff-42a7-9cee-1a882d2e5250` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-06T01:53:18.304Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-06T03:53:18.304Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '913b559b-cdff-42a7-9cee-1a882d2e5250' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69faa5289d3ff3294b9e2af1
+    author: danxbot
+    timestamp: 2026-05-06T02:19:20.960Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Helper module (`src/poller/local-issues.ts`) clean separation: 3 sync walkers, 135 lines, 16 dedicated unit tests covering filter/sort/edge cases.
+      - Cutover preserved every existing `_poll` invariant (orphan-resume, blocked-resolve, pickup-prefix, single-dispatch). Pre-existing tests (~2900) all pass after mock infrastructure update.
+      - `vi.mock("./local-issues.js")` test infra derives Issue[] from the most recent `tracker.fetchOpenCards` settledResult, so 90+ legacy tests using `mockTracker.fetchOpenCards.mockResolvedValueOnce(...)` keep working without per-test rewrites.
+      - 5 new DX-86 dispatch-decision tests pin: hand-written ToDo dispatches; blocked YAML skipped; action_items skipped; local status wins over tracker; pickup-prefix runs on local list; FIFO mtime ordering at `_poll` layer; AC4/AC5 explicit invocation assertions.
+
+      **What went wrong:** - `recoverStuckCards` (out-of-`_poll` failure path) was reading `tracker.fetchOpenCards` — same anti-pattern. Code-reviewer caught it; switched to `listInProgressYamls` and updated 4 stuck-card recovery tests + 1 integration test to match.
+      - `list_kind` is NOT persisted on YAML (it's tracker-IssueRef-only) — the helper's filter relies on the call site passing an `excludeExternalIds` Set. Required a small workaround vs. the AC's literal "filtered by list_kind" wording. Helper accepts the Set; call site builds it from `actionItemRefs.map(c => c.external_id)`.
+      - Integration test mocked `node:fs` made the helper invisible — needed a separate `vi.mock("../../poller/local-issues.js")` per test file with state captured via wrapping factory (memory-tracker test) or pre-written YAML on disk (critical-failure test). Two distinct strategies but both reproducible.
+
+      **Action items:** Nothing
+      **Commits:** 76618fe
+history: []
+retro:
+  good: |
+    - Helper module (`src/poller/local-issues.ts`) clean separation: 3 sync walkers, 135 lines, 16 dedicated unit tests covering filter/sort/edge cases.
+    - Cutover preserved every existing `_poll` invariant (orphan-resume, blocked-resolve, pickup-prefix, single-dispatch). Pre-existing tests (~2900) all pass after mock infrastructure update.
+    - `vi.mock("./local-issues.js")` test infra derives Issue[] from the most recent `tracker.fetchOpenCards` settledResult, so 90+ legacy tests using `mockTracker.fetchOpenCards.mockResolvedValueOnce(...)` keep working without per-test rewrites.
+    - 5 new DX-86 dispatch-decision tests pin: hand-written ToDo dispatches; blocked YAML skipped; action_items skipped; local status wins over tracker; pickup-prefix runs on local list; FIFO mtime ordering at `_poll` layer; AC4/AC5 explicit invocation assertions.
+  bad: |
+    - `recoverStuckCards` (out-of-`_poll` failure path) was reading `tracker.fetchOpenCards` — same anti-pattern. Code-reviewer caught it; switched to `listInProgressYamls` and updated 4 stuck-card recovery tests + 1 integration test to match.
+    - `list_kind` is NOT persisted on YAML (it's tracker-IssueRef-only) — the helper's filter relies on the call site passing an `excludeExternalIds` Set. Required a small workaround vs. the AC's literal "filtered by list_kind" wording. Helper accepts the Set; call site builds it from `actionItemRefs.map(c => c.external_id)`.
+    - Integration test mocked `node:fs` made the helper invisible — needed a separate `vi.mock("../../poller/local-issues.js")` per test file with state captured via wrapping factory (memory-tracker test) or pre-written YAML on disk (critical-failure test). Two distinct strategies but both reproducible.
+  action_item_ids: []
+  commits:
+    - 76618fe
+waiting_on: null
+blocked: null

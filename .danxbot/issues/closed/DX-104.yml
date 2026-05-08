@@ -1,0 +1,154 @@
+schema_version: 4
+tracker: trello
+id: DX-104
+external_id: 69fd2261d9d5ce18cf03e727
+parent_id: null
+children: []
+dispatch: null
+status: Done
+type: Bug
+title: Triage agent silent-completion guard — detect dispatches that complete without advancing triage.expires_at
+description: |-
+  ## Context
+
+  Phase 4 of DX-90 (DX-94, commit `76b7723`) wired per-card triage dispatches into the poller. A new failure mode is reachable today and not detected:
+
+  A `kind: "triage"` dispatch that signals `danxbot_complete({status: "completed"})` **without persisting `triage.expires_at`** is invisible to every existing guard:
+
+  - `consecutiveFailures` does not increment (status=completed, by design).
+  - `recoverStuckCards` does not fire (it only triggers on agent failure / timeout, and only for cards that moved to In Progress mid-run).
+  - `checkCardProgressedOrHalt` does not fire — `tryTriageDispatch` deliberately leaves `state.trackedCardId` null because triage is not a list-move operation.
+  - The next poll tick's `listTriageDueYamls` returns the same card (expired-or-empty `triage.expires_at` still matches).
+  - The same broken agent gets dispatched against the same card on every interval. Token burn loop.
+
+  This is a real regression surface introduced by Phase 4: pre-Phase-4, the bulk-triage agent failed-loud-or-not-at-all because every Action Items card flowed through one prompt. Per-card triage moves the responsibility onto every individual dispatch.
+
+  ## Repro
+
+  1. Spawn a triage agent that returns `danxbot_complete({status: "completed", summary: "..."})` without calling `mcp__danx-issue__danx_issue_save` (or saving without updating `triage.expires_at`).
+  2. Observe: `tracker.fetchOpenCards` still returns the card on the next tick, `listTriageDueYamls` still includes it, `tryTriageDispatch` re-dispatches the same broken agent.
+  3. Repeat indefinitely until operator notices the dashboard's per-card spend.
+
+  ## Root Cause
+
+  No invariant in the worker or poller asserts that a triage dispatch progressed its `triage.expires_at` (or any other observable triage state). The `dispatch{}` block IS cleared by `clearActiveDispatch` in `onComplete` regardless — that's correct, the dispatch DID end. The missing guard is at the application-state level: did the dispatch DO ANYTHING.
+
+  ## Proposed Solutions
+
+  Pick exactly one. Both close the loop.
+
+  ### Option A — Worker-side validator (preferred)
+
+  In the danxbot worker's `mcp__danxbot__danxbot_complete` handler (or the `mcp__danx-issue__danx_issue_save` path), reject a save from a `kind: "triage"` dispatch that did NOT advance `triage.expires_at` past the dispatch's `started_at`. Mechanism:
+
+  - Worker tracks the dispatch's `started_at` from `activeJobs`.
+  - On the final `danx_issue_save` for that dispatchId, compare the saved YAML's `triage.expires_at` against the dispatch's `started_at`.
+  - If `expires_at` is empty OR `expires_at <= started_at`, fail the save with a structured error and / or write the `CRITICAL_FAILURE` flag.
+
+  ### Option B — Poller post-dispatch guard
+
+  In `handleAgentCompletion` (`src/poller/index.ts`), add a parallel branch to `checkCardProgressedOrHalt` that fires for `kind: "triage"` dispatches:
+
+  - Track the triage target's `id` on `RepoPollerState` (analog to `trackedCardId`).
+  - After completion, re-read the YAML and verify `triage.expires_at` advanced. If it didn't, write the `CRITICAL_FAILURE` flag with a triage-specific reason.
+
+  Option A localizes the contract to the save path (catches every consumer including future ones); Option B keeps the change in the poller (no MCP server publish needed).
+
+  ## Files
+
+  - `src/agent/launcher.ts` — `activeJobs` already tracks `startedAt`; expose for reading.
+  - `src/worker/issue-route.ts` — likely the validator hook for Option A.
+  - `src/poller/index.ts` — `tryTriageDispatch` + `handleAgentCompletion` for Option B.
+  - `src/critical-failure.ts` — flag writer (already exists, just adopt for the new branch).
+
+  ## Acceptance
+
+  - A triage dispatch that completes without updating `triage.expires_at` fails LOUDLY — either the save is rejected with a structured error OR the `CRITICAL_FAILURE` flag is written.
+  - The poller refuses to re-dispatch the same triage target until an operator acks the failure.
+  - Test: drive a fake triage agent that returns `status: "completed"` without saving; assert the loud failure path fires.
+  - Existing successful triage flow still passes (regression guard).
+
+  ## Out of scope
+
+  - Changing the `triage{}` schema.
+  - Re-introducing the bulk-triage path.
+  - Worker-side dispatch lifecycle changes beyond the validator hook.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd226289a773159489178e
+    title: Triage dispatch that completes without advancing triage.expires_at fails loudly (worker-side error OR CRITICAL_FAILURE flag)
+    checked: true
+  - check_item_id: 69fd2262e61f133fbe9bb5b3
+    title: Poller refuses to re-dispatch the same broken triage target until operator acks
+    checked: true
+  - check_item_id: 69fd2262b251c7bf0703df4f
+    title: Test covers a fake triage agent returning completed without saving — asserts the loud failure path fires
+    checked: true
+  - check_item_id: 69fd226345277536c5cd5833
+    title: Existing successful triage flow still passes (regression guard)
+    checked: true
+  - check_item_id: 69fd2264ac76ae4c3eaf344a
+    title: "Decision documented: Option A (worker validator) vs Option B (poller post-dispatch guard) — pick one and explain"
+    checked: true
+comments:
+  - id: 69fd3db3c0e127bc34d8b6bb
+    author: danxbot
+    timestamp: 2026-05-08T01:34:43.930Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Decision — Option B (poller post-dispatch guard)
+
+      Picked Option B over Option A. Reasoning:
+
+      - **Option B mirrors the existing pattern.** `checkCardProgressedOrHalt` already does post-dispatch verification keyed off `RepoPollerState`, with `writeFlag(source: "post-dispatch-check", ...)` on env-level signal. The triage guard is a parallel branch using the same primitives (`loadLocal` instead of `tracker.getCard`, `triage.expires_at` advance instead of list-move). One conceptual model, two readers.
+      - **No save-path coupling.** Option A would intercept `mcp__danx-issue__danx_issue_save` (or `danxbot_complete`) in the worker, then track per-dispatch `started_at` to validate the LAST save. The "last save" signal is fragile — agents may save 0, 1, or N times — and rejecting any individual save that didn't update `triage.expires_at` is too strict (mid-dispatch saves are legitimate). Option B sidesteps this entirely by checking once, after the dispatch finishes.
+      - **No MCP server publish needed.** Option B is a pure poller change. Option A would touch `src/worker/issue-route.ts` and the `danx-issue` MCP server's contract.
+      - **Same fail-loud halt.** Both options write the critical-failure flag — same reader, same operator UX, same poller-stop semantics. Option B reaches the same end-state through fewer moving parts.
+
+      Implementation lives in `src/poller/index.ts`:
+      - `RepoPollerState.triageTracked: { id, startedAt } | null` — set in `tryTriageDispatch` BEFORE spawn, cleared by `cleanupAfterAgent`.
+      - `checkTriageProgressedOrHalt(repo, state, job)` — re-reads YAML via `loadLocal`, asserts `Date.parse(triage.expires_at) > Date.parse(started_at)`, writes the flag otherwise. Tolerates read failures (false-negative preferred over false-positive, mirroring `checkCardProgressedOrHalt`).
+      - Wired into `handleAgentCompletion` parallel to the work-dispatch guard.
+  - id: 69fd3eece1fba21907598ea9
+    author: danxbot
+    timestamp: 2026-05-08T01:39:56.724Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Option B (poller post-dispatch guard) was the right call — symmetric with `checkCardProgressedOrHalt`, one mental model, no save-path coupling, no MCP republish. The reviewer agreed the implementation should ship as-is.
+      - TDD discipline paid off: the seven initial tests caught the throw-tolerance bug (loadLocal throws inside `clearActiveDispatch` BEFORE my guard runs) before any production interaction. Test #6 ended up needing a counter-based toggle, not a phase-based one — small cost, big regression-protection win.
+      - Test-reviewer flagged 3 cheap defensive cases (malformed `Date.parse`, missing `triage` block, `triageTracked` cleanup); code-reviewer flagged 1 boundary case (`expires_at == started_at`). All four were tiny in-session adds rather than action items — Step 1.5 applied correctly.
+      - Pre-existing `tsc` error (DX-100 mock signature drift on `mockListDispatchable/InProgress/BlockedTodo/TriageDueYamls`) was a small in-scope fix, not deferred. Worth ~3 lines of mock-signature relaxation.
+      **What went wrong:** - Test #6 (`loadLocal throws`) needed two iterations to land — first attempt had loadLocal throw on EVERY post-dispatch call, but `clearActiveDispatch` calls loadLocal first inside the same onComplete chain, so the throw fired before my guard. Counter-based toggle (skip first call, throw on second) is the right pattern but it took a failing test cycle to discover.
+      - Code reviewer caught a misleading comment in `tryTriageDispatch` claiming pre-spawn failures route through `onComplete` — they don't, the catch branch calls `cleanupAfterAgent` directly. Fixed inline.
+      **Action items:** Nothing
+      **Commits:** 96ca9ac
+history: []
+retro:
+  good: |-
+    - Option B (poller post-dispatch guard) was the right call — symmetric with `checkCardProgressedOrHalt`, one mental model, no save-path coupling, no MCP republish. The reviewer agreed the implementation should ship as-is.
+    - TDD discipline paid off: the seven initial tests caught the throw-tolerance bug (loadLocal throws inside `clearActiveDispatch` BEFORE my guard runs) before any production interaction. Test #6 ended up needing a counter-based toggle, not a phase-based one — small cost, big regression-protection win.
+    - Test-reviewer flagged 3 cheap defensive cases (malformed `Date.parse`, missing `triage` block, `triageTracked` cleanup); code-reviewer flagged 1 boundary case (`expires_at == started_at`). All four were tiny in-session adds rather than action items — Step 1.5 applied correctly.
+    - Pre-existing `tsc` error (DX-100 mock signature drift on `mockListDispatchable/InProgress/BlockedTodo/TriageDueYamls`) was a small in-scope fix, not deferred. Worth ~3 lines of mock-signature relaxation.
+  bad: |-
+    - Test #6 (`loadLocal throws`) needed two iterations to land — first attempt had loadLocal throw on EVERY post-dispatch call, but `clearActiveDispatch` calls loadLocal first inside the same onComplete chain, so the throw fired before my guard. Counter-based toggle (skip first call, throw on second) is the right pattern but it took a failing test cycle to discover.
+    - Code reviewer caught a misleading comment in `tryTriageDispatch` claiming pre-spawn failures route through `onComplete` — they don't, the catch branch calls `cleanupAfterAgent` directly. Fixed inline.
+  action_item_ids: []
+  commits:
+    - 96ca9ac
+waiting_on: null
+blocked: null

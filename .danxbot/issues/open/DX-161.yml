@@ -1,0 +1,192 @@
+schema_version: 4
+tracker: trello
+id: DX-161
+external_id: 69fe27ebf4479535ad3360a3
+parent_id: DX-158
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Multi-Worker > Phase 3: Worktree manager + branch-recovery dispatch"
+description: |-
+  ## Context
+
+  Phase 3 of the Multi-Worker Dispatch epic (DX-158). Adds the git worktree machinery: bootstrap on agent create, pre-dispatch validation, and the recovery-mode dispatch path for dirty/divergent branches. After this phase ships, agents have isolated working directories but are not yet picked or dispatched concurrently — that comes in Phase 5.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-multi-worker-dispatch-design.md`, "Worktree management" section.
+
+  ## Solution
+
+  ### New module: `src/agent/worktree-manager.ts`
+
+  ```ts
+  export interface WorktreeManager {
+    bootstrap(ctx: RepoContext, agentName: string): Promise<void>;       // git worktree add
+    teardown(ctx: RepoContext, agentName: string): Promise<void>;        // git worktree remove + branch delete
+    validate(ctx: RepoContext, agentName: string): Promise<ValidationResult>;
+    resetClean(ctx: RepoContext, agentName: string): Promise<void>;      // checkout <name>; reset --hard origin/main
+  }
+
+  export type ValidationResult =
+    | { state: "clean" }
+    | { state: "dirty"; reason: string; details: { porcelain: string; ahead: number; behind: number } };
+  ```
+
+  Layout: `<repo>/.danxbot/worktrees/<agent-name>/`. Branch named after the agent. Add `.danxbot/worktrees/` to repo's `.danxbot/.gitignore`.
+
+  Bootstrap is idempotent — re-running on an existing worktree is a no-op (return success). Verify by checking `git worktree list` for the path.
+
+  ### Pre-dispatch validation flow
+
+  Inside `dispatch()` (`src/dispatch/core.ts`), BEFORE spawning the agent:
+
+  ```ts
+  const result = await worktreeManager.validate(ctx, agentName);
+  if (result.state === "clean") {
+    await worktreeManager.resetClean(ctx, agentName);
+    // proceed to normal dispatch
+  } else {
+    // Recovery-mode dispatch: spawn the agent with a recovery prompt
+    return dispatchInRecoveryMode(ctx, agentName, result);
+  }
+  ```
+
+  ### Recovery-mode dispatch
+
+  New helper `dispatchInRecoveryMode(ctx, agentName, validation)`:
+
+  - Builds a recovery prompt that:
+    - Names the branch state (porcelain output, ahead/behind counts).
+    - Forbids destructive ops (`git reset --hard`, `git clean -fd`, `git checkout -- .`, etc.).
+    - Asks the agent to inspect the branch state, identify any in-progress card whose YAML's `assigned_agent` matches `<agentName>`, finish the work the WIP represents, commit, and exit clean (back on origin/main equivalent).
+    - Lists allowed operations: read files, run tests, edit files, `git add`, `git commit`, `git rebase origin/main`, `git push` via the standard finalize flow.
+    - Sets `dispatch.kind: "recovery"` on the YAML for visibility (extend the existing dispatch record schema if needed; or stash the marker on the dispatches DB row).
+  - Runs through `spawnAgent()` like a normal dispatch (single fork, single JSONL, single watcher per agent-dispatch contract in `.claude/rules/agent-dispatch.md`).
+
+  Recovery-mode prompts go through the same MCP surface (incl. `danxbot_complete`). On completion, the worker re-runs `validate()`. If still dirty: file a `Needs Help` comment on the most recently-modified card and log loudly. If clean: poller picks again next tick.
+
+  ### Agent-create / delete wiring
+
+  Phase 2 (DX-160) already added the POST/DELETE endpoints. This phase wires them to the worktree manager:
+
+  - POST `/api/agents` → after writing the settings record, call `worktreeManager.bootstrap(ctx, name)`. On bootstrap failure, roll back the settings write and return 500 with the error.
+  - DELETE `/api/agents/:name` → call `worktreeManager.teardown(ctx, name)` BEFORE deleting the settings record (if teardown fails, the record stays so the operator can retry).
+
+  Lazy bootstrap on first dispatch (in case an agent was added via hand-edit of settings.json without going through the API): also try `bootstrap()` at dispatch start; idempotent so cheap.
+
+  ## Files
+
+  Create:
+
+  - `src/agent/worktree-manager.ts` + `.test.ts` + `src/__tests__/integration/worktree-manager.test.ts`
+
+  Modify:
+
+  - `src/dispatch/core.ts` (call validate; route to recovery-mode if dirty)
+  - `src/dispatch/recovery-mode.ts` (new) + `.test.ts` — `dispatchInRecoveryMode` + recovery prompt builder
+  - `src/dashboard/agents-route.ts` — wire POST → bootstrap, DELETE → teardown
+  - `src/types.ts` — extend `DispatchKind` if needed: `"work" | "triage" | "recovery"`
+  - `<repo>/.danxbot/.gitignore` — ensure `worktrees/` ignored
+
+  ## Test plan
+
+  Unit (`src/agent/worktree-manager.test.ts`) — mock `child_process.execFile`:
+
+  1. `bootstrap()` first run → executes `git worktree add -B <name> <path> origin/main`.
+  2. `bootstrap()` second run on existing worktree → no-op (detected via `git worktree list`).
+  3. `validate()` clean tree on origin/main → `{state: "clean"}`.
+  4. `validate()` with uncommitted file → `{state: "dirty", reason: "uncommitted changes", details}`.
+  5. `validate()` with branch ahead of main → `{state: "dirty", reason: "branch has unmerged commits"}`.
+  6. `validate()` with branch behind main → `{state: "clean"}` (reset will fast-forward).
+  7. `resetClean()` → executes `git checkout <name>; git reset --hard origin/main`.
+  8. `teardown()` → `git worktree remove --force <path>` + `git push origin --delete <name>` (best-effort).
+
+  Integration (`src/__tests__/integration/worktree-manager.test.ts`) — real git in tmpdir:
+
+  9. Bootstrap on a fresh tmpdir repo → worktree exists, branch exists, `git worktree list` includes it.
+  10. Bootstrap twice → no error, single entry in `git worktree list`.
+  11. Make a commit on the agent branch, validate → dirty (ahead).
+  12. After resetClean, validate → clean.
+  13. Teardown → worktree gone, branch gone (locally + remote — use `--mirror` setup for remote in test).
+
+  Recovery dispatch (`src/dispatch/recovery-mode.test.ts`):
+
+  14. Build recovery prompt → contains agent name, porcelain output, list of forbidden ops, instructions to finish WIP.
+  15. Failing test: dispatcher with dirty branch result → routes to `dispatchInRecoveryMode` (mocked).
+  16. Recovery completion + still-dirty validation → files Needs Help comment on last-modified card.
+
+  Endpoint wiring:
+
+  17. POST /api/agents → bootstrap called once with the right args.
+  18. POST /api/agents bootstrap failure → settings record rolled back; 500 returned with error.
+  19. DELETE /api/agents/:name → teardown called BEFORE settings record removed.
+  20. DELETE teardown failure → settings record stays; 500 returned.
+
+  ## Acceptance
+
+  - `WorktreeManager` interface implemented + idempotent bootstrap.
+  - Pre-dispatch validation routes to recovery-mode on dirty/divergent state without destroying work.
+  - Recovery prompt forbids destructive ops + instructs the agent to finish WIP cleanly.
+  - POST /api/agents bootstraps; DELETE /api/agents tears down.
+  - 20 tests pass; integration tests use real git tmpdir.
+  - `make test` green; `tsc + vue-tsc` clean.
+  - Manual smoke: create agent alice → `<repo>/.danxbot/worktrees/alice/` exists with branch `alice` checked out at origin/main. Stash a fake uncommitted file → trigger a dispatch → recovery-mode prompt visible in Claude Code session log.
+
+  ## Out of scope
+
+  - Persona injection (DX-162).
+  - Agent + card lock queries + triage-precursor (DX-163).
+  - Card UI badges (DX-164).
+  - Slack / API dispatch integration with worktrees — those dispatches don't write code, so they can stay in a shared workspace; only issue-worker dispatches go through the per-agent worktree path.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe27ec333d435bbadbcca3
+    title: src/agent/worktree-manager.ts exposes bootstrap / teardown / validate / resetClean; idempotent bootstrap
+    checked: false
+  - check_item_id: 69fe27edda6e8462e0f6723e
+    title: validate() returns clean / dirty with porcelain + ahead/behind; never throws
+    checked: false
+  - check_item_id: 69fe27edc4b5d0fef8a5424b
+    title: dispatch() pre-flight calls validate; clean → reset+normal dispatch; dirty → recovery-mode dispatch
+    checked: false
+  - check_item_id: 69fe27ed8ecb80c7b6dfbd37
+    title: dispatchInRecoveryMode builds recovery prompt forbidding destructive ops; sets dispatch.kind=recovery
+    checked: false
+  - check_item_id: 69fe27ee0b10731385e533ed
+    title: POST /api/agents calls bootstrap; rollback on failure
+    checked: false
+  - check_item_id: 69fe27eee125169918cdae81
+    title: DELETE /api/agents calls teardown; settings record stays on teardown failure
+    checked: false
+  - check_item_id: 69fe27ee6f028647074ce7c8
+    title: 20 tests across unit + integration + recovery + endpoint wiring pass
+    checked: false
+  - check_item_id: 69fe27ef37f1ac9007e90ceb
+    title: make test green; tsc + vue-tsc clean
+    checked: false
+  - check_item_id: 69fe27ef6e52a7bcf643ea72
+    title: Manual smoke — create alice, observe worktree at <repo>/.danxbot/worktrees/alice/; trigger dirty-state recovery-mode dispatch and verify the prompt content via JSONL
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Sequential phase ordering — bootstrap/teardown wire into the POST/DELETE handlers from Phase 2 (DX-160).
+  timestamp: 2026-05-08T12:00:00.000Z
+  by:
+    - DX-160
+blocked: null

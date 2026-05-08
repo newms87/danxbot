@@ -1,0 +1,58 @@
+schema_version: 4
+tracker: trello
+id: DX-123
+external_id: 69df2789129ccb053fba6a4d
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot > Dashboard] Add pagination to /api/events endpoint"
+description: |-
+  **Context:** The dashboard's `/api/events` endpoint returns all in-memory events (up to 500) in a single JSON response. For busy deployments that hit the 500-event cap, this is a ~multi-MB payload on every page load or refresh. The Vue frontend renders the full list in the MessagesTable component without virtualization. For low-traffic deployments this is fine today, but it will degrade as usage grows.
+
+  **Solution:** Add `offset` and `limit` query parameters to `/api/events` in `src/dashboard/server.ts` (e.g., `?offset=0&limit=50`). Default to returning all events when no params are provided (backwards compatible). Update the Vue frontend's `useEvents.ts` composable to fetch the first page on load and support load-more. The SSE stream continues to push full event objects for real-time updates (unchanged).
+
+  **ICE Score:** 224 = 4 × 8 × 7 (I: 4 — meaningful for high-traffic deployments; for current usage the 500-event cap keeps payloads manageable but this is a growth concern. C: 8 — REST pagination is a well-understood pattern with clear implementation path. E: 7 — API change is trivial; Vue composable update takes ~2 hours.)
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69df27c449c7c75d2521e70e
+    title: Add optional offset and limit query params to GET /api/events; default to returning all events (backwards compatible)
+    checked: false
+  - check_item_id: 69df27c5649a79b74a474889
+    title: API response includes total_count field so the frontend knows how many pages exist
+    checked: false
+  - check_item_id: 69df27c5a082b76cbef55bd9
+    title: Update useEvents.ts composable to fetch first 50 events on load and expose loadMore()
+    checked: false
+  - check_item_id: 69df27c651d984b2d4689b93
+    title: MessagesTable.vue renders a Load More button when more events are available
+    checked: false
+  - check_item_id: 69df27c6c4db95ea8f48d470
+    title: SSE stream continues to push complete event objects unchanged (no pagination in the stream)
+    checked: false
+  - check_item_id: 69df27c70099fd0bb14c90b5
+    title: Existing server.test.ts tests for /api/events pass without modification
+    checked: false
+  - check_item_id: 69df27c7c390c84910c0cbee
+    title: "Add server tests for offset/limit params: verifies correct slice, verifies total_count accuracy"
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

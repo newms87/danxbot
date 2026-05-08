@@ -1,0 +1,51 @@
+schema_version: 4
+tracker: trello
+id: DX-24
+external_id: 69f19330f4f6f2fc9f398d28
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: Document or tighten useStream.disconnect() reusability contract
+description: |-
+  Action item from card `tninskjw` (Refactor createHydrationBuffer for continuous subscription).
+
+  The code-reviewer subagent noticed that `useAgents.stopStream` (pre-Phase-7) called `stream?.disconnect()` but did NOT null `stream`. The next `startStream()` then reused the disconnected `useStream` instance — which works only because `useStream.disconnect()` (`useStream.ts:171-179`) leaves the instance reusable: it sets `connectionState = "disconnected"` and nulls `ctrl`, but the `handlers` map persists, and a later `subscribe()` call triggers `scheduleConnect()` which reconnects.
+
+  That reusability is undocumented. Phase 7 fixed `useAgents.stopStream` to null the stream, sidestepping the reliance — but the contract on `useStream` itself is still ambiguous: future readers might assume `disconnect()` is terminal.
+
+  Two options:
+  1. **Document it.** Add JSDoc on `useStream.disconnect()` that the returned object is reusable for future `subscribe()` calls (which trigger an automatic reconnect).
+  2. **Tighten it.** Make `disconnect()` actually terminal — once called, `subscribe()` rejects or returns a no-op unsub. Then `useStream()` is a single-use instance.
+
+  Probably option 1 (document) since `followDispatch` and other callers may also rely on the current reusability. But pick deliberately.
+
+  ## Files
+
+  - `dashboard/src/composables/useStream.ts` — `useStream.disconnect()` JSDoc
+
+  ## Acceptance criteria
+
+  - The reusability of a `useStream` instance after `disconnect()` is either documented in JSDoc OR the API is tightened to forbid it. No middle ground.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

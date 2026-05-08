@@ -1,0 +1,450 @@
+schema_version: 4
+tracker: trello
+id: DX-87
+external_id: 69fa9eab449bf07e04edb2df
+parent_id: DX-67
+children: []
+dispatch:
+  id: 873277cd-c7f8-47ca-9695-8b3a0f5cbedf
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Fix: poller dispatch decision must read local YAML, not Trello > Phase 2: Slice B — inbound channel: tracker-born cards + human comments only"
+description: |-
+  ## Context
+
+  Parent epic: DX-67. Phase 1 flipped the dispatch source to local
+  YAML; the tracker fetch still runs every tick. This phase locks
+  down what the tick is allowed to consume from the tracker.
+
+  Per the Source-of-Truth contract
+  (`~/.claude/rules/issues.md` "Source of Truth"), the inbound
+  channel has TWO narrow exceptions:
+
+  1. **New cards.** A card created on the tracker that has no
+     matching local YAML gets hydrated into a fresh YAML on the
+     next tick.
+  2. **New comments.** Human-authored tracker comments get pulled
+     into the YAML's `comments[]`. Bot-mirrored comments are
+     detected and skipped to avoid echo loops.
+
+  Everything else inbound is ignored — status drags, title edits,
+  AC checkbox ticks, label changes on the tracker have no effect.
+
+  ## Current State
+
+  - Card hydration: `bulkSyncMissingYamls` already imports
+    tracker-born cards into local YAMLs each tick. Likely already
+    correct.
+  - Comment merge: `syncIssue` (`src/issue-tracker/sync.ts` ~line
+    100-116) already merges remote comments by `id` dedup. BUT
+    there's no explicit bot-comment skip on the inbound side — the
+    only thing keeping locally-stamped bot comments out is that
+    they already have an `id` after the worker POSTed them. A bot
+    comment that lands on the tracker via a different path
+    (different danxbot deployment, or worker write that didn't
+    stamp the id back) could be re-imported as a "human" comment
+    and trigger an echo loop.
+  - The card description envisions a tick-level "for each card,
+    fetch tracker comments" loop. The current architecture does it
+    inside `syncIssue` per-card during outbound. Same effect.
+
+  ## Solution
+
+  ### Step 1 — Audit + tighten card hydration
+
+  - Verify `bulkSyncMissingYamls` writes a complete YAML for any
+    tracker card with no matching local file (every required field
+    populated, `dispatch_id: null`, `comments: []` initial — the
+    next tick's `syncIssue` pulls remote comments).
+  - Confirm the inbound side does NOT re-assert tracker title /
+    description / status / AC / labels onto an existing YAML —
+    `syncIssue` is local-as-truth (verified in Slice C / Phase 3
+    too, but assert it here).
+  - Add a regression test: edit a card's title on the tracker
+    (mock), with the local YAML already present and unchanged →
+    next sync re-asserts the local title onto the tracker. The
+    YAML's title is untouched.
+
+  ### Step 2 — Explicit bot-comment skip
+
+  - Define the bot-comment marker (likely the existing
+    `DANXBOT_COMMENT_MARKER` from `src/issue-tracker/markers.ts`).
+    Bot comments POSTed by `syncIssue` already carry the marker
+    prefix.
+  - In the inbound merge inside `syncIssue` (lines ~100-116),
+    after dedup by `id`, also skip any comment whose `text`
+    starts with `DANXBOT_COMMENT_MARKER`. Belt-and-suspenders: if
+    the same bot deployment has already stamped the id, dedup
+    already wins; if a different bot stamped it (or the id is
+    missing), the marker check catches it. No echo loop possible.
+  - Tests:
+    - Comment authored by human (no marker) on tracker, no local
+      copy → appended to local `comments[]` after sync.
+    - Comment with `DANXBOT_COMMENT_MARKER` prefix on tracker, no
+      matching local id → SKIPPED (no append).
+    - Comment with marker AND matching local id → already
+      deduped (existing behavior, just re-confirm).
+
+  ### Step 3 — Document inbound boundaries in code
+
+  - Update the comment block at the top of `syncIssue` (or add a
+    new one above the inbound-merge block) explicitly enumerating
+    the two narrow inbound exceptions. Future readers should not
+    have to grep `~/.claude/rules/issues.md` to know what's
+    allowed inbound.
+
+  ## Out of Scope (this phase)
+
+  - Slice C outbound mirror audit (Phase 3). Even though this
+    phase touches `syncIssue`, the work here is bounded to the
+    INBOUND merge side.
+  - Multi-repo combined dispatch.
+
+  ## Key Files
+
+  - `src/issue-tracker/sync.ts` — inbound merge tighten + comment
+    block
+  - `src/issue-tracker/sync.test.ts` — bot-skip + human-pull
+    coverage
+  - `src/poller/index.ts` — `bulkSyncMissingYamls` call site
+    (verify only, likely no edit)
+  - `src/__tests__/poller/*` (or equivalent) — hydration
+    regression test
+
+  ## Verify
+
+  - `npx vitest run` clean
+  - `npx tsc --noEmit` clean
+  - Manual: edit a tracker card's title (different from local
+    YAML) → next tick reverts on the tracker, YAML unchanged.
+  - Manual: post a human comment on the tracker → next tick
+    appends to YAML `comments[]`.
+  - Manual: post a bot-marked comment on the tracker (simulate via
+    direct API call) → next tick does NOT re-import.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa9eacdde9fb5319f390d1
+    title: "Card hydration: tracker-born cards (no matching local YAML) are written as complete YAMLs by bulkSyncMissingYamls each tick"
+    checked: true
+  - check_item_id: 69fa9eade81d62b8c40e122c
+    title: Inbound comment merge skips comments whose text starts with DANXBOT_COMMENT_MARKER (no echo loop)
+    checked: true
+  - check_item_id: 69fa9ead02411747c95ed58d
+    title: Inbound comment merge appends human-authored tracker comments to YAML comments[] (deduped by id)
+    checked: true
+  - check_item_id: 69fa9eae46399b49cf2b5d46
+    title: Tracker-side title / description / status / AC edits do NOT propagate to YAML — next tick re-asserts YAML state
+    checked: true
+  - check_item_id: 69fa9eae61908ad51e64df51
+    title: syncIssue inbound block has a comment block enumerating the two narrow inbound exceptions (cards, comments)
+    checked: true
+  - check_item_id: 69fa9eaf937d709e60f5ee53
+    title: "New tests cover: human comment pull, bot comment skip, dedup by id, hydration completeness, tracker-side title edit reverts"
+    checked: true
+  - check_item_id: 69fa9eaf9b3c7b3489de887b
+    title: npx vitest run clean (full suite); npx tsc --noEmit clean
+    checked: true
+comments:
+  - id: 69faa588eaa0c8d7cb3410d9
+    author: danxbot
+    timestamp: 2026-05-06T02:20:56.977Z
+    text: |
+      <!-- danxbot -->
+
+      ## Notes from Phase 1 (DX-86)
+
+      Phase 1 landed at commit `76618fe`. Reusable infrastructure +
+      gotchas you will want before starting Phase 2:
+
+      ### Reusable
+      - `src/poller/local-issues.ts` exports
+        `listDispatchableYamls`, `listInProgressYamls`,
+        `listBlockedTodoYamls`. Phase 2's per-card inbound-merge loop
+        will likely want a "list every open YAML" walker — extend
+        this module rather than rolling a fourth ad-hoc walk.
+      - `localIssueToRef(issue)` projection sits at the top of
+        `src/poller/index.ts` (just below `log`). Drops `list_kind`
+        deliberately — that field lives only on tracker `IssueRef`s.
+      - `_poll`'s tracker-side partitioning happens at the top:
+        `trackerToDoRefs`, `trackerInProgressRefs`, `actionItemRefs`.
+        Phase 2's hydration / comment-pull will want to read the full
+        `openCards` list (no filter) — already available; just don't
+        re-call `fetchOpenCards`.
+
+      ### Gotchas
+      - `list_kind` is NOT persisted on the YAML schema. Phase 1
+        worked around this by passing `excludeExternalIds:
+        Set<string>` from the call site into the helper. If Phase 2
+        needs to distinguish "Action Items YAML" from "regular YAML"
+        on disk, the same Set-from-tracker pattern is the path; OR
+        Phase 2 can extend the schema to persist `list_kind` — that's
+        a bigger change but cleaner long-term. Decide and call out.
+      - Bot-vs-human comment detection: the description references
+        the `DANXBOT_COMMENT_MARKER` already used by retro / lock /
+        recovery comments — check `src/issue-tracker/markers.ts` for
+        the canonical marker. `syncIssue` (`src/issue-tracker/sync.ts`
+        ~line 100) is where the inbound merge happens today.
+      - The integration tests live under
+        `src/__tests__/integration/poller-memory-tracker.test.ts`
+        (uses `MemoryTracker` directly) and
+        `critical-failure-end-to-end.test.ts` (uses real fs + a
+        fake-claude wrapper). Both required DX-86-specific changes;
+        the patterns (capture `fetchOpenCards` via wrapping factory;
+        pre-write a YAML on disk) are documented inline.
+
+      ### Verify before merging Phase 2
+      - `npx vitest run` clean (Phase 1: 2922 tests, all pass).
+      - `npx tsc --noEmit` clean.
+      - Manual: add a tracker-only card, verify the next tick writes
+        a YAML and a subsequent tick dispatches it. Add a tracker
+        comment as a human, verify it appends to `comments[]` AND
+        that the bot's own re-mirror of that comment doesn't cause
+        an echo loop.
+  - id: 69faa5b340e237c7354df022
+    author: newms87
+    timestamp: 2026-05-06T02:21:39.190Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `873277cd-c7f8-47ca-9695-8b3a0f5cbedf` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-06T02:21:40.321Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-06T04:21:40.321Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '873277cd-c7f8-47ca-9695-8b3a0f5cbedf' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69faa81a4a859d35057960d9
+    author: code-reviewer
+    timestamp: 2026-05-06T02:31:54.533Z
+    text: |
+      <!-- danxbot -->
+
+      ## Code Review
+
+      **1. Silent fallback risk — `c.text.includes(DANXBOT_COMMENT_MARKER)` is fuzzy.**
+      Anchoring to `startsWith` matches outbound stamping convention
+      (marker at position 0) and avoids suppressing human replies that
+      quote the marker mid-body. Same correctness, narrower blast
+      radius. **Fixed** — extracted to `isBotMirroredComment` in
+      `markers.ts` using `startsWith`.
+
+      **2. DRY — bot-detection should be a named predicate.**
+      Inline `text.includes(...)` would be duplicated as soon as
+      another inbound path (hydrate, future bulk-pull) needs the same
+      skip. **Fixed** — `isBotMirroredComment(comment)` is now the
+      single source of truth.
+
+      **3. Test smell — completeness test asserted `Array.isArray` /
+      `toBeDefined` instead of structural values.** Hydration bug that
+      returns `[]` for a non-empty AC list would have passed.
+      **Fixed** — assertions now check concrete values from the
+      `defaultCreate` fixture (`status: "ToDo"`, `type: "Feature"`,
+      `title: "Card title"`, AC `title: "AC1"`, etc.).
+
+      **4. Doc-block quality — good.** Clear, links source-of-truth
+      rule, enumerates exceptions, explains what's NOT propagated.
+      Kept.
+
+      No backwards-compat shims. No SOLID violations.
+  - id: 69faa81a1c98fd906b028d55
+    author: test-reviewer
+    timestamp: 2026-05-06T02:31:54.899Z
+    text: |
+      <!-- danxbot -->
+
+      ## Test Review
+
+      All ACs covered. No coverage gaps that block AC verification.
+
+      | AC | Test | Status |
+      |---|---|---|
+      | AC1 (hydration completeness) | yaml-lifecycle.test.ts DX-87 | covered |
+      | AC2 (bot-marker skip) | sync.test.ts (skip + mixed pull + anchored) | covered |
+      | AC3 (human dedup) | sync.test.ts dedup-by-id | covered |
+      | AC4 (no inbound propagation: title) | sync.test.ts title-revert | covered |
+      | AC4 (no inbound propagation: desc/status/AC) | sync.test.ts | covered |
+      | AC5 (doc block) | structural — present at sync.ts inbound merge | covered |
+      | AC6 (tests cover above) | inventory above | covered |
+
+      Optional extension: explicit "tracker-side `children[]` /
+      `blocked` / `labels` edits don't propagate" test. Doc block +
+      existing local-as-truth tests imply it; not a blocker for this
+      phase.
+  - id: 69faa81b792353c5fe359c44
+    author: danxbot
+    timestamp: 2026-05-06T02:31:55.289Z
+    text: |
+      <!-- danxbot -->
+
+      ## Review Fixes
+
+      Addressed all three code-review findings in the same dispatch
+      (commit `e57722d`):
+
+      1. Switched to anchored `startsWith(DANXBOT_COMMENT_MARKER)`
+         via the new `isBotMirroredComment` predicate.
+      2. Extracted predicate to `src/issue-tracker/markers.ts` so any
+         future inbound path uses the single source of truth.
+      3. Strengthened the hydration completeness test to assert
+         concrete VALUES (not just types).
+
+      Added an anchored-marker test in sync.test.ts asserting a human
+      comment that quotes the marker mid-body IS pulled.
+
+      Re-ran full suite: 2929 tests pass. tsc --noEmit clean.
+  - id: 69faa8182895cdf7a4a9ffc8
+    author: newms87
+    timestamp: 2026-05-06T02:31:52.026Z
+    text: |
+      <!-- danxbot -->
+
+      ## Code Review
+
+      **1. Silent fallback risk — `c.text.includes(DANXBOT_COMMENT_MARKER)` is fuzzy.**
+      Anchoring to `startsWith` matches outbound stamping convention
+      (marker at position 0) and avoids suppressing human replies that
+      quote the marker mid-body. Same correctness, narrower blast
+      radius. **Fixed** — extracted to `isBotMirroredComment` in
+      `markers.ts` using `startsWith`.
+
+      **2. DRY — bot-detection should be a named predicate.**
+      Inline `text.includes(...)` would be duplicated as soon as
+      another inbound path (hydrate, future bulk-pull) needs the same
+      skip. **Fixed** — `isBotMirroredComment(comment)` is now the
+      single source of truth.
+
+      **3. Test smell — completeness test asserted `Array.isArray` /
+      `toBeDefined` instead of structural values.** Hydration bug that
+      returns `[]` for a non-empty AC list would have passed.
+      **Fixed** — assertions now check concrete values from the
+      `defaultCreate` fixture (`status: "ToDo"`, `type: "Feature"`,
+      `title: "Card title"`, AC `title: "AC1"`, etc.).
+
+      **4. Doc-block quality — good.** Clear, links source-of-truth
+      rule, enumerates exceptions, explains what's NOT propagated.
+      Kept.
+
+      No backwards-compat shims. No SOLID violations.
+  - id: 69faa8185250339e871adb37
+    author: newms87
+    timestamp: 2026-05-06T02:31:52.384Z
+    text: |
+      <!-- danxbot -->
+
+      ## Test Review
+
+      All ACs covered. No coverage gaps that block AC verification.
+
+      | AC | Test | Status |
+      |---|---|---|
+      | AC1 (hydration completeness) | yaml-lifecycle.test.ts DX-87 | covered |
+      | AC2 (bot-marker skip) | sync.test.ts (skip + mixed pull + anchored) | covered |
+      | AC3 (human dedup) | sync.test.ts dedup-by-id | covered |
+      | AC4 (no inbound propagation: title) | sync.test.ts title-revert | covered |
+      | AC4 (no inbound propagation: desc/status/AC) | sync.test.ts | covered |
+      | AC5 (doc block) | structural — present at sync.ts inbound merge | covered |
+      | AC6 (tests cover above) | inventory above | covered |
+
+      Optional extension: explicit "tracker-side `children[]` /
+      `blocked` / `labels` edits don't propagate" test. Doc block +
+      existing local-as-truth tests imply it; not a blocker for this
+      phase.
+  - id: 69faa8188ec55170232ce72d
+    author: newms87
+    timestamp: 2026-05-06T02:31:52.809Z
+    text: |
+      <!-- danxbot -->
+
+      ## Review Fixes
+
+      Addressed all three code-review findings in the same dispatch
+      (commit `e57722d`):
+
+      1. Switched to anchored `startsWith(DANXBOT_COMMENT_MARKER)`
+         via the new `isBotMirroredComment` predicate.
+      2. Extracted predicate to `src/issue-tracker/markers.ts` so any
+         future inbound path uses the single source of truth.
+      3. Strengthened the hydration completeness test to assert
+         concrete VALUES (not just types).
+
+      Added an anchored-marker test in sync.test.ts asserting a human
+      comment that quotes the marker mid-body IS pulled.
+
+      Re-ran full suite: 2929 tests pass. tsc --noEmit clean.
+  - id: 69faa819549f472250ee4751
+    author: newms87
+    timestamp: 2026-05-06T02:31:53.211Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Inbound channel discipline now matches the
+        `~/.claude/rules/issues.md` Source-of-Truth contract: a single
+        anchored marker check + dedup-by-id keeps echo loops impossible
+        regardless of which deployment posted the bot comment.
+      - Code reviewer caught two real improvements (anchor `startsWith`
+        vs `includes`; extract `isBotMirroredComment` predicate); both
+        shipped in the same dispatch.
+      - Hydration completeness regression test asserts concrete VALUES
+        (not just types), so a future drop-a-field bug fails loudly here
+        instead of silently downstream.
+
+      **What went wrong:** - Initial implementation used `text.includes(MARKER)` which would
+        have incorrectly suppressed any human reply that quoted the bot's
+        prior comment in its body. Caught by code review, not by the
+        tests I wrote — added an anchored-marker test on the fix pass.
+
+      **Action items:** Nothing
+      **Commits:** e57722d
+history: []
+retro:
+  good: |
+    - Inbound channel discipline now matches the
+      `~/.claude/rules/issues.md` Source-of-Truth contract: a single
+      anchored marker check + dedup-by-id keeps echo loops impossible
+      regardless of which deployment posted the bot comment.
+    - Code reviewer caught two real improvements (anchor `startsWith`
+      vs `includes`; extract `isBotMirroredComment` predicate); both
+      shipped in the same dispatch.
+    - Hydration completeness regression test asserts concrete VALUES
+      (not just types), so a future drop-a-field bug fails loudly here
+      instead of silently downstream.
+  bad: |
+    - Initial implementation used `text.includes(MARKER)` which would
+      have incorrectly suppressed any human reply that quoted the bot's
+      prior comment in its body. Caught by code review, not by the
+      tests I wrote — added an anchored-marker test on the fix pass.
+  action_item_ids: []
+  commits:
+    - e57722d
+waiting_on: null
+blocked: null

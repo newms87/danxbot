@@ -1,0 +1,54 @@
+schema_version: 4
+tracker: trello
+id: DX-27
+external_id: 69f17f4c2fd19793d391b165
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Doc: integration tests that import `poll` or `dispatch` must reset their module state in afterEach"
+description: |-
+  ## Action item from 6AjSUCUQ retro
+
+  While writing the AC12 fake-claude integration test (commit `87584d6`), I hit two cross-test pollution failures that took an iteration to diagnose:
+
+  1. `src/dispatch/core.ts` keeps an in-module `activeJobs` Map + per-dispatch TTL eviction timers. Without `_resetForTesting()` between tests, jobs from test N stay registered when test N+1 runs.
+  2. `src/poller/index.ts` keeps a per-repo `repoState` Map (`teamRunning`, `polling`, `consecutiveFailures`, `backoffUntil`, `priorTodoCardIds`, `trackedCardId`). Without `_resetForTesting()`, the second test sees `teamRunning: true` (or similar leftover state) from the first test's dispatch and `poll()` returns early for the wrong reason.
+
+  Both modules already export `_resetForTesting`. The trap is that nothing tells you to call them — both tests pass when run individually but fail when run together.
+
+  ## Suggested doc
+
+  Add a one-line entry under the existing "Isolate Pure Helpers From `src/poller/index.ts`" section in `.claude/rules/danx-repo-workflow.md`:
+
+  > Integration tests that import `poll` from `src/poller/index.js` or `dispatch` from `src/dispatch/core.js` MUST call their `_resetForTesting()` exports in `afterEach`. Both modules hold mutable per-process state (`repoState`, `activeJobs`, TTL eviction timers) that bleeds between tests. The failure mode is subtle — tests pass alone but fail when sequenced.
+
+  ## Why deferred
+
+  It's documentation, not code. Doesn't gate any current functionality. Cheap follow-up.
+
+  ## Found while
+
+  `6AjSUCUQ` (Halt-flag AC12 fake-claude integration test).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

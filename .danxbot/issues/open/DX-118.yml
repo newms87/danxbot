@@ -1,0 +1,61 @@
+schema_version: 4
+tracker: trello
+id: DX-118
+external_id: 69df24dc32dfa2044ef76c04
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot > Dashboard] Filter SSE stream by repo in multi-repo mode"
+description: |
+  **Context:** The dashboard's SSE endpoint (`/api/stream`) broadcasts every event to all connected clients regardless of repo. The `/api/events` REST endpoint already accepts a `?repo=` filter, and the Vue frontend uses this filter when a specific repo is selected. However the SSE stream ignores the repo filter entirely — so in multi-repo setups, a client viewing only the 'platform' repo still receives real-time events from all other repos, causing spurious UI updates and unnecessary data transfer.
+
+  **Solution:** Accept an optional `?repo=` query parameter on `/api/stream`. When present, only broadcast events whose `repoName` matches. This requires per-client filter state: replace the current `Set<SSEClient>` with a `Map<SSEClient, string | undefined>` where the value is the repo filter.
+
+  **ICE Score:** 480 = 8 x 8 x 7 (I: 8 — every multi-repo dashboard user is affected; spurious updates confuse the UI and waste bandwidth. C: 8 — the broadcast function is a single place and the pattern is identical to what /api/events already does. E: 7 — touches events.ts broadcast/addSSEClient/removeSSEClient and server.ts SSE handler, isolated to 2 files.)
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69df25133835b0620d3b519f
+    title: Accept optional ?repo= query param on GET /api/stream
+    checked: false
+  - check_item_id: 69df2514a80fccca5d3c124f
+    title: When ?repo= is provided, only broadcast events matching that repoName to that client
+    checked: false
+  - check_item_id: 69df251400a1fd2fa80856b6
+    title: When no ?repo= is provided, broadcast all events (backward-compatible default)
+    checked: false
+  - check_item_id: 69df25153aaabc00b01ee694
+    title: addSSEClient accepts optional repo filter and stores it per-client
+    checked: false
+  - check_item_id: 69df2515e59d6cf2e7a7a860
+    title: broadcast function applies per-client filter before sending
+    checked: false
+  - check_item_id: 69df2516530d215dfdbe72a9
+    title: Dashboard frontend passes current repo selection as ?repo= when subscribing to SSE
+    checked: false
+  - check_item_id: 69df251665cdf59650c43a65
+    title: Switching repos in the UI reconnects SSE with updated filter
+    checked: false
+  - check_item_id: 69df2517d7b233eabf559b95
+    title: All tests pass via npx vitest run
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

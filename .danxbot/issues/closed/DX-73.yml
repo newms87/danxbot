@@ -1,0 +1,125 @@
+schema_version: 4
+tracker: trello
+id: DX-73
+external_id: 69fa128c88a2f2e4745a182c
+parent_id: null
+children: []
+dispatch: null
+status: Done
+type: Bug
+title: "Fix: orphan-resume duplicates host-mode dispatch after worker restart"
+description: |-
+  ## Problem
+
+  Worker restart wipes in-memory `activeJobs`. The poller's
+  `tryResumeOrphan` only checked `getActiveJob(issue.dispatch_id)` —
+  also wiped — so when host-mode claude survived the restart (`script
+  -q -f` reparents claude to PID 1, immune to SIGTERM cascade),
+  orphan-resume saw "no live job" + a JSONL on disk → stamped a NEW
+  `dispatch_id` and spawned a duplicate claude.
+
+  Observed today on DX-66: original agent finalized + committed
+  `[DX-66] Phase 6` with `dispatch_id: 1cbb878b-...`. A worker
+  restart between mid-work and finalize triggered orphan-resume,
+  spawning a second claude with `dispatch_id: 5d8a9dd3-...` — the
+  duplicate ran in parallel, redoing Phase 6 from scratch.
+
+  ## Root Cause
+
+  Two checks guard against duplicate spawn:
+  - `getActiveJob` — in-memory, lost on worker restart.
+  - `hasLiveDispatchForCard` — DB-backed, persists across restarts
+    (DX-69).
+
+  DX-69 wired `hasLiveDispatchForCard` into the ToDo dispatch path
+  but NOT the orphan-resume path. Orphan-resume runs first on every
+  tick — the duplicate fires before the ToDo guard ever runs.
+
+  ## Solution
+
+  Mirror DX-69 inside `tryResumeOrphan`: after the in-memory
+  `getActiveJob` check, also call the existing
+  `hasLiveDispatchForCard(repo.name, ref.external_id)` wrapper.
+  Continue (skip the card) when DB shows a non-terminal row with a
+  live `host_pid`. Existing wrapper already swallows DB failures and
+  fails open, so symmetry with the ToDo path is preserved.
+
+  ## Key Files
+
+  - `src/poller/index.ts` — added probe inside `tryResumeOrphan`
+    loop; reuses the in-module wrapper added by DX-69.
+  - `src/poller/index.test.ts` — added `findNonTerminalDispatches` +
+    `isPidAlive` module mocks and a regression test "skips orphan
+    resume when DB has a non-terminal dispatch row with a live
+    host_pid for the card".
+
+  ## Verify
+
+  - `npx vitest run src/poller/index.test.ts` clean (103 tests).
+  - `npx vitest run` clean (153 files).
+  - `npx tsc --noEmit` clean.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa128dd1842c2df73ef06a
+    title: tryResumeOrphan calls hasLiveDispatchForCard before stamping a new dispatch_id
+    checked: true
+  - check_item_id: 69fa128e9d3ff3294b777494
+    title: Live DB row + alive host_pid skips the resume; YAML dispatch_id unchanged
+    checked: true
+  - check_item_id: 69fa128efa9a3d02a7c2f5fb
+    title: Existing orphan-resume tests + ToDo dispatch tests still pass
+    checked: true
+  - check_item_id: 69fa128fe18556e68d507ff2
+    title: npx tsc --noEmit clean
+    checked: true
+comments:
+  - id: 69fa12d7eee0ace76dfbe99c
+    author: danxbot
+    timestamp: 2026-05-05T15:55:03.054Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Mirrored DX-69's pattern exactly — single-line probe call + reuse
+      of the existing `hasLiveDispatchForCard` wrapper. No new module,
+      no new abstraction, no schema change. Test scaffolding extended
+      by two `vi.mock` blocks + one beforeEach reset; existing 102
+      orphan-resume + ToDo tests untouched.
+      **What went wrong:** Bug shipped because DX-69 patched only ONE of the two paths that
+      can spawn claude for a given card. Reviewer / planner missed the
+      orphan-resume sibling. Lesson: when adding a "no duplicate
+      dispatch" guard, grep every site that can spawn claude
+      (`spawnClaude`, `dispatch(`) and verify each is gated.
+      **Action items:** Nothing
+      **Commits:** 05681ff5
+history: []
+retro:
+  good: |-
+    Mirrored DX-69's pattern exactly — single-line probe call + reuse
+    of the existing `hasLiveDispatchForCard` wrapper. No new module,
+    no new abstraction, no schema change. Test scaffolding extended
+    by two `vi.mock` blocks + one beforeEach reset; existing 102
+    orphan-resume + ToDo tests untouched.
+  bad: |-
+    Bug shipped because DX-69 patched only ONE of the two paths that
+    can spawn claude for a given card. Reviewer / planner missed the
+    orphan-resume sibling. Lesson: when adding a "no duplicate
+    dispatch" guard, grep every site that can spawn claude
+    (`spawnClaude`, `dispatch(`) and verify each is gated.
+  action_item_ids: []
+  commits:
+    - 05681ff5
+waiting_on: null
+blocked: null

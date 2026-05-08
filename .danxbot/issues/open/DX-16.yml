@@ -1,0 +1,71 @@
+schema_version: 4
+tracker: trello
+id: DX-16
+external_id: 69f6d11f32498da53c521576
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot] Lazy-validate env in src/config.ts so DB-touching modules can top-level import"
+description: |-
+  ## Context
+
+  `src/config.ts` validates `DANXBOT_DB_USER`, `DANXBOT_DB_PASSWORD`, `DANXBOT_DB_HOST`, `DANXBOT_DB_NAME` etc. at module-init time via `required()` calls in the top-level config object. Any module that transitively imports `src/dashboard/dispatches-db.ts` therefore can NOT be loaded in a test environment that doesn't set those env vars.
+
+  Phase 3 of tracker-agnostic-agents (Trello wsb4TVNT) hit this and worked around it with `await import()` lazy-loading inside two new modules:
+  - `src/worker/issue-route.ts` — `defaultRecordError` lazy-imports `dispatches-db` for `updateDispatch`
+  - `src/worker/auto-sync.ts` — `defaultGetDispatch` lazy-imports `dispatches-db` for `getDispatchById`
+
+  The lazy import is a smell. Code reviewer flagged it: the actual fix is in `src/config.ts`, not in every consumer. Workaround was kept for Phase 3 because it ships now and the proper fix is a separate refactor with broader blast radius.
+
+  ## Solution
+
+  Convert `src/config.ts` from module-init eager validation to lazy validation. Two cleanest options:
+
+  1. **Proxy-based lazy access:** wrap the config object in a Proxy that calls `required(key)` only when the field is accessed. First access throws if env is missing; subsequent accesses are cached. Tests that don't read DB fields never trigger validation.
+
+  2. **Function-based access:** convert `config.db.user` etc. into `getDbUser()` style accessors. More verbose but unambiguous.
+
+  Option 1 preserves the existing `config.db.user` API; consumers don't change. Recommended.
+
+  ## Key files
+
+  - `src/config.ts` — the validation chain
+  - `src/env.ts` — `required()` helper (no change expected)
+  - `src/worker/issue-route.ts` — restore top-level `import { updateDispatch }` after fix lands
+  - `src/worker/auto-sync.ts` — restore top-level `import { getDispatchById }` after fix lands
+
+  ## Gotchas
+
+  - Many tests already mock `src/config.js` via `vi.mock` (see `src/worker/dispatch.test.ts`). The lazy refactor must NOT break those mocks — Proxy-wrapped exports may surface differently to vi.mock.
+  - Some modules expect specific exports at module-init for type narrowing or error throwing. Audit `src/config.ts` consumers before refactoring.
+  - The fix should NOT change runtime semantics in production — config validation must still happen, just deferred to first access. A worker that never accesses `config.db.user` (impossible in practice) would silently miss the validation; consider a one-shot `validateAllConfig()` call at worker boot to preserve fail-loud behavior.
+
+  ## How to verify
+
+  - Remove the `await import()` in `src/worker/issue-route.ts#defaultRecordError` and `src/worker/auto-sync.ts#defaultGetDispatch`. Replace with top-level `import`.
+  - Run `npx vitest run src/__tests__/worker/` — tests still pass without DB env vars set.
+  - Run `npx vitest run` — full suite still passes (no regression in mocked test paths).
+  - Boot a real worker — config errors surface on first DB call as before, OR via the explicit `validateAllConfig()` boot check.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

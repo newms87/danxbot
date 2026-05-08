@@ -1,0 +1,52 @@
+schema_version: 4
+tracker: trello
+id: DX-122
+external_id: 69df277dbcd2f37f93f09e6b
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot > Worker] Cap activeJobs map size to prevent unbounded memory growth"
+description: |-
+  **Context:** `src/worker/server.ts` tracks all dispatched jobs in an `activeJobs` Map. Completed jobs are cleaned up 1 hour after completion via a `setInterval`. However there is no cap on the map's size — in a long-running worker that receives many dispatch requests, completed-but-not-yet-cleaned jobs accumulate in memory. The 1-hour cleanup interval means up to 1 hour of jobs can be held before removal.
+
+  **Solution:** Add a MAX_ACTIVE_JOBS constant (e.g., 1000) and trim the oldest completed jobs when the map exceeds this limit. Since completed jobs are only needed for status queries (which are typically checked immediately after launch), evicting old completed entries is safe. Alternatively, reduce the cleanup interval from 60 minutes to 5 minutes to limit the window of accumulation without needing an explicit cap.
+
+  **ICE Score:** 243 = 3 × 9 × 9 (I: 3 — unlikely to cause issues in practice since job objects are small, but a correctness improvement for long-running workers. C: 9 — trivial map maintenance, completely contained. E: 9 — 10 lines of change in worker/server.ts.)
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69df27b8056e530ff7af3897
+    title: Reduce the cleanup interval from 60 minutes to 5 minutes in worker/server.ts
+    checked: false
+  - check_item_id: 69df27b8e8f5fe53e03dbb7e
+    title: Add a MAX_ACTIVE_JOBS constant (e.g. 1000) and evict oldest non-running entries when exceeded
+    checked: false
+  - check_item_id: 69df27b9c8aca93acf10e8e3
+    title: Running jobs are never evicted regardless of map size
+    checked: false
+  - check_item_id: 69df27bacfc7a819a4193f32
+    title: Existing tests for /api/status and /api/cancel still pass after the change
+    checked: false
+  - check_item_id: 69df27baf9c1fc4a3a40e0d1
+    title: Add a test that verifies map does not grow beyond MAX_ACTIVE_JOBS after many completed jobs
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

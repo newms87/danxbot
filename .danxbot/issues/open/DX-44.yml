@@ -1,0 +1,121 @@
+schema_version: 4
+tracker: trello
+id: DX-44
+external_id: 69ec3c07f4738e531c138599
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: "Fix: per-dispatch MCP/terminal temp-dir cleanup leaks (1373+ stale dirs in /tmp on dev workstation)"
+description: |-
+  ## Problem
+
+  `make test-system-cleanup` failed at session 2026-04-25 with 1373 orphaned `/tmp/danxbot-mcp-*` dirs and 1 orphaned `/tmp/danxbot-term-*` dir, all older than 60 minutes. After manual cleanup the test passes — but new dirs accumulate: ~30 new dirs accrued over a ~1 hour active development window (about one dir per dispatch, occasionally more).
+
+  ## Root Cause (TBD)
+
+  `src/dispatch/core.ts#cleanupMcpSettings` is wired into the `onComplete` callback of `spawnAgent`. The cleanup runs for the most recent spawn's settings dir, but on stall-and-respawn there are TWO settingsDirs (parent + nudge respawn). The parent's cleanup may not fire if the parent's onComplete is short-circuited by the respawn path.
+
+  Other suspects:
+  - Container-restart kills mid-dispatch (worker SIGTERM bypasses cleanup chain)
+  - Test cleanup paths in `_allow_tools_cleanup` only handle the flag and probe card, not the per-dispatch temp dir
+  - `terminateWithGrace` calls inside the stall detector may not propagate to onComplete
+
+  The leak is pre-existing and independent of P6 — confirmed by checking dir mtimes (most stale dirs are days old, predating the P6 session). 1403 dirs total at session start; cleanup happened ~5–30 dirs/day in normal operation.
+
+  ## Solution
+
+  1. Audit `src/dispatch/core.ts` cleanup paths: list every code path that creates a `danxbot-mcp-*` or `danxbot-term-*` dir, and verify each has a paired cleanup that fires on every termination path (clean exit, stall-respawn, SIGTERM, host-kill, exception).
+  2. Move cleanup to a finally-block / process-exit handler so kill-9 and worker-restart still trigger cleanup of the dispatch's own dirs.
+  3. Add a startup sweep: when the worker boots, find `/tmp/danxbot-mcp-*` dirs older than ~10 minutes that don't correspond to active dispatches and remove them. The 60-minute threshold the test uses is too lenient for a maintenance sweep — anything older than the longest dispatch timeout is provably stale.
+  4. Add a unit test that covers stall-and-respawn cleanup ordering.
+
+  ## Verification
+
+  - `make test-system-cleanup` passes after a long dev session (no manual /tmp cleanup needed)
+  - Counter: number of `danxbot-mcp-*` dirs older than 1h on a dev workstation that has been running danxbot daily for a week, verified to be near-zero
+
+  ## Key Files
+
+  - `src/dispatch/core.ts#runResolved` — cleanup chain wiring around `spawnForDispatch` retries
+  - `src/dispatch/core.ts#cleanupMcpSettings` — current cleanup helper
+  - `src/agent/launcher.ts#spawnAgent` — onComplete invocation
+  - `src/__tests__/system/run-system-tests.sh#test_cleanup` — current test (60-minute threshold)
+
+  ## Discovered
+
+  During P6 verification (Trello [WWYKnQhc](https://trello.com/c/WWYKnQhc)). Independent of P6 — the leak's mtimes show accumulation over weeks.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments:
+  - id: 69f17483bca474a31b021174
+    author: newms87
+    timestamp: 2026-04-29T03:01:23.106Z
+    text: |-
+      ## Triage 2026-04-28
+
+      State: **Kept**. Real, reproducible, code paths verified.
+
+      ### Code audit
+
+      `src/dispatch/core.ts#runResolved`:
+      - `writeMcpSettingsFile` mkdtemp's `/tmp/danxbot-mcp-XXXXXX` per spawn.
+      - Cleanup wired two ways: `onComplete` callback (cleanupMcpSettings before caller's hook — ordering is load-bearing) AND a `try/catch` around the `spawnAgent` call that cleans on spawn failure.
+      - Stall-respawn (`spawnForDispatch(prompt, isRespawn=true)`) creates a NEW settingsDir each respawn. Each respawn's `onComplete` fires when its own `spawnAgent` job terminates — so per-spawn cleanup IS wired correctly.
+
+      `src/agent/launcher.ts#spawnAgent`:
+      - mkdtemp's `/tmp/danxbot-prompt-XXXXXX` for `prompt.md`.
+      - Host mode also mkdtemp's `/tmp/danxbot-term-XXXXXX` (registered via `registerTermDir`).
+      - `runCleanup` has a `finally` block that rmSync's `promptDir` + `termSettingsDirToClean` — survives observer throws.
+
+      ### Real failure modes (uncovered by code)
+
+      1. **Worker SIGTERM during active dispatch** — there is no `process.on("SIGTERM")` shutdown hook that drains active jobs and runs their cleanup chains. Compose `down`, `make stop-worker`, container restart all leak whatever's mid-flight. This is by far the largest source given dev workflow.
+      2. **SIGKILL / OOM** — same, no recovery possible. Only a startup sweep helps.
+      3. **Tests** — fake-claude / capture-server tests that bypass the `dispatch()` path can mkdtemp via direct calls; `_allow_tools_cleanup` was retired but residue of older test scaffolding may still leak.
+      4. **Stall mid-cleanup race** — if `dispatchTracker.finalize` throws synchronously before the `finally` block (extremely unlikely; `finalize` is async), it would bypass `rmSync`. Currently NOT a leak path.
+
+      ### Current /tmp state on this workstation
+
+      - `/tmp/danxbot-mcp-*`: 42
+      - `/tmp/danxbot-term-*`: 0
+      - `/tmp/danxbot-prompt-*`: 0
+
+      42 down from 1373 — partial improvement since card was filed (P6 + later cleanup commits). Still leaking, just slower.
+
+      ### ICE
+
+      - I=7 (1373→42 trajectory shows fix is needed; affects every dev box; eventually fills `/tmp` causing weird failures)
+      - C=4 (startup sweep is trivial; SIGTERM handler is medium; stall-respawn audit + unit test is medium; ~1–2 hour fix total)
+      - E=8 (single-repo, well-isolated, mechanical; risk only if shutdown hook accidentally triggers cleanup of OTHER worker's dispatches — addressed by scoping sweep to dispatchId mtime > timeout)
+      - Total: 7+4+8 = **19**
+
+      ### Deps
+
+      None. Self-contained. Card already references `WWYKnQhc` (P6) which is in Done; this is the orphaned cleanup tail.
+
+      ### Recommended scope for Kept impl
+
+      1. Worker SIGTERM/SIGINT handler in `src/worker/server.ts` that calls each active job's `_cleanup`.
+      2. Startup sweep in worker boot: rm `/tmp/danxbot-{mcp,term,prompt}-*` with mtime > 2 × longest dispatch timeout.
+      3. Unit test for stall-respawn cleanup ordering (already proposed in card).
+      4. Skip the 60→10-minute test threshold change; once #1+#2 land, the existing 60-min test is the right canary.
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

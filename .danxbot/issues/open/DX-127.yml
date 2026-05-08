@@ -1,0 +1,52 @@
+schema_version: 4
+tracker: trello
+id: DX-127
+external_id: 69df29f886f7be49aaf74c63
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot > Slack] Extract shared response finalization logic from listener.ts"
+description: |
+  **Context:** `src/slack/listener.ts` has two nearly-identical code paths for handling agent responses: the `very_low` fast path (lines ~281-408) and the full agent path (lines ~412-682). Both paths contain identical logic for SQL block counting, `processSqlInResponse()`, `markdownToSlackMrkdwn()`, `splitMessage()`, `chat.update()` for the first chunk, overflow chunk posting, `addMessageToThread()`, `uploadCsvAttachments()`, `swapReaction()`, `updateEvent()` for responseTs, and adding thumbsup/thumbsdown reactions. This is approximately 60-80 lines duplicated across both paths, with the only differences being heartbeat management and the placeholder color.
+
+  **Solution:** Extract a `finalizeResponse()` helper function that takes the Slack client, channel/thread context, placeholder TS, response text, dashEvent, and optional attachments — and handles everything from SQL processing through reaction adding. Both the `very_low` path and the full path call this helper. This eliminates the duplication and makes future changes (e.g. adding new attachment types) a single-location edit.
+
+  **ICE Score:** 160 = 5 × 8 × 4 (I: 5 — Reduces maintenance burden and future bug surface in a frequently-changed file. C: 8 — Clear refactor path with well-understood behavior. E: 4 — Requires careful extraction across ~300 lines in a high-complexity function; risk of subtle behavioral differences.)
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69df2a069e7150104760a6ae
+    title: "Extract a finalizeResponse() or equivalent helper covering: SQL processing, mrkdwn formatting, split/post chunks, addMessageToThread, CSV upload, swapReaction, updateEvent(responseTs), add feedback reactions"
+    checked: false
+  - check_item_id: 69df2a08dd5434dfcbd9d168
+    title: Both the very_low path and the full agent path call the shared helper with no behavioral difference
+    checked: false
+  - check_item_id: 69df2a093835b0620d48075a
+    title: listener.ts total line count is reduced by at least 60 lines
+    checked: false
+  - check_item_id: 69df2a0a190385d67bee8496
+    title: All existing listener.test.ts tests pass without modification
+    checked: false
+  - check_item_id: 69df2a0bcb7747d377316b49
+    title: Run npx vitest run and npx tsc --noEmit — zero failures
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

@@ -1,0 +1,250 @@
+schema_version: 4
+tracker: trello
+id: DX-85
+external_id: 69fa9172b428dce68ddd881a
+parent_id: null
+children: []
+dispatch:
+  id: d5d07837-6ee2-494c-8f8e-fd24a41a8d25
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: Move ChildStatusId palette + projection from backend to SPA
+description: |-
+  ## Context
+
+  DX-81 introduced `ChildStatusId = "done" | "todo" | "blocked"` and `projectChildStatus(child)` in `src/dashboard/issues-reader.ts` to feed the SPA's `CHILD_STATUS_META` palette in `dashboard/src/components/issues/issuePalette.ts`. The wire shape `IssueListChild.status` carries the projected design-system status.
+
+  Architecture review on DX-81 flagged two related issues:
+
+  1. **Backend owns a frontend palette decision.** The set of keys (`done|todo|blocked`) is a 3-color palette choice; the `projectChildStatus` docstring literally says "Cancelled is conflated with Done to keep the palette to three colors — if operators ever need to distinguish 'shipped' from 'won't ship,' split into a fourth `cancelled` state." That is design-system reasoning placed inside a backend reader. Any second consumer of the issues API that wants a different palette has no path to the raw fields.
+
+  2. **OverviewTab.vue / IssueCard.vue rendering inconsistency** — addressed inline in DX-81. `OverviewTab` now consumes the parent's `children_detail[]` and renders the same `CHILD_STATUS_META` chip as `IssueCard`/`ChildrenChecklist`. Remaining work is the location move only.
+
+  ## Solution
+
+  Move `ChildStatusId` + `projectChildStatus` from `src/dashboard/issues-reader.ts` to `dashboard/src/components/issues/issuePalette.ts` (or sibling). Reshape `IssueListChild` to carry RAW data the projection can derive from:
+
+  ```ts
+  export interface IssueListChild {
+    id: string;
+    name: string;
+    status: IssueStatus;   // raw — "ToDo" | "In Progress" | ...
+    blocked: boolean;       // raw — was the child's blocked record non-null?
+  }
+  ```
+
+  SPA's `issuePalette.ts` owns both the projection (`projectChildStatus(status, blocked) → ChildStatusId`) and the palette (`CHILD_STATUS_META`). Co-locates one design-system decision in one module.
+
+  Update `OverviewTab.vue` to consume `props.issue.children_detail` (already in scope on the IssueDetail prop's parent listing) and render the same `CHILD_STATUS_META` chip + glyph as `ChildrenChecklist.vue`. Re-evaluate whether the `allIssues` prop is still needed once `children_detail` covers the per-child render — likely only the TypeBadge needs the full Issue lookup; everything else comes from `children_detail`.
+
+  ## Acceptance Criteria
+
+  - `ChildStatusId` type removed from `src/dashboard/issues-reader.ts` (and its re-export from `dashboard/src/types.ts`); same name re-defined in `dashboard/src/components/issues/issuePalette.ts`.
+  - `projectChildStatus` removed from `src/dashboard/issues-reader.ts`; same logic re-implemented in `issuePalette.ts` taking `(status: IssueStatus, blocked: boolean)`.
+  - `IssueListChild` wire shape updated: `status: IssueStatus`, new `blocked: boolean`.
+  - `toListItem` in `issues-reader.ts` populates new fields directly from `child.status` + `child.blocked !== null`.
+  - `ChildrenChecklist.vue` derives the `ChildStatusId` per row by calling `projectChildStatus(c.status, c.blocked)` then indexing `CHILD_STATUS_META`.
+  - `OverviewTab.vue` consumes `props.issue.children_detail` (NOT `allIssues.find(...)`) for child rows; renders the same `CHILD_STATUS_META` chip + glyph as `IssueCard`. TypeBadge can still use a parent-listing lookup if needed but only for that one node.
+  - Backend tests at `src/__tests__/dashboard/issues-reader.test.ts` covering `projectChildStatus:*` cases UPDATED to assert raw `child.status` + `child.blocked` flow through to `IssueListChild` (no projection done in backend).
+  - New SPA test at `dashboard/src/components/issues/issuePalette.test.ts` covering `projectChildStatus` Done/Cancelled/Needs Help/Needs Approval/blocked-record/normal cases (logic, not presentation — not exempt from coverage).
+  - `npx tsc --noEmit` clean.
+  - `cd dashboard && npx vue-tsc --noEmit` clean.
+  - `npx vitest run` clean.
+  - `cd dashboard && npx vitest run` clean.
+  - Visual smoke: open dashboard, pick an Epic with child phases at multiple statuses (ToDo, In Progress, Needs Help, Done), confirm `OverviewTab` and `IssueCard` show the SAME status glyph for each child.
+
+  ## Out of scope
+
+  - Adding a fourth `cancelled` palette state — orthogonal call once palette lives in SPA.
+  - Reworking `OverviewTab.allIssues` prop entirely — keep if TypeBadge still needs the full Issue lookup.
+
+  ## Key Files
+
+  - `src/dashboard/issues-reader.ts`
+  - `src/__tests__/dashboard/issues-reader.test.ts`
+  - `dashboard/src/types.ts`
+  - `dashboard/src/components/issues/issuePalette.ts`
+  - `dashboard/src/components/issues/issuePalette.test.ts` (new)
+  - `dashboard/src/components/issues/ChildrenChecklist.vue`
+  - `dashboard/src/components/issues/OverviewTab.vue`
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa917489b3dff15ba648cb
+    title: ChildStatusId moved from src/dashboard/issues-reader.ts to dashboard/src/components/issues/issuePalette.ts
+    checked: true
+  - check_item_id: 69fa91749559422df2156ba7
+    title: projectChildStatus moved to issuePalette.ts; takes raw (status, blocked) args
+    checked: true
+  - check_item_id: 69fa91744a25c39056e43b18
+    title: "IssueListChild wire shape carries raw status: IssueStatus + blocked: boolean"
+    checked: true
+  - check_item_id: 69fa9175f5da1e1207e96a80
+    title: ChildrenChecklist.vue derives ChildStatusId per row via projectChildStatus(c.status, c.blocked)
+    checked: true
+  - check_item_id: 69fa91767349d87b88f5967f
+    title: Backend tests updated to assert raw status/blocked flow through IssueListChild
+    checked: true
+  - check_item_id: 69fa91764ba38b8f6f48031b
+    title: New SPA test file dashboard/src/components/issues/issuePalette.test.ts covers projectChildStatus cases
+    checked: true
+  - check_item_id: 69fa9176c948345bcbf857c0
+    title: npx tsc --noEmit + cd dashboard && npx vue-tsc --noEmit clean
+    checked: true
+  - check_item_id: 69fa9177d98cb57804f7f943
+    title: npx vitest run + cd dashboard && npx vitest run clean
+    checked: true
+comments:
+  - id: 69fa92c9f15682b5405ef0ab
+    author: newms87
+    timestamp: 2026-05-06T01:00:57.733Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `d5d07837-6ee2-494c-8f8e-fd24a41a8d25` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-06T01:00:56.731Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-06T03:00:56.731Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l 'd5d07837-6ee2-494c-8f8e-fd24a41a8d25' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa95c3eb4ca97b89b673d2
+    author: code-reviewer
+    timestamp: 2026-05-06T01:13:39.816Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      **Findings:**
+      1. Silent fallback for unknown children (`status: "ToDo", blocked: false`) — indistinguishable from a real ToDo entry; violates "Fallbacks Are Bugs."
+      2. OverviewTab filtered out children missing from `allIssues` while `ChildrenChecklist` rendered them — inconsistent.
+      3. Per-child `allIssues` lookup in OverviewTab — `type` could live on `IssueListChild` instead.
+
+      No legacy/backwards-compat shims. Comments accurate. Wire shape coherent across backend → frontend.
+  - id: 69fa95c43812f47c371494b6
+    author: test-reviewer
+    timestamp: 2026-05-06T01:13:40.184Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Test Review
+
+      All prior `projectChildStatus:*` backend cases now have raw-passthrough equivalents asserting `(status, blocked)` flow through `IssueListChild` unprojected. New SPA test file covers every projection branch (Done, Cancelled, terminal-overrides-blocked, Needs Help, Needs Approval, blocked-on-non-terminal, plain non-terminal). No gaps.
+  - id: 69fa95c4eee0ace76dfb0b1f
+    author: danxbot
+    timestamp: 2026-05-06T01:13:40.958Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Review Fixes
+
+      Addressed code-reviewer findings #1, #2, #3:
+
+      - Added `missing: boolean` discriminator + `type: IssueType` to `IssueListChild`. Unknown children now surface as `{type: "Feature", status: "ToDo", blocked: true, missing: true}` so the SPA's `projectChildStatus` routes them to the distinct ⛔ row.
+      - OverviewTab now consumes `children_detail[]` directly (no per-child `allIssues` lookup); renders every row including children missing from `allIssues`, matching `ChildrenChecklist.vue`.
+      - Backend tests extended with `type`-flow + missing-child cases.
+
+      Backend + dashboard tests + tsc + vue-tsc all green.
+  - id: 69fa95c53cce2e41eefb8fe2
+    author: danxbot
+    timestamp: 2026-05-06T01:13:41.282Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - `ChildStatusId` + `projectChildStatus` co-located with
+        `CHILD_STATUS_META` in `dashboard/src/components/issues/issuePalette.ts` —
+        one design-system decision lives in one module.
+      - Wire shape `IssueListChild` now carries raw `(type, status, blocked,
+        missing)`; backend has zero palette knowledge.
+      - Code-reviewer caught the silent unknown-child fallback (was
+        `status: "ToDo", blocked: false` — indistinguishable from a real
+        ToDo). Fixed by adding `missing: boolean` discriminator and
+        routing unknown rows through `blocked: true` so the SPA
+        projects them to the distinct ⛔ chip.
+      - Code-reviewer also flagged OverviewTab's allIssues filter
+        dropping children missing from `allIssues` while
+        ChildrenChecklist still rendered them — inconsistent.
+        Fixed by adding `type` to `IssueListChild`, removing the
+        per-child `allIssues` lookup, and rendering directly from
+        `children_detail[]`.
+      - Visual-smoke equivalence verified structurally:
+        `ChildrenChecklist.vue:30-33` and `OverviewTab.vue:77-80` both
+        evaluate `CHILD_STATUS_META[projectChildStatus(c.status, c.blocked)]`
+        on the same `IssueListChild` input — identical chip + glyph
+        render is given by construction of the shared pipeline.
+
+      **What went wrong:** - Visual smoke step on the running dashboard (login wall) was
+        not run inside the agent session — credentials are external. The
+        structural equivalence check above stands in.
+      - Unknown-child silent fallback slipped past first implementation;
+        caught by code-reviewer. Reinforces "Fallbacks Are Bugs" rule —
+        should have surfaced `missing: true` from the start.
+
+      **Action items:** Nothing
+      **Commits:** 5f311cb67f9b868150666cbe09460e690e0688ec
+history: []
+retro:
+  good: |
+    - `ChildStatusId` + `projectChildStatus` co-located with
+      `CHILD_STATUS_META` in `dashboard/src/components/issues/issuePalette.ts` —
+      one design-system decision lives in one module.
+    - Wire shape `IssueListChild` now carries raw `(type, status, blocked,
+      missing)`; backend has zero palette knowledge.
+    - Code-reviewer caught the silent unknown-child fallback (was
+      `status: "ToDo", blocked: false` — indistinguishable from a real
+      ToDo). Fixed by adding `missing: boolean` discriminator and
+      routing unknown rows through `blocked: true` so the SPA
+      projects them to the distinct ⛔ chip.
+    - Code-reviewer also flagged OverviewTab's allIssues filter
+      dropping children missing from `allIssues` while
+      ChildrenChecklist still rendered them — inconsistent.
+      Fixed by adding `type` to `IssueListChild`, removing the
+      per-child `allIssues` lookup, and rendering directly from
+      `children_detail[]`.
+    - Visual-smoke equivalence verified structurally:
+      `ChildrenChecklist.vue:30-33` and `OverviewTab.vue:77-80` both
+      evaluate `CHILD_STATUS_META[projectChildStatus(c.status, c.blocked)]`
+      on the same `IssueListChild` input — identical chip + glyph
+      render is given by construction of the shared pipeline.
+  bad: |
+    - Visual smoke step on the running dashboard (login wall) was
+      not run inside the agent session — credentials are external. The
+      structural equivalence check above stands in.
+    - Unknown-child silent fallback slipped past first implementation;
+      caught by code-reviewer. Reinforces "Fallbacks Are Bugs" rule —
+      should have surfaced `missing: true` from the start.
+  action_item_ids: []
+  commits:
+    - 5f311cb67f9b868150666cbe09460e690e0688ec
+waiting_on: null
+blocked: null

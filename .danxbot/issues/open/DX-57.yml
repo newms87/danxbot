@@ -1,0 +1,108 @@
+schema_version: 4
+tracker: trello
+id: DX-57
+external_id: 69e5bd811c799dfa7f658808
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: Extract stall-recovery controller from runDispatchSlot
+description: |-
+  ## Context
+
+  `src/worker/dispatch.ts::runDispatchSlot` now owns three responsibilities for both `/api/launch` and `/api/resume`:
+
+  1. Spawn orchestration (initial + respawn under same dispatchId)
+  2. Stall detection wiring (TerminalOutputWatcher + StallDetector + onStall callback with respawn logic)
+  3. activeJobs registration + TTL-based eviction
+
+  The stall-detection block is ~90 lines with its own `resumeCount` closure, nudge-prompt construction, and teardown wrapping via `job._cleanup`. This was flagged by the code-reviewer during the resume feature review but was deferred as pre-existing structure (not introduced by that feature).
+
+  ## Why this matters
+
+  The closure over `inputs` inside `spawnForDispatch` exists only because stall detection needs the same inputs to respawn. That's the classic "parameter threading" smell — per `code-quality.md`, instance state is preferred. Also, `setupStallDetection` is currently nested inside `runDispatchSlot` — it can't be unit-tested in isolation, only through handleLaunch/handleResume integration-style tests.
+
+  ## Proposed solution
+
+  Move stall detection into `src/worker/stall-recovery.ts` as a `StallRecoveryController` class:
+
+  - Constructor takes `dispatchId`, `inputs: DispatchSlotInputs`, and a `spawnForDispatch` function reference
+  - Holds `resumeCount` as instance state (no closure)
+  - Exposes `attachTo(job: AgentJob)` which sets up the watchers and onStall callback
+  - Handles respawn by calling back into `spawnForDispatch` + re-attaching
+
+  `runDispatchSlot` becomes a slim coordinator that creates the controller, attaches it on initial spawn, and registers the TTL eviction interval.
+
+  ## Key files
+
+  - `src/worker/dispatch.ts` — the current ~200-line `runDispatchSlot` shrinks to ~50 lines
+  - `src/worker/stall-recovery.ts` — NEW, owns nudging + respawn
+  - `src/worker/stall-recovery.test.ts` — NEW, unit tests for the controller
+
+  ## Acceptance criteria
+
+  - `runDispatchSlot` is ≤ 80 lines
+  - `StallRecoveryController` is unit-testable without spinning up HTTP handlers
+  - All existing `handleLaunch` stall tests still pass (preserve behavior)
+  - Single-fork invariant preserved (still one claude per dispatchId, respawn reuses the same dispatchId)
+
+  ## How to verify
+
+  Existing tests in `src/worker/dispatch.test.ts > handleLaunch — stall detection (host mode)` must pass unchanged. Add new unit tests in `stall-recovery.test.ts` that exercise: (1) stall under max nudges → respawn, (2) stall at max nudges → job.stop("failed"), (3) stall during a respawn → no-op, (4) teardown when job completes before stall fires.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments:
+  - id: 69e6f66b51475c19c03351c0
+    author: newms87
+    timestamp: 2026-04-21T04:00:43.324Z
+    text: |-
+      ## Triage 2026-04-21
+
+      **Status:** Outstanding
+      **Priority:** Low-Medium (testability + SRP)
+
+      `src/worker/stall-recovery.ts` does not exist. `runDispatchSlot` in `src/worker/dispatch.ts` still owns spawn + stall detection + activeJobs registration. No production bug — stall recovery works correctly today, this is a refactor for unit-testability. Keep in Action Items.
+  - id: 69f181c12c57895647d1d614
+    author: newms87
+    timestamp: 2026-04-29T03:57:53.753Z
+    text: |-
+      ## Triage — 2026-04-29
+
+      **State:** Keep
+
+      **ICE:** 120 (I=3 × C=8 × E=5)
+      - Impact 3 — pure refactor, no user-visible change. Improves SRP + unit-testability for one code path (stall recovery).
+      - Confidence 8 — well-scoped class extraction; pattern (closure → instance state) is straightforward and described in the card.
+      - Ease 5 — ~175-line `runResolved` to slim, ~90 lines of stall logic to extract, plus a new test file. ~1 session of focused work.
+
+      **Evidence:**
+      - `src/worker/stall-recovery.ts` does NOT exist — extraction not started.
+      - `runDispatchSlot` does NOT exist either; the actual structure described by the card has been **renamed/relocated**: stall detection now lives inside `src/dispatch/core.ts::runResolved` (line 276). The internal nested function is `setupStallDetection` (line 351), `spawnForDispatch` is the closure (line 284), `resumeCount` is the closure variable (line 282). The closure-over-`input` parameter-threading smell the card flags is real and present at this new location.
+      - The architectural concern stands: `setupStallDetection` is nested inside `runResolved` and cannot be unit-tested without going through `dispatch()`. Existing `StallDetector` unit tests at `src/agent/stall-detector.test.ts` only cover the low-level detector, not the recovery+respawn coordinator.
+
+      **Description update needed:** When this card is picked up, the description's "Key files" + "Proposed solution" should be updated to reference `src/dispatch/core.ts::runResolved` (not `src/worker/dispatch.ts::runDispatchSlot`) and propose `src/dispatch/stall-recovery.ts` (or `src/worker/stall-recovery.ts` — pick whichever sibling makes sense once the work starts).
+
+      **Dependencies:** none — self-contained refactor.
+
+      **Recommendation:** Keep in Action Items at low-medium priority. Worth doing for testability + SRP, but no production bug — stall recovery works correctly today.
+
+      <!-- danxbot-triage -->
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

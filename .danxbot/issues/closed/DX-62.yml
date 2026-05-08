@@ -1,0 +1,249 @@
+schema_version: 4
+tracker: trello
+id: DX-62
+external_id: 69f9dfb11ca2a4ddd3077332
+parent_id: DX-60
+children: []
+dispatch:
+  id: 2e45e477-228f-4650-9fc4-e4f642380ff3
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Issues board > Phase 2: board skeleton, columns, minimal card, repo wiring"
+description: |-
+  ## Context
+
+  Phase 2 of DX-60. Backend (DX-61) ships first; this phase puts a working
+  board on screen against the live endpoints. Minimal card only — Phase 3
+  adds rich content (epic accents, phase checklist, AC bar). Drawer + filters
+  + scope come in later phases.
+
+  ## Solution
+
+  ### Tab + page wiring
+
+  - `dashboard/src/components/DashboardHeader.vue` — add an `issues` tab
+    between `dispatches` and `agents`. Keep existing tab styling
+    (`border-bottom: 2px solid #6366f1` when active, indigo text). Update
+    `TabId` union to `"dispatches" | "issues" | "agents" | "settings"`.
+  - `dashboard/src/App.vue` — render `<IssuesPage />` when `activeTab ===
+    "issues"`. Reuse the existing repo selector from the header — both
+    `dispatches` and `issues` share `selectedRepo`.
+
+  ### New files (Vue 3 + `<script setup lang="ts">`)
+
+  - `dashboard/src/components/issues/IssuesPage.vue` — top-level page;
+    consumes `selectedRepo` (prop), uses `useIssues(selectedRepo)`, renders
+    `<IssueBoard>`. Loading skeleton + empty state ("No issues yet" /
+    "Select a repo to see issues").
+  - `dashboard/src/components/issues/IssueBoard.vue` — six-column grid.
+    Column ids/labels/order match `STATUS_COLUMNS` in
+    `docs/design/issues-board/IssuesFixtures.jsx`:
+    `review`, `todo`, `in_progress`, `needs_help`, `done`, `cancelled`.
+    Map backend `IssueStatus` → column id (lowercase, spaces → `_`).
+    Done + Cancelled collapsed by default, expandable per-column.
+    Column accents from `COLUMN_ACCENTS` in `IssueBoard.jsx`.
+    `ColumnHeader` matches design (6×6px dot, uppercase label, count chip,
+    ▾/▸ glyph, bottom border tinted with accent).
+  - `dashboard/src/components/issues/IssueCard.vue` — **minimal version
+    this phase**: id chip + type badge (`TypeBadge.vue`, see below) +
+    2-line clamped title + footer (parent_id chip if present, comment
+    count if > 0, retro tag if has_retro, relative time on the right).
+    No phase checklist, no AC bar, no blocked accent yet — Phase 3.
+    Click → emits `select` (no drawer wired yet, just the event).
+  - `dashboard/src/components/issues/TypeBadge.vue` — Epic/Bug/Feature
+    badge using `ISSUE_TYPE_META` palette from `IssuesFixtures.jsx`.
+  - `dashboard/src/composables/useIssues.ts` — fetches list via
+    `fetchIssues(repo)`, polls every 30s, exposes `issues`, `loading`,
+    `error`, `refresh()`. Selected-issue detail fetch comes in Phase 5.
+
+  ### API client
+
+  - `dashboard/src/api.ts` — add `fetchIssues(repo, opts?)` and
+    `fetchIssueDetail(repo, id)` typed wrappers over `fetchWithAuth`.
+  - `dashboard/src/types.ts` — re-export `IssueListItem` and `Issue` types
+    matching the backend (use the spec from DX-61).
+
+  ### Visual fidelity
+
+  Pixel-match against `docs/design/issues-board/`:
+  - background `#020617` (already on `<body>`)
+  - card background `rgb(15 23 42 / 0.7)`, border `#1e293b`, radius 8,
+    padding 10/12
+  - column gap `12px`, card gap `8px`
+  - header label `font-size: 11px, weight 600, uppercase, letterSpacing
+    .05em, color #cbd5e1`
+  - count chip `font-size: 10px, color #64748b, bg rgb(51 65 85 / .4)`
+
+  Use `danx-ui` components when they fit (e.g. `chip`, `badge`,
+  `button`); fall through to inline-styled divs where they don't (the
+  prototype uses inline styles throughout — keep one source of truth via
+  a small `<style>` block per SFC, not Tailwind, so values match the
+  prototype exactly).
+
+  ## Out of Scope (this phase)
+
+  - Filter toolbar (Phase 4)
+  - Drawer (Phase 5)
+  - Epic accents / phase checklists / AC bar / blocked accent (Phase 3)
+  - Scope filter / highlight (Phase 6)
+  - URL state (Phase 4)
+
+  ## Verify
+
+  - `cd /home/newms/web/danxbot && docker compose up -d` then visit
+    `http://localhost:5566` → log in → click Issues tab → see 6 columns
+    with cards from the live `/api/issues` endpoint for the selected
+    repo, Done + Cancelled collapsed, click toggles expand.
+  - `cd dashboard && npx vue-tsc --noEmit` clean.
+
+  ## Key Files
+
+  - `dashboard/src/components/DashboardHeader.vue` — add tab
+  - `dashboard/src/App.vue` — render `<IssuesPage>` when active
+  - `dashboard/src/components/issues/IssuesPage.vue` (new)
+  - `dashboard/src/components/issues/IssueBoard.vue` (new)
+  - `dashboard/src/components/issues/IssueCard.vue` (new, minimal)
+  - `dashboard/src/components/issues/TypeBadge.vue` (new)
+  - `dashboard/src/composables/useIssues.ts` (new)
+  - `dashboard/src/api.ts` — add `fetchIssues`, `fetchIssueDetail`
+  - `dashboard/src/types.ts` — add `IssueListItem`, `Issue`
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9dfb370f1b22a9a645691
+    title: DashboardHeader.vue exposes new Issues tab between Dispatches and Agents
+    checked: true
+  - check_item_id: 69f9dfb30786bd64fdd0fdc2
+    title: App.vue renders IssuesPage when activeTab === 'issues'; repo selector shared
+    checked: true
+  - check_item_id: 69f9dfb4c3bc064f330a1f15
+    title: IssueBoard.vue renders 6 columns in design order with correct accents from COLUMN_ACCENTS
+    checked: true
+  - check_item_id: 69f9dfb468acbc7bb446caa2
+    title: Done + Cancelled columns collapsed by default; clicking header toggles expand/collapse
+    checked: true
+  - check_item_id: 69f9dfb5eefd6d360b54c0c5
+    title: "Minimal IssueCard.vue: id chip, TypeBadge, 2-line clamped title, footer (parent chip, comments, retro tag, relative time)"
+    checked: true
+  - check_item_id: 69f9dfb50016413d4e1a1955
+    title: "useIssues(repo) composable: fetch on mount + repo change, poll every 30s, expose loading + error"
+    checked: true
+  - check_item_id: 69f9dfb68a3c6b940f68963c
+    title: fetchIssues + fetchIssueDetail wrappers added to api.ts; types added to types.ts
+    checked: true
+  - check_item_id: 69f9dfb68611cee7ec875fa9
+    title: Visual values (colors, spacing, radii, font sizes) match docs/design/issues-board/IssueBoard.jsx + IssueCard.jsx exactly
+    checked: true
+  - check_item_id: 69f9dfb79e453bcbb0aa43ff
+    title: cd dashboard && npx vue-tsc --noEmit passes clean
+    checked: true
+comments:
+  - id: 69f9e45e85120af35b7a54fc
+    author: code-reviewer
+    timestamp: 2026-05-05T12:36:46.276Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      **Critical:** none.
+
+      **Major (all addressed):**
+      - `useIssues.ts` — timer not reset on repo change → race cadence. Fixed: `watch(repo)` now calls `startTimer()` after `load()`.
+      - `useIssues.ts` — concurrent loads could clobber later result with earlier response. Fixed: monotonic `currentReq` id; only the latest outstanding load commits.
+      - `IssueBoard.vue` — `as ColumnId` silent cast on string-mangled status would drop unknown statuses silently. Fixed: explicit `Record<IssueStatus, ...>` map keyed by the backend union; unknown status logs a `console.warn` instead of falling through.
+      - `TypeBadge.vue` — `?? META.Feature` was dead but lied if it ever fired. Fixed: dropped the fallback (TS narrowing guarantees presence).
+
+      **Minor:**
+      - Extracted `relativeTime` to `dashboard/src/utils/relativeTime.ts` — pre-empts duplication in the future drawer / detail view.
+      - Restructured `IssueBoard` to key columns directly by `IssueStatus` — removed the parallel `ColumnId` enum + string-mangling bridge; the lowercase `id` is still defined per-column for `data-test` selectors only.
+      - Parent-id chip rendered as a plain non-interactive span (no scope-to-epic wiring until later phase) — comment in template explains the deferral.
+      - Epic accents (left border, tinted bg, "N phases" chip) deliberately deferred — card description scopes them to Phase 3.
+  - id: 69f9e4b0541131cc0680be05
+    author: danxbot
+    timestamp: 2026-05-05T12:38:08.718Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Phase 2 Commit
+
+      **Commit:** 5cce516
+      **Completed:**
+      - DashboardHeader.vue exposes Issues tab between Dispatches and Agents
+      - App.vue renders IssuesPage when activeTab === 'issues' (selectedRepo shared)
+      - IssueBoard.vue renders 6 columns in design order with COLUMN_ACCENTS
+      - Done + Cancelled collapsed by default; header click toggles
+      - Minimal IssueCard.vue (id chip, TypeBadge, 2-line clamped title, footer)
+      - useIssues composable: mount + watch repo + 30s poll, monotonic in-flight guard
+      - fetchIssues + fetchIssueDetail in api.ts; types re-exported from backend
+      - Visual values copied from docs/design/issues-board fixtures
+      - cd dashboard && npx vue-tsc --noEmit clean
+  - id: 69f9e270cc8b9c3b4a002660
+    author: newms87
+    timestamp: 2026-05-05T12:28:32.361Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `2e45e477-228f-4650-9fc4-e4f642380ff3` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T12:28:32.162Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T14:28:32.162Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '2e45e477-228f-4650-9fc4-e4f642380ff3' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69f9e4b19fabb1de7b743f11
+    author: danxbot
+    timestamp: 2026-05-05T12:38:09.075Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Backend DX-61 already shipped; types re-exported cleanly via `@backend/*` alias.
+      - Code review found 4 silent-fallback / race anti-patterns; all fixed before commit.
+      - Pulled visual values directly from JSX fixtures so no design drift.
+      **What went wrong:** - First IssueBoard pass had `defineProps` called twice (typo around `__props` alias) — caught only on second read; should have read own diff before moving on.
+      - Initial useIssues didn't reset poll timer on repo change (cadence race) — should have spotted in self-review.
+      **Action items:** Nothing
+      **Commits:** 5cce516
+history: []
+retro:
+  good: |-
+    - Backend DX-61 already shipped; types re-exported cleanly via `@backend/*` alias.
+    - Code review found 4 silent-fallback / race anti-patterns; all fixed before commit.
+    - Pulled visual values directly from JSX fixtures so no design drift.
+  bad: |-
+    - First IssueBoard pass had `defineProps` called twice (typo around `__props` alias) — caught only on second read; should have read own diff before moving on.
+    - Initial useIssues didn't reset poll timer on repo change (cadence race) — should have spotted in self-review.
+  action_item_ids: []
+  commits:
+    - 5cce516
+waiting_on: null
+blocked: null

@@ -1,0 +1,233 @@
+schema_version: 4
+tracker: trello
+id: DX-200
+external_id: 69fe27f75db44a6aaad21a6b
+parent_id: DX-158
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Multi-Worker > Phase 5: Agent + card locks + triage-precursor conflict-check + concurrent pick logic"
+description: |-
+  ## Context
+
+  Phase 5 of the Multi-Worker Dispatch epic (DX-158). The phase that turns the previous infrastructure into actual concurrency. The poller picks (agent, card) pairs honoring agent + card locks, runs the triage-precursor when contention exists, stamps the card YAML, and dispatches.
+
+  Card ID is `DX-200` (skipped 163-199 to dodge concurrent ID claims by the worker auto-splitting DX-152). DX-158's `children[]` lists this id.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-multi-worker-dispatch-design.md`. "Triage-precursor — conflict check" + "Issue YAML — assigned_agent" sections are authoritative.
+
+  ## Solution
+
+  ### Lock queries (DB-driven, requires DX-151 epic complete)
+
+  Two helpers in `src/agent/agent-locks.ts` (new):
+
+  ```ts
+  export async function busyAgents(repoName: string): Promise<Set<string>>;
+    // SELECT agent_name FROM dispatches WHERE repo_name = $1 AND status IN ('running','pending')
+    // (column exists post-DX-151; if not yet, fall back to issues.assigned_agent for status='In Progress')
+
+  export async function assignedCards(repoName: string): Promise<Map<string, string>>;
+    // SELECT id, assigned_agent FROM issues WHERE repo_name = $1 AND assigned_agent IS NOT NULL
+  ```
+
+  Used by the poller's pick step.
+
+  ### Poller pick algorithm (`src/poller/index.ts`)
+
+  Replace the current single-agent dispatch logic with a multi-agent pick:
+
+  ```ts
+  const agentsRoster = readAgents(ctx);                           // from settings.json
+  const busy = await busyAgents(ctx.name);
+  const assigned = await assignedCards(ctx.name);
+  const inProgressByOthers = await listInProgressYamls(ctx.name); // DB query (post-DX-155)
+
+  // Pick FREE AGENT: enabled, in-schedule (per tz/now), capability includes "issue-worker", not in busy set
+  const candidateAgent = pickFreeAgent(agentsRoster);
+  if (!candidateAgent) return;                                    // no free agent; tick ends
+
+  // Pick CARD: status=ToDo, !blocked, list_kind != action_items, assigned_agent IS NULL or === candidateAgent.name
+  // (allow re-claim of own previously-assigned cards)
+  const candidateCard = await pickCardForAgent(ctx.name, candidateAgent, /* ICE/priority sort */);
+  if (!candidateCard) return;
+
+  // Triage precursor (only when other agents are working)
+  if (inProgressByOthers.length > 0 && isConflictCheckEnabled(ctx)) {
+    const conflict = await runConflictCheck(candidateCard, inProgressByOthers);
+    if (!conflict.ok) {
+      stampBlocked(candidateCard, { reason: "Conflict-check rejection: " + conflict.reason, by: conflict.blocked_by });
+      return;
+    }
+  }
+
+  // Stamp assigned_agent on the card YAML (writeIssue triggers DB mirror via DX-154)
+  await stampAssignedAgent(candidateCard, candidateAgent.name);
+
+  // Dispatch (worktree validation + persona inject + finalize all already wired by Phases 3+4)
+  await dispatch({ ctx, kind: "issue-worker", agentName: candidateAgent.name, card: candidateCard });
+  ```
+
+  Loop variant: pick + dispatch up to N candidates per tick (where N = free agents at start of tick), instead of one. Each pick honors freshly-updated busy set after each dispatch.
+
+  ### Schedule check
+
+  Helper `isAgentInSchedule(agent, now): boolean` — convert `now` into the agent's `tz`, look up the appropriate day's windows, return true if any window covers the current minute. Tested separately.
+
+  ### Triage `--conflict-check` mode
+
+  Update the existing `/danx-triage` skill (in `<repo>/.danxbot/workspaces/issue-worker/.claude/skills/danx-triage/SKILL.md`):
+
+  - Detect a new optional flag in the prompt: `--conflict-check <candidate-id>`. When present, the staged files are the candidate YAML + every in-progress YAML (provided via `staged_files`).
+  - Output (via `danxbot_complete` summary, parsed JSON):
+    - `{ok: true, reason: "..."}`  — no overlap detected
+    - `{ok: false, reason: "...", blocked_by: ["DX-N", ...]}` — overlap; candidate should wait
+
+  Decision criteria for the agent: read each YAML, infer file scope from description / Files sections / AC, flag if two cards likely touch the same file or directory tree.
+
+  Worker-side caller:
+
+  ```ts
+  async function runConflictCheck(candidate, inProgress): Promise<ConflictResult> {
+    const stagedFiles = [
+      { path: "/tmp/conflict-check/candidate.yml", content: serialize(candidate) },
+      ...inProgress.map((c, i) => ({ path: `/tmp/conflict-check/in-progress-${i}.yml`, content: serialize(c) })),
+    ];
+    const { summary, status } = await spawnTriage({ mode: "conflict-check", stagedFiles, candidateId: candidate.id });
+    if (status !== "completed") return { ok: false, reason: "Triage failed: " + (summary ?? "unknown") };
+    try {
+      const parsed = JSON.parse(extractJson(summary));
+      return parsed;
+    } catch (e) {
+      return { ok: false, reason: "Triage returned malformed JSON; treating as conflict (conservative)" };
+    }
+  }
+  ```
+
+  Conservative behavior: any failure mode treated as `ok: false`. Better to defer than risk collision. Cap triage runtime at 90s; timeout → `ok: false`.
+
+  ## Files
+
+  Create:
+
+  - `src/agent/agent-locks.ts` + `.test.ts` — `busyAgents`, `assignedCards`
+  - `src/agent/agent-schedule.ts` + `.test.ts` — `isAgentInSchedule`
+  - `src/poller/pick-agent.ts` + `.test.ts` — `pickFreeAgent`, `pickCardForAgent`
+  - `src/dispatch/conflict-check.ts` + `.test.ts` — `runConflictCheck` + `spawnTriage`-mode integration
+
+  Modify:
+
+  - `src/poller/index.ts` (the new pick algorithm)
+  - `src/poller/yaml-lifecycle.ts` — add `stampAssignedAgent` + `stampBlocked` helpers if not already present
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-triage/SKILL.md` — `--conflict-check` mode
+  - `src/dashboard/dispatches-db.ts` — extend dispatches table with `agent_name` column if not already (a migration was added in the DB-mirror epic OR a new migration here — verify)
+
+  ## Test plan
+
+  Locks:
+
+  1. `busyAgents("danxbot")` returns set of names from running/pending dispatches.
+  2. `assignedCards("danxbot")` returns map of card id → agent name from `issues.assigned_agent`.
+
+  Schedule:
+
+  3. `isAgentInSchedule(alice, "Mon 10:00 CT")` with Mon `["09:00-17:00"]` → true.
+  4. Off-hours → false.
+  5. Multiple windows → true if any covers.
+  6. Empty array for the day → false.
+  7. tz tested across DST boundary (US/Eastern in November) — exact-window-edge case.
+
+  Pick:
+
+  8. Two free agents, both enabled+in-schedule+issue-worker → first by `name` returned (stable).
+  9. One agent busy → only the other picked.
+  10. All agents off-hours → `null`.
+  11. ToDo card with `assigned_agent: alice` and busy alice → not picked for alice (already busy); not picked for bob either (claimed); next ToDo card considered.
+
+  Conflict check:
+
+  12. `runConflictCheck` happy path → triage agent returns `{ok: true}`; result passes through.
+  13. Triage agent returns `{ok: false, blocked_by: ["DX-141"]}` → result passes through.
+  14. Triage agent returns malformed JSON → result is `{ok: false, reason: "...malformed..."}`.
+  15. Triage agent times out → result is `{ok: false, reason: "...timed out..."}`.
+
+  Poller integration:
+
+  16. Three free agents + three disjoint ToDo cards + no in-progress → three dispatches kicked off in one tick.
+  17. Three free agents + three cards + one in-progress card from a prior dispatch + conflict-check returns `ok: true` for two, `ok: false` for one → two dispatches, one card stamped blocked.
+  18. With `agentDefaults.conflictCheckEnabled: false` → no triage call; all three dispatched.
+
+  Skill update:
+
+  19. `--conflict-check` mode prompt invokes triage with the right input shape.
+
+  ## Acceptance
+
+  - Lock queries via DB; no YAML walks for busy/assigned lookups.
+  - Schedule check correctly handles tz windows including DST.
+  - Poller picks up to N free agents per tick (concurrent dispatch).
+  - `assigned_agent` stamped on candidate's YAML at dispatch start; persists through completion.
+  - Triage precursor runs ONLY when ≥1 other agent in-progress and `agentDefaults.conflictCheckEnabled !== false`.
+  - Triage failures (timeout / malformed) treated as `ok: false` (conservative).
+  - 19 tests pass.
+  - `make test` green; `tsc + vue-tsc` clean.
+  - Manual smoke: 3 agents alice/bob/charlie + 3 ToDo cards on disjoint files → all three running concurrently in <30s of poller tick. Re-run with cards on overlapping files → one or more get stamped `blocked` after triage.
+
+  ## Out of scope
+
+  - Card UI badges (DX-164).
+  - System test fixtures (DX-164).
+  - Slack / API dispatch integration with the agent lock — slack/api dispatches still flow through the existing path; the agent-busy check applies (alice can't reply to slack while running an issue), but the YAML stamp is issue-worker-specific.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe27f74a0749b5ef2f3f4e
+    title: agent-locks.ts — busyAgents + assignedCards DB queries; tests pass
+    checked: false
+  - check_item_id: 69fe27f8e435d837a3f0a527
+    title: agent-schedule.ts — isAgentInSchedule honors tz + per-day windows + DST edge cases
+    checked: false
+  - check_item_id: 69fe27f865f02042e53cc206
+    title: pick-agent.ts — pickFreeAgent + pickCardForAgent honor capabilities + schedule + busy + assigned_agent
+    checked: false
+  - check_item_id: 69fe27f84c85dee5e6860d43
+    title: conflict-check.ts — runConflictCheck spawns triage, parses JSON, treats failures as ok=false
+    checked: false
+  - check_item_id: 69fe27f973702116d2296e3a
+    title: poller dispatches up to N free agents per tick (concurrent); each dispatch stamps assigned_agent on the YAML
+    checked: false
+  - check_item_id: 69fe27f978a0ff52804df365
+    title: triage --conflict-check skill mode lives in danx-triage/SKILL.md; takes candidate + in-progress YAMLs; returns JSON
+    checked: false
+  - check_item_id: 69fe27f960fe294e470eaa97
+    title: 19 tests across locks / schedule / pick / conflict / poller-integration / skill pass
+    checked: false
+  - check_item_id: 69fe27fa4d956040843312c6
+    title: make test green; tsc + vue-tsc clean
+    checked: false
+  - check_item_id: 69fe27fa3c169a6b16af61e3
+    title: Manual smoke — 3 agents + 3 disjoint cards run concurrently; overlapping cards get stamped blocked
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Sequential phase ordering — locks query the DB schema added by DX-151 epic; agents call the finalize script from Phase 4 (DX-162); pre-dispatch validation comes from Phase 3 (DX-161).
+  timestamp: 2026-05-08T12:00:00.000Z
+  by:
+    - DX-162
+blocked: null

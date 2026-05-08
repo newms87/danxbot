@@ -1,0 +1,160 @@
+schema_version: 4
+tracker: trello
+id: DX-96
+external_id: 69f77e9b77472aefac1317b2
+parent_id: null
+children: []
+dispatch:
+  id: 0b85c45b-1931-4d09-9c76-ce1a6e0dbfda
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Bug
+title: "Fix yaml-lifecycle-memory-tracker.test.ts teardown leak. afterAll rmSync on testState.logsDir runs while EventForwarder still has pending writes to <logsDir>/event-queue/*.jsonl, producing ENOENT unhandled rejection that fails Vitest exit even when all 2588 tests pass. Drain or stop the forwarder before rmSync, or unref the queue write loop. Reproduce: npx vitest run from repo root."
+description: |
+  ## Problem
+
+  `src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts` mints
+  a `testState.logsDir` via `vi.hoisted` + `mkdtempSync`, mocks
+  `config.logsDir` to point at it, then `afterAll` runs `rmSync` on it.
+
+  The dispatch fork inside `spawnAgent` registers the EventForwarder /
+  EventQueue against `<config.logsDir>/event-queue/<jobId>.jsonl`. The
+  cleanup path (`launcher.ts#runCleanup`) intentionally fires the final
+  `forwarderFlush?.()` as `void` — fire-and-forget — to keep cleanup
+  latency short for production. The flush internally writes batches to
+  the queue file and may keep retrying for tens of seconds against the
+  Laravel events endpoint.
+
+  Result: when `afterAll` removes `testState.logsDir`, in-flight queue
+  writes can ENOENT (parent dir gone). The previous fix
+  (`fa15457`, Trello `69f7844004a63103a75b2bd5`) wrapped `drainAndSend`
+  in an inner try/catch so the rejection no longer escapes — but the
+  underlying TEARDOWN LEAK remains: the forwarder is still doing async
+  work after the test completes, which (a) keeps vitest's event loop
+  warm with pending timers/I/O, (b) re-introduces the ENOENT class of
+  symptoms the moment the inner catch is removed or a new code path
+  forgets the wrap.
+
+  ## Fix shape
+
+  Drain pending cleanup work — including the forwarder flush — at the
+  test-suite level BEFORE `rmSync`. Two changes:
+
+  1. **launcher.ts** — track the forwarder flush promise on the
+     `AgentJob` (`job._forwarderFlush`) so callers can await it
+     explicitly. `runCleanup` keeps the flush fire-and-forget for
+     production cleanup latency, but the promise is reachable.
+  2. **dispatch/core.ts** — add `_drainPendingCleanupsForTesting()` that
+     iterates `listActiveJobs()`, awaits each `j._cleanup?.()` (cached
+     promise — cheap when already resolved), and awaits each
+     `j._forwarderFlush` so any in-flight queue writes finish before
+     the caller proceeds.
+  3. **yaml-lifecycle-memory-tracker.test.ts** — call the drain helper
+     in `afterEach` BEFORE `resetDispatchCore()` and BEFORE
+     `rmSync(tempDir)`, and call it again in `afterAll` BEFORE
+     `rmSync(testState.logsDir)`.
+  4. **Regression test** — assert that calling the drain helper after a
+     completed dispatch leaves no pending writes (no `ENOENT` warn line
+     when the queue dir is removed immediately after).
+
+  Reproduce: `npx vitest run` from repo root. The leak is masked today
+  by the inner try/catch in `drainAndSend`, but timer activity from
+  `scheduleFlush`'s setTimeout + retry backoff in `postEventsWithRetry`
+  is observable as event-loop weight after the dispatch terminates.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f81dcd7aaddbc4fb2719a1
+    title: AgentJob exposes the forwarder flush promise (`_forwarderFlush`) so external callers can await in-flight queue writes.
+    checked: true
+  - check_item_id: 69f81dce65b371f10393d64a
+    title: "`dispatch/core.ts` exports `_drainPendingCleanupsForTesting()` that awaits both `_cleanup()` and `_forwarderFlush` for every job in `listActiveJobs()`."
+    checked: true
+  - check_item_id: 69f81dce530397d9ac5d8bf7
+    title: "`yaml-lifecycle-memory-tracker.test.ts` afterEach awaits `_drainPendingCleanupsForTesting()` before `resetDispatchCore()` / `rmSync(tempDir)`."
+    checked: true
+  - check_item_id: 69f81dce9c239f6aebb939f7
+    title: "`yaml-lifecycle-memory-tracker.test.ts` afterAll awaits `_drainPendingCleanupsForTesting()` before `rmSync(testState.logsDir)`."
+    checked: true
+  - check_item_id: 69f81dcf3263d5bbc75869bf
+    title: A regression test asserts that after the drain helper resolves, removing the queue's logs dir produces zero `ENOENT` rejections (process-level `unhandledRejection` listener filtered by queue path).
+    checked: true
+  - check_item_id: 69f81dd03e73cdc12ec98ad4
+    title: "All existing tests still pass: `npx vitest run src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts`, `npx vitest run src/agent/laravel-forwarder.test.ts`, `npx vitest run src/agent/launcher.test.ts`, `npx tsc --noEmit`."
+    checked: true
+comments:
+  - id: 69f8240a0962a4ca3d839d70
+    author: danxbot
+    timestamp: 2026-05-04T04:43:54.956Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** TDD flow worked cleanly: wrote the failing regression test against the
+      not-yet-implemented `_drainPendingCleanupsForTesting` import, then
+      implemented `job._forwarderFlush` + the helper to make it pass. The
+      integration test catches the real teardown race; the new launcher
+      + core unit tests pin the contract independently. Test-reviewer
+      flagged three missing pieces of coverage and I added all three (the
+      positive `_forwarderFlush` case, the negative poller-style case, and
+      the `_drainPendingCleanupsForTesting` unit test in core.test.ts).
+      Code-reviewer found zero required changes. Full suite ran 2603 passed
+      | 4 skipped after the fix — up from 4 yaml-lifecycle failures + 24
+      pre-existing failures in the prior run.
+
+      **What went wrong:** Lost ~10 min on the wrong teardown order: my first wiring drained the
+      forwarder AFTER `captureServer.stop()`, which turned `drainAndSend`
+      into a 60 s exponential-backoff retry loop against a dead URL and
+      tripped the 10 s afterEach hook timeout. The fix was to drain BEFORE
+      stopping the capture server. Documented the order with a multi-line
+      comment so a future agent doesn't re-introduce the bug. Also wasted
+      a moment chasing pre-existing tsc errors in `deploy/test-helpers.ts`
+      + `deploy/create-user.test.ts` before realizing they pre-date my
+      branch.
+
+      **Action items:** Nothing
+      **Commits:** 2ea22e3
+history: []
+retro:
+  good: |
+    TDD flow worked cleanly: wrote the failing regression test against the
+    not-yet-implemented `_drainPendingCleanupsForTesting` import, then
+    implemented `job._forwarderFlush` + the helper to make it pass. The
+    integration test catches the real teardown race; the new launcher
+    + core unit tests pin the contract independently. Test-reviewer
+    flagged three missing pieces of coverage and I added all three (the
+    positive `_forwarderFlush` case, the negative poller-style case, and
+    the `_drainPendingCleanupsForTesting` unit test in core.test.ts).
+    Code-reviewer found zero required changes. Full suite ran 2603 passed
+    | 4 skipped after the fix — up from 4 yaml-lifecycle failures + 24
+    pre-existing failures in the prior run.
+  bad: |
+    Lost ~10 min on the wrong teardown order: my first wiring drained the
+    forwarder AFTER `captureServer.stop()`, which turned `drainAndSend`
+    into a 60 s exponential-backoff retry loop against a dead URL and
+    tripped the 10 s afterEach hook timeout. The fix was to drain BEFORE
+    stopping the capture server. Documented the order with a multi-line
+    comment so a future agent doesn't re-introduce the bug. Also wasted
+    a moment chasing pre-existing tsc errors in `deploy/test-helpers.ts`
+    + `deploy/create-user.test.ts` before realizing they pre-date my
+    branch.
+  action_item_ids: []
+  commits:
+    - 2ea22e3
+waiting_on: null
+blocked: null

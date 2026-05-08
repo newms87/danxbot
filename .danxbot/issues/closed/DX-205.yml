@@ -1,0 +1,91 @@
+schema_version: 4
+tracker: trello
+id: DX-205
+external_id: 69fe4ed5378fe84c9f324cb8
+parent_id: null
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "[Action Item from DX-202] Push schema-v4 skill changes to claude-plugins repo + reload + unskip mirror tests"
+description: |-
+  ## Context
+
+  DX-202 (schema v4 — `Issue.blocked` self-block field + `Issue.waiting_on` dep-chain queue + status `"Needs Help"` → `"Blocked"`) updated the in-repo skill docs at `src/poller/inject/workspaces/issue-worker/.claude/skills/**` but did NOT push the matching commit to the cross-repo plugin source `~/web/claude-plugins/issues/skills/issue-card-workflow/SKILL.md` (and any other plugin-side skills that document the OLD `blocked` field semantics or the OLD `Needs Help` status).
+
+  Two tests in `src/poller/inject/workspaces/issue-worker/workspace-shape.test.ts` are currently `.skip`'d:
+  - `` `danx-triage-card/SKILL.md` ships with the per-status TTL contract + ICE rubric + decision enum ``
+  - `` `danx-triage-card/SKILL.md` matches the claude-plugins marketplace mirror byte-for-byte ``
+
+  These will pass once the operator pushes the matching commit to `git@github.com:newms87/claude-plugins`. Re-enable them after the push.
+
+  ## Solution
+
+  1. Diff the in-repo skill docs vs the plugin-source equivalents:
+     - `~/web/claude-plugins/issues/skills/issue-card-workflow/SKILL.md`
+     - any other plugin-source skills referencing the old `blocked.by[]` data field shape, the old `"Needs Help"` status string, or the conceptual "Blocked vs Waiting On" / "Needs Help vs Blocked" distinction.
+  2. Apply the same v4 rewrite as `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` and friends — the in-repo files are the canonical source of the new wording.
+  3. Commit + push to `git@github.com:newms87/claude-plugins`.
+  4. `/reload-plugins` in any active sessions consuming the marketplace.
+  5. Remove the `.skip` from the two marketplace-mirror tests in `src/poller/inject/workspaces/issue-worker/workspace-shape.test.ts` and verify they pass.
+  6. Container workers auto-update via `autoUpdate: true` — verify on the next poll tick that `workspace-shape.test` passes locally + in CI.
+
+  ## Key files
+
+  - `~/web/claude-plugins/issues/skills/issue-card-workflow/SKILL.md` — main cross-repo skill source
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` — in-repo canonical (already updated)
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-epic-link/SKILL.md`
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-triage-card/SKILL.md`
+  - `src/poller/inject/workspaces/issue-worker/workspace-shape.test.ts` — `.skip` removal site
+  - `~/.claude/CLAUDE.md` — global plugin source repo (`github:newms87/claude-plugins` marketplace)
+
+  ## Verification
+
+  - In-repo skill matches plugin-source skill byte-for-byte
+  - `npx vitest run src/poller/inject/workspaces/issue-worker/workspace-shape.test.ts` — 0 skipped
+  - `npx vitest run` total skipped count drops from 2 → 0
+
+  ## Out of scope
+
+  - Renaming the `claude-plugins` repo / directory layout
+  - Touching any plugin-source skill not affected by the v4 schema rename
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe4ed67fa566a946e9f406
+    title: claude-plugins repo's issue-card-workflow + danx-* skills updated to v4 schema language (Issue.blocked self-block, Issue.waiting_on dep-chain, status "Blocked" rename)
+    checked: true
+  - check_item_id: 69fe4ed6c61329574dbde652
+    title: Commit pushed to git@github.com:newms87/claude-plugins
+    checked: true
+  - check_item_id: 69fe4ed78b8125cbdfa6dbda
+    title: Two skipped marketplace-mirror tests in src/poller/inject/workspaces/issue-worker/workspace-shape.test.ts re-enabled (.skip removed)
+    checked: true
+  - check_item_id: 69fe4ed7807b18af5b20b75a
+    title: "`npx vitest run` total skipped count drops from 2 to 0"
+    checked: true
+comments: []
+history: []
+retro:
+  good: |
+    - Plugin source rewrite was a clean diff against the in-repo SOT — the in-repo files at `src/poller/inject/workspaces/issue-worker/.claude/skills/**` were already v4-correct, so syncing was mechanical (`cp` per file) and the byte-for-byte mirror test confirms zero drift.
+    - Caught and fixed three downstream plugin docs that still leaked v3 vocabulary (`pipeline/skills/pipe-plan/SKILL.md` had a bogus `blocked.action_required` field that never existed in any schema; `pipe-commit` + `halt-flag` + `danxbot/SKILL.md` referenced "Needs Help" in retro/halt/poll-decision contexts) — same `grep -nE "Needs Help|blocked\\.by"` sweep would have missed them if the search were narrower.
+    - Test re-enable surfaced one bug it was meant to catch: the TTL regex still asserted `Needs Help|3h` + `Blocked|1h`, which is v3. Updated to `Blocked|3h` + `Waiting On|1h` so the assertion now pins the v4 cadence table (Review 24h / Blocked 3h / Waiting On 1h).
+  bad: |
+    - The plugin `pipe-plan/SKILL.md` Move B procedure referenced `blocked.action_required` — a field that has never existed in `Issue.blocked` shape (v3 was `{reason, timestamp, by[]}`, v4 is `{reason, timestamp}`). That doc had been wrong since whenever it was written; DX-202's schema rewrite only made the wrong-ness visible. A separate pass over plugin docs to verify every field reference against `src/issue-tracker/interface.ts` would have caught it earlier.
+    - `git add .danxbot/issues/open/DX-205.yml` failed because `.danxbot/issues` is gitignored — terminal-status YAMLs flow back through the `danx_issue_save` MCP path, not the git index. Worth a one-line rule callout next time someone tries to commit a YAML directly.
+  action_item_ids: []
+  commits:
+    - c694a25
+    - 486145a
+waiting_on: null
+blocked: null

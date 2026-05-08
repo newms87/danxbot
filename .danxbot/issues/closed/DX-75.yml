@@ -1,0 +1,240 @@
+schema_version: 4
+tracker: trello
+id: DX-75
+external_id: 69fa2728bd83bb1f0322cfa8
+parent_id: DX-74
+children: []
+dispatch:
+  id: 094baa68-2cbe-44d9-876a-9f412c72f27a
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Auto-triage Epic > Phase 1: Add Needs Approval issue status"
+description: |-
+  ## Context
+
+  Parent epic: DX-74. We need a fifth non-dispatchable issue status —
+  `Needs Approval` — distinct from the existing `Needs Help` so the
+  triage agent (Phase 4) and humans can express:
+
+  > "An agent could write code for this, but I am not certain it is
+  > the right direction. Human, please review the architectural choice
+  > / disruptive scope / cross-cutting risk before we proceed."
+
+  Today the only "park this card" terminal-but-not-closed status is
+  `Needs Help`, which by `~/.claude/rules/issues.md` is reserved for
+  cards where a human must SUPPLY information (creds, missing decision
+  input, ambiguous AC). Conflating direction-approval with
+  information-required loses signal — operators triaging the Needs
+  Help list cannot tell which kind of intervention is needed.
+
+  ## Solution
+
+  ### Schema change (`src/issue-tracker/interface.ts`)
+
+  Extend the `IssueStatus` union with `"Needs Approval"`. Add to
+  `ISSUE_STATUSES` array. Status remains in the `open/` directory
+  on terminal save (NOT closed) — analogous to `Needs Help`.
+
+  ### YAML lifecycle (`src/poller/yaml-lifecycle.ts`)
+
+  Confirm `Needs Approval` does NOT trigger the `open/` → `closed/`
+  move. Today only `Done` and `Cancelled` move; verify and add
+  explicit test coverage.
+
+  ### Worker move enforcement (`src/poller/index.ts`)
+
+  Wherever the worker forces `status: ToDo` on `blocked` clear, leave
+  `Needs Approval` alone — same treatment as `Needs Help`. Approval
+  is cleared only by a human moving the card back to ToDo (mirrors
+  Needs Help today).
+
+  ### Tracker mirror
+
+  Trello board needs a new "Needs Approval" list. Add list config slot
+  to `<repo>/.danxbot/config/trello.yml` schema and the danxbot board's
+  trello-config.md. Outbound mirror's `moveToStatus` maps
+  `Needs Approval` → that list id.
+
+  ### Label
+
+  Add a Trello label "Needs Approval" mirroring the existing "Needs
+  Help" label workflow if labels are auto-applied per status. (Audit
+  current behavior — only add if the existing pattern does so.)
+
+  ### Tests
+
+  - `parseIssue` accepts `Needs Approval` and round-trips.
+  - `yaml-lifecycle.test.ts`: `Needs Approval` keeps file in `open/`.
+  - Status-to-list mapping covers the new entry.
+
+  ### Docs
+
+  - `~/.claude/rules/issues.md` — add `Needs Approval` row to the
+    status field reference; add a "Needs Approval vs Needs Help"
+    section paralleling the existing "Needs Help vs Blocked" section.
+  - `.claude/rules/trello-config.md` — add the new list id placeholder.
+  - `.claude/rules/settings-file.md` — no change.
+
+  ## Out of scope
+
+  - Triage skill behavior — Phase 4 (DX-78) wires it.
+  - Poller spawn logic — Phase 5 (DX-79).
+
+  ## Key Files
+
+  - `src/issue-tracker/interface.ts`
+  - `src/poller/yaml-lifecycle.ts` + `.test.ts`
+  - `src/poller/index.ts` (audit only — should be additive)
+  - `src/issue-tracker/trello.ts` (status → list map)
+  - `src/__tests__/issue-tracker/*` — extend status-mapping coverage
+  - `<repo>/.danxbot/config/trello.yml` — add Needs Approval list id (operator step, document in card comment if a new tracker list must be created by a human)
+  - `~/.claude/rules/issues.md`
+  - `.claude/rules/trello-config.md`
+
+  ## Verify
+
+  - Edit a YAML to `status: "Needs Approval"`, run worker tick,
+    confirm file stays in `open/` and tracker mirrors to the new list.
+  - `npx vitest run` clean. `npx tsc --noEmit` clean.
+  - Existing `Needs Help` flow unaffected.
+
+  ## Operator note
+
+  Creating the new Trello list + label on the danxbot board is a
+  human action (board IDs live in `trello-config.md`). If the tracker
+  list does not exist yet when this card is picked up, the agent
+  should set the YAML to `Needs Help` and explain in a comment so an
+  operator creates the list, then resume.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa2729f97dcb32372812a9
+    title: IssueStatus union and ISSUE_STATUSES include Needs Approval
+    checked: true
+  - check_item_id: 69fa272accdd43128fb309ea
+    title: yaml-lifecycle.ts keeps Needs Approval in open/ (test added)
+    checked: true
+  - check_item_id: 69fa272abd76ef6e05c4c9b8
+    title: parseIssue round-trips Needs Approval (test added)
+    checked: true
+  - check_item_id: 69fa272a6e2386afc0bc83da
+    title: Trello status-to-list map handles Needs Approval; trello.yml schema slot added
+    checked: true
+  - check_item_id: 69fa272beac940c845b4ea0c
+    title: issues.md documents Needs Approval vs Needs Help distinction
+    checked: true
+  - check_item_id: 69fa272b4f59c51bd91e0a89
+    title: trello-config.md documents the new list id placeholder
+    checked: true
+  - check_item_id: 69fa272bc88babaf0e380b9d
+    title: npx vitest run + npx tsc --noEmit clean
+    checked: true
+comments:
+  - id: 69fa55ae16f2a73e9f8dab5c
+    author: newms87
+    timestamp: 2026-05-05T20:40:14.986Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `094baa68-2cbe-44d9-876a-9f412c72f27a` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T23:04:23.051Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-06T01:04:23.051Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '094baa68-2cbe-44d9-876a-9f412c72f27a' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa801aae4be35e00ec9aea
+    author: code-reviewer
+    timestamp: 2026-05-05T23:41:14.687Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      Findings + dispositions:
+
+      1. **Silent fallback in `resolveLabelIds`** when `needsApprovalLabelId` empty — accepted as the rollout contract (label provisioning lags list provisioning). Comment + `types.ts` doc updated to call out the contract explicitly.
+      2. **Empty-string defaults in `loadTrelloIds`** — accepted; matches the optional-during-rollout pattern. Belt-and-suspenders guards already in place: `fetchOpenCards` skips empty list ids, `listIdToStatus` truthy-checks before mapping, `allManagedLabelIdsForFiltering` skips empty label id.
+      3. **Unrelated `dashboard/src/style.css` change** — pre-existing modification by another agent. Excluded from this commit.
+      4. **DRY: 4 duplicate `ManagedLabels`-shaped literal types** — extracted `ManagedLabels` interface in `interface.ts`; consumers (trello.ts, memory.ts, IssueTracker contract) now reference the single type.
+      5. **`types.ts:111` comment accuracy** — rewritten to match the actual thrown message + describe the read-side short-circuit invariants.
+  - id: 69fa801bc0b778e5903a1034
+    author: test-reviewer
+    timestamp: 2026-05-05T23:41:15.033Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Test Review
+
+      Gaps closed:
+
+      - `statusToListId("Needs Approval")` empty-listId throw (`trello.test.ts` Needs Approval suite).
+      - `setLabels({needsApproval:true})` positive path — label applied when provisioned.
+      - `setLabels` empty `needsApprovalLabelId` silently skips — no `""` in `idLabels`.
+      - `allManagedLabelIdsForFiltering` empty-id skip — preserved-label filter does not strip non-managed labels.
+      - `getCard` on a card whose `idList === needsApprovalListId` → `status: "Needs Approval"`.
+      - `listIdToStatus` regression guard for the truthy-check (empty `needsApprovalListId` does not match an empty card `idList`).
+      - `loadTrelloIds` covers both paths (default `""` when key absent; configured value when provisioned).
+      - `sync.ts` derives `needsApproval: true` from `status === "Needs Approval"` (mirrors the existing `needsHelp` test).
+      - `parseIssue` round-trips `Needs Approval` (yaml.test.ts).
+      - Worker `persistAfterSync` keeps `Needs Approval` files in `open/` (issue-route.test.ts).
+
+      All 7 ACs have direct test evidence.
+  - id: 69fa80bad5a8c8ca3e9623ea
+    author: danxbot
+    timestamp: 2026-05-05T23:43:54.252Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Schema-only phase shipped clean: `IssueStatus` extension, tracker mapping, label flag, dashboard column, full test coverage, all in one commit.
+      - DRY win: extracted `ManagedLabels` interface during code review — adding the next managed label is now a one-line edit instead of four type-literal updates.
+      - Fail-loud invariants preserved at every site that reads the new optional config slot. `loadTrelloIds` defaults to `""`; `statusToListId` throws on empty list id; `setLabels` silently skips empty label id; `allManagedLabelIdsForFiltering` excludes `""` so the preserved-label filter cannot strip on blank.
+      - Reviewers caught the test gaps that mattered: empty-listId throw, empty-label silent-skip, `listIdToStatus` truthy guard, sync-derives-needsApproval, `loadTrelloIds` rollout fallback. All addressed in-session.
+      **What went wrong:** - Operator action still required to provision the actual Trello list + label on the danxbot board. Until the operator adds the IDs to `<repo>/.danxbot/config/trello.yml`, any agent or human that flips a YAML to `Needs Approval` will hit the fail-loud throw on the next sync. This is the intended rollout contract, but the next agent should expect to either provision the IDs or document the fail-loud surface in Phase 4 (DX-78) before the triage agent starts emitting Needs Approval.
+      - Touched ~13 fixture files just to add two strings each (`needsApprovalListId`, `needsApprovalLabelId`). Used a Python script to do the mechanical insert; tedious but unavoidable until a `defaultTrelloConfig()` test helper consolidates the literals.
+      **Action items:** Nothing
+      **Commits:** 3841bd4
+history: []
+retro:
+  good: |-
+    - Schema-only phase shipped clean: `IssueStatus` extension, tracker mapping, label flag, dashboard column, full test coverage, all in one commit.
+    - DRY win: extracted `ManagedLabels` interface during code review — adding the next managed label is now a one-line edit instead of four type-literal updates.
+    - Fail-loud invariants preserved at every site that reads the new optional config slot. `loadTrelloIds` defaults to `""`; `statusToListId` throws on empty list id; `setLabels` silently skips empty label id; `allManagedLabelIdsForFiltering` excludes `""` so the preserved-label filter cannot strip on blank.
+    - Reviewers caught the test gaps that mattered: empty-listId throw, empty-label silent-skip, `listIdToStatus` truthy guard, sync-derives-needsApproval, `loadTrelloIds` rollout fallback. All addressed in-session.
+  bad: |-
+    - Operator action still required to provision the actual Trello list + label on the danxbot board. Until the operator adds the IDs to `<repo>/.danxbot/config/trello.yml`, any agent or human that flips a YAML to `Needs Approval` will hit the fail-loud throw on the next sync. This is the intended rollout contract, but the next agent should expect to either provision the IDs or document the fail-loud surface in Phase 4 (DX-78) before the triage agent starts emitting Needs Approval.
+    - Touched ~13 fixture files just to add two strings each (`needsApprovalListId`, `needsApprovalLabelId`). Used a Python script to do the mechanical insert; tedious but unavoidable until a `defaultTrelloConfig()` test helper consolidates the literals.
+  action_item_ids: []
+  commits:
+    - 3841bd4
+waiting_on: null
+blocked: null

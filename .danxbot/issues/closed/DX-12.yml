@@ -1,0 +1,192 @@
+schema_version: 4
+tracker: trello
+id: DX-12
+external_id: 69f9df8df92ead2855476395
+parent_id: null
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "[Danxbot] Add `blocked` field to issues + Blocked Trello label + redefine Needs Help vs Blocked"
+description: |-
+  ## Problem
+
+  Two failure modes are conflated under "Needs Help":
+
+  1. **Genuine human intervention needed** — credentials, deploy, ambiguous spec, repo we can't write to, architectural decision that changes the goal. This is what Needs Help SHOULD mean.
+  2. **Card cannot proceed YET** — waiting on another card / dependency to ship first. There's no actual human action required; the card just needs to wait. Today these clog the Needs Help list and require a human to keep moving them back.
+
+  We need a separate "blocked" concept that means "wait, don't ask a human" and is automatically resolved when the blocker clears.
+
+  ## Solution
+
+  ### 1. Schema — `blocked` field on `Issue`
+
+  Add `blocked: BlockedRecord | null` to the `Issue` type in `src/issue-tracker/interface.ts`. Default `null`. Shape:
+
+  ```yaml
+  blocked: null
+
+  # OR
+  blocked:
+    reason: "explanation of what is blocking this card"
+    timestamp: "2026-05-04T12:34:56.000Z"
+    by:
+      - DX-42
+      - DX-43
+  ```
+
+  - `reason`: required non-empty string.
+  - `timestamp`: required ISO 8601 string.
+  - `by`: required, non-empty array of `ISS-N` strings. Must always reference at least one issue. If the blocker is human work, the agent must FIRST create a Needs Help (or ToDo) issue describing the human task and put its `id` in `by[]`.
+
+  Validate in `src/issue-tracker/yaml.ts#validateIssue`. Serialize in canonical position (after `phases`, before `comments` — pick a stable spot and document). Round-trip identity.
+
+  ### 2. `Blocked` Trello label — managed automatically
+
+  - Add `blockedLabelId: string` to `TrelloConfig` in `src/types.ts`.
+  - Add `labels.blocked` to per-repo `<repo>/.danxbot/config/trello.yml` (required key in `loadTrelloIds`).
+  - Extend `IssueTracker.setLabels` signature: `{type, needsHelp, triaged, blocked}`.
+  - `TrelloTracker.resolveLabelIds` adds `blockedLabelId` when `blocked: true`.
+  - `TrelloTracker.allManagedLabelIdsForFiltering` includes the Blocked label so toggling off cleanly strips it.
+  - `MemoryTracker.setLabels` accepts the new flag.
+  - `sync.ts` label diff includes `blocked: local.blocked !== null`.
+  - Update `setup` skill to create + capture the Blocked label id (orange or grey) and add to `trello.yml`.
+  - Manually add the label id to the danxbot + gpt-manager + platform `trello.yml` so production is unblocked even before re-running setup. Verify on the Trello board first that a Blocked label exists; create if missing.
+
+  ### 3. Worker semantics
+
+  - `handleIssueSave` and `syncTrackedIssueOnComplete` in `src/worker/issue-route.ts`: BEFORE persisting / pushing, if `issue.blocked !== null` mechanically force `issue.status = "ToDo"`. Agents only set `blocked` — they don't separately move status. The worker handles both at once. If an agent saves with `blocked != null` AND a non-ToDo status (Done, Cancelled, Needs Help, In Progress), worker normalizes to ToDo and writes a single warning comment to the YAML. Empty blocked → leave status alone.
+  - The existing label diff in `sync.ts` will then push the Blocked label and `Needs Help: false` (since status is now ToDo) on the next sync.
+
+  ### 4. Poller dispatch gate
+
+  In `src/poller/index.ts#_poll`, after the ToDo filter and BEFORE the dispatch primary lock attempt:
+
+  ```
+  for each ToDo card in priority order:
+    load local YAML (already hydrated via bulk-sync)
+    if issue.blocked == null: pick this card, proceed.
+    else:
+      for each blocker_id in issue.blocked.by:
+        load blocker YAML (open or closed)
+        if not found OR status not in {Done, Cancelled}: still blocked, skip card
+      all blockers terminal → clear blocked, save YAML, pick this card.
+  ```
+
+  If every ToDo card is blocked, fall through to the ideator path / no-dispatch as if the list were empty. Log skipped blocked cards once per tick.
+
+  ### 5. `fetchOpenCards` — import Action Items list
+
+  `TrelloTracker.fetchOpenCards`: today imports Review / ToDo / In Progress / Needs Help. Add `Action Items` so blocker-search can find them.
+
+  Map list-id → status: Action Items list maps to status `ToDo` (they ARE ToDo cards from the schema's perspective; the "Action Items" Trello list is a UI organization layer for human triage, not a separate status). The poller already filters dispatch by `status === "ToDo"` AND title-prefix; Action Items cards will land in `issues/open/` and be queryable by id but won't auto-dispatch unless an operator moves them to the actual ToDo list.
+
+  Memory tracker: `fetchOpenCards` open-set already covers Review/ToDo/InProgress/NeedsHelp. Action Items live as `status: ToDo` in memory — no separate concept. No-op there.
+
+  Update `listIdToStatus` in `TrelloTracker` to map Action Items → ToDo, and add a corresponding entry to `openLists` in `fetchOpenCards`.
+
+  ### 6. Skill rewrite
+
+  Edit `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md`:
+
+  - Tighten Step 10 (Needs Help) to ONLY the four genuine-blocker categories: external repo write, credentials/deploy/secrets, genuine human design decision, card-specific tool failure. Drop "waiting on another card" entirely from Step 10.
+  - Add a new "Step 10b — Move to Blocked" section. Trigger: card cannot proceed because it's waiting on other in-flight work, but no human intervention is needed. Procedure:
+    1. Search for the blocking card. Look in: (a) phase siblings via parent epic's `children[]`, (b) all open issues at `<repo>/.danxbot/issues/open/*.yml` matching the topic, (c) `Action Items` issues now imported.
+    2. If a real blocker is found, capture its `id`(s) into `blocked.by[]`.
+    3. If no existing card describes the unblock work, the agent MUST create a new ToDo card via `danx_issue_create` describing the work required to unblock, then put that new id in `blocked.by[]`. If the unblock work needs a human, create the new card with `status: "Needs Help"` and a human-readable description; still put its id in `blocked.by[]`.
+    4. Set `blocked: {reason, timestamp, by}` on the current card. Do NOT also set `status: Needs Help` — the worker handles flipping `status` back to ToDo. Save.
+  - Update YAML schema table at the top of the skill to document `blocked`.
+
+  ### 7. Global rule docs
+
+  - `~/.claude/rules/issues.md`: extend YAML schema table with `blocked`. Document distinction Needs Help vs Blocked.
+  - `CLAUDE.md` (project): mention Blocked label in the "Trello Board" labels list. Update `.claude/rules/trello-config.md` to include the Blocked label id once we know it.
+
+  ### 8. Tests
+
+  - `src/__tests__/issue-tracker/yaml.test.ts`: blocked round-trip, validation (missing reason, empty `by`, non-ISS id, non-string reason), null is the default.
+  - `src/__tests__/issue-tracker/sync.test.ts`: setLabels gets `blocked: true` when issue.blocked !== null; idempotent.
+  - `src/__tests__/issue-tracker/trello.test.ts`: label-id wiring covers blocked.
+  - `src/__tests__/worker/issue-route.test.ts`: save with `blocked != null` and `status: Needs Help` flips status to ToDo before persistence.
+  - `src/poller/index.test.ts`: blocked card with all blockers Done unblocks; with one blocker still open is skipped; with mixed terminal/open is skipped; new test for Action Items list import.
+
+  ## Key files
+
+  - `src/issue-tracker/interface.ts`
+  - `src/issue-tracker/yaml.ts`
+  - `src/issue-tracker/trello.ts`
+  - `src/issue-tracker/memory.ts`
+  - `src/issue-tracker/sync.ts`
+  - `src/types.ts`
+  - `src/poller/constants.ts`
+  - `src/poller/index.ts`
+  - `src/worker/issue-route.ts`
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md`
+  - `~/.claude/rules/issues.md`
+  - `repos/{danxbot,gpt-manager,platform}/.danxbot/config/trello.yml` (add `labels.blocked`)
+  - `.claude/skills/setup/SKILL.md` (provision Blocked label on install)
+
+  ## Out of scope
+
+  - Auto-creating the Blocked label via danxbot itself at runtime — operator runs setup or manually adds the id. (Setup skill IS updated; runtime auto-create is rejected as too magical.)
+  - Migration of existing Needs Help cards that are actually blocked-style — humans can re-categorize as they see fit.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9df8eff6d1954a4296b7b
+    title: "`Issue.blocked: BlockedRecord | null` field added to TS interface, YAML serializer, and validator. Round-trip parse → serialize → parse is byte-stable."
+    checked: true
+  - check_item_id: 69f9df8f9fabb1de7b6798c3
+    title: "Validator rejects: missing `reason`, empty `reason`, missing `timestamp`, missing or empty `by[]`, non-`ISS-N` entries in `by[]`."
+    checked: true
+  - check_item_id: 69f9df8ff746422b8f69994f
+    title: "`TrelloConfig.blockedLabelId` required field; `loadTrelloIds` requires `labels.blocked`; danxbot/gpt-manager/platform `trello.yml` populated with the real Blocked label id."
+    checked: true
+  - check_item_id: 69f9df91f6035a58e4d8ea59
+    title: "`IssueTracker.setLabels` signature includes `blocked: boolean`; both `TrelloTracker` and `MemoryTracker` honor it; managed-label set strips Blocked when toggled off."
+    checked: true
+  - check_item_id: 69f9df91ed1b588720a385d6
+    title: "`sync.ts` label diff includes `blocked` (`local.blocked !== null`) — re-syncing a card whose blocked state hasn't changed issues zero label writes."
+    checked: true
+  - check_item_id: 69f9df92a76e74598a9c509d
+    title: Worker `handleIssueSave` and `syncTrackedIssueOnComplete` mechanically force `status = ToDo` whenever the saved YAML carries `blocked != null`, regardless of what status the agent wrote. Test asserts via `_drainAsyncWorkForTesting`.
+    checked: true
+  - check_item_id: 69f9df929aa7b228ce64df85
+    title: "Poller dispatch gate: ToDo card with non-null `blocked` whose `by[]` contains any non-terminal issue is skipped. ToDo card with all-terminal `by[]` has `blocked` cleared, YAML saved, then dispatched."
+    checked: true
+  - check_item_id: 69f9df93c78eb2ba7cdd67b2
+    title: "`TrelloTracker.fetchOpenCards` imports the Action Items list as well; cards land at `<repo>/.danxbot/issues/open/<id>.yml` via bulk-sync."
+    checked: true
+  - check_item_id: 69f9df93cd71fb814879b1e4
+    title: "`danx-next` SKILL.md rewritten: Step 10 narrowed to four human-blocker categories; new Step 10b for Blocked workflow with mandatory blocker discovery + create-new-card fallback."
+    checked: true
+  - check_item_id: 69f9df949e453bcbb0a9b7fc
+    title: "`~/.claude/rules/issues.md` schema table extended with `blocked`; Needs Help vs Blocked distinction documented."
+    checked: true
+  - check_item_id: 69f9df95e391884812f60fb7
+    title: "Tests added: yaml round-trip + validation, sync label diff, worker forced-status, poller dispatch gate, fetchOpenCards Action Items import. All green via `npx vitest run`."
+    checked: true
+  - check_item_id: 69f9df959602093d41616f6d
+    title: "`npx tsc --noEmit` passes."
+    checked: true
+comments: []
+history: []
+retro:
+  good: |
+    Single coherent epic landed in one card. All 12 ACs verified by `npx vitest run` (2667 passing, +13 new) and `npx tsc --noEmit` clean. Trello Blocked label provisioned on danxbot + gpt-manager via API; reused existing label on platform. Worker mechanically forces `status: ToDo` when `blocked != null` — agents can't accidentally split the state. Poller dispatch gate auto-clears `blocked` when every blocker reaches Done/Cancelled, so unblocking is hands-free. Action Items list now imports into local YAMLs so blocker-discovery is offline-friendly.
+  bad: |
+    Couldn't make the Trello-side `blocked` round-trip cleanly through `getCard` because Trello has no native carrier for the structured record (only the label survives). Sync diff treats remote-side blocked as null always, which means the Blocked label gets cleared only when some other label change triggers `setLabels`. Acceptable for now — local YAML stays authoritative, agents always set/clear via the YAML.
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

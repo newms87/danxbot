@@ -1,0 +1,302 @@
+schema_version: 4
+tracker: trello
+id: DX-64
+external_id: 69f9dfbc67ef3ff9d1664273
+parent_id: DX-60
+children: []
+dispatch:
+  id: 6d3e9c87-005f-4ac9-a5dd-a2786d891861
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Issues board > Phase 4: FilterToolbar + URL-state persistence"
+description: |-
+  ## Context
+
+  Phase 4 of DX-60. With the board (Phase 2) and rich cards (Phase 3) on
+  screen, this phase adds the filter / search chrome and persists every
+  filter to the URL query string so links are shareable.
+
+  ## Solution
+
+  ### Component
+
+  New `dashboard/src/components/issues/FilterToolbar.vue`. Pixel-match
+  `docs/design/issues-board/IssueBoard.jsx` `FilterToolbar` block (lines
+  47–177). Renders above the board grid in `IssuesPage.vue`.
+
+  ### Filters in scope this phase
+
+  - **Free-text search input** — `padding: 5px 10px, radius 6, bg
+    rgb(15 23 42 / 0.4)` (rest), `rgb(30 41 59 / 0.8)` + border `#334155`
+    when non-empty. Glyph `⌕`, placeholder
+    `"Search id, title, description, comments…"`, `×` clear button when
+    populated. Debounced 200ms via `useDebouncedRef` (or a tiny inline
+    helper). Match against `id + title + description` plus
+    `comments[].text` if loaded — for v1, the list response doesn't
+    include comments[], so search matches `id + title` only and a TODO
+    comment in code calls out adding description/comments once the
+    list ships them. **Add description to the list response** in
+    DX-61's AC; same follow-up rule as DX-63.
+  - **Type chips** — three buttons (Epic / Bug / Feature) using
+    `ISSUE_TYPE_META`. Multi-select; active = filled with that type's
+    `bg/fg/border`; inactive = `bg rgb(30 41 59 / 0.5)`, `color
+    #94a3b8`, `border #334155`. Empty selection = no type filter.
+  - **Blocked-only toggle** — single pill button. Active styling:
+    `color #fca5a5`, `bg rgb(239 68 68 / 0.15)`, `border rgb(239 68 68 /
+    0.35)`. Glyph `⛔ Blocked only`.
+  - **Show closed checkbox** — visibility-only on Done + Cancelled
+    columns. Native `<input type="checkbox">`, `accentColor: #6366f1`.
+    The columns themselves are still always rendered; the checkbox
+    auto-expands them and overrides the per-column collapsed state when
+    on. Off → cards in those columns hidden (column header still shows
+    the count).
+  - **Count display** pinned right: `<visible> of <total>`,
+    `font-size 11, color #64748b`.
+
+  ### URL state
+
+  Use `URLSearchParams` against `window.location` — no router dep:
+
+  - `q=<search>` — only when non-empty
+  - `type=epic,bug` — comma-joined
+  - `blocked=1` — only when true
+  - `closed=1` — only when true
+  - `repo=<name>` — already maintained by the existing
+    repo selector if it's URL-aware; if not, this phase adds it.
+
+  Two-way binding: composable `useIssueFilters()` reads `location.search`
+  on mount, exposes typed reactive refs, and on each change calls
+  `history.replaceState` (NOT `push` — avoid clogging back/forward).
+  Browser back works because state is read on mount + popstate listener.
+
+  ### Wire to board
+
+  `IssueBoard.vue` accepts the filtered list as a prop (or consumes the
+  composable). Filtering is client-side over the already-loaded
+  `issues[]` from `useIssues`. No re-fetch on filter changes.
+
+  ### Visibility logic
+
+  - Type filter: empty array = pass; non-empty = include only matching
+    types (case-mapped to lowercase ids).
+  - Blocked-only: `i.blocked === true`.
+  - Search: case-insensitive match.
+  - Show-closed: when off, the Done + Cancelled columns render but
+    contain zero cards (the count badge in `ColumnHeader` should reflect
+    the filtered count, NOT the total — confirm with the design's
+    `count` semantics, which use the visible-after-filtering count).
+
+  Always show the count display "X of Y" even if filters are empty.
+
+  ## Out of Scope (this phase)
+
+  - Epic scope filter / highlight (Phase 6 — adds the scoped-epic row
+    inside the toolbar)
+  - Drawer (Phase 5)
+
+  ## Verify
+
+  - `cd dashboard && npx vue-tsc --noEmit` clean.
+  - Type a query → URL updates `?q=...` without page reload; back/forward
+    browser buttons restore state.
+  - Apply Type=Bug + Blocked-only → only blocked bugs visible; URL has
+    `?type=bug&blocked=1`.
+  - Show-closed off → Done + Cancelled columns empty (header count = 0);
+    on → cards render. Reload page with `?closed=1` → state restored.
+  - `<visible> of <total>` updates live as filters change.
+
+  ## Key Files
+
+  - `dashboard/src/components/issues/FilterToolbar.vue` (new)
+  - `dashboard/src/composables/useIssueFilters.ts` (new)
+  - `dashboard/src/components/issues/IssuesPage.vue` — render toolbar
+  - `dashboard/src/components/issues/IssueBoard.vue` — accept filters
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9dfbd0081af64b33d5590
+    title: FilterToolbar.vue matches docs/design/issues-board/IssueBoard.jsx FilterToolbar block (search, type chips, blocked toggle, show-closed checkbox, count display)
+    checked: true
+  - check_item_id: 69f9dfbeb5a703dea18dfa01
+    title: Free-text search debounced 200ms; case-insensitive match against id + title + description
+    checked: true
+  - check_item_id: 69f9dfbe9d6298129a2d7cae
+    title: Type chips multi-select; empty selection = no type filter
+    checked: true
+  - check_item_id: 69f9dfbfd08464db03cf4fb1
+    title: Blocked-only toggle filters to issues with blocked === true
+    checked: true
+  - check_item_id: 69f9dfbf23e22f85aa5814f3
+    title: Show-closed off → Done + Cancelled columns render with zero cards (count reflects visible)
+    checked: true
+  - check_item_id: 69f9dfc06e72863f3846df64
+    title: useIssueFilters composable mirrors q / type / blocked / closed / repo to URL via history.replaceState; restores on mount + popstate
+    checked: true
+  - check_item_id: 69f9dfc09a50123894537347
+    title: Backend list response includes description so search can match against it
+    checked: true
+  - check_item_id: 69f9dfc1cdb7c6ee9283946a
+    title: <visible> of <total> count chip pinned right; updates live as filters change
+    checked: true
+  - check_item_id: 69f9dfc22ebfa64d53f6b843
+    title: cd dashboard && npx vue-tsc --noEmit passes clean
+    checked: true
+comments:
+  - id: 69f9fbd041e4c878d9e1cec0
+    author: danxbot
+    timestamp: 2026-05-05T14:16:48.198Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Notes from Phase 3
+
+      Phase 3 (DX-63, commit `ae8be13`) shipped the rich IssueCard. Pickup hints for Phase 4:
+
+      **New shared modules to consume (don't reinvent):**
+      - `dashboard/src/components/issues/issuePalette.ts` — single source of truth for `ISSUE_TYPE_META`, `PHASE_STATUS_META`, `COLUMN_ACCENTS`, `statusToColumnId`, `typeToId`. Use these for any chip / accent the toolbar needs (e.g. type-chip filter, status pills).
+      - `dashboard/src/components/issues/ACBar.vue`, `PhaseChecklist.vue` — already split; reuse if the toolbar adds preview cards.
+
+      **Backend list shape was extended:**
+      - `IssueListItem` now carries `phases?: { name, status }[]` on epics and `blocked_reason: string | null` for every card. If the toolbar's blocked-only filter wants to show why, the field is already on the wire.
+
+      **Filter wiring:**
+      - `IssueBoard.vue` now emits `parent-click` (Phase 6 will scope on it). Don't suppress that emit when adding the toolbar — keep it bubbling.
+      - The poller passes `&include_closed=all` already; `useIssues.ts` controls the toggle. Wire the closed-cap override to the existing query param, don't add a second one.
+
+      **Type-check command (still required):** `cd dashboard && npx vue-tsc --noEmit`.
+  - id: 69fa0c537ed0ddf3ec269208
+    author: test-reviewer
+    timestamp: 2026-05-05T15:27:15.028Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Test Review
+
+      Backend change in scope: `IssueListItem.description` field on `toListItem()`. Updated full-shape `toEqual` assertion at `src/__tests__/dashboard/issues-reader.test.ts:103-125` covers it (non-empty value verbatim from `Issue.description`). All UI changes under `dashboard/src/**` are exempt per CLAUDE.md UI Frontend Test Exemption.
+
+      18 tests reviewed, 0 gaps. Coverage adequate.
+  - id: 69fa0c53228d3922ae083f77
+    author: code-reviewer
+    timestamp: 2026-05-05T15:27:15.377Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      No critical findings. Two priority fixes applied before commit:
+
+      1. **`IssueBoard.vue` show-closed off-branch reset** — original watch reset Done/Cancelled `collapsed` to `collapsedByDefault` when `showClosed` flipped off, silently clobbering user manual state. Cards are already filtered upstream, so the off-branch is unnecessary. Narrowed watch to true-only force-expand.
+      2. **`useIssueFilters.ts` unsafe `Array<unknown>` cast** — combined-source `watch` used `as Parameters<typeof watch>[0]` to satisfy overload typing. Split into `watch([q, types, blockedOnly, showClosed], writeToUrl)` plus optional `watch(selectedRepo, writeToUrl)` — eliminates the cast.
+
+      Other notes (low-impact, accepted): `description` field on every list row will scale fine at current size; sort canonicalization on `type=` URL param is intentional.
+  - id: 69fa0c5339af97b2100f8d05
+    author: danxbot
+    timestamp: 2026-05-05T15:27:15.740Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Review Fixes
+
+      - `IssueBoard.vue` watch on `showClosed`: only force-expand when `next === true`; off-branch is a no-op (cards already filtered upstream).
+      - `useIssueFilters.ts`: replaced single combined `watch([...], cb)` + unsafe cast with two `watch()` calls — `[q, types, blockedOnly, showClosed]` always, `selectedRepo` only when provided.
+
+      `cd dashboard && npx vue-tsc --noEmit` passes after both fixes.
+  - id: 69fa0c5439fa84267639d843
+    author: danxbot
+    timestamp: 2026-05-05T15:27:16.096Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Notes from Phase 4 (for Phase 6 pickup)
+
+      Phase 4 (commit `a06d34d`) shipped FilterToolbar + URL-state via `useIssueFilters`. Pickup hints for Phase 6 (epic scope filter / highlight):
+
+      **New shared modules to consume:**
+      - `dashboard/src/composables/useIssueFilters.ts` — already mirrors `q / type / blocked / closed / repo` to URL via `history.replaceState`. Add `epic=<id>` + `mode=filter|highlight` params here in Phase 6; match the existing parse/write pattern (sort canonicalization, `popstate` listener, `null`-clears delete the param).
+      - `dashboard/src/components/issues/FilterToolbar.vue` — toolbar lives here. Phase 6's "scoped epic" row goes BELOW the existing flex `.row` (see design fixture `IssueBoard.jsx` lines 135–174). Reuse the existing `.toolbar` outer + add a sibling `.scope` row.
+
+      **Wire-through:**
+      - `IssuesPage.vue` owns `filteredIssues` (a `computed`). Layer the epic-scope predicate into that pipeline before reaching `IssueBoard`. Don't double-filter in `IssueBoard.vue`.
+      - `IssueBoard.vue` already emits `parent-click` (Phase 3) — Phase 6 wires it to set `scopedEpicId`. Don't add a second emit.
+
+      **Backend list shape note:**
+      - `IssueListItem` now carries `description: string` (Phase 4 addition). Search currently matches `id + title + description`. Phase 6 doesn't need a backend change.
+
+      **Type-check (still required):** `cd dashboard && npx vue-tsc --noEmit`.
+  - id: 69fa0a79b16638ca6809848f
+    author: newms87
+    timestamp: 2026-05-05T15:19:21.644Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `6d3e9c87-005f-4ac9-a5dd-a2786d891861` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T15:19:21.476Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T17:19:21.476Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '6d3e9c87-005f-4ac9-a5dd-a2786d891861' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa0c54b22167b1f9e563cb
+    author: danxbot
+    timestamp: 2026-05-05T15:27:16.439Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** FilterToolbar pixel-matched the React design via plain CSS — no extra
+      CSS framework needed. Backend `description` field landed as a tiny
+      addition with one updated test assertion. Code review caught two
+      legitimate issues (off-branch reset clobbering user state, unsafe
+      `Array<unknown>` cast) and both fixed cleanly before commit.
+      **What went wrong:** Initial `useIssueFilters` watch combined sources via an unsafe cast
+      to satisfy `watch`'s overload typing — split into two `watch()`
+      calls in review. IssueBoard's show-closed off-branch was over-eager
+      and silently reset user collapse state — narrowed to true-only.
+      **Action items:** Nothing
+      **Commits:** a06d34d
+history: []
+retro:
+  good: |-
+    FilterToolbar pixel-matched the React design via plain CSS — no extra
+    CSS framework needed. Backend `description` field landed as a tiny
+    addition with one updated test assertion. Code review caught two
+    legitimate issues (off-branch reset clobbering user state, unsafe
+    `Array<unknown>` cast) and both fixed cleanly before commit.
+  bad: |-
+    Initial `useIssueFilters` watch combined sources via an unsafe cast
+    to satisfy `watch`'s overload typing — split into two `watch()`
+    calls in review. IssueBoard's show-closed off-branch was over-eager
+    and silently reset user collapse state — narrowed to true-only.
+  action_item_ids: []
+  commits:
+    - a06d34d
+waiting_on: null
+blocked: null

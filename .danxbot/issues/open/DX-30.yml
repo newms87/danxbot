@@ -1,0 +1,60 @@
+schema_version: 4
+tracker: trello
+id: DX-30
+external_id: 69f134e0315c505ce97ab463
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: Mark host-only cards (~/.claude/skills, ~/.claude/rules) at triage so docker workers don't pick them up
+description: |-
+  ## Context
+
+  Card #90 (`Enforce pipeline preflight in /flow-commit skill`) reached ToDo and was picked up by the docker `danxbot-worker-danxbot` worker, which has no access to `~/.claude/skills/flow-commit/SKILL.md` on the developer's host. The agent could only investigate and move it to Needs Help — wasting one full dispatch on a card structurally guaranteed to fail in this environment.
+
+  This is not unique to card #90. Any card whose only required edits are in `~/.claude/skills/` or `~/.claude/rules/` (developer-personal Claude Code config) is unreachable from a dispatched docker worker, since the container's `/home/danxbot/.claude/` is isolated from the host's `/home/newms/.claude/` (only `.credentials.json` is bind-mounted, per `.claude/rules/docker-runtime.md`).
+
+  ## Solution
+
+  Update the danx-triage skill (and/or the triage agent definition) to detect cards whose `desc` references only paths under `~/.claude/skills/` or `~/.claude/rules/` and either:
+
+  - **Option A:** Apply a `Host-only` label and demote the card back to Review with a comment explaining why a docker worker can't take it. The human moves it back to ToDo only when ready to take it on their host.
+  - **Option B:** Add a separate `Host-only` list (or `Host ToDo`) the docker poller is configured to ignore, and route these cards there at triage time.
+
+  Option A is lower-effort and reuses existing label machinery; option B is more explicit but adds a list and a poller filter.
+
+  ## Key files
+
+  - `src/poller/inject/skills/danx-triage/` — triage skill body, where the new detection rule lives
+  - `.claude/agents/ideator.md` — ideator could also flag this at card-creation time
+  - Trello board labels — may need a new `Host-only` label
+
+  ## How to verify
+
+  After the change, a card with `desc` containing only `~/.claude/skills/...` paths should be triaged into Review (or Host ToDo), never into ToDo where the docker poller picks it up.
+
+  ## Origin
+
+  Filed as an action item from card #90 retro (`5qoyfsF0`).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

@@ -1,0 +1,253 @@
+schema_version: 4
+tracker: trello
+id: DX-78
+external_id: 69fa27650913d7cc6c41e7d3
+parent_id: DX-74
+children: []
+dispatch:
+  id: f057b4c4-35b8-455f-a86d-997ef7bedcbd
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Auto-triage Epic > Phase 4: danx-triage auto mode + Needs Approval outcome"
+description: |-
+  ## Context
+
+  Parent epic: DX-74. Phases 1–3 are schema / dashboard plumbing.
+  This phase teaches the existing `danx-triage` skill how to be
+  invoked by the poller in **auto mode** with a fixed scope (Action
+  Items list FIRST, Review list SECOND) and how to emit the new
+  `Needs Approval` decision.
+
+  Existing skill spec:
+  `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-triage/SKILL.md`.
+  Reads, edits, and saves YAMLs; classifies into 6 states; maps
+  terminal cases to `status` moves; never touches the tracker
+  directly.
+
+  ## Solution
+
+  ### New invocation: `/danx-triage auto`
+
+  Add to the SKILL.md scope table:
+
+  | `/danx-triage auto` | Scope = Action Items list (priority 1) + Review list (priority 2). Ignore the default open-YAML scope. Skip already-triaged AND <24h floors. NEVER skip; every card gets a decision. |
+
+  In auto mode the orchestrator's Step 1 ("Resolve Scope") becomes:
+  1. Use `mcp__danx-issue__danx_issue_list({status: "ToDo", list_kind: "action_items"})` (or equivalent fetch — confirm actual MCP surface) to enumerate Action Items.
+  2. Use `mcp__danx-issue__danx_issue_list({status: "Review"})` to enumerate Review.
+  3. Concatenate Action Items first, then Review. This is the priority order the report uses.
+
+  ### New outcomes — split `Ambiguous`
+
+  Today `Ambiguous` → `status: Needs Help`. After Phase 1 ships
+  `Needs Approval`, split:
+
+  | New `triaged.status` | When | YAML `status` |
+  |---|---|---|
+  | `NeedsHelp` | Card spec is incomplete; agent needs a human to SUPPLY information (creds, decision input, missing AC). | `Needs Help` |
+  | `NeedsApproval` | Card is implementable but direction is uncertain (architectural ambiguity, disruptive scope, cross-cutting risk, plausible-but-not-obvious ask). Agent should NOT proceed without a human signing off. | `Needs Approval` |
+
+  Update Step 2c "Classify into one of N states":
+  - Replace `Ambiguous` row with two rows for `NeedsHelp` and
+    `NeedsApproval` per the table above.
+  - Provide 2-3 worked examples for each so the subagent can
+    distinguish.
+
+  Update Step 2f terminal-move table accordingly.
+
+  Update Step 6 completion summary template to reference the new
+  outcomes.
+
+  Update Step 5 report column to render `NeedsHelp` vs `NeedsApproval`
+  distinctly.
+
+  ### Auto-mode reporting
+
+  In auto mode, Step 5's report MUST also call out:
+  - Count of cards moved into ToDo (now dispatchable on next tick).
+  - Count of `NeedsApproval` cards — these need human attention.
+  - The card titles + ISS-N for any `NeedsApproval` outcome (operators
+    skim Trello but the report comment is ground truth).
+
+  ### Triage prompt template (`src/poller/constants.ts`)
+
+  Add a sibling to `IDEATOR_PROMPT` named `TRIAGE_AUTO_PROMPT`. Body
+  invokes the skill in auto mode and emphasizes:
+  - Action Items first, Review second.
+  - Never skip; every card gets one of: ToDo / Done / Cancelled / Needs Help / Needs Approval.
+  - Use `Needs Approval` when uncertain about direction; `Needs Help`
+    only when missing information from a human.
+
+  Phase 5 (DX-79) imports this constant. Defining it here keeps the
+  spawn site small.
+
+  ## Out of scope
+
+  - Poller integration — Phase 5.
+  - Settings toggle — Phase 3.
+  - Adding new tracker MCP tools — use existing `danx_issue_list` /
+    `danx_issue_save`.
+
+  ## Key Files
+
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-triage/SKILL.md`
+  - `src/poller/constants.ts` — add `TRIAGE_AUTO_PROMPT`
+  - Possible: small JSON fixture / unit test asserting prompt contents
+    contain the auto-mode markers.
+
+  ## Verify
+
+  - SKILL.md auto-mode section is self-contained (zero-context test).
+  - `TRIAGE_AUTO_PROMPT` exported and importable from
+    `src/poller/constants.ts`.
+  - Manual smoke (no need to wire poller yet): `/danx-triage auto` in
+    a dispatched issue-worker classifies an Action Items card and a
+    Review card, with one of the five outcomes each, and writes the
+    YAML correctly.
+  - `npx vitest run` clean. `npx tsc --noEmit` clean.
+
+  ## Depends on
+
+  - DX-75 (Needs Approval status). Without it the YAML save fails
+    validation. Phase 5 enforces the dependency at the poller level;
+    here it's a soft order — pickup of DX-78 should happen after
+    DX-75 is Done.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa2766c71172a638821b86
+    title: SKILL.md scope table includes /danx-triage auto with Action Items first + Review second
+    checked: true
+  - check_item_id: 69fa27660913d7cc6c41ea9c
+    title: Classification table replaces Ambiguous with NeedsHelp + NeedsApproval rows (worked examples included)
+    checked: true
+  - check_item_id: 69fa27661da0f95eee8c11f4
+    title: Step 2f terminal-move table maps NeedsHelp → Needs Help and NeedsApproval → Needs Approval
+    checked: true
+  - check_item_id: 69fa27673c7dbee5cb59eb5f
+    title: Step 5 report renders new outcomes; auto-mode report calls out promoted-to-ToDo count + NeedsApproval card list
+    checked: true
+  - check_item_id: 69fa27670bd657f3d66480b6
+    title: TRIAGE_AUTO_PROMPT exported from src/poller/constants.ts
+    checked: true
+  - check_item_id: 69fa2768c45519cd1559df47
+    title: "Manual smoke: dispatch /danx-triage auto, verify both an Action Item and a Review card classify correctly"
+    checked: true
+  - check_item_id: 69fa27688411f2ffdbf46a00
+    title: All type-checks + tests clean
+    checked: true
+comments:
+  - id: 69fa812964e4ce3cecdeb06a
+    author: danxbot
+    timestamp: 2026-05-05T23:45:45.533Z
+    text: |
+      <!-- danxbot -->
+
+      ## Notes from Phase 1 (DX-75)
+
+      **Schema is in place — your job is the agent behavior.** Phase 1 (commit 3841bd4) shipped:
+
+      - `IssueStatus` union + `ISSUE_STATUSES` array carry `"Needs Approval"`. `parseIssue` round-trips it. Worker `persistAfterSync` keeps the YAML in `open/` (non-terminal). The poller does NOT dispatch cards in this status (verify in `src/poller/index.ts` — Needs Approval is not in any dispatch source).
+      - `ManagedLabels` interface (`src/issue-tracker/interface.ts`) is the canonical shape for the booleans we push to the tracker. `sync.ts` already derives `needsApproval: status === "Needs Approval"` and pushes via `setLabels`. You don't need to touch any of this.
+      - Tracker mapping: `TrelloConfig` carries `needsApprovalListId` + `needsApprovalLabelId`; `loadTrelloIds` reads them as ROLLOUT-OPTIONAL with empty-string default. `statusToListId("Needs Approval")` THROWS when the list id is empty. `setLabels` silently skips applying the label when label id is empty.
+
+      **CRITICAL operator-action gate before your skill ships:**
+
+      The actual Trello list + label do NOT exist on the danxbot board yet. Until the operator (a) creates the list "Needs Approval" + label "Needs Approval" on the board, and (b) updates `<repo>/.danxbot/config/trello.yml` to add `lists.needs_approval: <id>` and `labels.needs_approval: <id>`, ANY card flipped to `status: Needs Approval` will throw on the next sync.
+
+      Implications for your skill:
+      1. **Document this loudly in the auto-mode SKILL.md.** Before emitting `Needs Approval` for the first time, the skill should pre-check that `lists.needs_approval` is non-empty in trello.yml. If empty, the auto-triage agent should fall back to `Needs Help` for that card with a comment "Direction approval needed; Trello board not yet provisioned" so the operator sees the blocker.
+      2. Alternatively, file a Needs Help action-item card (separate from this Phase 4 card) explicitly asking the operator to provision the Trello list + label, then proceed with `Needs Help` as the parking status until the operator unblocks. Either path is acceptable — pick what fits your skill's classification flow.
+      3. The placeholder rows are documented in `.claude/rules/trello-config.md` (gitignored, but human-readable in the danxbot repo) and the danxbot self-config `.danxbot/config/trello.yml` carries commented placeholder lines.
+
+      **Outcome → status mapping (from epic DX-74):**
+
+      | Outcome | Status to set |
+      |---|---|
+      | Already complete | `Done` |
+      | Obsolete / superseded | `Cancelled` |
+      | Ready, direction clear | `ToDo` |
+      | Spec incomplete, human SUPPLIES info | `Needs Help` |
+      | Direction unclear, architectural risk | `Needs Approval` (if board provisioned) |
+
+      **Concurrent agent activity to watch:** another agent (DX-81) is reshaping `src/issue-tracker/interface.ts` (removed the `phases[]` field on the `Issue` type — epics now use `children[]` exclusively for phase cards). Their changes were uncommitted at Phase 1 commit time. If they ship between now and your dispatch, expect to see no `phases[]` field on the `Issue` interface and the `IssuePhase` type may also be gone. The `phases[]` checklist on cards lives on the YAML schema only via that interface, so re-read interface.ts before assuming any phase-related shape.
+
+      **Useful paths:**
+      - Skill spec: `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-triage/SKILL.md`
+      - `IssueStatus` union: `src/issue-tracker/interface.ts:37`
+      - Tracker `moveToStatus` + `setLabels`: `src/issue-tracker/trello.ts`
+      - YAML save: `mcp__danxbot__danx_issue_save({id})` (worker route at `src/worker/issue-route.ts`)
+      - Phase 3 toggle (already shipped): `overrides.autoTriage.enabled` in `<repo>/.danxbot/settings.json`. Read via `isFeatureEnabled(ctx, "autoTriage")`.
+  - id: 69fa81774577f4866fde195a
+    author: newms87
+    timestamp: 2026-05-05T23:47:03.766Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `f057b4c4-35b8-455f-a86d-997ef7bedcbd` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T23:47:03.376Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-06T01:47:03.376Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l 'f057b4c4-35b8-455f-a86d-997ef7bedcbd' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa84440844141789708c78
+    author: danxbot
+    timestamp: 2026-05-05T23:59:00.794Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Spec edits to `danx-triage/SKILL.md` (auto-mode scope, classification split, terminal-move table, Step 5/6 addenda) shipped self-contained — zero-context test holds.
+      - `TRIAGE_AUTO_PROMPT` exported with stable invariants pinned in `constants.test.ts` (first-line spawn contract, priority ordering, status enumeration). Phase 5 has a clean handoff target.
+      - Code-reviewer feedback on Step 1.auto scope ambiguity addressed before commit — the doc now honestly distinguishes "explicit partition (Phase 5)" from "implicit glob partition (manual smoke)" instead of pretending list_kind is on disk.
+      - Smoke-by-dry-run: classified one Review epic (DX-82 → Keep → ToDo) and one ToDo card (DX-14 → NeedsHelp → Needs Help, since description + AC are empty) without mutating their YAMLs — the procedure produced valid IssueStatus outcomes for real cards.
+
+      **What went wrong:** - The running worker still requires the legacy `phases: []` field on save even though `src/issue-tracker/yaml.ts` (modified by the parallel DX-81 worker) no longer validates it. Had to re-add `phases: []` to DX-78 + DX-79 YAMLs to land the saves. Once DX-81 ships and the worker rebuilds, this hack drops out — but the cross-agent timing is awkward.
+      - `list_kind` is not persisted on YAML (lives only on `IssueRef`), so standalone `/danx-triage auto` cannot distinguish Action Items from regular ToDo on disk. Documented honestly in Step 1.auto rather than papered over; Phase 5 supplies the partition explicitly via `tracker.fetchOpenCards()`.
+
+      **Action items:** Nothing
+      **Commits:** 592c941
+history: []
+retro:
+  good: |
+    - Spec edits to `danx-triage/SKILL.md` (auto-mode scope, classification split, terminal-move table, Step 5/6 addenda) shipped self-contained — zero-context test holds.
+    - `TRIAGE_AUTO_PROMPT` exported with stable invariants pinned in `constants.test.ts` (first-line spawn contract, priority ordering, status enumeration). Phase 5 has a clean handoff target.
+    - Code-reviewer feedback on Step 1.auto scope ambiguity addressed before commit — the doc now honestly distinguishes "explicit partition (Phase 5)" from "implicit glob partition (manual smoke)" instead of pretending list_kind is on disk.
+    - Smoke-by-dry-run: classified one Review epic (DX-82 → Keep → ToDo) and one ToDo card (DX-14 → NeedsHelp → Needs Help, since description + AC are empty) without mutating their YAMLs — the procedure produced valid IssueStatus outcomes for real cards.
+  bad: |
+    - The running worker still requires the legacy `phases: []` field on save even though `src/issue-tracker/yaml.ts` (modified by the parallel DX-81 worker) no longer validates it. Had to re-add `phases: []` to DX-78 + DX-79 YAMLs to land the saves. Once DX-81 ships and the worker rebuilds, this hack drops out — but the cross-agent timing is awkward.
+    - `list_kind` is not persisted on YAML (lives only on `IssueRef`), so standalone `/danx-triage auto` cannot distinguish Action Items from regular ToDo on disk. Documented honestly in Step 1.auto rather than papered over; Phase 5 supplies the partition explicitly via `tracker.fetchOpenCards()`.
+  action_item_ids: []
+  commits:
+    - 592c941
+waiting_on: null
+blocked: null

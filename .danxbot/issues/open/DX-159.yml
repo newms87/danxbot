@@ -1,0 +1,197 @@
+schema_version: 4
+tracker: trello
+id: DX-159
+external_id: 69fe27e409c8446a2b4a5665
+parent_id: DX-158
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Multi-Worker > Phase 1: Agents settings schema + Settings/Agents UI tab restructure"
+description: |-
+  ## Context
+
+  Phase 1 of the Multi-Worker Dispatch epic (DX-158). Foundation phase — adds the `agents{}` map to `<repo>/.danxbot/settings.json` with validation, AND restructures the dashboard so the existing Agents tab (which today shows every connected repo's env-toggles all at once) becomes a per-repo Settings tab. The new Agents tab is stubbed with an empty roster — full CRUD lands in Phase 2 (DX-160).
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-multi-worker-dispatch-design.md`. Read the "Settings.json schema" + "Dashboard UI" sections.
+
+  ## Solution
+
+  ### Settings file schema additions
+
+  Extend the `Settings` type in `src/settings-file.ts`:
+
+  ```ts
+  export interface AgentScheduleWindow { /* "HH:MM-HH:MM" */ }
+
+  export interface AgentRecord {
+    type: "agent";                                   // discriminator
+    bio: string;                                     // free-form markdown
+    avatar_path?: string;                            // relative to <repo>/.danxbot/
+    capabilities: ("issue-worker" | "slack" | "api")[];
+    schedule: {
+      tz: string;                                    // IANA, validated by Intl.DateTimeFormat
+      mon: string[]; tue: string[]; wed: string[];
+      thu: string[]; fri: string[]; sat: string[]; sun: string[];
+    };
+    enabled: boolean;
+    created_at: string;                              // ISO
+    updated_at: string;                              // ISO
+  }
+
+  export interface AgentDefaults {
+    conflictCheckEnabled: boolean;                   // default true
+  }
+
+  export interface Settings {
+    overrides: { … existing fields unchanged … };
+    display:   { … existing fields unchanged … };
+    agents?:   Record<string, AgentRecord>;          // NEW; max 5 entries
+    agentDefaults?: AgentDefaults;                   // NEW
+    meta:      { … unchanged … };
+  }
+  ```
+
+  Validation in `normalize()`:
+
+  - Max 5 entries in `agents`.
+  - Names: `^[a-z][a-z0-9_-]{0,31}$` (URL-safe; used in branch + worktree path + container hostnames).
+  - `capabilities` non-empty subset of `{"issue-worker","slack","api"}`.
+  - `schedule.tz` parseable: `try { new Intl.DateTimeFormat('en', {timeZone: tz}); } catch ...`.
+  - Per-day windows: regex `^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$`. Empty array allowed.
+  - `bio`: required, no length cap (operator's call).
+  - `enabled`, `created_at`, `updated_at`: required.
+
+  Invalid records on read: log loudly, drop the bad agent from the in-memory shape, do NOT throw. The file remains source of truth; the operator fixes via dashboard or hand-edit.
+
+  ### UI tab restructure
+
+  Today (verify by reading `dashboard/src/App.vue` + `dashboard/src/composables/useAgents.ts` if present):
+
+  - Tab labeled "Agents" is rendered by some component (likely `dashboard/src/views/AgentsView.vue` or similar — search the codebase).
+  - It iterates EVERY repo and shows the env-feature toggles for each.
+
+  After this phase:
+
+  - Rename existing tab/component → "Settings". Make it iterate ONLY the currently-selected repo (read from the existing repo switcher's state). Show env-feature toggles + a new `agentDefaults.conflictCheckEnabled` toggle. Layout: card per feature toggle.
+  - Create a NEW component for the "Agents" tab. Empty state for now: "No agents yet — Phase 2 will add the CRUD UI." A "+ New Agent" button that's disabled with a tooltip "Coming in Phase 2".
+  - Update the dashboard nav to render two tabs (Settings + Agents) using the existing icon library.
+
+  ### REST surface stub (Phase 1)
+
+  ```
+  GET  /api/agents?repo=<name>           → returns { agents: [], settings: { conflictCheckEnabled } }  (always-empty roster + read of agentDefaults)
+  PATCH /api/agents-settings?repo=<name> → updates agentDefaults.conflictCheckEnabled
+  ```
+
+  Both auth-gated by the existing dashboard auth layer. Both validate `repo` is a known connected repo.
+
+  ## Files
+
+  Modify:
+
+  - `src/settings-file.ts` + `src/settings-file.test.ts` — add types, validation, normalize, new readers (`readAgents(ctx)`, `isConflictCheckEnabled(ctx)`)
+  - `src/dashboard/server.ts` — register the two stub routes
+  - `src/dashboard/agents-route.ts` (new file) + `agents-route.test.ts` — handlers
+  - `dashboard/src/App.vue` — nav update
+  - the existing component currently labeled "Agents" — rename + scope to selected repo
+  - `dashboard/src/views/AgentsView.vue` (or equivalent path) — new stub component
+  - `dashboard/src/composables/useAgents.ts` (new) + `.test.ts` — fetch + cache logic
+
+  Create:
+
+  - `src/dashboard/agents-route.ts` + tests
+  - `dashboard/src/views/AgentsView.vue` (new) + corresponding component test
+  - `dashboard/src/composables/useAgents.ts` + tests (UI test exemption applies — type-check required, tests optional per project rule)
+
+  ## Test plan (TDD)
+
+  Backend tests (mandatory):
+
+  1. Failing test: `normalize()` with `agents` map of 6 entries → drops to 5 + log warn.
+  2. Failing test: `agents.<name>` with bad name (`Alice`, `1abc`, `a-very-long-name-…`) → dropped + log warn.
+  3. Failing test: `agents.<name>.capabilities = []` → dropped.
+  4. Failing test: `agents.<name>.capabilities = ["issue-worker", "wat"]` → "wat" stripped, `["issue-worker"]` kept.
+  5. Failing test: `agents.<name>.schedule.tz = "Bogus/Place"` → dropped.
+  6. Failing test: schedule day = `["09:00-25:00"]` → bad window stripped.
+  7. Failing test: round-trip — write a valid `Settings` with two agents, read back, equal.
+  8. Failing test: `readAgents(ctx)` returns the agent records as an array.
+  9. Failing test: `isConflictCheckEnabled(ctx)` returns true when undefined (default), false when explicitly false, true when explicitly true.
+  10. Implement, all green.
+
+  Backend route tests:
+
+  11. `GET /api/agents?repo=<name>` returns `{agents: [], settings: {conflictCheckEnabled: true}}` for an empty config.
+  12. `GET /api/agents?repo=<unknown>` returns 404.
+  13. `PATCH /api/agents-settings?repo=<name>` with `{conflictCheckEnabled: false}` writes the file and returns the new settings.
+  14. PATCH unauthenticated → 401.
+
+  Dashboard SPA:
+
+  15. Type-check (`cd dashboard && npx vue-tsc --noEmit`) clean.
+  16. Manual smoke: open `http://localhost:5566`, observe two tabs (Settings + Agents). Settings shows ONLY the currently-selected repo. Agents shows the empty state.
+
+  ## Acceptance
+
+  - `Settings` type extended with `agents?` + `agentDefaults?`; backwards-compat with existing files (missing keys treated as empty / defaults).
+  - Validation rejects invalid records via drop+log, never throws.
+  - `GET /api/agents?repo=<name>` and `PATCH /api/agents-settings?repo=<name>` live + tested.
+  - Existing `Agents` tab → renamed to `Settings`, scoped to currently-selected repo (no longer shows all repos at once).
+  - New `Agents` tab live with empty-state UI.
+  - 14 backend tests pass; full `vitest run` green; `tsc --noEmit` + `vue-tsc --noEmit` clean.
+  - Manual smoke through `http://localhost:5566`.
+  - No agent CRUD logic yet (Phase 2 scope).
+
+  ## Out of scope
+
+  - Agent CRUD UI + endpoints (DX-160).
+  - Worktree management (DX-161).
+  - Persona inject + finalize script (DX-162).
+  - Lock queries + triage-precursor (DX-163).
+  - Card UI badges + busy state (DX-164).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe27e519808c84f66e368e
+    title: Settings type extends with agents{} + agentDefaults; existing files load without errors
+    checked: false
+  - check_item_id: 69fe27e5b97b604f9e3c6320
+    title: normalize() validates max-5, name pattern, capability subset, IANA tz, HH:MM windows; bad records dropped + logged
+    checked: false
+  - check_item_id: 69fe27e6a28d527ba0936967
+    title: GET /api/agents and PATCH /api/agents-settings live; 4 route tests pass
+    checked: false
+  - check_item_id: 69fe27e6f9c8ce642dcbdea8
+    title: Existing Agents tab renamed to Settings and scoped to currently-selected repo (no longer iterates all repos)
+    checked: false
+  - check_item_id: 69fe27e62217ddb6dc983576
+    title: New Agents tab live with empty-state UI + disabled "+ New Agent" button
+    checked: false
+  - check_item_id: 69fe27e70c224d27e2df79b5
+    title: 10 settings-file tests + 4 route tests pass; full vitest green; tsc + vue-tsc clean
+    checked: false
+  - check_item_id: 69fe27e712bcbf9b9c55c06d
+    title: Manual smoke at http://localhost:5566 — two tabs visible, Settings shows current repo only, Agents shows empty state
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Hard dependency on Issues DB Mirror epic (DX-151) — locks queried in Phase 5 (DX-163) need the issues table generated columns.
+  timestamp: 2026-05-08T12:00:00.000Z
+  by:
+    - DX-151
+blocked: null

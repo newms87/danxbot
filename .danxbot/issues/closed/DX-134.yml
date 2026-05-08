@@ -1,0 +1,263 @@
+schema_version: 4
+tracker: trello
+id: DX-134
+external_id: 69fd5b2da69ad976c3698cea
+parent_id: DX-130
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "[Trello decouple > Phase 4] Dashboard system_errors SSE channel + UI banner"
+description: |-
+  ## Context
+
+  Phase 1 + 2 push tracker errors to `recordError` + log files. Phase 3 healer logs healing actions. None of those surface to a human watching the dashboard. Operators need a visible signal that the system is in a degraded state (e.g. Trello down, queue draining slowly, reconcile/reattach mismatch).
+
+  ## Solution
+
+  New `system_errors` SSE channel. Backend ring-buffer (last 200 events, in-memory). Dashboard banner component subscribes; renders a top-of-page yellow/red bar listing recent errors with timestamp + source + message. Click-to-dismiss per event; auto-clear on resolve event.
+
+  Event shape:
+
+  ```ts
+  type SystemError = {
+    id: string;          // uuid
+    timestamp: string;   // ISO
+    source: "tracker" | "healer" | "reconcile" | "retry-queue" | "poller";
+    severity: "warn" | "error";
+    repo: string;        // repo name
+    message: string;
+    details?: Record<string, unknown>;
+  };
+  ```
+
+  Producers:
+
+  - `src/worker/issue-route.ts` `runSync` catch (Phase 1) → `recordSystemError({source: "tracker", ...})`.
+  - `src/issue-tracker/retry-queue.ts` max-attempts branch (Phase 2) → `recordSystemError({source: "retry-queue", severity: "error"})`.
+  - `src/poller/index.ts` `healLocalYamls` (Phase 3) → `recordSystemError({source: "healer", severity: "warn"})` per heal action.
+  - `src/worker/reconcile.ts` mismatch branch (Phase 7) — wired in Phase 7.
+
+  Backend:
+
+  - `src/dashboard/system-errors.ts` (new) — ring buffer + SSE emitter.
+  - `src/dashboard/server.ts` — register `/api/system-errors/stream` SSE route + `/api/system-errors` REST list (last N).
+
+  Frontend:
+
+  - `dashboard/src/components/SystemErrorsBanner.vue` (new)
+  - `dashboard/src/composables/useSystemErrors.ts` (new) — typed wrapper around the SSE stream + REST seed.
+  - `dashboard/src/App.vue` — mount the banner above the existing layout.
+
+  ## Test plan (TDD)
+
+  Backend (mandatory tests):
+
+  1. `recordSystemError(...)` adds to ring buffer; capacity caps at 200 (oldest evicted).
+  2. SSE clients receive new events live; late subscribers get the buffered tail on connect.
+  3. REST endpoint returns last N events ordered newest-first.
+  4. Per-repo filter on REST + SSE works (`?repo=danxbot`).
+
+  Frontend: per CLAUDE.md exemption, dashboard SFCs don't require tests. Type-check + smoke verify only.
+
+  ## Acceptance
+
+  - SSE channel + REST endpoint shipped; backed by ring buffer.
+  - Producers in tracker/healer/retry-queue wired (reconcile producer wired in Phase 7).
+  - 4 backend tests pass.
+  - `cd dashboard && npx vue-tsc --noEmit` clean.
+  - Manual smoke: revoke Trello token, save a card, see banner appear.
+
+  ## Out of scope
+
+  - Persistent storage (ring buffer = in-memory; restarts clear it; persistence is a follow-up).
+  - Per-error acknowledgment workflow (click-to-dismiss is local UI state only).
+  - Email/Slack escalation.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd5b2efaf37d91dd761f32
+    title: Backend ring buffer + recordSystemError API shipped (capacity cap, FIFO eviction)
+    checked: true
+  - check_item_id: 69fd5b2f66c36cea96b78fc7
+    title: SSE channel /api/system-errors/stream emits live; REST /api/system-errors returns buffered tail
+    checked: true
+  - check_item_id: 69fd5b2f8b426239dc005f09
+    title: Tracker/healer/retry-queue producers wired (reconcile wired in Phase 7)
+    checked: true
+  - check_item_id: 69fd5b304765743ced544272
+    title: Banner component visible on dashboard; subscribes to SSE; click-to-dismiss works
+    checked: true
+  - check_item_id: 69fd5b30a9412ca8be8143ba
+    title: 4 backend tests pass; tsc + vue-tsc clean; no existing tests regressed
+    checked: true
+comments:
+  - id: 69fd5d9d014f1e85131f202d
+    author: danxbot
+    timestamp: 2026-05-08T03:50:53.589Z
+    text: |
+      <!-- danxbot -->
+
+      ## Notes from Phase 3 (DX-133, commit `f27575b`)
+
+      Phase 3 has shipped. The healer producer surface you'll need to wire is ready — here's what to plug into.
+
+      ### Producer surface in `src/poller/heal.ts`
+
+      `healLocalYamls(repoLocalPath, prefix)` returns:
+
+      ```ts
+      export interface HealResult {
+        healed: { id: string; status: "Done" | "Cancelled" }[];
+        errors: { path: string; message: string }[];
+      }
+      ```
+
+      Today's caller (`src/poller/index.ts:_poll`, right after `syncRepoFiles`) loops over both arrays and calls `log.info` / `log.warn`. Phase 4 work here is to replace that loop with `recordSystemError({source: "healer", ...})`:
+
+      - `result.healed[i]` → optional `severity: "info"` event (or skip — successful heals are arguably not worth a banner; check the design doc).
+      - `result.errors[i]` → `severity: "warn"` event with `{path, message}` in the details payload.
+
+      Don't add the producer inside `heal.ts`. The pure-helper boundary (no `createLogger`, no config import) is load-bearing — heal.ts must stay importable from `yaml-lifecycle.test.ts`-style real-fs tests without paying the env-validation tax. Producer wiring lives in `_poll`, where the logger already lives.
+
+      ### Spec line item to revisit
+
+      Phase 4's description (line 60-61) says "`src/poller/index.ts` `healLocalYamls` (Phase 3) → `recordSystemError({source: "healer", severity: "warn"})` per heal action." That wording predates the `{healed, errors}` split — `severity: "warn"` should fire on `errors[]`, not on every heal action. Successful heals at `info` (or no event at all) is the right shape; the per-error warn is mandatory.
+
+      ### Files
+
+      Wiring point: `src/poller/index.ts` lines 514-522 (the heal-result log loops). Same callsite produces both severities — one place to edit.
+
+      ### Other phase status
+
+      - Phase 1 (DX-131) — still ToDo; not blocking my work but unblocks DX-132.
+      - Phase 2 (DX-132) — blocked on Phase 1.
+      - Phase 3 (DX-133) — Done.
+
+      Your `blocked.by[]` lists DX-131 + DX-132 + DX-133. The DX-133 entry can drop on the next poller tick (or by a quick edit when you pick this card up); the other two remain.
+
+      ### Test pattern to copy
+
+      `src/poller/heal.test.ts` is the closest precedent for testing a poller-tick producer with real fs (`mkdtempSync`-backed). The dashboard `system_errors` ring buffer + SSE stream layer should follow `src/dashboard/events.ts` patterns; the producer side stays in the poller and goes through real-fs tests.
+
+      ### Things I noticed but didn't fix (Phase 1.5 candidates)
+
+      - The `_poll` flake count under heavy parallel test load is non-zero (`src/index.test.ts` setTimeout(0)x10 drain, plus 2 subprocess test harnesses). Not in scope here, but if Phase 4 churns the poller's call path it may surface. Re-runs are clean.
+  - id: 69fe4eaa9d48df7d302479f8
+    author: danxbot
+    timestamp: 2026-05-08T20:59:22.972Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Most of the heavy lifting (ring buffer, REST handler, SSE topic,
+        banner SFC, composable, producer wiring in `runSync` / heal pass /
+        retry-queue, and the `defaultRecordSystemError` lazy import) was
+        already on disk from DX-202's commit `e4d3649`. Reading the
+        existing files first showed the design matched what I'd write
+        anyway — saved ~30 min of greenfield work and avoided two parallel
+        drafts colliding.
+      - The composable / SFC pattern in `useDispatches` + `useAgents`
+        generalized cleanly: same `createHydrationBuffer(stream, topic)`
+        shape for the system-errors stream, same REST seed + SSE live
+        hookup. No new SSE plumbing — just one more topic in the existing
+        multiplexer.
+      - 17 new backend tests (14 in `system-errors.test.ts`, 1 in
+        `issue-route.test.ts`, 2 in `index.test.ts`) close the producer
+        wiring gap the test-reviewer flagged: deletion of any of the
+        three producer call sites would have silently regressed the
+        operator banner without these tests.
+
+      **What went wrong:** - The DX-202 commit shipped the full backend + frontend
+        implementation but left two load-bearing gaps unwired: (1) App.vue
+        destructured `init`/`destroy` from `useSystemErrors()` but never
+        called them and never mounted `<SystemErrorsBanner>` in the
+        template (so the banner was invisible), and (2) the
+        retry-queue arrow-fn body returned the SystemError, violating
+        the `void | Promise<void>` hook signature — a real `tsc` failure
+        that was sitting at HEAD. Both took 5 min to fix once spotted but
+        the sister card had been declared done.
+      - Discovery flow burned 10 min: `Write` overwrote files that already
+        existed on disk with byte-identical content; `git status` showed
+        no diff so I had to grep + `git ls-files` to figure out what was
+        ALREADY committed vs. genuinely new. A faster signal would have
+        been to run `git status` before the first `Write` call.
+      - Concurrent agent work on DX-103 / DX-202 follow-ups was modifying
+        the same files in parallel (poller/index.ts, server.ts,
+        index.test.ts). Had to stash + revert + reapply to keep the
+        commit clean. The MCP tool surface doesn't currently expose a way
+        to know what other agents are touching.
+      - URL pattern divergence: card description called for
+        `/api/system-errors/stream`, but the codebase's existing pattern
+        is the multiplexed `/api/stream?topics=system-errors`. Followed
+        the codebase convention. The card spec was written before the
+        multiplexer was as comprehensive as it is now.
+
+      **Action items:** Nothing
+      **Commits:** 92d4168
+history:
+  - timestamp: 2026-05-08T20:59:20.097Z
+    actor: dispatch:20abd2da-fe0e-45e0-b8e3-cff4347c4d37
+    event: status_change
+    from: In Progress
+    to: Done
+retro:
+  good: |
+    - Most of the heavy lifting (ring buffer, REST handler, SSE topic,
+      banner SFC, composable, producer wiring in `runSync` / heal pass /
+      retry-queue, and the `defaultRecordSystemError` lazy import) was
+      already on disk from DX-202's commit `e4d3649`. Reading the
+      existing files first showed the design matched what I'd write
+      anyway — saved ~30 min of greenfield work and avoided two parallel
+      drafts colliding.
+    - The composable / SFC pattern in `useDispatches` + `useAgents`
+      generalized cleanly: same `createHydrationBuffer(stream, topic)`
+      shape for the system-errors stream, same REST seed + SSE live
+      hookup. No new SSE plumbing — just one more topic in the existing
+      multiplexer.
+    - 17 new backend tests (14 in `system-errors.test.ts`, 1 in
+      `issue-route.test.ts`, 2 in `index.test.ts`) close the producer
+      wiring gap the test-reviewer flagged: deletion of any of the
+      three producer call sites would have silently regressed the
+      operator banner without these tests.
+  bad: |
+    - The DX-202 commit shipped the full backend + frontend
+      implementation but left two load-bearing gaps unwired: (1) App.vue
+      destructured `init`/`destroy` from `useSystemErrors()` but never
+      called them and never mounted `<SystemErrorsBanner>` in the
+      template (so the banner was invisible), and (2) the
+      retry-queue arrow-fn body returned the SystemError, violating
+      the `void | Promise<void>` hook signature — a real `tsc` failure
+      that was sitting at HEAD. Both took 5 min to fix once spotted but
+      the sister card had been declared done.
+    - Discovery flow burned 10 min: `Write` overwrote files that already
+      existed on disk with byte-identical content; `git status` showed
+      no diff so I had to grep + `git ls-files` to figure out what was
+      ALREADY committed vs. genuinely new. A faster signal would have
+      been to run `git status` before the first `Write` call.
+    - Concurrent agent work on DX-103 / DX-202 follow-ups was modifying
+      the same files in parallel (poller/index.ts, server.ts,
+      index.test.ts). Had to stash + revert + reapply to keep the
+      commit clean. The MCP tool surface doesn't currently expose a way
+      to know what other agents are touching.
+    - URL pattern divergence: card description called for
+      `/api/system-errors/stream`, but the codebase's existing pattern
+      is the multiplexed `/api/stream?topics=system-errors`. Followed
+      the codebase convention. The card spec was written before the
+      multiplexer was as comprehensive as it is now.
+  action_item_ids: []
+  commits:
+    - 92d4168
+waiting_on: null
+blocked: null

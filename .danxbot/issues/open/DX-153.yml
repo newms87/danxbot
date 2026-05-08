@@ -1,0 +1,191 @@
+schema_version: 4
+tracker: trello
+id: DX-153
+external_id: 69fe1eac3961b2f48802f4ff
+parent_id: DX-151
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Issues DB Mirror > Phase 2: Add issues + issue_history tables (PG schema, generated columns, indexes)"
+description: |-
+  ## Context
+
+  Phase 2 of the Issues DB Mirror epic (DX-151). After Phase 1 (DX-152) ships, Postgres is running and every existing feature uses it; this phase adds the `issues` and `issue_history` tables. **No code reads or writes them in this phase** — that arrives in Phase 3 (DX-154). The point of splitting it out is to land the migrations on their own commit so the schema review happens in isolation.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-issues-db-mirror-design.md`. The "Schema" section there is the authoritative description; this card transcribes it into a concrete migration.
+
+  ## Solution
+
+  One new migration file: `src/db/migrations/016_issues_mirror.ts` (number bumps if Phase 1 added or renumbered any). Up-migration creates both tables; down-migration drops them.
+
+  ### `issues` table
+
+  Primary key: `(repo_name, id)`. The full Issue object lives in `data jsonb`. Frequently queried fields are exposed as **stored generated columns** (`GENERATED ALWAYS AS (...) STORED`).
+
+  Columns:
+
+  | Column | Type | Source / Notes |
+  |---|---|---|
+  | `repo_name` | `text not null` | inserted by writer |
+  | `id` | `text` | generated from `data->>'id'` (also exposed as a column for FK + index targeting) |
+  | `external_id` | `text` | generated from `data->>'external_id'` |
+  | `status` | `text` | generated from `data->>'status'` |
+  | `list_kind` | `text` | generated from `data->>'list_kind'` |
+  | `type` | `text` | generated from `data->>'type'` |
+  | `parent_id` | `text` | generated from `data->>'parent_id'` |
+  | `dispatch_id` | `text` | generated from `data#>>'{dispatch,id}'` |
+  | `dispatch_started_at` | `timestamptz` | generated from `(data#>>'{dispatch,started_at}')::timestamptz` |
+  | `dispatch_host_pid` | `int` | generated from `(data#>>'{dispatch,pid}')::int` |
+  | `assigned_agent` | `text` | generated from `data->>'assigned_agent'` (for the multi-worker epic; field already in the YAML schema or NULL) |
+  | `created_at` | `timestamptz` | generated from `(data->>'created_at')::timestamptz` |
+  | `updated_at` | `timestamptz` | generated from `(data->>'updated_at')::timestamptz` |
+  | `closed_at` | `timestamptz` | generated from `(data->>'closed_at')::timestamptz` |
+  | `last_status_change_at` | `timestamptz` | generated from `(data->>'last_status_change_at')::timestamptz` |
+  | `triage_expires_at` | `timestamptz` | generated from `(data#>>'{triage,expires_at}')::timestamptz` |
+  | `blocked` | `boolean` | generated from `(data->'blocked') IS NOT NULL` |
+  | `blocked_reason` | `text` | generated from `data#>>'{blocked,reason}'` |
+  | `labels` | `jsonb` | generated from `data->'labels'` (NB: the `Issue` schema doesn't have a top-level `labels` field today; if it doesn't, expose this as `data->'labels'` which evaluates to `null jsonb` — the column still exists for the multi-worker / dashboard filter epic) |
+  | `data` | `jsonb not null` | inserted; the full Issue object |
+  | `content_hash` | `text not null` | inserted; sha256 of the canonicalized YAML bytes (or canonicalized data — pick one in Phase 3 and document) |
+  | `mirror_updated_at` | `timestamptz not null default now()` | inserted on every upsert |
+
+  Note on the `::timestamptz` casts: jsonb arrow operators always return `text`. PG generated columns in `STORED` mode require IMMUTABLE expressions, and `text::timestamptz` is IMMUTABLE in modern PG. If a particular cast trips the immutability check on the target PG version, fall back to a regular column populated by the writer instead of a generated column for that one field; document the swap in the migration's comment header.
+
+  Primary key: `PRIMARY KEY (repo_name, id)`.
+
+  Indexes:
+
+  ```sql
+  create index issues_status        on issues (repo_name, status);
+  create index issues_status_kind   on issues (repo_name, status, list_kind);
+  create index issues_assigned      on issues (repo_name, assigned_agent) where assigned_agent is not null;
+  create index issues_parent        on issues (repo_name, parent_id) where parent_id is not null;
+  create index issues_triage_due    on issues (repo_name, triage_expires_at) where triage_expires_at is not null;
+  create index issues_dispatch_id   on issues (dispatch_id) where dispatch_id is not null;
+  create index issues_labels_gin    on issues using gin (labels);
+  ```
+
+  Partial indexes are intentional — the supermajority of rows have null `assigned_agent` / `parent_id` / `dispatch_id`, and excluding them keeps the indexes small.
+
+  ### `issue_history` table
+
+  Append-only log of every mirror write that produced a hash change.
+
+  Columns:
+
+  | Column | Type | Notes |
+  |---|---|---|
+  | `id` | `bigserial primary key` | |
+  | `repo_name` | `text not null` | |
+  | `issue_id` | `text not null` | matches `issues.id` |
+  | `changed_at` | `timestamptz not null default now()` | |
+  | `source` | `text not null` | `writer` / `watcher` / `reconcile` / `boot-scan` |
+  | `patch` | `jsonb not null` | RFC 6902 ops vs the previous snapshot |
+  | `prev_hash` | `text` | nullable — null on the first row for an issue |
+  | `next_hash` | `text not null` | |
+
+  No FK to `issues` (the brainstorm's "tombstone delete" open detail resolves to: drop the FK so history rows survive issue row deletion). The trade-off: history rows can outlive their issue row, and consumers must tolerate the `JOIN` returning nulls for the issue side.
+
+  Indexes:
+
+  ```sql
+  create index issue_history_timeline on issue_history (repo_name, issue_id, changed_at);
+  create index issue_history_source   on issue_history (source);
+  ```
+
+  ## Files
+
+  Create:
+
+  - `src/db/migrations/016_issues_mirror.ts` — the up + down migration
+  - `src/db/migrations/016_issues_mirror.test.ts` — assertions described below
+
+  Modify:
+
+  - none
+
+  ## Test plan (TDD)
+
+  These run against a real Postgres test instance. The integration test harness from Phase 1 already exposes a `withTestDb()` helper; reuse it.
+
+  1. Failing test: after `up()`, `information_schema.tables` contains `issues` and `issue_history`. Run, watch fail.
+  2. Implement `up()`, watch pass.
+  3. Failing test: after `up()`, `issues` table has a column named `data` of type `jsonb`. Pass.
+  4. Failing test: after `up()`, every column in the spec's table appears with the expected type. Single test driven by a constants array (`[ ['repo_name','text'], ['id','text'], ... ]`). Pass.
+  5. Failing test: inserting a row with `data = {"id":"DX-1","status":"ToDo","external_id":"abc"}` produces generated values `id='DX-1'`, `status='ToDo'`, `external_id='abc'`. Pass.
+  6. Failing test: every index in the spec exists (read `pg_indexes`). Pass.
+  7. Failing test: `down()` drops both tables cleanly; running `up()` again succeeds. Pass.
+  8. Failing test: inserting an `issue_history` row with `prev_hash IS NULL` succeeds (initial creation case). Pass.
+  9. Failing test: deleting an `issues` row does NOT cascade-delete its `issue_history` rows (FK absence is intentional). Pass.
+
+  Wire the test file into the existing migrate-test pattern; one `describe("migration 016 — issues mirror")` block.
+
+  ## Acceptance
+
+  - Migration file exists at `src/db/migrations/016_issues_mirror.ts` with both `up` and `down`.
+  - Running `npm run db:migrate` (or whatever the migrate target is post-Phase 1) on a clean PG database produces both tables with the documented columns, types, and indexes.
+  - All 9 tests in `016_issues_mirror.test.ts` pass.
+  - `npx tsc --noEmit` clean.
+  - `npx vitest run` full suite green (no other test broke).
+  - The migration is idempotent: applying it twice does not error (the runner's `schema_migrations` skip handles this; verify in a test).
+  - No application code reads or writes either table in this phase — `grep -rn "from issues\|from issue_history\|INSERT INTO issues\b\|INSERT INTO issue_history" src` returns ZERO matches.
+
+  ## Out of scope
+
+  - The watcher, the writer, the boot scan, the reconcile timer (DX-154).
+  - Any reader migration (DX-155, DX-156).
+  - Adding `assigned_agent` to the `Issue` TypeScript type — the multi-worker epic owns that. The DB column may evaluate to NULL today; that is fine.
+  - Picking the read-your-writes mechanism (DX-154 picks).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe1eacdf7fe13a80fde095
+    title: src/db/migrations/016_issues_mirror.ts created with up/down; applies cleanly on empty PG DB
+    checked: false
+  - check_item_id: 69fe1eadf60d24cab8903247
+    title: issues table — every spec column present with correct type (verified by test reading information_schema)
+    checked: false
+  - check_item_id: 69fe1ead95f89bff7dd5d5ec
+    title: issues — every generated column derives correct value from inserted data jsonb
+    checked: false
+  - check_item_id: 69fe1eaea55a13c1f16d056a
+    title: issues — every index in the spec exists (issues_status, _status_kind, _assigned, _parent, _triage_due, _dispatch_id, _labels_gin)
+    checked: false
+  - check_item_id: 69fe1eae61523efbd6e8ffef
+    title: issue_history table — columns + 2 indexes match spec; no FK to issues (history survives issue deletion)
+    checked: false
+  - check_item_id: 69fe1eae65d414790f3980ef
+    title: down() drops both tables; up() re-applies cleanly afterward
+    checked: false
+  - check_item_id: 69fe1eaf0f1ab61d73e02e77
+    title: 9 tests in 016_issues_mirror.test.ts pass
+    checked: false
+  - check_item_id: 69fe1eaf536d612595b7c062
+    title: grep verifies zero callsites read/write the new tables (Phase 2 introduces schema only)
+    checked: false
+  - check_item_id: 69fe1eb0738e6708b2c7b274
+    title: full vitest suite green; tsc + vue-tsc clean
+    checked: false
+comments: []
+history:
+  - timestamp: 2026-05-08T23:13:30.605Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-152"
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

@@ -1,0 +1,92 @@
+schema_version: 4
+tracker: trello
+id: DX-109
+external_id: 69e86479da89ea17345c820c
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot] Agent isolation > Phase 2: Dispatch profiles + strict MCP + allowed-tools"
+description: |-
+  ## Context
+
+  Part of the "Agent isolation" epic. See the epic card for the full architecture. Depends on Phase 1 only for the workspace `.mcp.json` existing — this phase is primarily a spawn-flag refactor and doesn't require Phase 3's cwd change.
+
+  What exists today: `src/dispatch/resolve-tools.ts` (or equivalent) produces a per-dispatch settings.json with `mcpServers`. The poller passes a hardcoded `POLLER_ALLOW_TOOLS` constant from `src/poller/constants.ts`. `/api/launch` uses its own flow. `--strict-mcp-config` is NOT currently passed, so claude merges project + user scope with the per-dispatch file, leaking repo-root MCP servers into dispatched agents.
+
+  ## Solution
+
+  Introduce a `DispatchProfile` concept that names the MCP servers and allowed tools for a dispatch. Two built-in profiles: `poller` and `http-launch`.
+
+  1. Create `src/dispatch/profiles.ts` exporting `DispatchProfile` type + two constants `POLLER_PROFILE` and `HTTP_LAUNCH_PROFILE`.
+  2. Refactor `resolveDispatchTools` to take a profile name + optional overrides, return `{mcpServers, allowedTools}`.
+  3. Add `--strict-mcp-config` to the claude flag array in `buildClaudeInvocation` unconditionally for dispatched agents.
+  4. Always pass `--allowed-tools` derived from the profile's allowedTools list.
+
+  The `danxbot` MCP server (provides `danxbot_complete`) is always in every profile — it's infrastructure.
+
+  - **Poller profile:** servers = `trello` + `danxbot`, allowedTools = `POLLER_ALLOW_TOOLS` (existing constant).
+  - **HTTP-launch profile:** servers = `danxbot`, allowedTools = built-ins + `mcp__danxbot__danxbot_complete`.
+
+  Per-request overrides (Phase 4) will extend/override profile defaults.
+
+  ## Key Files
+
+  - `src/dispatch/profiles.ts` (new)
+  - `src/dispatch/resolve-tools.ts` — refactor
+  - `src/dispatch/core.ts` — accept profile name on DispatchInput
+  - `src/agent/launcher.ts` — flag builder adds `--strict-mcp-config` + `--allowed-tools`
+  - `src/poller/index.ts` — pass `"poller"` profile
+  - `src/worker/dispatch.ts` — /api/launch passes `"http-launch"` profile
+  - `src/poller/constants.ts` — existing POLLER_ALLOW_TOOLS
+  - Tests
+
+  ## How to Verify
+
+  Run a poller dispatch — confirm the claude process flag array contains `--strict-mcp-config` and `--allowed-tools <POLLER_ALLOW_TOOLS joined>`. Run an HTTP dispatch — same flags with http-launch allowlist. Rename the trello server key in `<repo>/.mcp.json` and confirm poller dispatch still has it (proves project-scope no longer leaks).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69e865279ebf2bcf1ea2630f
+    title: "`src/dispatch/profiles.ts` exports `DispatchProfile` type + `POLLER_PROFILE` + `HTTP_LAUNCH_PROFILE`"
+    checked: false
+  - check_item_id: 69e86529655ca0d25d869252
+    title: "`resolveDispatchTools` takes a profile name + optional overrides, returns `{mcpServers, allowedTools}`"
+    checked: false
+  - check_item_id: 69e8652a1afe435e561c0eb3
+    title: Every `spawnAgent` call passes a profile name (poller / http-launch)
+    checked: false
+  - check_item_id: 69e8652bab83a82f7a96afeb
+    title: Claude invocation always includes `--strict-mcp-config` and `--allowed-tools`
+    checked: false
+  - check_item_id: 69e8652de512cb91bee9d06b
+    title: "Poller profile: servers = trello + danxbot; allowedTools = POLLER_ALLOW_TOOLS"
+    checked: false
+  - check_item_id: 69e8652e85ca44326fb00a1d
+    title: "HTTP-launch profile: servers = danxbot only; allowedTools = built-ins + danxbot_complete"
+    checked: false
+  - check_item_id: 69e8652fb4efdeaa65e383cf
+    title: "Unit tests: each profile produces the expected settings.json + flag array"
+    checked: false
+  - check_item_id: 69e865302efb519b8278e81f
+    title: "Integration test: renaming project `.mcp.json` trello key leaves dispatched agents unaffected"
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

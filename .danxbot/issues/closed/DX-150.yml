@@ -1,0 +1,306 @@
+schema_version: 4
+tracker: trello
+id: DX-150
+external_id: 69fd91d1b251594c5817e63e
+parent_id: DX-130
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "[Trello decouple > Phase 9] external_id format heal — auto-recover MemoryTracker→Trello swaps"
+description: |-
+  ## Context
+
+  Two YAMLs in `gpt-manager` carry stale `MemoryTracker`-minted external_ids:
+
+  - `gpt-manager/.danxbot/issues/closed/SG-105.yml` → `external_id: mem-1`
+  - `gpt-manager/.danxbot/issues/open/SG-106.yml` → `external_id: mem-2`
+
+  Source: `src/issue-tracker/memory.ts:161` mints `mem-${nextExternalId++}` for every card created while the tracker is `MemoryTracker`. When the operator later switches the tracker to Trello (config edit), those `mem-N` ids become invalid against the new tracker. Every tracker call against them errors (Trello: 400; other future trackers may differ). DX-149 (Phase 8) prevents the error from crashing the worker; this phase prevents the error from happening at all by healing the YAML.
+
+  Observed format mismatch:
+
+  - Trello card ids = 24-char hex (e.g. `69fd1486208523401e60afcb`)
+  - MemoryTracker ids = `mem-N` (e.g. `mem-1`, `mem-42`)
+  - No future-tracker scheme defined; healer should be schema-aware via `tracker.isValidExternalId(id)` (new method on the `IssueTracker` interface).
+
+  ## Solution
+
+  Add a healing pass to the poller that runs after `healLocalYamls` (DX-133) and before any tracker call. For every YAML in `open/` AND `closed/`:
+
+  1. Skip if `external_id === ""` (orphan — `syncIssue` already handles).
+  2. Call `tracker.isValidExternalId(external_id)`. New method per tracker:
+     - `TrelloTracker`: returns `true` for 24-char `[0-9a-f]{24}` strings.
+     - `MemoryTracker`: returns `true` for `^mem-\d+$`.
+  3. Invalid → blank the `external_id` field, append a `comments[]` entry titled `## Tracker swap — external_id healed` with the old id + reason, leave file location unchanged. The card now looks like an orphan to the next tick's sync pass; `syncIssue` calls `tracker.createCard` and mints a fresh real id.
+  4. Log the heal: `[<repo>] Healed external_id mismatch on <id>: <old> → "" (tracker.isValidExternalId rejected)`.
+
+  Idempotent: a card whose `external_id` is already valid OR already empty is a no-op. Pass runs every tick — cheap (just a regex check per YAML, no tracker call).
+
+  ### Why a tracker-method instead of a static regex map
+
+  The tracker already abstracts the "what's my id format" concept. A static `EXTERNAL_ID_PATTERNS` map duplicates that knowledge in two places and rots when a new tracker lands. Tracker owns its id format → tracker validates.
+
+  ### Why blank instead of delete-card-or-create-elsewhere
+
+  Blanking + re-orphaning is the existing well-tested path. `syncIssue` already creates cards for orphans, the next tick repaints all fields (status, AC, comments, retro), and the YAML's content is preserved. The closed-status pre-existing comment gives humans an audit trail.
+
+  ## Files
+
+  - `src/issue-tracker/interface.ts` — add `isValidExternalId(id: string): boolean` to `IssueTracker`
+  - `src/issue-tracker/trello.ts` — implement (24-hex regex)
+  - `src/issue-tracker/memory.ts` — implement (`/^mem-\d+$/`)
+  - `src/poller/heal-external-id.ts` (new) — pure function `healExternalIds(repoLocalPath, tracker)` returning `{healed: Array<{id, oldExternalId}>, errors[]}`
+  - `src/poller/heal-external-id.test.ts` (new) — TDD
+  - `src/poller/index.ts` — call `healExternalIds` after `healLocalYamls` and before `tracker.fetchOpenCards`
+
+  ## Test plan (TDD)
+
+  1. YAML with `external_id: "mem-2"` + `TrelloTracker` → blanked, comment appended, log emitted.
+  2. YAML with `external_id: "69fd1486208523401e60afcb"` + `TrelloTracker` → no change (idempotent).
+  3. YAML with `external_id: "mem-2"` + `MemoryTracker` → no change (valid for memory).
+  4. YAML with `external_id: ""` → no change (orphan, skip).
+  5. Mixed dir (3 valid + 1 invalid) → only invalid one healed; healed list returned with one entry.
+  6. Both `open/` and `closed/` directories scanned.
+  7. Unparseable YAML in dir → `errors[]` populated, other YAMLs still healed.
+  8. After heal, next tick's `syncIssue` flow against the orphaned YAML calls `tracker.createCard` (integration test with fake tracker).
+
+  ## Acceptance
+
+  - `IssueTracker.isValidExternalId(id)` exists on interface, implemented by Trello + Memory trackers.
+  - `healExternalIds` blanks invalid external_ids, appends audit comment, logs.
+  - Pass runs every tick BEFORE any tracker call.
+  - 8 new tests pass; existing tests not regressed.
+  - Manual smoke: drop the existing `mem-1` / `mem-2` YAMLs in `gpt-manager` → after one tick, both YAMLs have `external_id: ""` and a heal comment; after second tick, both have fresh Trello-minted external_ids and Trello cards exist.
+  - `tsc --noEmit` clean.
+
+  ## Out of scope
+
+  - Pruning closed/ YAMLs that no longer correspond to any real card (separate concern).
+  - Cross-tracker migration of card history (comments, retro on the old tracker are gone — accepted loss).
+  - Detecting tracker swaps proactively (config-watch) — purely reactive heal on YAML scan is enough.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd91d2a300408afd5c7cfd
+    title: IssueTracker.isValidExternalId(id) added to interface; implemented on TrelloTracker (24-hex) + MemoryTracker (^mem-\d+$)
+    checked: true
+  - check_item_id: 69fd91d22ed6879778b47947
+    title: healExternalIds pure function blanks invalid external_id + appends audit comment + logs; idempotent; scans both open/ and closed/
+    checked: true
+  - check_item_id: 69fd91d3e22e73fe82b5fff3
+    title: Heal pass runs in _poll AFTER healLocalYamls, BEFORE first tracker call
+    checked: true
+  - check_item_id: 69fd91d34117e32e8c725c71
+    title: 8 new tests pass; no existing poller / tracker tests regressed
+    checked: true
+  - check_item_id: 69fd91d4aac23e05e094340b
+    title: Manual smoke — gpt-manager mem-1/mem-2 YAMLs heal in one tick, recreate as fresh Trello cards in next tick
+    checked: true
+  - check_item_id: 69fd91d46f835dab467a5379
+    title: tsc --noEmit clean
+    checked: true
+comments:
+  - id: 69fda829985705d34ac9baad
+    author: danxbot
+    timestamp: 2026-05-08T09:08:57.610Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Notes from Phase 8 (DX-149)
+
+      DX-149 (`_poll` top-level try/catch) shipped in commit `372f6c0` and the `gpt-manager` worker now survives the `mem-2` 400 instead of crashing. **The bad data is unchanged** — every tick still logs `[gpt-manager] _poll crashed — tick aborted, next tick will retry: Trello API error: 400 Bad Request (GET /cards/mem-2/actions)` at the moment SG-106 is the dispatch primary. This phase is what makes that log line stop.
+
+      ### Concrete state at start of DX-150
+
+      Two YAMLs in `<gpt-manager>/.danxbot/issues/`:
+      - `closed/SG-105.yml` → `external_id: mem-1`
+      - `open/SG-106.yml` → `external_id: mem-2`
+
+      Both are leftover from a `MemoryTracker` window before the repo's Trello config landed. `MemoryTracker` mints `mem-${nextExternalId++}` (`src/issue-tracker/memory.ts:161`). The healer must blank these so `syncIssue`'s existing orphan-create path mints fresh real Trello ids on the next tick.
+
+      ### Where DX-149 leaves things for the impl
+
+      - `_poll`'s top-level catch is at `src/poller/index.ts:498-918`. Add the new heal pass call AFTER `healLocalYamls` (line 516) and BEFORE the `evictDeadDispatches` call (line 533). It runs every tick, before any tracker call.
+      - Don't add per-call try/catches around the new pass — the outer catch already covers it.
+      - There is NO `recordError` poller-internal helper yet (DX-134 owns that). For now `log.warn` per heal, `log.error` on per-YAML parse failure, matches the `healLocalYamls` precedent.
+
+      ### Test framework already wired
+
+      `mockHealLocalYamls.mockImplementationOnce(() => throw)` is the canonical pattern for "early-_poll throw" tests (used at `src/poller/index.test.ts` ~line 1885). Same file has `mockTracker` + `mockFindByExternalId` + `mockHydrateFromRemote` + `MOCK_REPO_CONTEXT` ready for use. Mirror that pattern for the new `healExternalIds` tests.
+
+      ### Sub-agent prompt template
+
+      Card description already lays out all 8 tests + AC. A `general-purpose` sub-agent given THIS card's description + "TDD: failing-first then green; scope-locked to listed files; do not modify DX-149's wrap; verify with `npx vitest run > /tmp/x.log 2>&1` + `npx tsc --noEmit`" gets the right outcome. Same shape as DX-149's dispatch.
+
+      ### Acceptance smoke order (sequence matters)
+
+      Phase 9 ships → restart `gpt-manager` worker → tick 1: heal blanks `mem-1`/`mem-2`, audit comments appended → tick 2: orphan creates fresh Trello cards, `external_id` populated → tick 3: SG-106 dispatchable cleanly. AC #5 verifies that whole sequence; the manual smoke is unavoidable since the repo state is the test fixture.
+  - id: 69fd91d5dbb32c8a3c9415ca
+    author: newms87
+    timestamp: 2026-05-08T07:33:41.378Z
+    text: |-
+      ## Notes from Phase 8 (DX-149)
+
+      DX-149 (`_poll` top-level try/catch) shipped in commit `372f6c0` and the `gpt-manager` worker now survives the `mem-2` 400 instead of crashing. **The bad data is unchanged** — every tick still logs `[gpt-manager] _poll crashed — tick aborted, next tick will retry: Trello API error: 400 Bad Request (GET /cards/mem-2/actions)` at the moment SG-106 is the dispatch primary. This phase is what makes that log line stop.
+
+      ### Concrete state at start of DX-150
+
+      Two YAMLs in `<gpt-manager>/.danxbot/issues/`:
+      - `closed/SG-105.yml` → `external_id: mem-1`
+      - `open/SG-106.yml` → `external_id: mem-2`
+
+      Both are leftover from a `MemoryTracker` window before the repo's Trello config landed. `MemoryTracker` mints `mem-${nextExternalId++}` (`src/issue-tracker/memory.ts:161`). The healer must blank these so `syncIssue`'s existing orphan-create path mints fresh real Trello ids on the next tick.
+
+      ### Where DX-149 leaves things for the impl
+
+      - `_poll`'s top-level catch is at `src/poller/index.ts:498-918`. Add the new heal pass call AFTER `healLocalYamls` (line 516) and BEFORE the `evictDeadDispatches` call (line 533). It runs every tick, before any tracker call.
+      - Don't add per-call try/catches around the new pass — the outer catch already covers it.
+      - There is NO `recordError` poller-internal helper yet (DX-134 owns that). For now `log.warn` per heal, `log.error` on per-YAML parse failure, matches the `healLocalYamls` precedent.
+
+      ### Test framework already wired
+
+      `mockHealLocalYamls.mockImplementationOnce(() => throw)` is the canonical pattern for "early-_poll throw" tests (used at `src/poller/index.test.ts` ~line 1885). Same file has `mockTracker` + `mockFindByExternalId` + `mockHydrateFromRemote` + `MOCK_REPO_CONTEXT` ready for use. Mirror that pattern for the new `healExternalIds` tests.
+
+      ### Sub-agent prompt template
+
+      Card description already lays out all 8 tests + AC. A `general-purpose` sub-agent given THIS card's description + "TDD: failing-first then green; scope-locked to listed files; do not modify DX-149's wrap; verify with `npx vitest run > /tmp/x.log 2>&1` + `npx tsc --noEmit`" gets the right outcome. Same shape as DX-149's dispatch.
+
+      ### Acceptance smoke order (sequence matters)
+
+      Phase 9 ships → restart `gpt-manager` worker → tick 1: heal blanks `mem-1`/`mem-2`, audit comments appended → tick 2: orphan creates fresh Trello cards, `external_id` populated → tick 3: SG-106 dispatchable cleanly. AC #5 verifies that whole sequence; the manual smoke is unavoidable since the repo state is the test fixture.
+  - id: 69fdaefdb883ee42088a7c98
+    author: danxbot
+    timestamp: 2026-05-08T09:38:05.743Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Test Review
+
+      `test-reviewer` flagged 6 gaps; addressed all 6 in this dispatch. Result: 21 new tests across 3 files (16 in `heal-external-id.test.ts`, 6 in `memory.test.ts`, 7 in `trello.test.ts`).
+
+      ### Gaps closed
+
+      | Gap | Resolution |
+      |---|---|
+      | Direct unit tests for `TrelloTracker.isValidExternalId` | New `describe` block in `src/__tests__/issue-tracker/trello.test.ts` — 7 tests covering canonical id, mem-N rejection, empty, uppercase, boundary lengths (23/25), non-hex, no-network contract |
+      | Direct unit tests for `MemoryTracker.isValidExternalId` | New `describe` block in `src/__tests__/issue-tracker/memory.test.ts` — 6 tests; the **mint-vs-validator drift guard** (`createCard` returns an id; `isValidExternalId` MUST accept it) is the load-bearing one |
+      | Field-preservation round-trip | New test seeds every top-level field with a non-default value (rich `triage`, non-null `blocked`, `history` entries, `parent_id`, `children[]`, `retro` content), heals, asserts each field round-trips byte-identical |
+      | Write-failure path (`chmod 0o444`) | New test uses real `chmodSync` on tmpdir; verifies the read-only file is in `errors[]` and the healthy sibling still heals |
+      | `now` injection honored | One-line test pins the audit-comment timestamp exactly when `now: () => "2026-05-08T12:00:00.000Z"` is passed |
+      | Tracker throws inside `isValidExternalId` (fail-loud per JSDoc) | Proxy-based test asserts the error escapes `healExternalIds` rather than landing in `errors[]` |
+      | Half-missing dir (open/ exists, closed/ doesn't, and vice versa) | Two new tests — covers the per-state `if (!existsSync(dir)) continue;` branch the original `beforeEach` masked |
+
+      ### Coverage stats
+
+      - 16 tests in `src/poller/heal-external-id.test.ts`
+      - 2 wiring tests in `src/poller/index.test.ts` (`describe("poll — external_id heal pass")`)
+      - 7 + 6 direct `isValidExternalId` tests in `trello.test.ts` + `memory.test.ts`
+      - 3385 backend tests pass; `tsc --noEmit` and `vue-tsc --noEmit` clean
+  - id: 69fdaefe1d6e2b875f6c193b
+    author: danxbot
+    timestamp: 2026-05-08T09:38:06.084Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      `code-reviewer` flagged one MUST-FIX (M2 — JSDoc accuracy) plus several judgment calls. Addressed M2 + L6; explicitly skipped the rest.
+
+      ### Fixed
+
+      **M2 (blocker) — JSDoc claimed "next tick" but heal → `pushOrphans` is single-tick.** `_poll` calls `healExternalIds` at line 567 then `pushOrphans` at line 666 in the SAME `_poll` invocation. Fixed the heal-external-id.ts header to say "later in the same `_poll` tick" and explain the single-tick recovery semantics. (The original card description carried the same `next tick` mistake — left as-is in the historic comment thread; the fixed JSDoc is the new authoritative source.)
+
+      **L6 — extracted `MEMORY_EXTERNAL_ID_PREFIX` constant.** The mint format in `MemoryTracker.createCard` (`mem-${nextExternalId++}`) and the regex in `isValidExternalId` (`^mem-\\d+$`) now both go through the same `MEMORY_EXTERNAL_ID_PREFIX = "mem-"` constant. Drift between mint + validator would self-heal every freshly-minted card on the next poll tick — this guarantees they stay locked.
+
+      ### Skipped (judgment calls)
+
+      - **L9 — append a `worker:heal` history entry.** The `IssueHistoryEvent` enum doesn't include a `tracker_swap` value yet (DX-138 owns the broader history-write paths). The audit comment IS the audit trail today; wiring the heal pass into `history[]` is correct follow-up work for DX-138 but not in scope here.
+      - **L8 / N2 — minor stylistic nits.** Skipped per reviewer's "skip if you prefer".
+      - **`HealExternalIdResult` → `HealExternalIdReport` rename.** Skipped — current shape matches `HealResult` from `healLocalYamls` (the precedent helper), and consistency with the sibling pattern beats the marginal naming clarity gain.
+
+      ### Other findings
+
+      - **Closed-dir-skip in `pushOrphans`** — flagged by reviewer as "the OTHER silent fallback" but the rationale (resurrecting Done cards as fresh tracker cards = bad UX) is documented in the heal-external-id.ts header and the existing `pushOrphans` JSDoc. No change.
+      - **Premature-abstraction guard for `forEachIssueYaml`** — explicitly punted per reviewer recommendation; rule-of-three not yet hit.
+  - id: 69fdaefe28fdff5fa13c5d89
+    author: danxbot
+    timestamp: 2026-05-08T09:38:06.435Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Needs Help — operator deploy + smoke verification (AC #5)
+
+      Code is implemented + committed + pushed. ACs #1, #2, #3, #4, #6 all verified by automated tests in this dispatch. **AC #5 (manual smoke against gpt-manager production)** requires operator action that this dispatched agent cannot perform.
+
+      **What's done:**
+
+      - Commit `675de2a` on `main` ([Danxbot] DX-150 Phase 9: external_id format heal).
+      - 21 new tests; 3385 backend tests pass; `tsc --noEmit` and `vue-tsc --noEmit` clean.
+      - Reviewer findings addressed (M2 JSDoc accuracy + L6 constant extraction).
+
+      **What's still needed (operator action):**
+
+      1. **Deploy to gpt:** `make deploy TARGET=gpt`
+      2. **Wait for the next gpt-manager poller tick** (~60s after restart) and check the worker logs for:
+
+         ```text
+         [gpt-manager] Healed external_id mismatch on SG-106: mem-2 → "" (tracker.isValidExternalId rejected)
+         [gpt-manager] Healed external_id mismatch on SG-105: mem-1 → "" (tracker.isValidExternalId rejected)
+         ```
+
+      3. **Verify the YAMLs on disk** at the deployed `gpt-manager` repo:
+
+         ```bash
+         # On the gpt EC2 instance, inside the worker container:
+         docker exec danxbot-worker-gpt-manager grep -E '^external_id:' \
+           /danxbot/repos/gpt-manager/.danxbot/issues/open/SG-106.yml \
+           /danxbot/repos/gpt-manager/.danxbot/issues/closed/SG-105.yml
+         # Expected after tick 1: both lines show `external_id: ""` (open SG-106)
+         # or `external_id: ""` (closed SG-105). Audit comment present in
+         # `comments:` block titled `## Tracker swap — external_id healed`.
+         ```
+
+      4. **Wait for the next tick** (or the same tick — `pushOrphans` runs later in the same `_poll` invocation, so AC #5's "next tick" wording was an over-cautious estimate; recovery is single-tick by design). Verify SG-106's `external_id` is now a 24-char Trello id (not empty, not `mem-2`):
+
+         ```bash
+         docker exec danxbot-worker-gpt-manager grep '^external_id:' \
+           /danxbot/repos/gpt-manager/.danxbot/issues/open/SG-106.yml
+         # Expected: external_id: <24-char hex Trello id>
+         ```
+
+         **Note:** SG-105 stays in `closed/` with `external_id: ""` permanently — the existing `pushOrphans` contract intentionally skips closed/ orphans (resurrecting Done cards as fresh tracker cards = bad UX). That is by design; don't flag it as a regression.
+
+      5. **Verify no more 400s** — the `[gpt-manager] _poll crashed — tick aborted... Trello API error: 400 Bad Request (GET /cards/mem-2/actions)` log line should stop appearing after tick 2 (the previous primary YAML now points to a real Trello card).
+
+      **Why this needs human/host help:** Production deploy + container restart + log inspection on the gpt EC2 instance. Dispatched agents cannot run `make deploy` or `docker exec` against production from within the worker container.
+
+      **Incomplete ACs:**
+      - AC #5: `Manual smoke — gpt-manager mem-1/mem-2 YAMLs heal in one tick, recreate as fresh Trello cards in next tick`
+
+      **Final AC check:** Before Done, every AC must be checked: true. Once the operator confirms the smoke result, mark AC #5 checked, re-save, and the worker will close the card.
+history: []
+retro:
+  good: |-
+    - Card description was exceptionally well-specified: the 8-test plan, file list, and concrete state notes from DX-149 made TDD straightforward. Seeded the test file from the description verbatim before writing a line of `heal-external-id.ts`.
+    - The `healLocalYamls` precedent gave a clean shape to mirror — same walk pattern, same `{healed, errors}` return shape, same caller-logs-result convention. Zero new abstractions introduced.
+    - `MemoryTracker` mint/validator drift hazard caught proactively (per reviewer L6). Now both go through `MEMORY_EXTERNAL_ID_PREFIX` so the symmetry is enforced by construction, not docstring.
+    - Test reviewer caught the field-preservation gap — the spread `{...issue, external_id: "", comments: [...]}` is a real silent-data-loss hazard. The added round-trip test seeds every top-level field with non-default values and verifies byte-identical preservation.
+  bad: |-
+    - Original JSDoc claimed `next tick` recovery; the code reviewer correctly pointed out heal + `pushOrphans` run in the SAME `_poll` tick. The mistake was inherited from the card's own description (operator's "after second tick" wording in AC #5). Fixed in the JSDoc; the AC #5 prose says "next tick" but the smoke procedure works either way (heal at tick N → fresh id at tick N or N+1).
+    - Tripped one pre-existing integration test (`critical-failure-end-to-end.test.ts`) that used a placeholder external_id (`card-stuck-in-todo`) which my new heal pass blanked. Required adding `isValidExternalId: vi.fn().mockReturnValue(true)` to its `trackerMock`. Easy fix once spotted, but a reminder that interface additions cascade to every test mock that constructs an `IssueTracker`-shaped object.
+    - Pre-existing `vue-tsc` failure in `dashboard/src/components/__tests__/DispatchDetail.test.ts` (DX-140 leftover — missing `hostPidAt` and `pidTerminatedAt` on the test fixture) blocked the dashboard type-check. Fixed in the same commit and called out explicitly in the message body.
+  action_item_ids: []
+  commits:
+    - 675de2a
+waiting_on: null
+blocked: null

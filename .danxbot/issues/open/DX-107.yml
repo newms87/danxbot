@@ -1,0 +1,87 @@
+schema_version: 4
+tracker: trello
+id: DX-107
+external_id: 69e864a71c0955a355e7d731
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot] Agent isolation > Phase 4: /api/launch per-request MCP + tools overrides"
+description: |-
+  ## Context
+
+  Part of the "Agent isolation" epic. Depends on Phase 2 (profile registry exists). This phase extends `/api/launch` so external callers (gpt-manager, dashboard smoke tests, curl) can opt into non-default MCP servers and a broader tool allowlist per request.
+
+  What exists today: `/api/launch` body = `{repo, task, api_token, ...}`. No knobs for MCP / tool allowlist. The `http-launch` profile from Phase 2 sets a minimal default (only `danxbot` MCP, only built-ins + `danxbot_complete`).
+
+  ## Solution
+
+  Extend the body schema to accept two optional fields:
+
+  - `mcp: { trello?: boolean }` — flip `mcp.trello = true` to include the trello MCP server in this dispatch only. Unknown keys → 400.
+  - `allowed_tools: string[]` — merged into the profile's default allowlist (union, deduped).
+
+  Both validated strictly. Bearer-token auth is the existing gate — no change.
+
+  Update `src/worker/dispatch.ts` `handleLaunch` to read these fields from the body into `DispatchInput.overrides`. Extend `DispatchInput` type. Update `src/dispatch/profiles.ts` merge helper (or add one) that applies overrides on top of the profile default. Update `src/dashboard/dispatch-proxy.ts` to forward the fields verbatim.
+
+  Keep the proxy allowlist strict — only known fields forwarded, no open-ended passthrough.
+
+  ## Key Files
+
+  - `src/worker/dispatch.ts` — handleLaunch body parsing
+  - `src/dispatch/core.ts` — accept overrides on DispatchInput
+  - `src/dispatch/profiles.ts` — merge logic
+  - `src/dashboard/dispatch-proxy.ts` — forward fields
+  - TypeScript types on both sides
+  - Tests: unit (merge logic), integration (curl roundtrip via dashboard proxy)
+
+  ## How to Verify
+
+  `curl -sS -X POST https://danxbot.sageus.ai/api/launch -H "Authorization: Bearer $TOKEN" -d '{"repo":"gpt-manager","task":"List Trello lists","mcp":{"trello":true},"allowed_tools":["mcp__trello__*"]}'` — dispatched agent's claude has trello MCP available and can call `mcp__trello__get_lists`. Same curl WITHOUT `mcp.trello` — dispatched agent lacks trello MCP (confirm via its attempt + failure). Bad bearer → 401 unchanged. Unknown mcp key (e.g. `mcp.foo=true`) → 400.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69e8655b8b5f92a06ecd919a
+    title: /api/launch accepts optional `mcp` object with boolean keys for non-default servers
+    checked: false
+  - check_item_id: 69e8655c80b31ab21ececc3a
+    title: /api/launch accepts optional `allowed_tools` string array
+    checked: false
+  - check_item_id: 69e8655d228fec4a9008626c
+    title: Dashboard proxy forwards both fields verbatim
+    checked: false
+  - check_item_id: 69e8655ec97a53e65b8b907b
+    title: Per-request `mcp.trello=true` adds trello server to the dispatch
+    checked: false
+  - check_item_id: 69e865621afe435e561c9e96
+    title: "`allowed_tools` union-merged with profile default (deduped)"
+    checked: false
+  - check_item_id: 69e865627c7aa8df08353f7b
+    title: Unknown mcp key → 400 with descriptive error
+    checked: false
+  - check_item_id: 69e865637a0f7dd023153423
+    title: "Integration test: curl with trello opt-in works; without it, trello tools are inaccessible"
+    checked: false
+  - check_item_id: 69e86563ed23a33de951cd55
+    title: Auth contract unchanged — missing/bad bearer still 401
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

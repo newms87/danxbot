@@ -1,0 +1,57 @@
+schema_version: 4
+tracker: trello
+id: DX-34
+external_id: 69efca7f3a167720d2ffca26
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: "Fix: install.sh writes danx-* symlinks to connected repos without updating their .gitignore"
+description: |-
+  ## Problem
+
+  `install.sh` (commit e63c1c3) creates symlinks at `<connected-repo>/.claude/skills/danx-{ideate,next,start,triage}` so the developer's interactive `claude` can invoke the skills from inside the connected repo. The symlinks are gitignored on the danxbot side (`.gitignore` line 36: `.claude/skills/danx-*`), but danxbot does NOT touch the connected repo's own `.gitignore`. Result: when a dev runs `git status` in their repo (gpt-manager, platform, etc) those symlinks appear as Untracked.
+
+  ## Root Cause
+
+  The `<repo>/.claude/` tree is "strictly developer territory" per `.claude/rules/docker-runtime.md` — danxbot's poller never writes there. `install.sh` is user-initiated (not the poller) so it has license to create the symlinks, but it stops short of editing the dev's `.gitignore` because that's still their territory.
+
+  ## Solution Options
+
+  1. **Print warning** — install.sh emits a one-line WARN per connected repo telling the dev to add `.claude/skills/danx-*` to their repo's `.gitignore`. Lowest invasion, dev still has to do something.
+  2. **Auto-append idempotently** — install.sh greps the connected repo's `.gitignore` for `.claude/skills/danx-` and appends a one-line entry + comment if missing. Touches dev territory but the install.sh contract already does (writes the symlinks themselves). Idempotent so re-running is safe.
+  3. **Switch from symlinks to a direnv-style hook** — out of scope.
+
+  Pick (2) for the path of least friction; it's consistent with install.sh already writing into `<repo>/.claude/skills/`.
+
+  ## Key Files
+
+  - `install.sh` — the new "Wiring /danx-* skill symlinks" block (lines ~95-135 after e63c1c3)
+  - `.claude/skills/setup/SKILL.md` — note the gitignore step
+  - `.claude/rules/docker-runtime.md` — clarify install.sh's territory carve-out vs poller's never-write rule
+
+  ## How to Verify
+
+  Run `./install.sh` against a fresh connected repo with no `.claude/skills/danx-*` gitignore entry; confirm the entry is appended exactly once. Re-run; confirm no duplicate. Run `git status` in the connected repo; confirm danx-* symlinks are not Untracked.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

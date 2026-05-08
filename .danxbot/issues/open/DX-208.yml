@@ -1,0 +1,151 @@
+schema_version: 4
+tracker: trello
+id: DX-208
+external_id: 69fe515d1cb14e77493a2ed7
+parent_id: DX-141
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "[DB registry > Phase 2b] Extract attachMonitoringStack helper from spawnAgent"
+description: |-
+  ## Context
+
+  Sub-phase 2b of `DX-141` (DB-driven full-stack reattach). Phase 2c
+  (reattach pass) needs to attach a SessionLogWatcher +
+  StallDetector + heartbeat + cleanup chain to an ALREADY-running
+  agent process — exactly the same monitoring stack `spawnAgent`
+  builds for a fresh spawn. Today that stack is inlined in
+  `spawnAgent` with no reusable seam.
+
+  This sub-phase extracts the watcher / usage / forwarder /
+  inactivity-timer / heartbeat / cleanup / stop-handler wiring into
+  a standalone helper so:
+
+  - Phase 2c can reattach to a running PID without re-implementing
+    the wiring (and risking divergence).
+  - `spawnAgent`'s body shrinks to: preflight → invocation builder →
+    `attachMonitoringStack(job, options)` → runtime fork →
+    `pairedWriteHostPid`.
+
+  Behavior-preserving refactor. All ~3354 existing tests pass
+  unchanged.
+
+  ## Solution
+
+  New module `src/agent/attach-monitoring-stack.ts` exporting
+  `attachMonitoringStack({job, jobId, options, agentCwd, ...}) →
+  {cleanup, stop, dispatchTracker, ...}`. The helper takes a
+  partially-constructed `AgentJob` (id + skeleton) and returns the
+  full lifecycle handles.
+
+  Inputs come from the caller's context:
+    - `job` (skeleton from `runSpawnPreflight` OR a reattach shim)
+    - `agentCwd` (for SessionLogWatcher session dir)
+    - `options.eventForwarding`, `statusUrl`, `apiToken`,
+      `timeoutMs`, `maxRuntimeMs` — same as today
+    - `dispatchTrigger` (optional — only fresh spawns insert a row;
+      reattach hands the existing tracker in via a new branch in
+      Phase 2c)
+    - `existingDispatchTracker` (optional — Phase 2c passes its
+      reattached tracker reference)
+    - `notifyTerminalStatus` (kept identical)
+
+  Outputs:
+    - `cleanup` (cached promise, same semantics as today)
+    - `stop` (the existing buildJobStopHandler wrapping)
+    - `dispatchTracker` (set when fresh-spawn or reattach provides it)
+
+  Does NOT include: runtime fork, paired-write, MCP settings file
+  cleanup. Those stay in their current homes — only the monitoring
+  + lifecycle chain is extracted.
+
+  ## Files
+
+  - `src/agent/attach-monitoring-stack.ts` (new) — the extracted
+    helper. Lives next to `agent-cleanup.ts` / `agent-stop.ts` /
+    `agent-types.ts`.
+  - `src/agent/launcher.ts` — `spawnAgent` rewires to call
+    `attachMonitoringStack`. Net loss of ~80 lines.
+  - `src/agent/launcher.test.ts` (existing) — must still pass; no
+    test changes required.
+  - `src/agent/attach-monitoring-stack.test.ts` (new) — 2-3 unit
+    tests targeting the helper directly with mocked watcher / queue
+    so future maintainers can drive the helper without spinning up a
+    full spawn.
+
+  ## Test plan (TDD)
+
+  1. Existing `launcher.test.ts` (and every spawnAgent caller) still
+     passes with no test changes — proves behavior preservation.
+  2. `attachMonitoringStack` builds a watcher subscriber that
+     accumulates usage with messageId-dedup (same as today).
+  3. `attachMonitoringStack` resets the inactivity timer on every
+     watcher entry.
+  4. `attachMonitoringStack` skips eventForwarding when
+     `options.eventForwarding` is undefined (Slack-router-only
+     parity).
+
+  ## Acceptance
+
+  - `attachMonitoringStack` module exists and is consumed by
+    `spawnAgent`.
+  - `spawnAgent` body is reduced to its three runtime concerns
+    (preflight, attach, fork + pair-write).
+  - `npx vitest run` passes — no existing tests modified.
+  - 3 new unit tests for the helper pass.
+  - `npx tsc --noEmit` clean.
+
+  ## Out of scope
+
+  - Runtime-fork extraction (runHostModeFork + spawnDockerMode are
+    fine where they are).
+  - Paired-write (`pairedWriteHostPid`) extraction — already its own
+    module.
+  - Reattach consumer — that's Phase 2c.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe515e0252fcd64fa5d70a
+    title: New attach-monitoring-stack.ts module owns watcher/usage/forwarder/inactivity-timer/heartbeat/cleanup/stop wiring
+    checked: false
+  - check_item_id: 69fe515f252c9bd15e6dfd44
+    title: spawnAgent calls attachMonitoringStack; behavior preserved across all existing tests
+    checked: false
+  - check_item_id: 69fe516007aa9b703dd00c44
+    title: Existing test suite passes unchanged (no test files modified beyond imports)
+    checked: false
+  - check_item_id: 69fe5160dc5a53f6413f98d7
+    title: 3 new unit tests for attachMonitoringStack pass; tsc clean
+    checked: false
+comments: []
+history:
+  - timestamp: 2026-05-08T21:10:56.868Z
+    actor: dispatch:3ecfde68-c199-415f-b265-5480e68e5b74
+    event: created
+    to: ToDo
+  - timestamp: 2026-05-08T21:12:38.156Z
+    actor: dispatch:3ecfde68-c199-415f-b265-5480e68e5b74
+    event: blocked
+    to: ToDo
+    note: Waiting on DX-207
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Waits for DX-207 (mcp_settings_path column) to land — the extract has no value until the column it persists exists in the schema, and DX-209's reattach consumer needs both pieces in place.
+  timestamp: 2026-05-08T21:11:14.661Z
+  by:
+    - DX-207
+blocked: null

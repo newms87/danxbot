@@ -1,0 +1,73 @@
+schema_version: 4
+tracker: trello
+id: DX-36
+external_id: 69ef8867993590e1329a5caa
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: "[Danxbot > tests] Flake: dispatch-pipeline summary extraction picks early assistant text under full-suite load"
+description: |
+  ## Problem
+
+  `src/__tests__/integration/dispatch-pipeline.test.ts:354` — "extracts summary from last assistant text in JSONL" — intermittently fails under full-suite load:
+
+  ```
+  AssertionError: expected 'I\'ll help you with that task.' to contain 'Task completed successfully'
+  Expected: "Task completed successfully"
+  Received: "I'll help you with that task."
+  ```
+
+  The summary getter is returning the FIRST assistant text in the JSONL instead of the LAST one. The fake-claude JSONL emits two assistant messages — an early "I'll help you with that task." and a later "Task completed successfully" — and the summary extraction at completion-time should land on the latter.
+
+  ## Root Cause: TBD
+
+  Hypothesis: the watcher captures `lastAssistantText` while the JSONL is being polled mid-write. Under full-suite contention (~50s integration run with ~13 fakes) the polling cadence may catch the JSONL after the first assistant block but before the second. When the test reads `job.summary` on completion, it sees the stale first-block text.
+
+  Verified flake characteristics:
+  - Test PASSES in isolation: `npx vitest run src/__tests__/integration/dispatch-pipeline.test.ts` → 13/13 (49s)
+  - Test PASSED on a prior full-suite run in the same session (no code changes between runs)
+  - Test FAILED on a subsequent full-suite run with no relevant code change
+  - Failure was on the ASSERTION at line 354, not a timeout
+
+  ## Solution: TBD
+
+  Likely directions:
+  1. Make `extractSummary` re-read the JSONL after the completion signal so it always sees the final state, not whatever was buffered.
+  2. Make the test wait for `lastAssistantText === "Task completed successfully"` (poll-based) instead of asserting on first stable read.
+  3. Make fake-claude flush the JSONL after each assistant block.
+
+  Investigate before picking — the right fix is at the producer (watcher / extractSummary), not the consumer (test).
+
+  ## Key Files
+
+  - `src/__tests__/integration/dispatch-pipeline.test.ts:340-355` — failing assertion
+  - `src/agent/launcher.ts` (`spawnAgent`, summary extraction)
+  - `src/agent/session-log-watcher.ts`
+  - `src/__tests__/integration/helpers/fake-claude.ts`
+
+  ## Note
+
+  Surfaced during the cjAyJpgr final cleanup. None of the changes in that commit touch the dispatch pipeline or watcher; this is a pre-existing flake exposed by full-suite timing variation. Filing as Action Item so it gets attention without blocking the unrelated commit.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

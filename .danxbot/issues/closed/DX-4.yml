@@ -1,0 +1,159 @@
+schema_version: 4
+tracker: trello
+id: DX-4
+external_id: 69f771e9c88c36ded4f15d0e
+parent_id: null
+children: []
+dispatch:
+  id: 226868d8-6dc6-458d-b346-7a882b6711d5
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "[Danxbot] DRY: extract sync.ts comment-edit reflection + document retro/action-items coupling"
+description: |-
+  ## Context
+
+  Phase 5 (commit `c8e8101`) added two near-identical in-place-edit reflection branches in `src/issue-tracker/sync.ts` finalize block (~lines 386-412). Code-reviewer flagged the duplication:
+
+  ```typescript
+  if (
+    retroEditedCommentId !== null &&
+    retroEditedNewText !== null &&
+    base.id === retroEditedCommentId
+  ) {
+    return { ...base, text: retroEditedNewText };
+  }
+  if (
+    actionItemsEditedCommentId !== null &&
+    actionItemsEditedNewText !== null &&
+    base.id === actionItemsEditedCommentId
+  ) {
+    return { ...base, text: actionItemsEditedNewText };
+  }
+  ```
+
+  Two paths today; a third (e.g., a future structured-status comment edit) would copy-paste a third branch. The pattern is `Map<commentId, newText>` keyed by id.
+
+  Also: the retro renderer and action-items spawner couple via the rendered retro body — when `retro.action_items[]` changes, the retro comment ALSO edits because `renderRetroComment` includes a `**Action items:**` bullet list rendered from `local.retro.action_items`. This is intentional but non-obvious; the test "incremental: appending an action_item spawns ONLY the new title" expects 3 writes (1 spawn + 2 edits) and the explanation lives only in that test's comment. Worth a header comment in `sync.ts`.
+
+  ## Solution
+
+  1. Replace the two `xEditedCommentId` / `xEditedNewText` pairs in `syncIssue` with a single `editedCommentTexts: Map<string, string>` keyed by comment id. Both the retro renderer and action-items spawner push into it after issuing `tracker.editComment`. The `finalComments` mapping reads via `editedCommentTexts.get(base.id)`.
+
+  2. Add a header comment to `src/issue-tracker/sync.ts` near the action-items spawner block (around line 263) explaining the coupling: when `retro.action_items[]` changes, BOTH the bookkeeping comment AND the retro comment get edited because the retro body's `**Action items:**` bullet list is rendered from the same field. This is intentional — the retro is the human-readable summary, the bookkeeping is the machine-readable spawn ledger. Verified by the "incremental: appending an action_item" test in `sync.test.ts`.
+
+  3. (Optional) If a third edit-source lands later, extend the map naturally without copy-pasting a new variable pair.
+
+  ## Key files
+
+  - `src/issue-tracker/sync.ts` (~lines 263, 271-320, 347-373, 386-412)
+
+  ## Acceptance Criteria
+
+  - `editedCommentTexts: Map<string, string>` replaces the four `xEditedCommentId`/`xEditedNewText` variables.
+  - The two branches in the `finalComments` `.map` block collapse to one lookup.
+  - A header comment in `sync.ts` near the action-items spawner explains the retro/action-items coupling (1-3 sentences).
+  - All existing tests pass; no behavior change.
+  - `npx vitest run src/__tests__/issue-tracker/` → green.
+
+  ## Out of scope
+
+  - Test additions (existing tests already pin behavior).
+  - Cosmetic refactor of `renderRetroComment` formatting.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f7810b66ed1d86b4a1ab0a
+    title: "`editedCommentTexts: Map<string, string>` replaces the four `xEditedCommentId`/`xEditedNewText` variables."
+    checked: true
+  - check_item_id: 69f7810c77b70c30a7274631
+    title: The two branches in the `finalComments` `.map` block collapse to one lookup.
+    checked: true
+  - check_item_id: 69f7810cb18587b1061bdaa8
+    title: A header comment in `sync.ts` near the action-items spawner explains the retro/action-items coupling (1-3 sentences).
+    checked: true
+  - check_item_id: 69f7810d2cd7758b1dd777bc
+    title: All existing tests pass; no behavior change.
+    checked: true
+  - check_item_id: 69f7810d5ac71199537773b9
+    title: "`npx vitest run src/__tests__/issue-tracker/` → green."
+    checked: true
+comments:
+  - id: 69f7810e2632a71a5d02bde3
+    author: test-reviewer
+    timestamp: 2026-05-03T17:08:30.298Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Test Review
+
+      **Verdict: No genuine coverage gap.**
+
+      Existing tests fully pin the refactor:
+
+      - `incremental: appending an action_item ... 1 spawn + 2 edits` (sync.test.ts:647) — the dual-edit case asserting BOTH retro AND action-items bookkeeping comments are edited in one sync (`editCount === 2`).
+      - `re-syncing after a combined first sync (retro + action_items + bookkeeping) yields zero remote writes` (sync.test.ts:704) — critical pin: BOTH edited comments must reflect into `finalComments` so the second sync's identity check hits zero writes. Drop either reflection and the second sync re-edits.
+      - `editing retro.good triggers editComment ... NOT a new addComment` — pins the retro-only edit reflection path.
+      - `idempotent: re-sync with same retro produces zero retro writes` — pins single-edit-source reflection round-trip.
+
+      All 124/124 tests in `src/__tests__/issue-tracker/` pass. AC's "test additions out of scope" is correct.
+  - id: 69f7810eb126cbfe3b3331d4
+    author: code-reviewer
+    timestamp: 2026-05-03T17:08:30.641Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      **Verdict: ship-ready.** Map-based collector is a clear win over the four-variable pair. Coupling note explicitly references the test invariant. No SOLID/DRY regressions introduced.
+
+      Findings:
+
+      1. `if (base.id)` guard correct — `IssueComment.id` is `string | undefined`; truthy guard correctly excludes both `undefined` and the theoretical `""` case. Phase 5 behavior preserved.
+      2. **Stale orphaned JSDoc** at lines 493-498 (legacy detector doc sitting above `findManagedRetroComment`). Fixed in-session per Step 1.5.
+      3. File length 597 lines exceeds the 200-line module guideline. Pre-existing, not introduced by this refactor. Out of scope for this card.
+      4. No silent fallbacks, no legacy code, no `any` casts, no dead code. `parseActionItemsBookkeeping` correctly throws on malformed input.
+  - id: 69f7810e3117bd030b046a64
+    author: danxbot
+    timestamp: 2026-05-03T17:08:30.998Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Review Fixes
+
+      Code review finding #2 (stale orphaned JSDoc above `findManagedRetroComment`) fixed in this session — the legacy-detector doc block at lines 493-498 was orphaned doc rot from prior refactor neighborhood. Removed; the actual `hasLegacyRetroComment` JSDoc still lives on its own definition. Tests + tsc still green.
+  - id: 69f78138f1e1f0a0821a21e5
+    author: danxbot
+    timestamp: 2026-05-03T17:09:12.159Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Map-based collector cleanly subsumes both edit-sources; one-line lookup in finalComments. Header comment makes the retro/action-items coupling discoverable from the spawner block, no longer buried in a test comment. Code-reviewer also caught an orphaned JSDoc one neighborhood over — fixed in-session.
+      **What went wrong:** Initial pass left a stale doc block above findManagedRetroComment; would have shipped if code-reviewer hadn't surfaced it. Lesson: scan ±20 lines around every Edit's blast radius before declaring done.
+      **Action items:** Nothing
+      **Commits:** 0601187
+history: []
+retro:
+  good: Map-based collector cleanly subsumes both edit-sources; one-line lookup in finalComments. Header comment makes the retro/action-items coupling discoverable from the spawner block, no longer buried in a test comment. Code-reviewer also caught an orphaned JSDoc one neighborhood over — fixed in-session.
+  bad: "Initial pass left a stale doc block above findManagedRetroComment; would have shipped if code-reviewer hadn't surfaced it. Lesson: scan ±20 lines around every Edit's blast radius before declaring done."
+  action_item_ids: []
+  commits:
+    - "0601187"
+waiting_on: null
+blocked: null

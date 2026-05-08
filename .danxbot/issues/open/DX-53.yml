@@ -1,0 +1,55 @@
+schema_version: 4
+tracker: trello
+id: DX-53
+external_id: 69e7ea0796754cd2cb4ce46f
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot] Fix: startJsonlWatcher hydration race condition"
+description: In dispatch-stream.ts startJsonlWatcher, two concurrent calls for the same jobId can both pass the early-return guard before either writes to jsonlWatchers. Fix by adding an in-flight sentinel Set before the async hydration begins.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments:
+  - id: 69f180a4c956ae890ed21f75
+    author: newms87
+    timestamp: 2026-04-29T03:53:08.290Z
+    text: |-
+      ## Triage
+
+      **State:** Keep
+
+      **Verification:** Race is real and unfixed in `src/dashboard/dispatch-stream.ts` (lines 184-218 as of `5d9e229`). `startJsonlWatcher` checks `jsonlWatchers.has(jobId)` synchronously (line 188), then awaits `readFile(jsonlPath, "utf-8")` (line 193) before writing to `jsonlWatchers` (line 217). Two concurrent calls for the same jobId can both pass the early-return guard and both `await readFile` in parallel, then both register `setInterval` timers — leaking the first one (it can never be cleared because `jsonlWatchers.set(jobId, ...)` overwrites the reference) and double-publishing the hydration blocks.
+
+      The `subscriberCount === 0` post-await check (line 205) does NOT close this race — it protects against the disconnect-during-await case, not the concurrent-attach case. The existing idempotency test at `dispatch-stream.test.ts:330` only awaits the first call before issuing the second, so it passes by accident of sequencing rather than by structural guard.
+
+      **Trigger:** Two SSE clients subscribing to the same `dispatch:jsonl:<jobId>` topic within the readFile window. The bus's `subscribe` handler in `event-bus.ts` calls `startJsonlWatcher` lazily on first subscriber; a fast second subscriber arriving before the first's hydration completes hits the race.
+
+      **ICE:**
+      - Impact: 2 (leaked interval + duplicate hydration block publish; memory drip, not data corruption; self-heals on process restart)
+      - Confidence: 5 (race is visible in source — async gap with no in-flight sentinel)
+      - Effort: 5 (XS — add `inFlightHydrations: Set<string>` sentinel; ~10 LOC + one new test)
+      - Score: 50
+
+      **Proposed fix:** Add `const inFlightHydrations = new Set<string>()` adjacent to `jsonlWatchers`. At the top of `startJsonlWatcher`, after the `jsonlWatchers.has` check, also `if (inFlightHydrations.has(jobId)) return;` then `inFlightHydrations.add(jobId)`. Use `try { ... } finally { inFlightHydrations.delete(jobId); }` around the readFile + register block. Add a test that issues two concurrent `startJsonlWatcher` calls without awaiting the first, asserts `readFile` was called once and `setInterval` was registered once.
+
+      **Dependencies:** none — standalone fix in one file + one test file.
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

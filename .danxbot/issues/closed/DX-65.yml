@@ -1,0 +1,268 @@
+schema_version: 4
+tracker: trello
+id: DX-65
+external_id: 69f9dfc245a088ecfe67ccfe
+parent_id: DX-60
+children: []
+dispatch:
+  id: 88a206ef-82dc-4924-88c9-f8dce7cf355d
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Issues board > Phase 5: IssueDrawer slide-over with 4 tabs"
+description: |-
+  ## Context
+
+  Phase 5 of DX-60. Click an IssueCard → right-side slide-over panel
+  showing full issue detail with 4 tabs (Overview / Comments / Retro /
+  Raw YAML). Pixel-match `docs/design/issues-board/IssueDrawer.jsx`.
+
+  ## Solution
+
+  ### Component layout
+
+  - `dashboard/src/components/issues/IssueDrawer.vue` — top-level drawer.
+    Renders a `<dialog>` or absolute slide-over (the prototype uses
+    inline-styled fixed-position divs with a scrim + slide animation —
+    match exactly). Width `min(560px, 100vw)`, right-anchored,
+    `bg #0b1220, borderLeft 1px solid #1e293b`.
+    Animations:
+    ```
+    @keyframes iss-slide { from { transform: translateX(100%); } to { transform: translateX(0); } }
+    @keyframes iss-fade  { from { opacity: 0; } to { opacity: 1; } }
+    ```
+    Slide 200ms `cubic-bezier(.2,.8,.2,1)`; fade 150ms ease-out.
+  - Scrim — fixed `inset:0`, `bg rgb(2 6 23 / 0.5)`, click closes.
+
+  Reuse `danx-ui`'s `dialog` component if its animation can be customized
+  to match; otherwise inline divs (the prototype path). Don't sacrifice
+  visual fidelity for the abstraction.
+
+  ### Header (`DrawerHeader`)
+
+  `padding: 16px 20px 12px`, `borderBottom: 1px solid #1e293b`,
+  flex-column gap 10. Top row: id chip · `<TypeBadge>` · status pill ·
+  blocked badge (when blocked) · relative time pinned right · close `×`
+  button. Below: H2 title (`font-size 18, weight 600, line-height 1.3,
+  letterSpacing -0.01em, color #f1f5f9`). Below: relationships row when
+  parent_id or children present — see Phase 6 for the scope-toggle
+  button (this phase ships the static parent / children chips only).
+
+  ### Tabs strip
+
+  Underneath the header, before the body. Tabs:
+
+  - `Overview` (default)
+  - `Comments<count if > 0>`
+  - `Retro` (disabled when `!has_retro` — opacity 0.5, cursor not-allowed)
+  - `Raw YAML`
+
+  Active tab has `borderBottom 2px solid #6366f1, color #a5b4fc`.
+
+  ### OverviewTab
+
+  Sections, top to bottom (skip empty ones):
+
+  1. `Description` — uppercase 11px label, then markdown rendered into
+     `font-size 13, color #cbd5e1, line-height 1.55, textWrap pretty`.
+     Use `danx-ui`'s `markdown-editor` in read-only mode if it accepts
+     a `readonly` flag — otherwise add a tiny markdown renderer
+     (description content is markdown today: `##` headers, `**bold**`,
+     code fences, backticks). The card description in DX-60/61 etc.
+     uses these features — the renderer must handle them.
+  2. `Blocked panel` (when `blocked` non-null) — `bg rgb(239 68 68 /
+     0.08), border rgb(239 68 68 / 0.25), padding 10/12, radius 6`.
+     Title `⛔ Blocked` (`#fca5a5`). Reason text. `by:` row with one
+     chip per blocker id (`#fecaca, bg rgb(239 68 68 / 0.15)` chips,
+     clickable — emits `jump-issue` with that id; cross-card nav lands
+     in Phase 6).
+  3. `Acceptance Criteria` — uppercase label + count `<done>/<total>`.
+     One row per AC item. Done = green check chip + line-through.
+     Pending = empty grey chip.
+  4. `Phases` — uppercase label + one card-row per phase. Each row has
+     a 22×22 status-glyph chip (PHASE_STATUS_META palette), `<i+1>.
+     <name>` text, status pill on the right.
+  5. `Children · <N>` (epic only) — one row per child id. Click emits
+     `jump-issue` with that id (cross-card nav: Phase 6). Each row
+     shows id chip + TypeBadge + ellipsized title + status text.
+
+  ### CommentsTab
+
+  Empty state: centered grey `"No comments yet."`. Otherwise one bubble
+  per comment: `padding 10/12, radius 6`. `danxbot`-authored bubbles
+  use `bg rgb(30 27 75 / 0.4), border rgb(99 102 241 / 0.25), name
+  color #a5b4fc`. Others: `bg rgb(15 23 42 / 0.6), border #1e293b,
+  name color #e2e8f0`. Time = relative.
+
+  ### RetroTab
+
+  Three sections (`What went well` / `What didn't` / `Action items`)
+  rendered as bulleted lists when populated. Heading colors `#6ee7b7
+  / #fca5a5 / #fcd34d`. Plus `Commits` row of monospace chips when
+  `retro.commits` non-empty.
+
+  Issue YAML model has `retro.good / retro.bad` as strings (not
+  arrays). Split on newlines + filter empty lines for the bulleted
+  rendering. `retro.action_items` already an array. Adapt accordingly.
+
+  ### RawTab
+
+  Mono-pre dump of the issue's core fields. Use the prototype's
+  pseudo-YAML shape from `IssueDrawer.jsx` `RawTab`. Optionally use
+  `danx-ui`'s `code-viewer` if it supports yaml + dark theme cleanly;
+  the prototype's plain `<pre>` with `bg #020617, font-size 12, color
+  #cbd5e1, whitespace pre-wrap` is acceptable.
+
+  ## State wiring
+
+  - `IssuesPage.vue` tracks `selectedIssueId`. When non-null, fetch full
+    detail via `fetchIssueDetail(repo, id)` (cached in a `Map<string,
+    Issue>` so reopening is instant). While loading, render the drawer
+    shell with a centered spinner.
+  - On `select` from card → set selectedIssueId; on `close` from drawer
+    → clear it.
+  - Push `?issue=<id>` to URL via `replaceState` so deep-linking works.
+    Initial load reads `?issue` and opens that drawer if present.
+
+  ## Out of Scope (this phase)
+
+  - Epic scope toggle button in the header (Phase 6)
+  - Cross-card jump from blocked-by chips / children rows / parent chip
+    (Phase 6 — emit the events here, but the page handler that scopes /
+    swaps drawer issue lands in Phase 6)
+  - Comment authoring / editing
+  - Markdown of `comments[].text` if comments contain markdown — render
+    plain text for v1 (line breaks honored, no other formatting)
+
+  ## Verify
+
+  - Click any card on the live board → drawer slides in from the right
+    in 200ms with the spec animation.
+  - Tabs switch instantly with the indigo underline; Retro tab is
+    disabled when `has_retro === false`.
+  - Reload `http://localhost:5566/?issue=DX-60` → drawer auto-opens to
+    that issue.
+  - `cd dashboard && npx vue-tsc --noEmit` clean.
+
+  ## Key Files
+
+  - `dashboard/src/components/issues/IssueDrawer.vue` (new)
+  - `dashboard/src/components/issues/DrawerHeader.vue` (new)
+  - `dashboard/src/components/issues/OverviewTab.vue` (new)
+  - `dashboard/src/components/issues/CommentsTab.vue` (new)
+  - `dashboard/src/components/issues/RetroTab.vue` (new)
+  - `dashboard/src/components/issues/RawTab.vue` (new)
+  - `dashboard/src/components/issues/MarkdownView.vue` (new) — small
+    read-only markdown renderer (or wraps `danx-ui` markdown-editor
+    read-only)
+  - `dashboard/src/composables/useIssues.ts` — extend with
+    `fetchDetail(id)` + cache
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9dfc324e5b3635e3c4ac3
+    title: Drawer slides in from the right in 200ms with cubic-bezier(.2,.8,.2,1); scrim fade 150ms; matches IssueDrawer.jsx animation keyframes
+    checked: true
+  - check_item_id: 69f9dfc4a0fb3e982276cebe
+    title: "DrawerHeader: id chip + TypeBadge + status pill + (optional) blocked badge + relative time + close X"
+    checked: true
+  - check_item_id: 69f9dfc4e4f50c72278c4386
+    title: "Tabs: Overview / Comments<count> / Retro (disabled when !has_retro) / Raw YAML — active tab has indigo underline"
+    checked: true
+  - check_item_id: 69f9dfc45c53c3e231cf5b66
+    title: OverviewTab renders Description (markdown), Blocked panel, AC checklist, Phases, Children — each section hides when empty
+    checked: true
+  - check_item_id: 69f9dfc5f96330c344da8102
+    title: "Markdown rendering supports ## headers, **bold**, `inline code`, ``` fenced code blocks ```"
+    checked: true
+  - check_item_id: 69f9dfc5ffb059f6d9ce6f2f
+    title: "CommentsTab: danxbot author bubbles use indigo accent; others use slate; relative time"
+    checked: true
+  - check_item_id: 69f9dfc668acbc7bb4472618
+    title: RetroTab parses retro.good / retro.bad newline-strings into bullets; Commits row when retro.commits non-empty
+    checked: true
+  - check_item_id: 69f9dfc6c8c6ebefc33b9c7c
+    title: RawTab dumps issue YAML with monospace font on near-black background
+    checked: true
+  - check_item_id: 69f9dfc704a63103a7c12105
+    title: Click card → drawer opens; click scrim or X → drawer closes; URL ?issue=<id> mirrors selection and deep-links
+    checked: true
+  - check_item_id: 69f9dfc7f05573238468697f
+    title: useIssues fetchDetail(id) caches Issue objects; reopening same drawer is instant
+    checked: true
+  - check_item_id: 69f9dfc821a15df932082fc6
+    title: cd dashboard && npx vue-tsc --noEmit passes clean
+    checked: true
+comments:
+  - id: 69f9fbf90ec4e9ec6f5d725f
+    author: newms87
+    timestamp: 2026-05-05T14:17:29.987Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `88a206ef-82dc-4924-88c9-f8dce7cf355d` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T14:17:29.886Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T16:17:29.886Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '88a206ef-82dc-4924-88c9-f8dce7cf355d' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa0a63f81bf3e2176fb2da
+    author: danxbot
+    timestamp: 2026-05-05T15:18:59.041Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Markdown renderer kept tiny — no marked/markdown-it dep, ~80 LOC. PUA-codepoint placeholder sentinel (U+E000/E001) prevents user-typed collision after escapeHtml.
+      Detail cache invalidates per-id by mtime instead of on every poll → reopen-same-drawer stays instant while stale data can't linger.
+      Cwd-bind to existing IssueListItem flow (allIssues prop) means OverviewTab Children rows reuse the already-fetched list — no extra API.
+
+      **What went wrong:** First MarkdownView Edit attempt corrupted the file with NUL bytes (regex literal in old_string with U+0020 space matched against U+0000 NUL silently). Caught via cat -A, rewrote whole SFC.
+      RawTab is a partial pseudo-YAML serializer (matches prototype + AC) — would be cleaner backed by js-yaml on a future pass.
+      Italic regex still hand-rolled; tighter than original but a real markdown lib remains the right answer for v2.
+
+      **Action items:** Nothing
+      **Commits:** 66c212f
+history: []
+retro:
+  good: |
+    Markdown renderer kept tiny — no marked/markdown-it dep, ~80 LOC. PUA-codepoint placeholder sentinel (U+E000/E001) prevents user-typed collision after escapeHtml.
+    Detail cache invalidates per-id by mtime instead of on every poll → reopen-same-drawer stays instant while stale data can't linger.
+    Cwd-bind to existing IssueListItem flow (allIssues prop) means OverviewTab Children rows reuse the already-fetched list — no extra API.
+  bad: |
+    First MarkdownView Edit attempt corrupted the file with NUL bytes (regex literal in old_string with U+0020 space matched against U+0000 NUL silently). Caught via cat -A, rewrote whole SFC.
+    RawTab is a partial pseudo-YAML serializer (matches prototype + AC) — would be cleaner backed by js-yaml on a future pass.
+    Italic regex still hand-rolled; tighter than original but a real markdown lib remains the right answer for v2.
+  action_item_ids: []
+  commits:
+    - 66c212f
+waiting_on: null
+blocked: null

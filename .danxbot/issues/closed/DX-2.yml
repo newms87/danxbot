@@ -1,0 +1,272 @@
+schema_version: 4
+tracker: trello
+id: DX-2
+external_id: 69f772083ebbc515fcf1534e
+parent_id: null
+children: []
+dispatch:
+  id: d269351c-c7e4-4a69-b2ea-e55893f8e63a
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "[Danxbot] Run Layer 3 verification of Phase 5 against renamed issue-worker workspace"
+description: |-
+  ## Context
+
+  Phase 5 (commit `c8e8101`) shipped major changes inside `src/issue-tracker/sync.ts` (worker retro renderer + action-items spawner) AND renamed the workspace dir `trello-worker` → `issue-worker`. Layer 1/2 tests cover both ends extensively (2567 backend + 179 dashboard tests green). Layer 3 (`make test-system-yaml-memory`, ~$0.05 per run) was NOT run as part of Phase 5 verification.
+
+  Why it matters: Layer 3 dispatches REAL claude into the renamed workspace. It catches drift the unit + integration layers can't:
+
+  - Workspace fixture loads cleanly under the new name end-to-end.
+  - The dispatched session's JSONL contains zero `mcp__trello__*` tool calls (the AC #4 structural property).
+  - Real claude's retro write path produces YAML the worker's new sync renders without surprise.
+  - The `injectIssueWorkerAlias` symlink (one-release alias) doesn't break anything when the fixture creates an `issue-worker/` workspace + the alias creates a `trello-worker/` symlink alongside.
+
+  ## Solution
+
+  1. Boot the worker locally via `make launch-worker REPO=<some-repo>` (any repo with `DANX_TRELLO_ENABLED=false` and a populated `.danxbot/.env`).
+  2. Run `make test-system-yaml-memory` from the repo root.
+  3. Capture output to `/tmp/v5-l3.log`. If green, done. If red, file a bug card with the failure mode.
+  4. (Optional) Run `make test-system-poller` if a Trello-enabled repo is available — exercises the full dispatch round-trip + critical-failure flag.
+
+  ## Acceptance Criteria
+
+  - `make test-system-yaml-memory` exit 0.
+  - The captured JSONL contains zero `mcp__trello__*` entries.
+  - The worker container's `<repo>/.danxbot/workspaces/` listing shows `issue-worker/` as a real directory and `trello-worker` as a symlink pointing to it.
+
+  ## Out of scope
+
+  - Production deploy (`make deploy TARGET=gpt`) — separate operator action.
+  - Performance benchmarking of the new sync path.
+
+  ## Notes
+
+  This is a one-shot verification task; the next agent should pick it up FIRST before touching any code. If it fails, that's a Phase 5 hotfix; if it passes, all the other follow-up cards (`VeChPbUQ`, `AoIo3L6K`, the test-coverage and DRY cards) can ship in any order.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f775284b8802e2b0c89e72
+    title: "`make test-system-yaml-memory` exit 0."
+    checked: true
+  - check_item_id: 69f77528b4be0c36559d1f3d
+    title: The captured JSONL contains zero `mcp__trello__*` entries.
+    checked: true
+  - check_item_id: 69f77528f8609ee4bbb0dbcf
+    title: "`<repo>/.danxbot/workspaces/issue-worker/` is the canonical real directory and the legacy `trello-worker` symlink alias is retired (commit `593cc40` — `scrubLegacyTrelloWorkerSymlink` removes any leftover symlink; pre-existing real directories are preserved as operator-authored content)."
+    checked: true
+comments:
+  - id: 69f7768070cd68e0abc192fd
+    author: danxbot
+    timestamp: 2026-05-03T16:23:28.108Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Needs Help — Layer 3 verification RED, Phase 5 hotfix card filed
+
+      **What's done:**
+      - Ran `make test-system-yaml-memory` against the local host-mode worker on port 5561 (`localhost`, repo `danxbot`, runtime: host). Captured full output to `/tmp/v5-l3.log`.
+      - Verified workspace dir layout on `repos/danxbot`, `repos/gpt-manager`, `repos/platform`.
+      - Filed Phase 5 hotfix bug card `69f7764f908404c7d19bf9b1` covering both root causes with reproducer, AC list, and key files.
+
+      **What's still needed:**
+      1. Land the Phase 5 hotfix card `69f7764f908404c7d19bf9b1`. After it ships, re-dispatch this verification card.
+      2. Re-run `make test-system-yaml-memory` and confirm exit 0, JSONL has zero `mcp__trello__*` entries.
+      3. Re-verify `<repo>/.danxbot/workspaces/` on all three connected repos: `issue-worker/` real dir, `trello-worker` symlink → `issue-worker/`.
+
+      **Why this needs human/host help:**
+      The verification revealed two Phase 5 defects. The card description itself states "If red, that's a Phase 5 hotfix" — by design this verification card does not fix; it produces a verdict and hands off. The hotfix card needs operator priority + a fresh dispatch round.
+
+      **Findings (ground truth from this run):**
+
+      Defect 1 — `src/poller/inject/workspaces/issue-worker/workspace.yml` declares `TRELLO_API_KEY`, `TRELLO_TOKEN`, `TRELLO_BOARD_ID` under `required-placeholders`, but Phase 4 dropped the trello MCP server and `workspace-shape.test.ts:38-40` even asserts those strings DO NOT appear in `.mcp.json`. `/api/launch` rejects the dispatch:
+
+      ```
+      {"error":"workspace \"issue-worker\" missing required placeholder(s): DANXBOT_WORKER_PORT, TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID"}
+      ```
+
+      Note: the `DANXBOT_WORKER_PORT` entry in the error string is a side-effect of the test invoking `make` without `DANXBOT_WORKER_PORT` set in the dispatched agent's env (literal `${DANXBOT_WORKER_PORT}` was in the agent env, defaulted by `${VAR:-5561}` to `${DANXBOT_WORKER_PORT}`). With `DANXBOT_WORKER_PORT=5561` exported, the worker port placeholder is satisfied and only the three Trello entries remain unresolved. The hotfix card's Defect 1 description focuses on those three, which are the real stale entries.
+
+      Defect 2 — `src/poller/index.ts:632 injectIssueWorkerAlias` returns silently when `trello-worker/` exists as a real directory (the shape Phase 3 commit `52410c8` produced on every previous tick). Result on every upgraded environment: `trello-worker/` stays a real directory forever. Confirmed locally on `repos/danxbot`, `repos/gpt-manager`, `repos/platform` — all three have real `trello-worker/` dirs and only `repos/danxbot` has `issue-worker/`.
+
+      **Incomplete ACs:**
+      - `make test-system-yaml-memory` exit 0. (FAILED — see `/tmp/v5-l3.log`. Launch returned 4xx with "missing required placeholder(s)" before any claude session was spawned.)
+      - The captured JSONL contains zero `mcp__trello__*` entries. (UNVERIFIABLE — no JSONL was produced; launch failed before claude started.)
+      - The worker container's `<repo>/.danxbot/workspaces/` listing shows `issue-worker/` as a real directory and `trello-worker` as a symlink pointing to it. (FAILED — `trello-worker` is a real directory on every connected repo, not a symlink.)
+
+      **Final AC check:** Before Done, every AC must be checked: true.
+
+      **References:**
+      - Hotfix card: `69f7764f908404c7d19bf9b1`
+      - Verification log: `/tmp/v5-l3.log`
+      - Phase 5 commit: `c8e8101`
+      - Phase 4 commit (dropped Trello MCP): `a2dc586`
+      - Phase 3 commit (introduced trello-worker dir): `52410c8`
+  - id: 69fa4e1d460221b7f315d60f
+    author: danxbot
+    timestamp: 2026-05-05T20:07:57.846Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Verification PASSED — Phase 5 Layer 3 green
+
+      `make test-system-yaml-memory` against the running worker on port 5563 completed with exit 0:
+
+      ```
+      === test-system-yaml-memory ===
+        ✓ Job launched (id: 5bcab2ef-bba9-4989-8fc1-ce5812f888fc)
+        ✓ Status is completed
+        ✓ Located session JSONL
+        ✓ Zero mcp__trello__ tool calls in session JSONL
+        → Completed in 29s
+      Passed: 6, Failed: 0, Skipped: 0
+      ```
+
+      **AC #1 + AC #2:** verified directly by the test (launch ok, JSONL has zero `mcp__trello__*`).
+
+      **AC #3 — rewritten:** the original wording required `trello-worker` to be a symlink → `issue-worker`. That contract was the Phase 5 alias period, retired in commit `593cc40` ("Drop legacy trello-worker symlink alias"). Current canonical state: `issue-worker/` is the real workspace dir; `scrubLegacyTrelloWorkerSymlink` (in `src/poller/legacy-trello-worker-scrub.ts`) removes any leftover symlink on every poll tick; pre-existing real `trello-worker/` dirs on already-upgraded repos are preserved by design as operator-authored content. AC #3 edited in place to reflect that contract — same `check_item_id` retained, justification captured here per the "wording too strict → edit AC with justification" Step 8 rule.
+
+      **References:**
+      - Test log: `/tmp/iss-2-rerun.log`
+      - Phase 5 hotfix: `a417f99`
+      - Alias retirement: `593cc40`
+      - Worker port: `5563` (DANXBOT_WORKER_PORT in `repos/danxbot/.danxbot/.env`)
+      - Phase 5 commit: `c8e8101`
+  - id: 69f77ce4de3cd3ed896f30a6
+    author: danxbot
+    timestamp: 2026-05-03T16:50:44.022Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Needs Help — running worker still on pre-hotfix code; operator must restart before re-verification
+
+      **Re-pickup state:** Card was moved back from Needs Help → ToDo expecting Layer 3 to pass after hotfix `a417f99`. It does NOT pass yet because the running danxbot worker (PID 23459, started 13:15) was launched BEFORE the hotfix landed (13:44). `tsx` does not hot-reload TypeScript source — the worker process is still executing pre-hotfix `src/dispatch/core.ts`, so the new `DANXBOT_WORKER_PORT` auto-inject is not active.
+
+      **Empirical proof (collected this dispatch):**
+
+      ```
+      $ curl -sS -X POST http://127.0.0.1:5561/api/launch \
+          -H 'Content-Type: application/json' \
+          -d '{"workspace":"issue-worker","task":"Reply OK ...","api_token":"system-test-token"}'
+      {"error":"workspace \"issue-worker\" missing required placeholder(s): DANXBOT_WORKER_PORT"}
+      ```
+
+      The error string only lists `DANXBOT_WORKER_PORT` (not `TRELLO_*`) — confirming the workspace fixture mirror IS post-hotfix (source-to-target file copy on each tick picked up the trimmed `required-placeholders` block) but the worker process code is NOT.
+
+      Likewise the alias defect remains visible on disk: `repos/{danxbot,gpt-manager,platform}/.danxbot/workspaces/trello-worker/` are all still real directories, none symlinks. (gpt-manager + platform have no worker running at all; only danxbot's worker is up.)
+
+      **Why this can't be done in-session:** Restarting the worker (`kill 23459` then `make launch-worker REPO=danxbot`) would SIGKILL this dispatch before any save lands. There is no in-process reload path for `tsx`.
+
+      **What's still needed (operator, ~5 minutes):**
+
+      1. Wait for `danxbot_complete` from this dispatch.
+      2. `make stop-worker REPO=danxbot && make launch-worker REPO=danxbot` (or host-mode equivalent).
+      3. Optionally start gpt-manager + platform workers so AC #3 covers all three repos: `make launch-worker REPO=gpt-manager && make launch-worker REPO=platform`. Wait one poll tick (~60s).
+      4. Verify AC #1: `make test-system-yaml-memory > /tmp/v5-l3-rerun.log 2>&1; echo $?`. Expect exit 0.
+      5. Verify AC #2: confirm the captured JSONL inside that test contains zero `mcp__trello__*` entries (the test asserts this; any pass = AC met).
+      6. Verify AC #3: `for r in danxbot gpt-manager platform; do ls -la repos/$r/.danxbot/workspaces/ | grep -E "(issue|trello)-worker"; done`. Expect `issue-worker` real dir + `trello-worker` symlink → issue-worker on each.
+      7. Re-dispatch this card so the next agent flips it to Done.
+
+      **Incomplete ACs (verbatim):**
+      - `make test-system-yaml-memory` exit 0.
+      - The captured JSONL contains zero `mcp__trello__*` entries.
+      - The worker container's `<repo>/.danxbot/workspaces/` listing shows `issue-worker/` as a real directory and `trello-worker` as a symlink pointing to it.
+
+      **Final AC check:** Before Done, every AC must be `checked: true`.
+
+      **References:**
+      - Hotfix commit: `a417f99` (verified present in tree, source files contain the fix)
+      - Running worker PID: 23459, started 13:15, hotfix shipped 13:44
+      - Verification probe output: `{"error":"... missing required placeholder(s): DANXBOT_WORKER_PORT"}` (above)
+  - id: 69f8026364f405193944c81a
+    author: newms87
+    timestamp: 2026-05-04T02:20:19.029Z
+    text: |-
+      ## Retro
+
+      ### What went well
+      - Hotfix `a417f99` resolved Defect 1 (stale `required-placeholders`). `workspace.yml` now declares only `DANXBOT_STOP_URL` + `DANXBOT_WORKER_PORT`; auto-injected by `dispatch()`.
+      - Test passed clean: exit 0, 12s, ~$0.05. Zero `mcp__trello__*` calls in dispatched session JSONL (AC #2).
+      - Followup commits `593cc40` (drop alias) + `8bb380a` (drop migration script) reframed Defect 2 entirely — alias was retired, recovery via Trello re-hydrate.
+
+      ### What went wrong
+      - Verification blocked initially: danxbot worker (port 5561) wasn't running; gpt-manager worker (port 5562) was halted via `CRITICAL_FAILURE` flag from a prior dispatch (`danx_issue_save broken on v1 YAMLs`). Required restart + flag clear before test could run.
+      - Stale `trello-worker/` real dirs remain on disk in `repos/{danxbot,gpt-manager,platform}/.danxbot/workspaces/` — cosmetic only since alias scrubber retired, but should be cleaned.
+      - 863 stale MCP dirs flagged by test prereq → separate cleanup target.
+
+      ### Verdict
+      - AC #1 ✓ (exit 0)
+      - AC #2 ✓ (zero mcp__trello__ in JSONL, dispatch `7e1adf5c-c362-4bba-99e3-43620be74473`)
+      - AC #3 N/A — alias-based contract retired by `593cc40`. Original AC was unsatisfiable by design after the alias-drop.
+
+      ### Action items
+      - Manual cleanup: `rm -rf repos/{danxbot,gpt-manager,platform}/.danxbot/workspaces/trello-worker` (operator).
+      - v1 YAML schema migration: gpt-manager critical-failure flag indicated stale `validateIssue` on disk vs runtime. Recovery path is delete YAML + re-hydrate per `8bb380a`. Separate work; flag cleared.
+      - 863 stale MCP dirs cleanup target.
+
+      ### Commits referenced
+      - `a417f99` Phase 5 hotfix
+      - `593cc40` Drop legacy trello-worker symlink alias
+      - `8bb380a` Drop migration script — recovery via Trello re-hydrate
+
+      ### Verification log
+      `/tmp/v5-l3-rerun3.log`
+  - id: 69fa4a91eaa0c8d7cb88813c
+    author: newms87
+    timestamp: 2026-05-05T19:52:49.367Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `d269351c-c7e4-4a69-b2ea-e55893f8e63a` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T19:52:49.757Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T21:52:49.757Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l 'd269351c-c7e4-4a69-b2ea-e55893f8e63a' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa4e1e6a855d080ce705d3
+    author: danxbot
+    timestamp: 2026-05-05T20:07:58.188Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Layer 3 verification (`make test-system-yaml-memory`) passed against worker on port 5563 — job `5bcab2ef-bba9-4989-8fc1-ce5812f888fc`, status completed, located session JSONL, zero `mcp__trello__*` tool calls. Phase 5's structural guarantee (workspace `.mcp.json` no longer advertises Trello server) holds end-to-end. Both Phase 5 hotfix (`a417f99`, fixed stale `required-placeholders`) and the alias-retirement cleanup (`593cc40`, dropped the legacy `trello-worker` symlink) shipped before this re-dispatch, so the original two defects are gone.
+      **What went wrong:** AC #3 as originally authored required `trello-worker` to exist as a symlink pointing to `issue-worker`. That requirement reflected the Phase 5 alias-period contract, which was retired in `593cc40` before this verification re-ran. AC #3 was rewritten in-place to the current canonical contract (issue-worker is the real workspace dir; any leftover symlink is auto-scrubbed; pre-existing real `trello-worker` directories on already-upgraded repos are preserved as operator-authored content per `scrubLegacyTrelloWorkerSymlink`'s safety rule). Verified via direct read of `src/poller/legacy-trello-worker-scrub.ts` and the dispatching cwd itself (`<repo>/.danxbot/workspaces/issue-worker/`).
+      **Action items:** Nothing
+      **Commits:** —
+history: []
+retro:
+  good: Layer 3 verification (`make test-system-yaml-memory`) passed against worker on port 5563 — job `5bcab2ef-bba9-4989-8fc1-ce5812f888fc`, status completed, located session JSONL, zero `mcp__trello__*` tool calls. Phase 5's structural guarantee (workspace `.mcp.json` no longer advertises Trello server) holds end-to-end. Both Phase 5 hotfix (`a417f99`, fixed stale `required-placeholders`) and the alias-retirement cleanup (`593cc40`, dropped the legacy `trello-worker` symlink) shipped before this re-dispatch, so the original two defects are gone.
+  bad: "AC #3 as originally authored required `trello-worker` to exist as a symlink pointing to `issue-worker`. That requirement reflected the Phase 5 alias-period contract, which was retired in `593cc40` before this verification re-ran. AC #3 was rewritten in-place to the current canonical contract (issue-worker is the real workspace dir; any leftover symlink is auto-scrubbed; pre-existing real `trello-worker` directories on already-upgraded repos are preserved as operator-authored content per `scrubLegacyTrelloWorkerSymlink`'s safety rule). Verified via direct read of `src/poller/legacy-trello-worker-scrub.ts` and the dispatching cwd itself (`<repo>/.danxbot/workspaces/issue-worker/`)."
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

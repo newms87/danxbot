@@ -1,0 +1,255 @@
+schema_version: 4
+tracker: trello
+id: DX-63
+external_id: 69f9dfb7fca208a9dc348d3d
+parent_id: DX-60
+children: []
+dispatch:
+  id: 248d31af-e127-44de-8b4b-24d92bd6b8bb
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Issues board > Phase 3: rich IssueCard (epic accents, phase checklist, AC bar, blocked, parent chip)"
+description: |-
+  ## Context
+
+  Phase 3 of DX-60. Phase 2 shipped a minimal card; this phase grows it to
+  pixel-match `docs/design/issues-board/IssueCard.jsx`. Drawer + filters +
+  scope still come later.
+
+  ## Solution
+
+  Replace the minimal IssueCard.vue with the full design. Source of truth:
+  `docs/design/issues-board/IssueCard.jsx`. Follow it line-by-line; do not
+  invent palette or spacing.
+
+  ### Card shell
+
+  - Background:
+    - epic: `rgb(30 27 75 / 0.45)`
+    - non-epic: `rgb(15 23 42 / 0.7)`
+  - Border: `1px solid #1e293b`
+  - Left bar: `3px solid #ef4444` if `blocked`; else for epic
+    `3px solid #6366f1`; else default 1px border (no left bar).
+  - Radius `8px`, padding `10px 12px`.
+  - Hover: lift `translateY(-1px)` 100ms; mouseleave returns.
+
+  ### Header row (id + type + meta)
+
+  - `font-size: 10px, weight 600, color #64748b, tabular-nums` for the id.
+  - `<TypeBadge type="epic|bug|feature" compact />` (already exists from
+    Phase 2 — make sure `compact` variant uses `padding: 1px 6px`).
+  - Epic only: phase-count chip
+    `<N> phases` with `color #a5b4fc, bg rgb(99 102 241 / 0.12), padding
+    1px 6px, radius 4`.
+  - Blocked badge pinned to the right via `marginLeft: auto` —
+    `⛔ Blocked` glyph + `font-size: 10px, weight 600, color #fca5a5`,
+    `title` attr = `issue.blocked.reason`.
+
+  ### Title
+
+  Two-line clamp via `display: -webkit-box; WebkitLineClamp: 2;
+  WebkitBoxOrient: vertical; overflow: hidden;`. `font-size: 13, weight
+  500, color #e2e8f0, line-height 1.35`.
+
+  ### Body content
+
+  - **Epic**: render the `PhaseChecklist` — one row per phase. Each row
+    has a 16×16 status-glyph chip (`PHASE_STATUS_META` palette: ✓ done /
+    ◐ in_progress / ○ todo / ⛔ blocked) plus `<i+1>: <p.name>`. Done
+    phases get `text-decoration: line-through` and `color: #64748b`.
+  - **Non-epic** with `ac.length > 0`: render an `<ACBar>` — a 4px-tall
+    progress track (`bg rgb(51 65 85 / .6)`) with the filled portion
+    `#10b981` at 100% else `#6366f1`. To the right show
+    `<done>/<total>` in `color #94a3b8, font-size 11, tabular-nums`.
+
+  ### Footer
+
+  - `parent_id` chip (clickable): `↑ <parent_id>`, `color #a5b4fc, bg
+    rgb(99 102 241 / 0.12), border rgb(99 102 241 / 0.25), padding 1px
+    6px, radius 4`. Click stops propagation and emits
+    `parent-click` with the parent id (the page handles scope in
+    Phase 6 — for now just emit the event).
+  - `comments_count > 0` → `💬<n>` icon-text.
+  - `has_retro` → green `retro` tag, `color #86efac, font-size 10`.
+  - `relativeTime(updated_at)` pinned right (`font-size 10`). Use the
+    helper from `IssuesFixtures.jsx` — copy into a TS util at
+    `dashboard/src/utils/relativeTime.ts`.
+
+  ### Backend → frontend mapping
+
+  Backend status values are **schema-cased** (`"In Progress"`,
+  `"Needs Help"`); design uses lowercase ids (`in_progress`,
+  `needs_help`). Phase 2 already centralized this via
+  `statusToColumnId(status)` in IssueBoard.vue. Same mapping for
+  phase status: `"Complete"` → `"done"`, `"Pending"` → `"todo"`,
+  `"Blocked"` → `"blocked"`, `"In Progress"` → `"in_progress"`.
+  Map type values `"Epic" | "Bug" | "Feature"` → `"epic" | "bug" |
+  "feature"` for the design's palette lookup.
+
+  Note: list endpoint returns `phases_total`/`phases_done` only — to
+  render the phase checklist with names + per-phase status the card
+  needs `phases[]`. **Extend the list shape (DX-61)?** No — instead,
+  for epics include `phases: { name: string, status: PhaseStatusId }[]`
+  in the list response. Add this to DX-61's AC before that phase
+  starts; this card's implementation depends on it. If DX-61 already
+  shipped, the implementer of THIS phase pushes the addition to DX-61
+  via a follow-up commit before continuing.
+
+  ## Verify
+
+  - Side-by-side compare with `docs/design/issues-board/index.html`
+    rendered locally (`npx serve docs/design/issues-board/`). Card
+    visuals match: hover lift, blocked left-bar, epic accent + phase
+    chip, AC bar percentage colors at 100% vs partial.
+  - `cd dashboard && npx vue-tsc --noEmit` clean.
+
+  ## Key Files
+
+  - `dashboard/src/components/issues/IssueCard.vue` — replace
+  - `dashboard/src/components/issues/PhaseChecklist.vue` (new)
+  - `dashboard/src/components/issues/ACBar.vue` (new)
+  - `dashboard/src/utils/relativeTime.ts` (new)
+  - `dashboard/src/components/issues/issuePalette.ts` (new) — exports
+    `ISSUE_TYPE_META`, `PHASE_STATUS_META`, `COLUMN_ACCENTS`,
+    `statusToColumnId`, `phaseStatusToId` so every issue component
+    consumes one source of truth
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9dfb86d441950c9bc0bed
+    title: "Epic cards: indigo left bar 3px, dark indigo bg rgb(30 27 75 / 0.45), <N> phases chip, full PhaseChecklist body"
+    checked: true
+  - check_item_id: 69f9dfb9bce1418deca7bc23
+    title: "Non-epic cards: ACBar with #6366f1 fill (or #10b981 at 100%), <done>/<total> readout"
+    checked: true
+  - check_item_id: 69f9dfba7e639e0390eab002
+    title: "Blocked cards: red left bar 3px (overrides epic accent), ⛔ Blocked badge pinned right with title=blocked.reason"
+    checked: true
+  - check_item_id: 69f9dfbaff6d1954a429db29
+    title: "Header row: id chip + TypeBadge compact + phase-count chip (epic) all match design palette"
+    checked: true
+  - check_item_id: 69f9dfba18cd0b9dcd55fc6c
+    title: "Footer: parent chip clickable (emits parent-click, stops propagation), comments / retro / relative time"
+    checked: true
+  - check_item_id: 69f9dfbbd53ef3243892c858
+    title: "Hover: card lifts translateY(-1px) 100ms; mouseleave returns to 0"
+    checked: true
+  - check_item_id: 69f9dfbb5c53c3e231cf39d1
+    title: PHASE_STATUS_META + ISSUE_TYPE_META + COLUMN_ACCENTS exported from one issuePalette.ts module
+    checked: true
+  - check_item_id: 69f9dfbca0e2e9adbb94681d
+    title: Backend list response includes phases[] for epics so the checklist can render without a detail fetch
+    checked: true
+  - check_item_id: 69f9dfbc5714b6151cec0020
+    title: cd dashboard && npx vue-tsc --noEmit passes clean
+    checked: true
+comments:
+  - id: 69f9e525721a38429f7a0060
+    author: danxbot
+    timestamp: 2026-05-05T12:40:05.091Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Notes from Phase 2
+
+      Phase 2 (DX-62, commit `5cce516`) shipped the minimal card. Phase 3 layers rich content on top. Pickup notes:
+
+      **Files to edit:**
+      - `dashboard/src/components/issues/IssueCard.vue` — current minimal version: id chip + TypeBadge + 2-line title + footer (parent chip / comments / retro / time). Add: epic accents, `PhaseChecklist`, `ACBar`, blocked accent.
+      - Optionally split `PhaseChecklist` and `ACBar` into sibling SFCs in `dashboard/src/components/issues/` if they grow.
+
+      **Reusable already in repo:**
+      - `dashboard/src/utils/relativeTime.ts` — already used by IssueCard.
+      - `TypeBadge.vue` — already imported.
+      - `IssueListItem` from `@backend/dashboard/issues-reader.js` re-exported via `dashboard/src/types.ts`. Has `ac_total`, `ac_done`, `phases_total`, `phases_done`, `blocked: boolean`, `comments_count`, `has_retro`, `updated_at`. Render AC bar + phase progress chip directly from these — NO detail fetch needed for the bar.
+
+      **Watch out for:**
+      - The full phase checklist needs phase titles + per-phase statuses, which are NOT on `IssueListItem`. Either (a) extend `IssueListItem` in backend with a slim `phases: {title, status}[]` shape, or (b) fetch detail on hover/click via the existing `fetchIssueDetail` wrapper. Recommend (a) — phase checklist is a board-level affordance, lazy-fetch is jarring. Coordinate the backend tweak as part of this card.
+      - Blocked accent: `IssueListItem.blocked: boolean` only. Reason text comes from detail fetch. Min-viable: 3px red left border + "⛔ Blocked" badge with no tooltip; tooltip can ship with drawer (Phase 5).
+      - Parent chip is currently a plain `<span class="parent-chip">`. Phase 6 turns it into a button. Phase 3 should NOT wire scope.
+      - Epic accent values direct from `docs/design/issues-board/IssueCard.jsx` lines 83-108: left border `3px solid #6366f1`, background `rgb(30 27 75 / 0.45)`, "N phases" chip with `phases_total`.
+
+      **Type-check command:** `cd dashboard && npx vue-tsc --noEmit` (still required).
+  - id: 69f9f94d999847658cfd3052
+    author: newms87
+    timestamp: 2026-05-05T14:06:05.610Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `248d31af-e127-44de-8b4b-24d92bd6b8bb` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T14:06:05.245Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T16:06:05.245Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '248d31af-e127-44de-8b4b-24d92bd6b8bb' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69f9fbeb866000c0765d5df4
+    author: danxbot
+    timestamp: 2026-05-05T14:17:15.623Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Centralized palette in issuePalette.ts in one pass — IssueCard,
+      IssueBoard, TypeBadge, and any future issues component now read from
+      a single source. Backend list extension (`phases?` + `blocked_reason`)
+      landed with TDD: failing test first, then impl. Reviewer caught a
+      silent `?? 0` fallback in the phase-count chip; replaced with a
+      fail-loud computed that throws on backend contract violation.
+      **What went wrong:** Pre-existing typing bug in DispatchDetail.test.ts (`hostPid` missing
+      on the fixture) was blocking vue-tsc. Fixed in this commit but it
+      wasn't strictly the card's scope. The dashboard test suite has
+      unrelated failures (App.test, useStream.test, SettingsPage.test —
+      `danx-ui` import / SSE setup) that pre-date this work; left for a
+      separate session.
+      **Action items:** Nothing
+      **Commits:** ae8be13
+history: []
+retro:
+  good: |-
+    Centralized palette in issuePalette.ts in one pass — IssueCard,
+    IssueBoard, TypeBadge, and any future issues component now read from
+    a single source. Backend list extension (`phases?` + `blocked_reason`)
+    landed with TDD: failing test first, then impl. Reviewer caught a
+    silent `?? 0` fallback in the phase-count chip; replaced with a
+    fail-loud computed that throws on backend contract violation.
+  bad: |-
+    Pre-existing typing bug in DispatchDetail.test.ts (`hostPid` missing
+    on the fixture) was blocking vue-tsc. Fixed in this commit but it
+    wasn't strictly the card's scope. The dashboard test suite has
+    unrelated failures (App.test, useStream.test, SettingsPage.test —
+    `danx-ui` import / SSE setup) that pre-date this work; left for a
+    separate session.
+  action_item_ids: []
+  commits:
+    - ae8be13
+waiting_on: null
+blocked: null

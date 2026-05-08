@@ -1,0 +1,221 @@
+schema_version: 4
+tracker: trello
+id: DX-162
+external_id: 69fe27ef31ded1d847c64aab
+parent_id: DX-158
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Multi-Worker > Phase 4: Persona injection + agent-finalize.sh + Conventional Commits squash-merge flow"
+description: |-
+  ## Context
+
+  Phase 4 of the Multi-Worker Dispatch epic (DX-158). Two work streams in one phase because they're tightly coupled to the agent-side prompt:
+
+  1. **Persona injection** — every dispatch prompt gets a persona block prepended as the first paragraph (free-form markdown bio + worktree path + branch name).
+  2. **Finalize script** — a sh helper at `<repo>/.danxbot/scripts/agent-finalize.sh` that performs the rebase + squash-merge to main + Conventional Commits + rebase-loop push race resolution. Issue-worker skill instructed to invoke it on completion.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-multi-worker-dispatch-design.md`, "Persona injection" + "Per-dispatch completion" sections.
+
+  ## Solution
+
+  ### Persona injection
+
+  Inside the prompt-build path (likely `src/agent/claude-invocation.ts` or `src/dispatch/core.ts` — confirm via grep on `prompt.md` write):
+
+  ```ts
+  const persona = agent
+    ? `You are ${agent.displayName ?? agent.name}.\n\n${agent.bio}\n\nYour worktree: ${worktreePath}\nYour branch: ${agent.name}\n\n`
+    : "";
+  const fullPrompt = `${persona}${cardTaskBody}\n\n${standardDispatchInstructions}`;
+  ```
+
+  Persona block is prepended only for issue-worker / slack / api dispatches that have a resolved `agent` from the poller's pick. Recovery-mode dispatches get a slightly different persona-prepended preamble (Phase 3 already builds the recovery prompt; just ensure the persona prepend wraps it consistently).
+
+  ### `agent-finalize.sh`
+
+  New file: `<repo>/.danxbot/scripts/agent-finalize.sh`. Mirrored into every connected repo by the existing inject pipeline (similar to how `tools.md` is mirrored). Source location: `src/poller/inject/scripts/agent-finalize.sh`.
+
+  Contract:
+
+  ```bash
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  # Usage: agent-finalize.sh <agent-name> <DX-N> <title> "<bullet-1>" "<bullet-2>" ...
+  # Run from inside <repo>/.danxbot/worktrees/<agent-name>/
+
+  agent="$1"; card="$2"; title="$3"; shift 3
+  bullets=("$@")
+
+  # 0. Sanity
+  test "$(git rev-parse --abbrev-ref HEAD)" = "$agent"
+
+  # 1. Stage + commit any uncommitted work
+  if [[ -n "$(git status --porcelain)" ]]; then
+    git add .
+    git commit -m "WIP: $card"
+  fi
+
+  # 2. Rebase onto latest origin/main
+  git fetch origin
+  git rebase origin/main      # bails with conflicts → exits 1, agent must resolve
+
+  # 3. Squash merge to main
+  git checkout main
+  git pull --rebase origin main
+  git merge --squash "$agent"
+  msg_args=(-m "feat($card): $title")
+  for b in "${bullets[@]}"; do
+    msg_args+=(-m "- $b")
+  done
+  git commit "${msg_args[@]}"
+
+  # 4. Push with rebase-loop on race (cap 5 retries)
+  attempts=0
+  until git push origin main; do
+    attempts=$((attempts + 1))
+    if [[ $attempts -ge 5 ]]; then
+      echo "PUSH_RACE_EXHAUSTED" >&2
+      exit 2
+    fi
+    git pull --rebase origin main
+  done
+
+  # 5. Reset agent branch back to origin/main for the next dispatch
+  git checkout "$agent"
+  git reset --hard origin/main
+
+  echo "PUSHED $(git rev-parse origin/main)"
+  ```
+
+  Exit codes: 0 = success; 1 = rebase conflict (agent reads stderr + resolves); 2 = push race exhausted (agent signals `needs_help`).
+
+  ### Issue-worker skill update
+
+  The workspace skill that today commits-and-completes (`<repo>/.danxbot/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` or wherever the completion section lives) gets rewritten to invoke the script:
+
+  ```
+  When you're done implementing the card AND tests + tsc are green:
+
+  1. Compose the title verbatim from the card title.
+  2. Compose 1–5 bullets summarizing what changed (verbs in past tense — "added", "fixed", "refactored").
+  3. Run: bash .danxbot/scripts/agent-finalize.sh <YOUR-NAME> <DX-N> "<title>" "<bullet 1>" "<bullet 2>" …
+
+  - Exit 0 → success. Read the printed sha. Call danxbot_complete({status:"completed", summary:"<sha>"}).
+  - Exit 1 → rebase conflict. Resolve conflicts, run `git rebase --continue`, then re-run the script.
+  - Exit 2 → push race exhausted. Comment on the card explaining; call danxbot_complete({status:"needs_help", summary:"Push race exhausted; operator must finalize."}).
+  ```
+
+  Inject pipeline mirrors this skill into every connected repo on the next tick.
+
+  ### Conventional Commits format reference
+
+  Header: `<type>(<scope>): <title>`. Allowed types: `feat`, `fix`, `refactor`, `test`, `chore`, `docs`, `perf`, `build`, `ci`. Scope = card id (e.g. `DX-N`). Body: blank line + bullet list. The script's contract enforces it via `git commit -m`.
+
+  ## Files
+
+  Create:
+
+  - `src/poller/inject/scripts/agent-finalize.sh` (source — mirrored to every connected repo by the existing inject pipeline)
+  - `src/poller/inject/scripts/agent-finalize.test.ts` — pure-bash unit tests via `bash -c` in a tmpdir; verify exit codes, message format, retry behavior
+  - integration test under `src/__tests__/integration/agent-finalize.test.ts` — real git tmpdir, real script
+
+  Modify:
+
+  - `src/agent/claude-invocation.ts` (or wherever the prompt is built) + `.test.ts` — add persona prepend
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` — completion section rewritten
+  - any other workspace skill that documents completion (audit via grep on "danxbot_complete")
+  - `src/poller/index.ts` — confirm the inject pipeline copies `scripts/` (extend if it doesn't)
+
+  ## Test plan
+
+  Persona inject:
+
+  1. Failing test: prompt build with `agent` resolved → output starts with `You are <Name>.\n\n<bio>` block.
+  2. Failing test: prompt build with no agent → no persona prepend (legacy behavior).
+  3. Failing test: persona block contains worktree path + branch name.
+
+  Finalize script (bash):
+
+  4. tmpdir repo + dirty file → script stages, commits WIP, rebases (no conflict), squash-merges to main, pushes; exit 0; output contains `PUSHED <sha>`.
+  5. tmpdir repo + rebase conflict (modify same line on main + branch) → exit 1; stderr empty (rebase output goes to stderr naturally).
+  6. tmpdir repo + simulated push race (mocked remote that rejects then accepts) → succeeds within retries; output shows multiple pull-rebase loops.
+  7. tmpdir repo + 5 consecutive push rejections → exit 2; stderr contains `PUSH_RACE_EXHAUSTED`.
+  8. Commit message format check: `feat(DX-1): some title` then bullets via `git log --format=%B HEAD~1`.
+  9. Branch state after success: `<agent>` reset to `origin/main`; `main` ahead of pre-run state by exactly one commit.
+
+  Inject pipeline:
+
+  10. After a poll tick, the script appears at `<repo>/.danxbot/scripts/agent-finalize.sh` with exec mode set on every connected repo.
+
+  Workspace skill:
+
+  11. After a poll tick, the updated SKILL.md content lands in every connected repo's workspace.
+
+  ## Acceptance
+
+  - Persona block prepended to every dispatch prompt with a resolved agent.
+  - `agent-finalize.sh` script ships under `src/poller/inject/scripts/`; injected to every connected repo.
+  - Script handles happy-path squash-merge + Conventional Commits format.
+  - Script's rebase-loop handles push race; caps at 5 retries; exit 2 on exhaustion.
+  - Issue-worker skill rewritten to invoke the script on completion.
+  - 11 tests pass.
+  - `make test` green; `tsc + vue-tsc` clean.
+  - Manual smoke: dispatch alice on a real card, observe the persona block in the prompt.md, observe a clean Conventional Commits commit on main.
+
+  ## Out of scope
+
+  - Locks + triage precursor (DX-163).
+  - Card UI badges (DX-164).
+  - Recovery-mode-specific persona handling — Phase 3 owns the recovery prompt; this phase only wraps it with persona.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe27f0d32688f8baa42b75
+    title: Persona block prepended as first paragraph of every dispatch prompt for resolved agents
+    checked: false
+  - check_item_id: 69fe27f14db51c50cad3165f
+    title: agent-finalize.sh ships at src/poller/inject/scripts/; injected to every connected repo as <repo>/.danxbot/scripts/agent-finalize.sh
+    checked: false
+  - check_item_id: 69fe27f194d11087afad8ba4
+    title: Script performs WIP commit + rebase + squash-merge + Conventional Commits push; exit codes documented (0/1/2)
+    checked: false
+  - check_item_id: 69fe27f176ba5758bb784fae
+    title: Script's rebase-loop on push race caps at 5 retries; exit 2 on exhaustion
+    checked: false
+  - check_item_id: 69fe27f25e9399b5c39e4099
+    title: Issue-worker skill rewritten to invoke the script on completion; updated SKILL.md mirrored on next poll tick
+    checked: false
+  - check_item_id: 69fe27f2d69f2195bca2a310
+    title: 11 tests across persona / script / inject / skill paths pass
+    checked: false
+  - check_item_id: 69fe27f2fd53d6162d4ab0d3
+    title: make test green; tsc + vue-tsc clean
+    checked: false
+  - check_item_id: 69fe27f366a72ac3a392f3aa
+    title: Manual smoke — dispatch alice, persona block visible in JSONL, single Conventional Commits commit lands on main
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Sequential phase ordering — needs the worktree manager from Phase 3 (DX-161) so the script's git operations have the right starting state.
+  timestamp: 2026-05-08T12:00:00.000Z
+  by:
+    - DX-161
+blocked: null

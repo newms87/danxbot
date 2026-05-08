@@ -1,0 +1,116 @@
+schema_version: 4
+tracker: trello
+id: DX-207
+external_id: 69fe51583c4def2c82a28911
+parent_id: DX-141
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "[DB registry > Phase 2a] mcp_settings_path column — find per-dispatch MCP file at reattach"
+description: |-
+  ## Context
+
+  Sub-phase 2a of `DX-141` (DB-driven full-stack reattach). Phase 2c
+  (reattach pass) needs to locate each dispatch's per-dispatch MCP
+  settings file (`/tmp/danxbot-mcp-XXXX/settings.json`) so it can
+  rewrite `DANXBOT_STOP_URL` when the worker restarts on a different
+  port. Today the path lives only in the spawning worker's memory and
+  is lost across restart.
+
+  This sub-phase persists the path to the `dispatches` table so the
+  reattach pass in Phase 2c can resolve it from the row alone — no
+  cross-session ferrying required.
+
+  ## Solution
+
+  - **Migration 016** — `mcp_settings_path VARCHAR(512) NULL` on
+    `dispatches`. Idempotent. Down direction drops the column.
+  - **`Dispatch` interface** (`src/dashboard/dispatches.ts`) — add
+    `mcpSettingsPath: string | null`. Header doc explains the column
+    is the path to the per-dispatch MCP settings JSON written by
+    `dispatch()` (`src/dispatch/core.ts`) during workspace
+    resolution. NULL when the dispatch was created without a per-
+    dispatch MCP overlay (e.g. legacy rows).
+  - **`dispatches-db.ts`** — extend `COLUMN_MAP` (`mcpSettingsPath` →
+    `mcp_settings_path`), `DispatchRow`, `rowToDispatch`. Loose
+    `==`-null check matching `hostPid`/`hostPidAt` (so legacy rows +
+    test fixtures parse).
+  - **`dispatch-tracker.ts#startDispatchTracking`** — accept new
+    optional `mcpSettingsPath` and persist via `insertDispatch`.
+  - **`dispatch/core.ts`** — pass the resolved per-dispatch settings
+    dir's `settings.json` path to `startDispatchTracking` (it already
+    knows the path — it just wrote the file via
+    `writeMcpSettingsFile`).
+
+  ## Files
+
+  - `src/db/migrations/016_dispatches_mcp_settings_path.ts` (new) +
+    test
+  - `src/dashboard/dispatches.ts` (extend interface)
+  - `src/dashboard/dispatches-db.ts` (extend column map / row /
+    parser)
+  - `src/dashboard/dispatch-tracker.ts` (accept + persist)
+  - `src/dispatch/core.ts` (pass the path through)
+  - test fixtures across `src/__tests__/` updated for new field
+
+  ## Test plan (TDD)
+
+  1. Migration 016 adds `mcp_settings_path` column; idempotent (re-
+     run after first apply is a no-op).
+  2. Migration 016 down direction drops the column.
+  3. `insertDispatch` round-trips `mcpSettingsPath` (string + null).
+  4. `dispatch()` populates `mcpSettingsPath` on insert when the
+     workspace had a per-dispatch MCP file written.
+
+  ## Acceptance
+
+  - `mcp_settings_path` column exists; migration is idempotent.
+  - Every dispatch inserted post-migration carries the column value
+    (string for normal flows, null only for legacy / no-MCP test
+    paths).
+  - 4 new unit tests pass; no existing tests regress; `tsc --noEmit`
+    clean.
+
+  ## Out of scope
+
+  - Reading the column or rewriting the file — Phase 2c.
+  - Backfilling NULL for pre-migration rows — they will simply not be
+    reattachable and Phase 2c falls through to mark-failed.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe51599d2191f37b5cbed3
+    title: Migration 016 adds mcp_settings_path VARCHAR(512) NULL to dispatches; idempotent up + down
+    checked: false
+  - check_item_id: 69fe5159fbc33c7eae3fd9b3
+    title: Dispatch interface + COLUMN_MAP + DispatchRow + rowToDispatch all carry mcpSettingsPath
+    checked: false
+  - check_item_id: 69fe51595e151ec5be1398af
+    title: startDispatchTracking accepts and persists mcpSettingsPath; dispatch() supplies it
+    checked: false
+  - check_item_id: 69fe515acd9f3a9df6fc442c
+    title: 4 new unit tests pass; no existing tests regressed; tsc clean
+    checked: false
+comments: []
+history:
+  - timestamp: 2026-05-08T21:10:50.473Z
+    actor: dispatch:3ecfde68-c199-415f-b265-5480e68e5b74
+    event: created
+    to: ToDo
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

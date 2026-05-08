@@ -1,0 +1,157 @@
+schema_version: 4
+tracker: trello
+id: DX-131
+external_id: 69fd5b22287019bf52173bc8
+parent_id: DX-130
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "[Trello decouple > Phase 1] runSync split — local persist always, Trello detached"
+description: |-
+  ## Context
+
+  `src/worker/issue-route.ts:298-315` `runSync`:
+
+  ```ts
+  async function runSync(deps, dispatchId, repo, issue) {
+    try {
+      const { updatedLocal } = await syncIssue(deps.tracker, issue, { actionItemTitles });
+      persistAfterSync(repo.localPath, updatedLocal);   // <-- only on success
+    } catch (err) {
+      const msg = `danx_issue_save async sync failed for ${issue.external_id}: ...`;
+      log.error(msg);
+      await deps.recordError?.(dispatchId, msg);
+    }
+  }
+  ```
+
+  `persistAfterSync` (line 356-380) is the function that writes the canonical YAML to `closed/<id>.yml` and removes `open/<id>.yml` for `Done` / `Cancelled` saves. When `syncIssue` throws (Trello 401/500), the local persist NEVER runs. The handler already returned `{saved: true}` synchronously upstream, so the agent thinks the save worked, but the YAML is in an inconsistent state: in-memory copy reflects the agent's edit, on-disk file in `open/` may or may not match (depends on whether the in-process Edit landed before the save call).
+
+  This is the root cause of DX-95 sitting in `open/` with `status: Done`.
+
+  ## Solution
+
+  Split into two operations:
+
+  1. `persistAfterSync(repo.localPath, issue)` runs **first**, unconditionally, before the tracker push. Local file = authoritative; the worker's local-write path must be deterministic regardless of network.
+  2. `syncIssue(deps.tracker, ...)` runs **after** persist, in a detached fire-and-forget. Errors → `recordError` + dashboard `system_errors` event (Phase 4 wires the dashboard event; Phase 1 emits the log only).
+  3. The `updatedLocal` object that `syncIssue` returns may contain tracker-side mutations (e.g. `external_id` for new orphans, `check_item_id` for new AC items). On successful sync, persist a SECOND time with the merged object. Idempotent — second persist is a no-op when no fields changed.
+
+  ## Files
+
+  - `src/worker/issue-route.ts` — `runSync`, `persistAfterSync` (no signature change)
+  - `src/worker/issue-route.test.ts` — new tests below
+
+  ## Test plan (TDD)
+
+  Failing tests first. Each is a unit test against `runSync` with a mock `tracker.syncIssue`:
+
+  1. Tracker throws → local file at `closed/<id>.yml` exists with the saved status, `open/<id>.yml` does not exist (terminal save), `recordError` called with the error message.
+  2. Tracker succeeds → local file at `closed/<id>.yml` exists with merged tracker fields (e.g. `external_id` populated for orphan).
+  3. Non-terminal save (`status: ToDo`) + tracker throws → local file at `open/<id>.yml` exists with saved content, `recordError` called.
+  4. Tracker succeeds with no field mutations → only one `writeFileSync` call (idempotent second persist is a no-op or a same-content write).
+
+  ## Acceptance
+
+  - `persistAfterSync` runs before `syncIssue` in `runSync`. Tracker failure does NOT prevent the local YAML's open→closed move on terminal saves.
+  - `recordError` still called on tracker failure (preserves existing dispatch-row visibility).
+  - All 4 tests pass; no existing tests regressed.
+  - Type-check clean: `npx tsc --noEmit`.
+
+  ## Out of scope
+
+  - Persistent retry queue (Phase 2).
+  - Dashboard surface (Phase 4).
+  - Changes to `syncIssue` itself or to `persistAfterSync`'s signature.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd5b23f78b3c8830e8515b
+    title: persistAfterSync runs before syncIssue in runSync (local-first ordering)
+    checked: true
+  - check_item_id: 69fd5b2429cc09c50789bac2
+    title: Tracker throw → terminal-status YAML at closed/<id>.yml; open/<id>.yml absent
+    checked: true
+  - check_item_id: 69fd5b25646999903d75d528
+    title: Tracker success → second persist applies merged fields (external_id, check_item_id) idempotently
+    checked: true
+  - check_item_id: 69fd5b2532f6892d92254800
+    title: recordError still invoked on tracker failure
+    checked: true
+  - check_item_id: 69fd5b256f791a5936bce499
+    title: 4 new unit tests pass; no existing tests regressed; tsc clean
+    checked: true
+comments:
+  - id: 69fd964777f8b46d4d129853
+    author: danxbot
+    timestamp: 2026-05-08T07:52:39.189Z
+    text: |
+      <!-- danxbot -->
+
+      ## Phase 1 Commit
+
+      **Commit:** `a61f4aa`
+      **Files:** `src/worker/issue-route.ts`, `src/worker/issue-route.test.ts`
+
+      `runSync` reordered: `persistAfterSync(repo.localPath, issue)` now runs FIRST unconditionally, before the tracker `syncIssue` call. After a successful sync, a second `persistAfterSync(repo.localPath, updatedLocal)` applies any tracker-mutated fields (`external_id` orphan-recovery, `check_item_id[]` stamps, inbound human comments). Idempotent under no remote mutations — same-content `writeFileSync` is safe to repeat.
+
+      Tracker errors flow through `recordError` as before, so the dashboard still surfaces them — but never roll back the local persist.
+
+      **Tests** (6 new, all in `src/worker/issue-route.test.ts`):
+
+      | # | Branch | Pin |
+      |---|--------|-----|
+      | 1 | tracker throw + Done | `closed/<id>.yml` exists, `open/<id>.yml` absent, `recordError` invoked |
+      | 2 | tracker success + mutations | `external_id` + `check_item_id[]` merged into the persisted YAML |
+      | 3 | tracker throw + ToDo (non-terminal) | `open/<id>.yml` exists, `closed/<id>.yml` absent, `recordError` invoked |
+      | 4 | tracker success + no mutations | byte-identical re-run of `runSync` (idempotency) |
+      | 5 | tracker throw + Cancelled | `closed/<id>.yml` exists (second terminal branch) |
+      | 6 | tracker throw + ToDo + `blocked != null` | YAML lands in `open/`, `dispatch` cleared (blocked is session-terminal) |
+
+      Tests 1, 3, 5, 6 fail without the local-first ordering — the local write only fires before the tracker call, so a tracker throw still leaves the file on disk.
+
+      Full suite: 3298/3298 (one pre-existing flake on `mcp-server-probe.test.ts > actually kills the hung subprocess on timeout` reproduced once under full-suite load, then cleared on re-run; passes deterministically in isolation; unrelated to this scope). Type-check clean.
+  - id: 69fd96472cc3557784107556
+    author: danxbot
+    timestamp: 2026-05-08T07:52:39.617Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Pure TDD: failing tests landed first (tests 1 + 3), confirmed failures pinned the local-first ordering claim, then the implementation flipped them green.
+      - Reviewer recommendations all addressed in-session: idempotency assertion strengthened to byte-equality, Cancelled coverage added, blocked-record + dispatch-clear coverage added, JSDoc explains both the export rationale and why the second persist isn't guarded.
+      - Phase scope held — only `src/worker/issue-route.ts` and its test file. No incidental edits, no scope creep into Phase 2's retry queue.
+      - The `_drainAsyncWorkForTesting` helper already exists in `issue-route.ts` and the integration suite at `yaml-lifecycle-memory-tracker.test.ts` exercises the full handler path — meaning the unit tests can stay focused on `runSync` semantics with mocked `syncIssue` while the integration layer continues to pin end-to-end behaviour. Clean separation paid off.
+
+      **What went wrong:** - Caught one TDD discipline slip mid-implementation: edited `runSync` to add the local-first persist BEFORE writing failing tests, then reverted the implementation, wrote the tests, watched them fail, then re-applied. No harm — but a reminder that "failing test first" is a checklist, not an aspiration.
+      - One unrelated flake (`mcp-server-probe.test.ts > actually kills the hung subprocess on timeout`) reproduced once on the first full-suite run. Confirmed pre-existing (clean diff against scope) by running the file in isolation (passes) and re-running the full suite (passes). Not in DX-131's scope to fix; flagged here for visibility, not deferred as an action item per the "small unrelated fixes belong in-session" rule — since the flake is intermittent and the fix isn't a one-liner, it falls into the "needs its own scoping" bucket and is genuinely separable.
+
+      **Action items:** Nothing
+      **Commits:** a61f4aa
+history: []
+retro:
+  good: |
+    - Pure TDD: failing tests landed first (tests 1 + 3), confirmed failures pinned the local-first ordering claim, then the implementation flipped them green.
+    - Reviewer recommendations all addressed in-session: idempotency assertion strengthened to byte-equality, Cancelled coverage added, blocked-record + dispatch-clear coverage added, JSDoc explains both the export rationale and why the second persist isn't guarded.
+    - Phase scope held — only `src/worker/issue-route.ts` and its test file. No incidental edits, no scope creep into Phase 2's retry queue.
+    - The `_drainAsyncWorkForTesting` helper already exists in `issue-route.ts` and the integration suite at `yaml-lifecycle-memory-tracker.test.ts` exercises the full handler path — meaning the unit tests can stay focused on `runSync` semantics with mocked `syncIssue` while the integration layer continues to pin end-to-end behaviour. Clean separation paid off.
+  bad: |
+    - Caught one TDD discipline slip mid-implementation: edited `runSync` to add the local-first persist BEFORE writing failing tests, then reverted the implementation, wrote the tests, watched them fail, then re-applied. No harm — but a reminder that "failing test first" is a checklist, not an aspiration.
+    - One unrelated flake (`mcp-server-probe.test.ts > actually kills the hung subprocess on timeout`) reproduced once on the first full-suite run. Confirmed pre-existing (clean diff against scope) by running the file in isolation (passes) and re-running the full suite (passes). Not in DX-131's scope to fix; flagged here for visibility, not deferred as an action item per the "small unrelated fixes belong in-session" rule — since the flake is intermittent and the fix isn't a one-liner, it falls into the "needs its own scoping" bucket and is genuinely separable.
+  action_item_ids: []
+  commits:
+    - a61f4aa
+waiting_on: null
+blocked: null

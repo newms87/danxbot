@@ -1,0 +1,252 @@
+schema_version: 4
+tracker: trello
+id: DX-147
+external_id: 69fd77dd13bcb76fb70f4dc6
+parent_id: DX-138
+children: []
+dispatch:
+  id: 021bc59f-cef7-4f50-a608-f73a9f473f25
+  pid: 13784
+  host: dan
+  kind: work
+  started_at: 2026-05-08T18:14:21.627Z
+  ttl_seconds: 7200
+status: Done
+type: Feature
+title: "[Dashboard] Card history > Phase 3: Auto-mutation appends — `worker:auto-derive` + `worker:heal` + `tracker:trello` `created`"
+description: |-
+  ## Goal
+
+  Wire the three non-dispatch-driven write-paths to push their own history entries:
+
+  1. The poller's epic auto-derive flips a parent epic's status when its children's union state changes (`src/poller/epic-status.ts` — DX-98).
+  2. The poller's `healLocalYamls` pass moves a stuck terminal-status YAML from `open/` → `closed/` (`src/poller/heal.ts` — DX-133 Phase 3).
+  3. Inbound Trello hydrate adopts a tracker-born card and writes a fresh local YAML (`src/issue-tracker/sync.ts` — `bulkSyncMissingYamls`).
+
+  After this phase, every state change made by the worker / poller / tracker is attributed in the audit log. Combined with Phase 2's dispatch-driven appends, the schema covers every non-human, non-setup write path.
+
+  Parent epic: `DX-138`. Depends on `DX-145` (Phase 1: schema + `appendHistory` helper) and `DX-146` (Phase 2: diff helper + actor pattern).
+
+  ## Integration points
+
+  ### `epic-status.ts` — `worker:auto-derive`
+
+  The derive step in `applyEpicStatus` (or equivalent — locate via `Grep` for the actual symbol) compares `parent.status` to the derived value and writes only on diff. When the diff fires, push:
+
+  ```ts
+  appendHistory(parent.history, {
+    timestamp: <now ISO>,
+    actor: "worker:auto-derive",
+    event: "status_change",
+    from: parent.status,
+    to: derived,
+    note: <rule-that-fired>,
+  });
+  ```
+
+  `<rule-that-fired>` describes which rule produced the new status — e.g. `All children Done — derive to Done`, `One child Needs Help — derive to Needs Help`, `Mixed children — derive to In Progress`. The exact strings live in `epic-status.ts` already as branch reasons; thread them through.
+
+  ### `heal.ts` — `worker:heal`
+
+  When the healer moves a YAML from `open/` to `closed/` because its status is terminal, that's a no-op state change at the issue level (status is already terminal in-file) — but the healer ALSO covers the inverse: a closed YAML whose status drifted to non-terminal must move back. Per DX-133 Phase 3, the healer's typical action is the open→closed move. Push:
+
+  ```ts
+  appendHistory(issue.history, {
+    timestamp: <now ISO>,
+    actor: "worker:heal",
+    event: "status_change",
+    from: <prior status from filename location heuristic>,
+    to: issue.status,
+    note: "Healer moved <open|closed> → <closed|open> to match status",
+  });
+  ```
+
+  If the heal pass discovers no real status delta and the move is purely a filesystem fix, prefer NOT to emit a history entry (avoid noise — heal entries should reflect a real state change, not janitorial filesystem moves). The `note` must be specific to what happened.
+
+  The blocker `worker:auto-derive` and `worker:heal` may both fire and clear `blocked` automatically when all blockers reach terminal. Wire those events too:
+
+  - Poller's auto-clear (when every blocker in `by[]` is terminal) → push `unblocked` with `actor: worker:auto-derive`, `note: All blockers terminal: ISS-X, ISS-Y`.
+
+  ### `sync.ts` (`bulkSyncMissingYamls` / Trello hydrate) — `tracker:trello`
+
+  When the poller / sync layer adopts a tracker-born card (one that exists on Trello but lacks a local YAML), it builds a fresh `Issue` and writes it. Push exactly one entry on the fresh issue BEFORE the first write:
+
+  ```ts
+  appendHistory(hydrated.history, {
+    timestamp: <now ISO>,
+    actor: "tracker:trello",
+    event: "created",
+    to: hydrated.status,
+    note: "Hydrated from tracker external_id <id>",
+  });
+  ```
+
+  If `hydrated.history` already has entries (e.g. the YAML round-tripped from a previous worker session), this branch should be a no-op. The `created` event is exactly-one-per-card.
+
+  ## Files
+
+  - `src/poller/epic-status.ts` — append on derive flip.
+  - `src/poller/heal.ts` — append on real status delta only.
+  - `src/issue-tracker/sync.ts` — append on inbound hydrate `bulkSyncMissingYamls`.
+  - `src/poller/epic-status.test.ts` — extend.
+  - `src/poller/heal.test.ts` — extend.
+  - `src/issue-tracker/sync.test.ts` (or wherever bulkSyncMissingYamls is tested) — extend.
+
+  ## Test plan (TDD)
+
+  1. `epic-status.ts` — derive flips parent's status from `In Progress` to `Done` → exactly one `status_change` entry with `actor: worker:auto-derive` and a `note` describing the rule.
+  2. `epic-status.ts` — derive runs but no flip → zero history entries appended.
+  3. `epic-status.ts` — auto-clear of `blocked` when every `by[]` is terminal → one `unblocked` entry with `actor: worker:auto-derive`.
+  4. `heal.ts` — heal moves a `closed/` Done YAML back to `open/` because operator re-opened (status drifted to ToDo) → one `status_change` entry with `actor: worker:heal`.
+  5. `heal.ts` — heal does the typical `open → closed` move on a terminal YAML; status already matches → zero entries (no fake state delta).
+  6. `bulkSyncMissingYamls` — adopts a fresh tracker card → exactly one `created` entry with `actor: tracker:trello` and a `note` referencing the external_id.
+  7. `bulkSyncMissingYamls` — runs against a card whose local YAML already exists with non-empty history → no second `created` entry pushed (idempotent).
+
+  ## Acceptance
+
+  - `epic-status.ts` auto-derive appends `worker:auto-derive` `status_change` with a `note` describing the rule.
+  - `epic-status.ts` auto-clear of `blocked` appends `worker:auto-derive` `unblocked`.
+  - `heal.ts` appends `worker:heal` `status_change` ONLY when there's a real status delta (no filesystem-noise entries).
+  - `bulkSyncMissingYamls` appends `tracker:trello` `created` with `note` referencing external_id, exactly once per fresh card.
+  - 7 new backend tests pass; `npx tsc --noEmit` clean; no existing tests regressed.
+  - AC #5 + AC #6 of the parent epic (DX-138) hold.
+
+  ## Out of scope
+
+  - Dashboard rendering — Phase 4.
+  - `worker:retry-queue` / `worker:reconcile` actors — those code paths are pre-existing helpers used by other features; a future card can extend the actor list when those paths actually mutate status. The actor table in the parent epic's description is a canonical reference, not a Phase 3 deliverable.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd77def1b7675a92bdeef2
+    title: epic-status.ts auto-derive appends worker:auto-derive status_change with a note describing the rule that fired
+    checked: true
+  - check_item_id: 69fd77dffb310b869d1f39c3
+    title: epic-status.ts auto-clear of blocked appends worker:auto-derive unblocked entry
+    checked: true
+  - check_item_id: 69fd77df7580076a9a2b1f08
+    title: heal.ts appends worker:heal status_change only when there is a real status delta (no filesystem-noise entries)
+    checked: true
+  - check_item_id: 69fd77df1b74629e080ae1c0
+    title: bulkSyncMissingYamls appends tracker:trello 'created' entry with note referencing external_id, exactly once per fresh card
+    checked: true
+  - check_item_id: 69fd77e0d75a45ead008f1bf
+    title: 7 new backend tests pass; npx tsc --noEmit clean; no existing tests regressed
+    checked: true
+comments:
+  - id: 69fdc05b7e8c34150a7726fc
+    author: danxbot
+    timestamp: 2026-05-08T10:52:11.524Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Notes from Phase 2 (DX-146)
+
+      Phase 2 commit: `be5c03a`. The dispatch-driven save / create paths now populate `Issue.history[]`. Your phase wires the **auto-mutation** writers (auto-derive, heal, Trello hydrate) so non-dispatch worker code paths also leave a fully-attributed audit trail.
+
+      ### Reusable helpers Phase 3 should consume
+
+      | Symbol | File | Use |
+      |---|---|---|
+      | `appendHistory(history, entry)` | `src/issue-tracker/yaml.ts` | The ONLY entry point for pushing onto `issue.history`. Phase 1 helper. Pure. |
+      | `appendDiffEntries(old, new, dispatchId, nowIso, deps)` | `src/worker/issue-route.ts` | Pure diff helper from Phase 2. Useful when Phase 3 callers ALSO want diff semantics (e.g. heal pass that happens to flip status). For deterministic auto-mutations (auto-derive flips a known status), call `appendHistory` directly with a `worker:auto-derive` actor — diff isn't needed. |
+      | `HISTORY_CAP`, `HISTORY_NOTE_CAP` | `src/issue-tracker/yaml.ts` | Constants — import, don't redefine. |
+      | `IssueHistoryAppendError` | `src/issue-tracker/yaml.ts` | Thrown by `appendHistory` on malformed input. Phase 3 callers should let it propagate. |
+
+      ### Actor format for Phase 3
+
+      Phase 2 callers use `dispatch:<uuid>`. Phase 3 callers use bare-prefix actors per the canonical actor table on the parent epic (`DX-138`):
+
+      | Phase 3 caller | Actor |
+      |---|---|
+      | `epic-status.ts#deriveAndPersist` (auto-derive) | `worker:auto-derive` |
+      | `heal.ts#healLocalYamls` (heal pass) | `worker:heal` |
+      | Trello hydrate (`bulkSyncMissingYamls`) | `tracker:trello` |
+      | Retry queue drain (if it ever flips status) | `worker:retry-queue` |
+
+      All four match `appendHistory`'s actor regex `^([^:]+:.+|setup|unknown)$`.
+
+      ### Phase 2 deviations from spec (worth knowing)
+
+      - The original spec said the diff source was the on-disk YAML pre/post agent edit. With the current MCP architecture (`{id}`-only request, agent edits disk before save), the actual diff source is the **in-memory `lastSeenIssueState` cache** in `src/worker/issue-route.ts`. Worker restart loses the cache; first save after restart has no diff context. Acceptable trade-off — YAML stays authoritative, history is best-effort audit.
+      - **Auto-mutations don't need the cache.** When `epic-status.ts` flips a parent's status from In Progress → Done, the writer KNOWS what it changed. Just call `appendHistory(parent.history, {timestamp, actor: "worker:auto-derive", event: "status_change", from: oldStatus, to: newStatus, note: "..."})` directly. No cache lookup, no `appendDiffEntries`.
+      - **Note for `worker:auto-derive` should describe the rule that fired.** Per AC #5 of the parent epic. Example: `note: "All children Done — DX-98 derive rule"` or `note: "Any child Needs Help → parent Needs Help"`. Reuse the priority-rule numbering from the issue-card-workflow skill so dashboard readers can correlate.
+      - **`HISTORY_NOTE_CAP = 200` is enforced by `appendHistory`.** Don't pre-truncate; let the helper do it (Phase 2 burned a test cycle on this).
+
+      ### Test pattern Phase 3 should mirror
+
+      Phase 2 added 21 tests in `src/__tests__/worker/issue-route.test.ts` (search for `DX-146`). Pure-helper tests + integration tests using a real `node:http` server bound to a tmpdir + `MemoryTracker`. Phase 3's auto-derive append should test:
+
+      - Status diff at the parent triggers a `worker:auto-derive` `status_change` entry.
+      - Note string accurately describes the derive rule that fired.
+      - Multiple children moving simultaneously produce ONE entry per parent flip, not one per child.
+
+      ### Gotchas
+
+      - The cache in `src/worker/issue-route.ts` is keyed by `issue.id`. If your Phase 3 writers ALSO bypass the cache and write directly via `appendHistory`, the cache stays out of sync — that's fine because `appendDiffEntries`'s only consumer is `applyHistoryDiff`, and it tolerates cache divergence (worst case = a redundant entry on the next save).
+      - Trello hydrate's `created` entry should fire ONLY when the YAML is FRESHLY-hydrated (no prior local YAML). If the YAML already exists and inbound updates re-add comments, that's not a `created` event.
+      - The healer's status flips are usually open→closed file moves on Done / Cancelled cards — terminal states. Append the history entry BEFORE the file move so the closed/ YAML carries it.
+  - id: 69fe3104b4d24469729de707
+    author: danxbot
+    timestamp: 2026-05-08T18:52:52.297Z
+    text: |
+      <!-- danxbot -->
+
+      ## Phase 3 Commit
+
+      **Commit:** `be94d96` — `[Danxbot] DX-147 / DX-138 Phase 3: Auto-mutation history appends`
+
+      **Completed:**
+
+      - `epic-status.ts` auto-derive appends `worker:auto-derive` `status_change` with rule note
+      - `epic-status.ts` auto-clear of `blocked` (now in `blocked-resolver.ts`) appends `worker:auto-derive` `unblocked`
+      - `heal.ts` appends `worker:heal` `status_change` ONLY on real status delta (no filesystem-noise entries)
+      - `bulkSyncMissingYamls` (`hydrateFromRemote`) appends `tracker:<name>` `created` referencing external_id, exactly once per fresh card
+      - 32 new backend tests pass (epic-status +6, blocked-resolver +7, heal +7, yaml-lifecycle +2, integration mock fix +0); `npx tsc --noEmit` clean; full backend suite 3476/3476 green
+
+      **Reviewers:** test-reviewer + code-reviewer ran in parallel; every finding addressed (3 medium code-review fixes incl. dropping `await` on sync `resolveBlockedCards`, swapping inline `writeFileSync` for `writeIssue` helper, threading `ParentStatusChange.rule` into the poller log line; 9 test-review additions incl. 2 HIGH — rewrote the hollow hydrate idempotency test as an honest round-trip + added per-rule note assertions for rules 1/2/4/6).
+  - id: 69fe3104d046a8e20b62b061
+    author: danxbot
+    timestamp: 2026-05-08T18:52:52.677Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - **Skill load order honored.** Loaded `pipe-start` before code, `dev:testing` before more tests, `dev:git-discipline` + `pipe-commit` + `pipe-quality` before commit. The pipeline gate caught that I'd dispatched reviewer subagents directly via `Agent` rather than via the `pipe-review` skill — surfacing the auto-mutation idempotency-test gap before commit.
+      - **`deriveStatus` refactor was the right call.** Returning `{status, rule}` instead of bolting a separate `deriveStatusEx` helper kept the single canonical path for parent-status derivation. The mechanical churn in existing tests was small (`?.status` everywhere) and `ParentStatusChange.rule` now flows into the per-flip log line at `src/poller/index.ts:721` so dashboard log readers see WHY a parent flipped.
+      - **Removed dead code instead of testing it.** The hydrate idempotency guard `if (history.length === 0)` was unreachable (every tracker returns `history: []` from `getCard`; bulk-sync gates on `findByExternalId`). `test-reviewer` flagged the test as a tautology — Rule 3 (no dead code) made the right move "remove the guard" rather than "thread `remote.history` through trackers to make the guard real". Test rewritten as an honest round-trip assertion.
+      - **Reviewer feedback fully internalized.** Both reviewers ran in parallel; every finding (3 medium code-review, 9 test-review including 2 HIGH) addressed before commit. No skips, no rationalizations.
+
+      **What went wrong:** - **Forgot to load `dev:testing` skill before writing the FIRST test batch.** Per the mandate it's required on the first test-related action of the session; I wrote the initial 13 tests first and only loaded the skill before the second batch (gap-fix tests). Caught myself when re-reading the system reminders. No tests were broken by the order, but the discipline order was wrong.
+      - **Surprised by the `inject-root-mcp.ts` commit landing mid-session.** Run #1 had a green full suite; Run #2 (after my gap fixes) had 8 failures in `poller-memory-tracker.test.ts` — initially looked like a regression I'd caused. Took ~8 minutes of bisection (`git stash` per-file) to find that another agent's DX-201 commit had wired `injectDanxIssueMcp` into `_poll` between my runs and that helper uses `node:fs#renameSync` which the integration test's mock didn't include. Fixed by adding `renameSync: vi.fn()` to that one mock. Per Rule 7 (own the codebase) it's mine to fix even though the breakage came from elsewhere — but next time I should check `git log` early when a previously-green test starts failing.
+      - **Heal `from` heuristic is fuzzy.** When a closed YAML drifts to non-terminal status, the `worker:heal` `status_change.from` is inferred via "most recent terminal in history → fall back to Done". The fallback is correct for legacy YAMLs but it's a silent guess. Acceptable trade-off because losing audit fidelity beats failing the heal entirely (card stuck in `closed/`), but DX-138 Phase 4 (dashboard rendering) should surface the heuristic explicitly so a stale audit-log entry doesn't read as ground truth.
+
+      **Action items:** Nothing
+      **Commits:** be94d96
+history: []
+retro:
+  good: |
+    - **Skill load order honored.** Loaded `pipe-start` before code, `dev:testing` before more tests, `dev:git-discipline` + `pipe-commit` + `pipe-quality` before commit. The pipeline gate caught that I'd dispatched reviewer subagents directly via `Agent` rather than via the `pipe-review` skill — surfacing the auto-mutation idempotency-test gap before commit.
+    - **`deriveStatus` refactor was the right call.** Returning `{status, rule}` instead of bolting a separate `deriveStatusEx` helper kept the single canonical path for parent-status derivation. The mechanical churn in existing tests was small (`?.status` everywhere) and `ParentStatusChange.rule` now flows into the per-flip log line at `src/poller/index.ts:721` so dashboard log readers see WHY a parent flipped.
+    - **Removed dead code instead of testing it.** The hydrate idempotency guard `if (history.length === 0)` was unreachable (every tracker returns `history: []` from `getCard`; bulk-sync gates on `findByExternalId`). `test-reviewer` flagged the test as a tautology — Rule 3 (no dead code) made the right move "remove the guard" rather than "thread `remote.history` through trackers to make the guard real". Test rewritten as an honest round-trip assertion.
+    - **Reviewer feedback fully internalized.** Both reviewers ran in parallel; every finding (3 medium code-review, 9 test-review including 2 HIGH) addressed before commit. No skips, no rationalizations.
+  bad: |
+    - **Forgot to load `dev:testing` skill before writing the FIRST test batch.** Per the mandate it's required on the first test-related action of the session; I wrote the initial 13 tests first and only loaded the skill before the second batch (gap-fix tests). Caught myself when re-reading the system reminders. No tests were broken by the order, but the discipline order was wrong.
+    - **Surprised by the `inject-root-mcp.ts` commit landing mid-session.** Run #1 had a green full suite; Run #2 (after my gap fixes) had 8 failures in `poller-memory-tracker.test.ts` — initially looked like a regression I'd caused. Took ~8 minutes of bisection (`git stash` per-file) to find that another agent's DX-201 commit had wired `injectDanxIssueMcp` into `_poll` between my runs and that helper uses `node:fs#renameSync` which the integration test's mock didn't include. Fixed by adding `renameSync: vi.fn()` to that one mock. Per Rule 7 (own the codebase) it's mine to fix even though the breakage came from elsewhere — but next time I should check `git log` early when a previously-green test starts failing.
+    - **Heal `from` heuristic is fuzzy.** When a closed YAML drifts to non-terminal status, the `worker:heal` `status_change.from` is inferred via "most recent terminal in history → fall back to Done". The fallback is correct for legacy YAMLs but it's a silent guess. Acceptable trade-off because losing audit fidelity beats failing the heal entirely (card stuck in `closed/`), but DX-138 Phase 4 (dashboard rendering) should surface the heuristic explicitly so a stale audit-log entry doesn't read as ground truth.
+  action_item_ids: []
+  commits:
+    - be94d96
+waiting_on: null
+blocked: null

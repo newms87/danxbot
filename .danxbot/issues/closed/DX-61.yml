@@ -1,0 +1,292 @@
+schema_version: 4
+tracker: trello
+id: DX-61
+external_id: 69f9dfaca0e2e9adbb942532
+parent_id: DX-60
+children: []
+dispatch:
+  id: 7d0daa83-b06f-47b5-9ecd-bf8a8658e644
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "Issues board > Phase 1: backend list + detail endpoints"
+description: |-
+  ## Context
+
+  Phase 1 of the Issues-tab epic (DX-60). Frontend phases all depend on
+  these endpoints existing and being shaped right. Pure backend work — zero
+  Vue files touched.
+
+  ## Solution
+
+  Two REST routes added to `src/dashboard/server.ts`, served on the
+  dashboard's existing port (`5555` baked image / `5566` Vite dev proxy):
+
+  ### `GET /api/issues?repo=<name>&include_closed=<recent|all>`
+
+  - Auth: same `requireUser` middleware as `/api/agents`.
+  - `repo` required. 400 if missing or not in connected repos.
+  - Reads `<repo>/.danxbot/issues/open/*.yml` AND
+    `<repo>/.danxbot/issues/closed/*.yml` (skipping `.migrated-to-v3`
+    and any non-`.yml`).
+  - Each file parsed via existing `parseIssue` from
+    `src/issue-tracker/yaml.ts`. Parse failures log-once and are
+    skipped, never throw.
+  - Closed cap: `include_closed` defaults to `recent` → 50 most-recent
+    closed by `mtime`. `all` returns every closed file.
+  - Response is the **list-card shape** (NOT the full Issue):
+
+    ```ts
+    interface IssueListItem {
+      id: string;                     // ISS-N
+      type: "Epic" | "Bug" | "Feature";
+      title: string;
+      status: IssueStatus;            // 6 values from interface.ts
+      parent_id: string | null;
+      children: string[];
+      ac_total: number;
+      ac_done: number;
+      phases_total: number;
+      phases_done: number;            // status === "Complete"
+      blocked: boolean;               // bool only — full record on detail
+      comments_count: number;
+      has_retro: boolean;             // any of good/bad/action_items/commits non-empty
+      updated_at: number;             // mtime ms
+    }
+    ```
+
+  - Sort: by `updated_at` desc inside the response.
+
+  ### `GET /api/issues/:id?repo=<name>`
+
+  - Auth + 400 rules same as list.
+  - Returns the **full `Issue` object** verbatim (after `parseIssue`)
+    plus a top-level `updated_at: number` from mtime. Description,
+    AC[], phases[], comments[], retro, triaged, blocked, all there.
+  - 404 if no `<id>.yml` in either `open/` or `closed/`.
+
+  ## Architecture
+
+  - New file `src/dashboard/issues-reader.ts` — pure functions:
+    `listIssues(repoCwd, { includeClosed })` and
+    `readIssueDetail(repoCwd, id)`. `server.ts` thin glue only.
+  - DRY: parse via `parseIssue`; do not duplicate YAML logic.
+  - Validate `repo` against the dashboard's known repos
+    (`loadRepoContextsForDashboard()` already exists for `/api/agents`).
+  - No caching; `mtime`-driven order is enough for v1.
+
+  ## Tests (mandatory — backend is NOT exempt)
+
+  Path: `src/__tests__/dashboard/issues-reader.test.ts` and
+  `src/__tests__/dashboard/issues-routes.test.ts`. Fixtures: a tmpdir
+  populated with hand-crafted YAMLs covering every Issue shape (epic,
+  phase, blocked, retro, comments, malformed). Cover:
+
+  - List shape exact (every list-card field present + correct).
+  - Closed cap default 50, `?include_closed=all` returns all.
+  - Sort by updated_at desc.
+  - Malformed YAML skipped, not 500.
+  - 401 without auth, 400 missing repo, 400 unknown repo, 404 unknown id.
+  - Detail returns full body verbatim with mtime injected.
+  - parent_id / children round-trip cleanly (no nested mutation).
+
+  Run with `npx vitest run > /tmp/vitest.log 2>&1` per the testing skill's
+  output-to-file convention.
+
+  ## Key Files
+
+  - `src/dashboard/server.ts` — wire two routes
+  - `src/dashboard/issues-reader.ts` (new) — list + detail readers
+  - `src/issue-tracker/yaml.ts` — re-use `parseIssue` (do NOT modify)
+  - `src/__tests__/dashboard/issues-reader.test.ts` (new)
+  - `src/__tests__/dashboard/issues-routes.test.ts` (new)
+
+  ## Out of Scope
+
+  - SSE / streaming
+  - Mutation endpoints
+  - Cross-repo aggregation
+  - Caching layer
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9dfad8fb6b1f28c2627bf
+    title: GET /api/issues?repo=<name> returns the IssueListItem[] shape defined above
+    checked: true
+  - check_item_id: 69f9dfae53b3ed3fb07c5c48
+    title: GET /api/issues/:id?repo=<name> returns the full Issue object plus injected updated_at
+    checked: true
+  - check_item_id: 69f9dfae3fc7922cfc69a1c7
+    title: Both endpoints gated by requireUser (same as /api/agents); 401 without auth
+    checked: true
+  - check_item_id: 69f9dfaf8e68a342f3363e22
+    title: Missing or unknown repo → 400; unknown id → 404
+    checked: true
+  - check_item_id: 69f9dfaf8c9a448bc9b4f58f
+    title: Closed cap defaults to 50 by mtime desc; ?include_closed=all returns all closed
+    checked: true
+  - check_item_id: 69f9dfb0bd4604b7ffef49f0
+    title: Malformed YAML skipped with a single warn log per path; never throws
+    checked: true
+  - check_item_id: 69f9dfb0d045cf46a12bebc9
+    title: Reuses parseIssue from src/issue-tracker/yaml.ts; no duplicate parsing logic
+    checked: true
+  - check_item_id: 69f9dfb19f606e60690c2d09
+    title: Unit + integration tests in src/__tests__/dashboard/issues-{reader,routes}.test.ts pass
+    checked: true
+  - check_item_id: 69f9dfb119ea14126359c6ec
+    title: npx tsc --noEmit passes after the change
+    checked: true
+comments:
+  - id: 69f9e0050c91529ac7e7fe82
+    author: newms87
+    timestamp: 2026-05-05T12:18:13.868Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `7d0daa83-b06f-47b5-9ecd-bf8a8658e644` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T12:18:13.822Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T14:18:13.822Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '7d0daa83-b06f-47b5-9ecd-bf8a8658e644' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69f9e258b9ecedb681828449
+    author: code-reviewer
+    timestamp: 2026-05-05T12:28:08.170Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      No SOLID/DRY/zero-tech-debt violations. `parseIssue` reused; no duplicate parsing. Routes diverge from `agents-routes.ts` only on the deliberate 400-vs-404 distinction (query-param vs path-segment repo).
+
+      Findings (low/style):
+      1. `listYamlNames` swallowed all errors — tightened to log non-ENOENT only.
+      2. `closedRaw.sort` looked redundant — added comment explaining the slice is correctness-bound.
+
+      Result: ship-ready after the two nits above.
+  - id: 69f9e2580b99bd371571d805
+    author: test-reviewer
+    timestamp: 2026-05-05T12:28:08.574Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Test Review
+
+      25 → 30 tests after additions. AC1, 2, 4, 5, 6, 8 covered. AC3 auth handled by blanket `/api/*` gate (covered by `auth-middleware.test.ts`). AC7 verified by import grep — single `parseIssue` consumer in `src/dashboard/`.
+
+      Gaps surfaced:
+      1. `has_retro` only tested the `commits[]` branch — table-drove all four (good/bad/action_item_ids/commits).
+      2. `readIssueDetail` open-vs-closed precedence untested when same id present in both — added test asserting `open/` wins.
+      3. `warnedPaths` dedupe asserted only by name, never by behavior — added test that spies on `console.error` and counts warns per path.
+  - id: 69f9e2584095a684bcca9da9
+    author: danxbot
+    timestamp: 2026-05-05T12:28:08.935Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Review Fixes
+
+      All findings addressed in the same dispatch:
+
+      - `listYamlNames` non-ENOENT log path (issues-reader.ts).
+      - `closedRaw` slice rationale comment (issues-reader.ts).
+      - `has_retro` table-driven across all four OR branches.
+      - `readIssueDetail` open-preferred-over-closed test added.
+      - `warnedPaths` dedupe test using `console.error` spy added.
+
+      Final: 30 new tests; full backend suite 2772 passing; `npx tsc --noEmit` clean. Commit 4b2868e.
+  - id: 69f9e25579fa3546c8e614a5
+    author: newms87
+    timestamp: 2026-05-05T12:28:05.673Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Code Review
+
+      No SOLID/DRY/zero-tech-debt violations. `parseIssue` reused; no duplicate parsing. Routes diverge from `agents-routes.ts` only on the deliberate 400-vs-404 distinction (query-param vs path-segment repo).
+
+      Findings (low/style):
+      1. `listYamlNames` swallowed all errors — tightened to log non-ENOENT only.
+      2. `closedRaw.sort` looked redundant — added comment explaining the slice is correctness-bound.
+
+      Result: ship-ready after the two nits above.
+  - id: 69f9e2565978c528e965fc6a
+    author: newms87
+    timestamp: 2026-05-05T12:28:06.313Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Test Review
+
+      25 → 30 tests after additions. AC1, 2, 4, 5, 6, 8 covered. AC3 auth handled by blanket `/api/*` gate (covered by `auth-middleware.test.ts`). AC7 verified by import grep — single `parseIssue` consumer in `src/dashboard/`.
+
+      Gaps surfaced:
+      1. `has_retro` only tested the `commits[]` branch — table-drove all four (good/bad/action_item_ids/commits).
+      2. `readIssueDetail` open-vs-closed precedence untested when same id present in both — added test asserting `open/` wins.
+      3. `warnedPaths` dedupe asserted only by name, never by behavior — added test that spies on `console.error` and counts warns per path.
+  - id: 69f9e256ca8630d15d8dc90e
+    author: newms87
+    timestamp: 2026-05-05T12:28:06.725Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Review Fixes
+
+      All findings addressed in the same dispatch:
+
+      - `listYamlNames` non-ENOENT log path (issues-reader.ts).
+      - `closedRaw` slice rationale comment (issues-reader.ts).
+      - `has_retro` table-driven across all four OR branches.
+      - `readIssueDetail` open-preferred-over-closed test added.
+      - `warnedPaths` dedupe test using `console.error` spy added.
+
+      Final: 30 new tests; full backend suite 2772 passing; `npx tsc --noEmit` clean. Commit 4b2868e.
+  - id: 69f9e257fd7ce9d4edf6dd6f
+    author: newms87
+    timestamp: 2026-05-05T12:28:07.128Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Pure-function reader split from HTTP glue kept the surface tiny — `issues-reader.ts` (~175 lines) plus `issues-routes.ts` (~75 lines). `parseIssue` from `src/issue-tracker/yaml.ts` was reused verbatim, so YAML parsing has one owner. 30 tests; full suite (2772) green; tsc clean.
+      **What went wrong:** First pass swallowed non-ENOENT errors in `listYamlNames` (silent fallback) and the `has_retro` test only covered one of four OR branches. Code-review + test-review caught both before commit. No structural rework needed.
+      **Action items:** Nothing
+      **Commits:** 4b2868e
+history: []
+retro:
+  good: Pure-function reader split from HTTP glue kept the surface tiny — `issues-reader.ts` (~175 lines) plus `issues-routes.ts` (~75 lines). `parseIssue` from `src/issue-tracker/yaml.ts` was reused verbatim, so YAML parsing has one owner. 30 tests; full suite (2772) green; tsc clean.
+  bad: First pass swallowed non-ENOENT errors in `listYamlNames` (silent fallback) and the `has_retro` test only covered one of four OR branches. Code-review + test-review caught both before commit. No structural rework needed.
+  action_item_ids: []
+  commits:
+    - 4b2868e
+waiting_on: null
+blocked: null

@@ -1,0 +1,82 @@
+schema_version: 4
+tracker: trello
+id: DX-15
+external_id: 69f7630de87072dda420b89d
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot] Refactor: Extract shared integration-test dispatch harness"
+description: |-
+  ## Context
+
+  `src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts` (added in Phase 4 of tracker-agnostic-agents, commit a2dc586) duplicates ~150 lines of fixture setup from `src/__tests__/integration/critical-failure-end-to-end.test.ts`. Both test files use the same patterns:
+
+  - `vi.hoisted` mock state with `testState` + `mockConfig`
+  - The same set of `vi.mock` blocks for `config.js`, `poller/constants.js`, `logger.js`, `terminal.js`, `worker/url-normalizer.js`, `agent/mcp-server-probe.js`, `slack/listener.js`, `repo-context.js`, `dashboard/dispatches-db.js`
+  - `writeWorkspaceFixture(workspaceName)` helper (identical between the two)
+  - `createClaudeWrapper(binDir)` helper (identical)
+  - `reservePort()` helper (identical)
+  - `waitFor(predicate, timeout, label)` helper (identical)
+  - `beforeAll` / `beforeEach` / `afterEach` / `afterAll` lifecycle (near-identical — only differ in scenario-specific env vars and which `vi.mock` returns the IssueTracker mock)
+
+  When Phase 5 ships the poller refactor (`fetchTodoCards` → `IssueTracker.fetchOpenCards`), additional integration tests will land that need the same harness — duplicating it a third time would be the wrong move.
+
+  ## Solution
+
+  Extract a `setupIntegrationDispatchHarness` factory in `src/__tests__/integration/helpers/dispatch-harness.ts` that exposes:
+
+  - `setupHarness({reposBaseSeed, scenarios})` — runs the hoisted mock setup, returns a `harness` object with `setupBeforeEach()`, `teardownAfterEach()`, `setupBeforeAll()`, `teardownAfterAll()`, plus accessors for `repo`, `workerPort`, `captureServer`, `tempDir`, `repoDir`, `workspaceSessionDir(workspaceName)`.
+  - The factory should accept an `issueTrackerOverride` option (closure that returns the per-test MemoryTracker — yaml-lifecycle and critical-failure tests use different seeding strategies) and a `runtimeMode` option (docker vs host).
+  - Keep `vi.mock` calls explicit at module top-level in each test file (vi.mock is hoist-only); the harness factory just provides hooks the lifecycle blocks call.
+
+  Migrate both existing tests to use the harness. New integration tests added in Phase 5+ pick it up by default.
+
+  ## Key files
+
+  - `src/__tests__/integration/critical-failure-end-to-end.test.ts` — primary template
+  - `src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts` — secondary copy
+  - `src/__tests__/integration/helpers/` — destination directory; `fixtures.ts` already lives here
+
+  ## Gotchas
+
+  - `vi.mock` factories are hoisted by vitest, so the harness CANNOT register them inside a function call — they MUST stay at module top-level in each test file. Only the lifecycle hooks + helper functions move.
+  - `vi.hoisted` shared state (`testState`, `mockConfig`) is shared across all `vi.mock` calls in the same file. The harness factory must thread this through carefully.
+  - `setIssueTracker(seed)` patterns differ between tests — yaml-lifecycle stubs every IssueTracker method to echo a seed; critical-failure uses MemoryTracker.createCard + getCard/getComments stubs. Keep these seeding strategies as test-local closures; the harness only owns the boilerplate.
+
+  ## How to verify
+
+  - Both existing test files compile + pass after migration with no behavior changes (`npx vitest run src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts src/__tests__/integration/critical-failure-end-to-end.test.ts`)
+  - Net line count drops ~150-200 lines across the two files
+  - `npx vitest run` — full suite stays green (currently 137 files / 2545 tests)
+  - `npx tsc --noEmit` — clean
+
+  ## ICE
+
+  - Impact: 4 — saves time for every future integration test author (Phase 5 will add at least 2 more)
+  - Confidence: 9 — pure refactor, well-understood pattern, no behavior change
+  - Ease: 6 — vi.mock hoisting requires careful thread-through, but the boilerplate boundary is clear
+
+  ICE = 216
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

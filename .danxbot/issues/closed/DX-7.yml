@@ -1,0 +1,175 @@
+schema_version: 4
+tracker: trello
+id: DX-7
+external_id: 69f76d57359b5fe89f80ab22
+parent_id: null
+children: []
+dispatch:
+  id: 2d6d2a26-9ead-4fd3-b64e-253a5c975d2f
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Feature
+title: "[Danxbot] Refactor poller hot path → IssueTracker (deferred from Phase 5)"
+description: |-
+  ## Context
+
+  Phase 5 of tracker-agnostic-agents shipped the worker-side retro renderer + action-items spawner + workspace rename, but deferred the poller-internal refactor that AC #3 ("Dead Trello-direct call sites removed from src/poller/index.ts and src/poller/trello-client.ts — only calls behind IssueTracker remain") demanded in its strict reading.
+
+  **Why deferred:** the swap is mechanical at call sites (`fetchTodoCards` → `tracker.fetchOpenCards().filter(c => c.status === "ToDo")` etc.) but rewires every test in `src/poller/index.test.ts` (153 mock invocations across ~2400 lines) and `src/__tests__/integration/critical-failure-end-to-end.test.ts`. Phase 5 already shipped 5 sub-units of work; bundling a 50+-test rewrite would have ballooned the commit and risked test correctness regressions. Card description Section "Poller cleanup" explicitly authorized the deferral with a follow-up filed.
+
+  ## Solution
+
+  1. Add `getRepoTracker(repo): IssueTracker` cache helper in `src/poller/index.ts` so MemoryTracker preserves state across poll ticks (essential for Layer 3 `DANXBOT_TRACKER=memory` system test).
+  2. Replace direct `trello-client.ts` imports in `src/poller/index.ts`:
+     - `fetchTodoCards` → `tracker.fetchOpenCards().filter(c => c.status === "ToDo")`
+     - `fetchNeedsHelpCards` → same with `"Needs Help"`
+     - `fetchReviewCards` → same with `"Review"`
+     - `fetchInProgressCards` → same with `"In Progress"`
+     - `fetchLatestComment` + `isUserResponse` → `tracker.getComments(externalId)` + last-element check on `.text.includes(DANXBOT_COMMENT_MARKER)`
+     - `fetchCard` → `tracker.getCard(externalId)` (returns Issue with status; replace `card.idList !== todoListId` with `card.status !== "ToDo"`)
+     - `moveCardToList` → `tracker.moveToStatus`
+     - `addComment` → `tracker.addComment`
+  3. Delete `src/poller/trello-client.ts` + `src/poller/trello-client.test.ts` (HTTP-level coverage already exists in `src/__tests__/issue-tracker/trello.test.ts`).
+  4. Rewrite `src/poller/index.test.ts`: drop `vi.mock("./trello-client.js", ...)` block, replace per-function mock fns with a single `mockTracker` returned by `createIssueTracker` mock. Each test sets `mockTracker.fetchOpenCards.mockResolvedValueOnce([{external_id, title, status}, ...])` instead of `mockFetchTodoCards.mockResolvedValue([{id, name}, ...])`.
+  5. Rewrite `src/__tests__/integration/critical-failure-end-to-end.test.ts` similarly: drop `trelloMocks`, drive everything through `setIssueTracker` (already partially in place — extend stub method coverage to include `fetchOpenCards`, `moveToStatus`, `addComment`).
+  6. After refactor, extend `src/__tests__/system/run-system-tests.sh#test_yaml_memory` (or add a new scenario) to boot a worker with `DANXBOT_TRACKER=memory`, drive a full ToDo → In Progress → Done lifecycle through the poller, and assert the MemoryTracker singleton contains the expected card sequence — this is the AC #6 "strict reading" deferred from Phase 4.
+
+  ## Key files
+
+  - `src/poller/index.ts` — call-site swaps + `getRepoTracker` cache
+  - `src/poller/trello-client.ts` — DELETE
+  - `src/poller/trello-client.test.ts` — DELETE
+  - `src/poller/index.test.ts` — mock surface rewrite
+  - `src/__tests__/integration/critical-failure-end-to-end.test.ts` — extend `setIssueTracker`, drop `trelloMocks`
+  - `src/__tests__/system/run-system-tests.sh` — add poller-driven memory-tracker scenario
+
+  ## Acceptance Criteria
+
+  - `rg "trello-client" src/` → zero matches.
+  - `rg "fetchTodoCards|fetchNeedsHelpCards|fetchReviewCards|fetchInProgressCards|fetchLatestComment|fetchCard\b|moveCardToList|isUserResponse" src/poller/` → zero matches.
+  - `npx vitest run src/poller/ src/__tests__/integration/ src/__tests__/worker/` → green.
+  - New Layer 3 scenario in `make test-system-poller` (or equivalent) drives a full ToDo→Done lifecycle through the poller against MemoryTracker; the JSONL contains zero `mcp__trello__*` calls and the MemoryTracker request log shows the expected `fetchOpenCards`/`moveToStatus`/`addComment` sequence.
+  - All comments in `src/poller/index.ts` referencing `trello-client` callers are removed or updated.
+
+  ## Out of scope
+
+  - Slack agent path — untouched.
+  - `/api/launch` external dispatch — untouched.
+  - Phase 5 retro/action-items rendering (already shipped).
+  - TrelloTracker / MemoryTracker internals (already covered).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fa9d97cd3a472f140c0281
+    title: '`rg "trello-client" src/` → zero matches.'
+    checked: true
+  - check_item_id: 69fa9d97886d5be100282847
+    title: '`rg "fetchTodoCards|fetchNeedsHelpCards|fetchReviewCards|fetchInProgressCards|fetchLatestComment|fetchCard\b|moveCardToList|isUserResponse" src/poller/` → zero matches.'
+    checked: true
+  - check_item_id: 69fa9d98ec384bd830264f87
+    title: "`npx vitest run src/poller/ src/__tests__/integration/ src/__tests__/worker/` → green."
+    checked: true
+  - check_item_id: 69fa9d99325ea93fc5f74cf0
+    title: Layer 3 scenario drives full ToDo→Done lifecycle through the poller against MemoryTracker; JSONL contains zero `mcp__trello__*` calls; MemoryTracker request log shows expected `fetchOpenCards`/`moveToStatus`/`addComment` sequence.
+    checked: true
+  - check_item_id: 69fa9d99318475342faf4b64
+    title: All comments in `src/poller/index.ts` referencing `trello-client` callers are removed or updated.
+    checked: true
+comments:
+  - id: 69fa9d9c9a02e88bba258a99
+    author: danxbot
+    timestamp: 2026-05-06T01:47:08.657Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Verification
+
+      All five ACs already satisfied by prior work landed under the tracker-agnostic-agents epic. No new code shipped in this dispatch — pure verification pass.
+
+      **Evidence:**
+
+      - `rg "trello-client" src/` → 0 matches.
+      - `rg "fetchTodoCards|fetchNeedsHelpCards|fetchReviewCards|fetchInProgressCards|fetchLatestComment|fetchCard\b|moveCardToList|isUserResponse" src/poller/` → 0 matches.
+      - `npx vitest run src/poller/ src/__tests__/integration/ src/__tests__/worker/` → 345 tests passed (24 files, 62.91s).
+      - `npx tsc --noEmit` → exit 0.
+      - Layer 2: `src/__tests__/integration/poller-memory-tracker.test.ts` exists and asserts on `getRequestLog()`.
+      - Layer 3: `test_yaml_memory()` in `src/__tests__/system/run-system-tests.sh` (line 864) asserts zero `mcp__trello__*` JSONL entries.
+      - `src/poller/index.ts` uses `getRepoTracker(repo)` cache helper + only `tracker.*` calls.
+  - id: 69f80671e0c5718b07b38c82
+    author: newms87
+    timestamp: 2026-05-04T02:37:37.845Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Refactor verification confirmed all ACs satisfied without any new code — prior epic work covered the deferred poller hot-path swap end-to-end. Targeted vitest run (345 tests) + tsc both green on first try.
+      **What went wrong:** Card description authored before the refactor landed; YAML `ac[]` field was empty at pickup (triage hadn't extracted the AC list from the description). Populated structured ACs at close time.
+      **Action items:** Nothing
+      **Commits:** —
+  - id: 69fa9cf0f8bf3e1b5563579f
+    author: newms87
+    timestamp: 2026-05-06T01:44:16.128Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `2d6d2a26-9ead-4fd3-b64e-253a5c975d2f` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-06T01:44:16.827Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-06T03:44:16.827Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '2d6d2a26-9ead-4fd3-b64e-253a5c975d2f' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69fa9d94b65fa26b24f54c47
+    author: newms87
+    timestamp: 2026-05-06T01:47:00.604Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Verification
+
+      All five ACs already satisfied by prior work landed under the tracker-agnostic-agents epic. No new code shipped in this dispatch — pure verification pass.
+
+      **Evidence:**
+
+      - `rg "trello-client" src/` → 0 matches.
+      - `rg "fetchTodoCards|fetchNeedsHelpCards|fetchReviewCards|fetchInProgressCards|fetchLatestComment|fetchCard\b|moveCardToList|isUserResponse" src/poller/` → 0 matches.
+      - `npx vitest run src/poller/ src/__tests__/integration/ src/__tests__/worker/` → 345 tests passed (24 files, 62.91s).
+      - `npx tsc --noEmit` → exit 0.
+      - Layer 2: `src/__tests__/integration/poller-memory-tracker.test.ts` exists and asserts on `getRequestLog()`.
+      - Layer 3: `test_yaml_memory()` in `src/__tests__/system/run-system-tests.sh` (line 864) asserts zero `mcp__trello__*` JSONL entries.
+      - `src/poller/index.ts` uses `getRepoTracker(repo)` cache helper + only `tracker.*` calls.
+history: []
+retro:
+  good: Refactor verification confirmed all ACs satisfied without any new code — prior epic work covered the deferred poller hot-path swap end-to-end. Targeted vitest run (345 tests) + tsc both green on first try.
+  bad: Card description authored before the refactor landed; YAML `ac[]` field was empty at pickup (triage hadn't extracted the AC list from the description). Populated structured ACs at close time.
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

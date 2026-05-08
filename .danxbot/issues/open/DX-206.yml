@@ -1,0 +1,82 @@
+schema_version: 4
+tracker: trello
+id: DX-206
+external_id: 69fe4ed7db1ef6161fee6c70
+parent_id: null
+children: []
+dispatch:
+  id: 060c2cab-413f-4ca2-996c-1a95a38c95f9
+  pid: 98300
+  host: dan
+  kind: work
+  started_at: 2026-05-08T23:16:57.916Z
+  ttl_seconds: 7200
+status: In Progress
+type: Feature
+title: "[Action Item from DX-202] Rename Trello list/label `Needs Help` → `Blocked` on connected repos' boards"
+description: |-
+  ## Context
+
+  DX-202 renamed the `IssueStatus` value `"Needs Help"` → `"Blocked"` on the data layer + parser + dashboard. The Trello tracker continues to route cards with `status: "Blocked"` to the existing `needsHelpListId` Trello list (and applies the existing `blockedLabelId` label) so the data layer ships without operator action.
+
+  But the Trello LIST + LABEL still carry the literal name "Needs Help" on the board. Operators viewing the Trello UI see the legacy name; the dashboard SPA shows the new name. The mismatch is cosmetic but creates ongoing operator confusion.
+
+  ## Solution
+
+  Per connected repo:
+
+  1. Open the Trello board for the repo (`trello.yml` carries the `boardId`).
+  2. Rename list "Needs Help" → "Blocked" in the Trello UI.
+  3. Rename label "Needs Help" → "Blocked" in the Trello UI (or merge the existing "Blocked" label if both exist; danxbot uses `blockedLabelId` so the operator picks which id to keep).
+  4. Update the per-repo `<repo>/.danxbot/config/trello.yml` field naming if desired (the runtime field names `needsHelpListId` / `needsHelpLabelId` in `TrelloConfig` are intentionally retained for backward compat — renaming those is a separate code change).
+  5. Verify on next poll tick that danxbot continues to push correctly (no breakage — the IDs don't change when a list/label is renamed in Trello).
+
+  ## Key files
+
+  - `<each-connected-repo>/.danxbot/config/trello.yml` — board ID + list IDs + label IDs (renaming the LIST in Trello UI does not change the ID; the YAML stays the same)
+  - `.claude/rules/trello-config.md` (danxbot repo root) — table mapping list names to IDs; update labels post-rename to match operator-visible names
+  - `src/types.ts` — `TrelloConfig.needsHelpListId` / `needsHelpLabelId` field names (retained as-is; future rename to `blockedListId` / `blockedLabelId` is a separate code-cleanup task)
+
+  ## Verification
+
+  - Trello board displays "Blocked" list + label
+  - Cards with `status: "Blocked"` continue to land in the renamed list (verify on poll tick)
+  - `.claude/rules/trello-config.md` table reflects the renamed list
+
+  ## Out of scope
+
+  - Renaming `TrelloConfig.needsHelpListId` field name in TypeScript (separate code refactor; can be a follow-up action item if operator wants a clean rename)
+  - Adding a new dedicated "Waiting On" Trello label for cards with non-null `waiting_on` — by design, waiting_on does NOT auto-paint a Trello label; the dashboard renders it
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe4ed883d9918775a6d5f3
+    title: Trello list "Needs Help" renamed to "Blocked" on every connected repo's board
+    checked: false
+  - check_item_id: 69fe4ed9fdf8b0b6e1d5f689
+    title: Trello label "Needs Help" renamed (or merged with existing "Blocked" label) on every connected repo's board
+    checked: false
+  - check_item_id: 69fe4ed9ba725dbbc9cf0394
+    title: .claude/rules/trello-config.md table reflects renamed list + label (in danxbot repo root)
+    checked: false
+  - check_item_id: 69fe4ed96722814c94f1ef84
+    title: Verify on next poll tick that danxbot pushes correctly to renamed list (no ID drift)
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

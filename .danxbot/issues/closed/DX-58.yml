@@ -1,0 +1,165 @@
+schema_version: 4
+tracker: trello
+id: DX-58
+external_id: 69f9df964b7f58666dc95671
+parent_id: null
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: Add staged_files to /api/launch — generic pre-dispatch file staging into workspaces
+description: |-
+  ## Context
+
+  Connected repos (gpt-manager, others in future) need to pre-populate the dispatched agent's working filesystem before the agent starts. Today the only mechanism is "agent calls an MCP tool at startup to fetch its own state" — which puts a runtime contract on the agent (must call exactly once, must not re-call), races sub-agent saves on overwrite, and fails opaquely when the agent forgets the call.
+
+  Concrete first consumer: gpt-manager's schema-builder dispatch needs `/tmp/schemas/${SCHEMA_DEFINITION_ID}/` populated with `schema.json`, `blueprints/{id}.json`, `templates/{id}.json`, `templates/sample-data-{id}.json`, and `annotations/{notes,questions,research,rules}.json` before the agent spawns. See gpt-manager's sibling card `DX-47`.
+
+  ## Solution
+
+  Add a generic file-staging mechanism to the danxbot dispatch layer. Inline-in-launch (not a separate endpoint) so staging + dispatch are atomic.
+
+  **`POST /api/launch` gains a `staged_files` field:**
+
+  ```json
+  {
+    "repo": "gpt-manager",
+    "workspace": "schema-builder",
+    "task": "...",
+    "api_token": "...",
+    "overlay": { "SCHEMA_DEFINITION_ID": "42", ... },
+    "staged_files": [
+      { "path": "/tmp/schemas/${SCHEMA_DEFINITION_ID}/schema.json", "content": "..." },
+      { "path": "/tmp/schemas/${SCHEMA_DEFINITION_ID}/blueprints/7.json", "content": "..." }
+    ]
+  }
+  ```
+
+  Worker behavior:
+
+  1. Receive launch body. Validate `staged_files[]` shape.
+  2. Resolve placeholders in each `path` against the launch body's `overlay` (e.g. `${SCHEMA_DEFINITION_ID}` → `"42"`). Fail loud on unresolved placeholders.
+  3. Validate each resolved path against the workspace's declared `staging-paths` allowlist. Reject anything outside the allowlist with 400 + clear error. NEVER write outside.
+  4. Resolve each path to its canonical absolute form (`path.resolve` after normalization). Reject any path that contains `..` or escapes the allowlist root after normalization (path-traversal guard).
+  5. Write each file. On any write failure, abort the dispatch — do NOT proceed to `spawnAgent`. Return 5xx with the failure detail.
+  6. Spawn the agent only after every staged file is on disk.
+  7. Track staged files for post-dispatch cleanup. When the dispatch reaches a terminal state (completed/failed/cancelled/timed-out), remove every staged file the worker wrote. Cleanup MUST NOT touch files the worker did not write.
+
+  **Workspace config — declare allowlist roots:**
+
+  Each workspace's `<repo>/.danxbot/workspaces/<name>/workspace.yml` gains:
+
+  ```yaml
+  staging-paths:
+    - "/tmp/schemas/${SCHEMA_DEFINITION_ID}/"
+  ```
+
+  Multiple roots permitted. Placeholders resolved against the dispatch's `overlay` at request time. Workspace with no `staging-paths` rejects any non-empty `staged_files` payload (fail closed).
+
+  ## Why inline-in-launch (not a separate `PUT /api/workspace/{name}/files` endpoint)
+
+  - Atomic. Staging + dispatch are one operation; no race window where staged files exist but no dispatch follows (or vice versa).
+  - One round-trip from caller. Schema dispatches stage ~10–30 small JSON files; one POST is faster + simpler than orchestrating per-file PUT calls.
+  - No extra public surface. The existing `/api/launch` bearer auth covers it; no new endpoint to defend.
+
+  ## Out of Scope
+
+  - Public `PUT /api/workspace/{name}/files` HTTP endpoint
+  - Mutating staged files mid-dispatch
+  - File-content size limit / streaming
+  - Cross-workspace staging
+
+  ## Key Files
+
+  - `src/dispatch/core.ts` — wire staging before `spawnAgent`, cleanup in `onComplete`
+  - `src/dispatch/staged-files.ts` (new) — sandbox enforcement, write, cleanup
+  - `src/worker/dispatch.ts` — accept + validate `staged_files` body
+  - `src/workspace/manifest.ts` — add `stagingPaths: readonly string[]`
+  - `src/workspace/resolve.ts` — substitute + return `stagingPaths` on `ResolvedWorkspace`
+  - `src/__tests__/dispatch/staged-files.test.ts` (new) — comprehensive sandbox + placeholder tests
+  - `.claude/rules/agent-dispatch.md` — document new field + ownership boundary
+
+  ## Architecture Constraints
+
+  - **DRY**: single staging implementation in `staged-files.ts`.
+  - **SOLID**: dispatch core calls staging module; never reimplements.
+  - **Fail loud**: every reject path returns a structured error.
+  - **No legacy / no backwards-compat**: `staged_files` is a new field.
+
+  ## How to Verify
+
+  - Unit tests cover every reject case + happy path + cleanup invariant.
+  - Path-traversal payloads (`..`, abs paths outside allowlist) rejected.
+  - Workspace with no `staging-paths` rejects non-empty `staged_files`.
+  - Cleanup removes only worker-staged files; non-staged files untouched.
+
+  ## Sibling Card
+
+  gpt-manager `DX-47` is blocked on this card.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9df981e639dfc8d767f7a
+    title: "/api/launch accepts staged_files: [{path, content}] in body"
+    checked: true
+  - check_item_id: 69f9df98ac25989e94e43ffb
+    title: Worker resolves ${VAR} placeholders in staged_files[].path against launch body's overlay; unresolved placeholder = reject
+    checked: true
+  - check_item_id: 69f9df99adca873f5773f22e
+    title: Worker rejects staged_files[].path that escapes the workspace's staging-paths allowlist (post-normalization) with 400 + structured error
+    checked: true
+  - check_item_id: 69f9df99bf2602eb5b63b82e
+    title: Path-traversal payloads (containing .., absolute paths outside allowlist) are all rejected
+    checked: true
+  - check_item_id: 69f9df9aeee1dd8c4cf9ab4a
+    title: "Workspace config (workspace.yml) supports staging-paths: [...] with placeholder substitution"
+    checked: true
+  - check_item_id: 69f9df9a23d33f4abe66fea5
+    title: Workspace with no staging-paths declared rejects any non-empty staged_files payload
+    checked: true
+  - check_item_id: 69f9df9befc42d7865822a24
+    title: Dispatch only calls spawnAgent after every staged_files write succeeds; partial-failure aborts dispatch + returns 5xx
+    checked: true
+  - check_item_id: 69f9df9b85213225d251443b
+    title: Post-dispatch cleanup removes every file the worker staged; never touches non-staged files
+    checked: true
+  - check_item_id: 69f9df9c2ae60c63ac5e816a
+    title: src/dispatch/staged-files.ts owns path resolution, sandbox, write, cleanup — single source of truth
+    checked: true
+  - check_item_id: 69f9df9dccae9bc589b5388e
+    title: Unit tests cover every reject path + happy path + cleanup invariant
+    checked: true
+  - check_item_id: 69f9df9d9215b3aa21c409c3
+    title: .claude/rules/agent-dispatch.md documents the new staged_files field + ownership
+    checked: true
+comments: []
+history: []
+retro:
+  good: |
+    TDD held throughout — manifest, resolver, staged-files module, worker
+    parser, dispatch core integration each landed with tests-first. Path
+    traversal coverage includes the sibling-prefix attack (`/tmp/schemas/42`
+    vs `/tmp/schemas/42-evil`) which a naive startsWith check would let
+    through. All-or-nothing rollback inside writeStagedFiles plus error
+    `kind` discriminator (validation/write) gives the HTTP layer a clean
+    400 vs 500 mapping with no message-string parsing.
+  bad: |
+    Wired cleanup into runResolved.spawnForDispatch via the resolved
+    surface object (`stagedFilePaths`) — a slightly leaky abstraction
+    since spawn/cleanup logic now reaches into stagedFilePaths. Acceptable
+    given the alternative (a closure-captured cleanup callback) would
+    have re-implemented the onComplete chaining the file already does
+    for cleanupMcpSettings.
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

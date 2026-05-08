@@ -1,0 +1,188 @@
+schema_version: 4
+tracker: trello
+id: DX-68
+external_id: 69f9e2626583172b8d7f905d
+parent_id: null
+children: []
+dispatch:
+  id: 463290cf-88d8-4f01-b212-6547cc4aa835
+  pid: 0
+  host: ""
+  kind: work
+  started_at: ""
+  ttl_seconds: 0
+status: Done
+type: Bug
+title: "Fix: handleStop /api/stop/:jobId 404s after worker restart — add DB fallback"
+description: |-
+  ## Problem
+
+  `worker/dispatch.ts::handleStop` looks up jobs in the in-memory
+  `activeJobs` Map only. After a worker restart, that Map is empty, so
+  every long-running dispatched agent that calls `danxbot_complete`
+  hits HTTP 404 from `/api/stop/:jobId` and dies without finalizing
+  its dispatch row, syncing the tracked YAML, or running
+  `autoSyncTrackedIssue`. The agent's claude process kept running
+  across the restart (parent is `script -q -f`, not the worker
+  daemon), but the worker has no record of it.
+
+  Burned a real dispatch on this during DX-53: agent finished the
+  card cleanly but `danxbot_complete` returned 404 → MCP tool error →
+  agent thought it failed → no terminal-state propagation. Worse, the
+  poller saw the card without an active dispatch and re-claimed it,
+  spawning a duplicate dispatch against the same card.
+
+  ## Root cause
+
+  `src/worker/dispatch.ts:863`:
+
+      const job: AgentJob | undefined = getActiveJob(jobId);
+      if (!job) {
+        json(res, 404, { error: "Job not found" });
+        return;
+      }
+
+  `getActiveJob` is in-memory-only. No DB fallback.
+
+  ## Solution
+
+  When `getActiveJob(jobId)` misses, query `getDispatchById(jobId)`
+  before returning 404. If the row exists and is in a non-terminal
+  status (`queued` / `running`):
+
+  1. Mark the dispatch row terminal via `updateDispatch` — status
+     mapped from the request body's `status` field (`completed` /
+     `failed` / `critical_failure` per the existing parseStopStatus
+     contract).
+  2. Run `autoSyncTrackedIssue(jobId, repo)` to push the local YAML
+     edits to the tracker (same as the in-memory path).
+  3. For `critical_failure`, also write the flag file via `writeFlag`.
+  4. Return 200 with the resolved status.
+
+  The in-process job is gone (different worker incarnation); we
+  cannot signal `job.stop()`, but we don't need to — the DB update
+  is the only side effect that hadn't already happened.
+
+  Return 404 only when the dispatch row genuinely does not exist
+  (caller bug or wrong jobId).
+
+  Idempotency: if the row is already in a terminal status, return 200
+  with the existing status (no-op). Don't re-mark — preserves the
+  original terminal reason.
+
+  ## Tests
+
+  Add to `src/worker/dispatch.test.ts`:
+
+  - `handleStop with active job — current behavior` (existing) still passes.
+  - `handleStop falls back to DB when activeJobs is empty (worker-restart
+     simulation)` — pre-seed a `running` dispatch row, call handleStop,
+     assert 200 + DB row updated to `completed`.
+  - `handleStop returns 404 when neither activeJobs nor DB has the row`.
+  - `handleStop is idempotent on already-terminal rows`.
+
+  ## Key files
+
+  - `src/worker/dispatch.ts` — `handleStop` (the change)
+  - `src/dashboard/dispatches-db.ts` — `getDispatchById`, `updateDispatch`
+  - `src/worker/dispatch.test.ts` — tests
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69f9e264377fc9bb1d2c6d70
+    title: handleStop falls back to DB lookup when activeJobs miss
+    checked: true
+  - check_item_id: 69f9e2641861fd2a452eb30c
+    title: DB-fallback path runs autoSyncTrackedIssue + updates dispatch row to terminal status
+    checked: true
+  - check_item_id: 69f9e2641430ca7847fc95bc
+    title: critical_failure path still writes flag file even on DB-fallback path
+    checked: true
+  - check_item_id: 69f9e26547d8ac12da0eb502
+    title: 404 only when neither activeJobs nor DB has the row
+    checked: true
+  - check_item_id: 69f9e2654488eb01fb48c516
+    title: Idempotent on already-terminal rows (returns 200, no double-update)
+    checked: true
+  - check_item_id: 69f9e266974f9160dffeea65
+    title: Test coverage in src/worker/dispatch.test.ts for all four branches
+    checked: true
+comments:
+  - id: 69f9e534cd342ed8efd9863c
+    author: newms87
+    timestamp: 2026-05-05T12:40:20.183Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-lock -->
+
+      **Dispatch lock**
+
+      | Field | Value |
+      |---|---|
+      | holder | `danxbot-local` |
+      | host | `dan` |
+      | dispatch_id | `463290cf-88d8-4f01-b212-6547cc4aa835` |
+      | repo_path | `/home/newms/web/danxbot/repos/danxbot` |
+      | jsonl_dir | `/home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker` |
+      | workspace | `issue-worker` |
+      | started_at | `2026-05-05T12:40:19.927Z` |
+      | ttl | `120m` |
+      | stale_after | `2026-05-05T14:40:19.927Z` |
+
+      To find the agent session that worked this card:
+      ```
+      grep -l '463290cf-88d8-4f01-b212-6547cc4aa835' /home/newms/.claude/projects/-home-newms-web-danxbot-repos-danxbot-.danxbot-workspaces-issue-worker/*.jsonl
+      ```
+  - id: 69f9e7af01270ccc7a007636
+    author: newms87
+    timestamp: 2026-05-05T12:50:55.158Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** Clean TDD cycle: 9 red tests → impl → green, then 4 more from the
+      test-reviewer + code-reviewer feedback (queued state, missing
+      status, no-summary completed, updateDispatch reject → 500). Reused
+      `isTerminalStatus` from `dashboard/dispatches.ts` instead of
+      hand-rolling the terminal check, and extracted
+      `mapCompleteToDispatchStatus` so the critical_failure asymmetry
+      (response = critical_failure, row = failed) is encoded once.
+      **What went wrong:** `handleStopFromDb` and the in-memory `handleStop` branch still
+      duplicate the writeFlag/autoSync ordering. A full extraction would
+      need to abstract `job.stop` vs `updateDispatch` behind a finalizer
+      callback — left for a follow-up since the in-memory branch's
+      job.stop does cleanup beyond the DB write.
+      **Action items:** Nothing
+      **Commits:** 25230512ad1341d4aa0f3edfde3394b47133cb8d
+history: []
+retro:
+  good: |-
+    Clean TDD cycle: 9 red tests → impl → green, then 4 more from the
+    test-reviewer + code-reviewer feedback (queued state, missing
+    status, no-summary completed, updateDispatch reject → 500). Reused
+    `isTerminalStatus` from `dashboard/dispatches.ts` instead of
+    hand-rolling the terminal check, and extracted
+    `mapCompleteToDispatchStatus` so the critical_failure asymmetry
+    (response = critical_failure, row = failed) is encoded once.
+  bad: |-
+    `handleStopFromDb` and the in-memory `handleStop` branch still
+    duplicate the writeFlag/autoSync ordering. A full extraction would
+    need to abstract `job.stop` vs `updateDispatch` behind a finalizer
+    callback — left for a follow-up since the in-memory branch's
+    job.stop does cleanup beyond the DB write.
+  action_item_ids: []
+  commits:
+    - 25230512ad1341d4aa0f3edfde3394b47133cb8d
+waiting_on: null
+blocked: null

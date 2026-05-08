@@ -1,0 +1,135 @@
+schema_version: 4
+tracker: trello
+id: DX-133
+external_id: 69fd5b2aef0ea7e17d46d98f
+parent_id: DX-130
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "[Trello decouple > Phase 3] healLocalYamls poller pass — auto-move Done → closed/"
+description: |-
+  ## Context
+
+  Even with Phase 1 + 2, cards already in the inconsistent state (terminal status in `open/`) need to self-heal. DX-95 + DX-90 are sitting on disk right now in that state. The poller must auto-recover without a human `mv`.
+
+  Existing similar pass: `evictDeadDispatches` clears stale `dispatch{}` blocks. Existing similar pass: DX-98 epic-status auto-derive. Both run inside the poller tick. This phase adds a third complementary pass.
+
+  ## Solution
+
+  New pass `healLocalYamls(repo)` runs at the TOP of every poll tick (before any dispatch logic, before tracker fetches). Per repo, scan `<repo>/.danxbot/issues/open/`:
+
+  - Parse each `.yml`. Malformed → log warn, skip.
+  - `status ∈ {"Done", "Cancelled"}` → call `persistAfterSync`'s open→closed mover (extract that block into a shared helper). Idempotent: `closed/<id>.yml` already present → write merged content + unlink open copy.
+  - `dispatch != null` and PID is dead → already handled by `evictDeadDispatches`, no overlap.
+  - Log healing actions at info level so dashboard (Phase 4) can surface them.
+
+  Order of poller-tick passes after this lands:
+
+  1. `healLocalYamls` (new) — heal terminal-status open/ files
+  2. `drainRetries` (Phase 2) — drain Trello retry queue
+  3. `evictDeadDispatches` (existing) — clear stale dispatch records
+  4. tracker fetch + bulk-sync inbound (existing)
+  5. epic-status auto-derive (existing, DX-98)
+  6. dispatch decisions (existing)
+
+  Heal pass + epic auto-derive together close the DX-95/DX-90 loop: heal moves DX-95 to `closed/`; the next tick's auto-derive sees all of DX-90's children Done → flips DX-90 to Done; subsequent tick heals DX-90 too.
+
+  ## Files
+
+  - `src/poller/index.ts` — new `healLocalYamls` function + integration into `_poll`
+  - `src/poller/yaml-lifecycle.ts` — extract `moveToClosedIfTerminal` shared helper
+  - `src/worker/issue-route.ts` — `persistAfterSync` calls the shared helper instead of inlining the move (keeps single implementation)
+  - `src/poller/index.test.ts` — new test cases below
+
+  ## Test plan (TDD)
+
+  1. `healLocalYamls` finds `open/ISS-N.yml` with `status: Done` → moves to `closed/`. `open/` copy gone, `closed/` copy present.
+  2. Idempotent: running `healLocalYamls` again with `closed/<id>.yml` present + no `open/<id>.yml` → no-op.
+  3. Stale `closed/<id>.yml` already present + `open/<id>.yml` with `status: Done` → `closed/` copy is overwritten with the open's content (open wins, see existing comment in `persistAfterSync`).
+  4. `status: ToDo` YAML in `open/` → not touched by heal pass.
+  5. Malformed YAML → logged, skipped, doesn't crash the pass.
+  6. End-to-end: stage DX-95-style YAML (`status: Done` in `open/`), run one tick, assert YAML moved.
+
+  ## Acceptance
+
+  - `healLocalYamls` is the FIRST pass in `_poll`, before tracker fetch.
+  - Terminal-status YAMLs in `open/` move to `closed/` automatically every tick. Idempotent. Tracker-independent.
+  - 6 new tests pass; no existing tests regressed.
+  - Real-world verification: launch worker against repo with DX-95 + DX-90 in their current stuck state → next tick moves DX-95 to closed/; tick after auto-derive flips DX-90 to Done; tick after heals DX-90 to closed/. AC #8 of DX-130 verified live.
+
+  ## Out of scope
+
+  - Healing OTHER drift classes (orphan dispatch blocks, AC item id reconciliation) — those have their own existing passes.
+  - Changing the order of existing passes beyond inserting healLocalYamls at the top.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd5b2a31f8b414801810dc
+    title: healLocalYamls runs as first pass in _poll, before any tracker call
+    checked: true
+  - check_item_id: 69fd5b2b902742adb080ffc7
+    title: status Done/Cancelled YAMLs in open/ are moved to closed/ idempotently
+    checked: true
+  - check_item_id: 69fd5b2c6995f66962ed8096
+    title: Stale closed/ copy is overwritten by open/ content (open wins per existing contract)
+    checked: true
+  - check_item_id: 69fd5b2c6d6b49bbb8c03b9a
+    title: Malformed YAML logged + skipped without crashing the pass
+    checked: true
+  - check_item_id: 69fd5b2c83a99452b8d80270
+    title: 6 new unit tests pass; no existing tests regressed; tsc clean
+    checked: true
+  - check_item_id: 69fd5b2d40a1ca45fa075e04
+    title: Live verification — ISS-95 auto-moves to closed/ on first tick after deploy; ISS-90 auto-flips to Done via ISS-98 derive on subsequent tick
+    checked: true
+comments:
+  - id: 69fd5d743a3785b902ff3388
+    author: danxbot
+    timestamp: 2026-05-08T03:50:12.289Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - **Clean DRY extraction.** `moveToClosedIfTerminal` lives once in `src/poller/yaml-lifecycle.ts` and is consumed by both the new poller pass (`healLocalYamls`) and the worker's existing `persistAfterSync`. No duplicated open→closed logic; both code paths inherit the same "open wins" overwrite contract automatically.
+      - **First-run TDD pass.** All 8 heal unit tests passed against the implementation on the very first run — the schema and the `epic-status.ts` precedent gave a solid template, and the test fixture at `heal.test.ts` test #6 reproduces the exact DX-95 stuck state (terminal status + lingering `dispatch{}` block) so a regression that re-introduces that bug fails immediately.
+      - **Live verification was simple and convincing.** Staged `closed/DX-95.yml` back into `open/`, ran `healLocalYamls('/home/newms/web/danxbot/repos/danxbot')`, observed `healed: [{id: "DX-95", status: "Done"}]` and the file moved on disk. The contract works end-to-end against the real repo path, not just synthetic tmpdirs.
+      - **Pure-helper boundary preserved.** Both `heal.ts` and `yaml-lifecycle.ts` stay logger-free / config-chain-free, matching the project rule that lets test files import them without paying the `DANXBOT_DB_USER` env-validation tax. The caller (`_poll`) handles all logging.
+      - **Code review verdict was "ship as-is".** Nits 1-5 from the review were all optional polish; none surfaced critical or high-priority concerns, which validates the test-first / pattern-matching approach.
+
+      **What went wrong:** - **YAML status flipped back to ToDo mid-dispatch.** The first `danx_issue_save` in this dispatch returned `{saved: false, errors: ["sync failed: Trello API error: 500 Internal Server Error (POST /cards)"]}`. Despite the name, the local YAML was written successfully — the failure was only the Trello orphan-create. But because the synchronous response was `saved: false`, the worker's later async push (which succeeded once Trello recovered) round-tripped the OLD in-memory state (`status: ToDo`) back onto disk, overwriting the `In Progress` flip I'd persisted locally. Had to re-flip after the quality-gate review. **This is exactly the failure mode DX-130 / DX-131 fix.** Phase 1 (when shipped) makes `persistAfterSync` run before tracker push, which would have made my first save authoritative and prevented the round-trip clobber.
+      - **Pre-existing full-suite flakes surfaced under load.** Two of three full-backend `vitest run` invocations were 100% green (3242/3242). The third hit 5 failures across `src/index.test.ts`, `src/cli/list-target-repos.test.ts`, and `src/__tests__/integration/helpers/capture-server-cli.test.ts` — all 57 tests in those files passed cleanly in isolation. These are timing-dependent subprocess + microtask-drain flakes, NOT regressions caused by DX-133, but they're real and worth investigating in a separate card. Filed as the Phase 3 retro observation; not blocking ship.
+      - **Initial TS narrowing dance in `heal.ts`.** TypeScript doesn't propagate the `issue.status !== "Done" && issue.status !== "Cancelled"` narrow across the `{ ...issue, dispatch: null }` spread. Caught by the first `tsc --noEmit` run. The fix (capture `terminalStatus: "Done" | "Cancelled" = issue.status` before the spread) is a small smell but the comment explains why; the alternative (widening the helper return type) was worse.
+      - **Heal pass logging coverage gap.** The poller's heal-result log loop (info for `healed[]`, warn for `errors[]`) has no direct test. Test reviewer flagged this as low-priority; Phase 4 will replace those `log.*` calls with `recordSystemError`, so testing the current shape now would just churn. Acceptable tradeoff.
+
+      **Action items:** Nothing
+      **Commits:** f27575b
+history: []
+retro:
+  good: |
+    - **Clean DRY extraction.** `moveToClosedIfTerminal` lives once in `src/poller/yaml-lifecycle.ts` and is consumed by both the new poller pass (`healLocalYamls`) and the worker's existing `persistAfterSync`. No duplicated open→closed logic; both code paths inherit the same "open wins" overwrite contract automatically.
+    - **First-run TDD pass.** All 8 heal unit tests passed against the implementation on the very first run — the schema and the `epic-status.ts` precedent gave a solid template, and the test fixture at `heal.test.ts` test #6 reproduces the exact DX-95 stuck state (terminal status + lingering `dispatch{}` block) so a regression that re-introduces that bug fails immediately.
+    - **Live verification was simple and convincing.** Staged `closed/DX-95.yml` back into `open/`, ran `healLocalYamls('/home/newms/web/danxbot/repos/danxbot')`, observed `healed: [{id: "DX-95", status: "Done"}]` and the file moved on disk. The contract works end-to-end against the real repo path, not just synthetic tmpdirs.
+    - **Pure-helper boundary preserved.** Both `heal.ts` and `yaml-lifecycle.ts` stay logger-free / config-chain-free, matching the project rule that lets test files import them without paying the `DANXBOT_DB_USER` env-validation tax. The caller (`_poll`) handles all logging.
+    - **Code review verdict was "ship as-is".** Nits 1-5 from the review were all optional polish; none surfaced critical or high-priority concerns, which validates the test-first / pattern-matching approach.
+  bad: |
+    - **YAML status flipped back to ToDo mid-dispatch.** The first `danx_issue_save` in this dispatch returned `{saved: false, errors: ["sync failed: Trello API error: 500 Internal Server Error (POST /cards)"]}`. Despite the name, the local YAML was written successfully — the failure was only the Trello orphan-create. But because the synchronous response was `saved: false`, the worker's later async push (which succeeded once Trello recovered) round-tripped the OLD in-memory state (`status: ToDo`) back onto disk, overwriting the `In Progress` flip I'd persisted locally. Had to re-flip after the quality-gate review. **This is exactly the failure mode DX-130 / DX-131 fix.** Phase 1 (when shipped) makes `persistAfterSync` run before tracker push, which would have made my first save authoritative and prevented the round-trip clobber.
+    - **Pre-existing full-suite flakes surfaced under load.** Two of three full-backend `vitest run` invocations were 100% green (3242/3242). The third hit 5 failures across `src/index.test.ts`, `src/cli/list-target-repos.test.ts`, and `src/__tests__/integration/helpers/capture-server-cli.test.ts` — all 57 tests in those files passed cleanly in isolation. These are timing-dependent subprocess + microtask-drain flakes, NOT regressions caused by DX-133, but they're real and worth investigating in a separate card. Filed as the Phase 3 retro observation; not blocking ship.
+    - **Initial TS narrowing dance in `heal.ts`.** TypeScript doesn't propagate the `issue.status !== "Done" && issue.status !== "Cancelled"` narrow across the `{ ...issue, dispatch: null }` spread. Caught by the first `tsc --noEmit` run. The fix (capture `terminalStatus: "Done" | "Cancelled" = issue.status` before the spread) is a small smell but the comment explains why; the alternative (widening the helper return type) was worse.
+    - **Heal pass logging coverage gap.** The poller's heal-result log loop (info for `healed[]`, warn for `errors[]`) has no direct test. Test reviewer flagged this as low-priority; Phase 4 will replace those `log.*` calls with `recordSystemError`, so testing the current shape now would just churn. Acceptable tradeoff.
+  action_item_ids: []
+  commits:
+    - f27575b
+waiting_on: null
+blocked: null

@@ -1,0 +1,67 @@
+schema_version: 4
+tracker: trello
+id: DX-47
+external_id: 69ec3127e0fd8dc6597a8da7
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: Update production-deploy-port-design.md spec — references flat claude-auth layout
+description: |-
+  ## Context
+
+  Found during code review of Trello 0bjFD0a2 (rename-over-mount fix). The deploy-port design spec at `docs/superpowers/specs/2026-04-17-production-deploy-port-design.md` describes the auth-dir layout with `.credentials.json` at the root (flat layout). After 0bjFD0a2 the canonical layout is `.claude.json` at root + `.claude/.credentials.json` in a subdir. A future agent reading this spec to add a feature would produce code matching the OLD layout — a comments-don't-match-behavior violation (per `code-quality.md`).
+
+  ## Solution direction
+
+  Either update the references (lines noted as 47, 96, 191 by the code reviewer) to describe the canonical subdir layout and link the rationale to `scripts/claude-auth-setup.sh`, OR add a one-line note at the top of the file that the layout was migrated under Trello 0bjFD0a2 and point at the current canonical description.
+
+  ## Key files
+
+  - `docs/superpowers/specs/2026-04-17-production-deploy-port-design.md`
+  - `scripts/claude-auth-setup.sh` — current authoritative description of the layout
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments:
+  - id: 69f175471e30ea843a2c1dd3
+    author: newms87
+    timestamp: 2026-04-29T03:04:39.966Z
+    text: |-
+      ## Triage — 2026-04-28
+
+      **State:** Keep
+
+      **ICE:** 84 (3×7×4)
+      - Impact (3): Doc-only correctness; prevents a future agent reading the spec from coding to the obsolete flat layout (small but real comments-don't-match-behavior risk per code-quality.md).
+      - Confidence (7): Fix path is unambiguous — either edit lines 43/47/96/191 to describe the subdir layout or prepend a one-line "superseded by 0bjFD0a2, see scripts/claude-auth-setup.sh" note.
+      - Ease (4): Single-file doc edit, no tests, but the spec is long-form prose so the edit must stay coherent across multiple call sites and explain WHY .claude/ is a dir-bind vs .claude.json file-bind.
+
+      **Evidence:**
+      - Git: spec last touched in da51b21 (initial add); layout migration landed in 6781fd7 + b680fee + cc0a789 + 7780b5d, none of which updated the spec. `scripts/claude-auth-setup.sh` header is now the canonical layout description.
+      - Code: `docs/superpowers/specs/2026-04-17-production-deploy-port-design.md:43` (`/danxbot/claude-auth/` description), `:47` (`claude_auth_dir` references `.claude.json` and `.credentials.json` flat), `:96` (SCP step lists flat files), `:191` (`gpt.yml` example claims dir contains `.claude.json` + `.credentials.json`). Canonical layout: `scripts/claude-auth-setup.sh:9-26`.
+
+      **Dependencies:**
+      - None
+
+      **Decision:** Real doc/behavior drift introduced when 0bjFD0a2 migrated `.credentials.json` into a `.claude/` subdir. The spec still describes the pre-migration flat layout. Keep — small doc fix, but worth doing because the spec is the entry point a future agent would read before extending the deploy/auth pipeline.
+
+      <!-- danxbot-triage -->
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

@@ -1,0 +1,55 @@
+schema_version: 4
+tracker: trello
+id: DX-125
+external_id: 69df29baef8a77eb7ec58d54
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot > Worker] Expose poller state in /health endpoint"
+description: |
+  **Context:** The worker server's `/health` endpoint (`src/worker/server.ts`) reports Slack connectivity, DB connectivity, queued message counts, and uptime. It does not report poller state — whether polling is enabled, whether a team is currently running, or when the last poll cycle ran. When debugging a stuck worker (no cards being processed), there is no observable signal from the health endpoint.
+
+  **Solution:** Expose poller state in the `/health` response. Export a `getPollerHealth()` function from `src/poller/index.ts` that returns `{ enabled: boolean, teamRunning: boolean, lastPollAt: Date | null }`. Update `getHealthStatus()` in `server.ts` to call it and include the fields in the response. Update `allHealthy` to consider `pollerEnabled` — if polling is disabled, flag the status as `degraded` (unless intentional, which could be documented via a separate field).
+
+  **ICE Score:** 320 = 5 × 8 × 8 (I: 5 — Valuable for debugging stuck workers in production; not user-facing but ops-critical. C: 8 — Clear pattern, same style as existing health fields. E: 8 — Small addition to two files with no cross-cutting concerns.)
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69df29c3f9b823697e646b46
+    title: Export getPollerHealth() from src/poller/index.ts returning { enabled, teamRunning, lastPollAt }
+    checked: false
+  - check_item_id: 69df29c4c6a0ee04eeab4875
+    title: Update lastPollAt timestamp at the start of each _poll() call
+    checked: false
+  - check_item_id: 69df29c6d9aff3d0cede6efd
+    title: Call getPollerHealth() in getHealthStatus() in src/worker/server.ts and include fields in response
+    checked: false
+  - check_item_id: 69df29c77d763b79b8023bbc
+    title: Mark status as degraded when pollerEnabled is false (add poller_enabled field to response)
+    checked: false
+  - check_item_id: 69df29c8d5ed96d3b905e1f8
+    title: Add unit tests for getPollerHealth() covering enabled/disabled and teamRunning states
+    checked: false
+  - check_item_id: 69df29c83767a8a88aad2767
+    title: Run npx vitest run and npx tsc --noEmit — zero failures
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

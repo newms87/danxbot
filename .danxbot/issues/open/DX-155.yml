@@ -1,0 +1,192 @@
+schema_version: 4
+tracker: trello
+id: DX-155
+external_id: 69fe1eb6013dac9fb1ad6a86
+parent_id: DX-151
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Issues DB Mirror > Phase 4: Migrate poller readers from YAML scan to DB queries"
+description: |-
+  ## Context
+
+  Phase 4 of the Issues DB Mirror epic (DX-151). After Phase 3 (DX-154) ships, every YAML write is mirrored into Postgres. This phase replaces the poller's YAML-scanning readers with SQL queries against the `issues` table. Each helper is rewritten in place; its return shape stays identical so callers don't change.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-issues-db-mirror-design.md`, "Read pipeline" section.
+
+  ## Helpers in scope
+
+  Located in:
+
+  - `src/poller/local-issues.ts` — `listDispatchableYamls`, `listInProgressYamls`, `listTriageDueYamls`, `listBlockedTodoYamls`
+  - `src/poller/yaml-lifecycle.ts` — `loadLocal(repoLocalPath, id)`, `findByExternalId(repoLocalPath, externalId)`
+  - `src/poller/epic-status.ts` — children-by-parent_id lookup used in the parent-status derivation pass
+
+  Each helper currently does some flavor of `Glob` + `Read` + `parseSimpleYaml` + filter. After this phase, each helper does one SQL query.
+
+  ## Solution
+
+  Per helper:
+
+  1. Read the existing helper (file + tests) — capture its exact return shape (`Issue` vs `IssueRef` vs filtered subset). Note any in-memory filtering the YAML version did so the SQL filter exactly reproduces it.
+  2. Add a sibling `<helper>.sql.ts` (or fold the SQL implementation directly into the existing file — pick whatever produces the smaller diff per file). The new implementation queries the `issues` table, filtering on indexed generated columns.
+  3. Run the existing test suite — every test must still pass without modification, because the return shape is unchanged. Fix any test that was depending on YAML-scan order; the SQL version produces deterministic ordering via `ORDER BY` clauses (document the chosen order in a comment).
+  4. Delete the YAML-walk implementation. Imports of `parseSimpleYaml`, `readdirSync`, `readFileSync`, etc. shrink as a side effect.
+  5. After all helpers in a file are migrated, run the full vitest suite. Commit per file.
+
+  ### SQL query templates
+
+  These are starting points; pick exact column lists matching each caller's needs. For helpers returning the full `Issue`, select `data` and project:
+
+  ```sql
+  -- listDispatchableYamls(repoName, pickupNamePrefix?)
+  select data
+    from issues
+   where repo_name = $1
+     and status = 'ToDo'
+     and blocked = false
+     and list_kind != 'action_items'
+     and ($2::text is null or data->>'title' like $2 || '%')
+   order by (data->>'updated_at')::timestamptz desc;
+
+  -- listInProgressYamls(repoName)
+  select data from issues
+   where repo_name = $1 and status = 'In Progress'
+   order by (data->>'updated_at')::timestamptz desc;
+
+  -- listTriageDueYamls(repoName, now)
+  select data from issues
+   where repo_name = $1
+     and triage_expires_at <= $2
+     and status in ('Review','Needs Help','ToDo')
+   order by triage_expires_at asc;
+
+  -- listBlockedTodoYamls(repoName)
+  select data from issues
+   where repo_name = $1 and blocked = true and status = 'ToDo'
+   order by (data->>'updated_at')::timestamptz desc;
+
+  -- loadLocal(repoLocalPath, id)
+  select data from issues where repo_name = $1 and id = $2;
+
+  -- findByExternalId(repoLocalPath, externalId)
+  select data from issues where repo_name = $1 and external_id = $2 limit 1;
+
+  -- epic-status: children of a parent
+  select data from issues where repo_name = $1 and parent_id = $2;
+  ```
+
+  Project `data` (jsonb) → `Issue` via the existing parser path used by the YAML reader (likely an `as Issue` cast since the canonicalized data already shape-matches the type).
+
+  ### `repoName` plumbing
+
+  Existing helpers take `repoLocalPath` as their first argument. The mirror writer stores `repo_name` (a string label like `"gpt-manager"`, derived from the directory name during Phase 3). Add a small helper `repoNameFromPath(repoLocalPath): string` that maps the path to the canonical name (read from `RepoContext.name` if available, else the basename of the path). Use it in every migrated helper. Keep the `repoLocalPath` argument signature unchanged for caller compatibility.
+
+  ### Fallback for empty DB / mid-bootstrap
+
+  If a query returns zero rows but the YAML directory has files, that is a real bug — the mirror is broken. Do NOT add a YAML fallback. Return the empty array; let the bug surface. A fallback would silently mask mirror failures and defeat the entire epic. The boot scan ensures the DB is consistent before the poller starts querying.
+
+  ## Files
+
+  Modify:
+
+  - `src/poller/local-issues.ts`
+  - `src/poller/local-issues.test.ts` (verify no test depends on YAML-walk ordering specifics)
+  - `src/poller/yaml-lifecycle.ts`
+  - `src/poller/yaml-lifecycle.test.ts`
+  - `src/poller/epic-status.ts`
+  - `src/poller/epic-status.test.ts`
+
+  Create (optional helper):
+
+  - `src/poller/repo-name.ts` — `repoNameFromPath` if not already living somewhere
+
+  ## Test plan (TDD-style — but mostly "preserve existing tests")
+
+  1. Read every existing test file for the helpers in scope. Note any that mock `readdirSync` / `readFileSync` — those tests need to be reshaped to mock the DB query layer instead.
+  2. Add an integration test per helper that seeds the test DB with 3-5 issues, calls the helper, asserts the right subset comes back.
+  3. Migrate the helper. Run unit + integration tests. Both green.
+  4. Delete the YAML-walk code. Imports shrink. Re-run tests.
+  5. After all helpers migrated, run `make test` end-to-end.
+
+  Per-helper coverage targets:
+
+  - **listDispatchableYamls** — happy path, ToDo-only filter, blocked-excluded, action_items-excluded, pickupNamePrefix filter, ordering.
+  - **listInProgressYamls** — only In Progress rows returned, multi-repo isolation.
+  - **listTriageDueYamls** — only rows with `triage_expires_at <= now` returned, status filter, ordering ascending.
+  - **listBlockedTodoYamls** — only blocked=true AND status=ToDo, ordering.
+  - **loadLocal** — exact match, no row → null.
+  - **findByExternalId** — exact match, no row → null, multiple rows ⇒ first one (shouldn't happen but document).
+  - **epic-status children** — every child of parent_id returned, ordering by created_at preserves children list semantics.
+
+  ## Acceptance
+
+  - All 7 helpers migrated; `grep -n "readdirSync\|parseSimpleYaml" src/poller/local-issues.ts src/poller/yaml-lifecycle.ts src/poller/epic-status.ts` returns ZERO matches (the YAML-walk code is gone).
+  - Existing test suite for each helper passes without changes to assertions.
+  - New integration tests seeded against test PG verify each query returns the right subset.
+  - `make test` green; `npx tsc --noEmit` clean; `cd dashboard && npx vue-tsc --noEmit` clean.
+  - `make test-system-poller` (Layer 3) passes — the poller still picks up cards correctly through the new DB-backed list helpers.
+  - Manual smoke: launch the worker, manually edit a YAML to flip `status: ToDo` → `In Progress`, observe the next poller tick uses the DB to make its dispatch decision (debug-log shows the SQL helper return values).
+
+  ## Out of scope
+
+  - Dashboard endpoints + MCP query tools (DX-156).
+  - Retiring `danx_issue_save` (DX-157).
+  - Adding new helpers — only migrating existing ones.
+  - Adding a YAML fallback path — explicitly forbidden per the spec.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe1eb79307038395718411
+    title: listDispatchableYamls migrated to SQL; existing tests pass; integration test seeds DB + asserts correct subset
+    checked: false
+  - check_item_id: 69fe1eb740b5c284d9c68193
+    title: listInProgressYamls migrated; tests pass
+    checked: false
+  - check_item_id: 69fe1eb8defd5466c8408f78
+    title: listTriageDueYamls migrated; tests pass
+    checked: false
+  - check_item_id: 69fe1eb9e0f5096091c3096c
+    title: listBlockedTodoYamls migrated; tests pass
+    checked: false
+  - check_item_id: 69fe1eb937b05aeb26284a78
+    title: loadLocal migrated; tests pass; null-on-miss preserved
+    checked: false
+  - check_item_id: 69fe1eb9a5ede52bae59fced
+    title: findByExternalId migrated; tests pass
+    checked: false
+  - check_item_id: 69fe1eba85316df3577ab389
+    title: epic-status children-by-parent_id migrated; parent-status derivation still produces correct status union
+    checked: false
+  - check_item_id: 69fe1ebb9b01a551c7894bd2
+    title: grep verifies no readdirSync / parseSimpleYaml references remain in the migrated files
+    checked: false
+  - check_item_id: 69fe1ebbf44d7d12124c987c
+    title: make test green; tsc + vue-tsc clean; make test-system-poller passes
+    checked: false
+  - check_item_id: 69fe1ebbb29da395f2f2b315
+    title: Manual smoke — worker dispatches off DB-backed list, debug log confirms
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Sequential phase ordering — readers need the mirror writing into Postgres (Phase 3 / DX-154) before they can query it.
+  timestamp: 2026-05-08T12:00:00.000Z
+  by:
+    - DX-154
+blocked: null

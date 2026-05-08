@@ -1,0 +1,157 @@
+schema_version: 4
+tracker: trello
+id: DX-158
+external_id: 69fe27e0c7e26e6436775174
+parent_id: null
+children:
+  - DX-159
+  - DX-160
+  - DX-161
+  - DX-162
+  - DX-200
+  - DX-164
+dispatch: null
+status: ToDo
+type: Epic
+title: "[Multi-Worker] Per-agent worktrees, identity, locks, triage-precursor conflict check"
+description: |-
+  ## Context
+
+  Today every dispatched agent for a given repo runs in the SAME workspace dir at `<repo>/.danxbot/workspaces/<name>/`. This is fine for the one-dispatch-at-a-time model danxbot was built around, but blocks any concurrency: two issue-workers running in parallel would clobber each other's edits.
+
+  This epic introduces named per-repo agents (Alice, Bob, etc.) with persistent git worktrees, capability flags (which dispatch types they serve), schedules, personas, and dashboard CRUD. The poller picks (agent, card) pairs honoring per-agent locks. A triage agent runs in a precursor mode to flag scope-overlap conflicts before two agents touch the same files. Each agent works on a branch named after itself, squash-merges to `main` on completion.
+
+  Full design: `docs/superpowers/specs/2026-05-08-multi-worker-dispatch-design.md` (commit `378df0b`). Read that BEFORE picking up any phase.
+
+  ## Architecture (one screen)
+
+  ```
+  settings.json: agents{alice,bob,…}  ──►  poller _poll() per repo
+                                                │
+                                                ▼
+                              pick free agent A (capability + schedule
+                              + enabled + dispatches table not busy)
+                              pick free card C (status=ToDo, !blocked,
+                              assigned_agent IS NULL)
+                                                │
+                  ≥1 other agent in-progress?  ───── yes ─►  triage --conflict-check
+                                                │             ok / conflict
+                  no, or ok                                       │
+                                                │           conflict → stamp blocked
+                                                ▼           on C, retry pick
+                                pre-dispatch branch validation
+                                in <repo>/.danxbot/worktrees/<A>/
+                                                │
+                          dirty/divergent → branch-recovery dispatch
+                          clean → reset --hard origin/main; checkout A
+                                                │
+                                                ▼
+                          spawn agent w/ persona-prepended prompt
+                                                │
+                                                ▼
+                          agent completes → rebase A onto origin/main →
+                          squash merge to main → conventional-commit →
+                          rebase-loop push → checkout A → reset clean
+                                                │
+                                                ▼
+                                  danxbot_complete
+  ```
+
+  ## Phases
+
+  Each phase its own card; sequential ordering via `blocked.by`.
+
+  | Card | Phase | Scope |
+  |---|---|---|
+  | DX-159 | 1: Agents settings schema + Settings/Agents UI tab restructure | Add `agents{}` + `agentDefaults` to `<repo>/.danxbot/settings.json`. Validation (max 5, name pattern, capability subset, schedule shape, tz parseable). Move existing Agents tab → Settings tab, scope to currently-selected repo. Stub the new Agents tab w/ empty roster. |
+  | DX-160 | 2: Agents tab CRUD + REST + avatar storage | Full agent roster UI (cards, edit drawer, schedule editor, capability checkboxes). REST endpoints (`GET/POST/PATCH/DELETE /api/agents`, avatar upload + serve). FS avatar storage at `<repo>/.danxbot/agents/<name>/avatar.<ext>`. |
+  | DX-161 | 3: Worktree manager + branch-recovery dispatch | Bootstrap `<repo>/.danxbot/worktrees/<name>/` on agent create. Pre-dispatch validation in worker (clean + up-to-date with `origin/main`). Branch-recovery dispatch path that finishes any WIP card without destroying work. |
+  | DX-162 | 4: Persona injection + agent-finalize.sh + squash-merge flow | Persona block prepended to every dispatch prompt. New `<repo>/.danxbot/scripts/agent-finalize.sh` script for the rebase + squash-merge + Conventional Commits push + rebase-loop push race. Update issue-worker skill to invoke the script on completion. |
+  | DX-200 | 5: Agent + card locks + triage-precursor conflict-check | Lock queries via DB (agent busy ← `dispatches` table; card assigned ← `issues.assigned_agent`). Stamp `assigned_agent` on YAML at dispatch start. New `--conflict-check` mode in `/danx-triage`. Dispatch pipeline runs precursor when ≥1 other agent in-progress and `agentDefaults.conflictCheckEnabled`. |
+  | DX-164 | 6: Card UI badges + busy state + end-to-end system test | `<avatar><name>` chip on issue list rows + drawer header. Live busy badge on Agents tab roster. New system-test scenario: 3 agents, 3 cards on disjoint files, all run concurrently, all squash-merge cleanly. |
+
+  ## Locked decisions (from brainstorm 2026-05-08)
+
+  - **Persistent per-agent worktrees** at `<repo>/.danxbot/worktrees/<name>/`. Branch named after agent.
+  - **Max 5 agents per repo.** Operator-named in dashboard. Each declares capabilities (subset of `issue-worker / slack / api`).
+  - **One dispatch per agent at a time regardless of type.** Alice running an issue dispatch can't reply to Slack until done.
+  - **Free-form markdown bio.** Filesystem avatar (max 1 MB). Per-day schedule windows + IANA tz.
+  - **Persona prepended** to every dispatch prompt as the first paragraph.
+  - **Branch model:** rebase agent branch onto `origin/main` at dispatch start. Squash-merge to main on completion. Conventional Commits (`feat(DX-N): <title>` + bullet body). Rebase-loop on push race; cap retries; Needs Help on exhaustion.
+  - **Branch state recovery:** dirty/divergent worktree → recovery-mode dispatch (finish WIP, never destroy work, exit clean). Then re-validate, dispatch next card.
+  - **Triage-precursor:** existing `/danx-triage` skill + `--conflict-check` mode. Runs every dispatch when ≥1 other agent in-progress AND repo's `agentDefaults.conflictCheckEnabled !== false`.
+  - **UI restructure:** existing Agents tab → Settings tab, repo-scoped (was showing every repo at once). New Agents tab → agent CRUD + roster + busy state.
+
+  ## Hard dependency
+
+  Blocked by **Issues DB Mirror (DX-151)**. Locks are derived from DB queries on the `dispatches` table + `issues.assigned_agent` generated column. Without the mirror, lock checks would re-walk YAMLs on every poll tick.
+
+  ## Acceptance (epic-level — verified after Phase 6)
+
+  - `<repo>/.danxbot/settings.json` carries an `agents{}` map with up to 5 entries; dashboard CRUD round-trips.
+  - Each agent has a persistent worktree at `<repo>/.danxbot/worktrees/<name>/`; bootstrap runs on agent create; teardown runs on agent delete.
+  - Multiple issue-worker dispatches run concurrently for the same repo without code-edit collisions.
+  - Branches named after agents survive across dispatches; squash-merges land on `main` with Conventional Commits messages.
+  - Pre-dispatch validation catches dirty/divergent state and runs a recovery dispatch instead of next card.
+  - Triage `--conflict-check` blocks colliding dispatches; conflicts stamp `blocked` on the candidate card.
+  - Issue list rows + drawer headers show the assigned-agent chip when set.
+  - System test: 3 agents, 3 cards, concurrent dispatch, all merge cleanly to main.
+  - `make test`, `make test-system`, `make deploy-smoke TARGET=gpt` pass.
+
+  ## Out of scope
+
+  - Multi-repo agents (each agent belongs to one repo).
+  - Cross-agent collaboration (an agent picking up another agent's WIP).
+  - Per-agent model preference (haiku / sonnet / opus) — future.
+  - Per-agent tool allowlist beyond the workspace's surface — future.
+  - Auto-scaling agent count based on queue depth.
+  - Slack / API dispatch-type stamping of `assigned_agent` — issue-worker only (slack/api don't have an issue YAML).
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe27e133fe43b048d4d21f
+    title: All 6 phase cards (DX-159..DX-164) reach Done
+    checked: false
+  - check_item_id: 69fe27e2c661adcb02816071
+    title: settings.json agents{} schema live; dashboard CRUD round-trips for up to 5 agents per repo
+    checked: false
+  - check_item_id: 69fe27e218925a0628e2a19b
+    title: Per-agent worktrees bootstrapped + torn down on create/delete
+    checked: false
+  - check_item_id: 69fe27e240357fd910366465
+    title: Concurrent dispatch of 3 agents on disjoint cards completes without code-edit collisions; all squash-merge to main
+    checked: false
+  - check_item_id: 69fe27e30739aa6eee7a02ab
+    title: Pre-dispatch branch validation triggers recovery-mode dispatch on dirty/divergent state
+    checked: false
+  - check_item_id: 69fe27e3e25a182c2994095b
+    title: Triage-precursor blocks dispatches with file-overlap conflicts; stamps blocked on the candidate card
+    checked: false
+  - check_item_id: 69fe27e38e86fd483d3ea098
+    title: Issue list rows + drawer header show <avatar><name> chip when assigned_agent set
+    checked: false
+  - check_item_id: 69fe27e409caa0da7be60867
+    title: make test + make test-system + make deploy-smoke TARGET=gpt pass after the final phase
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Hard dependency on Issues DB Mirror epic (DX-151) — multi-worker locks are DB-derived from dispatches table + issues.assigned_agent generated column.
+  timestamp: 2026-05-08T12:00:00.000Z
+  by:
+    - DX-151
+blocked: null

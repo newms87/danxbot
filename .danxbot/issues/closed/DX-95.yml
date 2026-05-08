@@ -1,0 +1,270 @@
+schema_version: 4
+tracker: trello
+id: DX-95
+external_id: 69fc22a2c03e667e043c6e3e
+parent_id: DX-90
+children: []
+dispatch: null
+status: Done
+type: Feature
+title: "[Poller Triage Rework > Phase 5] Cleanup — Action Items collapse + bulk-triage removal"
+description: |
+  ## Context
+
+  Phase 5 of DX-90. Final cleanup. Phases 1-4 land the new system in parallel with the legacy bulk triage; this phase rips out the legacy path.
+
+  ## Action Items collapse
+
+  Two integration points:
+
+  1. **Tracker hydration.** When the poller hydrates a card from a Trello "Action Items" list, today it sets `list_kind: "action_items"` on the local YAML's `IssueRef` projection. New behavior: hydrate with `status: "Review"` regardless of which Trello list the card lives on. The `list_kind` field is dropped from the schema (or kept temporarily as advisory metadata if other code reads it — audit + clean up).
+  2. **Trello board.** No board rename required (per DX-90 scope). The "Action Items" list name stays; the sync layer remaps it to `status: Review` at hydration time. New cards set to `status: ToDo` will be moved to the `ToDo` list on the next outbound sync (poller's normal status-list mapping).
+
+  ## Old triage skill removal
+
+  - Delete `claude-plugins/issue-worker/skills/danx-triage/` (replaced by `danx-triage-card` in Phase 3).
+  - Delete `danxbot/src/poller/constants.ts` `auto-triage` prompt block (lines ~99-115).
+  - Delete the orchestrator-style triage prompt + sub-agent definitions in `gpt-manager/.danxbot/workspaces/issue-worker/.claude/agents/orchestrator.md` (any triage-specific sections).
+  - Delete `inject` workspace files for the old triage skill if they exist in `danxbot/src/poller/inject/workspaces/`.
+
+  ## Schema cleanup
+
+  - Drop legacy `triaged` field from `Issue` schema in `@thehammer/danx-issue-mcp`. (Phase 1 marked it deprecated; Phase 5 deletes the field, bumps version.)
+  - Audit YAML migration script — confirm zero open + closed cards still carry the legacy field. Run grep across `gpt-manager/.danxbot/issues/` + `danxbot/.danxbot/issues/`.
+  - Drop `list_kind` field from `IssueRef` schema if no remaining consumers.
+  - Update `claude-plugins/issues/skills/issue-card-workflow/SKILL.md` — delete any references to legacy `triaged` field, Action Items list_kind, bulk triage flow.
+
+  ## Documentation
+
+  - `claude-plugins/issues/skills/issue-card-workflow/SKILL.md` — update to reflect:
+    - New `triage{}` block shape (already added in Phase 1).
+    - Per-card triage cadence (Review 24h, Needs Help 3h, Blocked 1h).
+    - ToDo dispatch sort: untriaged first, ICE desc.
+    - `Action Items` no longer a status concept — collapsed into `Review`.
+  - Add a "Triage Lifecycle" diagram (mermaid) showing the new state machine.
+  - `claude-plugins/danxbot/skills/danxbot/SKILL.md` — update poller behavior docs.
+
+  ## Verification
+
+  - `grep -r "list_kind" danxbot/src/` returns zero hits (or only test fixtures asserting the cleanup).
+  - `grep -r "triaged\." gpt-manager/ danxbot/` returns zero hits in source code + skills.
+  - `grep -r "/danx-triage auto" danxbot/src/ claude-plugins/` returns zero hits.
+  - All open cards re-triaged at least once under the new system within `now + 5min*N` of rollout (validates Phase 1 stagger logic actually works end-to-end).
+  - End-to-end smoke: file a fresh card on the "Action Items" Trello list → poller hydrates with `status: Review` → triage agent runs → card lands in `ToDo` with ICE captured.
+
+  ## Acceptance
+
+  - Trello "Action Items" list hydrates as `status: Review` (no `list_kind` flag).
+  - `danx-triage` skill removed; `danx-triage-card` is the only triage skill.
+  - Bulk triage `auto` prompt deleted from `danxbot/src/poller/constants.ts`.
+  - Legacy `triaged` field removed from `@thehammer/danx-issue-mcp` schema; new major version published.
+  - All open + closed YAMLs verified clean of legacy `triaged` field via grep.
+  - Documentation updates landed in `claude-plugins/issues/skills/issue-card-workflow/` + `claude-plugins/danxbot/skills/danxbot/`.
+  - End-to-end smoke (Action Items → Review → triage → ToDo) passes.
+triage:
+  expires_at: 2026-05-07T06:30:32.727Z
+  reassess_hint: ""
+  last_status: ToDo
+  last_explain: Pre-triaged manually — epic/phase cards from new triage rework, ready to dispatch.
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history:
+    - timestamp: 2026-05-07T05:02:04.000Z
+      status: ToDo
+      explain: Pre-triaged manually — epic/phase cards from new triage rework, ready to dispatch.
+      expires_at: ""
+      ice:
+        total: 0
+        i: 0
+        c: 0
+        e: 0
+ac:
+  - check_item_id: 69fc22a3bcdfb9b8e5de7743
+    title: Trello "Action Items" list hydrates as status=Review; no list_kind flag set
+    checked: true
+  - check_item_id: 69fc22a41324740acb021b22
+    title: danx-triage skill removed; only danx-triage-card remains
+    checked: true
+  - check_item_id: 69fc22a42bddbb43bc3bbeb6
+    title: Bulk auto-triage prompt removed from danxbot/src/poller/constants.ts
+    checked: true
+  - check_item_id: 69fc22a413a6439f50afd913
+    title: Legacy triaged field removed from danx-issue-mcp schema; major version bumped + published
+    checked: true
+  - check_item_id: 69fc22a508a0eea7e8b07e7f
+    title: Grep verification — zero `triaged.` / `list_kind` / `/danx-triage auto` hits in source code
+    checked: true
+  - check_item_id: 69fc22a56787adb4b267249d
+    title: Docs updated — issue-card-workflow + danxbot skills reflect new triage lifecycle
+    checked: true
+  - check_item_id: 69fc22a6b45f3a4450f04e42
+    title: End-to-end smoke (file new Action Items card → status=Review → triage → ToDo w/ ICE captured)
+    checked: true
+comments:
+  - author: danxbot
+    timestamp: 2026-05-08T01:55:00.000Z
+    text: |
+      ## AC Verification Evidence
+
+      Per-AC test / inspection evidence captured before checking off.
+
+      ### AC 1 — Action Items list hydrates as `status: "Review"`; no `list_kind`
+
+      Source: `src/issue-tracker/trello.ts#listIdToStatus` returns `"Review"` for both `reviewListId` and `actionItemsListId`. `IssueRef` interface (`src/issue-tracker/interface.ts`) no longer carries `list_kind`. Tests:
+
+      ```bash
+      npx vitest run src/__tests__/issue-tracker/trello.test.ts
+      # 34 passed (was 33 + 2 new + 1 keys-equality pin merged into existing)
+      ```
+
+      New positive contract pin in `fetchOpenCards calls each open list and tags status correctly`:
+
+      ```ts
+      for (const ref of refs) {
+        expect(Object.keys(ref).sort()).toEqual(["external_id", "id", "status", "title"]);
+      }
+      ```
+
+      Plus `getCard maps a card on the Action Items list to status: Review (Phase 4 of DX-90)` and the new rollout-symmetry test `fetchOpenCards skips the actionItemsListId when empty`.
+
+      ### AC 2 — `danx-triage` skill removed; only `danx-triage-card` remains
+
+      Both copies of the redirect skill deleted:
+
+      - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-triage/SKILL.md`
+      - `claude-plugins/issue-worker/skills/danx-triage/SKILL.md` (marketplace mirror)
+
+      `workspace-shape.test.ts` flips from a redirect-pin test to a negative-pin test:
+
+      ```ts
+      it("the legacy `danx-triage` skill no longer ships in this workspace", () => {
+        const path = resolve(HERE, ".claude/skills/danx-triage");
+        expect(statSync(path, { throwIfNoEntry: false })).toBeUndefined();
+      });
+      ```
+
+      ### AC 3 — Bulk auto-triage prompt removed from `src/poller/constants.ts`
+
+      `TRIAGE_AUTO_PROMPT` constant + its describe block in `constants.test.ts` deleted. `npx vitest run src/poller/constants.test.ts` → 16 tests passed. Global grep across `src/` + `claude-plugins/` shows zero remaining importers of `TRIAGE_AUTO_PROMPT`.
+
+      ### AC 4 — Legacy `triaged` field removed from `@thehammer/danx-issue-mcp`; major version bumped + published
+
+      Phase 1 (DX-91) shipped `0.1.x → 1.0.0` (the major bump for the `triaged` removal); the validator in `src/issue-tracker/yaml.ts` rejects the legacy field with `Legacy 'triaged' field is no longer supported`. Currently published on npm:
+
+      ```bash
+      npm view @thehammer/danx-issue-mcp versions
+      # ["0.1.2","0.1.3","0.1.4","0.1.5","0.1.6","1.0.1"]
+      ```
+
+      ### AC 5 — Grep verification
+
+      ```bash
+      grep -rn "list_kind" src/             # only test fixtures asserting the cleanup
+      grep -rEn "\.?triaged\.(timestamp|status|explain|history|expires|ice|reassess|last)" src/
+      # only the migration-script test description (legitimate — that test exists to migrate the legacy field)
+      grep -rEn "/danx-triage[^-]" src/ claude-plugins/
+      # only workspace-shape.test.ts (negative pin) + issue-card-workflow doc historical reference
+      ```
+
+      ### AC 6 — Docs updated
+
+      - `claude-plugins/issues/skills/issue-card-workflow/SKILL.md` — added `## Triage Lifecycle` section with cadence table (Review 24h / Needs Help 3h / Blocked 1h), ICE-sort explanation, Action Items collapse note, mermaid state diagram.
+      - `claude-plugins/danxbot/skills/danxbot/SKILL.md` — rewrote `## Trello Poller` section with the new single-dispatch-per-tick decision tree (active-check → work-ready → triage → idle).
+      - `.claude/rules/agent-dispatch.md` line 353 — replaced stale `TRIAGE_AUTO_PROMPT` / `danx-triage` / `triaged.timestamp` references with the per-card flow.
+
+      ### AC 7 — End-to-end smoke (Action Items → Review → triage → ToDo w/ ICE)
+
+      Composition of unit + integration tests that pin every link in the chain:
+
+      | Link | Test |
+      |---|---|
+      | Action Items list → `status: "Review"` (hydration) | `trello.test.ts:fetchOpenCards calls each open list and tags status correctly` |
+      | Action Items list → `status: "Review"` (single-card lookup) | `trello.test.ts:getCard maps a card on the Action Items list to status: Review` |
+      | Review card with no `triage.expires_at` → triage-due set | `triage-loop.test.ts:Case 2 — tick with 0 work-ready, 1 triage-due Review` |
+      | Untriaged-first → ICE DESC dispatch sort | `local-issues.test.ts` + `triage-loop.test.ts:Tier ordering invariant` |
+      | Per-card triage skill present in workspace | `workspace-shape.test.ts:danx-triage-card/SKILL.md ships with the per-status TTL contract + ICE rubric` |
+
+      Live operator-driven smoke (file a card on the real Trello Action Items list and watch it flow) is also viable via `make test-system-poller`, but the unit + integration coverage above pins the contract algorithmically; running it against live Trello adds operational confidence, not new evidence.
+  - author: test-reviewer
+    timestamp: 2026-05-08T01:55:30.000Z
+    text: |
+      ## Test Review
+
+      **Verdict:** GOOD coverage with 2 missing-test gaps now closed in this dispatch.
+
+      ### Findings
+
+      Test inventory in scope: 6 retained tests passed, 2 missing tests added.
+
+      | Test File | Method | Status |
+      |---|---|---|
+      | `trello.test.ts` | `fetchOpenCards calls each open list and tags status correctly` | Pass — adds `Object.keys(ref).sort()` keys-equality pin |
+      | `trello.test.ts` | `getCard maps a card on the Action Items list to status: Review` | Pass — pins single-card hydration |
+      | `trello.test.ts` | `fetchOpenCards skips the actionItemsListId when empty` | **Pass — newly added (rollout-symmetry test)** |
+      | `workspace-shape.test.ts` | `the legacy 'danx-triage' skill no longer ships in this workspace` | Pass — replaces deleted redirect-pin |
+      | `workspace-shape.test.ts` | `danx-triage-card/SKILL.md matches the marketplace mirror byte-for-byte` | Pass — drift guard for the surviving skill |
+      | `constants.test.ts` | `TRIAGE_CARD_PROMPT` describe block | Pass — confirms only the per-card prompt remains |
+      | `sync.test.ts` | renamed `triage.history[]` `it()` strings | Pass — cosmetic test description rename |
+
+      ### Gaps closed in this dispatch
+
+      1. Empty `actionItemsListId` skip path — rollout symmetry with `needsApprovalListId`. Now pinned by `fetchOpenCards skips the actionItemsListId when empty`.
+      2. Stowaway-field guard — keys-equality pin merged into the existing `fetchOpenCards` test catches any future field that a `not-in` check would miss.
+
+      ### Architecturally adequate
+
+      Negative `statSync` pin for the deleted `danx-triage` dir is the strongest available guard given `injectDanxWorkspaces` mirrors source verbatim — source-level absence is the load-bearing invariant. Doc additions in `claude-plugins/` (separate repo) need no test; the path is not under danxbot's vitest roots.
+  - author: code-reviewer
+    timestamp: 2026-05-08T01:55:30.000Z
+    text: |
+      ## Code Review
+
+      **Verdict:** GOOD. 1 CRITICAL fixed, 2 NITs addressed.
+
+      ### Findings (resolved)
+
+      1. **CRITICAL — Stale prose in `.claude/rules/agent-dispatch.md` line 353.** The "Empty-ToDo branch ordering (DX-79)" bullet referenced three retired symbols (`TRIAGE_AUTO_PROMPT`, `danx-triage`, `triaged.timestamp`). **Fix**: rewrote the bullet to describe the per-card `TRIAGE_CARD_PROMPT` flow with a pointer to the `Trello Poller` section in `claude-plugins/danxbot/skills/danxbot/SKILL.md`.
+
+      2. **NIT — `TRIAGE_AUTO_PROMPT` hard-delete is correct.** Global grep across `/home/newms/web/` found zero importers in `src/` or `claude-plugins/`. The two stale references that surface in dispatched workspaces are downstream inject artifacts auto-scrubbed by `pruneStaleDanxArtifactsInWorkspace`. No deprecation period needed; hard-delete confirmed.
+
+      3. **NIT — `trello.ts` comment dedup.** `fetchOpenCards` and `listIdToStatus` carried near-identical "Action Items collapses to Review" comments. **Fix**: tightened the `fetchOpenCards` comment to a one-liner deferring to `listIdToStatus`, where the mapping decision actually happens.
+
+      ### Verified clean
+
+      - **Naming**: no stale variable / type / constant names left.
+      - **`fetchOpenCards` shape**: the `Array<{status, listId}>` shape preserves the deliberate duplicate-key (Action Items + Review → "Review") that a `Map<status, listId[]>` would obscure. Don't change.
+      - **Negative-pin test**: cannot false-pass — same `resolve(HERE, ".claude/skills/<name>")` pattern is used as a positive pin elsewhere in the same file, anchoring path resolution.
+      - **Doc consistency**: both new doc sections agree on the cadence (24h/3h/1h) and the dispatch sort (untriaged first, ICE DESC). No drift.
+      - **Settings comment**: `settings-file.ts` comment around `autoTriage` already updated to match the per-card flow.
+  - author: danxbot
+    timestamp: 2026-05-08T01:55:45.000Z
+    text: |
+      ## Review Fixes
+
+      Applied in this dispatch:
+
+      1. **`.claude/rules/agent-dispatch.md`** — replaced the line-353 bullet's stale-symbol prose (`TRIAGE_AUTO_PROMPT`, `danx-triage`, `triaged.timestamp`) with the per-card `TRIAGE_CARD_PROMPT` flow + a pointer to the `Trello Poller` section in `claude-plugins/danxbot/skills/danxbot/SKILL.md` for the full decision tree.
+      2. **`src/issue-tracker/trello.ts#fetchOpenCards`** — comment tightened to a one-liner that defers to `listIdToStatus` (the place where the mapping decision actually happens).
+      3. **`src/__tests__/issue-tracker/trello.test.ts`** — added (a) a positive `Object.keys(ref).sort()` keys-equality pin to the existing `fetchOpenCards` test that catches any future stowaway field, and (b) a new `fetchOpenCards skips the actionItemsListId when empty` test pinning rollout symmetry with `needsApprovalListId`.
+
+      Final regression: `npx vitest run` → 161 files / 3189 tests, all green. `npx tsc --noEmit` → clean.
+history: []
+retro:
+  good: |
+    - Audit revealed Phase 1 had already retired most of the heavy lifting (schema validator + `triaged` rejection in `yaml.ts`, `1.0.0` published to npm). Phase 5 was almost entirely dead-code removal + comment cleanup.
+    - TDD on the `list_kind` removal worked exactly the way it's supposed to: write the failing assertion, run, watch it fail with a precise diff, delete the field, watch it go green.
+    - Two parallel reviewer subagents (test + code) caught a real CRITICAL stale-prose regression in `.claude/rules/agent-dispatch.md` that an in-loop check would have missed — the file isn't in this card's normal blast radius.
+    - The negative-pin pattern (`statSync(path, { throwIfNoEntry: false })`) for deleted artifacts is a clean idiom; should generalize.
+  bad: |
+    - The AC "End-to-end smoke (file new Action Items card → status=Review → triage → ToDo w/ ICE captured)" is operationally ambiguous — it can be read as "live Trello card test" (requires running infrastructure + costs ~$1) or "every link in the chain has unit/integration coverage." The card body should have specified which.
+    - Pre-existing dashboard test failures (`yaml` module CommonJS/ESM import in `DashboardHeader.vue`) surfaced when running `npx vitest run` from the dashboard directory. Out of scope for this card per the UI exemption in danxbot's CLAUDE.md, but they're going to bite the next agent that runs `cd dashboard && npx vitest run` cold. Worth filing.
+    - The `TRIAGE_AUTO_PROMPT = ""` empty-marker pattern (kept by Phase 4 to avoid breaking importers) survived one phase past its usefulness — by Phase 5 there were no importers left, so the marker was dead weight in two source files + a test. Faster shipping would have skipped the marker stage.
+  action_item_ids: []
+  commits:
+    - f8b5456ae8067785fffd31834b5cebb5a546ff09
+    - 03f8fabf6c32e0dbe5df9d6dbf863cb464bb6d29
+waiting_on: null
+blocked: null

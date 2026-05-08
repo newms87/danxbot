@@ -1,0 +1,177 @@
+schema_version: 4
+tracker: trello
+id: DX-130
+external_id: 69fd5b1d6b6f190a5c12bd84
+parent_id: null
+children:
+  - DX-131
+  - DX-132
+  - DX-133
+  - DX-134
+  - DX-135
+  - DX-136
+  - DX-149
+  - DX-150
+dispatch: null
+status: Done
+type: Epic
+title: "[Danxbot] Trello decouple + local self-recovery + resume hardening"
+description: |-
+  ## Context
+
+  A real-world dispatch (DX-95 / DX-90 epic, May 7 2026) exposed three independent failures that compound into a stuck-card class:
+
+  1. Trello creds were dead/intermittent (401 + 500 across every list fetch including `/members/me`). Every poller tick errored out before reaching local healing logic. `mcp__danx-issue__danx_issue_save` returned `{saved: true}` synchronously but the async `runSync` (`src/worker/issue-route.ts:298-315`) called `syncIssue` which threw — and `persistAfterSync` (the `open/` → `closed/` move) is INSIDE the try block, after the throwing call. Result: DX-95 YAML had `status: Done` but the file stayed in `open/`.
+  2. Parent epic (DX-90) auto-derive (DX-98) never ran because the poller tick aborted on `fetchListCards` before reaching the auto-derive pass.
+  3. The dispatched agent armed a `ScheduleWakeup` (`/loop` dynamic mode) BEFORE calling `danxbot_complete`. Worker's stop callback never fired → `script -q -f` + claude stayed alive ~60min after the work was done. Poller orphan-resume eventually re-spawned via `--resume <sessionId>`, claude code's TUI rendered the prior session's `ScheduleWakeup` history as a "/loop wakeup" banner, agent (and observer) misread it as a wakeup instead of a poller-driven resume, and re-ran `/danx-next` instead of self-checking "am I done already?".
+
+  Plus a smaller invariant break — DB row `host_pid` and YAML `dispatch.pid` disagreed on the same dispatch UUID. Reconcile (`src/worker/reconcile.ts`) marked the row failed; poller reattach (`src/poller/index.ts:242`) registered the YAML's PID as alive. Two truth sources for the same fact.
+
+  ## Solution
+
+  Trello becomes a strict one-way courtesy mirror with zero impact on local flow.
+
+  - Phase 1 — split `runSync` so `persistAfterSync` runs ALWAYS (local first), Trello detached. Tracker errors → `recordError` + dashboard event, never block local.
+  - Phase 2 — disk-backed Trello retry queue. Failed pushes are persisted, drained next tick with backoff, surfaced to the dashboard when persistent.
+  - Phase 3 — poller `healLocalYamls` pass each tick. Idempotent self-heal: terminal-status YAMLs in `open/` move to `closed/`; stale dispatch records cleared via existing `evictDeadDispatches` (no change). Runs BEFORE dispatch decisions so the next tick auto-recovers DX-95-class stuck cards.
+  - Phase 4 — dashboard `system_errors` SSE channel + UI banner. Backend ring-buffer (last N). Sources: tracker fails, healer warnings, reconcile mismatches.
+  - Phase 5 — resume prompt rewrite + danx-next/danx-start skill self-check contract: on resume, agent reads YAML; status terminal AND ACs satisfied → `danxbot_complete` immediately, no `/danx-next` re-run; else continue remaining work.
+  - Phase 6 — `/loop` + `ScheduleWakeup` contract in dispatched-agent skills. Allowed for in-card async monitoring/testing only. Forbidden for "waiting on human / next card / unrelated to this card". MUST NOT call `danxbot_complete` while a loop is active (loop owns completion timing).
+  - Phase 7 — `host_pid` (DB) + `dispatch.pid` (YAML) write-ordered atomically. Reconcile + reattach read the same value. Mismatch → halt + dashboard event.
+  - Phase 8 (DX-149) — `_poll` top-level try/catch. A throw inside any tracker call inside `_poll` (e.g. `tryAcquireLock` → `getComments` for an invalid `external_id`) currently kills the whole worker process. Wrap `_poll` body in one outer try/catch → log + `recordError` + clean return; the next tick re-runs idempotently. Strictly defensive — no behavior change on the happy path.
+  - Phase 9 (DX-150) — `external_id` format heal. Tracker swaps (e.g. MemoryTracker → Trello) leave stale `mem-N` external_ids in YAMLs that are invalid for the new tracker. Add `tracker.isValidExternalId(id)` to the `IssueTracker` interface; per-tick poller pass blanks invalid external_ids → `syncIssue`'s existing orphan path mints fresh real ids. Idempotent, cheap, schema-aware.
+
+  ## May 8 2026 — second crash class observed
+
+  `gpt-manager` worker died booting against `SG-106` (`external_id: mem-2`, leftover from MemoryTracker before Trello config landed): `Trello API error: 400 Bad Request (GET /cards/mem-2/actions)` thrown from `tryAcquireLock` → `getComments` and unwound past `_poll`'s only `fetchOpenCards` try/catch. The whole worker process exited. DX-131 / DX-132 / DX-134 are scoped to OUTBOUND `runSync` only and do not protect the inbound dispatch-lock comment fetch — Phases 8 + 9 close that gap.
+
+  ## Stuck cards self-healing as part of acceptance
+
+  DX-95 + DX-90 are sitting in `open/` with `status: Done` and `status: ToDo` respectively (epic blocked from auto-flip by Trello errors). Phase 3's healer must move DX-95 to `closed/` on first tick and Phase 3 + DX-98 auto-derive must flip DX-90 to Done on a subsequent tick — automatic, no human `mv`. AC #6 below is verified against THESE specific cards.
+
+  ## Files
+
+  - `src/worker/issue-route.ts` — `runSync` split (Phase 1)
+  - `src/issue-tracker/trello.ts` + new `src/issue-tracker/retry-queue.ts` — retry queue (Phase 2)
+  - `src/poller/index.ts` — `healLocalYamls` pass (Phase 3)
+  - `src/dashboard/server.ts`, `src/dashboard/events.ts`, `dashboard/src/components/SystemErrorsBanner.vue` — dashboard surface (Phase 4)
+  - `src/poller/index.ts` resume prompt + `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` — resume contract (Phase 5)
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` + danx-start SKILL.md — `/loop` rules (Phase 6)
+
+  Phase 7 (PID source-of-truth) was carved out into a sibling epic DX-139 (DB-as-dispatch-registry + full reattach + orphan-process scan) since the scope grew beyond a single phase.
+
+  ## Out of scope
+
+  - Trello credential rotation (operator action, not code).
+  - Replacing Trello with a different tracker (separate epic).
+  - Dispatch lifecycle changes beyond the PID-stamp ordering fix.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fd5b1ed7b27f2260b1eefd
+    title: Phase 1 shipped — Trello sync failure no longer blocks local YAML persist (open→closed move runs even when tracker throws)
+    checked: true
+  - check_item_id: 69fd5b1f3c2d08b8f157b49a
+    title: Phase 2 shipped — failed Trello pushes are persisted to disk and drained on subsequent ticks with backoff
+    checked: false
+  - check_item_id: 69fd5b1fd679bdea8015736f
+    title: Phase 3 shipped — poller healLocalYamls pass moves terminal YAMLs open→closed every tick, idempotent
+    checked: false
+  - check_item_id: 69fd5b208e8272e2b6136dad
+    title: Phase 4 shipped — dashboard surfaces tracker + healer + reconcile errors via system_errors SSE channel + UI banner
+    checked: false
+  - check_item_id: 69fd5b20f80441875b874edf
+    title: Phase 5 shipped — resume prompt + skill instructs agent to self-check terminal+ACs and call danxbot_complete instead of re-running /danx-next
+    checked: false
+  - check_item_id: 69fd5b211bf1db313863f5dd
+    title: Phase 6 shipped — /loop + ScheduleWakeup rules in danx-next/danx-start forbid waiting-on-human use; in-card async monitoring permitted; no danxbot_complete while loop active
+    checked: false
+  - check_item_id: 69fd5b229572eb4098e5925a
+    title: ISS-95 + ISS-90 auto-recovered after Phase 3 ships (no manual mv required) — verified on real stuck cards
+    checked: false
+  - check_item_id: 69fd966d74caa199424031bf
+    title: Phase 8 shipped (DX-149) — _poll top-level try/catch; tracker throw inside _poll no longer kills worker
+    checked: true
+  - check_item_id: 69fd966d8f47a779d8d52b1a
+    title: Phase 9 shipped (DX-150) — tracker.isValidExternalId + healer pass auto-recovers MemoryTracker→Trello swaps
+    checked: false
+  - check_item_id: 69fd966e8bd9c9113130a64f
+    title: gpt-manager worker boots clean against existing mem-1/mem-2 SG-105/SG-106 YAMLs after Phases 8+9 ship
+    checked: false
+comments:
+  - id: 69fd966f7e65ae574f9a7a69
+    author: danxbot
+    timestamp: 2026-05-08T07:53:19.567Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Phase 8 Handoff (DX-149 → next phase agent)
+
+      **Built:** `_poll` body wrapped in single top-level try/catch in `src/poller/index.ts`. Commit `372f6c0`. Tracker throw inside `_poll` (and any throw inside its body — `syncRepoFiles` rm, corrupt YAML, hydrate failure, etc.) → log + clean return. Worker process survives. Verified by manual smoke against the real `gpt-manager` `mem-2` SG-106 YAML on May 8 2026.
+
+      **Discoveries affecting remaining phases:**
+
+      1. **`recordError` doesn't exist as a poller-internal helper yet.** DX-149's catch logs only via `log.error`. When DX-134 (Phase 4 — dashboard system_errors SSE banner) lands, wire `_poll`'s top-level catch into that channel — single attributable line per dropped tick is the contract. Same goes for `runSync`'s catch in DX-131 (Phase 1) and the retry-queue persistent-failure surface in DX-132 (Phase 2).
+
+      2. **Top-level catch necessarily swallows non-tracker throws too** (`syncRepoFiles` rm EACCES, corrupt-YAML hydration, hydrate 401, missing-creds guard). 5 fail-loud tests in `src/poller/index.test.ts` + 1 in `src/__tests__/integration/poller-memory-tracker.test.ts` were rewritten to assert log-and-swallow. Trade-off accepted: process-stability over fail-loud-on-bad-state. If any of those non-tracker failure modes surface as silently-stuck cards, the fix is per-call wrappers around the affected helpers, not retiring DX-149's outer catch.
+
+      3. **DX-150 (Phase 9 — `external_id` format heal) is the natural follow-on.** DX-149 keeps the worker alive past `mem-2` but the bad data still trips the catch every tick (~1 log line per minute per repo with stale external_ids). DX-150 makes the bad data heal automatically. Sub-agent prompt is implicit in the DX-150 description — `tracker.isValidExternalId(id)` interface + Trello/Memory implementations + `healExternalIds` poller pass that runs after `healLocalYamls`. 8 unit tests + 1 manual smoke.
+
+      **Corrections to remaining phase descriptions:** none. DX-131 / DX-132 / DX-134 still framed correctly relative to outbound `runSync` push; DX-149 is strictly defensive on the inbound side and doesn't change their contracts.
+
+      **Next-agent context:**
+      - The wrap is at `src/poller/index.ts:498-918` with a long header comment at `:498-522` documenting the design.
+      - `mockHealLocalYamls.mockImplementationOnce(() => throw)` is the canonical "deeper-throw-path" test pattern in `src/poller/index.test.ts` (line ~1885 area).
+      - Full suite: `npx vitest run > /tmp/vitest.log 2>&1` → 3290 pass. Type-check: `npx tsc --noEmit`.
+      - Don't reintroduce per-call try/catches inside `_poll`'s body; the outer catch is the single point of resilience.
+  - id: 69fd966f04ae656c4d119dd0
+    author: danxbot
+    timestamp: 2026-05-08T07:53:19.938Z
+    text: |
+      <!-- danxbot -->
+
+      ## Phase 1 Handoff (DX-131 → next phase agent)
+
+      **Built:** `runSync` in `src/worker/issue-route.ts` is now local-first. `persistAfterSync(repo.localPath, issue)` runs FIRST unconditionally, before `syncIssue`. On successful sync, a second `persistAfterSync(repo.localPath, updatedLocal)` merges tracker-side mutations (`external_id` orphan recovery, `check_item_id[]` stamps, inbound comments). Tracker errors still flow through `recordError` for dashboard visibility but no longer roll back the local persist. Commit `a61f4aa`. AC #1 verified.
+
+      **Discoveries affecting remaining phases:**
+
+      1. **`runSync` is now exported** (`export async function runSync`). Two real callers: `handleIssueSave` (line 258) and `syncTrackedIssueOnComplete` (line ~698). Phase 2 (DX-132) will add a third caller path via `enqueueRetry` → `drainRetries`. The retry-queue drain at the top of `_poll` should call `syncIssue` (or a sibling helper) directly with the freshly-read YAML — re-using `runSync` from poll-tick context would duplicate the local-first persist (the YAML on disk is already the correct state when the queue drains; it's the TRACKER side that's behind). Recommend: `drainRetries` reads the YAML, calls `syncIssue` directly, persists `updatedLocal` only if it differs (matching `runSync`'s second-persist contract). Don't call `runSync` from the drain path.
+
+      2. **`runSync`'s catch branch is the natural enqueue point for the retry queue.** Today: `log.error` + `recordError`. Phase 2: also `enqueueRetry({issueId: issue.id})`. The branch already has `dispatchId` + `issue.id` in scope. One-line addition once `retry-queue.ts` exists.
+
+      3. **The `recordError` poller helper still doesn't exist** (per Phase 8's handoff note). Phase 4 (DX-134) wires the dashboard `system_errors` SSE channel; until then both `runSync`'s catch and the retry-queue's "max attempts exceeded" branch will continue logging via `log.error` only.
+
+      4. **Tests pin the local-first ordering structurally.** `src/worker/issue-route.test.ts` describe block `runSync (local-first persist)` has 6 tests. A regression that puts `syncIssue` before `persistAfterSync` would fail tests 1, 3, 5, 6 (every "tracker throws" branch). Don't relax those tests when adding retry-queue-related tests in Phase 2; add a new describe block instead.
+
+      **Corrections to remaining phase descriptions:** none. DX-132's description is accurate (retry queue, drain at top of `_poll`, FIFO by `queuedAt`, 24-attempt cap).
+
+      **Next-agent context (Phase 2 specifically):**
+      - `runSync` is at `src/worker/issue-route.ts:339`. Catch branch is at `:355-360` (the 3-line block with `log.error` + `recordError`).
+      - Retry-queue dir: `<repo>/.danxbot/.trello-retry/`. Already gitignored (`.danxbot/` covers everything).
+      - The poller's `_poll` body lives in `src/poller/index.ts` and is wrapped in a top-level try/catch (DX-149). Drain at the very top of `_poll` (per DX-132's plan) means inside that try block — fine, the outer catch will still log + clean-return on a drain throw.
+      - For test isolation: when adding `retry-queue.test.ts`, follow `issue-route.test.ts`'s pattern of `mkdtempSync` + per-test cleanup via `rmSync`. Don't share a tmpdir across tests.
+      - Full suite + tsc baseline: 3298 pass. Type-check clean.
+history:
+  - timestamp: 2026-05-08T21:20:41.076Z
+    actor: worker:auto-derive
+    event: status_change
+    from: Blocked
+    to: Done
+    note: All non-cancelled children Done — parent Done
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

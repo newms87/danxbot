@@ -1,0 +1,173 @@
+schema_version: 4
+tracker: trello
+id: DX-160
+external_id: 69fe27e73c169a6b16af2eae
+parent_id: DX-158
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Multi-Worker > Phase 2: Agents tab CRUD + REST endpoints + avatar storage"
+description: |-
+  ## Context
+
+  Phase 2 of the Multi-Worker Dispatch epic (DX-158). After Phase 1 (DX-159) lands the schema + tab restructure, this phase adds the full CRUD UI on the new Agents tab and the REST endpoints behind it. The user can create, edit, delete agents, upload avatars, and configure schedules.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-multi-worker-dispatch-design.md`. "Dashboard UI" section is the source of truth for the layout.
+
+  ## Solution
+
+  ### REST endpoints (in `src/dashboard/agents-route.ts`)
+
+  Extend the file Phase 1 created:
+
+  ```
+  POST   /api/agents?repo=<name>                    body { name, bio, capabilities[], schedule, enabled }
+                                                    creates agent (validates 5-cap)
+  PATCH  /api/agents/:name?repo=<name>              partial update (any field except name)
+  DELETE /api/agents/:name?repo=<name>              tear down worktree + remove branch + drop record
+  POST   /api/agents/:name/avatar?repo=<name>       multipart upload (max 1 MB; png/jpeg/webp)
+  GET    /api/agents/:name/avatar?repo=<name>       serve image (Content-Type from stored ext)
+  ```
+
+  All auth-gated. POST validates name pattern + 5-cap. DELETE behavior:
+
+  ```
+  if agent has running dispatch → 409 "agent is busy"
+  else:
+    git worktree remove --force <repo>/.danxbot/worktrees/<name>
+    git push origin --delete <name>     (best-effort; log on failure)
+    rm -rf <repo>/.danxbot/agents/<name>/   (avatar + any per-agent dir)
+    delete settings.json record
+    return 204
+  ```
+
+  Note: actual worktree creation lives in Phase 3 (DX-161) — Phase 2's POST handler creates the agent record only; if Phase 3 ships first we can wire the worktree bootstrap call here, otherwise file an action item to add it. Cross-phase ordering: this phase ships independent of Phase 3.
+
+  ### Avatar storage
+
+  - Save uploaded file to `<repo>/.danxbot/agents/<name>/avatar.<ext>` where `<ext>` matches the uploaded MIME (png/jpeg/webp).
+  - Update `agents.<name>.avatar_path = "agents/<name>/avatar.<ext>"` (relative to `<repo>/.danxbot/`).
+  - Add `agents/` to the `.danxbot/.gitignore` (path likely already covers `agents/` via a subdir-of-`.danxbot/` pattern; verify).
+
+  ### Dashboard SPA
+
+  Replace the empty-state Agents tab body with:
+
+  - "+ New Agent" button (top right). Disabled when 5 already exist; tooltip "5-agent limit reached".
+  - Grid of `<AgentCard>` components, one per agent:
+    - Avatar (initials fallback if no avatar_path).
+    - Name (bold).
+    - Capability chips (`issue-worker`, `slack`, `api`).
+    - Live busy badge (placeholder grey dot in this phase; Phase 6 wires real busy state).
+    - Schedule summary line.
+    - Edit + Delete buttons.
+  - Edit drawer (right slide-over): all fields per the schema. Avatar uploader (drag-drop + click). Schedule editor (per-day rows w/ +/- buttons for windows). Capability checkboxes. Bio markdown editor (reuse existing `MarkdownEditor`).
+  - Delete confirmation modal: warn that worktree + branch will be torn down.
+
+  Reuse existing dashboard components where they exist (`MarkdownEditor`, drawers, modals). Type-check required (`vue-tsc --noEmit`); tests optional per project frontend exemption.
+
+  ## Files
+
+  Modify:
+
+  - `src/dashboard/agents-route.ts` + `.test.ts`
+  - `src/dashboard/server.ts` (register the new routes)
+  - `dashboard/src/views/AgentsView.vue` (replace empty state with full UI)
+  - `dashboard/src/composables/useAgents.ts` (add CRUD methods)
+  - `<repo>/.danxbot/.gitignore` (verify `agents/` is ignored)
+
+  Create:
+
+  - `dashboard/src/components/AgentCard.vue`
+  - `dashboard/src/components/AgentEditDrawer.vue`
+  - `dashboard/src/components/AgentDeleteModal.vue`
+  - `dashboard/src/components/AgentScheduleEditor.vue`
+  - any small image-upload helper component if not already present
+
+  ## Test plan (TDD — backend)
+
+  1. POST empty body → 400 with field-list error.
+  2. POST valid → 201 + `Settings.agents.<name>` written + returned.
+  3. POST hitting cap → 409 "agent limit reached".
+  4. POST invalid name → 400.
+  5. POST duplicate name → 409.
+  6. PATCH unknown name → 404.
+  7. PATCH partial (just bio) → updates bio + bumps `updated_at`, leaves other fields untouched.
+  8. PATCH name field → 400 "name is immutable".
+  9. DELETE on busy agent (mock dispatches table row with status running) → 409.
+  10. DELETE on idle agent → 204; settings record gone; teardown side-effects mocked + verified.
+  11. POST avatar 2 MB → 413.
+  12. POST avatar bad MIME → 415.
+  13. POST avatar valid → file written to `<repo>/.danxbot/agents/<name>/avatar.png`; `avatar_path` field updated.
+  14. GET avatar → 200 with correct Content-Type + bytes.
+  15. GET avatar for agent with no avatar → 404.
+  16. All endpoints — unauthenticated → 401.
+
+  ## Acceptance
+
+  - 6 endpoints live (POST/PATCH/DELETE agent, POST/GET avatar, plus the Phase 1 GET /api/agents).
+  - 16+ backend tests pass.
+  - Avatar files persist under `<repo>/.danxbot/agents/<name>/avatar.<ext>`; gitignored.
+  - Agents tab UI renders the grid + edit drawer + delete modal; create / edit / delete round-trips.
+  - 5-cap enforced on both backend (409) and frontend (button disable + tooltip).
+  - `vue-tsc --noEmit` clean; full `vitest run` green; `tsc --noEmit` clean.
+  - Manual smoke: create alice + bob via UI; upload avatars; edit alice's schedule; delete bob; verify `<repo>/.danxbot/settings.json` reflects each change.
+
+  ## Out of scope
+
+  - Worktree bootstrap on agent create — Phase 3 owns that. POST creates the settings record; the worktree gets bootstrapped later (lazily on first dispatch is also acceptable; pick during Phase 3).
+  - Live busy badge wiring — Phase 6.
+  - Triage precursor — Phase 5.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe27e8902742adb0fc50ee
+    title: POST /api/agents creates agent record with full validation (name pattern, 5-cap, capabilities, schedule)
+    checked: false
+  - check_item_id: 69fe27e8968bf5d803bab397
+    title: PATCH /api/agents/:name updates fields except name; bumps updated_at
+    checked: false
+  - check_item_id: 69fe27e99b6fde545f8ec3d5
+    title: DELETE /api/agents/:name removes record + tears down worktree (mocked) + removes branch (mocked); rejects busy agents w/ 409
+    checked: false
+  - check_item_id: 69fe27e9a8153c4707e9085d
+    title: POST + GET /api/agents/:name/avatar — multipart upload to <repo>/.danxbot/agents/<name>/avatar.<ext>; size + MIME validation
+    checked: false
+  - check_item_id: 69fe27ea2ee50519a9dd825e
+    title: 16 backend route tests pass; auth required on all routes
+    checked: false
+  - check_item_id: 69fe27eaa380ec5380a5b539
+    title: AgentsView.vue renders grid + edit drawer + delete modal; CRUD round-trips through the UI
+    checked: false
+  - check_item_id: 69fe27ea718c4cf655539eca
+    title: 5-cap enforced on backend (409) and UI ("+ New Agent" button disabled with tooltip)
+    checked: false
+  - check_item_id: 69fe27eb665b173c2bd892c8
+    title: Manual smoke — create / edit / delete agents via UI; settings.json reflects each change; avatars served correctly
+    checked: false
+  - check_item_id: 69fe27ebe435d837a3f071c8
+    title: vitest run green; tsc + vue-tsc clean
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on:
+  reason: Sequential phase ordering — needs the schema + tab restructure from Phase 1 (DX-159) before CRUD UI can land.
+  timestamp: 2026-05-08T12:00:00.000Z
+  by:
+    - DX-159
+blocked: null

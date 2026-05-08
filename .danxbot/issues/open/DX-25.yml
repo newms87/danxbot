@@ -1,0 +1,50 @@
+schema_version: 4
+tracker: trello
+id: DX-25
+external_id: 69f19322baad560df3d8bcf6
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: Unify lifecycle pattern across dashboard composables
+description: |-
+  Action item from card `tninskjw` (Refactor createHydrationBuffer for continuous subscription).
+
+  `useDispatches.ts` uses module-scoped singletons + manual `init()`/`destroy()` called from `App.vue::onMounted`/`onUnmounted`. `useAgents.ts` uses per-instance refs + `onMounted`/`onBeforeUnmount` lifecycle hooks inside the composable. Both work but the asymmetry is real tech debt — a future composable author will copy whichever they see first, and we'll end up maintaining both patterns.
+
+  The code-reviewer subagent flagged it as out-of-scope for the createHydrationBuffer refactor but a real concern. Worth deciding on one canonical pattern and migrating the odd one out.
+
+  Pick one approach (probably per-instance + lifecycle hooks, since useAgents's pattern is more idiomatic Vue) and migrate the other to match.
+
+  ## Files
+
+  - `dashboard/src/composables/useDispatches.ts` (current: module-singleton)
+  - `dashboard/src/composables/useAgents.ts` (current: per-instance)
+  - `dashboard/src/App.vue` (calls `initDispatches()`/`destroy()` directly today)
+
+  ## Acceptance criteria
+
+  - One canonical lifecycle pattern across all dashboard composables.
+  - Existing tests still pass; new tests where coverage of the migrated pattern needs them.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

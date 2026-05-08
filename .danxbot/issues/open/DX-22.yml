@@ -1,0 +1,62 @@
+schema_version: 4
+tracker: trello
+id: DX-22
+external_id: 69f1b05433667651d550d0e7
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: "[Danxbot > Agent] TerminalOutputWatcher silently stops reading new content if log file is truncated"
+description: |-
+  ## Found while
+
+  Test reviewer audit during Trello `Ajf79Lfp` (TerminalOutputWatcher flaky test fix).
+
+  ## Problem
+
+  `src/agent/terminal-output-watcher.ts:83` returns early when `fileStats.size <= this.byteOffset`. If `script -q -f` rotates its log file (uncommon but possible during long sessions) or the file is otherwise truncated, the file size drops below the watcher's `byteOffset`. From that point onward, every poll returns early — the watcher stops reading new content, `lastActivityAt` is never updated, and the `StallDetector` reading off it would (falsely?) declare a stall.
+
+  ## Why it matters
+
+  This is a silent failure. There is no error log, no metric, no visible signal — the watcher simply stops doing its job. In production, a healthy agent could be killed/nudged because the watcher is no longer reporting its activity. The opposite case (a stalled agent reported as active) is also possible if `lastActivityAt` was set just before the truncation.
+
+  ## Solution sketch
+
+  Detect truncation in `poll()`: if `fileStats.size < this.byteOffset` (strictly less, the new and current "stops polling" branch should NOT fire — i.e., size shrank), reset `byteOffset = 0` and re-read the whole file on the next poll. Add a log.warn so it's diagnosable.
+
+  ## Acceptance Criteria
+
+  - New test in `terminal-output-watcher.test.ts`: write file, let watcher read, truncate to empty, append new content, assert watcher picks up the new content (or assert documented "won't pick up" behavior, if we choose that path).
+  - Whichever behavior we pick is logged at warn level so production breakage is visible in `make deploy-logs`.
+
+  ## Key files
+
+  - `src/agent/terminal-output-watcher.ts` (line 83 — the `<=` branch)
+  - `src/agent/terminal-output-watcher.test.ts` (file truncation test)
+
+  ## Notes
+
+  - Lower priority than `Ajf79Lfp` (which it spun out of) — `script -q -f` doesn't typically rotate, but this is an unbounded silent-failure surface that should be closed before someone hits it in prod.
+  - Related: the test reviewer also flagged "3+ append cycles" and "partial ANSI straddling" gaps. Those are lower priority still — bundle them into a follow-up if any of these surface in production.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

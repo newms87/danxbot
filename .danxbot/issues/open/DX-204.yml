@@ -1,0 +1,136 @@
+schema_version: 4
+tracker: trello
+id: DX-204
+external_id: 69fe4ed34ebc41d8115eb0bf
+parent_id: DX-102
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: "Fix: poller bulk-sync slice(1) skips Trello-top cards from hydration → test-system-poller broken + new top-positioned cards never dispatch"
+description: |
+  ## Problem
+
+  `bulkSyncMissingYamls` in `src/poller/index.ts` is called with
+  `trackerToDoRefs.slice(1)` (line 688) — this explicitly drops the
+  TOP card of the Trello ToDo list from the bulk-sync hydration pass.
+
+  ```ts
+  // src/poller/index.ts:687-689
+  await bulkSyncMissingYamls(repo, tracker, [
+    ...trackerToDoRefs.slice(1),     // <-- top card skipped
+    ...trackerInProgressRefs,
+    ...trackerReviewRefs,
+    ...trackerNeedsHelpRefs,
+  ]);
+  ```
+
+  The original comment claims the top card is the "dispatch primary"
+  and is hydrated separately via `stampDispatchAndWrite`. But the
+  dispatch primary path reads from local YAMLs:
+
+  ```ts
+  // src/poller/index.ts:732-734
+  let cards: IssueRef[] = listDispatchableYamls(
+    repo.localPath,
+    repo.issuePrefix,
+  ).map(localIssueToRef);
+  // ...
+  // src/poller/index.ts:822
+  const primary = cards[0];
+  ```
+
+  And the lone `hydrateFromRemote` callsite for `primary` (line 933)
+  only fires if `existing == null` AFTER `cards[0]` has been picked.
+  But `cards[0]` only exists if at least one local YAML survived
+  `listDispatchableYamls`. For a brand-new Trello-top card with no
+  prior local YAML, that branch never runs — chicken and egg.
+
+  ## Symptoms
+
+  1. **`make test-system-poller` is broken.** The harness creates a
+     test card with `pos: "top"` and engages a `pickupNamePrefix`
+     filter. `slice(1)` skips the test card, no local YAML is
+     written, the filter has nothing to match, the 120s pickup
+     deadline expires, the test fails. Verified empirically on
+     2026-05-08 against rebuilt worker.
+  2. **Any human-created Trello card placed at the top of ToDo will
+     also fail to dispatch** until another card displaces it. Less
+     visible because operators don't usually `pos: top` cards through
+     the UI, but it's the same code path.
+
+  ## Origin
+
+  Introduced in commit `a6c586a` ([Danxbot] Two-way epic ↔ phase
+  linkage + bulk-sync ToDo cards). The slice(1) was an optimization
+  premised on "the dispatch primary handles its own hydration" —
+  which doesn't hold for fresh Trello-only cards.
+
+  ## Fix sketch
+
+  Drop the `.slice(1)` so bulk-sync hydrates EVERY tracker ToDo
+  card. The "dispatch primary" hydration path then becomes a no-op
+  on the first tick (local YAML already exists from bulk-sync), but
+  that's fine — `findByExternalId` short-circuits.
+
+  Alternative: keep `slice(1)` but call `hydrateFromRemote` for the
+  top card BEFORE `listDispatchableYamls` so it's eligible for the
+  dispatch primary slot on the same tick.
+
+  Add a regression test that creates a fresh Trello card, ticks the
+  poller once, asserts a local YAML for it.
+
+  ## Acceptance
+
+  - `bulkSyncMissingYamls` is called with the full
+    `trackerToDoRefs` list (or the alternative path is wired so a
+    fresh top-of-ToDo card hydrates on the same tick it appears).
+  - Regression test in `src/poller/index.test.ts` covering the
+    "card created at Trello-top, no prior local YAML, must hydrate
+    on next tick" case.
+  - `make test-system-poller` passes against the rebuilt worker
+    without modification (the harness still creates with
+    `pos: "top"`).
+
+  ## Out of scope
+
+  - Refactoring the dispatch primary selection logic.
+  - Reworking `stampDispatchAndWrite` ordering with bulk-sync.
+
+  ## Origin / why filed
+
+  Surfaced during DX-102 (Phase 3 of DX-99 epic) post-migration
+  verification. AC #5 (`make test-system-poller green against
+  migrated repos`) was attempted, hit this bug, was closed via
+  empirical migration verification instead. This card carries the
+  uncovered structural fix.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe4ed4f2c16a08b64634e1
+    title: bulkSyncMissingYamls receives full trackerToDoRefs (or alternative path hydrates Trello-top on first tick)
+    checked: false
+  - check_item_id: 69fe4ed41a81c4bdf0ec04ec
+    title: Regression test in src/poller/index.test.ts for fresh-Trello-top → local YAML hydration
+    checked: false
+  - check_item_id: 69fe4ed4bffed54b6f576976
+    title: make test-system-poller green without harness modification (still uses pos:top)
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

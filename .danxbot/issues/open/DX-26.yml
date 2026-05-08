@@ -1,0 +1,39 @@
+schema_version: 4
+tracker: trello
+id: DX-26
+external_id: 69f18828be5e39ad7ce889de
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: 'Action: Draft "How to Verify" test FIRST in TDD plan when card names a specific scope'
+description: |-
+  From retro on `C7W1cEhh` (renderRepoConfigMarkdown fail-loud).
+
+  When a Trello card's "How to Verify" section names a specific test scope (e.g. "calls `syncRepoFiles` without running `validateRepoConfig`..."), the orchestrator should draft THAT test as the first failing test in the TDD plan, not start from the unit level. Without this, the unit-only coverage can ship and the integration regression only surfaces in the test-reviewer pass — which is too late if the reviewer misses it.
+
+  Concrete: in `/danx-next` Step 4 (TDD), check the card's "How to Verify" section and ensure the named test scope appears in the failing-test draft. If the card calls out an integration-level test, the unit tests are *additional*, not a substitute.
+
+  Discovered during the C7W1cEhh retro — test reviewer caught the gap, but the orchestrator should have drafted the integration test up front.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

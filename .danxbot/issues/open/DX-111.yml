@@ -1,0 +1,149 @@
+schema_version: 4
+tracker: trello
+id: DX-111
+external_id: 69e27d857fe435bba78e65e3
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Dispatch viewer > Phase 6: Dashboard UI — detail view"
+description: |-
+  Part of epic #83 — `[Danxbot > Dashboard] Dispatch tracking + session history viewer` (https://trello.com/c/DAdy3itc). Depends on Phases 4 (detail + follow API) and 5 (routing + shared components).
+
+  ## Context
+
+  The list view (Phase 5) sends users to `/history/:id`. This phase builds the detail page — the three-pane session viewer that makes the whole epic worthwhile. Users land here to see the full agent session: every tool call, every thinking block, every sub-agent, every token usage report.
+
+  Mockup: `.superpowers/brainstorm/53132-1776448847/content/dispatch-viewer-v3.html` (View 2). Match it.
+
+  ## Solution
+
+  ### Layout
+
+  Three panes:
+  1. **Breadcrumb + Header** — top bar. Trigger badge, trigger metadata (card name / channel+user / endpoint), repo, started timestamp (full `YYYY-MM-DD HH:mm:ss`), status pill, duration, sub-agent count, tokens total, danxbot_commit (clickable → `https://github.com/newms87/danxbot-flytebot/commit/<hash>` — hardcode repo URL for now, or derive from config if available).
+  2. **Timeline** — main scrollable area. Renders `entries` array from `/api/dispatches/:id`. One block component per entry type.
+  3. **Sidebar** — right rail. Totals (turns, tool calls, sub-agents, nudges), Tokens (total, in, out, cache_read, cache_write), Top tools (counts by `tool_use.name`, top 5), Artifacts (JSONL download → `/api/dispatches/:id/raw`).
+
+  ### Block components (one per `JsonlEntry` type)
+
+  Each lives in `dashboard/src/components/blocks/`:
+
+  - `UserBlock.vue` — blue left-rail (2px), `USER` label, text body. Used for the initial prompt and nudges.
+  - `AssistantTextBlock.vue` — purple left-rail, `ASSISTANT · turn N` label, markdown-rendered text body. Per mockup includes the optional thinking child and tool_use / tool_result children (composition pattern: the turn component owns its children).
+  - `ThinkingBlock.vue` — dashed muted box inside an AssistantText turn. `THINKING` yellow chip label, italic muted body. Collapsed by default if >3 lines (expand on click).
+  - `ToolUseBlock.vue` — indigo tinted box. Header: wrench emoji + tool name (monospace). Body: JSON args, syntax-highlighted if easy, raw monospace otherwise. Expandable when long.
+  - `ToolResultBlock.vue` — green tinted box. Header: ✓ + byte count or short preview. Body: content (string or array-of-blocks). Collapsed by default if > 10 lines.
+  - `SubagentBlock.vue` — pink left-rail (3px), indented 14px, pink tinted background. Header: `▶ SUB-AGENT · Task (description) · agent-type`. Recursively renders its `entries` via `SessionTimeline` — nesting is natural.
+  - `SystemBlock.vue` — grey left-rail, small text, muted.
+  - `UsageLine.vue` — small monospace line at end of each assistant turn: `in N · out N · cache_r N · cache_w N`.
+
+  ### Orchestrator
+
+  `dashboard/src/components/SessionTimeline.vue` — takes `entries: JsonlEntry[]`, groups consecutive assistant-related entries (assistant_text, thinking, tool_use, tool_result, usage) into "turns", renders each turn as an `AssistantTextBlock` that composes its children. User / system / subagent entries break turns.
+
+  ### Live tail
+
+  When `dispatch.status === "running"`, open an EventSource to `/api/dispatches/:id/follow` on mount. Append new entries to the reactive `entries` array as they arrive. Close on `event: done`. If the page is reopened after completion, follow is not needed — just do the one-shot GET.
+
+  ### Page component
+
+  `dashboard/src/components/DispatchDetail.vue` — top-level page. Composes header + `SessionTimeline` + sidebar. Routed from `/history/:id`. On mount: GET `/api/dispatches/:id`, then EventSource for follow if running.
+
+  ### Composable additions
+
+  Extend `useDispatches.ts` with `loadDispatch(id)` and `followDispatch(id, onEntry, onDone)`. Return reactive `currentDispatch`, `currentEntries`, `isFollowing`.
+
+  ## Key Files
+
+  **Create:**
+  - `dashboard/src/components/DispatchDetail.vue`
+  - `dashboard/src/components/SessionTimeline.vue`
+  - `dashboard/src/components/blocks/UserBlock.vue`
+  - `dashboard/src/components/blocks/AssistantTextBlock.vue`
+  - `dashboard/src/components/blocks/ThinkingBlock.vue`
+  - `dashboard/src/components/blocks/ToolUseBlock.vue`
+  - `dashboard/src/components/blocks/ToolResultBlock.vue`
+  - `dashboard/src/components/blocks/SubagentBlock.vue`
+  - `dashboard/src/components/blocks/SystemBlock.vue`
+  - `dashboard/src/components/blocks/UsageLine.vue`
+
+  **Modify:**
+  - `dashboard/src/App.vue` — route `/history/:id` to `DispatchDetail`.
+  - `dashboard/src/composables/useDispatches.ts` — add detail + follow helpers.
+  - `dashboard/src/api.ts` — add `getDispatch(id)` and `followDispatch(id): EventSource`.
+
+  ## How to verify
+
+  - Vite dev visually matches the mockup — three-pane layout, colors, nesting indentation, typography.
+  - Completed dispatch with sub-agents: open the detail page, verify sub-agents nest with pink left-rail and their internal tool calls render. The sidebar sub-agent count matches the mockup.
+  - Running dispatch: open the detail page, watch new entries stream in live via SSE as the agent works. Verify the timeline auto-scrolls OR has a "scroll to bottom" affordance (user preference — use whatever feels natural, not both).
+  - Failed dispatch: verify the error appears prominently in the header.
+  - Markdown rendering in assistant text: code fences render, inline code, links. Sanitize — no raw HTML. Use `marked` + `DOMPurify` or the equivalent Vue markdown component.
+  - Component tests for each block: mount with a fake entry, assert it renders expected DOM. SessionTimeline test: mount with a fixture entry tree including sub-agents, verify nesting structure.
+  - No Vue warnings.
+
+  ## Gotchas
+
+  - The "turn" concept in the mockup is not a JSONL primitive — it's a UI grouping. An assistant turn starts at an `assistant_text` entry and accumulates `thinking`, `tool_use`, `tool_result`, `usage` until the next `user` / `system` / `subagent` or the end. Implement this grouping in `SessionTimeline`, not in the reader (Phase 3 returns flat ordered entries).
+  - `tool_use.input` can be a huge blob (whole file contents on an Edit call). Render truncated with "show more" — don't blow up the browser.
+  - `tool_result.content` as array: text blocks concat, image blocks show as a small placeholder with size (no inline image viewer in v1).
+  - Sub-agent block rendering is recursive: `SubagentBlock` uses `SessionTimeline` on its `entries` — make sure there's no import cycle (may need to pass it via props or use `defineAsyncComponent`).
+  - SSE reconnection: on network drop, EventSource auto-reconnects. Server's `tailJsonl` resumes from last offset — no duplicate entries. Test by killing the server briefly mid-follow.
+  - Auto-scroll logic: only auto-scroll if the user was already at the bottom. If they've scrolled up to read something, respect that and show a "new entries ↓" affordance.
+  - Markdown in assistant text frequently contains code fences with very long lines — ensure overflow-x on code blocks so they don't blow out the pane.
+  - `danxbot_commit` link: github URL assumes public repo. If private/misconfigured, still render the hash but without link if URL missing.
+  - Typography scale: match existing dashboard base font-size to avoid a mismatched feel. Check `dashboard/src/style.css`.
+
+  ## Out of scope for this phase
+
+  - Editing / annotating a dispatch (read-only).
+  - Replaying a dispatch.
+  - Side-by-side comparison.
+  - Downloading `prompt.md` as artifact — OK to ship only the JSONL download for now.
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69e27e03878767f58ca97788
+    title: "`/history/:id` renders three-pane layout matching mockup (header, timeline, sidebar)"
+    checked: false
+  - check_item_id: 69e27e05d0af73d1d504ffb9
+    title: All 9 block components exist in `dashboard/src/components/blocks/` and render per mockup styling
+    checked: false
+  - check_item_id: 69e27e066ec02c6f3658fda4
+    title: "`SessionTimeline` groups consecutive assistant-related entries into turns at UI level"
+    checked: false
+  - check_item_id: 69e27e08c47860f03f9dfe56
+    title: Sub-agent blocks nest recursively with pink left-rail (render via `SessionTimeline` on subagent entries)
+    checked: false
+  - check_item_id: 69e27e0aaeec8a1b616ee8e1
+    title: "Running dispatches open EventSource to `/follow` and append entries live; close on `event: done`"
+    checked: false
+  - check_item_id: 69e27e0b60f1985008a7e094
+    title: Sidebar displays Totals, Tokens breakdown (total/in/out/cache_read/cache_write), Top tools (top 5), Artifacts (JSONL download link)
+    checked: false
+  - check_item_id: 69e27e0de6ef238adccff607
+    title: Auto-scroll respects user position (only auto-scrolls if user is already at bottom)
+    checked: false
+  - check_item_id: 69e27e0e6a32e9e4386f15d2
+    title: Component tests for each block + SessionTimeline green; zero Vue warnings
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null

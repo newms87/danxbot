@@ -1,0 +1,55 @@
+schema_version: 4
+tracker: trello
+id: DX-121
+external_id: 69df27729976c65c8fd31310
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "[Danxbot > Slack] Add per-user message rate limiting to prevent queue flooding"
+description: |-
+  **Context:** The Slack listener processes messages sequentially per thread using the message queue (`src/slack/message-queue.ts`). There is no per-user rate limit — a user can send messages rapidly and build up a large queue, causing extended API costs and lock-out of other users' responses. The existing queue also counts all threads independently, so a single user opening multiple threads can run several agents simultaneously.
+
+  **Solution:** Add a per-user rate limiter in `message-queue.ts`: (1) track message counts per userId within a sliding window (e.g., 5 messages per 60 seconds), (2) if a user exceeds the limit, drop the message and post a friendly rate-limit notice to Slack instead of queuing it. Add `SLACK_RATE_LIMIT_MESSAGES` and `SLACK_RATE_LIMIT_WINDOW_MS` env vars with sensible defaults. The rate limiter should clean up expired windows automatically.
+
+  **ICE Score:** 245 = 5 × 7 × 7 (I: 5 — prevents cost runaway and queue congestion from fast users; real risk in shared channels. C: 7 — message-queue.ts already has isolated state, adding a userId counter map is straightforward. E: 7 — isolated to message-queue.ts + one call site in listener.ts, ~2 hours.)
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69df27ac5ea02fd5159f71ba
+    title: Add checkRateLimit(userId) and resetRateLimit() to message-queue.ts using a sliding window counter
+    checked: false
+  - check_item_id: 69df27ac8adcd3e4f6f65acf
+    title: "Add SLACK_RATE_LIMIT_MESSAGES (default: 10) and SLACK_RATE_LIMIT_WINDOW_MS (default: 60000) env vars to config.ts"
+    checked: false
+  - check_item_id: 69df27ada6ddfb8cb636f3d9
+    title: Listener calls checkRateLimit before queuing; posts a friendly one-sentence notice to Slack if rate limited
+    checked: false
+  - check_item_id: 69df27ad23d0d6583db0e53a
+    title: Rate-limited messages are not queued and do not trigger an agent run
+    checked: false
+  - check_item_id: 69df27ae2b3a0759863b9623
+    title: Window counters clean up automatically after expiry to prevent unbounded memory use
+    checked: false
+  - check_item_id: 69df27ae05ed257f67777243
+    title: "Unit tests cover: allows messages below limit, blocks on threshold+1, resets after window expires"
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null
