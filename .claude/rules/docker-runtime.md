@@ -127,7 +127,8 @@ The poller injects exactly ONE MCP server — `danx-issue` — into every connec
 
 The injection is implemented by `src/poller/inject/inject-root-mcp.ts#injectDanxIssueMcp` and wired into `syncRepoFiles`. Contract:
 
-- ADDS the `danx-issue` entry to `mcpServers` when the key is missing.
+- ADDS the `danx-issue` entry to `mcpServers` when the key is missing. The entry's `env.DANX_REPO_ROOT` and `env.DANX_TRACKER` are baked as **literals** (the connected repo's absolute path; tracker name from poll-time options, default `"trello"`). They are NOT `${...}` placeholders, because the host-session `claude` that consumes this file does not have the worker's env-injection layer — `${DANX_REPO_ROOT}` would resolve to the empty string and the MCP server would refuse to start.
+- `env.TRELLO_API_KEY` and `env.TRELLO_API_TOKEN` ARE `${...}` placeholders — they are secrets, and operators may want to commit `.mcp.json`. The operator is responsible for exporting these in the shell that launches `claude` (direnv `.env.local`, dotenv-cli, shell rc, etc.). Missing values surface as Claude Code's `Missing environment variables` warning when running `/mcp`.
 - NEVER deletes, rewrites, or reorders any other `mcpServers` entry — pre-existing servers (operator's own MCPs, playwright in repos that ship one at root, etc.) survive byte-identical.
 - NEVER touches top-level keys outside `mcpServers`.
 - Operator override wins: if `mcpServers["danx-issue"]` already exists with different content, it is left alone.

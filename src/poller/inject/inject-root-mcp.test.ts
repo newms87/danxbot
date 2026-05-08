@@ -24,10 +24,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   injectDanxIssueMcp,
-  CANONICAL_DANX_ISSUE_ENTRY,
+  buildDanxIssueEntry,
 } from "./inject-root-mcp.js";
-
-const CANONICAL_DANX_ISSUE = CANONICAL_DANX_ISSUE_ENTRY;
 
 describe("injectDanxIssueMcp", () => {
   let repoRoot: string;
@@ -47,7 +45,7 @@ describe("injectDanxIssueMcp", () => {
     expect(result.changed).toBe(true);
     expect(result.path).toBe(mcpPath);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
-    expect(parsed.mcpServers["danx-issue"]).toEqual(CANONICAL_DANX_ISSUE);
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "trello"));
   });
 
   it("adds danx-issue when file exists with empty mcpServers", () => {
@@ -55,7 +53,7 @@ describe("injectDanxIssueMcp", () => {
     const result = injectDanxIssueMcp({ repoRoot });
     expect(result.changed).toBe(true);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
-    expect(parsed.mcpServers["danx-issue"]).toEqual(CANONICAL_DANX_ISSUE);
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "trello"));
   });
 
   it("preserves pre-existing mcpServers entries byte-identical", () => {
@@ -72,14 +70,14 @@ describe("injectDanxIssueMcp", () => {
     expect(result.changed).toBe(true);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
     expect(parsed.mcpServers.playwright).toEqual(playwright);
-    expect(parsed.mcpServers["danx-issue"]).toEqual(CANONICAL_DANX_ISSUE);
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "trello"));
   });
 
   it("is a no-op when canonical danx-issue already present", () => {
     writeFileSync(
       mcpPath,
       JSON.stringify(
-        { mcpServers: { "danx-issue": CANONICAL_DANX_ISSUE } },
+        { mcpServers: { "danx-issue": buildDanxIssueEntry(repoRoot, "trello") } },
         null,
         2,
       ) + "\n",
@@ -134,7 +132,7 @@ describe("injectDanxIssueMcp", () => {
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
     expect(parsed.extensions).toEqual(["foo", "bar"]);
     expect(parsed.otherKey).toEqual({ nested: true });
-    expect(parsed.mcpServers["danx-issue"]).toEqual(CANONICAL_DANX_ISSUE);
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "trello"));
   });
 
   it("writes atomically via .tmp + rename (no .tmp left behind on success)", () => {

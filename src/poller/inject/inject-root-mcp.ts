@@ -36,6 +36,8 @@ const log = createLogger("inject-root-mcp");
 
 export interface InjectRootMcpOptions {
   repoRoot: string;
+  /** Tracker name baked into the entry's env. Default "trello". */
+  tracker?: string;
   /** @internal — see InjectRootMcpFsHooks. */
   _fsHooks?: InjectRootMcpFsHooks;
 }
@@ -45,17 +47,33 @@ export interface InjectRootMcpResult {
   path: string;
 }
 
-export const CANONICAL_DANX_ISSUE_ENTRY = {
-  type: "stdio",
-  command: "npx",
-  args: ["-y", "@thehammer/danx-issue-mcp"],
-  env: {
-    DANX_REPO_ROOT: "${DANX_REPO_ROOT}",
-    DANX_TRACKER: "${DANX_TRACKER}",
-    TRELLO_API_KEY: "${TRELLO_API_KEY}",
-    TRELLO_API_TOKEN: "${TRELLO_API_TOKEN}",
-  },
-} as const;
+/**
+ * Build the canonical `danx-issue` server entry for a given repo.
+ *
+ * `DANX_REPO_ROOT` and `DANX_TRACKER` are baked as literals because the
+ * `.mcp.json` is consumed by a host-session `claude` whose shell may not
+ * export them. (Workspace `.mcp.json` files use `${...}` placeholders
+ * because the danxbot worker injects those vars at spawn time — host
+ * `claude` has no such injection.)
+ *
+ * `TRELLO_API_KEY` and `TRELLO_API_TOKEN` stay as `${...}` placeholders
+ * — they are secrets and operators may want to commit `.mcp.json`.
+ * The operator is responsible for exporting these in the shell that
+ * launches `claude` (direnv, dotenv-cli, shell rc, etc.).
+ */
+export function buildDanxIssueEntry(repoRoot: string, tracker: string) {
+  return {
+    type: "stdio" as const,
+    command: "npx",
+    args: ["-y", "@thehammer/danx-issue-mcp"],
+    env: {
+      DANX_REPO_ROOT: repoRoot,
+      DANX_TRACKER: tracker,
+      TRELLO_API_KEY: "${TRELLO_API_KEY}",
+      TRELLO_API_TOKEN: "${TRELLO_API_TOKEN}",
+    },
+  };
+}
 
 /**
  * Test seam for atomic-write rollback. Production code must not pass
@@ -122,7 +140,7 @@ export function injectDanxIssueMcp(
     ...existing,
     mcpServers: {
       ...mcpServers,
-      "danx-issue": CANONICAL_DANX_ISSUE_ENTRY,
+      "danx-issue": buildDanxIssueEntry(opts.repoRoot, opts.tracker ?? "trello"),
     },
   };
 
