@@ -293,12 +293,52 @@ function loadActionItemTitles(
   return out;
 }
 
-async function runSync(
+/**
+ * Local-first sync: persist the agent's edit to disk BEFORE pushing to
+ * the tracker, then push, then re-persist any tracker-side mutations
+ * (orphan-recovery `external_id` allocation, `check_item_id` stamps,
+ * inbound human comments).
+ *
+ * The local YAML at `<repo>/.danxbot/issues/{open,closed}/` is the
+ * single source of truth — Trello is a one-way mirror (see
+ * `.claude/rules/agent-dispatch.md` "Source of Truth"). When Trello is
+ * unreachable (401, 500, network outage), the previous order — push
+ * first, persist on success — left terminal-status YAMLs stranded in
+ * `open/`: the in-memory copy reflected the agent's `Done` edit but the
+ * on-disk file never got the open→closed move. That was the root cause
+ * of DX-95 sitting in `open/` with `status: Done`.
+ *
+ * Re-persisting after a successful tracker push is idempotent:
+ * `persistAfterSync` is a single `writeFileSync` plus an `existsSync`-
+ * gated `unlinkSync`, both safe to repeat with identical input. When
+ * `updatedLocal` is structurally identical to `issue` (no orphan-id
+ * mint, no new check_item_ids, no inbound comments), the second call
+ * writes the same bytes — same end state.
+ *
+ * The second persist is unconditional rather than guarded on
+ * `remoteWriteCount > 0`: deciding "did the tracker mutate anything?"
+ * cleanly requires a deep diff of `issue` vs `updatedLocal` (ac stamps,
+ * comment merges, orphan-recovered external_id), and that branch is
+ * more expensive than a same-content `writeFileSync`. Idempotency is
+ * the contract — pinned by the byte-identical re-run test in
+ * `issue-route.test.ts`.
+ *
+ * Tracker errors are recorded against the dispatch row (so the
+ * dashboard surfaces them) but never roll back the local persist.
+ *
+ * Exported for two reasons: (a) `syncTrackedIssueOnComplete` reuses it
+ * for the synchronous danxbot-complete auto-sync path; (b) the unit
+ * tests in `issue-route.test.ts` drive it directly with a mocked
+ * `syncIssue`. Not part of the worker's public HTTP surface.
+ */
+export async function runSync(
   deps: IssueRouteDeps,
   dispatchId: string,
   repo: RepoContext,
   issue: Issue,
 ): Promise<void> {
+  persistAfterSync(repo.localPath, issue);
+
   try {
     const actionItemTitles = loadActionItemTitles(
       repo.localPath,

@@ -5,11 +5,29 @@
  * The full handler (`handleIssueSave`) is integration-tested via
  * `src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts`. This
  * module covers the focused contract that distinguishes mid-session
- * saves (dispatch survives) from terminal saves (dispatch clears).
+ * saves (dispatch survives) from terminal saves (dispatch clears), plus
+ * `runSync`'s local-first ordering invariant (DX-131).
  */
-import { describe, expect, it } from "vitest";
-import { isDispatchSessionTerminal } from "./issue-route.js";
-import type { Issue } from "../issue-tracker/interface.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+vi.mock("../issue-tracker/sync.js", () => ({
+  syncIssue: vi.fn(),
+}));
+
+import { syncIssue } from "../issue-tracker/sync.js";
+import { isDispatchSessionTerminal, runSync } from "./issue-route.js";
+import { ensureIssuesDirs, issuePath } from "../poller/yaml-lifecycle.js";
+import { parseIssue } from "../issue-tracker/yaml.js";
+import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
+import type { RepoContext } from "../types.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return {
@@ -94,5 +112,227 @@ describe("isDispatchSessionTerminal", () => {
     expect(isDispatchSessionTerminal(makeIssue({ status: "Review" }))).toBe(
       false,
     );
+  });
+});
+
+/**
+ * `runSync` local-first ordering (DX-131 / Phase 1 of the Trello-decouple
+ * epic). The handler must persist the agent's edit to disk BEFORE pushing
+ * to the tracker, so a tracker outage never leaves a terminal-status YAML
+ * stranded in `open/`. These tests drive the function directly with a
+ * mocked `syncIssue` and assert the on-disk lifecycle for each branch:
+ *
+ *   1. Tracker throw + Done → local file lands in `closed/`; `open/`
+ *      absent; `recordError` invoked.
+ *   2. Tracker success → second persist applies the merged tracker
+ *      fields (`external_id`, `check_item_id[]`).
+ *   3. Tracker throw + ToDo → local file lands in `open/`; `closed/`
+ *      absent; `recordError` invoked.
+ *   4. Tracker success with no remote mutations → idempotent (final
+ *      file content is correct).
+ *
+ * Tests 1 and 3 collectively pin "persist BEFORE push": they fail unless
+ * the local write executes prior to (and independent of) the tracker
+ * call, since the tracker mock throws before the legacy code's
+ * post-success persist could run.
+ */
+describe("runSync (local-first persist)", () => {
+  let tmpDir: string;
+  let repo: RepoContext;
+  const tracker = {} as IssueTracker;
+
+  beforeEach(() => {
+    vi.mocked(syncIssue).mockReset();
+    tmpDir = mkdtempSync(join(tmpdir(), "danxbot-runsync-"));
+    ensureIssuesDirs(tmpDir);
+    repo = { localPath: tmpDir, issuePrefix: "ISS" } as RepoContext;
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("tracker throw + Done status → terminal-status YAML lands in closed/, open/ absent, recordError invoked", async () => {
+    vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 500"));
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-100",
+      external_id: "ext-100",
+      status: "Done",
+    });
+
+    await runSync({ tracker, recordError }, "dispatch-1", repo, issue);
+
+    const closedPath = issuePath(tmpDir, "ISS-100", "closed");
+    const openPath = issuePath(tmpDir, "ISS-100", "open");
+    expect(existsSync(closedPath)).toBe(true);
+    expect(existsSync(openPath)).toBe(false);
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"));
+    expect(persisted.status).toBe("Done");
+    expect(persisted.id).toBe("ISS-100");
+    expect(recordError).toHaveBeenCalledTimes(1);
+    expect(recordError).toHaveBeenCalledWith(
+      "dispatch-1",
+      expect.stringContaining("tracker 500"),
+    );
+  });
+
+  it("tracker success → second persist writes merged tracker fields (external_id, check_item_id) onto the local YAML", async () => {
+    const inputIssue = makeIssue({
+      id: "ISS-101",
+      external_id: "",
+      status: "Done",
+      ac: [
+        { check_item_id: "", title: "AC 1", checked: true },
+        { check_item_id: "", title: "AC 2", checked: true },
+      ],
+    });
+    const trackerStamped: Issue = {
+      ...inputIssue,
+      external_id: "ext-new-from-tracker",
+      ac: [
+        { check_item_id: "ci-1", title: "AC 1", checked: true },
+        { check_item_id: "ci-2", title: "AC 2", checked: true },
+      ],
+    };
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: trackerStamped,
+      remoteWriteCount: 1,
+    });
+    const recordError = vi.fn();
+
+    await runSync({ tracker, recordError }, "dispatch-2", repo, inputIssue);
+
+    const closedPath = issuePath(tmpDir, "ISS-101", "closed");
+    expect(existsSync(closedPath)).toBe(true);
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"));
+    expect(persisted.external_id).toBe("ext-new-from-tracker");
+    expect(persisted.ac.map((a) => a.check_item_id)).toEqual(["ci-1", "ci-2"]);
+    expect(recordError).not.toHaveBeenCalled();
+  });
+
+  it("tracker throw + ToDo (non-terminal) → YAML lands in open/, closed/ absent, recordError invoked", async () => {
+    vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 401"));
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-102",
+      external_id: "ext-102",
+      status: "ToDo",
+    });
+
+    await runSync({ tracker, recordError }, "dispatch-3", repo, issue);
+
+    const openPath = issuePath(tmpDir, "ISS-102", "open");
+    const closedPath = issuePath(tmpDir, "ISS-102", "closed");
+    expect(existsSync(openPath)).toBe(true);
+    expect(existsSync(closedPath)).toBe(false);
+    const persisted = parseIssue(readFileSync(openPath, "utf-8"));
+    expect(persisted.status).toBe("ToDo");
+    expect(persisted.external_id).toBe("ext-102");
+    expect(recordError).toHaveBeenCalledTimes(1);
+    expect(recordError).toHaveBeenCalledWith(
+      "dispatch-3",
+      expect.stringContaining("tracker 401"),
+    );
+  });
+
+  it("tracker success with no remote mutations → second persist is idempotent (byte-identical re-runs)", async () => {
+    const issue = makeIssue({
+      id: "ISS-103",
+      external_id: "ext-103",
+      status: "Done",
+      title: "Idempotent save",
+    });
+    // syncIssue returns the SAME issue (no orphan recovery, no
+    // tracker-side id stamps, no inbound comments). The card's test plan
+    // permits "no-op or same-content write" for the second persist — we
+    // pin the stronger property: running runSync TWICE leaves the file
+    // byte-identical, so any future regression that introduces drift
+    // (e.g. a non-deterministic timestamp slipped into serializeIssue)
+    // surfaces here.
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: issue,
+      remoteWriteCount: 0,
+    });
+    const recordError = vi.fn();
+
+    await runSync({ tracker, recordError }, "dispatch-4", repo, issue);
+
+    const closedPath = issuePath(tmpDir, "ISS-103", "closed");
+    expect(existsSync(closedPath)).toBe(true);
+    const firstBytes = readFileSync(closedPath);
+    const persisted = parseIssue(firstBytes.toString("utf-8"));
+    expect(persisted.id).toBe("ISS-103");
+    expect(persisted.external_id).toBe("ext-103");
+    expect(persisted.status).toBe("Done");
+    expect(persisted.title).toBe("Idempotent save");
+
+    // Second run, same input → bytes must match the first run exactly.
+    await runSync({ tracker, recordError }, "dispatch-4-repeat", repo, issue);
+    const secondBytes = readFileSync(closedPath);
+    expect(secondBytes.equals(firstBytes)).toBe(true);
+
+    expect(recordError).not.toHaveBeenCalled();
+  });
+
+  it("tracker throw + Cancelled status → terminal-status YAML lands in closed/, open/ absent", async () => {
+    vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 503"));
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-104",
+      external_id: "ext-104",
+      status: "Cancelled",
+    });
+
+    await runSync({ tracker, recordError }, "dispatch-5", repo, issue);
+
+    const closedPath = issuePath(tmpDir, "ISS-104", "closed");
+    const openPath = issuePath(tmpDir, "ISS-104", "open");
+    expect(existsSync(closedPath)).toBe(true);
+    expect(existsSync(openPath)).toBe(false);
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"));
+    expect(persisted.status).toBe("Cancelled");
+    expect(recordError).toHaveBeenCalledTimes(1);
+  });
+
+  it("tracker throw + blocked record on ToDo → YAML lands in open/ (blocked is non-terminal for moveToClosedIfTerminal)", async () => {
+    // `isDispatchSessionTerminal` returns true for blocked (which clears
+    // `dispatch` on persist), but `moveToClosedIfTerminal` only fires on
+    // status Done / Cancelled — so a blocked ToDo card stays in open/.
+    // Pin both behaviours here so a future refactor of either branch
+    // can't silently drift.
+    vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 502"));
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-105",
+      external_id: "ext-105",
+      status: "ToDo",
+      blocked: {
+        reason: "Waits on ISS-99",
+        timestamp: "2026-05-08T07:00:00Z",
+        by: ["ISS-99"],
+      },
+      dispatch: {
+        id: "stale-dispatch-id",
+        pid: 0,
+        host: "",
+        kind: "work",
+        started_at: "",
+        ttl_seconds: 0,
+      },
+    });
+
+    await runSync({ tracker, recordError }, "dispatch-6", repo, issue);
+
+    const openPath = issuePath(tmpDir, "ISS-105", "open");
+    const closedPath = issuePath(tmpDir, "ISS-105", "closed");
+    expect(existsSync(openPath)).toBe(true);
+    expect(existsSync(closedPath)).toBe(false);
+    const persisted = parseIssue(readFileSync(openPath, "utf-8"));
+    expect(persisted.status).toBe("ToDo");
+    // Blocked is treated as session-terminal → dispatch slot cleared.
+    expect(persisted.dispatch).toBeNull();
+    expect(persisted.blocked).not.toBeNull();
+    expect(recordError).toHaveBeenCalledTimes(1);
   });
 });
