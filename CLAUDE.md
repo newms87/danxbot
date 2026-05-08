@@ -207,6 +207,34 @@ The backend tracker (Trello) is a **one-way mirror** with two narrow inbound exc
 
 Outbound (every tick): every YAML field — title, description, status, AC, phases, labels, comments, blocked record — is pushed to the tracker so humans see current state.
 
+### Trello Is Background Infrastructure — Never In The Agent's Critical Path
+
+**The agent flow (read YAML → edit YAML → save YAML → done) MUST NOT depend on Trello in any way.** This is a load-bearing architectural rule, not a preference.
+
+| What | Where it lives | When Trello is involved |
+|---|---|---|
+| `danx_issue_create` | MCP server, default `tracker: "memory"` | NEVER. Allocates `ISS-N` + writes YAML. Returns immediately. |
+| `danx_issue_save` | MCP server, default `tracker: "memory"` | NEVER. Validates YAML + writes to disk. Returns immediately. |
+| `danx_issue_get` / `danx_issue_list` / `danx_issue_close` | MCP server | NEVER. Pure local YAML ops. |
+| YAML → Trello mirror | Worker poller (`src/poller/index.ts`, `src/poller/orphan-push.ts`) | EVERY tick (~60s). Async, batched, retried. |
+| Failed Trello pushes | `<repo>/.danxbot/.trello-retry/` queue + dashboard error surface | Operator inspects on the dashboard. |
+
+**Implications every agent MUST internalize:**
+
+- Trello creds missing, Trello down, Trello rate-limited, Trello API changed — **none** of these affect agent operations. The agent never sees Trello errors.
+- A new card created via `danx_issue_create` does NOT immediately appear in Trello. The next worker poll picks up the orphan (empty `external_id`) and pushes it. Latency = polling interval. This is by design.
+- Edits to a YAML do NOT immediately appear in Trello. Same pipeline.
+- If Trello sync is broken, the dashboard is the SOLE error surface. Do not surface Trello errors in agent output, MCP tool responses, or skill output. The retry queue + dashboard banner own that signal.
+- Host-session `claude` at the repo root uses `tracker: "memory"` by default (the canonical `.mcp.json` injected by DX-201). Agents never need Trello credentials in their environment.
+- Workspace dispatches (poller / `/api/launch` / Slack) get the same `IssueTracker` interface. The `trello` driver is used by the WORKER's poll loop, not by the dispatched agent's MCP. The dispatched agent's MCP is local-YAML only; the worker mirrors after the agent returns.
+
+**Forbidden patterns (regressions to prevent):**
+
+- Calling `mcp__trello__*` from any agent skill, prompt, or workspace. Use `mcp__danx-issue__*` only.
+- Adding a synchronous Trello call inside `danx_issue_create` / `danx_issue_save`. The MCP server's create/save MUST stay tracker-agnostic — `tracker.createCard` from the trello driver is invoked ONLY by the worker's orphan-push, never by the MCP server's request handler.
+- Treating "Trello not reachable" as a hard failure in agent flow. It's a dashboard signal, never an agent-blocking error.
+- Surfacing TRELLO_API_TOKEN / TRELLO_API_KEY to a dispatched agent's environment. Workers need them; agents do not.
+
 ### Trello Board
 
 Board / list / label IDs live in each connected repo's `<repo>/.danxbot/config/trello.yml`. Workspace skills resolve them through the `IssueTracker` interface (`src/issue-tracker/`); Trello-specific bookkeeping stays inside `src/issue-tracker/trello.ts`.

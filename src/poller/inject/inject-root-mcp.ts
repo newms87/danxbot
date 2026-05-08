@@ -57,9 +57,12 @@ export interface InjectRootMcpResult {
  * `claude` has no such injection.)
  *
  * `TRELLO_API_KEY` and `TRELLO_API_TOKEN` stay as `${...}` placeholders
- * — they are secrets and operators may want to commit `.mcp.json`.
- * The operator is responsible for exporting these in the shell that
- * launches `claude` (direnv, dotenv-cli, shell rc, etc.).
+ * for the rare operator who explicitly opts into `tracker: "trello"`.
+ * The default tracker is `"memory"` — local YAML only, no upstream
+ * tracker calls inside the MCP server. The worker polls the YAML and
+ * mirrors to Trello asynchronously (orphan-push + retry queue), so a
+ * broken or absent Trello has zero effect on dev MCP operations.
+ * Trello errors surface in the dashboard, not in the agent's flow.
  */
 export function buildDanxIssueEntry(repoRoot: string, tracker: string) {
   return {
@@ -140,7 +143,7 @@ export function injectDanxIssueMcp(
     ...existing,
     mcpServers: {
       ...mcpServers,
-      "danx-issue": buildDanxIssueEntry(opts.repoRoot, opts.tracker ?? "trello"),
+      "danx-issue": buildDanxIssueEntry(opts.repoRoot, opts.tracker ?? "memory"),
     },
   };
 

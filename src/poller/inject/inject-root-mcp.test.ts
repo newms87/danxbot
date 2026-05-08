@@ -45,7 +45,7 @@ describe("injectDanxIssueMcp", () => {
     expect(result.changed).toBe(true);
     expect(result.path).toBe(mcpPath);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
-    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "trello"));
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "memory"));
   });
 
   it("adds danx-issue when file exists with empty mcpServers", () => {
@@ -53,7 +53,7 @@ describe("injectDanxIssueMcp", () => {
     const result = injectDanxIssueMcp({ repoRoot });
     expect(result.changed).toBe(true);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
-    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "trello"));
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "memory"));
   });
 
   it("preserves pre-existing mcpServers entries byte-identical", () => {
@@ -70,14 +70,14 @@ describe("injectDanxIssueMcp", () => {
     expect(result.changed).toBe(true);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
     expect(parsed.mcpServers.playwright).toEqual(playwright);
-    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "trello"));
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "memory"));
   });
 
   it("is a no-op when canonical danx-issue already present", () => {
     writeFileSync(
       mcpPath,
       JSON.stringify(
-        { mcpServers: { "danx-issue": buildDanxIssueEntry(repoRoot, "trello") } },
+        { mcpServers: { "danx-issue": buildDanxIssueEntry(repoRoot, "memory") } },
         null,
         2,
       ) + "\n",
@@ -132,7 +132,7 @@ describe("injectDanxIssueMcp", () => {
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
     expect(parsed.extensions).toEqual(["foo", "bar"]);
     expect(parsed.otherKey).toEqual({ nested: true });
-    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "trello"));
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "memory"));
   });
 
   it("writes atomically via .tmp + rename (no .tmp left behind on success)", () => {
