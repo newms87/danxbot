@@ -90,10 +90,7 @@ const grouped = computed<Record<string, IssueListItem[]>>(() => {
     result[col.key].push(issue);
   }
   for (const col of cols) {
-    result[col.key].sort((a, b) => {
-      if ((a.type === "Epic") !== (b.type === "Epic")) return a.type === "Epic" ? -1 : 1;
-      return b.updated_at - a.updated_at;
-    });
+    result[col.key].sort((a, b) => b.updated_at - a.updated_at);
   }
   return result;
 });

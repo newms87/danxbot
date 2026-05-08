@@ -12,15 +12,13 @@ const log = createLogger("issues-reader");
 
 /**
  * Slim child entry on the list shape — child id + title + type + raw
- * status + raw waiting_on flag + missing flag. The SPA projects
- * `(status, waiting_on)` into its design-system `done | todo | waiting`
- * palette via `projectChildStatus` in
- * `dashboard/src/components/issues/issuePalette.ts`. `missing` is true
- * when the child id was referenced but no Issue was loaded (e.g. closed
- * beyond the recent-50 cap, or genuinely orphaned); the SPA renders
- * such rows with the unknown placeholder name. Used for both epic
- * phases and non-epic sub-cards (the shape is identical; the SPA
- * relabels the section header per parent type).
+ * status + raw waiting_on flag + missing flag. Every field is a literal
+ * passthrough of the child's YAML; the SPA renders verbatim. `missing`
+ * is true when the child id was referenced but no Issue was loaded
+ * (e.g. closed beyond the recent-50 cap, or genuinely orphaned); the
+ * SPA renders such rows with the unknown placeholder name. Used for
+ * both epic phases and non-epic sub-cards (the shape is identical; the
+ * SPA relabels the section header per parent type).
  */
 export interface IssueListChild {
   id: string;
@@ -179,88 +177,29 @@ function toListItem(
         missing: false,
       };
     });
-  // Epics are not "waiting on" their own children — the children ARE
-  // the epic's completion criteria. If every dependency on the epic is
-  // one of its own children, the projection drops the waiting_on state
-  // entirely so the board doesn't render the epic with a pill that
-  // misrepresents the relationship. External dependencies (other epics,
-  // unrelated cards) still surface as normal.
-  const childSet = new Set(issue.children);
-  const isEpic = issue.type === "Epic";
-  const rawBy = issue.waiting_on?.by ?? [];
-  const externalBy = isEpic ? rawBy.filter((id) => !childSet.has(id)) : rawBy;
-  const epicSelfWaiting =
-    isEpic &&
-    issue.waiting_on !== null &&
-    rawBy.length > 0 &&
-    externalBy.length === 0;
-
-  // Inherited waiting: an epic surfaces in the "waiting" state ONLY when
-  // at least one child is GENUINELY waiting on external work — not merely
-  // waiting on a sibling. Intra-sibling `waiting_on.by[]` (every id is another child
-  // of the same epic) is ordering, not impediment: "do this card after
-  // that one"; the epic itself is moving forward in order. Real waits:
-  //   - status Blocked / Needs Approval (operator must intervene)
-  //   - `waiting_on.by[]` containing ANY id outside the epic's own
-  //     children set (cross-epic dependency)
-  // Schema requires `waiting_on.by[]` non-empty when `waiting_on` is set, so
-  // there is no empty-by[] branch.
-  // Missing children (not in byId — closed beyond the 50-cap or
-  // genuinely orphaned) do NOT trigger epic-waiting: their state is
-  // unknown, not impeded.
-  const isChildWaiting = (child: Issue): boolean => {
-    if (child.status === "Blocked" || child.status === "Needs Approval") {
-      return true;
-    }
-    if (child.waiting_on === null) return false;
-    return child.waiting_on.by.some((id) => !childSet.has(id));
-  };
-  const waitingChildIds = isEpic
-    ? issue.children
-        .map((cid) => byId.get(cid))
-        .filter((c): c is Issue => c !== undefined && isChildWaiting(c))
-        .map((c) => c.id)
-    : [];
-  const inheritedWaiting = isEpic && waitingChildIds.length > 0;
-
-  let projectedStatus: IssueStatus = issue.status;
-  let projectedWaitingOn = issue.waiting_on !== null && !epicSelfWaiting;
-  let projectedWaitingOnReason: string | null = epicSelfWaiting
-    ? null
-    : issue.waiting_on?.reason ?? null;
-  let projectedWaitingOnBy = externalBy;
-  if (inheritedWaiting) {
-    // Don't override Done / Cancelled — those are terminal regardless
-    // of stragglers. In Progress / ToDo / Review get pulled to Blocked so the epic surfaces in a non-dispatchable state.
-    if (
-      issue.status !== "Done" &&
-      issue.status !== "Cancelled" &&
-      issue.status !== "Blocked"
-    ) {
-      projectedStatus = "Blocked";
-    }
-    projectedWaitingOn = true;
-    projectedWaitingOnBy = waitingChildIds;
-    projectedWaitingOnReason =
-      `Waiting on ${waitingChildIds.length} waiting child` +
-      (waitingChildIds.length === 1 ? "" : "ren") +
-      `: ${waitingChildIds.join(", ")}.`;
-  }
+  // No projection. The literal YAML `status` + `waiting_on` are the
+  // single source of truth for both the board's column placement and
+  // the card's "Blocked by" pill. If an epic should surface as Blocked,
+  // the worker / operator writes that into the YAML directly. Epics
+  // whose only deps are intra-sibling children — and the Issues tab's
+  // child glyph badges — communicate the structural relationship
+  // without the dashboard inventing a different status from what the
+  // tracker says.
 
   return {
     id: issue.id,
     type: issue.type,
     title: issue.title,
     description: issue.description,
-    status: projectedStatus,
+    status: issue.status,
     parent_id: issue.parent_id,
     children: [...issue.children],
     ac_total: issue.ac.length,
     ac_done: issue.ac.filter((a) => a.checked).length,
     children_detail: childrenDetail,
-    waiting_on: projectedWaitingOn,
-    waiting_on_reason: projectedWaitingOnReason,
-    waiting_on_by: projectedWaitingOnBy,
+    waiting_on: issue.waiting_on !== null,
+    waiting_on_reason: issue.waiting_on?.reason ?? null,
+    waiting_on_by: issue.waiting_on?.by ?? [],
     comments_count: issue.comments.length,
     has_retro:
       issue.retro.good.length > 0 ||
@@ -351,28 +290,8 @@ export async function readIssueDetail(
     const path = join(repoCwd, ".danxbot", "issues", sub, `${id}.yml`);
     const raw = await readIssueFile(path);
     if (raw) {
-      const issue = applyEpicWaitingOnProjection(raw.issue);
-      return { ...issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };
+      return { ...raw.issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };
     }
   }
   return null;
-}
-
-/**
- * Strip the `waiting_on` record from epics that are waiting solely on
- * their own children. Mirrors the projection in `toListItem` so the
- * drawer (which reads the full `Issue` shape) doesn't render a panel
- * that contradicts the board card.
- */
-function applyEpicWaitingOnProjection(issue: Issue): Issue {
-  if (issue.type !== "Epic" || issue.waiting_on === null) return issue;
-  const childSet = new Set(issue.children);
-  const externalBy = issue.waiting_on.by.filter((id) => !childSet.has(id));
-  if (issue.waiting_on.by.length > 0 && externalBy.length === 0) {
-    return { ...issue, waiting_on: null };
-  }
-  if (externalBy.length !== issue.waiting_on.by.length) {
-    return { ...issue, waiting_on: { ...issue.waiting_on, by: externalBy } };
-  }
-  return issue;
 }

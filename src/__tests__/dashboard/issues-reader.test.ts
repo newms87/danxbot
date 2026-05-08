@@ -109,10 +109,9 @@ describe("listIssues", () => {
       type: "Epic",
       title: "Epic title",
       description: "Epic body markdown",
-      // Missing children do NOT trigger inherited-block — their state
-      // is unknown, not impeded. The fixture's own YAML `blocked`
-      // (waiting on ISS-2) is intra-sibling self-block, also masked.
-      // Net: epic surfaces with raw status + no projected block.
+      // Literal passthrough. No projection. The YAML's status +
+      // waiting_on are wired verbatim — board column + Blocked-by pill
+      // both follow the tracker exactly.
       status: "In Progress",
       parent_id: null,
       children: ["ISS-2", "ISS-3"],
@@ -122,9 +121,9 @@ describe("listIssues", () => {
         { id: "ISS-2", name: "<ISS-2: unknown>", type: "Feature", status: "ToDo", waiting_on: true, waiting_on_by_card: false, missing: true },
         { id: "ISS-3", name: "<ISS-3: unknown>", type: "Feature", status: "ToDo", waiting_on: true, waiting_on_by_card: false, missing: true },
       ],
-      waiting_on: false,
-      waiting_on_reason: null,
-      waiting_on_by: [],
+      waiting_on: true,
+      waiting_on_reason: "waiting",
+      waiting_on_by: ["ISS-2"],
       comments_count: 2,
       has_retro: true,
       updated_at: 1_700_000_000_000,
@@ -257,13 +256,11 @@ describe("listIssues", () => {
     expect(epic.children_detail[0].waiting_on).toBe(false);
   });
 
-  // Regression — intra-sibling ordering ≠ epic block. Phase children
-  // that wait on each other ("do Phase 2 after Phase 1") are doing
-  // work in order; the epic itself is moving forward, not impeded.
-  // Pre-fix the projection counted any `blocked != null` child as
-  // cause for the epic to surface in the Blocked column with a
-  // "Blocked" pill — wrong.
-  it("epic NOT blocked when child blocked.by[] is fully intra-sibling", async () => {
+  // No projection — epic's status + waiting_on come from its own YAML
+  // verbatim. Children's waiting state is rendered through the
+  // children_detail[] glyph badges, not folded onto the epic. Tests
+  // below assert literal passthrough.
+  it("epic with no own waiting_on is NOT waiting regardless of child state (literal)", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -303,7 +300,7 @@ describe("listIssues", () => {
     expect(epic.waiting_on_by).toEqual([]);
   });
 
-  it("epic IS blocked when child has cross-epic external blocker in by[]", async () => {
+  it("epic status untouched by child waiting on external work (literal)", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -325,7 +322,6 @@ describe("listIssues", () => {
         waiting_on: {
           reason: "waits cross-epic",
           timestamp: "2026-01-01T00:00:00Z",
-          // ISS-99 is NOT a child of this epic → real external block
           by: ["ISS-99"],
         },
         blocked: null,
@@ -333,12 +329,14 @@ describe("listIssues", () => {
       2_000,
     );
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
-    expect(epic.waiting_on).toBe(true);
-    expect(epic.status).toBe("Blocked");
-    expect(epic.waiting_on_by).toEqual(["ISS-2"]);
+    expect(epic.status).toBe("In Progress");
+    expect(epic.waiting_on).toBe(false);
+    expect(epic.waiting_on_by).toEqual([]);
+    // Child's waiting state surfaces via children_detail, not the epic.
+    expect(epic.children_detail[0].waiting_on).toBe(true);
   });
 
-  it("epic IS blocked when child status is Blocked regardless of by[]", async () => {
+  it("epic status untouched by child status === Blocked (literal)", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -358,12 +356,38 @@ describe("listIssues", () => {
       1_000,
     );
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
-    expect(epic.waiting_on).toBe(true);
-    expect(epic.status).toBe("Blocked");
-    expect(epic.waiting_on_by).toEqual(["ISS-2"]);
+    expect(epic.status).toBe("In Progress");
+    expect(epic.waiting_on).toBe(false);
+    expect(epic.children_detail[0].status).toBe("Blocked");
   });
 
-  it("epic NOT blocked by missing children — unknown ≠ impeded", async () => {
+  it("epic with non-null waiting_on surfaces literally on the wire", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        type: "Epic",
+        status: "ToDo",
+        children: ["ISS-2"],
+        waiting_on: {
+          reason: "hard dep on external epic",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-99"],
+        },
+      }),
+      2_000,
+    );
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-2" }), 1_000);
+    const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
+    expect(epic.status).toBe("ToDo");
+    expect(epic.waiting_on).toBe(true);
+    expect(epic.waiting_on_reason).toBe("hard dep on external epic");
+    expect(epic.waiting_on_by).toEqual(["ISS-99"]);
+  });
+
+  it("epic NOT waiting by missing children alone (literal)", async () => {
     const repo = setupRepo();
     writeIssue(
       repo,
