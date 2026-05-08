@@ -189,21 +189,12 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     expect(body).toMatch(/operator-driven verification|honest way to verify/);
   });
 
-  // Phase 3 of ISS-90: the `danx-triage` skill body becomes a thin
-  // redirect (deprecated stub) pointing at `danx-triage-card`. Pin that
-  // shape so a future Phase 5 agent doesn't prematurely delete the
-  // redirect, and so a future agent doesn't accidentally re-fill it with
-  // bulk-orchestrator content.
-  it("`danx-triage/SKILL.md` is a deprecated thin redirect to `danx-triage-card`", () => {
-    const path = resolve(HERE, ".claude/skills/danx-triage/SKILL.md");
-    const body = readFileSync(path, "utf-8");
-    expect(body).toMatch(/DEPRECATED/);
-    expect(body).toMatch(/danx-triage-card/);
-    // Belt-and-suspenders: the redirect should NOT carry the legacy
-    // bulk-orchestrator instructions (ICE 1-10, Step 2 — Per-Card Audit
-    // (parallel subagents), etc.). Pinning the absence of the most
-    // distinctive phrase is enough to catch a revert.
-    expect(body).not.toMatch(/Per-Card Audit \(parallel subagents\)/);
+  // Phase 5 of ISS-90 (ISS-95): the legacy `danx-triage` redirect skill
+  // was deleted entirely. Pin its absence so a future agent does not
+  // resurrect the bulk-orchestrator path.
+  it("the legacy `danx-triage` skill no longer ships in this workspace", () => {
+    const path = resolve(HERE, ".claude/skills/danx-triage");
+    expect(statSync(path, { throwIfNoEntry: false })).toBeUndefined();
   });
 
   // Phase 3 of ISS-90: the skill body lives in BOTH the danxbot inject
@@ -224,16 +215,6 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
       // fail. The drift-prevention is dev-time-only by design.
       return;
     }
-    const injectBody = readFileSync(injectPath, "utf-8");
-    const marketplaceBody = readFileSync(marketplacePath, "utf-8");
-    expect(injectBody).toEqual(marketplaceBody);
-  });
-
-  it("`danx-triage/SKILL.md` redirect matches the claude-plugins marketplace mirror byte-for-byte", () => {
-    const injectPath = resolve(HERE, ".claude/skills/danx-triage/SKILL.md");
-    const marketplacePath =
-      "/home/newms/web/claude-plugins/issue-worker/skills/danx-triage/SKILL.md";
-    if (!statSync(marketplacePath, { throwIfNoEntry: false })) return;
     const injectBody = readFileSync(injectPath, "utf-8");
     const marketplaceBody = readFileSync(marketplacePath, "utf-8");
     expect(injectBody).toEqual(marketplaceBody);

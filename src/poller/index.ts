@@ -83,11 +83,7 @@ const log = createLogger("poller");
 
 /**
  * Project a local-YAML `Issue` into the `IssueRef` shape the dispatch
- * pipeline downstream consumes. `list_kind` is intentionally undefined
- * for local-derived refs — it's a tracker-only concept and was made
- * dead weight by the Phase 4 ISS-90 mapping change (Action Items list
- * cards now hydrate as `status: "Review"` and pass through the normal
- * status filter, not a parallel taxonomy).
+ * pipeline downstream consumes.
  */
 function localIssueToRef(issue: Issue): IssueRef {
   return {
@@ -548,9 +544,8 @@ async function _poll(repo: RepoContext): Promise<void> {
   // YAMLs land in dispatch on the same tick orphan-push stamps their
   // external_id.
   //
-  // Phase 4 of ISS-90 retired the `list_kind === "action_items"`
-  // partition: cards on the Trello Action Items list now surface
-  // with `status: "Review"` (see `trello.ts#listIdToStatus`) and are
+  // Cards on the Trello Action Items list surface with
+  // `status: "Review"` (see `trello.ts#listIdToStatus`) so they are
   // bulk-synced through the Review branch alongside other Review
   // cards.
   const trackerToDoRefs = openCards.filter((c) => c.status === "ToDo");

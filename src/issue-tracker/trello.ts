@@ -60,45 +60,15 @@ export class TrelloTracker implements IssueTracker {
   // ---------- Public API ----------
 
   async fetchOpenCards(): Promise<IssueRef[]> {
-    // Phase 4 of ISS-90 collapsed the Action Items list_kind into
-    // `status: "Review"`: cards on the Trello Action Items list
-    // surface with `status: "Review"` so the per-card triage agent picks
-    // them up alongside Review-list cards. The legacy
-    // `list_kind: "action_items"` distinction (and the poller filter
-    // built on it) is gone — the new triage loop dispatches by status
-    // alone. Phase 5 (ISS-95) deletes the residual `list_kind` field
-    // from `IssueRef` once every consumer is off it.
-    const openLists: Array<{
-      status: IssueStatus;
-      listId: string;
-      listKind: IssueRef["list_kind"];
-    }> = [
-      {
-        status: "Review",
-        listId: this.trello.reviewListId,
-        listKind: undefined,
-      },
-      { status: "ToDo", listId: this.trello.todoListId, listKind: "todo" },
-      {
-        status: "In Progress",
-        listId: this.trello.inProgressListId,
-        listKind: undefined,
-      },
-      {
-        status: "Needs Help",
-        listId: this.trello.needsHelpListId,
-        listKind: undefined,
-      },
-      {
-        status: "Needs Approval",
-        listId: this.trello.needsApprovalListId,
-        listKind: undefined,
-      },
-      {
-        status: "Review",
-        listId: this.trello.actionItemsListId,
-        listKind: undefined,
-      },
+    // Two list ids map to `status: "Review"` (review + Action Items) —
+    // see `listIdToStatus` for the rationale.
+    const openLists: Array<{ status: IssueStatus; listId: string }> = [
+      { status: "Review", listId: this.trello.reviewListId },
+      { status: "ToDo", listId: this.trello.todoListId },
+      { status: "In Progress", listId: this.trello.inProgressListId },
+      { status: "Needs Help", listId: this.trello.needsHelpListId },
+      { status: "Needs Approval", listId: this.trello.needsApprovalListId },
+      { status: "Review", listId: this.trello.actionItemsListId },
     ];
     const refs: IssueRef[] = [];
     for (const entry of openLists) {
@@ -109,14 +79,12 @@ export class TrelloTracker implements IssueTracker {
       const cards = await this.fetchListCards(entry.listId);
       for (const card of cards) {
         const { id, title } = parseCardTitle(card.name);
-        const ref: IssueRef = {
+        refs.push({
           id,
           external_id: card.id,
           title,
           status: entry.status,
-        };
-        if (entry.listKind !== undefined) ref.list_kind = entry.listKind;
-        refs.push(ref);
+        });
       }
     }
     return refs;
@@ -525,12 +493,10 @@ export class TrelloTracker implements IssueTracker {
     }
     if (listId === this.trello.doneListId) return "Done";
     if (listId === this.trello.cancelledListId) return "Cancelled";
-    // Phase 4 of ISS-90: Action Items list cards collapse into
+    // Phase 4 of ISS-90 collapsed the Action Items list into
     // `status: "Review"` so the per-card triage agent picks them up
     // alongside the Review list. The list itself stays on the Trello
     // board (no rename), but the sync layer remaps it on hydration.
-    // Phase 5 (ISS-95) deletes the residual `list_kind` field from
-    // `IssueRef` once every consumer is off it.
     if (listId === this.trello.actionItemsListId) return "Review";
     throw new Error(`Trello list id ${listId} is not mapped to a status`);
   }

@@ -7,7 +7,6 @@ import {
   IDEATOR_PROMPT,
   loadTrelloIds,
   TEAM_PROMPT,
-  TRIAGE_AUTO_PROMPT,
   TRIAGE_CARD_PROMPT,
 } from "./constants.js";
 
@@ -155,12 +154,6 @@ describe("agent-mode prompts", () => {
   it("TEAM_PROMPT and IDEATOR_PROMPT are stable slash commands", () => {
     expect(TEAM_PROMPT).toBe("/danx-next");
     expect(IDEATOR_PROMPT).toBe("/danx-ideate");
-  });
-
-  describe("TRIAGE_AUTO_PROMPT (legacy bulk auto-triage prompt)", () => {
-    it("is an empty string — Phase 4 of ISS-90 retired the bulk auto-triage path in favor of per-card dispatches via TRIAGE_CARD_PROMPT", () => {
-      expect(TRIAGE_AUTO_PROMPT).toBe("");
-    });
   });
 
   describe("TRIAGE_CARD_PROMPT (per-card triage dispatch — ISS-94)", () => {

@@ -51,17 +51,6 @@ export interface IssueRef {
   external_id: string;
   title: string;
   status: IssueStatus;
-  /**
-   * @deprecated Slated for removal in Phase 5 of ISS-90 (ISS-95).
-   *
-   * Phase 4 of ISS-90 (ISS-94) collapsed the Action Items list into
-   * `status: "Review"`: the Trello tracker no longer emits
-   * `list_kind: "action_items"`, and the poller no longer reads this
-   * field. The legacy `"todo"` value is also dead code — no consumer
-   * branches on it. Phase 5 deletes the field entirely; until then it
-   * remains optional + ignored.
-   */
-  list_kind?: "todo" | "action_items";
 }
 
 export interface IssueAcItem {

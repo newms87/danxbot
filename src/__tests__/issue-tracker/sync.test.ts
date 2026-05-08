@@ -466,7 +466,7 @@ describe("syncIssue", () => {
     expect(setLabels).toBeUndefined();
   });
 
-  it("derives triaged:true when triaged.timestamp is non-empty (gap C)", async () => {
+  it("derives triaged:true when triage.history[] has at least one entry (gap C)", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
@@ -484,8 +484,8 @@ describe("syncIssue", () => {
     ).toBe(true);
   });
 
-  it("derives triaged:false when triaged.timestamp is empty (gap C)", async () => {
-    // Build a tracker pre-seeded with a card whose triaged record IS set on
+  it("derives triaged:false when triage.history[] is empty (gap C)", async () => {
+    // Build a tracker pre-seeded with a card whose triage record IS set on
     // the server (via seed Issue), then sync a local that has cleared it.
     const seed: Issue = {
       schema_version: 3,

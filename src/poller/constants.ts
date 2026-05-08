@@ -117,13 +117,3 @@ export const IDEATOR_PROMPT = "/danx-ideate";
 export const TRIAGE_CARD_PROMPT = (issueId: string): string =>
   `Triage card ${issueId} using the danx-triage-card skill.`;
 
-/**
- * Legacy bulk auto-triage prompt — retired by Phase 4 of ISS-90 in
- * favor of per-card dispatches via `TRIAGE_CARD_PROMPT`. Kept exported
- * as a stable empty marker so any skill / fixture that still imports
- * the symbol gets a deterministic empty string instead of a runtime
- * `undefined`. Phase 5 (ISS-95) deletes this symbol and the redirect
- * skill that historically consumed it.
- */
-export const TRIAGE_AUTO_PROMPT = "";
-

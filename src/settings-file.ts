@@ -462,9 +462,10 @@ function envDefault(ctx: RepoContext, feature: Feature): boolean {
       return false;
     case "autoTriage":
       // Explicit opt-in: same rationale as ideator — the auto-triage
-      // poller spawns `/danx-triage` to clean Action Items + Review
-      // when ToDo is empty, a recurring agent dispatch that costs
-      // tokens. Operators turn it on per-repo from the Agents tab.
+      // poller spawns `/danx-triage-card` per eligible Review /
+      // Needs Help / Blocked card whose `triage.expires_at` is in the
+      // past, a recurring agent dispatch that costs tokens. Operators
+      // turn it on per-repo from the Agents tab.
       return false;
   }
 }

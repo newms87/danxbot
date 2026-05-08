@@ -1,5 +1,5 @@
 name: issue-worker
-description: Poller dispatch — danx-next, danx-start, danx-ideate, danx-epic-link, danx-triage-card (+ deprecated danx-triage redirect)
+description: Poller dispatch — danx-next, danx-start, danx-ideate, danx-epic-link, danx-triage-card
 required-placeholders:
   - DANXBOT_STOP_URL
   - DANXBOT_WORKER_PORT

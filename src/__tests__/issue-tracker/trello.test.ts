@@ -62,42 +62,62 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(TRELLO);
     const refs = await tracker.fetchOpenCards();
+    // Phase 5 of ISS-90 (ISS-95): the legacy `list_kind` field was
+    // removed from `IssueRef` entirely — refs now carry only
+    // {id, external_id, title, status}. Action Items list cards
+    // surface as `status: "Review"` so the per-card triage agent
+    // picks them up alongside the Review list.
     expect(refs).toEqual([
       { id: "ISS-1", external_id: "r1", title: "R1", status: "Review" },
-      {
-        id: "",
-        external_id: "t1",
-        title: "T1",
-        status: "ToDo",
-        list_kind: "todo",
-      },
+      { id: "", external_id: "t1", title: "T1", status: "ToDo" },
       { id: "ISS-3", external_id: "n1", title: "N1", status: "Needs Help" },
-      {
-        id: "ISS-9",
-        external_id: "p1",
-        title: "P1",
-        status: "Needs Approval",
-      },
-      // Phase 4 of ISS-90: Action Items list cards collapse into
-      // status: Review so the per-card triage agent picks them up
-      // alongside the Review list. The legacy list_kind tag is gone.
-      {
-        id: "ISS-4",
-        external_id: "a1",
-        title: "A1",
-        status: "Review",
-      },
+      { id: "ISS-9", external_id: "p1", title: "P1", status: "Needs Approval" },
+      { id: "ISS-4", external_id: "a1", title: "A1", status: "Review" },
     ]);
     // Pin the call count so a future regression that drops one of the
     // six open-list statuses (Review, ToDo, In Progress, Needs Help,
     // Needs Approval, Action Items) gets caught here, even when the
     // dropped list happened to be empty.
     expect(fetchMock).toHaveBeenCalledTimes(6);
-    // Phase 4 of ISS-90 retired the legacy `list_kind: "action_items"`
-    // tag — the Action Items list now collapses into status: Review.
-    // Negatively assert that NO ref carries the legacy tag so a
-    // regression that re-introduces it is caught here.
-    expect(refs.every((r) => r.list_kind !== "action_items")).toBe(true);
+    // Belt-and-suspenders: no ref carries any `list_kind` field at all
+    // (the field is gone from the schema in Phase 5).
+    expect(refs.every((r) => !("list_kind" in r))).toBe(true);
+    // Positive contract pin — every ref carries EXACTLY these four
+    // keys. Catches any future stowaway field (e.g. `list_kind_v2`,
+    // `triage_due`, `kind`) that a `not-in` assertion would miss.
+    for (const ref of refs) {
+      expect(Object.keys(ref).sort()).toEqual([
+        "external_id",
+        "id",
+        "status",
+        "title",
+      ]);
+    }
+  });
+
+  it("fetchOpenCards skips the actionItemsListId when empty (rollout symmetry with needsApprovalListId)", async () => {
+    // The `if (!entry.listId) continue` guard inside fetchOpenCards
+    // tolerates any missing optional list id, not just Needs Approval.
+    // Pin that the Action Items list is also skip-tolerant — a
+    // regression that hard-required `actionItemsListId` would surface
+    // as a fetch attempt against an empty URL.
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes("list-review/cards")) return jsonResponse([]);
+      if (url.includes("list-todo/cards")) return jsonResponse([]);
+      if (url.includes("list-ip/cards")) return jsonResponse([]);
+      if (url.includes("list-nh/cards")) return jsonResponse([]);
+      if (url.includes("list-na/cards")) return jsonResponse([]);
+      throw new Error(`unexpected url: ${url}`);
+    });
+    const tracker = new TrelloTracker({ ...TRELLO, actionItemsListId: "" });
+    const refs = await tracker.fetchOpenCards();
+    expect(refs).toEqual([]);
+    // Five lists fetched (Review, ToDo, In Progress, Needs Help,
+    // Needs Approval) — Action Items skipped because its id is empty.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    for (const call of fetchMock.mock.calls) {
+      expect(call[0]).not.toContain("list-ai");
+    }
   });
 
   it("getCard maps a card on the Action Items list to status: Review (Phase 4 of ISS-90)", async () => {
