@@ -54,6 +54,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 ## Top-Level Flow
 
 1. Read the YAML the dispatch prompt named.
+1.1. **Resume self-check** (Step 1.1) — terminal state + checked ACs + filled retro = call `danxbot_complete` and stop. Do not redo work.
 1.5. Internalize the **You Fix What You Find** rule (Step 1.5) before doing anything else.
 2. Plan (Step 2).
 3. Evaluate scope; epic-split if needed (Step 3).
@@ -79,6 +80,16 @@ The YAML carries `status: ToDo` at this point — the poller picked it up and hy
 If the YAML's `status` is already `In Progress`, treat this as resumption — skip the flip + save and proceed.
 
 If the YAML doesn't exist or fails to parse, signal `danxbot_complete({status: "critical_failure"})` per `.claude/rules/danx-halt-flag.md` — the poller is broken if it dispatched without a YAML.
+
+---
+
+## Step 1.1 — Resume self-check (read first, every dispatch)
+
+Before doing ANY work, read the assigned YAML. If status is terminal (`Done` / `Cancelled`) AND every AC item is checked (`ac[i].checked === true` for every i) AND retro is filled (`retro.good` and `retro.bad` non-empty) — the prior session already finished. Call `danxbot_complete({status: "completed", summary: "Prior session already completed; verified terminal state on resume."})` and stop. **Do not redo work.** Do not flip status. Do not re-save the YAML. Do not append a new comment. The work has already shipped.
+
+If you're not sure whether prior work landed (e.g. status is `ToDo` or `In Progress` but you see commits in `retro.commits[]` referencing your assigned scope, OR the resume prompt says `RESUMED dispatch on …`), inspect `git log` for those commit hashes before writing any new code. Real commits + checked ACs = done — fall through to the terminal-state branch above. No commits = fresh work — proceed to Step 1.5.
+
+This is the May-7 incident gate (ISS-135). An orphan-resumed agent that re-runs `/danx-next` from scratch against a card whose prior session already shipped the work creates noisy duplicate retro comments, duplicate `danxbot_complete` calls, and looks to humans like a regression. The self-check is a 30-second read that costs zero tokens of redo.
 
 ---
 

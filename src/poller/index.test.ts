@@ -108,6 +108,7 @@ vi.mock("./constants.js", () => ({
   getReposBase: () => "/danxbot/repos",
   REVIEW_MIN_CARDS: 10,
   TEAM_PROMPT: "/danx-next",
+  TEAM_PROMPT_RESUME: "/danx-next",
   IDEATOR_PROMPT: "/danx-ideate",
   TRIAGE_CARD_PROMPT: (id: string) =>
     `Triage card ${id} using the danx-triage-card skill.`,
@@ -3836,6 +3837,28 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     );
   });
 
+  // ISS-135 — Fresh dispatch (non-resume) must NOT carry the resume
+  // contract anchors. The two paths share the /danx-next slash command
+  // (so the same skill loads), but the resume contract is only
+  // appropriate when there's a prior in-flight session to verify
+  // against. A future regression that swapped TEAM_PROMPT for
+  // TEAM_PROMPT_RESUME at the fresh-dispatch callsite would tell every
+  // newly-picked-up card "verify what the prior session did" — which
+  // is wrong because there was no prior session.
+  it("fresh dispatch task does NOT contain the RESUMED-dispatch resume contract anchors", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("card-fresh-no-resume", "Fresh card", "ToDo"),
+    ]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const dispatchArg = mockDispatch.mock.calls[0][0] as { task: string };
+    expect(dispatchArg.task).not.toContain("RESUMED dispatch");
+    expect(dispatchArg.task).not.toContain("CONTRACT — read FIRST");
+    expect(dispatchArg.task).not.toContain("Verify, don't repeat");
+  });
+
   it("threads the same dispatchId into both the YAML stamp and the dispatch() call", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("card-uuid-2", "Card 2", "ToDo"),
@@ -4362,6 +4385,50 @@ describe("poll — In Progress sync + orphan resume", () => {
     expect(writeArgs).toBeDefined();
   });
 
+  // ISS-135 — the orphan-resume task body MUST carry an explicit
+  // "this is a resume, verify don't repeat" contract so a resumed
+  // agent that lands on a card whose prior session already finished
+  // (Done + every AC checked + retro filled) calls danxbot_complete
+  // immediately instead of running /danx-next from scratch and
+  // re-doing the work. The May-7 incident showed an orphan-resumed
+  // agent re-dispatching `danxbot_complete` after the work + commits
+  // had already shipped in the prior session.
+  it("orphan-resume task body contains the RESUMED-dispatch contract anchors (verify, don't repeat)", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([
+      ref("ip-resume-contract", "Orphan resume contract", "In Progress"),
+    ]);
+    const orphan = inProgressIssue(
+      "ISS-135-X",
+      "ip-resume-contract",
+      "old-dispatch-uuid",
+    );
+    mockFindByExternalId.mockImplementation(
+      (_repo: string, externalId: string) =>
+        externalId === "ip-resume-contract" ? orphan : null,
+    );
+    mockResolveParentSessionId.mockResolvedValue({
+      kind: "found",
+      sessionId: "claude-session-resume",
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    const dispatchArg = mockDispatch.mock.calls[0][0] as { task: string };
+    // Resume contract markers — these three substrings are the
+    // load-bearing phrases the dispatched agent reads to decide
+    // "verify already-done card vs. resume in-flight work."
+    expect(dispatchArg.task).toContain("RESUMED dispatch");
+    expect(dispatchArg.task).toContain("CONTRACT");
+    expect(dispatchArg.task).toContain("Verify, don't repeat");
+    // Parent dispatch id surfaces in the prompt so the resumed agent
+    // can grep its own session log against the parent's dispatch tag
+    // when it's deciding "did I already finish this?".
+    expect(dispatchArg.task).toContain("old-dispatch-uuid");
+    // Card id still appears so the agent reads the right YAML.
+    expect(dispatchArg.task).toContain("ISS-135-X");
+  });
+
   it("resumes an orphaned In Progress card whose dispatch_id session file exists on disk", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("ip-1", "Orphaned card", "In Progress"),
@@ -4771,7 +4838,7 @@ describe("poll — In Progress sync + orphan resume", () => {
     expect(reset).toBeUndefined();
   });
 
-  it("composes a resume task containing TEAM_PROMPT, the YAML path, the issue id, the resume phrasing, and the danx_issue_save directive", async () => {
+  it("composes a resume task containing TEAM_PROMPT_RESUME, the YAML path, the issue id, and the RESUMED-dispatch contract phrasing (ISS-135)", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("ip-prompt", "Prompt check", "In Progress"),
     ]);
@@ -4787,14 +4854,23 @@ describe("poll — In Progress sync + orphan resume", () => {
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const dispatchArg = mockDispatch.mock.calls[0][0] as { task: string };
+    // /danx-next is still the slash command (TEAM_PROMPT_RESUME maps
+    // to "/danx-next" today — the skill itself contains the resume
+    // self-check section).
     expect(dispatchArg.task).toContain("/danx-next");
-    expect(dispatchArg.task).toContain("Resuming prior dispatch on ISS-93");
+    // ISS-135: the legacy "Resuming prior dispatch on ISS-93" phrasing
+    // was replaced with the explicit RESUMED-dispatch CONTRACT block
+    // that tells the agent to verify terminal state before redoing
+    // any work. The card id and YAML path still appear; the
+    // `danx_issue_save` directive is replaced by the
+    // `danxbot_complete` directive embedded in the contract.
+    expect(dispatchArg.task).toContain("RESUMED dispatch on ISS-93");
     expect(dispatchArg.task).toContain(
       "/test/repos/test-repo/.danxbot/issues/open/ISS-93.yml",
     );
-    expect(dispatchArg.task).toContain(
-      'Call danx_issue_save({id: "ISS-93"}) when done.',
-    );
+    expect(dispatchArg.task).toContain("CONTRACT — read FIRST, act AFTER");
+    expect(dispatchArg.task).toContain("Verify, don't repeat");
+    expect(dispatchArg.task).toContain("danxbot_complete");
   });
 
   it("stamps + writes the resume YAML BEFORE dispatch — ordering invariant", async () => {

@@ -19,6 +19,7 @@ import { repoContexts } from "../repo-context.js";
 import {
   REVIEW_MIN_CARDS,
   TEAM_PROMPT,
+  TEAM_PROMPT_RESUME,
   IDEATOR_PROMPT,
   TRIAGE_CARD_PROMPT,
 } from "./constants.js";
@@ -1170,11 +1171,34 @@ async function tryResumeOrphan(
     const startStamp = buildStartStamp(newDispatchId, "work", osHostname());
     const stamped = stampDispatchAndWrite(repo.localPath, issue, startStamp);
     const yamlPath = issuePath(repo.localPath, stamped.id, "open");
+    // ISS-135 — explicit RESUMED-dispatch contract. The May-7 incident
+    // showed an orphan-resumed agent re-running /danx-next from
+    // scratch against a card whose prior session had already shipped
+    // the work + commits, then re-dispatching `danxbot_complete` as
+    // if it were starting fresh. The contract below tells the agent
+    // to read the YAML FIRST, recognise terminal state (Done /
+    // Cancelled + every AC checked + retro filled), and call
+    // danxbot_complete WITHOUT redoing any work. Anything short of
+    // terminal — find the smallest gap and resume from there.
+    //
+    // Keep in sync with the "Resume self-check" sections in
+    // src/poller/inject/workspaces/issue-worker/.claude/skills/
+    //   danx-next/SKILL.md (Step 1.1) and danx-start/SKILL.md.
+    // Two-layer defense: this prompt is what the agent sees on its
+    // first turn; the skill section is what it sees if it ever
+    // consults the workflow. Both must agree on the "terminal + ACs
+    // checked + retro filled = call danxbot_complete and stop" rule.
     const task =
-      `${TEAM_PROMPT}\n\nResuming prior dispatch on ${stamped.id}. ` +
-      `Read ${yamlPath} for current state, verify progress against ACs, ` +
-      `complete remaining work. ` +
-      `Call danx_issue_save({id: "${stamped.id}"}) when done.`;
+      `${TEAM_PROMPT_RESUME}\n\n` +
+      `RESUMED dispatch on ${stamped.id} (parent ${dispatchId}).\n\n` +
+      `CONTRACT — read FIRST, act AFTER:\n` +
+      `1. Read ${yamlPath} now. Note current status, AC checked-state, retro state, commits in retro.commits[].\n` +
+      `2. If status ∈ {Done, Cancelled} AND every AC item checked AND retro filled — work is COMPLETE. ` +
+      `Call danxbot_complete({status: "completed", summary: "..."}) immediately. ` +
+      `Do NOT re-run /danx-next. Do NOT redo any work. Do NOT save the YAML again.\n` +
+      `3. Else, identify the smallest gap (uncompleted AC, missing retro field, unverified AC item) and resume from that point. ` +
+      `Save the YAML when each gap closes. Call danxbot_complete only when every gap is closed.\n\n` +
+      `This is a RESUME, not a fresh dispatch. The prior session already did most or all of the work. Verify, don't repeat.`;
     await spawnClaude(
       repo,
       task,

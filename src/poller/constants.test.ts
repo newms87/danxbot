@@ -7,6 +7,7 @@ import {
   IDEATOR_PROMPT,
   loadTrelloIds,
   TEAM_PROMPT,
+  TEAM_PROMPT_RESUME,
   TRIAGE_CARD_PROMPT,
 } from "./constants.js";
 
@@ -154,6 +155,17 @@ describe("agent-mode prompts", () => {
   it("TEAM_PROMPT and IDEATOR_PROMPT are stable slash commands", () => {
     expect(TEAM_PROMPT).toBe("/danx-next");
     expect(IDEATOR_PROMPT).toBe("/danx-ideate");
+  });
+
+  // ISS-135 — orphan-resume callsite uses TEAM_PROMPT_RESUME instead
+  // of TEAM_PROMPT so a future swap to a dedicated `/danx-resume`
+  // slash command is a one-line edit. Today the value is identical
+  // to TEAM_PROMPT (same /danx-next skill loads, the resume self-
+  // check section lives inside it). Pin the value at its source so
+  // a rename here does not silently pass the constants suite — the
+  // index.test.ts mock is scaffolding, not a value assertion.
+  it("TEAM_PROMPT_RESUME is /danx-next today (resume self-check ships in the danx-next skill)", () => {
+    expect(TEAM_PROMPT_RESUME).toBe("/danx-next");
   });
 
   describe("TRIAGE_CARD_PROMPT (per-card triage dispatch — ISS-94)", () => {

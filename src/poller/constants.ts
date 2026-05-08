@@ -96,6 +96,22 @@ export const TEAM_PROMPT = "/danx-next";
 export const IDEATOR_PROMPT = "/danx-ideate";
 
 /**
+ * Slash-command prefix for orphan-resume dispatches (ISS-135).
+ *
+ * Identical to `TEAM_PROMPT` today (both load the `danx-next` skill,
+ * which now ships a "Resume self-check" section that detects
+ * already-terminal cards before doing any work). Carved out as its own
+ * constant so the orphan-resume callsite is grep-distinct from the
+ * fresh-dispatch callsite — and so a future swap to a dedicated
+ * `/danx-resume` slash command is a one-line edit here. The May-7
+ * incident (resumed agent re-running `/danx-next` against a Done card)
+ * is the load-bearing reason: the resume path now prepends an explicit
+ * "verify, don't repeat" CONTRACT block, while the fresh-dispatch path
+ * keeps its current "Edit <yaml>" body.
+ */
+export const TEAM_PROMPT_RESUME = "/danx-next";
+
+/**
  * Per-card triage prompt — invoked by the poller's triage-due path
  * (Phase 4 of ISS-90) when an open card with `status` ∈
  * {Review, Needs Help} OR `blocked != null` has `triage.expires_at` in

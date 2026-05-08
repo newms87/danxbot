@@ -189,6 +189,48 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     expect(body).toMatch(/operator-driven verification|honest way to verify/);
   });
 
+  // ISS-135 — both `danx-next` and `danx-start` MUST ship a "Resume
+  // self-check" section so a resumed agent that lands on a card whose
+  // prior session already finished (Done + every AC checked + retro
+  // filled) reads the YAML, recognises the terminal state, and calls
+  // danxbot_complete WITHOUT redoing any work. The May-7 incident
+  // showed an orphan-resumed agent re-dispatching `danxbot_complete`
+  // after the prior session had already shipped the work + commits.
+  // The contract ships in BOTH skills because either is the entry
+  // point depending on which slash command the resume prompt uses.
+  // `mirrorWorkspaceTree` copies these source files verbatim into
+  // every connected repo's `<repo>/.danxbot/workspaces/issue-worker/
+  // .claude/skills/`, so asserting on the source pins the rendered
+  // workspace shape too.
+  it("`danx-next/SKILL.md` and `danx-start/SKILL.md` ship the Resume self-check section (ISS-135)", () => {
+    const danxNext = readFileSync(
+      resolve(HERE, ".claude/skills/danx-next/SKILL.md"),
+      "utf-8",
+    );
+    expect(danxNext).toMatch(/Resume self-check/);
+    // Load-bearing instructions agents must read before doing work.
+    expect(danxNext).toMatch(/status is terminal/i);
+    expect(danxNext).toMatch(/every AC item is checked/i);
+    expect(danxNext).toMatch(/retro is filled/i);
+    expect(danxNext).toMatch(/danxbot_complete/);
+    expect(danxNext).toMatch(/Do not redo work/i);
+    // Verification mechanism the agent uses when status is non-
+    // terminal but commits already landed — pin so a future edit
+    // can't silently delete the `git log` step and keep only the
+    // heading. Without this, a regression that drops the commits-
+    // hash inspection passes the heading test alone.
+    expect(danxNext).toMatch(/git log/);
+    expect(danxNext).toMatch(/retro\.commits\[\]/);
+
+    const danxStart = readFileSync(
+      resolve(HERE, ".claude/skills/danx-start/SKILL.md"),
+      "utf-8",
+    );
+    expect(danxStart).toMatch(/Resume self-check/);
+    expect(danxStart).toMatch(/danxbot_complete/);
+    expect(danxStart).toMatch(/Do not redo work/i);
+  });
+
   // Phase 5 of ISS-90 (ISS-95): the legacy `danx-triage` redirect skill
   // was deleted entirely. Pin its absence so a future agent does not
   // resurrect the bulk-orchestrator path.
