@@ -416,13 +416,19 @@ vi.mock("../workspace/write-if-changed.js", () => ({
   },
 }));
 
-vi.mock("../logger.js", () => ({
-  createLogger: () => ({
+// Shared logger instance so tests can spy on log.error (e.g. crash-isolation
+// tests assert the top-level catch fires exactly once). Created via
+// `vi.hoisted` because the mock factory is hoisted above test code.
+const { mockLogger } = vi.hoisted(() => ({
+  mockLogger: {
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
-  }),
+  },
+}));
+vi.mock("../logger.js", () => ({
+  createLogger: () => mockLogger,
 }));
 
 const mockExistsSync = vi.fn();
@@ -1457,13 +1463,19 @@ language: node
     expect(rmPaths).not.toContain(toolsDanxPath);
   });
 
-  // (d) fail-loud on rm error: per CLAUDE.md "Fail loudly" rule, an
-  // `rm` failure during prune means the agent will load dead config
-  // on the next dispatch — exactly the bug this exists to prevent.
-  // The error must propagate out of `poll()` so the operator sees it
-  // immediately. Pins the docstring's stated invariant against a
-  // future `try/catch log.warn` regression.
-  it("injectDanxWorkspaces propagates an rm failure during prune (fail-loud per CLAUDE.md)", async () => {
+  // (d) DX-149: rm failures during prune used to propagate out of
+  // `poll()` so the operator saw them immediately ("fail-loud per
+  // CLAUDE.md"). DX-149 retired that contract for everything inside
+  // `_poll`: the worker process must survive a single bad tick so
+  // Slack listener / dispatch API / dashboard SSE stay alive when
+  // ONE per-tick failure (tracker, lock, fs) hits. The replacement
+  // contract — log+swallow at the top of `_poll`, retry on the next
+  // tick — applies to syncRepoFiles' rm failures too because the
+  // wrap is intentionally one block (see DX-149 design rationale on
+  // top-level vs per-call). This test pins the new shape so a
+  // future regression that re-introduces the rethrow surfaces
+  // immediately.
+  it("injectDanxWorkspaces rm failure during prune is logged + swallowed (DX-149)", async () => {
     const workspacesSource = "src/poller/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
@@ -1546,17 +1558,20 @@ language: node
       }
     });
 
-    await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/EACCES/);
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+    const errCalls = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(errCalls).toHaveLength(1);
+    expect(String(errCalls[0][0])).toMatch(/EACCES/);
   });
 
-  // Symmetric fail-loud test for `scrubRepoRootDanxArtifacts`. Phase 5
-  // retired the older `try/catch log.warn` swallow in favor of loud
-  // abort; this pins the new invariant so a future regression that
-  // re-introduces the swallow surfaces immediately. Without fail-loud
-  // semantics here, a perm/lock failure leaves stale `danx-*` rules
-  // at `<repo>/.claude/` that claude's ancestor walk would load on
-  // the next dispatch — exact bug the scrubber exists to prevent.
-  it("scrubRepoRootDanxArtifacts propagates an rm failure (fail-loud per CLAUDE.md)", async () => {
+  // Symmetric DX-149 update for `scrubRepoRootDanxArtifacts`. Pre-DX-149
+  // an rm failure here propagated out of `poll()`; post-DX-149 the
+  // `_poll` top-level catch logs+swallows so the worker process
+  // survives. Stale `danx-*` rules at `<repo>/.claude/` will retry on
+  // the next tick — same convergence model as the tracker call wrap.
+  it("scrubRepoRootDanxArtifacts rm failure is logged + swallowed (DX-149)", async () => {
     const workspacesSource = "src/poller/inject/workspaces";
     const repoRootClaudeRulesDir = "/test/repos/test-repo/.claude/rules";
     const staleRepoRootRulePath = `${repoRootClaudeRulesDir}/danx-leftover.md`;
@@ -1621,7 +1636,12 @@ language: node
       }
     });
 
-    await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/EACCES/);
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+    const errCalls = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(errCalls).toHaveLength(1);
+    expect(String(errCalls[0][0])).toMatch(/EACCES/);
   });
 });
 
@@ -1676,9 +1696,18 @@ describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; 
       refToFakeIssue({ id: "", external_id: "c1", title: "Card 1", status: "ToDo" }),
     ]);
 
-    await expect(poll(repoNoCreds)).rejects.toThrow(
-      /without complete trello credentials/,
+    // DX-149: the credentials-guard throw is now caught by `_poll`'s
+    // top-level catch (the worker survives an in-tick crash; the
+    // operator sees the error in logs and the next tick re-asserts
+    // the guard). Pre-DX-149 this propagated out of `poll()`; that
+    // contract is retired so a single bad repo can't kill the whole
+    // worker process.
+    await expect(poll(repoNoCreds)).resolves.toBeUndefined();
+    const errCalls = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
     );
+    expect(errCalls).toHaveLength(1);
+    expect(String(errCalls[0][0])).toMatch(/without complete trello credentials/);
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
@@ -1757,6 +1786,162 @@ describe("poll — dispatch lock gating", () => {
       (c: unknown[]) => c[0] === "c1" && String(c[1]).includes("danxbot-lock"),
     );
     expect(lockPostsForC1).toHaveLength(1);
+  });
+});
+
+/**
+ * DX-149 — _poll crash isolation.
+ *
+ * Before the fix, any tracker call inside `_poll` AFTER the existing
+ * inner try/catch around `fetchOpenCards` (e.g. `tryAcquireLock` →
+ * `tracker.getComments`) would throw straight past `_poll` and out
+ * through `poll()`'s `finally`, killing the whole worker process.
+ *
+ * Contract: a single top-level try/catch in `_poll` swallows any
+ * thrown error, logs it, and returns cleanly so the next tick fires.
+ * `state.polling` is already reset in `poll()`'s finally; these tests
+ * verify that property end-to-end by calling `poll()` twice.
+ */
+describe("poll — _poll crash isolation (DX-149)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+  });
+
+  it("survives tracker.getComments rejection inside tryAcquireLock — no rethrow", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
+    // Trigger the exact crash class from production (DX-149): Trello
+    // 400 on /cards/<bogus-external-id>/actions surfaces as a thrown
+    // error from `getComments`, which `tryAcquireLock` calls. Pre-fix,
+    // this killed the worker process. Post-fix, the top-level catch
+    // logs and returns cleanly.
+    mockTracker.getComments.mockRejectedValue(
+      new Error("Trello API error: 400 Bad Request (GET /cards/mem-2/actions)"),
+    );
+
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+
+    // Top-level catch fired with a diagnostic prefix so the error is
+    // attributable to the poller and the originating repo.
+    const crashLogs = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(crashLogs).toHaveLength(1);
+    expect(String(crashLogs[0][0])).toContain("test-repo");
+    expect(String(crashLogs[0][0])).toContain("Trello API error: 400");
+
+    // Dispatch never fired (lock acquisition is gating).
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("subsequent poll() tick fires after a _poll crash — state.polling reset", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
+    mockTracker.getComments.mockRejectedValueOnce(new Error("boom"));
+
+    // First tick: crashes inside _poll, swallowed by top-level catch.
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+
+    // Second tick: tracker is healthy again. fetchOpenCards must be
+    // re-invoked, proving `state.polling` was correctly reset in
+    // poll()'s finally despite the inner crash.
+    mockTracker.getComments.mockResolvedValue([]);
+    mockTracker.fetchOpenCards.mockClear();
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+  });
+
+  it("preserves no-double-fire when fetchOpenCards rejects (existing inner catch wins)", async () => {
+    mockTracker.fetchOpenCards.mockRejectedValue(new Error("Network error"));
+
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+
+    // The inner try/catch at the fetchOpenCards site logs once and
+    // returns early. The new outer try/catch must NOT also log —
+    // that would surface the same error twice on every tracker
+    // outage. Assert exactly one error log fires for this path.
+    const errorCalls = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("Error fetching cards"),
+    );
+    expect(errorCalls).toHaveLength(1);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("survives an early-_poll throw from healLocalYamls (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
+    // Reviewer-recommended representative test for the deeper-in-_poll
+    // throw paths the wrap also covers (orphan-push, evictDeadDispatches,
+    // checkAndSpawnTriage/Ideator, etc.). `healLocalYamls` runs at the
+    // very top of _poll's body — well before any tracker call — so a
+    // throw here exercises the catch from a structurally distinct
+    // entry point relative to the tracker-call tests above. Pins the
+    // contract that the catch covers the WHOLE body, not just the
+    // tracker subset.
+    mockHealLocalYamls.mockImplementationOnce(() => {
+      throw new Error("disk full during heal pass");
+    });
+
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+
+    const crashLogs = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(crashLogs).toHaveLength(1);
+    expect(String(crashLogs[0][0])).toContain("disk full during heal pass");
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("happy path unchanged — no top-level catch fires when nothing throws", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
+    mockTracker.getComments.mockResolvedValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    // The new top-level catch must not fire on the green path. Pin the
+    // exact diagnostic prefix the catch emits at index.ts:915
+    // (`_poll crashed — tick aborted, next tick will retry: ...`) so a
+    // future log-format change updates this test in lockstep with the
+    // implementation.
+    const crashLogs = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(crashLogs).toHaveLength(0);
+  });
+
+  it("top-level catch does not trip backoff (next tick fetches cards as normal, no `In backoff` skip)", async () => {
+    // Pin the invariant in the comment at index.ts:516–519: a `_poll`
+    // crash is logged + swallowed but does NOT count as a dispatch
+    // failure for backoff purposes. Observable behavior: after a crash
+    // the very next `poll()` invokes `fetchOpenCards` and does NOT log
+    // `In backoff`. A regression that incremented `state.consecutiveFailures`
+    // inside the top-level catch would skip the second tick with
+    // `In backoff — Ns remaining` instead.
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
+    mockTracker.getComments.mockRejectedValueOnce(
+      new Error("Trello API error: 400"),
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+    const firstCallCount = mockTracker.fetchOpenCards.mock.calls.length;
+
+    // Second tick — must run, must not be skipped by backoff. Assert
+    // it advances the call count rather than fixing an absolute number,
+    // since `_poll` may call `fetchOpenCards` more than once per tick
+    // (Needs Help + ToDo paths share the same mock).
+    mockTracker.getComments.mockResolvedValue([]);
+    await poll(MOCK_REPO_CONTEXT);
+    expect(mockTracker.fetchOpenCards.mock.calls.length).toBeGreaterThan(
+      firstCallCount,
+    );
+
+    const backoffLogs = mockLogger.info.mock.calls.filter((c) =>
+      String(c[0]).includes("In backoff"),
+    );
+    expect(backoffLogs).toHaveLength(0);
   });
 });
 
@@ -2507,7 +2692,6 @@ describe("poll — post-dispatch card-progress check", () => {
     expect(mockFindByExternalId).toHaveBeenCalledWith(
       MOCK_REPO_CONTEXT.localPath,
       "c1",
-      "ISS",
     );
     expect(mockWriteFlag).not.toHaveBeenCalled();
   });
@@ -4069,7 +4253,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     expect(mockTracker.moveToStatus).toHaveBeenCalledWith("nh1", "ToDo");
   });
 
-  it("propagates a corrupt-YAML error from findByExternalId — the poller does not silently fall back to hydration", async () => {
+  it("corrupt-YAML error from findByExternalId is logged + swallowed — no silent hydration fallback (DX-149)", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("card-bad", "Bad YAML", "ToDo"),
     ]);
@@ -4080,12 +4264,22 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       throw parseError;
     });
 
-    await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/Invalid Issue YAML/);
+    // DX-149: previously rejected. Now caught by `_poll`'s top-level
+    // catch — worker survives, error is logged, hydration still
+    // never runs (we threw before reaching the fallback), no
+    // dispatch fires. Operator sees the parse error in logs and
+    // fixes the YAML; the next tick re-asserts.
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+    const errCalls = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(errCalls).toHaveLength(1);
+    expect(String(errCalls[0][0])).toMatch(/Invalid Issue YAML/);
     expect(mockHydrateFromRemote).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("propagates a tracker getCard failure — hydration crashes loud, no dispatch", async () => {
+  it("tracker hydrateFromRemote failure is logged + swallowed — no dispatch (DX-149)", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("card-net-fail", "Net fail", "ToDo"),
     ]);
@@ -4094,7 +4288,15 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       new Error("Trello API error: 401 Unauthorized"),
     );
 
-    await expect(poll(MOCK_REPO_CONTEXT)).rejects.toThrow(/401 Unauthorized/);
+    // DX-149: previously rejected ("hydration crashes loud"). Now
+    // caught by `_poll`'s top-level catch — worker survives a
+    // 401 storm instead of getting OOM-killed by repeated restarts.
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+    const errCalls = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(errCalls).toHaveLength(1);
+    expect(String(errCalls[0][0])).toMatch(/401 Unauthorized/);
     expect(mockWriteIssueFn).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
   });

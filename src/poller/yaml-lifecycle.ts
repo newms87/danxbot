@@ -31,7 +31,6 @@ import {
 } from "node:fs";
 import { resolve, dirname } from "node:path";
 import {
-  buildIssueIdRegex,
   createEmptyIssue,
   DEFAULT_ISSUE_PREFIX,
   parseIssue,
@@ -111,20 +110,34 @@ export function loadLocal(
 export function findByExternalId(
   repoLocalPath: string,
   externalId: string,
-  prefix: string = DEFAULT_ISSUE_PREFIX,
 ): Issue | null {
   if (!externalId) return null;
-  const idRegex = buildIssueIdRegex(prefix);
+  // Prefix-agnostic by contract — `external_id` is the unique key across
+  // the tracker, so filtering by a single prefix returns false-negatives
+  // during prefix-migration windows (a cached `prefix=ISS` worker that
+  // ran bulk-sync after every YAML had been renamed to `DX-*` matched
+  // zero files → re-hydrated every card as a dup ISS-*.yml). Stems must
+  // match `<2-4 caps>-<digits>`; a stem-shape miss is a real disk
+  // anomaly (rogue file in the issues dir) and throws.
+  const stemShape = /^([A-Z]{2,4})-\d+$/;
   for (const state of ["open", "closed"] as const) {
     const dir = resolve(repoLocalPath, ".danxbot", "issues", state);
     if (!existsSync(dir)) continue;
     for (const entry of readdirSync(dir)) {
       if (!entry.endsWith(".yml")) continue;
       const stem = entry.slice(0, -".yml".length);
-      if (!idRegex.test(stem)) continue;
+      const match = stemShape.exec(stem);
+      if (!match) {
+        throw new Error(
+          `findByExternalId: rogue filename in ${dir}: "${entry}" — stem must match ${stemShape}. Remove or rename before retrying.`,
+        );
+      }
       const path = resolve(dir, entry);
+      // parseIssue throws on schema / id-shape / prefix mismatch — let
+      // it propagate. A corrupt YAML in the issues tree is operator-fix
+      // territory, never silent-skip territory.
       const issue = parseIssue(readFileSync(path, "utf-8"), {
-        expectedPrefix: prefix,
+        expectedPrefix: match[1]!,
       });
       if (issue.external_id === externalId) return issue;
     }

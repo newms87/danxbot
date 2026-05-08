@@ -338,6 +338,69 @@ describe("yaml-lifecycle", () => {
       ensureIssuesDirs(repoRoot);
       expect(findByExternalId(repoRoot, "ghost-card")).toBeNull();
     });
+
+    // Regression — ISS-99 prefix-migration dup-spawn: bulk-sync after a
+    // rename pass must STILL find the canonical YAML by external_id
+    // regardless of which prefix the on-disk file carries. Pre-fix the
+    // prefix-filtered regex returned null and bulk-sync re-hydrated 97
+    // dup ISS-*.yml files next to their DX-* siblings.
+    it("is prefix-agnostic — finds the YAML by external_id alone", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "DX-7" }),
+      );
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+        "DX",
+      );
+      writeIssue(repoRoot, issue);
+
+      expect(findByExternalId(repoRoot, external_id)?.id).toBe("DX-7");
+    });
+
+    it("co-existing prefixes both resolve by external_id", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id: extA } = await tracker.createCard(
+        defaultCreate({ id: "DX-12" }),
+      );
+      const { external_id: extB } = await tracker.createCard(
+        defaultCreate({ id: "SG-3" }),
+      );
+      writeIssue(
+        repoRoot,
+        await hydrateFromRemote(tracker, extA, "d-a", repoRoot, "DX"),
+      );
+      writeIssue(
+        repoRoot,
+        await hydrateFromRemote(tracker, extB, "d-b", repoRoot, "SG"),
+      );
+
+      expect(findByExternalId(repoRoot, extA)?.id).toBe("DX-12");
+      expect(findByExternalId(repoRoot, extB)?.id).toBe("SG-3");
+    });
+
+    it("throws on malformed YAML — no silent skip", async () => {
+      ensureIssuesDirs(repoRoot);
+      writeFileSync(
+        join(repoRoot, ".danxbot", "issues", "open", "DX-99.yml"),
+        "this: is: not: yaml: at: all: [",
+      );
+      expect(() => findByExternalId(repoRoot, "any-ext")).toThrow();
+    });
+
+    it("throws on rogue filename in the issues dir", () => {
+      ensureIssuesDirs(repoRoot);
+      writeFileSync(
+        join(repoRoot, ".danxbot", "issues", "open", "garbage.yml"),
+        "schema_version: 3\n",
+      );
+      expect(() => findByExternalId(repoRoot, "any-ext")).toThrow(
+        /rogue filename/,
+      );
+    });
   });
 
   describe("writeIssue", () => {

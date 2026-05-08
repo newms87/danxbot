@@ -707,12 +707,17 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
-  it("bulk-sync: a primary hydrate failure DOES propagate (preserves the credential-regression-crashes-loud invariant)", async () => {
-    // Counterpart to the sibling-tolerant test: when the primary card's
-    // hydrate fails (e.g. tracker creds revoked), the poller MUST throw
-    // rather than silently log + continue. Pre-Phase-1 contract; the
-    // bulk-sync block only wraps siblings in try/catch — primary stays
-    // outside that block.
+  it("bulk-sync: a primary hydrate failure is logged + swallowed by _poll's top-level catch (DX-149) — no dispatch fires", async () => {
+    // Counterpart to the sibling-tolerant test. Pre-DX-149 contract was
+    // "primary hydrate failure rethrows from _poll" so the worker
+    // process would die loud on a credential regression. DX-149 retired
+    // that — the top-level catch in _poll now logs + swallows EVERY
+    // throw inside its body, so a single bad card no longer kills the
+    // whole worker (Slack listener, dispatch API, dashboard SSE all
+    // share the worker process). Observable contract preserved here:
+    // the poll resolves cleanly AND no dispatch fires for the bad
+    // card. Loud-error visibility moves to the dashboard system_errors
+    // surface (DX-134, separate phase).
     const tracker = trackerHandle.current!;
     await seedDraft(tracker, { id: "ISS-1", title: "primary fails" });
     await seedDraft(tracker, { id: "ISS-2", title: "sibling" });
@@ -742,7 +747,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
       },
     );
 
-    await expect(poll(REPO)).rejects.toThrow(/401 Unauthorized/);
+    await expect(poll(REPO)).resolves.toBeUndefined();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 

@@ -496,6 +496,31 @@ export async function poll(repo: RepoContext): Promise<void> {
 }
 
 async function _poll(repo: RepoContext): Promise<void> {
+  // DX-149: top-level crash isolation.
+  //
+  // Any tracker call inside `_poll` (other than `tracker.fetchOpenCards`,
+  // which has its own inner try/catch below) historically threw
+  // straight past `_poll` and out through `poll()`'s `finally`,
+  // killing the whole worker process. Production hit this when a
+  // local YAML carried a stale `external_id` (e.g. `mem-2` from an
+  // earlier `MemoryTracker` run) and the repo later switched to
+  // Trello — `tryAcquireLock` → `tracker.getComments` returned
+  // 400 and the entire worker died: Slack listener, dispatch API,
+  // dashboard SSE, all gone.
+  //
+  // The wrap is intentionally one block, not per-call. Per-call
+  // try/catches multiply boilerplate and don't cover future tracker
+  // calls. The next tick re-runs the whole `_poll` body
+  // idempotently, so partial completion inside this function is
+  // already a non-issue. Keep `state.polling` reset in `poll()`'s
+  // finally — this catch must not touch it (would mask state bugs)
+  // and must not increment `state.consecutiveFailures` /
+  // `state.backoffUntil` (those bookkeep dispatch failures, not
+  // poller crashes — DX-130 follow-on phases own that surface).
+  //
+  // Tests: see `describe("poll — _poll crash isolation (DX-149)")`
+  // in `index.test.ts`.
+  try {
   // Re-run the inject pipeline every tick (not just at worker boot) so
   // changes inside `.danxbot/config/` propagate to dispatched agents
   // without a restart. `syncRepoFiles` is idempotent — see its
@@ -767,7 +792,6 @@ async function _poll(repo: RepoContext): Promise<void> {
   const existingForGuard = findByExternalId(
     repo.localPath,
     primary.external_id,
-    repo.issuePrefix,
   );
   if (
     existingForGuard &&
@@ -839,7 +863,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   // it twice would burn CPU on every dispatch tick.
   const existing =
     existingForGuard ??
-    findByExternalId(repo.localPath, primary.external_id, repo.issuePrefix);
+    findByExternalId(repo.localPath, primary.external_id);
   let resolvedIssue: Issue;
   if (existing) {
     resolvedIssue = stampDispatchAndWrite(repo.localPath, existing, startStamp);
@@ -875,6 +899,22 @@ async function _poll(repo: RepoContext): Promise<void> {
     undefined,
     { issueId: resolvedIssue.id, startStamp },
   );
+  } catch (error) {
+    // DX-149: any throw from inside `_poll` (tracker calls, lock
+    // acquisition, hydrate-or-load, dispatch shell prep) lands here
+    // so the worker process survives. The inner try/catch around
+    // `tracker.fetchOpenCards` already returns early on its own
+    // failure mode — that path never reaches here.
+    //
+    // No `recordError` / dashboard surface yet — DX-134 owns that
+    // SSE channel + UI banner. Until then, `log.error` is the
+    // contract: a single, attributable line per dropped tick.
+    const message = error instanceof Error ? error.message : String(error);
+    log.error(
+      `[${repo.name}] _poll crashed — tick aborted, next tick will retry: ${message}`,
+      error,
+    );
+  }
 }
 
 /**
@@ -914,7 +954,7 @@ async function bulkSyncMissingYamls(
 ): Promise<void> {
   for (const card of targets) {
     if (
-      findByExternalId(repo.localPath, card.external_id, repo.issuePrefix)
+      findByExternalId(repo.localPath, card.external_id)
     )
       continue;
     try {
@@ -963,11 +1003,7 @@ async function resolveBlockedCards(
 ): Promise<IssueRef[]> {
   const out: IssueRef[] = [];
   for (const card of cards) {
-    const local = findByExternalId(
-      repo.localPath,
-      card.external_id,
-      repo.issuePrefix,
-    );
+    const local = findByExternalId(repo.localPath, card.external_id);
     if (!local) {
       out.push(card);
       continue;
@@ -1044,11 +1080,7 @@ async function tryResumeOrphan(
 ): Promise<OrphanScanResult> {
   const resetToToDo: IssueRef[] = [];
   for (const ref of inProgressRefs) {
-    const issue = findByExternalId(
-      repo.localPath,
-      ref.external_id,
-      repo.issuePrefix,
-    );
+    const issue = findByExternalId(repo.localPath, ref.external_id);
     // No local YAML — bulk-sync runs immediately before this so a
     // missing YAML means hydration failed; warning already logged
     // upstream. Skip and let the next sync attempt fix it.
@@ -2259,7 +2291,7 @@ async function checkCardProgressedOrHalt(
   // (false-negative, never false-positive).
   let local;
   try {
-    local = findByExternalId(repo.localPath, cardId, repo.issuePrefix);
+    local = findByExternalId(repo.localPath, cardId);
   } catch (err) {
     log.error(
       `[${repo.name}] Failed to read local YAML for ${cardId} during post-dispatch check — skipping flag`,
