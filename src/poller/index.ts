@@ -53,6 +53,7 @@ import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js"
 import { pushOrphans } from "./orphan-push.js";
 import { recomputeParentStatuses } from "./epic-status.js";
 import { healLocalYamls } from "./heal.js";
+import { healExternalIds } from "./heal-external-id.js";
 import {
   listBlockedTodoYamls,
   listDispatchableYamls,
@@ -547,6 +548,38 @@ async function _poll(repo: RepoContext): Promise<void> {
     log.warn(`[${repo.name}] Heal pass skipped malformed YAML at ${e.path}: ${e.message}`);
   }
 
+  // ONE tracker per repo, reused across every tick (see `getRepoTracker`).
+  // Resolved early so the external-id format heal below has a tracker to
+  // ask `isValidExternalId` against — every later helper reuses this
+  // instance, so `MemoryTracker` state survives the tick and tests can
+  // assert on a single mock.
+  const tracker = getRepoTracker(repo);
+
+  // DX-150: per-tick `external_id` format heal pass. Walks open/ AND
+  // closed/, blanks any external_id whose format the active tracker
+  // doesn't recognize (e.g. `mem-N` minted by a `MemoryTracker` window
+  // before a Trello-config landed). The blanked YAML re-enters the
+  // orphan-push path on the next tick and gets a fresh tracker-native
+  // id. Pairs with DX-149 — DX-149 stopped the 400 from crashing the
+  // worker; this stops the 400 from happening at all by removing the
+  // foreign id from disk. Runs BEFORE every tracker call (no
+  // `tracker.getCard` / `getComments` against the bad id ever fires).
+  const externalIdHeal = healExternalIds(
+    repo.localPath,
+    tracker,
+    repo.issuePrefix,
+  );
+  for (const h of externalIdHeal.healed) {
+    log.info(
+      `[${repo.name}] Healed external_id mismatch on ${h.id}: ${h.oldExternalId} → "" (tracker.isValidExternalId rejected)`,
+    );
+  }
+  for (const e of externalIdHeal.errors) {
+    log.warn(
+      `[${repo.name}] external_id heal skipped malformed YAML at ${e.path}: ${e.message}`,
+    );
+  }
+
   // YAML-driven liveness scan (ISS-92, Phase 2). Walks the in-memory
   // `activeDispatches` mirror, re-checks every entry, and evicts any
   // whose verdict turned dead/expired/cross-host. The YAML's
@@ -559,12 +592,6 @@ async function _poll(repo: RepoContext): Promise<void> {
   evictDeadDispatches(repo);
 
   log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
-
-  // ONE tracker per repo, reused across every tick (see `getRepoTracker`).
-  // Threaded through every helper that needs to talk to the issue
-  // tracker so `MemoryTracker` state survives the lifecycle and so
-  // tests can assert on a single mock.
-  const tracker = getRepoTracker(repo);
 
   // Check Needs Help first — user-responded cards get moved to ToDo top
   const movedFromNeedsHelp = await checkNeedsHelp(repo, tracker);

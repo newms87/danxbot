@@ -49,6 +49,8 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     nudgeCount: 0,
     danxbotCommit: null,
     hostPid: null,
+    hostPidAt: null,
+    pidTerminatedAt: null,
     ...overrides,
   };
 }

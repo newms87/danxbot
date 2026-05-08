@@ -136,6 +136,10 @@ const mockTracker = {
   // hydrateFromRemote calls updateCard when the remote title is missing
   // the `#ISS-N: ` prefix. Default to no-op resolved.
   updateCard: vi.fn(),
+  // DX-150: cheap synchronous shape check used by the per-tick external_id
+  // heal pass. Default true so ad-hoc fixtures (`ext-DX-N`) don't get
+  // mass-blanked when a test forgets to wire it.
+  isValidExternalId: vi.fn().mockReturnValue(true),
 };
 
 const mockCreateIssueTracker = vi.fn().mockReturnValue(mockTracker);
@@ -394,6 +398,17 @@ const mockHealLocalYamls = vi
   .mockReturnValue({ healed: [], errors: [] });
 vi.mock("./heal.js", () => ({
   healLocalYamls: (...args: unknown[]) => mockHealLocalYamls(...args),
+}));
+
+// DX-150: per-tick external_id format heal pass. Mocked so existing
+// tests' fake fs doesn't crash the real readdirSync; the wiring test
+// below overrides the implementation to assert call order vs
+// healLocalYamls / tracker.fetchOpenCards.
+const mockHealExternalIds = vi
+  .fn()
+  .mockReturnValue({ healed: [], errors: [] });
+vi.mock("./heal-external-id.js", () => ({
+  healExternalIds: (...args: unknown[]) => mockHealExternalIds(...args),
 }));
 
 // Feature-aware default: ideator's env default is `false` (explicit
@@ -5711,6 +5726,70 @@ describe("poll — heal pass ordering (ISS-133, Phase 3)", () => {
     // ran (tracker fetch fired). Without this assertion a regression
     // that throws on a non-empty `healed[]` would silently abort the
     // tick.
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+  });
+});
+
+describe("poll — external_id heal pass (DX-150, Trello-decouple Phase 9)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockHealLocalYamls.mockReset();
+    mockHealLocalYamls.mockReturnValue({ healed: [], errors: [] });
+    mockHealExternalIds.mockReset();
+    mockHealExternalIds.mockReturnValue({ healed: [], errors: [] });
+  });
+
+  it("calls healExternalIds AFTER healLocalYamls and BEFORE tracker.fetchOpenCards (AC #3)", async () => {
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockHealExternalIds).toHaveBeenCalledTimes(1);
+    // Args are (repoLocalPath, tracker, prefix). The tracker is the
+    // shared per-repo instance — same as the one fetchOpenCards uses
+    // below — so the pass can ask `isValidExternalId` without an
+    // extra factory round-trip.
+    const [path, trackerArg, prefix] =
+      mockHealExternalIds.mock.calls[0]!;
+    expect(path).toBe(MOCK_REPO_CONTEXT.localPath);
+    expect(prefix).toBe(MOCK_REPO_CONTEXT.issuePrefix);
+    expect(trackerArg).toBe(mockTracker);
+
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+
+    // healLocalYamls (the open/→closed/ pass) MUST run first. The
+    // ordering matters: a ToDo-class YAML stamped Done locally without
+    // a tracker push is moved to closed/ first, then the format heal
+    // ignores it (closed/ is scanned but a healed-then-moved file is
+    // already gone from open/).
+    const healLocalOrder =
+      mockHealLocalYamls.mock.invocationCallOrder[0]!;
+    const healExternalOrder =
+      mockHealExternalIds.mock.invocationCallOrder[0]!;
+    const fetchOrder = mockTracker.fetchOpenCards.mock.invocationCallOrder[0]!;
+    expect(healLocalOrder).toBeLessThan(healExternalOrder);
+    expect(healExternalOrder).toBeLessThan(fetchOrder);
+  });
+
+  it("a non-empty healed[] is consumed without aborting the tick (AC #2)", async () => {
+    // Heal helper unit-tested in `heal-external-id.test.ts` — this
+    // test pins the integration: poller invokes the helper, receives
+    // a non-empty `healed[]`, and continues into the regular tick
+    // (tracker fetch fires).
+    mockHealExternalIds.mockReturnValue({
+      healed: [{ id: "DX-30", oldExternalId: "mem-2" }],
+      errors: [],
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockHealExternalIds).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.localPath,
+      mockTracker,
+      MOCK_REPO_CONTEXT.issuePrefix,
+    );
     expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
   });
 });

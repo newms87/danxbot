@@ -161,6 +161,11 @@ const trackerMock = vi.hoisted(() => ({
   moveToStatus: vi.fn(),
   addComment: vi.fn(),
   updateCard: vi.fn(),
+  // DX-150: per-tick external_id format heal pass calls this on every
+  // YAML in `open/` + `closed/`. The fixtures here use placeholder ids
+  // like `card-stuck-in-todo` (not 24-hex Trello shape) — return true
+  // unconditionally so the heal pass is a no-op for these tests.
+  isValidExternalId: vi.fn().mockReturnValue(true),
 }));
 
 function seedHydratedCard(externalId: string, title: string): void {

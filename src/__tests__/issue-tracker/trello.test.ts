@@ -829,6 +829,62 @@ describe("TrelloTracker", () => {
 });
 
 
+// ---------- isValidExternalId (DX-150 — format heal contract) ----------
+//
+// Trello card ids are 24-char lowercase hex MongoDB ObjectIds. The check
+// is the load-bearing input to `healExternalIds` — the per-tick heal pass
+// that blanks foreign-tracker ids (e.g. `mem-N` left over from a
+// MemoryTracker window). Direct unit tests here so a regression that
+// drifts the regex away from `^[0-9a-f]{24}$` is caught without depending
+// on the heal-helper's integration tests.
+
+describe("TrelloTracker.isValidExternalId", () => {
+  const tracker = new TrelloTracker(TRELLO);
+
+  it("accepts a canonical 24-char lowercase hex id", () => {
+    expect(tracker.isValidExternalId("69fd1486208523401e60afcb")).toBe(true);
+  });
+
+  it("rejects a MemoryTracker-minted mem-N id (the production motivating case)", () => {
+    expect(tracker.isValidExternalId("mem-1")).toBe(false);
+    expect(tracker.isValidExternalId("mem-9999")).toBe(false);
+  });
+
+  it("rejects empty string (heal pass skips orphans before reaching the validator, but the contract still rejects)", () => {
+    expect(tracker.isValidExternalId("")).toBe(false);
+  });
+
+  it("rejects uppercase hex (Trello ids are always lowercase)", () => {
+    expect(tracker.isValidExternalId("69FD1486208523401E60AFCB")).toBe(false);
+  });
+
+  it("rejects boundary lengths (23 chars too short, 25 chars too long)", () => {
+    expect(tracker.isValidExternalId("69fd1486208523401e60afc")).toBe(false);
+    expect(tracker.isValidExternalId("69fd1486208523401e60afcbd")).toBe(false);
+  });
+
+  it("rejects 24 non-hex characters", () => {
+    expect(tracker.isValidExternalId("zzzzzzzzzzzzzzzzzzzzzzzz")).toBe(false);
+    expect(tracker.isValidExternalId("g".repeat(24))).toBe(false);
+  });
+
+  it("does not call the network (regex-only — JSDoc forbids network calls)", () => {
+    // Stub fetch with a spy that never resolves. If the impl ever made
+    // an HTTP call we'd see the spy invoked. Regex-only contract per
+    // the JSDoc on `IssueTracker.isValidExternalId`.
+    const originalFetch = globalThis.fetch;
+    const spy = vi.fn();
+    globalThis.fetch = spy as unknown as typeof globalThis.fetch;
+    try {
+      expect(tracker.isValidExternalId("69fd1486208523401e60afcb")).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+
 // ---------- Card-title encode/decode prefix roundtrip (Phase 2 of ISS-99) ----------
 //
 // `parseCardTitle` MUST accept any `^#([A-Z]{2,4}-\d+):\s*(.*)$` so cards
