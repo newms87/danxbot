@@ -1,4 +1,5 @@
 name: danxbot
+issue_prefix: DX
 url: git@github-newms87:newms87/danxbot.git
 runtime: local
 language: typescript
