@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import {
   DANXBOT_COMMENT_MARKER,
   RETRO_COMMENT_MARKER,
@@ -12,7 +13,11 @@ import {
   type IssueRetro,
   type IssueTracker,
 } from "./interface.js";
-import { issueToCreateInput } from "./yaml.js";
+import { issuePath } from "./paths.js";
+import { IssueParseError, issueToCreateInput, parseIssue } from "./yaml.js";
+import { createLogger, type Logger } from "../logger.js";
+
+const log = createLogger("sync");
 
 /**
  * Project an Issue body into the `CreateCardInput` payload for
@@ -121,6 +126,47 @@ export function stampTrackerIds(
  * dead generality. Keep this type narrow.
  */
 export type ActionItemTitleResolver = Map<string, string>;
+
+/**
+ * Resolve `retro.action_item_ids[]` to a `{id → title}` map by reading
+ * each linked YAML from the local repo. IDs missing on disk are simply
+ * absent from the map; the renderer surfaces them as `<ISS-N: unknown>`
+ * so a typo / stale reference is loud, not silent. Returns an empty
+ * map when there are no ids to resolve, avoiding pointless filesystem
+ * walks on the common no-action-items case.
+ *
+ * Single canonical helper used by both the worker (`runSync` /
+ * `syncTrackedIssueOnComplete`) and the poller's retry-queue drain
+ * (`drainRetries`). Lives next to `syncIssue` because both paths feed
+ * the result into `syncIssue`'s `actionItemTitles` option for the
+ * structured retro renderer.
+ */
+export function loadActionItemTitles(
+  repoLocalPath: string,
+  ids: readonly string[],
+  prefix: string,
+  logger: Logger = log,
+): ActionItemTitleResolver {
+  const out = new Map<string, string>();
+  for (const id of ids) {
+    const open = issuePath(repoLocalPath, id, "open");
+    const closed = issuePath(repoLocalPath, id, "closed");
+    const path = existsSync(open) ? open : existsSync(closed) ? closed : null;
+    if (!path) continue;
+    try {
+      // Don't kill the parent sync over a malformed linked YAML — leave
+      // the id absent from the map so the renderer flags it as unknown.
+      const linked = parseIssue(readFileSync(path, "utf-8"), {
+        expectedPrefix: prefix,
+      });
+      out.set(id, linked.title);
+    } catch (err) {
+      const msg = err instanceof IssueParseError ? err.message : String(err);
+      logger.warn(`loadActionItemTitles: failed to parse ${path}: ${msg}`);
+    }
+  }
+  return out;
+}
 
 export async function syncIssue(
   tracker: IssueTracker,

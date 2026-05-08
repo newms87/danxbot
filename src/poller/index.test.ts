@@ -411,6 +411,24 @@ vi.mock("./heal-external-id.js", () => ({
   healExternalIds: (...args: unknown[]) => mockHealExternalIds(...args),
 }));
 
+// DX-132: retry-queue drain at top of `_poll`. Mocked so the existing
+// fake-fs tests don't try to readdirSync a real `.trello-retry/`. The
+// wiring test below overrides the implementation to assert it's called
+// with the tracker + repoLocalPath + prefix.
+const mockDrainRetries = vi.fn().mockResolvedValue({
+  attempted: 0,
+  succeeded: 0,
+  failed: 0,
+  exhausted: 0,
+  yamlMissing: 0,
+  yamlInvalid: 0,
+  skipped: 0,
+  malformed: 0,
+});
+vi.mock("../issue-tracker/retry-queue.js", () => ({
+  drainRetries: (...args: unknown[]) => mockDrainRetries(...args),
+}));
+
 // Feature-aware default: ideator's env default is `false` (explicit
 // opt-in via `<repo>/.danxbot/settings.json` overrides). Every other
 // feature defaults to `true` so existing tests that don't care about
@@ -1958,6 +1976,141 @@ describe("poll — _poll crash isolation (DX-149)", () => {
       String(c[0]).includes("In backoff"),
     );
     expect(backoffLogs).toHaveLength(0);
+  });
+});
+
+/**
+ * DX-132 Phase 2 wiring — drainRetries runs at the top of `_poll` BEFORE
+ * any list fetch, with the active tracker + repo paths threaded through.
+ *
+ * Module-level behavior of drainRetries itself is tested in
+ * `src/issue-tracker/retry-queue.test.ts`; these tests pin only the
+ * wiring (it gets called, with the right deps, on a healthy tick).
+ */
+describe("poll — DX-132 retry-queue drain wiring", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDrainRetries.mockResolvedValue({
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      exhausted: 0,
+      yamlMissing: 0,
+      yamlInvalid: 0,
+      skipped: 0,
+      malformed: 0,
+    });
+  });
+
+  it("calls drainRetries once per tick with the active tracker + repo paths", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockDrainRetries).toHaveBeenCalledTimes(1);
+    const callArg = mockDrainRetries.mock.calls[0]![0] as {
+      tracker: unknown;
+      repoLocalPath: string;
+      prefix: string;
+    };
+    expect(callArg.tracker).toBe(mockTracker);
+    expect(callArg.repoLocalPath).toBe(MOCK_REPO_CONTEXT.localPath);
+    expect(callArg.prefix).toBe(MOCK_REPO_CONTEXT.issuePrefix);
+  });
+
+  it("drains BEFORE fetchOpenCards so a recovered tracker can replay queued pushes the same tick", async () => {
+    const callOrder: string[] = [];
+    mockDrainRetries.mockImplementation(async () => {
+      callOrder.push("drainRetries");
+      return {
+        attempted: 0,
+        succeeded: 0,
+        failed: 0,
+        exhausted: 0,
+        yamlMissing: 0,
+        yamlInvalid: 0,
+        skipped: 0,
+        malformed: 0,
+      };
+    });
+    mockTracker.fetchOpenCards.mockImplementation(async () => {
+      callOrder.push("fetchOpenCards");
+      return [];
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(callOrder.indexOf("drainRetries")).toBeGreaterThan(-1);
+    expect(callOrder.indexOf("drainRetries")).toBeLessThan(
+      callOrder.indexOf("fetchOpenCards"),
+    );
+  });
+
+  it("a drainRetries throw is caught by the outer DX-149 wrap — tick aborts, next tick still fires", async () => {
+    mockDrainRetries.mockRejectedValueOnce(new Error("retry queue exploded"));
+
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+
+    const crashLogs = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(crashLogs).toHaveLength(1);
+    expect(String(crashLogs[0][0])).toContain("retry queue exploded");
+    expect(mockDispatch).not.toHaveBeenCalled();
+
+    // Subsequent tick recovers — drain returns clean, fetch fires.
+    mockDrainRetries.mockResolvedValue({
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      exhausted: 0,
+      yamlMissing: 0,
+      yamlInvalid: 0,
+      skipped: 0,
+      malformed: 0,
+    });
+    mockTracker.fetchOpenCards.mockResolvedValue([]);
+    await poll(MOCK_REPO_CONTEXT);
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+  });
+
+  it("suppresses the drain summary log on a no-op tick (all zeros)", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([]);
+    // beforeEach already sets mockDrainRetries to all zeros.
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const drainLogs = mockLogger.info.mock.calls.filter((c) =>
+      String(c[0]).includes("Retry queue drained"),
+    );
+    expect(drainLogs).toHaveLength(0);
+  });
+
+  it("emits the drain summary log when work was done (attempted > 0)", async () => {
+    mockTracker.fetchOpenCards.mockResolvedValue([]);
+    mockDrainRetries.mockResolvedValue({
+      attempted: 2,
+      succeeded: 2,
+      failed: 0,
+      exhausted: 0,
+      yamlMissing: 0,
+      yamlInvalid: 0,
+      skipped: 0,
+      malformed: 0,
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const drainLogs = mockLogger.info.mock.calls.filter((c) =>
+      String(c[0]).includes("Retry queue drained"),
+    );
+    expect(drainLogs).toHaveLength(1);
+    expect(String(drainLogs[0][0])).toContain("2/2 succeeded");
   });
 });
 

@@ -20,9 +20,17 @@ import { join } from "node:path";
 
 vi.mock("../issue-tracker/sync.js", () => ({
   syncIssue: vi.fn(),
+  // Real implementation is fine — it's a thin local-FS reader that
+  // returns an empty Map for tests where action_item_ids is empty.
+  loadActionItemTitles: () => new Map<string, string>(),
+}));
+
+vi.mock("../issue-tracker/retry-queue.js", () => ({
+  enqueueRetry: vi.fn(),
 }));
 
 import { syncIssue } from "../issue-tracker/sync.js";
+import { enqueueRetry } from "../issue-tracker/retry-queue.js";
 import { isDispatchSessionTerminal, runSync } from "./issue-route.js";
 import { ensureIssuesDirs, issuePath } from "../poller/yaml-lifecycle.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
@@ -144,6 +152,7 @@ describe("runSync (local-first persist)", () => {
 
   beforeEach(() => {
     vi.mocked(syncIssue).mockReset();
+    vi.mocked(enqueueRetry).mockReset();
     tmpDir = mkdtempSync(join(tmpdir(), "danxbot-runsync-"));
     ensureIssuesDirs(tmpDir);
     repo = { localPath: tmpDir, issuePrefix: "ISS" } as RepoContext;
@@ -335,5 +344,70 @@ describe("runSync (local-first persist)", () => {
     expect(persisted.dispatch).toBeNull();
     expect(persisted.blocked).not.toBeNull();
     expect(recordError).toHaveBeenCalledTimes(1);
+  });
+
+  it("tracker throw → DX-132 retry queue enqueueRetry is called with issue id + repoLocalPath + tracker errMessage", async () => {
+    // DX-132 Phase 2: the runSync catch branch fires enqueueRetry
+    // alongside recordError. The poller's drainRetries picks the entry
+    // up on a subsequent tick and replays the failed tracker push.
+    vi.mocked(syncIssue).mockRejectedValue(new Error("Trello 500"));
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-110",
+      external_id: "ext-110",
+      status: "Done",
+    });
+
+    await runSync({ tracker, recordError }, "dispatch-7", repo, issue);
+
+    expect(enqueueRetry).toHaveBeenCalledTimes(1);
+    expect(enqueueRetry).toHaveBeenCalledWith({
+      issueId: "ISS-110",
+      repoLocalPath: tmpDir,
+      errMessage: "Trello 500",
+    });
+    // Local YAML still landed in closed/ (Phase 1 contract: persist
+    // before push). Queue entry is purely additive.
+    expect(existsSync(issuePath(tmpDir, "ISS-110", "closed"))).toBe(true);
+    // Original tracker error reached recordError.
+    expect(recordError).toHaveBeenCalledWith(
+      "dispatch-7",
+      expect.stringContaining("Trello 500"),
+    );
+  });
+
+  it("enqueueRetry filesystem failure does NOT shadow the original tracker error", async () => {
+    // DX-132 SHOULD ADD #8: a filesystem failure in the retry-queue
+    // enqueue path (e.g. EROFS, disk full) must not mask the original
+    // tracker error in the dispatch row. The catch around enqueueRetry
+    // in runSync swallows the enqueue throw with a log.warn and the
+    // original tracker error is the one persisted via recordError.
+    vi.mocked(syncIssue).mockRejectedValue(new Error("Trello 500"));
+    vi.mocked(enqueueRetry).mockImplementation(() => {
+      throw new Error("EROFS: read-only file system");
+    });
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-111",
+      external_id: "ext-111",
+      status: "ToDo",
+    });
+
+    await expect(
+      runSync({ tracker, recordError }, "dispatch-8", repo, issue),
+    ).resolves.toBeUndefined();
+
+    // recordError got the ORIGINAL tracker error — not the EROFS.
+    expect(recordError).toHaveBeenCalledTimes(1);
+    expect(recordError).toHaveBeenCalledWith(
+      "dispatch-8",
+      expect.stringContaining("Trello 500"),
+    );
+    expect(recordError).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining("EROFS"),
+    );
+    // Local YAML still landed in open/ (Phase 1 contract preserved).
+    expect(existsSync(issuePath(tmpDir, "ISS-111", "open"))).toBe(true);
   });
 });

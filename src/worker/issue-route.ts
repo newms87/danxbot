@@ -57,7 +57,8 @@ import {
   serializeIssue,
 } from "../issue-tracker/yaml.js";
 import { nextIssueId } from "../issue-tracker/id-generator.js";
-import { syncIssue } from "../issue-tracker/sync.js";
+import { loadActionItemTitles, syncIssue } from "../issue-tracker/sync.js";
+import { enqueueRetry } from "../issue-tracker/retry-queue.js";
 import {
   ensureIssuesDirs,
   issuePath,
@@ -259,41 +260,6 @@ export async function handleIssueSave(
 }
 
 /**
- * Resolve `retro.action_item_ids[]` to a `{id → title}` map by reading each
- * referenced YAML from the local repo. IDs missing on disk are simply
- * absent from the map; the renderer surfaces them as `<ISS-N: unknown>`
- * so a typo / stale reference is loud, not silent. Returns an empty map
- * when there are no ids to resolve, avoiding pointless filesystem walks
- * on the common no-action-items case.
- */
-function loadActionItemTitles(
-  repoLocalPath: string,
-  ids: readonly string[],
-  prefix: string,
-): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const id of ids) {
-    const path = locateIssueFile(repoLocalPath, id);
-    if (!path) continue;
-    try {
-      const linked = parseIssue(readFileSync(path, "utf-8"), {
-        expectedPrefix: prefix,
-      });
-      out.set(id, linked.title);
-    } catch (err) {
-      // Don't kill the parent sync over a malformed linked YAML — leave
-      // the id absent from the map so the renderer flags it as unknown.
-      log.warn(
-        `loadActionItemTitles: failed to parse ${path}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-  return out;
-}
-
-/**
  * Local-first sync: persist the agent's edit to disk BEFORE pushing to
  * the tracker, then push, then re-persist any tracker-side mutations
  * (orphan-recovery `external_id` allocation, `check_item_id` stamps,
@@ -344,6 +310,7 @@ export async function runSync(
       repo.localPath,
       issue.retro.action_item_ids,
       repo.issuePrefix,
+      log,
     );
     const { updatedLocal } = await syncIssue(deps.tracker, issue, {
       actionItemTitles,
@@ -355,6 +322,28 @@ export async function runSync(
     }`;
     log.error(msg);
     await deps.recordError?.(dispatchId, msg);
+    // DX-132 Phase 2: persist a retry intent to disk. Phase 1 made the
+    // local YAML write happen first (so terminal-status moves are no
+    // longer rolled back by tracker errors); this line ensures the
+    // failed tracker push is REPLAYED on a subsequent poller tick
+    // instead of being permanently lost. Drain runs at the top of
+    // every `_poll`. Enqueue is best-effort — a filesystem failure
+    // here would shadow the original tracker error, so we swallow.
+    try {
+      enqueueRetry({
+        issueId: issue.id,
+        repoLocalPath: repo.localPath,
+        errMessage: err instanceof Error ? err.message : String(err),
+      });
+    } catch (enqueueErr) {
+      log.warn(
+        `Retry queue: enqueue failed for ${issue.id}: ${
+          enqueueErr instanceof Error
+            ? enqueueErr.message
+            : String(enqueueErr)
+        }`,
+      );
+    }
   }
 }
 

@@ -54,6 +54,7 @@ import { pushOrphans } from "./orphan-push.js";
 import { recomputeParentStatuses } from "./epic-status.js";
 import { healLocalYamls } from "./heal.js";
 import { healExternalIds } from "./heal-external-id.js";
+import { drainRetries } from "../issue-tracker/retry-queue.js";
 import {
   listBlockedTodoYamls,
   listDispatchableYamls,
@@ -577,6 +578,35 @@ async function _poll(repo: RepoContext): Promise<void> {
   for (const e of externalIdHeal.errors) {
     log.warn(
       `[${repo.name}] external_id heal skipped malformed YAML at ${e.path}: ${e.message}`,
+    );
+  }
+
+  // DX-132: drain the on-disk Trello retry queue. Runs BEFORE every
+  // list fetch and BEFORE every dispatch decision so a backlog of
+  // failed tracker pushes (accumulated during a Trello outage) gets
+  // FIFO-replayed against the recovered tracker on the first tick
+  // after recovery. Single pass per tick — eligible entries process,
+  // ineligible entries (still inside their backoff window) sit until
+  // the next tick. Snapshot at start so concurrent enqueues during the
+  // pass land on the next tick. Throws inside drain bubble up to the
+  // outer DX-149 catch and abort just this tick.
+  const drainResult = await drainRetries({
+    tracker,
+    repoLocalPath: repo.localPath,
+    prefix: repo.issuePrefix,
+  });
+  if (
+    drainResult.attempted > 0 ||
+    drainResult.exhausted > 0 ||
+    drainResult.yamlMissing > 0 ||
+    drainResult.yamlInvalid > 0 ||
+    drainResult.malformed > 0
+  ) {
+    // `skipped`-only ticks are no-op-by-definition (everything in the
+    // queue is sitting inside its backoff window) and don't deserve a
+    // log line.
+    log.info(
+      `[${repo.name}] Retry queue drained: ${drainResult.succeeded}/${drainResult.attempted} succeeded, ${drainResult.failed} rescheduled, ${drainResult.exhausted} exhausted, ${drainResult.yamlMissing} yaml-missing, ${drainResult.yamlInvalid} yaml-invalid, ${drainResult.skipped} still-in-backoff, ${drainResult.malformed} malformed`,
     );
   }
 
@@ -1880,6 +1910,10 @@ export function syncRepoFiles(repo: RepoContext): void {
   // re-install.
   ensureIssuesDirs(repo.localPath);
   ensureGitignoreEntry(repo.localPath, "issues/");
+  // DX-132 Phase 2: the on-disk Trello retry queue under
+  // `<repo>/.danxbot/.trello-retry/` is local-only and must never be
+  // committed (entries contain raw upstream tracker error strings).
+  ensureGitignoreEntry(repo.localPath, ".trello-retry/");
 
   copyComposeOverride(
     danxbotConfigDir,

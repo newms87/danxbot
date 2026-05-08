@@ -44,38 +44,12 @@ import type {
   IssueTracker,
 } from "../issue-tracker/interface.js";
 
-export type IssueState = "open" | "closed";
-
-/**
- * Absolute path to the YAML file for an issue in a given lifecycle state.
- * Filename basename is the internal `id` (`ISS-N`), not the external_id.
- */
-export function issuePath(
-  repoLocalPath: string,
-  id: string,
-  state: IssueState,
-): string {
-  return resolve(
-    repoLocalPath,
-    ".danxbot",
-    "issues",
-    state,
-    `${id}.yml`,
-  );
-}
-
-/**
- * Create the `<repo>/.danxbot/issues/{open,closed}/` dirs if missing.
- * Idempotent — silent no-op when both already exist.
- */
-export function ensureIssuesDirs(repoLocalPath: string): void {
-  mkdirSync(resolve(repoLocalPath, ".danxbot", "issues", "open"), {
-    recursive: true,
-  });
-  mkdirSync(resolve(repoLocalPath, ".danxbot", "issues", "closed"), {
-    recursive: true,
-  });
-}
+// DX-132: pure path helpers moved to `src/issue-tracker/paths.ts` so
+// tracker-layer modules can import them without an upward dependency
+// into the poller. Re-exported here so every existing caller keeps
+// working unchanged.
+export { type IssueState, issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
+import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
 
 /**
  * Read + parse + validate the YAML for an issue by its internal `id`.
