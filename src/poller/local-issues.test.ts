@@ -129,6 +129,21 @@ describe("local-issues", () => {
       expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
     });
 
+    it("excludes Epic-typed YAMLs (phase children dispatched directly)", () => {
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-1", external_id: "a", type: "Epic" }),
+        1000,
+      );
+      writeAt(
+        repoRoot,
+        makeIssue({ id: "ISS-2", external_id: "b", type: "Feature" }),
+        1000,
+      );
+      const result = listDispatchableYamls(repoRoot);
+      expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+    });
+
     it("sorts untriaged cards (triage.expires_at empty) before triaged cards regardless of mtime", () => {
       // Triaged with high ICE (mtime 1000) — would win FIFO
       writeAt(

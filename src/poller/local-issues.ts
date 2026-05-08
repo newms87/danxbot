@@ -113,6 +113,14 @@ export function listDispatchableYamls(
     if (i.status !== "ToDo") return false;
     if (i.blocked !== null) return false;
     if (i.dispatch !== null) return false;
+    // Epics are containers — phase children carry the actual work. The
+    // poller dispatches phase cards directly; the dispatched agent reads
+    // the parent epic for context. Epic status is derived from children
+    // (see `deriveParentStatuses`), so the epic transitions through
+    // In Progress / Done automatically as phases progress. Dispatching
+    // the epic itself produces a false-positive critical-failure flag
+    // when a phase succeeds but the epic legitimately stays ToDo.
+    if (i.type === "Epic") return false;
     return true;
   });
   filtered.sort(workReadyCompare);
