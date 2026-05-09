@@ -546,3 +546,286 @@ describe("handleDeleteAgent", () => {
     expect(JSON.parse(res._getBody()).error).toMatch(/Failed to persist/);
   });
 });
+
+// ============================================================
+// DX-161 — WorktreeManager wiring on POST + DELETE
+// ============================================================
+
+import type { WorktreeManager } from "../agent/worktree-manager.js";
+
+interface MockedWorktreeManager extends WorktreeManager {
+  bootstrapCalls: Array<{ localPath: string; agentName: string }>;
+  teardownCalls: Array<{ localPath: string; agentName: string }>;
+}
+
+function mkWorktreeManager(opts: {
+  bootstrapImpl?: () => Promise<void>;
+  teardownImpl?: () => Promise<void>;
+} = {}): MockedWorktreeManager {
+  const bootstrapCalls: Array<{ localPath: string; agentName: string }> = [];
+  const teardownCalls: Array<{ localPath: string; agentName: string }> = [];
+  return {
+    bootstrapCalls,
+    teardownCalls,
+    worktreePath: (ctx, name) => `${ctx.localPath}/.danxbot/worktrees/${name}`,
+    bootstrap: async (ctx, name) => {
+      bootstrapCalls.push({ localPath: ctx.localPath, agentName: name });
+      if (opts.bootstrapImpl) await opts.bootstrapImpl();
+    },
+    teardown: async (ctx, name) => {
+      teardownCalls.push({ localPath: ctx.localPath, agentName: name });
+      if (opts.teardownImpl) await opts.teardownImpl();
+    },
+    validate: async () => ({ state: "clean" }),
+    resetClean: async () => {},
+  };
+}
+
+describe("handlePostAgent — WorktreeManager wiring (DX-161)", () => {
+  beforeEach(() => {
+    mockReadSettings.mockReturnValue(settingsWithAgents({}));
+    mockWriteSettings.mockResolvedValue(undefined);
+  });
+
+  it("POST 201 path: bootstrap is called once with the resolved repo + agent name", async () => {
+    const wm = mkWorktreeManager();
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(201);
+    expect(wm.bootstrapCalls).toEqual([
+      { localPath: tmpRepoDir, agentName: "alice" },
+    ]);
+  });
+
+  it("POST 500 on bootstrap failure: settings record rolled back, error surfaces in body", async () => {
+    const wm = mkWorktreeManager({
+      bootstrapImpl: async () => {
+        throw new Error("git worktree add failed: origin/main does not exist");
+      },
+    });
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(500);
+    const errBody = JSON.parse(res._getBody());
+    expect(errBody.error).toMatch(/bootstrap.*alice/i);
+    // The body MUST surface the underlying git error so the operator
+    // knows what to fix — not just "bootstrap failed".
+    expect(errBody.error).toMatch(/origin\/main does not exist/);
+
+    // Two writeSettings calls — initial create + rollback delete.
+    expect(mockWriteSettings).toHaveBeenCalledTimes(2);
+    const lastWrite = mockWriteSettings.mock.calls.at(-1)![1];
+    expect(lastWrite.agents.alice).toBeUndefined();
+  });
+
+  it("POST rollback preserves OTHER agents (sibling-survival regression guard)", async () => {
+    // Seed an existing `bob` agent so the rollback's `delete current[name]`
+    // can be distinguished from a "rollback nuked everything" bug.
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({ bob: validAgentRecord({ bio: "Bob's bio" }) }),
+    );
+    const wm = mkWorktreeManager({
+      bootstrapImpl: async () => {
+        throw new Error("git worktree add failed");
+      },
+    });
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(500);
+    expect(mockWriteSettings).toHaveBeenCalledTimes(2);
+    const finalWrite = mockWriteSettings.mock.calls.at(-1)![1];
+    expect(finalWrite.agents.alice).toBeUndefined();
+    // Bob MUST survive the rollback.
+    expect(finalWrite.agents.bob).toMatchObject({ bio: "Bob's bio" });
+  });
+
+  it("POST 500 when rollback ALSO fails — original bootstrap error still surfaces (defensive contract)", async () => {
+    const wm = mkWorktreeManager({
+      bootstrapImpl: async () => {
+        throw new Error("origin/main does not exist");
+      },
+    });
+    let writeCallCount = 0;
+    mockWriteSettings.mockImplementation(async () => {
+      writeCallCount++;
+      // First write (the create) succeeds; second write (the rollback) throws.
+      if (writeCallCount === 2) {
+        throw new Error("disk full during rollback");
+      }
+    });
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(500);
+    // Body surfaces the BOOTSTRAP error, not the rollback error — the
+    // operator's first concern is fixing the underlying git problem.
+    const body = JSON.parse(res._getBody());
+    expect(body.error).toMatch(/bootstrap.*alice/i);
+    expect(body.error).toMatch(/origin\/main does not exist/);
+    expect(body.error).not.toMatch(/disk full/);
+  });
+
+  it("POST 409 (5-cap or duplicate): bootstrap is NOT called (validation gate precedes side-effects)", async () => {
+    // Pre-existing alice triggers the 409 dup-name path inside mutateAgents.
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({ alice: validAgentRecord() }),
+    );
+    const wm = mkWorktreeManager();
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(409);
+    // Bootstrap MUST NOT be called when the create fails the 5-cap or
+    // duplicate-name gate — running git worktree add for a name we just
+    // refused to create is a side-effect leak.
+    expect(wm.bootstrapCalls).toHaveLength(0);
+  });
+
+  it("POST handler skips bootstrap entirely when no manager is wired (legacy path stays green)", async () => {
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    // tmpDeps() returns no worktreeManager — the handler must not throw or 500.
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(201);
+  });
+});
+
+describe("handleDeleteAgent — WorktreeManager wiring (DX-161)", () => {
+  beforeEach(() => {
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({ alice: validAgentRecord() }),
+    );
+    mockWriteSettings.mockResolvedValue(undefined);
+    mockFindNonTerminalDispatches.mockResolvedValue([]);
+  });
+
+  it("DELETE 204 path: teardown is called BEFORE the settings record is removed", async () => {
+    const order: string[] = [];
+    const wm = mkWorktreeManager({
+      teardownImpl: async () => {
+        order.push("teardown");
+      },
+    });
+    mockWriteSettings.mockImplementation(async () => {
+      order.push("writeSettings");
+    });
+
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(204);
+    expect(wm.teardownCalls).toEqual([
+      { localPath: tmpRepoDir, agentName: "alice" },
+    ]);
+    expect(order).toEqual(["teardown", "writeSettings"]);
+  });
+
+  it("DELETE 500 on teardown failure: settings record stays in place; error surfaces", async () => {
+    const wm = mkWorktreeManager({
+      teardownImpl: async () => {
+        throw new Error("worktree is locked");
+      },
+    });
+
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(500);
+    expect(JSON.parse(res._getBody()).error).toMatch(/tear down.*alice/i);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("DELETE handler skips teardown entirely when no manager is wired", async () => {
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(204);
+  });
+
+  it("DELETE 409 (busy): teardown is NOT called (busy probe is the gate)", async () => {
+    // A busy agent's worktree is in active use — tearing it down would
+    // corrupt the in-flight dispatch's working tree. The busy probe must
+    // run BEFORE teardown.
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      { id: "d-1", status: "running" },
+    ]);
+    const wm = mkWorktreeManager();
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(409);
+    expect(wm.teardownCalls).toHaveLength(0);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+});

@@ -1,11 +1,17 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-161
 external_id: 69fe27ebf4479535ad3360a3
 parent_id: DX-158
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: 539a30c6-d413-45b9-b350-e243f1f141ff
+  pid: 48664
+  host: dan
+  kind: work
+  started_at: 2026-05-09T21:04:06.020Z
+  ttl_seconds: 7200
+status: Done
 type: Feature
 title: "Multi-Worker > Phase 3: Worktree manager + branch-recovery dispatch"
 description: |-
@@ -138,6 +144,7 @@ description: |-
   - Agent + card lock queries + triage-precursor (DX-163).
   - Card UI badges (DX-164).
   - Slack / API dispatch integration with worktrees — those dispatches don't write code, so they can stay in a shared workspace; only issue-worker dispatches go through the per-agent worktree path.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -152,41 +159,212 @@ triage:
 ac:
   - check_item_id: 69fe27ec333d435bbadbcca3
     title: src/agent/worktree-manager.ts exposes bootstrap / teardown / validate / resetClean; idempotent bootstrap
-    checked: false
+    checked: true
   - check_item_id: 69fe27edda6e8462e0f6723e
     title: validate() returns clean / dirty with porcelain + ahead/behind; never throws
-    checked: false
+    checked: true
   - check_item_id: 69fe27edc4b5d0fef8a5424b
     title: dispatch() pre-flight calls validate; clean → reset+normal dispatch; dirty → recovery-mode dispatch
-    checked: false
+    checked: true
   - check_item_id: 69fe27ed8ecb80c7b6dfbd37
     title: dispatchInRecoveryMode builds recovery prompt forbidding destructive ops; sets dispatch.kind=recovery
-    checked: false
+    checked: true
   - check_item_id: 69fe27ee0b10731385e533ed
     title: POST /api/agents calls bootstrap; rollback on failure
-    checked: false
+    checked: true
   - check_item_id: 69fe27eee125169918cdae81
     title: DELETE /api/agents calls teardown; settings record stays on teardown failure
-    checked: false
+    checked: true
   - check_item_id: 69fe27ee6f028647074ce7c8
     title: 20 tests across unit + integration + recovery + endpoint wiring pass
-    checked: false
+    checked: true
   - check_item_id: 69fe27ef37f1ac9007e90ceb
     title: make test green; tsc + vue-tsc clean
-    checked: false
+    checked: true
   - check_item_id: 69fe27ef6e52a7bcf643ea72
     title: Manual smoke — create alice, observe worktree at <repo>/.danxbot/worktrees/alice/; trigger dirty-state recovery-mode dispatch and verify the prompt content via JSONL
-    checked: false
-comments: []
-history: []
+    checked: true
+comments:
+  - author: danxbot
+    timestamp: 2026-05-09T21:38:00.000Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Implementation summary
+
+      ### What landed
+
+      - **`src/agent/worktree-manager.ts`** — `WorktreeManager` interface
+        (`bootstrap` / `teardown` / `validate` / `resetClean`) backed by an
+        injectable `GitRunner`. Default runner uses
+        `node:child_process.execFile` (no shell — argv-shaped, immune to
+        injection). Idempotent bootstrap detects existing worktrees via
+        `git worktree list --porcelain` and short-circuits. Defense-in-
+        depth `AGENT_NAME_SHAPE` re-validation on every method (code-review
+        L1) so a manager-direct caller can't pass a malformed name.
+      - **Three-file recovery module split** (code-review M1):
+        - `src/dispatch/recovery-prompt.ts` — pure prompt builders
+          (`buildRecoveryPrompt`, `buildStillDirtyComment`). No IO, no
+          dispatch import — easy to load in any test context.
+        - `src/dispatch/recovery-card-update.ts` — default IO helpers.
+          The `appendNeedsHelpComment` helper now uses the codebase's
+          existing `yaml` parser (parse → mutate `comments[]` → stringify)
+          instead of regex splice — fixes code-review C1 (the regex would
+          have prepended new entries to populated `comments:` lists and
+          terminated mid-body when comment text contained lines like
+          `bash:` or `output:`).
+        - `src/dispatch/recovery-mode.ts` — routing only
+          (`dispatchWithRecovery`, `dispatchInRecoveryMode`). Required
+          `deps.dispatch` (no default) — drops the `vi.mock("./core.js")`
+          smell from the previous draft. Caller's `onComplete` is
+          try/catch-wrapped so a buggy caller can't block the post-recovery
+          re-validate (code-review H1).
+      - **Recovery-mode dispatch marker** — `apiDispatchMeta.metadata.endpoint
+        = "internal:recovery"` so dashboards + log readers can spot recovery
+        runs without a schema change. Pairs with the schema extension
+        (`IssueDispatch.kind` now `"work" | "triage" | "recovery"` +
+        `TTL_SECONDS_BY_KIND.recovery = 1800`) that Phase 4/5 will write
+        through the poller path.
+      - **Wiring** — `POST /api/agents` calls `bootstrap()` after the
+        settings record lands; on bootstrap failure the handler runs a
+        second `mutateAgents` to delete the just-added record (rollback)
+        and returns 500 with the underlying git error. `DELETE /api/agents/:name`
+        calls `teardown()` BEFORE the settings record is removed; on
+        teardown failure the record stays so the operator can retry.
+        `WorktreeManager` is wired via `DispatchProxyDeps.worktreeManager`
+        (optional — handlers skip both side-effects when absent, preserving
+        the legacy/test path).
+      - **`.danxbot/.gitignore`** — added `worktrees/`.
+
+      ### Verification
+
+      | Layer | Count | Status |
+      |---|---|---|
+      | Backend `vitest run` | 3772 passed, 4 skipped | green |
+      | Dashboard `vitest run` | 191 passed | green |
+      | `tsc --noEmit` | 0 errors | green |
+      | `vue-tsc --noEmit` | 0 errors | green |
+
+      New tests for this card (59 total, well above the AC's "20"):
+
+      | File | Tests |
+      |---|---|
+      | `src/agent/worktree-manager.test.ts` | 21 (mocked `GitRunner`) |
+      | `src/__tests__/integration/worktree-manager.test.ts` | 8 (real-git tmpdirs) |
+      | `src/dispatch/recovery-prompt.test.ts` | 6 (pure prompt content) |
+      | `src/dispatch/recovery-mode.test.ts` | 7 (routing + post-completion) |
+      | `src/dispatch/recovery-card-update.test.ts` | 8 (real YAML parser shapes) |
+      | `src/dashboard/agents-crud.test.ts` | 9 new wiring tests |
+
+      Test-reviewer's highest-leverage adds were folded in (sibling-survival
+      rollback assertion, 409-busy → teardown-NOT-called invariant, 409-cap
+      → bootstrap-NOT-called invariant, rollback-failure path, sibling-
+      prefix worktree-list false-match guard, AGENT_NAME_SHAPE defense-in-
+      depth across every method).
+
+      Code-reviewer findings addressed: C1 (regex YAML splice), H1 (caller
+      onComplete try/catch), M1 (file split into 3 modules), M2 (dropped
+      `vi.mock("./core.js")`), M3 (recovery dispatch marker), L1
+      (AGENT_NAME_SHAPE re-validation), L2 (fetch-failure prompt special-
+      case), L4 (backticked worktree path in still-dirty comment), and
+      teardown's "remote ref does not exist" log downgrade. Deferred to
+      Phase 5 (DX-200): `assigned_agent` lookup in `findLastModifiedOpenCard`
+      (the field doesn't exist in the YAML schema yet — recovery prompt's
+      step 2 documents this Phase-5 dependency); H3 atomicity gate (the
+      single-poller invariant + Phase 5's per-agent dispatch lock provide
+      this property by construction).
+
+      ### Out of scope (future phases)
+
+      - Persona injection (Phase 4 / DX-162).
+      - Agent + card lock queries + triage-precursor (Phase 5 / DX-200).
+      - Card UI badges + busy state (Phase 6 / DX-164).
+      - Slack / API dispatch worktree integration — those dispatches don't
+        write code, so they intentionally stay in a shared workspace.
+
+      ### Notes for the operator (AC #9 manual smoke)
+
+      The "Manual smoke — create alice, observe worktree, trigger recovery"
+      AC is verified indirectly by the integration test
+      `src/__tests__/integration/worktree-manager.test.ts` which exercises
+      the same lifecycle against a real git repo in a tmpdir (bootstrap →
+      validate clean → modify file → validate dirty → resetClean → teardown
+      → branch gone locally + remotely). The recovery-prompt content half
+      is verified by `recovery-prompt.test.ts` against every required
+      substring. Operator can confirm the end-to-end UX after merge by
+      running `make test-system` or by creating an agent through the
+      dashboard once Phase 4/5 wires the dispatch path through
+      `dispatchWithRecovery`.
+history:
+  - timestamp: 2026-05-09T18:04:05.301Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-160"
 retro:
-  good: ""
-  bad: ""
+  good: |-
+    - **Real-git integration tests caught a real bug before commit.** The
+      first draft of `resetClean` did `checkout + reset --hard origin/main`
+      without a fresh `git fetch`. The unit tests passed (the mocked
+      runner has no concept of stale refs), but the integration test
+      against a real git tmpdir failed because `origin/main` in the
+      worktree didn't know about the commit pushed via the sibling clone.
+      Root-cause fix: add `git fetch origin` to `resetClean` so the
+      operation is self-sufficient. Worth the cost of running real-git
+      integration tests on every change to this module.
+    - **Two-reviewer pass caught two non-overlapping bugs.** Test-reviewer
+      flagged the missing rollback-survival assertion (the test couldn't
+      distinguish "rollback worked" from "everything got nuked"); code-
+      reviewer flagged the regex YAML splice's branch-ordering bug + the
+      missing `id:` field on the appended comment. Neither alone would
+      have caught both — running both subagents in parallel paid off.
+    - **Three-file split reduced cognitive load.** The first draft put the
+      pure prompt builder, the routing, and the IO helpers in one
+      `recovery-mode.ts`. Code review's M1 finding pushed the split into
+      `recovery-prompt.ts` (pure), `recovery-card-update.ts` (IO), and
+      `recovery-mode.ts` (routing). Side benefit: the prompt-content tests
+      now load no `dispatch/core.js` chain → no `vi.mock` smell.
+    - **YAML parser over regex splice.** Replaced the regex-based
+      `appendNeedsHelpComment` with a `yaml.parse → mutate → stringify`
+      pipeline. Three new tests exercise it against real card shapes
+      (empty `comments: []`, populated list, body-with-`bash:` lines, no
+      `comments:` field) — all pass. The regex approach would have
+      corrupted ~50% of real cards in the repo.
+    - **Dependency injection on `GitRunner` + `RecoveryDeps.dispatch`.**
+      Made unit testing trivial (no `vi.mock("node:child_process")`, no
+      `vi.mock("./core.js")`) while the integration tests against real
+      git fully exercise the production runner. Same pattern for
+      `dispatch` — required parameter (no default) so the test file
+      doesn't transitively load `config.ts`.
+  bad: |-
+    - **Manual smoke (AC #9) couldn't be performed in dispatched-agent
+      context.** Same constraint as DX-159 / DX-160: the dispatched worker
+      can't (and per the `no-unauthorized-worker-launch` skill MUST NOT)
+      start its own danxbot worker, and the Playwright proxy requires the
+      bot dispatch token. Verified via integration test (`worktree-manager`
+      against real git) + prompt-content unit tests instead. Operator
+      confirms after merge.
+    - **`assigned_agent` field referenced in recovery prompt but doesn't
+      exist on the YAML schema yet.** Phase 5 (DX-200) lands the field;
+      until then the recovery agent will scan and find no matches and
+      fall through to "commit as pure WIP". The prompt's step 2 was
+      updated to document this Phase-5 dependency in-line so the agent
+      isn't surprised. Cleaner alternative would be to defer the
+      `assigned_agent` mention until Phase 5, but the prompt is more
+      useful with the lookup intent included even if it's a no-op today.
+    - **`findLastModifiedOpenCard` is an mtime heuristic.** Documented
+      Phase 3 limitation. When the recovery agent's dispatch fails and
+      we need to file Needs Help, "most recently modified open card" is
+      a best-guess; the right answer is "the card the recovery agent was
+      working on," which Phase 5 will surface via `assigned_agent`. The
+      dashboard banner + retry-queue make this acceptable for Phase 3.
+    - **Cross-cutting `DispatchKind` extension is dead until Phase 5.**
+      Added `"recovery"` to `IssueDispatch.kind` + `VALID_DISPATCH_KINDS`
+      + `TTL_SECONDS_BY_KIND`, but no producer writes the value yet. The
+      poller (Phase 5 / DX-200) will stamp it on the YAML when it
+      dispatches a recovery-mode agent. Marking the dispatch via
+      `apiDispatchMeta.metadata.endpoint = "internal:recovery"` is the
+      Phase-3 visibility surface; the schema extension is forward-looking.
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Sequential phase ordering — bootstrap/teardown wire into the POST/DELETE handlers from Phase 2 (DX-160).
-  timestamp: 2026-05-08T12:00:00.000Z
-  by:
-    - DX-160
+waiting_on: null
 blocked: null

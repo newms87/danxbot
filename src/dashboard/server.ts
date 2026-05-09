@@ -63,6 +63,7 @@ import {
 import { handleAdminReset } from "./admin-routes.js";
 import { requireUser } from "./auth-middleware.js";
 import { optional } from "../env.js";
+import { createWorktreeManager } from "../agent/worktree-manager.js";
 
 const log = createLogger("dashboard");
 
@@ -616,10 +617,15 @@ export async function startDashboard(): Promise<void> {
   // `worker_host:` in deploy/targets/<TARGET>.yml) and falls back to
   // the default `danxbot-worker-<name>` for repos without one.
   const resolveHost = makeResolveWorkerHost(repos);
+  // DX-161: per-agent worktree manager. One process-wide instance shared
+  // across every POST/DELETE /api/agents call. Tests opt in via mocked
+  // deps; production always wires the real default.
+  const worktreeManager = createWorktreeManager();
   const dispatchDeps: DispatchProxyDeps = {
     token,
     repos,
     resolveHost,
+    worktreeManager,
   };
 
   // Playwright proxy shares the DANXBOT_DISPATCH_TOKEN with dispatchDeps —

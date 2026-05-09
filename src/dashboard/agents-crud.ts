@@ -1,7 +1,15 @@
-// Agent record CRUD (DX-160 Phase 2). POST/PATCH/DELETE on /api/agents.
-// `MutateError` + `authAndResolveRepo` are exported so `agents-avatar.ts`
-// can reuse the pattern without a circular import. Avatar upload + serve
-// live there to keep both modules under the 300-line ceiling.
+// Agent record CRUD (DX-160 Phase 2 + DX-161 Phase 3). POST/PATCH/DELETE on
+// /api/agents. `MutateError` + `authAndResolveRepo` are exported so
+// `agents-avatar.ts` can reuse the pattern without a circular import.
+// Avatar upload + serve live there to keep both modules under the 300-line
+// ceiling.
+//
+// DX-161 Phase 3 wires `WorktreeManager` into POST + DELETE so the agent's
+// `<repo>/.danxbot/worktrees/<name>/` lifecycle is owned by the same
+// transaction as the settings record. POST bootstraps after the record
+// lands and rolls back on bootstrap failure; DELETE tears down BEFORE the
+// record is removed so a teardown failure leaves the operator with a
+// recoverable state (record still present, retry available).
 
 import type { IncomingMessage, ServerResponse } from "http";
 import { rmSync } from "node:fs";
@@ -147,6 +155,43 @@ export async function handlePostAgent(
     return;
   }
 
+  // DX-161: bootstrap the agent's worktree at
+  // `<repo>/.danxbot/worktrees/<name>/`. Runs AFTER the settings record
+  // lands so a bootstrap failure has a record to roll back. On failure we
+  // attempt the rollback (delete the just-added record) and return 500;
+  // a rollback failure is logged but the original 500 is still returned —
+  // the operator sees the bootstrap error message either way.
+  if (deps.worktreeManager) {
+    try {
+      await deps.worktreeManager.bootstrap(repo, name);
+    } catch (bootErr) {
+      const bootMsg = bootErr instanceof Error ? bootErr.message : String(bootErr);
+      log.error(
+        `handlePostAgent(${repo.name}, ${name}): bootstrap failed — rolling back settings record`,
+        bootErr,
+      );
+      try {
+        await mutateAgents(
+          repo.localPath,
+          (current) => {
+            delete current[name];
+            return current;
+          },
+          `${DASHBOARD_PREFIX}${username}`,
+        );
+      } catch (rollErr) {
+        log.error(
+          `handlePostAgent(${repo.name}, ${name}): ROLLBACK FAILED — settings record may be stale`,
+          rollErr,
+        );
+      }
+      json(res, 500, {
+        error: `Failed to bootstrap worktree for agent "${name}": ${bootMsg}`,
+      });
+      return;
+    }
+  }
+
   await publishAgentSnapshot(repo, deps.resolveHost);
   json(res, 201, namedRecord(name, record));
 }
@@ -254,6 +299,28 @@ export async function handleDeleteAgent(
     log.error(`handleDeleteAgent(${repo.name}, ${agentName}): busy probe threw`, err);
     json(res, 500, { error: "Failed to probe dispatch state" });
     return;
+  }
+
+  // DX-161: tear down the agent's worktree BEFORE removing the settings
+  // record. Ordering matters — if teardown fails (locked worktree,
+  // disconnected remote, fs permissions) we leave the record present so
+  // the operator can retry the DELETE. The worktree is the
+  // expensive-to-recover side; the record is the cheap-to-recover side.
+  // Skipped entirely when no manager wired (legacy / non-multi-worker).
+  if (deps.worktreeManager) {
+    try {
+      await deps.worktreeManager.teardown(repo, agentName);
+    } catch (tearErr) {
+      const tearMsg = tearErr instanceof Error ? tearErr.message : String(tearErr);
+      log.error(
+        `handleDeleteAgent(${repo.name}, ${agentName}): teardown failed — settings record left in place for retry`,
+        tearErr,
+      );
+      json(res, 500, {
+        error: `Failed to tear down worktree for agent "${agentName}": ${tearMsg}`,
+      });
+      return;
+    }
   }
 
   try {

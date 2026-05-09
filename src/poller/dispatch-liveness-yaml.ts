@@ -116,10 +116,16 @@ export function checkYamlDispatchLiveness(
  *    decision-tree pass typically takes well under a minute; the 10m
  *    cap is the worst-case upper bound for the agent's read +
  *    decision + write turn.
+ *  - `recovery`: 1800s (30m) — DX-161 branch-recovery dispatches finish
+ *    one in-flight WIP card on the agent's worktree, commit, and exit.
+ *    Bounded above by the same logic as triage (a single agent turn) but
+ *    given a wider window because the recovery agent may need to rebase,
+ *    resolve conflicts, and re-run tests before committing.
  */
 export const TTL_SECONDS_BY_KIND: Readonly<Record<IssueDispatch["kind"], number>> = {
   work: 7200,
   triage: 600,
+  recovery: 1800,
 };
 
 /**

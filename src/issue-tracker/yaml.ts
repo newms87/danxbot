@@ -42,7 +42,11 @@ function clampPriority(raw: unknown): number {
   if (raw > PRIORITY_MAX) return PRIORITY_MAX;
   return raw;
 }
-const VALID_DISPATCH_KINDS: ReadonlySet<string> = new Set(["work", "triage"]);
+const VALID_DISPATCH_KINDS: ReadonlySet<string> = new Set([
+  "work",
+  "triage",
+  "recovery",
+]);
 
 /**
  * Maximum number of `IssueHistoryEntry`s retained on an Issue. Enforced both
@@ -1091,7 +1095,7 @@ function validateDispatch(value: unknown): IssueDispatch | null | string {
     id: v.id,
     pid: v.pid,
     host: v.host,
-    kind: v.kind as "work" | "triage",
+    kind: v.kind as "work" | "triage" | "recovery",
     started_at: v.started_at,
     ttl_seconds: v.ttl_seconds,
   };

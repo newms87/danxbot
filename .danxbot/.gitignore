@@ -6,4 +6,5 @@ settings.json
 .settings.lock
 issues/
 agents/
+worktrees/
 .trello-retry/

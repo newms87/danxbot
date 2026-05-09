@@ -38,6 +38,7 @@ import { optional } from "../env.js";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import type { RepoConfig } from "../types.js";
+import type { WorktreeManager } from "../agent/worktree-manager.js";
 
 const log = createLogger("dispatch-proxy");
 
@@ -492,6 +493,16 @@ export interface DispatchProxyDeps {
   repos: RepoConfig[];
   /** Resolves a repo name to its worker hostname. Required — tests inject one. */
   resolveHost: (repoName: string) => string;
+  /**
+   * Per-agent worktree manager (DX-161). When present, agent CRUD handlers
+   * (`handlePostAgent` / `handleDeleteAgent`) bootstrap / teardown the
+   * agent's worktree at `<repo>/.danxbot/worktrees/<name>/` alongside the
+   * settings record write. Production wires
+   * `createWorktreeManager()` once at dashboard startup; tests opt in by
+   * passing a mock to assert the wiring contract. Absent → handlers skip
+   * the worktree side-effect entirely (legacy + non-multi-worker paths).
+   */
+  worktreeManager?: WorktreeManager;
 }
 
 /**
