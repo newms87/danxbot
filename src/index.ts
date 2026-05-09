@@ -12,6 +12,7 @@ import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
 import { getPool, initPlatformPool } from "./db/connection.js";
 import { startIssuesMirror } from "./db/issues-mirror.js";
+import { setRepoName } from "./poller/repo-name.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
@@ -160,6 +161,14 @@ async function startWorkerMode(): Promise<void> {
     process.env.DANXBOT_ISSUES_RECONCILE_INTERVAL_MS !== undefined
       ? Number(process.env.DANXBOT_ISSUES_RECONCILE_INTERVAL_MS)
       : undefined;
+  // Phase 4 (DX-155): register the repo's canonical name so the
+  // DB-backed readers (`loadLocal`, `findByExternalId`,
+  // `listDispatchableYamls`, etc.) can map the worker's `repoLocalPath`
+  // into the `repo_name` column on the `issues` table. Must happen
+  // BEFORE the mirror boot scan finishes — readers fired from the
+  // poller's first tick rely on the registration.
+  setRepoName(repo.localPath, repo.name);
+
   await startIssuesMirror(
     { name: repo.name, localPath: repo.localPath },
     {
@@ -181,7 +190,7 @@ async function startWorkerMode(): Promise<void> {
   }
 
   // Start poller for this repo
-  startPoller();
+  await startPoller();
   log.info(`[${repo.name}] Poller started`);
 
   initShutdownHandlers({});

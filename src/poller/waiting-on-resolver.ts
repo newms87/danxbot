@@ -51,7 +51,7 @@ export async function resolveWaitingOnCards(
 ): Promise<IssueRef[]> {
   const out: IssueRef[] = [];
   for (const card of cards) {
-    const local = findByExternalId(repo.localPath, card.external_id);
+    const local = await findByExternalId(repo.localPath, card.external_id);
     if (!local) {
       out.push(card);
       continue;
@@ -63,7 +63,7 @@ export async function resolveWaitingOnCards(
     const deps = local.waiting_on.by;
     const stillWaiting: string[] = [];
     for (const depId of deps) {
-      const dep = loadLocal(repo.localPath, depId, repo.issuePrefix);
+      const dep = await loadLocal(repo.localPath, depId, repo.issuePrefix);
       if (!dep) {
         stillWaiting.push(`${depId}(missing)`);
         continue;

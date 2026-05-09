@@ -12,14 +12,81 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { autoSyncTrackedIssue } from "../../worker/auto-sync.js";
 import { writeIssue } from "../../poller/yaml-lifecycle.js";
 import { createEmptyIssue } from "../../issue-tracker/yaml.js";
+import { canonicalize, sha256 } from "../../db/canonicalize.js";
+import { createTestDb, type TestDbHandle } from "../../db/test-db.js";
+import { up as upIssuesMirror } from "../../db/migrations/016_issues_mirror.js";
+import {
+  resetIssueDbQueryFn,
+  setIssueDbQueryFn,
+} from "../../poller/issues-db.js";
+import { clearAllRepoNames, setRepoName } from "../../poller/repo-name.js";
+import type { Issue } from "../../issue-tracker/interface.js";
 import type { Dispatch } from "../../dashboard/dispatches.js";
 import type { RepoContext } from "../../types.js";
 
 let scratchRoot = "/tmp/test-repo";
+
+const TEST_REPO_NAME = "auto-sync-test-repo";
+
+const handle: TestDbHandle | null = await createTestDb();
+
+if (!handle) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[auto-sync] skipping DB-backed assertions — local Postgres not reachable",
+  );
+} else {
+  const client = await handle.pool.connect();
+  try {
+    await client.query("BEGIN");
+    await upIssuesMirror(client);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+afterAll(async () => {
+  resetIssueDbQueryFn();
+  clearAllRepoNames();
+  if (handle) await handle.close();
+});
+
+if (handle) {
+  beforeAll(() => {
+    setIssueDbQueryFn(async (sql, params) => {
+      const result = await handle.pool.query(sql, params ?? []);
+      return result.rows as never;
+    });
+  });
+}
+
+async function seedDb(issue: Issue): Promise<void> {
+  if (!handle) return;
+  const data = issue as unknown as Record<string, unknown>;
+  const contentHash = sha256(canonicalize(data));
+  await handle.pool.query(
+    `INSERT INTO issues (repo_name, data, content_hash, mirror_updated_at)
+     VALUES ($1, $2::jsonb, $3, now())`,
+    [TEST_REPO_NAME, JSON.stringify(data), contentHash],
+  );
+}
 
 function buildRepo(): RepoContext {
   return {
@@ -100,18 +167,24 @@ function buildTrelloRow(cardId: string): Dispatch {
 }
 
 describe("autoSyncTrackedIssue", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     scratchRoot = mkdtempSync(join(tmpdir(), "danxbot-autosync-"));
+    if (handle) {
+      await handle.pool.query("DELETE FROM issues");
+      setRepoName(scratchRoot, TEST_REPO_NAME);
+    }
   });
 
   afterEach(() => {
     rmSync(scratchRoot, { recursive: true, force: true });
   });
 
-  it("AC #4: translates trello cardId → internal id via findByExternalId, then calls runSync", async () => {
-    // Seed a YAML file on disk that maps external_id "card-99" → id "ISS-9".
-    // The real findByExternalId implementation scans this dir and returns
-    // the parsed issue, from which auto-sync extracts `.id`.
+  it.skipIf(!handle)(
+    "AC #4: translates trello cardId → internal id via findByExternalId, then calls runSync",
+    async () => {
+    // Seed an `issues` row that maps external_id "card-99" → id "ISS-9".
+    // findByExternalId queries the DB by repo_name + external_id and
+    // auto-sync extracts `.id` from the resulting Issue.
     const repo = buildRepo();
     const issue = {
       ...createEmptyIssue({
@@ -120,7 +193,8 @@ describe("autoSyncTrackedIssue", () => {
         title: "Tracked card",
       }),
     };
-    writeIssue(repo.localPath, issue);
+    await seedDb(issue);
+    void writeIssue;
 
     const runSync = vi.fn().mockResolvedValue({ ok: true, errors: [] });
     const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-99"));
@@ -132,7 +206,8 @@ describe("autoSyncTrackedIssue", () => {
       expect.any(Object),
       "ISS-9",
     );
-  });
+    },
+  );
 
   it("skips runSync when no local YAML carries the trello cardId (no migration done)", async () => {
     // No YAML file on disk → findByExternalId returns null → no sync.
@@ -242,7 +317,9 @@ describe("autoSyncTrackedIssue", () => {
     expect(runSync).not.toHaveBeenCalled();
   });
 
-  it("logs but does not throw when runSync reports validation errors", async () => {
+  it.skipIf(!handle)(
+    "logs but does not throw when runSync reports validation errors",
+    async () => {
     const repo = buildRepo();
     const issue = {
       ...createEmptyIssue({
@@ -251,7 +328,7 @@ describe("autoSyncTrackedIssue", () => {
         title: "Tracked",
       }),
     };
-    writeIssue(repo.localPath, issue);
+    await seedDb(issue);
 
     const runSync = vi.fn().mockResolvedValue({
       ok: false,
@@ -262,5 +339,6 @@ describe("autoSyncTrackedIssue", () => {
       autoSyncTrackedIssue("job-1", repo, { getDispatch, runSync }),
     ).resolves.toBeUndefined();
     expect(runSync).toHaveBeenCalledTimes(1);
-  });
+    },
+  );
 });

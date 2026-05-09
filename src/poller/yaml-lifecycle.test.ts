@@ -15,14 +15,32 @@ import {
   clearDispatchAndWrite,
   ensureGitignoreEntry,
   ensureIssuesDirs,
-  findByExternalId,
   hydrateFromRemote,
   issuePath,
-  loadLocal,
   moveToClosedIfTerminal,
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
+
+/**
+ * Round-trip helper. The yaml-lifecycle test suite previously called
+ * `loadLocal` after `writeIssue` to verify YAML → parse round-trips.
+ * Phase 4 (DX-155) moved `loadLocal` + `findByExternalId` to a SQL
+ * query against the `issues` table, so a unit test without a running
+ * mirror can no longer use them. Direct file read + parseIssue is what
+ * those round-trip checks actually need; the DB-backed helpers are
+ * exercised separately in
+ * `src/__tests__/integration/yaml-lifecycle-readers.test.ts`.
+ */
+function readYamlFile(
+  repoRoot: string,
+  id: string,
+  state: "open" | "closed" = "open",
+): Issue {
+  return parseIssue(readFileSync(issuePath(repoRoot, id, state), "utf-8"), {
+    expectedPrefix: id.split("-")[0]!,
+  });
+}
 import type { CreateCardInput, Issue, IssueStatus } from "../issue-tracker/interface.js";
 
 function buildIssueLite(id: string, status: IssueStatus): Issue {
@@ -193,8 +211,8 @@ describe("yaml-lifecycle", () => {
       // Round-trip through writeIssue + the strict parseIssue validator
       // — null dispatch MUST survive serialization.
       await writeIssue(repoRoot, issue);
-      const reloaded = loadLocal(repoRoot, issue.id, "ISS");
-      expect(reloaded?.dispatch).toBeNull();
+      const reloaded = readYamlFile(repoRoot, issue.id);
+      expect(reloaded.dispatch).toBeNull();
     });
 
     it("ISS-87: hydrated Issue is complete — every required field populated, round-trips through serialize+parse", async () => {
@@ -245,13 +263,11 @@ describe("yaml-lifecycle", () => {
       });
       expect(issue.blocked).toBeNull();
 
-      // Round-trip through writeIssue + loadLocal (which uses the
-      // strict parseIssue). Any missing required field would throw
-      // here.
+      // Round-trip through writeIssue + parseIssue. Any missing required
+      // field would throw here.
       await writeIssue(repoRoot, issue);
-      const reloaded = loadLocal(repoRoot, issue.id, "ISS");
-      expect(reloaded).not.toBeNull();
-      expect(reloaded?.external_id).toBe(external_id);
+      const reloaded = readYamlFile(repoRoot, issue.id);
+      expect(reloaded.external_id).toBe(external_id);
     });
 
     it("includes remote comments in the hydrated Issue", async () => {
@@ -307,10 +323,10 @@ describe("yaml-lifecycle", () => {
       // Round-trip survival: the freshly hydrated Issue + its `created`
       // entry MUST round-trip through the strict validator unchanged.
       await writeIssue(repoRoot, issue);
-      const reloaded = loadLocal(repoRoot, issue.id, "ISS");
-      expect(reloaded?.history).toHaveLength(1);
-      expect(reloaded?.history[0].actor).toBe(entry.actor);
-      expect(reloaded?.history[0].event).toBe("created");
+      const reloaded = readYamlFile(repoRoot, issue.id);
+      expect(reloaded.history).toHaveLength(1);
+      expect(reloaded.history[0].actor).toBe(entry.actor);
+      expect(reloaded.history[0].event).toBe("created");
     });
 
     it("DX-147: 'created' entry survives writeIssue + loadLocal round-trip without growing a second entry", async () => {
@@ -330,11 +346,11 @@ describe("yaml-lifecycle", () => {
       expect(first.history[0].event).toBe("created");
 
       await writeIssue(repoRoot, first);
-      const reloaded = loadLocal(repoRoot, first.id, "ISS");
+      const reloaded = readYamlFile(repoRoot, first.id);
       // Round-trip is byte-stable: parsed history matches the hydrate
       // output exactly. No second entry was appended during
       // serialize/parse, and the parse path leaves `history` alone.
-      expect(reloaded?.history).toEqual(first.history);
+      expect(reloaded.history).toEqual(first.history);
     });
 
     it("DX-147: allocate-new-ISS-N hydrate path also stamps exactly one tracker:<name> 'created' entry", async () => {
@@ -358,144 +374,12 @@ describe("yaml-lifecycle", () => {
     });
   });
 
-  describe("loadLocal", () => {
-    it("returns null when no file exists in open/ or closed/", () => {
-      ensureIssuesDirs(repoRoot);
-      expect(loadLocal(repoRoot, "ISS-9999", "ISS")).toBeNull();
-    });
-
-    it("returns the parsed Issue from open/ when present", async () => {
-      const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(
-        defaultCreate({ id: "ISS-10" }),
-      );
-      const issue = await hydrateFromRemote(
-        tracker,
-        external_id,
-        "did-1",
-        repoRoot, "ISS",
-      );
-      await writeIssue(repoRoot, issue);
-
-      const loaded = loadLocal(repoRoot, "ISS-10", "ISS");
-      expect(loaded).not.toBeNull();
-      expect(loaded?.id).toBe("ISS-10");
-      expect(loaded?.external_id).toBe(external_id);
-      expect(loaded?.dispatch?.id).toBe("did-1");
-    });
-
-    it("returns the parsed Issue from closed/ when present and absent from open/", async () => {
-      const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(
-        defaultCreate({ id: "ISS-11" }),
-      );
-      const issue = await hydrateFromRemote(
-        tracker,
-        external_id,
-        "did-1",
-        repoRoot, "ISS",
-      );
-      ensureIssuesDirs(repoRoot);
-      writeFileSync(
-        issuePath(repoRoot, "ISS-11", "closed"),
-        serializeIssue(issue),
-      );
-
-      const loaded = loadLocal(repoRoot, "ISS-11", "ISS");
-      expect(loaded?.id).toBe("ISS-11");
-    });
-
-    it("throws on corrupt YAML", () => {
-      ensureIssuesDirs(repoRoot);
-      writeFileSync(
-        issuePath(repoRoot, "ISS-99", "open"),
-        "not: valid: yaml: at: all\n  - broken",
-      );
-      expect(() => loadLocal(repoRoot, "ISS-99", "ISS")).toThrow();
-    });
-  });
-
-  describe("findByExternalId", () => {
-    it("returns the issue whose external_id matches by scanning open + closed", async () => {
-      const tracker = new MemoryTracker();
-      const { external_id: ext } = await tracker.createCard(
-        defaultCreate({ id: "ISS-50" }),
-      );
-      const issue = await hydrateFromRemote(tracker, ext, "did-1", repoRoot, "ISS");
-      await writeIssue(repoRoot, issue);
-
-      const found = findByExternalId(repoRoot, ext);
-      expect(found?.id).toBe("ISS-50");
-    });
-
-    it("returns null when no YAML carries the external_id", () => {
-      ensureIssuesDirs(repoRoot);
-      expect(findByExternalId(repoRoot, "ghost-card")).toBeNull();
-    });
-
-    // Regression — ISS-99 prefix-migration dup-spawn: bulk-sync after a
-    // rename pass must STILL find the canonical YAML by external_id
-    // regardless of which prefix the on-disk file carries. Pre-fix the
-    // prefix-filtered regex returned null and bulk-sync re-hydrated 97
-    // dup ISS-*.yml files next to their DX-* siblings.
-    it("is prefix-agnostic — finds the YAML by external_id alone", async () => {
-      const tracker = new MemoryTracker();
-      const { external_id } = await tracker.createCard(
-        defaultCreate({ id: "DX-7" }),
-      );
-      const issue = await hydrateFromRemote(
-        tracker,
-        external_id,
-        "did-1",
-        repoRoot,
-        "DX",
-      );
-      await writeIssue(repoRoot, issue);
-
-      expect(findByExternalId(repoRoot, external_id)?.id).toBe("DX-7");
-    });
-
-    it("co-existing prefixes both resolve by external_id", async () => {
-      const tracker = new MemoryTracker();
-      const { external_id: extA } = await tracker.createCard(
-        defaultCreate({ id: "DX-12" }),
-      );
-      const { external_id: extB } = await tracker.createCard(
-        defaultCreate({ id: "SG-3" }),
-      );
-      await writeIssue(
-        repoRoot,
-        await hydrateFromRemote(tracker, extA, "d-a", repoRoot, "DX"),
-      );
-      await writeIssue(
-        repoRoot,
-        await hydrateFromRemote(tracker, extB, "d-b", repoRoot, "SG"),
-      );
-
-      expect(findByExternalId(repoRoot, extA)?.id).toBe("DX-12");
-      expect(findByExternalId(repoRoot, extB)?.id).toBe("SG-3");
-    });
-
-    it("throws on malformed YAML — no silent skip", async () => {
-      ensureIssuesDirs(repoRoot);
-      writeFileSync(
-        join(repoRoot, ".danxbot", "issues", "open", "DX-99.yml"),
-        "this: is: not: yaml: at: all: [",
-      );
-      expect(() => findByExternalId(repoRoot, "any-ext")).toThrow();
-    });
-
-    it("throws on rogue filename in the issues dir", () => {
-      ensureIssuesDirs(repoRoot);
-      writeFileSync(
-        join(repoRoot, ".danxbot", "issues", "open", "garbage.yml"),
-        "schema_version: 3\n",
-      );
-      expect(() => findByExternalId(repoRoot, "any-ext")).toThrow(
-        /rogue filename/,
-      );
-    });
-  });
+  // `loadLocal` and `findByExternalId` are DB-backed since DX-155 and
+  // exercised in the integration suite at
+  // `src/__tests__/integration/yaml-lifecycle-readers.test.ts` (real
+  // Postgres + a seeded `issues` table). Their unit tests left this
+  // file because the round-trip via writeIssue → file no longer
+  // observes the same medium the readers consume.
 
   describe("writeIssue", () => {
     it("serializes and writes to open/<id>.yml; round-trips through parseIssue", async () => {
@@ -538,8 +422,8 @@ describe("yaml-lifecycle", () => {
       const updated = await stampDispatchAndWrite(repoRoot, original, "did-2");
       expect(updated.dispatch?.id).toBe("did-2");
 
-      const reloaded = loadLocal(repoRoot, "ISS-13", "ISS");
-      expect(reloaded?.dispatch?.id).toBe("did-2");
+      const reloaded = readYamlFile(repoRoot, "ISS-13");
+      expect(reloaded.dispatch?.id).toBe("did-2");
     });
 
     it("string form stamps the placeholder dispatch shape", async () => {
@@ -596,11 +480,11 @@ describe("yaml-lifecycle", () => {
         ttl_seconds: 7200,
       });
 
-      const reloaded = loadLocal(repoRoot, "ISS-15", "ISS");
-      expect(reloaded?.dispatch?.pid).toBe(4321);
-      expect(reloaded?.dispatch?.host).toBe("danxbot-host-a");
-      expect(reloaded?.dispatch?.started_at).toBe("2026-05-07T12:00:00.000Z");
-      expect(reloaded?.dispatch?.ttl_seconds).toBe(7200);
+      const reloaded = readYamlFile(repoRoot, "ISS-15");
+      expect(reloaded.dispatch?.pid).toBe(4321);
+      expect(reloaded.dispatch?.host).toBe("danxbot-host-a");
+      expect(reloaded.dispatch?.started_at).toBe("2026-05-07T12:00:00.000Z");
+      expect(reloaded.dispatch?.ttl_seconds).toBe(7200);
     });
   });
 
@@ -629,8 +513,8 @@ describe("yaml-lifecycle", () => {
       const cleared = await clearDispatchAndWrite(repoRoot, stamped);
       expect(cleared.dispatch).toBeNull();
 
-      const reloaded = loadLocal(repoRoot, "ISS-16", "ISS");
-      expect(reloaded?.dispatch).toBeNull();
+      const reloaded = readYamlFile(repoRoot, "ISS-16");
+      expect(reloaded.dispatch).toBeNull();
     });
 
     it("is a no-op when dispatch is already null (returns input, no write)", async () => {

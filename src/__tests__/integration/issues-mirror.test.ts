@@ -406,6 +406,79 @@ describe("issues-mirror — real chokidar + real PG", () => {
   );
 
   it.skipIf(!handle)(
+    "DX-155: triage_expires_at column is populated from data.triage.expires_at",
+    async () => {
+      const repo = makeRepo();
+      const mirror = await startMirror(repo.localPath);
+      try {
+        // Three rows with different triage states:
+        //   - DX-700: triage.expires_at = ""        → column NULL (never-triaged sentinel)
+        //   - DX-701: triage.expires_at = ISO       → column populated
+        //   - DX-702: triage.expires_at = garbage    → column NULL (fail-open)
+        const empty =
+          `id: DX-700\nstatus: Review\ntype: Feature\ntriage:\n  expires_at: ""\n`;
+        const valid =
+          `id: DX-701\nstatus: Review\ntype: Feature\ntriage:\n  expires_at: "2026-09-01T00:00:00Z"\n`;
+        const garbage =
+          `id: DX-702\nstatus: Review\ntype: Feature\ntriage:\n  expires_at: "not-a-real-date"\n`;
+        const emptyHash = sha256(
+          canonicalize({
+            id: "DX-700",
+            status: "Review",
+            type: "Feature",
+            triage: { expires_at: "" },
+          }),
+        );
+        const validHash = sha256(
+          canonicalize({
+            id: "DX-701",
+            status: "Review",
+            type: "Feature",
+            triage: { expires_at: "2026-09-01T00:00:00Z" },
+          }),
+        );
+        const garbageHash = sha256(
+          canonicalize({
+            id: "DX-702",
+            status: "Review",
+            type: "Feature",
+            triage: { expires_at: "not-a-real-date" },
+          }),
+        );
+        const awaitEmpty = mirror.awaitMirror(REPO_NAME, "DX-700", emptyHash);
+        const awaitValid = mirror.awaitMirror(REPO_NAME, "DX-701", validHash);
+        const awaitGarbage = mirror.awaitMirror(REPO_NAME, "DX-702", garbageHash);
+        writeIssueFile(repo.localPath, "open", "DX-700", empty);
+        writeIssueFile(repo.localPath, "open", "DX-701", valid);
+        writeIssueFile(repo.localPath, "open", "DX-702", garbage);
+        await awaitOrTimeout(awaitEmpty);
+        await awaitOrTimeout(awaitValid);
+        await awaitOrTimeout(awaitGarbage);
+
+        const result = await handle!.pool.query<{
+          id: string;
+          triage_expires_at: Date | null;
+        }>(
+          `SELECT id, triage_expires_at FROM issues
+             WHERE repo_name = $1 AND id IN ('DX-700', 'DX-701', 'DX-702')
+             ORDER BY id`,
+          [REPO_NAME],
+        );
+        expect(result.rows).toHaveLength(3);
+        const byId = Object.fromEntries(
+          result.rows.map((r) => [r.id, r.triage_expires_at]),
+        );
+        expect(byId["DX-700"]).toBeNull();
+        expect(byId["DX-701"]).toEqual(new Date("2026-09-01T00:00:00Z"));
+        expect(byId["DX-702"]).toBeNull();
+      } finally {
+        await mirror.stop();
+        rmSync(repo.tmpdir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!handle)(
     "boot scan from a pre-populated tmpdir → N rows tagged source=boot-scan",
     async () => {
       const repo = makeRepo();

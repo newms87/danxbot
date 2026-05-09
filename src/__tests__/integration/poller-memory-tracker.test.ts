@@ -126,19 +126,23 @@ vi.mock("node:fs", () => ({
 
 // yaml-lifecycle: the poller asks for findByExternalId / hydrateFromRemote
 // to resolve the local Issue. Stub minimal returns.
-const mockFindByExternalId = vi.fn().mockReturnValue(null);
+const mockFindByExternalId = vi.fn().mockResolvedValue(null);
 const mockHydrateFromRemote = vi.fn();
 const mockWriteIssue = vi.fn();
 vi.mock("../../poller/yaml-lifecycle.js", () => ({
   findByExternalId: (...args: unknown[]) => mockFindByExternalId(...args),
   hydrateFromRemote: (...args: unknown[]) => mockHydrateFromRemote(...args),
-  loadLocal: () => null,
+  loadLocal: async () => null,
   writeIssue: (...args: unknown[]) => mockWriteIssue(...args),
   stampDispatchAndWrite: (
     _repo: string,
     issue: Record<string, unknown>,
     dispatchId: string,
   ) => ({ ...issue, dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 } }),
+  clearDispatchAndWrite: async (
+    _repo: string,
+    issue: Record<string, unknown>,
+  ) => ({ ...issue, dispatch: null }),
   ensureIssuesDirs: vi.fn(),
   ensureGitignoreEntry: vi.fn(),
   issuePath: (repo: string, id: string, state: string) =>
@@ -176,7 +180,7 @@ vi.mock("../../workspace/write-if-changed.js", () => ({
 const lastOpenCards: { value: IssueRef[] } = { value: [] };
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -187,6 +191,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     type: "Feature",
     title: ref.title,
     description: "",
+    priority: 3.0,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [],
     comments: [],
@@ -196,17 +201,28 @@ function refToFakeIssue(ref: IssueRef): Issue {
     history: [],
   };
 }
+// epic-status: queries the DB for parent + child rows since DX-155.
+// The unit mock-suite has no live PG, so stub the recompute pass to a
+// no-op so it doesn't throw on an unreachable connection.
+vi.mock("../../poller/epic-status.js", () => ({
+  recomputeParentStatuses: async (): Promise<unknown[]> => [],
+  deriveStatus: () => null,
+}));
+
 vi.mock("../../poller/local-issues.js", () => ({
-  listDispatchableYamls: (_repoPath: string): Issue[] =>
+  listDispatchableYamls: async (_repoPath: string): Promise<Issue[]> =>
     lastOpenCards.value
       .filter((r) => r.status === "ToDo")
       .map(refToFakeIssue),
-  listInProgressYamls: (_repoPath: string): Issue[] =>
+  listInProgressYamls: async (_repoPath: string): Promise<Issue[]> =>
     lastOpenCards.value
       .filter((r) => r.status === "In Progress")
       .map(refToFakeIssue),
-  listBlockedTodoYamls: (_repoPath: string): Issue[] => [],
-  listTriageDueYamls: (_repoPath: string, _now: number): Issue[] => [],
+  listBlockedTodoYamls: async (_repoPath: string): Promise<Issue[]> => [],
+  listTriageDueYamls: async (
+    _repoPath: string,
+    _now: number,
+  ): Promise<Issue[]> => [],
 }));
 
 // The factory mock returns the real MemoryTracker the test sets up.
@@ -288,7 +304,7 @@ function seedDraft(
   ac: { check_item_id: string }[];
 }> {
   return tracker.createCard({
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -297,6 +313,7 @@ function seedDraft(
     type: "Feature",
     title: "Demo task",
     description: "",
+    priority: 3.0,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [],
     comments: [],
@@ -318,7 +335,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     _resetForTesting();
     mockDispatch.mockReset();
     mockFindByExternalId.mockReset();
-    mockFindByExternalId.mockReturnValue(null);
+    mockFindByExternalId.mockResolvedValue(null);
     mockHydrateFromRemote.mockReset();
     mockWriteIssue.mockReset();
     trackerHandle.current = new MemoryTracker();
@@ -595,9 +612,9 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     // a redundant hydrate). Without this, the strict "one hydrate per
     // card" invariant can't be expressed at the mock level.
     const ledger = new Map<string, Record<string, unknown>>();
-    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
-      return ledger.get(eid) ?? null;
-    });
+    mockFindByExternalId.mockImplementation(
+      async (_repo: string, eid: string) => ledger.get(eid) ?? null,
+    );
     mockWriteIssue.mockImplementation(
       (_repo: string, issue: { external_id: string }) => {
         ledger.set(
@@ -763,7 +780,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     // hydrate ONLY card 2 during bulk-sync, then stamp ISS-1 with the
     // primary's dispatchId via stampDispatchAndWrite (which the mock
     // returns as a passthrough).
-    mockFindByExternalId.mockImplementation((_repo: string, eid: string) => {
+    mockFindByExternalId.mockImplementation(async (_repo: string, eid: string) => {
       if (eid === "mem-1") {
         return {
           schema_version: 3 as const,

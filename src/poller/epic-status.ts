@@ -48,19 +48,13 @@
  */
 
 import type { Issue, IssueStatus } from "../issue-tracker/interface.js";
-import { loadLocal, writeIssue } from "./yaml-lifecycle.js";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { writeIssue } from "./yaml-lifecycle.js";
+import { appendHistory } from "../issue-tracker/yaml.js";
 import {
-  appendHistory,
-  buildIssueIdRegex,
-
-  IssueParseError,
-  parseIssue,
-} from "../issue-tracker/yaml.js";
-import { createLogger } from "../logger.js";
-
-const log = createLogger("epic-status");
+  dbListChildrenByParent,
+  dbListParentsToRecompute,
+} from "./issues-db.js";
+import { repoNameFromPath } from "./repo-name.js";
 
 export interface ParentStatusChange {
   id: string;
@@ -128,76 +122,45 @@ export function deriveStatus(children: Issue[]): DeriveStatusResult | null {
 }
 
 /**
- * Walk every YAML in `<repo>/.danxbot/issues/open/` whose `children[]` is
- * non-empty and re-derive its `status` from the children's union. Writes
- * the parent's YAML only when the derived status differs from the
- * on-disk status. Returns the list of changes (id + before/after) so the
- * caller can log them.
+ * Iterate every issue in the DB whose `children[]` is non-empty and
+ * status is non-terminal, re-deriving its `status` from the union of its
+ * children's statuses. Writes the parent's YAML only when the derived
+ * status differs from the on-disk status. Returns the list of changes
+ * (id + before/after) so the caller can log them.
+ *
+ * Phase 4 (DX-155) — DB-backed: replaces the YAML walk with two SQL
+ * queries (parents + children-by-parent_id). Children of any parent are
+ * fetched via the `(repo_name, parent_id)` partial index. The `prefix`
+ * parameter is unused under SQL but kept for caller compatibility.
  *
  * Skips:
  *  - Parents with `waiting_on != null` (the worker forces those to
  *    `status: ToDo` on save; deriving would churn IO).
- *  - Parents whose every listed child is missing locally (defensive —
- *    `deriveStatus` of an empty resolved set returns null).
+ *  - Parents whose every listed child is missing from the DB (defensive
+ *    — `deriveStatus` of an empty resolved set returns null).
  *  - Parents whose derived status equals the current status.
  *
- * Closed parents are not walked: the file move open/→closed/ happens at
- * Done / Cancelled, so any closed parent already reached a terminal
- * status and re-derivation is a no-op anyway.
+ * Closed parents are not walked: the SQL filter excludes Done /
+ * Cancelled rows.
  */
 export async function recomputeParentStatuses(
   repoLocalPath: string,
-  prefix: string,
+  _prefix: string,
 ): Promise<ParentStatusChange[]> {
-  const dir = resolve(repoLocalPath, ".danxbot", "issues", "open");
-  if (!existsSync(dir)) return [];
-
-  const idRegex = buildIssueIdRegex(prefix);
+  const repoName = repoNameFromPath(repoLocalPath);
+  const parents = await dbListParentsToRecompute(repoName);
   const changes: ParentStatusChange[] = [];
 
-  for (const entry of readdirSync(dir)) {
-    if (!entry.endsWith(".yml")) continue;
-    const stem = entry.slice(0, -".yml".length);
-    if (!idRegex.test(stem)) continue;
-
-    const path = resolve(dir, entry);
-    let parent: Issue;
-    try {
-      parent = parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: prefix });
-    } catch (err) {
-      // Malformed YAML — skip (the local-issues walker logs it on the
-      // same tick, no need to double-log). Surface unexpected non-parse
-      // errors so silent breakage stays loud.
-      if (err instanceof IssueParseError) continue;
-      log.warn(
-        `Failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      continue;
-    }
-
+  for (const parent of parents) {
     if (parent.children.length === 0) continue;
     if (parent.waiting_on !== null) continue;
 
-    // Resolve children. Missing children are silently skipped — the
+    // Fetch every child of this parent via the (repo_name, parent_id)
+    // index. Missing rows (children referenced in the parent's
+    // `children[]` but absent from the DB) are silently dropped — the
     // alternative (treat missing as "blocks derivation") would lock a
-    // parent's status forever after a child is renamed/deleted. A
-    // malformed child YAML is also skipped (with the same defensive
-    // pattern as the parent walk above) so a single corrupt sibling
-    // doesn't abort derivation for every parent on the tick.
-    const resolved: Issue[] = [];
-    for (const childId of parent.children) {
-      try {
-        const child = loadLocal(repoLocalPath, childId, prefix);
-        if (child) resolved.push(child);
-      } catch (err) {
-        if (err instanceof IssueParseError) continue;
-        log.warn(
-          `Failed to load child ${childId} of ${parent.id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    }
+    // parent's status forever after a child is renamed / deleted.
+    const resolved = await dbListChildrenByParent(repoName, parent.id);
     if (resolved.length === 0) continue;
 
     const derived = deriveStatus(resolved);

@@ -1,11 +1,17 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-155
 external_id: 69fe1eb6013dac9fb1ad6a86
 parent_id: DX-151
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: a4e24f97-641e-48e6-8b18-a89f16fbc434
+  pid: 47600
+  host: dan
+  kind: work
+  started_at: 2026-05-09T02:17:59.682Z
+  ttl_seconds: 7200
+status: In Progress
 type: Feature
 title: "Issues DB Mirror > Phase 4: Migrate poller readers from YAML scan to DB queries"
 description: |-
@@ -135,6 +141,7 @@ description: |-
   - Retiring `danx_issue_save` (DX-157).
   - Adding new helpers — only migrating existing ones.
   - Adding a YAML fallback path — explicitly forbidden per the spec.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -149,44 +156,44 @@ triage:
 ac:
   - check_item_id: 69fe1eb79307038395718411
     title: listDispatchableYamls migrated to SQL; existing tests pass; integration test seeds DB + asserts correct subset
-    checked: false
+    checked: true
   - check_item_id: 69fe1eb740b5c284d9c68193
     title: listInProgressYamls migrated; tests pass
-    checked: false
+    checked: true
   - check_item_id: 69fe1eb8defd5466c8408f78
     title: listTriageDueYamls migrated; tests pass
-    checked: false
+    checked: true
   - check_item_id: 69fe1eb9e0f5096091c3096c
     title: listBlockedTodoYamls migrated; tests pass
-    checked: false
+    checked: true
   - check_item_id: 69fe1eb937b05aeb26284a78
     title: loadLocal migrated; tests pass; null-on-miss preserved
-    checked: false
+    checked: true
   - check_item_id: 69fe1eb9a5ede52bae59fced
     title: findByExternalId migrated; tests pass
-    checked: false
+    checked: true
   - check_item_id: 69fe1eba85316df3577ab389
     title: epic-status children-by-parent_id migrated; parent-status derivation still produces correct status union
-    checked: false
+    checked: true
   - check_item_id: 69fe1ebb9b01a551c7894bd2
     title: grep verifies no readdirSync / parseSimpleYaml references remain in the migrated files
-    checked: false
+    checked: true
   - check_item_id: 69fe1ebbf44d7d12124c987c
     title: make test green; tsc + vue-tsc clean; make test-system-poller passes
-    checked: false
+    checked: true
   - check_item_id: 69fe1ebbb29da395f2f2b315
     title: Manual smoke — worker dispatches off DB-backed list, debug log confirms
-    checked: false
+    checked: true
 comments: []
-history: []
+history:
+  - timestamp: 2026-05-09T02:17:58.182Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-154"
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Sequential phase ordering — readers need the mirror writing into Postgres (Phase 3 / DX-154) before they can query it.
-  timestamp: 2026-05-08T12:00:00.000Z
-  by:
-    - DX-154
+waiting_on: null
 blocked: null

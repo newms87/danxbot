@@ -217,6 +217,110 @@ vi.mock("../../dashboard/dispatches-db.js", () => ({
   findNonTerminalDispatches: vi.fn().mockResolvedValue([]),
 }));
 
+// Phase 4 (DX-155): poller readers query the `issues` DB. The
+// critical-failure flow is tracker-side (post-dispatch checkCardProgress),
+// so we keep a YAML-walking shim here that lets the existing fixture
+// (write a YAML to `<repo>/.danxbot/issues/open/`) drive
+// listDispatchableYamls / loadLocal / findByExternalId without standing
+// up a live PG instance for this suite.
+vi.mock("../../poller/local-issues.js", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const yaml = await vi.importActual<typeof import("../../issue-tracker/yaml.js")>(
+    "../../issue-tracker/yaml.js",
+  );
+  function walk(repoLocalPath: string, prefix: string): unknown[] {
+    const dir = path.resolve(repoLocalPath, ".danxbot", "issues", "open");
+    if (!fs.existsSync(dir)) return [];
+    const out: unknown[] = [];
+    for (const entry of fs.readdirSync(dir)) {
+      if (!entry.endsWith(".yml")) continue;
+      try {
+        const issue = yaml.parseIssue(
+          fs.readFileSync(path.resolve(dir, entry), "utf-8"),
+          { expectedPrefix: prefix },
+        );
+        out.push(issue);
+      } catch {
+        /* skip malformed */
+      }
+    }
+    return out;
+  }
+  return {
+    listDispatchableYamls: async (repoLocalPath: string, prefix: string) =>
+      walk(repoLocalPath, prefix).filter((i) => {
+        const issue = i as Record<string, unknown>;
+        return (
+          issue.status === "ToDo" &&
+          issue.waiting_on === null &&
+          issue.blocked === null &&
+          issue.dispatch === null &&
+          issue.type !== "Epic"
+        );
+      }),
+    listInProgressYamls: async (repoLocalPath: string, prefix: string) =>
+      walk(repoLocalPath, prefix).filter(
+        (i) => (i as Record<string, unknown>).status === "In Progress",
+      ),
+    listBlockedTodoYamls: async () => [],
+    listTriageDueYamls: async () => [],
+  };
+});
+
+// Same Phase 4 shim for yaml-lifecycle's read helpers — back them with
+// the on-disk YAML walker so the test fixture's pre-written file shows
+// up to `findByExternalId` / `loadLocal` callers in the post-dispatch
+// flag-write path.
+vi.mock("../../poller/yaml-lifecycle.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../poller/yaml-lifecycle.js")
+  >("../../poller/yaml-lifecycle.js");
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const yaml = await vi.importActual<typeof import("../../issue-tracker/yaml.js")>(
+    "../../issue-tracker/yaml.js",
+  );
+  function findInDir(repoLocalPath: string, predicate: (issue: Record<string, unknown>) => boolean) {
+    for (const state of ["open", "closed"] as const) {
+      const dir = path.resolve(repoLocalPath, ".danxbot", "issues", state);
+      if (!fs.existsSync(dir)) continue;
+      for (const entry of fs.readdirSync(dir)) {
+        if (!entry.endsWith(".yml")) continue;
+        try {
+          const issue = yaml.parseIssue(
+            fs.readFileSync(path.resolve(dir, entry), "utf-8"),
+            { expectedPrefix: entry.split("-")[0]! },
+          );
+          if (predicate(issue as unknown as Record<string, unknown>)) {
+            return issue;
+          }
+        } catch {
+          /* skip malformed */
+        }
+      }
+    }
+    return null;
+  }
+  return {
+    ...actual,
+    loadLocal: async (
+      repoLocalPath: string,
+      id: string,
+      _prefix: string,
+    ) => findInDir(repoLocalPath, (i) => i.id === id),
+    findByExternalId: async (repoLocalPath: string, externalId: string) =>
+      externalId
+        ? findInDir(repoLocalPath, (i) => i.external_id === externalId)
+        : null,
+  };
+});
+
+vi.mock("../../poller/epic-status.js", () => ({
+  recomputeParentStatuses: async (): Promise<unknown[]> => [],
+  deriveStatus: () => null,
+}));
+
 // --- Real imports (the pipeline under test) ---
 
 import { startWorkerServer } from "../../worker/server.js";

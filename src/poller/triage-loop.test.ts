@@ -1,61 +1,90 @@
 /**
- * Triage-loop behavior tests (Phase 4 of ISS-90, ISS-94).
+ * Triage-loop wiring tests (Phase 4 of ISS-90, ISS-94; DB-backed since DX-155).
  *
- * The new poller's main loop is:
+ * The poller's main loop is:
  *
  *   1. activeDispatches non-empty? → liveness scan + return early
  *   2. (handled by Phase 2 startup reattach — invariant: in-memory matches YAML)
  *   3. work-ready: oldest open ToDo+blocked=null+dispatch=null,
  *      sorted untriaged-first then ICE total DESC.
- *   4. triage-due: oldest open card with status ∈ {Review, Needs Help}
- *      OR blocked != null AND triage.expires_at empty/past;
+ *   4. triage-due: oldest open card with status ∈ {Review, Blocked}
+ *      OR waiting_on != null AND triage.expires_at empty/past;
  *      sorted never-triaged-first then expires_at ASC.
  *   5. idle → ideator (if enabled) or sleep.
  *
- * These tests pin the seven behavioral cases from ISS-94's AC list:
- *
- *   - 1 work-ready ToDo → dispatches work, returns
- *   - 0 work-ready, 1 triage-due Review → dispatches triage, returns
- *   - 5 ToDo (3 untriaged, 2 triaged 60+40) → untriaged-first oldest
- *   - 5 ToDo all triaged (80,60,40,20,10) → dispatches ICE 80
- *   - active dispatch in memory → no new dispatch, sleep
- *   - active dispatch in YAML but not memory (post-restart) →
- *     reattaches, no double-dispatch
- *   - triage agent crashes → idle-loop guard advances on next tick
- *
- * Plus a fast-path idempotence test confirming the sort priorities are
- * applied correctly.
- *
- * The poller composes its decision tree from helpers in
- * `local-issues.ts` (the sort) and `index.ts` (the dispatcher); the
- * helpers are independently exercised in `local-issues.test.ts` /
- * `index.test.ts`. This file is the wiring-level integration check
- * that proves the composition actually fires the right branch.
+ * These tests pin the seven behavioral cases from ISS-94's AC list at
+ * the helper-composition layer. Phase 4 of the Issues DB Mirror epic
+ * (DX-151 / DX-155) replaced the YAML-walk implementation with SQL
+ * queries against the `issues` table — the test seeds rows directly
+ * and asserts on the helper return.
  */
 import {
-  describe,
-  it,
-  expect,
+  afterAll,
+  beforeAll,
   beforeEach,
-  afterEach,
+  describe,
+  expect,
+  it,
 } from "vitest";
+import { createTestDb, type TestDbHandle } from "../db/test-db.js";
+import { up as upIssuesMirror } from "../db/migrations/016_issues_mirror.js";
+import { canonicalize, sha256 } from "../db/canonicalize.js";
 import {
-  mkdtempSync,
-  rmSync,
-  mkdirSync,
-  writeFileSync,
-  utimesSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { serializeIssue } from "../issue-tracker/yaml.js";
-import type { Issue, IssueIce } from "../issue-tracker/interface.js";
-import {
+  listBlockedTodoYamls,
   listDispatchableYamls,
   listInProgressYamls,
   listTriageDueYamls,
-  listBlockedTodoYamls,
 } from "./local-issues.js";
+import {
+  resetIssueDbQueryFn,
+  setIssueDbQueryFn,
+} from "./issues-db.js";
+import { clearAllRepoNames, setRepoName } from "./repo-name.js";
+import type { Issue, IssueIce } from "../issue-tracker/interface.js";
+
+const handle: TestDbHandle | null = await createTestDb();
+
+if (!handle) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[triage-loop] skipping — local Postgres not reachable; run `make launch-infra` to enable",
+  );
+} else {
+  const client = await handle.pool.connect();
+  try {
+    await client.query("BEGIN");
+    await upIssuesMirror(client);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+const REPO_NAME = "triage-loop-test-repo";
+const REPO_PATH = "/tmp/triage-loop-test-repo";
+
+afterAll(async () => {
+  resetIssueDbQueryFn();
+  clearAllRepoNames();
+  if (handle) await handle.close();
+});
+
+if (handle) {
+  beforeAll(() => {
+    setIssueDbQueryFn(async (sql, params) => {
+      const result = await handle.pool.query(sql, params ?? []);
+      return result.rows as never;
+    });
+    setRepoName(REPO_PATH, REPO_NAME);
+  });
+
+  beforeEach(async () => {
+    await handle.pool.query("DELETE FROM issues");
+  });
+}
 
 function ice(total: number, i = 1, c = 1, e = 1): IssueIce {
   return { total, i, c, e };
@@ -63,7 +92,7 @@ function ice(total: number, i = 1, c = 1, e = 1): IssueIce {
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -74,6 +103,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     type: "Feature",
     title: "Sample",
     description: "Body",
+    priority: 3.0,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -99,325 +129,302 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return merged;
 }
 
-function writeAt(repoRoot: string, issue: Issue, mtimeSeconds: number): void {
-  const dir = resolve(repoRoot, ".danxbot", "issues", "open");
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${issue.id}.yml`);
-  writeFileSync(path, serializeIssue(issue));
-  utimesSync(path, mtimeSeconds, mtimeSeconds);
+function extractTriageExpiresAt(issue: Issue): string | null {
+  const raw = issue.triage.expires_at;
+  if (!raw) return null;
+  if (!Number.isFinite(Date.parse(raw))) return null;
+  return raw;
+}
+
+async function seed(issue: Issue, mirrorUpdatedAtSec: number): Promise<void> {
+  if (!handle) return;
+  const data = issue as unknown as Record<string, unknown>;
+  const contentHash = sha256(canonicalize(data));
+  const triageExpires = extractTriageExpiresAt(issue);
+  await handle.pool.query(
+    `INSERT INTO issues
+       (repo_name, data, content_hash, mirror_updated_at, triage_expires_at)
+     VALUES
+       ($1, $2::jsonb, $3, to_timestamp($4), $5)`,
+    [REPO_NAME, JSON.stringify(data), contentHash, mirrorUpdatedAtSec, triageExpires],
+  );
 }
 
 const NOW = Date.parse("2026-05-07T12:00:00Z");
 
 describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
-  let repoRoot: string;
+  it.skipIf(!handle)(
+    "Case 1 — tick with 1 work-ready ToDo card → work-ready path picks it (triage-due path empty)",
+    async () => {
+      await seed(
+        makeIssue({ id: "ISS-1", external_id: "a", status: "ToDo" }),
+        1000,
+      );
+      expect(
+        (await listDispatchableYamls(REPO_PATH, "ISS")).map((i) => i.id),
+      ).toEqual(["ISS-1"]);
+      expect(await listTriageDueYamls(REPO_PATH, NOW, "ISS")).toEqual([]);
+    },
+  );
 
-  beforeEach(() => {
-    repoRoot = mkdtempSync(join(tmpdir(), "danxbot-triage-loop-"));
-  });
+  it.skipIf(!handle)(
+    "Case 2 — tick with 0 work-ready, 1 triage-due Review → triage path picks the Review card",
+    async () => {
+      await seed(
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          status: "Review",
+          triage: {
+            expires_at: "",
+            reassess_hint: "",
+            last_status: "",
+            last_explain: "",
+            ice: ice(0, 0, 0, 0),
+            history: [],
+          },
+        }),
+        1000,
+      );
+      expect(await listDispatchableYamls(REPO_PATH, "ISS")).toEqual([]);
+      expect(
+        (await listTriageDueYamls(REPO_PATH, NOW, "ISS")).map((i) => i.id),
+      ).toEqual(["ISS-1"]);
+    },
+  );
 
-  afterEach(() => {
-    rmSync(repoRoot, { recursive: true, force: true });
-  });
+  it.skipIf(!handle)(
+    "Case 3 — 5 ToDo (3 untriaged, 2 triaged ICE 60+40) → untriaged-first oldest",
+    async () => {
+      await seed(
+        makeIssue({
+          id: "ISS-101",
+          external_id: "t1",
+          status: "ToDo",
+          triage: {
+            expires_at: "2026-09-01T00:00:00Z",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "",
+            ice: ice(60, 5, 4, 3),
+            history: [],
+          },
+        }),
+        1000,
+      );
+      await seed(
+        makeIssue({
+          id: "ISS-102",
+          external_id: "t2",
+          status: "ToDo",
+          triage: {
+            expires_at: "2026-09-01T00:00:00Z",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "",
+            ice: ice(40, 4, 5, 2),
+            history: [],
+          },
+        }),
+        2000,
+      );
+      await seed(
+        makeIssue({ id: "ISS-203", external_id: "u3", status: "ToDo" }),
+        5000,
+      );
+      await seed(
+        makeIssue({ id: "ISS-201", external_id: "u1", status: "ToDo" }),
+        3000,
+      );
+      await seed(
+        makeIssue({ id: "ISS-202", external_id: "u2", status: "ToDo" }),
+        4000,
+      );
+      const result = await listDispatchableYamls(REPO_PATH, "ISS");
+      expect(result.map((i) => i.id)).toEqual([
+        "ISS-201",
+        "ISS-202",
+        "ISS-203",
+        "ISS-101",
+        "ISS-102",
+      ]);
+    },
+  );
 
-  it("Case 1 — tick with 1 work-ready ToDo card → work-ready path picks it (triage-due path empty)", () => {
-    writeAt(
-      repoRoot,
-      makeIssue({ id: "ISS-1", external_id: "a", status: "ToDo" }),
-      1000,
-    );
-    expect(listDispatchableYamls(repoRoot, "ISS").map((i) => i.id)).toEqual([
-      "ISS-1",
-    ]);
-    expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
-  });
+  it.skipIf(!handle)(
+    "Case 4 — 5 ToDo all triaged (ICE 80, 60, 40, 20, 10) → ICE 80 first",
+    async () => {
+      function triagedToDo(id: string, total: number): Issue {
+        return makeIssue({
+          id,
+          external_id: `${id}-ext`,
+          status: "ToDo",
+          triage: {
+            expires_at: "2026-09-01T00:00:00Z",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "",
+            ice: ice(total, 5, 4, 4),
+            history: [],
+          },
+        });
+      }
+      await seed(triagedToDo("ISS-401", 80), 1000);
+      await seed(triagedToDo("ISS-402", 60), 2000);
+      await seed(triagedToDo("ISS-403", 40), 3000);
+      await seed(triagedToDo("ISS-404", 20), 4000);
+      await seed(triagedToDo("ISS-405", 10), 5000);
+      const result = await listDispatchableYamls(REPO_PATH, "ISS");
+      expect(result.map((i) => i.id)).toEqual([
+        "ISS-401",
+        "ISS-402",
+        "ISS-403",
+        "ISS-404",
+        "ISS-405",
+      ]);
+    },
+  );
 
-  it("Case 2 — tick with 0 work-ready, 1 triage-due Review → triage path picks the Review card", () => {
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-1",
-        external_id: "a",
-        status: "Review",
-        triage: {
-          expires_at: "",
-          reassess_hint: "",
-          last_status: "",
-          last_explain: "",
-          ice: ice(0, 0, 0, 0),
-          history: [],
-        },
-      }),
-      1000,
-    );
-    expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
-    expect(listTriageDueYamls(repoRoot, NOW, "ISS").map((i) => i.id)).toEqual([
-      "ISS-1",
-    ]);
-  });
+  it.skipIf(!handle)(
+    "Case 5 — active dispatch on the YAML hides the card from BOTH the work-ready set AND the triage-due set",
+    async () => {
+      await seed(
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          status: "ToDo",
+          dispatch: {
+            id: "uuid-1",
+            pid: 1,
+            host: "h",
+            kind: "work",
+            started_at: "2026-05-07T11:50:00Z",
+            ttl_seconds: 7200,
+          },
+        }),
+        1000,
+      );
+      await seed(
+        makeIssue({
+          id: "ISS-2",
+          external_id: "b",
+          status: "Review",
+          dispatch: {
+            id: "uuid-2",
+            pid: 2,
+            host: "h",
+            kind: "triage",
+            started_at: "2026-05-07T11:55:00Z",
+            ttl_seconds: 600,
+          },
+        }),
+        2000,
+      );
+      expect(await listDispatchableYamls(REPO_PATH, "ISS")).toEqual([]);
+      expect(await listTriageDueYamls(REPO_PATH, NOW, "ISS")).toEqual([]);
+    },
+  );
 
-  it("Case 3 — 5 ToDo (3 untriaged, 2 triaged ICE 60+40) → untriaged-first oldest", () => {
-    // Two triaged with high ICE — would win ICE sort if we ignored
-    // untriaged tier.
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-101",
-        external_id: "t1",
-        status: "ToDo",
-        triage: {
-          expires_at: "2026-09-01T00:00:00Z",
-          reassess_hint: "",
-          last_status: "Keep",
-          last_explain: "",
-          ice: ice(60, 5, 4, 3),
-          history: [],
-        },
-      }),
-      1000,
-    );
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-102",
-        external_id: "t2",
-        status: "ToDo",
-        triage: {
-          expires_at: "2026-09-01T00:00:00Z",
-          reassess_hint: "",
-          last_status: "Keep",
-          last_explain: "",
-          ice: ice(40, 4, 5, 2),
-          history: [],
-        },
-      }),
-      2000,
-    );
-    // Three untriaged — different mtimes
-    writeAt(
-      repoRoot,
-      makeIssue({ id: "ISS-203", external_id: "u3", status: "ToDo" }),
-      5000,
-    );
-    writeAt(
-      repoRoot,
-      makeIssue({ id: "ISS-201", external_id: "u1", status: "ToDo" }),
-      3000,
-    );
-    writeAt(
-      repoRoot,
-      makeIssue({ id: "ISS-202", external_id: "u2", status: "ToDo" }),
-      4000,
-    );
-    const result = listDispatchableYamls(repoRoot, "ISS");
-    expect(result.map((i) => i.id)).toEqual([
-      // Untriaged tier first, FIFO oldest mtime
-      "ISS-201",
-      "ISS-202",
-      "ISS-203",
-      // Then triaged tier, ICE DESC
-      "ISS-101",
-      "ISS-102",
-    ]);
-  });
+  it.skipIf(!handle)(
+    "Case 6 — In Progress orphan with stamped dispatch is reattached; the helpers do not surface it as work-ready",
+    async () => {
+      await seed(
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          status: "In Progress",
+          dispatch: {
+            id: "uuid-1",
+            pid: 1,
+            host: "h",
+            kind: "work",
+            started_at: "2026-05-07T11:50:00Z",
+            ttl_seconds: 7200,
+          },
+        }),
+        1000,
+      );
+      expect(await listDispatchableYamls(REPO_PATH, "ISS")).toEqual([]);
+      expect(
+        (await listInProgressYamls(REPO_PATH, "ISS")).map((i) => i.id),
+      ).toEqual(["ISS-1"]);
+      expect(await listTriageDueYamls(REPO_PATH, NOW, "ISS")).toEqual([]);
+    },
+  );
 
-  it("Case 4 — 5 ToDo all triaged (ICE 80, 60, 40, 20, 10) → ICE 80 first", () => {
-    function triagedToDo(id: string, total: number): Issue {
-      return makeIssue({
-        id,
-        external_id: `${id}-ext`,
-        status: "ToDo",
-        triage: {
-          expires_at: "2026-09-01T00:00:00Z",
-          reassess_hint: "",
-          last_status: "Keep",
-          last_explain: "",
-          ice: ice(total, 5, 4, 4),
-          history: [],
-        },
-      });
-    }
-    writeAt(repoRoot, triagedToDo("ISS-401", 80), 1000);
-    writeAt(repoRoot, triagedToDo("ISS-402", 60), 2000);
-    writeAt(repoRoot, triagedToDo("ISS-403", 40), 3000);
-    writeAt(repoRoot, triagedToDo("ISS-404", 20), 4000);
-    writeAt(repoRoot, triagedToDo("ISS-405", 10), 5000);
-    const result = listDispatchableYamls(repoRoot, "ISS");
-    expect(result.map((i) => i.id)).toEqual([
-      "ISS-401",
-      "ISS-402",
-      "ISS-403",
-      "ISS-404",
-      "ISS-405",
-    ]);
-  });
+  it.skipIf(!handle)(
+    "Case 7 — idle-loop guard: a triage agent that previously crashed leaves a short TTL on the card",
+    async () => {
+      await seed(
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          status: "Review",
+          triage: {
+            expires_at: new Date(NOW + 5 * 60 * 1000).toISOString(),
+            reassess_hint: "Triage agent crashed — retry after 5min cooldown",
+            last_status: "",
+            last_explain: "",
+            ice: ice(0, 0, 0, 0),
+            history: [],
+          },
+        }),
+        1000,
+      );
+      expect(await listTriageDueYamls(REPO_PATH, NOW, "ISS")).toEqual([]);
+      // Once 5 minutes pass, the same row appears in the triage-due set.
+      expect(
+        (
+          await listTriageDueYamls(REPO_PATH, NOW + 6 * 60 * 1000, "ISS")
+        ).map((i) => i.id),
+      ).toEqual(["ISS-1"]);
+    },
+  );
 
-  it("Case 5 — active dispatch on the YAML hides the card from BOTH the work-ready set AND the triage-due set", () => {
-    // ToDo card that's already dispatched — the work-ready helper
-    // filters it out via `dispatch !== null`. Mirrors the in-memory
-    // `activeDispatches` check `_poll` runs at the top of each tick.
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-1",
-        external_id: "a",
-        status: "ToDo",
-        dispatch: {
-          id: "uuid-1",
-          pid: 1,
-          host: "h",
-          kind: "work",
-          started_at: "2026-05-07T11:50:00Z",
-          ttl_seconds: 7200,
-        },
-      }),
-      1000,
-    );
-    // Review card already in triage — same defense for the triage path.
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-2",
-        external_id: "b",
-        status: "Review",
-        dispatch: {
-          id: "uuid-2",
-          pid: 2,
-          host: "h",
-          kind: "triage",
-          started_at: "2026-05-07T11:55:00Z",
-          ttl_seconds: 600,
-        },
-      }),
-      2000,
-    );
-    expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
-    expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
-  });
+  it.skipIf(!handle)(
+    "Tier ordering invariant — triage-due picks the FIFO-oldest among never-triaged",
+    async () => {
+      await seed(
+        makeIssue({ id: "ISS-501", external_id: "a", status: "Review" }),
+        1000,
+      );
+      await seed(
+        makeIssue({ id: "ISS-502", external_id: "b", status: "Review" }),
+        2000,
+      );
+      await seed(
+        makeIssue({ id: "ISS-503", external_id: "c", status: "Review" }),
+        3000,
+      );
+      const due = await listTriageDueYamls(REPO_PATH, NOW, "ISS");
+      expect(due.length).toBe(3);
+      expect(due[0].id).toBe("ISS-501");
+    },
+  );
 
-  it("Case 6 — In Progress orphan with stamped dispatch is reattached; the helpers do not surface it as work-ready", () => {
-    // The boot reattach pass and `tryResumeOrphan` own the resume flow —
-    // the work-ready helper just needs to NOT hand out an In Progress
-    // YAML as a fresh dispatch target.
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-1",
-        external_id: "a",
-        status: "In Progress",
-        dispatch: {
-          id: "uuid-1",
-          pid: 1,
-          host: "h",
-          kind: "work",
-          started_at: "2026-05-07T11:50:00Z",
-          ttl_seconds: 7200,
-        },
-      }),
-      1000,
-    );
-    expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
-    expect(listInProgressYamls(repoRoot, "ISS").map((i) => i.id)).toEqual(["ISS-1"]);
-    expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
-  });
-
-  it("Case 7 — idle-loop guard: a triage agent that previously crashed leaves a short TTL on the card; the next tick sees the YAML as not-yet-due and skips it", () => {
-    // The poller's crash-recovery path stamps a near-future
-    // `triage.expires_at` on a card whose triage agent threw. Until that
-    // expiry passes, the card stays out of the triage-due set even
-    // though it's a Review card — preventing the busy-loop where every
-    // tick re-attempts a permanently broken triage.
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-1",
-        external_id: "a",
-        status: "Review",
-        triage: {
-          // 5 minutes after NOW — short, but in the future.
-          expires_at: new Date(NOW + 5 * 60 * 1000).toISOString(),
-          reassess_hint: "Triage agent crashed — retry after 5min cooldown",
-          last_status: "",
-          last_explain: "",
-          ice: ice(0, 0, 0, 0),
-          history: [],
-        },
-      }),
-      1000,
-    );
-    expect(listTriageDueYamls(repoRoot, NOW, "ISS")).toEqual([]);
-    // Once 5 minutes pass, the same YAML appears in the triage-due set.
-    expect(
-      listTriageDueYamls(repoRoot, NOW + 6 * 60 * 1000, "ISS").map((i) => i.id),
-    ).toEqual(["ISS-1"]);
-  });
-
-  it("Tier ordering invariant (single-dispatch composition) — triage-due picks one card per tick even when many are eligible", () => {
-    // Three Review cards, all triage-due; the dispatcher in `_poll`
-    // hands the FIRST entry to spawn. This pin protects against a
-    // future regression that processes the whole list in one tick
-    // (which would re-introduce the bulk-orchestrator pattern that
-    // Phase 4 retired).
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-501",
-        external_id: "a",
-        status: "Review",
-      }),
-      1000,
-    );
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-502",
-        external_id: "b",
-        status: "Review",
-      }),
-      2000,
-    );
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-503",
-        external_id: "c",
-        status: "Review",
-      }),
-      3000,
-    );
-    const due = listTriageDueYamls(repoRoot, NOW, "ISS");
-    expect(due.length).toBe(3);
-    // First entry is the FIFO-oldest among never-triaged. The
-    // dispatcher fires that one and returns; the rest wait for the
-    // next tick.
-    expect(due[0].id).toBe("ISS-501");
-  });
-
-  it("Blocked card (blocked != null, status ToDo) lands in the triage-due set and the blocked-todo set, NOT the work-ready set", () => {
-    // The poller's loop layers these helpers — the work-ready set
-    // never includes blocked cards (`listDispatchableYamls` filters
-    // `blocked === null`), the blocked-todo helper feeds the
-    // resolve-blocked sweep, and the triage-due helper picks the same
-    // card for triage when its TTL is up. All three must agree on
-    // which set a blocked card belongs to or the loop double-dispatches.
-    writeAt(
-      repoRoot,
-      makeIssue({
-        id: "ISS-1",
-        external_id: "a",
-        status: "ToDo",
-        waiting_on: {
-          reason: "Waits for ISS-99",
-          timestamp: "2026-04-01T00:00:00Z",
-          by: ["ISS-99"],
-        },
-      }),
-      1000,
-    );
-    expect(listDispatchableYamls(repoRoot, "ISS")).toEqual([]);
-    expect(listBlockedTodoYamls(repoRoot, "ISS").map((i) => i.id)).toEqual(["ISS-1"]);
-    expect(listTriageDueYamls(repoRoot, NOW, "ISS").map((i) => i.id)).toEqual([
-      "ISS-1",
-    ]);
-  });
+  it.skipIf(!handle)(
+    "Waiting card (waiting_on != null, status ToDo) lands in the blocked-todo + triage-due sets, NOT the work-ready set",
+    async () => {
+      await seed(
+        makeIssue({
+          id: "ISS-1",
+          external_id: "a",
+          status: "ToDo",
+          waiting_on: {
+            reason: "Waits for ISS-99",
+            timestamp: "2026-04-01T00:00:00Z",
+            by: ["ISS-99"],
+          },
+        }),
+        1000,
+      );
+      expect(await listDispatchableYamls(REPO_PATH, "ISS")).toEqual([]);
+      expect(
+        (await listBlockedTodoYamls(REPO_PATH, "ISS")).map((i) => i.id),
+      ).toEqual(["ISS-1"]);
+      expect(
+        (await listTriageDueYamls(REPO_PATH, NOW, "ISS")).map((i) => i.id),
+      ).toEqual(["ISS-1"]);
+    },
+  );
 });

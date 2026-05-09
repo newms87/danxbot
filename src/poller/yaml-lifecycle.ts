@@ -24,20 +24,22 @@
 import {
   existsSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   appendHistory,
   createEmptyIssue,
-
-  parseIssue,
   serializeIssue,
   validateIssue,
 } from "../issue-tracker/yaml.js";
+import {
+  dbSelectIssueById,
+  dbSelectIssueByExternalId,
+} from "./issues-db.js";
+import { repoNameFromPath } from "./repo-name.js";
 import { nextIssueId } from "../issue-tracker/id-generator.js";
 import type {
   Issue,
@@ -60,71 +62,44 @@ const writeIssueLog = createLogger("write-issue");
 const WRITE_ISSUE_AWAIT_TIMEOUT_MS = 5_000;
 
 /**
- * Read + parse + validate the YAML for an issue by its internal `id`.
- * Looks in `open/` first, then `closed/`. Returns null when neither file
- * exists. Throws `IssueParseError` on malformed YAML or schema-validation
- * failure — the validator is strict and that's a load-bearing invariant.
+ * Read the issue identified by `id`. Returns null when no row exists.
+ *
+ * Phase 4 (DX-155) — DB-backed: queries the `issues` table by
+ * `(repo_name, id)`. Open / closed status is a column, not a directory:
+ * a Done / Cancelled card whose YAML lives in `closed/` is still
+ * findable. The `prefix` argument is unused under SQL (every card in a
+ * repo carries the same prefix; the `repo_name` filter is sufficient)
+ * but kept for caller compatibility. The mirror canonicalizes parsed
+ * YAML before storing, so the returned `Issue` has already been
+ * structurally validated through the strict schema at write time —
+ * the previous YAML-walk's `parseIssue` validation ran on every read,
+ * which was redundant work.
  */
-export function loadLocal(
+export async function loadLocal(
   repoLocalPath: string,
   id: string,
-  prefix: string,
-): Issue | null {
-  for (const state of ["open", "closed"] as const) {
-    const path = issuePath(repoLocalPath, id, state);
-    if (!existsSync(path)) continue;
-    return parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: prefix });
-  }
-  return null;
+  _prefix: string,
+): Promise<Issue | null> {
+  const repoName = repoNameFromPath(repoLocalPath);
+  return dbSelectIssueById(repoName, id);
 }
 
 /**
- * Locate the local YAML for an issue keyed by its tracker-native
- * `external_id`. Scans every `ISS-N.yml` in `open/` and `closed/`,
- * parses, and returns the first match. Returns null when no file
- * carries the given `external_id`.
+ * Look up an issue by its tracker-native `external_id`. Returns null
+ * when no row carries the supplied id (or when `externalId` is empty).
  *
- * The lookup is O(N) in the issue count — acceptable because the
- * poller calls it once per tick and N is per-repo (small). If this
- * grows hot, swap to an in-memory `external_id → id` index built from
- * `readdirSync` filenames + a single parse pass.
+ * Phase 4 (DX-155) — DB-backed: queries the `issues` table by
+ * `(repo_name, external_id)`. The previous YAML-walk's prefix-agnostic
+ * scan over `open/` + `closed/` is redundant under SQL — a single
+ * indexed predicate over the full `issues` row set replaces it.
  */
-export function findByExternalId(
+export async function findByExternalId(
   repoLocalPath: string,
   externalId: string,
-): Issue | null {
+): Promise<Issue | null> {
   if (!externalId) return null;
-  // Prefix-agnostic by contract — `external_id` is the unique key across
-  // the tracker, so filtering by a single prefix returns false-negatives
-  // during prefix-migration windows (a cached `prefix=ISS` worker that
-  // ran bulk-sync after every YAML had been renamed to `DX-*` matched
-  // zero files → re-hydrated every card as a dup ISS-*.yml). Stems must
-  // match `<2-4 caps>-<digits>`; a stem-shape miss is a real disk
-  // anomaly (rogue file in the issues dir) and throws.
-  const stemShape = /^([A-Z]{2,4})-\d+$/;
-  for (const state of ["open", "closed"] as const) {
-    const dir = resolve(repoLocalPath, ".danxbot", "issues", state);
-    if (!existsSync(dir)) continue;
-    for (const entry of readdirSync(dir)) {
-      if (!entry.endsWith(".yml")) continue;
-      const stem = entry.slice(0, -".yml".length);
-      const match = stemShape.exec(stem);
-      if (!match) {
-        throw new Error(
-          `findByExternalId: rogue filename in ${dir}: "${entry}" — stem must match ${stemShape}. Remove or rename before retrying.`,
-        );
-      }
-      const path = resolve(dir, entry);
-      // parseIssue throws on schema / id-shape / prefix mismatch — let
-      // it propagate. A corrupt YAML in the issues tree is operator-fix
-      // territory, never silent-skip territory.
-      const issue = parseIssue(readFileSync(path, "utf-8"), {
-        expectedPrefix: match[1]!,
-      });
-      if (issue.external_id === externalId) return issue;
-    }
-  }
-  return null;
+  const repoName = repoNameFromPath(repoLocalPath);
+  return dbSelectIssueByExternalId(repoName, externalId);
 }
 
 /**

@@ -35,7 +35,7 @@ import {
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
-import { serializeIssue } from "../issue-tracker/yaml.js";
+import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
 import { createIssueTracker, TrelloTracker } from "../issue-tracker/index.js";
 import type {
   Issue,
@@ -182,30 +182,28 @@ export function _getActiveDispatchesForTesting(
  * reattach pass; tolerates malformed files (logs + skips) so a single
  * corrupt YAML doesn't halt the boot phase.
  */
-function readOpenIssuesWithDispatch(
+async function readOpenIssuesWithDispatch(
   repo: RepoContext,
-): Issue[] {
+): Promise<Issue[]> {
   const dir = resolve(repo.localPath, ".danxbot", "issues", "open");
   if (!existsSync(dir)) return [];
   const out: Issue[] = [];
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith(".yml")) continue;
     const stem = entry.slice(0, -".yml".length);
-    const path = resolve(dir, entry);
     try {
-      // `loadLocal` validates strictly. The reattach pass deliberately
-      // doesn't use `walkOpenIssues` from local-issues.ts (which has
-      // its own ID-regex filter) because we want the same fail-loud
-      // semantics as `loadLocal` here — a YAML that survived the disk
-      // write but parses as garbage indicates corruption that
-      // observability should surface.
-      const issue = loadLocal(repo.localPath, stem, repo.issuePrefix);
+      // `loadLocal` is DB-backed since DX-155 — by the time this runs,
+      // the issues mirror's boot scan has already populated the DB
+      // from disk (started before the poller in `src/index.ts`).
+      // Tolerates malformed YAMLs by logging + skipping so a single
+      // corrupt file doesn't halt the boot phase.
+      const issue = await loadLocal(repo.localPath, stem, repo.issuePrefix);
       if (issue && issue.dispatch !== null) {
         out.push(issue);
       }
     } catch (err) {
       log.warn(
-        `[${repo.name}] reattach: skipping ${path}: ${
+        `[${repo.name}] reattach: skipping ${entry}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -231,8 +229,8 @@ function readOpenIssuesWithDispatch(
  * verdict.kind is logged so a future multi-host extension knows
  * exactly which entries it would need to probe.
  */
-export function runStartupReattach(repo: RepoContext): void {
-  const issues = readOpenIssuesWithDispatch(repo);
+export async function runStartupReattach(repo: RepoContext): Promise<void> {
+  const issues = await readOpenIssuesWithDispatch(repo);
   if (issues.length === 0) return;
 
   const plan = buildReattachPlan(issues, {
@@ -291,7 +289,7 @@ export function runStartupReattach(repo: RepoContext): void {
  * same card simultaneously (single-dispatch-per-tick invariant), so
  * the read-modify-write race window is empty.
  */
-export function evictDeadDispatches(repo: RepoContext): void {
+export async function evictDeadDispatches(repo: RepoContext): Promise<void> {
   const map = getActiveDispatches(repo.name);
   if (map.size === 0) return;
 
@@ -340,7 +338,7 @@ export function evictDeadDispatches(repo: RepoContext): void {
       log.warn(
         `[${repo.name}] liveness: evicting ${issueId} (verdict=${action.verdict.kind}, dispatch=${dispatchBlock.id})`,
       );
-      const issue = loadLocal(repo.localPath, issueId, repo.issuePrefix);
+      const issue = await loadLocal(repo.localPath, issueId, repo.issuePrefix);
       if (issue) {
         try {
           void clearDispatchAndWrite(repo.localPath, issue).catch((err) =>
@@ -664,7 +662,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   // (typically 0–1 entries). Runs BEFORE the tracker fetch so the
   // ToDo dispatch path can immediately re-claim a card whose previous
   // dispatch just died.
-  evictDeadDispatches(repo);
+  await evictDeadDispatches(repo);
 
   // ISS-98 / DX-210 follow-up: derive parent (Epic + non-epic) statuses
   // from the union of children at the TOP of the tick — BEFORE any
@@ -792,13 +790,11 @@ async function _poll(repo: RepoContext): Promise<void> {
   // Items list cards now hydrate as `status: "Review"` (see
   // `trello.ts#listIdToStatus`), so the existing `status === "ToDo"`
   // filter inside `listDispatchableYamls` naturally excludes them.
-  let cards: IssueRef[] = listDispatchableYamls(
-    repo.localPath,
-    repo.issuePrefix,
+  let cards: IssueRef[] = (
+    await listDispatchableYamls(repo.localPath, repo.issuePrefix)
   ).map(localIssueToRef);
-  const inProgressCards: IssueRef[] = listInProgressYamls(
-    repo.localPath,
-    repo.issuePrefix,
+  const inProgressCards: IssueRef[] = (
+    await listInProgressYamls(repo.localPath, repo.issuePrefix)
   ).map(localIssueToRef);
 
   // Orphan-resume check. Runs BEFORE the ToDo dispatch path so a
@@ -846,9 +842,8 @@ async function _poll(repo: RepoContext): Promise<void> {
   // sweep of the waiting ToDo YAMLs: `resolveWaitingOnCards` clears the
   // record + saves, and the freshly-cleared cards join the dispatchable
   // pool for this tick. See `resolveWaitingOnCards` for the contract.
-  const waitingRefs: IssueRef[] = listBlockedTodoYamls(
-    repo.localPath,
-    repo.issuePrefix,
+  const waitingRefs: IssueRef[] = (
+    await listBlockedTodoYamls(repo.localPath, repo.issuePrefix)
   ).map(localIssueToRef);
   if (waitingRefs.length > 0) {
     const cleared = await resolveWaitingOnCards(repo, waitingRefs);
@@ -915,7 +910,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   // and we honor that mirror here in case the stale state ever leaks
   // through. We resolve the local id via `findByExternalId` because
   // the in-memory map is keyed by issue id, not external_id.
-  const existingForGuard = findByExternalId(
+  const existingForGuard = await findByExternalId(
     repo.localPath,
     primary.external_id,
   );
@@ -989,7 +984,7 @@ async function _poll(repo: RepoContext): Promise<void> {
   // it twice would burn CPU on every dispatch tick.
   const existing =
     existingForGuard ??
-    findByExternalId(repo.localPath, primary.external_id);
+    (await findByExternalId(repo.localPath, primary.external_id));
   let resolvedIssue: Issue;
   if (existing) {
     resolvedIssue = await stampDispatchAndWrite(
@@ -1083,10 +1078,7 @@ async function bulkSyncMissingYamls(
   targets: IssueRef[],
 ): Promise<void> {
   for (const card of targets) {
-    if (
-      findByExternalId(repo.localPath, card.external_id)
-    )
-      continue;
+    if (await findByExternalId(repo.localPath, card.external_id)) continue;
     try {
       const hydrated = await hydrateFromRemote(
         tracker,
@@ -1149,7 +1141,7 @@ async function tryResumeOrphan(
 ): Promise<OrphanScanResult> {
   const resetToToDo: IssueRef[] = [];
   for (const ref of inProgressRefs) {
-    const issue = findByExternalId(repo.localPath, ref.external_id);
+    const issue = await findByExternalId(repo.localPath, ref.external_id);
     // No local YAML — bulk-sync runs immediately before this so a
     // missing YAML means hydration failed; warning already logged
     // upstream. Skip and let the next sync attempt fix it.
@@ -2158,7 +2150,7 @@ async function spawnClaude(
             ...dispatchStamp.startStamp,
             pid,
           };
-          const issue = loadLocal(
+          const issue = await loadLocal(
             repo.localPath,
             dispatchStamp.issueId,
             repo.issuePrefix,
@@ -2189,7 +2181,7 @@ async function spawnClaude(
           // Rollback path — DB UPDATE failed after we wrote the YAML.
           // Clear the YAML's `dispatch{}` and drop the in-memory entry
           // so the next tick sees a clean slate.
-          const issue = loadLocal(
+          const issue = await loadLocal(
             repo.localPath,
             dispatchStamp.issueId,
             repo.issuePrefix,
@@ -2231,9 +2223,18 @@ async function spawnClaude(
         // and drops the in-memory entry. Runs BEFORE the failure-
         // handling backoff so a rapid re-tick doesn't see stale state.
         // Skipped silently when no dispatchStamp was passed (ideator /
-        // auto-triage paths).
+        // auto-triage paths). Fire-and-forget — `clearActiveDispatch`
+        // is async since DX-155 (loadLocal queries Postgres) but the
+        // dispatch onComplete contract is sync; we drop into the
+        // standard "log on rejection" pattern the rest of this branch
+        // uses.
         if (dispatchStamp) {
-          clearActiveDispatch(repo, dispatchStamp.issueId);
+          void clearActiveDispatch(repo, dispatchStamp.issueId).catch((err) =>
+            log.error(
+              `[${repo.name}] clearActiveDispatch failed for ${dispatchStamp.issueId}`,
+              err,
+            ),
+          );
         }
         handleAgentCompletion(repo, state, job).catch((err) =>
           log.error(`[${repo.name}] Error in post-completion handler`, err),
@@ -2254,7 +2255,7 @@ async function spawnClaude(
       // the YAML pointing at a dispatch that never started. Clear so
       // the next tick sees a clean slate; the regular ToDo dispatch
       // path will re-pick the card up with a fresh dispatchId.
-      const issue = loadLocal(
+      const issue = await loadLocal(
         repo.localPath,
         dispatchStamp.issueId,
         repo.issuePrefix,
@@ -2291,10 +2292,13 @@ async function spawnClaude(
  * agent termination, regardless of whether the agent saved a terminal
  * status or simply exited (timeout, stall, kill).
  */
-function clearActiveDispatch(repo: RepoContext, issueId: string): void {
+async function clearActiveDispatch(
+  repo: RepoContext,
+  issueId: string,
+): Promise<void> {
   const map = getActiveDispatches(repo.name);
   map.delete(issueId);
-  const issue = loadLocal(repo.localPath, issueId, repo.issuePrefix);
+  const issue = await loadLocal(repo.localPath, issueId, repo.issuePrefix);
   if (issue && issue.dispatch !== null) {
     try {
       void clearDispatchAndWrite(repo.localPath, issue).catch((mirrorErr) =>
@@ -2371,7 +2375,7 @@ async function handleAgentCompletion(
   // dispatches use `trigger: "api"` and never move the card across
   // lists). Same fail-loud halt mechanism via the critical-failure flag.
   if (state.triageTracked) {
-    checkTriageProgressedOrHalt(repo, state, job);
+    await checkTriageProgressedOrHalt(repo, state, job);
   }
 
   cleanupAfterAgent(state);
@@ -2452,7 +2456,7 @@ async function checkCardProgressedOrHalt(
   // (false-negative, never false-positive).
   let local;
   try {
-    local = findByExternalId(repo.localPath, cardId);
+    local = await findByExternalId(repo.localPath, cardId);
   } catch (err) {
     log.error(
       `[${repo.name}] Failed to read local YAML for ${cardId} during post-dispatch check — skipping flag`,
@@ -2506,24 +2510,22 @@ async function checkCardProgressedOrHalt(
  * also breaks the next dispatch, that next dispatch will surface the
  * signal through its own guard.
  *
- * Sync (not async) because everything it does is sync — `loadLocal`
- * reads the YAML synchronously and `writeFlag` is a synchronous
- * tmp+rename. Keeping the signature sync avoids gratuitous Promise
- * plumbing in the completion handler.
+ * Async since DX-155 — `loadLocal` queries Postgres now, so the
+ * helper carries the Promise<void> through to the completion handler.
  *
  * Phase 1 of ISS-104.
  */
-function checkTriageProgressedOrHalt(
+async function checkTriageProgressedOrHalt(
   repo: RepoContext,
   state: RepoPollerState,
   job: AgentJob,
-): void {
+): Promise<void> {
   const tracked = state.triageTracked;
   if (!tracked) return;
 
   let issue: Issue | null;
   try {
-    issue = loadLocal(repo.localPath, tracked.id, repo.issuePrefix);
+    issue = await loadLocal(repo.localPath, tracked.id, repo.issuePrefix);
   } catch (err) {
     log.error(
       `[${repo.name}] Failed to read local YAML for triage target ${tracked.id} after dispatch — skipping triage-progress check`,
@@ -2583,7 +2585,9 @@ async function recoverStuckCards(
     // the local YAML, not tracker.fetchOpenCards. Match by external_id
     // so the priorTodoCardIds set (recorded before dispatch from the
     // tracker view) keys correctly into the local-derived list.
-    const stuckCards = listInProgressYamls(repo.localPath, repo.issuePrefix)
+    const stuckCards = (
+      await listInProgressYamls(repo.localPath, repo.issuePrefix)
+    )
       .map(localIssueToRef)
       .filter((card) => state.priorTodoCardIds.includes(card.external_id));
 
@@ -2653,7 +2657,11 @@ async function tryTriageDispatch(repo: RepoContext): Promise<boolean> {
     return false;
   }
 
-  const due = listTriageDueYamls(repo.localPath, Date.now(), repo.issuePrefix);
+  const due = await listTriageDueYamls(
+    repo.localPath,
+    Date.now(),
+    repo.issuePrefix,
+  );
   if (due.length === 0) {
     return false;
   }
@@ -2792,7 +2800,7 @@ export function shutdown(): void {
   process.exit(0);
 }
 
-export function start(): void {
+export async function start(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
@@ -2826,7 +2834,7 @@ export function start(): void {
     // dispatch is dead/expired/cross-host. MUST run before the first
     // `poll(repo)` call so the dispatch path doesn't double-spawn a
     // card whose previous claude is still alive across worker restart.
-    runStartupReattach(repo);
+    await runStartupReattach(repo);
 
     poll(repo);
     state.intervalId = setInterval(() => poll(repo), config.pollerIntervalMs);

@@ -263,6 +263,7 @@ const FAKE_ISSUE_FOR_TESTS = {
   type: "Feature" as const,
   title: "fake",
   description: "",
+  priority: 3.0,
   triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
   ac: [],
   comments: [],
@@ -282,8 +283,8 @@ const mockHydrateFromRemote = vi
       dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
     }),
   );
-const mockLoadLocal = vi.fn().mockReturnValue(null);
-const mockFindByExternalId = vi.fn().mockReturnValue(null);
+const mockLoadLocal = vi.fn().mockResolvedValue(null);
+const mockFindByExternalId = vi.fn().mockResolvedValue(null);
 const mockWriteIssueFn = vi.fn();
 const mockStampDispatchAndWrite = vi
   .fn()
@@ -306,7 +307,7 @@ const mockEnsureGitignoreEntry = vi.fn();
  */
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "trello",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -317,6 +318,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     type: "Feature",
     title: ref.title,
     description: "",
+    priority: 3.0,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [],
     comments: [],
@@ -339,22 +341,26 @@ function _currentOpenCards(): IssueRef[] {
 // and prefix. Production calls supply both args; tests assert on
 // `mock.calls[0][1]` to verify the prefix is forwarded.
 const mockListDispatchableYamls = vi.fn(
-  (_repoPath: string, _prefix?: string): Issue[] =>
+  async (_repoPath: string, _prefix?: string): Promise<Issue[]> =>
     _currentOpenCards()
       .filter((r) => r.status === "ToDo")
       .map(refToFakeIssue),
 );
 const mockListInProgressYamls = vi.fn(
-  (_repoPath: string, _prefix?: string): Issue[] =>
+  async (_repoPath: string, _prefix?: string): Promise<Issue[]> =>
     _currentOpenCards()
       .filter((r) => r.status === "In Progress")
       .map(refToFakeIssue),
 );
 const mockListBlockedTodoYamls = vi.fn(
-  (_repoPath: string, _prefix?: string): Issue[] => [],
+  async (_repoPath: string, _prefix?: string): Promise<Issue[]> => [],
 );
 const mockListTriageDueYamls = vi.fn(
-  (_repoPath: string, _now: number, _prefix?: string): Issue[] => [],
+  async (
+    _repoPath: string,
+    _now: number,
+    _prefix?: string,
+  ): Promise<Issue[]> => [],
 );
 
 vi.mock("./local-issues.js", () => ({
@@ -366,6 +372,13 @@ vi.mock("./local-issues.js", () => ({
     mockListBlockedTodoYamls(...(args as [string, string?])),
   listTriageDueYamls: (...args: unknown[]) =>
     mockListTriageDueYamls(...(args as [string, number, string?])),
+}));
+
+// epic-status: queries the DB for parents/children since DX-155. The
+// unit-mock suite has no live PG, so stub recompute to a no-op.
+vi.mock("./epic-status.js", () => ({
+  recomputeParentStatuses: async (): Promise<unknown[]> => [],
+  deriveStatus: () => null,
 }));
 
 const mockClearDispatchAndWrite = vi.fn((...args: unknown[]) => {
@@ -578,6 +591,7 @@ const DEFAULT_GET_CARD_ISSUE = {
   type: "Feature" as const,
   title: "default",
   description: "",
+  priority: 3.0,
   triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
   ac: [],
   comments: [],
@@ -1790,7 +1804,7 @@ describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; 
     // ISS-86: dispatch source is local YAML, not the (real) tracker's
     // fetchOpenCards. Provide one synthetic local Issue so the
     // credentials guard inside spawnClaude is reached.
-    mockListDispatchableYamls.mockReturnValueOnce([
+    mockListDispatchableYamls.mockResolvedValueOnce([
       refToFakeIssue({ id: "", external_id: "c1", title: "Card 1", status: "ToDo" }),
     ]);
 
@@ -2522,17 +2536,17 @@ describe("start", () => {
     }
   });
 
-  it("starts polling without errors", () => {
-    expect(() => start()).not.toThrow();
+  it("starts polling without errors", async () => {
+    await expect(start()).resolves.not.toThrow();
   });
 
-  it("starts polling for every repo regardless of trelloEnabled — the per-tick isFeatureEnabled check decides whether to skip", () => {
+  it("starts polling for every repo regardless of trelloEnabled — the per-tick isFeatureEnabled check decides whether to skip", async () => {
     mockRepoContexts[0].trelloEnabled = false;
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "issuePoller",
     );
 
-    start();
+    await start();
 
     expect(mockIsFeatureEnabled).toHaveBeenCalledWith(
       expect.any(Object),
@@ -2544,7 +2558,7 @@ describe("start", () => {
     mockIsFeatureEnabled.mockReturnValue(true);
   });
 
-  it("polls every repo in repoContexts — per-tick toggle decides which fetch the tracker", () => {
+  it("polls every repo in repoContexts — per-tick toggle decides which fetch the tracker", async () => {
     const enabledRepo = {
       ...mockRepoContexts[0],
       name: "enabled",
@@ -2564,7 +2578,7 @@ describe("start", () => {
       return ctx.name === "enabled";
     });
 
-    start();
+    await start();
 
     // The factory should have been called for the enabled repo only —
     // the disabled repo skips the entire tick before reaching the
@@ -2669,7 +2683,7 @@ describe("poll — post-dispatch card-progress check", () => {
     // critical-failure trip). Reset between tests so per-test
     // implementations don't leak forward.
     mockFindByExternalId.mockReset();
-    mockFindByExternalId.mockReturnValue(null);
+    mockFindByExternalId.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -2725,6 +2739,7 @@ describe("poll — post-dispatch card-progress check", () => {
       type: "Feature" as const,
       title,
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
@@ -2880,7 +2895,7 @@ describe("poll — post-dispatch card-progress check", () => {
     // mutation.
     let blockedSet = false;
     mockFindByExternalId.mockImplementation(
-      (_repo: string, externalId: string) => {
+      async (_repo: string, externalId: string) => {
         if (externalId !== "c1") return null;
         return blockedSet
           ? {
@@ -3034,9 +3049,9 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
     );
     mockListTriageDueYamls.mockReset();
     mockListBlockedTodoYamls.mockReset();
-    mockListBlockedTodoYamls.mockReturnValue([]);
+    mockListBlockedTodoYamls.mockResolvedValue([]);
     mockLoadLocal.mockReset();
-    mockLoadLocal.mockReturnValue(null);
+    mockLoadLocal.mockResolvedValue(null);
     mockStampDispatchAndWrite.mockClear();
   });
 
@@ -3056,7 +3071,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
       completedAt: Date;
     },
   ): Promise<void> {
-    mockListTriageDueYamls.mockReturnValueOnce([target]);
+    mockListTriageDueYamls.mockResolvedValueOnce([target]);
     let capturedOnComplete: ((job: unknown) => void) | undefined;
     mockDispatch.mockImplementation(
       (opts: { onComplete?: (job: unknown) => void }) => {
@@ -3080,7 +3095,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
     });
     // Post-dispatch read: the agent did not save, so the YAML still has
     // the same stale (empty) triage block.
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-7" ? target : null,
     );
 
@@ -3123,7 +3138,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
     // After dispatch the YAML still shows the same stale expiry. (The
     // agent might have called `danx_issue_save` but did not update the
     // triage block — same failure mode as not saving at all.)
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-8" ? target : null,
     );
 
@@ -3145,7 +3160,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
       external_id: "rv7",
       status: "Review",
     });
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-7" ? target : null,
     );
 
@@ -3188,7 +3203,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
     const fixedNow = Date.parse(fixedStart);
     Date.now = () => fixedNow;
     try {
-      mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+      mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
         id === "ISS-15" ? target : null,
       );
       await runOneTriageDispatch(target, {
@@ -3225,7 +3240,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
         last_explain: "ICE 60 — keep on board",
       },
     };
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-9" ? triagedYaml : null,
     );
 
@@ -3249,7 +3264,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
     // loadLocal returns null after the dispatch (YAML moved to closed/,
     // deleted, etc). The poller can't re-dispatch a missing id, so the
     // loop self-terminates — no flag needed.
-    mockLoadLocal.mockReturnValue(null);
+    mockLoadLocal.mockResolvedValue(null);
 
     await runOneTriageDispatch(target, {
       id: "tj5",
@@ -3275,7 +3290,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
     // post-dispatch read failures, not pre-existing call sites.
     let onCompleteLoadCalls = 0;
     let postDispatchPhase = false;
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id !== "ISS-11") return null;
       if (!postDispatchPhase) return target;
       onCompleteLoadCalls += 1;
@@ -3285,7 +3300,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
       return target;
     });
 
-    mockListTriageDueYamls.mockReturnValueOnce([target]);
+    mockListTriageDueYamls.mockResolvedValueOnce([target]);
     let capturedOnComplete: ((job: unknown) => void) | undefined;
     mockDispatch.mockImplementation(
       (opts: { onComplete?: (job: unknown) => void }) => {
@@ -3323,7 +3338,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
         history: [],
       },
     });
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-12" ? target : null,
     );
 
@@ -3353,7 +3368,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
       ...target,
       triage: undefined as unknown as Issue["triage"],
     };
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-13" ? triageMissing : null,
     );
 
@@ -3385,10 +3400,10 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
       ...target,
       triage: { ...target.triage, expires_at: futureExpiry },
     };
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-14" ? triagedYaml : null,
     );
-    mockListTriageDueYamls.mockReturnValueOnce([target]);
+    mockListTriageDueYamls.mockResolvedValueOnce([target]);
     let capturedOnComplete: ((job: unknown) => void) | undefined;
     mockDispatch.mockImplementation(
       (opts: { onComplete?: (job: unknown) => void }) => {
@@ -3975,7 +3990,7 @@ describe("poll — stuck card recovery on failure", () => {
 
     // ISS-86: stuck-card recovery now reads local YAML, not the
     // tracker view. Inject the In-Progress projection directly.
-    mockListInProgressYamls.mockReturnValueOnce([
+    mockListInProgressYamls.mockResolvedValueOnce([
       refToFakeIssue({ id: "ISS-1", external_id: "c1", title: "My Card", status: "In Progress" }),
     ]);
     mockExistsSync.mockReturnValue(false);
@@ -4021,7 +4036,7 @@ describe("poll — stuck card recovery on failure", () => {
     // Recovery's IP fetch sees both the just-moved card AND a
     // pre-existing IP card. Only the dispatch's own card should be
     // recovered. ISS-86: source is local YAML.
-    mockListInProgressYamls.mockReturnValueOnce([
+    mockListInProgressYamls.mockResolvedValueOnce([
       refToFakeIssue({ id: "ISS-1", external_id: "c1", title: "My Card", status: "In Progress" }),
       refToFakeIssue({ id: "ISS-99", external_id: "c99", title: "Already In Progress", status: "In Progress" }),
     ]);
@@ -4091,7 +4106,7 @@ describe("poll — stuck card recovery on failure", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     // ISS-86: source is local YAML.
-    mockListInProgressYamls.mockReturnValueOnce([
+    mockListInProgressYamls.mockResolvedValueOnce([
       refToFakeIssue({ id: "ISS-1", external_id: "c1", title: "Card 1", status: "In Progress" }),
       refToFakeIssue({ id: "ISS-2", external_id: "c2", title: "Card 2", status: "In Progress" }),
     ]);
@@ -4134,7 +4149,7 @@ describe("poll — stuck card recovery on failure", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     // ISS-86: source is local YAML.
-    mockListInProgressYamls.mockReturnValueOnce([
+    mockListInProgressYamls.mockResolvedValueOnce([
       refToFakeIssue({ id: "ISS-1", external_id: "c1", title: "Card 1", status: "In Progress" }),
     ]);
     mockExistsSync.mockReturnValue(false);
@@ -4201,9 +4216,9 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     );
     mockGetIssuePollerPickupPrefix.mockReset();
     mockGetIssuePollerPickupPrefix.mockReturnValue(null);
-    mockLoadLocal.mockReturnValue(null);
+    mockLoadLocal.mockResolvedValue(null);
     mockFindByExternalId.mockReset();
-    mockFindByExternalId.mockReturnValue(null);
+    mockFindByExternalId.mockResolvedValue(null);
     mockHydrateFromRemote.mockReset();
     mockHydrateFromRemote.mockImplementation(
       async (
@@ -4358,7 +4373,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     // again across multiple back-to-back ticks (without
     // `_resetForTesting`).
     mockFindByExternalId.mockReturnValue({
-      schema_version: 4,
+      schema_version: 5,
       tracker: "trello",
       id: "ISS-100",
       external_id: "card-cached",
@@ -4369,6 +4384,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       type: "Feature",
       title: "Cached",
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
@@ -4539,7 +4555,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ref("card-uuid-3", "Card 3", "ToDo"),
     ]);
     const existingIssue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "trello",
       id: "ISS-200",
       external_id: "card-uuid-3",
@@ -4550,6 +4566,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       type: "Feature",
       title: "Card 3",
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
@@ -4579,7 +4596,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ref("card-block-1", "Blocked card", "ToDo"),
     ]);
     const blockedIssue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "trello",
       id: "ISS-300",
       external_id: "card-block-1",
@@ -4590,6 +4607,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       type: "Feature",
       title: "Blocked card",
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
@@ -4603,14 +4621,14 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       history: [],
     };
     mockFindByExternalId.mockReturnValue(blockedIssue);
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id === "ISS-99") return { ...blockedIssue, id: "ISS-99", status: "ToDo", blocked: null };
       return null;
     });
     // ISS-86: blocked YAMLs are surfaced via listBlockedTodoYamls (NOT
     // the dispatchable list). resolveBlockedCards then keeps or drops.
-    mockListDispatchableYamls.mockReturnValueOnce([]);
-    mockListBlockedTodoYamls.mockReturnValueOnce([blockedIssue as Issue]);
+    mockListDispatchableYamls.mockResolvedValueOnce([]);
+    mockListBlockedTodoYamls.mockResolvedValueOnce([blockedIssue as Issue]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -4625,7 +4643,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ref("card-block-2", "Now-unblocked card", "ToDo"),
     ]);
     const blockedIssue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "trello",
       id: "ISS-301",
       external_id: "card-block-2",
@@ -4636,6 +4654,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       type: "Feature",
       title: "Now-unblocked card",
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
@@ -4649,15 +4668,15 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       history: [],
     };
     mockFindByExternalId.mockReturnValue(blockedIssue);
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id === "ISS-99") return { ...blockedIssue, id: "ISS-99", status: "Done", blocked: null };
       return null;
     });
     // ISS-86: blocked YAMLs come via listBlockedTodoYamls; the
     // resolve gate clears `blocked` on terminal blockers and pushes
     // the cleared ref into `cards` for dispatch this tick.
-    mockListDispatchableYamls.mockReturnValueOnce([]);
-    mockListBlockedTodoYamls.mockReturnValueOnce([blockedIssue as Issue]);
+    mockListDispatchableYamls.mockResolvedValueOnce([]);
+    mockListBlockedTodoYamls.mockResolvedValueOnce([blockedIssue as Issue]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -4739,6 +4758,7 @@ describe("poll — In Progress sync + orphan resume", () => {
       type: "Feature" as const,
       title,
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
@@ -4753,7 +4773,7 @@ describe("poll — In Progress sync + orphan resume", () => {
     mockSpawn.mockReturnValue(createFakeSpawnResult());
     setupRepoConfigMocks();
     mockFindByExternalId.mockReset();
-    mockFindByExternalId.mockReturnValue(null);
+    mockFindByExternalId.mockResolvedValue(null);
     mockHydrateFromRemote.mockReset();
     mockHydrateFromRemote.mockImplementation(
       async (
@@ -5467,17 +5487,17 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
     mockSpawn.mockReturnValue(createFakeSpawnResult());
     setupRepoConfigMocks();
     mockListTriageDueYamls.mockReset();
-    mockListTriageDueYamls.mockReturnValue([]);
+    mockListTriageDueYamls.mockResolvedValue([]);
     mockListBlockedTodoYamls.mockReset();
-    mockListBlockedTodoYamls.mockReturnValue([]);
+    mockListBlockedTodoYamls.mockResolvedValue([]);
     mockStampDispatchAndWrite.mockClear();
     mockFindByExternalId.mockReset();
-    mockFindByExternalId.mockReturnValue(null);
+    mockFindByExternalId.mockResolvedValue(null);
   });
 
   it("does NOT spawn triage when autoTriage is disabled even with triage-due cards", async () => {
     // Default mock keeps autoTriage off (resetTrackerMocks).
-    mockListTriageDueYamls.mockReturnValueOnce([
+    mockListTriageDueYamls.mockResolvedValueOnce([
       triageDueIssue({
         id: "ISS-1",
         external_id: "rv1",
@@ -5495,7 +5515,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockListTriageDueYamls.mockReturnValueOnce([
+    mockListTriageDueYamls.mockResolvedValueOnce([
       triageDueIssue({
         id: "ISS-7",
         external_id: "rv7",
@@ -5522,7 +5542,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockListTriageDueYamls.mockReturnValueOnce([
+    mockListTriageDueYamls.mockResolvedValueOnce([
       triageDueIssue({
         id: "ISS-7",
         external_id: "rv7",
@@ -5545,7 +5565,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
   it("does NOT spawn triage and falls through to ideator when no triage-due cards", async () => {
     mockIsFeatureEnabled.mockImplementation(() => true);
     // Empty triage-due list → triage path returns false → ideator runs.
-    mockListTriageDueYamls.mockReturnValueOnce([]);
+    mockListTriageDueYamls.mockResolvedValueOnce([]);
     // Empty Review on the tracker so ideator's threshold gate fires.
     mockTracker.fetchOpenCards.mockResolvedValue([]);
 
@@ -5560,7 +5580,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("td1", "Real ToDo", "ToDo"),
     ]);
-    mockListTriageDueYamls.mockReturnValueOnce([
+    mockListTriageDueYamls.mockResolvedValueOnce([
       triageDueIssue({
         id: "ISS-7",
         external_id: "rv7",
@@ -5578,7 +5598,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
 
   it("preserves the single-dispatch invariant: triage runs and ideator is NOT also dispatched in the same tick", async () => {
     mockIsFeatureEnabled.mockImplementation(() => true);
-    mockListTriageDueYamls.mockReturnValueOnce([
+    mockListTriageDueYamls.mockResolvedValueOnce([
       triageDueIssue({
         id: "ISS-9",
         external_id: "rv9",
@@ -5599,7 +5619,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
     const before = Date.now();
-    mockListTriageDueYamls.mockReturnValueOnce([]);
+    mockListTriageDueYamls.mockResolvedValueOnce([]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -5627,7 +5647,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockListTriageDueYamls.mockReturnValueOnce([
+    mockListTriageDueYamls.mockResolvedValueOnce([
       triageDueIssue({
         id: "ISS-11",
         external_id: "nh1",
@@ -5648,7 +5668,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockListTriageDueYamls.mockReturnValueOnce([
+    mockListTriageDueYamls.mockResolvedValueOnce([
       triageDueIssue({
         id: "ISS-13",
         external_id: "blk1",
@@ -5680,7 +5700,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
     mockIsFeatureEnabled.mockImplementation(
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
-    mockListTriageDueYamls.mockReturnValueOnce([
+    mockListTriageDueYamls.mockResolvedValueOnce([
       triageDueIssue({
         id: "ISS-7",
         external_id: "rv7",
@@ -5735,7 +5755,7 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
       title: "Hand-written card",
       status: "ToDo",
     });
-    mockListDispatchableYamls.mockReturnValueOnce([localOnly]);
+    mockListDispatchableYamls.mockResolvedValueOnce([localOnly]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -5755,8 +5775,8 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("blocked-card", "Blocked", "ToDo"),
     ]);
-    mockListDispatchableYamls.mockReturnValueOnce([]);
-    mockListBlockedTodoYamls.mockReturnValueOnce([]);
+    mockListDispatchableYamls.mockResolvedValueOnce([]);
+    mockListBlockedTodoYamls.mockResolvedValueOnce([]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -5773,8 +5793,8 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
     mockTracker.fetchOpenCards.mockResolvedValue([
       ref("split-brain", "Split-brain card", "ToDo"),
     ]);
-    mockListDispatchableYamls.mockReturnValueOnce([]);
-    mockListInProgressYamls.mockReturnValueOnce([
+    mockListDispatchableYamls.mockResolvedValueOnce([]);
+    mockListInProgressYamls.mockResolvedValueOnce([
       refToFakeIssue({
         id: "ISS-700",
         external_id: "split-brain",
@@ -5796,7 +5816,7 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
     // cutover it must run on the local-YAML projection.
     mockGetIssuePollerPickupPrefix.mockReturnValue("[ST]");
     mockTracker.fetchOpenCards.mockResolvedValue([]);
-    mockListDispatchableYamls.mockReturnValueOnce([
+    mockListDispatchableYamls.mockResolvedValueOnce([
       refToFakeIssue({
         id: "ISS-801",
         external_id: "card-skip",
@@ -5850,7 +5870,7 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
     // The helper is contractually FIFO-sorted; _poll must not re-sort
     // or shuffle. Order the mock return as [older, newer] and assert
     // the older card dispatches.
-    mockListDispatchableYamls.mockReturnValueOnce([
+    mockListDispatchableYamls.mockResolvedValueOnce([
       refToFakeIssue({
         id: "ISS-OLD",
         external_id: "card-older",
@@ -6120,7 +6140,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
     kindOverride: "work" | "triage" = "work",
   ): Issue {
     const merged: Issue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "memory",
       id,
       external_id: `ext-${id}`,
@@ -6138,6 +6158,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
       type: "Feature",
       title: id,
       description: "",
+      priority: 3.0,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6173,7 +6194,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
     );
     mockIsPidAlive.mockReturnValue(true);
 
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-1")).toBe(true);
@@ -6192,7 +6213,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
     );
     mockIsPidAlive.mockReturnValue(false);
 
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-2")).toBe(false);
@@ -6213,7 +6234,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
     // Even with isPidAlive: true, cross-host wins.
     mockIsPidAlive.mockReturnValue(true);
 
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-3")).toBe(false);
@@ -6245,7 +6266,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
     );
     mockIsPidAlive.mockReturnValue(true);
 
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-4")).toBe(false);
@@ -6271,7 +6292,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
     );
     mockIsPidAlive.mockImplementation((pid: number) => pid === 1234);
 
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-10")).toBe(true);
@@ -6291,17 +6312,17 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
       (_repo: string, id: string) => (id === "ISS-99" ? issueNoDispatch : null),
     );
 
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-99")).toBe(false);
     expect(mockClearDispatchAndWrite).not.toHaveBeenCalled();
   });
 
-  it("is a no-op when the issues/open dir does not exist", () => {
+  it("is a no-op when the issues/open dir does not exist", async () => {
     mockExistsSync.mockReturnValue(false);
 
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
 
     expect(mockReaddirSync).not.toHaveBeenCalled();
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
@@ -6334,7 +6355,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
     host: string,
   ): Promise<Issue> {
     const issue: Issue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "memory",
       id,
       external_id: `ext-${id}`,
@@ -6352,6 +6373,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
       type: "Feature",
       title: id,
       description: "",
+      priority: 3.0,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6373,7 +6395,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
         lookupId === id ? issue : null,
     );
     mockIsPidAlive.mockReturnValue(true);
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
     mockClearDispatchAndWrite.mockClear();
     return issue;
   }
@@ -6393,7 +6415,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
         lookupId === "ISS-50" ? issue : null,
     );
 
-    evictDeadDispatches(MOCK_REPO_CONTEXT);
+    await evictDeadDispatches(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-50")).toBe(false);
@@ -6411,15 +6433,15 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
     // PID still alive — eviction must be a pure read, no writes.
     mockIsPidAlive.mockReturnValue(true);
 
-    evictDeadDispatches(MOCK_REPO_CONTEXT);
+    await evictDeadDispatches(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-51")).toBe(true);
     expect(mockClearDispatchAndWrite).not.toHaveBeenCalled();
   });
 
-  it("is a no-op when activeDispatches is empty (cheap fast path)", () => {
-    evictDeadDispatches(MOCK_REPO_CONTEXT);
+  it("is a no-op when activeDispatches is empty (cheap fast path)", async () => {
+    await evictDeadDispatches(MOCK_REPO_CONTEXT);
     expect(mockClearDispatchAndWrite).not.toHaveBeenCalled();
     expect(mockLoadLocal).not.toHaveBeenCalled();
   });
@@ -6445,7 +6467,7 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const aliveIssue: Issue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "memory",
       id: "ISS-200",
       external_id: "ext-200",
@@ -6463,6 +6485,7 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
       type: "Feature",
       title: "Healthy",
       description: "",
+      priority: 3.0,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6480,14 +6503,14 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
     };
 
     mockReaddirSync.mockReturnValue(["ISS-201.yml", "ISS-200.yml"]);
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id === "ISS-201") throw new Error("Malformed YAML");
       if (id === "ISS-200") return aliveIssue;
       return null;
     });
     mockIsPidAlive.mockReturnValue(true);
 
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
 
     // Healthy sibling still got registered. Corrupt YAML did not produce
     // a clear write (the planner can't decide on a missing dispatch).
@@ -6521,7 +6544,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const issue: Issue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "memory",
       id: "ISS-301",
       external_id: "ext-301",
@@ -6539,6 +6562,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
       type: "Feature",
       title: "X",
       description: "",
+      priority: 3.0,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6561,15 +6585,15 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
       (_repo: string, id: string) => (id === "ISS-301" ? issue : null),
     );
     mockIsPidAlive.mockReturnValue(true);
-    runStartupReattach(MOCK_REPO_CONTEXT);
+    await runStartupReattach(MOCK_REPO_CONTEXT);
     mockClearDispatchAndWrite.mockClear();
 
     // Now the YAML disappears (manual delete by operator, file move) —
     // loadLocal returns null. PID has died too.
     mockIsPidAlive.mockReturnValue(false);
-    mockLoadLocal.mockReturnValue(null);
+    mockLoadLocal.mockResolvedValue(null);
 
-    evictDeadDispatches(MOCK_REPO_CONTEXT);
+    await evictDeadDispatches(MOCK_REPO_CONTEXT);
 
     const map = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
     expect(map.has("ISS-301")).toBe(false);
@@ -6630,10 +6654,10 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       },
     );
     mockGetIssuePollerPickupPrefix.mockReturnValue(null);
-    mockListBlockedTodoYamls.mockReturnValue([]);
-    mockListInProgressYamls.mockReturnValue([]);
+    mockListBlockedTodoYamls.mockResolvedValue([]);
+    mockListInProgressYamls.mockResolvedValue([]);
     mockFindByExternalId.mockReturnValue(null);
-    mockLoadLocal.mockReturnValue(null);
+    mockLoadLocal.mockResolvedValue(null);
     mockFindNonTerminalDispatches.mockResolvedValue([]);
     mockIsPidAlive.mockReturnValue(false);
     // runStartupReattach reads through `existsSync` for the issues/open
@@ -6697,7 +6721,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
 
     // The pairedWriteYaml.write callback consults loadLocal to read the
     // current Issue before re-stamping the YAML with the real PID.
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id !== "ISS-FAKE") return null;
       return {
         ...FAKE_ISSUE_FOR_TESTS,
@@ -6753,7 +6777,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
         stop: async () => {},
       },
     });
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id !== "ISS-FAKE") return null;
       return {
         ...FAKE_ISSUE_FOR_TESTS,
@@ -6782,7 +6806,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     // dispatch() rejects — workspace resolution failure, MCP probe failure,
     // OS spawn error all funnel through this branch.
     mockDispatch.mockRejectedValue(new Error("Workspace not found"));
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id !== "ISS-FAKE") return null;
       return {
         ...FAKE_ISSUE_FOR_TESTS,
@@ -6843,7 +6867,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       },
     );
 
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id !== "ISS-FAKE") return null;
       return {
         ...FAKE_ISSUE_FOR_TESTS,
@@ -6903,7 +6927,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
 
     // Simulate the boot reattach having already registered this card.
     const aliveYaml: Issue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "memory",
       id: "ISS-501",
       external_id: "card-restart-alive",
@@ -6914,6 +6938,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       type: "Feature",
       title: "Pre-existing live dispatch",
       description: "",
+      priority: 3.0,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6931,14 +6956,14 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     };
 
     mockReaddirSync.mockReturnValue(["ISS-501.yml"]);
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-501" ? aliveYaml : null,
     );
     mockIsPidAlive.mockReturnValue(true);
 
     // Boot reattach phase: registers ISS-501 as alive in activeDispatches.
     const mod = await import("./index.js");
-    mod.runStartupReattach(MOCK_REPO_CONTEXT);
+    await mod.runStartupReattach(MOCK_REPO_CONTEXT);
 
     // Now drive a full poll tick. tracker shows the same card In Progress.
     // The orphan-resume path should consult activeDispatches and skip.
@@ -6948,8 +6973,8 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     // Use *Once variants so the override doesn't leak into subsequent
     // tests in this describe block (vi.clearAllMocks() preserves
     // implementations set via mockReturnValue).
-    mockListInProgressYamls.mockReturnValueOnce([aliveYaml]);
-    mockListDispatchableYamls.mockReturnValueOnce([]);
+    mockListInProgressYamls.mockResolvedValueOnce([aliveYaml]);
+    mockListDispatchableYamls.mockResolvedValueOnce([]);
     mockFindByExternalId.mockImplementation(
       (_repo: string, externalId: string) =>
         externalId === "card-restart-alive" ? aliveYaml : null,
@@ -6975,7 +7000,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const expiredYaml: Issue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "memory",
       id: "ISS-502",
       external_id: "card-ttl-expired",
@@ -6994,6 +7019,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       type: "Feature",
       title: "Expired",
       description: "",
+      priority: 3.0,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -7011,14 +7037,14 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     };
 
     mockReaddirSync.mockReturnValue(["ISS-502.yml"]);
-    mockLoadLocal.mockImplementation((_repo: string, id: string) =>
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-502" ? expiredYaml : null,
     );
     mockIsPidAlive.mockReturnValue(true);
     mockClearDispatchAndWrite.mockClear();
 
     const mod = await import("./index.js");
-    mod.runStartupReattach(MOCK_REPO_CONTEXT);
+    await mod.runStartupReattach(MOCK_REPO_CONTEXT);
 
     // Reattach pass cleared the YAML (dead-ttl verdict).
     expect(mockClearDispatchAndWrite).toHaveBeenCalledWith(
@@ -7057,7 +7083,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
         });
       },
     );
-    mockLoadLocal.mockImplementation((_repo: string, id: string) => {
+    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
       if (id !== "ISS-FAKE") return null;
       return {
         ...FAKE_ISSUE_FOR_TESTS,

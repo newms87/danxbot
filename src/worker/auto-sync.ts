@@ -78,7 +78,7 @@ export async function autoSyncTrackedIssue(
     // local YAMLs. The trigger metadata still carries the external_id
     // (it's the only stable handle the poller has at dispatch time),
     // but the worker's save-route is keyed by the internal id.
-    const local = findByExternalId(repo.localPath, externalId);
+    const local = await findByExternalId(repo.localPath, externalId);
     if (!local) return;
     const result = await deps.runSync(jobId, repo, local.id);
     if (!result.ok && result.errors.length > 0) {

@@ -167,6 +167,12 @@ let fakePool: FakePlatformPool;
 vi.mock("../../db/connection.js", () => ({
   getPlatformPool: () => fakePool,
   initPlatformPool: vi.fn(),
+  // DX-155: issues-db.ts imports `query` from connection.js. The slack
+  // path doesn't query the issues table, but the import side-effect
+  // pulls connection.js in transitively, so the mock must expose it.
+  query: vi.fn().mockResolvedValue([]),
+  getPool: () => fakePool,
+  withTx: async () => undefined,
 }));
 
 // --- Dispatch core — controllable simulation ---

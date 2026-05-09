@@ -1,127 +1,95 @@
 /**
- * Local-YAML walkers used by the poller's dispatch path.
+ * DB-backed dispatch readers used by the poller's per-tick decisions.
  *
  * Source-of-truth contract: `<repo>/.danxbot/issues/open/*.yml` is the
  * single authority for "what cards exist and what state are they in".
- * The tracker (Trello) is a one-way mirror plus a narrow inbound
- * channel for new cards + human comments — it never decides what gets
- * dispatched. This module replaces the legacy
- * `tracker.fetchOpenCards().filter(status === "ToDo" | "In Progress")`
- * dispatch source. See ISS-67 (epic) and ISS-86 (Phase 1 / Slice A).
+ * The chokidar mirror in `src/db/issues-mirror.ts` watches every YAML
+ * change and projects it into the `issues` table; these readers query
+ * that projection. Phase 4 of the Issues DB Mirror epic (DX-151 /
+ * DX-155) replaced the previous YAML-walk implementation here. The
+ * filesystem is still authoritative — boot scan + 10-min reconcile
+ * keep the DB consistent with disk; if the DB diverges, the next
+ * reconcile fixes it.
+ *
+ * The signatures take `repoLocalPath` as the first argument for caller
+ * compatibility; internally the repo name (the `repo_name` column on
+ * `issues`) is resolved via `repoNameFromPath` (registered at worker
+ * boot). The `prefix` parameter is unused under SQL — the per-repo id
+ * shape is stable so the prefix filter the YAML walker did via regex is
+ * implicit in the `repo_name` filter.
  *
  * ## Sort orders
  *
  * Two distinct sorts are exported:
  *
- *  - **Work-ready** (`listDispatchableYamls`): untriaged cards first
- *    (`triage.expires_at === ""`), then triaged cards by
- *    `triage.ice.total` DESC. Within each tier, FIFO mtime. Untriaged
- *    cards have unknown priority so they get flushed first; among
- *    triaged cards, the highest ICE total wins (Impact × Confidence ×
- *    Ease). Phase 4 of ISS-90 introduced the priority sort to replace
- *    the legacy pure-FIFO order.
+ *  - **Work-ready** (`listDispatchableYamls`): canonical
+ *    `sortInputsForStatus("ToDo", ...)` order — tier (waiting/blocked
+ *    last) → ICE total DESC (untriaged = +Inf) → priority DESC →
+ *    `updatedAt` ASC (FIFO). The poller filters waiting/blocked rows
+ *    out before sorting, so the tier predicate is a no-op there.
  *
  *  - **Triage-due** (`listTriageDueYamls`): never-triaged first
  *    (`triage.expires_at === ""`), then `expires_at` ASC (oldest stale
- *    first). Within each tier, FIFO mtime tiebreak. The poller dispatches
- *    a per-card triage agent for the FIRST entry in this list every tick
- *    that has no work-ready card to dispatch.
+ *    first). FIFO `mirror_updated_at` tiebreak.
  *
- * Action Items list cards now hydrate as `status: "Review"` (the Trello
- * tracker's `listIdToStatus` does that mapping); the legacy
- * `excludeExternalIds` filter at this layer was retired in Phase 4.
+ * `mirrorUpdatedAtMs` replaces file mtime as the FIFO signal. The
+ * mirror stamps it on every content-changing upsert, so it is a logical
+ * mtime under the SQL projection.
  */
-import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+
 import {
-  buildIssueIdRegex,
-
-  IssueParseError,
-  parseIssue,
-} from "../issue-tracker/yaml.js";
+  dbListOpenIssues,
+  type DbIssueRow,
+} from "./issues-db.js";
 import type { Issue } from "../issue-tracker/interface.js";
-import { createLogger } from "../logger.js";
+import {
+  ancestorWaitingOrBlocked,
+  sortInputsForStatus,
+} from "../issue-tracker/sort.js";
+import { repoNameFromPath } from "./repo-name.js";
 
-const log = createLogger("local-issues");
-
-interface WalkEntry {
-  issue: Issue;
-  mtimeMs: number;
-}
-
-function walkOpenIssues(
-  repoLocalPath: string,
-  prefix: string,
-): WalkEntry[] {
-  const dir = resolve(repoLocalPath, ".danxbot", "issues", "open");
-  if (!existsSync(dir)) return [];
-  const idRegex = buildIssueIdRegex(prefix);
-  const out: WalkEntry[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (!entry.endsWith(".yml")) continue;
-    const stem = entry.slice(0, -".yml".length);
-    if (!idRegex.test(stem)) continue;
-    const path = resolve(dir, entry);
-    let issue: Issue;
-    try {
-      issue = parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: prefix });
-    } catch (err) {
-      // Malformed YAML on disk is a real fault — skip it but log loudly so
-      // the poller doesn't silently drop a card. The next tick re-tries.
-      const msg = err instanceof IssueParseError ? err.message : String(err);
-      log.error(`[local-issues] Failed to parse ${path}: ${msg}`);
-      continue;
-    }
-    out.push({ issue, mtimeMs: statSync(path).mtimeMs });
+function fifoCompare(a: DbIssueRow, b: DbIssueRow): number {
+  if (a.mirrorUpdatedAtMs !== b.mirrorUpdatedAtMs) {
+    return a.mirrorUpdatedAtMs - b.mirrorUpdatedAtMs;
   }
-  return out;
-}
-
-function fifoCompare(a: WalkEntry, b: WalkEntry): number {
-  if (a.mtimeMs !== b.mtimeMs) return a.mtimeMs - b.mtimeMs;
   return a.issue.id.localeCompare(b.issue.id);
 }
 
-function sortFifo(entries: WalkEntry[]): Issue[] {
-  // Oldest mtime first (FIFO across ticks); tiebreak by id ascending so
-  // ordering is deterministic when two YAMLs are written in the same ms.
-  entries.sort(fifoCompare);
-  return entries.map((e) => e.issue);
+function sortFifo(rows: DbIssueRow[]): Issue[] {
+  // Oldest mirror_updated_at first (FIFO across ticks); tiebreak by id
+  // ascending so two rows updated in the same instant resolve
+  // deterministically.
+  rows.sort(fifoCompare);
+  return rows.map((r) => r.issue);
 }
 
 /**
- * Walk `<repo>/.danxbot/issues/open/*.yml` and return every issue
- * eligible for dispatch this tick:
+ * Return every issue eligible for dispatch this tick. Predicates:
+ *
  *   - `status === "ToDo"`
  *   - `waiting_on === null`
  *   - `blocked === null`
  *   - `dispatch === null` (an active dispatch occupies the card)
+ *   - `type !== "Epic"` (epics are containers; phase children carry the work)
  *   - No ancestor (parent, grandparent, …) has `waiting_on !== null`
  *     OR `blocked !== null`. A blocked / waiting parent transitively
  *     blocks every descendant — the entire subtree is held until the
- *     ancestor's impediment clears. Cards do NOT need to repeat the
- *     ancestor's `waiting_on.by[]` on themselves; the relationship is
- *     resolved at dispatch time by walking `parent_id`. Closed
- *     ancestors (Done / Cancelled) are not in the open map and are
- *     treated as non-blocking by definition.
+ *     ancestor's impediment clears. Ancestor walk runs on the fetched
+ *     `byId` map; closed (Done / Cancelled) ancestors are excluded
+ *     from the map so they cannot block descendants.
  *
- * Sort order (Phase 4 of ISS-90):
- *   1. Untriaged cards first — `triage.expires_at === ""` means the
- *      poller has no priority signal, so flush them before triaged
- *      siblings. Newly hydrated cards hit this branch by default.
- *   2. Triaged cards by `triage.ice.total` DESC — highest ICE first.
- *   3. FIFO mtime tiebreak inside each tier so two cards stamped the
- *      same priority resolve deterministically.
+ * Sort: `sortInputsForStatus("ToDo", byId)` — see module header.
  */
-export function listDispatchableYamls(
+export async function listDispatchableYamls(
   repoLocalPath: string,
-  prefix: string,
-): Issue[] {
-  const all = walkOpenIssues(repoLocalPath, prefix);
+  _prefix: string,
+): Promise<Issue[]> {
+  const repoName = repoNameFromPath(repoLocalPath);
+  const rows = await dbListOpenIssues(repoName);
   const byId = new Map<string, Issue>();
-  for (const e of all) byId.set(e.issue.id, e.issue);
-  const filtered = all.filter((e) => {
-    const i = e.issue;
+  for (const r of rows) byId.set(r.issue.id, r.issue);
+  const filtered = rows.filter((r) => {
+    const i = r.issue;
     if (i.status !== "ToDo") return false;
     if (i.waiting_on !== null) return false;
     if (i.blocked !== null) return false;
@@ -134,81 +102,58 @@ export function listDispatchableYamls(
     // the epic itself produces a false-positive critical-failure flag
     // when a phase succeeds but the epic legitimately stays ToDo.
     if (i.type === "Epic") return false;
-    if (ancestorBlocks(i, byId)) return false;
+    if (ancestorWaitingOrBlocked(i, byId)) return false;
     return true;
   });
-  filtered.sort(workReadyCompare);
-  return filtered.map((e) => e.issue);
+  return sortInputsForStatus(
+    filtered.map((r) => ({
+      issue: r.issue,
+      payload: r.issue,
+      updatedAtMs: r.mirrorUpdatedAtMs,
+    })),
+    "ToDo",
+    byId,
+  );
 }
 
 /**
- * Walk the `parent_id` chain. Return true when ANY ancestor has a
- * non-null `waiting_on` or `blocked` record. Cycle-safe via a `seen`
- * set; closed ancestors (not in the open map) are treated as
- * non-blocking. The card's OWN waiting_on / blocked are NOT checked
- * here — caller (`listDispatchableYamls`) already filtered those.
- */
-function ancestorBlocks(issue: Issue, byId: Map<string, Issue>): boolean {
-  const seen = new Set<string>();
-  let parentId = issue.parent_id;
-  while (parentId !== null && !seen.has(parentId)) {
-    seen.add(parentId);
-    const parent = byId.get(parentId);
-    if (!parent) return false;
-    if (parent.waiting_on !== null) return true;
-    if (parent.blocked !== null) return true;
-    parentId = parent.parent_id;
-  }
-  return false;
-}
-
-function workReadyCompare(a: WalkEntry, b: WalkEntry): number {
-  const aUntriaged = a.issue.triage.expires_at === "";
-  const bUntriaged = b.issue.triage.expires_at === "";
-  if (aUntriaged !== bUntriaged) return aUntriaged ? -1 : 1;
-  const iceDelta = b.issue.triage.ice.total - a.issue.triage.ice.total;
-  if (iceDelta !== 0) return iceDelta;
-  return fifoCompare(a, b);
-}
-
-/**
- * Walk `<repo>/.danxbot/issues/open/*.yml` and return every In Progress
- * issue. Used by the orphan-resume / stuck-card recovery path. Same
- * FIFO ordering as `listDispatchableYamls` — oldest first so the
+ * Return every In Progress issue. Used by the orphan-resume / stuck-card
+ * recovery path. FIFO `mirror_updated_at` ordering — oldest first so the
  * longest-running orphan is reconciled first.
  */
-export function listInProgressYamls(
+export async function listInProgressYamls(
   repoLocalPath: string,
-  prefix: string,
-): Issue[] {
-  const filtered = walkOpenIssues(repoLocalPath, prefix).filter(
-    (e) => e.issue.status === "In Progress",
-  );
-  return sortFifo(filtered);
+  _prefix: string,
+): Promise<Issue[]> {
+  const repoName = repoNameFromPath(repoLocalPath);
+  const rows = await dbListOpenIssues(repoName);
+  return sortFifo(rows.filter((r) => r.issue.status === "In Progress"));
 }
 
 /**
- * Walk `<repo>/.danxbot/issues/open/*.yml` and return every ToDo issue
- * with a non-null `waiting_on` record. Companion to
- * `listDispatchableYamls` (which filters waiting_on=null out): the call
+ * Return every ToDo issue with a non-null `waiting_on` record. Companion
+ * to `listDispatchableYamls` (which filters waiting_on=null out): the call
  * site feeds these to `resolveWaitingOnCards` so a card whose dependencies
  * just became terminal can be cleared and appended to the dispatchable
- * pool on the same tick. "Blocked" here refers to the old data field name
- * (now `waiting_on`) — this function name reflects historical terminology.
+ * pool on the same tick. "Blocked" in the function name is historical
+ * (the field was renamed to `waiting_on`).
  */
-export function listBlockedTodoYamls(
+export async function listBlockedTodoYamls(
   repoLocalPath: string,
-  prefix: string,
-): Issue[] {
-  const filtered = walkOpenIssues(repoLocalPath, prefix).filter(
-    (e) => e.issue.status === "ToDo" && e.issue.waiting_on !== null,
+  _prefix: string,
+): Promise<Issue[]> {
+  const repoName = repoNameFromPath(repoLocalPath);
+  const rows = await dbListOpenIssues(repoName);
+  return sortFifo(
+    rows.filter(
+      (r) => r.issue.status === "ToDo" && r.issue.waiting_on !== null,
+    ),
   );
-  return sortFifo(filtered);
 }
 
 /**
- * Walk `<repo>/.danxbot/issues/open/*.yml` and return every issue that
- * the per-card triage agent should be dispatched against this tick.
+ * Return every issue the per-card triage agent should be dispatched
+ * against this tick.
  *
  * Eligible if all of:
  *   - `dispatch === null` (no in-flight dispatch on the card)
@@ -218,31 +163,36 @@ export function listBlockedTodoYamls(
  *      b. `waiting_on == null` AND `status === "Review"` — Review path
  *      c. `waiting_on == null` AND `status === "Blocked"` — Blocked path
  *
- * Sort (Phase 4 of ISS-90):
- *   1. Never-triaged first — `triage.expires_at === ""`. These are
- *      brand-new or post-migration cards; the operator wants priority
+ * Sort:
+ *   1. Never-triaged first — `triage.expires_at === ""`. Brand-new
+ *      cards or post-migration entries; the operator wants priority
  *      info ASAP so flush them before stale-but-priorited entries.
- *   2. Then `expires_at` ASC — oldest stale entry first so the poller
- *      catches up on overdue triage in chronological order.
- *   3. FIFO mtime tiebreak so two cards expiring the same instant
- *      resolve deterministically.
+ *   2. Then `expires_at` ASC — oldest stale first.
+ *   3. FIFO `mirror_updated_at` tiebreak.
  *
- * `now` is supplied by the caller (typically `Date.now()`) so tests can
- * pin the clock without monkey-patching `Date`.
+ * The triage_expires_at column is populated by the mirror writer
+ * (see `extractTriageExpiresAt` in `src/db/issues-mirror.ts`). An
+ * unparseable string lands as NULL, which falls through to the
+ * never-triaged branch — fail-open (re-triage will rewrite the field).
+ *
+ * `now` is supplied by the caller (typically `Date.now()`) so tests
+ * can pin the clock without monkey-patching `Date`.
  */
-export function listTriageDueYamls(
+export async function listTriageDueYamls(
   repoLocalPath: string,
   now: number,
-  prefix: string,
-): Issue[] {
-  const filtered = walkOpenIssues(repoLocalPath, prefix).filter((e) => {
-    const i = e.issue;
+  _prefix: string,
+): Promise<Issue[]> {
+  const repoName = repoNameFromPath(repoLocalPath);
+  const rows = await dbListOpenIssues(repoName);
+  const filtered = rows.filter((r) => {
+    const i = r.issue;
     if (i.dispatch !== null) return false;
     if (!isTriageDue(i, now)) return false;
     return inTriageScope(i);
   });
   filtered.sort(triageDueCompare);
-  return filtered.map((e) => e.issue);
+  return filtered.map((r) => r.issue);
 }
 
 function inTriageScope(issue: Issue): boolean {
@@ -260,7 +210,7 @@ function isTriageDue(issue: Issue, now: number): boolean {
   return expiresMs <= now;
 }
 
-function triageDueCompare(a: WalkEntry, b: WalkEntry): number {
+function triageDueCompare(a: DbIssueRow, b: DbIssueRow): number {
   const aNever = a.issue.triage.expires_at === "";
   const bNever = b.issue.triage.expires_at === "";
   if (aNever !== bNever) return aNever ? -1 : 1;
