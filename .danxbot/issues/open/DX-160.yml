@@ -276,6 +276,7 @@ retro:
     - **Test-reviewer flagged 4 lower-priority backfill tests not added** — 500-fallback for read/write throws across 5 handlers, invalid-JSON-body 400 for POST/PATCH/DELETE, full-update PATCH (every field at once). Folded into DX-214's scope rather than ballooning this PR. The 500 fallbacks all share the same `try/catch → json(res, 500, ...)` shape; one parameterized test in DX-214 closes them all.
   action_item_ids:
     - DX-214
-  commits: []
+  commits:
+    - c853107510542934550c553086fc3e0d927cc040
 waiting_on: null
 blocked: null
