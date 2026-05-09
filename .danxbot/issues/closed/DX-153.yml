@@ -1,11 +1,17 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-153
 external_id: 69fe1eac3961b2f48802f4ff
 parent_id: DX-151
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: 2e6e5a72-3db5-4965-9329-32c9b7f6ef1c
+  pid: 11914
+  host: dan
+  kind: work
+  started_at: 2026-05-09T00:52:12.664Z
+  ttl_seconds: 7200
+status: Done
 type: Feature
 title: "Issues DB Mirror > Phase 2: Add issues + issue_history tables (PG schema, generated columns, indexes)"
 description: |-
@@ -137,6 +143,7 @@ description: |-
   - Any reader migration (DX-155, DX-156).
   - Adding `assigned_agent` to the `Issue` TypeScript type — the multi-worker epic owns that. The DB column may evaluate to NULL today; that is fine.
   - Picking the read-your-writes mechanism (DX-154 picks).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -151,41 +158,156 @@ triage:
 ac:
   - check_item_id: 69fe1eacdf7fe13a80fde095
     title: src/db/migrations/016_issues_mirror.ts created with up/down; applies cleanly on empty PG DB
-    checked: false
+    checked: true
   - check_item_id: 69fe1eadf60d24cab8903247
     title: issues table — every spec column present with correct type (verified by test reading information_schema)
-    checked: false
+    checked: true
   - check_item_id: 69fe1ead95f89bff7dd5d5ec
     title: issues — every generated column derives correct value from inserted data jsonb
-    checked: false
+    checked: true
   - check_item_id: 69fe1eaea55a13c1f16d056a
     title: issues — every index in the spec exists (issues_status, _status_kind, _assigned, _parent, _triage_due, _dispatch_id, _labels_gin)
-    checked: false
+    checked: true
   - check_item_id: 69fe1eae61523efbd6e8ffef
     title: issue_history table — columns + 2 indexes match spec; no FK to issues (history survives issue deletion)
-    checked: false
+    checked: true
   - check_item_id: 69fe1eae65d414790f3980ef
     title: down() drops both tables; up() re-applies cleanly afterward
-    checked: false
+    checked: true
   - check_item_id: 69fe1eaf0f1ab61d73e02e77
     title: 9 tests in 016_issues_mirror.test.ts pass
-    checked: false
+    checked: true
   - check_item_id: 69fe1eaf536d612595b7c062
     title: grep verifies zero callsites read/write the new tables (Phase 2 introduces schema only)
-    checked: false
+    checked: true
   - check_item_id: 69fe1eb0738e6708b2c7b274
     title: full vitest suite green; tsc + vue-tsc clean
-    checked: false
-comments: []
+    checked: true
+comments:
+  - author: test-reviewer
+    timestamp: 2026-05-09T01:30:00Z
+    text: |
+      ## Test Review
+
+      **Verdict:** ADEQUATE (with minor optional follow-ups).
+
+      All 9 tests map cleanly to AC #1–#7, #8 (initial-creation), #9
+      (no-cascade). AC "zero callsites read/write the new tables" is a
+      `grep` verification, correctly excluded from the 9-test count.
+
+      ### Coverage observations
+
+      - Sparse + rich row in the generated-columns test exercises NULL
+        passthrough, the `blocked` `COALESCE` branch, the `pid::int`
+        cast, the `dispatch.id` `#>>` extraction, and labels jsonb
+        passthrough.
+      - Index test uses `has()` not equality — extra indexes wouldn't
+        fail (intentional; partial-index DDL is verified at apply).
+      - The down/up-cycle test restores the schema before returning so
+        the rest of the suite still sees a clean migration.
+      - `test-db.ts` is exercised end-to-end (create → up → query → down
+        → up → close). Direct unit tests would mostly assert
+        `pg`-library behavior — skipped intentionally.
+
+      ### Optional follow-ups (Phase 3, not blocking)
+
+      - PK uniqueness on `(repo_name, id)` not pinned — a typo turning
+        the PK into a non-unique constraint would pass.
+      - `blocked: null` literal jsonb branch is documented in the
+        migration header but no test pins the behavior.
+      - Malformed `dispatch.pid` (non-numeric) — `(text)::int` would
+        raise on insert; Phase 3 writer concern.
+
+      No flake risks identified — cleanups, schema restoration, unique
+      DB names via `randomBytes(6).toString("hex")`, and
+      `pg_terminate_backend` before `DROP DATABASE` are all in place.
+  - author: code-reviewer
+    timestamp: 2026-05-09T01:30:00Z
+    text: |
+      ## Code Review
+
+      **Verdict:** PASS with non-blocking notes.
+
+      Three files are clean, well-documented, and match conventions
+      from DX-140 / DX-152. AC met (9 tests). DDL quoting consistent
+      with siblings (`002_events_table.ts`, `009_dispatches_table.ts`).
+      Generated-column expressions correctly limited to IMMUTABLE
+      operators. Schema-only Phase 2 boundary respected — zero
+      application-code references.
+
+      ### Findings (all addressed)
+
+      1. **`DANXBOT_DB_HOST_TEST` env var** in `src/db/test-db.ts`
+         invented a one-off contract that defaulted to `127.0.0.1`
+         anyway — the test always runs from the host where `127.0.0.1`
+         is the only reachable address. **Fix:** dropped the env var,
+         hard-coded `127.0.0.1`. Documented why.
+      2. **Bare `catch {}` in `createTestDb`** swallowed connectivity
+         errors silently — operators couldn't distinguish "PG not
+         running" from "wrong port / bad password". **Fix:** added a
+         `console.warn` inside the catch surfacing the error message.
+      3. **DRY violation** — `runUp` and `runDown` in the test file
+         differed only in the `up`/`down` symbol. **Fix:** collapsed to
+         a single `runMigration(pool, fn)` helper.
+      4. **`blocked` COALESCE** at `016_issues_mirror.ts:81-84` is
+         correct and IMMUTABLE; verified `jsonb_typeof('null'::jsonb)
+         = 'null'`, not `'object'`. No change needed.
+  - author: danxbot
+    timestamp: 2026-05-09T01:30:00Z
+    text: |
+      ## Review Fixes
+
+      Applied all three actionable findings from `code-reviewer` before
+      committing:
+
+      - Dropped `DANXBOT_DB_HOST_TEST` env-var read; `127.0.0.1`
+        hard-coded with comment explaining why (test always runs from
+        host).
+      - Added `console.warn` inside `createTestDb`'s catch so PG-down
+        vs PG-misconfigured is distinguishable.
+      - Collapsed `runUp`/`runDown` in the test file to a single
+        `runMigration(pool, fn)` helper.
+
+      Re-verified: 9/9 tests pass, full backend suite (3516 tests)
+      green, `npx tsc --noEmit` clean, `cd dashboard && npx vue-tsc
+      --noEmit` clean.
 history:
   - timestamp: 2026-05-08T23:13:30.605Z
     actor: worker:auto-derive
     event: unblocked
     note: "All deps terminal: DX-152"
 retro:
-  good: ""
-  bad: ""
+  good: |
+    - All 9 ACs satisfied on the first commit. 9/9 integration tests
+      pass against the local `danxbot-postgres`; full backend suite
+      (3516 tests) green; `npx tsc --noEmit` and `npx vue-tsc --noEmit`
+      clean.
+    - Generated-column DDL landed correctly on the first run despite
+      PG's IMMUTABLE/STABLE distinction for `text::timestamptz` — the
+      card description's documented escape hatch (regular columns for
+      timestamptz, populated by Phase 3 writer) avoided the trap.
+    - Code review caught three minor issues (one-off env var, silent
+      catch, DRY in `runUp`/`runDown`) — all fixed in the same
+      dispatch before committing.
+    - Real-PG integration tests fill the gap left by the existing
+      mock-only `migrate.test.ts` — `src/db/test-db.ts` is the
+      reusable building block Phase 3+ will need anyway.
+  bad: |
+    - Card description claimed Phase 1 already ships a `withTestDb()`
+      helper. It did not — DX-152's tests are mock-only. Built the
+      helper from scratch in this dispatch.
+    - First test run skipped all 9 tests because `it.skipIf(!handle)`
+      evaluates eagerly at describe-collection time, not lazily at
+      test-runtime — `beforeAll`-built handle was always null when
+      `skipIf` ran. Refactored to top-level `await createTestDb()`
+      before the describe block. Cost ~5 minutes.
+    - Initial `blocked` column expression
+      `(jsonb_typeof(data->'blocked') = 'object')` returned NULL
+      (not `false`) when `data` had no `blocked` key, because
+      `NULL = 'object'` is NULL in SQL. Wrapped in `COALESCE(..., false)`.
+      Caught immediately by the rich/sparse generated-columns test.
   action_item_ids: []
-  commits: []
+  commits:
+    - 98a38e0
 waiting_on: null
 blocked: null
