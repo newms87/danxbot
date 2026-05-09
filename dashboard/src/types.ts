@@ -65,6 +65,8 @@ export type {
   IssueAcItem,
   IssueComment,
   IssueRetro,
+  IssueHistoryEntry,
+  IssueHistoryEvent,
   WaitingOn,
   Blocked,
 } from "@backend/issue-tracker/interface.js";

@@ -8,13 +8,14 @@ import ChildrenTab from "./ChildrenTab.vue";
 import CommentsTab from "./CommentsTab.vue";
 import RetroTab from "./RetroTab.vue";
 import RawTab from "./RawTab.vue";
+import HistoryTab from "./HistoryTab.vue";
 import AgentChat from "../chat/AgentChat.vue";
 import { acCounts } from "./acCounts";
 
-type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "retro" | "raw";
+type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "history" | "retro" | "raw";
 
 const VALID_TABS: ReadonlyArray<TabId> = [
-  "overview", "ac", "children", "chat", "comments", "retro", "raw",
+  "overview", "ac", "children", "chat", "comments", "history", "retro", "raw",
 ];
 
 // Two persisted defaults: epic vs non-epic. Different card kinds have
@@ -110,6 +111,14 @@ const tabs = computed(() => {
           : ""),
       disabled: false,
     },
+    {
+      id: "history",
+      label: (() => {
+        const n = props.issue?.history?.length ?? 0;
+        return n > 0 ? `History · ${n}` : "History";
+      })(),
+      disabled: false,
+    },
     { id: "retro", label: "Retro", disabled: !hasRetro.value },
     { id: "raw", label: "Raw YAML", disabled: false },
   );
@@ -177,6 +186,7 @@ function selectTab(id: TabId, disabled: boolean): void {
           @jump-issue="(id) => emit('jump-issue', id)"
         />
         <CommentsTab v-else-if="tab === 'comments'" :issue="issue" />
+        <HistoryTab v-else-if="tab === 'history'" :issue="issue" />
         <RetroTab v-else-if="tab === 'retro'" :issue="issue" />
         <RawTab v-else-if="tab === 'raw'" :issue="issue" />
       </div>
