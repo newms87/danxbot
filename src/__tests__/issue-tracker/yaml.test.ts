@@ -25,7 +25,7 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -36,6 +36,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     type: "Feature",
     title: "Do the thing",
     description: "A longer body",
+    priority: 3.0,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [{ check_item_id: "ac-1", title: "Returns 200", checked: false }],
     comments: [
@@ -74,6 +75,26 @@ describe("serializeIssue / parseIssue", () => {
     const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
     expect(parsed.status).toBe("Needs Approval");
     expect(serializeIssue(parsed)).toBe(yaml);
+  });
+
+  it("round-trips status: ToDo + waiting_on byte-stable (DX-212)", () => {
+    // The canonical compliant shape under the new parser invariant. A
+    // serialize → parse → re-serialize chain MUST be byte-identical so
+    // `waiting_on != null + status: ToDo` round-trips without normalization
+    // surprises (no field gets dropped, no field gets reordered).
+    const issue = fullIssue({
+      status: "ToDo",
+      waiting_on: {
+        reason: "Waiting on ISS-99 to ship",
+        timestamp: "2026-05-09T00:00:00.000Z",
+        by: ["ISS-99"],
+      },
+    });
+    const yaml1 = serializeIssue(issue);
+    const parsed = parseIssue(yaml1, { expectedPrefix: "ISS" });
+    expect(parsed).toEqual(issue);
+    const yaml2 = serializeIssue(parsed);
+    expect(yaml2).toBe(yaml1);
   });
 
   it("preserves null parent_id and dispatch through round-trip", () => {
@@ -466,11 +487,11 @@ describe("validateIssue", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 5 produces the exact error string (next unsupported version)", () => {
-    const result = validateIssue(valid({ schema_version: 5 }));
+  it("schema_version: 6 produces the exact error string (next unsupported version)", () => {
+    const result = validateIssue(valid({ schema_version: 6 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors).toContain("schema_version must be 3 or 4 (got 5)");
+      expect(result.errors).toContain("schema_version must be 3, 4, or 5 (got 6)");
     }
   });
 
@@ -576,6 +597,218 @@ describe("validateIssue", () => {
         ),
       ).toBe(true);
     }
+  });
+});
+
+// DX-212: parser invariant — `waiting_on != null` REQUIRES `status: ToDo`.
+// Mirrors the existing `Blocked ⟺ blocked != null` invariant. Pushed into
+// the parser so every reader (auto-sync, poller heal, dashboard, retry
+// queue) refuses bad shape uniformly — the worker's `forceWaitingOnToToDo`
+// is no longer the only enforcement, and the trigger=trello gate in
+// `auto-sync.ts` can no longer let a non-Trello dispatch silently land
+// `status: In Progress + waiting_on: {…}` on disk.
+describe("validateIssue waiting_on ⟹ status: ToDo invariant (DX-212)", () => {
+  function withWaitingOnAndStatus(
+    waitingOn: unknown,
+    status: string,
+  ): Record<string, unknown> {
+    return {
+      schema_version: 4,
+      tracker: "trello",
+      id: "ISS-42",
+      external_id: "",
+      parent_id: null,
+      children: [],
+      dispatch: null,
+      status,
+      type: "Bug",
+      title: "t",
+      description: "",
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      blocked: null,
+      waiting_on: waitingOn,
+    };
+  }
+
+  const populatedWaitingOn = {
+    reason: "queued behind ISS-99",
+    timestamp: "2026-05-09T00:00:00.000Z",
+    by: ["ISS-99"],
+  };
+
+  it("accepts waiting_on != null with status: ToDo (the canonical shape)", () => {
+    const result = validateIssue(
+      withWaitingOnAndStatus(populatedWaitingOn, "ToDo"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts waiting_on: null with any non-Blocked status", () => {
+    for (const status of ["Review", "ToDo", "In Progress", "Done", "Cancelled", "Needs Approval"]) {
+      const result = validateIssue(
+        withWaitingOnAndStatus(null, status),
+        { expectedPrefix: "ISS" },
+      );
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it("rejects waiting_on != null with status: In Progress", () => {
+    const result = validateIssue(
+      withWaitingOnAndStatus(populatedWaitingOn, "In Progress"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) =>
+          /waiting_on is non-null but status is 'In Progress'/.test(e),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects waiting_on != null with status: Review", () => {
+    const result = validateIssue(
+      withWaitingOnAndStatus(populatedWaitingOn, "Review"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) =>
+          /waiting_on is non-null but status is 'Review'/.test(e),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects waiting_on != null with status: Done", () => {
+    const result = validateIssue(
+      withWaitingOnAndStatus(populatedWaitingOn, "Done"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) =>
+          /waiting_on is non-null but status is 'Done'/.test(e),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects waiting_on != null with status: Cancelled", () => {
+    const result = validateIssue(
+      withWaitingOnAndStatus(populatedWaitingOn, "Cancelled"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects waiting_on != null with status: Needs Approval", () => {
+    const result = validateIssue(
+      withWaitingOnAndStatus(populatedWaitingOn, "Needs Approval"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(false);
+  });
+
+  it("error message names the offending status verbatim and points at the rule", () => {
+    const result = validateIssue(
+      withWaitingOnAndStatus(populatedWaitingOn, "In Progress"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const offending = result.errors.find((e) =>
+        /waiting_on is non-null but status/.test(e),
+      );
+      expect(offending).toBeDefined();
+      // The message points the operator/agent at the corrective action so
+      // the failure is loud AND actionable.
+      expect(offending).toContain("'In Progress'");
+      expect(offending).toContain("'ToDo'");
+    }
+  });
+
+  it("does not double-report the invariant when the status enum is itself invalid", () => {
+    // A bogus status value already fails validation via the enum check.
+    // We don't want a SECOND `waiting_on / status` error on top — that
+    // would be confusing noise. The invariant only fires when status is
+    // a recognized non-ToDo enum.
+    const result = validateIssue(
+      withWaitingOnAndStatus(populatedWaitingOn, "totally-bogus"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.errors.some((e) =>
+          /waiting_on is non-null but status is 'totally-bogus'/.test(e),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it("parseIssue throws IssueParseError on a serialized YAML carrying the bad shape", () => {
+    // Hand-build the YAML text rather than going through serializeIssue
+    // so the test pins the on-disk surface, not the in-memory object.
+    // This is the surface a human-edited file or pre-DX-212 agent would
+    // hit on the next reader's parseIssue call.
+    const yaml = [
+      "schema_version: 4",
+      "tracker: trello",
+      "id: ISS-42",
+      'external_id: ""',
+      "parent_id: null",
+      "children: []",
+      "dispatch: null",
+      "status: In Progress",
+      "type: Bug",
+      "title: t",
+      "description: ''",
+      "priority: 3",
+      "triage:",
+      "  expires_at: ''",
+      "  reassess_hint: ''",
+      "  last_status: ''",
+      "  last_explain: ''",
+      "  ice: { total: 0, i: 0, c: 0, e: 0 }",
+      "  history: []",
+      "ac: []",
+      "comments: []",
+      "history: []",
+      "retro:",
+      "  good: ''",
+      "  bad: ''",
+      "  action_item_ids: []",
+      "  commits: []",
+      "waiting_on:",
+      "  reason: queued behind ISS-99",
+      "  timestamp: 2026-05-09T00:00:00Z",
+      "  by:",
+      "    - ISS-99",
+      "blocked: null",
+      "",
+    ].join("\n");
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+      IssueParseError,
+    );
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+      /waiting_on is non-null but status/,
+    );
   });
 });
 
@@ -721,7 +954,7 @@ describe("createEmptyIssue", () => {
 
   it("uses sensible defaults when no seed fields are provided", () => {
     const issue = createEmptyIssue();
-    expect(issue.schema_version).toBe(4);
+    expect(issue.schema_version).toBe(5);
     expect(issue.tracker).toBe("memory");
     expect(issue.children).toEqual([]);
     expect(issue.status).toBe("ToDo");
@@ -738,7 +971,7 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -749,6 +982,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       type: "Feature",
       title: "Canonical fixture",
       description: "First line of description.\nSecond line, with detail.",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [
         { check_item_id: "ac-1", title: "Returns 200", checked: false },
@@ -774,7 +1008,7 @@ describe("serializeIssue byte-stable snapshot", () => {
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 4
+      "schema_version: 5
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -789,6 +1023,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       description: |-
         First line of description.
         Second line, with detail.
+      priority: 3
       triage:
         expires_at: ""
         reassess_hint: ""

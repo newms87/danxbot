@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-166
 external_id: 69fe26d76c62bc82a3f1208e
@@ -122,6 +122,7 @@ description: |-
   - Skipping `RETURNING` and falling back to `SELECT LAST_VALUE FROM <seq>`. PG's last-value-of-sequence is per-session and brittle; `RETURNING` is the canonical answer.
   - Casually dropping `fake-platform-pool`'s `field` packet emit. The integration tests assert on `FieldPacket` shape. Update both sides together.
   - Moving infra changes (compose, package.json) into this phase. Phase 1.4 owns those — keep this phase about modules + tests only.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -186,9 +187,5 @@ retro:
   action_item_ids: []
   commits:
     - 1ad6504
-waiting_on:
-  reason: "Waits for DX-165 (Phase 1.2: Re-author 15 migrations in PG syntax) — without re-authored PG migrations, consumer modules can't actually run against a PG database; the order matters."
-  timestamp: 2026-05-08T18:30:00.000Z
-  by:
-    - DX-165
+waiting_on: null
 blocked: null

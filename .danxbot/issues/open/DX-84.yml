@@ -1,11 +1,11 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-84
 external_id: 69fa8b114034e53cfffb8164
 parent_id: DX-82
 children: []
 dispatch: null
-status: Review
+status: ToDo
 type: Feature
 title: "[Dashboard > Issues] Agent Chat > Phase 2: JSONL stream + resume backend"
 description: |-
@@ -116,6 +116,7 @@ description: |-
   - `dashboard/src/components/chat/BoardSessionPicker.vue` (real wiring)
   - `dashboard/src/components/chat/TokenMeter.vue` (real wiring)
   - `dashboard/src/components/chat/chatFixtures.ts` (delete)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

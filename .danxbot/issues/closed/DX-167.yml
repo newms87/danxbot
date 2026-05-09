@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-167
 external_id: 69fe272c156224f714beeeec
@@ -115,6 +115,7 @@ description: |-
   - Removing `mysql2` from `package.json` BEFORE the consumer port phase (1.3) lands. The dispatch order via `blocked.by` prevents this — if you somehow start work on this phase before 1.3 is Done, immediately stop and verify 1.3's status.
   - Skipping the operator step. The card cannot be marked Done without operator verification — the agent's vitest + tsc passes are necessary but not sufficient. Mark Needs Help with the playbook; let the operator run + report.
   - Renaming `DANXBOT_DB_*` env vars. The brainstorm decision keeps the names stable so SSM keys don't churn — only the underlying engine changes.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -188,9 +189,5 @@ retro:
   action_item_ids: []
   commits:
     - 1ad6504
-waiting_on:
-  reason: "Waits for DX-166 (Phase 1.3: Port every *-db.ts consumer module + full vitest green) — until every consumer ports to PG and tests are green, removing MySQL infrastructure would break the build."
-  timestamp: 2026-05-08T18:30:00.000Z
-  by:
-    - DX-166
+waiting_on: null
 blocked: null

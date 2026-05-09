@@ -826,15 +826,29 @@ export async function handleIssueCreate(
 }
 
 /**
- * Force `status: "ToDo"` whenever the YAML carries a non-null `waiting_on`
- * record. Returns the original issue unchanged when `waiting_on === null` or
- * `status` is already ToDo, so the no-op path doesn't allocate.
+ * Defense-in-depth normalizer. Forces `status: "ToDo"` whenever the input
+ * Issue carries a non-null `waiting_on` record. Returns the original issue
+ * unchanged when `waiting_on === null` or `status` is already ToDo, so the
+ * no-op path doesn't allocate.
  *
- * Why this lives in the worker (not the agent's skill text): if any agent
- * forgets the rule, the worker silently corrects it before persistence and
- * before the tracker push. The pairing is mechanical — `waiting_on` and
- * `status: ToDo` are inseparable — so it belongs at the layer that owns
- * persistence, not at the layer that's easy to forget.
+ * **Load-bearing enforcement of this invariant lives in the parser.**
+ * `validateIssue` in `src/issue-tracker/yaml.ts` rejects any YAML with
+ * `waiting_on != null && status !== "ToDo"` (DX-212). Every `parseIssue`
+ * caller — `syncTrackedIssueOnComplete`, the poller's heal pass, the
+ * dashboard reader, the retry queue — therefore refuses the bad shape on
+ * read. This helper only matters for in-memory `Issue` values constructed
+ * WITHOUT going through `parseIssue` (test fixtures, future programmatic
+ * builders). On the auto-sync path here, `parseIssue` at line ~898 throws
+ * before this helper would ever see a non-compliant shape, so the helper
+ * is a no-op in production. Kept for two reasons: (a) defense-in-depth
+ * against a future caller that constructs an Issue programmatically and
+ * forgets the pairing, (b) the existing test surface invokes it directly.
+ *
+ * Historical note (pre-DX-212): this WAS the load-bearing enforcement.
+ * The `auto-sync.ts` `trigger === "trello"` gate meant non-Trello
+ * dispatches skipped this normalization entirely, leaving
+ * `status: In Progress + waiting_on: {…}` on disk indefinitely. Promoting
+ * the invariant into the parser closed that gap structurally.
  */
 export function forceWaitingOnToToDo(issue: Issue): Issue {
   if (issue.waiting_on === null) return issue;

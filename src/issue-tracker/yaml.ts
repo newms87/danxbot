@@ -24,6 +24,24 @@ import {
 } from "./interface.js";
 
 const TRIAGE_HISTORY_CAP = 10;
+
+/**
+ * Priority field bounds + default. Operators set `priority` in
+ * `[1.0, 5.0]` (float; 3.0 is "medium"); the parser clamps out-of-range
+ * values and defaults missing fields to `PRIORITY_DEFAULT` so legacy
+ * v3/v4 YAMLs round-trip without a hard migration. See `Issue.priority`
+ * for the full semantic. Introduced by ISS-210.
+ */
+export const PRIORITY_MIN = 1.0;
+export const PRIORITY_MAX = 5.0;
+export const PRIORITY_DEFAULT = 3.0;
+
+function clampPriority(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return PRIORITY_DEFAULT;
+  if (raw < PRIORITY_MIN) return PRIORITY_MIN;
+  if (raw > PRIORITY_MAX) return PRIORITY_MAX;
+  return raw;
+}
 const VALID_DISPATCH_KINDS: ReadonlySet<string> = new Set(["work", "triage"]);
 
 /**
@@ -115,7 +133,7 @@ export function createEmptyIssue(
   } = {},
 ): Issue {
   return {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -126,6 +144,7 @@ export function createEmptyIssue(
     type: seed.type ?? "Feature",
     title: seed.title ?? "",
     description: seed.description ?? "",
+    priority: PRIORITY_DEFAULT,
     triage: emptyTriage(),
     ac: [],
     comments: [],
@@ -257,6 +276,7 @@ export function serializeIssue(issue: Issue): string {
     type: issue.type,
     title: issue.title,
     description: issue.description,
+    priority: issue.priority,
     triage: {
       expires_at: issue.triage.expires_at,
       reassess_hint: issue.triage.reassess_hint,
@@ -431,7 +451,7 @@ export function buildIssueIdRegex(prefix: string): RegExp {
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 4,
+    schema_version: 5,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -440,6 +460,7 @@ export function issueToCreateInput(issue: Issue): CreateCardInput {
     type: issue.type,
     title: issue.title,
     description: issue.description,
+    priority: issue.priority,
     triage: cloneTriage(issue.triage),
     ac: issue.ac.map((a) => ({ title: a.title, checked: a.checked })),
     comments: issue.comments.map((c) => ({ ...c })),
@@ -519,9 +540,13 @@ export function validateIssue(
     errors.push(
       `schema_version ${v.schema_version} is no longer supported — run scripts/migrate-issues-to-v3.ts to upgrade`,
     );
-  } else if (v.schema_version !== 3 && v.schema_version !== 4) {
+  } else if (
+    v.schema_version !== 3 &&
+    v.schema_version !== 4 &&
+    v.schema_version !== 5
+  ) {
     errors.push(
-      `schema_version must be 3 or 4 (got ${JSON.stringify(v.schema_version)})`,
+      `schema_version must be 3, 4, or 5 (got ${JSON.stringify(v.schema_version)})`,
     );
   }
 
@@ -769,6 +794,19 @@ export function validateIssue(
   // Invariant: status === "Blocked" ⟺ blocked !== null. Worker write-paths
   // enforce this on write; the parser enforces it on read so a hand-edited
   // file with a half-set state fails loud rather than landing in memory.
+  //
+  // DX-212: paired invariant — `waiting_on != null ⟹ status === "ToDo"`.
+  // The worker's `forceWaitingOnToToDo` helper is the legacy enforcement
+  // point, but it only ran inside `syncTrackedIssueOnComplete` AFTER the
+  // `auto-sync.ts` `trigger === "trello"` gate. Non-Trello dispatches
+  // (`/api/launch issue-worker`, future workspaces) silently skipped that
+  // normalization, leaving `status: In Progress + waiting_on: {…}` on
+  // disk. Pushing the invariant into the parser makes every reader refuse
+  // the bad shape uniformly — the chokidar mirror still upserts the raw
+  // YAML to Postgres (it uses `parseYamlText`, not `parseIssue`), but the
+  // poller's heal pass / `syncTrackedIssueOnComplete` / dashboard reader
+  // / retry queue all hit `parseIssue` and fail loud via
+  // `recordSystemError` so the operator banner surfaces the bad file.
   if (
     typeof v.status === "string" &&
     ISSUE_STATUSES.includes(v.status as IssueStatus)
@@ -783,6 +821,11 @@ export function validateIssue(
     if (!statusBlocked && fieldBlocked) {
       errors.push(
         `blocked field is non-null but status is '${v.status}' — must set status to 'Blocked'`,
+      );
+    }
+    if (waitingOnResult !== null && v.status !== "ToDo") {
+      errors.push(
+        `waiting_on is non-null but status is '${v.status}' — must set status to 'ToDo' (waiting_on overrides any other status; the poller skips dispatch while any blocker is non-terminal)`,
       );
     }
   }
@@ -804,8 +847,14 @@ export function validateIssue(
   }
 
   // All required fields present and well-typed; build the validated Issue.
+  // Priority: missing / out-of-range values are clamped to `[1.0, 5.0]` and
+  // missing fields default to `3.0` — same forgiving shape as `description`
+  // so v3 / v4 YAMLs round-trip without a hard migration. The
+  // `migrate-issues-priority.ts` one-off bumps the on-disk shape lazily.
+  const priorityValue =
+    "priority" in v ? clampPriority(v.priority) : PRIORITY_DEFAULT;
   const issue: Issue = {
-    schema_version: 4,
+    schema_version: 5,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
@@ -816,6 +865,7 @@ export function validateIssue(
     type: v.type as IssueType,
     title: v.title as string,
     description: description as string,
+    priority: priorityValue,
     triage: triageResult as IssueTriage,
     ac: acResult as IssueAcItem[],
     comments: commentsResult as IssueComment[],

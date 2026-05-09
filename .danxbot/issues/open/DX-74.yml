@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-74
 external_id: 69fa26ef9011d56c9c662dfe
@@ -10,7 +10,7 @@ children:
   - DX-78
   - DX-79
 dispatch: null
-status: Review
+status: ToDo
 type: Epic
 title: "Auto-triage poller: triage Action Items + Review when ToDo is empty"
 description: |-
@@ -97,6 +97,7 @@ description: |-
     Item + Review card with one of the five outcomes above.
   - Toggle off → poller behavior unchanged from today (ideator still
     runs when Review is short).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

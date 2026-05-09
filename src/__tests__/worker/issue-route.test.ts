@@ -668,25 +668,26 @@ describe("syncTrackedIssueOnComplete", () => {
     expect(result.errors[0]).toMatch(/No YAML file found at \.danxbot\/issues/);
   });
 
-  it("DX-157 AC #1: forceWaitingOnToToDo normalizes In Progress + waiting_on YAML to ToDo + waiting_on preserved", async () => {
-    // Pin the legacy `handleIssueSave` normalization contract — the
-    // load-bearing line for the worker's `waiting_on != null → status:
-    // ToDo` rule. After DX-157 the SOLE entry point is
-    // `syncTrackedIssueOnComplete`. An agent that writes
-    // `status: In Progress + waiting_on: {...}` MUST be normalized to
-    // `status: ToDo + waiting_on preserved` on the post-completion
-    // auto-sync. (The `status: Blocked + waiting_on != null` shape is
-    // rejected by `parseIssue`'s v4 invariant before normalization
-    // could even run, so the agent's category-error path goes through
-    // the `status: In Progress` branch.)
+  it("DX-157 AC #1 (post-DX-212): preserves the canonical `status: ToDo + waiting_on: {…}` YAML through the auto-sync round-trip", async () => {
+    // After DX-212 the parser invariant rejects
+    // `status: In Progress + waiting_on: {...}` at parse time, so the
+    // legacy `forceWaitingOnToToDo` normalization is no longer the
+    // load-bearing enforcement (it remains as defense-in-depth for
+    // in-memory Issues constructed by tests / non-parse paths). What we
+    // pin here is the canonical compliant shape: a YAML where
+    // `status: ToDo` and `waiting_on != null` round-trips through
+    // `syncTrackedIssueOnComplete` byte-stable. The "what happens when
+    // an agent writes the bad shape" branch now lives in the
+    // `rejects status: In Progress + waiting_on: {…} via parseIssue
+    // invariant (DX-212)` test below.
     const issue: Issue = {
       ...createEmptyIssue({
         id: "ISS-9301",
         external_id: "",
-        title: "Waiting on normalize",
+        title: "Waiting on canonical",
       }),
       tracker: "memory",
-      status: "In Progress",
+      status: "ToDo",
       waiting_on: {
         reason: "Waiting on ISS-99 to ship",
         timestamp: "2026-05-08T00:00:00.000Z",
@@ -702,22 +703,81 @@ describe("syncTrackedIssueOnComplete", () => {
       { tracker: h.tracker, recordError: async () => {} },
     );
     if (!result.ok) {
-      // Surface the parser error so a future failure doesn't reduce
-      // to a bare `false` mismatch.
       throw new Error(`syncTrackedIssueOnComplete failed: ${result.errors.join(" | ")}`);
     }
     expect(result.ok).toBe(true);
     await _drainAsyncWorkForTesting();
 
-    // File stays in `open/` (ToDo is non-terminal).
+    // File stays in `open/` (ToDo is non-terminal); status preserved.
     const persisted = readYaml(h.repo.localPath, "ISS-9301");
     expect(persisted).toContain("status: ToDo");
-    expect(persisted).not.toContain("status: In Progress");
     expect(persisted).toContain("blocked: null");
-    // waiting_on is preserved — that's the queueing signal the poller
-    // reads; only the status field is normalized.
     expect(persisted).toContain("by:");
     expect(persisted).toContain("ISS-99");
+  });
+
+  it("DX-212: rejects `status: In Progress + waiting_on: {…}` via parseIssue invariant (records error, returns ok:false)", async () => {
+    // The category-error shape an agent following the SKILL.md text
+    // ("set waiting_on, leave status alone") historically left on disk
+    // after a `/api/launch issue-worker` dispatch — `auto-sync.ts`
+    // skipped the normalization for non-Trello triggers, leaving the
+    // YAML un-normalized indefinitely. After DX-212 the parser
+    // invariant `waiting_on != null ⟹ status === "ToDo"` lives in
+    // `validateIssue`, so EVERY reader hits the failure: the auto-sync
+    // path here records the error against the dispatch row and returns
+    // `{ok: false}`; the next poller heal pass surfaces it on the
+    // dashboard's system-errors banner; the chokidar mirror still
+    // upserts the raw YAML to Postgres (it uses `parseYamlText`, not
+    // `parseIssue`) but the dashboard reader's `parseIssue` call
+    // refuses the bad shape too.
+    //
+    // We bypass `serializeIssue` here because the in-memory Issue is
+    // constructed with the bad shape; `serializeIssue` is non-validating
+    // and emits whatever it's handed, which is exactly the surface a
+    // post-`Edit`-tool agent leaves behind.
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-9302",
+        external_id: "",
+        title: "Bad shape from non-Trello dispatch",
+      }),
+      tracker: "memory",
+      status: "In Progress",
+      waiting_on: {
+        reason: "Waiting on ISS-99 to ship",
+        timestamp: "2026-05-08T00:00:00.000Z",
+        by: ["ISS-99"],
+      },
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    const recordedErrors: Array<{ dispatchId: string; message: string }> = [];
+    const result = await syncTrackedIssueOnComplete(
+      "dispatch-bad-shape",
+      h.repo,
+      "ISS-9302",
+      {
+        tracker: h.tracker,
+        recordError: async (dispatchId, message) => {
+          recordedErrors.push({ dispatchId, message });
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors[0]).toMatch(/waiting_on is non-null but status is 'In Progress'/);
+    // The auto-sync prefixes its recordError so the dashboard
+    // dispatches detail panel surfaces the validation gap; the dispatch
+    // row carries `error: "danxbot_complete auto-sync validation
+    // failure: …"` for the operator.
+    expect(recordedErrors).toHaveLength(1);
+    expect(recordedErrors[0].dispatchId).toBe("dispatch-bad-shape");
+    expect(recordedErrors[0].message).toContain(
+      "danxbot_complete auto-sync validation failure",
+    );
+    expect(recordedErrors[0].message).toContain(
+      "waiting_on is non-null but status is 'In Progress'",
+    );
   });
 
   it("returns ok:false with parse error when YAML on disk is malformed (does not throw)", async () => {

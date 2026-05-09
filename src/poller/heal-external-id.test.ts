@@ -26,7 +26,7 @@ function buildIssue(
   overrides: Partial<Issue> & { id: string },
 ): Issue {
   const merged: Issue = {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "trello",
     external_id: "",
     parent_id: null,
@@ -36,6 +36,7 @@ function buildIssue(
     type: "Feature",
     title: `Title for ${overrides.id}`,
     description: "Body",
+    priority: 3.0,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -380,9 +381,13 @@ describe("healExternalIds (DX-150 — per-tick external_id format heal)", () => 
       id: "DX-50",
       external_id: "mem-2",
       type: "Bug",
-      status: "In Progress",
+      // DX-212: `waiting_on != null` requires `status: ToDo` per the
+      // parser invariant. The original "In Progress" was incidental — the
+      // test exercises external_id healing, not status semantics.
+      status: "ToDo",
       title: "Custom title",
       description: "Custom description",
+      priority: 3.0,
       parent_id: "DX-49",
       children: ["DX-51", "DX-52"],
       ac: [
