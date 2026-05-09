@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventQueue } from "./event-queue.js";
@@ -120,5 +120,63 @@ describe("EventQueue", () => {
     await q1.enqueue(sampleBatch("to-one"));
     expect(await q1.peekAll()).toHaveLength(1);
     expect(await q2.peekAll()).toHaveLength(0);
+  });
+
+  // Regression for DX-13. Boot replay (replayQueueOnBoot) and the running
+  // forwarder both reach `retain → writeFile` after `peekAll`. If a log
+  // reaper or test teardown rm -rf's the parent dir between the two calls,
+  // writeFile throws ENOENT. Without this swallow, replayQueueOnBoot has no
+  // outer catch and the throw escapes — best-effort delivery becomes a
+  // worker-crashing operation. peekAll, clear, and hasPending all swallow
+  // ENOENT already; retain keeps the symmetry.
+  it("retain swallows ENOENT and logs a warn instead of throwing", async () => {
+    const subDir = join(tempDir, "reaper-race");
+    const path = join(subDir, "d-race.jsonl");
+    const q = new EventQueue(path);
+    await q.enqueue(sampleBatch("a"));
+    await q.enqueue(sampleBatch("b"));
+
+    // Simulate a log reaper / test teardown wiping the parent dir between
+    // peekAll() and retain(). Real boot path: peekAll reads a file that
+    // exists, then a reaper rm -rf's the dir, then retain tries writeFile.
+    rmSync(subDir, { recursive: true, force: true });
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(q.retain([sampleBatch("b")])).resolves.toBeUndefined();
+
+    const warnLines = errorSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((line) => typeof line === "string" && line.includes('"level":"warn"'))
+      .filter((line) => line.includes("event-queue"));
+    expect(warnLines.length).toBeGreaterThanOrEqual(1);
+    expect(warnLines[0]).toContain("ENOENT");
+    expect(warnLines[0]).toContain(path);
+    // Operator-facing fields — pinning these prevents a future agent from
+    // dropping the batch count or dispatch id from the warn message.
+    expect(warnLines[0]).toContain("batches_lost=1");
+    expect(warnLines[0]).toContain("dispatch=d-race");
+    errorSpy.mockRestore();
+  });
+
+  // Companion to the ENOENT swallow test: the catch must be narrow. A
+  // future agent dropping the `if (code === "ENOENT")` guard and silently
+  // eating every writeFile error would mask EROFS, ENOSPC, and EISDIR
+  // failures the operator needs to see.
+  it("retain re-throws non-ENOENT errors from writeFile", async () => {
+    const subDir = join(tempDir, "is-a-dir");
+    mkdirSync(subDir, { recursive: true });
+    const path = join(subDir, "queue.jsonl");
+    // Make the queue-file path itself a directory → writeFile errors with
+    // EISDIR (not ENOENT). The constructor's mkdirSync targets dirname,
+    // which is subDir (already exists), so construction still succeeds.
+    // POSIX (Linux/macOS) returns EISDIR; Windows would return EPERM. The
+    // danxbot test suite runs on Linux/macOS only, so this trick is stable.
+    mkdirSync(path);
+
+    const q = new EventQueue(path);
+    await expect(q.retain([sampleBatch("x")])).rejects.toMatchObject({
+      code: "EISDIR",
+    });
   });
 });

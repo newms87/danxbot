@@ -1114,6 +1114,46 @@ describe("createLaravelForwarder with EventQueue (write-ahead + retry)", () => {
     expect(unhandled).toEqual([]);
   });
 
+  // Regression for DX-13. The boot-replay test under `replayQueueOnBoot`
+  // pins this contract for the boot path; this test pins the SAME contract
+  // for the running forwarder's `drainAndSend → drainQueue → queue.retain`
+  // path. The card body explicitly calls out both code sites, and the
+  // existing "queue dir gone" tests above (lines 1074, 1084) exercise the
+  // ENQUEUE-side ENOENT (`appendFile`) — distinct from the RETAIN-side
+  // ENOENT (`writeFile`). Without this test the running-forwarder reach
+  // would be untested.
+  it("drainAndSend → retain swallows ENOENT when the queue dir is reaped between fetches", async () => {
+    const { queue, flush } = makeForwarder();
+    // Pre-stage two pending batches simulating prior flushes that hit a
+    // transient outage; the worker is now retrying on the next flush.
+    await queue.enqueue([{ type: "agent_event", message: "first" }]);
+    await queue.enqueue([{ type: "agent_event", message: "second" }]);
+
+    // First post lands → drainQueue advances past batch[0]. Before the
+    // second post, a log reaper rm -rf's the queue dir. The 503 response
+    // exhausts retries → drainQueue calls `retain(pending.slice(1))` →
+    // writeFile would ENOENT without the swallow.
+    let postCount = 0;
+    mockFetch.mockImplementation(async () => {
+      postCount++;
+      if (postCount === 1) return { ok: true, status: 200 };
+      rmSync(queueDir, { recursive: true, force: true });
+      return { ok: false, status: 503 };
+    });
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(flush()).resolves.toBeUndefined();
+
+    const warnLines = errorSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((line) => typeof line === "string" && line.includes('"level":"warn"'))
+      .filter((line) => line.includes("event-queue"));
+    expect(warnLines.length).toBeGreaterThanOrEqual(1);
+    expect(warnLines[0]).toContain("ENOENT");
+    expect(warnLines[0]).toContain("batches_lost=1");
+    errorSpy.mockRestore();
+  });
+
   // Ensures the swallow-with-log.warn contract in `drainAndSend` doesn't
   // silently rot to a bare `catch {}`. Without an assertion that
   // log.warn actually fires, a future agent could "simplify" the catch
@@ -1181,5 +1221,36 @@ describe("replayQueueOnBoot", () => {
       DELAYS,
     );
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  // Regression for DX-13. drainQueue → queue.retain → writeFile is the
+  // call chain that ENOENTs when a log reaper races boot drain and rm
+  // -rf's the queue dir between peekAll and retain. The fix lives in
+  // EventQueue.retain (symmetric with peekAll/clear/hasPending); this
+  // test pins the contract at the replayQueueOnBoot level — boot replay
+  // must not throw when the dir disappears mid-drain.
+  it("survives the queue dir being reaped between peekAll and retain (drainQueue partial-fail path)", async () => {
+    const queue = new EventQueue(deriveQueuePath(queueDir, "d-reaped"));
+    await queue.enqueue([{ type: "agent_event", message: "a" }]);
+    await queue.enqueue([{ type: "agent_event", message: "b" }]);
+
+    // First post resolves OK so drainQueue advances past batch[0].
+    // Before the second post, the queue dir is reaped — the second post
+    // result triggers retain([b]) which would otherwise ENOENT.
+    let postCount = 0;
+    mockFetch.mockImplementation(async () => {
+      postCount++;
+      if (postCount === 1) {
+        return { ok: true, status: 200 };
+      }
+      // Race-window: dir vanishes before the retain call lands.
+      rmSync(queueDir, { recursive: true, force: true });
+      // 503 forces drainQueue to surface "retry-later" → retain([b]).
+      return { ok: false, status: 503 };
+    });
+
+    await expect(
+      replayQueueOnBoot("d-reaped", queueDir, STATUS_URL, API_TOKEN, DELAYS),
+    ).resolves.toBeUndefined();
   });
 });

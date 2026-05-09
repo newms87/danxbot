@@ -18,7 +18,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { createLogger } from "../logger.js";
 import type { EventPayload } from "./laravel-forwarder.js";
 
@@ -67,6 +67,15 @@ export class EventQueue {
    * Rewrite the queue with exactly the given batches. Called after a partial
    * drain when some batches were delivered but others must be retried. Empty
    * input clears the queue (file is removed).
+   *
+   * ENOENT (parent dir reaped between peekAll and retain — log reaper races
+   * boot drain, or test teardown wipes the dir mid-flush) is swallowed with a
+   * warn. Symmetric with peekAll (returns []), clear (idempotent), and
+   * hasPending (returns false): a transient filesystem race must not crash
+   * the worker. The pending batches are lost — best-effort delivery is the
+   * contract — but the operator gets a log line. Every other writeFile error
+   * (EROFS, ENOSPC, EISDIR, EACCES, ENOTDIR) re-throws so real disk problems
+   * still surface. See DX-13.
    */
   async retain(batches: EventPayload[][]): Promise<void> {
     if (batches.length === 0) {
@@ -74,7 +83,18 @@ export class EventQueue {
       return;
     }
     const text = batches.map((b) => JSON.stringify(b)).join("\n") + "\n";
-    await writeFile(this.filePath, text);
+    try {
+      await writeFile(this.filePath, text);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        const dispatchId = basename(this.filePath, ".jsonl");
+        log.warn(
+          `Queue dir reaped during retain (ENOENT); dispatch=${dispatchId} batches_lost=${batches.length} path=${this.filePath}`,
+        );
+        return;
+      }
+      throw err;
+    }
   }
 
   /** Remove the queue file. Idempotent. */
