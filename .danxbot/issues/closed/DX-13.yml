@@ -1,0 +1,149 @@
+schema_version: 5
+tracker: trello
+id: DX-13
+external_id: 69f80d0f252e6b4c0734a4ad
+parent_id: null
+children: []
+dispatch:
+  id: 90694252-369c-47b4-9953-9c7980667ca3
+  pid: 89654
+  host: dan
+  kind: work
+  started_at: 2026-05-09T01:14:17.700Z
+  ttl_seconds: 7200
+status: Done
+type: Feature
+title: Audit replayQueueOnBoot for retain ENOENT — `src/agent/laravel-forwarder.ts#replayQueueOnBoot` calls drainQueue → queue.retain → writeFile, which can ENOENT if the queue dir is reaped between peekAll and retain. Boot timing makes this near-impossible in practice, but the same swallow-with-warn pattern (or moving the catch into EventQueue.retain) would close the gap.
+description: |
+  ## Problem
+
+  `src/agent/laravel-forwarder.ts#replayQueueOnBoot` calls `drainQueue → queue.retain → writeFile`. If the queue dir is reaped between `peekAll()` and `retain()` (log reaper races boot drain, or test teardown wipes the dir mid-flush), `writeFile` throws `ENOENT` and the boot replay fails outright. `replayQueueOnBoot` has no try/catch, so the throw escapes — best-effort delivery becomes worker-crashing delivery.
+
+  Boot timing makes this near-impossible in production today. But the same call path is reachable from the running forwarder's `drainQueue` (via `drainAndSend()`), where a future refactor could drop the outer catch in `drainAndSend` and leave the gap.
+
+  ## Fix
+
+  Move the ENOENT swallow into `EventQueue.retain` — symmetric with `peekAll()` (returns `[]` on ENOENT), `clear()` (idempotent on ENOENT), and `hasPending()` (returns `false` on any error). Closes the gap for every retain caller (replay + running drain) and stops a transient filesystem race from raising.
+
+  ## Approach
+
+  In `src/agent/event-queue.ts#EventQueue.retain`, wrap the `writeFile` call in try/catch. On ENOENT: log.warn with the file path + batch count and return. Re-throw anything else.
+
+  Add a regression test in `event-queue.test.ts` that removes the queue dir between `peekAll()` and `retain()` and asserts retain resolves without throwing. Add a paired test that replayQueueOnBoot survives a dir reap mid-drain.
+priority: 3
+triage:
+  expires_at: 2026-05-08T17:56:39.049Z
+  reassess_hint: ""
+  last_status: Keep
+  last_explain: Defensive hardening with precise anchors (file, function, call chain, exact syscall) and a one-line fix; implementable without human direction → promote to ToDo. ICE 2×4×5=40 (I=2 near-impossible per card body; C=4 anchors look stable; E=5 single try/catch in EventQueue.retain or replayQueueOnBoot).
+  ice:
+    total: 40
+    i: 2
+    c: 4
+    e: 5
+  history:
+    - timestamp: 2026-05-07T17:56:39.048Z
+      status: Keep
+      explain: Defensive hardening with precise anchors (file, function, call chain, exact syscall) and a one-line fix; implementable without human direction → promote to ToDo. ICE 2×4×5=40 (I=2 near-impossible per card body; C=4 anchors look stable; E=5 single try/catch in EventQueue.retain or replayQueueOnBoot).
+      expires_at: 2026-05-08T17:56:39.049Z
+      ice:
+        total: 40
+        i: 2
+        c: 4
+        e: 5
+ac:
+  - check_item_id: ""
+    title: "`EventQueue.retain` swallows ENOENT (file path or parent dir gone) and logs a warn naming the file path + batch count, instead of throwing."
+    checked: true
+  - check_item_id: ""
+    title: "`EventQueue.retain` re-throws every non-ENOENT error from the underlying `writeFile` call (no over-broad swallow)."
+    checked: true
+  - check_item_id: ""
+    title: "`replayQueueOnBoot` resolves cleanly when the queue dir is removed between `peekAll()` and `retain()` — verified by a regression test that simulates the race."
+    checked: true
+  - check_item_id: ""
+    title: Existing `event-queue.test.ts` and `laravel-forwarder.test.ts` suites still pass; new tests cover both the unit case (retain ENOENT) and the integration case (replayQueueOnBoot survives a dir reap).
+    checked: true
+  - check_item_id: ""
+    title: "`npx tsc --noEmit` passes."
+    checked: true
+comments:
+  - id: 69fcd27fd44f4cda9692c46e
+    author: danxbot-triage
+    timestamp: 2026-05-07T17:57:19.853Z
+    text: |
+      <!-- danxbot -->
+
+      ## Triage — 2026-05-07
+
+      **Status:** Review → ToDo
+      **Decision:** Keep
+      **ICE:** 40 (2×4×5)
+      **Explain:** Defensive hardening for an ENOENT race in `replayQueueOnBoot` boot replay. Card body acknowledges the race is "near-impossible in practice" → impact is low (**I=2**). Anchors are precise — names `src/agent/laravel-forwarder.ts#replayQueueOnBoot`, the call chain `drainQueue → queue.retain → writeFile`, and the exact syscall (`ENOENT`) — high confidence (**C=4**). Fix is a one-line swallow-with-warn (`if (e.code === "ENOENT") log.warn(...); else throw`) inside `EventQueue.retain` or the boot replay path (**E=5**).
+  - author: code-reviewer
+    timestamp: 2026-05-09T01:25:00Z
+    text: |
+      ## Code Review
+
+      No CRITICAL findings. Fix is well-scoped, narrow, symmetric with the rest of `EventQueue`, JSDoc explicitly states the contract + non-allowlisted error codes.
+
+      ### Suggested
+
+      - **Sibling-race code: ENOTDIR, not just ENOENT.** `src/agent/event-queue.ts` allowlists only `ENOENT`. If the parent path component is replaced by a *file* (not removed) — log-rotator that swaps the dir for a tarball — `writeFile` throws `ENOTDIR`. Card's stated race is `rm -rf` (ENOENT), so out of scope behaviour-wise, but worth listing `ENOTDIR` among the JSDoc re-throw examples so the next reader doesn't re-open the question.
+      - **Warn message could surface the dispatch id.** Filename is `<dispatchId>.jsonl` so the operator can recover by basename, but a dedicated `dispatch=<id>` token makes grep-from-noisy-logs trivial. Recommend `Queue dir reaped during retain (ENOENT); dispatch=${basename(this.filePath, ".jsonl")} batches_lost=${batches.length} path=${this.filePath}`.
+      - **Missing test: the `drainAndSend` path (running forwarder, not boot).** The replayQueueOnBoot test pins the boot path; the existing "queue dir gone" tests around line 1074 / 1084 / 1122 cover ENQUEUE-side ENOENT (`appendFile`), not RETAIN-side. Card explicitly calls out "the running forwarder's `drainQueue` path" as also-reachable.
+
+      ### Nits
+
+      - **EISDIR test cross-platform stability**: `mkdirSync(path)` to force `EISDIR` is documented POSIX behaviour; Windows returns `EPERM`. danxbot test suite is Linux/macOS only — fine, but a one-line comment locks the assumption.
+      - **JSDoc "transient filesystem race"** is accurate; the parenthetical already names test teardown — disregard.
+  - author: test-reviewer
+    timestamp: 2026-05-09T01:25:30Z
+    text: |
+      ## Test Review
+
+      | Test | Status | Notes |
+      |---|---|---|
+      | `retain swallows ENOENT and logs a warn` | Good | Pins AC #1; `rmSync` deterministic; missing batch-count assertion against AC wording. |
+      | `retain re-throws non-ENOENT errors from writeFile` | Good | Pins AC #2; EISDIR via mkdir-at-filepath stable on Linux/macOS. |
+      | `replayQueueOnBoot survives queue dir reap mid-drain` | Good | Pins AC #3 at boot-replay layer; mockFetch ordering deterministic. |
+      | running-forwarder `drainAndSend → drainQueue → retain` ENOENT | **Missing** | **CRITICAL.** Card calls out running-forwarder reach explicitly. Existing tests cover ENQUEUE-side ENOENT (different syscall, different site). RETAIN-side ENOENT through `drainAndSend` is untested. |
+      | `retain([])` ENOENT path | Already covered | `retain([])` delegates to `clear()` which already swallows ENOENT. |
+
+      ### Gaps to close
+
+      - **CRITICAL:** Add a `createLaravelForwarder` integration test exercising the running forwarder's `drainAndSend → drainQueue → retain` ENOENT path. Repro: enqueue 2 batches, mock fetch 200-then-503, rmSync between, await `flush()`, assert resolves + warn from `event-queue` logger fires.
+      - **Nice-to-have:** Strengthen ENOENT warn assertion to check batch count substring (`"batches_lost=1"`) — AC #1 names the field; without the assertion a regression dropping `${batches.length}` would pass.
+
+      ### Determinism
+
+      All three new tests deterministic — `rmSync` synchronous, `mockImplementation` runs inside the awaited fetch promise, no real timers needed.
+  - author: danxbot
+    timestamp: 2026-05-09T01:27:00Z
+    text: |
+      ## Review Fixes
+
+      Addressed every finding from the parallel code-review + test-review subagents:
+
+      1. **Added `ENOTDIR` to the JSDoc re-throw allowlist** in `src/agent/event-queue.ts#EventQueue.retain` (next to `EROFS, ENOSPC, EISDIR, EACCES`). Documents the next-most-likely sibling race; behaviour unchanged — already re-thrown via the catch-all branch.
+      2. **Improved warn message format**: now `Queue dir reaped during retain (ENOENT); dispatch=<id> batches_lost=<n> path=<filePath>`. Operator can grep by `dispatch=` token without parsing basename.
+      3. **CRITICAL — added running-forwarder test** in `laravel-forwarder.test.ts` (`createLaravelForwarder with EventQueue` block): `drainAndSend → retain swallows ENOENT when the queue dir is reaped between fetches`. Pre-stages two pending batches; mocks fetch 200-then-503 with `rmSync(queueDir)` between; asserts `flush()` resolves and a warn from the `event-queue` logger fires with `ENOENT` + `batches_lost=1`.
+      4. **Strengthened ENOENT warn assertion** in `event-queue.test.ts` to also check `batches_lost=1` and `dispatch=d-race` — pins the operator-facing fields against silent regressions.
+      5. **Added Linux/macOS comment** on the EISDIR test documenting that POSIX returns EISDIR, Windows would return EPERM (suite is Linux-only in CI).
+
+      Re-ran filtered: 4/4 new pass. Re-ran `src/agent/event-queue.test.ts` + `src/agent/laravel-forwarder.test.ts`: 81/81. Re-ran `src/agent/`: 604/604. `npx tsc --noEmit`: clean.
+history: []
+retro:
+  good: |
+    - Card description was precise (file, function, call chain, exact syscall) → triage to ToDo to fix took zero ambiguity.
+    - Picked the correct of the two locations the card offered: putting the catch in `EventQueue.retain` makes it symmetric with `peekAll` / `clear` / `hasPending` (all already swallow ENOENT) AND closes the gap for both the boot-replay path AND the running forwarder's `drainQueue` path in one edit. Putting it only in `replayQueueOnBoot` would have left the running path uncovered.
+    - TDD cycle was clean: RED for the right reason on first run (ENOENT writeFile error from the test setup), single edit to GREEN, then re-running both files surfaced the running-forwarder gap that the parallel reviewers also flagged.
+    - Both reviewers (code-reviewer + test-reviewer) independently flagged the same CRITICAL gap (running-forwarder test missing) — convergent signal that the issue was real, not subjective taste.
+  bad: |
+    - First test pass missed the running-forwarder reach. The card description literally names "the same call path is reachable from the running forwarder's drainQueue (via drainAndSend())", but I initially only wrote tests for `replayQueueOnBoot`. Both reviewers caught it; the gap was added before commit. Lesson: when a card describes two reach paths, write a test for each before declaring the test-pass scope complete.
+    - Initial warn message said only `path + ENOENT + batch count`. Reviewer suggested adding a `dispatch=<id>` token so operators can grep without parsing basename — small change, real ergonomic improvement, should have been there from the first pass.
+  action_item_ids: []
+  commits:
+    - d3f162da458d34ea810c7e345720f75eca10fe63
+waiting_on: null
+blocked: null
