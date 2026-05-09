@@ -79,7 +79,13 @@ describe("checkAuthEither (removed in Phase 4)", () => {
     // Source-level guard: a regression that re-imports `checkAuthEither`
     // from a stale commit would compile, but this test pins the text.
     const sources = [
-      "agents-routes.ts",
+      "agents-list.ts",
+      "agents-toggles.ts",
+      "agents-prefix.ts",
+      "agents-crud.ts",
+      "agents-avatar.ts",
+      "agent-validators.ts",
+      "agent-fs.ts",
       "server.ts",
       "dispatch-proxy.ts",
       "auth-middleware.ts",

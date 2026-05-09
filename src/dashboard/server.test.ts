@@ -65,9 +65,10 @@ vi.mock("./dispatch-proxy.js", async () => {
   };
 });
 
-// agents-routes imports from auth-middleware + dispatches-db — the dashboard
-// side of the /api/agents/:repo/toggles handler. Stub it so server.test only
-// verifies the wiring; agents-routes.test.ts owns the full-path coverage.
+// The agents-* modules import from auth-middleware + dispatches-db. Stub at
+// the route boundary so server.test only verifies wiring; per-module tests
+// (agents-list.test.ts, agents-toggles.test.ts, agents-prefix.test.ts,
+// agents-crud.test.ts, agents-avatar.test.ts) own the full-path coverage.
 const mockHandleGetAgent = vi.fn();
 const mockHandleGetRoster = vi.fn();
 const mockHandleListAgents = vi.fn();
@@ -80,22 +81,30 @@ const mockHandlePatchAgent = vi.fn();
 const mockHandleDeleteAgent = vi.fn();
 const mockHandlePostAvatar = vi.fn();
 const mockHandleGetAvatar = vi.fn();
-vi.mock("./agents-routes.js", () => ({
+vi.mock("./agents-list.js", () => ({
+  handleGetAgent: (...args: unknown[]) => mockHandleGetAgent(...args),
+  handleListAgents: (...args: unknown[]) => mockHandleListAgents(...args),
+}));
+vi.mock("./agents-toggles.js", () => ({
   handleClearAgentCriticalFailure: (...args: unknown[]) =>
     mockHandleClearAgentCriticalFailure(...args),
-  handleDeleteAgent: (...args: unknown[]) => mockHandleDeleteAgent(...args),
-  handleGetAgent: (...args: unknown[]) => mockHandleGetAgent(...args),
-  handleGetAvatar: (...args: unknown[]) => mockHandleGetAvatar(...args),
   handleGetRoster: (...args: unknown[]) => mockHandleGetRoster(...args),
-  handleListAgents: (...args: unknown[]) => mockHandleListAgents(...args),
-  handlePatchAgent: (...args: unknown[]) => mockHandlePatchAgent(...args),
   handlePatchAgentDefaults: (...args: unknown[]) =>
     mockHandlePatchAgentDefaults(...args),
   handlePatchToggle: (...args: unknown[]) => mockHandlePatchToggle(...args),
-  handlePostAgent: (...args: unknown[]) => mockHandlePostAgent(...args),
-  handlePostAvatar: (...args: unknown[]) => mockHandlePostAvatar(...args),
+}));
+vi.mock("./agents-prefix.js", () => ({
   handlePutIssuePrefix: (...args: unknown[]) =>
     mockHandlePutIssuePrefix(...args),
+}));
+vi.mock("./agents-crud.js", () => ({
+  handleDeleteAgent: (...args: unknown[]) => mockHandleDeleteAgent(...args),
+  handlePatchAgent: (...args: unknown[]) => mockHandlePatchAgent(...args),
+  handlePostAgent: (...args: unknown[]) => mockHandlePostAgent(...args),
+}));
+vi.mock("./agents-avatar.js", () => ({
+  handleGetAvatar: (...args: unknown[]) => mockHandleGetAvatar(...args),
+  handlePostAvatar: (...args: unknown[]) => mockHandlePostAvatar(...args),
 }));
 
 // auth-routes depends on auth-db + auth-middleware; stub for the server test.
@@ -451,7 +460,7 @@ describe("dashboard server", () => {
       // handler runs and produces 401 via requireUser. Our handler is
       // mocked here, so it's invoked but doesn't actually 401 — verify
       // dispatch happened (auth-validation contract is owned by
-      // agents-routes.test.ts).
+      // agents-toggles.test.ts).
       expect(mockHandlePatchAgentDefaults).toHaveBeenCalledTimes(1);
     });
 

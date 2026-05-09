@@ -17,7 +17,7 @@
 
 import type { Dispatch } from "./dispatches.js";
 import type { JsonlBlock } from "./jsonl-reader.js";
-import type { AgentSnapshot } from "./agents-routes.js";
+import type { AgentSnapshot } from "./agents-list.js";
 import type { SystemError } from "./system-errors.js";
 
 /** All first-class topic literals. Wildcard prefix patterns are also valid but

@@ -78,7 +78,7 @@ export function applyAgentEvent(
  * ### Wire contract
  *
  * Backend emits exactly ONE agent topic: `agent:updated`, carrying a full
- * `AgentSnapshot` as the payload. Producer: `src/dashboard/agents-routes.ts`
+ * `AgentSnapshot` as the payload. Producer: `src/dashboard/agents-toggles.ts`
  * `handlePatchToggle` publishes after a successful settings write. The
  * `DELETE /critical-failure` route does NOT publish — the SPA re-fetches
  * the single repo via `fetchAgent` afterward (see `clearCriticalFailure`

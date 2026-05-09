@@ -37,7 +37,7 @@ export interface DispatchDetail {
   totals: JsonlTotals | null;
 }
 
-export type { AgentSnapshot, WorkerHealth } from "@backend/dashboard/agents-routes.js";
+export type { AgentSnapshot, WorkerHealth } from "@backend/dashboard/agents-list.js";
 export type {
   CriticalFailurePayload,
   CriticalFailureSource,
@@ -57,7 +57,7 @@ export type {
   SettingsDisplayWorker,
   SettingsMeta,
 } from "@backend/settings-file.js";
-export type { AgentRosterResponse } from "@backend/dashboard/agents-routes.js";
+export type { AgentRosterResponse } from "@backend/dashboard/agents-toggles.js";
 export type { RepoInfo } from "./api";
 export type { RepoDispatchCounts, DispatchCountsByTrigger } from "@backend/dashboard/dispatches-db.js";
 export type {

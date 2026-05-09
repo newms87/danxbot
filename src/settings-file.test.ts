@@ -1313,7 +1313,7 @@ describe("settings-file", () => {
   });
 
   // ============================================================
-  // isValidIanaTimeZone — exported for shared use in agents-routes
+  // isValidIanaTimeZone — exported for shared use in agent-validators
   // ============================================================
 
   describe("isValidIanaTimeZone", () => {

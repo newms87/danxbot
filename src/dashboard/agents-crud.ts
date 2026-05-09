@@ -1,0 +1,299 @@
+// Agent record CRUD (DX-160 Phase 2). POST/PATCH/DELETE on /api/agents.
+// `MutateError` + `authAndResolveRepo` are exported so `agents-avatar.ts`
+// can reuse the pattern without a circular import. Avatar upload + serve
+// live there to keep both modules under the 300-line ceiling.
+
+import type { IncomingMessage, ServerResponse } from "http";
+import { rmSync } from "node:fs";
+import { json, parseBody } from "../http/helpers.js";
+import { createLogger } from "../logger.js";
+import type { RepoConfig } from "../types.js";
+import type { DispatchProxyDeps } from "./dispatch-proxy.js";
+import { requireUser } from "./auth-middleware.js";
+import { findNonTerminalDispatches } from "./dispatches-db.js";
+import {
+  AGENT_NAME_SHAPE,
+  AGENTS_MAX,
+  DASHBOARD_PREFIX,
+  mutateAgents,
+  type AgentRecord,
+  type AgentRecordWithName,
+} from "../settings-file.js";
+import { publishAgentSnapshot } from "./agents-list.js";
+import { validateAgentFields } from "./agent-validators.js";
+import { agentDir, assertWithinAgentsRoot } from "./agent-fs.js";
+
+const log = createLogger("agents-crud");
+
+// Bail out of a `mutateAgents` callback with an HTTP status — exception
+// rather than return-shape since the callback runs inside the lock.
+export class MutateError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+export const namedRecord = (n: string, r: AgentRecord): AgentRecordWithName =>
+  ({ name: n, ...r });
+
+// Auth + repo lookup shared by every mutation route. Returns the repo
+// + username on success; null after writing 401/400/404 itself.
+export async function authAndResolveRepo(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoName: string | null,
+  deps: DispatchProxyDeps,
+): Promise<{ repo: RepoConfig; username: string } | null> {
+  const auth = await requireUser(req);
+  if (!auth.ok) {
+    json(res, 401, { error: "Unauthorized" });
+    return null;
+  }
+  if (!repoName) {
+    json(res, 400, { error: "Missing required query param: repo" });
+    return null;
+  }
+  const repo = deps.repos.find((r) => r.name === repoName);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoName}" is not configured` });
+    return null;
+  }
+  return { repo, username: auth.user.username };
+}
+
+// POST /api/agents?repo=<name>. Body `{name, bio, capabilities[],
+// schedule, enabled}`; server stamps `type:"agent"`, `created_at`,
+// `updated_at`. Returns 201 / 400 / 409 (5-cap or duplicate name).
+export async function handlePostAgent(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoName: string | null,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const ctx = await authAndResolveRepo(req, res, repoName, deps);
+  if (!ctx) return;
+  const { repo, username } = ctx;
+
+  let body: Record<string, unknown>;
+  try {
+    body = await parseBody(req);
+  } catch {
+    json(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  const rawName = body.name;
+  if (typeof rawName !== "string" || !AGENT_NAME_SHAPE.test(rawName)) {
+    json(res, 400, {
+      error: `name must match ${AGENT_NAME_SHAPE} (lowercase, starts with letter, ≤32 chars, [a-z0-9_-])`,
+    });
+    return;
+  }
+  const name = rawName;
+
+  const validation = validateAgentFields(body, { requireAll: true });
+  if ("errors" in validation) {
+    json(res, 400, { error: "validation failed", errors: validation.errors });
+    return;
+  }
+  const f = validation.fields;
+  if (
+    f.bio === undefined ||
+    f.capabilities === undefined ||
+    f.schedule === undefined ||
+    f.enabled === undefined
+  ) {
+    // requireAll=true guarantees these — guard preserves type narrowing.
+    json(res, 400, { error: "validation failed" });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const record: AgentRecord = {
+    type: "agent",
+    bio: f.bio,
+    capabilities: f.capabilities,
+    schedule: f.schedule,
+    enabled: f.enabled,
+    created_at: now,
+    updated_at: now,
+  };
+
+  try {
+    await mutateAgents(
+      repo.localPath,
+      (current) => {
+        if (Object.prototype.hasOwnProperty.call(current, name)) {
+          throw new MutateError(409, `agent "${name}" already exists`);
+        }
+        if (Object.keys(current).length >= AGENTS_MAX) {
+          throw new MutateError(
+            409,
+            `agent limit reached — at most ${AGENTS_MAX} agents per repo`,
+          );
+        }
+        current[name] = record;
+        return current;
+      },
+      `${DASHBOARD_PREFIX}${username}`,
+    );
+  } catch (err) {
+    if (err instanceof MutateError) {
+      json(res, err.status, { error: err.message });
+      return;
+    }
+    log.error(`handlePostAgent(${repo.name}, ${name}): mutateAgents threw`, err);
+    json(res, 500, { error: "Failed to persist agent" });
+    return;
+  }
+
+  await publishAgentSnapshot(repo, deps.resolveHost);
+  json(res, 201, namedRecord(name, record));
+}
+
+// PATCH /api/agents/:name?repo=<name>. Partial update; `name` is
+// immutable. Any subset of `bio`, `capabilities`, `schedule`, `enabled`
+// accepted; missing fields preserve. `avatar_path` is server-managed
+// (POST /avatar). Bumps `updated_at`. Returns 200 / 400 / 404.
+export async function handlePatchAgent(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoName: string | null,
+  agentName: string,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const ctx = await authAndResolveRepo(req, res, repoName, deps);
+  if (!ctx) return;
+  const { repo, username } = ctx;
+
+  let body: Record<string, unknown>;
+  try {
+    body = await parseBody(req);
+  } catch {
+    json(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "name")) {
+    json(res, 400, { error: "name is immutable" });
+    return;
+  }
+
+  const validation = validateAgentFields(body, { requireAll: false });
+  if ("errors" in validation) {
+    json(res, 400, { error: "validation failed", errors: validation.errors });
+    return;
+  }
+  const f = validation.fields;
+
+  let saved: AgentRecord | null = null;
+  try {
+    await mutateAgents(
+      repo.localPath,
+      (current) => {
+        const record = current[agentName];
+        if (!record) {
+          throw new MutateError(404, `agent "${agentName}" not found`);
+        }
+        const updated: AgentRecord = {
+          ...record,
+          bio: f.bio ?? record.bio,
+          capabilities: f.capabilities ?? record.capabilities,
+          schedule: f.schedule ?? record.schedule,
+          enabled: f.enabled ?? record.enabled,
+          updated_at: new Date().toISOString(),
+        };
+        current[agentName] = updated;
+        saved = updated;
+        return current;
+      },
+      `${DASHBOARD_PREFIX}${username}`,
+    );
+  } catch (err) {
+    if (err instanceof MutateError) {
+      json(res, err.status, { error: err.message });
+      return;
+    }
+    log.error(`handlePatchAgent(${repo.name}, ${agentName}): mutateAgents threw`, err);
+    json(res, 500, { error: "Failed to persist agent update" });
+    return;
+  }
+  // mutateAgents either runs the callback (which assigns saved) or throws.
+  await publishAgentSnapshot(repo, deps.resolveHost);
+  json(res, 200, namedRecord(agentName, saved!));
+}
+
+// DELETE /api/agents/:name?repo=<name>. 409 if any non-terminal dispatch
+// in the repo (Phase 5 / DX-200 narrows to `assigned_agent === agentName`);
+// else drop the record + `rm -rf <repo>/.danxbot/agents/<name>/`
+// (best-effort). Worktree teardown is Phase 3. Returns 204.
+export async function handleDeleteAgent(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoName: string | null,
+  agentName: string,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const ctx = await authAndResolveRepo(req, res, repoName, deps);
+  if (!ctx) return;
+  const { repo, username } = ctx;
+
+  // Busy check runs OUTSIDE the settings lock — different storage
+  // layer. Worktree teardown is Phase 3; the Phase 2 contract here is
+  // "remove the record + per-agent dir", which a stale probe doesn't
+  // compromise.
+  try {
+    const active = await findNonTerminalDispatches(repo.name);
+    if (active.length > 0) {
+      json(res, 409, {
+        error: `agent "${agentName}" is busy — ${active.length} non-terminal dispatch(es) in repo "${repo.name}"`,
+      });
+      return;
+    }
+  } catch (err) {
+    log.error(`handleDeleteAgent(${repo.name}, ${agentName}): busy probe threw`, err);
+    json(res, 500, { error: "Failed to probe dispatch state" });
+    return;
+  }
+
+  try {
+    await mutateAgents(
+      repo.localPath,
+      (current) => {
+        if (!Object.prototype.hasOwnProperty.call(current, agentName)) {
+          throw new MutateError(404, `agent "${agentName}" not found`);
+        }
+        delete current[agentName];
+        return current;
+      },
+      `${DASHBOARD_PREFIX}${username}`,
+    );
+  } catch (err) {
+    if (err instanceof MutateError) {
+      json(res, err.status, { error: err.message });
+      return;
+    }
+    log.error(`handleDeleteAgent(${repo.name}, ${agentName}): mutateAgents threw`, err);
+    json(res, 500, { error: "Failed to persist agent removal" });
+    return;
+  }
+
+  // Best-effort cleanup — a failure here is logged but does NOT roll
+  // back the settings write; a stale `agents/<name>/` directory is
+  // gitignored and harmless.
+  const dir = agentDir(repo, agentName);
+  const escape = assertWithinAgentsRoot(repo, dir);
+  if (escape) {
+    log.error(`handleDeleteAgent(${repo.name}, ${agentName}): refusing to rm — ${escape}`);
+  } else {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (err) {
+      log.warn(`handleDeleteAgent(${repo.name}, ${agentName}): rm ${dir} failed`, err);
+    }
+  }
+
+  await publishAgentSnapshot(repo, deps.resolveHost);
+  res.writeHead(204);
+  res.end();
+}

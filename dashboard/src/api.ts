@@ -84,7 +84,7 @@ export async function fetchDispatchDetail(id: string): Promise<DispatchDetail> {
 /**
  * Fetch the per-repo agent snapshot list rendered on the Agents tab.
  * Each entry combines settings, dispatch counts, and worker reachability
- * — see `src/dashboard/agents-routes.ts` for the response shape.
+ * — see `src/dashboard/agents-list.ts` for the response shape.
  */
 export async function fetchAgents(): Promise<AgentSnapshot[]> {
   const res = await fetchWithAuth("/api/agents");
@@ -142,7 +142,7 @@ export async function fetchAgent(repo: string): Promise<AgentSnapshot> {
  * roster + agentDefaults.conflictCheckEnabled. The query-string variant
  * is the new shape; the path-style `/api/agents/:repo` continues to
  * return the per-repo aggregation snapshot consumed by the Settings
- * tab. Same path, two shapes — see `agents-routes.ts` for rationale.
+ * tab. Same path, two shapes — see `agents-toggles.ts#handleGetRoster` for rationale.
  */
 export async function fetchAgentRoster(
   repo: string,

@@ -29,7 +29,7 @@
  *
  * - **Readers**: the poller's halt gate in `src/poller/index.ts::poll`,
  *   `/health` via `src/worker/health.ts`, the dashboard's `/api/agents`
- *   snapshot via `src/dashboard/agents-routes.ts::buildSnapshot`, and the
+ *   snapshot via `src/dashboard/agents-list.ts::buildSnapshot`, and the
  *   clear endpoint.
  *
  * - **Clearing**: `rm` on disk OR `DELETE /api/agents/:repo/critical-failure`

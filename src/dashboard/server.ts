@@ -35,20 +35,20 @@ import {
   loadPlaywrightUrl,
   type PlaywrightProxyDeps,
 } from "./playwright-proxy.js";
+import { handleGetAgent, handleListAgents } from "./agents-list.js";
 import {
   handleClearAgentCriticalFailure,
-  handleDeleteAgent,
-  handleGetAgent,
-  handleGetAvatar,
   handleGetRoster,
-  handleListAgents,
-  handlePatchAgent,
   handlePatchAgentDefaults,
   handlePatchToggle,
+} from "./agents-toggles.js";
+import { handlePutIssuePrefix } from "./agents-prefix.js";
+import {
+  handleDeleteAgent,
+  handlePatchAgent,
   handlePostAgent,
-  handlePostAvatar,
-  handlePutIssuePrefix,
-} from "./agents-routes.js";
+} from "./agents-crud.js";
+import { handleGetAvatar, handlePostAvatar } from "./agents-avatar.js";
 import {
   handleGetIssue,
   handleGetIssueHistory,
@@ -482,7 +482,7 @@ async function route(
     // for the new Agents tab. Without the query param, the legacy
     // unparameterized variant returns the per-repo aggregation array
     // consumed by the Settings tab. Same path, two shapes — see
-    // `agents-routes.ts` for the rationale.
+    // `agents-toggles.ts#handleGetRoster` for the rationale.
     const rosterRepo = url.searchParams.get("repo");
     if (rosterRepo) {
       await handleGetRoster(res, rosterRepo, dispatchDeps);
