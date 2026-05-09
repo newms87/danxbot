@@ -16,6 +16,14 @@ These rule files are auto-loaded; the pointers below exist so a fresh agent know
 | Anything in production (logs, status, db, ssh) | `.claude/rules/production-access.md` |
 | Repo bind-mounts, container layout, runtime detection | `.claude/rules/docker-runtime.md` |
 
+## `@thehammer/danx-issue-mcp` — danxbot owns this package
+
+Source: `~/web/danx-issue-mcp/`. Every dispatched agent and host session resolves the MCP via `npx -y @thehammer/danx-issue-mcp` so npm IS the runtime. Source edits are not deployed until published.
+
+**Standing authorization.** Any agent that edits `~/web/danx-issue-mcp/` source — schema bumps, handler changes, dist rebuilds — MUST run `make publish-danx-issue-mcp` from this repo as the final step of that work. The target handles version bump, per-publish `.npmrc` from `NPM_TOKEN` (in `<danxbot>/.env`), registry propagation wait, `~/.npm/_npx/` cache clear. No operator gate, no Blocked card, no "human will publish later" — publishing IS the completion of the edit. Defer only on transient registry network failures (retry).
+
+**Sequencing rule.** When the change touches BOTH the MCP package AND danxbot's consumer side (workspace `.mcp.json`, inject contract, dispatch overlay), publish first → then commit danxbot side. Reverse order = ~60s window where every workspace dispatch breaks because the new env shape lands locally before npm propagates the matching server. The publish make target waits for `npm view` to surface the new version before exiting; once it returns, the danxbot commit is safe.
+
 ## Architecture
 
 ```
