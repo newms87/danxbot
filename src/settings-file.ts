@@ -325,7 +325,7 @@ function normalizeIssuePollerOverride(raw: unknown): IssuePollerOverride {
  * any value the platform does not recognize as an IANA name; on Node
  * 20+ this matches the system tzdata.
  */
-function isValidIanaTimeZone(tz: unknown): tz is string {
+export function isValidIanaTimeZone(tz: unknown): tz is string {
   if (typeof tz !== "string" || tz.length === 0) return false;
   try {
     new Intl.DateTimeFormat("en", { timeZone: tz });
@@ -741,6 +741,66 @@ export function getIssuePollerPickupPrefix(
     );
     return null;
   }
+}
+
+/**
+ * Atomic per-agent mutation. Runs `read → mutate → write` INSIDE the
+ * per-file lock so concurrent CRUD on the agents map can't lose data.
+ *
+ * The base `writeSettings({agents})` patch shape is a wholesale
+ * replace — fine for setup/seed flows but unsafe for per-agent CRUD,
+ * because the read used to compute the new map happens OUTSIDE the
+ * lock. Two near-simultaneous `POST /api/agents` calls would each
+ * read `{}`, each compute a one-entry map containing their own
+ * agent, and the second write would silently clobber the first.
+ *
+ * `mutateAgents` closes that window: the lock is acquired BEFORE the
+ * read, held across the mutator, and released after the write. The
+ * mutator function is given the on-disk agents map (a fresh object;
+ * mutations are safe) and returns the next map. Throwing from the
+ * mutator (e.g. for `409 duplicate name`) propagates the error
+ * without writing — the caller's response shape carries the rejection.
+ *
+ * The mutator's return value is normalized through the same
+ * validation pipeline as the public write surface; passing a record
+ * with garbage in `capabilities` results in the record being dropped
+ * exactly as a hand-edited bad JSON file would. Callers should
+ * validate at the HTTP boundary BEFORE the mutator runs.
+ */
+export async function mutateAgents(
+  localPath: string,
+  mutator: (current: Record<string, AgentRecord>) => Record<string, AgentRecord>,
+  writtenBy: SettingsWriter,
+): Promise<Settings> {
+  return enqueueWrite(localPath, async () => {
+    const path = settingsFilePath(localPath);
+    const lockFile = settingsLockPath(localPath);
+    const dir = dirname(path);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+    const release = await acquireFileLock(lockFile);
+    try {
+      const existing = existsSync(path) ? safeParse(path) : defaultSettings();
+      // Pass a shallow copy so callers can mutate freely without
+      // worrying about whether a defensive `{...x}` was applied.
+      const next = mutator({ ...(existing.agents ?? {}) });
+
+      const merged: Settings = {
+        overrides: existing.overrides,
+        display: existing.display,
+        agents: normalizeAgents(next),
+        agentDefaults: existing.agentDefaults ?? { conflictCheckEnabled: true },
+        meta: { updatedAt: new Date().toISOString(), updatedBy: writtenBy },
+      };
+      const body = JSON.stringify(merged, null, 2) + "\n";
+      const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
+      writeFileSync(tmp, body, "utf-8");
+      renameSync(tmp, path);
+      return merged;
+    } finally {
+      await release();
+    }
+  });
 }
 
 /**

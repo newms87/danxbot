@@ -37,12 +37,17 @@ import {
 } from "./playwright-proxy.js";
 import {
   handleClearAgentCriticalFailure,
-  handlePutIssuePrefix,
+  handleDeleteAgent,
   handleGetAgent,
+  handleGetAvatar,
   handleGetRoster,
   handleListAgents,
+  handlePatchAgent,
   handlePatchAgentDefaults,
   handlePatchToggle,
+  handlePostAgent,
+  handlePostAvatar,
+  handlePutIssuePrefix,
 } from "./agents-routes.js";
 import {
   handleGetIssue,
@@ -284,6 +289,69 @@ async function route(
     return true;
   }
 
+  // ── DX-160 Phase 2 — Agent CRUD + avatar upload.
+  // All mutation routes match BEFORE the blanket `/api/*` gate so
+  // each handler's own `requireUser` call produces the 401 (mirrors
+  // the existing PATCH-toggle / DELETE-critical-failure / PUT-prefix
+  // handlers). Avatar GET is below the gate (read-only, served via
+  // the gate's user-auth check).
+  //
+  // Path/segment naming: `:name` here is the AGENT name from the path
+  // segment; the REPO is supplied via `?repo=<name>` query string.
+  // This is intentionally orthogonal to the existing `/api/agents/:repo`
+  // GET (single repo snapshot) — methods differ, no collision.
+  if (method === "POST" && url.pathname === "/api/agents") {
+    await handlePostAgent(
+      req,
+      res,
+      url.searchParams.get("repo"),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // /api/agents/:name/avatar — POST (upload). Match before the broader
+  // /api/agents/:name pattern so the avatar segment doesn't get
+  // swallowed.
+  const agentAvatarMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/avatar$/,
+  );
+  if (method === "POST" && agentAvatarMatch) {
+    await handlePostAvatar(
+      req,
+      res,
+      url.searchParams.get("repo"),
+      decodeURIComponent(agentAvatarMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // /api/agents/:name — PATCH / DELETE. Order matters: must match AFTER
+  // the more-specific subpath patterns (toggles, critical-failure,
+  // issue-prefix, avatar) and BEFORE the blanket /api/* gate.
+  const agentByNameMatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
+  if (method === "PATCH" && agentByNameMatch) {
+    await handlePatchAgent(
+      req,
+      res,
+      url.searchParams.get("repo"),
+      decodeURIComponent(agentByNameMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+  if (method === "DELETE" && agentByNameMatch) {
+    await handleDeleteAgent(
+      req,
+      res,
+      url.searchParams.get("repo"),
+      decodeURIComponent(agentByNameMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
   // User-auth gate for every remaining /api/* route. Bearer lives only in
   // the Authorization header — SSE uses fetch+ReadableStream on the client
   // so query-string tokens (which would leak into access logs) are never
@@ -421,6 +489,23 @@ async function route(
     } else {
       await handleListAgents(res, dispatchDeps);
     }
+    return true;
+  }
+
+  // GET /api/agents/:name/avatar — DX-160 Phase 2. Matched BEFORE the
+  // single-segment `/api/agents/:repo` snapshot route so the avatar
+  // tail isn't swallowed. The handler returns the bytes with the
+  // correct Content-Type (png/jpeg/webp).
+  const agentAvatarGet = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/avatar$/,
+  );
+  if (method === "GET" && agentAvatarGet) {
+    await handleGetAvatar(
+      res,
+      url.searchParams.get("repo"),
+      decodeURIComponent(agentAvatarGet[1]),
+      dispatchDeps,
+    );
     return true;
   }
 

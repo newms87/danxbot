@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import {
   createServer,
   type Server,
@@ -18,12 +18,47 @@ import type { DispatchProxyDeps } from "./dispatch-proxy.js";
 const mockReadSettings = vi.fn();
 const mockWriteSettings = vi.fn();
 
-vi.mock("../settings-file.js", () => ({
-  readSettings: (...args: unknown[]) => mockReadSettings(...args),
-  writeSettings: (...args: unknown[]) => mockWriteSettings(...args),
-  FEATURES: ["slack", "issuePoller", "dispatchApi", "ideator"],
-  DASHBOARD_PREFIX: "dashboard:",
-}));
+vi.mock("../settings-file.js", async () => {
+  const actual = await vi.importActual<typeof import("../settings-file.js")>(
+    "../settings-file.js",
+  );
+  return {
+    ...actual,
+    readSettings: (...args: unknown[]) => mockReadSettings(...args),
+    writeSettings: (...args: unknown[]) => mockWriteSettings(...args),
+    /**
+     * Test-only `mutateAgents` shim. Reads via `mockReadSettings`, runs
+     * the mutator, writes via `mockWriteSettings`. Mirrors the
+     * production lock-then-mutate contract well enough for the
+     * unit-test surface — handlers see the same `MutateError` rejection
+     * path and the same in-memory state they would on the real path.
+     * Concurrent-write race tests should use the real `mutateAgents`
+     * via `vi.importActual`.
+     */
+    mutateAgents: async (
+      localPath: string,
+      mutator: (
+        agents: Record<string, unknown>,
+      ) => Record<string, unknown>,
+      writtenBy: string,
+    ) => {
+      const existing = mockReadSettings(localPath);
+      const next = mutator({ ...(existing.agents ?? {}) });
+      const merged = {
+        ...existing,
+        agents: next,
+        meta: { updatedAt: new Date().toISOString(), updatedBy: writtenBy },
+      };
+      await mockWriteSettings(localPath, {
+        agents: next,
+        writtenBy,
+      });
+      return merged;
+    },
+    FEATURES: ["slack", "issuePoller", "dispatchApi", "ideator"],
+    DASHBOARD_PREFIX: "dashboard:",
+  };
+});
 
 const mockReadFlag = vi.fn().mockReturnValue(null);
 vi.mock("../critical-failure.js", () => ({
@@ -39,10 +74,13 @@ vi.mock("./dispatch-proxy.js", () => ({
 }));
 
 const mockCountDispatchesByRepo = vi.fn();
+const mockFindNonTerminalDispatches = vi.fn().mockResolvedValue([]);
 
 vi.mock("./dispatches-db.js", () => ({
   countDispatchesByRepo: (...args: unknown[]) =>
     mockCountDispatchesByRepo(...args),
+  findNonTerminalDispatches: (...args: unknown[]) =>
+    mockFindNonTerminalDispatches(...args),
 }));
 
 const mockEventBusPublish = vi.fn();
@@ -89,11 +127,16 @@ vi.mock("./auth-middleware.js", () => ({
 
 import {
   handleClearAgentCriticalFailure,
+  handleDeleteAgent,
   handleGetAgent,
+  handleGetAvatar,
   handleGetRoster,
   handleListAgents,
+  handlePatchAgent,
   handlePatchAgentDefaults,
   handlePatchToggle,
+  handlePostAgent,
+  handlePostAvatar,
   handlePutIssuePrefix,
   probeWorkerHealth,
 } from "./agents-routes.js";
@@ -966,5 +1009,604 @@ describe("handlePatchAgentDefaults", () => {
     expect(patch.writtenBy).toBe("dashboard:alice");
     const body = JSON.parse(res._getBody());
     expect(body.settings).toEqual({ conflictCheckEnabled: false });
+  });
+});
+
+// ============================================================
+// DX-160 Phase 2 — Agent CRUD: POST/PATCH/DELETE + avatar
+// ============================================================
+
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve as resolvePath } from "node:path";
+
+const VALID_SCHEDULE = {
+  tz: "America/Chicago",
+  mon: ["09:00-17:00"],
+  tue: [],
+  wed: [],
+  thu: [],
+  fri: [],
+  sat: [],
+  sun: [],
+};
+
+function validAgentRecord(over?: Partial<{
+  bio: string;
+  capabilities: string[];
+  enabled: boolean;
+  avatar_path: string;
+}>) {
+  return {
+    type: "agent" as const,
+    bio: over?.bio ?? "Default test bio.",
+    capabilities: over?.capabilities ?? ["issue-worker"],
+    schedule: VALID_SCHEDULE,
+    enabled: over?.enabled ?? true,
+    created_at: "2026-05-08T12:00:00Z",
+    updated_at: "2026-05-08T12:00:00Z",
+    ...(over?.avatar_path !== undefined ? { avatar_path: over.avatar_path } : {}),
+  };
+}
+
+function settingsWithAgents(agents: Record<string, unknown>) {
+  return {
+    ...settings(),
+    agents,
+    agentDefaults: { conflictCheckEnabled: true },
+  };
+}
+
+// Use a fixed isolated repo dir for FS-touching tests.
+let tmpRepoDir: string;
+beforeEach(() => {
+  tmpRepoDir = mkdtempSync(resolvePath(tmpdir(), "danxbot-agents-routes-test-"));
+  mkdirSync(resolvePath(tmpRepoDir, ".danxbot"), { recursive: true });
+});
+afterEach(() => {
+  rmSync(tmpRepoDir, { recursive: true, force: true });
+});
+
+function tmpDeps(): DispatchProxyDeps {
+  return {
+    token: "test-token",
+    repos: [
+      {
+        name: "danxbot",
+        url: "https://github.com/x/danxbot.git",
+        localPath: tmpRepoDir,
+        workerPort: 5562,
+      },
+    ],
+    resolveHost: () => "127.0.0.1",
+  };
+}
+
+function authReqJSON(method: string, body: Record<string, unknown> | null) {
+  const req = body
+    ? createMockReqWithBody(method, body)
+    : createMockReqWithBody(method, {});
+  (req.headers as Record<string, string>)["authorization"] =
+    "Bearer user-alice";
+  return req;
+}
+
+// ============================================================
+// POST /api/agents — create
+// ============================================================
+
+describe("handlePostAgent", () => {
+  beforeEach(() => {
+    mockReadSettings.mockReturnValue(settingsWithAgents({}));
+    mockWriteSettings.mockResolvedValue(undefined);
+  });
+
+  it("returns 401 without a user bearer", async () => {
+    const req = createMockReqWithBody("POST", {});
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(401);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when ?repo= is missing", async () => {
+    const req = authReqJSON("POST", {});
+    const res = createMockRes();
+    await handlePostAgent(req, res, null, tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/repo/i);
+  });
+
+  it("returns 404 for an unknown repo", async () => {
+    const req = authReqJSON("POST", {});
+    const res = createMockRes();
+    await handlePostAgent(req, res, "not-a-repo", tmpDeps());
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("returns 400 with field-list error on empty body", async () => {
+    const req = authReqJSON("POST", {});
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    const body = JSON.parse(res._getBody());
+    expect(body.error).toMatch(/name/);
+  });
+
+  it("returns 400 for an invalid name pattern", async () => {
+    const req = authReqJSON("POST", {
+      name: "Alice", // uppercase rejected
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/name/);
+  });
+
+  it("returns 400 for an invalid IANA tz", async () => {
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: { ...VALID_SCHEDULE, tz: "Bogus/Place" },
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).errors.join(" ")).toMatch(/IANA/);
+  });
+
+  it("returns 400 for an empty capabilities array", async () => {
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: [],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).errors.join(" ")).toMatch(/capabilities/);
+  });
+
+  it("returns 400 for an invalid schedule window shape", async () => {
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: { ...VALID_SCHEDULE, mon: ["09:00-25:00"] },
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).errors.join(" ")).toMatch(/HH:MM/);
+  });
+
+  it("returns 409 when the 5-cap is reached", async () => {
+    const at5 = Object.fromEntries(
+      Array.from({ length: 5 }, (_, i) => [`a${i}`, validAgentRecord()]),
+    );
+    mockReadSettings.mockReturnValue(settingsWithAgents(at5));
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(409);
+    expect(JSON.parse(res._getBody()).error).toMatch(/limit reached/i);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 on duplicate name", async () => {
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({ alice: validAgentRecord() }),
+    );
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(409);
+    expect(JSON.parse(res._getBody()).error).toMatch(/already exists/i);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("creates the record and returns 201 with the new agent", async () => {
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "Engineer",
+      capabilities: ["issue-worker", "slack"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(201);
+
+    const body = JSON.parse(res._getBody());
+    expect(body.name).toBe("alice");
+    expect(body.bio).toBe("Engineer");
+    expect(body.capabilities).toEqual(["issue-worker", "slack"]);
+    expect(body.created_at).toBeDefined();
+    expect(body.updated_at).toBe(body.created_at);
+    expect(body.type).toBe("agent");
+
+    expect(mockWriteSettings).toHaveBeenCalledTimes(1);
+    const [path, patch] = mockWriteSettings.mock.calls[0];
+    expect(path).toBe(tmpRepoDir);
+    expect(patch.writtenBy).toBe("dashboard:alice");
+    expect(patch.agents.alice).toMatchObject({
+      bio: "Engineer",
+      capabilities: ["issue-worker", "slack"],
+    });
+  });
+
+  it("server stamps timestamps regardless of client-supplied values", async () => {
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+      created_at: "1999-01-01T00:00:00Z",
+      updated_at: "1999-01-01T00:00:00Z",
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    const body = JSON.parse(res._getBody());
+    expect(body.created_at).not.toBe("1999-01-01T00:00:00Z");
+    expect(new Date(body.created_at).getFullYear()).toBeGreaterThanOrEqual(2026);
+  });
+});
+
+// ============================================================
+// PATCH /api/agents/:name
+// ============================================================
+
+describe("handlePatchAgent", () => {
+  beforeEach(() => {
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({ alice: validAgentRecord({ bio: "old" }) }),
+    );
+    mockWriteSettings.mockResolvedValue(undefined);
+  });
+
+  it("returns 401 without a user bearer", async () => {
+    const req = createMockReqWithBody("PATCH", { bio: "new" });
+    const res = createMockRes();
+    await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(401);
+  });
+
+  it("returns 404 for an unknown agent", async () => {
+    const req = authReqJSON("PATCH", { bio: "new" });
+    const res = createMockRes();
+    await handlePatchAgent(req, res, "danxbot", "nobody", tmpDeps());
+    expect(res._getStatusCode()).toBe(404);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects body with a `name` field (name is immutable)", async () => {
+    const req = authReqJSON("PATCH", { name: "renamed", bio: "x" });
+    const res = createMockRes();
+    await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/immutable/i);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("partial update: bio only — bumps updated_at, leaves other fields untouched", async () => {
+    const req = authReqJSON("PATCH", { bio: "fresh" });
+    const res = createMockRes();
+    await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.bio).toBe("fresh");
+    expect(body.capabilities).toEqual(["issue-worker"]);
+    expect(body.updated_at).not.toBe("2026-05-08T12:00:00Z");
+    // created_at preserved
+    expect(body.created_at).toBe("2026-05-08T12:00:00Z");
+  });
+
+  it("returns 400 on invalid capabilities", async () => {
+    const req = authReqJSON("PATCH", { capabilities: ["bogus"] });
+    const res = createMockRes();
+    await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("rejects avatar_path in body (clients must use POST /avatar)", async () => {
+    const req = authReqJSON("PATCH", { avatar_path: "../../../etc/passwd" });
+    const res = createMockRes();
+    await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).errors.join(" ")).toMatch(/avatar_path/);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================
+// DELETE /api/agents/:name
+// ============================================================
+
+describe("handleDeleteAgent", () => {
+  beforeEach(() => {
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({ alice: validAgentRecord() }),
+    );
+    mockWriteSettings.mockResolvedValue(undefined);
+    mockFindNonTerminalDispatches.mockResolvedValue([]);
+  });
+
+  it("returns 401 without a user bearer", async () => {
+    const req = createMockReqWithBody("DELETE", {});
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(401);
+  });
+
+  it("returns 404 for an unknown agent", async () => {
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "nobody", tmpDeps());
+    expect(res._getStatusCode()).toBe(404);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 when an agent has a running dispatch", async () => {
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      { id: "d-1", status: "running" },
+    ]);
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(409);
+    expect(JSON.parse(res._getBody()).error).toMatch(/busy/i);
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("204s on idle agent; settings record is dropped + per-agent dir is removed", async () => {
+    // Pre-create per-agent dir with a stub avatar so we can assert removal.
+    const dir = resolvePath(tmpRepoDir, ".danxbot/agents/alice");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolvePath(dir, "avatar.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", tmpDeps());
+
+    expect(res._getStatusCode()).toBe(204);
+    const [, patch] = mockWriteSettings.mock.calls[0];
+    expect(patch.agents.alice).toBeUndefined();
+    expect(existsSync(dir)).toBe(false);
+  });
+});
+
+// ============================================================
+// POST /api/agents/:name/avatar — upload
+// ============================================================
+
+describe("handlePostAvatar", () => {
+  beforeEach(() => {
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({ alice: validAgentRecord() }),
+    );
+    mockWriteSettings.mockResolvedValue(undefined);
+  });
+
+  function mockBinaryReq(
+    method: string,
+    contentType: string,
+    body: Buffer,
+  ) {
+    const req = new (require("http") as typeof import("http")).IncomingMessage(null as never);
+    req.method = method;
+    req.headers = {
+      authorization: "Bearer user-alice",
+      "content-type": contentType,
+      "content-length": String(body.byteLength),
+    };
+    process.nextTick(() => {
+      req.emit("data", body);
+      req.emit("end");
+    });
+    return req;
+  }
+
+  it("returns 401 without a user bearer", async () => {
+    const req = new (require("http") as typeof import("http")).IncomingMessage(null as never);
+    req.method = "POST";
+    req.headers = { "content-type": "image/png" };
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(401);
+  });
+
+  it("returns 415 for unsupported MIME types", async () => {
+    const req = mockBinaryReq("POST", "application/pdf", Buffer.from([0x25, 0x50]));
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(415);
+  });
+
+  it("returns 413 when the body exceeds 1 MB", async () => {
+    // 1 MB + 1 byte
+    const big = Buffer.alloc(1_000_001, 0xff);
+    const req = mockBinaryReq("POST", "image/png", big);
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(413);
+  });
+
+  it("accepts a body at exactly the 1 MB boundary (off-by-one guard)", async () => {
+    const exactly = Buffer.alloc(1_000_000, 0xff);
+    const req = mockBinaryReq("POST", "image/png", exactly);
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(200);
+  });
+
+  it("returns 404 for an unknown agent", async () => {
+    const req = mockBinaryReq("POST", "image/png", Buffer.from([0x89, 0x50]));
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "nobody", tmpDeps());
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("happy path: writes the file, updates avatar_path + updated_at, returns the record", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const req = mockBinaryReq("POST", "image/png", png);
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "alice", tmpDeps());
+
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.avatar_path).toBe("agents/alice/avatar.png");
+    expect(body.updated_at).not.toBe("2026-05-08T12:00:00Z");
+
+    // File on disk matches the uploaded bytes
+    const onDisk = readFileSync(
+      resolvePath(tmpRepoDir, ".danxbot/agents/alice/avatar.png"),
+    );
+    expect(onDisk.equals(png)).toBe(true);
+
+    // writeSettings was called with the avatar_path stamped
+    const [, patch] = mockWriteSettings.mock.calls[0];
+    expect(patch.agents.alice.avatar_path).toBe("agents/alice/avatar.png");
+  });
+
+  it("removes a stale prior-extension avatar when the new upload uses a different MIME", async () => {
+    // Pre-existing png from a previous upload.
+    const dir = resolvePath(tmpRepoDir, ".danxbot/agents/alice");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolvePath(dir, "avatar.png"), Buffer.from([0x00]));
+
+    // New upload as JPEG.
+    const jpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    const req = mockBinaryReq("POST", "image/jpeg", jpg);
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "alice", tmpDeps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(existsSync(resolvePath(dir, "avatar.jpg"))).toBe(true);
+    expect(existsSync(resolvePath(dir, "avatar.png"))).toBe(false);
+  });
+
+  it("accepts image/webp and writes avatar.webp", async () => {
+    const webp = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+    const req = mockBinaryReq("POST", "image/webp", webp);
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "alice", tmpDeps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody()).avatar_path).toBe(
+      "agents/alice/avatar.webp",
+    );
+    expect(
+      existsSync(resolvePath(tmpRepoDir, ".danxbot/agents/alice/avatar.webp")),
+    ).toBe(true);
+  });
+
+  it("treats image/jpg alias same as image/jpeg (writes avatar.jpg)", async () => {
+    const jpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    const req = mockBinaryReq("POST", "image/jpg", jpg);
+    const res = createMockRes();
+    await handlePostAvatar(req, res, "danxbot", "alice", tmpDeps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody()).avatar_path).toBe(
+      "agents/alice/avatar.jpg",
+    );
+  });
+});
+
+// ============================================================
+// GET /api/agents/:name/avatar — serve
+// ============================================================
+
+describe("handleGetAvatar", () => {
+  it("returns 400 when ?repo= is missing", async () => {
+    const res = createMockRes();
+    await handleGetAvatar(res, null, "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("returns 404 for an unknown repo", async () => {
+    const res = createMockRes();
+    await handleGetAvatar(res, "not-a-repo", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("returns 404 when agent has no avatar_path", async () => {
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({ alice: validAgentRecord() }),
+    );
+    const res = createMockRes();
+    await handleGetAvatar(res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("serves the file with correct Content-Type", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const dir = resolvePath(tmpRepoDir, ".danxbot/agents/alice");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(resolvePath(dir, "avatar.png"), png);
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({
+        alice: validAgentRecord({ avatar_path: "agents/alice/avatar.png" }),
+      }),
+    );
+
+    const res = createMockRes();
+    await handleGetAvatar(res, "danxbot", "alice", tmpDeps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(res._getHeaders()["content-type"]).toBe("image/png");
+    // The mock res.end captures body as a string; assert by length.
+    const captured = res._getBody();
+    expect(captured.length).toBe(png.byteLength);
+  });
+
+  it("returns 404 when the avatar_path is set but the file is missing on disk", async () => {
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({
+        alice: validAgentRecord({ avatar_path: "agents/alice/avatar.png" }),
+      }),
+    );
+    const res = createMockRes();
+    await handleGetAvatar(res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("rejects a path-traversal avatar_path with 404 (defense in depth)", async () => {
+    // AGENT_NAME_SHAPE precludes building this avatar_path through any
+    // public surface today, but the assertWithinAgentsRoot guard exists
+    // so a future regression that lets an unvalidated name reach the FS
+    // layer fails closed. Pin the behavior so the next person who
+    // relaxes the regex doesn't punch a hole.
+    mockReadSettings.mockReturnValue(
+      settingsWithAgents({
+        alice: validAgentRecord({ avatar_path: "../../../etc/passwd" }),
+      }),
+    );
+    const res = createMockRes();
+    await handleGetAvatar(res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(404);
   });
 });

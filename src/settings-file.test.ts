@@ -18,7 +18,9 @@ import {
   getIssuePollerPickupPrefix,
   isConflictCheckEnabled,
   isFeatureEnabled,
+  isValidIanaTimeZone,
   mask,
+  mutateAgents,
   readAgents,
   readSettings,
   settingsFilePath,
@@ -1182,6 +1184,148 @@ describe("settings-file", () => {
       const s = readSettings(localPath);
       expect(s.agents).toEqual({});
       expect(s.agentDefaults?.conflictCheckEnabled).toBe(true);
+    });
+  });
+
+  // ============================================================
+  // mutateAgents — DX-160 Phase 2
+  //
+  // Atomic per-agent mutator. Acquires the per-file lock before reading
+  // so concurrent CRUD calls can't interleave their read+write phases
+  // and silently lose data.
+  // ============================================================
+
+  describe("mutateAgents", () => {
+    function validAgent(over?: Partial<AgentRecord>): AgentRecord {
+      return {
+        type: "agent",
+        bio: "x",
+        capabilities: ["issue-worker"],
+        schedule: {
+          tz: "America/Chicago",
+          mon: ["09:00-17:00"],
+          tue: [],
+          wed: [],
+          thu: [],
+          fri: [],
+          sat: [],
+          sun: [],
+        },
+        enabled: true,
+        created_at: "2026-05-08T12:00:00Z",
+        updated_at: "2026-05-08T12:00:00Z",
+        ...over,
+      };
+    }
+
+    it("read+mutate+write inside the lock — concurrent creates do not race", async () => {
+      // Two concurrent createAgent-style calls. Without the lock-protected
+      // read this would lose one entry (each reads {} → adds its own → second
+      // write clobbers first).
+      const [a, b] = await Promise.all([
+        mutateAgents(
+          localPath,
+          (current) => {
+            current.alice = validAgent({ bio: "A" });
+            return current;
+          },
+          "dashboard:tester",
+        ),
+        mutateAgents(
+          localPath,
+          (current) => {
+            current.bob = validAgent({ bio: "B" });
+            return current;
+          },
+          "dashboard:tester",
+        ),
+      ]);
+
+      const s = readSettings(localPath);
+      expect(Object.keys(s.agents ?? {}).sort()).toEqual(["alice", "bob"]);
+      expect(s.agents?.alice.bio).toBe("A");
+      expect(s.agents?.bob.bio).toBe("B");
+      // Both `mutateAgents` resolves see the merged state once their slot
+      // in the queue runs — the second writer's return reflects both.
+      expect(a.agents).toBeDefined();
+      expect(b.agents).toBeDefined();
+    });
+
+    it("propagates an error from the mutator without writing", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent() },
+        writtenBy: "dashboard:tester",
+      });
+      const before = readSettings(localPath);
+
+      await expect(
+        mutateAgents(
+          localPath,
+          () => {
+            throw new Error("conflict");
+          },
+          "dashboard:tester",
+        ),
+      ).rejects.toThrow("conflict");
+
+      const after = readSettings(localPath);
+      expect(after.agents).toEqual(before.agents);
+      expect(after.meta.updatedAt).toBe(before.meta.updatedAt);
+    });
+
+    it("normalizes garbage returned by the mutator (drops bad records, keeps good ones)", async () => {
+      await mutateAgents(
+        localPath,
+        () => ({
+          // `Bad` capitalization fails the name regex → dropped on normalize.
+          Bad: validAgent(),
+          good: validAgent(),
+        }),
+        "dashboard:tester",
+      );
+      const s = readSettings(localPath);
+      expect(Object.keys(s.agents ?? {})).toEqual(["good"]);
+    });
+
+    it("preserves overrides + display + agentDefaults across a mutation", async () => {
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false } },
+        display: { worker: { port: 5562, runtime: "docker" } },
+        agentDefaults: { conflictCheckEnabled: false },
+        writtenBy: "dashboard:tester",
+      });
+
+      await mutateAgents(
+        localPath,
+        (current) => {
+          current.alice = validAgent();
+          return current;
+        },
+        "dashboard:tester",
+      );
+
+      const s = readSettings(localPath);
+      expect(s.overrides.slack.enabled).toBe(false);
+      expect(s.display.worker?.port).toBe(5562);
+      expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+      expect(Object.keys(s.agents ?? {})).toEqual(["alice"]);
+    });
+  });
+
+  // ============================================================
+  // isValidIanaTimeZone — exported for shared use in agents-routes
+  // ============================================================
+
+  describe("isValidIanaTimeZone", () => {
+    it("accepts known IANA zones", () => {
+      expect(isValidIanaTimeZone("America/Chicago")).toBe(true);
+      expect(isValidIanaTimeZone("UTC")).toBe(true);
+    });
+    it("rejects unknown zones, empty strings, and non-strings", () => {
+      expect(isValidIanaTimeZone("Bogus/Place")).toBe(false);
+      expect(isValidIanaTimeZone("")).toBe(false);
+      expect(isValidIanaTimeZone(null)).toBe(false);
+      expect(isValidIanaTimeZone(123)).toBe(false);
     });
   });
 });

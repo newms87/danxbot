@@ -1,6 +1,8 @@
 import { watch } from "vue";
 import type {
+  AgentRecordWithName,
   AgentRosterResponse,
+  AgentSchedule,
   AgentSnapshot,
   Dispatch,
   DispatchDetail,
@@ -150,6 +152,138 @@ export async function fetchAgentRoster(
   );
   if (!res.ok) throw new Error(`fetchAgentRoster failed: ${res.status}`);
   return res.json();
+}
+
+// ── DX-160 Phase 2: Agent CRUD + avatar upload/serve ──────────────────
+
+/**
+ * Body shape for `createAgent` / `updateAgent`. PATCH allows any subset;
+ * POST requires `name` plus all the non-optional fields. The server
+ * stamps `type:"agent"` + timestamps, so callers never set those.
+ */
+export interface AgentCreateInput {
+  name: string;
+  bio: string;
+  capabilities: string[];
+  schedule: AgentSchedule;
+  enabled: boolean;
+  avatar_path?: string;
+}
+
+export type AgentUpdateInput = Partial<Omit<AgentCreateInput, "name">>;
+
+async function readJsonError(res: Response): Promise<string | undefined> {
+  try {
+    const body = await res.json();
+    if (body && typeof body.error === "string") return body.error;
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+/**
+ * POST /api/agents?repo=<name> — create one agent. Returns the new
+ * record on 201; throws a `ToggleError` carrying the server message
+ * for 4xx/5xx so the UI can render the error inline (e.g. 409 when
+ * the 5-cap is reached or the name is duplicate).
+ */
+export async function createAgent(
+  repo: string,
+  input: AgentCreateInput,
+): Promise<AgentRecordWithName> {
+  const res = await fetchWithAuth(
+    `/api/agents?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return res.json();
+}
+
+/**
+ * PATCH /api/agents/:name?repo=<name> — partial update. `name` is
+ * immutable on the server (400). Returns the refreshed record.
+ */
+export async function updateAgent(
+  repo: string,
+  name: string,
+  input: AgentUpdateInput,
+): Promise<AgentRecordWithName> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(name)}?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return res.json();
+}
+
+/**
+ * DELETE /api/agents/:name?repo=<name>. 204 on success; 409 when a
+ * non-terminal dispatch is in flight for the repo.
+ */
+export async function deleteAgent(
+  repo: string,
+  name: string,
+): Promise<void> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(name)}?repo=${encodeURIComponent(repo)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+}
+
+/**
+ * POST /api/agents/:name/avatar?repo=<name> — raw binary upload. The
+ * server validates MIME (png/jpeg/webp) and size (≤1 MB). Returns the
+ * refreshed agent record carrying the new `avatar_path`.
+ *
+ * Note on the wire shape: the server accepts a raw body with the file's
+ * MIME type in `Content-Type` (no multipart). The browser's `File`
+ * object plugs in directly via `fetch(url, {body: file})` — `File.type`
+ * carries the MIME and the bytes stream from the underlying blob.
+ */
+export async function uploadAgentAvatar(
+  repo: string,
+  name: string,
+  file: File,
+): Promise<AgentRecordWithName> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(name)}/avatar?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": file.type },
+      body: file,
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return res.json();
+}
+
+/**
+ * Fetch the avatar bytes via authed GET and return a `blob:` URL the
+ * browser can render in `<img src>`. Returns `null` on 404 (no avatar
+ * uploaded yet, or file missing on disk). Caller is responsible for
+ * `URL.revokeObjectURL` on unmount to free memory.
+ */
+export async function fetchAgentAvatarUrl(
+  repo: string,
+  name: string,
+): Promise<string | null> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(name)}/avatar?repo=${encodeURIComponent(repo)}`,
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }
 
 /**

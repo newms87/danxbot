@@ -75,15 +75,25 @@ const mockHandlePatchAgentDefaults = vi.fn();
 const mockHandlePatchToggle = vi.fn();
 const mockHandleClearAgentCriticalFailure = vi.fn();
 const mockHandlePutIssuePrefix = vi.fn();
+const mockHandlePostAgent = vi.fn();
+const mockHandlePatchAgent = vi.fn();
+const mockHandleDeleteAgent = vi.fn();
+const mockHandlePostAvatar = vi.fn();
+const mockHandleGetAvatar = vi.fn();
 vi.mock("./agents-routes.js", () => ({
   handleClearAgentCriticalFailure: (...args: unknown[]) =>
     mockHandleClearAgentCriticalFailure(...args),
+  handleDeleteAgent: (...args: unknown[]) => mockHandleDeleteAgent(...args),
   handleGetAgent: (...args: unknown[]) => mockHandleGetAgent(...args),
+  handleGetAvatar: (...args: unknown[]) => mockHandleGetAvatar(...args),
   handleGetRoster: (...args: unknown[]) => mockHandleGetRoster(...args),
   handleListAgents: (...args: unknown[]) => mockHandleListAgents(...args),
+  handlePatchAgent: (...args: unknown[]) => mockHandlePatchAgent(...args),
   handlePatchAgentDefaults: (...args: unknown[]) =>
     mockHandlePatchAgentDefaults(...args),
   handlePatchToggle: (...args: unknown[]) => mockHandlePatchToggle(...args),
+  handlePostAgent: (...args: unknown[]) => mockHandlePostAgent(...args),
+  handlePostAvatar: (...args: unknown[]) => mockHandlePostAvatar(...args),
   handlePutIssuePrefix: (...args: unknown[]) =>
     mockHandlePutIssuePrefix(...args),
 }));
@@ -216,6 +226,11 @@ describe("dashboard server", () => {
     mockHandlePatchToggle.mockReset();
     mockHandleClearAgentCriticalFailure.mockReset();
     mockHandlePutIssuePrefix.mockReset();
+    mockHandlePostAgent.mockReset();
+    mockHandlePatchAgent.mockReset();
+    mockHandleDeleteAgent.mockReset();
+    mockHandlePostAvatar.mockReset();
+    mockHandleGetAvatar.mockReset();
     mockHandleLogin.mockReset();
     mockHandleLogout.mockReset();
     mockHandleMe.mockReset();
@@ -447,6 +462,126 @@ describe("dashboard server", () => {
       expect(res._getStatusCode()).toBe(400);
       expect(JSON.parse(res._getBody()).error).toContain("repo");
       expect(mockHandlePatchAgentDefaults).not.toHaveBeenCalled();
+    });
+
+    // ── DX-160 Phase 2: Agent CRUD + avatar route wiring ─────────
+
+    it("POST /api/agents dispatches to handlePostAgent (handler-internal auth)", async () => {
+      mockHandlePostAgent.mockImplementation(
+        async (_req: http.IncomingMessage, res: http.ServerResponse) => {
+          res.writeHead(201, { "Content-Type": "application/json" });
+          res.end("{}");
+        },
+      );
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/agents?repo=danxbot",
+      );
+      // No auth — the handler owns its own requireUser; the router must
+      // still dispatch to it.
+      await requestHandler(req, res);
+      expect(mockHandlePostAgent).toHaveBeenCalledTimes(1);
+      expect(mockHandlePostAgent.mock.calls[0][2]).toBe("danxbot");
+    });
+
+    it("PATCH /api/agents/:name dispatches to handlePatchAgent", async () => {
+      mockHandlePatchAgent.mockImplementation(
+        async (_req: http.IncomingMessage, res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        },
+      );
+      const { req, res } = createMockReqRes(
+        "PATCH",
+        "/api/agents/alice?repo=danxbot",
+      );
+      await requestHandler(req, res);
+      expect(mockHandlePatchAgent).toHaveBeenCalledTimes(1);
+      expect(mockHandlePatchAgent.mock.calls[0][2]).toBe("danxbot");
+      expect(mockHandlePatchAgent.mock.calls[0][3]).toBe("alice");
+    });
+
+    it("DELETE /api/agents/:name dispatches to handleDeleteAgent", async () => {
+      mockHandleDeleteAgent.mockImplementation(
+        async (_req: http.IncomingMessage, res: http.ServerResponse) => {
+          res.writeHead(204);
+          res.end();
+        },
+      );
+      const { req, res } = createMockReqRes(
+        "DELETE",
+        "/api/agents/alice?repo=danxbot",
+      );
+      await requestHandler(req, res);
+      expect(mockHandleDeleteAgent).toHaveBeenCalledTimes(1);
+      expect(mockHandleDeleteAgent.mock.calls[0][2]).toBe("danxbot");
+      expect(mockHandleDeleteAgent.mock.calls[0][3]).toBe("alice");
+    });
+
+    it("POST /api/agents/:name/avatar dispatches to handlePostAvatar", async () => {
+      mockHandlePostAvatar.mockImplementation(
+        async (_req: http.IncomingMessage, res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        },
+      );
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/agents/alice/avatar?repo=danxbot",
+      );
+      await requestHandler(req, res);
+      expect(mockHandlePostAvatar).toHaveBeenCalledTimes(1);
+      expect(mockHandlePostAvatar.mock.calls[0][3]).toBe("alice");
+    });
+
+    it("route ordering: /api/agents/:name/avatar wins over /api/agents (POST)", async () => {
+      // Locks the comment-only invariant in server.ts that the more
+      // specific avatar tail must be matched BEFORE the bare /api/agents
+      // create route would catch a same-method request. Asserting both
+      // call counts in one test prevents an accidental rule-order swap.
+      mockHandlePostAvatar.mockImplementation(
+        async (_req: http.IncomingMessage, res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        },
+      );
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/agents/alice/avatar?repo=danxbot",
+      );
+      await requestHandler(req, res);
+      expect(mockHandlePostAvatar).toHaveBeenCalledTimes(1);
+      expect(mockHandlePostAgent).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/agents/:name/avatar dispatches to handleGetAvatar (under user auth gate)", async () => {
+      mockHandleGetAvatar.mockImplementation(
+        async (res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "image/png" });
+          res.end();
+        },
+      );
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/agents/alice/avatar?repo=danxbot",
+      );
+      withAuth(req);
+      await requestHandler(req, res);
+      expect(mockHandleGetAvatar).toHaveBeenCalledTimes(1);
+      // signature: (res, repoName, agentName, deps)
+      expect(mockHandleGetAvatar.mock.calls[0][1]).toBe("danxbot");
+      expect(mockHandleGetAvatar.mock.calls[0][2]).toBe("alice");
+      expect(mockHandleGetAgent).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/agents/:name/avatar without auth returns 401 (router gate)", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/agents/alice/avatar?repo=danxbot",
+      );
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+      expect(mockHandleGetAvatar).not.toHaveBeenCalled();
     });
 
     it("GET /api/stream without auth returns 401", async () => {

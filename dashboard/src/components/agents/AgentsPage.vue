@@ -1,26 +1,36 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { fetchAgentRoster } from "../../api";
+import {
+  createAgent,
+  deleteAgent,
+  fetchAgentRoster,
+  updateAgent,
+  uploadAgentAvatar,
+  type AgentCreateInput,
+  type AgentUpdateInput,
+  type ToggleError,
+} from "../../api";
 import type {
   AgentRecordWithName,
   AgentRosterResponse,
+  AgentSchedule,
   RepoInfo,
 } from "../../types";
+import AgentCard from "./AgentCard.vue";
+import AgentEditDrawer from "./AgentEditDrawer.vue";
+import AgentDeleteModal from "./AgentDeleteModal.vue";
 
 /**
- * DX-159 Phase 1 — empty Agents tab stub.
+ * DX-160 Phase 2 — Agents tab CRUD UI.
  *
- * The previous "Agents" tab content (per-repo env-toggles aggregation
- * for every connected repo) moved to the Settings tab and is now
- * scoped to the operator's currently-selected repo. The Agents tab is
- * the new home for the multi-worker agent CRUD UI; Phase 1 only ships
- * the empty-state shell. Phase 2 (DX-160) lands creation, edit,
- * avatar upload, schedule editor, and delete.
+ * Hosts the per-repo agent roster grid + Edit drawer + Delete modal.
+ * The component owns the local roster state, the API plumbing, and
+ * the optimistic concurrency surface. Server is the source of truth —
+ * every mutation re-loads the roster on success so the cap counter
+ * stays honest after a 5th create.
  *
- * The component still calls `GET /api/agents?repo=<name>` so the typed
- * fetch wrapper has a real consumer in Phase 1 — and so the empty
- * state surfaces "0 agents" via the same code path that will render
- * the real roster in Phase 2.
+ * Phase 1 shipped the empty-state stub via the same `fetchAgentRoster`
+ * API; this phase replaces the empty body but keeps the wire shape.
  */
 
 const props = defineProps<{
@@ -33,9 +43,33 @@ const activeRepoName = computed<string>(() => {
   return props.repos[0]?.name ?? "";
 });
 
+const AGENT_LIMIT = 5;
+
 const roster = ref<AgentRecordWithName[]>([]);
 const loading = ref<boolean>(false);
 const error = ref<string | null>(null);
+
+// Edit drawer state. `null` when closed; `{agent: null}` for create
+// mode; `{agent: <record>}` for edit mode. Wrapping the agent in an
+// object distinguishes "drawer closed" from "drawer open in create
+// mode" without tri-state booleans.
+interface DrawerState {
+  agent: AgentRecordWithName | null;
+}
+const drawer = ref<DrawerState | null>(null);
+const drawerBusy = ref(false);
+const drawerError = ref<string | null>(null);
+
+// Delete modal state.
+const deleteTarget = ref<AgentRecordWithName | null>(null);
+const deleteBusy = ref(false);
+const deleteError = ref<string | null>(null);
+
+const atCap = computed(() => roster.value.length >= AGENT_LIMIT);
+const newButtonDisabled = computed(() => atCap.value || !activeRepoName.value);
+const newButtonTitle = computed(() =>
+  atCap.value ? "5-agent limit reached" : "",
+);
 
 async function loadRoster(): Promise<void> {
   if (!activeRepoName.value) {
@@ -55,7 +89,122 @@ async function loadRoster(): Promise<void> {
 }
 
 onMounted(() => void loadRoster());
-watch(activeRepoName, () => void loadRoster());
+watch(activeRepoName, () => {
+  drawer.value = null;
+  deleteTarget.value = null;
+  void loadRoster();
+});
+
+function openCreate(): void {
+  if (newButtonDisabled.value) return;
+  drawerError.value = null;
+  drawer.value = { agent: null };
+}
+
+function openEdit(agent: AgentRecordWithName): void {
+  drawerError.value = null;
+  drawer.value = { agent };
+}
+
+function closeDrawer(): void {
+  drawer.value = null;
+  drawerError.value = null;
+  drawerBusy.value = false;
+}
+
+async function onSubmit(input: {
+  name: string;
+  bio: string;
+  capabilities: string[];
+  schedule: AgentSchedule;
+  enabled: boolean;
+  avatarFile: File | null;
+}): Promise<void> {
+  if (!drawer.value) return;
+  const isCreate = drawer.value.agent === null;
+  drawerBusy.value = true;
+  drawerError.value = null;
+  try {
+    let saved: AgentRecordWithName;
+    if (isCreate) {
+      const create: AgentCreateInput = {
+        name: input.name,
+        bio: input.bio,
+        capabilities: input.capabilities,
+        schedule: input.schedule,
+        enabled: input.enabled,
+      };
+      saved = await createAgent(activeRepoName.value, create);
+    } else {
+      const update: AgentUpdateInput = {
+        bio: input.bio,
+        capabilities: input.capabilities,
+        schedule: input.schedule,
+        enabled: input.enabled,
+      };
+      saved = await updateAgent(
+        activeRepoName.value,
+        drawer.value.agent!.name,
+        update,
+      );
+    }
+    if (input.avatarFile) {
+      saved = await uploadAgentAvatar(
+        activeRepoName.value,
+        saved.name,
+        input.avatarFile,
+      );
+    }
+    // Replace or append in-place so the grid updates without a full
+    // refetch (and a full refetch follows below to reconcile any
+    // server-side normalization).
+    const idx = roster.value.findIndex((a) => a.name === saved.name);
+    if (idx === -1) roster.value = [...roster.value, saved];
+    else
+      roster.value = [
+        ...roster.value.slice(0, idx),
+        saved,
+        ...roster.value.slice(idx + 1),
+      ];
+    closeDrawer();
+    await loadRoster();
+  } catch (err) {
+    const te = err as ToggleError;
+    drawerError.value = te?.serverMessage ?? te?.message ?? "Save failed.";
+  } finally {
+    drawerBusy.value = false;
+  }
+}
+
+function askDelete(agent: AgentRecordWithName): void {
+  deleteError.value = null;
+  deleteTarget.value = agent;
+}
+
+function cancelDelete(): void {
+  deleteTarget.value = null;
+  deleteError.value = null;
+  deleteBusy.value = false;
+}
+
+async function confirmDelete(): Promise<void> {
+  if (!deleteTarget.value) return;
+  deleteBusy.value = true;
+  deleteError.value = null;
+  try {
+    await deleteAgent(activeRepoName.value, deleteTarget.value.name);
+    roster.value = roster.value.filter(
+      (a) => a.name !== deleteTarget.value!.name,
+    );
+    cancelDelete();
+    await loadRoster();
+  } catch (err) {
+    const te = err as ToggleError;
+    deleteError.value = te?.serverMessage ?? te?.message ?? "Delete failed.";
+  } finally {
+    deleteBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -68,17 +217,29 @@ watch(activeRepoName, () => void loadRoster());
         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
           Named workers (Alice, Bob, …) with bios, schedules, capabilities, and persistent worktrees. Each agent serves one dispatch at a time across enabled types (issue-worker / Slack / API).
         </p>
+        <p
+          class="mt-1 text-xs text-gray-400 dark:text-gray-500"
+          data-test="agent-count"
+        >
+          {{ roster.length }} / {{ AGENT_LIMIT }} agents
+        </p>
       </div>
       <span
         class="inline-flex"
-        title="Coming in Phase 2"
+        :title="newButtonTitle"
         data-test="new-agent-tooltip"
       >
         <button
           type="button"
-          class="rounded-md bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 px-3 py-1.5 text-sm font-medium cursor-not-allowed"
-          disabled
+          class="rounded-md px-3 py-1.5 text-sm font-medium"
+          :class="
+            newButtonDisabled
+              ? 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+              : 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
+          "
+          :disabled="newButtonDisabled"
           data-test="new-agent-button"
+          @click="openCreate"
         >
           + New Agent
         </button>
@@ -116,35 +277,42 @@ watch(activeRepoName, () => void loadRoster());
         No agents yet
       </h3>
       <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
-        Phase 2 will add the CRUD UI. For now the schema is in place — see
-        <code class="text-xs">{{ "<repo>/.danxbot/settings.json#agents" }}</code>.
+        Click <strong>+ New Agent</strong> above to create one. Names become git branches and worktree directories — keep them URL/branch/path-safe.
       </p>
     </div>
 
-    <div v-else class="grid grid-cols-1 gap-4">
-      <article
+    <div
+      v-else
+      class="grid grid-cols-1 md:grid-cols-2 gap-4"
+      data-test="agents-grid"
+    >
+      <AgentCard
         v-for="agent in roster"
         :key="agent.name"
-        class="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 shadow-sm"
-      >
-        <header class="flex items-start justify-between">
-          <div>
-            <h3 class="text-base font-bold text-gray-900 dark:text-white">{{ agent.name }}</h3>
-            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              {{ agent.capabilities.join(", ") }} · {{ agent.schedule.tz }}
-            </p>
-          </div>
-          <span
-            class="text-xs rounded-full px-2 py-0.5"
-            :class="agent.enabled
-              ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-200'
-              : 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300'"
-          >
-            {{ agent.enabled ? "enabled" : "disabled" }}
-          </span>
-        </header>
-        <p class="mt-2 text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{{ agent.bio }}</p>
-      </article>
+        :agent="agent"
+        :repo="activeRepoName"
+        @edit="openEdit"
+        @delete="askDelete"
+      />
     </div>
+
+    <AgentEditDrawer
+      v-if="drawer"
+      :agent="drawer.agent"
+      :repo="activeRepoName"
+      :busy="drawerBusy"
+      :error="drawerError"
+      @cancel="closeDrawer"
+      @submit="onSubmit"
+    />
+
+    <AgentDeleteModal
+      v-if="deleteTarget"
+      :agent="deleteTarget"
+      :busy="deleteBusy"
+      :error="deleteError"
+      @cancel="cancelDelete"
+      @confirm="confirmDelete"
+    />
   </section>
 </template>
