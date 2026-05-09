@@ -3102,7 +3102,7 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
     await runOneTriageDispatch(target, {
       id: "tj1",
       status: "completed",
-      summary: "Lied — never called danx_issue_save",
+      summary: "Lied — never edited the YAML",
       startedAt: new Date(),
       completedAt: new Date(),
     });
@@ -3136,8 +3136,8 @@ describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
       },
     });
     // After dispatch the YAML still shows the same stale expiry. (The
-    // agent might have called `danx_issue_save` but did not update the
-    // triage block — same failure mode as not saving at all.)
+    // agent might have edited the YAML but did not update the triage
+    // block — same failure mode as not editing at all.)
     mockLoadLocal.mockImplementation(async (_repo: string, id: string) =>
       id === "ISS-8" ? target : null,
     );
@@ -4265,7 +4265,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       "Edit /test/repos/test-repo/.danxbot/issues/open/ISS-FAKE.yml",
     );
     expect(dispatchArg.task).toContain(
-      'Call danx_issue_save({id: "ISS-FAKE"}) when done.',
+      "Call danxbot_complete when done.",
     );
   });
 
@@ -5320,9 +5320,9 @@ describe("poll — In Progress sync + orphan resume", () => {
     // ISS-135: the legacy "Resuming prior dispatch on ISS-93" phrasing
     // was replaced with the explicit RESUMED-dispatch CONTRACT block
     // that tells the agent to verify terminal state before redoing
-    // any work. The card id and YAML path still appear; the
-    // `danx_issue_save` directive is replaced by the
-    // `danxbot_complete` directive embedded in the contract.
+    // any work. The card id and YAML path still appear; the legacy
+    // save-tool directive is replaced by the `danxbot_complete`
+    // directive embedded in the contract.
     expect(dispatchArg.task).toContain("RESUMED dispatch on ISS-93");
     expect(dispatchArg.task).toContain(
       "/test/repos/test-repo/.danxbot/issues/open/ISS-93.yml",

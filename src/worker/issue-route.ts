@@ -1,36 +1,39 @@
 /**
- * Worker HTTP handlers for the danx_issue_save / danx_issue_create MCP tools
- * (Phase 3 of tracker-agnostic-agents — Trello wsb4TVNT).
+ * Worker HTTP handler for the `danx_issue_create` MCP tool, plus the
+ * `syncTrackedIssueOnComplete` helper invoked by `handleStop` /
+ * `auto-sync.ts` when an agent calls `danxbot_complete`.
  *
  * The MCP server (`src/mcp/danxbot-server.ts`) runs as a per-dispatch `npx
  * tsx` subprocess and has no direct access to the worker's `IssueTracker`
- * instance, dispatch DB, or filesystem-relative repo paths. Both tools
- * therefore POST to per-dispatch worker endpoints (auto-injected as
- * `DANXBOT_ISSUE_SAVE_URL` / `DANXBOT_ISSUE_CREATE_URL` by the dispatch
- * core), and the bulk of the work lives here in-process.
+ * instance, dispatch DB, or filesystem-relative repo paths. The tool
+ * therefore POSTs to a per-dispatch worker endpoint (auto-injected as
+ * `DANXBOT_ISSUE_CREATE_URL` by the dispatch core), and the bulk of the
+ * work lives here in-process.
  *
- * `danx_issue_save({id})` — two-tier semantics:
- *
- *   1. Sync (returned to agent): load + parseIssue from
- *      `<repo>/.danxbot/issues/{open,closed}/<id>.yml`. Format
- *      errors → `{saved: false, errors: [...]}` at HTTP 200 (agent-side
- *      failure, not a network error). Validation passing →
- *      `{saved: true}` returned IMMEDIATELY.
- *   2. Async (NOT returned to agent): syncIssue runs detached. Tracker
- *      errors are swallowed from the agent's view and surfaced via
- *      `updateDispatch({error})` so the dashboard SSE stream picks them
- *      up. When the saved status is Done or Cancelled, the YAML moves
- *      from `open/` → `closed/` (idempotent: skip when target file
- *      already exists).
+ * **DX-157 retired the parallel agent save tool / HTTP route.**
+ * Agents now `Edit` / `Write` the YAML at
+ * `<repo>/.danxbot/issues/{open,closed}/<id>.yml` directly. The chokidar
+ * watcher (Phase 3, `src/db/issues-mirror.ts`) catches the file event and
+ * mirrors it to Postgres; the poller's per-tick mirror handles the
+ * outbound tracker push asynchronously. The watcher is ALWAYS the canonical
+ * write path to the DB, including for agent-driven edits.
  *
  * `danx_issue_create({filename})` — fully synchronous. Reads
  * `<repo>/.danxbot/issues/open/<filename>.yml` (a draft slug, e.g.
- * `add-jsonl-tail.yml`), allocates the next internal `ISS-N` id via
+ * `add-jsonl-tail.yml`), allocates the next internal `<PREFIX>-N` id via
  * `nextIssueId`, stamps it into the draft, calls `tracker.createCard`,
  * stamps the returned `external_id` + check_item_ids back into the YAML,
  * renames the file to `<id>.yml`, and returns `{created: true, id,
  * external_id}`. Drafts that already carry a non-empty `id` are rejected
- * — that's a save case, not a create case.
+ * — the existing-id update path is `Edit` directly, not `create`.
+ *
+ * `syncTrackedIssueOnComplete` runs synchronously from inside the worker
+ * (no HTTP round-trip) when an agent signals `danxbot_complete`. It
+ * applies the same `forceWaitingOnToToDo` normalization + history-diff
+ * append the legacy save handler did, then calls `runSync` to push to
+ * the tracker. This is the immediate-tracker-push safety net; without it
+ * a completed agent's terminal-state YAML would only reach the tracker
+ * on the poller's next tick (~30-60s lag).
  *
  * HTTP status codes:
  *   - 200 with `{ok: false, errors}` for every agent-recoverable failure
@@ -111,27 +114,29 @@ let cachedTracker: IssueTracker | null = null;
 const issueLocks = new Map<string, Promise<void>>();
 
 /**
- * Last-seen `{status, waiting_on}` per internal id. Populated on every
- * successful save (and `created` on `handleIssueCreate`); read at the
- * start of each save to compute the diff that drives `appendDiffEntries`.
+ * Last-seen `{status, waiting_on}` per internal id. Populated by
+ * `handleIssueCreate` on the `created` event and by every
+ * `syncTrackedIssueOnComplete` invocation; read at the start of each
+ * subsequent invocation to compute the diff that drives
+ * `appendDiffEntries`.
  *
- * This is the only place the worker carries cross-save state for an
- * issue. Cache miss = first save in this worker process for that id =
+ * This is the only place the worker carries cross-call state for an
+ * issue. Cache miss = first event in this worker process for that id =
  * no diff (intentional; we have no prior reference state). Worker
- * restart loses the cache, so the first save after restart also has no
+ * restart loses the cache, so the first sync after restart also has no
  * diff — same fallback. The cache is updated AFTER `appendDiffEntries`
- * is called for the current save so the next save sees the
- * post-normalization state (`forceWaitingOnToToDo` already applied).
+ * runs so the next call sees the post-normalization state
+ * (`forceWaitingOnToToDo` already applied).
  *
- * **Concurrent-save safety on the same id.** `applyHistoryDiff` reads
+ * **Concurrent-call safety on the same id.** `applyHistoryDiff` reads
  * `prior` and writes the new state in straight-line synchronous code
  * (no `await` between the `.get` and the `.set`). Two concurrent
- * `handleIssueSave` calls on the same id can interleave at the
- * application level, but inside `applyHistoryDiff` each save observes
- * a coherent snapshot of `prior`. The "last save wins" outcome is the
- * intended semantic — B's post-normalization state IS the correct
- * reference for whatever save lands next, regardless of which call
- * arrived first at the cache.
+ * `syncTrackedIssueOnComplete` calls on the same id can interleave at
+ * the application level, but inside `applyHistoryDiff` each call
+ * observes a coherent snapshot of `prior`. The "last call wins" outcome
+ * is the intended semantic — B's post-normalization state IS the correct
+ * reference for whatever call lands next, regardless of which arrived
+ * first at the cache.
  *
  * NOT a substitute for the on-disk YAML — the YAML remains the only
  * persisted source of truth. The cache is purely a diff-source for the
@@ -288,18 +293,18 @@ export function appendDiffEntries(
 
 /**
  * Apply the diff-driven history append AND update the last-seen cache
- * in one place. Called by every save path BEFORE the first
+ * in one place. Called by `syncTrackedIssueOnComplete` BEFORE the first
  * `persistAfterSync` so the on-disk YAML carries the new entries. The
- * cache update happens unconditionally so the next save sees this
- * save's post-normalization state.
+ * cache update happens unconditionally so the next call sees this
+ * call's post-normalization state.
  *
  * The `forceWaitingOnToToDo` normalization happens upstream (in
- * `handleIssueSave` / `syncTrackedIssueOnComplete`), so `issue` here is
- * already the post-normalized shape per the diff contract.
+ * `syncTrackedIssueOnComplete`), so `issue` here is already the
+ * post-normalized shape per the diff contract.
  *
  * **Allocation:** when no transitions were detected, `appendDiffEntries`
  * returns `issue.history` by reference; the identity check below short-
- * circuits the spread so steady-state mid-session saves do not pay an
+ * circuits the spread so steady-state mid-session calls do not pay an
  * issue-clone allocation per call.
  */
 function applyHistoryDiff(
@@ -402,10 +407,11 @@ export function _resetForTesting(): void {
 }
 
 /**
- * Test-only: await every in-flight async sync. The async branch of
- * `handleIssueSave` returns to the agent immediately and lets the sync
- * work run detached; tests need a deterministic await point before
- * asserting on disk + tracker state.
+ * Test-only: await every in-flight async task on the per-issue mutex
+ * chain. `chainOnIssueLock` schedules tracker pushes off the hot path
+ * (currently invoked only from `syncTrackedIssueOnComplete`); tests
+ * need a deterministic await point before asserting on disk + tracker
+ * state.
  */
 export async function _drainAsyncWorkForTesting(): Promise<void> {
   while (inFlight.size > 0) {
@@ -417,10 +423,10 @@ export async function _drainAsyncWorkForTesting(): Promise<void> {
  * Schedule an async task on the per-issue mutex chain. Returns the
  * settle promise of the new tail. The previous tail's failure is
  * swallowed via `.catch(() => undefined)` so a single tracker error
- * doesn't poison every subsequent save in the queue — each task logs
- * its own failure independently. Both `scheduleAsyncSync` and
- * `syncTrackedIssueOnComplete` chain through this helper to keep the
- * mutex semantics in one place.
+ * doesn't poison every subsequent task in the queue — each task logs
+ * its own failure independently. `syncTrackedIssueOnComplete` is the
+ * sole production caller; helper exists in its own function so the
+ * mutex semantics live in one place even if a future caller is added.
  */
 function chainOnIssueLock(
   id: string,
@@ -437,90 +443,6 @@ function chainOnIssueLock(
   issueLocks.set(id, finalized);
   inFlight.add(finalized);
   return finalized;
-}
-
-/** POST /api/issue-save/:dispatchId — agent-facing save endpoint. */
-export async function handleIssueSave(
-  req: IncomingMessage,
-  res: ServerResponse,
-  dispatchId: string,
-  repo: RepoContext,
-  override?: IssueRouteDeps,
-): Promise<void> {
-  const deps = getDeps(repo, override);
-
-  let body: Record<string, unknown>;
-  try {
-    body = await parseBody(req);
-  } catch (err) {
-    json(res, 400, {
-      saved: false,
-      errors: [err instanceof Error ? err.message : String(err)],
-    });
-    return;
-  }
-
-  const id = typeof body.id === "string" ? body.id.trim() : "";
-  if (!id) {
-    json(res, 200, {
-      saved: false,
-      errors: ["missing required field: id"],
-    });
-    return;
-  }
-
-  const sourcePath = locateIssueFile(repo.localPath, id);
-  if (!sourcePath) {
-    json(res, 200, {
-      saved: false,
-      errors: [`No YAML file found at .danxbot/issues/{open,closed}/${id}.yml`],
-    });
-    return;
-  }
-
-  let issue: Issue;
-  try {
-    issue = parseIssue(readFileSync(sourcePath, "utf-8"), {
-      expectedPrefix: repo.issuePrefix,
-    });
-  } catch (err) {
-    const msg = err instanceof IssueParseError ? err.message : String(err);
-    json(res, 200, { saved: false, errors: [msg] });
-    return;
-  }
-
-  // Worker contract: `blocked != null` ALWAYS forces `status: "ToDo"`.
-  // Agents set the blocked record only — they don't separately move
-  // status, and a stray `status: Needs Help` / `Done` paired with a
-  // non-null blocked is a category error we silently normalize. The
-  // poller's dispatch gate then skips the card while every blocker in
-  // `by[]` is non-terminal. See `forceWaitingOnToToDo`.
-  issue = forceWaitingOnToToDo(issue);
-
-  // DX-146 / Phase 2: diff against the worker's last-seen state and
-  // append history entries BEFORE the first persist, so the on-disk
-  // YAML carries the new audit-log rows from this save onward. Both
-  // the local-only and tracker-bound branches go through the same
-  // `applyHistoryDiff` helper — single code path, single cache.
-  issue = applyHistoryDiff(issue, dispatchId, deps);
-
-  // Sync validation passed — return `saved: true` immediately. Tracker
-  // errors must NEVER surface to the agent (AC #2). The async branch runs
-  // detached and reports failures to the dispatch row.
-  json(res, 200, { saved: true });
-
-  // Skip the tracker push entirely when no external_id has been assigned
-  // (memory-tracker issues never get one; pre-create drafts go through
-  // handleIssueCreate, not handleIssueSave). The local file write is the
-  // entire save semantics in that case.
-  if (!issue.external_id) {
-    chainOnIssueLock(issue.id, async () => {
-      persistAfterSync(repo.localPath, issue);
-    });
-    return;
-  }
-
-  chainOnIssueLock(issue.id, () => runSync(deps, dispatchId, repo, issue));
 }
 
 /**
@@ -559,7 +481,8 @@ export async function handleIssueSave(
  * Exported for two reasons: (a) `syncTrackedIssueOnComplete` reuses it
  * for the synchronous danxbot-complete auto-sync path; (b) the unit
  * tests in `issue-route.test.ts` drive it directly with a mocked
- * `syncIssue`. Not part of the worker's public HTTP surface.
+ * `syncIssue`. Not part of the worker's public HTTP surface — DX-157
+ * retired the legacy agent-facing save route entirely.
  */
 export async function runSync(
   deps: IssueRouteDeps,
@@ -581,7 +504,7 @@ export async function runSync(
     });
     persistAfterSync(repo.localPath, updatedLocal);
   } catch (err) {
-    const msg = `danx_issue_save async sync failed for ${issue.external_id}: ${
+    const msg = `tracker sync failed for ${issue.external_id}: ${
       err instanceof Error ? err.message : String(err)
     }`;
     log.error(msg);
@@ -755,12 +678,12 @@ export async function handleIssueCreate(
   // Reject drafts that already carry an id or external_id. Either is a
   // signal the file is not a fresh draft — running create on it would
   // either duplicate the tracker card or overwrite the existing id.
-  // Fail loud and push the agent toward `danx_issue_save`.
+  // Fail loud and push the agent toward `Edit` / `Write` directly.
   if (typeof draftMap.id === "string" && draftMap.id.length > 0) {
     json(res, 200, {
       created: false,
       errors: [
-        `Draft already has id "${String(draftMap.id)}" — use danx_issue_save to update an existing issue, not danx_issue_create`,
+        `Draft already has id "${String(draftMap.id)}" — edit the existing YAML at .danxbot/issues/{open,closed}/${String(draftMap.id)}.yml directly, not danx_issue_create`,
       ],
     });
     return;
@@ -772,7 +695,7 @@ export async function handleIssueCreate(
     json(res, 200, {
       created: false,
       errors: [
-        `Draft already has external_id "${String(draftMap.external_id)}" — use danx_issue_save to update an existing issue, not danx_issue_create`,
+        `Draft already has external_id "${String(draftMap.external_id)}" — edit the existing YAML directly, not danx_issue_create`,
       ],
     });
     return;
@@ -937,11 +860,20 @@ function locateIssueFile(repoLocalPath: string, id: string): string | null {
 }
 
 /**
- * Run `danx_issue_save` synchronously from inside the worker (no HTTP
- * round-trip). Used by `handleStop` for `danxbot_complete` auto-sync —
- * the dispatch is already terminating, so the worker fires + awaits the
+ * Run the post-completion tracker sync synchronously from inside the
+ * worker. Used by `handleStop` for `danxbot_complete` auto-sync — the
+ * dispatch is already terminating, so the worker fires + awaits the
  * sync directly. Validation failures are recorded via `recordError`;
  * tracker errors are swallowed (same contract as the async path).
+ *
+ * DX-157 made this the SOLE entry point for the tracker push triggered
+ * by an agent's terminal save: the legacy agent-facing save HTTP route
+ * was retired, and the chokidar watcher (`src/db/issues-mirror.ts`)
+ * now mirrors agent-driven YAML edits to the DB on every file event.
+ * The poller's per-tick mirror handles the eventual outbound tracker
+ * push; this helper is the immediate-push safety net so the dashboard
+ * sees the final tracker state without waiting up to ~30-60s for the
+ * next poll.
  *
  * Returns `{ ok, errors }` so the caller can log validation failures
  * without forcing them into the response body of an unrelated handler.
@@ -975,15 +907,18 @@ export async function syncTrackedIssueOnComplete(
     return { ok: false, errors: [msg] };
   }
 
-  // Same waiting_on → ToDo normalization as `handleIssueSave` (see comment
-  // there). Auto-sync on completion goes through this code path when the
-  // agent calls `danxbot_complete` without a final explicit save.
+  // Worker contract: `waiting_on != null` ALWAYS forces `status:
+  // "ToDo"`. Agents set the waiting_on record only — they don't
+  // separately move status, and a stray `Blocked` / `Done` paired with
+  // a non-null waiting_on is a category error we silently normalize.
+  // The poller's dispatch gate then skips the card while every blocker
+  // in `by[]` is non-terminal. See `forceWaitingOnToToDo`.
   issue = forceWaitingOnToToDo(issue);
 
-  // DX-146 / Phase 2: same diff append as `handleIssueSave`. The
-  // auto-sync triggered by `danxbot_complete` is a save event from
-  // history's perspective — flipping a phase to Done by walking off
-  // without an explicit save still mints the status_change entry.
+  // DX-146 / Phase 2: diff append. The auto-sync triggered by
+  // `danxbot_complete` is a save event from history's perspective —
+  // flipping a phase to Done by walking off mints the status_change
+  // entry that pairs with the cache-seeded create state.
   issue = applyHistoryDiff(issue, dispatchId, deps);
 
   // Skip the tracker push entirely when no external_id is set (memory
@@ -996,9 +931,9 @@ export async function syncTrackedIssueOnComplete(
     return { ok: true, errors: [] };
   }
 
-  // Wait on the per-issue mutex so we don't race a concurrent agent-
-  // initiated save. The agent is shutting down here, so we await the
-  // tracker push synchronously (unlike the async branch in handleIssueSave).
+  // Wait on the per-issue mutex so we don't race a concurrent
+  // chain-scheduled task. The agent is shutting down here, so we await
+  // the tracker push synchronously (the async branch is gone — DX-157).
   await chainOnIssueLock(issue.id, () =>
     runSync(deps, dispatchId, repo, issue),
   );

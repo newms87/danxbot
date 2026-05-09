@@ -251,24 +251,20 @@ describe("danxbot MCP server", () => {
 
 describe("danxbot MCP server — issue tools", () => {
   /**
-   * Capture server that records every issue-save / issue-create POST so
-   * tests can assert the body the agent sent and respond with a custom
-   * status + JSON. Keyed by URL path so a single server can route both
-   * tools.
+   * Capture server that records every issue-create POST so tests can
+   * assert the body the agent sent and respond with a custom status +
+   * JSON. DX-157 retired the parallel save HTTP route; the watcher now
+   * mirrors agent edits to the DB on every YAML write and the poller's
+   * per-tick mirror handles the outbound tracker push.
    */
   function createIssueServer(): Promise<{
-    saveUrl: string;
     createUrl: string;
-    saveRequests: Array<{ body: Record<string, unknown> }>;
     createRequests: Array<{ body: Record<string, unknown> }>;
-    setNextSaveResponse: (status: number, body: unknown) => void;
     setNextCreateResponse: (status: number, body: unknown) => void;
     close: () => Promise<void>;
   }> {
     return new Promise((resolveOuter) => {
-      const saveRequests: Array<{ body: Record<string, unknown> }> = [];
       const createRequests: Array<{ body: Record<string, unknown> }> = [];
-      let nextSave = { status: 200, body: { saved: true } as unknown };
       let nextCreate = {
         status: 200,
         body: { created: true, external_id: "mem-1" } as unknown,
@@ -281,14 +277,6 @@ describe("danxbot MCP server — issue tools", () => {
         req.on("end", () => {
           const body = raw ? JSON.parse(raw) : {};
           const path = req.url ?? "/";
-          if (path.includes("/api/issue-save/")) {
-            saveRequests.push({ body });
-            res.writeHead(nextSave.status, {
-              "Content-Type": "application/json",
-            });
-            res.end(JSON.stringify(nextSave.body));
-            return;
-          }
           if (path.includes("/api/issue-create/")) {
             createRequests.push({ body });
             res.writeHead(nextCreate.status, {
@@ -305,13 +293,8 @@ describe("danxbot MCP server — issue tools", () => {
         const { port } = server.address() as AddressInfo;
         const base = `http://127.0.0.1:${port}`;
         resolveOuter({
-          saveUrl: `${base}/api/issue-save/test-job`,
           createUrl: `${base}/api/issue-create/test-job`,
-          saveRequests,
           createRequests,
-          setNextSaveResponse: (status, body) => {
-            nextSave = { status, body };
-          },
           setNextCreateResponse: (status, body) => {
             nextCreate = { status, body };
           },
@@ -323,14 +306,12 @@ describe("danxbot MCP server — issue tools", () => {
 
   function spawnIssueServer(
     stopUrl: string,
-    issueSaveUrl: string | undefined,
     issueCreateUrl: string | undefined,
   ): ChildProcess {
     return spawn(tsxBin, [serverScript], {
       env: {
         ...process.env,
         DANXBOT_STOP_URL: stopUrl,
-        DANXBOT_ISSUE_SAVE_URL: issueSaveUrl,
         DANXBOT_ISSUE_CREATE_URL: issueCreateUrl,
       } as NodeJS.ProcessEnv,
       stdio: ["pipe", "pipe", "pipe"],
@@ -352,12 +333,8 @@ describe("danxbot MCP server — issue tools", () => {
     await issueServer.close();
   });
 
-  it("advertises danx_issue_save + danx_issue_create when both URLs are set", async () => {
-    proc = spawnIssueServer(
-      stopServer.url,
-      issueServer.saveUrl,
-      issueServer.createUrl,
-    );
+  it("advertises danx_issue_create when its URL is set", async () => {
+    proc = spawnIssueServer(stopServer.url, issueServer.createUrl);
     await new Promise((r) => setTimeout(r, 500));
 
     await sendMessage(proc, {
@@ -381,78 +358,18 @@ describe("danxbot MCP server — issue tools", () => {
       tools: Array<{ name: string }>;
     };
     const names = result.tools.map((t) => t.name);
-    expect(names).toContain("danx_issue_save");
     expect(names).toContain("danx_issue_create");
-  }, 10_000);
-
-  it("hides danx_issue_create when only DANXBOT_ISSUE_SAVE_URL is set (AND-semantics on filter)", async () => {
-    // Pins the filter contract: each tool's URL is its OWN gate.
-    // A regression to OR-semantics ("any issue URL set → expose both")
-    // would let a partially-configured dispatch advertise a tool whose
-    // env var is undefined and the agent would crash on first call.
-    proc = spawnIssueServer(stopServer.url, issueServer.saveUrl, undefined);
-    await new Promise((r) => setTimeout(r, 500));
-
-    await sendMessage(proc, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "test", version: "1.0" },
-      },
-    });
-
-    const response = await sendMessage(proc, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/list",
-      params: {},
-    });
-    const result = response.result as {
-      tools: Array<{ name: string }>;
-    };
-    const names = result.tools.map((t) => t.name);
-    expect(names).toContain("danx_issue_save");
-    expect(names).not.toContain("danx_issue_create");
-  }, 10_000);
-
-  it("hides danx_issue_* tools when URLs are absent", async () => {
-    proc = spawnIssueServer(stopServer.url, undefined, undefined);
-    await new Promise((r) => setTimeout(r, 500));
-
-    await sendMessage(proc, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "test", version: "1.0" },
-      },
-    });
-
-    const response = await sendMessage(proc, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/list",
-      params: {},
-    });
-    const result = response.result as {
-      tools: Array<{ name: string }>;
-    };
-    const names = result.tools.map((t) => t.name);
-    expect(names).not.toContain("danx_issue_save");
-    expect(names).not.toContain("danx_issue_create");
-  }, 10_000);
-
-  it("calls danx_issue_save → POSTs to save URL → returns worker JSON verbatim", async () => {
-    proc = spawnIssueServer(
-      stopServer.url,
-      issueServer.saveUrl,
-      issueServer.createUrl,
+    // DX-157 retired the parallel save tool — agents `Edit` directly.
+    // Confirm the legacy tool name is NOT advertised by checking the
+    // pruned tool surface against a hardcoded allowlist.
+    expect(names).toEqual(
+      expect.arrayContaining(["danxbot_complete", "danx_issue_create"]),
     );
+    expect(names).not.toContain("danxbot_slack_reply");
+  }, 10_000);
+
+  it("hides danx_issue_create when its URL is absent", async () => {
+    proc = spawnIssueServer(stopServer.url, undefined);
     await new Promise((r) => setTimeout(r, 500));
 
     await sendMessage(proc, {
@@ -466,32 +383,21 @@ describe("danxbot MCP server — issue tools", () => {
       },
     });
 
-    issueServer.setNextSaveResponse(200, { saved: true });
     const response = await sendMessage(proc, {
       jsonrpc: "2.0",
       id: 2,
-      method: "tools/call",
-      params: {
-        name: "danx_issue_save",
-        arguments: { id: "ISS-1" },
-      },
+      method: "tools/list",
+      params: {},
     });
-
-    expect(response.error).toBeUndefined();
     const result = response.result as {
-      content: Array<{ type: string; text: string }>;
+      tools: Array<{ name: string }>;
     };
-    expect(JSON.parse(result.content[0].text)).toEqual({ saved: true });
-    expect(issueServer.saveRequests).toHaveLength(1);
-    expect(issueServer.saveRequests[0].body).toEqual({ id: "ISS-1" });
+    const names = result.tools.map((t) => t.name);
+    expect(names).not.toContain("danx_issue_create");
   }, 10_000);
 
   it("calls danx_issue_create → POSTs to create URL → forwards worker JSON", async () => {
-    proc = spawnIssueServer(
-      stopServer.url,
-      issueServer.saveUrl,
-      issueServer.createUrl,
-    );
+    proc = spawnIssueServer(stopServer.url, issueServer.createUrl);
     await new Promise((r) => setTimeout(r, 500));
 
     await sendMessage(proc, {
@@ -529,11 +435,7 @@ describe("danxbot MCP server — issue tools", () => {
   }, 10_000);
 
   it("forwards a worker non-2xx as a JSON-RPC error", async () => {
-    proc = spawnIssueServer(
-      stopServer.url,
-      issueServer.saveUrl,
-      issueServer.createUrl,
-    );
+    proc = spawnIssueServer(stopServer.url, issueServer.createUrl);
     await new Promise((r) => setTimeout(r, 500));
 
     await sendMessage(proc, {
@@ -547,26 +449,22 @@ describe("danxbot MCP server — issue tools", () => {
       },
     });
 
-    issueServer.setNextSaveResponse(500, { error: "boom" });
+    issueServer.setNextCreateResponse(500, { error: "boom" });
     const response = await sendMessage(proc, {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
       params: {
-        name: "danx_issue_save",
-        arguments: { id: "ISS-501" },
+        name: "danx_issue_create",
+        arguments: { filename: "broken" },
       },
     });
     expect(response.error).toBeDefined();
     expect((response.error as { message: string }).message).toContain("500");
   }, 10_000);
 
-  it("returns saved:false body verbatim on 200 response (validation failure)", async () => {
-    proc = spawnIssueServer(
-      stopServer.url,
-      issueServer.saveUrl,
-      issueServer.createUrl,
-    );
+  it("returns created:false body verbatim on 200 response (validation failure)", async () => {
+    proc = spawnIssueServer(stopServer.url, issueServer.createUrl);
     await new Promise((r) => setTimeout(r, 500));
 
     await sendMessage(proc, {
@@ -580,8 +478,8 @@ describe("danxbot MCP server — issue tools", () => {
       },
     });
 
-    issueServer.setNextSaveResponse(200, {
-      saved: false,
+    issueServer.setNextCreateResponse(200, {
+      created: false,
       errors: ["missing required field: title"],
     });
     const response = await sendMessage(proc, {
@@ -589,21 +487,21 @@ describe("danxbot MCP server — issue tools", () => {
       id: 2,
       method: "tools/call",
       params: {
-        name: "danx_issue_save",
-        arguments: { id: "ISS-broken" },
+        name: "danx_issue_create",
+        arguments: { filename: "broken" },
       },
     });
     const result = response.result as {
       content: Array<{ type: string; text: string }>;
     };
     expect(JSON.parse(result.content[0].text)).toEqual({
-      saved: false,
+      created: false,
       errors: ["missing required field: title"],
     });
   }, 10_000);
 
-  it("rejects danx_issue_save when called without DANXBOT_ISSUE_SAVE_URL", async () => {
-    proc = spawnIssueServer(stopServer.url, undefined, undefined);
+  it("rejects danx_issue_create when called without DANXBOT_ISSUE_CREATE_URL", async () => {
+    proc = spawnIssueServer(stopServer.url, undefined);
     await new Promise((r) => setTimeout(r, 500));
 
     await sendMessage(proc, {
@@ -625,13 +523,13 @@ describe("danxbot MCP server — issue tools", () => {
       id: 2,
       method: "tools/call",
       params: {
-        name: "danx_issue_save",
-        arguments: { id: "ISS-1" },
+        name: "danx_issue_create",
+        arguments: { filename: "draft" },
       },
     });
     expect(response.error).toBeDefined();
     expect((response.error as { message: string }).message).toContain(
-      "DANXBOT_ISSUE_SAVE_URL",
+      "DANXBOT_ISSUE_CREATE_URL",
     );
   }, 10_000);
 });

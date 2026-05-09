@@ -2,11 +2,11 @@
  * Unit tests for the small pure helpers in `issue-route.ts` that gate
  * dispatch-end behavior (ISS-92, Phase 2 of the poller-triage rework).
  *
- * The full handler (`handleIssueSave`) is integration-tested via
- * `src/__tests__/integration/yaml-lifecycle-memory-tracker.test.ts`. This
- * module covers the focused contract that distinguishes mid-session
- * saves (dispatch survives) from terminal saves (dispatch clears), plus
- * `runSync`'s local-first ordering invariant (DX-131).
+ * Post-DX-157, `runSync` runs only from `syncTrackedIssueOnComplete`
+ * (the post-completion auto-sync). This module covers the focused
+ * contract that distinguishes mid-session saves (dispatch survives)
+ * from terminal saves (dispatch clears), plus `runSync`'s local-first
+ * ordering invariant (DX-131).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -39,7 +39,7 @@ import type { RepoContext } from "../types.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id: "ISS-1",
     external_id: "ext-1",
@@ -50,6 +50,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     type: "Feature",
     title: "Test",
     description: "",
+    priority: 3.0,
     triage: {
       expires_at: "",
       reassess_hint: "",

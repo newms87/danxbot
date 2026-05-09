@@ -1,8 +1,13 @@
 /**
  * Unit tests for `autoSyncTrackedIssue` (Phase 3 of tracker-agnostic-
- * agents — Trello wsb4TVNT). Verifies AC #4: `danxbot_complete`
- * automatically calls `danx_issue_save` on the dispatch's tracked issue
- * before the agent process terminates.
+ * agents — Trello wsb4TVNT). Verifies that `danxbot_complete`
+ * automatically pushes the dispatch's tracked issue YAML to the tracker
+ * before the agent process terminates. DX-157 made this the SOLE
+ * agent-driven post-edit tracker push (the legacy save HTTP route was
+ * retired); the chokidar watcher mirrors agent edits to the DB on every
+ * file write, while this auto-sync runs once on `danxbot_complete` to
+ * cut the up-to-60s tracker lag the per-tick poller mirror would
+ * otherwise produce.
  *
  * Mocks the DB lookup (`getDispatch`) + the actual sync invocation
  * (`runSync`) via the `AutoSyncDeps` injection seam, so tests don't need

@@ -88,8 +88,9 @@ For each candidate phase YAML, in the order from Step 2:
    - `author: "danxbot"`
    - `timestamp: <current ISO>`
    - `text:` `Linked to parent epic <epic-id> by danx-epic-link skill.`
-4. `danx_issue_save({id: "<phase-id>"})`. The worker pushes the changes
-   to the tracker.
+4. The chokidar watcher catches the `Edit` and mirrors the change to
+   the DB; the poller's per-tick mirror pushes to the tracker. There is
+   no save verb to call — the watcher is the canonical write path.
 
 After all phase YAMLs are saved, edit the epic's YAML:
 
@@ -112,7 +113,8 @@ After all phase YAMLs are saved, edit the epic's YAML:
      - <phase-2-id>: <phase-2-title>
      - ...
      ```
-3. `danx_issue_save({id: "<epic-id>"})`.
+3. The watcher mirrors the epic edit to the DB; the poller's per-tick
+   mirror pushes to the tracker.
 
 ---
 
@@ -126,7 +128,7 @@ For each phase YAML at index `i >= 1` in the ordered `children[]`:
 
 1. `Read <repo>/.danxbot/issues/open/<phase-id>.yml`.
 2. Edit: set `waiting_on: {reason: "Waits for <prev-phase-id> (<prev-phase-title>) to complete.", timestamp: "<current ISO>", by: ["<children[i-1]>"]}`.
-3. `danx_issue_save({id: "<phase-id>"})`.
+3. The watcher mirrors the change automatically.
 
 Phase 1 (`children[0]`) stays `waiting_on: null` — it dispatches first. The
 poller auto-clears `waiting_on` and releases phase N+1 once phase N reaches
@@ -159,9 +161,9 @@ Do NOT call `danxbot_complete` from this skill — the orchestrator owns
 that signal. Do NOT move the epic to Done — the epic stays In Progress
 until all phase cards reach Done.
 
-After your last `danx_issue_save`, simply stop. The orchestrator's flow
-will see `children[]` non-empty on its next read and skip Step 3 (Epic
-Split) entirely, then jump to the first incomplete phase card and pick
+After your last `Edit`, simply stop. The orchestrator's flow will see
+`children[]` non-empty on its next read and skip Step 3 (Epic Split)
+entirely, then jump to the first incomplete phase card and pick
 that up via the normal pipeline.
 
 ---

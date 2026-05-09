@@ -12,13 +12,15 @@
  * Phase 3 of ISS-90 (Poller triage rework) added a `danx-issue` MCP server
  * entry — the YAML-first `@thehammer/danx-issue-mcp` package — so the
  * triage agent can call `mcp__danx-issue__danx_issue_get` /
- * `danx_issue_save` directly. That server happens to need `TRELLO_API_KEY`
- * + `TRELLO_API_TOKEN` for outbound sync, so the raw `.mcp.json` now
- * references those keys (declared as `optional-placeholders` in
- * `workspace.yml` so non-trello deploys substitute them to ""). The
- * tracker-agnostic guarantee still holds — the YAML store is the source
- * of truth; Trello is a one-way mirror reached only through the
- * `danx-issue` MCP server.
+ * `danx_issue_list` directly. DX-203 retired the server's tracker
+ * dependency entirely: the only env var the server reads is
+ * `DANX_REPO_ROOT`. The `DANX_TRACKER` / `TRELLO_API_KEY` /
+ * `TRELLO_API_TOKEN` triple older versions injected is gone. DX-157
+ * retired the agent-facing save tool — agents `Edit` / `Write` the
+ * YAML directly and the chokidar watcher mirrors the change. The
+ * tracker-agnostic guarantee is now structural — the YAML store IS the
+ * agent's source of truth; the worker's poll loop owns the YAML →
+ * Trello mirror asynchronously.
  *
  * This file lives alongside the workspace fixtures (not under `src/poller/`)
  * because `injectDanxWorkspaces` mirrors this directory verbatim into every
@@ -51,13 +53,12 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     expect(raw).not.toMatch(/TRELLO_BOARD_ID/);
   });
 
-  // Phase 3 of ISS-90: the `danx-issue` MCP server (`@thehammer/danx-issue-mcp`)
-  // has its own env contract — `DANX_REPO_ROOT` is required (the server fails
-  // loud without it), and the trello triple is optional so non-trello deploys
-  // can substitute empty strings without throwing PlaceholderError. Pin the
-  // exact required + optional sets so a future agent can't silently flip a
-  // required placeholder to optional (which would let the server start with a
-  // missing repo root and produce confusing 500s downstream).
+  // DX-203: the `danx-issue` MCP server reads ONLY `DANX_REPO_ROOT` —
+  // the previous `DANX_TRACKER` / `TRELLO_API_KEY` / `TRELLO_API_TOKEN`
+  // triple was retired when the server became purely a YAML manipulator.
+  // Pin the exact required + optional sets so a future agent can't
+  // silently re-introduce tracker creds (which would re-introduce the
+  // "Trello in the agent's critical path" anti-pattern).
   it("workspace.yml required-placeholders + optional-placeholders match the resolver's contract", () => {
     const path = resolve(HERE, "workspace.yml");
     const manifest = parseYaml(readFileSync(path, "utf-8")) as {
@@ -69,17 +70,15 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     expect([...required].sort()).toEqual(
       ["DANXBOT_STOP_URL", "DANXBOT_WORKER_PORT", "DANX_REPO_ROOT"].sort(),
     );
-    expect([...optional].sort()).toEqual(
-      ["DANX_TRACKER", "TRELLO_API_KEY", "TRELLO_API_TOKEN"].sort(),
-    );
+    expect(optional).toEqual([]);
   });
 
-  // Phase 3 of ISS-90: the `danx-issue` MCP server must declare every env var
-  // the `@thehammer/danx-issue-mcp` package's `resolveServerContext` reads
-  // (DANX_REPO_ROOT required; DANX_TRACKER + TRELLO_API_KEY + TRELLO_API_TOKEN
-  // for trello mode). Missing any one would either crash the server at boot
-  // or silently fall back to memory tracker — pin the contract here.
-  it("`.mcp.json` `danx-issue` server declares every env key the package needs", () => {
+  // DX-203: the `danx-issue` MCP server's env contract shrank to exactly
+  // `DANX_REPO_ROOT`. Missing it crashes the server at boot; any extra
+  // key (`DANX_TRACKER`, `TRELLO_API_KEY`, `TRELLO_API_TOKEN`) is
+  // forbidden — the server reads no tracker creds. Pin the shape so a
+  // regression that re-adds tracker creds trips loud.
+  it("`.mcp.json` `danx-issue` server declares ONLY DANX_REPO_ROOT", () => {
     const path = resolve(HERE, ".mcp.json");
     const content = JSON.parse(readFileSync(path, "utf-8")) as {
       mcpServers: Record<
@@ -91,9 +90,7 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     expect(danxIssue).toBeDefined();
     expect(danxIssue.command).toBe("npx");
     expect(danxIssue.args).toEqual(["-y", "@thehammer/danx-issue-mcp"]);
-    expect(Object.keys(danxIssue.env ?? {}).sort()).toEqual(
-      ["DANX_REPO_ROOT", "DANX_TRACKER", "TRELLO_API_KEY", "TRELLO_API_TOKEN"].sort(),
-    );
+    expect(Object.keys(danxIssue.env ?? {})).toEqual(["DANX_REPO_ROOT"]);
     // Each value must be a placeholder reference — concrete values would
     // bake host paths or secrets into the committed file.
     for (const value of Object.values(danxIssue.env ?? {})) {

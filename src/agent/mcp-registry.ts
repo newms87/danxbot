@@ -54,13 +54,12 @@ const DANXBOT_ENTRY: McpServerEntry = {
       env.DANXBOT_SLACK_REPLY_URL = opts.slack.replyUrl;
       env.DANXBOT_SLACK_UPDATE_URL = opts.slack.updateUrl;
     }
-    // Issue-tracker URL injection: parallel to the Slack pair. The
-    // danxbot MCP process gets the URLs via env and `buildActiveTools`
-    // exposes `danx_issue_save` + `danx_issue_create` only when both
-    // env vars are set. Absent here, the tools don't appear in
-    // `tools/list` and an agent can't accidentally call them.
+    // Issue-create URL injection. The danxbot MCP process gets the URL
+    // via env and `buildActiveTools` exposes `danx_issue_create` only
+    // when the env var is set. Single-URL surface — DX-157 retired the
+    // parallel agent-facing save tool; agents now `Edit` / `Write` the
+    // YAML directly and the chokidar watcher mirrors the change.
     if (opts.issue) {
-      env.DANXBOT_ISSUE_SAVE_URL = opts.issue.saveUrl;
       env.DANXBOT_ISSUE_CREATE_URL = opts.issue.createUrl;
     }
     // Worker-restart URL injection. The danxbot MCP process gets the

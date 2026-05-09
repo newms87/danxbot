@@ -18,7 +18,6 @@ vi.mock("./critical-failure-route.js", () => ({
 }));
 vi.mock("./issue-route.js", () => ({
   handleIssueCreate: vi.fn(),
-  handleIssueSave: vi.fn(),
 }));
 vi.mock("./restart-route.js", () => ({ handleRestart: vi.fn() }));
 // `restage-route.js` transitively imports `src/dispatch/core.ts` →

@@ -66,16 +66,17 @@ export interface DanxbotToolUrls {
   slackReply?: string;
   slackUpdate?: string;
   /**
-   * Issue-tracker save/create endpoints. Both required together to
-   * expose the `danx_issue_save` + `danx_issue_create` tools — a half-
-   * defined surface would mean the agent could call save but never
-   * create (or vice versa), and silent partial behavior is exactly the
-   * failure mode the fail-loud `callTool` guard catches.
+   * Issue-create endpoint. Exposes the `danx_issue_create` tool (atomic
+   * `<PREFIX>-N` allocation needs server-side coordination — two agents
+   * picking the next id from disk simultaneously would collide). Agents
+   * edit YAMLs in place via `Edit` / `Write`; the chokidar watcher
+   * mirrors changes to the DB and the poller's per-tick mirror pushes
+   * to the tracker. There is no `issueSave` URL — the watcher replaced
+   * it (DX-157).
    *
    * Auto-injected by `dispatch()` in worker mode (the worker URL is
-   * `http://localhost:<workerPort>/api/issue-…/<dispatchId>`).
+   * `http://localhost:<workerPort>/api/issue-create/<dispatchId>`).
    */
-  issueSave?: string;
   issueCreate?: string;
   /**
    * Worker-restart endpoint (`POST /api/restart/:dispatchId`). When
@@ -159,37 +160,15 @@ export const TOOLS = [
     },
   },
   {
-    name: "danx_issue_save",
-    description:
-      "Save the per-issue YAML at .danxbot/issues/open/<id>.yml " +
-      "(or .danxbot/issues/closed/<id>.yml if the issue is Done/Cancelled). " +
-      "The worker validates the YAML synchronously and returns " +
-      "{saved: true} on success or {saved: false, errors: [...]} on " +
-      "schema-validation failure. Call this after every meaningful edit " +
-      "to the local YAML. When the saved status is Done or Cancelled, " +
-      "the worker moves the file from open/ → closed/ as part of the save.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: {
-          type: "string",
-          description:
-            "The issue's id (matches the YAML filename without the .yml " +
-            "extension, e.g. ISS-138).",
-        },
-      },
-      required: ["id"],
-    },
-  },
-  {
     name: "danx_issue_create",
     description:
       "Create a brand-new issue from a draft YAML at " +
       ".danxbot/issues/open/<filename>.yml. The draft can have empty " +
       "id and empty check_item_ids; the worker assigns them. On success " +
       "the worker stamps the assigned id back into the YAML and renames " +
-      "the file to <id>.yml — your subsequent danx_issue_save calls must " +
-      "use that new id. Returns {created: true, id} on success or " +
+      "the file to <id>.yml — subsequent edits to that issue go through " +
+      "the `Edit` / `Write` tools directly (the watcher mirrors them). " +
+      "Returns {created: true, id} on success or " +
       "{created: false, errors: [...]} on schema-validation failure.",
     inputSchema: {
       type: "object",
@@ -355,13 +334,13 @@ async function callDanxbotSlackPostUpdate(
 
 /**
  * Forward an MCP tool call to one of the worker's HTTP routes
- * (`/api/issue-save`, `/api/issue-create`, `/api/restart`) and return
- * the response body verbatim as the tool's text content.
+ * (`/api/issue-create`, `/api/restart`) and return the response body
+ * verbatim as the tool's text content.
  *
  * Network / 4xx / 5xx are surfaced as JSON-RPC errors — those represent
  * worker-side failures, not the agent's expected outcomes. The agent's
  * success/failure semantics live entirely in the 200-response body
- * shape (e.g. `{saved: true|false}`, `{started: true|false}`).
+ * shape (e.g. `{created: true|false}`, `{started: true|false}`).
  */
 async function postWorkerRoute(
   url: string,
@@ -376,20 +355,6 @@ async function postWorkerRoute(
     );
   }
   return text;
-}
-
-async function callDanxIssueSave(
-  args: Record<string, unknown>,
-  urls: DanxbotToolUrls,
-): Promise<string> {
-  if (!urls.issueSave) {
-    throw new Error(
-      "danx_issue_save called without DANXBOT_ISSUE_SAVE_URL configured " +
-        "(no worker endpoint available)",
-    );
-  }
-  const id = requireNonBlankString("danx_issue_save", "id", args.id);
-  return postWorkerRoute(urls.issueSave, { id }, "danx_issue_save");
 }
 
 async function callDanxbotRestartWorker(
@@ -470,11 +435,6 @@ export async function callTool(
         requireObjectArgs("danxbot_slack_post_update", args),
         urls,
       );
-    case "danx_issue_save":
-      return callDanxIssueSave(
-        requireObjectArgs("danx_issue_save", args),
-        urls,
-      );
     case "danx_issue_create":
       return callDanxIssueCreate(
         requireObjectArgs("danx_issue_create", args),
@@ -519,7 +479,6 @@ export function buildActiveTools(urls: DanxbotToolUrls) {
   return TOOLS.filter((t) => {
     if (t.name === "danxbot_slack_reply") return !!urls.slackReply;
     if (t.name === "danxbot_slack_post_update") return !!urls.slackUpdate;
-    if (t.name === "danx_issue_save") return !!urls.issueSave;
     if (t.name === "danx_issue_create") return !!urls.issueCreate;
     if (t.name === "danxbot_restart_worker") return !!urls.restartWorker;
     return true;
@@ -602,7 +561,6 @@ if (import.meta.url === entryUrl) {
     stop: stopUrl,
     slackReply: process.env.DANXBOT_SLACK_REPLY_URL,
     slackUpdate: process.env.DANXBOT_SLACK_UPDATE_URL,
-    issueSave: process.env.DANXBOT_ISSUE_SAVE_URL,
     issueCreate: process.env.DANXBOT_ISSUE_CREATE_URL,
     restartWorker: process.env.DANXBOT_RESTART_WORKER_URL,
   };

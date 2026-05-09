@@ -28,10 +28,7 @@ import {
   handleSlackUpdate,
 } from "./dispatch.js";
 import { handleClearCriticalFailure } from "./critical-failure-route.js";
-import {
-  handleIssueCreate,
-  handleIssueSave,
-} from "./issue-route.js";
+import { handleIssueCreate } from "./issue-route.js";
 import { handleRestart } from "./restart-route.js";
 import { handleRestage } from "./restage-route.js";
 import { seedCooldownFromDb } from "./restart.js";
@@ -96,12 +93,6 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
     const slackUpdateMatch = url.pathname.match(/^\/api\/slack\/update\/(.+)$/);
     if (method === "POST" && slackUpdateMatch) {
       await handleSlackUpdate(req, res, slackUpdateMatch[1], repo);
-      return;
-    }
-
-    const issueSaveMatch = url.pathname.match(/^\/api\/issue-save\/(.+)$/);
-    if (method === "POST" && issueSaveMatch) {
-      await handleIssueSave(req, res, issueSaveMatch[1], repo);
       return;
     }
 

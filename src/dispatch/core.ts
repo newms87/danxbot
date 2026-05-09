@@ -187,11 +187,12 @@ export interface DispatchInput {
    *     the Slack URL pair, the issue-tool URL pair, and
    *     `DANXBOT_RESTART_WORKER_URL`. Derived from `repo.workerPort` +
    *     `dispatchId`.
-   *   - **Per-repo MCP env block** — `DANX_REPO_ROOT`, `DANX_TRACKER`,
-   *     `TRELLO_API_KEY`, `TRELLO_API_TOKEN`. Derived from
-   *     `repo.localPath` + `repo.trelloEnabled` + `repo.trello.{apiKey,
-   *     apiToken}`. Consumed by the workspace-declared `danx-issue` MCP
-   *     server (`@thehammer/danx-issue-mcp`).
+   *   - **Per-repo MCP env block** — `DANX_REPO_ROOT`. Derived from
+   *     `repo.localPath`. Consumed by the workspace-declared
+   *     `danx-issue` MCP server (`@thehammer/danx-issue-mcp`). DX-203
+   *     retired the `DANX_TRACKER` / `TRELLO_API_KEY` / `TRELLO_API_TOKEN`
+   *     triple — the MCP server is purely a YAML manipulator and reads no
+   *     tracker creds.
    * Everything else (`SCHEMA_*`, etc.) is caller-supplied. Caller overlay
    * wins over auto-injected values — tests rely on that.
    */
@@ -638,7 +639,6 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // `required-placeholders` so these auto-injected values satisfy its
   // overlay contract without forcing the caller to compute per-dispatch
   // URLs.
-  const issueSaveUrl = `http://localhost:${input.repo.workerPort}/api/issue-save/${dispatchId}`;
   const issueCreateUrl = `http://localhost:${input.repo.workerPort}/api/issue-create/${dispatchId}`;
   const restartWorkerUrl = `http://localhost:${input.repo.workerPort}/api/restart/${dispatchId}`;
   const overlay: Record<string, string> = {
@@ -652,21 +652,18 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     DANXBOT_WORKER_PORT: String(input.repo.workerPort),
     DANXBOT_SLACK_REPLY_URL: `http://localhost:${input.repo.workerPort}/api/slack/reply/${dispatchId}`,
     DANXBOT_SLACK_UPDATE_URL: `http://localhost:${input.repo.workerPort}/api/slack/update/${dispatchId}`,
-    DANXBOT_ISSUE_SAVE_URL: issueSaveUrl,
     DANXBOT_ISSUE_CREATE_URL: issueCreateUrl,
     DANXBOT_RESTART_WORKER_URL: restartWorkerUrl,
-    // Auto-inject every value the per-workspace `danx-issue` MCP server
-    // (`@thehammer/danx-issue-mcp`) needs to talk to its own repo's
-    // `.danxbot/issues/` store + tracker. `DANX_REPO_ROOT` is required
-    // (the MCP server fails loud without it); the trello triple is
-    // optional so non-trello deploys don't need to special-case the
-    // overlay. The issue-worker workspace declares the placeholders
-    // accordingly. Other workspaces that don't reference these keys
-    // simply ignore them.
+    // Auto-inject the value the per-workspace `danx-issue` MCP server
+    // (`@thehammer/danx-issue-mcp`) needs to find its own repo's
+    // `.danxbot/issues/` store. `DANX_REPO_ROOT` is required (the MCP
+    // server fails loud without it). DX-203 retired the
+    // `DANX_TRACKER` / `TRELLO_API_KEY` / `TRELLO_API_TOKEN` triple —
+    // the MCP server is purely a YAML manipulator and reads no tracker
+    // creds; the worker's poll loop owns the YAML → Trello mirror
+    // asynchronously. Workspaces that don't reference `DANX_REPO_ROOT`
+    // simply ignore the extra overlay key.
     DANX_REPO_ROOT: input.repo.localPath,
-    DANX_TRACKER: input.repo.trelloEnabled ? "trello" : "memory",
-    TRELLO_API_KEY: input.repo.trello.apiKey,
-    TRELLO_API_TOKEN: input.repo.trello.apiToken,
     ...input.overlay,
   };
 
@@ -704,13 +701,15 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
       ? { replyUrl: slackReplyUrl, updateUrl: slackUpdateUrl }
       : undefined;
 
-  // Issue-tracker MCP tools (`danx_issue_save`, `danx_issue_create`) are
-  // exposed for every worker-mode dispatch — the URLs always resolve to
-  // the same worker process this dispatch runs in. Absent the worker
-  // port (e.g. dashboard-mode tests that bypass the worker server), we
-  // simply omit the field and the tools don't appear.
+  // Issue-create MCP tool (`danx_issue_create`) is exposed for every
+  // worker-mode dispatch — the URL always resolves to the same worker
+  // process this dispatch runs in. Absent the worker port (e.g.
+  // dashboard-mode tests that bypass the worker server), we simply omit
+  // the field and the tool doesn't appear. DX-157 retired the parallel
+  // agent-facing save tool — agents `Edit` / `Write` the YAML directly
+  // and the chokidar watcher mirrors the change.
   const issue = input.repo.workerPort
-    ? { saveUrl: issueSaveUrl, createUrl: issueCreateUrl }
+    ? { createUrl: issueCreateUrl }
     : undefined;
 
   // Worker-restart MCP tool — same workerPort gate as issue. Absent the

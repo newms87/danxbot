@@ -898,8 +898,9 @@ async function _poll(repo: RepoContext): Promise<void> {
   //      ISS-N (or parses one from the title prefix), patches the
   //      tracker title, and writes a fresh local YAML. Reuses the same
   //      cached tracker instance so MemoryTracker state survives.
-  //   4. Dispatch task references the local id — agent calls
-  //      `danx_issue_save({id})` and never knows external trackers exist.
+  //   4. Dispatch task references the local id — agent edits
+  //      `<repo>/.danxbot/issues/open/<id>.yml` directly with `Edit` /
+  //      `Write` and never knows external trackers exist.
   const dispatchId = randomUUID();
 
   // ISS-92 Phase 2: YAML-based liveness guard (defense in depth with
@@ -1013,8 +1014,9 @@ async function _poll(repo: RepoContext): Promise<void> {
 
   const yamlPath = issuePath(repo.localPath, resolvedIssue.id, "open");
   const task =
-    `${TEAM_PROMPT}\n\nEdit ${yamlPath}. ` +
-    `Call danx_issue_save({id: "${resolvedIssue.id}"}) when done.`;
+    `${TEAM_PROMPT}\n\nEdit ${yamlPath} directly with the Edit / Write tools. ` +
+    `The watcher mirrors changes to the database automatically; the poller's ` +
+    `per-tick mirror pushes them to the tracker. Call danxbot_complete when done.`;
 
   await spawnClaude(
     repo,
@@ -2444,10 +2446,12 @@ async function checkCardProgressedOrHalt(
   // (the only source of structured `blocked` data — Trello has no
   // native field) and skip the flag when it's set.
   //
-  // Ordering invariant: the agent calls `danx_issue_save` (which
-  // synchronously persists the YAML via writeFileSync in the worker's
-  // issue-save handler) BEFORE calling `danxbot_complete`. By the time
-  // the worker fires `onComplete` and we reach this check, the blocked
+  // Ordering invariant: the agent edits the YAML in place with `Edit` /
+  // `Write` (DX-157 retired the legacy save MCP tool — the chokidar
+  // watcher now mirrors every file change to the DB) BEFORE calling
+  // `danxbot_complete`. The on-disk write completes synchronously
+  // before `danxbot_complete` returns to the agent, so by the time the
+  // worker fires `onComplete` and we reach this check, the blocked
   // record is already on disk. No race.
   //
   // `findByExternalId` is the only structured reader we have for the
@@ -2491,11 +2495,11 @@ async function checkCardProgressedOrHalt(
  * After a `kind: "triage"` dispatch exits, re-read the target YAML
  * locally and verify `triage.expires_at` advanced past the dispatch's
  * `started_at`. If not, the dispatch did zero application-level work —
- * either the agent forgot to call `mcp__danx-issue__danx_issue_save`
- * or the save did not update the triage block. Either way the next
- * tick's `listTriageDueYamls` returns the same card and the same broken
- * agent gets dispatched again. Write the critical-failure flag so the
- * halt gate stops the loop.
+ * either the agent forgot to update the triage block at all, or the
+ * `Edit` call did not advance the `expires_at` timestamp. Either way
+ * the next tick's `listTriageDueYamls` returns the same card and the
+ * same broken agent gets dispatched again. Write the critical-failure
+ * flag so the halt gate stops the loop.
  *
  * Parallels `checkCardProgressedOrHalt` (work-dispatch guard). The
  * progress signal differs:

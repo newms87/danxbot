@@ -1,6 +1,6 @@
 ---
 name: danx-triage-card
-description: 'Per-card triage agent. Single Claude session reads ONE card via mcp__danx-issue__danx_issue_get, decides per status (Review / Blocked / Waiting On), writes back via mcp__danx-issue__danx_issue_save with TTL-stamped triage{} block. Dispatched 1-card-per-tick by the poller (Phase 4 / ISS-94). Replaces the bulk-triage orchestrator.'
+description: 'Per-card triage agent. Single Claude session reads ONE card via mcp__danx-issue__danx_issue_get, decides per status (Review / Blocked / Waiting On), writes the TTL-stamped triage{} block back with the Edit tool. Dispatched 1-card-per-tick by the poller (Phase 4 / ISS-94). Replaces the bulk-triage orchestrator.'
 argument-hint: <PREFIX>-N card id
 ---
 
@@ -8,13 +8,13 @@ argument-hint: <PREFIX>-N card id
 
 You triage **ONE** card per dispatch. No orchestrator, no sub-agents. You:
 
-1. `mcp__danx-issue__danx_issue_get({id: "<PREFIX>-N"})` — load the YAML.
+1. `mcp__danx-issue__danx_issue_get({id: "<PREFIX>-N"})` — load the YAML and learn its filesystem path.
 2. Decide per `status` (Review / Blocked / Waiting On) — apply the per-status decision tree below.
-3. Edit the YAML's `triage{}` block (always) + `status` / `blocked` fields when the decision is terminal.
-4. `mcp__danx-issue__danx_issue_save({id: "<PREFIX>-N"})` — persist. Returns `{saved: true}` or `{saved: false, errors}`.
+3. Edit the YAML's `triage{}` block (always) + `status` / `blocked` fields when the decision is terminal, using the `Edit` tool directly on `<repo>/.danxbot/issues/{open,closed}/<PREFIX>-N.yml`.
+4. Re-read the file with `Read` to confirm the edit landed and the YAML parses (look for the new `triage.expires_at` value).
 5. `danxbot_complete({status: "completed", summary: "..."})` — signal done.
 
-You read, edit, and save the YAML through the `danx-issue` MCP server. You do NOT make tracker calls — `danx_issue_save` syncs the tracker for you.
+You read the YAML through the `danx-issue` MCP server (which exposes the get/list tools) and write it through `Edit` / `Write` directly. You do NOT make tracker calls — the chokidar watcher in the worker (`src/db/issues-mirror.ts`) catches every YAML edit and mirrors it to Postgres; the poller's per-tick mirror pushes it to the tracker.
 
 ## /loop and ScheduleWakeup — narrow contract
 
@@ -49,16 +49,22 @@ during this dispatch must be disarmed (or have already fired and exited).
 Active loop + complete signal = workflow violation; the next resume will
 re-fire the loop after the dispatch is logically over.
 
-## CRITICAL — use `mcp__danx-issue__*` exclusively, NEVER `mcp__danxbot__danx_issue_*`
+## Read via MCP, write via Edit
 
-The dispatched workspace exposes TWO MCP servers that both advertise tools named `danx_issue_save` / `danx_issue_create`:
+The dispatched workspace exposes the `danx-issue` MCP server (the
+`@thehammer/danx-issue-mcp` package) which advertises read tools (`get`,
+`list`) plus a `create` tool that allocates the next `<PREFIX>-N` id
+atomically. Use those for reading the card and resolving its
+filesystem path. The danxbot infrastructure server also advertises
+`danx_issue_create` (POSTs to a worker HTTP route) — both work; pick
+either based on what's already in your tool list.
 
-- `mcp__danx-issue__danx_issue_save` / `danx_issue_create` / `danx_issue_get` / `danx_issue_list` — the `@thehammer/danx-issue-mcp` package, in-process YAML write + tracker sync. **THIS IS THE ONE TO USE.**
-- `mcp__danxbot__danx_issue_save` / `danx_issue_create` — the danxbot infrastructure server, POSTs to a worker HTTP route. This is the legacy path used by `danx-next` / `danx-start` workflows; it goes through a different validator + tracker code path.
-
-**For triage, ONLY call the `mcp__danx-issue__*` flavour.** The `mcp__danxbot__*` flavour will appear in your tool list because the danxbot infra server is auto-injected on every dispatch — ignore it. Calling the wrong one bypasses the per-card validator pipeline and will produce divergent YAML state between local + tracker. The two paths look identical in the tool advertise list; the prefix is the only signal.
-
-`danx_issue_get` and `danx_issue_list` are ONLY available on the `danx-issue` server — the danxbot infra server doesn't advertise them, so a call to `mcp__danxbot__danx_issue_get` would simply not resolve. That's the unambiguous case. The ambiguous case is `_save` / `_create` — always namespace those as `mcp__danx-issue__*`.
+DX-157 retired the agent-facing save tool entirely. **Write through
+`Edit` / `Write` directly on the YAML at
+`<repo>/.danxbot/issues/{open,closed}/<PREFIX>-N.yml`.** The chokidar
+watcher catches every file change and mirrors it to Postgres; the
+poller's per-tick mirror pushes to the tracker. There is no save verb
+to call.
 
 ## In-scope cards
 
@@ -214,7 +220,7 @@ The poller is the gatekeeper; if you receive a genuinely out-of-scope card (`blo
 
 ## YAML changes — checklist (every triage save)
 
-Before `mcp__danx-issue__danx_issue_save`, every triage decision MUST update the `triage{}` block:
+Before calling `Edit`, every triage decision MUST update the `triage{}` block:
 
 1. `triage.expires_at` — set to `(now + status_ttl).toISOString()` where `status_ttl ∈ {24h, 3h, 1h}` per the table above.
 2. `triage.last_status` — one of `Keep | Cancel | Approve | Demote | Confirm-Block | Unblock`.
@@ -223,7 +229,7 @@ Before `mcp__danx-issue__danx_issue_save`, every triage decision MUST update the
 5. `triage.ice` — populated on Review / Keep|Approve. Zeros on every other path.
 6. `triage.history` — APPEND a new entry with the same fields (`{timestamp, status, explain, expires_at, ice}`). Cap history at 10; oldest dropped on overflow.
 
-The schema validator (Phase 1 / ISS-91) rejects saves with stale `triaged` field, malformed `triage.history` entries, missing required fields, or out-of-range ICE values — fail-loud is intentional. If `danx_issue_save` returns `{saved: false, errors: [...]}`, fix the YAML and retry; never fall through to `danxbot_complete` with a non-saved card.
+After `Edit`, re-read the file with `Read`. Confirm the file parses (no YAML errors visible in the lines you cared about) and `triage.expires_at` matches the value you wrote. If the file is malformed (e.g. wrong indentation broke a sibling key), fix it via another `Edit` and re-read. The chokidar watcher mirrors every YAML write to the DB; a malformed file is mirrored as `{_malformed: true, raw: <text>}` and surfaces in the dashboard banner — recover before calling `danxbot_complete` so you don't ship malformed state.
 
 ## Comment policy
 
@@ -261,8 +267,8 @@ Any mismatch on the above is a skill-body bug; file as a follow-up issue and sur
 
 ## Failure handling
 
-- YAML parse error / `danx_issue_get` returns `{error: ...}` → `danxbot_complete({status: "failed", summary: "Failed to load <PREFIX>-N: <error>"})`. Do NOT save.
-- `danx_issue_save` returns `{saved: false, errors: [...]}` → fix the YAML, retry once. If it fails again, `danxbot_complete({status: "failed", summary: "..."})` with the validation error.
+- YAML parse error / `danx_issue_get` returns `{error: ...}` → `danxbot_complete({status: "failed", summary: "Failed to load <PREFIX>-N: <error>"})`. Do NOT edit the file.
+- Re-read after `Edit` shows the YAML is malformed → fix it via another `Edit`, re-read again. If you can't recover after one retry, `danxbot_complete({status: "failed", summary: "..."})` describing what went wrong.
 - MCP tool itself errors (server unreachable, tool not registered) → `danxbot_complete({status: "critical_failure", summary: "mcp__danx-issue__* tools not available — workspace .mcp.json wiring broken"})` per `claude-plugins/issue-worker/skills/halt-flag/SKILL.md`.
 
 ## Boundaries

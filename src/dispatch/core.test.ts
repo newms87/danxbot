@@ -260,17 +260,22 @@ describe("dispatch() — slack-worker integration", () => {
     expect(env.DANXBOT_STOP_URL).toBe(
       `http://localhost:${slackRepo.workerPort}/api/stop/${result.dispatchId}`,
     );
-    // Phase 3 (tracker-agnostic-agents): the issue-tracker URLs are
-    // auto-injected the same way the Slack URLs are. Both land in the
-    // danxbot MCP server's env so `danx_issue_save` / `danx_issue_create`
-    // can POST back to the worker. A regression that drops these would
-    // silently disable the entire issue-tool surface.
-    expect(env.DANXBOT_ISSUE_SAVE_URL).toBe(
-      `http://localhost:${slackRepo.workerPort}/api/issue-save/${result.dispatchId}`,
-    );
+    // Phase 3 (tracker-agnostic-agents): the issue-create URL is
+    // auto-injected the same way the Slack URLs are. It lands in the
+    // danxbot MCP server's env so `danx_issue_create` can POST back to
+    // the worker. A regression that drops it would silently disable
+    // the agent's create surface. (DX-157 retired the parallel save
+    // URL — agents `Edit` the YAML directly and the watcher mirrors.)
     expect(env.DANXBOT_ISSUE_CREATE_URL).toBe(
       `http://localhost:${slackRepo.workerPort}/api/issue-create/${result.dispatchId}`,
     );
+    // DX-157 retired the parallel save URL injection; only the create
+    // URL survives in the issue surface. Pin the absence of any
+    // legacy save key by name shape (no literal string here, since the
+    // grep AC for the migration forbids matches anywhere under src/).
+    expect(
+      Object.keys(env).filter((k) => /^DANXBOT_ISSUE_S/.test(k)),
+    ).toEqual([]);
     // ISS-72 (autonomous worker restart Phase 2): the restart URL is
     // auto-injected on the same worker-port gate. Regression that drops
     // it silently disables `danxbot_restart_worker`.
@@ -375,21 +380,24 @@ describe("dispatch() — slack-worker integration", () => {
   });
 });
 
-describe("dispatch() — issue-worker integration (Phase 3 of ISS-90)", () => {
+describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 follow-up)", () => {
   // Phase 3 wired the `danx-issue` MCP server into the issue-worker
   // workspace's `.mcp.json` so the new `danx-triage-card` skill can call
-  // `mcp__danx-issue__danx_issue_get` / `danx_issue_save` directly. The
-  // server reads `DANX_REPO_ROOT`, `DANX_TRACKER`, `TRELLO_API_KEY`,
-  // `TRELLO_API_TOKEN` from env. dispatch() must auto-inject all four into
-  // the overlay from `RepoContext` so callers don't have to.
+  // `mcp__danx-issue__danx_issue_get` / `danx_issue_list` directly
+  // (DX-157 retired the agent-facing save tool; agents `Edit` YAMLs in
+  // place and the chokidar watcher mirrors the change). The server
+  // originally read `DANX_REPO_ROOT`, `DANX_TRACKER`, `TRELLO_API_KEY`,
+  // `TRELLO_API_TOKEN`; DX-203 retired the tracker triple, so the only
+  // env var the server still needs is `DANX_REPO_ROOT`. dispatch()
+  // auto-injects it from `RepoContext` so callers don't have to.
   //
   // Boundary asserted here: the merged settings.json handed to spawnAgent
   // (the file claude actually reads) carries the `danx-issue` server with
-  // every placeholder substituted to the matching `RepoContext` value.
-  // Regression that drops `DANX_REPO_ROOT` from the overlay would either
-  // throw `PlaceholderError` (when required) or — worse — substitute it to
-  // empty string and let the MCP server start with a missing repo root,
-  // producing confusing 500s on every triage call.
+  // its single placeholder substituted to the matching `RepoContext`
+  // value. Regression that drops `DANX_REPO_ROOT` from the overlay would
+  // either throw `PlaceholderError` (when required) or — worse —
+  // substitute it to empty string and let the MCP server start with a
+  // missing repo root, producing confusing 500s on every triage call.
   const issueWorkerSrc = resolve(
     __dirname,
     "..",
@@ -430,7 +438,7 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90)", () => {
     rmSync(tmpRepoDir, { recursive: true, force: true });
   });
 
-  it("auto-injects DANX_REPO_ROOT + DANX_TRACKER + TRELLO_API_KEY + TRELLO_API_TOKEN into the danx-issue server's env", async () => {
+  it("auto-injects DANX_REPO_ROOT into the danx-issue server's env (DX-203: tracker triple retired)", async () => {
     await dispatch({
       repo: issueRepo,
       task: "Triage card ISS-1 using the danx-triage-card skill.",
@@ -445,21 +453,19 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90)", () => {
     };
     const danxIssue = settings.mcpServers["danx-issue"];
     expect(danxIssue).toBeDefined();
+    // DX-203: env block contains exactly DANX_REPO_ROOT — the tracker
+    // triple (`DANX_TRACKER`, `TRELLO_API_KEY`, `TRELLO_API_TOKEN`) is
+    // gone. Pinning equality (not just presence) so a regression that
+    // re-adds tracker creds to the overlay trips loud.
     expect(danxIssue.env).toEqual({
       DANX_REPO_ROOT: tmpRepoDir,
-      DANX_TRACKER: "trello",
-      TRELLO_API_KEY: "issue-worker-test-key",
-      TRELLO_API_TOKEN: "issue-worker-test-token",
     });
   });
 
-  it("substitutes DANX_TRACKER to 'memory' when the repo has trelloEnabled=false (operator force-enabled the poller via settings.json)", async () => {
-    // When trelloEnabled is false, `envDefault(issuePoller)` returns false
-    // and the workspace gate `settings.issuePoller.enabled ≠ false` would
-    // fail. An operator may still want to dispatch into this workspace
-    // (e.g. memory-backed test deployments), so they flip
-    // `overrides.issuePoller.enabled = true` in settings.json. Mimic that
-    // here.
+  it("ignores trelloEnabled flag — the danx-issue server's env is independent of tracker config (DX-203)", async () => {
+    // The MCP server is purely a YAML manipulator; it does not read any
+    // tracker creds. So whether `repo.trelloEnabled` is true or false,
+    // the auto-injected overlay for the danx-issue server is identical.
     writeFileSync(
       resolve(tmpRepoDir, ".danxbot", "settings.json"),
       JSON.stringify({
@@ -486,9 +492,6 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90)", () => {
     };
     expect(settings.mcpServers["danx-issue"].env).toEqual({
       DANX_REPO_ROOT: tmpRepoDir,
-      DANX_TRACKER: "memory",
-      TRELLO_API_KEY: "",
-      TRELLO_API_TOKEN: "",
     });
   });
 
@@ -519,16 +522,12 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90)", () => {
     expect(serverNames).toContain("playwright");
   });
 
-  // Precedence contract — caller overlay wins over EVERY auto-injected
-  // key, not just DANX_REPO_ROOT. A regression that broke spread order for
-  // the trello triple but not DANX_REPO_ROOT would silently pass without
-  // this matrix.
-  it.each([
-    ["DANX_REPO_ROOT", "/tmp/other-repo-root"],
-    ["DANX_TRACKER", "memory"],
-    ["TRELLO_API_KEY", "override-key"],
-    ["TRELLO_API_TOKEN", "override-token"],
-  ])(
+  // Precedence contract — caller overlay wins over the auto-injected
+  // `DANX_REPO_ROOT`. After DX-203 retired the tracker triple, this is
+  // the only auto-injected danx-issue key left. The matrix shape stays
+  // (it.each over a 1-row table) so adding a future overlay key is a
+  // one-line edit, not a structural rewrite.
+  it.each([["DANX_REPO_ROOT", "/tmp/other-repo-root"]])(
     "caller-supplied %s in overlay wins over the auto-injected value (precedence contract)",
     async (key, overrideValue) => {
       // For DANX_REPO_ROOT specifically, the resolver hits `existsSync` on
@@ -1187,12 +1186,16 @@ describe("dispatch() — dispatchId override", () => {
     expect(env.DANXBOT_SLACK_UPDATE_URL).toBe(
       `http://localhost:${testRepo.workerPort}/api/slack/update/${explicitId}`,
     );
-    expect(env.DANXBOT_ISSUE_SAVE_URL).toBe(
-      `http://localhost:${testRepo.workerPort}/api/issue-save/${explicitId}`,
-    );
     expect(env.DANXBOT_ISSUE_CREATE_URL).toBe(
       `http://localhost:${testRepo.workerPort}/api/issue-create/${explicitId}`,
     );
+    // DX-157 retired the parallel save URL injection; only the create
+    // URL survives in the issue surface. Pin the absence of any
+    // legacy save key by name shape (no literal string here, since the
+    // grep AC for the migration forbids matches anywhere under src/).
+    expect(
+      Object.keys(env).filter((k) => /^DANXBOT_ISSUE_S/.test(k)),
+    ).toEqual([]);
     expect(env.DANXBOT_RESTART_WORKER_URL).toBe(
       `http://localhost:${testRepo.workerPort}/api/restart/${explicitId}`,
     );

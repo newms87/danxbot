@@ -224,10 +224,11 @@ vi.mock("../critical-failure.js", () => ({
 
 // Phase 3 of tracker-agnostic-agents (Trello wsb4TVNT): handleStop calls
 // `autoSyncTrackedIssue(jobId, repo)` BEFORE `job.stop` for the
-// completed/failed path so an agent that called `danxbot_complete`
-// without an explicit `danx_issue_save` still gets its YAML pushed to
-// the tracker. Critical-failure short-circuits BEFORE this call. Mock
-// records call order against `mockStop` so assertions pin the
+// completed/failed path so an agent that edited the local YAML and
+// called `danxbot_complete` gets its YAML pushed to the tracker
+// immediately (rather than waiting up to ~30-60s for the next poller
+// tick to mirror it). Critical-failure short-circuits BEFORE this call.
+// Mock records call order against `mockStop` so assertions pin the
 // before-stop sequence.
 const mockAutoSyncTrackedIssue = vi.fn().mockResolvedValue(undefined);
 vi.mock("./auto-sync.js", () => ({

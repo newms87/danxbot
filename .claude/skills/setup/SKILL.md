@@ -327,7 +327,7 @@ Synced by poller to: `docs/domains/` and `docs/schema/`
 - `.danxbot/config/compose.yml` → copies to danxbot's `repo-overrides/<name>-compose.yml`
 - `.danxbot/config/docs/` → copies to danxbot's `docs/domains/` and `docs/schema/`
 
-`<repo>/.claude/` is strictly developer territory — danxbot never reads or writes there. Trello config (`trello.yml`) is consumed by the worker for backend-tracker sync only; it is NOT injected into the workspace as a rule (`danx-trello-config.md` was retired in Phase 5 once skills moved to the `danx_issue_save` / `danx_issue_create` MCP flow).
+`<repo>/.claude/` is strictly developer territory — danxbot never reads or writes there. Trello config (`trello.yml`) is consumed by the worker for backend-tracker sync only; it is NOT injected into the workspace as a rule (`danx-trello-config.md` was retired in Phase 5 once skills moved to the YAML-first / `danx_issue_create` MCP flow).
 
 All of these target paths are gitignored in danxbot. They are generated artifacts, not source files. The poller syncs them before each Claude spawn.
 

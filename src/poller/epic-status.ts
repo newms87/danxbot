@@ -26,9 +26,9 @@
  *
  * Pure-local: no tracker imports, no logger import. Outbound mirror to
  * the tracker happens via the existing `syncIssue` path on the parent's
- * next reconcile (worker-side `danx_issue_save`). The poller does not
- * push the derived status itself — accepts brief tracker-side drift in
- * exchange for keeping this module pure-local + cheap.
+ * next reconcile (the worker's per-tick poller mirror). The poller does
+ * not push the derived status itself — accepts brief tracker-side drift
+ * in exchange for keeping this module pure-local + cheap.
  *
  * Priority rules (first match wins):
  *

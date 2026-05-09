@@ -104,7 +104,8 @@ export async function findByExternalId(
 
 /**
  * Write the issue to `<repo>/.danxbot/issues/open/<id>.yml`. Always writes
- * to `open/` — the move to `closed/` happens via `danx_issue_save` when
+ * to `open/` — the move to `closed/` happens via `moveToClosedIfTerminal`
+ * (called by `persistAfterSync` in the worker's auto-sync path) when the
  * status reaches Done or Cancelled.
  *
  * Read-your-writes integration (DX-154): after `writeFileSync`, looks up

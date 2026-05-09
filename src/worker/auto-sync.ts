@@ -1,9 +1,11 @@
 /**
- * Best-effort `danx_issue_save` on the dispatch's tracked issue. Phase 3
- * of the tracker-agnostic-agents epic (Trello wsb4TVNT) wires this into
- * `handleStop` so an agent that calls `danxbot_complete` directly
- * (without an explicit `danx_issue_save`) still gets its YAML pushed to
- * the tracker before the process exits.
+ * Best-effort tracker push on the dispatch's tracked issue. Phase 3 of
+ * the tracker-agnostic-agents epic (Trello wsb4TVNT) wires this into
+ * `handleStop` so an agent that calls `danxbot_complete` after editing
+ * its YAML still gets that YAML pushed to the tracker before the
+ * process exits — without waiting up to ~30-60s for the next poller
+ * tick to mirror it. DX-157 made this the SOLE entry point for an
+ * agent-driven terminal-save tracker push.
  *
  * Lookup chain:
  *   1. `getDispatch(jobId)` → trigger metadata.

@@ -5,10 +5,12 @@
  * `defaultMcpRegistry[DANXBOT_SERVER_NAME].build(opts)` is the SOLE seam
  * that turns dispatch-time URL options into the env block of the danxbot
  * MCP subprocess. Phase 3 of tracker-agnostic-agents (Trello wsb4TVNT)
- * extended `McpFactoryOptions` with `issue?: {saveUrl, createUrl}`; this
- * suite pins the env-mapping contract so a regression that drops one URL
- * (or wires it under the wrong name) fails loudly at unit level instead
- * of silently disabling Phase 3 in production.
+ * extended `McpFactoryOptions` with the issue options group; DX-157
+ * pruned the legacy save URL so the surface is now `issue?: {createUrl}`
+ * only. This suite pins the env-mapping contract so a regression that
+ * drops a URL (or wires it under the wrong name) fails loudly at unit
+ * level instead of silently disabling agent issue-create flows in
+ * production.
  */
 
 import { describe, expect, it } from "vitest";
@@ -48,21 +50,16 @@ describe("danxbot MCP registry — build()", () => {
     expect(cfg.env?.DANXBOT_SLACK_UPDATE_URL).toBe(
       "http://localhost:9999/api/slack/update/job-1",
     );
-    expect(cfg.env?.DANXBOT_ISSUE_SAVE_URL).toBeUndefined();
     expect(cfg.env?.DANXBOT_ISSUE_CREATE_URL).toBeUndefined();
   });
 
-  it("adds DANXBOT_ISSUE_*_URL when opts.issue is supplied (Phase 3)", () => {
+  it("adds DANXBOT_ISSUE_CREATE_URL when opts.issue is supplied", () => {
     const cfg = build({
       danxbotStopUrl: STOP_URL,
       issue: {
-        saveUrl: "http://localhost:9999/api/issue-save/job-1",
         createUrl: "http://localhost:9999/api/issue-create/job-1",
       },
     });
-    expect(cfg.env?.DANXBOT_ISSUE_SAVE_URL).toBe(
-      "http://localhost:9999/api/issue-save/job-1",
-    );
     expect(cfg.env?.DANXBOT_ISSUE_CREATE_URL).toBe(
       "http://localhost:9999/api/issue-create/job-1",
     );
@@ -78,7 +75,6 @@ describe("danxbot MCP registry — build()", () => {
         updateUrl: "slackUpdate",
       },
       issue: {
-        saveUrl: "issueSave",
         createUrl: "issueCreate",
       },
     });
@@ -86,7 +82,6 @@ describe("danxbot MCP registry — build()", () => {
       DANXBOT_STOP_URL: STOP_URL,
       DANXBOT_SLACK_REPLY_URL: "slackReply",
       DANXBOT_SLACK_UPDATE_URL: "slackUpdate",
-      DANXBOT_ISSUE_SAVE_URL: "issueSave",
       DANXBOT_ISSUE_CREATE_URL: "issueCreate",
     });
   });
@@ -100,7 +95,7 @@ describe("danxbot MCP registry — build()", () => {
       "http://localhost:9999/api/restart/job-1",
     );
     expect(cfg.env?.DANXBOT_SLACK_REPLY_URL).toBeUndefined();
-    expect(cfg.env?.DANXBOT_ISSUE_SAVE_URL).toBeUndefined();
+    expect(cfg.env?.DANXBOT_ISSUE_CREATE_URL).toBeUndefined();
   });
 
   it("omits DANXBOT_RESTART_WORKER_URL when opts.restartWorkerUrl is absent", () => {

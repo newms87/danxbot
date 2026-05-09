@@ -58,19 +58,22 @@ export interface McpFactoryOptions {
     updateUrl: string;
   };
   /**
-   * Issue-tracker callback URLs for the `danx_issue_save` and
-   * `danx_issue_create` MCP tools. When present, the danxbot MCP server
-   * exposes both tools and POSTs to these URLs from inside the agent
-   * subprocess. Both fields are required together; a half-defined issue
-   * surface would produce a partially-working tool set and hide bugs.
+   * Issue-create callback URL for the `danx_issue_create` MCP tool.
+   * When present, the danxbot MCP server exposes the tool and POSTs to
+   * the URL from inside the agent subprocess.
    *
    * Auto-injected by `dispatch()` for every dispatched agent in worker
-   * mode (the worker URL is `http://localhost:<workerPort>/api/issue-…/
-   * <dispatchId>`). Absent on dispatches that don't have access to a
-   * worker — the tools simply don't appear in `tools/list` then.
+   * mode (the worker URL is
+   * `http://localhost:<workerPort>/api/issue-create/<dispatchId>`).
+   * Absent on dispatches that don't have access to a worker — the tool
+   * simply doesn't appear in `tools/list` then.
+   *
+   * DX-157 retired the parallel agent-facing save tool — agents now
+   * `Edit` / `Write` the YAML directly and the chokidar watcher mirrors
+   * the change to the DB; the poller's per-tick mirror handles the
+   * outbound tracker push.
    */
   issue?: {
-    saveUrl: string;
     createUrl: string;
   };
   /**
@@ -82,9 +85,9 @@ export interface McpFactoryOptions {
    *
    * Auto-injected by `dispatch()` for every dispatched agent in worker
    * mode (the URL is dispatchId-derived, parallel to the issue + slack
-   * pair). Carried as a single string (not an object) because the
-   * worker route is single-endpoint, unlike issue (save + create) and
-   * slack (reply + update).
+   * groups). Carried as a single string (not an object) because the
+   * worker route is single-endpoint, like the issue group's
+   * `{createUrl}`, unlike slack's `{replyUrl, updateUrl}` pair.
    */
   restartWorkerUrl?: string;
 }

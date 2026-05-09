@@ -120,8 +120,10 @@ export const TEAM_PROMPT_RESUME = "/danx-next";
  * Drives the `danx-triage-card` skill (Phase 3 / ISS-93). The single
  * Claude session reads the named card via `mcp__danx-issue__danx_issue_get`,
  * decides per the per-status decision tree, writes the TTL-stamped
- * `triage{}` block back via `mcp__danx-issue__danx_issue_save`, and
- * signals completion. Decisions:
+ * `triage{}` block back via `Edit` (the chokidar watcher in
+ * `src/db/issues-mirror.ts` mirrors the change to the DB; the poller's
+ * per-tick mirror pushes to the tracker), and signals completion.
+ * Decisions:
  *   - Review → ICE-score → Keep / Cancel / Approve (status flips)
  *   - Needs Help → Hard Gate audit → Demote / Confirm
  *   - Blocked (`blocked != null`) → Re-check `blocked.by[]` → Unblock

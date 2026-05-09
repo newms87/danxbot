@@ -1011,9 +1011,11 @@ export async function handleStop(
 
     // Phase 3 of tracker-agnostic-agents (Trello wsb4TVNT): auto-sync
     // the dispatch's tracked issue YAML before tearing the agent down.
-    // The agent may have edited the local YAML and called
-    // `danxbot_complete` directly without `danx_issue_save`; the auto-
-    // sync ensures the tracker reflects the final state regardless.
+    // The agent edits the local YAML directly with `Edit` / `Write`
+    // (DX-157 retired the legacy save MCP tool) and calls
+    // `danxbot_complete` to terminate; the auto-sync ensures the
+    // tracker reflects the final state immediately, without waiting on
+    // the poller's per-tick mirror.
     //
     // Only fires for tracker-backed triggers (Trello today). Slack and
     // API dispatches have no tracked issue and skip the sync. Validation
