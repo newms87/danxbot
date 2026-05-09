@@ -21,6 +21,36 @@ ONE command brings the whole dev stack up:
 
 **Danxbot dev is permanently on 5566.** 5173 is Vite's default and collides with every other Vite-based project on the host (e.g. gpt-manager). 5566 is owned by danxbot and never moves. Do not change `DASHBOARD_DEV_PORT` in docs, scripts, or bookmarks.
 
+## Agent API Access — Auth Token
+
+Dashboard endpoints require `Authorization: Bearer <token>`. Agents working in this repo use a persistent local-dev token at `~/.config/danxbot/dashboard-token` (mode 0600, gitignored by virtue of `$HOME` placement).
+
+### Quick usage
+
+```bash
+TOKEN=$(cat ~/.config/danxbot/dashboard-token)
+curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:5566/api/issues?repo=danxbot
+curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:5555/api/auth/me   # sanity: {"user":{"username":"monitor"}}
+```
+
+### One-time create / rotate
+
+If the token file is missing or `/api/auth/me` returns `401`:
+
+```bash
+DANXBOT_CREATE_USER_PASSWORD='<any-password>' make create-user LOCALHOST=1 USERNAME=monitor
+# Capture the printed token (shown once), then persist:
+mkdir -p ~/.config/danxbot
+echo '<token>' > ~/.config/danxbot/dashboard-token
+chmod 600 ~/.config/danxbot/dashboard-token
+```
+
+Re-running the make target rotates the token (old one invalidated). The `monitor` user is the conventional service account for autonomous agent monitoring; humans should use their own usernames (e.g. `make create-user LOCALHOST=1 USERNAME=dan`).
+
+### Production targets
+
+For `gpt`/etc., swap `LOCALHOST=1` → `TARGET=<t>` and store the token at `~/.config/danxbot/dashboard-token-<target>`. The dashboard host is the Caddy-fronted public URL (e.g. `https://danxbot.sageus.ai`).
+
 ## Two Dev URLs
 
 | URL | Serves | When to use |

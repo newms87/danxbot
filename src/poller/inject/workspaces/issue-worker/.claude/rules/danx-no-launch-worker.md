@@ -43,6 +43,19 @@ If you are unsure whether a command would launch a worker, the rule is
 **don't run it** — leave a `comments[]` note on the card describing what
 you would have done and why, and let the operator decide.
 
+## What IS allowed (local verification)
+
+The forbidden list is specifically **launching workers + deploys**, NOT verification commands. Run these freely when an AC needs them:
+
+- `make test` (Layer 1 — unit + integration)
+- `make test-system` (Layer 3 — real Claude API, ~$1, hits the LOCAL worker on this host, does NOT touch production)
+- `make test-validate` (Layer 2 — real Claude API budget-capped)
+- `npx vitest run …`, `npx tsc --noEmit`, `npx vue-tsc --noEmit`
+- `curl http://localhost:5566/...` / `curl http://localhost:5555/...` (local dashboard probes)
+- `gh pr create` / `gh pr view` / `git` operations on the repo you were dispatched to
+
+**A card is Done when committed code passes local tests.** Deployment is operations and is never a completion gate — see `danx-next/SKILL.md` Step 6 + Step 10.
+
 ## What to do when your card seems to need a running worker
 
 1. **Stop.** Do not run any launch / deploy / restart command.

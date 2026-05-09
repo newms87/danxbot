@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-151
 external_id: 69fe1e9ecc5983f1cc05e679
@@ -11,7 +11,7 @@ children:
   - DX-156
   - DX-157
 dispatch: null
-status: ToDo
+status: Done
 type: Epic
 title: "[Issues > DB Mirror] Postgres-backed mirror of issue YAMLs (file-authoritative)"
 description: |-
@@ -95,6 +95,7 @@ description: |-
   - Migrating any historical data from the dropped MySQL tables (dispatches, events, etc. start fresh).
   - Replacing the outbound tracker mirror — still poller-tick-driven against the local YAML.
   - Touching any field on the `Issue` schema (no new YAML fields are introduced; `assigned_agent` already exists in the schema for the multi-worker epic).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -130,7 +131,7 @@ ac:
     checked: false
 comments:
   - author: dispatch:1ad6504
-    timestamp: "2026-05-08T23:15:00Z"
+    timestamp: 2026-05-08T23:15:00Z
     text: |
       ## Phase 1 shipped (DX-152 Done)
 
@@ -186,11 +187,64 @@ comments:
       - Migration-syntax-snapshot tests (002, 004, 011, 015) were
         deleted as redundant. Don't reintroduce them. Schema is
         verified end-to-end via integration tests against real PG.
-history: []
+history:
+  - timestamp: 2026-05-09T00:57:58.731Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: In Progress
+    note: Any child In Progress — parent In Progress
+  - timestamp: 2026-05-09T01:14:17.436Z
+    actor: worker:auto-derive
+    event: status_change
+    from: In Progress
+    to: ToDo
+    note: Any child ToDo — parent ToDo
+  - timestamp: 2026-05-09T04:52:04.454Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: Blocked
+    note: Any child Blocked — parent Blocked
 retro:
-  good: ""
-  bad: ""
-  action_item_ids: []
-  commits: []
+  good: |
+    - **Six phases shipped sequentially** (DX-152 → DX-157) over ~6h on
+      2026-05-08/09. Each phase landed its own commit:
+      - DX-152 Phase 1: Postgres swap (15 migrations + every DB module)
+      - DX-153 Phase 2: `issues` + `issue_history` schema
+      - DX-154 Phase 3: chokidar watcher + writer + boot scan + reconcile + read-your-writes
+      - DX-155 Phase 4: poller readers migrate to DB queries
+      - DX-156 Phase 5: dashboard endpoints + danx-issue MCP query tools migrate to DB
+      - DX-157 Phase 6: retire `danx_issue_save` MCP tool + helper route
+    - **DB mirror operational.** Boot scan populated 181 issue rows for
+      the danxbot repo on first restart with the watcher code; chokidar
+      catches every YAML edit; agents continue reading YAMLs unchanged.
+    - **Architectural boundary preserved.** Trello stayed background
+      infrastructure throughout. Agent path (read YAML → edit YAML →
+      save YAML) never depended on Trello at any phase.
+  bad: |
+    - **Phase 6 agent mis-classified deploy as a completion gate** and
+      moved itself to Blocked. Operator manually closed and updated
+      `danx-next/SKILL.md` + `danx-no-launch-worker.md` to clarify:
+      deploy is operations, not a verification gate. Local
+      `make test-system` covers the same surface.
+    - **Worker restart was needed mid-epic** to load DX-154's chokidar
+      module — host worker had been running pre-DX-154 code. Boot scan
+      then populated the DB. Caught only because operator probed
+      `/api/issues` and saw `[]`.
+    - **chokidar dep didn't ship with the dashboard container image.**
+      DX-154 added the dep to package.json but the running dashboard
+      image was baked before that. `docker exec npm install chokidar`
+      unblocked the dev proxy; permanent fix lands on next `make build`.
+  action_item_ids:
+    - DX-211
+    - DX-212
+    - DX-213
+  commits:
+    - 701a7fa  # DX-154 Phase 3
+    - 0777281  # DX-155 Phase 4
+    - 3b9d7d7  # DX-156 Phase 5
+    - 328cff1  # DX-156 close
+    - c464e77  # DX-157 Phase 6
 waiting_on: null
 blocked: null

@@ -147,8 +147,7 @@ Apply this filter, in order, every time you're tempted to defer work:
    debt, and incur re-dispatch cost. Prefer fixing every time.
 3. **Unrelated AND large** (multi-phase refactor, cross-cutting redesign,
    needs its own scoping, would derail this card)? → Action item is OK.
-4. **Needs human decision or external access** (credentials, deploy, repo
-   you can't write to, ambiguous spec)? → Step 10 / action item.
+4. **Needs human decision or external access** (credentials, ambiguous spec, repo you can't write to, secret rotation)? → Step 10 / action item. **NOT a valid blocker:** "needs deploy", "needs prod smoke", "needs production verification". A card is **Done when code is committed and tests pass locally** — deploys are an operational concern that ship code already accepted as Done. Never block a card on `make deploy` / `make deploy-smoke` / "verify in prod"; that's how Done turns into Forever-Blocked.
 
 Mechanical check before writing any action item or going to Blocked:
 **"Could I just do this in the next 10–30 minutes?"** Yes → do it. Drop the
@@ -172,7 +171,7 @@ Blocked status.
 
 1. Read the full `description`, all `comments[]`, all `ac[]` titles, and any existing `children[]` (look up each child YAML to see what's already been built).
 2. **Bug cards (`type: Bug`):** investigate root cause via `Read` / `Grep` / `Bash` before designing the fix.
-3. **Blocked vs Waiting On vs fix-it-yourself:** if the card cannot be done by an agent, route it correctly. Step 10 (Blocked) ONLY for human-action blockers (credentials, deploy, ambiguous spec needing human decision, architectural ambiguity that changes the goal). Step 10b (Waiting On) for waiting on other in-flight work — no human required, the poller auto-unblocks. Anything else → apply Step 1.5 and fix it yourself in this dispatch.
+3. **Blocked vs Waiting On vs fix-it-yourself:** if the card cannot be done by an agent, route it correctly. Step 10 (Blocked) ONLY for true human-action blockers (credentials, secret rotation, ambiguous spec needing human decision, architectural ambiguity that changes the goal). **"Needs deploy" / "needs prod smoke" / "needs Layer 3 system test" are NOT valid blockers** — Layer 3 tests run locally (`make test-system`); deploys ship code already accepted as Done. Step 10b (Waiting On) for waiting on other in-flight work — no human required, the poller auto-unblocks. Anything else → apply Step 1.5 and fix it yourself in this dispatch.
 4. Design the approach in your head. No code yet.
 5. Invoke the `/pipe-start` skill to reload pre-implementation rules.
 
@@ -289,7 +288,9 @@ For each `ac[i]`, verify it holds (test evidence, command output, direct code re
 
 **Never check off an unverified item.** "By construction" / "obviously correct" are not evidence. State must reflect a passing test, captured command output, or a quoted line from code that demonstrably satisfies the criterion.
 
-If you cannot verify an item — repo this worker cannot commit to, requires a deploy, depends on external state — leave `checked: false`. Do NOT check it off with an excuse. Do NOT paraphrase it as "done in spirit."
+If you cannot verify an item — repo this worker cannot commit to, depends on external state you cannot reach — leave `checked: false`. Do NOT check it off with an excuse. Do NOT paraphrase it as "done in spirit."
+
+**"Requires deploy" is NOT a valid reason to leave an AC unchecked.** Every AC is verifiable locally. `make test`, `make test-system`, integration tests, manual local smoke against `http://localhost:5566` — all run on this host. Production deploy is operations, NOT a verification gate. If an AC literally says "verify in production," rewrite it to "verify locally via `<command>`" and check it once that passes — `make deploy` ships code already accepted as Done.
 
 ---
 
@@ -366,8 +367,8 @@ other in-flight work — that's **Waiting On** (Step 10b), not Blocked.
 
 Use Step 10 ONLY when the blocker is genuinely one of:
 
-- **Credentials / deploy / secrets / production action** a human must
-  perform (rotate a key, run a deploy, push a config to SSM).
+- **Credentials / secrets** a human must rotate / push to SSM.
+  - **NOT a Blocker:** "needs deploy" / "needs prod smoke" / "needs Layer 3 system test". Layer 3 (`make test-system`) runs locally on this host — you can run it yourself. Production deploy ships code already accepted as Done; it is NEVER a completion gate. A card whose only remaining ACs are "deploy + smoke prod" is **already Done** — rewrite the ACs to local-verify form, run them, mark Done.
 - **External repo / file your worker has no write access to** AND no other
   agent is going to fix it for you.
 - **Genuine human design decision** (ambiguous spec, missing requirement,
