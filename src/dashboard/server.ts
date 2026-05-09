@@ -35,6 +35,7 @@ import {
 } from "./agents-routes.js";
 import {
   handleGetIssue,
+  handleGetIssueHistory,
   handleListIssues,
 } from "./issues-routes.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
@@ -343,6 +344,23 @@ async function route(
       {
         repo: url.searchParams.get("repo"),
         includeClosed: url.searchParams.get("include_closed"),
+      },
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // History route MUST come before the generic /api/issues/:id route —
+  // otherwise `:id` greedily matches "history" and the history endpoint
+  // is unreachable.
+  const issueHistoryMatch = url.pathname.match(/^\/api\/issues\/history\/([^/]+)$/);
+  if (method === "GET" && issueHistoryMatch) {
+    await handleGetIssueHistory(
+      res,
+      decodeURIComponent(issueHistoryMatch[1]),
+      {
+        repo: url.searchParams.get("repo"),
+        limit: url.searchParams.get("limit"),
       },
       dispatchDeps,
     );

@@ -1,14 +1,18 @@
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
 import type {
   Issue,
   IssueStatus,
   IssueType,
 } from "../issue-tracker/interface.js";
-import { parseIssue } from "../issue-tracker/yaml.js";
-import { createLogger } from "../logger.js";
-
-const log = createLogger("issues-reader");
+import { ISSUE_STATUSES } from "../issue-tracker/interface.js";
+import { sortInputsForStatus } from "../issue-tracker/sort.js";
+import { serializeIssue } from "../issue-tracker/yaml.js";
+import {
+  dbListAllIssues,
+  dbListIssueHistory,
+  dbSelectIssueDetail,
+  type DbIssueRow,
+} from "../poller/issues-db.js";
+import { repoNameFromPath } from "../poller/repo-name.js";
 
 /**
  * Slim child entry on the list shape — child id + title + type + raw
@@ -65,83 +69,72 @@ export interface IssueListItem {
   comments_count: number;
   has_retro: boolean;
   updated_at: number;
+  /**
+   * Operator priority knob. `[1.0, 5.0]`; default `3.0`. Surfaced on the
+   * list item so the SPA mirror (`dashboard/src/types.ts`) can render it
+   * and so a future Agents-tab edit affordance has the value pre-loaded.
+   * The board's per-column order already incorporates priority via the
+   * backend's `sortIssuesForStatus`; the SPA should NEVER re-sort using
+   * this field. ISS-210.
+   */
+  priority: number;
 }
 
-/** Full Issue plus the file's mtime in ms and the raw YAML source text. */
+/** Full Issue plus the mirror-write timestamp (ms) and a serialized YAML rendering of the current state. */
 export type IssueDetail = Issue & { updated_at: number; raw_yaml: string };
+
+/**
+ * Per-issue history entry projected from `issue_history`. The mirror
+ * stamps a row on every content-changing upsert + every tombstone; the
+ * dashboard exposes them as a timeline. RFC 6902 patch ops live in
+ * `patch` verbatim — the SPA is free to render them directly or apply
+ * them to a synthetic prior snapshot.
+ */
+export interface IssueHistoryEntry {
+  changed_at: string;
+  source: string;
+  prev_hash: string | null;
+  next_hash: string;
+  patch: unknown;
+}
 
 const DEFAULT_CLOSED_LIMIT = 50;
 
-// Module-scoped log-once dedupe for malformed / unreadable YAMLs. Surfaced
-// to tests via `__resetWarnedPathsForTests`.
-const warnedPaths = new Set<string>();
-
-export function __resetWarnedPathsForTests(): void {
-  warnedPaths.clear();
-}
+const STEM_SHAPE = /^([A-Z]{2,4})-\d+$/;
 
 interface RawIssue {
   issue: Issue;
   mtimeMs: number;
-  text: string;
 }
 
-const STEM_SHAPE = /^([A-Z]{2,4})-\d+$/;
-
-async function readIssueFile(path: string): Promise<RawIssue | null> {
-  let mtimeMs: number;
-  let text: string;
-  try {
-    const s = await stat(path);
-    mtimeMs = s.mtimeMs;
-    text = await readFile(path, "utf-8");
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    // ENOENT is the normal "no such issue" path for detail lookups —
-    // surface as null. Anything else (EACCES, EIO, ENOTDIR) is a real
-    // disk anomaly and propagates: the route's 500 handler turns it
-    // into an operator-visible error rather than a silently empty list.
-    if (code === "ENOENT") return null;
-    throw err;
-  }
-  // Derive expectedPrefix from the filename stem, not from a per-repo
-  // config field. `external_id`/`id` are stable across the tracker; the
-  // file's own stem is the canonical prefix for THAT card. This makes
-  // the reader robust to mixed-prefix repos AND to stale cached
-  // `loadIssuePrefix` values inside long-running dashboard processes.
-  // A rogue filename (no stem-shape match) is a real disk anomaly →
-  // throw, no silent skip.
-  const stem = path.split("/").pop()!.replace(/\.yml$/, "");
-  const match = STEM_SHAPE.exec(stem);
-  if (!match) {
+/**
+ * Phase 5 of the Issues DB Mirror epic (DX-151 / DX-156).
+ *
+ * Project a DB row into the shape the JS slice + sort logic consumes.
+ * Throws on malformed entries (mirror writer stores `{_malformed: true}`
+ * for unparseable YAML bytes) — fail loud, no silent skip, matching
+ * the pre-DX-156 reader's behaviour for rogue YAMLs on disk.
+ */
+function toRawIssue(row: DbIssueRow): RawIssue {
+  const data = row.issue as unknown as Record<string, unknown>;
+  if (data._malformed === true) {
+    const id = typeof data.id === "string" ? data.id : "<unknown>";
     throw new Error(
-      `readIssueFile: rogue filename "${stem}.yml" at ${path} — stem must match ${STEM_SHAPE}.`,
+      `issues-reader: malformed YAML mirrored for ${id} — refusing to surface in the dashboard. Operator must fix the YAML on disk.`,
     );
   }
-  // parseIssue throws on schema / id-shape / prefix mismatch. Let it
-  // propagate — corrupt YAML in the issues tree is operator-fix
-  // territory, never silent-skip territory.
-  const issue = parseIssue(text, { expectedPrefix: match[1]! });
-  return { issue, mtimeMs, text };
-}
-
-async function listYamlNames(dir: string): Promise<string[]> {
-  try {
-    const entries = await readdir(dir);
-    return entries.filter((n) => n.endsWith(".yml"));
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    // ENOENT = the issues subtree doesn't exist yet (fresh repo). Anything
-    // else (EACCES, EIO, ENOTDIR) is real and would otherwise render as
-    // "no issues" silently — surface it once per dir.
-    if (code !== "ENOENT" && !warnedPaths.has(dir)) {
-      warnedPaths.add(dir);
-      log.warn(
-        `Failed to list ${dir}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    return [];
+  // Defensive: a row whose `data.id` doesn't match the per-prefix shape
+  // is a regression in the mirror writer (the (repo_name, id) PK is fed
+  // by `data->>'id'`, so the row could not have landed without an id).
+  // Throw so the dashboard surfaces the corruption rather than silently
+  // dropping the row.
+  const id = typeof data.id === "string" ? data.id : "";
+  if (!STEM_SHAPE.test(id)) {
+    throw new Error(
+      `issues-reader: rogue id "${id}" in DB row — id must match ${STEM_SHAPE}.`,
+    );
   }
+  return { issue: row.issue, mtimeMs: row.mirrorUpdatedAtMs };
 }
 
 function toListItem(
@@ -207,40 +200,49 @@ function toListItem(
       issue.retro.action_item_ids.length > 0 ||
       issue.retro.commits.length > 0,
     updated_at: mtimeMs,
+    priority: issue.priority,
   };
 }
 
+function isClosed(status: IssueStatus): boolean {
+  return status === "Done" || status === "Cancelled";
+}
+
 /**
- * List every parseable Issue under `<repoCwd>/.danxbot/issues/{open,closed}/*.yml`.
+ * Phase 5 of the Issues DB Mirror epic (DX-151 / DX-156).
  *
- * - Malformed / unreadable YAMLs are skipped with a single warn log per path.
- * - Closed cap: `recent` (default) returns the 50 newest by mtime; `all`
- *   returns every closed file.
- * - Final list is sorted by `updated_at` (mtime ms) descending.
+ * List every Issue currently mirrored into the `issues` table for the
+ * named repo. Replaces the pre-DX-156 YAML walk over
+ * `<repoCwd>/.danxbot/issues/{open,closed}/*.yml`.
+ *
+ * - Closed cap: `recent` (default) returns the 50 newest by
+ *   `mirror_updated_at` PLUS every closed card referenced from an open
+ *   card or a recent-closed parent. `all` returns every closed row.
+ * - Final list is grouped by status, sorted per-status via
+ *   `sortInputsForStatus`, and concatenated in `ISSUE_STATUSES` order so
+ *   debug dumps land in a stable column order. The SPA re-groups by
+ *   `status` for board rendering.
  */
 export async function listIssues(
   repoCwd: string,
   opts: { includeClosed: "recent" | "all" } = { includeClosed: "recent" },
 ): Promise<IssueListItem[]> {
-  const openDir = join(repoCwd, ".danxbot", "issues", "open");
-  const closedDir = join(repoCwd, ".danxbot", "issues", "closed");
+  const repoName = repoNameFromPath(repoCwd);
+  const dbRows = await dbListAllIssues(repoName);
+  const all = dbRows.map(toRawIssue);
 
-  const [openNames, closedNames] = await Promise.all([
-    listYamlNames(openDir),
-    listYamlNames(closedDir),
-  ]);
-
-  const openRaw = (
-    await Promise.all(openNames.map((n) => readIssueFile(join(openDir, n))))
-  ).filter((r): r is RawIssue => r !== null);
-
-  const closedRaw = (
-    await Promise.all(closedNames.map((n) => readIssueFile(join(closedDir, n))))
-  ).filter((r): r is RawIssue => r !== null);
+  const openRaw: RawIssue[] = [];
+  const closedRaw: RawIssue[] = [];
+  for (const r of all) {
+    if (isClosed(r.issue.status)) {
+      closedRaw.push(r);
+    } else {
+      openRaw.push(r);
+    }
+  }
 
   // Sort closed by mtime BEFORE slicing — the cap (50) is "newest 50",
-  // so the slice is correctness-bound, not cosmetic. The combined `all`
-  // is sorted again below to interleave open + closed by mtime.
+  // so the slice is correctness-bound, not cosmetic.
   closedRaw.sort((a, b) => b.mtimeMs - a.mtimeMs);
   let closedSlice: RawIssue[];
   if (opts.includeClosed === "all") {
@@ -256,7 +258,13 @@ export async function listIssues(
     const recent = closedRaw.slice(0, DEFAULT_CLOSED_LIMIT);
     const recentIds = new Set(recent.map((r) => r.issue.id));
     const referencedIds = new Set<string>();
-    for (const r of openRaw) {
+    // Walk BOTH open AND recent-closed parents so a recent-but-old-children
+    // closed Epic (DX-99 lives in recent-50, its DX-100 / DX-101 / DX-103
+    // phase children fall past the cap) still pulls its children into view.
+    // The walk is single-level — good enough for the operator-visible
+    // "show me what's still referenced" guarantee without unbounded
+    // pull-in.
+    for (const r of [...openRaw, ...recent]) {
       for (const cid of r.issue.children) referencedIds.add(cid);
       if (r.issue.parent_id) referencedIds.add(r.issue.parent_id);
       if (r.issue.waiting_on) {
@@ -269,29 +277,95 @@ export async function listIssues(
     closedSlice = [...recent, ...referencedExtras];
   }
 
-  const all = [...openRaw, ...closedSlice];
+  const slice = [...openRaw, ...closedSlice];
   // Build an id → Issue map across BOTH open + closed so parents can
   // resolve their `children[]` ids regardless of where each child lives.
   const byId = new Map<string, Issue>();
-  for (const r of all) byId.set(r.issue.id, r.issue);
-  all.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return all.map((r) => toListItem(r, byId));
+  for (const r of slice) byId.set(r.issue.id, r.issue);
+  // Group by status, run the canonical per-status sort, and
+  // concatenate. The SPA renders the resulting order verbatim — no
+  // column-level re-sort. Status order in the concatenation follows
+  // `ISSUE_STATUSES` so columns the SPA cares about appear in a stable
+  // order on debugging dumps; the SPA itself re-groups by `status` in
+  // `IssueBoard.vue` so the actual on-screen column placement is
+  // unchanged.
+  const grouped = new Map<IssueStatus, RawIssue[]>();
+  for (const status of ISSUE_STATUSES) grouped.set(status, []);
+  for (const r of slice) grouped.get(r.issue.status)?.push(r);
+
+  const ordered: RawIssue[] = [];
+  for (const status of ISSUE_STATUSES) {
+    const rows = grouped.get(status) ?? [];
+    if (rows.length === 0) continue;
+    const sorted = sortInputsForStatus(
+      rows.map((r) => ({
+        issue: r.issue,
+        payload: r,
+        updatedAtMs: r.mtimeMs,
+      })),
+      status,
+      byId,
+    );
+    for (const r of sorted) ordered.push(r);
+  }
+  return ordered.map((r) => toListItem(r, byId));
 }
 
 /**
- * Read a single issue by `ISS-N` from `<repoCwd>/.danxbot/issues/{open,closed}/<id>.yml`.
- * Returns null when neither file exists or when the file is malformed.
+ * Phase 5 of the Issues DB Mirror epic (DX-151 / DX-156).
+ *
+ * Read a single issue by `<PREFIX>-N`. Pre-DX-156 the helper looked at
+ * `<repoCwd>/.danxbot/issues/{open,closed}/<id>.yml`; under the DB
+ * mirror there is exactly one row per `(repo_name, id)` regardless of
+ * status, so a single SELECT replaces the open/closed two-step.
+ *
+ * `raw_yaml` is rendered from the canonicalized `data` jsonb via
+ * `serializeIssue` rather than re-reading the file. The mirror writer's
+ * `data` column carries the parsed YAML state authoritatively; the
+ * round-trip serialization is byte-stable for any YAML originally
+ * written by `serializeIssue` (every tracker / agent / dashboard write
+ * goes through that path). Hand-edited YAMLs with non-canonical
+ * formatting will lose those formatting choices in the rendered string
+ * — acceptable, the field is for read-only display.
  */
 export async function readIssueDetail(
   repoCwd: string,
   id: string,
 ): Promise<IssueDetail | null> {
-  for (const sub of ["open", "closed"] as const) {
-    const path = join(repoCwd, ".danxbot", "issues", sub, `${id}.yml`);
-    const raw = await readIssueFile(path);
-    if (raw) {
-      return { ...raw.issue, updated_at: raw.mtimeMs, raw_yaml: raw.text };
-    }
-  }
-  return null;
+  const repoName = repoNameFromPath(repoCwd);
+  const row = await dbSelectIssueDetail(repoName, id);
+  if (!row) return null;
+  const raw = toRawIssue(row);
+  return {
+    ...raw.issue,
+    updated_at: raw.mtimeMs,
+    raw_yaml: serializeIssue(raw.issue),
+  };
+}
+
+/**
+ * Phase 5 of the Issues DB Mirror epic (DX-151 / DX-156).
+ *
+ * Per-issue change history — RFC 6902 patches the mirror stamps on
+ * every content-changing upsert + every tombstone. Returned in
+ * ascending `changed_at` order so a timeline UI renders without a
+ * client-side sort.
+ *
+ * `limit` defaults to 200. Pass a higher value when an export needs
+ * the full lifecycle.
+ */
+export async function readIssueHistory(
+  repoCwd: string,
+  id: string,
+  opts: { limit?: number } = {},
+): Promise<IssueHistoryEntry[]> {
+  const repoName = repoNameFromPath(repoCwd);
+  const rows = await dbListIssueHistory(repoName, id, opts.limit ?? 200);
+  return rows.map((r) => ({
+    changed_at: r.changedAt,
+    source: r.source,
+    prev_hash: r.prevHash,
+    next_hash: r.nextHash,
+    patch: r.patch,
+  }));
 }

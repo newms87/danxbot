@@ -5,10 +5,12 @@ import type { DispatchProxyDeps } from "../../dashboard/dispatch-proxy.js";
 
 const mockListIssues = vi.fn();
 const mockReadIssueDetail = vi.fn();
+const mockReadIssueHistory = vi.fn();
 
 vi.mock("../../dashboard/issues-reader.js", () => ({
   listIssues: (...args: unknown[]) => mockListIssues(...args),
   readIssueDetail: (...args: unknown[]) => mockReadIssueDetail(...args),
+  readIssueHistory: (...args: unknown[]) => mockReadIssueHistory(...args),
 }));
 
 vi.mock("../../logger.js", () => ({
@@ -23,6 +25,7 @@ vi.mock("../../logger.js", () => ({
 import {
   handleListIssues,
   handleGetIssue,
+  handleGetIssueHistory,
 } from "../../dashboard/issues-routes.js";
 
 const REPOS: RepoConfig[] = [
@@ -179,6 +182,174 @@ describe("handleGetIssue", () => {
     mockReadIssueDetail.mockRejectedValue(new Error("boom"));
     const res = createMockRes();
     await handleGetIssue(res, "ISS-1", { repo: "danxbot" }, deps());
+    expect(res._getStatusCode()).toBe(500);
+  });
+});
+
+describe("handleGetIssueHistory", () => {
+  it("400s when repo query param is missing", async () => {
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: null, limit: null },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toContain("repo");
+    expect(mockReadIssueHistory).not.toHaveBeenCalled();
+  });
+
+  it("400s when repo is unknown", async () => {
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: "nope", limit: null },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toContain("nope");
+    expect(mockReadIssueHistory).not.toHaveBeenCalled();
+  });
+
+  it("returns the entries wrapped in {entries: [...]}", async () => {
+    const entries = [
+      {
+        changed_at: "2026-05-08T10:00:00.000Z",
+        source: "watcher",
+        prev_hash: null,
+        next_hash: "h1",
+        patch: [{ op: "add", path: "/", value: { id: "ISS-1" } }],
+      },
+    ];
+    mockReadIssueHistory.mockResolvedValue(entries);
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: "danxbot", limit: null },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({ entries });
+    expect(mockReadIssueHistory).toHaveBeenCalledWith(
+      "/repos/danxbot",
+      "ISS-1",
+      { limit: 200 },
+    );
+  });
+
+  it("returns 200 with empty entries for unknown ids (timeline render = empty state)", async () => {
+    mockReadIssueHistory.mockResolvedValue([]);
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-99999",
+      { repo: "danxbot", limit: null },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({ entries: [] });
+  });
+
+  it("forwards a positive limit", async () => {
+    mockReadIssueHistory.mockResolvedValue([]);
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: "danxbot", limit: "50" },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockReadIssueHistory).toHaveBeenCalledWith(
+      "/repos/danxbot",
+      "ISS-1",
+      { limit: 50 },
+    );
+  });
+
+  it("clamps an over-large limit to the cap (1000)", async () => {
+    mockReadIssueHistory.mockResolvedValue([]);
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: "danxbot", limit: "5000" },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockReadIssueHistory).toHaveBeenCalledWith(
+      "/repos/danxbot",
+      "ISS-1",
+      { limit: 1000 },
+    );
+  });
+
+  it.each([
+    ["zero", "0"],
+    ["non-numeric", "abc"],
+    ["negative", "-5"],
+    ["empty string", ""],
+    ["partial-numeric (parseInt slop)", "12abc"],
+    ["fractional", "1.5"],
+    ["leading whitespace", " 50"],
+  ])("400s on a malformed limit (%s)", async (_label, limit) => {
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: "danxbot", limit },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(400);
+    expect(mockReadIssueHistory).not.toHaveBeenCalled();
+  });
+
+  it("accepts limit=1 (lower bound)", async () => {
+    mockReadIssueHistory.mockResolvedValue([]);
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: "danxbot", limit: "1" },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockReadIssueHistory).toHaveBeenCalledWith(
+      "/repos/danxbot",
+      "ISS-1",
+      { limit: 1 },
+    );
+  });
+
+  it("accepts limit=1000 (exact cap, no clamp)", async () => {
+    mockReadIssueHistory.mockResolvedValue([]);
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: "danxbot", limit: "1000" },
+      deps(),
+    );
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockReadIssueHistory).toHaveBeenCalledWith(
+      "/repos/danxbot",
+      "ISS-1",
+      { limit: 1000 },
+    );
+  });
+
+  it("500s when readIssueHistory throws", async () => {
+    mockReadIssueHistory.mockRejectedValue(new Error("boom"));
+    const res = createMockRes();
+    await handleGetIssueHistory(
+      res,
+      "ISS-1",
+      { repo: "danxbot", limit: null },
+      deps(),
+    );
     expect(res._getStatusCode()).toBe(500);
   });
 });

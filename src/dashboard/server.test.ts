@@ -104,6 +104,20 @@ vi.mock("./admin-routes.js", () => ({
   handleAdminReset: (...args: unknown[]) => mockHandleAdminReset(...args),
 }));
 
+// issues-routes wraps handlers that pull in the DB-backed reader. Stub
+// at the route boundary so the server test only verifies wiring +
+// route-order invariants. issues-routes.test.ts owns handler-level
+// coverage; issues-reader.test.ts owns the SQL pattern coverage.
+const mockHandleListIssues = vi.fn();
+const mockHandleGetIssue = vi.fn();
+const mockHandleGetIssueHistory = vi.fn();
+vi.mock("./issues-routes.js", () => ({
+  handleListIssues: (...args: unknown[]) => mockHandleListIssues(...args),
+  handleGetIssue: (...args: unknown[]) => mockHandleGetIssue(...args),
+  handleGetIssueHistory: (...args: unknown[]) =>
+    mockHandleGetIssueHistory(...args),
+}));
+
 // Stub dispatch-stream so startDashboard() doesn't start a real DB poller.
 const mockStartDbChangeDetector = vi.fn();
 vi.mock("./dispatch-stream.js", () => ({
@@ -191,6 +205,9 @@ describe("dashboard server", () => {
     mockHandleLogout.mockReset();
     mockHandleMe.mockReset();
     mockHandleAdminReset.mockReset();
+    mockHandleListIssues.mockReset();
+    mockHandleGetIssue.mockReset();
+    mockHandleGetIssueHistory.mockReset();
     mockValidateToken.mockClear();
     // Re-install the default implementation (mockReset would wipe it).
     mockValidateToken.mockImplementation(async (t: string) =>
@@ -581,6 +598,114 @@ describe("dashboard server", () => {
       await requestHandler(req, res);
       expect(res._getStatusCode()).toBe(500);
       expect(JSON.parse(res._getBody())).toEqual({ error: "Internal server error" });
+    });
+  });
+
+  // The dashboard's `/api/issues/history/:id` route MUST match before
+  // the generic `/api/issues/:id` matcher — otherwise `:id` greedily
+  // matches "history" and the history endpoint silently 404s through
+  // the detail handler. The whole feature's correctness hinges on that
+  // ordering, so it gets its own regression suite.
+  describe("issues route ordering invariant (DX-156)", () => {
+    function ok() {
+      return async (_req: unknown, res: http.ServerResponse) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end("{}");
+      };
+    }
+
+    it("GET /api/issues forwards to handleListIssues", async () => {
+      mockHandleListIssues.mockImplementation(ok());
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/issues?repo=danxbot",
+      );
+      withAuth(req);
+      await requestHandler(req, res);
+      expect(mockHandleListIssues).toHaveBeenCalledTimes(1);
+      expect(mockHandleGetIssue).not.toHaveBeenCalled();
+      expect(mockHandleGetIssueHistory).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/issues/:id forwards to handleGetIssue", async () => {
+      mockHandleGetIssue.mockImplementation(ok());
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/issues/DX-1?repo=danxbot",
+      );
+      withAuth(req);
+      await requestHandler(req, res);
+      expect(mockHandleGetIssue).toHaveBeenCalledTimes(1);
+      const [, id] = mockHandleGetIssue.mock.calls[0];
+      expect(id).toBe("DX-1");
+      expect(mockHandleGetIssueHistory).not.toHaveBeenCalled();
+      expect(mockHandleListIssues).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/issues/history/:id forwards to handleGetIssueHistory (NOT handleGetIssue)", async () => {
+      // The load-bearing test: if a refactor reorders the regex
+      // matchers in `route()`, the URL `/api/issues/history/DX-1`
+      // collapses through the `:id` matcher with id="history" — this
+      // assertion catches that immediately.
+      mockHandleGetIssueHistory.mockImplementation(ok());
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/issues/history/DX-1?repo=danxbot",
+      );
+      withAuth(req);
+      await requestHandler(req, res);
+      expect(mockHandleGetIssueHistory).toHaveBeenCalledTimes(1);
+      const [, id] = mockHandleGetIssueHistory.mock.calls[0];
+      expect(id).toBe("DX-1");
+      expect(mockHandleGetIssue).not.toHaveBeenCalled();
+      expect(mockHandleListIssues).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/issues/history/:id forwards limit query param to the handler", async () => {
+      mockHandleGetIssueHistory.mockImplementation(ok());
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/issues/history/DX-1?repo=danxbot&limit=42",
+      );
+      withAuth(req);
+      await requestHandler(req, res);
+      expect(mockHandleGetIssueHistory).toHaveBeenCalledTimes(1);
+      const [, , params] = mockHandleGetIssueHistory.mock.calls[0];
+      expect(params).toEqual({ repo: "danxbot", limit: "42" });
+    });
+
+    it("URL-encoded ids decode for handleGetIssueHistory", async () => {
+      mockHandleGetIssueHistory.mockImplementation(ok());
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/issues/history/DX%2D1?repo=danxbot",
+      );
+      withAuth(req);
+      await requestHandler(req, res);
+      const [, id] = mockHandleGetIssueHistory.mock.calls[0];
+      expect(id).toBe("DX-1");
+    });
+
+    it("GET /api/issues/history/:id/extra returns 404 (no nested matcher)", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/issues/history/DX-1/extra",
+      );
+      withAuth(req);
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(404);
+      expect(mockHandleGetIssueHistory).not.toHaveBeenCalled();
+      expect(mockHandleGetIssue).not.toHaveBeenCalled();
+    });
+
+    it("GET /api/issues/* without auth returns 401 (auth gate)", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/issues/history/DX-1",
+      );
+      await requestHandler(req, res);
+      expect(res._getStatusCode()).toBe(401);
+      expect(mockHandleGetIssueHistory).not.toHaveBeenCalled();
     });
   });
 });
