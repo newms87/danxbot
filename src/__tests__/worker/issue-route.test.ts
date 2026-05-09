@@ -45,6 +45,7 @@ import {
   _resetForTesting,
   appendDiffEntries,
   handleIssueCreate,
+  runSync,
   syncTrackedIssueOnComplete,
   type IssueRouteDeps,
 } from "../../worker/issue-route.js";
@@ -462,6 +463,147 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
   });
 });
 
+describe("runSync (local-first persist)", () => {
+  // Direct-invocation tests against the exported `runSync` helper —
+  // distinct from the `syncTrackedIssueOnComplete` wrapper that adds the
+  // `forceWaitingOnToToDo` normalization, history-diff append, and
+  // per-issue mutex chain. These tests pin behaviors that survived the
+  // DX-157 retirement of the legacy save HTTP handler but moved one
+  // layer deeper into the runSync internals — primarily the
+  // `persistAfterSync` branching for non-terminal statuses and the
+  // recordError + recordSystemError dual-emission contract on tracker
+  // failure (DX-134 Phase 4).
+
+  let h: TestHarness;
+
+  beforeEach(async () => {
+    _resetForTesting();
+    h = await startTestServer();
+  });
+
+  afterEach(async () => {
+    await _drainAsyncWorkForTesting();
+    await h.close();
+  });
+
+  it("Needs Approval status keeps file in open/ — moveToClosedIfTerminal returns false", async () => {
+    // Needs Approval is a non-dispatchable, non-terminal parking status —
+    // distinct from Done / Cancelled. `moveToClosedIfTerminal` returns
+    // false, and `persistAfterSync` falls through to the open/ write
+    // branch. Pre-DX-157 had this coverage on the legacy save handler;
+    // pinning it on `runSync` directly preserves the contract that
+    // `Needs Approval` MUST NOT trigger the open→closed move.
+    await h.tracker.createCard({
+      schema_version: 5,
+      tracker: "memory",
+      id: "ISS-77",
+      parent_id: null,
+      children: [],
+      status: "Needs Approval",
+      type: "Feature",
+      title: "Awaiting design approval",
+      priority: 3.0,
+      description: "",
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-77",
+        external_id: "mem-1",
+        title: "Awaiting design approval",
+      }),
+      tracker: "memory",
+      status: "Needs Approval",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    await runSync(
+      { tracker: h.tracker, recordError: async () => {} },
+      "dispatch-na",
+      h.repo,
+      issue,
+    );
+
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-77", "open"))).toBe(
+      true,
+    );
+    expect(existsSync(issuePath(h.repo.localPath, "ISS-77", "closed"))).toBe(
+      false,
+    );
+    const persisted = readYaml(h.repo.localPath, "ISS-77");
+    expect(persisted).toContain("status: Needs Approval");
+  });
+
+  it("recordSystemError fires on tracker error alongside recordError (DX-134 Phase 4)", async () => {
+    // Pre-DX-157 had this coverage on the legacy save handler. The
+    // DX-134 Phase 4 contract is: when the tracker push throws,
+    // `runSync`'s catch block fires BOTH `recordError` (per-dispatch
+    // row, drives the dispatch's `error` column) AND `recordSystemError`
+    // (cross-dispatch SSE banner) with the IDENTICAL message body. A
+    // future refactor that drops the `fireAndForgetSystemError(deps, msg)`
+    // call regresses the operator banner without breaking recordError —
+    // this test catches that regression.
+    await h.tracker.createCard({
+      schema_version: 5,
+      tracker: "memory",
+      id: "ISS-44",
+      parent_id: null,
+      children: [],
+      status: "ToDo",
+      type: "Feature",
+      title: "remote-title",
+      priority: 3.0,
+      description: "",
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    });
+    // Local title diverges from the remote so the diff path produces an
+    // `updateCard` write — the operation that `failNextWrite` rejects.
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-44",
+        external_id: "mem-1",
+        title: "local-title",
+      }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    h.tracker.failNextWrite(new Error("simulated 401 from tracker"));
+
+    const recordedErrors: Array<{ dispatchId: string; message: string }> = [];
+    const recordedSystemErrors: string[] = [];
+    await runSync(
+      {
+        tracker: h.tracker,
+        recordError: async (dispatchId, message) => {
+          recordedErrors.push({ dispatchId, message });
+        },
+        recordSystemError: (msg) => {
+          recordedSystemErrors.push(msg);
+        },
+      },
+      "dispatch-banner-fail",
+      h.repo,
+      issue,
+    );
+
+    expect(recordedErrors).toHaveLength(1);
+    expect(recordedErrors[0].dispatchId).toBe("dispatch-banner-fail");
+    expect(recordedErrors[0].message).toMatch(/^tracker sync failed for mem-1: /);
+    expect(recordedErrors[0].message).toContain("simulated 401 from tracker");
+
+    expect(recordedSystemErrors).toHaveLength(1);
+    // Same body — both surfaces describe the same failure to the operator.
+    expect(recordedSystemErrors[0]).toBe(recordedErrors[0].message);
+  });
+});
+
 describe("syncTrackedIssueOnComplete", () => {
   let h: TestHarness;
 
@@ -576,6 +718,225 @@ describe("syncTrackedIssueOnComplete", () => {
     // reads; only the status field is normalized.
     expect(persisted).toContain("by:");
     expect(persisted).toContain("ISS-99");
+  });
+
+  it("returns ok:false with parse error when YAML on disk is malformed (does not throw)", async () => {
+    // Pre-DX-157 had "returns saved:false with errors on schema-validation
+    // failure" against the legacy save handler. The post-completion
+    // auto-sync path now catches `parseIssue` (IssueParseError or any
+    // other), records the failure against the dispatch row via
+    // `recordError` with a `danxbot_complete auto-sync validation
+    // failure: ` prefix, and returns `{ok: false, errors}` — never throws
+    // out of `handleStop`. A regression that lets the throw escape would
+    // crash the worker's stop handler.
+    const id = "ISS-9999";
+    ensureIssuesDirs(h.repo.localPath);
+    writeFileSync(
+      issuePath(h.repo.localPath, id, "open"),
+      "schema_version: 3\nbroken: true\n",
+    );
+
+    const recordedErrors: Array<{ dispatchId: string; message: string }> = [];
+    const result = await syncTrackedIssueOnComplete(
+      "dispatch-malformed",
+      h.repo,
+      id,
+      {
+        tracker: h.tracker,
+        recordError: async (dispatchId, message) => {
+          recordedErrors.push({ dispatchId, message });
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toHaveLength(1);
+    // The unparseable YAML carries `schema_version: 3` but is missing
+    // every other required field — `validateIssue` raises one of its
+    // `missing required field` / shape-mismatch errors. Match the
+    // category prefix without pinning the exact field order so a
+    // future validator-message tweak doesn't spuriously fail this test.
+    expect(result.errors[0]).toMatch(/missing required field|invalid|expected/i);
+
+    expect(recordedErrors).toHaveLength(1);
+    expect(recordedErrors[0].dispatchId).toBe("dispatch-malformed");
+    expect(recordedErrors[0].message).toMatch(
+      /^danxbot_complete auto-sync validation failure: /,
+    );
+    expect(recordedErrors[0].message).toContain(result.errors[0]);
+
+    // Tracker MUST NOT have been called — parse failure short-circuits
+    // before the chain runs.
+    const writes = h.tracker
+      .getRequestLog()
+      .filter(
+        (l) =>
+          l.method === "updateCard" ||
+          l.method === "moveToStatus" ||
+          l.method === "createCard",
+      );
+    expect(writes).toHaveLength(0);
+  });
+});
+
+describe("syncTrackedIssueOnComplete — concurrent invocations", () => {
+  // The per-issue mutex map (`issueLocks`) inside `issue-route.ts`
+  // serializes overlapping `syncTrackedIssueOnComplete` calls on the
+  // same internal id. Two independent guarantees the legacy handler had
+  // moved one layer in: (a) ordering — sync 2's tracker push runs only
+  // AFTER sync 1's chain task completes; (b) queue-poisoning resistance
+  // — sync 1's failure does NOT block sync 2 (each task's rejection is
+  // swallowed via `prior.catch(() => undefined)`).
+
+  let h: TestHarness;
+
+  beforeEach(async () => {
+    _resetForTesting();
+    h = await startTestServer();
+  });
+
+  afterEach(async () => {
+    await _drainAsyncWorkForTesting();
+    await h.close();
+  });
+
+  it("two concurrent calls on same id serialize via chainOnIssueLock; later call observes earlier call's writes", async () => {
+    await h.tracker.createCard({
+      schema_version: 5,
+      tracker: "memory",
+      id: "ISS-50",
+      parent_id: null,
+      children: [],
+      status: "ToDo",
+      type: "Feature",
+      title: "remote",
+      priority: 3.0,
+      description: "",
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-50",
+        external_id: "mem-1",
+        title: "first",
+      }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    // Sync 1 reads "first" synchronously (before its `await
+    // chainOnIssueLock`). Don't await — leave it pending.
+    const p1 = syncTrackedIssueOnComplete(
+      "dispatch-c1",
+      h.repo,
+      "ISS-50",
+      { tracker: h.tracker, recordError: async () => {} },
+    );
+
+    // Mutate the YAML BEFORE sync 2 begins. The synchronous prefix of
+    // `syncTrackedIssueOnComplete` will then read "second" before its
+    // chain-queue happens.
+    issue.title = "second";
+    writeYaml(h.repo.localPath, issue);
+
+    const p2 = syncTrackedIssueOnComplete(
+      "dispatch-c2",
+      h.repo,
+      "ISS-50",
+      { tracker: h.tracker, recordError: async () => {} },
+    );
+
+    await Promise.all([p1, p2]);
+    await _drainAsyncWorkForTesting();
+
+    // Mutex serializes — sync 1's updateCard("first") runs strictly
+    // before sync 2's updateCard("second"). The order in the request
+    // log is the load-bearing observable.
+    const updates = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "updateCard");
+    expect(updates).toHaveLength(2);
+    expect(updates[0].details).toEqual({
+      patch: { title: "first", id: "ISS-50" },
+    });
+    expect(updates[1].details).toEqual({
+      patch: { title: "second", id: "ISS-50" },
+    });
+  });
+
+  it("first call rejecting via runSync does not poison the queue — second call still runs", async () => {
+    await h.tracker.createCard({
+      schema_version: 5,
+      tracker: "memory",
+      id: "ISS-51",
+      parent_id: null,
+      children: [],
+      status: "ToDo",
+      type: "Feature",
+      title: "remote",
+      priority: 3.0,
+      description: "",
+      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    });
+    const issue: Issue = {
+      ...createEmptyIssue({
+        id: "ISS-51",
+        external_id: "mem-1",
+        title: "first",
+      }),
+      tracker: "memory",
+    };
+    writeYaml(h.repo.localPath, issue);
+
+    const recordedErrors: Array<{ dispatchId: string; message: string }> = [];
+    const deps: IssueRouteDeps = {
+      tracker: h.tracker,
+      recordError: async (dispatchId, message) => {
+        recordedErrors.push({ dispatchId, message });
+      },
+    };
+
+    h.tracker.failNextWrite(new Error("first sync explodes"));
+    const p1 = syncTrackedIssueOnComplete(
+      "dispatch-fail-1",
+      h.repo,
+      "ISS-51",
+      deps,
+    );
+
+    issue.title = "second";
+    writeYaml(h.repo.localPath, issue);
+    const p2 = syncTrackedIssueOnComplete(
+      "dispatch-fail-2",
+      h.repo,
+      "ISS-51",
+      deps,
+    );
+
+    await Promise.all([p1, p2]);
+    await _drainAsyncWorkForTesting();
+
+    // First failure recorded against dispatch-fail-1 only.
+    expect(recordedErrors).toHaveLength(1);
+    expect(recordedErrors[0].dispatchId).toBe("dispatch-fail-1");
+    expect(recordedErrors[0].message).toMatch(/^tracker sync failed for mem-1: /);
+
+    // Second sync still ran — exactly one updateCard for "second".
+    // Proves `prior.catch(() => undefined)` in `chainOnIssueLock`
+    // swallows sync 1's rejection so sync 2 isn't poisoned.
+    const updates = h.tracker
+      .getRequestLog()
+      .filter((l) => l.method === "updateCard");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].details).toEqual({
+      patch: { title: "second", id: "ISS-51" },
+    });
   });
 });
 
