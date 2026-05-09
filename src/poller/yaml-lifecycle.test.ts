@@ -27,7 +27,7 @@ import type { CreateCardInput, Issue, IssueStatus } from "../issue-tracker/inter
 
 function buildIssueLite(id: string, status: IssueStatus): Issue {
   const merged: Issue = {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id,
     external_id: "",
@@ -38,6 +38,7 @@ function buildIssueLite(id: string, status: IssueStatus): Issue {
     type: "Feature",
     title: `Title for ${id}`,
     description: "Body",
+    priority: 3.0,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -66,7 +67,7 @@ function defaultCreate(
   overrides: Partial<CreateCardInput> = {},
 ): CreateCardInput {
   return {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -75,6 +76,7 @@ function defaultCreate(
     type: "Feature",
     title: "Card title",
     description: "Card description",
+    priority: 3.0,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [{ title: "AC1", checked: false }],
     comments: [],
@@ -190,7 +192,7 @@ describe("yaml-lifecycle", () => {
 
       // Round-trip through writeIssue + the strict parseIssue validator
       // — null dispatch MUST survive serialization.
-      writeIssue(repoRoot, issue);
+      await writeIssue(repoRoot, issue);
       const reloaded = loadLocal(repoRoot, issue.id, "ISS");
       expect(reloaded?.dispatch).toBeNull();
     });
@@ -212,7 +214,7 @@ describe("yaml-lifecycle", () => {
       // (not just well-typed) so a hydration regression that drops a
       // remote field's content (e.g. returns `[]` for a non-empty AC
       // list) fails loudly here.
-      expect(issue.schema_version).toBe(4);
+      expect(issue.schema_version).toBe(5);
       expect(issue.id).toBe("ISS-200");
       expect(issue.external_id).toBe(external_id);
       expect(issue.parent_id).toBeNull();
@@ -246,7 +248,7 @@ describe("yaml-lifecycle", () => {
       // Round-trip through writeIssue + loadLocal (which uses the
       // strict parseIssue). Any missing required field would throw
       // here.
-      writeIssue(repoRoot, issue);
+      await writeIssue(repoRoot, issue);
       const reloaded = loadLocal(repoRoot, issue.id, "ISS");
       expect(reloaded).not.toBeNull();
       expect(reloaded?.external_id).toBe(external_id);
@@ -304,7 +306,7 @@ describe("yaml-lifecycle", () => {
 
       // Round-trip survival: the freshly hydrated Issue + its `created`
       // entry MUST round-trip through the strict validator unchanged.
-      writeIssue(repoRoot, issue);
+      await writeIssue(repoRoot, issue);
       const reloaded = loadLocal(repoRoot, issue.id, "ISS");
       expect(reloaded?.history).toHaveLength(1);
       expect(reloaded?.history[0].actor).toBe(entry.actor);
@@ -327,7 +329,7 @@ describe("yaml-lifecycle", () => {
       expect(first.history).toHaveLength(1);
       expect(first.history[0].event).toBe("created");
 
-      writeIssue(repoRoot, first);
+      await writeIssue(repoRoot, first);
       const reloaded = loadLocal(repoRoot, first.id, "ISS");
       // Round-trip is byte-stable: parsed history matches the hydrate
       // output exactly. No second entry was appended during
@@ -373,7 +375,7 @@ describe("yaml-lifecycle", () => {
         "did-1",
         repoRoot, "ISS",
       );
-      writeIssue(repoRoot, issue);
+      await writeIssue(repoRoot, issue);
 
       const loaded = loadLocal(repoRoot, "ISS-10", "ISS");
       expect(loaded).not.toBeNull();
@@ -420,7 +422,7 @@ describe("yaml-lifecycle", () => {
         defaultCreate({ id: "ISS-50" }),
       );
       const issue = await hydrateFromRemote(tracker, ext, "did-1", repoRoot, "ISS");
-      writeIssue(repoRoot, issue);
+      await writeIssue(repoRoot, issue);
 
       const found = findByExternalId(repoRoot, ext);
       expect(found?.id).toBe("ISS-50");
@@ -448,7 +450,7 @@ describe("yaml-lifecycle", () => {
         repoRoot,
         "DX",
       );
-      writeIssue(repoRoot, issue);
+      await writeIssue(repoRoot, issue);
 
       expect(findByExternalId(repoRoot, external_id)?.id).toBe("DX-7");
     });
@@ -461,11 +463,11 @@ describe("yaml-lifecycle", () => {
       const { external_id: extB } = await tracker.createCard(
         defaultCreate({ id: "SG-3" }),
       );
-      writeIssue(
+      await writeIssue(
         repoRoot,
         await hydrateFromRemote(tracker, extA, "d-a", repoRoot, "DX"),
       );
-      writeIssue(
+      await writeIssue(
         repoRoot,
         await hydrateFromRemote(tracker, extB, "d-b", repoRoot, "SG"),
       );
@@ -508,7 +510,7 @@ describe("yaml-lifecycle", () => {
         repoRoot, "ISS",
       );
 
-      writeIssue(repoRoot, issue);
+      await writeIssue(repoRoot, issue);
 
       const path = issuePath(repoRoot, "ISS-12", "open");
       expect(existsSync(path)).toBe(true);
@@ -531,9 +533,9 @@ describe("yaml-lifecycle", () => {
         "did-1",
         repoRoot, "ISS",
       );
-      writeIssue(repoRoot, original);
+      await writeIssue(repoRoot, original);
 
-      const updated = stampDispatchAndWrite(repoRoot, original, "did-2");
+      const updated = await stampDispatchAndWrite(repoRoot, original, "did-2");
       expect(updated.dispatch?.id).toBe("did-2");
 
       const reloaded = loadLocal(repoRoot, "ISS-13", "ISS");
@@ -551,9 +553,9 @@ describe("yaml-lifecycle", () => {
         "did-1",
         repoRoot, "ISS",
       );
-      writeIssue(repoRoot, original);
+      await writeIssue(repoRoot, original);
 
-      const updated = stampDispatchAndWrite(repoRoot, original, "did-2");
+      const updated = await stampDispatchAndWrite(repoRoot, original, "did-2");
       expect(updated.dispatch).toEqual({
         id: "did-2",
         pid: 0,
@@ -575,9 +577,9 @@ describe("yaml-lifecycle", () => {
         "did-1",
         repoRoot, "ISS",
       );
-      writeIssue(repoRoot, original);
+      await writeIssue(repoRoot, original);
 
-      const updated = stampDispatchAndWrite(repoRoot, original, {
+      const updated = await stampDispatchAndWrite(repoRoot, original, {
         id: "did-2",
         pid: 4321,
         host: "danxbot-host-a",
@@ -614,7 +616,7 @@ describe("yaml-lifecycle", () => {
         "did-1",
         repoRoot, "ISS",
       );
-      const stamped = stampDispatchAndWrite(repoRoot, original, {
+      const stamped = await stampDispatchAndWrite(repoRoot, original, {
         id: "did-1",
         pid: 9999,
         host: "host-x",
@@ -624,7 +626,7 @@ describe("yaml-lifecycle", () => {
       });
       expect(stamped.dispatch).not.toBeNull();
 
-      const cleared = clearDispatchAndWrite(repoRoot, stamped);
+      const cleared = await clearDispatchAndWrite(repoRoot, stamped);
       expect(cleared.dispatch).toBeNull();
 
       const reloaded = loadLocal(repoRoot, "ISS-16", "ISS");
@@ -642,10 +644,10 @@ describe("yaml-lifecycle", () => {
         null,
         repoRoot, "ISS",
       );
-      writeIssue(repoRoot, original);
+      await writeIssue(repoRoot, original);
       expect(original.dispatch).toBeNull();
 
-      const result = clearDispatchAndWrite(repoRoot, original);
+      const result = await clearDispatchAndWrite(repoRoot, original);
       // Same reference — no allocation, no spread.
       expect(result).toBe(original);
     });

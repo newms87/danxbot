@@ -255,7 +255,16 @@ export function runStartupReattach(repo: RepoContext): void {
       `[${repo.name}] reattach: clearing ${action.issue.id} (verdict=${action.verdict.kind}, dispatch=${action.issue.dispatch!.id})`,
     );
     try {
-      clearDispatchAndWrite(repo.localPath, action.issue);
+      // Sync phase (writeFileSync) throws here; the trailing mirror-
+      // ack Promise is fire-and-forget — the mirror's CRITICAL_FAILURE
+      // path covers DB-side failures, no per-call retry needed.
+      void clearDispatchAndWrite(repo.localPath, action.issue).catch(
+        (err) =>
+          log.warn(
+            `[${repo.name}] reattach: clearDispatch mirror ack failed for ${action.issue.id}`,
+            err,
+          ),
+      );
     } catch (err) {
       log.error(
         `[${repo.name}] reattach: clearDispatch failed for ${action.issue.id}`,
@@ -296,7 +305,7 @@ export function evictDeadDispatches(repo: RepoContext): void {
         // `issue.dispatch`. Keeps the verdict logic in one place
         // without forcing the per-tick scan to re-load every YAML.
         {
-          schema_version: 4,
+          schema_version: 5,
           tracker: "memory",
           id: issueId,
           external_id: "",
@@ -307,6 +316,7 @@ export function evictDeadDispatches(repo: RepoContext): void {
           type: "Feature",
           title: issueId,
           description: "",
+          priority: 3.0,
           triage: {
             expires_at: "",
             reassess_hint: "",
@@ -333,7 +343,12 @@ export function evictDeadDispatches(repo: RepoContext): void {
       const issue = loadLocal(repo.localPath, issueId, repo.issuePrefix);
       if (issue) {
         try {
-          clearDispatchAndWrite(repo.localPath, issue);
+          void clearDispatchAndWrite(repo.localPath, issue).catch((err) =>
+            log.warn(
+              `[${repo.name}] liveness: clearDispatch mirror ack failed for ${issueId}`,
+              err,
+            ),
+          );
         } catch (err) {
           log.error(
             `[${repo.name}] liveness: clearDispatch failed for ${issueId}`,
@@ -651,6 +666,27 @@ async function _poll(repo: RepoContext): Promise<void> {
   // dispatch just died.
   evictDeadDispatches(repo);
 
+  // ISS-98 / DX-210 follow-up: derive parent (Epic + non-epic) statuses
+  // from the union of children at the TOP of the tick — BEFORE any
+  // tracker round-trip. Derivation is purely local-YAML driven and must
+  // not depend on tracker reachability. Running it here means a Trello
+  // outage (or any failure inside `tracker.fetchOpenCards()` below
+  // that triggers the early `return`) cannot starve parent-status
+  // derivation. Cards hydrated by this tick's `bulkSyncMissingYamls`
+  // are picked up by the NEXT tick's derive — acceptable trade-off
+  // versus the previous "any tracker hiccup freezes Epic status"
+  // failure mode that CLAUDE.md "Trello Is Background Infrastructure"
+  // explicitly forbids.
+  const parentChangesEarly = await recomputeParentStatuses(
+    repo.localPath,
+    repo.issuePrefix,
+  );
+  for (const change of parentChangesEarly) {
+    log.info(
+      `[${repo.name}] Derived ${change.id}: ${change.before} → ${change.after} (${change.rule})`,
+    );
+  }
+
   log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
 
   // Check Needs Help first — user-responded cards get moved to ToDo top
@@ -735,14 +771,16 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  // ISS-98: derive parent (Epic + non-epic) statuses from the union of
-  // children. Runs AFTER `bulkSyncMissingYamls` so freshly hydrated
-  // children participate in the same tick's derivation, and BEFORE
-  // dispatch decisions so an Epic that just turned `Needs Help`
-  // (because a child did) is non-dispatchable on this tick. Pure-local
-  // — outbound mirror to the tracker happens via `syncIssue` on the
-  // parent's next reconcile.
-  const parentChanges = recomputeParentStatuses(repo.localPath, repo.issuePrefix);
+  // ISS-98: derive parent statuses again AFTER `bulkSyncMissingYamls`
+  // so freshly hydrated children participate in this tick's derivation
+  // (the early-tick derive at the top of `_poll` ran before hydrate).
+  // Idempotent: a no-op when no statuses changed since the early call.
+  // Kept BEFORE dispatch decisions so an Epic that just turned Blocked
+  // (because a child did) is non-dispatchable on this tick.
+  const parentChanges = await recomputeParentStatuses(
+    repo.localPath,
+    repo.issuePrefix,
+  );
   for (const change of parentChanges) {
     log.info(
       `[${repo.name}] Derived ${change.id}: ${change.before} → ${change.after} (${change.rule})`,
@@ -813,7 +851,7 @@ async function _poll(repo: RepoContext): Promise<void> {
     repo.issuePrefix,
   ).map(localIssueToRef);
   if (waitingRefs.length > 0) {
-    const cleared = resolveWaitingOnCards(repo, waitingRefs);
+    const cleared = await resolveWaitingOnCards(repo, waitingRefs);
     if (cleared.length > 0) cards = [...cards, ...cleared];
   }
 
@@ -954,7 +992,11 @@ async function _poll(repo: RepoContext): Promise<void> {
     findByExternalId(repo.localPath, primary.external_id);
   let resolvedIssue: Issue;
   if (existing) {
-    resolvedIssue = stampDispatchAndWrite(repo.localPath, existing, startStamp);
+    resolvedIssue = await stampDispatchAndWrite(
+      repo.localPath,
+      existing,
+      startStamp,
+    );
   } else {
     resolvedIssue = await hydrateFromRemote(
       tracker,
@@ -967,7 +1009,7 @@ async function _poll(repo: RepoContext): Promise<void> {
     // host:"", started_at:"", ttl_seconds:0). Overwrite with the
     // enriched start record so the YAML carries the real
     // host/started_at/ttl_seconds even before the spawn returns.
-    resolvedIssue = stampDispatchAndWrite(
+    resolvedIssue = await stampDispatchAndWrite(
       repo.localPath,
       resolvedIssue,
       startStamp,
@@ -1053,7 +1095,7 @@ async function bulkSyncMissingYamls(
         repo.localPath,
         repo.issuePrefix,
       );
-      writeIssue(repo.localPath, hydrated);
+      await writeIssue(repo.localPath, hydrated);
       log.info(
         `[${repo.name}] bulk-sync: hydrated ${card.external_id} → ${hydrated.id}`,
       );
@@ -1131,7 +1173,7 @@ async function tryResumeOrphan(
       log.warn(
         `[${repo.name}] In Progress card "${issue.title}" (${issue.id}) has no dispatch stamp — resetting to ToDo for fresh dispatch`,
       );
-      writeIssue(repo.localPath, {
+      await writeIssue(repo.localPath, {
         ...issue,
         status: "ToDo",
       });
@@ -1203,7 +1245,7 @@ async function tryResumeOrphan(
       log.warn(
         `[${repo.name}] In Progress card "${issue.title}" (${issue.id}) has dispatch.id ${dispatchId} but no matching JSONL on disk — resetting to ToDo`,
       );
-      writeIssue(repo.localPath, {
+      await writeIssue(repo.localPath, {
         ...issue,
         status: "ToDo",
         dispatch: null,
@@ -1228,7 +1270,11 @@ async function tryResumeOrphan(
     );
     const newDispatchId = randomUUID();
     const startStamp = buildStartStamp(newDispatchId, "work", osHostname());
-    const stamped = stampDispatchAndWrite(repo.localPath, issue, startStamp);
+    const stamped = await stampDispatchAndWrite(
+      repo.localPath,
+      issue,
+      startStamp,
+    );
     const yamlPath = issuePath(repo.localPath, stamped.id, "open");
     // ISS-135 — explicit RESUMED-dispatch contract. The May-7 incident
     // showed an orphan-resumed agent re-running /danx-next from
@@ -2107,7 +2153,7 @@ async function spawnClaude(
   // path which left a window where DB + YAML carried divergent values.
   const pairedWriteYaml = dispatchStamp
     ? {
-        write: (pid: number) => {
+        write: async (pid: number) => {
           const enrichedStamp: IssueDispatch = {
             ...dispatchStamp.startStamp,
             pid,
@@ -2131,7 +2177,7 @@ async function spawnClaude(
               `paired-write: YAML for ${dispatchStamp.issueId} disappeared during dispatch — cannot stamp pid ${pid}`,
             );
           }
-          stampDispatchAndWrite(repo.localPath, issue, enrichedStamp);
+          await stampDispatchAndWrite(repo.localPath, issue, enrichedStamp);
           // Mirror into the in-memory active map for the per-tick liveness
           // probe — keeps the poller's existing reattach logic functional.
           getActiveDispatches(repo.name).set(
@@ -2139,7 +2185,7 @@ async function spawnClaude(
             enrichedStamp,
           );
         },
-        clear: () => {
+        clear: async () => {
           // Rollback path — DB UPDATE failed after we wrote the YAML.
           // Clear the YAML's `dispatch{}` and drop the in-memory entry
           // so the next tick sees a clean slate.
@@ -2149,7 +2195,7 @@ async function spawnClaude(
             repo.issuePrefix,
           );
           if (issue && issue.dispatch !== null) {
-            clearDispatchAndWrite(repo.localPath, issue);
+            await clearDispatchAndWrite(repo.localPath, issue);
           }
           getActiveDispatches(repo.name).delete(dispatchStamp.issueId);
         },
@@ -2215,7 +2261,13 @@ async function spawnClaude(
       );
       if (issue) {
         try {
-          clearDispatchAndWrite(repo.localPath, issue);
+          void clearDispatchAndWrite(repo.localPath, issue).catch(
+            (mirrorErr) =>
+              log.warn(
+                `[${repo.name}] pre-spawn cleanup: clearDispatch mirror ack failed for ${dispatchStamp.issueId}`,
+                mirrorErr,
+              ),
+          );
         } catch (clearErr) {
           log.error(
             `[${repo.name}] pre-spawn cleanup: clearDispatch failed for ${dispatchStamp.issueId}`,
@@ -2245,7 +2297,12 @@ function clearActiveDispatch(repo: RepoContext, issueId: string): void {
   const issue = loadLocal(repo.localPath, issueId, repo.issuePrefix);
   if (issue && issue.dispatch !== null) {
     try {
-      clearDispatchAndWrite(repo.localPath, issue);
+      void clearDispatchAndWrite(repo.localPath, issue).catch((mirrorErr) =>
+        log.warn(
+          `[${repo.name}] clearActiveDispatch: mirror ack failed for ${issueId}`,
+          mirrorErr,
+        ),
+      );
     } catch (err) {
       log.error(
         `[${repo.name}] clearActiveDispatch: write failed for ${issueId}`,
@@ -2613,7 +2670,11 @@ async function tryTriageDispatch(repo: RepoContext): Promise<boolean> {
   // the work-ready dispatch path; the helper centralizes the
   // pid:0/host/TTL contract across all three spawn sites.
   const startStamp = buildStartStamp(dispatchId, "triage", osHostname());
-  const stamped = stampDispatchAndWrite(repo.localPath, target, startStamp);
+  const stamped = await stampDispatchAndWrite(
+    repo.localPath,
+    target,
+    startStamp,
+  );
   const prompt = TRIAGE_CARD_PROMPT(stamped.id);
 
   // ISS-104: record the triage target + dispatch start timestamp so the

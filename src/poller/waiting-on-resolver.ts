@@ -45,10 +45,10 @@ export interface WaitingOnResolverContext {
   issuePrefix: string;
 }
 
-export function resolveWaitingOnCards(
+export async function resolveWaitingOnCards(
   repo: WaitingOnResolverContext,
   cards: IssueRef[],
-): IssueRef[] {
+): Promise<IssueRef[]> {
   const out: IssueRef[] = [];
   for (const card of cards) {
     const local = findByExternalId(repo.localPath, card.external_id);
@@ -98,7 +98,7 @@ export function resolveWaitingOnCards(
       waiting_on: null,
       history: updatedHistory,
     };
-    writeIssue(repo.localPath, cleared);
+    await writeIssue(repo.localPath, cleared);
     out.push(card);
   }
   return out;

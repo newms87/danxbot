@@ -76,6 +76,21 @@ vi.mock("./settings-file.js", () => ({
   syncSettingsFileOnBoot: mockSyncSettingsFileOnBoot,
 }));
 
+const mockStartIssuesMirror = vi.fn().mockResolvedValue({
+  repoName: "mock",
+  repoLocalPath: "/mock",
+  awaitMirror: vi.fn().mockResolvedValue(undefined),
+  simulateWatcherEvent: vi.fn().mockResolvedValue(undefined),
+  reconcileNow: vi.fn().mockResolvedValue(undefined),
+  stop: vi.fn().mockResolvedValue(undefined),
+});
+vi.mock("./db/issues-mirror.js", () => ({
+  startIssuesMirror: mockStartIssuesMirror,
+  getMirrorByLocalPath: vi.fn().mockReturnValue(undefined),
+  hasAnyMirror: vi.fn().mockReturnValue(false),
+  createPgIssuesMirrorDb: vi.fn(),
+}));
+
 // Default: dashboard mode (no DANXBOT_REPO_NAME, no repo contexts)
 // These mocks are overridden in worker describe blocks via vi.doMock
 let mockIsWorkerMode = false;

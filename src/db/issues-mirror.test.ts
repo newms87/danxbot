@@ -1,0 +1,447 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import {
+  createPgIssuesMirrorDb,
+  startIssuesMirror,
+  type IssuesMirror,
+  type IssuesMirrorDb,
+  type UpsertArgs,
+  type TombstoneArgs,
+} from "./issues-mirror.js";
+import { canonicalize, sha256 } from "./canonicalize.js";
+import { flagPath, readFlag } from "../critical-failure.js";
+
+interface DbStateRow {
+  data: Record<string, unknown>;
+  content_hash: string;
+}
+
+interface FakeDb extends IssuesMirrorDb {
+  rows: Map<string, DbStateRow>;
+  history: UpsertArgs[];
+  tombstones: TombstoneArgs[];
+  /** When set, every operation throws this error (fault injection). */
+  fail?: Error;
+  /** When set, only the next op throws and the flag is then cleared. */
+  failOnce?: Error;
+}
+
+function rowKey(repoName: string, id: string): string {
+  return `${repoName}|${id}`;
+}
+
+function createFakeDb(): FakeDb {
+  const rows = new Map<string, DbStateRow>();
+  const history: UpsertArgs[] = [];
+  const tombstones: TombstoneArgs[] = [];
+  const db: FakeDb = {
+    rows,
+    history,
+    tombstones,
+    async selectExisting(repoName, id) {
+      maybeFail(db);
+      return rows.get(rowKey(repoName, id)) ?? null;
+    },
+    async upsertWithHistory(args) {
+      maybeFail(db);
+      rows.set(rowKey(args.repoName, args.id), {
+        data: args.data,
+        content_hash: args.contentHash,
+      });
+      history.push(args);
+    },
+    async tombstone(args) {
+      maybeFail(db);
+      rows.delete(rowKey(args.repoName, args.id));
+      tombstones.push(args);
+    },
+    async listIds(repoName) {
+      maybeFail(db);
+      const out: Array<{ id: string; content_hash: string }> = [];
+      for (const [key, row] of rows) {
+        const [r, id] = key.split("|");
+        if (r === repoName) out.push({ id, content_hash: row.content_hash });
+      }
+      return out;
+    },
+  };
+  return db;
+}
+
+function maybeFail(db: FakeDb): void {
+  if (db.failOnce) {
+    const err = db.failOnce;
+    db.failOnce = undefined;
+    throw err;
+  }
+  if (db.fail) throw db.fail;
+}
+
+function makeRepo(): { tmpdir: string; localPath: string; name: string } {
+  const root = mkdtempSync(resolve(tmpdir(), "danxbot-mirror-"));
+  const localPath = root;
+  mkdirSync(resolve(localPath, ".danxbot", "issues", "open"), {
+    recursive: true,
+  });
+  mkdirSync(resolve(localPath, ".danxbot", "issues", "closed"), {
+    recursive: true,
+  });
+  return { tmpdir: root, localPath, name: "test-repo" };
+}
+
+function writeYaml(
+  localPath: string,
+  state: "open" | "closed",
+  id: string,
+  content: string,
+): string {
+  const path = resolve(localPath, ".danxbot", "issues", state, `${id}.yml`);
+  writeFileSync(path, content);
+  return path;
+}
+
+const SAMPLE_YAML = (id: string, status = "ToDo") =>
+  `id: ${id}\nstatus: ${status}\ntype: Feature\n`;
+
+const PARSED_SAMPLE = (id: string, status = "ToDo") => ({
+  id,
+  status,
+  type: "Feature",
+});
+
+let warnSpy: ReturnType<typeof vi.spyOn>;
+
+beforeEach(() => {
+  warnSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  warnSpy.mockRestore();
+});
+
+describe("issues-mirror — per-event flow (mocked DB, simulated watcher)", () => {
+  let repo: ReturnType<typeof makeRepo>;
+  let db: FakeDb;
+  let mirror: IssuesMirror;
+
+  beforeEach(async () => {
+    repo = makeRepo();
+    db = createFakeDb();
+    mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      awaitTimeoutMs: 50,
+    });
+  });
+
+  afterEach(async () => {
+    await mirror.stop();
+    rmSync(repo.tmpdir, { recursive: true, force: true });
+  });
+
+  it("add event: upserts row + appends history with prev_hash null", async () => {
+    const path = writeYaml(repo.localPath, "open", "DX-1", SAMPLE_YAML("DX-1"));
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    expect(db.rows.get(rowKey("test-repo", "DX-1"))).toMatchObject({
+      data: PARSED_SAMPLE("DX-1"),
+    });
+    expect(db.history).toHaveLength(1);
+    expect(db.history[0]).toMatchObject({
+      id: "DX-1",
+      prevHash: null,
+      source: "watcher",
+    });
+    expect(db.history[0].contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("change event with same content: no upsert, no history", async () => {
+    const path = writeYaml(repo.localPath, "open", "DX-2", SAMPLE_YAML("DX-2"));
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    const before = db.history.length;
+    await mirror.simulateWatcherEvent({ event: "change", path });
+    expect(db.history.length).toBe(before);
+  });
+
+  it("change event with new content: upsert + history with correct prev/next hashes", async () => {
+    const path = writeYaml(repo.localPath, "open", "DX-3", SAMPLE_YAML("DX-3"));
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    const firstHash = db.history[0].contentHash;
+
+    writeFileSync(path, SAMPLE_YAML("DX-3", "In Progress"));
+    await mirror.simulateWatcherEvent({ event: "change", path });
+
+    expect(db.history).toHaveLength(2);
+    expect(db.history[1].prevHash).toBe(firstHash);
+    expect(db.history[1].contentHash).not.toBe(firstHash);
+    expect(db.history[1].contentHash).toBe(
+      sha256(canonicalize(PARSED_SAMPLE("DX-3", "In Progress"))),
+    );
+  });
+
+  it("unlink event: deletes row + appends history with empty next_hash", async () => {
+    const path = writeYaml(repo.localPath, "open", "DX-4", SAMPLE_YAML("DX-4"));
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    expect(db.rows.has(rowKey("test-repo", "DX-4"))).toBe(true);
+
+    rmSync(path);
+    await mirror.simulateWatcherEvent({ event: "unlink", path });
+
+    expect(db.rows.has(rowKey("test-repo", "DX-4"))).toBe(false);
+    expect(db.tombstones).toHaveLength(1);
+    expect(db.tombstones[0]).toMatchObject({
+      id: "DX-4",
+      existingHash: db.history[0].contentHash,
+      source: "watcher",
+    });
+  });
+
+  it("parse-error YAML: stores _malformed:true + raw text + id from filename, no crash", async () => {
+    const malformed = "id: DX-5\n  not: { valid yaml :::";
+    const path = writeYaml(repo.localPath, "open", "DX-5", malformed);
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    const stored = db.rows.get(rowKey("test-repo", "DX-5"));
+    expect(stored?.data).toMatchObject({
+      id: "DX-5",
+      _malformed: true,
+      raw: malformed,
+    });
+  });
+
+  it("DB write failure: writes CRITICAL_FAILURE flag + mirror keeps running", async () => {
+    db.fail = new Error("connection refused");
+    const path = writeYaml(repo.localPath, "open", "DX-6", SAMPLE_YAML("DX-6"));
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    const flag = readFlag(repo.localPath);
+    expect(flag).not.toBeNull();
+    expect(flag?.source).toBe("issues-db-mirror");
+    expect(flag?.reason).toMatch(/select existing|upsert/i);
+
+    // Mirror keeps running — recover after fault clears.
+    db.fail = undefined;
+    const path2 = writeYaml(
+      repo.localPath,
+      "open",
+      "DX-7",
+      SAMPLE_YAML("DX-7"),
+    );
+    await mirror.simulateWatcherEvent({ event: "add", path: path2 });
+    expect(db.rows.has(rowKey("test-repo", "DX-7"))).toBe(true);
+  });
+
+  it("awaitMirror resolves when matching upsert lands; rejects on timeout", async () => {
+    const path = writeYaml(repo.localPath, "open", "DX-8", SAMPLE_YAML("DX-8"));
+    const expectedHash = sha256(canonicalize(PARSED_SAMPLE("DX-8")));
+
+    const awaited = mirror.awaitMirror("test-repo", "DX-8", expectedHash);
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    await expect(awaited).resolves.toBeUndefined();
+
+    // Timeout case: a hash we never produce.
+    await expect(
+      mirror.awaitMirror("test-repo", "DX-8", "0".repeat(64), { timeoutMs: 30 }),
+    ).rejects.toThrow(/timeout/);
+  });
+
+  it("two pending awaitMirror calls for same key are both resolved by one upsert", async () => {
+    const path = writeYaml(repo.localPath, "open", "DX-9", SAMPLE_YAML("DX-9"));
+    const expectedHash = sha256(canonicalize(PARSED_SAMPLE("DX-9")));
+
+    const a = mirror.awaitMirror("test-repo", "DX-9", expectedHash);
+    const b = mirror.awaitMirror("test-repo", "DX-9", expectedHash);
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    await expect(Promise.all([a, b])).resolves.toEqual([undefined, undefined]);
+  });
+});
+
+describe("issues-mirror — boot scan", () => {
+  it("upserts every YAML on disk + tombstones missing rows", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    // Pre-populate DB with a row whose YAML disappears.
+    db.rows.set(rowKey("test-repo", "DX-50"), {
+      data: { id: "DX-50", status: "Done" },
+      content_hash: "stale",
+    });
+    writeYaml(repo.localPath, "open", "DX-10", SAMPLE_YAML("DX-10"));
+    writeYaml(repo.localPath, "open", "DX-11", SAMPLE_YAML("DX-11"));
+    writeYaml(repo.localPath, "closed", "DX-12", SAMPLE_YAML("DX-12", "Done"));
+
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+    });
+    try {
+      const sources = db.history.map((h) => h.source);
+      expect(sources.filter((s) => s === "boot-scan")).toHaveLength(3);
+      expect(db.rows.has(rowKey("test-repo", "DX-10"))).toBe(true);
+      expect(db.rows.has(rowKey("test-repo", "DX-11"))).toBe(true);
+      expect(db.rows.has(rowKey("test-repo", "DX-12"))).toBe(true);
+      // Tombstoned the orphaned row.
+      expect(db.rows.has(rowKey("test-repo", "DX-50"))).toBe(false);
+      expect(db.tombstones).toHaveLength(1);
+      expect(db.tombstones[0].id).toBe("DX-50");
+      expect(db.tombstones[0].source).toBe("boot-scan");
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("issues-mirror — reconcileNow (periodic timer logic)", () => {
+  it("re-scans open/ only and tags drift with source=reconcile", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+    });
+    try {
+      // Bypass the watcher to simulate a missed event: write the YAML
+      // AFTER startup so boot scan didn't see it. Reconcile should pick
+      // it up.
+      writeYaml(repo.localPath, "open", "DX-20", SAMPLE_YAML("DX-20"));
+      writeYaml(
+        repo.localPath,
+        "closed",
+        "DX-21",
+        SAMPLE_YAML("DX-21", "Done"),
+      );
+      const before = db.history.length;
+      await mirror.reconcileNow();
+      const reconcileRows = db.history
+        .slice(before)
+        .filter((h) => h.source === "reconcile");
+      expect(reconcileRows.map((r) => r.id)).toEqual(["DX-20"]);
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("createPgIssuesMirrorDb — pure factory smoke", () => {
+  it("produces an object with the IssuesMirrorDb method shape", () => {
+    // Shape check only — actual SQL exercised in the integration suite.
+    const fakePool = {} as unknown as Parameters<
+      typeof createPgIssuesMirrorDb
+    >[0];
+    const db = createPgIssuesMirrorDb(fakePool);
+    expect(typeof db.selectExisting).toBe("function");
+    expect(typeof db.upsertWithHistory).toBe("function");
+    expect(typeof db.tombstone).toBe("function");
+    expect(typeof db.listIds).toBe("function");
+  });
+});
+
+describe("issues-mirror — public-API contract", () => {
+  let repo: ReturnType<typeof makeRepo>;
+  let db: FakeDb;
+  let mirror: IssuesMirror;
+
+  beforeEach(async () => {
+    repo = makeRepo();
+    db = createFakeDb();
+    mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      awaitTimeoutMs: 50,
+    });
+  });
+
+  afterEach(async () => {
+    await mirror.stop();
+    rmSync(repo.tmpdir, { recursive: true, force: true });
+  });
+
+  it("awaitMirror short-circuits when the upsert was already observed within recentTtlMs", async () => {
+    // Simulate the late-await race: watcher fires before the writer
+    // registers awaitMirror. The mirror's recent-upserts cache should
+    // resolve the late awaiter immediately.
+    const path = writeYaml(
+      repo.localPath,
+      "open",
+      "DX-30",
+      SAMPLE_YAML("DX-30"),
+    );
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    const expectedHash = sha256(canonicalize(PARSED_SAMPLE("DX-30")));
+
+    // Register AFTER the upsert: should resolve immediately, no waiting.
+    const start = Date.now();
+    await mirror.awaitMirror("test-repo", "DX-30", expectedHash);
+    expect(Date.now() - start).toBeLessThan(20);
+  });
+
+  it("awaitMirror throws on repoName mismatch", async () => {
+    await expect(
+      mirror.awaitMirror("wrong-repo", "DX-31", "0".repeat(64)),
+    ).rejects.toThrow(/repoName mismatch/);
+  });
+
+  it("stop() rejects pending awaiters with 'Issues mirror stopped'", async () => {
+    const pending = mirror.awaitMirror("test-repo", "DX-32", "1".repeat(64), {
+      timeoutMs: 60_000,
+    });
+    // Don't await yet — stop() must reject this in-flight Promise.
+    await mirror.stop();
+    await expect(pending).rejects.toThrow(/Issues mirror stopped/);
+  });
+
+  it("hasAnyMirror reflects registry state", async () => {
+    const { hasAnyMirror } = await import("./issues-mirror.js");
+    expect(hasAnyMirror()).toBe(true);
+    await mirror.stop();
+    // After stop the mirror is deregistered; if no other test mirror is
+    // active, hasAnyMirror is false. With other mirrors potentially
+    // registered by parallel tests, just assert the contract: at least
+    // the registry no longer holds OUR repoLocalPath.
+    const { getMirrorByLocalPath } = await import("./issues-mirror.js");
+    expect(getMirrorByLocalPath(repo.localPath)).toBeUndefined();
+
+    // Re-create so afterEach's `mirror.stop()` is a no-op via the
+    // `stopped` guard. The original mirror is already stopped above.
+    mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+    });
+  });
+});
+
+describe("issues-mirror — non-object YAML fall-through", () => {
+  it("stores a top-level array as malformed (not an object)", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+    });
+    try {
+      const arrayYaml = "- item1\n- item2\n";
+      const path = writeYaml(repo.localPath, "open", "DX-40", arrayYaml);
+      await mirror.simulateWatcherEvent({ event: "add", path });
+      const stored = db.rows.get(rowKey("test-repo", "DX-40"));
+      expect(stored?.data).toMatchObject({
+        id: "DX-40",
+        _malformed: true,
+        raw: arrayYaml,
+      });
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+});

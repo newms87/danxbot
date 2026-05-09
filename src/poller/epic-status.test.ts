@@ -14,7 +14,7 @@ import { deriveStatus, recomputeParentStatuses } from "./epic-status.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -25,6 +25,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     type: "Feature",
     title: "Sample",
     description: "Body",
+    priority: 3.0,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -62,13 +63,13 @@ function writeOpen(repoRoot: string, issue: Issue, state: "open" | "closed" = "o
   return path;
 }
 
-describe("deriveStatus", () => {
-  it("returns null for empty children", () => {
+describe("deriveStatus", async () => {
+  it("returns null for empty children", async () => {
     expect(deriveStatus([])).toBeNull();
   });
 
-  describe("priority rule 1 — any Blocked / Needs Approval lifts to parent", () => {
-    it("Blocked wins over In Progress / ToDo / Review / Done / Cancelled", () => {
+  describe("priority rule 1 — any Blocked / Needs Approval lifts to parent", async () => {
+    it("Blocked wins over In Progress / ToDo / Review / Done / Cancelled", async () => {
       const result = deriveStatus([
         child("ISS-1", "In Progress"),
         child("ISS-2", "ToDo"),
@@ -79,7 +80,7 @@ describe("deriveStatus", () => {
       expect(result?.rule).toMatch(/Blocked/);
     });
 
-    it("Needs Approval lifts to parent (preserves distinction from Blocked)", () => {
+    it("Needs Approval lifts to parent (preserves distinction from Blocked)", async () => {
       const result = deriveStatus([
         child("ISS-1", "In Progress"),
         child("ISS-2", "Needs Approval"),
@@ -88,7 +89,7 @@ describe("deriveStatus", () => {
       expect(result?.rule).toMatch(/Needs Approval/);
     });
 
-    it("Blocked wins over Needs Approval when both present", () => {
+    it("Blocked wins over Needs Approval when both present", async () => {
       const result = deriveStatus([
         child("ISS-1", "Needs Approval"),
         child("ISS-2", "Blocked"),
@@ -97,8 +98,8 @@ describe("deriveStatus", () => {
     });
   });
 
-  describe("priority rule 2 — any In Progress (without Blocked/Approval)", () => {
-    it("In Progress wins over ToDo / Review / Done / Cancelled", () => {
+  describe("priority rule 2 — any In Progress (without Blocked/Approval)", async () => {
+    it("In Progress wins over ToDo / Review / Done / Cancelled", async () => {
       const result = deriveStatus([
         child("ISS-1", "Done"),
         child("ISS-2", "ToDo"),
@@ -110,8 +111,8 @@ describe("deriveStatus", () => {
     });
   });
 
-  describe("priority rule 3 — any ToDo (without higher priorities)", () => {
-    it("ToDo wins over Review / Done / Cancelled", () => {
+  describe("priority rule 3 — any ToDo (without higher priorities)", async () => {
+    it("ToDo wins over Review / Done / Cancelled", async () => {
       const result = deriveStatus([
         child("ISS-1", "Done"),
         child("ISS-2", "Review"),
@@ -122,8 +123,8 @@ describe("deriveStatus", () => {
     });
   });
 
-  describe("priority rule 4 — all non-cancelled children Review", () => {
-    it("returns Review when all are Review", () => {
+  describe("priority rule 4 — all non-cancelled children Review", async () => {
+    it("returns Review when all are Review", async () => {
       const result = deriveStatus([
         child("ISS-1", "Review"),
         child("ISS-2", "Review"),
@@ -132,7 +133,7 @@ describe("deriveStatus", () => {
       expect(result?.rule).toMatch(/Review/);
     });
 
-    it("returns Review when all non-cancelled are Review (cancelled excluded)", () => {
+    it("returns Review when all non-cancelled are Review (cancelled excluded)", async () => {
       const result = deriveStatus([
         child("ISS-1", "Review"),
         child("ISS-2", "Cancelled"),
@@ -142,8 +143,8 @@ describe("deriveStatus", () => {
     });
   });
 
-  describe("priority rule 5 — all non-cancelled children Done", () => {
-    it("returns Done when all are Done", () => {
+  describe("priority rule 5 — all non-cancelled children Done", async () => {
+    it("returns Done when all are Done", async () => {
       const result = deriveStatus([
         child("ISS-1", "Done"),
         child("ISS-2", "Done"),
@@ -152,7 +153,7 @@ describe("deriveStatus", () => {
       expect(result?.rule).toMatch(/Done/);
     });
 
-    it("returns Done when all non-cancelled are Done (cancelled excluded)", () => {
+    it("returns Done when all non-cancelled are Done (cancelled excluded)", async () => {
       const result = deriveStatus([
         child("ISS-1", "Done"),
         child("ISS-2", "Cancelled"),
@@ -162,8 +163,8 @@ describe("deriveStatus", () => {
     });
   });
 
-  describe("priority rule 6 — all children Cancelled (no exclusion)", () => {
-    it("returns Cancelled when every child is Cancelled", () => {
+  describe("priority rule 6 — all children Cancelled (no exclusion)", async () => {
+    it("returns Cancelled when every child is Cancelled", async () => {
       const result = deriveStatus([
         child("ISS-1", "Cancelled"),
         child("ISS-2", "Cancelled"),
@@ -172,7 +173,7 @@ describe("deriveStatus", () => {
       expect(result?.rule).toMatch(/Cancelled/);
     });
 
-    it("does NOT return Cancelled when at least one child is non-Cancelled (rule 5 fires for Done)", () => {
+    it("does NOT return Cancelled when at least one child is non-Cancelled (rule 5 fires for Done)", async () => {
       const result = deriveStatus([
         child("ISS-1", "Cancelled"),
         child("ISS-2", "Done"),
@@ -181,8 +182,8 @@ describe("deriveStatus", () => {
     });
   });
 
-  describe("edge cases", () => {
-    it("returns null for unresolvable mix (Review + Done, no Cancelled)", () => {
+  describe("edge cases", async () => {
+    it("returns null for unresolvable mix (Review + Done, no Cancelled)", async () => {
       // Neither rule 4 (all Review) nor rule 5 (all Done) fires.
       const result = deriveStatus([
         child("ISS-1", "Review"),
@@ -191,12 +192,12 @@ describe("deriveStatus", () => {
       expect(result).toBeNull();
     });
 
-    it("treats single Cancelled child as rule 6", () => {
+    it("treats single Cancelled child as rule 6", async () => {
       const result = deriveStatus([child("ISS-1", "Cancelled")]);
       expect(result?.status).toBe("Cancelled");
     });
 
-    it("Done + Cancelled mix excludes Cancelled and returns Done", () => {
+    it("Done + Cancelled mix excludes Cancelled and returns Done", async () => {
       const result = deriveStatus([
         child("ISS-1", "Cancelled"),
         child("ISS-2", "Cancelled"),
@@ -207,7 +208,7 @@ describe("deriveStatus", () => {
   });
 });
 
-describe("recomputeParentStatuses (integration)", () => {
+describe("recomputeParentStatuses (integration)", async () => {
   let repoRoot: string;
 
   beforeEach(() => {
@@ -223,7 +224,7 @@ describe("recomputeParentStatuses (integration)", () => {
     return parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: "ISS" }).status;
   }
 
-  it("writes parent only when derived status differs", () => {
+  it("writes parent only when derived status differs", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -236,7 +237,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
     writeOpen(repoRoot, child("ISS-3", "ToDo"));
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({
       id: "ISS-1",
@@ -246,7 +247,7 @@ describe("recomputeParentStatuses (integration)", () => {
     expect(loadStatus("ISS-1")).toBe("In Progress");
   });
 
-  it("no-op when derived status equals current status", () => {
+  it("no-op when derived status equals current status", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -258,12 +259,12 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toEqual([]);
     expect(loadStatus("ISS-1")).toBe("In Progress");
   });
 
-  it("walks every parent with non-empty children[] (epic OR non-epic)", () => {
+  it("walks every parent with non-empty children[] (epic OR non-epic)", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -285,14 +286,14 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"));
     writeOpen(repoRoot, child("ISS-4", "In Progress"));
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     const ids = changes.map((c) => c.id).sort();
     expect(ids).toEqual(["ISS-1", "ISS-3"]);
     expect(loadStatus("ISS-1")).toBe("Done");
     expect(loadStatus("ISS-3")).toBe("In Progress");
   });
 
-  it("reads children from open/ AND closed/ (terminal children carry Done/Cancelled)", () => {
+  it("reads children from open/ AND closed/ (terminal children carry Done/Cancelled)", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -306,21 +307,21 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"), "open");
     writeOpen(repoRoot, child("ISS-3", "Done"), "closed");
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Done");
   });
 
-  it("ignores YAMLs with empty children[]", () => {
+  it("ignores YAMLs with empty children[]", async () => {
     writeOpen(
       repoRoot,
       makeIssue({ id: "ISS-1", type: "Feature", status: "ToDo", children: [] }),
     );
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toEqual([]);
   });
 
-  it("skips parents with non-null blocked (worker normalizes status to ToDo on save)", () => {
+  it("skips parents with non-null blocked (worker normalizes status to ToDo on save)", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -337,12 +338,12 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toEqual([]);
     expect(loadStatus("ISS-1")).toBe("ToDo");
   });
 
-  it("skips defensive child whose YAML is missing", () => {
+  it("skips defensive child whose YAML is missing", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -355,12 +356,12 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"));
     // ISS-99 is referenced in children[] but has no YAML on disk.
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Done");
   });
 
-  it("skips malformed YAMLs without crashing", () => {
+  it("skips malformed YAMLs without crashing", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -383,12 +384,12 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeFileSync(badPath, "not: a: valid: issue:\n  yaml here");
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("In Progress");
   });
 
-  it("skips a malformed CHILD YAML and still derives from the resolvable subset", () => {
+  it("skips a malformed CHILD YAML and still derives from the resolvable subset", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -410,12 +411,12 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeFileSync(badPath, "not: a: valid: issue:\n  yaml here");
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Done");
   });
 
-  it("propagates Blocked up an Epic chain on the same call", () => {
+  it("propagates Blocked up an Epic chain on the same call", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -428,7 +429,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"));
     writeOpen(repoRoot, child("ISS-3", "Blocked"));
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(loadStatus("ISS-1")).toBe("Blocked");
   });
@@ -440,7 +441,7 @@ describe("recomputeParentStatuses (integration)", () => {
     return parseIssue(readFileSync(path, "utf-8"), { expectedPrefix: "ISS" });
   }
 
-  it("DX-147: derive flip appends exactly one worker:auto-derive status_change entry with rule note", () => {
+  it("DX-147: derive flip appends exactly one worker:auto-derive status_change entry with rule note", async () => {
     // Parent is In Progress; all children flip to Done; derivation
     // resolves to Done (rule 5). The parent's history must record one
     // status_change entry attributed to `worker:auto-derive` with a
@@ -458,7 +459,7 @@ describe("recomputeParentStatuses (integration)", () => {
     writeOpen(repoRoot, child("ISS-2", "Done"));
     writeOpen(repoRoot, child("ISS-3", "Done"));
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
     expect(changes[0]).toMatchObject({
       id: "ISS-1",
@@ -485,7 +486,7 @@ describe("recomputeParentStatuses (integration)", () => {
     expect(Number.isFinite(Date.parse(entry.timestamp))).toBe(true);
   });
 
-  it("DX-147: no flip means zero history entries appended (idempotent steady state)", () => {
+  it("DX-147: no flip means zero history entries appended (idempotent steady state)", async () => {
     // Parent already In Progress; derived status is also In Progress —
     // recomputeParentStatuses must skip the write AND leave the YAML's
     // history empty (no fake state-delta entries for janitorial passes).
@@ -501,14 +502,14 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "In Progress"));
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toEqual([]);
 
     const reloaded = loadIssue("ISS-1");
     expect(reloaded.history).toEqual([]);
   });
 
-  it("DX-147: derive flip preserves any prior history entries — append, not replace", () => {
+  it("DX-147: derive flip preserves any prior history entries — append, not replace", async () => {
     // Parent carries a prior dispatch-driven status_change in history.
     // The auto-derive flip must APPEND to that history, not overwrite
     // it — confirms `appendHistory`'s pure-array semantics survive the
@@ -532,7 +533,7 @@ describe("recomputeParentStatuses (integration)", () => {
     );
     writeOpen(repoRoot, child("ISS-2", "Done"));
 
-    const changes = recomputeParentStatuses(repoRoot, "ISS");
+    const changes = await recomputeParentStatuses(repoRoot, "ISS");
     expect(changes).toHaveLength(1);
 
     const reloaded = loadIssue("ISS-1");
@@ -547,7 +548,7 @@ describe("recomputeParentStatuses (integration)", () => {
   // misroutes the rule strings) would slip past the single Done-flip
   // test.
 
-  it("DX-147: rule 1 — Blocked flip note describes the Blocked rule", () => {
+  it("DX-147: rule 1 — Blocked flip note describes the Blocked rule", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -564,7 +565,7 @@ describe("recomputeParentStatuses (integration)", () => {
     expect(note).toMatch(/Blocked/);
   });
 
-  it("DX-147: rule 2 — In Progress flip note describes the In Progress rule", () => {
+  it("DX-147: rule 2 — In Progress flip note describes the In Progress rule", async () => {
     // Parent at ToDo, mixed children with one In Progress → rule 2
     // fires.
     writeOpen(
@@ -584,7 +585,7 @@ describe("recomputeParentStatuses (integration)", () => {
     expect(note).toMatch(/In Progress/);
   });
 
-  it("DX-147: rule 4 — Review flip note describes the Review rule", () => {
+  it("DX-147: rule 4 — Review flip note describes the Review rule", async () => {
     writeOpen(
       repoRoot,
       makeIssue({
@@ -602,7 +603,7 @@ describe("recomputeParentStatuses (integration)", () => {
     expect(note).toMatch(/Review/);
   });
 
-  it("DX-147: rule 6 — Cancelled flip note describes the Cancelled rule (every child Cancelled)", () => {
+  it("DX-147: rule 6 — Cancelled flip note describes the Cancelled rule (every child Cancelled)", async () => {
     writeOpen(
       repoRoot,
       makeIssue({

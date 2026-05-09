@@ -51,6 +51,13 @@ import type {
 // working unchanged.
 export { type IssueState, issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
 import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
+import { parse as parseYamlText } from "yaml";
+import { canonicalize, sha256 } from "../db/canonicalize.js";
+import { getMirrorByLocalPath } from "../db/issues-mirror.js";
+import { createLogger } from "../logger.js";
+
+const writeIssueLog = createLogger("write-issue");
+const WRITE_ISSUE_AWAIT_TIMEOUT_MS = 5_000;
 
 /**
  * Read + parse + validate the YAML for an issue by its internal `id`.
@@ -124,11 +131,78 @@ export function findByExternalId(
  * Write the issue to `<repo>/.danxbot/issues/open/<id>.yml`. Always writes
  * to `open/` — the move to `closed/` happens via `danx_issue_save` when
  * status reaches Done or Cancelled.
+ *
+ * Read-your-writes integration (DX-154): after `writeFileSync`, looks up
+ * the registered mirror for this repoLocalPath via
+ * `getMirrorByLocalPath`. If a mirror is active, awaits its
+ * `awaitMirror(repoName, id, contentHash)` with a 5-second timeout.
+ * Timeout logs a warning and returns successfully — the file IS on disk,
+ * the periodic reconcile + boot scan will catch the DB up. If no mirror
+ * is active (unit tests, dashboard mode, pre-Phase-4 paths), returns
+ * immediately after the file write — that's the legacy file-only
+ * behavior.
+ *
+ * The async signature applies even on the legacy path so callers don't
+ * need to branch on whether the mirror is active. Phase 4+ readers
+ * depend on the post-await guarantee that the DB reflects the just-
+ * written hash.
  */
-export function writeIssue(repoLocalPath: string, issue: Issue): void {
+export function writeIssue(
+  repoLocalPath: string,
+  issue: Issue,
+): Promise<void> {
+  // SYNC PHASE: file write throws synchronously. Callers wrapping
+  // `writeIssue(...)` in try/catch for fs errors keep working — the
+  // body before the first `return await` runs synchronously, and any
+  // throw from `writeFileSync` propagates up the stack as a sync error
+  // (NOT as a rejected promise).
   ensureIssuesDirs(repoLocalPath);
   const path = issuePath(repoLocalPath, issue.id, "open");
-  writeFileSync(path, serializeIssue(issue));
+  const serialized = serializeIssue(issue);
+  writeFileSync(path, serialized);
+
+  // ASYNC PHASE: await the mirror's read-your-writes ack. Best-effort —
+  // the file is on disk regardless. Wrapped in a helper so the sync
+  // throw above can't be converted to a rejected promise by the
+  // surrounding async wrapper.
+  return awaitMirrorRoundtrip(repoLocalPath, issue, serialized);
+}
+
+async function awaitMirrorRoundtrip(
+  repoLocalPath: string,
+  issue: Issue,
+  serialized: string,
+): Promise<void> {
+  const mirror = getMirrorByLocalPath(repoLocalPath);
+  if (!mirror) return;
+
+  // The mirror canonicalizes parsed YAML data, not raw text. Round-trip
+  // through `yaml.parse` once so the writer's hash exactly matches what
+  // the watcher will compute on the same file.
+  let parsed: unknown;
+  try {
+    parsed = parseYamlText(serialized);
+  } catch {
+    // Should never happen — we just serialized through `serializeIssue`.
+    // If the round-trip parse fails, the mirror's awaitMirror would never
+    // resolve anyway; bail out and let reconcile catch up.
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const contentHash = sha256(canonicalize(parsed));
+  try {
+    await mirror.awaitMirror(mirror.repoName, issue.id, contentHash, {
+      timeoutMs: WRITE_ISSUE_AWAIT_TIMEOUT_MS,
+    });
+  } catch (err) {
+    // Best-effort by design — surface the timeout as a warning without
+    // failing the write. Reconcile will pick up the drift on the next
+    // tick.
+    writeIssueLog.warn(
+      `awaitMirror timed out for ${mirror.repoName}/${issue.id} — DB will catch up via reconcile`,
+      err,
+    );
+  }
 }
 
 /**
@@ -276,7 +350,7 @@ export function stampDispatchAndWrite(
   repoLocalPath: string,
   issue: Issue,
   dispatchOrId: string | IssueDispatch,
-): Issue {
+): Promise<Issue> {
   const dispatch: IssueDispatch =
     typeof dispatchOrId === "string"
       ? {
@@ -289,8 +363,11 @@ export function stampDispatchAndWrite(
         }
       : { ...dispatchOrId };
   const updated: Issue = { ...issue, dispatch };
-  writeIssue(repoLocalPath, updated);
-  return updated;
+  // writeIssue's SYNC phase runs sync — any fs throw propagates from
+  // this call directly into the caller's stack frame, preserving the
+  // pre-DX-154 try/catch semantics. The returned Promise resolves once
+  // the mirror's read-your-writes ack lands (or its 5s timeout fires).
+  return writeIssue(repoLocalPath, updated).then(() => updated);
 }
 
 /**
@@ -316,11 +393,11 @@ export function stampDispatchAndWrite(
 export function clearDispatchAndWrite(
   repoLocalPath: string,
   issue: Issue,
-): Issue {
-  if (issue.dispatch === null) return issue;
+): Promise<Issue> {
+  if (issue.dispatch === null) return Promise.resolve(issue);
   const updated: Issue = { ...issue, dispatch: null };
-  writeIssue(repoLocalPath, updated);
-  return updated;
+  // Sync phase first — see `stampDispatchAndWrite` for the rationale.
+  return writeIssue(repoLocalPath, updated).then(() => updated);
 }
 
 /**

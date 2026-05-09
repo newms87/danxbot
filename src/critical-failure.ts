@@ -102,6 +102,7 @@ const log = createLogger("critical-failure");
 export type CriticalFailureSource =
   | "agent"
   | "post-dispatch-check"
+  | "issues-db-mirror"
   | "unparseable";
 
 export interface CriticalFailurePayload {
@@ -143,6 +144,7 @@ function normalize(raw: unknown): CriticalFailurePayload | null {
   if (
     source !== "agent" &&
     source !== "post-dispatch-check" &&
+    source !== "issues-db-mirror" &&
     source !== "unparseable"
   ) {
     return null;

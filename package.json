@@ -20,7 +20,9 @@
     "@anthropic-ai/sdk": "^0.74.0",
     "@slack/bolt": "^4.1.0",
     "bcrypt": "^6.0.0",
+    "chokidar": "^5.0.0",
     "pg": "^8.20.0",
+    "rfc6902": "^5.2.0",
     "yaml": "^2.3.4"
   },
   "devDependencies": {

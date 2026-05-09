@@ -19,7 +19,7 @@ import { resolveWaitingOnCards } from "./waiting-on-resolver.js";
 function buildIssue(overrides: Partial<Issue> & { id: string }): Issue {
   const { id, ...rest } = overrides;
   const merged: Issue = {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -30,6 +30,7 @@ function buildIssue(overrides: Partial<Issue> & { id: string }): Issue {
     type: "Feature",
     title: `Title for ${id}`,
     description: "",
+    priority: 3.0,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -70,7 +71,7 @@ function ref(externalId: string, title: string, status: IssueStatus): IssueRef {
   return { id: "", external_id: externalId, title, status };
 }
 
-describe("resolveWaitingOnCards", () => {
+describe("resolveWaitingOnCards", async () => {
   let repoRoot: string;
 
   beforeEach(() => {
@@ -87,23 +88,23 @@ describe("resolveWaitingOnCards", () => {
     issuePrefix: "ISS",
   });
 
-  it("passes through cards with no local YAML (defensive — bulk-sync covers these)", () => {
+  it("passes through cards with no local YAML (defensive — bulk-sync covers these)", async () => {
     const cards = [ref("ext-orphan", "No local YAML yet", "ToDo")];
-    expect(resolveWaitingOnCards(ctx(repoRoot), cards)).toEqual(cards);
+    expect(await resolveWaitingOnCards(ctx(repoRoot), cards)).toEqual(cards);
   });
 
-  it("passes through cards whose local YAML has waiting_on: null", () => {
+  it("passes through cards whose local YAML has waiting_on: null", async () => {
     const issue = buildIssue({ id: "ISS-1", waiting_on: null });
     writeIssueAt(repoRoot, issue);
 
     const cards = [ref(issue.external_id, issue.title, "ToDo")];
-    expect(resolveWaitingOnCards(ctx(repoRoot), cards)).toEqual(cards);
+    expect(await resolveWaitingOnCards(ctx(repoRoot), cards)).toEqual(cards);
 
     // Untouched — no history added.
     expect(loadIssue(repoRoot, "ISS-1").history).toEqual([]);
   });
 
-  it("drops cards whose deps are still non-terminal — no clear, no history entry", () => {
+  it("drops cards whose deps are still non-terminal — no clear, no history entry", async () => {
     const dep = buildIssue({ id: "ISS-99", status: "In Progress" });
     const waiting = buildIssue({
       id: "ISS-1",
@@ -117,7 +118,7 @@ describe("resolveWaitingOnCards", () => {
     writeIssueAt(repoRoot, waiting);
 
     const cards = [ref(waiting.external_id, waiting.title, "ToDo")];
-    const out = resolveWaitingOnCards(ctx(repoRoot), cards);
+    const out = await resolveWaitingOnCards(ctx(repoRoot), cards);
     expect(out).toEqual([]);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
@@ -127,7 +128,7 @@ describe("resolveWaitingOnCards", () => {
 
   // ----- DX-147 — auto-clear emits worker:auto-derive unblocked entry -----
 
-  it("DX-147: clearing waiting_on when every dep is terminal appends ONE worker:auto-derive unblocked entry with the dep ids in the note", () => {
+  it("DX-147: clearing waiting_on when every dep is terminal appends ONE worker:auto-derive unblocked entry with the dep ids in the note", async () => {
     // Two deps: one Done, one Cancelled — both terminal.
     const d1 = buildIssue({ id: "ISS-90", status: "Done" });
     const d2 = buildIssue({ id: "ISS-91", status: "Cancelled" });
@@ -145,7 +146,7 @@ describe("resolveWaitingOnCards", () => {
     writeIssueAt(repoRoot, waiting);
 
     const cards = [ref(waiting.external_id, waiting.title, "ToDo")];
-    const out = resolveWaitingOnCards(ctx(repoRoot), cards);
+    const out = await resolveWaitingOnCards(ctx(repoRoot), cards);
     expect(out).toEqual(cards);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
@@ -163,7 +164,7 @@ describe("resolveWaitingOnCards", () => {
     expect(Number.isFinite(Date.parse(entry.timestamp))).toBe(true);
   });
 
-  it("DX-147: a missing dep (no YAML on disk) keeps the card waiting — no clear, no history entry", () => {
+  it("DX-147: a missing dep (no YAML on disk) keeps the card waiting — no clear, no history entry", async () => {
     // `waiting_on.by` references a never-created dep. The resolver
     // treats that as "still waiting" (per the docstring) and drops
     // the card from the dispatch list. No write to disk, no history
@@ -180,7 +181,7 @@ describe("resolveWaitingOnCards", () => {
     writeIssueAt(repoRoot, waiting);
 
     const cards = [ref(waiting.external_id, waiting.title, "ToDo")];
-    const out = resolveWaitingOnCards(ctx(repoRoot), cards);
+    const out = await resolveWaitingOnCards(ctx(repoRoot), cards);
     expect(out).toEqual([]);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
@@ -188,7 +189,7 @@ describe("resolveWaitingOnCards", () => {
     expect(reloaded.history).toEqual([]);
   });
 
-  it("DX-147: ANY non-terminal dep keeps the card waiting even if other deps are terminal (mixed set)", () => {
+  it("DX-147: ANY non-terminal dep keeps the card waiting even if other deps are terminal (mixed set)", async () => {
     // Three deps: two terminal, one In Progress. The "ANY
     // non-terminal" rule means the card stays waiting. Pins the
     // existential semantic of `stillWaiting.length > 0`.
@@ -210,7 +211,7 @@ describe("resolveWaitingOnCards", () => {
     writeIssueAt(repoRoot, waiting);
 
     const cards = [ref(waiting.external_id, waiting.title, "ToDo")];
-    const out = resolveWaitingOnCards(ctx(repoRoot), cards);
+    const out = await resolveWaitingOnCards(ctx(repoRoot), cards);
     expect(out).toEqual([]);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
@@ -218,7 +219,7 @@ describe("resolveWaitingOnCards", () => {
     expect(reloaded.history).toEqual([]);
   });
 
-  it("appends history without losing prior entries (cap + truncation are appendHistory's responsibility)", () => {
+  it("appends history without losing prior entries (cap + truncation are appendHistory's responsibility)", async () => {
     const d = buildIssue({ id: "ISS-90", status: "Done" });
     writeIssueAt(repoRoot, d, "closed");
 
@@ -240,7 +241,7 @@ describe("resolveWaitingOnCards", () => {
     });
     writeIssueAt(repoRoot, waiting);
 
-    resolveWaitingOnCards(ctx(repoRoot), [ref(waiting.external_id, waiting.title, "ToDo")]);
+    await resolveWaitingOnCards(ctx(repoRoot), [ref(waiting.external_id, waiting.title, "ToDo")]);
 
     const reloaded = loadIssue(repoRoot, "ISS-1");
     expect(reloaded.history).toHaveLength(2);

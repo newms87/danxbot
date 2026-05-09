@@ -46,8 +46,8 @@ const log = createLogger("paired-host-pid");
  * exception would mask the first.
  */
 export interface YamlPairedWrite {
-  write(pid: number): void;
-  clear(): void;
+  write(pid: number): Promise<void> | void;
+  clear(): Promise<void> | void;
 }
 
 export interface PairedHostPidWriteOptions {
@@ -113,7 +113,7 @@ export async function pairedWriteHostPid(
 
   if (opts.yaml) {
     try {
-      opts.yaml.write(opts.pid);
+      await opts.yaml.write(opts.pid);
       yamlWritten = true;
     } catch (err) {
       yamlError = asError(err);
@@ -138,7 +138,7 @@ export async function pairedWriteHostPid(
   // Rollback whichever half succeeded.
   if (yamlWritten && dbError !== null) {
     try {
-      opts.yaml!.clear();
+      await opts.yaml!.clear();
     } catch (rollbackErr) {
       log.error(
         `[${opts.dispatchId}] paired-write YAML rollback failed`,

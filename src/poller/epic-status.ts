@@ -145,10 +145,10 @@ export function deriveStatus(children: Issue[]): DeriveStatusResult | null {
  * Done / Cancelled, so any closed parent already reached a terminal
  * status and re-derivation is a no-op anyway.
  */
-export function recomputeParentStatuses(
+export async function recomputeParentStatuses(
   repoLocalPath: string,
   prefix: string,
-): ParentStatusChange[] {
+): Promise<ParentStatusChange[]> {
   const dir = resolve(repoLocalPath, ".danxbot", "issues", "open");
   if (!existsSync(dir)) return [];
 
@@ -241,7 +241,7 @@ export function recomputeParentStatuses(
     // Done / Cancelled WILL leave the parent in open/ until the next
     // agent save triggers worker's open/→closed/ move; that's fine —
     // the file is still authoritative and the next save reconciles.
-    writeIssue(repoLocalPath, updated);
+    await writeIssue(repoLocalPath, updated);
     changes.push({ id: parent.id, before, after: derived.status, rule: derived.rule });
   }
 

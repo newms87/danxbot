@@ -152,7 +152,7 @@ export async function pushOrphans(
           check_item_id: result.ac[i].check_item_id,
         })),
       };
-      writeIssue(repoLocalPath, stamped);
+      await writeIssue(repoLocalPath, stamped);
       pushed++;
     } catch (err) {
       errors.push({

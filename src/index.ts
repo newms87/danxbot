@@ -10,7 +10,8 @@ import { startRetentionCron } from "./dashboard/retention.js";
 import { initShutdownHandlers } from "./shutdown.js";
 import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
-import { initPlatformPool } from "./db/connection.js";
+import { getPool, initPlatformPool } from "./db/connection.js";
+import { startIssuesMirror } from "./db/issues-mirror.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
@@ -137,6 +138,36 @@ async function startWorkerMode(): Promise<void> {
     // from serving live dispatches. Log and continue.
     log.error(`[${repo.name}] Dispatch reconciliation failed`, err);
   }
+
+  // Boot the issues DB mirror (DX-154) BEFORE the poller — the poller's
+  // bulk-sync writes go through writeIssue, which awaits the mirror's
+  // read-your-writes ack. The mirror's boot scan blocks here so the DB
+  // is consistent with disk before any reader queries it. Phase 4+ (DX-
+  // 155 / DX-156) swaps internal readers from YAML scans to SQL; until
+  // then the mirror runs silently and the YAMLs remain authoritative.
+  //
+  // Failure here is fatal — the mirror MUST be running before the poller
+  // dispatches anything that writes a YAML. Falling through with a
+  // dead mirror would leave every subsequent `writeIssue` racing the
+  // 5s `awaitMirror` timeout and the DB drifting silently. The mirror's
+  // own `reportFailure` writes CRITICAL_FAILURE on per-event errors;
+  // a boot-scan failure that propagates here is a hard wiring bug.
+  // Reconcile cadence is overridable via env for test fixtures + ops
+  // tooling. Production runs the default 10-minute cadence; the
+  // poller-fixture system tests squash it to 1s so reconcile-tagged
+  // history rows show up in the test window.
+  const reconcileIntervalMs =
+    process.env.DANXBOT_ISSUES_RECONCILE_INTERVAL_MS !== undefined
+      ? Number(process.env.DANXBOT_ISSUES_RECONCILE_INTERVAL_MS)
+      : undefined;
+  await startIssuesMirror(
+    { name: repo.name, localPath: repo.localPath },
+    {
+      pool: getPool(),
+      ...(reconcileIntervalMs !== undefined && { reconcileIntervalMs }),
+    },
+  );
+  log.info(`[${repo.name}] Issues mirror started`);
 
   // Start the worker HTTP server (dispatch API + health)
   await startWorkerServer(repo);
