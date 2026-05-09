@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { ChatSession } from "./chatFixtures";
-import { fmtTokens } from "./chatFixtures";
+import type { ChatSession } from "./chatTypes";
+import { fmtTokens } from "./chatTypes";
 
 const props = defineProps<{ session: ChatSession }>();
 const open = ref(false);

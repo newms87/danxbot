@@ -1585,6 +1585,9 @@ describe("handleLaunch — apiDispatchMeta build", () => {
       // mock req → null.
       statusUrl: null,
       callerIp: null,
+      // DX-84 — the workspace name is recorded so the chat list can
+      // filter board-chat dispatches via `triggerMetadata->>'workspace'`.
+      workspace: "issue-worker",
     });
   });
 

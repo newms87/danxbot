@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { ChatSession } from "./chatFixtures";
+import type { ChatSession } from "./chatTypes";
 import TokenMeter from "./TokenMeter.vue";
 
 const props = defineProps<{

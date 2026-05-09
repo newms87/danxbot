@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { ChatSession } from "./chatFixtures";
+import type { ChatSession } from "./chatTypes";
 import { relativeTime } from "../../utils/relativeTime";
 
 const props = defineProps<{
   sessions: ChatSession[];
   repo: string | null;
+  loading?: boolean;
+  error?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -24,7 +26,9 @@ const repoSessions = computed(() =>
       <div class="label">Recent sessions<template v-if="repo"> · {{ repo }}</template></div>
       <button type="button" class="new-chat" @click="emit('start-new')">+ New chat</button>
     </div>
-    <div v-if="repoSessions.length === 0" class="empty">
+    <div v-if="loading" class="empty">Loading sessions…</div>
+    <div v-else-if="error" class="empty error">{{ error }}</div>
+    <div v-else-if="repoSessions.length === 0" class="empty">
       No board chats yet for this repo.
     </div>
     <div v-else class="list">
@@ -85,6 +89,10 @@ const repoSessions = computed(() =>
   color: #475569;
   border: 1px dashed #1e293b;
   border-radius: 8px;
+}
+.empty.error {
+  color: #fca5a5;
+  border-color: rgb(239 68 68 / 0.35);
 }
 .list {
   display: flex;

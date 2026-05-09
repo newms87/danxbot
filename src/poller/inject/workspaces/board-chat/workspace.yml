@@ -1,0 +1,7 @@
+name: board-chat
+description: Per-board operator chat with the danxbot agent (DX-84). Read-only by default — no card mutations without explicit operator instruction.
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANX_REPO_ROOT
+optional-placeholders: []
+required-gates: []

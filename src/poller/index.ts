@@ -2219,6 +2219,10 @@ async function spawnClaude(
       dispatchId,
       resumeSessionId: resumeOpts?.resumeSessionId,
       parentJobId: resumeOpts?.parentJobId,
+      // DX-84 — when the poller binds the dispatch to a per-card YAML,
+      // forward the local issue id so the dispatch row stamps `issue_id`
+      // and the per-card Agent Chat tab can list this run.
+      issueId: dispatchStamp?.issueId,
       pairedWriteYaml,
       onComplete: (job) => {
         // ISS-92 Phase 2: dispatch end clears the YAML's `dispatch{}`

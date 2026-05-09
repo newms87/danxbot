@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { fmtChatTime } from "./chatFixtures";
+import { fmtChatTime } from "./chatTypes";
 
 defineProps<{ text: string; ts?: number }>();
 </script>

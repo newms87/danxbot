@@ -31,6 +31,15 @@ export interface ApiTriggerMetadata {
   callerIp: string | null;
   statusUrl: string | null;
   initialPrompt: string;
+  /**
+   * Workspace name the dispatch ran under (`issue-worker`, `board-chat`,
+   * caller-supplied schema workspace, ...). DX-84 added this so the
+   * dashboard's per-board chat list can filter to `workspace =
+   * "board-chat"` without scanning every api dispatch row. Optional —
+   * pre-DX-84 rows have it absent and the chat list query treats absent
+   * as "not a chat session" (which is the right answer for legacy rows).
+   */
+  workspace?: string;
 }
 
 export type DispatchTriggerMetadata =
@@ -79,6 +88,15 @@ export interface Dispatch {
    * resume chain without scanning JSONL files.
    */
   parentJobId: string | null;
+  /**
+   * Local issue id (`<PREFIX>-N`, e.g. `DX-84`) when this dispatch was
+   * launched against a card-bound YAML in `<repo>/.danxbot/issues/`. NULL
+   * for Slack dispatches, ideator runs, board-chat sessions, and any
+   * external `/api/launch` that didn't supply an issue id. The dashboard's
+   * Agent Chat tab queries this column to list a card's prior dispatches
+   * (DX-84 / Phase 2 of the Agent Chat epic).
+   */
+  issueId: string | null;
   status: DispatchStatus;
   startedAt: number;
   completedAt: number | null;

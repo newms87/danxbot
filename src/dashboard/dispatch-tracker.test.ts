@@ -215,6 +215,43 @@ describe("startDispatchTracking", () => {
     );
   });
 
+  it("persists issueId on the inserted row when the dispatch is poller-driven (DX-84)", async () => {
+    // Mirror of the parentJobId durability test for the issue-id column.
+    // The poller chain is dispatchStamp.issueId → dispatch() → spawnAgent
+    // → startDispatchTracking → insertDispatch; this asserts the final
+    // hop. A regression that drops the field silently un-stamps every
+    // poller-driven dispatch row, which would break the chat list
+    // endpoint without breaking any other test.
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "poller-job-1",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: "abc123",
+      watcher: watcher as never,
+      startedAtMs: 2000,
+      issueId: "DX-84",
+    });
+
+    expect(mockInsertDispatch).toHaveBeenCalledOnce();
+    expect(mockInsertDispatch.mock.calls[0][0].issueId).toBe("DX-84");
+  });
+
+  it("defaults issueId to null on launches that did not pass it (Slack, ideator, board-chat, external API)", async () => {
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "non-card-job",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      watcher: watcher as never,
+    });
+
+    expect(mockInsertDispatch.mock.calls[0][0].issueId).toBeNull();
+  });
+
   it("updates sessionUuid + jsonlPath on first entry after watcher attaches", async () => {
     const watcher = makeMockWatcher();
     await startDispatchTracking({

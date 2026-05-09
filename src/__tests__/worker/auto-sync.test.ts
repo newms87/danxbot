@@ -150,6 +150,7 @@ function buildTrelloRow(cardId: string): Dispatch {
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: null,
+    issueId: null,
     status: "running",
     startedAt: 0,
     completedAt: null,

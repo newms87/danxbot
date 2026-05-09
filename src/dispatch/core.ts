@@ -261,6 +261,14 @@ export interface DispatchInput {
   /** Parent dispatch ID. Present when this slot is a resume child. */
   parentJobId?: string;
   /**
+   * Local issue id (`<PREFIX>-N`) the dispatch is bound to, threaded
+   * through to the dispatch row's `issue_id` column. Set only by the
+   * poller path (it owns the per-issue YAML); Slack/ideator/external
+   * launch leave it undefined and the column stays NULL. DX-84 (Agent
+   * Chat Phase 2) — the dashboard's per-card chat list filters on this.
+   */
+  issueId?: string | null;
+  /**
    * Optional caller-supplied dispatchId. When provided, `dispatch()` uses
    * this value verbatim for the dispatch row, the spawned agent's `jobId`,
    * and every dispatchId-derived URL in the danxbot MCP server's env block.
@@ -459,6 +467,7 @@ async function runResolved(
         dispatch: isRespawn ? undefined : input.apiDispatchMeta,
         resumeSessionId: input.resumeSessionId,
         parentJobId: input.parentJobId,
+        issueId: input.issueId,
         // Paired host_pid write — only the initial spawn does this, and
         // only when the caller supplies a YAML pair. Stall-recovery
         // respawns reuse the existing dispatch row, so re-stamping

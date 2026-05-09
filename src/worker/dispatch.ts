@@ -412,6 +412,11 @@ export async function handleLaunch(
         callerIp: parsed.callerIp,
         statusUrl: parsed.statusUrl ?? null,
         initialPrompt: parsed.task,
+        // DX-84 — record the workspace name so the dashboard's per-board
+        // Agent Chat list can filter to `workspace = "board-chat"`. The
+        // chat list query reads `triggerMetadata->>'workspace'` directly
+        // (JSONB) — no separate column.
+        workspace: parsed.workspace,
       },
     };
 
@@ -536,6 +541,10 @@ export async function handleResume(
         callerIp: parsed.callerIp,
         statusUrl: parsed.statusUrl ?? null,
         initialPrompt: parsed.task,
+        // DX-84 — see handleLaunch for rationale. Resume inherits the
+        // parent's workspace via the body, so chat-list filters work
+        // identically across launches and resumes.
+        workspace: parsed.workspace,
       },
     };
 

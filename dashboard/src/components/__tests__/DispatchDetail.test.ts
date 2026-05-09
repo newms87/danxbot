@@ -33,6 +33,7 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: null,
+    issueId: null,
     status: "completed",
     startedAt: 1700000000000,
     completedAt: 1700000060000,

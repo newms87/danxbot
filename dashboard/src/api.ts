@@ -337,6 +337,124 @@ export async function resetAllData(): Promise<ResetAllDataResult> {
   return res.json();
 }
 
+// ── Agent Chat (DX-84) ───────────────────────────────────────────────
+
+/**
+ * Chat session summary returned by the chat list endpoints. Wire shape
+ * matches `chat-routes.ts#ChatSessionSummary` — keep them in sync.
+ */
+export interface ChatSessionSummary {
+  job_id: string;
+  parent_job_id: string | null;
+  issue_id: string | null;
+  repo: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  summary: string | null;
+  started_at: number;
+  completed_at: number | null;
+  tokens_total: number;
+  tool_call_count: number;
+  subagent_count: number;
+}
+
+export interface ChatTimelinePayload {
+  blocks: JsonlBlock[];
+  totals: {
+    tokensIn: number;
+    tokensOut: number;
+    cacheRead: number;
+    cacheWrite: number;
+    tokensTotal: number;
+    toolCallCount: number;
+  };
+  chain: string[];
+}
+
+export async function listChatSessions(
+  issueId: string,
+): Promise<ChatSessionSummary[]> {
+  const res = await fetchWithAuth(
+    `/api/chat/sessions?issue_id=${encodeURIComponent(issueId)}`,
+  );
+  if (!res.ok) throw new Error(`listChatSessions failed: ${res.status}`);
+  return res.json();
+}
+
+export async function listBoardChatSessions(
+  repo: string,
+): Promise<ChatSessionSummary[]> {
+  const res = await fetchWithAuth(
+    `/api/chat/sessions/board?repo=${encodeURIComponent(repo)}`,
+  );
+  if (!res.ok) throw new Error(`listBoardChatSessions failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchChatTimeline(
+  jobId: string,
+): Promise<ChatTimelinePayload> {
+  const res = await fetchWithAuth(
+    `/api/chat/sessions/${encodeURIComponent(jobId)}/timeline`,
+  );
+  if (!res.ok) throw new Error(`fetchChatTimeline failed: ${res.status}`);
+  return res.json();
+}
+
+export async function startBoardChat(
+  repo: string,
+  task: string,
+): Promise<{ job_id: string; status: string }> {
+  const res = await fetchWithAuth("/api/chat/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo, task }),
+  });
+  if (!res.ok) throw new Error(`startBoardChat failed: ${res.status}`);
+  return res.json();
+}
+
+export async function postChatMessage(
+  jobId: string,
+  task: string,
+): Promise<{ job_id: string; parent_job_id: string; status: string }> {
+  const res = await fetchWithAuth(
+    `/api/chat/sessions/${encodeURIComponent(jobId)}/resume`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task }),
+    },
+  );
+  if (!res.ok) throw new Error(`postChatMessage failed: ${res.status}`);
+  return res.json();
+}
+
+export async function cancelChatSession(
+  jobId: string,
+): Promise<{ status: string }> {
+  const res = await fetchWithAuth(
+    `/api/chat/sessions/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`cancelChatSession failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Live-follow a chat session via the same multiplexed SSE stream that
+ * powers `followDispatch`. The chat session route
+ * `/api/chat/sessions/:id/stream` is a thin alias — using the typed
+ * follow function below keeps the auth + reconnect contract identical
+ * (the SPA's `useStream` composable is the single SSE consumer).
+ */
+export function followChatSession(
+  jobId: string,
+  onBlock: (block: JsonlBlock) => void,
+  onError: () => void,
+): () => void {
+  return followDispatch(jobId, onBlock, onError);
+}
+
 /**
  * Live-follow a dispatch via the multiplexed SSE stream. Subscribes to the
  * `dispatch:jsonl:<id>` topic and invokes `onBlock` once per parsed

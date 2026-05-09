@@ -43,6 +43,7 @@ function makeRow(overrides: Partial<Dispatch> = {}): Dispatch {
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: null,
+    issueId: null,
     status: "running",
     startedAt: 1000,
     completedAt: null,

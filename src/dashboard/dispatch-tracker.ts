@@ -66,6 +66,13 @@ export interface StartDispatchTrackingArgs {
    * Persisted in `parent_job_id` so the resume chain is queryable.
    */
   parentJobId?: string | null;
+  /**
+   * Local issue id (`<PREFIX>-N`) when the dispatch is bound to a per-card
+   * YAML. The poller threads this through from `dispatchStamp.issueId`;
+   * non-card dispatches (Slack, ideator, board-chat, external launch)
+   * leave it unset and the column is stamped NULL.
+   */
+  issueId?: string | null;
 }
 
 /**
@@ -98,6 +105,7 @@ export async function startDispatchTracking(
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: args.parentJobId ?? null,
+    issueId: args.issueId ?? null,
     status: "running",
     startedAt,
     completedAt: null,

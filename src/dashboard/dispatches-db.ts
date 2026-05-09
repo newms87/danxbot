@@ -34,6 +34,7 @@ const COLUMN_MAP: Readonly<Record<keyof Dispatch, string>> = {
   sessionUuid: "session_uuid",
   jsonlPath: "jsonl_path",
   parentJobId: "parent_job_id",
+  issueId: "issue_id",
   status: "status",
   startedAt: "started_at",
   completedAt: "completed_at",
@@ -77,6 +78,7 @@ export interface DispatchRow {
   session_uuid: string | null;
   jsonl_path: string | null;
   parent_job_id: string | null;
+  issue_id: string | null;
   status: string;
   started_at: number;
   completed_at: number | null;
@@ -120,6 +122,7 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     sessionUuid: row.session_uuid,
     jsonlPath: row.jsonl_path,
     parentJobId: row.parent_job_id,
+    issueId: row.issue_id,
     status: row.status as DispatchStatus,
     startedAt: Number(row.started_at),
     completedAt: row.completed_at === null ? null : Number(row.completed_at),
@@ -321,6 +324,91 @@ export async function countDispatchesByRepo(): Promise<
     }
   }
   return out;
+}
+
+/**
+ * DX-84 — chat session listing helpers. The Agent Chat tab queries these
+ * to populate the per-issue dispatch list (chat tab inside the drawer)
+ * and the per-board chat session list (`workspace = "board-chat"` filter
+ * on api dispatches).
+ *
+ * Both helpers return rows newest-first so the chat shell can default to
+ * the most-recent session without sorting client-side.
+ */
+
+/**
+ * List every dispatch ever launched for the given local issue id
+ * (`<PREFIX>-N`). Sorted by `started_at DESC` so the chat shell defaults
+ * to the most-recent dispatch — that's the one the Resume button hits.
+ *
+ * Returns rows from every trigger type. In practice the poller-driven
+ * trello rows dominate here, but a future external dispatcher that
+ * stamps `issue_id` would also appear in the list.
+ */
+export async function listDispatchesByIssueId(
+  issueId: string,
+): Promise<Dispatch[]> {
+  const rows = await query<DispatchRow>(
+    `SELECT * FROM dispatches
+     WHERE issue_id = $1
+     ORDER BY started_at DESC`,
+    [issueId],
+  );
+  return rows.map(rowToDispatch);
+}
+
+/**
+ * List every board-chat dispatch for the given repo. Filter is on
+ * `triggerMetadata->>'workspace' = 'board-chat'` — workspace is a JSONB
+ * key (no dedicated column). Newest-first.
+ *
+ * Limited to the dashboard's chat session picker; not a hot path. The
+ * JSONB lookup uses the existing per-trigger indexes plus a hash index
+ * is not added here — at chat-list scale (one repo, dozens of rows) the
+ * scan is cheap.
+ */
+export async function listBoardChatDispatches(
+  repoName: string,
+): Promise<Dispatch[]> {
+  const rows = await query<DispatchRow>(
+    `SELECT * FROM dispatches
+     WHERE repo_name = $1
+       AND "trigger" = 'api'
+       AND trigger_metadata->>'workspace' = 'board-chat'
+     ORDER BY started_at DESC`,
+    [repoName],
+  );
+  return rows.map(rowToDispatch);
+}
+
+/**
+ * Walk a dispatch's resume chain root-first via `parent_job_id`.
+ * Returns the chain ordered oldest-first (the original launch is index 0,
+ * the youngest resume is the last entry). Used by the chat timeline
+ * endpoint to merge JSONL blocks across the conversation history.
+ *
+ * Single SQL recursive CTE — no per-step round trip. Cycle protection
+ * via a depth limit (32) so a malformed `parent_job_id` loop can't
+ * spin the query forever.
+ */
+export async function getResumeChain(
+  jobId: string,
+): Promise<Dispatch[]> {
+  const rows = await query<DispatchRow & { depth: number }>(
+    `WITH RECURSIVE chain AS (
+        SELECT *, 0 AS depth
+          FROM dispatches
+         WHERE id = $1
+        UNION ALL
+        SELECT d.*, c.depth + 1
+          FROM dispatches d
+          JOIN chain c ON d.id = c.parent_job_id
+         WHERE c.depth < 32
+     )
+     SELECT * FROM chain ORDER BY depth DESC`,
+    [jobId],
+  );
+  return rows.map((r) => rowToDispatch(r));
 }
 
 /**

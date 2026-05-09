@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import type { ChatBlock } from "./chatFixtures";
+import type { ChatBlock } from "./chatTypes";
 import ChatUserBlock from "./ChatUserBlock.vue";
 import ChatAssistantText from "./ChatAssistantText.vue";
 import ChatThinking from "./ChatThinking.vue";

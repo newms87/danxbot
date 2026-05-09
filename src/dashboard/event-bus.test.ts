@@ -25,6 +25,7 @@ function createdEvent(id = "job-1"): BusEvent {
       sessionUuid: null,
       jsonlPath: null,
       parentJobId: null,
+      issueId: null,
       status: "running",
       startedAt: Date.now(),
       completedAt: null,

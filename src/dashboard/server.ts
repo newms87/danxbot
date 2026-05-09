@@ -11,6 +11,15 @@ import {
   handleGetDispatch,
   handleRawJsonl,
 } from "./dispatches-routes.js";
+import {
+  handleCancelChatSession,
+  handleChatStream,
+  handleChatTimeline,
+  handleListBoardChatSessions,
+  handleListChatSessions,
+  handleResumeChatSession,
+  handleStartBoardChat,
+} from "./chat-routes.js";
 import { handleStream } from "./stream-routes.js";
 import { startDbChangeDetector } from "./dispatch-stream.js";
 import {
@@ -310,6 +319,75 @@ async function route(
 
   if (method === "GET" && url.pathname === "/api/stream") {
     await handleStream(req, res, url.searchParams);
+    return true;
+  }
+
+  // ── Agent Chat (DX-84) ──────────────────────────────────────────────
+  // Per-card and per-board chat surfaces. All routes sit under the
+  // user-auth gate above; POST proxies forward to the matching worker
+  // on `danxbot-net` directly (no DANXBOT_DISPATCH_TOKEN — the token is
+  // the EXTERNAL gate, not the internal one). Order matters: specific
+  // tail paths (`/board`, `/:id/timeline`, `/:id/resume`, `/:id/cancel`,
+  // `/:id/stream`) must match before any generic `/:id` would.
+
+  if (method === "GET" && url.pathname === "/api/chat/sessions") {
+    await handleListChatSessions(res, url.searchParams);
+    return true;
+  }
+
+  if (method === "GET" && url.pathname === "/api/chat/sessions/board") {
+    await handleListBoardChatSessions(res, url.searchParams);
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/chat/sessions") {
+    await handleStartBoardChat(req, res, dispatchDeps);
+    return true;
+  }
+
+  const chatTimelineMatch = url.pathname.match(
+    /^\/api\/chat\/sessions\/([^/]+)\/timeline$/,
+  );
+  if (method === "GET" && chatTimelineMatch) {
+    await handleChatTimeline(res, decodeURIComponent(chatTimelineMatch[1]));
+    return true;
+  }
+
+  const chatResumeMatch = url.pathname.match(
+    /^\/api\/chat\/sessions\/([^/]+)\/resume$/,
+  );
+  if (method === "POST" && chatResumeMatch) {
+    await handleResumeChatSession(
+      req,
+      res,
+      decodeURIComponent(chatResumeMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  const chatCancelMatch = url.pathname.match(
+    /^\/api\/chat\/sessions\/([^/]+)\/cancel$/,
+  );
+  if (method === "POST" && chatCancelMatch) {
+    await handleCancelChatSession(
+      req,
+      res,
+      decodeURIComponent(chatCancelMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  const chatStreamMatch = url.pathname.match(
+    /^\/api\/chat\/sessions\/([^/]+)\/stream$/,
+  );
+  if (method === "GET" && chatStreamMatch) {
+    await handleChatStream(
+      req,
+      res,
+      decodeURIComponent(chatStreamMatch[1]),
+    );
     return true;
   }
 

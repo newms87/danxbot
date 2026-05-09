@@ -40,6 +40,9 @@ import {
   deleteOldDispatches,
   rowToDispatch,
   dispatchToInsertParams,
+  listDispatchesByIssueId,
+  listBoardChatDispatches,
+  getResumeChain,
 } from "./dispatches-db.js";
 import type {
   Dispatch,
@@ -98,6 +101,7 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: null,
+    issueId: null,
     status: "running",
     startedAt: 1_700_000_000_000,
     completedAt: null,
@@ -153,7 +157,7 @@ describe("dispatchToInsertParams", () => {
     const orderedKeys: Array<keyof typeof d> = [
       "id", "repoName", "trigger", "triggerMetadata",
       "slackThreadTs", "slackChannelId",
-      "sessionUuid", "jsonlPath", "parentJobId", "status",
+      "sessionUuid", "jsonlPath", "parentJobId", "issueId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
       "hostPid",
       "hostPidAt",
@@ -171,7 +175,7 @@ describe("dispatchToInsertParams", () => {
     const orderedKeys: Array<keyof typeof d> = [
       "id", "repoName", "trigger", "triggerMetadata",
       "slackThreadTs", "slackChannelId",
-      "sessionUuid", "jsonlPath", "parentJobId", "status",
+      "sessionUuid", "jsonlPath", "parentJobId", "issueId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
       "hostPid",
       "hostPidAt",
@@ -206,7 +210,7 @@ describe("dispatchToInsertParams", () => {
     const orderedKeys: Array<keyof typeof d> = [
       "id", "repoName", "trigger", "triggerMetadata",
       "slackThreadTs", "slackChannelId",
-      "sessionUuid", "jsonlPath", "parentJobId", "status",
+      "sessionUuid", "jsonlPath", "parentJobId", "issueId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
       "hostPid",
       "hostPidAt",
@@ -224,7 +228,7 @@ describe("dispatchToInsertParams", () => {
     const orderedKeys: Array<keyof typeof d> = [
       "id", "repoName", "trigger", "triggerMetadata",
       "slackThreadTs", "slackChannelId",
-      "sessionUuid", "jsonlPath", "parentJobId", "status",
+      "sessionUuid", "jsonlPath", "parentJobId", "issueId", "status",
       "startedAt", "completedAt", "summary", "error", "runtimeMode",
       "hostPid",
       "hostPidAt",
@@ -249,6 +253,7 @@ describe("rowToDispatch", () => {
       session_uuid: "sess-uuid",
       jsonl_path: "/tmp/session.jsonl",
       parent_job_id: "parent-aea75840",
+      issue_id: null,
       status: "completed",
       started_at: 1000,
       completed_at: 2000,
@@ -292,6 +297,7 @@ describe("rowToDispatch", () => {
       session_uuid: null,
       jsonl_path: null,
       parent_job_id: null,
+      issue_id: null,
       status: "running",
       started_at: 1,
       completed_at: null,
@@ -687,5 +693,106 @@ describe("deleteOldDispatches", () => {
 
     const result = await deleteOldDispatches(1_000);
     expect(result[0].jsonlPath).toBeNull();
+  });
+});
+
+// ─── DX-84 Agent Chat helpers ──────────────────────────────────────────
+
+function makeRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "job-1",
+    repo_name: "danxbot",
+    trigger: "trello",
+    trigger_metadata: JSON.stringify(makeTrelloMeta()),
+    slack_thread_ts: null,
+    slack_channel_id: null,
+    session_uuid: null,
+    jsonl_path: null,
+    parent_job_id: null,
+    issue_id: null,
+    status: "completed",
+    started_at: 1000,
+    completed_at: 2000,
+    summary: null,
+    error: null,
+    runtime_mode: "docker",
+    host_pid: null,
+    host_pid_at: null,
+    pid_terminated_at: null,
+    tokens_total: 0,
+    tokens_in: 0,
+    tokens_out: 0,
+    cache_read: 0,
+    cache_write: 0,
+    tool_call_count: 0,
+    subagent_count: 0,
+    nudge_count: 0,
+    danxbot_commit: null,
+    ...overrides,
+  };
+}
+
+describe("listDispatchesByIssueId", () => {
+  it("filters by issue_id and orders newest-first", async () => {
+    mockQuery.mockResolvedValueOnce([]);
+    await listDispatchesByIssueId("DX-84");
+    const sql = mockQuery.mock.calls[0][0] as string;
+    const params = mockQuery.mock.calls[0][1] as unknown[];
+    expect(sql).toContain("FROM dispatches");
+    expect(sql).toContain("issue_id = $1");
+    expect(sql).toMatch(/ORDER BY started_at DESC/i);
+    expect(params).toEqual(["DX-84"]);
+  });
+
+  it("hydrates rows via rowToDispatch", async () => {
+    mockQuery.mockResolvedValueOnce([
+      makeRow({ id: "job-2", issue_id: "DX-84" }),
+    ]);
+    const rows = await listDispatchesByIssueId("DX-84");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("job-2");
+    expect(rows[0].issueId).toBe("DX-84");
+  });
+});
+
+describe("listBoardChatDispatches", () => {
+  it("filters api-trigger rows by repo + workspace=board-chat via JSONB key", async () => {
+    // The JSONB filter is the contract that ties chat session list to the
+    // board-chat workspace name. A regression that drops the filter would
+    // leak every api-trigger dispatch (schema, manual `/api/launch`, etc.)
+    // into the chat picker.
+    mockQuery.mockResolvedValueOnce([]);
+    await listBoardChatDispatches("danxbot");
+    const sql = mockQuery.mock.calls[0][0] as string;
+    const params = mockQuery.mock.calls[0][1] as unknown[];
+    expect(sql).toContain("repo_name = $1");
+    expect(sql).toContain("\"trigger\" = 'api'");
+    expect(sql).toContain("trigger_metadata->>'workspace' = 'board-chat'");
+    expect(sql).toMatch(/ORDER BY started_at DESC/i);
+    expect(params).toEqual(["danxbot"]);
+  });
+});
+
+describe("getResumeChain", () => {
+  it("issues a recursive CTE walking parent_job_id with a depth cap and oldest-first ordering", async () => {
+    // ORDER BY depth DESC is what makes the chain return root-first; a
+    // regression that flips it would render timelines in reverse.
+    mockQuery.mockResolvedValueOnce([]);
+    await getResumeChain("job-3");
+    const sql = mockQuery.mock.calls[0][0] as string;
+    expect(sql).toMatch(/WITH RECURSIVE/i);
+    expect(sql).toContain("parent_job_id");
+    expect(sql).toMatch(/depth\s*<\s*32/);
+    expect(sql).toMatch(/ORDER BY depth DESC/i);
+    expect(mockQuery.mock.calls[0][1]).toEqual(["job-3"]);
+  });
+
+  it("returns rows hydrated via rowToDispatch", async () => {
+    mockQuery.mockResolvedValueOnce([
+      { ...makeRow({ id: "p1" }), depth: 1 },
+      { ...makeRow({ id: "c1", parent_job_id: "p1" }), depth: 0 },
+    ]);
+    const chain = await getResumeChain("c1");
+    expect(chain.map((d) => d.id)).toEqual(["p1", "c1"]);
   });
 });

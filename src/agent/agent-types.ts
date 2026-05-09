@@ -218,6 +218,15 @@ export interface SpawnAgentOptions {
    */
   parentJobId?: string | null;
   /**
+   * Local issue id (`<PREFIX>-N`) the dispatch is bound to, when relevant.
+   * Forwarded to `startDispatchTracking` so the dispatches row carries
+   * `issue_id` for the Agent Chat tab's per-card listing (DX-84).
+   * Card-less dispatches (Slack, ideator, board-chat, external launch)
+   * omit this; the column is stamped NULL. Requires `dispatch` to also be
+   * set since the issue id only matters to the dispatch row.
+   */
+  issueId?: string | null;
+  /**
    * YAML write/clear pair invoked by `pairedWriteHostPid` after the runtime
    * fork resolves the agent PID. Set only by the poller path (it owns the
    * per-issue YAML); Slack and `/api/launch` omit this and only get the
