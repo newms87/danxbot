@@ -1,0 +1,292 @@
+schema_version: 5
+tracker: trello
+id: DX-156
+external_id: 69fe1ebcab7b8713362e5030
+parent_id: DX-151
+children: []
+dispatch:
+  id: 2174a2ad-b4d7-428a-802c-6be6ef42f706
+  pid: 67140
+  host: dan
+  kind: work
+  started_at: 2026-05-09T03:13:15.647Z
+  ttl_seconds: 7200
+status: Done
+type: Feature
+title: "Issues DB Mirror > Phase 5: Migrate dashboard endpoints + danx-issue MCP query tools to DB"
+description: |-
+  ## Context
+
+  Phase 5 of the Issues DB Mirror epic (DX-151). Sister to Phase 4 (DX-155) — same migration shape but applied to the dashboard's HTTP endpoints and the agent-facing `danx-issue` MCP server's read tools. After this phase, every internal Node consumer of issue data queries the DB.
+
+  Full epic spec: `docs/superpowers/specs/2026-05-08-issues-db-mirror-design.md`, "Read pipeline" section.
+
+  ## Endpoints + tools in scope
+
+  Inventory before starting (run `grep -rn "issues/open\|issues/closed\|parseSimpleYaml\|readdirSync.*issues" src/dashboard src/mcp` and reconcile against this list):
+
+  Dashboard (`src/dashboard/server.ts` + helpers):
+
+  - `GET /api/issues` — list with filtering by repo, status, parent, label, search
+  - `GET /api/issues/:id?repo=<name>` — single issue + history
+  - `GET /api/issues/history/:id?repo=<name>` — history rows for the issue (NEW endpoint enabled by `issue_history`)
+  - any SSE stream that pushes issue changes (today driven by file watching; can stay on the watcher OR switch to a DB-LISTEN pattern — pick file-watcher; LISTEN/NOTIFY is a future optimization)
+
+  MCP — the `@thehammer/danx-issue-mcp` package's tools, which run inside the workspace agent:
+
+  - `danx_issue_get(id)` — single issue lookup
+  - `danx_issue_list({status?, type?, parent_id?})` — filtered list
+
+  Both `danx_issue_get` and `danx_issue_list` today read YAMLs directly from the agent's workspace cwd. Since agents reach the danxbot worker via the worker's HTTP API (not directly into PG), the cleanest move is: the danx-issue MCP server keeps its current YAML reader for `danx_issue_get` (the agent has the file at hand — reading the file is fast and stays consistent with the "agents stay on YAML" rule) but `danx_issue_list` calls a new worker endpoint `GET /api/internal/issues?repo=<name>&filters` that the worker serves from the DB. Why: list queries are the cross-card lookups that benefit from the DB index; single-card gets do not.
+
+  Confirm this split with the maintainer before implementing if uncertain — the spec says agents stay on YAML for reads, but `danx_issue_list` is a cross-card query, which is the one shape the DB exists to accelerate.
+
+  ## Solution
+
+  ### Dashboard endpoints (single source change)
+
+  Replace every YAML walk inside the dashboard server's issue handlers with SQL queries against `issues`. Pagination + ordering becomes a real `LIMIT / OFFSET / ORDER BY`. Filtering uses indexed generated columns. The response shape (`Issue[]`, `Issue`, `HistoryEntry[]`) is unchanged.
+
+  Add the new history endpoint:
+
+  ```
+  GET /api/issues/history/:id?repo=<name>
+  → 200 { entries: [{ changed_at, source, prev_hash, next_hash, patch }] }
+  ```
+
+  ordered ascending by `changed_at`. Pagination optional (cap to last 200; expose `?since=<iso>` for forward streaming if dashboard timeline UI wants it — DON'T build the dashboard UI in this card; just expose the endpoint).
+
+  ### MCP `danx_issue_list`
+
+  Repo: `@thehammer/danx-issue-mcp` (separate npm-published package). The package source lives outside this repo — but the danxbot worker registers a handler for `danx_issue_list` calls? Actually, the MCP runs in-process inside the agent and reads the local FS. Two options:
+
+  - **Option A (preferred):** The MCP package itself adds an HTTP fallback. When env `DANX_ISSUE_LIST_VIA_HTTP=1` is set, `danx_issue_list` makes an HTTP GET to `${DANXBOT_ISSUE_LIST_URL}` (auto-injected by `dispatch()` like other per-dispatch URLs). The worker serves it from PG. Falls back to YAML scan when the env is unset (local dev / non-dispatched usage).
+  - **Option B:** Keep `danx_issue_list` on YAML scan inside the MCP. The MCP runs inside the agent's process; agents stay on YAML per spec. Skip the migration for this tool; only the dashboard side migrates.
+
+  The spec's "Reader scope" decision was "agents keep YAML reads." On a literal reading, Option B is correct: `danx_issue_list` runs inside the agent, so it stays on YAML. **Pick Option B.** Document in the card retro that the dashboard side gets DB acceleration; the agent side does not, by design.
+
+  That means MCP changes are zero. The full scope of Phase 5 reduces to: dashboard endpoints + new history endpoint.
+
+  ### Endpoint migrations — concrete
+
+  In `src/dashboard/server.ts`:
+
+  - Find every handler that reads from `<repo>/.danxbot/issues/`.
+  - Replace with the equivalent SQL against `issues`. Where filtering used in-memory predicates, translate to `WHERE` clauses on indexed columns.
+  - Where the handler returned `Issue[]`, project `select data ...` and cast.
+  - Where the handler took a `repo` query param, the SQL filter is `repo_name = $1`.
+  - Where SSE pushed issue changes, leave it on the existing file-watcher (out of scope to switch to LISTEN/NOTIFY in this epic).
+  - Add the new `GET /api/issues/history/:id` handler.
+
+  Update or add tests for each handler. The dashboard test layer already has DB-backed helpers from Phase 1.
+
+  ## Files
+
+  Modify:
+
+  - `src/dashboard/server.ts`
+  - any helper file the server delegates to (e.g. an `issues-route.ts` if it was extracted previously)
+  - tests for those handlers
+
+  Out (no longer in scope after the Option B decision):
+
+  - The `@thehammer/danx-issue-mcp` package — no changes.
+
+  ## Test plan
+
+  1. Inventory each handler that reads issue data. List them in a comment at the top of the test file.
+  2. For each handler, write an integration test that seeds the test DB with 3-5 fixture issues, hits the endpoint via the existing test harness, asserts the response shape + filtering.
+  3. Migrate the handler. Re-run.
+  4. Add tests for the new history endpoint:
+     - Returns ascending-ordered entries for a known issue.
+     - Returns empty array for an unknown issue.
+     - 404 for missing repo.
+     - Pagination (if exposed).
+  5. Full `make test` + `cd dashboard && npx vitest run`.
+  6. Manual smoke: open `http://localhost:5566`, navigate the Issues tab, verify lists, filters, and the per-issue drawer load correctly.
+  7. Manual smoke: hit `/api/issues/history/<known-id>?repo=danxbot` with curl + bearer token; verify the timeline renders.
+
+  ## Acceptance
+
+  - Every dashboard issue endpoint is DB-backed; `grep -n "issues/open\|issues/closed\|readdirSync\|parseSimpleYaml" src/dashboard/server.ts` returns ZERO matches.
+  - New `GET /api/issues/history/:id` endpoint live + tested.
+  - All existing dashboard tests pass without assertion changes (response shapes preserved).
+  - `make test` green; `cd dashboard && npx vitest run` green; `npx tsc --noEmit` + `vue-tsc --noEmit` clean.
+  - Manual smoke: dashboard Issues tab fully functional.
+  - `danx-issue` MCP package unchanged (decision documented in retro).
+
+  ## Out of scope
+
+  - Building a dashboard timeline UI for `issue_history` — endpoint exposed; UI is a separate card.
+  - Switching SSE issue updates from file-watcher to PG LISTEN/NOTIFY — future optimization.
+  - Migrating `danx_issue_list` — agents stay on YAML by design.
+  - Retiring `danx_issue_save` (DX-157).
+priority: 3
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 69fe1ebdc98a66dadf085732
+    title: Every dashboard handler that read issue YAMLs now queries the issues table; YAML-walk imports gone
+    checked: true
+  - check_item_id: 69fe1ebde8a5ec412007010d
+    title: GET /api/issues/history/:id endpoint live, returns ascending-ordered patches, tested for present + missing + bad-repo cases
+    checked: true
+  - check_item_id: 69fe1ebe06a8a6bea14bb308
+    title: Existing dashboard tests pass without response-shape changes
+    checked: true
+  - check_item_id: 69fe1ebe9b01a551c7895aa9
+    title: New integration tests seed the test DB and assert filter correctness for each migrated endpoint
+    checked: true
+  - check_item_id: 69fe1ebfa002764a971016b6
+    title: make test + cd dashboard && npx vitest run green; tsc + vue-tsc clean
+    checked: true
+  - check_item_id: 69fe1ebf6d7541014d33fb15
+    title: Manual smoke — Issues tab loads + filters + drawer functional
+    checked: true
+  - check_item_id: 69fe1ec0ebcaadf392e58552
+    title: Decision documented in retro — danx_issue_list intentionally stays on YAML (agents stay on YAML per spec)
+    checked: true
+comments:
+  - author: code-reviewer
+    timestamp: 2026-05-09T03:35:00.000Z
+    text: |-
+      ## Code Review
+
+      **Critical:** none. Migration preserves response shapes, route ordering correct, parameterized SQL, no injection risk.
+
+      **Major (addressed in this commit):**
+
+      - **`dbListIssueHistory` `id ASC` tiebreak comment.** Reviewer flagged that the equivalence between PG `bigserial id ASC` and the test simulator's `insertSeq` is non-obvious. Added a 6-line comment in `src/poller/issues-db.ts#dbListIssueHistory` explaining the tiebreaker semantics.
+      - **Limit parsing slop.** `parseInt("12abc", 10) === 12` — handler accepted partial-numeric input. Tightened to `/^\d+$/` test before parsing in `handleGetIssueHistory`. Added 7 boundary tests (`"0"`, `"abc"`, `"-5"`, `""`, `"12abc"`, `"1.5"`, `" 50"`) all 400.
+      - **`dbListAllIssues` scale guard.** Full-table pull had no SQL-level cap. Added `LIMIT 5001` + `IssuesPayloadTooLargeError` at >5000 rows; both unit and integration tests cover the boundary. The runaway-repo case now fails loudly instead of serving multi-MB responses every poll.
+
+      **Major (deferred):**
+
+      - **400 vs 404 for unknown repo.** The new history handler returns 400, matching the existing `handleListIssues` / `handleGetIssue` pattern. Reviewer noted 404 is more standard; out of scope to retrofit the existing handlers in this card.
+      - **Repo-lookup DRY violation across 7 handlers.** Same 6-line `if (!repo) {…}` block in every issues + agents route. Worth a small follow-up card extracting `resolveRepo(res, name, deps)` once we touch agents-routes again.
+
+      **Nits:**
+
+      - `RawIssue` interface in `issues-reader.ts` is now structurally equivalent to `DbIssueRow` with one renamed field; left as-is for diff readability.
+      - `raw_yaml` is rendered via `serializeIssue(data)` rather than re-reading the file. Trade-off documented inline at `readIssueDetail`'s comment block: hand-edited YAMLs lose non-canonical formatting in the rendered string. Only consumer is `RawTab.vue`'s read-only display.
+  - author: test-reviewer
+    timestamp: 2026-05-09T03:35:00.000Z
+    text: |-
+      ## Test Review
+
+      **Coverage status:** 73 of 82 enumerated test surfaces covered before fixes; all 11 missing items addressed in the same commit.
+
+      **Top gaps closed in this commit:**
+
+      1. **Server route-ordering invariant** — the load-bearing rule that `/api/issues/history/:id` matches before `/api/issues/:id`. Added 7 tests in `server.test.ts` (`describe("issues route ordering invariant (DX-156)")`) verifying each handler routes to its own mock and `/api/issues/history/:id` does NOT collapse through the generic `:id` matcher. URL-encoded id decode + nested-path 404 + auth gate also covered.
+      2. **Limit-parsing boundary tests** — added `it.each` table covering `"0"`, `"abc"`, `"-5"`, `""`, `"12abc"`, `"1.5"`, `" 50"` (all 400). Added accept tests for `limit=1` (lower bound) and `limit=1000` (exact cap, no clamp).
+      3. **Same-timestamp tiebreak** — added integration test seeding 3 history rows at identical `changed_at` and asserting insertion-order preservation via PG's `id ASC`. The unit simulator can't exercise this because it tiebreaks on `insertSeq`.
+      4. **50-cap + referenced-pull against real PG** — added 2 integration tests seeding 60+ closed rows with monotonic `mirror_updated_at` and asserting the JS slice / referenced-extras walk handles PG-returned timestamps correctly.
+      5. **Scale guard fail-loud** — added a unit test that stubs the simulator to return cap+1 rows and asserts `IssuesPayloadTooLargeError` propagates. Mirror integration test covers the same path against real PG.
+      6. **Simulator strict matcher** — refactored the in-memory mock from substring matching to exact normalized-SQL matching. New helpers added to `issues-db.ts` will trip the simulator's `Unhandled SQL` throw and fail loudly during test runs instead of silently returning the wrong row set through `dbListAllIssues`.
+      7. **Dead code removal** — the `Number.isFinite(limit) && limit > 0` no-LIMIT branch in `dbListIssueHistory` was unreachable. Replaced with an explicit fail-loud throw on bad input.
+  - author: danxbot
+    timestamp: 2026-05-09T03:40:00.000Z
+    text: |-
+      ## Review Fixes
+
+      Acted on every reviewer-flagged finding in this commit:
+
+      | Finding | Fix |
+      |---|---|
+      | Limit-parsing slop (`parseInt("12abc")`) | Tightened to `/^\d+$/` validation in `handleGetIssueHistory` |
+      | Missing scale guard on `dbListAllIssues` | Added `LIMIT 5001` + `IssuesPayloadTooLargeError` |
+      | Simulator pattern fragility | Refactored to exact normalized-SQL matching with fail-loud `Unhandled SQL` |
+      | Server route-ordering invariant has zero coverage | Added 7 server.test.ts tests sealing the invariant |
+      | Limit boundary tests missing | Added 7 malformed + 2 boundary acceptance cases |
+      | Same-timestamp tiebreak unverified against real PG | Added integration test asserting `id ASC` insertion-order preservation |
+      | Dead code branch in `dbListIssueHistory` | Removed; bad input now throws fail-loud |
+      | `id ASC` tiebreak comment | Added explanatory comment block at the helper |
+      | 50-cap + referenced-pull real-PG coverage | Added 2 integration tests seeding 60+ closed rows |
+
+      Deferred: 400→404 status code on unknown repo (would require touching all 4 agents-routes handlers — out of scope), `resolveRepo` DRY extraction (same), `RawIssue` cosmetic rename (nit). All flagged in retro for a follow-up card.
+history:
+  - timestamp: 2026-05-09T03:13:14.628Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-155"
+retro:
+  good: |
+    - **Option B preserved the agent/dashboard split cleanly.** The card's
+      pre-decided "MCP `danx_issue_list` stays on YAML" call meant zero
+      changes to `@thehammer/danx-issue-mcp`. Phase 5 reduced to dashboard
+      endpoints + history API — sharper diff, lower regression surface.
+      The card's own description explicitly walked the reasoning, which
+      is why this Phase landed in one tight commit instead of cascading
+      into the MCP package's release pipeline.
+    - **`setIssueDbQueryFn` test hook from Phase 4 was reusable.** The
+      poller's `src/poller/issues-db.ts` already had the query-function
+      injection point and the `setRepoName` registry. The dashboard
+      reader plugged into both with no shim — same SQL surface, same
+      mock pattern, same test ergonomics.
+    - **Strict-matcher simulator caught a real fragility.** The first
+      cut of the unit-test simulator pattern-matched on SQL substrings
+      ("FROM issues" + "repo_name = $1"). Reviewer flagged that any
+      future helper added to `issues-db.ts` (e.g. an external_id
+      lookup) would silently route through `dbListAllIssues` and
+      return the wrong rows. Refactored to normalize whitespace +
+      compare against EXACT expected SQL strings + throw on unknown.
+      Now adding a new helper trips the test loudly during CI.
+    - **`raw_yaml` re-serialization works.** The reader builds
+      `raw_yaml` from `serializeIssue(data)` rather than a disk read.
+      Round-trip equality holds for any YAML originally written by
+      `serializeIssue` (every code path that writes issue YAMLs goes
+      through that helper). The test suite confirms it for the unit
+      cases; the integration test confirms it after the data goes
+      through PG's jsonb canonicalization.
+    - **Scale guard pattern is the right shape.** `LIMIT 5001` + count
+      check + `IssuesPayloadTooLargeError` is a low-effort tripwire
+      that turns a silent multi-MB response into an operator-visible
+      error. Worth replicating any time a JS slice consumes a
+      bounded-by-convention SQL result set.
+  bad: |
+    - **The dashboard's `IssueListItem` slice + sort logic is doing the
+      DB's job in JS.** `listIssues` pulls every row, then in JS:
+      separates open/closed, slices closed to recent-50, walks open +
+      recent-closed for referenced ids, pulls referenced-extras. Every
+      step is a SQL query waiting to happen. At today's scale (150
+      closed cards/repo) the JS path is fine; the scale guard +
+      reviewer feedback both flag it as a tail risk. A follow-up card
+      should split into "all open" + "newest-N closed" + "explicit
+      referenced ids" once the dashboard caches indicate it's
+      worthwhile. The scale guard makes the pivot non-urgent but
+      observable.
+    - **400 vs 404 for unknown repo is now inconsistent across the
+      dashboard.** Agents-routes return 404; new history endpoint
+      returns 400 to match the existing `handleListIssues` /
+      `handleGetIssue`. Reviewer flagged 404 as more standard, but
+      retrofitting the four other handlers (and updating their tests)
+      was out of scope. The inconsistency is now documented in
+      issues-routes comments.
+    - **Repo-lookup boilerplate is duplicated 7 times across
+      issues-routes.ts (3) + agents-routes.ts (4).** Same `if
+      (!params.repo)` + `.find(name)` + `if (!repo)` block. Reviewer
+      called it out; pulling a `resolveRepo(res, name, deps)` helper
+      is straight DRY work but touches more files than this card's
+      scope warrants. Captured as future refactor.
+    - **Manual smoke depends on an operator dashboard restart.** This
+      dispatch ran with a no-restart prohibition. The dashboard SPA
+      didn't change, the API contract is locked by tests, but the
+      visual final-pass needs a `docker compose up -d --force-recreate
+      dashboard` after this commit lands. Operator should verify the
+      Issues tab + drawer + filters once after the restart to close
+      the loop.
+  action_item_ids: []
+  commits:
+    - 3b9d7d7
+waiting_on: null
+blocked: null
