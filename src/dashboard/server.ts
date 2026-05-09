@@ -30,7 +30,9 @@ import {
   handleClearAgentCriticalFailure,
   handlePutIssuePrefix,
   handleGetAgent,
+  handleGetRoster,
   handleListAgents,
+  handlePatchAgentDefaults,
   handlePatchToggle,
 } from "./agents-routes.js";
 import {
@@ -258,6 +260,21 @@ async function route(
     return true;
   }
 
+  // PATCH /api/agents-settings?repo=<name> — DX-159 Phase 1. Operator
+  // toggles the agentDefaults.conflictCheckEnabled flag for the named
+  // repo. Matched ahead of the blanket /api/* gate so the handler's own
+  // `requireUser` produces the 401 (mirrors the PATCH/DELETE handlers
+  // above). 400 on missing repo query, 404 on unknown repo.
+  if (method === "PATCH" && url.pathname === "/api/agents-settings") {
+    const repoName = url.searchParams.get("repo");
+    if (!repoName) {
+      json(res, 400, { error: "Missing required query param: repo" });
+      return true;
+    }
+    await handlePatchAgentDefaults(req, res, repoName, dispatchDeps);
+    return true;
+  }
+
   // User-auth gate for every remaining /api/* route. Bearer lives only in
   // the Authorization header — SSE uses fetch+ReadableStream on the client
   // so query-string tokens (which would leak into access logs) are never
@@ -314,7 +331,18 @@ async function route(
   }
 
   if (method === "GET" && url.pathname === "/api/agents") {
-    await handleListAgents(res, dispatchDeps);
+    // DX-159 Phase 1: ?repo=<name> returns the roster shape
+    // ({agents: AgentRecordWithName[], settings: {conflictCheckEnabled}})
+    // for the new Agents tab. Without the query param, the legacy
+    // unparameterized variant returns the per-repo aggregation array
+    // consumed by the Settings tab. Same path, two shapes — see
+    // `agents-routes.ts` for the rationale.
+    const rosterRepo = url.searchParams.get("repo");
+    if (rosterRepo) {
+      await handleGetRoster(res, rosterRepo, dispatchDeps);
+    } else {
+      await handleListAgents(res, dispatchDeps);
+    }
     return true;
   }
 

@@ -43,6 +43,11 @@ export type {
   CriticalFailureSource,
 } from "@backend/critical-failure.js";
 export type {
+  AgentCapability,
+  AgentDefaults,
+  AgentRecord,
+  AgentRecordWithName,
+  AgentSchedule,
   Feature,
   FeatureOverride,
   Settings,
@@ -52,6 +57,8 @@ export type {
   SettingsDisplayWorker,
   SettingsMeta,
 } from "@backend/settings-file.js";
+export type { AgentRosterResponse } from "@backend/dashboard/agents-routes.js";
+export type { RepoInfo } from "./api";
 export type { RepoDispatchCounts, DispatchCountsByTrigger } from "@backend/dashboard/dispatches-db.js";
 export type {
   IssueListItem,

@@ -36,6 +36,7 @@ import {
   FEATURES,
   readSettings,
   writeSettings,
+  type AgentRecordWithName,
   type Feature,
   type Settings,
 } from "../settings-file.js";
@@ -221,6 +222,121 @@ export async function handleListAgents(
   } catch (err) {
     log.error("handleListAgents failed", err);
     json(res, 500, { error: "Failed to list agents" });
+  }
+}
+
+/**
+ * Roster shape returned by `GET /api/agents?repo=<name>` (DX-159 Phase 1).
+ *
+ * Phase 1 ships the schema + per-repo Settings/Agents UI restructure.
+ * The roster is intentionally always-empty until DX-160 lands the CRUD
+ * UI + dispatch wiring; the field is populated here so the SPA's typed
+ * fetch wrapper can begin consuming the final shape today.
+ */
+export interface AgentRosterResponse {
+  agents: AgentRecordWithName[];
+  settings: { conflictCheckEnabled: boolean };
+}
+
+/**
+ * GET /api/agents?repo=<name> — agent roster for a single repo plus
+ * `agentDefaults.conflictCheckEnabled`. The router dispatches here when
+ * the `?repo=` query is present; the unparameterized variant continues
+ * to call `handleListAgents` for the per-repo aggregation list. Same
+ * path, two shapes, distinct consumers — see `.claude/rules/dashboard.md`.
+ */
+export async function handleGetRoster(
+  res: ServerResponse,
+  repoName: string,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const repo = deps.repos.find((r) => r.name === repoName);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoName}" is not configured` });
+    return;
+  }
+  try {
+    const settings = readSettings(repo.localPath);
+    const agentsMap = settings.agents ?? {};
+    const agents: AgentRecordWithName[] = Object.entries(agentsMap).map(
+      ([name, record]) => ({ name, ...record }),
+    );
+    const conflictCheckEnabled =
+      settings.agentDefaults?.conflictCheckEnabled ?? true;
+    const body: AgentRosterResponse = {
+      agents,
+      settings: { conflictCheckEnabled },
+    };
+    json(res, 200, body);
+  } catch (err) {
+    log.error(`handleGetRoster(${repoName}) failed`, err);
+    json(res, 500, { error: "Failed to load agent roster" });
+  }
+}
+
+/**
+ * PATCH /api/agents-settings?repo=<name> — operator toggles the
+ * conflict-check default for a repo. Auth: per-user bearer (mirrors
+ * `handlePatchToggle`). The dispatch token is intentionally NOT
+ * accepted here; only dashboard users mutate settings.
+ *
+ * Body: `{conflictCheckEnabled: boolean}`. Anything else 400s. The
+ * handler writes via `writeSettings` (which preserves overrides +
+ * agents + display) and returns the refreshed `agentDefaults` block.
+ */
+export async function handlePatchAgentDefaults(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoName: string,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const auth = await requireUser(req);
+  if (!auth.ok) {
+    json(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  const repo = deps.repos.find((r) => r.name === repoName);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoName}" is not configured` });
+    return;
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = await parseBody(req);
+  } catch {
+    json(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  const enabled = body["conflictCheckEnabled"];
+  if (enabled !== true && enabled !== false) {
+    json(res, 400, { error: "conflictCheckEnabled must be true or false" });
+    return;
+  }
+
+  try {
+    await writeSettings(repo.localPath, {
+      agentDefaults: { conflictCheckEnabled: enabled },
+      writtenBy: `${DASHBOARD_PREFIX}${auth.user.username}`,
+    });
+    const refreshed = readSettings(repo.localPath);
+    json(res, 200, {
+      settings: {
+        conflictCheckEnabled:
+          refreshed.agentDefaults?.conflictCheckEnabled ?? true,
+      },
+    });
+  } catch (err) {
+    log.error(
+      `handlePatchAgentDefaults(${repoName}, ${enabled}) failed`,
+      err,
+    );
+    json(res, 500, {
+      error:
+        err instanceof Error ? err.message : "Failed to update agentDefaults",
+    });
   }
 }
 

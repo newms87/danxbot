@@ -1,5 +1,6 @@
 import { watch } from "vue";
 import type {
+  AgentRosterResponse,
   AgentSnapshot,
   Dispatch,
   DispatchDetail,
@@ -131,6 +132,55 @@ export async function fetchIssueDetail(
 export async function fetchAgent(repo: string): Promise<AgentSnapshot> {
   const res = await fetchWithAuth(`/api/agents/${encodeURIComponent(repo)}`);
   if (!res.ok) throw new Error(`fetchAgent failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * GET /api/agents?repo=<name> — DX-159 Phase 1. Returns the empty
+ * roster + agentDefaults.conflictCheckEnabled. The query-string variant
+ * is the new shape; the path-style `/api/agents/:repo` continues to
+ * return the per-repo aggregation snapshot consumed by the Settings
+ * tab. Same path, two shapes — see `agents-routes.ts` for rationale.
+ */
+export async function fetchAgentRoster(
+  repo: string,
+): Promise<AgentRosterResponse> {
+  const res = await fetchWithAuth(
+    `/api/agents?repo=${encodeURIComponent(repo)}`,
+  );
+  if (!res.ok) throw new Error(`fetchAgentRoster failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * PATCH /api/agents-settings?repo=<name> — toggle the per-repo
+ * `agentDefaults.conflictCheckEnabled` flag. The Settings tab uses
+ * this to expose the conflict-check switch alongside the env-feature
+ * toggles. Returns the refreshed agentDefaults block. Errors surface
+ * as a `ToggleError` for direct rendering.
+ */
+export async function patchAgentDefaults(
+  repo: string,
+  conflictCheckEnabled: boolean,
+): Promise<{ settings: { conflictCheckEnabled: boolean } }> {
+  const res = await fetchWithAuth(
+    `/api/agents-settings?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conflictCheckEnabled }),
+    },
+  );
+  if (!res.ok) {
+    let message: string | undefined;
+    try {
+      const body = await res.json();
+      if (body && typeof body.error === "string") message = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw toggleError(res.status, message);
+  }
   return res.json();
 }
 

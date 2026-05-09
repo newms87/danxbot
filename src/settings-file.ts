@@ -123,9 +123,84 @@ export interface SettingsMeta {
   updatedBy: SettingsWriter;
 }
 
+/**
+ * Multi-worker agent — DX-159 / DX-158 epic.
+ *
+ * Each entry is keyed by the agent's name in the agents map. Names are
+ * URL/branch/path-safe (`^[a-z][a-z0-9_-]{0,31}$`) because they're used as
+ * git branch names, worktree directory names, and container hostnames.
+ *
+ * Validation lives in `normalize()`; invalid records are dropped from the
+ * in-memory shape with a log warning rather than throwing — the file
+ * remains source of truth and operators fix via the dashboard or a
+ * hand-edit. Phase 1 only ships the schema + per-repo Settings/Agents
+ * UI restructure; the CRUD UI + dispatch wiring lands in DX-160+.
+ */
+export type AgentCapability = "issue-worker" | "slack" | "api";
+
+export const AGENT_CAPABILITIES: readonly AgentCapability[] = [
+  "issue-worker",
+  "slack",
+  "api",
+] as const;
+
+export interface AgentSchedule {
+  tz: string;
+  mon: string[];
+  tue: string[];
+  wed: string[];
+  thu: string[];
+  fri: string[];
+  sat: string[];
+  sun: string[];
+}
+
+export interface AgentRecord {
+  type: "agent";
+  bio: string;
+  avatar_path?: string;
+  capabilities: AgentCapability[];
+  schedule: AgentSchedule;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentDefaults {
+  conflictCheckEnabled: boolean;
+}
+
+/**
+ * `readAgents` shape: `AgentRecord` enriched with the map key as `name`,
+ * suitable for direct iteration by callers that need both pieces.
+ */
+export interface AgentRecordWithName extends AgentRecord {
+  name: string;
+}
+
+/** Max agents per repo. Hard cap — entries beyond this are dropped on read. */
+export const AGENTS_MAX = 5;
+
+/** URL/branch/path-safe agent name shape. */
+export const AGENT_NAME_SHAPE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/** HH:MM-HH:MM, 24-hour, both ends optional minute leading zero handled. */
+export const SCHEDULE_WINDOW_SHAPE =
+  /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
+
 export interface Settings {
   overrides: SettingsOverrides;
   display: SettingsDisplay;
+  /**
+   * Map of agent records keyed by agent name. Optional in the type so
+   * test fixtures and pre-Phase-1 file shapes type-check without the
+   * field, but `readSettings` / `normalize` ALWAYS materialize an empty
+   * `{}` so production reads can rely on the field being present.
+   * Treat the `?` as a structural-typing accommodation, not a
+   * "sometimes missing in memory" signal.
+   */
+  agents?: Record<string, AgentRecord>;
+  agentDefaults?: AgentDefaults;
   meta: SettingsMeta;
 }
 
@@ -140,6 +215,15 @@ export interface WriteSettingsPatchOverrides {
 export interface WriteSettingsPatch {
   overrides?: WriteSettingsPatchOverrides;
   display?: SettingsDisplay;
+  /**
+   * Replace the entire agents map. Pass an empty object to clear all
+   * agents. Pass `undefined` (or omit the field) to leave the existing
+   * map untouched. Per-record patching lives in DX-160's CRUD routes;
+   * the schema-level write is a wholesale replace by design.
+   */
+  agents?: Record<string, AgentRecord>;
+  /** Patch a subset of agentDefaults; missing keys are preserved. */
+  agentDefaults?: Partial<AgentDefaults>;
   writtenBy: SettingsWriter;
 }
 
@@ -162,6 +246,8 @@ export function defaultSettings(): Settings {
       autoTriage: { enabled: null },
     },
     display: {},
+    agents: {},
+    agentDefaults: { conflictCheckEnabled: true },
     meta: { updatedAt: new Date(0).toISOString(), updatedBy: "worker" },
   };
 }
@@ -233,6 +319,129 @@ function normalizeIssuePollerOverride(raw: unknown): IssuePollerOverride {
   return { enabled: base.enabled, pickupNamePrefix };
 }
 
+/**
+ * Validate an IANA time zone string. Falsy / non-string / unknown zones
+ * return `false`. Uses `Intl.DateTimeFormat` which throws RangeError for
+ * any value the platform does not recognize as an IANA name; on Node
+ * 20+ this matches the system tzdata.
+ */
+function isValidIanaTimeZone(tz: unknown): tz is string {
+  if (typeof tz !== "string" || tz.length === 0) return false;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Filter an unknown windows array to the subset that match
+ * `SCHEDULE_WINDOW_SHAPE`. Non-array input returns `[]` so the caller
+ * always receives a fresh array safe to mutate. Empty array is the
+ * documented "off" state and is preserved.
+ */
+function normalizeScheduleDay(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (w): w is string => typeof w === "string" && SCHEDULE_WINDOW_SHAPE.test(w),
+  );
+}
+
+function normalizeSchedule(raw: unknown): AgentSchedule | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (!isValidIanaTimeZone(r.tz)) return null;
+  return {
+    tz: r.tz,
+    mon: normalizeScheduleDay(r.mon),
+    tue: normalizeScheduleDay(r.tue),
+    wed: normalizeScheduleDay(r.wed),
+    thu: normalizeScheduleDay(r.thu),
+    fri: normalizeScheduleDay(r.fri),
+    sat: normalizeScheduleDay(r.sat),
+    sun: normalizeScheduleDay(r.sun),
+  };
+}
+
+function normalizeCapabilities(raw: unknown): AgentCapability[] {
+  if (!Array.isArray(raw)) return [];
+  const known = new Set<string>(AGENT_CAPABILITIES);
+  return raw.filter((c): c is AgentCapability => typeof c === "string" && known.has(c));
+}
+
+function normalizeOneAgent(raw: unknown): AgentRecord | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+
+  // Discriminator — keep forward-compat with future entry shapes the file
+  // might host (e.g. service accounts) by rejecting anything that isn't
+  // explicitly tagged as an agent record.
+  if (r.type !== "agent") return null;
+  if (typeof r.bio !== "string") return null;
+  if (typeof r.enabled !== "boolean") return null;
+  if (typeof r.created_at !== "string") return null;
+  if (typeof r.updated_at !== "string") return null;
+
+  const capabilities = normalizeCapabilities(r.capabilities);
+  if (capabilities.length === 0) return null;
+
+  const schedule = normalizeSchedule(r.schedule);
+  if (!schedule) return null;
+
+  const out: AgentRecord = {
+    type: "agent",
+    bio: r.bio,
+    capabilities,
+    schedule,
+    enabled: r.enabled,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+  if (typeof r.avatar_path === "string" && r.avatar_path.length > 0) {
+    out.avatar_path = r.avatar_path;
+  }
+  return out;
+}
+
+function normalizeAgents(raw: unknown): Record<string, AgentRecord> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, AgentRecord> = {};
+  let count = 0;
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (count >= AGENTS_MAX) {
+      log.warn(
+        `agents map exceeds ${AGENTS_MAX}-entry cap — dropping "${name}" and remaining entries`,
+      );
+      break;
+    }
+    if (!AGENT_NAME_SHAPE.test(name)) {
+      log.warn(
+        `agents.${name} dropped — name must match ${AGENT_NAME_SHAPE} (URL/branch/path-safe)`,
+      );
+      continue;
+    }
+    const record = normalizeOneAgent(value);
+    if (!record) {
+      log.warn(`agents.${name} dropped — invalid record shape (capabilities/schedule/required-fields)`);
+      continue;
+    }
+    out[name] = record;
+    count += 1;
+  }
+  return out;
+}
+
+function normalizeAgentDefaults(raw: unknown): AgentDefaults {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const r = raw as Record<string, unknown>;
+    if (typeof r.conflictCheckEnabled === "boolean") {
+      return { conflictCheckEnabled: r.conflictCheckEnabled };
+    }
+  }
+  return { conflictCheckEnabled: true };
+}
+
 function normalize(partial: Partial<Settings> | null | undefined): Settings {
   const d = defaultSettings();
   if (!partial || typeof partial !== "object") return d;
@@ -268,6 +477,8 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
       partial.display && typeof partial.display === "object"
         ? partial.display
         : {},
+    agents: normalizeAgents(partial.agents),
+    agentDefaults: normalizeAgentDefaults(partial.agentDefaults),
     meta,
   };
 }
@@ -358,6 +569,16 @@ async function runWrite(
       display: patch.display
         ? { ...existing.display, ...patch.display }
         : existing.display,
+      agents:
+        patch.agents !== undefined
+          ? normalizeAgents(patch.agents)
+          : (existing.agents ?? {}),
+      agentDefaults: patch.agentDefaults
+        ? {
+            ...(existing.agentDefaults ?? { conflictCheckEnabled: true }),
+            ...patch.agentDefaults,
+          }
+        : (existing.agentDefaults ?? { conflictCheckEnabled: true }),
       meta: {
         updatedAt: new Date().toISOString(),
         updatedBy: patch.writtenBy,
@@ -519,6 +740,46 @@ export function getIssuePollerPickupPrefix(
       err,
     );
     return null;
+  }
+}
+
+/**
+ * Return the agents map as an array of records enriched with their map
+ * key as `name`. Stable insertion order — matches the on-disk JSON
+ * iteration. Empty array when no agents are configured. Never throws —
+ * read failure / corrupt JSON / unknown shape all degrade to `[]` so a
+ * misconfigured file can't take down dispatch wiring downstream.
+ */
+export function readAgents(localPath: string): AgentRecordWithName[] {
+  try {
+    const settings = readSettings(localPath);
+    return Object.entries(settings.agents ?? {}).map(([name, record]) => ({
+      name,
+      ...record,
+    }));
+  } catch (err) {
+    log.error(`readAgents threw — returning [] for ${localPath}`, err);
+    return [];
+  }
+}
+
+/**
+ * Return whether triage-precursor conflict-check should run for this
+ * repo. Defaults to `true` when the file is missing, the key is unset,
+ * or the JSON is corrupt — the conservative "extra LLM call per
+ * dispatch" branch keeps multi-worker safety on by default. Operators
+ * opt OUT explicitly via the dashboard for cost-sensitive ops.
+ */
+export function isConflictCheckEnabled(localPath: string): boolean {
+  try {
+    const settings = readSettings(localPath);
+    return settings.agentDefaults?.conflictCheckEnabled ?? true;
+  } catch (err) {
+    log.error(
+      `isConflictCheckEnabled threw — returning true for ${localPath}`,
+      err,
+    );
+    return true;
   }
 }
 

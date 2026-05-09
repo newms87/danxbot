@@ -1,11 +1,17 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-159
 external_id: 69fe27e409c8446a2b4a5665
 parent_id: DX-158
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: e2e4fa0a-0ea4-43a3-8c53-5107c0734286
+  pid: 82756
+  host: dan
+  kind: work
+  started_at: 2026-05-09T05:55:11.387Z
+  ttl_seconds: 7200
+status: In Progress
 type: Feature
 title: "Multi-Worker > Phase 1: Agents settings schema + Settings/Agents UI tab restructure"
 description: |-
@@ -149,6 +155,7 @@ description: |-
   - Persona inject + finalize script (DX-162).
   - Lock queries + triage-precursor (DX-163).
   - Card UI badges + busy state (DX-164).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -163,35 +170,35 @@ triage:
 ac:
   - check_item_id: 69fe27e519808c84f66e368e
     title: Settings type extends with agents{} + agentDefaults; existing files load without errors
-    checked: false
+    checked: true
   - check_item_id: 69fe27e5b97b604f9e3c6320
     title: normalize() validates max-5, name pattern, capability subset, IANA tz, HH:MM windows; bad records dropped + logged
-    checked: false
+    checked: true
   - check_item_id: 69fe27e6a28d527ba0936967
     title: GET /api/agents and PATCH /api/agents-settings live; 4 route tests pass
-    checked: false
+    checked: true
   - check_item_id: 69fe27e6f9c8ce642dcbdea8
     title: Existing Agents tab renamed to Settings and scoped to currently-selected repo (no longer iterates all repos)
-    checked: false
+    checked: true
   - check_item_id: 69fe27e62217ddb6dc983576
     title: New Agents tab live with empty-state UI + disabled "+ New Agent" button
-    checked: false
+    checked: true
   - check_item_id: 69fe27e70c224d27e2df79b5
     title: 10 settings-file tests + 4 route tests pass; full vitest green; tsc + vue-tsc clean
-    checked: false
+    checked: true
   - check_item_id: 69fe27e712bcbf9b9c55c06d
     title: Manual smoke at http://localhost:5566 — two tabs visible, Settings shows current repo only, Agents shows empty state
-    checked: false
+    checked: true
 comments: []
-history: []
+history:
+  - timestamp: 2026-05-09T05:25:29.354Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-151"
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Hard dependency on Issues DB Mirror epic (DX-151) — locks queried in Phase 5 (DX-163) need the issues table generated columns.
-  timestamp: 2026-05-08T12:00:00.000Z
-  by:
-    - DX-151
+waiting_on: null
 blocked: null

@@ -16,13 +16,16 @@ import {
   buildDisplayFromContext,
   defaultSettings,
   getIssuePollerPickupPrefix,
+  isConflictCheckEnabled,
   isFeatureEnabled,
   mask,
+  readAgents,
   readSettings,
   settingsFilePath,
   settingsLockPath,
   syncSettingsFileOnBoot,
   writeSettings,
+  type AgentRecord,
   type Settings,
 } from "./settings-file.js";
 
@@ -855,6 +858,330 @@ describe("settings-file", () => {
         pickupNamePrefix: "[X]",
       });
       expect(raw.overrides.trelloPoller).toBeUndefined();
+    });
+  });
+
+  // ============================================================
+  // agents{} + agentDefaults — DX-159 Phase 1
+  //
+  // Schema additions: AgentRecord-typed entries keyed by agent name plus
+  // an optional `agentDefaults` block carrying the conflictCheckEnabled
+  // toggle. Validation rules (drop-on-fail unless noted as filter):
+  //   - Max 5 entries; excess dropped + warned.
+  //   - Name regex: ^[a-z][a-z0-9_-]{0,31}$ (URL/branch/path-safe).
+  //   - capabilities: non-empty subset of {issue-worker,slack,api}.
+  //     Unknown values are filtered per-element; an empty result drops
+  //     the entire record.
+  //   - schedule.tz: parseable by Intl.DateTimeFormat (else drop).
+  //   - Per-day windows: HH:MM-HH:MM regex; bad windows filtered per
+  //     element; empty array allowed.
+  //
+  // Helpers: readAgents(ctx) returns a stable-ordered array of valid
+  // records; isConflictCheckEnabled(ctx) returns true by default.
+  // ============================================================
+
+  describe("agents schema", () => {
+    function validAgent(over?: Partial<AgentRecord>): AgentRecord {
+      return {
+        type: "agent",
+        bio: "Default test bio.",
+        capabilities: ["issue-worker"],
+        schedule: {
+          tz: "America/Chicago",
+          mon: ["09:00-17:00"],
+          tue: ["09:00-17:00"],
+          wed: ["09:00-17:00"],
+          thu: ["09:00-17:00"],
+          fri: ["09:00-12:00"],
+          sat: [],
+          sun: [],
+        },
+        enabled: true,
+        created_at: "2026-05-08T12:00:00Z",
+        updated_at: "2026-05-08T12:00:00Z",
+        ...over,
+      };
+    }
+
+    it("drops the 6th-and-beyond entry from a 6-agent file (cap = 5)", () => {
+      const agents: Record<string, AgentRecord> = {};
+      for (let i = 0; i < 6; i++) agents[`a${i}`] = validAgent();
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({ overrides: {}, agents }),
+      );
+
+      const s = readSettings(localPath);
+      const names = Object.keys(s.agents ?? {});
+      expect(names).toHaveLength(5);
+      // Insertion order — first 5 keep, 6th drops.
+      expect(names).toEqual(["a0", "a1", "a2", "a3", "a4"]);
+    });
+
+    it("drops agents with names that don't match ^[a-z][a-z0-9_-]{0,31}$", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            // bad — uppercase
+            Alice: validAgent(),
+            // bad — leading digit
+            "1abc": validAgent(),
+            // bad — too long (> 32 chars total)
+            "a-very-long-name-that-exceeds-thirty-two-chars": validAgent(),
+            // bad — empty name (would never serialize this way but proves the regex catches it)
+            // good
+            alice: validAgent(),
+            // good
+            bob_x: validAgent(),
+          },
+        }),
+      );
+
+      const s = readSettings(localPath);
+      const names = Object.keys(s.agents ?? {}).sort();
+      expect(names).toEqual(["alice", "bob_x"]);
+    });
+
+    it("drops agents with empty capabilities array", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: validAgent({ capabilities: [] }),
+            bob: validAgent({ capabilities: ["slack"] }),
+          },
+        }),
+      );
+
+      const s = readSettings(localPath);
+      expect(Object.keys(s.agents ?? {})).toEqual(["bob"]);
+    });
+
+    it("strips unknown capability values, keeps valid ones", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: validAgent({
+              capabilities: ["issue-worker", "wat", "api", "nope"] as never,
+            }),
+          },
+        }),
+      );
+
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.capabilities).toEqual(["issue-worker", "api"]);
+    });
+
+    it("drops agents with non-IANA schedule.tz", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: validAgent({
+              schedule: {
+                ...validAgent().schedule,
+                tz: "Bogus/Place",
+              },
+            }),
+            bob: validAgent(),
+          },
+        }),
+      );
+
+      const s = readSettings(localPath);
+      expect(Object.keys(s.agents ?? {})).toEqual(["bob"]);
+    });
+
+    it("strips per-day windows that don't match HH:MM-HH:MM", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: validAgent({
+              schedule: {
+                ...validAgent().schedule,
+                mon: ["09:00-25:00", "12:00-13:00", "ohai"],
+                tue: ["09:00-17:00"],
+              },
+            }),
+          },
+        }),
+      );
+
+      const s = readSettings(localPath);
+      // Only the in-range window survives on mon; tue is unchanged.
+      expect(s.agents?.alice.schedule.mon).toEqual(["12:00-13:00"]);
+      expect(s.agents?.alice.schedule.tue).toEqual(["09:00-17:00"]);
+    });
+
+    it("round-trips a valid agents map across write+read", async () => {
+      await writeSettings(localPath, {
+        agents: {
+          alice: validAgent({ bio: "Alice's bio." }),
+          bob: validAgent({ bio: "Bob's bio.", capabilities: ["slack"] }),
+        },
+        writtenBy: "dashboard:test",
+      });
+      const s = readSettings(localPath);
+      expect(Object.keys(s.agents ?? {}).sort()).toEqual(["alice", "bob"]);
+      expect(s.agents?.alice.bio).toBe("Alice's bio.");
+      expect(s.agents?.bob.capabilities).toEqual(["slack"]);
+    });
+
+    it("readAgents() returns the agents as an array in insertion order", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            charlie: validAgent({ bio: "C" }),
+            alice: validAgent({ bio: "A" }),
+            bob: validAgent({ bio: "B" }),
+          },
+        }),
+      );
+      const arr = readAgents(localPath);
+      expect(arr.map((a) => a.name)).toEqual(["charlie", "alice", "bob"]);
+      expect(arr.map((a) => a.bio)).toEqual(["C", "A", "B"]);
+    });
+
+    it("isConflictCheckEnabled() defaults true when undefined and reflects explicit values", async () => {
+      // Default (no agentDefaults written) → true.
+      expect(isConflictCheckEnabled(localPath)).toBe(true);
+
+      // Explicit true.
+      await writeSettings(localPath, {
+        agentDefaults: { conflictCheckEnabled: true },
+        writtenBy: "dashboard:test",
+      });
+      expect(isConflictCheckEnabled(localPath)).toBe(true);
+
+      // Explicit false.
+      await writeSettings(localPath, {
+        agentDefaults: { conflictCheckEnabled: false },
+        writtenBy: "dashboard:test",
+      });
+      expect(isConflictCheckEnabled(localPath)).toBe(false);
+
+      // Returns true on a corrupt file (fail-safe — never throws).
+      writeFileSync(settingsFilePath(localPath), "not json");
+      expect(isConflictCheckEnabled(localPath)).toBe(true);
+    });
+
+    it("preserves agents + agentDefaults across an unrelated overrides patch", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent({ bio: "A" }) },
+        agentDefaults: { conflictCheckEnabled: false },
+        writtenBy: "dashboard:test",
+      });
+
+      // An unrelated toggle patch must not clobber agents or agentDefaults.
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.bio).toBe("A");
+      expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+    });
+
+    it("missing agents/agentDefaults in stored file load as empty/defaults (backwards-compat)", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {
+            slack: { enabled: null },
+            issuePoller: { enabled: null },
+            dispatchApi: { enabled: null },
+          },
+          display: {},
+          meta: { updatedAt: "2026-05-08T12:00:00Z", updatedBy: "worker" },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.agents).toEqual({});
+      expect(s.agentDefaults?.conflictCheckEnabled).toBe(true);
+    });
+
+    it("drops records missing required fields (bio, enabled, timestamps)", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            // missing bio
+            no_bio: { ...validAgent(), bio: undefined },
+            // non-boolean enabled
+            bad_enabled: { ...validAgent(), enabled: "yes" },
+            // missing timestamps
+            no_created_at: { ...validAgent(), created_at: undefined },
+            no_updated_at: { ...validAgent(), updated_at: undefined },
+            // good baseline
+            ok: validAgent(),
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(Object.keys(s.agents ?? {})).toEqual(["ok"]);
+    });
+
+    it("drops records missing the type:'agent' discriminator", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            no_type: { ...validAgent(), type: undefined },
+            wrong_type: { ...validAgent(), type: "service" },
+            ok: validAgent(),
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(Object.keys(s.agents ?? {})).toEqual(["ok"]);
+    });
+
+    it("writeSettings({agents: {}}) clears every agent without touching defaults", async () => {
+      await writeSettings(localPath, {
+        agents: {
+          alice: validAgent({ bio: "A" }),
+          bob: validAgent({ bio: "B" }),
+        },
+        agentDefaults: { conflictCheckEnabled: false },
+        writtenBy: "dashboard:test",
+      });
+      // Confirm seeding worked.
+      expect(Object.keys(readSettings(localPath).agents ?? {})).toEqual([
+        "alice",
+        "bob",
+      ]);
+
+      await writeSettings(localPath, {
+        agents: {},
+        writtenBy: "dashboard:test",
+      });
+      const s = readSettings(localPath);
+      expect(s.agents).toEqual({});
+      // agentDefaults should NOT have been touched by an agents-only patch.
+      expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+    });
+
+    it("does not throw on totally bogus agents shape — degrades to empty map", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({ overrides: {}, agents: 42, agentDefaults: "wat" }),
+      );
+      const s = readSettings(localPath);
+      expect(s.agents).toEqual({});
+      expect(s.agentDefaults?.conflictCheckEnabled).toBe(true);
     });
   });
 });

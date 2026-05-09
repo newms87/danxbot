@@ -75,12 +75,12 @@ const activeTabModel = computed<string>({
       </span>
 
       <select
-        v-if="repos.length > 1 && (activeTab === 'dispatches' || activeTab === 'issues')"
+        v-if="repos.length > 1 && (activeTab === 'dispatches' || activeTab === 'issues' || activeTab === 'settings' || activeTab === 'agents')"
         :value="selectedRepo"
         class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300 border-0 outline-none cursor-pointer"
         @change="emit('update:selectedRepo', ($event.target as HTMLSelectElement).value)"
       >
-        <option value="">All repos</option>
+        <option v-if="activeTab === 'dispatches' || activeTab === 'issues'" value="">All repos</option>
         <option v-for="repo in repos" :key="repo.name" :value="repo.name">
           {{ repo.name }}
         </option>
