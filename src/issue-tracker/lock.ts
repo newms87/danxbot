@@ -43,6 +43,7 @@ import {
 } from "./markers.js";
 import { createLogger } from "../logger.js";
 import { type IssueTracker } from "./interface.js";
+import { isPidAlive as realIsPidAlive } from "../agent/host-pid.js";
 
 const log = createLogger("dispatch-lock");
 
@@ -55,10 +56,22 @@ export const LOCK_TTL_MS = 2 * 60 * 60 * 1000;
  * THIS list, so renaming a row touches one site instead of two. The
  * ordering is the on-disk render order; reorderings are cosmetic and
  * roundtrip cleanly through `parseLockComment`.
+ *
+ * `host_pid` (DX-241) carries the dispatching worker's host PID so a
+ * later acquire on the SAME host can fast-path liveness via signal-0,
+ * rather than waiting the full TTL when the prior worker is gone.
+ * Cross-host PID liveness is intentionally NOT asserted — different
+ * hosts have different PID namespaces.
+ *
+ * `released_at` (DX-241) is empty on a live lock and stamped by
+ * `releaseLock` to mark the lock as explicitly released. The release
+ * path also rewrites `started_at` to epoch so the comment is instantly
+ * stale to TTL — `released_at` is human-readable audit trail.
  */
 export const LOCK_FIELDS = [
   "holder",
   "host",
+  "host_pid",
   "dispatch_id",
   "repo_path",
   "jsonl_dir",
@@ -66,6 +79,7 @@ export const LOCK_FIELDS = [
   "started_at",
   "ttl",
   "stale_after",
+  "released_at",
 ] as const;
 export type LockField = (typeof LOCK_FIELDS)[number];
 
@@ -88,6 +102,14 @@ export type LockField = (typeof LOCK_FIELDS)[number];
 export interface LockHolderInfo {
   holder: string;
   host: string;
+  /**
+   * Host PID of the dispatching worker (`process.pid`). Stamped into the
+   * lock comment so the next acquire on the SAME host can fast-path
+   * liveness via signal-0 instead of waiting the 2h TTL. Cross-host
+   * acquires ignore the field — different hosts have different PID
+   * namespaces. Set to `0` to mean "unknown / pre-DX-241 worker".
+   */
+  hostPid: number;
   dispatchId: string;
   repoPath: string;
   jsonlDir: string;
@@ -98,11 +120,21 @@ export interface LockHolderInfo {
 export interface ParsedLock {
   holder: string;
   host: string;
+  /** Host PID stored on the lock; `0` for legacy comments missing the field. */
+  hostPid: number;
   dispatchId: string;
   repoPath: string;
   jsonlDir: string;
   workspace: string;
   startedAt: string;
+  /**
+   * Empty on a live lock; ISO timestamp on a released lock. Set by
+   * `releaseLock` to mark the lock as explicitly released. The release
+   * path ALSO rewrites `startedAt` to epoch so the lock is instantly
+   * stale to TTL — `releasedAt` is purely human-readable audit trail
+   * + the idempotency guard for repeated releases.
+   */
+  releasedAt: string;
   commentId: string;
 }
 
@@ -135,6 +167,7 @@ export function renderLockComment(
   const values: Record<LockField, string> = {
     holder: info.holder,
     host: info.host,
+    host_pid: String(info.hostPid),
     dispatch_id: info.dispatchId,
     repo_path: info.repoPath,
     jsonl_dir: info.jsonlDir,
@@ -142,6 +175,7 @@ export function renderLockComment(
     started_at: startedAt,
     ttl: ttlLabel,
     stale_after: staleAt,
+    released_at: "",
   };
   const tableRows = LOCK_FIELDS.map(
     (field) => `| ${field} | \`${values[field]}\` |`,
@@ -159,6 +193,50 @@ To find the agent session that worked this card:
 \`\`\`
 grep -l '${info.dispatchId}' ${info.jsonlDir}/*.jsonl
 \`\`\``;
+}
+
+/**
+ * Render a lock comment that has been explicitly released. Preserves the
+ * prior holder's identity for audit, but rewrites `started_at` to epoch
+ * so any future acquire treats it as stale on the very next tick. The
+ * `released_at` row is the audit trail and the idempotency guard
+ * (`releaseLock` refuses to re-release a comment that already carries
+ * a non-empty `released_at`).
+ */
+export function renderReleasedLockComment(
+  prior: ParsedLock,
+  releasedAt: string,
+  ttlMs: number = LOCK_TTL_MS,
+): string {
+  const epoch = "1970-01-01T00:00:00.000Z";
+  const staleAt = new Date(new Date(epoch).getTime() + ttlMs).toISOString();
+  const ttlLabel = `${Math.round(ttlMs / 60000)}m`;
+  const values: Record<LockField, string> = {
+    holder: prior.holder,
+    host: prior.host,
+    host_pid: String(prior.hostPid),
+    dispatch_id: prior.dispatchId,
+    repo_path: prior.repoPath,
+    jsonl_dir: prior.jsonlDir,
+    workspace: prior.workspace,
+    started_at: epoch,
+    ttl: ttlLabel,
+    stale_after: staleAt,
+    released_at: releasedAt,
+  };
+  const tableRows = LOCK_FIELDS.map(
+    (field) => `| ${field} | \`${values[field]}\` |`,
+  ).join("\n");
+  return `${DANXBOT_COMMENT_MARKER}
+${LOCK_COMMENT_MARKER}
+
+**Dispatch lock — RELEASED at ${releasedAt}**
+
+Prior holder shut down cleanly; this comment is preserved for audit only. The next acquire reclaims it on the next poll tick.
+
+| Field | Value |
+|---|---|
+${tableRows}`;
 }
 
 /**
@@ -185,14 +263,25 @@ export function parseLockComment(
   if (!fields.holder || !fields.dispatch_id || !fields.started_at) {
     return null;
   }
+  // Legacy locks (pre-DX-241) don't carry `host_pid`. Default to `0`,
+  // which the liveness path treats as "unknown / skip" — preserves
+  // pre-rollout behavior so swapping workers mid-rollout doesn't make
+  // every legacy lock instantly stale.
+  const hostPidRaw = fields.host_pid ?? "";
+  const hostPidParsed = Number.parseInt(hostPidRaw, 10);
+  const hostPid = Number.isFinite(hostPidParsed) && hostPidParsed > 0
+    ? hostPidParsed
+    : 0;
   return {
     holder: fields.holder,
     host: fields.host ?? "",
+    hostPid,
     dispatchId: fields.dispatch_id,
     repoPath: fields.repo_path ?? "",
     jsonlDir: fields.jsonl_dir ?? "",
     workspace: fields.workspace ?? "",
     startedAt: fields.started_at,
+    releasedAt: fields.released_at ?? "",
     commentId,
   };
 }
@@ -216,6 +305,7 @@ export async function tryAcquireLock(
   info: LockHolderInfo,
   now: Date = new Date(),
   ttlMs: number = LOCK_TTL_MS,
+  isPidAlive: (pid: number) => boolean = realIsPidAlive,
 ): Promise<AcquireResult> {
   const comments = await tracker.getComments(externalId);
   const existingComment = findCommentByMarker(comments, LOCK_COMMENT_MARKER);
@@ -256,7 +346,19 @@ export async function tryAcquireLock(
   const isStale = ageMs >= ttlMs;
   const isSelf = parsed.holder === info.holder && parsed.host === info.host;
 
-  if (!isStale && !isSelf) {
+  // DX-241: same-host PID liveness fast-path. When the prior holder ran
+  // on the same host and stored a real PID, signal-0 the kernel — if
+  // the process is gone, the lock is dead regardless of TTL. Cross-host
+  // is intentionally NOT checked (different PID namespaces). `hostPid:
+  // 0` means the lock pre-dates DX-241, so we skip the check (legacy
+  // safety: don't make every legacy lock instantly stale on rollout).
+  const sameHostDeadPid =
+    !isSelf &&
+    parsed.host === info.host &&
+    parsed.hostPid > 0 &&
+    !isPidAlive(parsed.hostPid);
+
+  if (!isStale && !isSelf && !sameHostDeadPid) {
     return {
       acquired: false,
       existing: parsed,
@@ -271,13 +373,78 @@ export async function tryAcquireLock(
   await tracker.editComment(externalId, existingComment.id, text);
   return {
     acquired: true,
-    reclaimed: isStale && !isSelf,
+    reclaimed: (isStale || sameHostDeadPid) && !isSelf,
     refreshed: isSelf,
     comment: {
       id: existingComment.id,
       text,
       timestamp: existingComment.timestamp,
     },
+  };
+}
+
+export type ReleaseLockReason =
+  | "no-lock"
+  | "unparseable"
+  | "not-mine"
+  | "already-released";
+
+export interface ReleaseResult {
+  released: boolean;
+  reason?: ReleaseLockReason;
+  comment?: { id: string; text: string };
+}
+
+/**
+ * Mark the dispatch lock for `externalId` as released. Edits the existing
+ * lock comment in-place to a "released" form (`started_at` rewritten to
+ * epoch + non-empty `released_at` audit row). The next acquire treats the
+ * lock as instantly stale and reclaims it without waiting the full
+ * `LOCK_TTL_MS`.
+ *
+ * Refusal modes (do not throw — the caller is usually a cleanup path
+ * that must keep going):
+ *  - `no-lock`           — no lock comment on the card.
+ *  - `unparseable`       — comment carries the marker but the body can't
+ *                          be parsed; the next acquire will overwrite
+ *                          it via the existing reclaim path.
+ *  - `not-mine`          — lock belongs to a different dispatch.
+ *  - `already-released`  — comment is in the released form already
+ *                          (idempotency guard for repeated calls).
+ *
+ * The release is keyed on `dispatchId` (NOT host/holder) because
+ * dispatchIds are unique per session — a dispatch's release should
+ * succeed even when its host/holder differs from the current process
+ * (the future `make clear-stale-locks` operator command runs from the
+ * host outside the dispatch's runtime).
+ */
+export async function releaseLock(
+  tracker: IssueTracker,
+  externalId: string,
+  dispatchId: string,
+  now: Date = new Date(),
+  ttlMs: number = LOCK_TTL_MS,
+): Promise<ReleaseResult> {
+  const comments = await tracker.getComments(externalId);
+  const existingComment = findCommentByMarker(comments, LOCK_COMMENT_MARKER);
+  if (!existingComment) {
+    return { released: false, reason: "no-lock" };
+  }
+  const parsed = parseLockComment(existingComment.text, existingComment.id);
+  if (!parsed) {
+    return { released: false, reason: "unparseable" };
+  }
+  if (parsed.releasedAt !== "") {
+    return { released: false, reason: "already-released" };
+  }
+  if (parsed.dispatchId !== dispatchId) {
+    return { released: false, reason: "not-mine" };
+  }
+  const text = renderReleasedLockComment(parsed, now.toISOString(), ttlMs);
+  await tracker.editComment(externalId, existingComment.id, text);
+  return {
+    released: true,
+    comment: { id: existingComment.id, text },
   };
 }
 
@@ -305,6 +472,12 @@ export function buildLockHolderInfo(args: {
   repoPath: string;
   workspace: string;
   dispatchId: string;
+  /**
+   * Host PID to stamp into the lock comment. Defaults to `process.pid`
+   * — the dispatching worker process. Tests override this to assert
+   * deterministic comment bodies.
+   */
+  hostPid?: number;
 }): LockHolderInfo {
   const host = hostname();
   const cwd = `${args.repoPath}/.danxbot/workspaces/${args.workspace}`;
@@ -313,6 +486,7 @@ export function buildLockHolderInfo(args: {
   return {
     holder: args.targetName || host,
     host,
+    hostPid: args.hostPid ?? process.pid,
     dispatchId: args.dispatchId,
     repoPath: args.repoPath,
     jsonlDir,

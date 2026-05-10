@@ -55,6 +55,12 @@ import { dispatch } from "../dispatch/core.js";
 import { runConflictCheck } from "../dispatch/conflict-check.js";
 import { dispatchWithRecovery } from "../dispatch/recovery-mode.js";
 import { assignedCards, busyAgents } from "../agent/agent-locks.js";
+import { targetName } from "../config.js";
+import {
+  buildLockHolderInfo,
+  tryAcquireLock,
+} from "../issue-tracker/lock.js";
+import type { IssueTracker } from "../issue-tracker/interface.js";
 // `createWorktreeManager` is intentionally imported lazily inside
 // `tryMultiAgentDispatch` so the poller's heavy unit-test mock surface
 // (which partially-mocks `node:child_process` for the OS-spawn path)
@@ -84,6 +90,18 @@ import type { IssueDispatch } from "../issue-tracker/interface.js";
 
 const log = createLogger("multi-agent-pick");
 
+/**
+ * DX-241: predicate for "this card lives on a shared tracker, so a
+ * sibling worker could be polling it." The tracker dispatch lock skips
+ * locally-only cards (memory-tracker fixtures, pre-create drafts that
+ * never pushed), and the dispatch's `lockRelease` field skips them too.
+ * One predicate keeps both call sites in sync — adding `external_id`
+ * normalization (whitespace, future shapes) is a one-line change.
+ */
+function hasTrackerCoordinate(card: { external_id: string }): boolean {
+  return card.external_id.trim() !== "";
+}
+
 export interface MultiAgentPickInput {
   repo: RepoContext;
   /**
@@ -97,6 +115,16 @@ export interface MultiAgentPickInput {
    * earlier in the tick.
    */
   inProgress: readonly Issue[];
+  /**
+   * Resolved tracker for this repo. The picker calls
+   * `tryAcquireLock` BEFORE dispatching so a sibling worker (local
+   * dev / production EC2) polling the same Trello card cannot
+   * double-dispatch — Trello-comment lock is the only cross-environment
+   * coordinate (DB-backed `busyAgents` is per-environment). On dispatch
+   * completion, `dispatch()` releases the lock via the new
+   * `lockRelease` field. DX-241.
+   */
+  tracker: IssueTracker;
   now: Date;
 }
 
@@ -126,7 +154,7 @@ export interface MultiAgentPickResult {
 export async function tryMultiAgentDispatch(
   input: MultiAgentPickInput,
 ): Promise<MultiAgentPickResult> {
-  const { repo, cards, inProgress, now } = input;
+  const { repo, cards, inProgress, tracker, now } = input;
   const roster: AgentRecordWithName[] = readAgents(repo.localPath);
   if (roster.length === 0) {
     // No agents configured → caller falls through to the legacy
@@ -218,6 +246,65 @@ export async function tryMultiAgentDispatch(
     const dispatchId = randomUUID();
     const startStamp = buildStartStamp(dispatchId, "work", osHostname());
 
+    // DX-241: tracker dispatch lock. Cross-environment coordination —
+    // a sibling worker (local dev / production EC2) polling the same
+    // tracker card must NOT double-dispatch. The DB-backed
+    // `busyAgents` lock is per-environment; the Trello-comment lock is
+    // the only coordinate every environment can read. Acquired here
+    // (after we know which card to dispatch) and released via
+    // `dispatch()`'s onComplete chain (`input.lockRelease` below).
+    //
+    // Skipped when `hasTrackerCoordinate(card)` is false — locally-only
+    // cards (memory-tracker fixtures, pre-create drafts that never
+    // pushed) have no shared coordinate to lock against. The skip is
+    // structurally safe: a card without an external_id can only be
+    // polled by THIS worker.
+    if (hasTrackerCoordinate(card)) {
+      const lockInfo = buildLockHolderInfo({
+        targetName,
+        repoPath: repo.localPath,
+        workspace: "issue-worker",
+        dispatchId,
+      });
+      let lockResult;
+      try {
+        lockResult = await tryAcquireLock(
+          tracker,
+          card.external_id,
+          lockInfo,
+          now,
+        );
+      } catch (err) {
+        // Tracker rejection during lock acquire — most commonly Trello
+        // 4xx on a stale/missing card or a network outage. Drop the
+        // card from this tick's working set and continue; the next
+        // tick will retry. We surface this loudly because a permanent
+        // tracker outage would silently churn through every card every
+        // tick if every error were swallowed at debug-level.
+        log.warn(
+          `[${repo.name}] multi-agent lock acquire threw for ${card.id} (external_id=${card.external_id}) → ${agent.name}: ${err instanceof Error ? err.message : String(err)} — skipping this tick`,
+        );
+        remainingCards.splice(remainingCards.indexOf(card), 1);
+        continue;
+      }
+      if (!lockResult.acquired) {
+        const held = lockResult.existing!;
+        const ageM = Math.round(
+          (now.getTime() - new Date(held.startedAt).getTime()) / 60000,
+        );
+        log.info(
+          `[${repo.name}] multi-agent lock held by ${held.holder}@${held.host} (dispatch ${held.dispatchId}, ${ageM}m old) — skipping ${card.id}`,
+        );
+        remainingCards.splice(remainingCards.indexOf(card), 1);
+        continue;
+      }
+      if (lockResult.reclaimed) {
+        log.info(
+          `[${repo.name}] multi-agent lock reclaimed for ${card.id} (previous holder went stale)`,
+        );
+      }
+    }
+
     // Stamp `assigned_agent` BEFORE dispatch so the next tick's
     // `assignedCards()` lookup sees the claim even if dispatch()
     // throws mid-spawn.
@@ -278,6 +365,12 @@ export async function tryMultiAgentDispatch(
           dispatchId,
           issueId: stamped.id,
           agent: { name: agent.name, bio: agent.bio },
+          // DX-241: dispatch() releases the tracker lock in its
+          // onComplete chain (success + failure). Skipped for
+          // locally-only cards (no external_id, no shared coordinate).
+          lockRelease: hasTrackerCoordinate(stamped)
+            ? { tracker, externalId: stamped.external_id }
+            : undefined,
           pairedWriteYaml: {
             write: async (pid: number) => {
               const enriched: IssueDispatch = { ...startStamp, pid };

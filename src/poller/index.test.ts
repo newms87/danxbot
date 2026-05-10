@@ -2160,29 +2160,27 @@ describe("poll — _poll crash isolation (DX-149)", () => {
     mockIsFeatureEnabled.mockReturnValue(true);
   });
 
-  it("survives tracker.getComments rejection inside tryAcquireLock — no rethrow", async () => {
+  it("survives tracker.getComments rejection from a deeper _poll path — no rethrow", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
-    // Trigger the exact crash class from production (DX-149): Trello
-    // 400 on /cards/<bogus-external-id>/actions surfaces as a thrown
-    // error from `getComments`, which `tryAcquireLock` calls. Pre-fix,
-    // this killed the worker process. Post-fix, the top-level catch
-    // logs and returns cleanly.
+    // Pre-DX-241 this test hit `tracker.getComments` via
+    // `tryAcquireLock` inside `_poll`. DX-241 moved the lock
+    // acquisition to `tryMultiAgentDispatch` (and removed it from
+    // `_poll` entirely — every poll tick used to write an orphan
+    // lock comment), but the property the test guards is broader: a
+    // tracker rejection from ANY `_poll` code path must not kill the
+    // worker. The orphan-push path under `_poll` calls
+    // `tracker.getComments` to dedupe stamps, so it's a faithful
+    // replacement crash class.
     mockTracker.getComments.mockRejectedValue(
       new Error("Trello API error: 400 Bad Request (GET /cards/mem-2/actions)"),
     );
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
 
-    // Top-level catch fired with a diagnostic prefix so the error is
-    // attributable to the poller and the originating repo.
-    const crashLogs = mockLogger.error.mock.calls.filter((c) =>
-      String(c[0]).includes("_poll crashed"),
-    );
-    expect(crashLogs).toHaveLength(1);
-    expect(String(crashLogs[0][0])).toContain("test-repo");
-    expect(String(crashLogs[0][0])).toContain("Trello API error: 400");
-
-    // Dispatch never fired (lock acquisition is gating).
+    // Either the top-level _poll catch OR an inner per-card catch
+    // absorbs the error — both satisfy the contract. Assert the
+    // worker did NOT escalate the throw (which would kill the
+    // process via poll()'s finally).
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 

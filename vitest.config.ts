@@ -7,6 +7,7 @@ export default defineConfig({
       "src/**/*.test.ts",
       "deploy/**/*.test.ts",
       "mcp-servers/**/*.test.ts",
+      "scripts/**/*.test.ts",
     ],
     exclude: ["**/__tests__/validation/**", "**/node_modules/**"],
   },

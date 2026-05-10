@@ -42,7 +42,9 @@ import type {
   IssueRef,
   IssueTracker,
 } from "../issue-tracker/interface.js";
-import { tryAcquireLock, buildLockHolderInfo } from "../issue-tracker/lock.js";
+// DX-241: legacy `_poll` lock acquisition removed (orphan-lock failure
+// mode #1). The lock is now acquired by `tryMultiAgentDispatch` and
+// released by `dispatch()`'s onComplete chain via `lockRelease`.
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
@@ -828,6 +830,7 @@ async function _poll(repo: RepoContext): Promise<void> {
     repo,
     cards: dispatchablePayloads,
     inProgress: inProgressIssues,
+    tracker,
     now: new Date(),
   });
   if (multiAgentResult.dispatched > 0 || multiAgentResult.conflictBlocked > 0) {
@@ -905,36 +908,15 @@ async function _poll(repo: RepoContext): Promise<void> {
     return;
   }
 
-  // Multi-environment dispatch lock. Same Trello card can be polled
-  // independently from local dev + production EC2 worker; without a
-  // tracker-side lock both write competing local YAMLs and silently
-  // overwrite each other on sync. See `src/issue-tracker/lock.ts`.
-  const lockInfo = buildLockHolderInfo({
-    targetName,
-    repoPath: repo.localPath,
-    workspace: "issue-worker",
-    dispatchId,
-  });
-  const lockResult = await tryAcquireLock(
-    tracker,
-    primary.external_id,
-    lockInfo,
-  );
-  if (!lockResult.acquired) {
-    const held = lockResult.existing!;
-    const ageM = Math.round(
-      (Date.now() - new Date(held.startedAt).getTime()) / 60000,
-    );
-    log.info(
-      `[${repo.name}] ${primary.title} held by ${held.holder}@${held.host} (dispatch ${held.dispatchId}, ${ageM}m old) — skipping this tick`,
-    );
-    return;
-  }
-  if (lockResult.reclaimed) {
-    log.info(
-      `[${repo.name}] ${primary.title} lock reclaimed (previous holder went stale)`,
-    );
-  }
+  // DX-241: legacy lock acquisition removed from this code path.
+  // The multi-environment dispatch lock now lives inside
+  // `tryMultiAgentDispatch` — that's the sole active dispatcher
+  // (legacy unscoped spawn was disabled by DX-242). Acquiring the
+  // lock here when the spawn never fires meant every poll tick wrote
+  // an orphan lock comment that lingered until TTL (DX-241 failure
+  // mode #1: "Worker stop = orphan lock for 2h"). The release path
+  // is wired into `dispatch()`'s onComplete chain via the new
+  // `lockRelease` field on `DispatchInput`.
 
   // Pre-stamp the YAML with the dispatch shell BEFORE spawn so a
   // crash between `dispatch()` resolving and the post-spawn pid stamp

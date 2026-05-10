@@ -62,8 +62,35 @@ vi.mock("./yaml-lifecycle.js", async () => {
 import { tryMultiAgentDispatch } from "./multi-agent-pick.js";
 import { runConflictCheck } from "../dispatch/conflict-check.js";
 import { dispatchWithRecovery } from "../dispatch/recovery-mode.js";
-import type { Issue } from "../issue-tracker/interface.js";
+import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
+
+/**
+ * Lock-acquire stub for the multi-agent path (DX-241). Tests in this
+ * file assert agent picking + dispatch wiring; the tracker-comment
+ * lock is exercised in `src/__tests__/issue-tracker/lock.test.ts`. The
+ * stub always grants the lock so the loop reaches the dispatch call —
+ * a separate test below covers the lock-refusal branch explicitly.
+ */
+function fakeTracker(): IssueTracker {
+  return {
+    fetchOpenCards: async () => [],
+    isValidExternalId: () => true,
+    getCard: async () => {
+      throw new Error("getCard not used in multi-agent-pick.test.ts");
+    },
+    createCard: async () => ({ external_id: "", ac: [] }),
+    updateCard: async () => {},
+    moveToStatus: async () => {},
+    setLabels: async () => {},
+    addComment: async () => ({ id: "lock-cmt", timestamp: "" }),
+    editComment: async () => {},
+    getComments: async () => [],
+    addAcItem: async () => ({ check_item_id: "" }),
+    updateAcItem: async () => {},
+    deleteAcItem: async () => {},
+  };
+}
 
 let tmpRepo: string;
 
@@ -180,6 +207,7 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards: [issue("DX-1")],
       inProgress: [],
+      tracker: fakeTracker(),
       now: NOW,
     });
     expect(result.dispatched).toBe(0);
@@ -202,6 +230,7 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards,
       inProgress: [],
+      tracker: fakeTracker(),
       now: NOW,
     });
 
@@ -230,6 +259,7 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
       inProgress: [issue("DX-99", { status: "In Progress" })],
+      tracker: fakeTracker(),
       now: NOW,
     });
     expect(result.dispatched).toBe(2);
@@ -258,6 +288,7 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards: [issue("DX-1")],
       inProgress: [issue("DX-141", { status: "In Progress" })],
+      tracker: fakeTracker(),
       now: NOW,
     });
     expect(result.dispatched).toBe(0);
@@ -290,6 +321,7 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2"), issue("DX-3")],
       inProgress: [issue("DX-99", { status: "In Progress" })],
+      tracker: fakeTracker(),
       now: NOW,
     });
     expect(result.dispatched).toBe(3);
@@ -317,6 +349,7 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
       inProgress: [],
+      tracker: fakeTracker(),
       now: NOW,
     });
     expect(result.dispatched).toBe(1);
@@ -341,6 +374,7 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
       inProgress: [],
+      tracker: fakeTracker(),
       now: NOW,
     });
     expect(result.dispatched).toBe(1);
@@ -362,12 +396,93 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
       inProgress: [],
+      tracker: fakeTracker(),
       now: NOW,
     });
     // First throw drops DX-1 from the working set; bob then picks
     // DX-2 and succeeds.
     expect(result.dispatched).toBe(1);
     expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(2);
+  });
+
+  it("tracker dispatch lock held by another holder → card is skipped, dispatch never called (DX-241)", async () => {
+    writeSettings({
+      alice: agentRecord("alice"),
+    });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    // Tracker reports an existing lock held by ANOTHER holder, fresh
+    // (within TTL). The picker must skip the card without invoking
+    // dispatchWithRecovery.
+    const heldLockTracker: IssueTracker = {
+      ...fakeTracker(),
+      getComments: async () => [
+        {
+          id: "lock-1",
+          author: "danxbot",
+          timestamp: "",
+          // Hand-built lock body matching renderLockComment.
+          text: [
+            "<!-- danxbot -->",
+            "<!-- danxbot-lock -->",
+            "",
+            "**Dispatch lock**",
+            "",
+            "| Field | Value |",
+            "|---|---|",
+            "| holder | `other-target` |",
+            "| host | `other-host` |",
+            "| host_pid | `4242` |",
+            "| dispatch_id | `held-dispatch-uuid` |",
+            "| repo_path | `/x` |",
+            "| jsonl_dir | `/y` |",
+            "| workspace | `issue-worker` |",
+            "| started_at | `" + NOW.toISOString() + "` |",
+            "| ttl | `120m` |",
+            "| stale_after | `2099-12-31T00:00:00.000Z` |",
+            "| released_at | `` |",
+          ].join("\n"),
+        },
+      ],
+    };
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: heldLockTracker,
+      now: NOW,
+    });
+    expect(result.dispatched).toBe(0);
+    expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+  });
+
+  it("dispatch input carries lockRelease pointing at the same tracker + external_id (DX-241)", async () => {
+    writeSettings({
+      alice: agentRecord("alice"),
+    });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+    const tracker = fakeTracker();
+
+    await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker,
+      now: NOW,
+    });
+
+    expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    expect(dispatchInput.lockRelease).toBeDefined();
+    expect(dispatchInput.lockRelease!.tracker).toBe(tracker);
+    expect(dispatchInput.lockRelease!.externalId).toBe("ext-DX-1");
   });
 
   it("card already assigned to another agent → other agent's card is skipped", async () => {
@@ -390,6 +505,7 @@ describe("tryMultiAgentDispatch", () => {
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
       inProgress: [],
+      tracker: fakeTracker(),
       now: NOW,
     });
     expect(result.dispatched).toBe(1);

@@ -382,6 +382,24 @@ else
 	@exit 1
 endif
 
+# DX-241 emergency cleanup. Walks every YAML in
+# `<repo>/.danxbot/issues/{open,closed}/`, finds tracker comments
+# carrying the dispatch-lock marker, and edits them to the "released"
+# form so the next poll tick reclaims without waiting the 2h TTL.
+# Runs from the repo root (cwd-relative paths inside the script
+# match the worker's view of `repos/<n>/`).
+#
+#   make clear-stale-locks REPO=<n>                   # apply
+#   DRY_RUN=1 make clear-stale-locks REPO=<n>         # preview only
+#   AGE_HOURS=4 make clear-stale-locks REPO=<n>       # only locks ≥ 4h old
+#
+# Idempotent — locks already in released form are reported but not
+# re-edited. Failures on a single card are logged but never abort
+# the run. See `scripts/clear-stale-locks.ts` for the full contract.
+clear-stale-locks: ## Release every stale dispatch-lock comment for a repo (usage: make clear-stale-locks REPO=<n>)
+	@if [ -z "$(REPO)" ]; then echo "Error: REPO is required. Usage: make clear-stale-locks REPO=<n>"; exit 1; fi
+	@DANXBOT_REPO_NAME="$(REPO)" DRY_RUN="$(DRY_RUN)" AGE_HOURS="$(AGE_HOURS)" npx tsx scripts/clear-stale-locks.ts
+
 # Publish @thehammer/danx-issue-mcp to npm. Danxbot OWNS this package
 # (source at ~/web/danx-issue-mcp/) — every dispatched agent and host
 # session resolves the MCP via `npx -y @thehammer/danx-issue-mcp`, so

@@ -62,6 +62,8 @@ import {
   type StagedFileInput,
 } from "./staged-files.js";
 import { prependPersona, type PersonaContext } from "../agent/persona.js";
+import { releaseLock } from "../issue-tracker/lock.js";
+import type { IssueTracker } from "../issue-tracker/interface.js";
 
 const log = createLogger("dispatch-core");
 
@@ -326,6 +328,33 @@ export interface DispatchInput {
    * dispatch.
    */
   agent?: PersonaContext;
+  /**
+   * Tracker dispatch lock to release when this dispatch reaches a
+   * terminal state. Set by the poller path (Trello multi-agent
+   * dispatch) — when present, `dispatch()` fires
+   * `releaseLock(tracker, externalId, dispatchId)` as part of the
+   * onComplete cleanup chain, BEFORE the caller's `onComplete`.
+   *
+   * Failures (`released: false`) are logged but never thrown — the
+   * cleanup path must keep running. Includes:
+   *  - `no-lock`           — fine, the lock was already cleared.
+   *  - `unparseable`       — fine, next acquire reclaims via the
+   *                          existing legacy-corruption path.
+   *  - `not-mine`          — surprising; another holder rewrote the
+   *                          comment between dispatch + completion.
+   *  - `already-released`  — fine, idempotent.
+   *
+   * Also fired from the spawn-failure catch in `spawnForDispatch` so a
+   * dispatch that crashes before reaching a terminal status still
+   * releases its lock instead of leaking it for 2h.
+   *
+   * Slack listener / `/api/launch` / system tests omit this — they
+   * don't acquire a tracker lock, so there is nothing to release. DX-241.
+   */
+  lockRelease?: {
+    tracker: IssueTracker;
+    externalId: string;
+  };
 }
 
 export interface DispatchResult {
@@ -355,6 +384,39 @@ function cleanupMcpSettings(settingsDir: string): void {
   } catch (err) {
     log.error(`Failed to clean up MCP settings dir ${settingsDir}:`, err);
   }
+}
+
+function releaseDispatchLock(
+  dispatchId: string,
+  lockRelease: { tracker: IssueTracker; externalId: string },
+): void {
+  releaseLock(lockRelease.tracker, lockRelease.externalId, dispatchId)
+    .then((result) => {
+      if (result.released) {
+        log.info(
+          `[Dispatch ${dispatchId}] released tracker lock on ${lockRelease.externalId}`,
+        );
+      } else if (result.reason === "not-mine") {
+        // A sibling worker (local dev / production EC2 / parallel
+        // host) reclaimed this lock between our acquire and our
+        // terminal state. That means our work potentially raced
+        // theirs against the same card — investigate before assuming
+        // both runs were independent.
+        log.warn(
+          `[Dispatch ${dispatchId}] lock release on ${lockRelease.externalId} found a different dispatch as owner — another worker reclaimed mid-dispatch; our work may have raced theirs (investigate)`,
+        );
+      } else {
+        log.info(
+          `[Dispatch ${dispatchId}] lock release on ${lockRelease.externalId} no-op (${result.reason})`,
+        );
+      }
+    })
+    .catch((err) => {
+      log.error(
+        `[Dispatch ${dispatchId}] lock release on ${lockRelease.externalId} threw — leaking until TTL or next poll tick`,
+        err,
+      );
+    });
 }
 
 /**
@@ -437,6 +499,31 @@ async function runResolved(
 ): Promise<DispatchResult> {
   const taskWithInstruction = input.task + buildCompletionInstruction();
   let resumeCount = 0;
+
+  // DX-241: state shared across all respawns for one dispatch.
+  // - `lockReleased`: at-most-once gate, idempotent across the
+  //   `pairedWriteHostPid` rollback race (close-handler onComplete +
+  //   spawnForDispatch's catch can both fire — without the gate the
+  //   tracker eats a duplicate editComment call and the second invocation
+  //   logs a misleading `not-mine`/`already-released` line).
+  // - `respawnInProgress`: gates the lock-release call inside the
+  //   per-respawn onComplete chain. Stall recovery's
+  //   `terminateWithGrace` triggers the prior job's close handler →
+  //   onComplete fires; without this flag the dispatch lock would be
+  //   released between every respawn, opening a window where a sibling
+  //   worker (local dev / production EC2) could grab the same card mid-
+  //   recovery. Held=true while the next spawn is being prepared; reset
+  //   in a finally so a respawn-failure path still releases at the end.
+  let lockReleased = false;
+  let respawnInProgress = false;
+
+  function fireLockReleaseOnce(): void {
+    if (lockReleased) return;
+    lockReleased = true;
+    if (input.lockRelease) {
+      releaseDispatchLock(dispatchId, input.lockRelease);
+    }
+  }
 
   async function spawnForDispatch(
     prompt: string,
@@ -541,6 +628,18 @@ async function runResolved(
           if (resolved.settingsPath) {
             cleanupWorkspaceSettings(resolved.settingsPath);
           }
+          // DX-241: fire-and-forget tracker lock release. Runs BEFORE
+          // the caller's onComplete so the lock is gone by the time
+          // the poller's card-progress check observes the terminal
+          // job. Two gates: `respawnInProgress` skips release between
+          // stall-recovery respawns (the dispatch is logically still
+          // running); `fireLockReleaseOnce` makes the call idempotent
+          // across the `pairedWriteHostPid` rollback race (the
+          // close-handler onComplete + the catch path can both fire
+          // — gate them so the tracker only eats one editComment).
+          if (!respawnInProgress) {
+            fireLockReleaseOnce();
+          }
           input.onComplete?.(completedJob);
         },
       });
@@ -550,6 +649,14 @@ async function runResolved(
       if (resolved.settingsPath) {
         cleanupWorkspaceSettings(resolved.settingsPath);
       }
+      // DX-241: spawn-failure path also releases the tracker lock so a
+      // dispatch that died before reaching a terminal status doesn't
+      // leak its lock until TTL. `fireLockReleaseOnce` short-circuits
+      // when the close-handler onComplete already fired (the
+      // `pairedWriteHostPid` rollback path SIGTERMs the process,
+      // which triggers the close handler before throwing back up
+      // here).
+      fireLockReleaseOnce();
       throw spawnErr;
     }
 
@@ -602,25 +709,39 @@ async function runResolved(
           ),
         );
 
-        await terminateWithGrace(currentJob, 5_000);
-
-        // Use the original task (not taskWithInstruction) as the base so the
-        // completion instruction appears exactly once, followed by the stall note.
-        const nudgePrompt =
-          input.task +
-          buildCompletionInstruction() +
-          `\n\n---\nNOTE: Your previous session appeared to stall after receiving ` +
-          `a tool result (resume ${resumeCount}/${MAX_STALL_RESUMES}). ` +
-          `Continue your work from where it was left off.`;
-
+        // DX-241: hold the lock across the respawn. Without this flag
+        // `terminateWithGrace` triggers the prior job's close handler →
+        // onComplete fires → `releaseDispatchLock` runs, leaving the
+        // tracker card unlocked between respawns. A sibling worker
+        // (local dev vs production EC2) polling the same card could
+        // grab it during the recovery window.
+        respawnInProgress = true;
         try {
-          const newJob = await spawnForDispatch(nudgePrompt, true);
-          setupStallDetection(newJob);
-        } catch (err) {
-          log.error(
-            `[Dispatch ${dispatchId}] Failed to respawn after stall:`,
-            err,
-          );
+          await terminateWithGrace(currentJob, 5_000);
+
+          // Use the original task (not taskWithInstruction) as the base so the
+          // completion instruction appears exactly once, followed by the stall note.
+          const nudgePrompt =
+            input.task +
+            buildCompletionInstruction() +
+            `\n\n---\nNOTE: Your previous session appeared to stall after receiving ` +
+            `a tool result (resume ${resumeCount}/${MAX_STALL_RESUMES}). ` +
+            `Continue your work from where it was left off.`;
+
+          try {
+            const newJob = await spawnForDispatch(nudgePrompt, true);
+            setupStallDetection(newJob);
+          } catch (err) {
+            log.error(
+              `[Dispatch ${dispatchId}] Failed to respawn after stall:`,
+              err,
+            );
+            // Respawn never landed — release the lock now so the next
+            // poll tick can reclaim instead of waiting for TTL.
+            fireLockReleaseOnce();
+          }
+        } finally {
+          respawnInProgress = false;
         }
       },
     });
