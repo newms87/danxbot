@@ -152,6 +152,11 @@ async function startMirror(
       pool: handle!.pool,
       reconcileIntervalMs: 0,
       awaitTimeoutMs: 5000,
+      // Production's 5000ms stabilityThreshold ties with vitest's default
+      // 5000ms test timeout — every chokidar-driven test would time out.
+      // Tests write complete buffers in one syscall, so the mid-write
+      // JSONB race the production debounce smooths cannot occur here.
+      awaitWriteFinish: { stabilityThreshold: 50, pollInterval: 25 },
     },
   );
 }
