@@ -17,7 +17,7 @@ function buildIssue(
   overrides: Partial<Issue> & { id: string; status: IssueStatus },
 ): Issue {
   const merged: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     external_id: "",
     parent_id: null,
@@ -39,6 +39,7 @@ function buildIssue(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on: null,
     history: [],
@@ -142,11 +143,10 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     expect(reloaded.title).toBe("Fresh open copy");
   });
 
-  it("does not touch non-terminal YAMLs (ToDo / In Progress / Blocked / Needs Approval / waiting_on)", () => {
+  it("does not touch non-terminal YAMLs (ToDo / In Progress / Blocked / waiting_on / requires_human)", () => {
     const todo = buildIssue({ id: "ISS-1", status: "ToDo" });
     const inProgress = buildIssue({ id: "ISS-2", status: "In Progress" });
     const needsHelp = buildIssue({ id: "ISS-3", status: "Blocked" });
-    const needsApproval = buildIssue({ id: "ISS-4", status: "Needs Approval" });
     const blocked = buildIssue({
       id: "ISS-5",
       status: "ToDo",
@@ -156,8 +156,20 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
         by: ["ISS-9"],
       },
     });
+    // DX-231: a card with `requires_human != null` is a dispatch gate,
+    // not a terminal state — heal must leave it in `open/`.
+    const requiresHuman = buildIssue({
+      id: "ISS-6",
+      status: "ToDo",
+      requires_human: {
+        reason: "Need 3rd-party Stripe key rotation",
+        steps: ["Rotate the Stripe secret"],
+        set_by: "agent",
+        set_at: "2026-05-10T12:00:00.000Z",
+      },
+    });
 
-    for (const issue of [todo, inProgress, needsHelp, needsApproval, blocked]) {
+    for (const issue of [todo, inProgress, needsHelp, blocked, requiresHuman]) {
       writeFileSync(resolve(openDir, `${issue.id}.yml`), serializeIssue(issue));
     }
 
@@ -165,7 +177,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
 
     expect(result.healed).toEqual([]);
     expect(result.errors).toEqual([]);
-    for (const issue of [todo, inProgress, needsHelp, needsApproval, blocked]) {
+    for (const issue of [todo, inProgress, needsHelp, blocked, requiresHuman]) {
       expect(
         existsSync(resolve(openDir, `${issue.id}.yml`)),
         `${issue.id}.yml should remain in open/`,

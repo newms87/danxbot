@@ -11,7 +11,7 @@ function makeIssue(
   status: Issue["status"] = "In Progress",
 ): Issue {
   const merged: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -35,6 +35,7 @@ function makeIssue(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on: null,
     history: [],

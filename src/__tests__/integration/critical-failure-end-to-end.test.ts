@@ -476,7 +476,6 @@ beforeEach(async () => {
       todoListId: "list-todo",
       inProgressListId: "list-inprog",
       needsHelpListId: "list-needshelp",
-      needsApprovalListId: "list-needshelp",
       doneListId: "list-done",
       cancelledListId: "list-cancelled",
       actionItemsListId: "list-actionitems",
@@ -484,7 +483,6 @@ beforeEach(async () => {
       featureLabelId: "label-feature",
       epicLabelId: "label-epic",
       needsHelpLabelId: "label-needshelp",
-      needsApprovalLabelId: "label-needshelp",
       blockedLabelId: "label-blocked",
     },
   });

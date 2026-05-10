@@ -20,7 +20,6 @@ const MOCK_REPO_CONTEXT: RepoContext = {
     todoListId: "todo-list",
     inProgressListId: "ip-list",
     needsHelpListId: "nh-list",
-    needsApprovalListId: "nh-list",
     doneListId: "done-list",
     cancelledListId: "cancelled-list",
     actionItemsListId: "ai-list",
@@ -28,7 +27,6 @@ const MOCK_REPO_CONTEXT: RepoContext = {
     featureLabelId: "feature-label",
     epicLabelId: "epic-label",
     needsHelpLabelId: "nh-label",
-    needsApprovalLabelId: "nh-label",
     blockedLabelId: "blk-label",
   },
   slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
@@ -62,7 +60,6 @@ const { mockRepoContexts } = vi.hoisted(() => {
       todoListId: "todo-list",
       inProgressListId: "ip-list",
       needsHelpListId: "nh-list",
-      needsApprovalListId: "nh-list",
       doneListId: "done-list",
       cancelledListId: "cancelled-list",
       actionItemsListId: "ai-list",
@@ -70,7 +67,6 @@ const { mockRepoContexts } = vi.hoisted(() => {
       featureLabelId: "feature-label",
       epicLabelId: "epic-label",
       needsHelpLabelId: "nh-label",
-      needsApprovalLabelId: "nh-label",
       blockedLabelId: "blk-label",
     },
     slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
@@ -308,7 +304,7 @@ const mockEnsureGitignoreEntry = vi.fn();
  */
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "trello",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -325,6 +321,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on: null,
     history: [],
@@ -4488,7 +4485,7 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll �
     // again across multiple back-to-back ticks (without
     // `_resetForTesting`).
     mockFindByExternalId.mockReturnValue({
-      schema_version: 5,
+      schema_version: 6,
       tracker: "trello",
       id: "ISS-100",
       external_id: "card-cached",
@@ -4670,7 +4667,7 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll �
       ref("card-uuid-3", "Card 3", "ToDo"),
     ]);
     const existingIssue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "trello",
       id: "ISS-200",
       external_id: "card-uuid-3",
@@ -4711,7 +4708,7 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll �
       ref("card-block-1", "Blocked card", "ToDo"),
     ]);
     const blockedIssue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "trello",
       id: "ISS-300",
       external_id: "card-block-1",
@@ -4734,6 +4731,7 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll �
         by: ["ISS-99"],
       },
       blocked: null,
+      requires_human: null,
       history: [],
     };
     mockFindByExternalId.mockReturnValue(blockedIssue);
@@ -6127,7 +6125,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
     kindOverride: "work" | "triage" = "work",
   ): Issue {
     const merged: Issue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id,
       external_id: `ext-${id}`,
@@ -6158,7 +6156,8 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
-    assigned_agent: null,
+      requires_human: null,
+      assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -6343,7 +6342,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
     host: string,
   ): Promise<Issue> {
     const issue: Issue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id,
       external_id: `ext-${id}`,
@@ -6374,7 +6373,8 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
-    assigned_agent: null,
+      requires_human: null,
+      assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -6456,7 +6456,7 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const aliveIssue: Issue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-200",
       external_id: "ext-200",
@@ -6487,7 +6487,8 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
-    assigned_agent: null,
+      requires_human: null,
+      assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -6534,7 +6535,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const issue: Issue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-301",
       external_id: "ext-301",
@@ -6565,7 +6566,8 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
-    assigned_agent: null,
+      requires_human: null,
+      assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -6951,7 +6953,7 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] spawnC
 
     // Simulate the boot reattach having already registered this card.
     const aliveYaml: Issue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-501",
       external_id: "card-restart-alive",
@@ -6975,7 +6977,8 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] spawnC
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
-    assigned_agent: null,
+      requires_human: null,
+      assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -7025,7 +7028,7 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] spawnC
     const { hostname: osHostname } = await import("node:os");
     const host = osHostname();
     const expiredYaml: Issue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-502",
       external_id: "card-ttl-expired",
@@ -7057,7 +7060,8 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] spawnC
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
-    assigned_agent: null,
+      requires_human: null,
+      assigned_agent: null,
     waiting_on: null,
       history: [],
     };

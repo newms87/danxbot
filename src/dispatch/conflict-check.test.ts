@@ -13,7 +13,7 @@ function issue(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id,
     external_id: "",
@@ -39,6 +39,7 @@ function issue(
     assigned_agent: null,
     waiting_on: null,
     blocked: null,
+    requires_human: null,
     history: [],
     ...overrides,
   };

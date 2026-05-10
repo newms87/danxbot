@@ -6,7 +6,7 @@ function defaultInput(
   overrides: Partial<CreateCardInput> = {},
 ): CreateCardInput {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -84,7 +84,7 @@ describe("MemoryTracker", () => {
     await tracker.setLabels(external_id, {
       type: "Bug",
       blocked: false,
-      needsApproval: false,
+      requires_human: false,
       triaged: false,
     });
     const card = await tracker.getCard(external_id);
@@ -101,7 +101,7 @@ describe("MemoryTracker", () => {
     expect(initial.labels).toEqual({
       type: "Feature",
       blocked: false,
-      needsApproval: false,
+      requires_human: false,
       triaged: false,
     });
 
@@ -109,14 +109,14 @@ describe("MemoryTracker", () => {
     await tracker.setLabels(external_id, {
       type: "Bug",
       blocked: true,
-      needsApproval: false,
+      requires_human: false,
       triaged: true,
     });
     const updated = await tracker.getCard(external_id);
     expect(updated.labels).toEqual({
       type: "Bug",
       blocked: true,
-      needsApproval: false,
+      requires_human: false,
       triaged: true,
     });
   });
@@ -219,7 +219,7 @@ describe("MemoryTracker", () => {
     await tracker.setLabels(external_id, {
       type: "Bug",
       blocked: false,
-      needsApproval: false,
+      requires_human: false,
       triaged: true,
     });
     const addedCommentResult = await tracker.addComment(external_id, "hi");
@@ -265,7 +265,7 @@ describe("MemoryTracker", () => {
 
     // details payload shape: setLabels carries the labels triple.
     expect(byMethod("setLabels")?.details).toEqual({
-      labels: { type: "Bug", blocked: false, needsApproval: false, triaged: true },
+      labels: { type: "Bug", blocked: false, requires_human: false, triaged: true },
     });
     // moveToStatus carries the target status.
     expect(byMethod("moveToStatus")?.details).toEqual({
@@ -319,7 +319,7 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 5,
+          schema_version: 6,
           tracker: "memory",
           id: "ISS-1",
           external_id: "seed-1",
@@ -338,6 +338,7 @@ describe("MemoryTracker", () => {
           blocked: null,
           assigned_agent: null,
           waiting_on: null,
+          requires_human: null,
           history: [],
         },
       ],
@@ -354,7 +355,7 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 5,
+          schema_version: 6,
           tracker: "trello",
           id: "ISS-2",
           external_id: "seed-trello",
@@ -373,6 +374,7 @@ describe("MemoryTracker", () => {
           blocked: null,
           assigned_agent: null,
           waiting_on: null,
+          requires_human: null,
           history: [],
         },
       ],

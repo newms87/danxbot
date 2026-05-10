@@ -38,7 +38,7 @@ import { ReconcileValidationError } from "./reconcile-types.js";
 
 function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id,
     external_id: "",
@@ -64,6 +64,7 @@ function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
     assigned_agent: null,
     waiting_on: null,
     blocked: null,
+    requires_human: null,
     history: [],
   };
 }
@@ -247,7 +248,6 @@ describe("reconcileIssue — behaviour parity (no-op chokepoint)", () => {
     { name: "In Progress card", status: "In Progress", dir: "open" },
     { name: "Done in closed/", status: "Done", dir: "closed" },
     { name: "Cancelled in closed/", status: "Cancelled", dir: "closed" },
-    { name: "Needs Approval", status: "Needs Approval", dir: "open" },
   ];
 
   for (const f of fixtures) {

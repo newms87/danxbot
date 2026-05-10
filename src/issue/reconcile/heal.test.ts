@@ -7,7 +7,7 @@ function makeIssue(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -36,6 +36,7 @@ function makeIssue(
         : null,
     assigned_agent: null,
     waiting_on: null,
+    requires_human: null,
     history: [],
     ...overrides,
   };
@@ -66,10 +67,8 @@ describe("decideFileMove — pure helper (DX-217)", () => {
     it("Blocked in open/ → null (Blocked is non-terminal)", () => {
       expect(decideFileMove(makeIssue("Blocked"), "open")).toBeNull();
     });
-
-    it("Needs Approval in open/ → null", () => {
-      expect(decideFileMove(makeIssue("Needs Approval"), "open")).toBeNull();
-    });
+    // DX-231 retired the `Needs Approval` parking status — the
+    // corresponding heal-direction case went away with it.
   });
 
   describe("open → closed direction (terminal in wrong bucket)", () => {

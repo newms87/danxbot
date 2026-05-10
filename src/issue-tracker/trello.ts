@@ -80,14 +80,14 @@ export class TrelloTracker implements IssueTracker {
       { status: "ToDo", listId: this.trello.todoListId },
       { status: "In Progress", listId: this.trello.inProgressListId },
       { status: "Blocked", listId: this.trello.needsHelpListId },
-      { status: "Needs Approval", listId: this.trello.needsApprovalListId },
       { status: "Review", listId: this.trello.actionItemsListId },
     ];
     const refs: IssueRef[] = [];
     for (const entry of openLists) {
-      // Skip lists the operator has not provisioned yet (empty id).
-      // Currently only `Needs Approval` can be empty during rollout; the
-      // others are required by `loadTrelloIds`.
+      // `loadTrelloIds` requires every list id, so a non-empty value is
+      // an invariant by the time the request reaches this loop. The
+      // legacy `Needs Approval` rollout-empty exemption was retired in
+      // DX-231 alongside the parking status itself.
       if (!entry.listId) continue;
       const cards = await this.fetchListCards(entry.listId);
       for (const card of cards) {
@@ -135,7 +135,7 @@ export class TrelloTracker implements IssueTracker {
     // calls `getComments` itself for the merge step).
     const parsed = parseCardTitle(card.name);
     return {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "trello",
       // Internal id is parsed from the `#<PREFIX>-N: ` title prefix where
       // PREFIX is any 2-4 uppercase letters (Phase 2 of ISS-99 — supports
@@ -175,13 +175,15 @@ export class TrelloTracker implements IssueTracker {
       // native field for the persona claim. Always emit null on read so
       // the local YAML stays authoritative.
       assigned_agent: null,
-      // `waiting_on` (dep-chain queue) and `blocked` (self-block reason)
-      // are local-only metadata managed by the agent + worker. Trello has
-      // no native field for either — the Blocked label is derived from
-      // `status === "Blocked"` only. Always emit null on read so the
-      // local YAML stays authoritative for both records.
+      // `waiting_on` (dep-chain queue), `blocked` (self-block reason),
+      // and `requires_human` (orthogonal "needs human action" indicator,
+      // DX-231) are all local-only metadata managed by the agent + worker.
+      // Trello has no native field for any of them — labels carry the
+      // boolean projection only. Always emit null on read so the local
+      // YAML stays authoritative for the structured records.
       waiting_on: null,
       blocked: null,
+      requires_human: null,
       // `history` is local-only audit; Trello has no native field for it.
       // Phase 1 of DX-138 (DX-145) lands the schema; the tracker abstraction
       // never sees history, so `getCard` always emits [] here.
@@ -195,10 +197,15 @@ export class TrelloTracker implements IssueTracker {
     ac: { check_item_id: string }[];
   }> {
     const listId = this.statusToListId(input.status);
+    // `requires_human: false` on every fresh card — the field is null on
+    // create per the schema; agents/operators populate it later via
+    // subsequent saves. Phase 3 of DX-231 wires the actual Trello label
+    // id into `resolveLabelIds`; today the label is provisioned but
+    // unwired here, so passing the boolean is a no-op until then.
     const labelIds = await this.resolveLabelIds({
       type: input.type,
       blocked: input.status === "Blocked",
-      needsApproval: input.status === "Needs Approval",
+      requires_human: false,
       triaged: isTriaged(input.triage),
     });
     const url = `${TRELLO_BASE}/cards?${this.auth()}`;
@@ -340,9 +347,13 @@ export class TrelloTracker implements IssueTracker {
       // exist on the board for now (operator-renamed later); the data
       // layer is fully repurposed to the new "Blocked" status name.
       blocked: idLabels.includes(this.trello.blockedLabelId),
-      needsApproval:
-        !!this.trello.needsApprovalLabelId &&
-        idLabels.includes(this.trello.needsApprovalLabelId),
+      // `requires_human` (DX-231) is the orthogonal "needs human action"
+      // indicator. Phase 3 of the epic provisions the matching Trello
+      // label and wires its id through `TrelloConfig`; until then the
+      // projection always reads `false` because no label id exists to
+      // match against. Local YAML's `requires_human` field is the
+      // source of truth in the meantime.
+      requires_human: false,
       triaged: idLabels.includes(triagedLabelId),
     };
   }
@@ -496,13 +507,6 @@ export class TrelloTracker implements IssueTracker {
         return this.trello.inProgressListId;
       case "Blocked":
         return this.trello.needsHelpListId;
-      case "Needs Approval":
-        if (!this.trello.needsApprovalListId) {
-          throw new Error(
-            "Trello board has no Needs Approval list configured — add `lists.needs_approval` to .danxbot/config/trello.yml after creating the list on the board.",
-          );
-        }
-        return this.trello.needsApprovalListId;
       case "Done":
         return this.trello.doneListId;
       case "Cancelled":
@@ -515,12 +519,6 @@ export class TrelloTracker implements IssueTracker {
     if (listId === this.trello.todoListId) return "ToDo";
     if (listId === this.trello.inProgressListId) return "In Progress";
     if (listId === this.trello.needsHelpListId) return "Blocked";
-    if (
-      this.trello.needsApprovalListId &&
-      listId === this.trello.needsApprovalListId
-    ) {
-      return "Needs Approval";
-    }
     if (listId === this.trello.doneListId) return "Done";
     if (listId === this.trello.cancelledListId) return "Cancelled";
     // Phase 4 of ISS-90 collapsed the Action Items list into
@@ -552,12 +550,13 @@ export class TrelloTracker implements IssueTracker {
     }
     // status === "Blocked" → existing Trello "Blocked" label.
     if (labels.blocked) ids.push(this.trello.blockedLabelId);
-    // Apply the Needs Approval label only when the operator has provisioned
-    // it. Empty id during rollout → silently skip; the managed-set filter
-    // still strips a stale label if the operator removes it later.
-    if (labels.needsApproval && this.trello.needsApprovalLabelId) {
-      ids.push(this.trello.needsApprovalLabelId);
-    }
+    // `requires_human` (DX-231): Phase 3 of the epic provisions the
+    // matching Trello label and threads its id through `TrelloConfig`.
+    // In Phase 1 (this phase) the label is unwired here on purpose —
+    // `Issue.requires_human` defaults to null on every parsed card, so
+    // `labels.requires_human` is always false at this point and the
+    // branch never fires until Phase 3 lands the label id.
+    void labels.requires_human;
     if (labels.triaged) ids.push(await this.resolveTriagedLabelId());
     return ids;
   }
@@ -588,8 +587,12 @@ export class TrelloTracker implements IssueTracker {
    * set always includes it — guaranteeing stale Triaged labels can be
    * stripped on `setLabels({triaged: false})` even when the cache is cold.
    */
+  // DX-231 PHASE 3 HOOK: append `this.trello.requiresHumanLabelId`
+  // to the returned array once the operator has provisioned the
+  // matching Trello label. Phase 1 ships only the schema; the field's
+  // TrelloConfig slot lands in Phase 3.
   private allManagedLabelIdsForFiltering(triagedLabelId: string): string[] {
-    const ids = [
+    return [
       this.trello.bugLabelId,
       this.trello.featureLabelId,
       this.trello.epicLabelId,
@@ -597,13 +600,6 @@ export class TrelloTracker implements IssueTracker {
       this.trello.blockedLabelId,
       triagedLabelId,
     ];
-    // Include the Needs Approval label id only when provisioned. An empty
-    // string in the managed set would erroneously strip every unlabeled
-    // card's labels (the filter compares by exact id match including "").
-    if (this.trello.needsApprovalLabelId) {
-      ids.push(this.trello.needsApprovalLabelId);
-    }
-    return ids;
   }
 
   private async createChecklist(cardId: string, name: string): Promise<string> {

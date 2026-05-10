@@ -315,7 +315,7 @@ export async function evictDeadDispatches(repo: RepoContext): Promise<void> {
         // `issue.dispatch`. Keeps the verdict logic in one place
         // without forcing the per-tick scan to re-load every YAML.
         {
-          schema_version: 5,
+          schema_version: 6,
           tracker: "memory",
           id: issueId,
           external_id: "",
@@ -341,6 +341,7 @@ export async function evictDeadDispatches(repo: RepoContext): Promise<void> {
           assigned_agent: null,
           waiting_on: null,
           blocked: null,
+          requires_human: null,
           history: [],
         } as Issue,
       ],

@@ -122,28 +122,11 @@ describe("loadTrelloIds", () => {
     expect(() => loadTrelloIds(tempRepo)).toThrow(/labels\.bug/);
   });
 
-  it("defaults needsApprovalListId and needsApprovalLabelId to '' when the trello.yml omits the rollout-optional keys", () => {
-    // Phase 1 of the auto-triage epic adds Needs Approval as an OPTIONAL
-    // tracker mapping during the rollout — existing repos predate the
-    // line and must keep loading. Pin the empty-string default so a
-    // future tightening to `req(...)` is caught here, not in production.
-    writeYml(baseYml);
-    const ids = loadTrelloIds(tempRepo);
-    expect(ids.needsApprovalListId).toBe("");
-    expect(ids.needsApprovalLabelId).toBe("");
-  });
-
-  it("returns configured needsApprovalListId / needsApprovalLabelId when the operator has provisioned them", () => {
-    writeYml([
-      ...baseYml.slice(0, 7), // up through needs_help line
-      "  needs_approval: na1",
-      ...baseYml.slice(7), // done, cancelled, action_items, labels, ...
-      "  needs_approval: nal1",
-    ]);
-    const ids = loadTrelloIds(tempRepo);
-    expect(ids.needsApprovalListId).toBe("na1");
-    expect(ids.needsApprovalLabelId).toBe("nal1");
-  });
+  // DX-231 retired `needsApprovalListId` and `needsApprovalLabelId`
+  // from `TrelloConfig`. The legacy "rollout-optional" tests were
+  // removed — Phase 3 of DX-231 introduces a `requiresHumanLabelId`
+  // (and possibly a corresponding list) and reinstates equivalent
+  // coverage there.
 
   it("throws when trello.yml is absent", () => {
     // No writeYml call

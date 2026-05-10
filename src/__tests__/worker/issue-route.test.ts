@@ -101,7 +101,6 @@ async function startTestServer(): Promise<TestHarness> {
       todoListId: "",
       inProgressListId: "",
       needsHelpListId: "",
-      needsApprovalListId: "",
       doneListId: "",
       cancelledListId: "",
       actionItemsListId: "",
@@ -109,7 +108,6 @@ async function startTestServer(): Promise<TestHarness> {
       featureLabelId: "",
       epicLabelId: "",
       needsHelpLabelId: "",
-      needsApprovalLabelId: "",
       blockedLabelId: "",
     },
     trelloEnabled: false,
@@ -487,20 +485,20 @@ describe("runSync (local-first persist)", () => {
     await h.close();
   });
 
-  it("Needs Approval status keeps file in open/ — moveToClosedIfTerminal returns false", async () => {
-    // Needs Approval is a non-dispatchable, non-terminal parking status —
-    // distinct from Done / Cancelled. `moveToClosedIfTerminal` returns
-    // false, and `persistAfterSync` falls through to the open/ write
-    // branch. Pre-DX-157 had this coverage on the legacy save handler;
-    // pinning it on `runSync` directly preserves the contract that
-    // `Needs Approval` MUST NOT trigger the open→closed move.
+  it("requires_human != null keeps file in open/ — moveToClosedIfTerminal returns false (DX-231)", async () => {
+    // DX-231 retired the `Needs Approval` parking status; the orthogonal
+    // `requires_human` field replaces it. A card with the field
+    // populated stays in `open/` regardless of status — the dispatch
+    // session is terminal but the file location is not. This test pins
+    // that `runSync` falls through to the open/ write branch when the
+    // saved YAML carries `requires_human != null`.
     await h.tracker.createCard({
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-77",
       parent_id: null,
       children: [],
-      status: "Needs Approval",
+      status: "ToDo",
       type: "Feature",
       title: "Awaiting design approval",
       priority: 3.0,
@@ -517,7 +515,13 @@ describe("runSync (local-first persist)", () => {
         title: "Awaiting design approval",
       }),
       tracker: "memory",
-      status: "Needs Approval",
+      status: "ToDo",
+      requires_human: {
+        reason: "Need an architectural review before implementation",
+        steps: ["Review approach with a senior eng", "Toggle off this flag"],
+        set_by: "agent",
+        set_at: "2026-05-10T12:00:00.000Z",
+      },
     };
     writeYaml(h.repo.localPath, issue);
 
@@ -535,7 +539,8 @@ describe("runSync (local-first persist)", () => {
       false,
     );
     const persisted = readYaml(h.repo.localPath, "ISS-77");
-    expect(persisted).toContain("status: Needs Approval");
+    expect(persisted).toContain("status: ToDo");
+    expect(persisted).toContain("requires_human:");
   });
 
   it("recordSystemError fires on tracker error alongside recordError (DX-134 Phase 4)", async () => {
@@ -548,7 +553,7 @@ describe("runSync (local-first persist)", () => {
     // call regresses the operator banner without breaking recordError —
     // this test catches that regression.
     await h.tracker.createCard({
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-44",
       parent_id: null,
@@ -620,7 +625,7 @@ describe("syncTrackedIssueOnComplete", () => {
 
   it("AC #4: calls syncIssue synchronously for the tracked id", async () => {
     await h.tracker.createCard({
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-11",
       parent_id: null,
@@ -863,7 +868,7 @@ describe("syncTrackedIssueOnComplete — concurrent invocations", () => {
 
   it("two concurrent calls on same id serialize via chainOnIssueLock; later call observes earlier call's writes", async () => {
     await h.tracker.createCard({
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-50",
       parent_id: null,
@@ -930,7 +935,7 @@ describe("syncTrackedIssueOnComplete — concurrent invocations", () => {
 
   it("first call rejecting via runSync does not poison the queue — second call still runs", async () => {
     await h.tracker.createCard({
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-51",
       parent_id: null,
@@ -1399,7 +1404,7 @@ describe("DX-146: syncTrackedIssueOnComplete reuses the same diff helper", () =>
     // (a) entry lands once and (b) tracker push fires once (no
     // double-append from a hypothetical second helper invocation).
     await h.tracker.createCard({
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-510",
       parent_id: null,

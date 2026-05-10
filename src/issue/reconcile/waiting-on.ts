@@ -20,7 +20,7 @@
  *  - `issue.waiting_on === null` (no record to clear).
  *  - Any dep in `by[]` is missing from the status map.
  *  - Any dep's status is non-terminal (Review / ToDo / In Progress /
- *    Blocked / Needs Approval).
+ *    Blocked).
  *
  * Returns `true` when every dep resolves to `Done` or `Cancelled`.
  */

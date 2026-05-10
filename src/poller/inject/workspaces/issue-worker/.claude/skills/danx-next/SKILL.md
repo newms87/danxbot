@@ -70,7 +70,8 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `parent_id` | string \| null | Set on child cards (epic's `id` for phase children, or any other parent's `id` for sub-cards). Reverse linkage to `children[]`. |
 | `children` | `string[]` (ids) | Ordered list of child issue ids (`<PREFIX>-N`). On `type: Epic` cards, `children[]` IS the list of phase cards (label "Phases"). On non-epic cards, it's the list of sub-cards (label "Children"). Same field, two labels. Maintained by `danx_issue_create` (when a child card is created from a draft) and by the `danx-epic-link` skill (for human-created phase cards). Phases MUST be cards — there is no separate in-card phase checklist. |
 | `dispatch` | `{id, pid, host, kind, started_at, ttl_seconds} \| null` | Poller-managed dispatch record. `null` when no agent is running. Don't touch. |
-| `status` | `Review` \| `ToDo` \| `In Progress` \| `Blocked` \| `Needs Approval` \| `Done` \| `Cancelled` | Editing this is how you move the card across lists. |
+| `status` | `Review` \| `ToDo` \| `In Progress` \| `Blocked` \| `Done` \| `Cancelled` | Editing this is how you move the card across lists. The legacy `Needs Approval` parking status was retired in DX-231 (schema_version 6); use the orthogonal `requires_human` field instead. |
+| `requires_human` | `null` OR `{reason, steps[], set_by, set_at}` | Orthogonal "this card needs a human" indicator (DX-231). `null` when no human action needed. Non-null = the card cannot make progress until a human acts (3rd-party token rotation, credential rotation, ambiguous spec needing a design decision). Independent from `blocked` and `waiting_on`; all three are dispatch gates and may co-exist. Phase 2 of DX-231 lands the dispatch filter that skips cards with `requires_human != null`. |
 | `type` | `Bug` \| `Feature` \| `Epic` | Required label. |
 | `title` | string | Card name. |
 | `description` | string | Full markdown body. |

@@ -15,12 +15,16 @@
  * Priority rules (first match wins):
  *
  *  1. Any child `Blocked` → parent `Blocked`.
- *  2. Any child `Needs Approval` → parent `Needs Approval`.
- *  3. Any child `In Progress` → parent `In Progress`.
- *  4. Any child `ToDo` → parent `ToDo`.
- *  5. All non-cancelled children `Review` → parent `Review`.
- *  6. All non-cancelled children `Done` → parent `Done`.
- *  7. All children `Cancelled` (no exclusion) → parent `Cancelled`.
+ *  2. Any child `In Progress` → parent `In Progress`.
+ *  3. Any child `ToDo` → parent `ToDo`.
+ *  4. All non-cancelled children `Review` → parent `Review`.
+ *  5. All non-cancelled children `Done` → parent `Done`.
+ *  6. All children `Cancelled` (no exclusion) → parent `Cancelled`.
+ *
+ * `Needs Approval` was retired in DX-231 (schema_version 6). The
+ * orthogonal `requires_human` field replaces the parking status —
+ * children carrying it do NOT propagate to the parent (only the dispatch
+ * filter consults the field; epic-level rollup is purely status-based).
  *
  * Anything that doesn't fit (e.g. mix of `Review` + `Done` with no
  * `Cancelled`) returns `null` — the caller leaves the parent's current
@@ -56,12 +60,6 @@ export function deriveParentStatus(
 
   if (children.some((c) => c.status === "Blocked")) {
     return { status: "Blocked", rule: "Any child Blocked — parent Blocked" };
-  }
-  if (children.some((c) => c.status === "Needs Approval")) {
-    return {
-      status: "Needs Approval",
-      rule: "Any child Needs Approval — parent Needs Approval",
-    };
   }
   if (children.some((c) => c.status === "In Progress")) {
     return {

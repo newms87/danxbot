@@ -21,6 +21,7 @@ import {
   type IssueTriage,
   type IssueTriageHistoryEntry,
   type IssueType,
+  type RequiresHuman,
 } from "./interface.js";
 
 const TRIAGE_HISTORY_CAP = 10;
@@ -123,7 +124,7 @@ function emptyTriage(): IssueTriage {
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 4
+ *  - schema_version: 6
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
@@ -147,7 +148,7 @@ export function createEmptyIssue(
   } = {},
 ): Issue {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -166,6 +167,7 @@ export function createEmptyIssue(
     assigned_agent: null,
     waiting_on: null,
     blocked: null,
+    requires_human: null,
     history: [],
   };
 }
@@ -350,7 +352,7 @@ export function serializeIssue(issue: Issue): string {
     // `assigned_agent` carries the persona name claiming the card or `null`
     // when no agent owns it. Serialized AFTER `retro` so existing YAMLs that
     // omit the field round-trip without churning the byte order; the v3 →
-    // v5 migrations don't need a hard rewrite.
+    // v6 migrations don't need a hard rewrite.
     assigned_agent: issue.assigned_agent,
     // `waiting_on` carries `null` (default) or a record with reason/timestamp/by[].
     // Position after `retro` keeps the canonical key order stable for older
@@ -374,6 +376,20 @@ export function serializeIssue(issue: Issue): string {
         : {
             reason: issue.blocked.reason,
             timestamp: issue.blocked.timestamp,
+          },
+    // `requires_human` is the orthogonal "this card needs a human"
+    // indicator (DX-231 — replaces the retired `"Needs Approval"`
+    // status). Position after `blocked` so a reader scanning the YAML
+    // sees every dispatch gate adjacent. Field is `null` when no human
+    // action is needed. Independent from `blocked` and `waiting_on`.
+    requires_human:
+      issue.requires_human === null
+        ? null
+        : {
+            reason: issue.requires_human.reason,
+            steps: [...issue.requires_human.steps],
+            set_by: issue.requires_human.set_by,
+            set_at: issue.requires_human.set_at,
           },
   };
 
@@ -471,7 +487,7 @@ export function buildIssueIdRegex(prefix: string): RegExp {
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -549,11 +565,17 @@ export function validateIssue(
   }
   const v = value as Record<string, unknown>;
 
-  // schema_version — v3 or v4. Reject older versions with a loud migration
-  // pointer. v1 was retired by `migrate-issues-to-v2`; v2 is retired by
-  // `migrate-issues-to-v3` (adds the required `children: []` field). v3 is
-  // migrated to v4 lazily by this validator when reading v3 YAMLs with
-  // `blocked:` field (auto-renamed to `waiting_on:` in the output).
+  // schema_version — v3 through v6. Reject older versions with a loud
+  // migration pointer. v1 was retired by `migrate-issues-to-v2`; v2 is
+  // retired by `migrate-issues-to-v3` (adds the required `children: []`
+  // field). v3 is migrated to v4 lazily by this validator when reading v3
+  // YAMLs with `blocked:` field (auto-renamed to `waiting_on:` in the
+  // output). v6 (DX-231) drops `"Needs Approval"` status and adds the
+  // orthogonal `requires_human` field — the migration is a no-op for
+  // YAMLs that did not carry the retired status (the field defaults
+  // `null` on parse when missing); YAMLs carrying `status: "Needs
+  // Approval"` are rejected fail-loud below so the operator migrates by
+  // hand before the loader can normalize them.
   if (!("schema_version" in v)) {
     errors.push("missing required field: schema_version");
   } else if (v.schema_version === 1 || v.schema_version === 2) {
@@ -563,10 +585,11 @@ export function validateIssue(
   } else if (
     v.schema_version !== 3 &&
     v.schema_version !== 4 &&
-    v.schema_version !== 5
+    v.schema_version !== 5 &&
+    v.schema_version !== 6
   ) {
     errors.push(
-      `schema_version must be 3, 4, or 5 (got ${JSON.stringify(v.schema_version)})`,
+      `schema_version must be 3, 4, 5, or 6 (got ${JSON.stringify(v.schema_version)})`,
     );
   }
 
@@ -656,9 +679,21 @@ export function validateIssue(
   // status — fail loud). Sets `v3NeedsHelpMigration = true` so the v3
   // `blocked` synthesis below populates the new self-block field (the
   // invariant `status === "Blocked" ⟺ blocked !== null` requires it).
+  //
+  // DX-231 (schema_version 6): the `"Needs Approval"` parking status was
+  // retired in favour of the orthogonal `requires_human` field. The
+  // ~3 cards in flight at the time of the rollout are migrated by hand
+  // BEFORE this phase merges (operator moves them to `Review`/`ToDo` and
+  // sets `requires_human` where appropriate). Any YAML still carrying
+  // `status: "Needs Approval"` is a half-migrated file — reject fail-loud
+  // with a clear migration pointer rather than silently coercing.
   let v3NeedsHelpMigration = false;
   if (!("status" in v)) {
     errors.push("missing required field: status");
+  } else if (v.status === "Needs Approval") {
+    errors.push(
+      'status: "Needs Approval" was retired in DX-231 (schema_version 6) — migrate this card by hand: move it to "Review" or "ToDo" and set the orthogonal `requires_human: {...}` field if a human still needs to act.',
+    );
   } else if (
     v.status === "Needs Help" &&
     v.schema_version === 3
@@ -850,6 +885,18 @@ export function validateIssue(
     }
   }
 
+  // requires_human — optional field. Missing → null. Cards predating
+  // DX-231 omit the field entirely; the loader defaults `null` so legacy
+  // YAMLs continue to parse cleanly. Present must be either YAML null OR
+  // `{reason, steps[], set_by, set_at}`. Independent from `blocked` /
+  // `waiting_on` — all three are dispatch gates and may co-exist.
+  let requiresHumanResult: RequiresHuman | null = null;
+  if ("requires_human" in v) {
+    const r = validateRequiresHuman(v.requires_human);
+    if (typeof r === "string") errors.push(r);
+    else requiresHumanResult = r;
+  }
+
   // history — optional field. Missing → []. Legacy YAMLs ship without the
   // field (DX-138 Phase 1 lands the schema). Present must be a list (or YAML
   // null which normalizes to []); each entry strictly validated so a
@@ -901,7 +948,7 @@ export function validateIssue(
   const priorityValue =
     "priority" in v ? clampPriority(v.priority) : PRIORITY_DEFAULT;
   const issue: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
@@ -920,9 +967,56 @@ export function validateIssue(
     assigned_agent: assignedAgentResult,
     waiting_on: waitingOnResult,
     blocked: blockedResult,
+    requires_human: requiresHumanResult,
     history: historyResult,
   };
   return { ok: true, issue };
+}
+
+/**
+ * Validate the `requires_human` field. Shape: `{reason, steps[], set_by,
+ * set_at}` OR null. Mirrors the `Blocked` validator's strictness:
+ *  - `reason` must be a non-empty string (a blank reason is uninformative
+ *    and would surface as an empty banner on the dashboard).
+ *  - `steps` must be an array of strings (empty list permitted but
+ *    discouraged — the dashboard renders the array as a numbered
+ *    checklist; an empty list is a wording defect).
+ *  - `set_by` must be `"agent"` or `"human"` (anything else is a typo).
+ *  - `set_at` must be a non-empty string (caller supplies ISO 8601; the
+ *    validator does not parse the format).
+ */
+function validateRequiresHuman(value: unknown): RequiresHuman | null | string {
+  if (value === null || value === undefined) return null;
+  if (!isPlainObject(value)) {
+    return "requires_human must be a mapping or null";
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.reason !== "string" || v.reason.length === 0) {
+    return "requires_human.reason must be a non-empty string";
+  }
+  if (!Array.isArray(v.steps)) {
+    return "requires_human.steps must be a list of strings";
+  }
+  const steps: string[] = [];
+  for (let i = 0; i < v.steps.length; i++) {
+    const item = v.steps[i];
+    if (typeof item !== "string") {
+      return `requires_human.steps[${i}] must be a string`;
+    }
+    steps.push(item);
+  }
+  if (v.set_by !== "agent" && v.set_by !== "human") {
+    return `requires_human.set_by must be one of ["agent", "human"] (got ${JSON.stringify(v.set_by)})`;
+  }
+  if (typeof v.set_at !== "string" || v.set_at.length === 0) {
+    return "requires_human.set_at must be a non-empty string";
+  }
+  return {
+    reason: v.reason,
+    steps,
+    set_by: v.set_by,
+    set_at: v.set_at,
+  };
 }
 
 function validateHistory(value: unknown): IssueHistoryEntry[] | string {

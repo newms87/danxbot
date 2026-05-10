@@ -11,6 +11,7 @@ import {
   type IssueTriage,
   type IssueType,
   type ManagedLabels,
+  type RequiresHuman,
 } from "./interface.js";
 
 /**
@@ -92,6 +93,7 @@ interface StoredCard {
   };
   waiting_on: { reason: string; timestamp: string; by: string[] } | null;
   blocked: { reason: string; timestamp: string } | null;
+  requires_human: RequiresHuman | null;
   labels: ManagedLabels;
 }
 
@@ -157,7 +159,6 @@ export class MemoryTracker implements IssueTracker {
       "ToDo",
       "In Progress",
       "Blocked",
-      "Needs Approval",
     ]);
     const refs: IssueRef[] = [];
     for (const card of this.cards.values()) {
@@ -218,10 +219,15 @@ export class MemoryTracker implements IssueTracker {
       },
       waiting_on: null,
       blocked: null,
+      requires_human: null,
       labels: {
         type: input.type,
         blocked: input.status === "Blocked",
-        needsApproval: input.status === "Needs Approval",
+        // `createCard` always stamps `requires_human: null` on a fresh
+        // card per the schema contract (the field is added via subsequent
+        // saves), so the matching label boolean is `false` at create
+        // time. DX-231 retired the legacy `needsApproval` derive here.
+        requires_human: false,
         triaged: isTriaged(input.triage),
       },
     };
@@ -387,7 +393,7 @@ export class MemoryTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 5,
+      schema_version: 6,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
@@ -426,6 +432,15 @@ export class MemoryTracker implements IssueTracker {
         card.blocked === null
           ? null
           : { reason: card.blocked.reason, timestamp: card.blocked.timestamp },
+      requires_human:
+        card.requires_human === null
+          ? null
+          : {
+              reason: card.requires_human.reason,
+              steps: [...card.requires_human.steps],
+              set_by: card.requires_human.set_by,
+              set_at: card.requires_human.set_at,
+            },
       // `history` is local-only audit; the tracker abstraction never sees it.
       // MemoryTracker mirrors Trello's contract: always emit [] on read so
       // the local YAML stays authoritative for the audit log.
@@ -469,10 +484,21 @@ export class MemoryTracker implements IssueTracker {
         issue.blocked === null
           ? null
           : { reason: issue.blocked.reason, timestamp: issue.blocked.timestamp },
+      requires_human:
+        issue.requires_human === null
+          ? null
+          : {
+              reason: issue.requires_human.reason,
+              steps: [...issue.requires_human.steps],
+              set_by: issue.requires_human.set_by,
+              set_at: issue.requires_human.set_at,
+            },
       labels: {
         type: issue.type,
         blocked: issue.status === "Blocked",
-        needsApproval: issue.status === "Needs Approval",
+        // Mirrors `createCard`: a stored seed reflects whether the seed
+        // YAML carries a non-null `requires_human` record.
+        requires_human: issue.requires_human !== null,
         triaged: isTriaged(issue.triage),
       },
     };

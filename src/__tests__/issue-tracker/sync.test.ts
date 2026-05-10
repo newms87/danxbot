@@ -17,7 +17,7 @@ import type {
 
 function defaultCreate(): CreateCardInput {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -189,7 +189,7 @@ describe("syncIssue", () => {
   describe("orphan recovery (empty external_id → createCard)", () => {
     function orphan(): Issue {
       return {
-        schema_version: 5,
+        schema_version: 6,
         tracker: "memory",
         id: "ISS-1",
         external_id: "",
@@ -208,6 +208,7 @@ describe("syncIssue", () => {
         blocked: null,
         assigned_agent: null,
         waiting_on: null,
+        requires_human: null,
         history: [],
       };
     }
@@ -398,7 +399,7 @@ describe("syncIssue", () => {
     await tracker.setLabels(external_id, {
       type: "Feature",
       blocked: true,
-      needsApproval: false,
+      requires_human: false,
       triaged: false,
     });
     const local: Issue = {
@@ -417,12 +418,57 @@ describe("syncIssue", () => {
     ).toBe(false);
   });
 
-  it("derives needsApproval:true from status='Needs Approval' (Phase 1 of auto-triage epic)", async () => {
+  it("Phase 1: requires_human-only diff does NOT fire setLabels (deferred to DX-231 Phase 3)", async () => {
+    // DX-231 Phase 1 ships the schema only. The Trello label id for
+    // `requires_human` is provisioned in Phase 3, and until then the
+    // sync layer omits the boolean from the diff predicate so a
+    // flagged card doesn't churn ~2880 no-op setLabels PUTs per day
+    // (the Trello `projectLabels` always reads `false` until the
+    // label id wires through). The local `requires_human` field is
+    // still authoritative on disk; the diff suppression is purely an
+    // outbound-mirror choice.
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
-      status: "Needs Approval",
+      requires_human: {
+        reason: "Need Stripe API key rotated",
+        steps: ["Roll the Stripe secret", "Update DANX_STRIPE_KEY"],
+        set_by: "agent",
+        set_at: "2026-05-10T12:00:00.000Z",
+      },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+    const setLabels = tracker
+      .getRequestLog()
+      .find((l) => l.method === "setLabels");
+    // No setLabels call: type, blocked, triaged are all unchanged;
+    // requires_human is intentionally omitted from the diff in Phase 1.
+    expect(setLabels).toBeUndefined();
+  });
+
+  it("Phase 1: setLabels payload still carries requires_human boolean when other labels do diff", async () => {
+    // Even though the diff predicate omits `requires_human`, the
+    // payload sent to `setLabels` still carries the boolean — so a
+    // tracker that has provisioned the label can still apply / strip
+    // it. The Trello tracker's resolveLabelIds is a no-op on this
+    // boolean in Phase 1 (no label id), but the MemoryTracker mirrors
+    // it through faithfully. Test pinned: when status flips Blocked
+    // (which DOES fire the diff), the setLabels payload includes
+    // `requires_human: true` derived from the orthogonal field.
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Blocked",
+      blocked: { reason: "self-block", timestamp: "2026-05-10T00:00:00.000Z" },
+      requires_human: {
+        reason: "Need Stripe API key rotated",
+        steps: ["Roll the Stripe secret"],
+        set_by: "agent",
+        set_at: "2026-05-10T12:00:00.000Z",
+      },
     };
     tracker.clearRequestLog();
     await syncIssue(tracker, local);
@@ -432,11 +478,11 @@ describe("syncIssue", () => {
     expect(setLabels).toBeDefined();
     const labels = (
       setLabels!.details as {
-        labels: { needsApproval: boolean; blocked: boolean };
+        labels: { requires_human: boolean; blocked: boolean };
       }
     ).labels;
-    expect(labels.needsApproval).toBe(true);
-    expect(labels.blocked).toBe(false);
+    expect(labels.requires_human).toBe(true);
+    expect(labels.blocked).toBe(true);
   });
 
   it("derives blocked:true from local.blocked != null and pushes the Blocked label", async () => {
@@ -499,7 +545,7 @@ describe("syncIssue", () => {
     // Build a tracker pre-seeded with a card whose triage record IS set on
     // the server (via seed Issue), then sync a local that has cleared it.
     const seed: Issue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "memory",
       id: "ISS-2",
       external_id: "card-triaged",
@@ -533,6 +579,7 @@ describe("syncIssue", () => {
       blocked: null,
       assigned_agent: null,
       waiting_on: null,
+      requires_human: null,
       history: [],
     };
     const tracker = new MemoryTracker({ seed: [seed] });
@@ -953,7 +1000,7 @@ describe("syncIssue", () => {
   it("comprehensive idempotency: full-populated YAML re-syncs with zero writes across every diffable field", async () => {
     // Sets every mirrored field to a non-default value, syncs once to push,
     // then re-syncs and asserts zero writes — covers title / description /
-    // status / labels (type + needsHelp + needsApproval + triaged + blocked)
+    // status / labels (type + needsHelp + requires_human + triaged + blocked)
     // / AC items / bot comments / retro in one round-trip.
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());

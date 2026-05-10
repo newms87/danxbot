@@ -50,15 +50,20 @@ function statusColumn(status: IssueStatus): BoardColumn {
 
 const columns = computed<BoardColumn[]>(() => {
   const review = statusColumn("Review");
-  const needsApproval = statusColumn("Needs Approval");
   const todo = statusColumn("ToDo");
   const blocked = statusColumn("Blocked");
   const inProgress = statusColumn("In Progress");
 
+  // DX-231 retired the `Needs Approval` parking column. The orthogonal
+  // `requires_human` field replaces it; Phase 8 of the epic adds a
+  // dedicated indicator on every card. Until then no separate column
+  // exists for the field — flagged cards stay in their status column
+  // with the indicator surfacing the human-action handoff.
+
   if (props.showClosed) {
     const done = { ...statusColumn("Done"), collapsedByDefault: false };
     const cancelled = { ...statusColumn("Cancelled"), collapsedByDefault: false };
-    return [review, needsApproval, todo, blocked, inProgress, done, cancelled];
+    return [review, todo, blocked, inProgress, done, cancelled];
   }
 
   const cutoff = Date.now() - RECENT_DONE_WINDOW_MS;
@@ -70,7 +75,7 @@ const columns = computed<BoardColumn[]>(() => {
     collapsedByDefault: false,
     match: (i) => i.status === "Done" && i.updated_at * 1000 >= cutoff,
   };
-  return [review, needsApproval, todo, blocked, inProgress, doneRecent];
+  return [review, todo, blocked, inProgress, doneRecent];
 });
 
 const collapsed = ref<Record<string, boolean>>({});

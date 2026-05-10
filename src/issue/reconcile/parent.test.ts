@@ -4,7 +4,7 @@ import { applyParentDeriveMutation, deriveParentStatus } from "./parent.js";
 
 function child(id: string, status: IssueStatus): Issue {
   const merged: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -28,6 +28,7 @@ function child(id: string, status: IssueStatus): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on: null,
     history: [],
@@ -58,18 +59,14 @@ describe("deriveParentStatus — pure helper (DX-217)", () => {
     });
   });
 
-  describe("priority rule 2 — any Needs Approval", () => {
-    it("Needs Approval wins over In Progress / Done / ToDo", () => {
-      const result = deriveParentStatus([
-        child("DX-2", "ToDo"),
-        child("DX-3", "Needs Approval"),
-        child("DX-4", "Done"),
-      ]);
-      expect(result?.status).toBe("Needs Approval");
-    });
-  });
+  // DX-231 retired the `Needs Approval` parking status; the priority
+  // rule that propagated it to parents went away with it. The
+  // orthogonal `requires_human` field replaces the status, but it is
+  // intentionally NOT propagated through parent rollup — only the
+  // dispatch filter consults the field. Tests for the retired rule
+  // were removed.
 
-  describe("priority rule 3 — any In Progress", () => {
+  describe("priority rule 2 — any In Progress", () => {
     it("In Progress wins over ToDo / Review / Done / Cancelled", () => {
       const result = deriveParentStatus([
         child("DX-2", "ToDo"),
@@ -176,7 +173,7 @@ function makeParent(
   overrides: Partial<Issue> = {},
 ): Issue {
   const merged: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -200,6 +197,7 @@ function makeParent(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on: null,
     history: [],

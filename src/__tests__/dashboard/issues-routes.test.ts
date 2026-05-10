@@ -170,6 +170,7 @@ describe("handleGetIssue", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+      requires_human: null,
       updated_at: 1_700_000_000_000,
     };
     mockReadIssueDetail.mockResolvedValue(detail);

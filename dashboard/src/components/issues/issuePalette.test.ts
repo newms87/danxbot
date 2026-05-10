@@ -21,10 +21,9 @@ describe("projectChildStatus", () => {
   it("Blocked → 'blocked'", () => {
     expect(projectChildStatus("Blocked", false)).toBe("blocked");
   });
-
-  it("Needs Approval → 'blocked'", () => {
-    expect(projectChildStatus("Needs Approval", false)).toBe("blocked");
-  });
+  // DX-231 retired the legacy `Needs Approval` status mapping; the
+  // orthogonal `requires_human` field gets its own indicator (Phase 8
+  // of the epic), not a status-derived palette branch.
 
   it("non-null waiting_on on a non-terminal status → 'waiting'", () => {
     expect(projectChildStatus("ToDo", true)).toBe("waiting");

@@ -34,7 +34,7 @@ const HOLDER: LockHolderInfo = {
 
 function defaultCreate(): CreateCardInput {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,

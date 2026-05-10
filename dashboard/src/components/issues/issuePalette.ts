@@ -4,10 +4,12 @@ import type { IssueStatus, IssueType } from "../../types";
  * Child-status palette key used by `CHILD_STATUS_META`. Owned by the SPA
  * because the palette is a 5-color design-system decision: Cancelled is
  * conflated with Done; `waiting` is the dep-chain queue rendered as a
- * yellow ⏸ glyph; `blocked` is self-block (status === "Blocked" or the
- * sibling `Needs Approval` parking status) rendered as a red ⛔ glyph;
- * `in_progress` distinguishes a child currently being worked on (amber
- * ◐ glyph) from idle ToDo / Review siblings.
+ * yellow ⏸ glyph; `blocked` is self-block (status === "Blocked")
+ * rendered as a red ⛔ glyph; `in_progress` distinguishes a child
+ * currently being worked on (amber ◐ glyph) from idle ToDo / Review
+ * siblings. DX-231 retired the legacy `Needs Approval` status; the
+ * orthogonal `requires_human` field will get its own indicator in
+ * Phase 8 of the epic.
  */
 export type ChildStatusId =
   | "done"
@@ -21,7 +23,7 @@ export type ChildStatusId =
  * `done | todo | in_progress | blocked | waiting` palette key.
  *
  *  - Done / Cancelled                                     → "done"
- *  - status === "Blocked" / "Needs Approval"              → "blocked"
+ *  - status === "Blocked"                                 → "blocked"
  *  - waiting_on === true                                  → "waiting"
  *  - status === "In Progress"                             → "in_progress"
  *  - Anything else (Review, ToDo)                         → "todo"
@@ -38,7 +40,7 @@ export function projectChildStatus(
   waitingOnByCard: boolean = false,
 ): ChildStatusId {
   if (status === "Done" || status === "Cancelled") return "done";
-  if (status === "Blocked" || status === "Needs Approval") return "blocked";
+  if (status === "Blocked") return "blocked";
   if (waitingOnByCard || waitingOn) return "waiting";
   if (status === "In Progress") return "in_progress";
   return "todo";
@@ -50,7 +52,6 @@ export type ColumnId =
   | "todo"
   | "in_progress"
   | "blocked"
-  | "needs_approval"
   | "done"
   | "cancelled";
 
@@ -102,7 +103,6 @@ export const COLUMN_ACCENTS: Record<IssueStatus, ColumnAccent> = {
   "ToDo":        { id: "todo",        label: "To Do",       accent: "#64748b", collapsedByDefault: false },
   "In Progress": { id: "in_progress", label: "In Progress", accent: "#fcd34d", collapsedByDefault: false },
   "Blocked":     { id: "blocked",     label: "Blocked",     accent: "#ef4444", collapsedByDefault: false },
-  "Needs Approval": { id: "needs_approval", label: "Needs Approval", accent: "#f59e0b", collapsedByDefault: false },
   "Done":        { id: "done",        label: "Done",        accent: "#10b981", collapsedByDefault: true  },
   "Cancelled":   { id: "cancelled",   label: "Cancelled",   accent: "#475569", collapsedByDefault: true  },
 };

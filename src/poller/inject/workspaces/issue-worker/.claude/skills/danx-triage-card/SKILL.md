@@ -78,16 +78,23 @@ The triage agent has THREE paths. The right path is decided by the YAML's
 | `waiting_on == null` AND `status === "Blocked"` | **Blocked** — Hard Gate audit |
 
 `Blocked` is a top-level `status` value (replaced "Needs Help"). The schema's allowed statuses
-are `Review`, `ToDo`, `In Progress`, `Blocked`, `Needs Approval`, `Done`,
-`Cancelled`. A "blocked" card has `status: "Blocked"` AND `blocked: {reason, timestamp}`
-populated; the worker enforces the invariant `status === "Blocked" ⟺ blocked !== null`. A card with `status: ToDo` AND `waiting_on != null` is a Waiting On
-card and routes to the Waiting On path; a card with `status: ToDo` AND
+are `Review`, `ToDo`, `In Progress`, `Blocked`, `Done`, `Cancelled`. The
+legacy `Needs Approval` parking status was retired in DX-231; the
+orthogonal `requires_human` field replaces it. A "blocked" card has
+`status: "Blocked"` AND `blocked: {reason, timestamp}` populated; the
+worker enforces the invariant `status === "Blocked" ⟺ blocked !== null`.
+A card with `status: ToDo` AND `waiting_on != null` is a Waiting On card
+and routes to the Waiting On path; a card with `status: ToDo` AND
 `waiting_on == null` is dispatchable work and OUT OF SCOPE for triage (the
 poller dispatches it through the worker path, not the triage path).
 
 The poller only dispatches you when the card is in one of the three
 in-scope shapes above AND `triage.expires_at <= now` (or empty). For any
-other shape (`status` ∈ `{ToDo, In Progress, Done, Cancelled, Needs Approval}` AND `waiting_on == null` AND `blocked == null`) the poller refuses to dispatch — if you somehow receive one, fail loud with `danxbot_complete({status: "failed", summary: "..."})` and do NOT mutate the YAML.
+other shape (`status` ∈ `{ToDo, In Progress, Done, Cancelled}` AND
+`waiting_on == null` AND `blocked == null`) the poller refuses to
+dispatch — if you somehow receive one, fail loud with
+`danxbot_complete({status: "failed", summary: "..."})` and do NOT mutate
+the YAML.
 
 ## TTLs (per-status re-triage cadence)
 
@@ -140,11 +147,11 @@ Decide one of three outcomes:
 |---|---|---|
 | **Keep** | Card is sound; promote into the dispatch queue. | `status: ToDo`, `triage.last_status: Keep`, `triage.ice` populated. |
 | **Cancel** | Obsolete / superseded / no-longer-desired. | `status: Cancelled`, `triage.last_status: Cancel`, `triage.ice` zeros. |
-| **Approve** | Implementable but the **direction needs human sign-off** before work starts (architectural risk, cross-cutting scope, ambiguous tradeoff). | `status: Needs Approval`, `triage.last_status: Approve`, `triage.ice` populated (so when the human approves and flips to ToDo, the dispatch queue already has a score). |
+| **Approve** | Implementable but the **direction needs human sign-off** before work starts (architectural risk, cross-cutting scope, ambiguous tradeoff). | `status: ToDo`, `requires_human: {reason, steps[], set_by: "agent", set_at: <ISO>}`, `triage.last_status: Approve`, `triage.ice` populated (so when the human flips `requires_human: null` and the card unblocks for dispatch, the queue already has a score). |
 
-**Before emitting `Approve`:** read `<repo>/.danxbot/config/trello.yml` and verify `lists.needs_approval` is non-empty. If empty, fall back to `Cancel` is wrong — instead, **do not save Approve** and append a one-line note in `triage.last_explain`: `"Direction approval needed; Trello board not yet provisioned for Needs Approval — leaving in Review until operator provisions the list."` Stamp `triage.expires_at = now + 24h` and save with `last_status: ""`.
+**Before emitting `Approve`:** populate `requires_human` with a clear `reason` (one sentence — what direction needs human sign-off) and `steps[]` (concrete actions the operator must take to clear the field — e.g. "Confirm direction in design doc", "Decide between options A and B"). Set `set_by: "agent"` and `set_at` to the current ISO timestamp. The poller's dispatch filter (Phase 2 of DX-231) skips any card with `requires_human != null`, so the card stays parked until the human clears the field. The legacy `status: "Needs Approval"` parking status was retired in DX-231 and is rejected fail-loud by the loader.
 
-Distinguishing `Approve` vs `Cancel` vs `Keep` — apply the rule from `claude-plugins/issues/skills/issue-card-workflow/SKILL.md` "Needs Approval vs Blocked":
+Distinguishing `Approve` vs `Cancel` vs `Keep`:
 
 - Could a competent agent finish the card without ever asking the human a question? → **Keep**.
 - Card is implementable but the chosen direction needs sanity-check? → **Approve**.
@@ -206,13 +213,17 @@ A card is **out of scope** ONLY when ALL conditions hold:
 
 1. `waiting_on == null` (no dep-chain record), AND
 2. `blocked == null` (no self-block record), AND
-3. `status` is one of: `ToDo`, `In Progress`, `Done`, `Cancelled`, `Needs Approval`.
+3. `status` is one of: `ToDo`, `In Progress`, `Done`, `Cancelled`.
 
 | `status` (with `waiting_on == null` AND `blocked == null`) | Action |
 |---|---|
 | `ToDo` / `In Progress` | Refuse — these are dispatchable / actively-dispatched cards; never re-triaged. `danxbot_complete({status: "failed", summary: "..."})`. |
 | `Done` / `Cancelled` | Refuse — terminal cards stay frozen. `danxbot_complete({status: "failed", summary: "..."})`. |
-| `Needs Approval` | Refuse — humans only set/clear this status. `danxbot_complete({status: "failed", summary: "..."})`. |
+
+DX-231 retired the legacy `Needs Approval` parking status. The
+orthogonal `requires_human` field replaces it — a card with
+`requires_human != null` is parked the same way (poller skips
+dispatching it) but lives at any open status.
 
 **A card with `waiting_on != null` is NEVER out of scope** — even if its `status` is `ToDo` (the worker forces `ToDo` on every waiting-on card). **A card with `blocked != null` is NEVER out of scope** — even if its `status` is `Blocked` (the worker enforces the invariant). Always route waiting-on cards to the Waiting On path and blocked cards to the Blocked path. Re-read the in-scope table at the top of "Per-status decision trees" if you find yourself looking at `status: ToDo` and considering refusal — the FIRST checks are `waiting_on != null` and `blocked != null`, not `status`.
 

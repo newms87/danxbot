@@ -545,28 +545,34 @@ export async function runSync(
  * indicates the dispatch slot is no longer needed (ISS-92, Phase 2).
  *
  * Triggers on save:
- *  - terminal status: Done, Cancelled, Needs Help, Needs Approval
+ *  - terminal status: Done, Cancelled, Blocked
  *  - non-terminal status with `waiting_on != null`: the agent has flipped
  *    the card to waiting (worker normalizes to ToDo) and is exiting
  *    its session. Mid-session saves keep status: ToDo / In Progress
  *    with `waiting_on: null`, which fall through and preserve the live
  *    dispatch record.
+ *  - `requires_human != null` on save: the agent flipped the orthogonal
+ *    "needs human action" indicator and is exiting; the human is the
+ *    next actor.
  *
  * Without this, a stale `dispatch{}` block survives every Done /
- * Needs Help / Waiting save and falsely re-claims the card on the
- * next poller startup's reattach pass — the symptom that prompted
+ * Blocked / Waiting / requires_human save and falsely re-claims the card
+ * on the next poller startup's reattach pass — the symptom that prompted
  * Phase 2 of the poller-triage rework.
+ *
+ * DX-231 retired `Needs Approval`; the orthogonal `requires_human` field
+ * is now the trigger for the agent-set "human is next actor" handoff.
  */
 export function isDispatchSessionTerminal(issue: Issue): boolean {
   if (
     issue.status === "Done" ||
     issue.status === "Cancelled" ||
-    issue.status === "Blocked" ||
-    issue.status === "Needs Approval"
+    issue.status === "Blocked"
   ) {
     return true;
   }
   if (issue.waiting_on !== null) return true;
+  if (issue.requires_human !== null) return true;
   return false;
 }
 

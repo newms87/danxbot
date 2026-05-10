@@ -263,18 +263,23 @@ export async function syncIssue(
 
   // 4c: labels
   //
-  // The four managed labels — type, blocked, needsApproval, triaged —
+  // The four managed labels — type, blocked, requires_human, triaged —
   // are derived from local YAML data (`status`, `type`,
-  // `triage.last_status` / `triage.history`). On Trello, NONE
-  // of those source fields round-trip through `getCard`'s data shape —
-  // `triage` has no native column, and `type` itself is derived from
-  // labels. So the remote-side diff MUST come from the actual label state.
+  // `triage.last_status` / `triage.history`, `requires_human`). On Trello,
+  // NONE of those source fields round-trip through `getCard`'s data shape
+  // — `triage` and `requires_human` have no native column, and `type`
+  // itself is derived from labels. So the remote-side diff MUST come from
+  // the actual label state.
   //
-  // `blocked` mirrors `status === "Blocked"` (the renamed-from-Needs-Help
-  // self-block status). The `Issue.blocked` FIELD carries the reason, but
-  // the label is keyed off status alone — status is the index lookup, the
-  // field is the reason cache, and the worker enforces the field/status
-  // invariant.
+  // `blocked` mirrors `status === "Blocked"`. The `Issue.blocked` FIELD
+  // carries the reason, but the label is keyed off status alone — status
+  // is the index lookup, the field is the reason cache, and the worker
+  // enforces the field/status invariant.
+  //
+  // `requires_human` mirrors `Issue.requires_human != null`. DX-231
+  // replaced the legacy `needsApproval` derive (driven by the retired
+  // `"Needs Approval"` status) with this orthogonal indicator. The setup
+  // skill provisions the matching Trello label in Phase 3 of the epic.
   //
   // `waiting_on` is NOT a managed label. Cards waiting on dep-chains stay
   // visually `ToDo`; their state is captured in the YAML and rendered by
@@ -287,7 +292,18 @@ export async function syncIssue(
   const localLabels = {
     type: local.type,
     blocked: local.status === "Blocked",
-    needsApproval: local.status === "Needs Approval",
+    // DX-231 Phase 1: the orthogonal "needs human action" boolean is
+    // computed for the `setLabels` payload (so trackers that already
+    // wire the matching label can apply/strip it) but is INTENTIONALLY
+    // OMITTED from the diff predicate below. Phase 1 ships only the
+    // schema; the Trello label id provisioning lands in Phase 3. Until
+    // then, the Trello `projectLabels` always reads `requires_human:
+    // false`, which would otherwise mismatch every flagged card on
+    // every poll tick — generating a stream of no-op `setLabels` PUTs
+    // (~2880/day per flagged card) that burn API quota for zero work.
+    // Phase 3 reinstates this in the diff once the label id wires
+    // through.
+    requires_human: local.requires_human !== null,
     // The "triaged" label flips on as soon as the triage agent has made
     // any decision on the card — `last_status` is non-empty after the
     // first triage. `expires_at` is unsuitable here because the migration
@@ -300,7 +316,6 @@ export async function syncIssue(
   if (
     localLabels.type !== remoteLabels.type ||
     localLabels.blocked !== remoteLabels.blocked ||
-    localLabels.needsApproval !== remoteLabels.needsApproval ||
     localLabels.triaged !== remoteLabels.triaged
   ) {
     await tracker.setLabels(local.external_id, localLabels);

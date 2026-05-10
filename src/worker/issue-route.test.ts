@@ -39,7 +39,7 @@ import type { RepoContext } from "../types.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: "ISS-1",
     external_id: "ext-1",
@@ -63,6 +63,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on: null,
     history: [],
@@ -94,9 +95,60 @@ describe("isDispatchSessionTerminal", () => {
     );
   });
 
-  it("returns true for Needs Approval", () => {
+  it("returns true when requires_human is non-null on a non-terminal status (DX-231)", () => {
+    // DX-231 retired the `Needs Approval` parking status; the orthogonal
+    // `requires_human` field is now the trigger for the agent-set
+    // "human is the next actor" handoff. The dispatch slot must be
+    // released regardless of the card's `status`.
     expect(
-      isDispatchSessionTerminal(makeIssue({ status: "Needs Approval" })),
+      isDispatchSessionTerminal(
+        makeIssue({
+          status: "ToDo",
+          requires_human: {
+            reason: "Need an architectural review",
+            steps: ["Review approach with a senior eng"],
+            set_by: "agent",
+            set_at: "2026-05-10T12:00:00.000Z",
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("returns true for In Progress + requires_human != null (mid-session agent-set handoff)", () => {
+    // The source comment in `issue-route.ts` explicitly names this
+    // case: an agent saving mid-session with `requires_human != null`
+    // and `status: In Progress` is exiting the dispatch and handing
+    // off to the human. Test pins the slot-release contract.
+    expect(
+      isDispatchSessionTerminal(
+        makeIssue({
+          status: "In Progress",
+          requires_human: {
+            reason: "Need 3rd-party API key rotation",
+            steps: ["Rotate the secret"],
+            set_by: "agent",
+            set_at: "2026-05-10T12:00:00.000Z",
+          },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("returns true for Review + requires_human != null", () => {
+    // Orthogonal to status; same rationale as the In Progress case.
+    expect(
+      isDispatchSessionTerminal(
+        makeIssue({
+          status: "Review",
+          requires_human: {
+            reason: "Direction sign-off needed",
+            steps: ["Decide between options A and B"],
+            set_by: "agent",
+            set_at: "2026-05-10T12:00:00.000Z",
+          },
+        }),
+      ),
     ).toBe(true);
   });
 

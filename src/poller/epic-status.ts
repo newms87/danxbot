@@ -32,16 +32,17 @@
  *
  * Priority rules (first match wins):
  *
- *  1. Any child `Needs Help` OR `Needs Approval` → parent inherits the
- *     same status. `Needs Help` wins if both are present (signals
- *     blocking-on-info, which is louder than blocking-on-approval).
- *     Both are non-dispatchable, so either lifts the parent into a
- *     non-dispatchable state.
+ *  1. Any child `Blocked` → parent `Blocked`. Non-dispatchable, so this
+ *     lifts the parent into a non-dispatchable state.
  *  2. Any child `In Progress` → parent `In Progress`.
  *  3. Any child `ToDo` → parent `ToDo`.
  *  4. All non-cancelled children `Review` → parent `Review`.
  *  5. All non-cancelled children `Done` → parent `Done`.
  *  6. All children `Cancelled` (no exclusion) → parent `Cancelled`.
+ *
+ * `Needs Approval` was retired in DX-231; parent rollup no longer
+ * consults the orthogonal `requires_human` field — only the dispatch
+ * filter does.
  *
  * Anything that doesn't fit (e.g. mix of `Review` + `Done` with no
  * `Cancelled`) returns `null`.

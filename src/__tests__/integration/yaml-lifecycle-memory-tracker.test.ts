@@ -165,7 +165,7 @@ function setIssueTracker(seed: Issue): {
     labels: {
       type: seed.type,
       blocked: seed.status === "Blocked",
-      needsApproval: seed.status === "Needs Approval",
+      requires_human: seed.requires_human !== null,
       triaged: seed.triage.last_status !== "",
     },
   };
@@ -311,7 +311,7 @@ async function reservePort(): Promise<number> {
 
 function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: `ISS-${Math.floor(Math.random() * 9000) + 1000}`,
     external_id: externalId,
@@ -337,6 +337,7 @@ function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
     blocked: null,
     assigned_agent: null,
     waiting_on: null,
+    requires_human: null,
     history: [],
   };
 }
@@ -406,7 +407,6 @@ beforeEach(async () => {
       todoListId: "list-todo",
       inProgressListId: "list-inprog",
       needsHelpListId: "list-needshelp",
-      needsApprovalListId: "list-needshelp",
       doneListId: "list-done",
       cancelledListId: "list-cancelled",
       actionItemsListId: "list-actionitems",
@@ -414,7 +414,6 @@ beforeEach(async () => {
       featureLabelId: "label-feature",
       epicLabelId: "label-epic",
       needsHelpLabelId: "label-needshelp",
-      needsApprovalLabelId: "label-needshelp",
       blockedLabelId: "label-blocked",
     },
   });

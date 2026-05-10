@@ -4,7 +4,7 @@ import { decideWaitingOnClear } from "./waiting-on.js";
 
 function makeIssue(waiting_on: WaitingOn | null): Issue {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -28,6 +28,7 @@ function makeIssue(waiting_on: WaitingOn | null): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on,
     history: [],
@@ -95,7 +96,6 @@ describe("decideWaitingOnClear — pure helper (DX-217)", () => {
     "ToDo",
     "In Progress",
     "Blocked",
-    "Needs Approval",
   ];
 
   for (const status of nonTerminal) {

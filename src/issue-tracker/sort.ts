@@ -9,10 +9,10 @@
  *
  * ## Per-status order
  *
- * | Status                                   | Sort                                                             |
- * |------------------------------------------|------------------------------------------------------------------|
- * | Review, ToDo, Blocked, Needs Approval    | tier (not waiting/blocked first) → ICE total DESC (untriaged = +Inf) → priority DESC → updated_at ASC (FIFO) |
- * | In Progress, Done, Cancelled             | updated_at DESC                                                   |
+ * | Status                          | Sort                                                             |
+ * |---------------------------------|------------------------------------------------------------------|
+ * | Review, ToDo, Blocked           | tier (not waiting/blocked first) → ICE total DESC (untriaged = +Inf) → priority DESC → updated_at ASC (FIFO) |
+ * | In Progress, Done, Cancelled    | updated_at DESC                                                   |
  *
  * The "tier" check considers BOTH the card's own `waiting_on` /
  * `blocked` fields AND any ancestor's. Ancestor walking re-uses the
@@ -92,7 +92,6 @@ const PRIORITY_BUCKET: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
   "Review",
   "ToDo",
   "Blocked",
-  "Needs Approval",
 ]);
 
 const RECENCY_BUCKET: ReadonlySet<IssueStatus> = new Set<IssueStatus>([

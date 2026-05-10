@@ -25,7 +25,7 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -52,6 +52,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     blocked: null,
     assigned_agent: null,
     waiting_on: null,
+    requires_human: null,
     history: [],
     ...overrides,
   };
@@ -67,15 +68,198 @@ describe("serializeIssue / parseIssue", () => {
     expect(yaml2).toBe(yaml1);
   });
 
-  it("round-trips status: 'Needs Approval' (Phase 1 of auto-triage epic)", () => {
-    // The new status must serialize, validate, and parse back without
-    // schema rejection. Pinning here so a future enum-tightening change
-    // can't silently drop the value.
-    const issue = fullIssue({ status: "Needs Approval" });
-    const yaml = serializeIssue(issue);
-    const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
-    expect(parsed.status).toBe("Needs Approval");
-    expect(serializeIssue(parsed)).toBe(yaml);
+  describe("requires_human field (DX-231 — orthogonal 'needs human action' indicator)", () => {
+    it("round-trips requires_human: null (default for cards needing no human action)", () => {
+      const issue = fullIssue({ requires_human: null });
+      const yaml = serializeIssue(issue);
+      const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
+      expect(parsed.requires_human).toBeNull();
+      expect(serializeIssue(parsed)).toBe(yaml);
+    });
+
+    it("round-trips a populated requires_human record byte-for-byte", () => {
+      const issue = fullIssue({
+        requires_human: {
+          reason: "Need Stripe API key rotated",
+          steps: [
+            "Log into Stripe → API keys → Roll secret",
+            "Update DANX_STRIPE_KEY in <repo>/.danxbot/.env",
+            "Redeploy worker; toggle off this flag",
+          ],
+          set_by: "agent",
+          set_at: "2026-05-10T12:00:00.000Z",
+        },
+      });
+      const yaml = serializeIssue(issue);
+      const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
+      expect(parsed.requires_human).toEqual(issue.requires_human);
+      expect(serializeIssue(parsed)).toBe(yaml);
+    });
+
+    it("treats a missing requires_human field as null on parse (back-compat for older YAMLs)", () => {
+      // Cards predating DX-231 (schema_version 5 and earlier) omit the
+      // field entirely. The parser must default `null` so legacy YAMLs
+      // round-trip cleanly through the v6 loader.
+      const yamlNoRequiresHuman = serializeIssue(fullIssue()).replace(
+        /\nrequires_human:.*$/s,
+        "\n",
+      );
+      expect(yamlNoRequiresHuman).not.toContain("requires_human:");
+      const parsed = parseIssue(yamlNoRequiresHuman, { expectedPrefix: "ISS" });
+      expect(parsed.requires_human).toBeNull();
+    });
+
+    it("rejects a requires_human record missing reason", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "requires_human: null\n",
+        "requires_human:\n  steps: []\n  set_by: agent\n  set_at: t\n",
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /requires_human\.reason/,
+      );
+    });
+
+    it("rejects a requires_human record with a non-string step", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "requires_human: null\n",
+        "requires_human:\n  reason: r\n  steps:\n    - 5\n  set_by: agent\n  set_at: t\n",
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /requires_human\.steps\[0\]/,
+      );
+    });
+
+    it("rejects a requires_human record with an invalid set_by value", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "requires_human: null\n",
+        "requires_human:\n  reason: r\n  steps: []\n  set_by: robot\n  set_at: t\n",
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /requires_human\.set_by/,
+      );
+    });
+
+    it("rejects a requires_human record where steps is not an array", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "requires_human: null\n",
+        'requires_human:\n  reason: r\n  steps: "not-a-list"\n  set_by: agent\n  set_at: t\n',
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /requires_human\.steps must be a list of strings/,
+      );
+    });
+
+    it("rejects a requires_human record with missing set_at", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "requires_human: null\n",
+        "requires_human:\n  reason: r\n  steps: []\n  set_by: agent\n",
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /requires_human\.set_at/,
+      );
+    });
+
+    it("rejects a requires_human record with empty set_at", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "requires_human: null\n",
+        'requires_human:\n  reason: r\n  steps: []\n  set_by: agent\n  set_at: ""\n',
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /requires_human\.set_at must be a non-empty string/,
+      );
+    });
+
+    it("rejects a requires_human field that is a primitive (not null or mapping)", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "requires_human: null\n",
+        "requires_human: not-a-mapping\n",
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /requires_human must be a mapping or null/,
+      );
+    });
+
+    it("accepts requires_human alongside status: Blocked + blocked record (orthogonal field; DX-231)", () => {
+      // The orthogonal "needs human" field MUST be permitted alongside
+      // a self-block — they are independent dispatch gates that may
+      // co-exist. A regression that adds an inadvertent invariant
+      // (`requires_human != null ⟹ status: Review`-style) ships
+      // unchallenged without this case.
+      const issue = fullIssue({
+        status: "Blocked",
+        blocked: {
+          reason: "self-blocked",
+          timestamp: "2026-05-10T00:00:00.000Z",
+        },
+        requires_human: {
+          reason: "Need 3rd-party Stripe key rotation",
+          steps: ["Rotate the secret in Stripe", "Update DANX_STRIPE_KEY"],
+          set_by: "agent",
+          set_at: "2026-05-10T12:00:00.000Z",
+        },
+      });
+      const yaml1 = serializeIssue(issue);
+      const parsed = parseIssue(yaml1, { expectedPrefix: "ISS" });
+      expect(parsed).toEqual(issue);
+      expect(serializeIssue(parsed)).toBe(yaml1);
+    });
+
+    it("accepts requires_human alongside status: ToDo + waiting_on record (orthogonal to DX-212 invariant)", () => {
+      const issue = fullIssue({
+        status: "ToDo",
+        waiting_on: {
+          reason: "Waiting on ISS-99 to ship",
+          timestamp: "2026-05-09T00:00:00.000Z",
+          by: ["ISS-99"],
+        },
+        requires_human: {
+          reason: "Operator must clear the matching design ambiguity",
+          steps: ["Read design doc DX-200", "Choose option A or B"],
+          set_by: "agent",
+          set_at: "2026-05-10T12:00:00.000Z",
+        },
+      });
+      const yaml1 = serializeIssue(issue);
+      const parsed = parseIssue(yaml1, { expectedPrefix: "ISS" });
+      expect(parsed).toEqual(issue);
+      expect(serializeIssue(parsed)).toBe(yaml1);
+    });
+
+    it("schema_version: 5 still parses (legacy YAMLs predating DX-231)", () => {
+      // The validator continues to accept v3..v6. v5 YAMLs predate
+      // the DX-231 schema bump and must round-trip cleanly through
+      // the v6 loader (the parser normalizes them to v6 in memory;
+      // the v5 file-shape is preserved by writing back v6 on the
+      // next save). Pin the legacy acceptance so a future tightening
+      // doesn't drop it.
+      const yaml1 = serializeIssue(fullIssue()).replace(
+        "schema_version: 6",
+        "schema_version: 5",
+      );
+      const parsed = parseIssue(yaml1, { expectedPrefix: "ISS" });
+      // In-memory schema_version is normalized to 6 (the canonical
+      // version the type system enforces); the on-disk shape is
+      // re-emitted as 6 on round-trip.
+      expect(parsed.schema_version).toBe(6);
+    });
+
+    it('parseIssue throws fail-loud on status: "Needs Approval" with a clear migration message (DX-231)', () => {
+      // The legacy parking status was retired in schema_version 6.
+      // ~3 cards in flight at the rollout were migrated by hand BEFORE
+      // this phase merged; any YAML still carrying the old status is a
+      // half-migrated file and must surface loudly so the operator
+      // notices and finishes the migration.
+      const yaml = serializeIssue(fullIssue()).replace(
+        "status: ToDo\n",
+        "status: Needs Approval\n",
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /retired in DX-231/,
+      );
+      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+        /requires_human/,
+      );
+    });
   });
 
   it("round-trips status: ToDo + waiting_on byte-stable (DX-212)", () => {
@@ -488,11 +672,16 @@ describe("validateIssue", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 6 produces the exact error string (next unsupported version)", () => {
+  it("schema_version: 6 is the current canonical version (DX-231 added requires_human)", () => {
     const result = validateIssue(valid({ schema_version: 6 }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("schema_version: 7 produces the exact error string (next unsupported version)", () => {
+    const result = validateIssue(valid({ schema_version: 7 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors).toContain("schema_version must be 3, 4, or 5 (got 6)");
+      expect(result.errors).toContain("schema_version must be 3, 4, 5, or 6 (got 7)");
     }
   });
 
@@ -656,7 +845,7 @@ describe("validateIssue waiting_on ⟹ status: ToDo invariant (DX-212)", () => {
   });
 
   it("accepts waiting_on: null with any non-Blocked status", () => {
-    for (const status of ["Review", "ToDo", "In Progress", "Done", "Cancelled", "Needs Approval"]) {
+    for (const status of ["Review", "ToDo", "In Progress", "Done", "Cancelled"]) {
       const result = validateIssue(
         withWaitingOnAndStatus(null, status),
         { expectedPrefix: "ISS" },
@@ -713,14 +902,6 @@ describe("validateIssue waiting_on ⟹ status: ToDo invariant (DX-212)", () => {
   it("rejects waiting_on != null with status: Cancelled", () => {
     const result = validateIssue(
       withWaitingOnAndStatus(populatedWaitingOn, "Cancelled"),
-      { expectedPrefix: "ISS" },
-    );
-    expect(result.ok).toBe(false);
-  });
-
-  it("rejects waiting_on != null with status: Needs Approval", () => {
-    const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "Needs Approval"),
       { expectedPrefix: "ISS" },
     );
     expect(result.ok).toBe(false);
@@ -955,7 +1136,7 @@ describe("createEmptyIssue", () => {
 
   it("uses sensible defaults when no seed fields are provided", () => {
     const issue = createEmptyIssue();
-    expect(issue.schema_version).toBe(5);
+    expect(issue.schema_version).toBe(6);
     expect(issue.tracker).toBe("memory");
     expect(issue.children).toEqual([]);
     expect(issue.status).toBe("ToDo");
@@ -972,7 +1153,7 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 5,
+      schema_version: 6,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1006,11 +1187,12 @@ describe("serializeIssue byte-stable snapshot", () => {
       blocked: null,
       assigned_agent: null,
       waiting_on: null,
+      requires_human: null,
       history: [],
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 5
+      "schema_version: 6
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1061,8 +1243,107 @@ describe("serializeIssue byte-stable snapshot", () => {
       assigned_agent: null
       waiting_on: null
       blocked: null
+      requires_human: null
       "
     `);
+  });
+
+  it("produces deterministic YAML for a populated requires_human record (DX-231 byte-stable)", () => {
+    // Pins the on-disk key order of `requires_human` (reason → steps →
+    // set_by → set_at). A regression that swaps the field order, drops
+    // `steps`, or inlines the array would round-trip through `parseIssue`
+    // as in-memory equal but produce a different on-disk byte sequence
+    // — broken for diffing + git history. The companion test for the
+    // `null` shape pins the same field's absence-from-payload contract.
+    const fixture: Issue = {
+      schema_version: 6,
+      tracker: "trello",
+      id: "ISS-99",
+      external_id: "card-99",
+      parent_id: null,
+      children: [],
+      dispatch: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "Needs human",
+      description: "Body",
+      priority: 3.0,
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      blocked: null,
+      assigned_agent: null,
+      waiting_on: null,
+      requires_human: {
+        reason: "Need Stripe API key rotated",
+        steps: [
+          "Log into Stripe → API keys → Roll secret",
+          "Update DANX_STRIPE_KEY in <repo>/.danxbot/.env",
+          "Redeploy worker; toggle off this flag",
+        ],
+        set_by: "agent",
+        set_at: "2026-05-10T12:00:00.000Z",
+      },
+      history: [],
+    };
+    const serialized = serializeIssue(fixture);
+    expect(serialized).toMatchInlineSnapshot(`
+      "schema_version: 6
+      tracker: trello
+      id: ISS-99
+      external_id: card-99
+      parent_id: null
+      children: []
+      dispatch: null
+      status: ToDo
+      type: Feature
+      title: Needs human
+      description: Body
+      priority: 3
+      triage:
+        expires_at: ""
+        reassess_hint: ""
+        last_status: ""
+        last_explain: ""
+        ice:
+          total: 0
+          i: 0
+          c: 0
+          e: 0
+        history: []
+      ac: []
+      comments: []
+      history: []
+      retro:
+        good: ""
+        bad: ""
+        action_item_ids: []
+        commits: []
+      assigned_agent: null
+      waiting_on: null
+      blocked: null
+      requires_human:
+        reason: Need Stripe API key rotated
+        steps:
+          - Log into Stripe → API keys → Roll secret
+          - Update DANX_STRIPE_KEY in <repo>/.danxbot/.env
+          - Redeploy worker; toggle off this flag
+        set_by: agent
+        set_at: 2026-05-10T12:00:00.000Z
+      "
+    `);
+    // Round-trip — the snapshot is the canonical on-disk form; parsing
+    // it and re-emitting MUST produce the same bytes.
+    const parsed = parseIssue(serialized, { expectedPrefix: "ISS" });
+    expect(serializeIssue(parsed)).toBe(serialized);
   });
 });
 

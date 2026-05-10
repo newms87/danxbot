@@ -93,6 +93,15 @@ export async function listDispatchableYamls(
     if (i.status !== "ToDo") return false;
     if (i.waiting_on !== null) return false;
     if (i.blocked !== null) return false;
+    // DX-231 (Phase 1): the orthogonal "needs human action" field is a
+    // dispatch gate parallel to `blocked` and `waiting_on`. The filter
+    // landed in Phase 1 (this phase) — paired with the same-phase
+    // `isDispatchSessionTerminal` clause in `src/worker/issue-route.ts`
+    // that releases the slot when an agent saves `requires_human != null`.
+    // Without both clauses landing together, an agent that flips the field
+    // and exits would see the poller re-dispatch the card on the next
+    // tick — infinite loop.
+    if (i.requires_human !== null) return false;
     if (i.dispatch !== null) return false;
     // Epics are containers — phase children carry the actual work. The
     // poller dispatches phase cards directly; the dispatched agent reads

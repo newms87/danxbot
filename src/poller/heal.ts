@@ -140,9 +140,9 @@ export function healLocalYamls(
       // A terminal card has no live work — clear `dispatch` if it
       // lingered from a session that crashed before persisting. Mirrors
       // the `isDispatchSessionTerminal` clear inside `persistAfterSync`,
-      // but scoped narrower: heal only fires for actual terminal status,
-      // not for Needs Help / Needs Approval / blocked != null (those
-      // stay in `open/` per spec).
+      // but scoped narrower: heal only fires for actual terminal status
+      // (Done / Cancelled), not for Blocked / requires_human != null /
+      // blocked != null (those stay in `open/` per spec).
       //
       // No `history[]` entry is emitted on this branch — the YAML's
       // status is already terminal and the file move is a janitorial

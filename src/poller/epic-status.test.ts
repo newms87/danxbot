@@ -29,7 +29,7 @@ import { ensureIssuesDirs } from "../issue-tracker/paths.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -53,6 +53,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on: null,
     history: [],
@@ -81,7 +82,7 @@ describe("deriveStatus", () => {
     expect(deriveStatus([])).toBeNull();
   });
 
-  describe("priority rule 1 — any Blocked / Needs Approval lifts to parent", () => {
+  describe("priority rule 1 — any Blocked lifts to parent", () => {
     it("Blocked wins over In Progress / ToDo / Review / Done / Cancelled", () => {
       const result = deriveStatus([
         child("ISS-1", "In Progress"),
@@ -93,25 +94,13 @@ describe("deriveStatus", () => {
       expect(result?.rule).toMatch(/Blocked/);
     });
 
-    it("Needs Approval lifts to parent (preserves distinction from Blocked)", () => {
-      const result = deriveStatus([
-        child("ISS-1", "In Progress"),
-        child("ISS-2", "Needs Approval"),
-      ]);
-      expect(result?.status).toBe("Needs Approval");
-      expect(result?.rule).toMatch(/Needs Approval/);
-    });
-
-    it("Blocked wins over Needs Approval when both present", () => {
-      const result = deriveStatus([
-        child("ISS-1", "Needs Approval"),
-        child("ISS-2", "Blocked"),
-      ]);
-      expect(result?.status).toBe("Blocked");
-    });
+    // DX-231 retired the `Needs Approval` parking status. The
+    // orthogonal `requires_human` field replaces it but is NOT
+    // propagated to parents — only status-based rules drive epic
+    // rollup. Tests asserting Needs-Approval propagation were removed.
   });
 
-  describe("priority rule 2 — any In Progress (without Blocked/Approval)", () => {
+  describe("priority rule 2 — any In Progress (without Blocked)", () => {
     it("In Progress wins over ToDo / Review / Done / Cancelled", () => {
       const result = deriveStatus([
         child("ISS-1", "In Progress"),

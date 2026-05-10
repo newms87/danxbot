@@ -27,7 +27,6 @@ const MOCK_TRELLO_CONFIG: TrelloConfig = {
   todoListId: "todo-list",
   inProgressListId: "ip-list",
   needsHelpListId: "nh-list",
-  needsApprovalListId: "nh-list",
   doneListId: "done-list",
   cancelledListId: "cancelled-list",
   actionItemsListId: "ai-list",
@@ -35,7 +34,6 @@ const MOCK_TRELLO_CONFIG: TrelloConfig = {
   featureLabelId: "feature-label",
   epicLabelId: "epic-label",
   needsHelpLabelId: "nh-label",
-  needsApprovalLabelId: "nh-label",
   blockedLabelId: "blk-label",
 };
 

@@ -26,7 +26,7 @@ function buildIssue(
   overrides: Partial<Issue> & { id: string },
 ): Issue {
   const merged: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "trello",
     external_id: "",
     parent_id: null,
@@ -49,6 +49,7 @@ function buildIssue(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    requires_human: null,
     assigned_agent: null,
     waiting_on: null,
     history: [],
@@ -71,7 +72,6 @@ const TRELLO_CONFIG: TrelloConfig = {
   todoListId: "list-todo",
   inProgressListId: "list-ip",
   needsHelpListId: "list-nh",
-  needsApprovalListId: "list-na",
   doneListId: "list-done",
   cancelledListId: "list-cancelled",
   actionItemsListId: "list-ai",
@@ -79,7 +79,6 @@ const TRELLO_CONFIG: TrelloConfig = {
   featureLabelId: "lbl-feature",
   epicLabelId: "lbl-epic",
   needsHelpLabelId: "lbl-nh",
-  needsApprovalLabelId: "lbl-na",
   blockedLabelId: "lbl-blocked",
   triagedLabelId: "lbl-triaged",
 };

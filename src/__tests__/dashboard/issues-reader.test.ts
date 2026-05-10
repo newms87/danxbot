@@ -59,7 +59,7 @@ let nextHistorySeq = 0;
 
 function emptyIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 5,
+    schema_version: 6,
     tracker: "memory",
     id: overrides.id ?? "ISS-1",
     external_id: "",
@@ -87,6 +87,7 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     blocked: overrides.blocked ?? null,
     assigned_agent: overrides.assigned_agent ?? null,
     waiting_on: overrides.waiting_on ?? null,
+    requires_human: overrides.requires_human ?? null,
   };
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {
@@ -276,6 +277,7 @@ describe("listIssues", () => {
           by: ["ISS-2"],
         },
         blocked: null,
+        requires_human: null,
         retro: {
           good: "ok",
           bad: "",
@@ -452,7 +454,8 @@ describe("listIssues", () => {
           by: ["ISS-3"],
         },
         blocked: null,
-      }),
+        requires_human: null,
+        }),
       1_000,
     );
     const items = await listIssues(repo);
@@ -512,7 +515,8 @@ describe("listIssues", () => {
           by: ["ISS-2"],
         },
         blocked: null,
-      }),
+        requires_human: null,
+        }),
       1_000,
     );
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
@@ -546,7 +550,8 @@ describe("listIssues", () => {
           by: ["ISS-99"],
         },
         blocked: null,
-      }),
+        requires_human: null,
+        }),
       2_000,
     );
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
@@ -625,7 +630,10 @@ describe("listIssues", () => {
     expect(epic.status).toBe("In Progress");
   });
 
-  it("children_detail carries Needs Approval raw + blocked=false", async () => {
+  it("children_detail carries Blocked raw + waiting_on=false (Blocked is the canonical non-dispatchable status)", async () => {
+    // DX-231 retired the `Needs Approval` parking status; Blocked is
+    // now the only non-dispatchable open-status code path. The
+    // children_detail projection still surfaces the raw status.
     const repo = setupRepo();
     writeIssue(
       repo,
@@ -638,14 +646,14 @@ describe("listIssues", () => {
       "open",
       emptyIssue({
         id: "ISS-2",
-        title: "approve me",
-        status: "Needs Approval",
+        title: "stuck child",
+        status: "Blocked",
       }),
       1_000,
     );
     const items = await listIssues(repo);
     const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("Needs Approval");
+    expect(epic.children_detail[0].status).toBe("Blocked");
     expect(epic.children_detail[0].waiting_on).toBe(false);
   });
 
@@ -1252,7 +1260,6 @@ describe("listIssues — status grouping smoke", () => {
     "ToDo",
     "In Progress",
     "Blocked",
-    "Needs Approval",
     "Done",
     "Cancelled",
   ])("retains rows in status %s", async (status) => {
