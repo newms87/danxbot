@@ -23,6 +23,7 @@ const TRELLO: TrelloConfig = {
   epicLabelId: "le",
   needsHelpLabelId: "lnh",
   blockedLabelId: "lblk",
+  requiresHumanLabelId: "lrh",
 };
 
 describe("createIssueTracker", () => {

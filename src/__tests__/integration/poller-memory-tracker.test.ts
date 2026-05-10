@@ -286,6 +286,7 @@ const REPO: RepoContext = {
     epicLabelId: "epic-label",
     needsHelpLabelId: "nh-label",
     blockedLabelId: "blk-label",
+    requiresHumanLabelId: "rh-label",
   },
   slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
   db: {

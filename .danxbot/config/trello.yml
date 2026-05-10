@@ -5,7 +5,6 @@ lists:
   todo: 69ddc38d9322fe56867b9de4
   in_progress: 69ddc39f8208297c5bf74a32
   needs_help: 69ddc39eee773f39baef379f
-  # needs_approval: <list-id> — operator action: create "Needs Approval" list on the board, then uncomment + paste the id here
   done: 69ddc38c53a99eda3c237f2b
   cancelled: 69ddc38cb9f480b00b13482c
   action_items: 69ddc39d84b99c0e340a2088
@@ -15,6 +14,6 @@ labels:
   feature: 69ddc215fd43f1b7f1a7117d
   epic: 69ddc215fd43f1b7f1a7117f
   needs_help: 69ddc215fd43f1b7f1a71181
-  # needs_approval: <label-id> — operator action: create "Needs Approval" label on the board, then uncomment + paste the id here
   blocked: 69f8de90edc64b2b94a18bf2
   triaged: 69efe3660eb2ab0ca0771efd
+  # requires_human: <label-id> — operator action: create "Requires Human" label on the board (color: orange), then uncomment + paste the id here. Empty string is the rollout default — sync skips applying / stripping until provisioned.

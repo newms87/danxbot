@@ -60,7 +60,7 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 
 **Expected lists:** Review, ToDo, In Progress, Needs Help, Done, Cancelled, Action Items
 
-**Expected labels:** Bug, Feature, Epic, Needs Help, Blocked, Triaged
+**Expected labels:** Bug, Feature, Epic, Needs Help, Blocked, Triaged, Requires Human
 
 6. Fuzzy-match existing lists to expected names (case-insensitive, ignore spaces/hyphens — "To Do" matches "ToDo", "to-do" matches "ToDo", etc.)
 7. Present the mapping to the user:
@@ -74,7 +74,8 @@ You are the interactive setup wizard for Danxbot. Guide the user through each st
 8. Ask: "Does this look right? (yes/no)" — if no, let user manually map each list
 9. Create any missing lists via: `curl -s -X POST "https://api.trello.com/1/boards/<BOARD_ID>/lists?name=<NAME>&key=<KEY>&token=<TOKEN>"`
 10. Create any missing labels via: `curl -s -X POST "https://api.trello.com/1/boards/<BOARD_ID>/labels?name=<NAME>&color=<COLOR>&key=<KEY>&token=<TOKEN>"`
-    - Bug: red, Feature: green, Epic: purple, Needs Help: orange, Blocked: red_light, Triaged: sky
+    - Bug: red, Feature: green, Epic: purple, Needs Help: orange, Blocked: red_light, Triaged: sky, Requires Human: orange
+    - **Requires Human** (DX-231): the orthogonal "this card needs a human" indicator that replaced the retired `Needs Approval` parking status. Color matches the dashboard's 👤 indicator (orange). Re-running setup is idempotent — the label is fuzzy-matched by name; existing repos auto-pick up the id without recreating. Leftover `Needs Approval` list / label from a pre-DX-231 board are ignored by setup; the operator removes them by hand on the Trello UI.
 11. **Hold all IDs in memory** — they go to `.danxbot/config/trello.yml` in Step 8, NOT to `.env`
 
 ## Step 5: Slack Setup (Optional)
@@ -205,8 +206,12 @@ labels:
   feature: <FEATURE_LABEL_ID>
   epic: <EPIC_LABEL_ID>
   needs_help: <NEEDS_HELP_LABEL_ID>
+  blocked: <BLOCKED_LABEL_ID>
   triaged: <TRIAGED_LABEL_ID>
+  requires_human: <REQUIRES_HUMAN_LABEL_ID>
 ```
+
+**`labels.requires_human`** (DX-231 Phase 3): the orthogonal "needs human action" indicator label provisioned in Step 4. Existing repos that predate the rollout may omit the row — the loader (`src/poller/constants.ts#loadTrelloIds`) tolerates absence with an empty-string fallback; `setLabels` short-circuits on the empty value so legacy boards stay no-op until the operator pastes in the id.
 
 **These IDs are NOT secrets** — they're safe to commit to version control.
 

@@ -19,6 +19,7 @@ vi.mock("./poller/constants.js", () => ({
     epicLabelId: "mock-epic-label-id",
     needsHelpLabelId: "mock-needs-help-label-id",
     blockedLabelId: "mock-blocked-label-id",
+    requiresHumanLabelId: "mock-requires-human-label-id",
   }),
   REVIEW_MIN_CARDS: 10,
 }));

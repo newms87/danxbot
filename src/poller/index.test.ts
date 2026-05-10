@@ -28,6 +28,7 @@ const MOCK_REPO_CONTEXT: RepoContext = {
     epicLabelId: "epic-label",
     needsHelpLabelId: "nh-label",
     blockedLabelId: "blk-label",
+    requiresHumanLabelId: "rh-label",
   },
   slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
   db: {
@@ -68,6 +69,7 @@ const { mockRepoContexts } = vi.hoisted(() => {
       epicLabelId: "epic-label",
       needsHelpLabelId: "nh-label",
       blockedLabelId: "blk-label",
+      requiresHumanLabelId: "rh-label",
     },
     slack: { enabled: false, botToken: "", appToken: "", channelId: "" },
     db: {

@@ -109,6 +109,7 @@ async function startTestServer(): Promise<TestHarness> {
       epicLabelId: "",
       needsHelpLabelId: "",
       blockedLabelId: "",
+      requiresHumanLabelId: "",
     },
     trelloEnabled: false,
     slack: {

@@ -418,15 +418,15 @@ describe("syncIssue", () => {
     ).toBe(false);
   });
 
-  it("Phase 1: requires_human-only diff does NOT fire setLabels (deferred to DX-231 Phase 3)", async () => {
-    // DX-231 Phase 1 ships the schema only. The Trello label id for
-    // `requires_human` is provisioned in Phase 3, and until then the
-    // sync layer omits the boolean from the diff predicate so a
-    // flagged card doesn't churn ~2880 no-op setLabels PUTs per day
-    // (the Trello `projectLabels` always reads `false` until the
-    // label id wires through). The local `requires_human` field is
-    // still authoritative on disk; the diff suppression is purely an
-    // outbound-mirror choice.
+  it("Phase 3 (DX-234): requires_human-only diff DOES fire setLabels — the Phase 1 suppression is reinstated", async () => {
+    // DX-231 Phase 3 (DX-234) wired `TrelloConfig.requiresHumanLabelId`
+    // through `projectLabels` / `resolveLabelIds` and reinstated the
+    // diff predicate clause: when the local YAML carries a non-null
+    // `requires_human` record but the remote label set has it `false`,
+    // sync now fires exactly one `setLabels` mutation to apply the
+    // label. The Phase 1 churn-prevention rationale (the projection
+    // always read `false`) no longer holds — projection now reads from
+    // the actual label state.
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
@@ -443,20 +443,49 @@ describe("syncIssue", () => {
     const setLabels = tracker
       .getRequestLog()
       .find((l) => l.method === "setLabels");
-    // No setLabels call: type, blocked, triaged are all unchanged;
-    // requires_human is intentionally omitted from the diff in Phase 1.
-    expect(setLabels).toBeUndefined();
+    expect(setLabels).toBeDefined();
+    const labels = (
+      setLabels!.details as { labels: { requires_human: boolean } }
+    ).labels;
+    expect(labels.requires_human).toBe(true);
   });
 
-  it("Phase 1: setLabels payload still carries requires_human boolean when other labels do diff", async () => {
-    // Even though the diff predicate omits `requires_human`, the
-    // payload sent to `setLabels` still carries the boolean — so a
-    // tracker that has provisioned the label can still apply / strip
-    // it. The Trello tracker's resolveLabelIds is a no-op on this
-    // boolean in Phase 1 (no label id), but the MemoryTracker mirrors
-    // it through faithfully. Test pinned: when status flips Blocked
-    // (which DOES fire the diff), the setLabels payload includes
-    // `requires_human: true` derived from the orthogonal field.
+  it("Phase 3 (DX-234): clearing requires_human (non-null → null) fires setLabels to strip the label", async () => {
+    // The reverse of the apply path: when the local YAML clears the
+    // requires_human record, the remote (which previously had the
+    // label) must have it stripped. Sync's diff predicate sees the
+    // local `false` vs remote `true` mismatch and fires one mutation.
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    // Seed: stamp a requires_human label on the remote first.
+    await tracker.setLabels(external_id, {
+      type: "Feature",
+      blocked: false,
+      requires_human: true,
+      triaged: false,
+    });
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      requires_human: null,
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+    const setLabels = tracker
+      .getRequestLog()
+      .find((l) => l.method === "setLabels");
+    expect(setLabels).toBeDefined();
+    const labels = (
+      setLabels!.details as { labels: { requires_human: boolean } }
+    ).labels;
+    expect(labels.requires_human).toBe(false);
+  });
+
+  it("setLabels payload carries requires_human boolean when other labels do diff", async () => {
+    // Pin: when status flips Blocked (which fires the diff via the
+    // blocked predicate), the setLabels payload still carries
+    // `requires_human: true` derived from the orthogonal field — so a
+    // tracker that has provisioned the matching label applies it in
+    // the same single mutation.
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {

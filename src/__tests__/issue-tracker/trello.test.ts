@@ -22,6 +22,7 @@ const TRELLO: TrelloConfig = {
   epicLabelId: "lbl-epic",
   needsHelpLabelId: "lbl-nh",
   blockedLabelId: "lbl-blocked",
+  requiresHumanLabelId: "lbl-rh",
   triagedLabelId: "lbl-triaged",
 };
 
@@ -183,10 +184,10 @@ describe("TrelloTracker", () => {
   });
 
   it("getCard projects idLabels onto Issue.labels for the outbound diff (ISS-88)", async () => {
-    // Card carries Bug + Triaged + Blocked + Needs Help; Needs Approval is
-    // off. The projection inverts setLabels so syncIssue can compare
-    // local-derived labels against the actual remote label state without
-    // re-deriving from data fields that don't round-trip on Trello.
+    // Card carries Bug + Triaged + Blocked. The projection inverts
+    // setLabels so syncIssue can compare local-derived labels against
+    // the actual remote label state without re-deriving from data
+    // fields that don't round-trip on Trello.
     fetchMock.mockImplementation(async (url: string) => {
       if (url.includes("/cards/c-projection?")) {
         return jsonResponse({
@@ -206,10 +207,9 @@ describe("TrelloTracker", () => {
     expect(issue.labels).toEqual({
       type: "Bug",
       blocked: true,
-      // DX-231: `requires_human` replaces the retired `needsApproval`
-      // boolean. Phase 1 always projects `false` because the matching
-      // Trello label is provisioned in Phase 3; no label id exists yet
-      // to match against.
+      // DX-231 Phase 3 (DX-234): `requires_human` is now read from
+      // actual label-id membership. The fixture card has no `lbl-rh`
+      // applied, so the projection is `false`.
       requires_human: false,
       triaged: true,
     });
@@ -217,23 +217,48 @@ describe("TrelloTracker", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("getCard.labels projects requires_human:false (Phase 1 of DX-231 — label id provisioned in Phase 3)", async () => {
-    // The `requires_human` boolean on `ManagedLabels` is the DX-231
-    // replacement for the legacy `needsApproval` projection. Phase 1
-    // hard-codes the value to `false` because no Trello label id has
-    // been provisioned yet — Phase 3 wires in the label and updates
-    // this projection to consult it.
+  it("getCard.labels projects requires_human:true when the requiresHumanLabelId is on the card (DX-234)", async () => {
+    // Phase 3 wired the projection to consult
+    // `TrelloConfig.requiresHumanLabelId`. When the operator has
+    // provisioned the label and applied it to a card, the projection
+    // surfaces `true` — the diff in `syncIssue` then matches the local
+    // `requires_human != null` boolean and skips the redundant write.
     fetchMock.mockImplementation(async () =>
       jsonResponse({
         id: "c-requires-human",
         name: "T",
         desc: "",
         idList: "list-todo",
-        idLabels: ["lbl-feature"],
+        idLabels: ["lbl-feature", "lbl-rh"],
         checklists: [],
       }),
     );
     const tracker = new TrelloTracker(TRELLO);
+    const issue = await tracker.getCard("c-requires-human");
+    expect(issue.labels?.requires_human).toBe(true);
+  });
+
+  it("getCard.labels projects requires_human:false when requiresHumanLabelId is empty (legacy boards)", async () => {
+    // Empty-string fallback — the operator has not provisioned the
+    // Requires Human label yet. The projection short-circuits to
+    // `false` so the outbound diff stays a no-op even when the local
+    // YAML carries a non-null `requires_human` record.
+    const cfg: TrelloConfig = { ...TRELLO, requiresHumanLabelId: "" };
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({
+        id: "c-requires-human",
+        name: "T",
+        desc: "",
+        idList: "list-todo",
+        // Even if the card carried some unrelated label that happened
+        // to have an empty id (impossible in practice but a defensive
+        // pin), the empty-string short-circuit guards against the
+        // collapse.
+        idLabels: ["lbl-feature"],
+        checklists: [],
+      }),
+    );
+    const tracker = new TrelloTracker(cfg);
     const issue = await tracker.getCard("c-requires-human");
     expect(issue.labels?.requires_human).toBe(false);
   });
@@ -337,6 +362,129 @@ describe("TrelloTracker", () => {
     expect(ids).toContain("lbl-feature"); // new type
     expect(ids).not.toContain("lbl-nh"); // needs help label removed in v4
     expect(ids).not.toContain("lbl-bug"); // old type removed
+  });
+
+  it("setLabels({requires_human:true}) applies the requiresHumanLabelId (DX-234)", async () => {
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "GET") {
+        return jsonResponse({ idLabels: ["lbl-feature"] });
+      }
+      return jsonResponse({});
+    });
+    const tracker = new TrelloTracker(TRELLO);
+    await tracker.setLabels("c1", {
+      type: "Feature",
+      blocked: false,
+      requires_human: true,
+      triaged: false,
+    });
+    const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
+    if (!putCall) throw new Error("expected PUT");
+    const body = JSON.parse(putCall[1].body as string);
+    const ids = (body.idLabels as string).split(",");
+    expect(ids).toContain("lbl-rh"); // requires_human label applied
+    expect(ids).toContain("lbl-feature"); // type preserved/applied
+  });
+
+  it("setLabels({requires_human:false}) strips a stale requiresHumanLabelId (DX-234)", async () => {
+    // The card already carries `lbl-rh` from a previous flag — the
+    // managed-set filter must drop it from `preserved`, and
+    // resolveLabelIds must NOT re-add it (the boolean is false).
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "GET") {
+        return jsonResponse({ idLabels: ["lbl-feature", "lbl-rh"] });
+      }
+      return jsonResponse({});
+    });
+    const tracker = new TrelloTracker(TRELLO);
+    await tracker.setLabels("c1", {
+      type: "Feature",
+      blocked: false,
+      requires_human: false,
+      triaged: false,
+    });
+    const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
+    if (!putCall) throw new Error("expected PUT");
+    const body = JSON.parse(putCall[1].body as string);
+    const ids = (body.idLabels as string).split(",").filter(Boolean);
+    expect(ids).not.toContain("lbl-rh"); // stripped
+    expect(ids).toContain("lbl-feature"); // type preserved
+  });
+
+  it("setLabels does NOT issue a PUT when the resolved idLabels are content-identical to the current ones (DX-234 — legacy-board churn guard)", async () => {
+    // The dominant case this guards: sync's diff predicate fires
+    // `setLabels` because local `requires_human` is non-null and the
+    // legacy-board projection returned `false`. The tracker's
+    // resolveLabelIds + managed-set filter collapse the resolved
+    // `next` set back to the existing `idLabels` (empty id short-
+    // circuits at every layer), so the PUT body would be content-
+    // identical. Without the early-return this fires once per poll
+    // tick (~1440 PUTs/day per flagged-on-legacy-board card),
+    // reintroducing the exact churn Phase 1 of DX-231 was built to
+    // prevent. With the early-return: zero mutating writes.
+    const cfg: TrelloConfig = { ...TRELLO, requiresHumanLabelId: "" };
+    const calls: Array<{ method: string }> = [];
+    fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+      calls.push({ method: init?.method ?? "GET" });
+      if ((init?.method ?? "GET") === "GET") {
+        // Card already has Feature + a non-managed priority label;
+        // managed set is {bug,feature,epic,nh,blocked,triaged}; the
+        // requires_human label id is "" (excluded). resolveLabelIds
+        // for {requires_human: true, type: Feature} returns just
+        // [feature]. preserved = [priority]. next = [priority,
+        // feature]. Identical to current idLabels — no PUT.
+        return jsonResponse({ idLabels: ["lbl-feature", "lbl-priority"] });
+      }
+      return jsonResponse({});
+    });
+    const tracker = new TrelloTracker(cfg);
+    await tracker.setLabels("c1", {
+      type: "Feature",
+      blocked: false,
+      requires_human: true,
+      triaged: false,
+    });
+    const puts = calls.filter((c) => c.method === "PUT");
+    expect(puts).toHaveLength(0);
+    const gets = calls.filter((c) => c.method === "GET");
+    expect(gets.length).toBeGreaterThanOrEqual(1); // GET still fires
+  });
+
+  it("setLabels({requires_human:true}) is a no-op on the requires_human label when requiresHumanLabelId is empty (legacy boards)", async () => {
+    // Legacy boards where the operator has not provisioned the
+    // Requires Human label leave `requiresHumanLabelId: ""`. setLabels
+    // must NOT push the empty string (would corrupt idLabels) AND must
+    // NOT include "" in the managed-set filter (would collapse against
+    // any other unrelated label whose comparison happens to be empty).
+    // We use a fixture where the type label DOES diff (Bug → Feature)
+    // so the PUT actually fires; this lets us inspect the body and
+    // confirm the empty id is not pushed and unrelated labels are
+    // preserved. (When the diff is purely synthetic — local
+    // requires_human:true vs remote false but no other change — the
+    // content-identity guard above zero-PUTs the call; that path is
+    // pinned by the previous test.)
+    const cfg: TrelloConfig = { ...TRELLO, requiresHumanLabelId: "" };
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "GET") {
+        return jsonResponse({ idLabels: ["lbl-bug", "lbl-priority"] });
+      }
+      return jsonResponse({});
+    });
+    const tracker = new TrelloTracker(cfg);
+    await tracker.setLabels("c1", {
+      type: "Feature",
+      blocked: false,
+      requires_human: true,
+      triaged: false,
+    });
+    const putCall = fetchMock.mock.calls.find((c) => c[1]?.method === "PUT");
+    if (!putCall) throw new Error("expected PUT");
+    const body = JSON.parse(putCall[1].body as string);
+    const ids = (body.idLabels as string).split(",").filter(Boolean);
+    expect(ids).not.toContain(""); // never push empty string
+    expect(ids).toContain("lbl-priority"); // non-managed preserved
+    expect(ids).toContain("lbl-feature"); // new type applied
+    expect(ids).not.toContain("lbl-bug"); // old type stripped
   });
 
   it("addComment POSTs and returns id+timestamp", async () => {

@@ -317,6 +317,23 @@ export class TrelloTracker implements IssueTracker {
     );
     const preserved = (card.idLabels ?? []).filter((id) => !managedSet.has(id));
     const next = Array.from(new Set([...preserved, ...desiredIds]));
+    // Content-identity short-circuit. Skip the PUT when the resolved
+    // next idLabels match the current set exactly. The dominant case
+    // this guards is the DX-234 legacy-board scenario: the sync diff
+    // predicate fires `setLabels` because local `requires_human` is
+    // non-null but `projectLabels` returned `false` (no provisioned
+    // label id to match) — the resolveLabelIds + managed-set filter
+    // collapse `next` back to the existing idLabels because the empty
+    // id short-circuits at every layer. Without this guard the sync
+    // layer issues 1 no-op PUT/tick per flagged-on-legacy-board card
+    // (~1440/day per card), reintroducing the exact Trello-quota
+    // churn Phase 1 of DX-231 was built to prevent. Sync's
+    // `remoteWriteCount` still increments per intent; the actual API
+    // mutation is what we suppress.
+    const currentSet = new Set<string>(card.idLabels ?? []);
+    const sameMembership =
+      next.length === currentSet.size && next.every((id) => currentSet.has(id));
+    if (sameMembership) return;
     const putUrl = this.buildUrl(`/cards/${externalId}`);
     await this.requestVoid(
       putUrl,
@@ -348,12 +365,19 @@ export class TrelloTracker implements IssueTracker {
       // layer is fully repurposed to the new "Blocked" status name.
       blocked: idLabels.includes(this.trello.blockedLabelId),
       // `requires_human` (DX-231) is the orthogonal "needs human action"
-      // indicator. Phase 3 of the epic provisions the matching Trello
-      // label and wires its id through `TrelloConfig`; until then the
-      // projection always reads `false` because no label id exists to
-      // match against. Local YAML's `requires_human` field is the
-      // source of truth in the meantime.
-      requires_human: false,
+      // indicator. DX-234 (Phase 3 of DX-231) wires the Trello label id
+      // through `TrelloConfig.requiresHumanLabelId`. When the operator
+      // has provisioned the label, the projection reads its membership
+      // on the card; when the slot is the empty-string fallback (legacy
+      // boards), the projection short-circuits to `false`. The sync diff
+      // predicate then mismatches against a flagged local card and
+      // fires `setLabels` — but the tracker's setLabels detects the
+      // content-identical idLabels and skips the PUT, so no API quota
+      // is consumed until the operator pastes in the label id and runs
+      // the next dispatch.
+      requires_human: this.trello.requiresHumanLabelId
+        ? idLabels.includes(this.trello.requiresHumanLabelId)
+        : false,
       triaged: idLabels.includes(triagedLabelId),
     };
   }
@@ -550,13 +574,17 @@ export class TrelloTracker implements IssueTracker {
     }
     // status === "Blocked" → existing Trello "Blocked" label.
     if (labels.blocked) ids.push(this.trello.blockedLabelId);
-    // `requires_human` (DX-231): Phase 3 of the epic provisions the
-    // matching Trello label and threads its id through `TrelloConfig`.
-    // In Phase 1 (this phase) the label is unwired here on purpose —
-    // `Issue.requires_human` defaults to null on every parsed card, so
-    // `labels.requires_human` is always false at this point and the
-    // branch never fires until Phase 3 lands the label id.
-    void labels.requires_human;
+    // `requires_human` (DX-231 Phase 3 / DX-234) → the orthogonal
+    // "needs human action" Trello label provisioned by the setup skill.
+    // Skip when the label id is the empty-string fallback (operator has
+    // not yet provisioned the label on a legacy board) — `setLabels`
+    // becomes a no-op on the boolean. Strip-on-`false` is handled by the
+    // managed-set filter in `allManagedLabelIdsForFiltering` (the id is
+    // in the managed set when non-empty, so an existing label is filtered
+    // out of `preserved` and dropped from the next state).
+    if (labels.requires_human && this.trello.requiresHumanLabelId) {
+      ids.push(this.trello.requiresHumanLabelId);
+    }
     if (labels.triaged) ids.push(await this.resolveTriagedLabelId());
     return ids;
   }
@@ -587,12 +615,14 @@ export class TrelloTracker implements IssueTracker {
    * set always includes it — guaranteeing stale Triaged labels can be
    * stripped on `setLabels({triaged: false})` even when the cache is cold.
    */
-  // DX-231 PHASE 3 HOOK: append `this.trello.requiresHumanLabelId`
-  // to the returned array once the operator has provisioned the
-  // matching Trello label. Phase 1 ships only the schema; the field's
-  // TrelloConfig slot lands in Phase 3.
+  // DX-231 Phase 3 (DX-234) wires `requiresHumanLabelId` into the
+  // managed set when the operator has provisioned the matching label.
+  // The empty-string fallback (legacy boards) is excluded so the filter
+  // never collapses an empty id into the managed set — that would let
+  // the operator's blank slot accidentally strip every non-managed
+  // label whose id happens to compare empty.
   private allManagedLabelIdsForFiltering(triagedLabelId: string): string[] {
-    return [
+    const ids = [
       this.trello.bugLabelId,
       this.trello.featureLabelId,
       this.trello.epicLabelId,
@@ -600,6 +630,10 @@ export class TrelloTracker implements IssueTracker {
       this.trello.blockedLabelId,
       triagedLabelId,
     ];
+    if (this.trello.requiresHumanLabelId) {
+      ids.push(this.trello.requiresHumanLabelId);
+    }
+    return ids;
   }
 
   private async createChecklist(cardId: string, name: string): Promise<string> {

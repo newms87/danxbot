@@ -127,6 +127,23 @@ export interface TrelloConfig {
    * the setup skill alongside the other danxbot-managed labels.
    */
   blockedLabelId: string;
+  /**
+   * Label applied to cards whose YAML carries `requires_human != null`.
+   * Managed automatically by the worker (paired with
+   * `setLabels({requires_human})`) so a card needing human action surfaces
+   * visually on the Trello board. Empty string = the operator has not yet
+   * provisioned the label — `setLabels` skips applying / stripping so the
+   * field stays a no-op on legacy boards. The card stays in its current
+   * Trello list (Review / ToDo / Blocked / In Progress) regardless;
+   * `requires_human` is the orthogonal indicator label, not a list move.
+   *
+   * DX-231 introduced this field as the replacement for the retired
+   * `Needs Approval` parking status. Provisioned by the setup skill on
+   * fresh boards (Phase 3 of DX-231); existing repos add the row to
+   * `<repo>/.danxbot/config/trello.yml` once the operator creates the
+   * "Requires Human" label on the board.
+   */
+  requiresHumanLabelId: string;
   triagedLabelId?: string;
 }
 

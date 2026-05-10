@@ -123,10 +123,33 @@ describe("loadTrelloIds", () => {
   });
 
   // DX-231 retired `needsApprovalListId` and `needsApprovalLabelId`
-  // from `TrelloConfig`. The legacy "rollout-optional" tests were
-  // removed — Phase 3 of DX-231 introduces a `requiresHumanLabelId`
-  // (and possibly a corresponding list) and reinstates equivalent
-  // coverage there.
+  // from `TrelloConfig`. Phase 3 (DX-234) introduces
+  // `requiresHumanLabelId` as the orthogonal-indicator label. The
+  // tests below pin both the new field's rollout-optional contract
+  // (empty default) and the legacy-keys absence tolerance.
+
+  it("requiresHumanLabelId returns the configured value when labels.requires_human is set (DX-234)", () => {
+    writeYml([...baseYml, "  requires_human: rh1"]);
+    const ids = loadTrelloIds(tempRepo);
+    expect(ids.requiresHumanLabelId).toBe("rh1");
+  });
+
+  it("requiresHumanLabelId defaults to '' when labels.requires_human is absent (rollout-optional)", () => {
+    // Existing repos predate the line; the loader tolerates absence.
+    // setLabels / projectLabels short-circuit on the empty value so
+    // legacy boards stay no-op.
+    writeYml(baseYml);
+    const ids = loadTrelloIds(tempRepo);
+    expect(ids.requiresHumanLabelId).toBe("");
+  });
+
+  it("loader tolerates trello.yml WITHOUT the legacy lists.needs_approval / labels.needs_approval keys (DX-234 AC)", () => {
+    // baseYml contains neither legacy key — DX-232 dropped both reads
+    // from loadTrelloIds. This test pins the AC: existing repo
+    // trello.yml parses cleanly with no needs_approval rows present.
+    writeYml(baseYml);
+    expect(() => loadTrelloIds(tempRepo)).not.toThrow();
+  });
 
   it("throws when trello.yml is absent", () => {
     // No writeYml call

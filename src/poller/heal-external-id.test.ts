@@ -80,6 +80,7 @@ const TRELLO_CONFIG: TrelloConfig = {
   epicLabelId: "lbl-epic",
   needsHelpLabelId: "lbl-nh",
   blockedLabelId: "lbl-blocked",
+  requiresHumanLabelId: "lbl-rh",
   triagedLabelId: "lbl-triaged",
 };
 

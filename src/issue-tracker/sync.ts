@@ -292,17 +292,23 @@ export async function syncIssue(
   const localLabels = {
     type: local.type,
     blocked: local.status === "Blocked",
-    // DX-231 Phase 1: the orthogonal "needs human action" boolean is
-    // computed for the `setLabels` payload (so trackers that already
-    // wire the matching label can apply/strip it) but is INTENTIONALLY
-    // OMITTED from the diff predicate below. Phase 1 ships only the
-    // schema; the Trello label id provisioning lands in Phase 3. Until
-    // then, the Trello `projectLabels` always reads `requires_human:
-    // false`, which would otherwise mismatch every flagged card on
-    // every poll tick — generating a stream of no-op `setLabels` PUTs
-    // (~2880/day per flagged card) that burn API quota for zero work.
-    // Phase 3 reinstates this in the diff once the label id wires
-    // through.
+    // DX-231 Phase 3 (DX-234) reinstates `requires_human` in the diff
+    // predicate. Phase 1 (DX-232) intentionally omitted it because the
+    // Trello label id was not yet provisioned — every flagged card
+    // would have triggered ~2880 no-op `setLabels` PUTs/day. With the
+    // label id wired through `TrelloConfig.requiresHumanLabelId` and
+    // projected in `trello.ts#projectLabels`, the diff is now
+    // meaningful: a remote mismatch fires exactly one `setLabels` to
+    // apply or strip the label. On legacy boards where the operator
+    // has not yet provisioned the label (`requiresHumanLabelId ===
+    // ""`), the projection returns `false` so this clause still fires
+    // `setLabels`, but the Trello tracker's `setLabels` short-circuits
+    // on content-identity (the resolveLabelIds + managed-set filter
+    // collapse `next` back to the existing idLabels because the empty
+    // id is a no-op at every layer) — so the actual API PUT does NOT
+    // fire. Sync's `remoteWriteCount` still increments per call intent
+    // (it counts mutations sync ASKED for, not mutations the tracker
+    // actually issued); the API quota is preserved.
     requires_human: local.requires_human !== null,
     // The "triaged" label flips on as soon as the triage agent has made
     // any decision on the card — `last_status` is non-empty after the
@@ -316,6 +322,7 @@ export async function syncIssue(
   if (
     localLabels.type !== remoteLabels.type ||
     localLabels.blocked !== remoteLabels.blocked ||
+    localLabels.requires_human !== remoteLabels.requires_human ||
     localLabels.triaged !== remoteLabels.triaged
   ) {
     await tracker.setLabels(local.external_id, localLabels);

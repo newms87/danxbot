@@ -35,6 +35,7 @@ const MOCK_TRELLO_CONFIG: TrelloConfig = {
   epicLabelId: "epic-label",
   needsHelpLabelId: "nh-label",
   blockedLabelId: "blk-label",
+  requiresHumanLabelId: "rh-label",
 };
 
 beforeEach(() => {

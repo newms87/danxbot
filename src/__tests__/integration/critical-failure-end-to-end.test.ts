@@ -484,6 +484,7 @@ beforeEach(async () => {
       epicLabelId: "label-epic",
       needsHelpLabelId: "label-needshelp",
       blockedLabelId: "label-blocked",
+      requiresHumanLabelId: "label-requires-human",
     },
   });
 

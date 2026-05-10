@@ -579,6 +579,7 @@ describe("settings-file", () => {
           epicLabelId: "",
           needsHelpLabelId: "",
           blockedLabelId: "",
+          requiresHumanLabelId: "",
         },
         githubToken: "ghp_1234567890abcdef",
       });

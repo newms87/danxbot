@@ -72,6 +72,15 @@ export function loadTrelloIds(repoPath: string): Omit<TrelloConfig, "apiKey" | "
     epicLabelId: req("labels.epic"),
     needsHelpLabelId: req("labels.needs_help"),
     blockedLabelId: req("labels.blocked"),
+    // `labels.requires_human` is OPTIONAL during rollout of the new
+    // orthogonal indicator (DX-231 Phase 3) — existing repos predate the
+    // line and would otherwise fail to load. Empty string = label not
+    // provisioned yet; `trello.ts#setLabels` / `projectLabels` /
+    // `allManagedLabelIdsForFiltering` short-circuit on the empty value
+    // so no churn is generated. The setup skill provisions the label on
+    // fresh boards; existing operators paste the id in once they create
+    // the matching Trello label by hand.
+    requiresHumanLabelId: yaml["labels.requires_human"] ?? "",
     ...(triaged ? { triagedLabelId: triaged } : {}),
   };
 }
