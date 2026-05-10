@@ -420,6 +420,223 @@ describe("issues-mirror — public-API contract", () => {
   });
 });
 
+describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
+  it("invokes onWatcherUpsert exactly once per watcher add event AFTER the upsert", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const calls: Array<{ id: string; rowsAtCallTime: number }> = [];
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onWatcherUpsert: async (id) => {
+        // Capture the DB state at callback time so we can assert the
+        // upsert ran first (the precondition the wiring guarantees).
+        calls.push({ id, rowsAtCallTime: db.rows.size });
+      },
+    });
+    try {
+      const path = writeYaml(
+        repo.localPath,
+        "open",
+        "DX-300",
+        SAMPLE_YAML("DX-300"),
+      );
+      await mirror.simulateWatcherEvent({ event: "add", path });
+      expect(calls).toEqual([{ id: "DX-300", rowsAtCallTime: 1 }]);
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("invokes onWatcherUpsert even when content is unchanged (no upsert this tick)", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const calls: string[] = [];
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onWatcherUpsert: async (id) => {
+        calls.push(id);
+      },
+    });
+    try {
+      const path = writeYaml(
+        repo.localPath,
+        "open",
+        "DX-301",
+        SAMPLE_YAML("DX-301"),
+      );
+      // First event: upsert + reconcile.
+      await mirror.simulateWatcherEvent({ event: "add", path });
+      // Second event with same content: no upsert (mirror short-circuits)
+      // but reconcile MUST still fire — the fs event reached the
+      // chokepoint and downstream fanout is independent of whether THIS
+      // tick wrote a row.
+      await mirror.simulateWatcherEvent({ event: "change", path });
+      expect(calls).toEqual(["DX-301", "DX-301"]);
+      // History only grew once (no duplicate upsert).
+      expect(db.history).toHaveLength(1);
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT invoke onWatcherUpsert for boot-scan or reconcile sources", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const calls: string[] = [];
+    // Pre-populate disk; boot scan must NOT fire reconcile.
+    writeYaml(repo.localPath, "open", "DX-302", SAMPLE_YAML("DX-302"));
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onWatcherUpsert: async (id) => {
+        calls.push(id);
+      },
+    });
+    try {
+      // Boot scan ran during startIssuesMirror and shouldn't have invoked.
+      expect(calls).toEqual([]);
+      await mirror.reconcileNow();
+      // reconcileNow source is "reconcile" — also no invocation.
+      expect(calls).toEqual([]);
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT invoke onWatcherUpsert for unlink events (Phase 1 scope)", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const calls: string[] = [];
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onWatcherUpsert: async (id) => {
+        calls.push(id);
+      },
+    });
+    try {
+      const path = writeYaml(
+        repo.localPath,
+        "open",
+        "DX-303",
+        SAMPLE_YAML("DX-303"),
+      );
+      await mirror.simulateWatcherEvent({ event: "add", path });
+      expect(calls).toEqual(["DX-303"]);
+      rmSync(path);
+      await mirror.simulateWatcherEvent({ event: "unlink", path });
+      // Phase 1 wires only the upsert path. Unlink wiring is a Phase 2+
+      // concern (parent recursion on tombstone).
+      expect(calls).toEqual(["DX-303"]);
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("end-to-end: a malformed YAML routed through reconcile records system-error with source=reconcile", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    // Real reconcile-style callback: throw a ReconcileValidationError
+    // shape so the error message reaches the system-errors buffer with
+    // the prefix the dashboard surfaces. This is the production wiring
+    // path collapsed to a unit-level seam.
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onWatcherUpsert: async (id) => {
+        throw new Error(`Issue validation failed for ${id}`);
+      },
+    });
+    try {
+      const path = writeYaml(
+        repo.localPath,
+        "open",
+        "DX-310",
+        SAMPLE_YAML("DX-310"),
+      );
+      const { _clearSystemErrors } = await import(
+        "../dashboard/system-errors.js"
+      );
+      _clearSystemErrors();
+      await mirror.simulateWatcherEvent({ event: "add", path });
+
+      const { listSystemErrors } = await import(
+        "../dashboard/system-errors.js"
+      );
+      const errs = listSystemErrors({ repo: "test-repo" });
+      const reconcileErrs = errs.filter((e) => e.source === "reconcile");
+      expect(reconcileErrs).toHaveLength(1);
+      expect(reconcileErrs[0]!.message).toContain("DX-310");
+      expect(reconcileErrs[0]!.message).toContain("Issue validation failed");
+      _clearSystemErrors();
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("a thrown reconcile error does NOT take down the watcher (recordSystemError + continue)", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onWatcherUpsert: async () => {
+        throw new Error("boom");
+      },
+    });
+    try {
+      const path = writeYaml(
+        repo.localPath,
+        "open",
+        "DX-304",
+        SAMPLE_YAML("DX-304"),
+      );
+      // The throw must be caught — the simulate call resolves cleanly.
+      await expect(
+        mirror.simulateWatcherEvent({ event: "add", path }),
+      ).resolves.toBeUndefined();
+      // The upsert still landed (reconcile failure is post-upsert).
+      expect(db.rows.has(rowKey("test-repo", "DX-304"))).toBe(true);
+
+      // The system-errors module captured the failure under
+      // source: "reconcile". Asserting on the buffer keeps this test
+      // hermetic w.r.t. log output.
+      const { listSystemErrors, _clearSystemErrors } = await import(
+        "../dashboard/system-errors.js"
+      );
+      const errs = listSystemErrors({ repo: "test-repo" });
+      expect(errs.some((e) => e.source === "reconcile")).toBe(true);
+      _clearSystemErrors();
+
+      // A second event for a different card still processes.
+      const path2 = writeYaml(
+        repo.localPath,
+        "open",
+        "DX-305",
+        SAMPLE_YAML("DX-305"),
+      );
+      await mirror.simulateWatcherEvent({ event: "add", path: path2 });
+      expect(db.rows.has(rowKey("test-repo", "DX-305"))).toBe(true);
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("issues-mirror — non-object YAML fall-through", () => {
   it("stores a top-level array as malformed (not an object)", async () => {
     const repo = makeRepo();

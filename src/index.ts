@@ -12,6 +12,7 @@ import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
 import { getPool, initPlatformPool } from "./db/connection.js";
 import { startIssuesMirror } from "./db/issues-mirror.js";
+import { reconcileIssue } from "./issue/reconcile.js";
 import { setRepoName } from "./poller/repo-name.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
@@ -174,6 +175,20 @@ async function startWorkerMode(): Promise<void> {
     {
       pool: getPool(),
       ...(reconcileIntervalMs !== undefined && { reconcileIntervalMs }),
+      // Phase 1 of Event-Driven Worker (DX-216) — reconcile fires after
+      // every watcher upsert. Phase 1 body is a no-op chokepoint; later
+      // phases activate derived-state computation, tracker push, and
+      // scheduler poke.
+      onWatcherUpsert: (id) =>
+        reconcileIssue(
+          {
+            name: repo.name,
+            localPath: repo.localPath,
+            issuePrefix: repo.issuePrefix,
+          },
+          id,
+          "watcher",
+        ).then(() => undefined),
     },
   );
   log.info(`[${repo.name}] Issues mirror started`);
