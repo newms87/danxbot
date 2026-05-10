@@ -164,6 +164,17 @@ vi.mock("./host-pid.js", () => ({
   killHostPid: (...args: unknown[]) => mockKillHostPid(...args),
 }));
 
+// DX-240: spawn-host-mode invokes ensureHostProjectsSymlink to install the
+// `${HOME}/.claude/projects/<encoded>` → `<repo>/claude-projects/<encoded>`
+// symlink on every host-mode dispatch. The real helper hits the host
+// filesystem; mock it here so launcher tests don't pollute the developer's
+// `~/.claude/projects/`. Real coverage lives in host-projects-symlink.test.ts.
+const mockEnsureHostProjectsSymlink = vi.fn();
+vi.mock("./host-projects-symlink.js", () => ({
+  ensureHostProjectsSymlink: (...args: unknown[]) =>
+    mockEnsureHostProjectsSymlink(...args),
+}));
+
 // DX-140: paired host_pid write fires after the runtime fork. The launcher
 // gates on `options.dispatch && job.handle`, so most launcher tests (which
 // omit `dispatch`) never trigger this code path. The few tests below that
@@ -2054,6 +2065,11 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
 
     expect(mockSpawnInTerminal).not.toHaveBeenCalled();
     expect(mockBuildDispatchScript).not.toHaveBeenCalled();
+    // DX-240: the host symlink installer must not run on the docker path —
+    // the docker bind already covers the cross-runtime mount, and running
+    // the installer in docker would fail trying to mkdir the container's
+    // `${HOME}/.claude/`.
+    expect(mockEnsureHostProjectsSymlink).not.toHaveBeenCalled();
   });
 
   it("calls buildDispatchScript and spawnInTerminal when openTerminal is true", async () => {
@@ -2085,6 +2101,28 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
         cwd: "/tmp/test-workspace",
       }),
     );
+  });
+
+  it("installs the host claude-projects symlink before spawning the terminal (DX-240 cross-runtime resume)", async () => {
+    mockTempDirs({ term: "/tmp/danxbot-term-test" });
+    mockEnsureHostProjectsSymlink.mockClear();
+
+    await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 300_000,
+      // agentCwd shape is `<repo>/.danxbot/workspaces/<name>` — dirname×3
+      // strips name, workspaces, and `.danxbot` to land on the repo root.
+      cwd: "/tmp/repos/platform/.danxbot/workspaces/issue-worker",
+      openTerminal: true,
+      apiToken: "test-token",
+    });
+
+    expect(mockEnsureHostProjectsSymlink).toHaveBeenCalledTimes(1);
+    expect(mockEnsureHostProjectsSymlink).toHaveBeenCalledWith({
+      workspaceCwd: "/tmp/repos/platform/.danxbot/workspaces/issue-worker",
+      repoLocalPath: "/tmp/repos/platform",
+    });
   });
 
   it("does NOT spawn a headless claude process when openTerminal is true — single-fork invariant", async () => {
@@ -2447,6 +2485,42 @@ describe("spawnAgent — job.watcher and terminal mode", () => {
     const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
     expect(rmPaths).toContain("/tmp/danxbot-term-timeout");
     expect(rmPaths).toContain("/tmp/danxbot-prompt-timeout");
+  });
+
+  it("fails the job loudly when ensureHostProjectsSymlink throws (DX-240 fail-loud invariant)", async () => {
+    // The host-projects-symlink helper runs BEFORE spawnInTerminal. If it
+    // throws (permission denied, divergent session state, regular file at
+    // link path), runHostModeFork's outer try/catch must mark the job
+    // failed, run cleanup, and propagate the error. Without this gate, an
+    // env-level symlink failure would silently turn into "the agent boot
+    // didn't write a PID file" 2 seconds later — much harder to diagnose.
+    mockTempDirs({
+      prompt: "/tmp/danxbot-prompt-symerr",
+      term: "/tmp/danxbot-term-symerr",
+    });
+    mockEnsureHostProjectsSymlink.mockImplementationOnce(() => {
+      throw new Error("ensureHostProjectsSymlink: permission denied");
+    });
+    const onComplete = vi.fn();
+
+    await expect(
+      spawnAgent({
+        prompt: "/danx-next",
+        repoName: "platform",
+        timeoutMs: 300_000,
+        cwd: "/tmp/test-workspace",
+        openTerminal: true,
+        onComplete,
+      }),
+    ).rejects.toThrow(/permission denied/);
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    const job = onComplete.mock.calls[0]![0] as AgentJob;
+    expect(job.status).toBe("failed");
+    expect(job.summary).toContain("Host-mode spawn failed");
+    expect(job.summary).toContain("permission denied");
+    // No terminal must be opened when the pre-spawn symlink installer fails.
+    expect(mockSpawnInTerminal).not.toHaveBeenCalled();
   });
 
   it("cleans up only the promptDir (no terminal settings dir) when openTerminal is false", async () => {

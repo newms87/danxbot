@@ -59,23 +59,34 @@ export interface SessionLogWatcherOptions {
 }
 
 /**
- * Derives the Claude Code session directory from a working directory path.
- * Claude Code stores sessions at ~/.claude/projects/<encoded-cwd>/, where
- * the encoded form replaces BOTH `/` and `.` with `-`. Verified empirically
- * against on-disk entries like `-home-newms-web-gpt-manager--danxbot-workspaces-issue-worker`
+ * Encode a working directory to the subdir name Claude Code writes JSONL
+ * under. Replaces BOTH `/` and `.` with `-`. Verified empirically against
+ * on-disk entries like `-home-newms-web-gpt-manager--danxbot-workspaces-issue-worker`
  * (from `/home/newms/web/gpt-manager/.danxbot/workspaces/issue-worker`) —
  * the leading `.` of `.danxbot` becomes the second dash in the
  * `--danxbot` run.
  *
- * The dot-encoding only matters for dispatched-agent cwds, which live
- * under `.danxbot/workspaces/<name>` (a hidden-directory segment).
- * Previously the encoder only replaced `/`, producing
- * `-.danxbot-workspaces-...` — a directory Claude Code never writes to
- * — which silently broke SessionLogWatcher attachment for every
- * host-mode dispatch. See Trello `9ZurZCK2`-adjacent failure
- * investigation and the `.danxbot`-path regression tests below.
+ * `realpathSync` runs first so the encoding matches what claude's own
+ * resolver produces — the agent's cwd is realpath'd by the kernel before
+ * claude reads `process.cwd()`. ENOENT falls back to the normalized path
+ * so callers can pre-compute encodings before the dir exists (e.g. unit
+ * tests that exercise the pure encoding contract).
+ *
+ * The dot-encoding matters for dispatched-agent cwds, which live under
+ * `.danxbot/workspaces/<name>` (a hidden-directory segment). Previously
+ * the encoder only replaced `/`, producing `-.danxbot-workspaces-...` —
+ * a directory Claude Code never writes to — which silently broke
+ * SessionLogWatcher attachment for every host-mode dispatch. See Trello
+ * `9ZurZCK2`-adjacent failure investigation and the `.danxbot`-path
+ * regression tests below.
+ *
+ * DX-240 added the host-projects-symlink consumer
+ * (`src/agent/host-projects-symlink.ts`). Both consumers MUST agree on
+ * the encoding — divergence means the symlink and the watcher disagree
+ * and the cross-runtime fix silently breaks. Keep the encoding logic
+ * centralized here.
  */
-export function deriveSessionDir(cwd: string): string {
+export function encodeClaudeProjectsCwd(cwd: string): string {
   const normalized = cwd.startsWith("/") ? cwd : `/${cwd}`;
   let resolved: string;
   try {
@@ -84,8 +95,16 @@ export function deriveSessionDir(cwd: string): string {
     // Path doesn't exist yet — use as-is (agent may not have started)
     resolved = normalized;
   }
-  const dirName = resolved.replace(/[/.]/g, "-");
-  return join(homedir(), ".claude", "projects", dirName);
+  return resolved.replace(/[/.]/g, "-");
+}
+
+/**
+ * Derives the Claude Code session directory from a working directory path.
+ * Claude Code stores sessions at ~/.claude/projects/<encoded-cwd>/. See
+ * `encodeClaudeProjectsCwd` for the encoding contract.
+ */
+export function deriveSessionDir(cwd: string): string {
+  return join(homedir(), ".claude", "projects", encodeClaudeProjectsCwd(cwd));
 }
 
 /**

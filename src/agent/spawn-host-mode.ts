@@ -19,7 +19,7 @@
 
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createLogger } from "../logger.js";
 import {
   buildDispatchScript,
@@ -28,6 +28,7 @@ import {
 } from "../terminal.js";
 import { createHostHandle } from "./agent-handle.js";
 import { createHostExitWatcher, readPidFileWithTimeout } from "./host-pid.js";
+import { ensureHostProjectsSymlink } from "./host-projects-symlink.js";
 import { putStatus, notifyTerminalStatus } from "./agent-status.js";
 import type { AgentJob, SpawnAgentOptions } from "./agent-types.js";
 
@@ -83,6 +84,17 @@ export async function spawnHostMode(
       `[Job ${jobId}] spawnAgent({openTerminal: true}) requires apiToken when statusUrl is set`,
     );
   }
+
+  // DX-240: install/repair the host symlink that points
+  // ${HOME}/.claude/projects/<encoded-cwd> at <repo>/claude-projects/<encoded-cwd>.
+  // Both runtimes converge on the per-repo dir so `claude --resume <sessionId>`
+  // and SessionLogWatcher attach work after a host↔docker swap. agentCwd is
+  // the canonical `<repo.hostPath>/.danxbot/workspaces/<name>` path produced
+  // by the workspace resolver, so dirname×3 lifts off `<name>`, `workspaces`,
+  // `.danxbot` and lands on the repo root — the same dir docker compose binds
+  // claude-projects from. See `src/agent/host-projects-symlink.ts`.
+  const repoLocalPath = dirname(dirname(dirname(agentCwd)));
+  ensureHostProjectsSymlink({ workspaceCwd: agentCwd, repoLocalPath });
 
   const termLogPath = getTerminalLogPath(jobId);
   job.terminalLogPath = termLogPath;
