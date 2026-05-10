@@ -49,7 +49,7 @@ export type IssueStatus =
   | "Done"
   | "Cancelled";
 
-export type IssueType = "Epic" | "Bug" | "Feature";
+export type IssueType = "Epic" | "Bug" | "Feature" | "Chore";
 
 export interface IssueRef {
   /** Internal id (`ISS-N`). Empty for refs from a tracker that has not yet been reconciled with a local YAML. */
@@ -679,4 +679,5 @@ export const ISSUE_TYPES: readonly IssueType[] = [
   "Epic",
   "Bug",
   "Feature",
+  "Chore",
 ] as const;

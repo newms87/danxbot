@@ -56,7 +56,7 @@ export type ColumnId =
   | "cancelled";
 
 /** Lowercase type id used by the design system's palette lookup. */
-export type IssueTypeId = "epic" | "bug" | "feature";
+export type IssueTypeId = "epic" | "bug" | "feature" | "chore";
 
 interface TypeMeta {
   label: string;
@@ -82,6 +82,7 @@ export const ISSUE_TYPE_META: Record<IssueTypeId, TypeMeta> = {
   epic:    { label: "Epic",    fg: "#a5b4fc", bg: "rgb(99 102 241 / 0.15)", border: "rgb(99 102 241 / 0.35)" },
   bug:     { label: "Bug",     fg: "#fca5a5", bg: "rgb(239 68 68 / 0.15)",  border: "rgb(239 68 68 / 0.35)" },
   feature: { label: "Feature", fg: "#86efac", bg: "rgb(16 185 129 / 0.15)", border: "rgb(16 185 129 / 0.35)" },
+  chore:   { label: "Chore",   fg: "#cbd5e1", bg: "rgb(100 116 139 / 0.18)", border: "rgb(100 116 139 / 0.40)" },
 };
 
 /**
@@ -111,6 +112,7 @@ const TYPE_TO_ID: Record<IssueType, IssueTypeId> = {
   Epic: "epic",
   Bug: "bug",
   Feature: "feature",
+  Chore: "chore",
 };
 
 export function statusToColumnId(status: IssueStatus): ColumnId {

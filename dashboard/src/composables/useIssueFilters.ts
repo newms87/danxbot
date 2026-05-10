@@ -1,10 +1,10 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
 
-export type IssueTypeFilter = "epic" | "bug" | "feature";
+export type IssueTypeFilter = "epic" | "bug" | "feature" | "chore";
 export type ScopeMode = "highlight" | "filter";
 
-const VALID_TYPES: ReadonlyArray<IssueTypeFilter> = ["epic", "bug", "feature"];
+const VALID_TYPES: ReadonlyArray<IssueTypeFilter> = ["epic", "bug", "feature", "chore"];
 const VALID_SCOPE_MODES: ReadonlyArray<ScopeMode> = ["highlight", "filter"];
 
 /**

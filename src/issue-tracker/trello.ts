@@ -571,6 +571,8 @@ export class TrelloTracker implements IssueTracker {
       case "Feature":
         ids.push(this.trello.featureLabelId);
         break;
+      case "Chore":
+        break;
     }
     // status === "Blocked" → existing Trello "Blocked" label.
     if (labels.blocked) ids.push(this.trello.blockedLabelId);

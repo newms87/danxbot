@@ -34,7 +34,7 @@ const SCOPE_MODES: ReadonlyArray<{ id: ScopeMode; label: string }> = [
   { id: "highlight", label: "Highlight" },
 ];
 
-const TYPE_ORDER: ReadonlyArray<IssueTypeFilter> = ["epic", "bug", "feature"];
+const TYPE_ORDER: ReadonlyArray<IssueTypeFilter> = ["epic", "bug", "feature", "chore"];
 
 // Local mirror of `q` so typing stays buttery; debounce 200ms before
 // pushing upstream (which mirrors to URL).
