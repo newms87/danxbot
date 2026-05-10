@@ -91,6 +91,7 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 
 ## Top-Level Flow
 
+0. Verify on latest `origin/main` (Step 0).
 1. Read the YAML the dispatch prompt named.
 1.1. **Resume self-check** (Step 1.1) — terminal state + checked ACs + filled retro = call `danxbot_complete` and stop. Do not redo work.
 1.5. Internalize the **You Fix What You Find** rule (Step 1.5) before doing anything else.
@@ -105,6 +106,30 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 10. `danxbot_complete` (Step 11).
 
 Config references: `.claude/rules/danx-repo-config.md` for repo commands. Never hardcode IDs.
+
+---
+
+## Step 0 — Verify on latest `origin/main`
+
+The worker's `dispatchWithRecovery` runs `git fetch origin main` and `git reset --hard origin/main` before spawning you, so your worktree SHOULD already be on the upstream tip. This step is the defense-in-depth audit — confirm freshness once at start so a regression in the dispatch path (skipped fetch, stale cache, racing operator push between fetch and reset) is caught here instead of silently shipping work against stale base.
+
+```bash
+git fetch origin --quiet
+git rev-list HEAD..origin/main --count
+```
+
+- Output `0` → you are on the latest main. Proceed to Step 1.
+- Output non-zero → upstream moved between the worker's pre-dispatch fetch and your spawn. Catch up before doing any work:
+
+  ```bash
+  git rebase origin/main
+  ```
+
+  A clean rebase puts you at HEAD = origin/main. Proceed to Step 1.
+
+  A rebase **conflict** here means your worktree carried in-flight work the worker's `validate()` did not flag (it should have routed you to recovery mode — a regression worth a comment on the card). Don't try to resolve blind. Add a `comments[]` entry titled `## Operator action required` describing the conflicting paths + the fact that the dispatch landed pre-recovery, then follow Step 10 (Blocked).
+
+This step is read-only against your worktree's existing work — if `git status` shows uncommitted changes BEFORE you do anything, the worker mis-routed (validate should have caught dirty state). Same operator-action comment + Blocked.
 
 ---
 

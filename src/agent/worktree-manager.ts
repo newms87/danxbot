@@ -137,6 +137,19 @@ export interface WorktreeManager {
    * of silently producing a worktree that fails on first dispatch).
    */
   ensureProvisioned(ctx: WorktreeRepo, agentName: string): Promise<void>;
+  /**
+   * Refresh the host clone's cached `refs/remotes/origin/main` so the
+   * subsequent `validate()` + `resetClean()` pair operates on the truly
+   * latest upstream sha. Called once by `dispatchWithRecovery` per
+   * dispatch so external pushes (PR-merge via the GitHub web UI, peer
+   * dev pushes, this host's own non-finalize pushes) take effect on the
+   * NEXT dispatch without manual operator intervention.
+   *
+   * Returns false on transient network failure — `dispatchWithRecovery`
+   * logs and proceeds with the stale cached ref (better to dispatch on
+   * stale than to dead-letter the card on flaky DNS). Never throws.
+   */
+  fetchOrigin(ctx: WorktreeRepo): Promise<boolean>;
 }
 
 /** Thin abstraction over `git` invocation so tests can stub command results. */
@@ -207,6 +220,29 @@ export function createWorktreeManager(
     worktreePath(ctx, agentName) {
       assertAgentName(agentName);
       return join(ctx.hostPath, ".danxbot", "worktrees", agentName);
+    },
+
+    async fetchOrigin(ctx) {
+      // Refresh `refs/remotes/origin/main` so the next validate/reset
+      // pair sees post-merge upstream commits. `--quiet` suppresses
+      // chatty FETCH output; `--prune` keeps stale remote-tracking
+      // refs from accumulating. Run against the host clone (shared
+      // .git for all worktrees) — fetching once updates every
+      // worktree's view.
+      const result = await runner.run(ctx.hostPath, [
+        "fetch",
+        "--quiet",
+        "--prune",
+        "origin",
+        "main",
+      ]);
+      if (result.code !== 0) {
+        log.warn(
+          `fetchOrigin(${ctx.hostPath}): git fetch failed (code=${result.code}): ${result.stderr.trim()} — proceeding with cached origin/main ref`,
+        );
+        return false;
+      }
+      return true;
     },
 
     async bootstrap(ctx, agentName) {

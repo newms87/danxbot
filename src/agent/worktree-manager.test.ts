@@ -483,6 +483,36 @@ describe("WorktreeManager", () => {
   // DX-242 — node_modules provisioning (real fs)
   // ============================================================
 
+  describe("fetchOrigin", () => {
+    it("runs `git fetch --quiet --prune origin main` in the host clone", async () => {
+      const runner = fakeRunner();
+      const wm = createWorktreeManager(runner);
+
+      const ok = await wm.fetchOrigin(ctx);
+
+      expect(ok).toBe(true);
+      expect(runner.calls).toEqual([
+        { cwd: ctx.hostPath, args: ["fetch", "--quiet", "--prune", "origin", "main"] },
+      ]);
+    });
+
+    it("returns false (does not throw) on non-zero exit", async () => {
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "fetch",
+            response: { code: 128, stderr: "fatal: unable to access remote" },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const ok = await wm.fetchOrigin(ctx);
+
+      expect(ok).toBe(false);
+    });
+  });
+
   describe("provisionNodeModules / ensureProvisioned (DX-242)", () => {
     let workArea: string;
     let repoRoot: string;

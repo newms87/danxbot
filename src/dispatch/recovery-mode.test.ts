@@ -37,10 +37,23 @@ vi.mock("../logger.js", () => ({
 function mkManager(opts: {
   validate?: () => Promise<ValidationResult>;
   resetClean?: () => Promise<void>;
+  fetchOrigin?: () => Promise<boolean>;
 }): WorktreeManager & {
-  calls: { validate: number; resetClean: number; bootstrap: number; teardown: number };
+  calls: {
+    validate: number;
+    resetClean: number;
+    bootstrap: number;
+    teardown: number;
+    fetchOrigin: number;
+  };
 } {
-  const calls = { validate: 0, resetClean: 0, bootstrap: 0, teardown: 0 };
+  const calls = {
+    validate: 0,
+    resetClean: 0,
+    bootstrap: 0,
+    teardown: 0,
+    fetchOrigin: 0,
+  };
   return {
     calls,
     worktreePath: (ctx, name) => `${ctx.localPath}/.danxbot/worktrees/${name}`,
@@ -59,6 +72,10 @@ function mkManager(opts: {
       if (opts.resetClean) await opts.resetClean();
     },
     ensureProvisioned: async () => {},
+    fetchOrigin: async () => {
+      calls.fetchOrigin++;
+      return opts.fetchOrigin ? opts.fetchOrigin() : true;
+    },
   };
 }
 
@@ -112,11 +129,67 @@ describe("dispatchWithRecovery", () => {
       { dispatch: dispatchMock },
     );
 
+    expect(manager.calls.fetchOrigin).toBe(1);
     expect(manager.calls.validate).toBe(1);
     expect(manager.calls.resetClean).toBe(1);
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(dispatchMock.mock.calls[0][0].task).toBe("do the thing");
     expect(result.dispatchId).toBe("id-1");
+  });
+
+  it("fetchOrigin runs before validate (refresh cached origin/main BEFORE deciding clean/dirty)", async () => {
+    const order: string[] = [];
+    const dispatchMock = vi.fn(
+      async (_input: DispatchInput): Promise<DispatchResult> => ({
+        dispatchId: "id-order",
+        job: fakeJob(),
+      }),
+    );
+    const manager = mkManager({
+      fetchOrigin: async () => {
+        order.push("fetchOrigin");
+        return true;
+      },
+      validate: async () => {
+        order.push("validate");
+        return { state: "clean" };
+      },
+      resetClean: async () => {
+        order.push("resetClean");
+      },
+    });
+
+    await dispatchWithRecovery(
+      mkInput(),
+      { agentName: "alice", manager },
+      { dispatch: dispatchMock },
+    );
+
+    expect(order).toEqual(["fetchOrigin", "validate", "resetClean"]);
+  });
+
+  it("dispatch proceeds when fetchOrigin returns false (transient network failure does not dead-letter)", async () => {
+    const dispatchMock = vi.fn(
+      async (_input: DispatchInput): Promise<DispatchResult> => ({
+        dispatchId: "id-flaky",
+        job: fakeJob(),
+      }),
+    );
+    const manager = mkManager({
+      fetchOrigin: async () => false,
+      validate: async () => ({ state: "clean" }),
+    });
+
+    const result = await dispatchWithRecovery(
+      mkInput(),
+      { agentName: "alice", manager },
+      { dispatch: dispatchMock },
+    );
+
+    expect(manager.calls.fetchOrigin).toBe(1);
+    expect(manager.calls.validate).toBe(1);
+    expect(manager.calls.resetClean).toBe(1);
+    expect(result.dispatchId).toBe("id-flaky");
   });
 
   it("dirty validation → routes to recovery-mode dispatch with recovery prompt + 'internal:recovery' endpoint", async () => {

@@ -194,6 +194,15 @@ export async function dispatchWithRecovery(
 ): Promise<DispatchResult> {
   const { agentName, manager } = worktreeContext;
 
+  // Refresh the host clone's `refs/remotes/origin/main` BEFORE validate
+  // so external pushes (PR-merge via GitHub web UI, peer-dev pushes,
+  // this host's own non-finalize pushes) are visible to the next
+  // resetClean. Without this, the agent starts on whatever sha was
+  // cached at the last finalize / manual fetch — silent staleness.
+  // Transient failures fall through (warning logged inside the
+  // manager) so a flaky network does not dead-letter the dispatch.
+  await manager.fetchOrigin(input.repo);
+
   const validation = await manager.validate(input.repo, agentName);
   if (validation.state === "dirty") {
     return dispatchInRecoveryMode(input, agentName, validation, manager, deps);

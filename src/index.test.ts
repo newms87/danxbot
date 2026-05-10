@@ -135,6 +135,7 @@ vi.mock("./agent/worktree-manager.js", () => ({
     validate: vi.fn().mockResolvedValue({ state: "clean" }),
     resetClean: vi.fn().mockResolvedValue(undefined),
     ensureProvisioned: vi.fn().mockResolvedValue(undefined),
+    fetchOrigin: vi.fn().mockResolvedValue(true),
   }),
 }));
 vi.mock("./agent/ensure-worktrees-provisioned.js", () => ({

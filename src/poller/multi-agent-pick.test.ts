@@ -24,6 +24,8 @@ vi.mock("../agent/worktree-manager.js", () => ({
     teardown: vi.fn(),
     validate: vi.fn().mockResolvedValue({ state: "clean" }),
     resetClean: vi.fn(),
+    ensureProvisioned: vi.fn(),
+    fetchOrigin: vi.fn().mockResolvedValue(true),
   }),
 }));
 vi.mock("./yaml-lifecycle.js", async () => {

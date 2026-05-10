@@ -35,6 +35,7 @@ function stubManager(opts: StubManagerOptions): {
     teardown: async () => {},
     validate: async () => ({ state: "clean" }),
     resetClean: async () => {},
+    fetchOrigin: async () => true,
     async ensureProvisioned(_ctx, agentName) {
       calls.push(agentName);
       const outcome = opts.outcomes[agentName];
