@@ -86,6 +86,10 @@ All repo config in `<repo>/.danxbot/config/` (version controlled). Secrets in `<
 
 Per-repo secrets use standardized `DANX_*` prefix: `DANX_SLACK_BOT_TOKEN`, `DANX_SLACK_APP_TOKEN`, `DANX_SLACK_CHANNEL_ID`, `DANX_DB_HOST/USER/PASSWORD/NAME`, `DANX_GITHUB_TOKEN`, `DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`. Danxbot's own `.env` keeps shared infra only: `ANTHROPIC_API_KEY`, `REPOS`, `DANXBOT_DB_*`, `DASHBOARD_PORT`, `DANXBOT_GIT_EMAIL`.
 
+## Portable Repo Path (DX-230)
+
+Every per-repo `compose.yml` MUST declare `DANXBOT_REPO_HOST_PATH: ${DANXBOT_REPO_ROOT}` in `environment:` AND a second mirror-bind volume `${DANXBOT_REPO_ROOT}:${DANXBOT_REPO_HOST_PATH:?...}`. The mirror-bind makes the repo visible at TWO real paths inside the container — the legacy `/danxbot/app/repos/<name>` and the host's absolute path — so `git worktree add` (which calls `realpath()` on its cwd before writing metadata) bakes runtime-agnostic paths. Adding a new connected repo without these two lines = worker boot fails loud (`ensurePortableRepoPath` throws). `scripts/worker-env.sh` exports `DANXBOT_REPO_HOST_PATH=DANXBOT_REPO_ROOT` for compose-up; both `make launch-worker` and `make launch-worker-host` source it. See `src/agent/portable-path.ts`.
+
 ## Per-Repo Trello Toggle
 
 `DANX_TRELLO_ENABLED` in `<repo>/.danxbot/.env` controls whether the poller runs for that repo. Defaults to `false` (explicit opt-in). Both runtimes read identically — docker via `env_file`, host via `make launch-worker-host` sourcing the per-repo `.env`.
