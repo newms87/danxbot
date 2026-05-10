@@ -1,4 +1,12 @@
 node_modules/
+# Match `node_modules` as a bare name too — git's `node_modules/` (with
+# trailing slash) only matches directories, NOT symlinks pointing at a
+# node_modules dir. Worktree-test workflows symlink node_modules into
+# the worktree (the symlink is created by the operator / CI to share
+# the parent checkout's deps); without this bare entry the symlink
+# becomes an untracked entry that `git add -A` happily commits as a
+# 120000-mode entry pointing at the operator's host filesystem.
+node_modules
 dist/
 docker-compose.override.yml
 .env
@@ -13,6 +21,7 @@ data/
 .poller-running
 dashboard/dist/
 dashboard/node_modules/
+dashboard/node_modules
 *.tsbuildinfo
 
 .claude/settings.local.json
