@@ -61,6 +61,7 @@ import {
   writeStagedFiles,
   type StagedFileInput,
 } from "./staged-files.js";
+import { prependPersona, type PersonaContext } from "../agent/persona.js";
 
 const log = createLogger("dispatch-core");
 
@@ -303,6 +304,28 @@ export interface DispatchInput {
    * the DB-side stamp.
    */
   pairedWriteYaml?: YamlPairedWrite;
+  /**
+   * Resolved agent persona for this dispatch (DX-162 / multi-worker
+   * dispatch epic DX-158). When set, `dispatch()` prepends a persona
+   * block (`You are <name>.\n<bio>\nYour worktree: <path>\nYour
+   * branch: <name>`) to `task` before any downstream consumption — the
+   * agent reads its identity + branch + worktree path on the very
+   * first turn.
+   *
+   * Pass `undefined` for legacy dispatches that don't resolve an agent
+   * (today: every caller). Phase 5 (DX-200) wires the poller to pick a
+   * free agent and pass it here. The recovery-mode helper
+   * (`src/dispatch/recovery-mode.ts`) routes through `dispatch()` with
+   * `...input` spread, so a recovery dispatch on an agent-bound card
+   * automatically inherits the persona without explicit wiring.
+   *
+   * The persona is applied to the original `task` body, BEFORE
+   * `buildCompletionInstruction` is appended in `runResolved` and
+   * BEFORE the stall-recovery respawn note is appended. This keeps
+   * the persona a stable first paragraph for every spawn under this
+   * dispatch.
+   */
+  agent?: PersonaContext;
 }
 
 export interface DispatchResult {
@@ -750,6 +773,26 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   });
   const stagedFilePaths = await writeStagedFiles(prepared);
 
+  // Persona prepend (DX-162). When the caller resolved an agent, we
+  // prepend a `You are <name>. <bio>. Your worktree: ... Your branch:
+  // ...` block as the first paragraph of the task body. Done HERE, not
+  // inside `runResolved`, so:
+  //   - The completion instruction (appended in runResolved) lands AFTER
+  //     the persona — agent identity stays the first line claude reads.
+  //   - The stall-recovery respawn path inside runResolved uses the
+  //     same `input.task` and therefore inherits the persona on every
+  //     respawn without an extra prepend call.
+  //   - Recovery-mode dispatches (`src/dispatch/recovery-mode.ts`) flow
+  //     through `dispatch()` with `...input` spread; a recovery on an
+  //     agent-bound card inherits the persona without explicit wiring.
+  const personaTask = prependPersona({
+    prompt: input.task,
+    repo: input.repo,
+    agent: input.agent,
+  });
+  const inputWithPersona =
+    personaTask === input.task ? input : { ...input, task: personaTask };
+
   // No allowlist: the workspace's `.mcp.json` (with the danxbot
   // infrastructure server merged in here) IS the agent's MCP surface.
   // `--strict-mcp-config` keeps the agent confined to those servers, and
@@ -757,7 +800,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // reachable because the danxbot server registers it, not because it's
   // listed anywhere.
   try {
-    return await runResolved(input, dispatchId, {
+    return await runResolved(inputWithPersona, dispatchId, {
       mcpServers,
       cwd: workspace.cwd,
       envOverrides: workspace.env,

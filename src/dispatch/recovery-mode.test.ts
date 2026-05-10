@@ -158,6 +158,63 @@ describe("dispatchWithRecovery", () => {
   });
 });
 
+describe("dispatchWithRecovery — persona inheritance (DX-162)", () => {
+  // The persona block prepended by `dispatch()` (Phase 4) lives on
+  // `DispatchInput.agent`. Recovery-mode wraps the input via `...input`
+  // spread + task-override; if the spread drops `agent`, recovery
+  // dispatches lose the persona. Pin that here so a future refactor
+  // can't regress the inheritance silently.
+  it("clean validation: deps.dispatch receives input.agent verbatim (no spread loss)", async () => {
+    const dispatchMock = vi.fn(
+      async (_input: DispatchInput): Promise<DispatchResult> => ({
+        dispatchId: "id-clean-with-agent",
+        job: fakeJob(),
+      }),
+    );
+    const manager = mkManager({ validate: async () => ({ state: "clean" }) });
+    const input = mkInput({
+      agent: { name: "alice", bio: "Senior backend engineer." },
+    });
+
+    await dispatchWithRecovery(input, { agentName: "alice", manager }, {
+      dispatch: dispatchMock,
+    });
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock.mock.calls[0][0].agent).toEqual({
+      name: "alice",
+      bio: "Senior backend engineer.",
+    });
+  });
+
+  it("dirty validation: recovery-mode dispatch ALSO carries input.agent verbatim through the spread", async () => {
+    const dispatchMock = vi.fn(
+      async (_input: DispatchInput): Promise<DispatchResult> => ({
+        dispatchId: "id-recovery-with-agent",
+        job: fakeJob(),
+      }),
+    );
+    const manager = mkManager({ validate: async () => dirty });
+    const input = mkInput({
+      agent: { name: "alice", bio: "Senior backend engineer." },
+    });
+
+    await dispatchWithRecovery(input, { agentName: "alice", manager }, {
+      dispatch: dispatchMock,
+    });
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock.mock.calls[0][0].agent).toEqual({
+      name: "alice",
+      bio: "Senior backend engineer.",
+    });
+    // The recovery prompt replaced the task body, so `dispatch()` will
+    // prepend the persona in front of the recovery prompt — exactly
+    // what we want.
+    expect(dispatchMock.mock.calls[0][0].task).toContain("alice");
+  });
+});
+
 // ============================================================
 // dispatchInRecoveryMode — post-completion re-validate
 // ============================================================

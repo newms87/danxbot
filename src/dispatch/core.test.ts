@@ -1441,3 +1441,155 @@ describe("dispatch() — restageContext stamping (gpt-manager ISS-102 / Phase 5c
     expect(result.job.restageContext).toBeUndefined();
   });
 });
+
+describe("dispatch() — persona prepend (DX-162 / multi-worker)", () => {
+  // Phase 4 of the multi-worker dispatch epic. When the caller resolves
+  // an `agent`, dispatch() prepends a persona block as the first
+  // paragraph of the prompt. The block carries the agent's name, bio,
+  // worktree path, and branch — the agent reads its identity on its
+  // very first turn.
+  //
+  // Boundary asserted here: the prompt handed to spawnAgent (the body
+  // claude actually sees) starts with the persona block when `agent`
+  // is set, and is byte-identical to `task` when `agent` is undefined.
+  // Reuses the slack-worker fixture (any workspace works; the prompt
+  // body is the boundary, not the MCP set).
+  const slackWorkerSrc = resolve(
+    __dirname,
+    "..",
+    "poller",
+    "inject",
+    "workspaces",
+    "slack-worker",
+  );
+
+  let tmpRepoDir: string;
+  let personaRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-persona-dispatch-"));
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "slack-worker");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(slackWorkerSrc, dest, { recursive: true });
+    personaRepo = makeRepoContext({ localPath: tmpRepoDir });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  const PERSONA_META: DispatchTriggerMetadata = {
+    trigger: "slack",
+    metadata: {
+      channelId: "C123",
+      threadTs: "1700.001",
+      messageTs: "1700.002",
+      user: "U1",
+      userName: null,
+      messageText: "do the thing",
+    },
+  };
+
+  it("prepends the persona block in front of the task body when agent is supplied", async () => {
+    await dispatch({
+      repo: personaRepo,
+      task: "Process card DX-1.",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: PERSONA_META,
+      agent: { name: "alice", bio: "Senior backend engineer." },
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    // The persona block lands as the first paragraph; the task body
+    // appears AFTER. The completion instruction (appended in
+    // runResolved) sits at the very end.
+    expect(opts.prompt.startsWith("You are alice.")).toBe(true);
+    expect(opts.prompt).toContain("Senior backend engineer.");
+    expect(opts.prompt).toContain(
+      `Your worktree: ${tmpRepoDir}/.danxbot/worktrees/alice`,
+    );
+    expect(opts.prompt).toContain("Your branch: alice");
+    // The original task body still appears.
+    expect(opts.prompt).toContain("Process card DX-1.");
+    // Persona must come BEFORE the task body, not after.
+    expect(opts.prompt.indexOf("You are alice.")).toBeLessThan(
+      opts.prompt.indexOf("Process card DX-1."),
+    );
+  });
+
+  it("does NOT prepend a persona block when agent is undefined (legacy callers stay byte-identical)", async () => {
+    await dispatch({
+      repo: personaRepo,
+      task: "Process card DX-1.",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: PERSONA_META,
+      // agent intentionally omitted — Phase-5-pre callers
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.prompt).not.toContain("You are ");
+    expect(opts.prompt).not.toContain("Your worktree:");
+    expect(opts.prompt).not.toContain("Your branch:");
+    // The task body still leads the prompt body — runResolved appends
+    // the completion instruction afterwards.
+    expect(opts.prompt.startsWith("Process card DX-1.")).toBe(true);
+  });
+
+  it("the completion instruction (appended in runResolved) lands AFTER the persona block — load-bearing invariant from core.ts:780", async () => {
+    // The source comment at the prepend call site is explicit:
+    // "The completion instruction (appended in runResolved) lands
+    // AFTER the persona — agent identity stays the first line claude
+    // reads." Pin it so a future refactor that moves the prepend
+    // into runResolved (or appends to it) trips this test. The
+    // instruction marker `danxbot_complete` is stable across the body.
+    await dispatch({
+      repo: personaRepo,
+      task: "Process card DX-1.",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: PERSONA_META,
+      agent: { name: "alice", bio: "Senior backend engineer." },
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    const personaIdx = opts.prompt.indexOf("You are alice.");
+    const completionIdx = opts.prompt.indexOf("danxbot_complete");
+    expect(personaIdx).toBeGreaterThanOrEqual(0);
+    expect(completionIdx).toBeGreaterThanOrEqual(0);
+    expect(personaIdx).toBeLessThan(completionIdx);
+  });
+
+  it("persona prepend works on the issue-worker workspace too — production multi-worker path (DX-200) will dispatch through this workspace", async () => {
+    // L2 from code-review: the boundary asserted is the same
+    // (mockSpawnAgent.opts.prompt), but covering the issue-worker
+    // workspace catches a future workspace-coupled refactor where
+    // prompt assembly accidentally depends on workspace identity.
+    const issueWorkerSrc = resolve(
+      __dirname,
+      "..",
+      "poller",
+      "inject",
+      "workspaces",
+      "issue-worker",
+    );
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "issue-worker");
+    cpSync(issueWorkerSrc, dest, { recursive: true });
+
+    await dispatch({
+      repo: personaRepo,
+      task: "Process card DX-1.",
+      workspace: "issue-worker",
+      overlay: {},
+      apiDispatchMeta: PERSONA_META,
+      agent: { name: "alice", bio: "Senior backend engineer." },
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(opts.prompt.startsWith("You are alice.")).toBe(true);
+    expect(opts.prompt).toContain("Your branch: alice");
+  });
+});

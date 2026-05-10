@@ -296,7 +296,36 @@ If you cannot verify an item — repo this worker cannot commit to, depends on e
 
 ## Step 7 — Commit
 
-Consult `Git Mode` in `.claude/rules/danx-repo-config.md`:
+Two paths — pick the one that matches THIS dispatch.
+
+### Step 7a — Multi-worker agent dispatch (persona block present)
+
+If your dispatch prompt's first paragraph reads `You are <name>.` followed by a `Your worktree:` line and a `Your branch:` line, you are running as a multi-worker agent (Alice / Bob / etc.) inside a persistent git worktree. Use the `agent-finalize.sh` helper — do NOT hand-roll the rebase + squash + push.
+
+1. **Compose the title verbatim from the card title.** Drop the `<Epic Title> > Phase N: ` prefix when present — keep just the leaf phase description. Example: `"Multi-Worker > Phase 4: Persona injection + agent-finalize.sh + Conventional Commits squash-merge flow"` → `"Persona injection + agent-finalize.sh + Conventional Commits squash-merge flow"`.
+2. **Compose 1–5 bullets summarizing what changed.** Verbs in past tense — `added`, `fixed`, `refactored`, `wired`. Each bullet is a separate command-line argument, properly quoted.
+3. **Run from inside your worktree** (the `Your worktree:` path from the persona block):
+
+   ```bash
+   cd <Your worktree path>
+   bash .danxbot/scripts/agent-finalize.sh <YOUR-NAME> <CARD-ID> "<title>" "<bullet 1>" "<bullet 2>" ...
+   ```
+
+   The script: WIP-commits any uncommitted changes, fetches + rebases onto `origin/main`, squashes the agent branch into ONE Conventional Commits commit (`feat(<CARD-ID>): <title>` + bullet body), pushes `HEAD:main` (with rebase-loop on push race up to 5 retries), then resets the agent branch back to `origin/main` for the next dispatch.
+
+4. **Read the exit code:**
+   - **Exit 0** — success. The script's stdout contains `PUSHED <sha>`. Capture that sha; append it to `retro.commits[]` in Step 9. Proceed.
+   - **Exit 1** — rebase conflict. The script's stderr (from `git rebase` itself) lists the conflicting paths. Resolve the conflicts in the worktree, run `git rebase --continue`, then re-invoke the script. If you cannot resolve the conflict (truly external), document the conflict in a `## Operator action required` comment and follow Step 10 (Blocked).
+   - **Exit 2** — push race exhausted (`PUSH_RACE_EXHAUSTED` on stderr). Five consecutive non-fast-forward push rejections — the remote has another writer pushing faster than you can rebase. Append a comment to the card explaining (script output verbatim), then call `danxbot_complete({status: "failed", summary: "Push race exhausted; operator must finalize."})` and exit. Do NOT loop manually.
+   - **Exit 64** — usage error. Either the args were malformed (missing `<title>` / `<bullets>`), `<CARD-ID>` doesn't match `<PREFIX>-N`, or `<title>` contains a newline. The script's stderr names the specific cause. Fix the invocation (single-line title, valid card id) and re-run. Do NOT `git rebase --continue` — that's a different failure.
+   - **Exit 65** — wrong branch. The worktree HEAD is not on `<YOUR-NAME>`. Investigate (`git status`, `git branch --show-current`) — the worktree may be wedged. If you can switch back to your branch cleanly (`git checkout <YOUR-NAME>`), re-run the script. If you cannot, document the wedge in a `## Operator action required` comment and follow Step 10 (Blocked).
+
+5. **No-op safety net.** If the script's stdout is `NO_OP` (and stderr contains `no commits ahead of origin/main`) you ran finalize without making any code changes — your dispatch was docs-only, or you forgot to actually edit code. Decide which: docs-only → still Done, leave `retro.commits[]` empty; missing edits → fix them in this dispatch, then re-run finalize. Do NOT push the literal token `NO_OP` into `retro.commits[]`.
+
+### Step 7b — Legacy single-workspace dispatch (no persona block)
+
+If your dispatch prompt has no `You are <name>.` first paragraph, you are running in the legacy single-workspace mode (`<repo>/.danxbot/workspaces/issue-worker/`). Consult `Git Mode` in `.claude/rules/danx-repo-config.md`:
+
 - `auto-merge`: feature branch `danxbot/<kebab-case-title>`, stage + commit, push, merge to main, delete branch.
 - `pr`: feature branch, stage + commit, push, `gh pr create`.
 

@@ -1584,6 +1584,45 @@ function copyRepoToolScripts(
 }
 
 /**
+ * Step 5: danxbot-shipped scripts -> `<repo>/.danxbot/scripts/` (executable).
+ *
+ * Currently mirrors `agent-finalize.sh` (DX-162 / multi-worker dispatch
+ * epic DX-158) — the agent's per-dispatch completion helper. Lives in
+ * `src/poller/inject/scripts/` and lands in EVERY connected repo on
+ * EVERY poll tick. Scope is intentionally repo-wide (not per-workspace):
+ * the script is invoked from inside an agent's git worktree at
+ * `<repo>/.danxbot/worktrees/<agent>/`, NOT from a workspace directory,
+ * so the path agents reference (`.danxbot/scripts/agent-finalize.sh`)
+ * resolves correctly relative to the worktree's repo root.
+ *
+ * Contract mirrors `injectDanxWorkspaces`:
+ *   - **Idempotent.** `writeIfChanged` skips writes when content is
+ *     byte-identical so inodes stay stable across ticks.
+ *   - **Write-only.** Scripts retired from the inject source survive
+ *     at target — there is no prune. The set is small and operator-
+ *     visible enough that drift here is preferable to accidentally
+ *     nuking an operator-authored script that lives alongside ours.
+ *   - **Executable bit.** Every `.sh` file gets `chmod 0755` — the
+ *     agent invokes them via `bash <path>` but operators / CI scripts
+ *     may run them directly.
+ *   - **Empty source dir is a no-op** — useful for tests that scaffold
+ *     a poller against a stripped-down danxbot tree.
+ */
+function injectDanxbotScripts(repoLocalPath: string): void {
+  const sourceDir = resolve(injectDir, "scripts");
+  if (!existsSync(sourceDir)) return;
+  const targetDir = resolve(repoLocalPath, ".danxbot", "scripts");
+  mkdirSync(targetDir, { recursive: true });
+  for (const entry of readdirSync(sourceDir)) {
+    const srcPath = resolve(sourceDir, entry);
+    if (!statSync(srcPath).isFile()) continue;
+    const destPath = resolve(targetDir, entry);
+    writeIfChanged(destPath, readFileSync(srcPath, "utf-8"));
+    if (entry.endsWith(".sh")) chmodExecutable(destPath);
+  }
+}
+
+/**
  * Step 6b: inject/workspaces/<name>/ -> <repo>/.danxbot/workspaces/<name>/.
  *
  * Part of the workspace-dispatch epic (Trello `jAdeJgi5`, Phase 2). Every
@@ -1929,6 +1968,12 @@ export function syncRepoFiles(repo: RepoContext): void {
   // Stage 1: static workspace mirror.
   const workspacesDir = resolve(repo.localPath, ".danxbot/workspaces");
   injectDanxWorkspaces(workspacesDir);
+
+  // Stage 1b: danxbot-shipped scripts -> <repo>/.danxbot/scripts/.
+  // Scope is repo-wide (not per-workspace) because the agent invokes
+  // these from inside a worktree at <repo>/.danxbot/worktrees/<agent>/,
+  // not from a workspace dir — see `injectDanxbotScripts`.
+  injectDanxbotScripts(repo.localPath);
 
   // Stage 2: per-repo render into every plural workspace.
   renderPerRepoFilesIntoWorkspaces(repo, danxbotConfigDir, cfg, workspacesDir);

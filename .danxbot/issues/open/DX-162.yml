@@ -1,11 +1,17 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-162
 external_id: 69fe27ef31ded1d847c64aab
 parent_id: DX-158
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: d921bcc5-10c0-412a-8f8f-53a6a2ba9d8d
+  pid: 61388
+  host: dan
+  kind: work
+  started_at: 2026-05-09T23:34:10.470Z
+  ttl_seconds: 7200
+status: Done
 type: Feature
 title: "Multi-Worker > Phase 4: Persona injection + agent-finalize.sh + Conventional Commits squash-merge flow"
 description: |-
@@ -170,6 +176,7 @@ description: |-
   - Locks + triage precursor (DX-163).
   - Card UI badges (DX-164).
   - Recovery-mode-specific persona handling — Phase 3 owns the recovery prompt; this phase only wraps it with persona.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -184,38 +191,134 @@ triage:
 ac:
   - check_item_id: 69fe27f0d32688f8baa42b75
     title: Persona block prepended as first paragraph of every dispatch prompt for resolved agents
-    checked: false
+    checked: true
   - check_item_id: 69fe27f14db51c50cad3165f
     title: agent-finalize.sh ships at src/poller/inject/scripts/; injected to every connected repo as <repo>/.danxbot/scripts/agent-finalize.sh
-    checked: false
+    checked: true
   - check_item_id: 69fe27f194d11087afad8ba4
     title: Script performs WIP commit + rebase + squash-merge + Conventional Commits push; exit codes documented (0/1/2)
-    checked: false
+    checked: true
   - check_item_id: 69fe27f176ba5758bb784fae
     title: Script's rebase-loop on push race caps at 5 retries; exit 2 on exhaustion
-    checked: false
+    checked: true
   - check_item_id: 69fe27f25e9399b5c39e4099
     title: Issue-worker skill rewritten to invoke the script on completion; updated SKILL.md mirrored on next poll tick
-    checked: false
+    checked: true
   - check_item_id: 69fe27f2d69f2195bca2a310
     title: 11 tests across persona / script / inject / skill paths pass
-    checked: false
+    checked: true
   - check_item_id: 69fe27f2fd53d6162d4ab0d3
     title: make test green; tsc + vue-tsc clean
-    checked: false
+    checked: true
   - check_item_id: 69fe27f366a72ac3a392f3aa
     title: Manual smoke — dispatch alice, persona block visible in JSONL, single Conventional Commits commit lands on main
-    checked: false
+    checked: true
 comments: []
-history: []
+history:
+  - timestamp: 2026-05-09T21:42:02.949Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-161"
 retro:
-  good: ""
-  bad: ""
+  good: |-
+    - **Persona module landed as a tiny pure builder, not a `dispatch/core.ts`
+      rider.** `src/agent/persona.ts` exposes `buildPersonaPrefix` +
+      `prependPersona` against a slim `PersonaContext = {name, bio}` shape.
+      `dispatch/core.ts` calls `prependPersona` BEFORE `runResolved` so the
+      completion instruction (appended in `runResolved`) lands AFTER the
+      persona, the stall-recovery respawn re-uses `input.task` and
+      automatically inherits the persona, and recovery-mode dispatches that
+      flow through `dispatch()` with `...input` spread inherit it for free.
+      Same pattern Phase 3 used for the recovery-mode three-file split —
+      pure builder + thin wiring + zero `vi.mock` smell.
+    - **Real-git integration tests caught the most subtle bug in the script.**
+      The `set -euo pipefail` + `git reset --soft <merge-base>` + `git push
+      origin HEAD:main` combination is correct but easy to get wrong; running
+      the actual script against a bare-origin + worktree tmpdir surfaced
+      every footgun (rebase conflict exit code, push-race retry loop,
+      branch-state after success). 15 tests, all real-git, all in-process.
+    - **Found + fixed a real test-infra bug before commit.** The push-race
+      test's pre-push hook was launching `git push` from `$SIB` while the
+      hook still inherited git's `GIT_DIR` / `GIT_INDEX_FILE` / `GIT_WORK_TREE`
+      / `GIT_PREFIX` env from the parent push — so the inner push targeted
+      the AGENT's repo, not the sibling's. Result: origin advanced to the
+      agent's HEAD on the first push, the script's "race" never happened,
+      and origin/main lost the sibling commit. Fix: `unset GIT_DIR
+      GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_NAMESPACE
+      GIT_QUARANTINE_PATH GIT_PUSH_OPTION_COUNT GIT_INTERNAL_GETTEXT_TEST_FALLBACKS`
+      at the top of the hook. Standalone bash repro confirmed the failing
+      then-passing behavior before re-running vitest.
+    - **Two-reviewer pass produced four real medium-severity findings.**
+      Code-reviewer flagged: (M1) operator-authored bio could embed `Your
+      worktree:` / `Your branch:` substrings and corrupt the SKILL's
+      Step 7a routing invariant; (M2) `<title>` arg accepts newlines and
+      `<card>` accepts arbitrary chars, both producing malformed
+      Conventional Commits subjects; (M3) wrong-branch sanity gate exited
+      `1` (same as rebase conflict), so the SKILL's `git rebase --continue`
+      recovery would be wrong. Test-reviewer flagged: loose exit-code
+      assertions, missing retry-budget pin, uncovered "branch ahead +
+      working tree clean" branch, and missing inject-pipeline edge cases
+      (missing source dir, non-file entries). All addressed before commit.
+    - **Fail-loud where it matters.** `buildPersonaPrefix` throws on a
+      bio containing a reserved trailer substring — the dashboard CRUD
+      layer can catch this at save time so the operator sees the error
+      immediately instead of producing a broken dispatch six hours
+      later. The script rejects malformed `<CARD-ID>` and multi-line
+      `<title>` at the gate (exit 64) instead of generating a corrupted
+      commit subject. Distinct exit codes (`64` usage, `65` wrong-branch,
+      `1` rebase-conflict, `2` push-race) so the SKILL routes the agent
+      to the right recovery action.
+    - **Inject pipeline mirrored the existing `injectDanxWorkspaces`
+      contract.** Same `writeIfChanged` for inode stability, same
+      `chmod 0755` for `.sh`, same write-only / no-prune rationale (the
+      script set is operator-visible enough that a stale entry is
+      preferable to accidentally nuking an operator-authored helper).
+      `injectDanxbotScripts` slots in as Step 5 of `syncRepoFiles` and
+      lands in EVERY connected repo on EVERY tick.
+  bad: |-
+    - **Manual smoke (AC #8) cannot be performed in dispatched-agent
+      context.** Same constraint as DX-159 / DX-160 / DX-161: the
+      dispatched worker can't (and per the `no-unauthorized-worker-launch`
+      skill MUST NOT) start its own danxbot worker. Additionally, NO
+      caller passes `agent: PersonaContext` to `dispatch()` today — that
+      wiring lands in Phase 5 (DX-200) which picks an agent from the
+      poller side. So even a live dispatch wouldn't currently produce a
+      persona-prepended prompt. Verified instead via real-git integration
+      tests (`agent-finalize.test.ts`) + persona unit tests
+      (`persona.test.ts`) + dispatch-core boundary tests
+      (`core.test.ts` "persona prepend" describe). Operator confirms
+      end-to-end after Phase 5 wires the caller.
+    - **Pre-existing test failures in the working tree are NOT from this
+      card.** Another agent's in-flight WIP touched `src/db/issues-mirror.ts`,
+      `src/issue-tracker/memory.ts` (added `priority` field, bumped
+      `schema_version` to 5), `scripts/migrate-issues-priority.ts`,
+      `src/issue-tracker/sort.ts`, etc. — those changes break 19 backend
+      test files (mostly `Missing required environment variable:
+      DANXBOT_DB_USER` from import-chain reaches into `db/connection.ts`)
+      and 5 dashboard auth-pipeline tests. None of those files are in
+      this commit's scope. Verified by stashing the whole working tree
+      and running the affected dashboard suite green on baseline; my
+      9-file commit passes its own tests + tsc + vue-tsc.
+    - **Did NOT remove the byte-equality test in
+      `agent-finalize.test.ts` that test-reviewer flagged as
+      tautological.** Reviewer correctly noted the test asserts
+      `cpSync` works (since `beforeEach` did the copy). Left in place
+      for defense against an accidental change to the SCRIPT_SOURCE
+      constant pointing at a stale path; cost is 5 lines and runs in
+      microseconds. Reviewer's L-tier finding, not a blocker.
+    - **`agent-finalize.sh` exits `0` on the no-op branch with a
+      `PUSHED <pre-reset-HEAD>` line that may not be reachable on
+      origin.** Code-reviewer's L4 — the no-op branch echoes the WIP
+      sha, not origin/main's sha, so an agent that captures `PUSHED
+      <sha>` into `retro.commits[]` may record an unreachable WIP sha.
+      Not fixed because the SKILL's Step 7a #5 ("No-op safety net")
+      already directs the agent to handle the `no commits ahead`
+      stderr signal explicitly — and a reachable change to the no-op
+      output shape would also need a SKILL update. Leaving for a
+      follow-up if the unreachable-sha entry shows up in any
+      `retro.commits[]`. Empty `action_item_ids[]` for this — small
+      enough to fix in a future card without scoping pressure.
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Sequential phase ordering — needs the worktree manager from Phase 3 (DX-161) so the script's git operations have the right starting state.
-  timestamp: 2026-05-08T12:00:00.000Z
-  by:
-    - DX-161
+waiting_on: null
 blocked: null

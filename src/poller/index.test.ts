@@ -501,6 +501,7 @@ const mockLstatSync = vi.fn().mockImplementation(() => ({
   isSymbolicLink: () => false,
 }));
 const mockReadlinkSync = vi.fn().mockReturnValue("");
+const mockChmodSync = vi.fn();
 vi.mock("node:fs", () => ({
   existsSync: (...args: unknown[]) => mockExistsSync(...args),
   readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
@@ -511,7 +512,7 @@ vi.mock("node:fs", () => ({
   unlinkSync: (...args: unknown[]) => mockUnlinkSync(...args),
   rmSync: (...args: unknown[]) => mockRmSync(...args),
   renameSync: vi.fn(),
-  chmodSync: vi.fn(),
+  chmodSync: (...args: unknown[]) => mockChmodSync(...args),
   statSync: (...args: unknown[]) => mockStatSync(...args),
   symlinkSync: vi.fn(),
   readlinkSync: (...args: unknown[]) => mockReadlinkSync(...args),
@@ -821,6 +822,232 @@ describe("poll", () => {
     )?.[1] as string;
     expect(writtenContent).toContain("danx-issue");
     expect(writtenContent).toContain("@thehammer/danx-issue-mcp");
+  });
+
+  it("syncRepoFiles mirrors danxbot-shipped scripts into <repo>/.danxbot/scripts/ with executable bit (DX-162)", () => {
+    // Phase 4 of the multi-worker dispatch epic. The agent invokes
+    // `bash .danxbot/scripts/agent-finalize.sh ...` from inside its
+    // worktree at `<repo>/.danxbot/worktrees/<agent>/` to squash-merge
+    // its branch onto origin/main. The inject pipeline mirrors the
+    // script source from `src/poller/inject/scripts/` into the
+    // connected repo on every poll tick — same idempotent
+    // writeIfChanged + chmod-exec contract `injectDanxWorkspaces`
+    // uses for tools/.
+    const scriptSourceDir = "src/poller/inject/scripts";
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.endsWith("tools.md")) return true;
+      // Source script dir + every file inside resolve as existing.
+      if (path.endsWith(scriptSourceDir)) return true;
+      if (path.includes(`${scriptSourceDir}/`)) return true;
+      return false;
+    });
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith(scriptSourceDir)) return ["agent-finalize.sh"];
+      return [];
+    });
+    mockStatSync.mockImplementation((path: unknown) => {
+      // The scripts source is a dir; its files (including the .sh) are
+      // files. `injectDanxbotScripts` filters non-files via `isFile()`.
+      if (typeof path === "string" && path.endsWith("agent-finalize.sh")) {
+        return { isDirectory: () => false, isFile: () => true };
+      }
+      return { isDirectory: () => true, isFile: () => false };
+    });
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("agent-finalize.sh"))
+        return "#!/usr/bin/env bash\necho hi\n";
+      return "";
+    });
+
+    syncRepoFiles(MOCK_REPO_CONTEXT);
+
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(writtenPaths).toContain(
+      "/test/repos/test-repo/.danxbot/scripts/agent-finalize.sh",
+    );
+    const mkdirPaths = mockMkdirSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(mkdirPaths).toContain("/test/repos/test-repo/.danxbot/scripts");
+    // The .sh helper must be executable — agents `bash` it (works
+    // either way) but operators / CI may invoke it directly. The
+    // contract matches `copyRepoToolScripts` for tools/.
+    const chmodPaths = mockChmodSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(chmodPaths).toContain(
+      "/test/repos/test-repo/.danxbot/scripts/agent-finalize.sh",
+    );
+  });
+
+  it("injectDanxbotScripts is a no-op when the inject scripts source dir is missing (DX-162)", () => {
+    // Empty inject source — the function early-returns. The rest of
+    // syncRepoFiles must keep working.
+    const scriptSourceDir = "src/poller/inject/scripts";
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.endsWith("tools.md")) return true;
+      // The scripts source dir DOES NOT exist.
+      if (path.endsWith(scriptSourceDir)) return false;
+      return false;
+    });
+    mockReaddirSync.mockReturnValue([]);
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      return "";
+    });
+
+    syncRepoFiles(MOCK_REPO_CONTEXT);
+
+    // No agent-finalize.sh write.
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(
+      writtenPaths.some((p) => p.endsWith("agent-finalize.sh")),
+    ).toBe(false);
+    // No chmod on it either.
+    const chmodPaths = mockChmodSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(
+      chmodPaths.some((p) => p.endsWith("agent-finalize.sh")),
+    ).toBe(false);
+  });
+
+  it("injectDanxbotScripts is write-only — a target file absent from the inject source is NOT pruned (asymmetric with injectDanxWorkspaces by design; DX-162)", () => {
+    // The script set is small + operator-visible; pruning would risk
+    // nuking an operator-authored helper that lives alongside ours.
+    // The test passes by NOT seeing any unlink / rmSync of the
+    // sibling target file. We only have one source file
+    // (`agent-finalize.sh`) and assert NO delete tracking happens
+    // for an unrelated `legacy.sh` we pretend exists at target.
+    const scriptSourceDir = "src/poller/inject/scripts";
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.endsWith("tools.md")) return true;
+      if (path.endsWith(scriptSourceDir)) return true;
+      if (path.includes(`${scriptSourceDir}/`)) return true;
+      // Pretend a sibling `legacy.sh` exists at the TARGET path —
+      // outside the inject source. A pruning implementation would
+      // unlink it.
+      if (path.endsWith(".danxbot/scripts/legacy.sh")) return true;
+      return false;
+    });
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith(scriptSourceDir)) return ["agent-finalize.sh"];
+      return [];
+    });
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path === "string" && path.endsWith("agent-finalize.sh")) {
+        return { isDirectory: () => false, isFile: () => true };
+      }
+      return { isDirectory: () => true, isFile: () => false };
+    });
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("agent-finalize.sh"))
+        return "#!/usr/bin/env bash\necho hi\n";
+      return "";
+    });
+
+    syncRepoFiles(MOCK_REPO_CONTEXT);
+
+    // No unlink / rmSync of the legacy file. The contract pins the
+    // write-only behavior — re-introducing prune would fail this
+    // assertion AND force the next maintainer to re-read the
+    // function's header rationale before changing it.
+    const unlinkPaths = mockUnlinkSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(
+      unlinkPaths.some((p) => p.endsWith(".danxbot/scripts/legacy.sh")),
+    ).toBe(false);
+  });
+
+  it("injectDanxbotScripts skips non-file entries (subdir) so a future grouping subdir does not chmod-execute as a script (DX-162)", () => {
+    // readdir returns a regular file + a subdir. Only the file should
+    // be copied + chmod'd. Pins the `isFile()` filter on the source loop.
+    const scriptSourceDir = "src/poller/inject/scripts";
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (path.endsWith("tools.md")) return true;
+      if (path.endsWith(scriptSourceDir)) return true;
+      if (path.includes(`${scriptSourceDir}/`)) return true;
+      return false;
+    });
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith(scriptSourceDir))
+        return ["agent-finalize.sh", "shared"];
+      return [];
+    });
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string")
+        return { isDirectory: () => false, isFile: () => false };
+      if (path.endsWith("agent-finalize.sh"))
+        return { isDirectory: () => false, isFile: () => true };
+      if (path.endsWith("/shared"))
+        return { isDirectory: () => true, isFile: () => false };
+      return { isDirectory: () => true, isFile: () => false };
+    });
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("agent-finalize.sh"))
+        return "#!/usr/bin/env bash\necho hi\n";
+      return "";
+    });
+
+    syncRepoFiles(MOCK_REPO_CONTEXT);
+
+    const writtenPaths = mockWriteFileSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    // Subdir was NOT written as a file.
+    expect(
+      writtenPaths.some((p) => p.endsWith(".danxbot/scripts/shared")),
+    ).toBe(false);
+    // .sh file still landed.
+    expect(writtenPaths).toContain(
+      "/test/repos/test-repo/.danxbot/scripts/agent-finalize.sh",
+    );
+    // Subdir was NOT chmod'd executable.
+    const chmodPaths = mockChmodSync.mock.calls.map(
+      (c: unknown[]) => c[0] as string,
+    );
+    expect(
+      chmodPaths.some((p) => p.endsWith(".danxbot/scripts/shared")),
+    ).toBe(false);
   });
 
   it("syncRepoFiles throws and writes nothing when a required config.yml field is missing (fail-loud — Trello `C7W1cEhh`)", () => {
