@@ -210,14 +210,15 @@ history:
     event: blocked
     to: ToDo
     note: Waiting on DX-208
+  - timestamp: 2026-05-10T06:54:31.244Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-208"
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Waits for DX-208 (attachMonitoringStack helper) to land — reattach calls the extracted helper to wire watcher / heartbeat / cleanup onto the shim AgentJob; without it, reattach has no clean seam to share with spawnAgent. Transitively also waits for DX-207 (column DX-208 itself blocks on).
-  timestamp: 2026-05-08T21:11:14.661Z
-  by:
-    - DX-208
+assigned_agent: null
+waiting_on: null
 blocked: null

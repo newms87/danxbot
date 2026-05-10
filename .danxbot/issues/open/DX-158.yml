@@ -144,9 +144,12 @@ ac:
     title: make test + make test-system + make deploy-smoke TARGET=gpt pass after the final phase
     checked: false
 comments:
-  - author: danxbot
-    timestamp: 2026-05-09T21:18:30Z
+  - id: 6a002b8aa57238eba3b299fa
+    author: danxbot
+    timestamp: 2026-05-10T06:54:02.772Z
     text: |-
+      <!-- danxbot -->
+
       ## Phase 4 Handoff
 
       **Built:** Persona block injection wired into `dispatch()` (DX-162); agent-finalize.sh squash-merge helper shipped to every connected repo via `injectDanxbotScripts`; issue-worker SKILL Step 7a routes the agent to the script with exit-code-driven recovery semantics. Commit `2d2c925`.
@@ -184,10 +187,47 @@ history:
     from: In Progress
     to: ToDo
     note: Any child ToDo — parent ToDo
+  - timestamp: 2026-05-10T05:46:10.378Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: Done
+    note: All non-cancelled children Done — parent Done
+  - timestamp: 2026-05-10T05:46:15.557Z
+    actor: worker:auto-derive
+    event: status_change
+    from: Done
+    to: ToDo
+    note: Any child ToDo — parent ToDo
+  - timestamp: 2026-05-10T05:46:15.557Z
+    actor: worker:heal
+    event: status_change
+    from: Done
+    to: ToDo
+    note: Healer moved closed → open to match status
+  - timestamp: 2026-05-10T06:53:57.031Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: Done
+    note: All non-cancelled children Done — parent Done
+  - timestamp: 2026-05-10T06:53:57.183Z
+    actor: worker:auto-derive
+    event: status_change
+    from: Done
+    to: ToDo
+    note: Any child ToDo — parent ToDo
+  - timestamp: 2026-05-10T06:53:57.183Z
+    actor: worker:heal
+    event: status_change
+    from: Done
+    to: ToDo
+    note: Healer moved closed → open to match status
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null

@@ -123,14 +123,15 @@ history:
     actor: worker:auto-derive
     event: unblocked
     note: "All deps terminal: DX-151"
+  - timestamp: 2026-05-10T05:46:10.530Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-158"
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Depends on DX-158 (multi-worker worktrees + identity + locks) shipping first — DX-139's idempotent worker-restart-across-dispatches contract relies on the per-agent worktree + lock infrastructure DX-158 introduces.
-  timestamp: 2026-05-09T05:35:00.000Z
-  by:
-    - DX-158
+assigned_agent: null
+waiting_on: null
 blocked: null

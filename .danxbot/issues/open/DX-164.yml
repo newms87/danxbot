@@ -155,15 +155,16 @@ ac:
     title: Epic DX-158 every AC checkable; epic flipped to Done by operator/automation on terminal save
     checked: false
 comments: []
-history: []
+history:
+  - timestamp: 2026-05-10T05:46:10.432Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-200"
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Sequential phase ordering — needs locks + assigned_agent stamping from Phase 5 (DX-200) for the busy badge + system test to be meaningful.
-  timestamp: 2026-05-08T12:00:00.000Z
-  by:
-    - DX-200
+assigned_agent: null
+waiting_on: null
 blocked: null
