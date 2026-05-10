@@ -51,7 +51,13 @@ import { dispatch, getActiveJob } from "../dispatch/core.js";
 import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { injectDanxIssueMcp } from "./inject/inject-root-mcp.js";
-import { pushOrphans } from "./orphan-push.js";
+// DX-218 (Event-Driven Worker Phase 3): the per-tick orphan push was
+// retired — empty-`external_id` YAMLs hit the tracker via reconcile
+// step 7 (`src/issue/reconcile/trello.ts`'s `external_id === ""`
+// branch) on the chokidar event for the YAML write itself, no per-tick
+// scan needed. The retry queue keeps any push that hits a transient
+// Trello error, scheduled via `setTimeout` rather than a per-tick drain.
+//
 // DX-217 (Event-Driven Worker Phase 2): the per-tick parent-derive,
 // healer, and waiting-on auto-clear passes were absorbed into
 // `reconcileIssue` step 3 (`src/issue/reconcile.ts`). Chokidar fires
@@ -62,8 +68,6 @@ import { pushOrphans } from "./orphan-push.js";
 // Phase 5 reintroduces them as a 1-min cron audit pass calling
 // `reconcileIssue` on every open YAML.
 import { healExternalIds } from "./heal-external-id.js";
-import { drainRetries } from "../issue-tracker/retry-queue.js";
-import { recordSystemError } from "../dashboard/system-errors.js";
 import {
   listDispatchableYamls,
   listInProgressYamls,
@@ -573,11 +577,12 @@ async function _poll(repo: RepoContext): Promise<void> {
   // closed/, blanks any external_id whose format the active tracker
   // doesn't recognize (e.g. `mem-N` minted by a `MemoryTracker` window
   // before a Trello-config landed). The blanked YAML re-enters the
-  // orphan-push path on the next tick and gets a fresh tracker-native
-  // id. Pairs with DX-149 — DX-149 stopped the 400 from crashing the
-  // worker; this stops the 400 from happening at all by removing the
-  // foreign id from disk. Runs BEFORE every tracker call (no
-  // `tracker.getCard` / `getComments` against the bad id ever fires).
+  // reconcile-driven push path (DX-218 step 7) on its next chokidar
+  // event and gets a fresh tracker-native id. Pairs with DX-149 —
+  // DX-149 stopped the 400 from crashing the worker; this stops the
+  // 400 from happening at all by removing the foreign id from disk.
+  // Runs BEFORE every tracker call (no `tracker.getCard` /
+  // `getComments` against the bad id ever fires).
   const externalIdHeal = healExternalIds(
     repo.localPath,
     tracker,
@@ -594,48 +599,15 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  // DX-132: drain the on-disk Trello retry queue. Runs BEFORE every
-  // list fetch and BEFORE every dispatch decision so a backlog of
-  // failed tracker pushes (accumulated during a Trello outage) gets
-  // FIFO-replayed against the recovered tracker on the first tick
-  // after recovery. Single pass per tick — eligible entries process,
-  // ineligible entries (still inside their backoff window) sit until
-  // the next tick. Snapshot at start so concurrent enqueues during the
-  // pass land on the next tick. Throws inside drain bubble up to the
-  // outer DX-149 catch and abort just this tick.
-  const drainResult = await drainRetries({
-    tracker,
-    repoLocalPath: repo.localPath,
-    prefix: repo.issuePrefix,
-    // DX-134 Phase 4: surface MAX_ATTEMPTS exhaustion to the dashboard's
-    // system-errors banner. Until Phase 4 the hook was a no-op default;
-    // wiring it here means a stuck retry entry stops being a buried log
-    // line and becomes a visible alert. Source = "retry-queue", severity
-    // is always "error" (max-attempts means we're out of automatic
-    // retries).
-    recordSystemError: (message) => {
-      recordSystemError({
-        source: "retry-queue",
-        severity: "error",
-        repo: repo.name,
-        message,
-      });
-    },
-  });
-  if (
-    drainResult.attempted > 0 ||
-    drainResult.exhausted > 0 ||
-    drainResult.yamlMissing > 0 ||
-    drainResult.yamlInvalid > 0 ||
-    drainResult.malformed > 0
-  ) {
-    // `skipped`-only ticks are no-op-by-definition (everything in the
-    // queue is sitting inside its backoff window) and don't deserve a
-    // log line.
-    log.info(
-      `[${repo.name}] Retry queue drained: ${drainResult.succeeded}/${drainResult.attempted} succeeded, ${drainResult.failed} rescheduled, ${drainResult.exhausted} exhausted, ${drainResult.yamlMissing} yaml-missing, ${drainResult.yamlInvalid} yaml-invalid, ${drainResult.skipped} still-in-backoff, ${drainResult.malformed} malformed`,
-    );
-  }
+  // DX-218 (Event-Driven Worker Phase 3): the per-tick `drainRetries`
+  // call is gone. Retry-queue entries arm a `setTimeout` for their
+  // backoff window inside `enqueueRetry`; the timer callback fires
+  // within ms of the window expiring instead of waiting up to one
+  // poller tick (~30-90s saved on average). Boot-rescheduling is wired
+  // in `src/index.ts` so retries persisted across a worker restart
+  // resume on schedule. The `recordSystemError` hook for max-attempts
+  // exhaustion is registered per-repo via
+  // `setRetryQueueSystemErrorHookForRepo` in `src/index.ts`.
 
   // YAML-driven liveness scan (ISS-92, Phase 2). Walks the in-memory
   // `activeDispatches` mirror, re-checks every entry, and evicts any
@@ -675,13 +647,13 @@ async function _poll(repo: RepoContext): Promise<void> {
   }
   // ISS-86: tracker.fetchOpenCards() is the inbound channel ONLY (new
   // cards + bulk-sync). It does NOT decide what gets dispatched —
-  // local YAML is the source of truth. The tracker-derived
-  // partitions below exist solely to drive the inbound mirror
-  // (bulkSyncMissingYamls, pushOrphans). The dispatch + stuck-card
-  // scan switch to listDispatchableYamls / listInProgressYamls /
-  // listTriageDueYamls AFTER the inbound mirror runs, so hand-written
-  // YAMLs land in dispatch on the same tick orphan-push stamps their
-  // external_id.
+  // local YAML is the source of truth. The tracker-derived partitions
+  // below exist solely to drive the inbound mirror
+  // (`bulkSyncMissingYamls`). DX-218 retired the per-tick orphan-push
+  // pass; outbound (YAML → tracker) pushes are now reconcile step 7's
+  // job. The dispatch + stuck-card scan switch to listDispatchableYamls
+  // / listInProgressYamls / listTriageDueYamls AFTER the inbound mirror
+  // runs.
   //
   // Cards on the Trello Action Items list surface with
   // `status: "Review"` (see `trello.ts#listIdToStatus`) so they are
@@ -722,23 +694,13 @@ async function _poll(repo: RepoContext): Promise<void> {
     ...trackerNeedsHelpRefs,
   ]);
 
-  // Orphan-push: scan local YAMLs for empty `external_id` and push each
-  // to the tracker via `createCard`. Closes the gap for cards written
-  // by hand (or by the `danx-epic-link` flow that splits an epic into
-  // phase children) without going through `danx_issue_create` — those
-  // YAMLs would otherwise stay invisible on the tracker forever.
-  // Failures per card are non-fatal: logged + tick continues.
-  const orphanPush = await pushOrphans(repo.localPath, tracker, repo.issuePrefix);
-  if (orphanPush.pushed > 0) {
-    log.info(
-      `[${repo.name}] Pushed ${orphanPush.pushed} local orphan${orphanPush.pushed > 1 ? "s" : ""} to tracker`,
-    );
-  }
-  for (const err of orphanPush.errors) {
-    log.error(
-      `[${repo.name}] orphan-push failed for ${err.id}: ${err.message}`,
-    );
-  }
+  // DX-218 (Event-Driven Worker Phase 3): the per-tick orphan push was
+  // removed — empty-`external_id` YAMLs hit the tracker via reconcile
+  // step 7 (`pushTrelloDiff`'s `external_id === ""` branch) on the
+  // chokidar event for the YAML write itself. Hand-written and
+  // `danx_issue_create` YAMLs reach Trello in <1s of the file event
+  // instead of waiting up to one poller tick (~30-60s). Persistent
+  // tracker errors enqueue into the event-driven retry queue.
 
   // DX-217 (Event-Driven Worker Phase 2): the post-hydrate parent
   // recompute pass (the second `recomputeParentStatuses` call) was
@@ -1021,14 +983,27 @@ async function _poll(repo: RepoContext): Promise<void> {
     `The watcher mirrors changes to the database automatically; the poller's ` +
     `per-tick mirror pushes them to the tracker. Call danxbot_complete when done.`;
 
-  await spawnClaude(
-    repo,
-    task,
-    { trigger: "trello", metadata: trelloMeta },
-    dispatchId,
-    undefined,
-    { issueId: resolvedIssue.id, startStamp },
+  // DX-242: legacy single-card unscoped dispatch DISABLED. The
+  // multi-agent picker (DX-200) is the SOLE dispatcher. When the
+  // picker returns 0 (every agent busy / out-of-schedule / roster
+  // empty), end the tick instead of falling through to an unscoped
+  // spawnClaude that runs from repo-root cwd with no agent persona +
+  // no worktree isolation. All prep code above (lock acquisition, DB
+  // guard, hydrate, stamp) intentionally STILL RUNS — it remains
+  // testable + still useful for the resume path. Event-Driven Worker
+  // epic (DX-215) Phases 4-6 retire the entire block once the
+  // scheduler reaches feature parity (see DX-219 + DX-221 ACs).
+  log.warn(
+    `[${repo.name}] Legacy unscoped dispatch suppressed for ${resolvedIssue.id} — configure an agent or wait for the multi-agent picker to free up`,
   );
+  // await spawnClaude(
+  //   repo,
+  //   task,
+  //   { trigger: "trello", metadata: trelloMeta },
+  //   dispatchId,
+  //   undefined,
+  //   { issueId: resolvedIssue.id, startStamp },
+  // );
   } catch (error) {
     // DX-149: any throw from inside `_poll` (tracker calls, lock
     // acquisition, hydrate-or-load, dispatch shell prep) lands here

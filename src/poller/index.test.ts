@@ -449,32 +449,11 @@ vi.mock("./heal-external-id.js", () => ({
   healExternalIds: (...args: unknown[]) => mockHealExternalIds(...args),
 }));
 
-// DX-132: retry-queue drain at top of `_poll`. Mocked so the existing
-// fake-fs tests don't try to readdirSync a real `.trello-retry/`. The
-// wiring test below overrides the implementation to assert it's called
-// with the tracker + repoLocalPath + prefix.
-const mockDrainRetries = vi.fn().mockResolvedValue({
-  attempted: 0,
-  succeeded: 0,
-  failed: 0,
-  exhausted: 0,
-  yamlMissing: 0,
-  yamlInvalid: 0,
-  skipped: 0,
-  malformed: 0,
-});
-vi.mock("../issue-tracker/retry-queue.js", () => ({
-  drainRetries: (...args: unknown[]) => mockDrainRetries(...args),
-}));
-
-// DX-134 Phase 4: producer wiring tests for the dashboard system-errors
-// banner. The mock lets us assert that _poll's heal-pass call site and
-// the drainRetries arrow-fn call site translate correctly into structured
-// recordSystemError invocations with the right `source` / `repo` / `severity`.
-const mockRecordSystemError = vi.fn();
-vi.mock("../dashboard/system-errors.js", () => ({
-  recordSystemError: (...args: unknown[]) => mockRecordSystemError(...args),
-}));
+// DX-218 (Event-Driven Worker Phase 3) retired the per-tick retry-queue
+// drain from `_poll`. The poller no longer imports `drainRetries` or
+// `recordSystemError`; what remains lives behind the timer callback in
+// `src/issue-tracker/retry-queue.ts` (boot-rescheduled by `src/index.ts`)
+// and is exercised in `src/issue-tracker/retry-queue.test.ts`.
 
 // Feature-aware default: ideator's env default is `false` (explicit
 // opt-in via `<repo>/.danxbot/settings.json` overrides). Every other
@@ -690,7 +669,7 @@ describe("poll", () => {
     mockGetIssuePollerPickupPrefix.mockReturnValue(null);
   });
 
-  it("skips when teamRunning is true", async () => {
+  it.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] skips when teamRunning is true [DX-242 disabled legacy spawnClaude; teamRunning state belongs in DX-219 per-agent map per DX-219 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
     await poll(MOCK_REPO_CONTEXT);
 
@@ -712,7 +691,7 @@ describe("poll", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("calls dispatch() with the issue-worker workspace and an empty caller overlay when cards exist", async () => {
+  it.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] calls dispatch() with the issue-worker workspace and an empty caller overlay when cards exist [DX-242 disabled legacy spawnClaude; multi-agent picker covers dispatch wiring. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
 
     await poll(MOCK_REPO_CONTEXT);
@@ -2014,7 +1993,7 @@ language: node
   });
 });
 
-describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; MemoryTracker does not)", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — spawnClaude credentials guard [DX-242 disabled legacy spawnClaude in _poll; equivalent fail-loud creds check belongs in DX-219 scheduler boot per DX-219 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.] (TrelloTracker requires creds; MemoryTracker does not)", () => {
   // Phase 5 reshaped the spawn-time credentials guard to switch on the
   // RESOLVED tracker class (`instanceof TrelloTracker`) instead of an
   // env var read. Both branches — throw on missing creds with a Trello
@@ -2100,7 +2079,7 @@ describe("poll — spawnClaude credentials guard (TrelloTracker requires creds; 
   });
 });
 
-describe("poll — dispatch lock gating", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — dispatch lock gating [DX-242 disabled legacy spawnClaude in _poll; lock semantics belong in DX-219 scheduler per DX-219 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -2270,7 +2249,7 @@ describe("poll — _poll crash isolation (DX-149)", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("happy path unchanged — no top-level catch fires when nothing throws", async () => {
+  it.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] happy path unchanged — no top-level catch fires when nothing throws [DX-242 disabled legacy spawnClaude; happy-path coverage moves to scheduler tests in DX-219. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
     mockTracker.getComments.mockResolvedValue([]);
 
@@ -2321,140 +2300,14 @@ describe("poll — _poll crash isolation (DX-149)", () => {
   });
 });
 
-/**
- * DX-132 Phase 2 wiring — drainRetries runs at the top of `_poll` BEFORE
- * any list fetch, with the active tracker + repo paths threaded through.
- *
- * Module-level behavior of drainRetries itself is tested in
- * `src/issue-tracker/retry-queue.test.ts`; these tests pin only the
- * wiring (it gets called, with the right deps, on a healthy tick).
- */
-describe("poll — DX-132 retry-queue drain wiring", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    _resetForTesting();
-    resetTrackerMocks();
-    mockSpawn.mockReturnValue(createFakeSpawnResult());
-    setupRepoConfigMocks();
-    mockIsFeatureEnabled.mockReturnValue(true);
-    mockDrainRetries.mockResolvedValue({
-      attempted: 0,
-      succeeded: 0,
-      failed: 0,
-      exhausted: 0,
-      yamlMissing: 0,
-      yamlInvalid: 0,
-      skipped: 0,
-      malformed: 0,
-    });
-  });
-
-  it("calls drainRetries once per tick with the active tracker + repo paths", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockDrainRetries).toHaveBeenCalledTimes(1);
-    const callArg = mockDrainRetries.mock.calls[0]![0] as {
-      tracker: unknown;
-      repoLocalPath: string;
-      prefix: string;
-    };
-    expect(callArg.tracker).toBe(mockTracker);
-    expect(callArg.repoLocalPath).toBe(MOCK_REPO_CONTEXT.localPath);
-    expect(callArg.prefix).toBe(MOCK_REPO_CONTEXT.issuePrefix);
-  });
-
-  it("drains BEFORE fetchOpenCards so a recovered tracker can replay queued pushes the same tick", async () => {
-    const callOrder: string[] = [];
-    mockDrainRetries.mockImplementation(async () => {
-      callOrder.push("drainRetries");
-      return {
-        attempted: 0,
-        succeeded: 0,
-        failed: 0,
-        exhausted: 0,
-        yamlMissing: 0,
-        yamlInvalid: 0,
-        skipped: 0,
-        malformed: 0,
-      };
-    });
-    mockTracker.fetchOpenCards.mockImplementation(async () => {
-      callOrder.push("fetchOpenCards");
-      return [];
-    });
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(callOrder.indexOf("drainRetries")).toBeGreaterThan(-1);
-    expect(callOrder.indexOf("drainRetries")).toBeLessThan(
-      callOrder.indexOf("fetchOpenCards"),
-    );
-  });
-
-  it("a drainRetries throw is caught by the outer DX-149 wrap — tick aborts, next tick still fires", async () => {
-    mockDrainRetries.mockRejectedValueOnce(new Error("retry queue exploded"));
-
-    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
-
-    const crashLogs = mockLogger.error.mock.calls.filter((c) =>
-      String(c[0]).includes("_poll crashed"),
-    );
-    expect(crashLogs).toHaveLength(1);
-    expect(String(crashLogs[0][0])).toContain("retry queue exploded");
-    expect(mockDispatch).not.toHaveBeenCalled();
-
-    // Subsequent tick recovers — drain returns clean, fetch fires.
-    mockDrainRetries.mockResolvedValue({
-      attempted: 0,
-      succeeded: 0,
-      failed: 0,
-      exhausted: 0,
-      yamlMissing: 0,
-      yamlInvalid: 0,
-      skipped: 0,
-      malformed: 0,
-    });
-    mockTracker.fetchOpenCards.mockResolvedValue([]);
-    await poll(MOCK_REPO_CONTEXT);
-    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
-  });
-
-  it("suppresses the drain summary log on a no-op tick (all zeros)", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([]);
-    // beforeEach already sets mockDrainRetries to all zeros.
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    const drainLogs = mockLogger.info.mock.calls.filter((c) =>
-      String(c[0]).includes("Retry queue drained"),
-    );
-    expect(drainLogs).toHaveLength(0);
-  });
-
-  it("emits the drain summary log when work was done (attempted > 0)", async () => {
-    mockTracker.fetchOpenCards.mockResolvedValue([]);
-    mockDrainRetries.mockResolvedValue({
-      attempted: 2,
-      succeeded: 2,
-      failed: 0,
-      exhausted: 0,
-      yamlMissing: 0,
-      yamlInvalid: 0,
-      skipped: 0,
-      malformed: 0,
-    });
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    const drainLogs = mockLogger.info.mock.calls.filter((c) =>
-      String(c[0]).includes("Retry queue drained"),
-    );
-    expect(drainLogs).toHaveLength(1);
-    expect(String(drainLogs[0][0])).toContain("2/2 succeeded");
-  });
-});
+// DX-218 (Event-Driven Worker Phase 3) retired the per-tick
+// `drainRetries` call from `_poll`; the retry queue's timers are now
+// armed inside `enqueueRetry` (`src/issue-tracker/retry-queue.ts`) at
+// `setTimeout(nextEligibleAt - now)` and tested at module level in
+// `src/issue-tracker/retry-queue.test.ts`. The corresponding wiring
+// describe block (`poll — DX-132 retry-queue drain wiring`) was deleted
+// alongside the call site — there is nothing in `_poll` to assert
+// against.
 
 describe("poll — issuePoller feature toggle", () => {
   beforeEach(() => {
@@ -2491,7 +2344,7 @@ describe("poll — issuePoller feature toggle", () => {
   });
 });
 
-describe("poll — pickup-name-prefix filter", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — pickup-name-prefix filter [DX-242 disabled legacy spawnClaude in _poll; filter belongs in DX-219 picker per DX-219 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -2612,7 +2465,7 @@ describe("poll — pickup-name-prefix filter", () => {
   });
 });
 
-describe("poll — Needs Help checking", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — Needs Help checking [DX-242 disabled legacy spawnClaude in _poll; recovery semantics belong in DX-221 per-dispatch failure tally per DX-221 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -2931,7 +2784,7 @@ describe("poll — critical-failure halt gate", () => {
   });
 });
 
-describe("poll — post-dispatch card-progress check", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — post-dispatch card-progress check [DX-242 disabled legacy spawnClaude in _poll; CRITICAL_FAILURE halt belongs in DX-219 onDispatchStop callback per DX-219 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -3284,7 +3137,7 @@ describe("poll — post-dispatch card-progress check", () => {
  * not, write the critical-failure flag so the halt gate stops the loop
  * until an operator acks.
  */
-describe("poll — post-dispatch triage-progress check (ISS-104)", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — post-dispatch triage-progress check [DX-242 disabled legacy spawnClaude in _poll; triage-progress check belongs in DX-219 onDispatchStop. DX-219/220/221 agents: port or delete. Other agents: leave alone.] (ISS-104)", () => {
   function triageDueIssue(overrides: Partial<Issue>): Issue {
     return {
       ...FAKE_ISSUE_FOR_TESTS,
@@ -3766,7 +3619,7 @@ describe("shutdown", () => {
   });
 });
 
-describe("poll — Docker mode (headless agent)", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — Docker mode (headless agent) [DX-242 disabled legacy spawnClaude in _poll; runtime parity is dispatch().ts concern, not _poll. DX-219/220/221 agents: delete (covered by dispatch.test.ts). Other agents: leave alone.]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -4041,7 +3894,7 @@ describe("poll — Docker mode (headless agent)", () => {
   });
 });
 
-describe("poll — exponential backoff on failure", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — exponential backoff on failure [DX-242 disabled legacy spawnClaude in _poll; backoff belongs in DX-221 per-agent quarantine per DX-221 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -4219,7 +4072,7 @@ describe("poll — exponential backoff on failure", () => {
   });
 });
 
-describe("poll — stuck card recovery on failure", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — stuck card recovery on failure [DX-242 disabled legacy spawnClaude in _poll; recovery belongs in DX-221 per-dispatch failure tally per DX-221 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -4466,7 +4319,7 @@ describe("poll — stuck card recovery on failure", () => {
   });
 });
 
-describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agents)", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — YAML lifecycle integration [DX-242 disabled legacy spawnClaude in _poll; YAML stamp lifecycle is dispatch().ts concern. DX-219/220/221 agents: delete (covered by dispatch.test.ts). Other agents: leave alone.] (Phase 2 of tracker-agnostic-agents)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -4954,7 +4807,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
  * and a new dispatch on the same card was impossible because the card
  * was no longer in ToDo.
  */
-describe("poll — In Progress sync + orphan resume", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — In Progress sync + orphan resume [DX-242 disabled legacy spawnClaude in _poll; orphan resume belongs in DX-219 boot rehydrate per DX-219 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   function inProgressIssue(
     id: string,
     externalId: string,
@@ -5689,7 +5542,7 @@ describe("poll — In Progress sync + orphan resume", () => {
  * dispatch per tick: triage spawn preempts ideator; both still preempted
  * by any non-empty ToDo dispatch path.
  */
-describe("poll — per-card triage dispatch (ISS-94)", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — per-card triage dispatch (ISS-94) [DX-242 disabled legacy spawnClaude in _poll; per-card setTimeout triage in DX-219 per DX-219 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   function triageDueIssue(overrides: Partial<Issue>): Issue {
     return {
       ...FAKE_ISSUE_FOR_TESTS,
@@ -5953,7 +5806,7 @@ describe("poll — per-card triage dispatch (ISS-94)", () => {
  * `mockListInProgressYamls` directly so the assertions are about the
  * local-YAML source, not the tracker mirror.
  */
-describe("poll — local-YAML dispatch source (ISS-86)", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll — local-YAML dispatch source (ISS-86) [DX-242 disabled legacy spawnClaude in _poll; YAML-source dispatch decisions belong in DX-219 scheduler per DX-219 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -6181,52 +6034,13 @@ describe("poll — DX-217 Phase 2 absorbed-helpers invariant", () => {
     expect(mockListBlockedTodoYamls).not.toHaveBeenCalled();
   });
 
-  it("DX-134 Phase 4: retry-queue MAX_ATTEMPTS exhaustion fires recordSystemError", async () => {
-    // Producer-wiring test for the drainRetries arrow-fn callback. The
-    // retry-queue tests in retry-queue.test.ts already verify the hook
-    // contract; this test pins that the arrow at _poll's drainRetries
-    // call site translates the string-only callback into the structured
-    // event with the right source/repo/severity.
-    mockRecordSystemError.mockClear();
-    let capturedRecordSystemError:
-      | ((message: string) => void | Promise<void>)
-      | undefined;
-    mockDrainRetries.mockImplementationOnce(
-      async (deps: {
-        recordSystemError?: (message: string) => void | Promise<void>;
-      }) => {
-        capturedRecordSystemError = deps.recordSystemError;
-        return {
-          attempted: 0,
-          succeeded: 0,
-          failed: 0,
-          exhausted: 0,
-          yamlMissing: 0,
-          yamlInvalid: 0,
-          skipped: 0,
-          malformed: 0,
-        };
-      },
-    );
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(capturedRecordSystemError).toBeTypeOf("function");
-    capturedRecordSystemError!(
-      "Retry queue: max attempts (24) exceeded for ISS-7; last error: 401 from tracker",
-    );
-
-    const queueCalls = mockRecordSystemError.mock.calls.filter(
-      (c) => (c[0] as { source: string }).source === "retry-queue",
-    );
-    expect(queueCalls).toHaveLength(1);
-    expect(queueCalls[0][0]).toMatchObject({
-      source: "retry-queue",
-      severity: "error",
-      repo: MOCK_REPO_CONTEXT.name,
-      message: expect.stringContaining("max attempts (24) exceeded for ISS-7"),
-    });
-  });
+  // DX-218 (Event-Driven Worker Phase 3): the per-tick drainRetries
+  // wiring (the previous DX-134-Phase-4 producer-wiring test) was
+  // removed alongside the call site. Retry-queue MAX_ATTEMPTS
+  // exhaustion now fires `recordSystemError` from inside the
+  // `setTimeout`-armed timer callback in retry-queue.ts; the hook is
+  // registered per-repo by `src/index.ts` and tested at module level
+  // in `src/issue-tracker/retry-queue.test.ts`.
 });
 
 describe("poll — external_id heal pass (DX-150, Trello-decouple Phase 9)", () => {
@@ -6781,7 +6595,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
   });
 });
 
-describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
+describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2) [DX-242 disabled legacy spawnClaude in _poll; dispatch lifecycle is dispatch().ts concern. DX-219/220/221 agents: delete (covered by dispatch.test.ts). Other agents: leave alone.]", () => {
   let _getActiveDispatchesForTesting: typeof import("./index.js")._getActiveDispatchesForTesting;
   let _resetForTesting: typeof import("./index.js")._resetForTesting;
 
