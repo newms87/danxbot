@@ -116,10 +116,16 @@ export function loadTarget(
           `Invalid repos[].worker_port in ${path} (repo "${repoName}"): required integer in [1, 65535]`,
         );
       }
+      const localPath = `${getReposBase()}/${repoName.trim()}`;
       const repo: RepoConfig = {
         name: repoName.trim(),
         url: repoUrl.trim(),
-        localPath: `${getReposBase()}/${repoName.trim()}`,
+        localPath,
+        // Dashboard reads `RepoConfig` from the deploy target; it never
+        // dispatches and never invokes WorktreeManager — `hostPath`
+        // mirrors `localPath` here. The worker overrides it from
+        // `process.env.DANXBOT_REPO_HOST_PATH` in `loadRepoContext`.
+        hostPath: localPath,
         workerPort,
       };
       if (workerHost !== undefined && workerHost !== null) {

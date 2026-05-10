@@ -110,6 +110,11 @@ __worker_env_main() {
     # Explicit overwrite — shadows any inherited shell value.
     export DANXBOT_WORKER_PORT="$port"
     export DANXBOT_REPO_ROOT="$repo_root"
+    # Canonical absolute repo path (DX-230). Same value as
+    # DANXBOT_REPO_ROOT — exported separately so the per-repo compose
+    # can reference `${DANXBOT_REPO_HOST_PATH}` for both the
+    # mirror-bind volume target and the in-container env var.
+    export DANXBOT_REPO_HOST_PATH="$repo_root"
     export CLAUDE_AUTH_DIR="$claude_auth_dir"
 
     return 0

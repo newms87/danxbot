@@ -148,6 +148,10 @@ describe("AC verification — Makefile + .env.example wiring", () => {
     // compose still needs DANXBOT_WORKER_PORT for the `ports:` interpolation;
     // give it any value so we can test the auth-var check in isolation.
     env.DANXBOT_WORKER_PORT = env.DANXBOT_WORKER_PORT ?? "5560";
+    // DX-230 — DANXBOT_REPO_HOST_PATH is now also a required compose
+    // var; set it so compose proceeds to the CLAUDE_CONFIG_FILE check
+    // we're actually testing.
+    env.DANXBOT_REPO_HOST_PATH = env.DANXBOT_REPO_HOST_PATH ?? "/danxbot/repos/test";
     const result = spawnSync("docker", ["compose", "-f", COMPOSE_PATH, "config"], {
       env,
       encoding: "utf-8",

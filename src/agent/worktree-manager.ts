@@ -42,11 +42,20 @@ import { AGENT_NAME_SHAPE } from "../settings-file.js";
 import type { RepoConfig } from "../types.js";
 
 /**
- * Minimal repo shape — just `localPath`. Both `RepoConfig` (dashboard) and
- * `RepoContext` (worker) satisfy this via structural subtyping, so callers
- * can pass whichever they have without an adapter layer.
+ * Minimal repo shape — needs `localPath` (where the actual repo lives,
+ * for `git -C` invocations) and `hostPath` (the canonical absolute path
+ * shared across runtimes; baked into worktree metadata so worktrees
+ * survive a host↔docker swap). On host these are the same string; in a
+ * container the per-repo `compose.yml` adds a mirror-bind volume so the
+ * host source is mounted at BOTH `localPath` (container abs path) AND
+ * `hostPath` (host abs path) — both real bind-mounts, so `realpath()`
+ * canonicalizes worktree metadata to whichever path was used at git
+ * invocation. All git invocations here use `hostPath` so the absolute
+ * paths git writes into worktree metadata are runtime-agnostic. Both
+ * `RepoConfig` (dashboard) and `RepoContext` (worker) satisfy this via
+ * structural subtyping. See `src/agent/portable-path.ts`.
  */
-export type WorktreeRepo = Pick<RepoConfig, "localPath">;
+export type WorktreeRepo = Pick<RepoConfig, "localPath" | "hostPath">;
 
 const execFile = promisify(execFileCb);
 const log = createLogger("worktree-manager");
@@ -77,7 +86,7 @@ export type ValidationResult =
     };
 
 export interface WorktreeManager {
-  /** Absolute path of an agent's worktree, derived from `ctx.localPath`. */
+  /** Absolute path of an agent's worktree, derived from `ctx.hostPath`. */
   worktreePath(ctx: WorktreeRepo, agentName: string): string;
   /** Idempotent. Re-running on an existing worktree is a no-op. */
   bootstrap(ctx: WorktreeRepo, agentName: string): Promise<void>;
@@ -163,7 +172,7 @@ export function createWorktreeManager(
   return {
     worktreePath(ctx, agentName) {
       assertAgentName(agentName);
-      return join(ctx.localPath, ".danxbot", "worktrees", agentName);
+      return join(ctx.hostPath, ".danxbot", "worktrees", agentName);
     },
 
     async bootstrap(ctx, agentName) {
@@ -173,7 +182,7 @@ export function createWorktreeManager(
       // Idempotency — `git worktree list --porcelain` emits one
       // "worktree <path>" line per registered worktree. If we find ours,
       // bootstrap is a no-op.
-      const list = await runner.run(ctx.localPath, [
+      const list = await runner.run(ctx.hostPath, [
         "worktree",
         "list",
         "--porcelain",
@@ -192,7 +201,7 @@ export function createWorktreeManager(
       // `-B` creates the branch if missing or resets it to `origin/main` if
       // it already exists (e.g. orphaned from a prior teardown that lost
       // the worktree but left the local branch around).
-      const created = await runner.run(ctx.localPath, [
+      const created = await runner.run(ctx.hostPath, [
         "worktree",
         "add",
         "-B",
@@ -214,7 +223,7 @@ export function createWorktreeManager(
 
       // `--force` so a worktree with uncommitted changes still tears down
       // (operator deleted the agent — they accept losing in-flight WIP).
-      const removed = await runner.run(ctx.localPath, [
+      const removed = await runner.run(ctx.hostPath, [
         "worktree",
         "remove",
         "--force",
@@ -238,7 +247,7 @@ export function createWorktreeManager(
       // the agent's branch must not block the operator's DELETE — they
       // can clean up the orphan branch later. Local + remote both
       // best-effort; both log on failure.
-      const localDel = await runner.run(ctx.localPath, [
+      const localDel = await runner.run(ctx.hostPath, [
         "branch",
         "-D",
         agentName,
@@ -248,7 +257,7 @@ export function createWorktreeManager(
           `teardown(${agentName}): local branch delete failed: ${localDel.stderr.trim()}`,
         );
       }
-      const remoteDel = await runner.run(ctx.localPath, [
+      const remoteDel = await runner.run(ctx.hostPath, [
         "push",
         "origin",
         "--delete",

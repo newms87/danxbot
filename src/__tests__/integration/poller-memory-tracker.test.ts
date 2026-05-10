@@ -268,6 +268,7 @@ const REPO: RepoContext = {
   name: "test-repo",
   url: "https://example.com/test.git",
   localPath: "/test/repos/test-repo",
+  hostPath: "/test/repos/test-repo",
   trello: {
     apiKey: "test-key",
     apiToken: "test-token",

@@ -356,3 +356,39 @@ describe("loadRepoContext — issuePrefix", () => {
     expect(() => loadRepoContext(TEST_REPO)).toThrow(/Invalid issue_prefix/);
   });
 });
+
+// DX-230 — canonical hostPath population. host runtime defaults to
+// localPath; container runtime requires DANXBOT_REPO_HOST_PATH (fail-loud).
+describe("loadRepoContext — hostPath", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setupEnvFileExists();
+    delete process.env.DANXBOT_REPO_HOST_PATH;
+    delete process.env.DANXBOT_WORKER_PORT;
+    mockParseEnvFile.mockReturnValue({ ...MINIMUM_ENV });
+  });
+
+  it("defaults hostPath to localPath on host runtime when env unset", async () => {
+    const { config } = await import("./config.js");
+    (config as { isHost: boolean }).isHost = true;
+    const ctx = loadRepoContext(TEST_REPO);
+    expect(ctx.hostPath).toBe(TEST_REPO.localPath);
+  });
+
+  it("uses DANXBOT_REPO_HOST_PATH when set (any runtime)", async () => {
+    const { config } = await import("./config.js");
+    (config as { isHost: boolean }).isHost = true;
+    process.env.DANXBOT_REPO_HOST_PATH = "/canonical/path";
+    const ctx = loadRepoContext(TEST_REPO);
+    expect(ctx.hostPath).toBe("/canonical/path");
+  });
+
+  it("throws on container runtime when DANXBOT_REPO_HOST_PATH is missing", async () => {
+    const { config } = await import("./config.js");
+    (config as { isHost: boolean }).isHost = false;
+    expect(() => loadRepoContext(TEST_REPO)).toThrow(
+      /DANXBOT_REPO_HOST_PATH/,
+    );
+    (config as { isHost: boolean }).isHost = true;
+  });
+});

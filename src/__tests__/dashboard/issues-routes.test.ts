@@ -33,12 +33,14 @@ const REPOS: RepoConfig[] = [
     name: "danxbot",
     url: "https://github.com/newms/danxbot.git",
     localPath: "/repos/danxbot",
+    hostPath: "/repos/danxbot",
     workerPort: 5562,
   },
   {
     name: "platform",
     url: "https://github.com/newms/platform.git",
     localPath: "/repos/platform",
+    hostPath: "/repos/platform",
     workerPort: 5563,
   },
 ];

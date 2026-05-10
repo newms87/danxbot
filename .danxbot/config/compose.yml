@@ -18,6 +18,15 @@ services:
     environment:
       DANXBOT_REPO_NAME: danxbot
       DANXBOT_WORKER_PORT: ${DANXBOT_WORKER_PORT:?Set DANXBOT_WORKER_PORT in repos/danxbot/.danxbot/.env}
+      # Canonical absolute path of the repo on the HOST. The container's
+      # primary bind target (/danxbot/app/repos/danxbot) differs from
+      # the host abs path; the second volume below mirror-binds the host
+      # source at this path so worktree metadata + spawn cwd resolve
+      # identically across runtimes (worktrees survive a host↔docker
+      # swap). The worker boot calls `ensurePortableRepoPath` to fail
+      # loud if the mirror-bind is missing. See
+      # `src/agent/portable-path.ts`.
+      DANXBOT_REPO_HOST_PATH: ${DANXBOT_REPO_ROOT}
       DANXBOT_DB_USER: danxbot
       DANXBOT_DB_PASSWORD: danxbot
       DANXBOT_DB_NAME: danxbot_chat
@@ -43,6 +52,15 @@ services:
       # (by `make launch-worker`), bypasses the symlink and makes the bind
       # deterministic across every dev layout.
       - ${DANXBOT_REPO_ROOT:-../..}:/danxbot/app/repos/danxbot
+      # Portable repo path (DX-230): mirror-bind the same host source at
+      # the host's absolute path INSIDE the container. Both paths are
+      # real bind mounts (not symlinks), so git's realpath() canonicalizes
+      # to whichever path was used at git invocation — letting worktree
+      # metadata + spawn cwd be runtime-agnostic. WorktreeManager + the
+      # workspace resolver use `repo.hostPath` (which equals
+      # DANXBOT_REPO_HOST_PATH); legacy code paths that hard-coded
+      # `/danxbot/app/repos/<name>` keep working via the original mount.
+      - ${DANXBOT_REPO_ROOT:-../..}:${DANXBOT_REPO_HOST_PATH:?Set DANXBOT_REPO_HOST_PATH (worker-env.sh exports it from DANXBOT_REPO_ROOT)}
       # Claude auth — split mount: file-bind for `.claude.json`,
       # dir-bind for `.claude/`. Trello 0bjFD0a2 + PHevzRil.
       #

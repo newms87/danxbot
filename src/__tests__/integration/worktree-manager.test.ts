@@ -18,7 +18,14 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -288,5 +295,51 @@ D("WorktreeManager (integration, real git)", () => {
         encoding: "utf-8",
       }).trim(),
     ).toBe("");
+  });
+
+  // DX-230 — load-bearing assertion. The whole point of the
+  // hostPath swap is that `git worktree add` bakes the canonical
+  // hostPath (not the runtime-local container path) into worktree
+  // metadata files. Without this assertion in CI, the portability
+  // claim is verified only by manual smoke and can silently regress.
+  it("git worktree metadata bakes ctx.hostPath, not ctx.localPath", async () => {
+    // Mirror-bind simulation: realPath = repoDir (where the actual
+    // git repo lives), canonical hostPath = a parallel directory that
+    // resolves through the SAME files (different directory entries,
+    // both real). Cannot use a symlink because git's realpath()
+    // follows symlinks back to the canonical path — defeated this
+    // approach in the first iteration of DX-230.
+    //
+    // The only filesystem primitive that mirrors a directory at two
+    // distinct real paths is a bind mount; we don't have that in a
+    // unit test. Instead, drive ctx.hostPath = ctx.localPath
+    // (matching host runtime — no mirror needed) and assert the
+    // worktree metadata path equals that string. Plus a contrastive
+    // assertion: with hostPath set to a different in-tree path,
+    // bootstrap throws (the repo isn't really there) — proving the
+    // git invocation cwd is hostPath, not localPath.
+    const wm = createWorktreeManager(defaultGitRunner);
+    const c = makeRepoContext({ localPath: repoDir, hostPath: repoDir });
+    await wm.bootstrap(c, "alice");
+
+    // The .git/worktrees/<name>/gitdir file holds the absolute path
+    // git canonicalized (via realpath) at worktree-add time. With no
+    // symlink involved that's the cwd we passed = ctx.hostPath.
+    const gitdirFile = join(repoDir, ".git", "worktrees", "alice", "gitdir");
+    expect(existsSync(gitdirFile)).toBe(true);
+    const gitdirContents = readFileSync(gitdirFile, "utf-8").trim();
+    expect(gitdirContents).toContain(repoDir);
+    expect(gitdirContents).toContain(".danxbot/worktrees/alice");
+  });
+
+  it("bootstrap fails when ctx.hostPath does not resolve to a git repo", async () => {
+    // Defends the swap in worktree-manager.ts — git invocations use
+    // ctx.hostPath. If the swap regressed back to ctx.localPath, this
+    // test would pass when it shouldn't (bootstrap would succeed via
+    // localPath even with a bogus hostPath).
+    const wm = createWorktreeManager(defaultGitRunner);
+    const bogus = join(workArea, "does-not-exist");
+    const c = makeRepoContext({ localPath: repoDir, hostPath: bogus });
+    await expect(wm.bootstrap(c, "alice")).rejects.toThrow();
   });
 });

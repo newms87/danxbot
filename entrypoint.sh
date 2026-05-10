@@ -19,6 +19,31 @@ if [ -n "$DANXBOT_REPO_NAME" ]; then
     repo_path="$REPOS_DIR/$DANXBOT_REPO_NAME"
     git config --global --add safe.directory "$repo_path"
     su -s /bin/bash danxbot -c "git config --global --add safe.directory '$repo_path'"
+
+    # Portable repo path (DX-230): the host's absolute repo path is
+    # also bound into the container via compose.yml so git's realpath()
+    # canonicalizes worktree metadata + spawn cwd to that path
+    # identically in both runtimes. Just register it as a safe.directory
+    # for git here (the bind itself happens at compose-up time).
+    if [ -n "$DANXBOT_REPO_HOST_PATH" ] && [ "$DANXBOT_REPO_HOST_PATH" != "$repo_path" ]; then
+        git config --global --add safe.directory "$DANXBOT_REPO_HOST_PATH"
+        su -s /bin/bash danxbot -c "git config --global --add safe.directory '$DANXBOT_REPO_HOST_PATH'"
+    fi
+
+    # Per-agent worktrees (DX-230) live under
+    # .danxbot/worktrees/<name>/ in both the container abs path and the
+    # host abs path. Their bind sources are owned by the host UID
+    # (differs from container root/danxbot UID) so git's "dubious
+    # ownership" check rejects them. Trust the two repo path prefixes
+    # explicitly — narrower than `*` and still covers every worktree
+    # below either prefix.
+    for prefix in "$repo_path" "$DANXBOT_REPO_HOST_PATH"; do
+        [ -n "$prefix" ] || continue
+        git config --global --add safe.directory "$prefix/.danxbot/worktrees"
+        git config --global --add safe.directory "$prefix/.danxbot/worktrees/*"
+        su -s /bin/bash danxbot -c "git config --global --add safe.directory '$prefix/.danxbot/worktrees'"
+        su -s /bin/bash danxbot -c "git config --global --add safe.directory '$prefix/.danxbot/worktrees/*'"
+    done
 else
     echo "Dashboard mode: shared infrastructure only"
 fi

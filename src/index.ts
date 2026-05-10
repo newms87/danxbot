@@ -19,6 +19,7 @@ import { repoContexts } from "./repo-context.js";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
 import { reconcileOrphanedDispatches } from "./worker/reconcile.js";
+import { ensurePortableRepoPath } from "./agent/portable-path.js";
 
 const log = createLogger("startup");
 
@@ -86,6 +87,9 @@ async function startWorkerMode(): Promise<void> {
   if (!repo) {
     throw new Error(`Worker mode: no repo context loaded for "${workerRepoName}"`);
   }
+
+  // Fail-loud assert canonical path; see src/agent/portable-path.ts.
+  ensurePortableRepoPath(repo.localPath, repo.hostPath);
 
   // Sync `.danxbot/settings.json` display section from RepoContext on
   // every worker boot. Creates the file on first boot AND refreshes

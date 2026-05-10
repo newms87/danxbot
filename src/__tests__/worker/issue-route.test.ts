@@ -90,6 +90,7 @@ async function startTestServer(): Promise<TestHarness> {
     name: `test-${Math.random().toString(36).slice(2, 10)}`,
     url: "https://example.invalid/repo",
     localPath: repoLocalPath,
+    hostPath: repoLocalPath,
     workerPort: 0,
     githubToken: "",
     trello: {

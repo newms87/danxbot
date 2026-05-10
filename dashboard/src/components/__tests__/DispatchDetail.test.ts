@@ -53,6 +53,7 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     hostPid: null,
     hostPidAt: null,
     pidTerminatedAt: null,
+    mcpSettingsPath: null,
     ...overrides,
   };
 }

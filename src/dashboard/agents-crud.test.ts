@@ -127,6 +127,7 @@ function tmpDeps(): DispatchProxyDeps {
         name: "danxbot",
         url: "https://github.com/x/danxbot.git",
         localPath: tmpRepoDir,
+        hostPath: tmpRepoDir,
         workerPort: 5562,
       },
     ],

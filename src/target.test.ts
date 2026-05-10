@@ -50,6 +50,7 @@ repos:
       name: "danxbot",
       url: "https://github.com/x/danxbot.git",
       localPath: "/danxbot/repos/danxbot",
+      hostPath: "/danxbot/repos/danxbot",
       workerPort: 5561,
     });
     expect(t.repos[1].workerPort).toBe(5562);

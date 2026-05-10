@@ -198,7 +198,9 @@ const GATE_REGISTRY: Readonly<Record<string, GateEvaluator>> = Object.freeze({
 });
 
 function workspaceRoot(repo: RepoContext, name: string): string {
-  return resolve(repo.localPath, ".danxbot", "workspaces", name);
+  // Canonical hostPath → spawn cwd identical across runtimes → JSONL
+  // encoded-cwd portable. See `src/agent/portable-path.ts`.
+  return resolve(repo.hostPath, ".danxbot", "workspaces", name);
 }
 
 function evaluateGates(manifest: WorkspaceManifest, repo: RepoContext): void {

@@ -56,6 +56,7 @@ describe("makeResolveWorkerHost", () => {
         name: "custom",
         url: "https://x/c.git",
         localPath: "/danxbot/repos/custom",
+        hostPath: "/danxbot/repos/custom",
         workerPort: 5561,
         workerHost: "renamed-container",
       },
@@ -69,6 +70,7 @@ describe("makeResolveWorkerHost", () => {
         name: "platform",
         url: "https://x/p.git",
         localPath: "/danxbot/repos/platform",
+        hostPath: "/danxbot/repos/platform",
         workerPort: 5561,
       },
     ];
@@ -92,6 +94,7 @@ describe("makeResolveWorkerHost", () => {
         name: "alpha",
         url: "https://x/a.git",
         localPath: "/danxbot/repos/alpha",
+        hostPath: "/danxbot/repos/alpha",
         workerPort: 5561,
         workerHost: "alpha-alias",
       },
@@ -99,6 +102,7 @@ describe("makeResolveWorkerHost", () => {
         name: "beta",
         url: "https://x/b.git",
         localPath: "/danxbot/repos/beta",
+        hostPath: "/danxbot/repos/beta",
         workerPort: 5562,
       },
     ];
@@ -237,12 +241,14 @@ describe("handleLaunchProxy", () => {
         name: "platform",
         url: "",
         localPath: "/tmp/platform",
+        hostPath: "/tmp/platform",
         workerPort: worker.port,
       },
       {
         name: "gpt-manager",
         url: "",
         localPath: "/tmp/gpt-manager",
+        hostPath: "/tmp/gpt-manager",
         workerPort: worker.port,
       },
     ];
@@ -386,6 +392,7 @@ describe("handleLaunchProxy", () => {
           name: "platform",
           url: "",
           localPath: "/tmp/platform",
+          hostPath: "/tmp/platform",
           workerPort: worker.port,
         },
       ],
@@ -415,6 +422,7 @@ describe("handleLaunchProxy", () => {
         name: "platform",
         url: "",
         localPath: "/tmp/platform",
+        hostPath: "/tmp/platform",
         workerPort: closedPort,
       },
     ];
@@ -455,6 +463,7 @@ describe("handleResumeProxy", () => {
         name: "platform",
         url: "",
         localPath: "/tmp/platform",
+        hostPath: "/tmp/platform",
         workerPort: worker.port,
       },
     ];
@@ -568,6 +577,7 @@ describe("handleJobProxy", () => {
         name: "platform",
         url: "",
         localPath: "/tmp/platform",
+        hostPath: "/tmp/platform",
         workerPort: worker.port,
       },
     ];

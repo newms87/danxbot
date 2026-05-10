@@ -101,6 +101,27 @@ describe("resolveWorkspace", () => {
       );
     });
 
+    // DX-230 — workspaceRoot uses repo.hostPath (canonical), not
+    // localPath. Without this, spawn cwd would differ across host +
+    // docker runtimes and Claude Code's JSONL encoded-cwd would
+    // diverge, breaking session resume across runtime swaps.
+    it("returns cwd rooted under hostPath when hostPath != localPath", () => {
+      const repoWithSplitPath: RepoContext = {
+        ...repo,
+        hostPath: "/canonical/host/path",
+      };
+      // resolveWorkspace will WorkspaceNotFoundError on the canonical
+      // path because no fixture exists there — we only care that it
+      // throws referencing hostPath, proving the resolver uses it.
+      expect(() =>
+        resolveWorkspace({
+          repo: repoWithSplitPath,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      ).toThrow(/\/canonical\/host\/path/);
+    });
+
     it("returns promptDelivery = 'at-file'", () => {
       const result = capture(
         resolveWorkspace({

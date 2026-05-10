@@ -81,6 +81,12 @@ export interface RepoConfig {
   url: string;
   localPath: string;
   /**
+   * Canonical absolute repo path — same value in host + docker
+   * runtimes. Used for `git worktree` ops + spawn cwd so worktree
+   * metadata is runtime-agnostic. See `src/agent/portable-path.ts`.
+   */
+  hostPath: string;
+  /**
    * Worker container port used to forward external dispatch requests.
    * Sourced from `deploy/targets/<TARGET>.yml` per-repo `worker_port`.
    * Required — the loader (`src/target.ts#loadTarget`) rejects entries
@@ -163,6 +169,8 @@ export interface RepoContext {
   name: string;
   url: string;
   localPath: string;
+  /** See `RepoConfig.hostPath` + `src/agent/portable-path.ts`. */
+  hostPath: string;
   trello: TrelloConfig;
   trelloEnabled: boolean;
   slack: SlackConfig;

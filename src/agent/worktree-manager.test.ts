@@ -463,4 +463,47 @@ describe("WorktreeManager", () => {
       ).toBe(join("/foo/", ".danxbot", "worktrees", "x"));
     });
   });
+
+  // DX-230 — every git invocation MUST run with cwd=hostPath (canonical
+  // absolute path), never localPath. A regression that re-reads
+  // localPath would corrupt worktree metadata across host↔docker swaps.
+  describe("hostPath != localPath (DX-230 portability)", () => {
+    const splitCtx = makeRepoContext({
+      localPath: "/container/path",
+      hostPath: "/host/canonical/path",
+    });
+    const splitWorktree = "/host/canonical/path/.danxbot/worktrees/alice";
+
+    it("worktreePath roots under hostPath, not localPath", () => {
+      const wm = createWorktreeManager(fakeRunner());
+      expect(wm.worktreePath(splitCtx, "alice")).toBe(splitWorktree);
+    });
+
+    it("bootstrap runs git with cwd=hostPath", async () => {
+      const runner = fakeRunner();
+      const wm = createWorktreeManager(runner);
+      await wm.bootstrap(splitCtx, "alice");
+      for (const call of runner.calls) {
+        expect(call.cwd).toBe(splitCtx.hostPath);
+      }
+    });
+
+    it("teardown runs git with cwd=hostPath", async () => {
+      const runner = fakeRunner();
+      const wm = createWorktreeManager(runner);
+      await wm.teardown(splitCtx, "alice");
+      for (const call of runner.calls) {
+        expect(call.cwd).toBe(splitCtx.hostPath);
+      }
+    });
+
+    it("validate runs git with cwd=worktreePath (rooted under hostPath)", async () => {
+      const runner = fakeRunner();
+      const wm = createWorktreeManager(runner);
+      await wm.validate(splitCtx, "alice");
+      for (const call of runner.calls) {
+        expect(call.cwd).toBe(splitWorktree);
+      }
+    });
+  });
 });

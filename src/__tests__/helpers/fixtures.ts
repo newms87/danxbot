@@ -47,10 +47,13 @@ export function makeConfig(overrides?: Record<string, unknown>) {
  * Creates a RepoContext with sensible test defaults.
  */
 export function makeRepoContext(overrides?: Partial<RepoContext>): RepoContext {
+  const localPath = overrides?.localPath ?? "/test/repos/test-repo";
+  const hostPath = overrides?.hostPath ?? localPath;
   return {
     name: "test-repo",
     url: "https://example.com/test.git",
-    localPath: "/test/repos/test-repo",
+    localPath,
+    hostPath,
     trello: {
       apiKey: "test-trello-key",
       apiToken: "test-trello-token",

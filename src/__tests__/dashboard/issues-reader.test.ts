@@ -323,6 +323,7 @@ describe("listIssues", () => {
       waiting_on_by: ["ISS-2"],
       comments_count: 2,
       has_retro: true,
+      created_at: 1_700_000_000_000,
       updated_at: 1_700_000_000_000,
       priority: 3,
       assigned_agent: null,
@@ -894,12 +895,12 @@ describe("listIssues", () => {
     expect(items).toEqual([]);
   });
 
-  it("throws on malformed entries — fail loud", async () => {
+  it("skips malformed rows and surfaces the rest", async () => {
     const repo = setupRepo();
-    // The mirror writer stamps `_malformed: true` on rows it could not
-    // YAML-parse so the `(repo_name, id)` PK still has a non-null id.
-    // The dashboard reader treats the flag as an operator-fix signal
-    // and refuses to surface the row instead of papering over it.
+    // Reader skips-and-logs on per-row corruption (issues-reader.ts
+    // toRawIssue catch) so a single transient bad row can't crash the
+    // entire `/api/issues` endpoint. The malformed row is dropped;
+    // healthy siblings still appear.
     mockIssues.push({
       repoName: basename(repo),
       issue: {
@@ -911,7 +912,8 @@ describe("listIssues", () => {
     });
     writeIssue(repo, "open", emptyIssue({ id: "ISS-1" }), 1_000);
 
-    await expect(listIssues(repo)).rejects.toThrow(/malformed/);
+    const items = await listIssues(repo);
+    expect(items.map((i) => i.id)).toEqual(["ISS-1"]);
   });
 
   it("preserves parent_id and children round-trip", async () => {
@@ -1114,17 +1116,19 @@ describe("listIssues / readIssueDetail prefix-agnostic", () => {
     expect(items.map((i) => i.id)).toEqual(["DX-1", "DX-3", "DX-2", "ISS-1"]);
   });
 
-  it("rogue id in DB row throws — fail loud", async () => {
+  it("skips rogue ids in DB rows", async () => {
     // The mirror writer's PK is fed by `data->>'id'`, so a row whose
     // id doesn't match `<PREFIX>-N` is a regression in the writer.
-    // The reader surfaces it instead of silently dropping the row.
+    // The reader skips-and-logs (defense-in-depth — single bad row
+    // can't crash `/api/issues`) rather than throwing.
     const repo = setupRepo();
     mockIssues.push({
       repoName: basename(repo),
       issue: { ...emptyIssue({ id: "lowercase-99" as unknown as string }) },
       mirrorUpdatedAtMs: 1_000,
     });
-    await expect(listIssues(repo)).rejects.toThrow(/rogue id/);
+    const items = await listIssues(repo);
+    expect(items).toEqual([]);
   });
 });
 

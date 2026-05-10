@@ -98,6 +98,7 @@ function buildRepo(): RepoContext {
     name: "test",
     url: "",
     localPath: scratchRoot,
+    hostPath: scratchRoot,
     workerPort: 0,
     githubToken: "",
     trello: {

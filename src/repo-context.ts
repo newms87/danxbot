@@ -13,6 +13,7 @@ import { loadIssuePrefix } from "./issue-tracker/load-issue-prefix.js";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { repos, isWorkerMode, workerRepoName, config } from "./config.js";
+import { DANXBOT_REPO_HOST_PATH_ENV } from "./agent/portable-path.js";
 
 // Re-export the prefix shape + loader so existing callers (and tests) that
 // import them from `repo-context.js` keep compiling. Single source for the
@@ -124,10 +125,24 @@ export function loadRepoContext(
   const dbName = optEnv("DANX_DB_NAME", "");
   const dbEnabled = !!(rawDbHost && dbUser);
 
+  // Canonical repo path (DX-230). In container runtime the per-repo
+  // compose.yml MUST inject DANXBOT_REPO_HOST_PATH (worker-env.sh
+  // exports it from DANXBOT_REPO_ROOT, compose passes it through), so
+  // a missing value here = misconfig and we fail loud. On host runtime
+  // localPath IS the host abs path — they're the same string.
+  const envHostPath = process.env[DANXBOT_REPO_HOST_PATH_ENV];
+  if (!config.isHost && !envHostPath) {
+    throw new Error(
+      `Missing required environment variable '${DANXBOT_REPO_HOST_PATH_ENV}' (container runtime). The per-repo compose.yml must pass it through — see src/agent/portable-path.ts.`,
+    );
+  }
+  const hostPath = envHostPath || repo.localPath;
+
   return {
     name: repo.name,
     url: repo.url,
     localPath: repo.localPath,
+    hostPath,
     trello: {
       apiKey: reqEnv("DANX_TRELLO_API_KEY"),
       apiToken: reqEnv("DANX_TRELLO_API_TOKEN"),

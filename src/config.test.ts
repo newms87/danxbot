@@ -38,6 +38,7 @@ const DEFAULT_TARGET: ResolvedTarget = {
       name: "platform",
       url: "https://github.com/Flytedesk/platform.git",
       localPath: "/danxbot/repos/platform",
+      hostPath: "/danxbot/repos/platform",
       workerPort: 5561,
     },
   ],
@@ -83,6 +84,15 @@ vi.mock("node:fs", async () => {
   };
 });
 
+// `loadRepoContext` reads the per-repo `issue_prefix` from
+// `<localPath>/.danxbot/config/config.yml` via `loadIssuePrefix`. Tests
+// here mock `localPath` to fixture paths that don't exist on disk, so
+// stub the loader to return a valid prefix without filesystem access.
+vi.mock("./issue-tracker/load-issue-prefix.js", () => ({
+  loadIssuePrefix: () => "ISS",
+  ISSUE_PREFIX_SHAPE: /^[A-Z]{2,4}$/,
+}));
+
 function validEnv(): Record<string, string> {
   return {
     ANTHROPIC_API_KEY: "test-key",
@@ -94,6 +104,10 @@ function validEnv(): Record<string, string> {
     AGENT_TIMEOUT_MS: "300000",
     MAX_THREAD_MESSAGES: "20",
     AGENT_MAX_RETRIES: "1",
+    // DX-230 — container-runtime tests need this set; loadRepoContext
+    // throws when missing in !isHost mode. The actual path doesn't
+    // matter for these suites (they exercise DB / runtime config).
+    DANXBOT_REPO_HOST_PATH: "/danxbot/repos/test",
   };
 }
 
@@ -144,12 +158,14 @@ describe("repos config (Phase B: sourced from deploy/targets/<TARGET>.yml)", () 
           name: "platform",
           url: "https://github.com/Flytedesk/platform.git",
           localPath: "/danxbot/repos/platform",
+          hostPath: "/danxbot/repos/platform",
           workerPort: 5561,
         },
         {
           name: "docs",
           url: "https://github.com/Flytedesk/docs.git",
           localPath: "/danxbot/repos/docs",
+          hostPath: "/danxbot/repos/docs",
           workerPort: 5562,
         },
       ],
@@ -173,6 +189,7 @@ describe("repos config (Phase B: sourced from deploy/targets/<TARGET>.yml)", () 
           name: "custom",
           url: "https://example.com/c.git",
           localPath: "/danxbot/repos/custom",
+          hostPath: "/danxbot/repos/custom",
           workerPort: 5562,
           workerHost: "renamed-container",
         },
@@ -221,12 +238,14 @@ describe("repoContexts", () => {
           name: "platform",
           url: "https://github.com/Flytedesk/platform.git",
           localPath: "/danxbot/repos/platform",
+          hostPath: "/danxbot/repos/platform",
           workerPort: 5561,
         },
         {
           name: "danxbot",
           url: "https://github.com/test/danxbot.git",
           localPath: "/danxbot/repos/danxbot",
+          hostPath: "/danxbot/repos/danxbot",
           workerPort: 5562,
         },
       ],
