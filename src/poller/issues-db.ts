@@ -127,6 +127,39 @@ export async function dbListOpenIssues(
 }
 
 /**
+ * DX-217 (Event-Driven Worker Phase 2) — dependents lookup. Returns
+ * every issue in the repo whose `waiting_on.by[]` array contains the
+ * supplied id. Used by `reconcileIssue` step 10 (recurse on dependents)
+ * to schedule a reconcile for every card waiting on the just-changed
+ * issue, so dep-chain unblocks propagate the same tick instead of
+ * waiting for the next 60s poll.
+ *
+ * Filters by repo (`repo_name = $1`) and uses the JSON containment
+ * operator `@>` against a single-element `by[]` array — Postgres can
+ * use the GIN index on `data` if one exists; absent that, the cost is
+ * a scan over the repo's rows, which is acceptable at current scale.
+ *
+ * Closed (Done / Cancelled) cards have `waiting_on: null` by
+ * construction (terminal save clears it), so the filter on
+ * `data->'waiting_on' IS NOT NULL` is for clarity, not correctness —
+ * either form returns the same set.
+ */
+export async function dbListDependentsByWaitingOnId(
+  repoName: string,
+  id: string,
+): Promise<Issue[]> {
+  const containment = JSON.stringify({ waiting_on: { by: [id] } });
+  const rows = await queryFn<{ data: Issue }>(
+    `SELECT data FROM issues
+       WHERE repo_name = $1
+         AND data->'waiting_on' IS NOT NULL
+         AND data @> $2::jsonb`,
+    [repoName, containment],
+  );
+  return rows.map((r) => r.data);
+}
+
+/**
  * Children of a parent — used by `recomputeParentStatuses`. Returns
  * children in any status (open or closed) so a Done child still
  * contributes to the parent-status derivation. The `(repo_name,

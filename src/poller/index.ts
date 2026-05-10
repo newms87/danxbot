@@ -52,14 +52,19 @@ import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { injectDanxIssueMcp } from "./inject/inject-root-mcp.js";
 import { pushOrphans } from "./orphan-push.js";
-import { recomputeParentStatuses } from "./epic-status.js";
-import { resolveWaitingOnCards } from "./waiting-on-resolver.js";
-import { healLocalYamls } from "./heal.js";
+// DX-217 (Event-Driven Worker Phase 2): the per-tick parent-derive,
+// healer, and waiting-on auto-clear passes were absorbed into
+// `reconcileIssue` step 3 (`src/issue/reconcile.ts`). Chokidar fires
+// reconcile on every YAML mutation; reconcile's recursion (steps 9 +
+// 10) propagates the same effects (parent recompute, dependent
+// unblock) the same trigger instead of waiting for the next tick. The
+// poller's _poll body no longer calls these three helpers directly —
+// Phase 5 reintroduces them as a 1-min cron audit pass calling
+// `reconcileIssue` on every open YAML.
 import { healExternalIds } from "./heal-external-id.js";
 import { drainRetries } from "../issue-tracker/retry-queue.js";
 import { recordSystemError } from "../dashboard/system-errors.js";
 import {
-  listBlockedTodoYamls,
   listDispatchableYamls,
   listInProgressYamls,
   listTriageDueYamls,
@@ -549,36 +554,13 @@ async function _poll(repo: RepoContext): Promise<void> {
   // docstring + the per-workspace render loop inside.
   syncRepoFiles(repo);
 
-  // ISS-133 Phase 3: per-tick self-heal pass for the local YAML dir.
-  // Runs BEFORE every tracker fetch and BEFORE every dispatch decision
-  // so a YAML stuck in `open/` with terminal status (e.g. ISS-95-class
-  // saves where the worker's runSync threw before persistAfterSync
-  // moved the file) auto-recovers without a human `mv`. Tracker-
-  // independent — no Trello call, runs even when creds are dead.
-  // Together with the ISS-98 epic-status auto-derive pass below, the
-  // healer closes the ISS-95/ISS-90 loop: heal moves ISS-95 to
-  // closed/ on this tick; the next tick's auto-derive flips ISS-90's
-  // status from the union of children; the tick after heals ISS-90
-  // too.
-  const healResult = healLocalYamls(repo.localPath, repo.issuePrefix);
-  for (const h of healResult.healed) {
-    const arrow = h.direction === "open-to-closed" ? "open/ → closed/" : "closed/ → open/";
-    log.info(`[${repo.name}] Healed ${h.id}: ${arrow} (status: ${h.status})`);
-  }
-  for (const e of healResult.errors) {
-    log.warn(`[${repo.name}] Heal pass skipped malformed YAML at ${e.path}: ${e.message}`);
-    // DX-134 Phase 4: a malformed YAML is operator-visible — surface it
-    // to the system-errors banner so the broken file gets attention
-    // BEFORE it cascades through the rest of the tick (it's already
-    // skipped here, but the next tick will hit it again).
-    recordSystemError({
-      source: "healer",
-      severity: "warn",
-      repo: repo.name,
-      message: `Heal pass skipped malformed YAML at ${e.path}: ${e.message}`,
-      details: { path: e.path },
-    });
-  }
+  // DX-217 (Event-Driven Worker Phase 2): the per-tick `healLocalYamls`
+  // pass (ISS-133 Phase 3) was absorbed into `reconcileIssue` step 3c.
+  // Every YAML mutation fires the chokidar watcher → reconcile, which
+  // moves the file to the correct bucket on the same trigger. Phase 5
+  // reintroduces a 1-min audit pass that calls `reconcileIssue` on
+  // every open YAML to catch any drift from event-loss; until then,
+  // chokidar coverage + the boot scan are the safety nets.
 
   // ONE tracker per repo, reused across every tick (see `getRepoTracker`).
   // Resolved early so the external-id format heal below has a tracker to
@@ -667,25 +649,12 @@ async function _poll(repo: RepoContext): Promise<void> {
   await evictDeadDispatches(repo);
 
   // ISS-98 / DX-210 follow-up: derive parent (Epic + non-epic) statuses
-  // from the union of children at the TOP of the tick — BEFORE any
-  // tracker round-trip. Derivation is purely local-YAML driven and must
-  // not depend on tracker reachability. Running it here means a Trello
-  // outage (or any failure inside `tracker.fetchOpenCards()` below
-  // that triggers the early `return`) cannot starve parent-status
-  // derivation. Cards hydrated by this tick's `bulkSyncMissingYamls`
-  // are picked up by the NEXT tick's derive — acceptable trade-off
-  // versus the previous "any tracker hiccup freezes Epic status"
-  // failure mode that CLAUDE.md "Trello Is Background Infrastructure"
-  // explicitly forbids.
-  const parentChangesEarly = await recomputeParentStatuses(
-    repo.localPath,
-    repo.issuePrefix,
-  );
-  for (const change of parentChangesEarly) {
-    log.info(
-      `[${repo.name}] Derived ${change.id}: ${change.before} → ${change.after} (${change.rule})`,
-    );
-  }
+  // DX-217 (Event-Driven Worker Phase 2): the per-tick parent-status
+  // derive pass (ISS-98) was absorbed into `reconcileIssue` step 3a.
+  // Every child save fires chokidar → reconcile, whose step 9 recurses
+  // on the parent and re-derives its status from the new union of
+  // children. Phase 5 reintroduces a 1-min audit pass for drift
+  // recovery.
 
   log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
 
@@ -771,21 +740,13 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  // ISS-98: derive parent statuses again AFTER `bulkSyncMissingYamls`
-  // so freshly hydrated children participate in this tick's derivation
-  // (the early-tick derive at the top of `_poll` ran before hydrate).
-  // Idempotent: a no-op when no statuses changed since the early call.
-  // Kept BEFORE dispatch decisions so an Epic that just turned Blocked
-  // (because a child did) is non-dispatchable on this tick.
-  const parentChanges = await recomputeParentStatuses(
-    repo.localPath,
-    repo.issuePrefix,
-  );
-  for (const change of parentChanges) {
-    log.info(
-      `[${repo.name}] Derived ${change.id}: ${change.before} → ${change.after} (${change.rule})`,
-    );
-  }
+  // DX-217 (Event-Driven Worker Phase 2): the post-hydrate parent
+  // recompute pass (the second `recomputeParentStatuses` call) was
+  // absorbed into `reconcileIssue`. The chokidar watcher fires reconcile
+  // for every freshly-hydrated YAML the bulk-sync block above just
+  // wrote, so step 9's parent recursion picks up new children inside
+  // the same tick. Phase 5 reintroduces a 1-min audit pass for drift
+  // recovery.
 
   // ISS-86: dispatch source is local YAML, not the tracker fetch above.
   // Phase 4 of ISS-90 dropped the `excludeExternalIds` filter — Action
@@ -846,19 +807,15 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  // Waiting-on-card gate. `listDispatchableYamls` already filtered out
-  // every YAML with non-null `waiting_on`, so the input set is exclusively
-  // not-waiting. The unblock-on-terminal path runs over a separate
-  // sweep of the waiting ToDo YAMLs: `resolveWaitingOnCards` clears the
-  // record + saves, and the freshly-cleared cards join the dispatchable
-  // pool for this tick. See `resolveWaitingOnCards` for the contract.
-  const waitingRefs: IssueRef[] = (
-    await listBlockedTodoYamls(repo.localPath, repo.issuePrefix)
-  ).map(localIssueToRef);
-  if (waitingRefs.length > 0) {
-    const cleared = await resolveWaitingOnCards(repo, waitingRefs);
-    if (cleared.length > 0) cards = [...cards, ...cleared];
-  }
+  // DX-217 (Event-Driven Worker Phase 2): the per-tick waiting-on
+  // auto-clear pass (DX-147 / `resolveWaitingOnCards`) was absorbed
+  // into `reconcileIssue` step 3b. When a dependency's YAML reaches
+  // a terminal status, its watcher event triggers reconcile → step 10
+  // recurses on every dependent → those dependents' reconciles clear
+  // `waiting_on` and write the YAML on the same trigger. Cleared cards
+  // appear in `listDispatchableYamls` on subsequent ticks (or already
+  // do on this tick if the watcher event landed during an earlier
+  // step's await). Phase 5's audit pass catches any drift.
 
   if (cards.length === 0) {
     // Phase 4 of ISS-90 — single-dispatch-per-tick decision tree.

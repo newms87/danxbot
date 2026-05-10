@@ -392,9 +392,15 @@ vi.mock("./local-issues.js", () => ({
 }));
 
 // epic-status: queries the DB for parents/children since DX-155. The
-// unit-mock suite has no live PG, so stub recompute to a no-op.
+// unit-mock suite has no live PG, so stub recompute to a no-op. Spy
+// kept on `mockRecomputeParentStatuses` so DX-217 Phase 2 anti-
+// regression tests can assert `_poll` no longer calls it.
+const mockRecomputeParentStatuses = vi
+  .fn()
+  .mockResolvedValue([] as unknown[]);
 vi.mock("./epic-status.js", () => ({
-  recomputeParentStatuses: async (): Promise<unknown[]> => [],
+  recomputeParentStatuses: (...args: unknown[]) =>
+    mockRecomputeParentStatuses(...args),
   deriveStatus: () => null,
 }));
 
@@ -2233,17 +2239,22 @@ describe("poll — _poll crash isolation (DX-149)", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("survives an early-_poll throw from healLocalYamls (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
+  it("survives an early-_poll throw from healExternalIds (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
     // Reviewer-recommended representative test for the deeper-in-_poll
     // throw paths the wrap also covers (orphan-push, evictDeadDispatches,
-    // checkAndSpawnTriage/Ideator, etc.). `healLocalYamls` runs at the
-    // very top of _poll's body — well before any tracker call — so a
-    // throw here exercises the catch from a structurally distinct
-    // entry point relative to the tracker-call tests above. Pins the
-    // contract that the catch covers the WHOLE body, not just the
-    // tracker subset.
-    mockHealLocalYamls.mockImplementationOnce(() => {
-      throw new Error("disk full during heal pass");
+    // checkAndSpawnTriage/Ideator, etc.). `healExternalIds` runs early
+    // in _poll — well before any tracker call — so a throw here
+    // exercises the catch from a structurally distinct entry point
+    // relative to the tracker-call tests above. Pins the contract that
+    // the catch covers the WHOLE body, not just the tracker subset.
+    //
+    // DX-217 (Event-Driven Worker Phase 2): replaces an earlier test
+    // that used `healLocalYamls` for this same purpose. That helper was
+    // absorbed into `reconcileIssue` step 3c and no longer runs from
+    // `_poll`; `healExternalIds` is the next-best representative early
+    // path.
+    mockHealExternalIds.mockImplementationOnce(() => {
+      throw new Error("disk full during external_id heal pass");
     });
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
@@ -2252,7 +2263,9 @@ describe("poll — _poll crash isolation (DX-149)", () => {
       String(c[0]).includes("_poll crashed"),
     );
     expect(crashLogs).toHaveLength(1);
-    expect(String(crashLogs[0][0])).toContain("disk full during heal pass");
+    expect(String(crashLogs[0][0])).toContain(
+      "disk full during external_id heal pass",
+    );
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
@@ -4886,54 +4899,13 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("blocked card whose every blocker is terminal clears blocked, saves, and dispatches", async () => {
-    // ISS-99 is Done → ISS-300 is unblocked. The poller clears the
-    // blocked record on the YAML (via writeFileSync, not mocked here)
-    // and dispatches the card.
-    mockTracker.fetchOpenCards.mockResolvedValue([
-      ref("card-block-2", "Now-unblocked card", "ToDo"),
-    ]);
-    const blockedIssue = {
-      schema_version: 5,
-      tracker: "trello",
-      id: "ISS-301",
-      external_id: "card-block-2",
-      parent_id: null,
-      children: [],
-      dispatch: null,
-      status: "ToDo",
-      type: "Feature",
-      title: "Now-unblocked card",
-      description: "",
-      priority: 3.0,
-      triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
-      ac: [],
-      comments: [],
-      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      assigned_agent: null,
-      waiting_on: {
-        reason: "waiting on ISS-99",
-        timestamp: "2026-05-04T18:00:00.000Z",
-        by: ["ISS-99"],
-      },
-      blocked: null,
-      history: [],
-    };
-    mockFindByExternalId.mockReturnValue(blockedIssue);
-    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
-      if (id === "ISS-99") return { ...blockedIssue, id: "ISS-99", status: "Done", blocked: null };
-      return null;
-    });
-    // ISS-86: blocked YAMLs come via listBlockedTodoYamls; the
-    // resolve gate clears `blocked` on terminal blockers and pushes
-    // the cleared ref into `cards` for dispatch this tick.
-    mockListDispatchableYamls.mockResolvedValueOnce([]);
-    mockListBlockedTodoYamls.mockResolvedValueOnce([blockedIssue as Issue]);
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockDispatch).toHaveBeenCalledTimes(1);
-  });
+  // DX-217 (Event-Driven Worker Phase 2): the in-tick `waiting_on`
+  // auto-clear gate (formerly `resolveWaitingOnCards`) was absorbed
+  // into `reconcileIssue` step 3b. Behavior parity for the unblock-on-
+  // terminal-deps path is now exercised by the reconcile test suite
+  // (`src/issue/reconcile.test.ts` "Phase 2 waiting_on auto-clear" +
+  // "step 10 recursion"). The poller no longer auto-clears mid-tick;
+  // chokidar events on the dep card propagate the unblock instead.
 
   it("Action Items list cards (now hydrated as status: Review) are bulk-synced but not dispatched", async () => {
     // Phase 4 of ISS-90 collapsed Action Items into status: Review.
@@ -6164,7 +6136,16 @@ describe("poll — local-YAML dispatch source (ISS-86)", () => {
   });
 });
 
-describe("poll — heal pass ordering (ISS-133, Phase 3)", () => {
+describe("poll — DX-217 Phase 2 absorbed-helpers invariant", () => {
+  // After Event-Driven Worker Phase 2 (DX-217), `_poll` no longer
+  // calls `healLocalYamls`, `recomputeParentStatuses`, or
+  // `resolveWaitingOnCards` directly. Each helper's logic was absorbed
+  // into `reconcileIssue` step 3 (`src/issue/reconcile.ts`); chokidar
+  // events on YAML mutations propagate the same effects via reconcile
+  // recursion (steps 9 + 10). Behavior parity for the absorbed paths
+  // is exercised by `src/issue/reconcile.test.ts`. This block is the
+  // anti-regression guard: a future edit that re-introduces an in-tick
+  // call to any of the three helpers fails here.
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -6175,85 +6156,28 @@ describe("poll — heal pass ordering (ISS-133, Phase 3)", () => {
     mockHealLocalYamls.mockReturnValue({ healed: [], errors: [] });
   });
 
-  it("calls healLocalYamls BEFORE tracker.fetchOpenCards on every tick (AC #1)", async () => {
-    // Default tracker fetch returns the Review filler — no ToDo cards
-    // means the tick is read-only after the heal pass + tracker fetch.
-    // Both must still fire so the heal pass runs every tick, not only
-    // when a dispatch is queued.
+  it("does NOT call healLocalYamls from _poll (Phase 2 — absorbed into reconcile step 3c)", async () => {
     await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockHealLocalYamls).toHaveBeenCalledTimes(1);
-    expect(mockHealLocalYamls).toHaveBeenCalledWith(
-      MOCK_REPO_CONTEXT.localPath,
-      MOCK_REPO_CONTEXT.issuePrefix,
-    );
-    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
-
-    const healOrder = mockHealLocalYamls.mock.invocationCallOrder[0];
-    const fetchOrder = mockTracker.fetchOpenCards.mock.invocationCallOrder[0];
-    expect(healOrder).toBeLessThan(fetchOrder);
-  });
-
-  it("end-to-end: an ISS-95-style stuck Done YAML is reported as healed and the result is logged (AC #6)", async () => {
-    // Heal-pass observable: the poller calls into the heal helper,
-    // receives `{healed: [{id, status}], errors: []}`, and continues
-    // the tick. The heal helper itself is unit-tested with real fs in
-    // `heal.test.ts` — this test pins the integration: poller invokes
-    // the helper with the right args and consumes the return value
-    // without crashing the rest of the tick.
-    mockHealLocalYamls.mockReturnValue({
-      healed: [{ id: "ISS-95", status: "Done" }],
-      errors: [],
-    });
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    // Helper called with the tick's repo path + prefix.
-    expect(mockHealLocalYamls).toHaveBeenCalledWith(
-      MOCK_REPO_CONTEXT.localPath,
-      MOCK_REPO_CONTEXT.issuePrefix,
-    );
-    // Tick continued past the heal pass — the rest of the poll body
-    // ran (tracker fetch fired). Without this assertion a regression
-    // that throws on a non-empty `healed[]` would silently abort the
-    // tick.
+    expect(mockHealLocalYamls).not.toHaveBeenCalled();
+    // Tick still advances past the (now absent) heal pass.
     expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
   });
 
-  it("DX-134 Phase 4: heal pass errors fire recordSystemError for the dashboard banner", async () => {
-    // Producer-wiring test: when the heal pass returns malformed-YAML
-    // errors, `_poll` MUST surface each one to the dashboard via
-    // recordSystemError(source: "healer", severity: "warn", ...).
-    // Without this, malformed-YAML alerts only land in the worker log.
-    mockRecordSystemError.mockClear();
-    mockHealLocalYamls.mockReturnValue({
-      healed: [],
-      errors: [
-        { path: "/tmp/foo/ISS-1.yml", message: "missing required field: id" },
-        { path: "/tmp/foo/ISS-2.yml", message: "schema_version must be 3 or 4" },
-      ],
-    });
-
+  it("does NOT call recomputeParentStatuses from _poll (Phase 2 — absorbed into reconcile step 3a)", async () => {
+    mockRecomputeParentStatuses.mockClear();
     await poll(MOCK_REPO_CONTEXT);
+    expect(mockRecomputeParentStatuses).not.toHaveBeenCalled();
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+  });
 
-    const healerCalls = mockRecordSystemError.mock.calls.filter(
-      (c) => (c[0] as { source: string }).source === "healer",
-    );
-    expect(healerCalls).toHaveLength(2);
-    expect(healerCalls[0][0]).toMatchObject({
-      source: "healer",
-      severity: "warn",
-      repo: MOCK_REPO_CONTEXT.name,
-      message: expect.stringContaining("missing required field: id"),
-      details: { path: "/tmp/foo/ISS-1.yml" },
-    });
-    expect(healerCalls[1][0]).toMatchObject({
-      source: "healer",
-      severity: "warn",
-      repo: MOCK_REPO_CONTEXT.name,
-      message: expect.stringContaining("schema_version must be 3 or 4"),
-      details: { path: "/tmp/foo/ISS-2.yml" },
-    });
+  it("does NOT call listBlockedTodoYamls from _poll (Phase 2 — waiting_on auto-clear absorbed into reconcile step 3b)", async () => {
+    // The legacy in-tick `resolveWaitingOnCards` block called
+    // `listBlockedTodoYamls` to find waiting cards. With the block gone,
+    // the listing helper is no longer reached from `_poll`. Reconcile's
+    // step 3b clears `waiting_on` per-card on chokidar events.
+    mockListBlockedTodoYamls.mockClear();
+    await poll(MOCK_REPO_CONTEXT);
+    expect(mockListBlockedTodoYamls).not.toHaveBeenCalled();
   });
 
   it("DX-134 Phase 4: retry-queue MAX_ATTEMPTS exhaustion fires recordSystemError", async () => {
@@ -6317,34 +6241,32 @@ describe("poll — external_id heal pass (DX-150, Trello-decouple Phase 9)", () 
     mockHealExternalIds.mockReturnValue({ healed: [], errors: [] });
   });
 
-  it("calls healExternalIds AFTER healLocalYamls and BEFORE tracker.fetchOpenCards (AC #3)", async () => {
+  it("calls healExternalIds BEFORE tracker.fetchOpenCards (AC #3)", async () => {
+    // DX-217 Phase 2: the original AC #3 ordered healExternalIds AFTER
+    // healLocalYamls. Phase 2 absorbed healLocalYamls into reconcile
+    // step 3c, so the AFTER-healLocalYamls leg of the ordering is
+    // irrelevant at the poller level. The remaining contract — the
+    // external_id heal precedes the tracker fetch so a foreign id is
+    // blanked before it can trigger a tracker 400 — still holds.
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockHealExternalIds).toHaveBeenCalledTimes(1);
-    // Args are (repoLocalPath, tracker, prefix). The tracker is the
-    // shared per-repo instance — same as the one fetchOpenCards uses
-    // below — so the pass can ask `isValidExternalId` without an
-    // extra factory round-trip.
-    const [path, trackerArg, prefix] =
-      mockHealExternalIds.mock.calls[0]!;
+    const [path, trackerArg, prefix] = mockHealExternalIds.mock.calls[0]!;
     expect(path).toBe(MOCK_REPO_CONTEXT.localPath);
     expect(prefix).toBe(MOCK_REPO_CONTEXT.issuePrefix);
     expect(trackerArg).toBe(mockTracker);
 
     expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
 
-    // healLocalYamls (the open/→closed/ pass) MUST run first. The
-    // ordering matters: a ToDo-class YAML stamped Done locally without
-    // a tracker push is moved to closed/ first, then the format heal
-    // ignores it (closed/ is scanned but a healed-then-moved file is
-    // already gone from open/).
-    const healLocalOrder =
-      mockHealLocalYamls.mock.invocationCallOrder[0]!;
     const healExternalOrder =
       mockHealExternalIds.mock.invocationCallOrder[0]!;
     const fetchOrder = mockTracker.fetchOpenCards.mock.invocationCallOrder[0]!;
-    expect(healLocalOrder).toBeLessThan(healExternalOrder);
     expect(healExternalOrder).toBeLessThan(fetchOrder);
+
+    // Phase 2 anti-regression: healLocalYamls is NOT called from _poll
+    // (was previously asserted to run before healExternalIds; it now
+    // runs from reconcile, not the tick).
+    expect(mockHealLocalYamls).not.toHaveBeenCalled();
   });
 
   it("a non-empty healed[] is consumed without aborting the tick (AC #2)", async () => {

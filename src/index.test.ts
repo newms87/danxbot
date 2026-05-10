@@ -58,6 +58,12 @@ vi.mock("./db/connection.js", () => ({
   getAdminPool: vi.fn(),
   closePool: vi.fn(),
   closeAdminPool: vi.fn(),
+  // DX-217 (Event-Driven Worker Phase 2): `reconcileIssue` (wired into
+  // index.ts at boot) transitively imports `query` via
+  // `src/poller/issues-db.ts`. The mock must export it so module load
+  // doesn't trip vitest's strict "No <name> export is defined on the
+  // mock" guard.
+  query: vi.fn(),
 }));
 
 const mockSyncRepoFiles = vi.fn();

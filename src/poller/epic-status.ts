@@ -49,12 +49,16 @@
 
 import type { Issue, IssueStatus } from "../issue-tracker/interface.js";
 import { writeIssue } from "./yaml-lifecycle.js";
-import { appendHistory } from "../issue-tracker/yaml.js";
 import {
   dbListChildrenByParent,
   dbListParentsToRecompute,
 } from "./issues-db.js";
 import { repoNameFromPath } from "./repo-name.js";
+import {
+  applyParentDeriveMutation,
+  deriveParentStatus,
+  type DeriveParentStatusResult,
+} from "../issue/reconcile/parent.js";
 
 export interface ParentStatusChange {
   id: string;
@@ -69,57 +73,14 @@ export interface ParentStatusChange {
 }
 
 /**
- * Result of `deriveStatus` — the derived parent status PLUS the rule
- * that produced it. The rule string is consumed by `recomputeParentStatuses`
- * as the `note` on the appended `worker:auto-derive` `status_change`
- * history entry (DX-147), so the dashboard can correlate parent flips
- * back to the priority rule that fired without re-running the derivation.
+ * Phase 2 (DX-217) moved the priority-rule decision function to
+ * `src/issue/reconcile/parent.ts#deriveParentStatus` so reconcile step 3a
+ * can call it directly. This re-export preserves the legacy
+ * `deriveStatus` name for tests + audit-loop callers; the source of
+ * truth is the pure helper in `reconcile/parent.ts`.
  */
-export interface DeriveStatusResult {
-  status: IssueStatus;
-  rule: string;
-}
-
-export function deriveStatus(children: Issue[]): DeriveStatusResult | null {
-  if (children.length === 0) return null;
-
-  if (children.some((c) => c.status === "Blocked")) {
-    return { status: "Blocked", rule: "Any child Blocked — parent Blocked" };
-  }
-  if (children.some((c) => c.status === "Needs Approval")) {
-    return {
-      status: "Needs Approval",
-      rule: "Any child Needs Approval — parent Needs Approval",
-    };
-  }
-  if (children.some((c) => c.status === "In Progress")) {
-    return { status: "In Progress", rule: "Any child In Progress — parent In Progress" };
-  }
-  if (children.some((c) => c.status === "ToDo")) {
-    return { status: "ToDo", rule: "Any child ToDo — parent ToDo" };
-  }
-
-  // Rules 4 + 5: terminal-or-review derivation excludes Cancelled
-  // children (they don't block a Done/Review parent).
-  const nonCancelled = children.filter((c) => c.status !== "Cancelled");
-  const hasNonCancelled = nonCancelled.length > 0;
-  if (hasNonCancelled && nonCancelled.every((c) => c.status === "Review")) {
-    return {
-      status: "Review",
-      rule: "All non-cancelled children Review — parent Review",
-    };
-  }
-  if (hasNonCancelled && nonCancelled.every((c) => c.status === "Done")) {
-    return { status: "Done", rule: "All non-cancelled children Done — parent Done" };
-  }
-  if (!hasNonCancelled) {
-    return { status: "Cancelled", rule: "All children Cancelled — parent Cancelled" };
-  }
-
-  // Mixed terminal states (e.g. Review + Done) — caller leaves the
-  // parent's current status untouched.
-  return null;
-}
+export type DeriveStatusResult = DeriveParentStatusResult;
+export const deriveStatus = deriveParentStatus;
 
 /**
  * Iterate every issue in the DB whose `children[]` is non-empty and
@@ -168,38 +129,17 @@ export async function recomputeParentStatuses(
     if (derived.status === parent.status) continue;
 
     const before = parent.status;
-    // DX-147: every auto-derive flip leaves an audit-log entry on the
-    // parent attributing the change to `worker:auto-derive` with the
-    // priority-rule string as the `note`. The writer KNOWS what it
-    // changed (deterministic, single source) so we call `appendHistory`
-    // directly rather than rerunning a diff against a cached snapshot.
-    const updatedHistory = appendHistory(parent.history, {
-      timestamp: new Date().toISOString(),
-      actor: "worker:auto-derive",
-      event: "status_change",
-      from: before,
-      to: derived.status,
-      note: derived.rule,
-    });
-    // Maintain the v4 invariant `status === "Blocked" ⟺ blocked !== null`
-    // when the auto-derive promotes the parent to / from Blocked. The
-    // self-block reason carries the derive-rule string so a reader can
-    // see why the parent was auto-flipped without walking children.
-    let updatedBlocked = parent.blocked;
-    if (derived.status === "Blocked" && parent.blocked === null) {
-      updatedBlocked = {
-        reason: `Auto-derived from children: ${derived.rule}`,
-        timestamp: new Date().toISOString(),
-      };
-    } else if (derived.status !== "Blocked" && parent.blocked !== null) {
-      updatedBlocked = null;
-    }
-    const updated: Issue = {
-      ...parent,
-      status: derived.status,
-      blocked: updatedBlocked,
-      history: updatedHistory,
-    };
+    // DX-217: the audit-pass mutation IS reconcile step 3a's mutation.
+    // Single source of truth lives in `applyParentDeriveMutation`
+    // (`src/issue/reconcile/parent.ts`) — it stamps the
+    // `worker:auto-derive` `status_change` history entry with the
+    // priority-rule string AND maintains the
+    // `status === "Blocked" ⟺ blocked !== null` schema invariant.
+    const updated: Issue = applyParentDeriveMutation(
+      parent,
+      derived,
+      new Date().toISOString(),
+    );
     // Use writeIssue which always writes to open/. Derived statuses of
     // Done / Cancelled WILL leave the parent in open/ until the next
     // agent save triggers worker's open/→closed/ move; that's fine —
