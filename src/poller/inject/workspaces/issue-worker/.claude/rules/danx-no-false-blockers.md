@@ -38,9 +38,36 @@ state you did not personally write in this dispatch:**
 - `git checkout -- <path>` / `git checkout HEAD <path>`
 - `git restore <path>` / `git restore --staged <path>`
 - `git reset <path>` / `git reset --hard`
+- `git clean` (any flags)
 - Any "verify failure pre-existed my changes" investigation. There is
   ZERO value in the answer. The suite either passes for YOUR changes
   (option 2) or it does not (option 1 / 3).
+
+### Pre-action gate — destructive working-tree op
+
+Before invoking ANY of the forbidden commands above, you MUST write a
+3-step audit into your reasoning. Skipping the audit is a rule
+violation EVEN IF the operator told you to do it. "User said do it" /
+"operator authorized" is NOT enough — the operator expects you to
+investigate first, then act on the result.
+
+1. `git log -1 -- <path>` — who last committed; what's the prior
+   shape; is the uncommitted diff a deviation from a recent commit by
+   the same author?
+2. Read the diff content + its inline comments — does the diff
+   justify itself in plain language (e.g. "fixes prod crash on
+   transient mid-write rows")? If yes, the diff is likely a real fix
+   and the test is what's stale.
+3. Search open issue cards / active dispatches for any peer agent
+   mid-flight on this file (`grep` open YAMLs for the path; check
+   `dispatches` table for in-flight jobs touching the file). If a
+   peer is iterating, leave it alone — your "fix" cascades into
+   their work.
+
+Only after answering all 3 in writing may you proceed. If any answer
+points to "this diff is intentional / a peer is working on it / there
+is a real bug it fixes" — the action is FORBIDDEN regardless of
+authorization.
 
 Reverting another agent's uncommitted work cascades — the peer agent
 re-runs, re-applies, two sessions fight over the same file, the
