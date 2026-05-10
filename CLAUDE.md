@@ -4,17 +4,38 @@ Autonomous AI agent that orchestrates Claude Code CLI dispatches. Connects to on
 
 ## CRITICAL Pointers Before Touching Sensitive Areas
 
-These rule files are auto-loaded; the pointers below exist so a fresh agent knows the contract BEFORE editing.
+Auto-loaded rules + skills. Trigger the right one BEFORE editing.
 
-| If you're touching… | Read first |
+### Rule files (auto-loaded each turn)
+
+| Touching… | Read first |
 |---|---|
-| **About to run `make launch-worker*`, `make launch-all-workers`, `make launch-infra`, `make launch-dashboard-host`, `make deploy*`, or any other command that starts a danxbot poller / worker / production target** | Skill `no-unauthorized-worker-launch` (in the `danxbot` plugin — STRICTLY PROHIBITED without explicit per-invocation user authorization, no exceptions) |
-| `src/agent/launcher.ts`, `terminal.ts`, `session-log-watcher.ts`, `stall-detector.ts`, `laravel-forwarder.ts`, `mcp/danxbot-server.ts`, `worker/dispatch.ts` | `.claude/rules/agent-dispatch.md` (single-fork, JSONL-only monitoring, completion signaling) |
-| Anything that builds the host-mode bash dispatch script | `.claude/rules/host-mode-interactive.md` (`claude -p` is FORBIDDEN in host mode) |
+| `src/agent/launcher.ts`, `terminal.ts`, `session-log-watcher.ts`, `stall-detector.ts`, `laravel-forwarder.ts`, `mcp/danxbot-server.ts`, `worker/dispatch.ts`, host-mode bash script | `.claude/rules/agent-dispatch.md` — single-fork, JSONL-only, completion signaling, "Host mode MUST be interactive" |
 | `<repo>/.danxbot/settings.json` ownership / feature toggles | `.claude/rules/settings-file.md` |
 | Anything `make`-able | `.claude/rules/make-commands.md` |
-| Anything in production (logs, status, db, ssh) | `.claude/rules/production-access.md` |
-| Repo bind-mounts, container layout, runtime detection | `.claude/rules/docker-runtime.md` |
+| Repo bind-mounts, container layout, runtime detection, root `.mcp.json` inject, `.env.<target>` overlays | `.claude/rules/docker-runtime.md` |
+| Dashboard dev URLs (5566/5555), restart matrix, agent auth token | `.claude/rules/dashboard.md` |
+
+### Skill triggers (invoke via Skill tool)
+
+| Trigger | Skill |
+|---|---|
+| About to run `make launch-*`, `make deploy*`, anything that starts a poller / worker / prod target | `danxbot:no-unauthorized-worker-launch` (strict — per-invocation user auth required) |
+| Anything in production: deployed job/dispatch/container/log/DB/SSH, `make deploy-*`, `danxbot.sageus.ai`, "I can't reach production" | `danxbot:prod-access` |
+| Editing root `.mcp.json` inject, `deploy/secrets.ts`, `.env.<target>` overlays, workspace cwd, container paths, Laravel `.env.{APP_ENV}` trap | `danxbot:docker-deep` |
+| Editing `/api/resume`, `staged_files` validation, Playwright proxy binary path, any `usage` accumulator, debugging silent-dispatch / claude-auth failures | `danxbot:dispatch-deep` |
+| Editing `src/settings-file.ts`, dashboard Agents tab handlers, adding feature toggle / display field, `syncSettingsFileOnBoot`, legacy `trelloPoller` migration | `danxbot:settings-deep` |
+| Reading / writing / creating any issue YAML, ESPECIALLY epic creation (epics MUST ship with phase cards same turn) | `issues:issue-card-workflow` |
+| Card status `Needs Help` / `blocked != null`, `/unblock` invoked | `issues:unblock` |
+| Anything about danxbot runtime / dispatch / Trello-as-background-infra / poller boundary | `danxbot:danxbot` |
+| Investigating without fixing (diagnose / "why" / "how does X work" / read-only audit) | `investigate:investigate` |
+| Bug, error, failing test, factual claim about codebase behavior | `dev:debugging` |
+| Running / writing / fixing any test | `dev:testing` |
+| Before any file edit | `dev:code-quality` |
+| Before any git op | `dev:git-discipline` |
+| Before any kill signal | `base:process-kill` |
+| Before any Agent / Task subagent dispatch | `base:sub-agent-delegation` |
+| Before EnterPlanMode, before checking off AC, before phase complete | `pipeline:planning-discipline` |
 
 ## `@thehammer/danx-issue-mcp` — danxbot owns this package
 
@@ -82,15 +103,9 @@ Danxbot's own root `.env` keeps only shared infrastructure: `ANTHROPIC_API_KEY`,
 
 ### Per-target env overlays
 
-`.env.<target>` files (e.g. `.env.platform`, `.env.gpt`) supply prod-only values without polluting the dev `.env`. They live alongside the `.env` they override — same directory, same key/value format — and are layered on top by `deploy/secrets.ts#collectDeploymentSecrets` ONLY when `make deploy TARGET=<target>` runs. The merge is in-memory: override keys win, base-only keys preserved, override-only keys added; missing override file is a no-op. Local dev never reads them. Three locations support overlays:
+`.env.<target>` files (e.g. `.env.gpt`) layer over the base `.env` ONLY at `make deploy TARGET=<target>` time (in-memory merge in `deploy/secrets.ts#collectDeploymentSecrets`). Local dev never reads them. Three overlay locations: `<root>/.env.<target>` (shared SSM), `<repo>/.danxbot/.env.<target>` (per-repo danxbot), `<repo>/<app_env_subpath>/.env.<target>` (per-repo app). Full contract: `.claude/rules/docker-runtime.md`.
 
-- `<root>/.env.<target>` → shared SSM keys (`/<ssm_prefix>/shared/*`)
-- `<repo>/.danxbot/.env.<target>` → per-repo danxbot keys (`/<ssm_prefix>/repos/<name>/*`)
-- `<repo>/<app_env_subpath>/.env.<target>` → per-repo app keys (`/<ssm_prefix>/repos/<name>/REPO_ENV_*`)
-
-Use this for prod Slack channel IDs, prod-specific DB hosts, prod URLs — anything that diverges between local and a specific deploy target. Files are gitignored by default (`.env.*` with `!.env.example` exception).
-
-Connected repos live at `repos/<name>/` (symlinks to actual working copies). The `REPOS` env var lists them: `platform:url,danxbot:url`. `loadRepoContext()` in worker mode builds the single active `RepoContext` from the named repo.
+Connected repos live at `repos/<name>/` (symlinks). `REPOS` env var lists them: `platform:url,danxbot:url`. `loadRepoContext()` builds the single active `RepoContext` from the named repo.
 
 ### Agent Tools
 
@@ -100,32 +115,13 @@ Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller sy
 
 Five runtime toggles per repo (Slack / Issue poller / Dispatch API / Ideator / Auto-triage) live at `<repo>/.danxbot/settings.json` — three-valued (`true` / `false` / `null` defers to env default). Workers re-read on every event so toggles take effect with no restart. Operator overrides survive every redeploy. `autoTriage` (env default `false` — explicit opt-in) lets the poller spawn the `danx-triage` agent in `auto` mode when the ToDo queue is empty AND there are untriaged Action Items / Review cards; triage spawn preempts the ideator on the same tick. Full ownership contract + schema: `.claude/rules/settings-file.md`. Spec: `docs/superpowers/specs/2026-04-20-agents-tab-design.md`.
 
-## External Dispatch API (Production)
+## External Dispatch API + Deployment
 
-Workers bind only on `danxbot-net`. The dashboard (Caddy → 443) proxies auth-gated dispatch requests to the right worker. Bearer token: `DANXBOT_DISPATCH_TOKEN` (per-deployment, persisted to SSM at `/<ssm_prefix>/shared/DANXBOT_DISPATCH_TOKEN`).
+Workers bind only on `danxbot-net`; dashboard (Caddy → 443) proxies auth-gated dispatch via `DANXBOT_DISPATCH_TOKEN` bearer. Per-target AWS deploys at `deploy/targets/<target>.yml`. Current targets: `gpt`.
 
-Quickstart:
+**"Deploy the X danxbot" ALWAYS means `make deploy TARGET=<x>`** — NEVER `make launch-worker` (local), NEVER the connected repo's own app deploy.
 
-```bash
-curl -sS -X POST https://danxbot.sageus.ai/api/launch \
-  -H "Authorization: Bearer $DANXBOT_DISPATCH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"repo": "gpt-manager", "workspace": "system-test", "task": "Reply OK and call danxbot_complete.", "api_token": "'"$DANXBOT_DISPATCH_TOKEN"'"}'
-```
-
-`workspace` is required since the P5 cutover (commit `9baf431`) — the worker rejects any body that uses the legacy caller-supplied `allow_tools`/`agents`/`schema_*` fields. Substitute the workspace name your deployment ships under `<repo>/.danxbot/workspaces/`. The danxbot-shipped `system-test` workspace works for connectivity smoke against any deployed target.
-
-Full route table (`/api/launch`, `/api/resume`, `/api/status/:id`, `/api/cancel/:id`, `/api/stop/:id`), the resume protocol, the disabled-state semantics, and the proxy 404 invariant: `.claude/rules/agent-dispatch.md#external-entry`.
-
-## Deployment
-
-Per-target AWS deploys; per-target config at `deploy/targets/<target>.yml`. Deploy source: `deploy/cli.ts`, terraform under `deploy/terraform/`.
-
-**Current targets:** `gpt` (hosts both `danxbot` and `gpt-manager` workers).
-
-**"Deploy the X danxbot" ALWAYS means `make deploy TARGET=<x>`** from this repo. NEVER `make launch-worker` (local docker), NEVER deploying the connected repo's own app.
-
-**Production IS reachable from this shell** — never say "I can't reach production from here". Use the proxy / SSH / `docker exec` recipes in `.claude/rules/production-access.md`.
+**Production IS reachable from this shell.** Routes (`/api/launch|resume|status|cancel|stop`), curl quickstart, SSH/docker-exec recipes, debug recipes → invoke `danxbot:prod-access` skill. Route + auth contract spec → `.claude/rules/agent-dispatch.md` "External Entry".
 
 ## Make Commands & Build Workflow
 
@@ -143,34 +139,16 @@ Steps 2 and 3 are mandatory quality gates. Applies to every phase in phased plan
 
 ## Testing
 
-**Before ANY test-related action — running, writing, fixing, inspecting, or reasoning about tests — invoke the `testing` skill.** This is mandatory on the FIRST test-related action per session and is the TodoWrite checklist for the entire testing discipline (run/write/fix procedure, output-to-file rule, `--filter` protocol, anti-patterns). The section below only documents danxbot-specific paths and layers; the HOW lives in the skill.
+**Before any test-related action: invoke `dev:testing` skill.** Skill owns the HOW (run/write/fix, output-to-file, `--filter`, anti-patterns). Section below = danxbot-specific paths only.
 
-Three layers; commands and cost are in `.claude/rules/make-commands.md`. Layer 1 (unit + integration) is free and Docker-free. Layer 2 (validation) hits the real Claude API. Layer 3 (system) needs running infra + worker + `ANTHROPIC_API_KEY`.
+Three layers (commands + cost: `.claude/rules/make-commands.md`):
+- **Layer 1** — unit + integration: free, Docker-free. `src/__tests__/`, helpers at `src/__tests__/integration/helpers/` (`fake-claude.ts`, `capture-server.ts`)
+- **Layer 2** — validation: ~$1, real Claude API. `src/__tests__/validation/` + `vitest.validation.config.ts`
+- **Layer 3** — system: ~$1, needs infra+worker+`ANTHROPIC_API_KEY`. `src/__tests__/system/run-system-tests.sh`
 
-Key test paths (project-specific, not duplicated elsewhere):
+Backend = `src/**/*.test.ts` (root vitest). Dashboard = `dashboard/src/**/*.test.ts` (`cd dashboard && npx vitest run`). Output convention: `> /tmp/vitest.log 2>&1`.
 
-| Path | Purpose |
-|---|---|
-| `src/__tests__/` | Unit + integration test root |
-| `src/__tests__/integration/helpers/` | `fake-claude.ts`, `capture-server.ts`, `capture-server-cli.ts` |
-| `src/__tests__/validation/` | Validation tests (real Claude API) |
-| `src/__tests__/system/run-system-tests.sh` | System test runner shell script |
-| `vitest.validation.config.ts` | Validation-specific vitest config |
-| `dashboard/vitest.config.ts` | Dashboard SFC tests (separate from backend `vitest.config.ts`) |
-
-Backend tests are at `src/**/*.test.ts`. Dashboard tests are at `dashboard/src/**/*.test.ts`. Running `npx vitest run` from the repo root only picks up backend — `cd dashboard && npx vitest run` for the SPA. (The `testing` skill's "Mandatory Setup" requires output-to-file; the danxbot convention is `> /tmp/vitest.log 2>&1`.)
-
-### UI Frontend Test Exemption
-
-**The Vue UI layer under `dashboard/src/` does NOT require tests.** This includes Vue SFCs (`*.vue`), composables (`dashboard/src/composables/**`), UI-only utilities, and `api.ts` typed fetch wrappers. Writing tests for them is optional; the `test-reviewer` subagent and pipeline step 2 (Test coverage) MUST NOT flag missing coverage in these paths, and a >10-line change confined to `dashboard/src/` does NOT trigger the mandatory test-coverage gate.
-
-**Still required** (no exemption):
-
-- Backend API + SSE + auth + analytics under `src/dashboard/**` (`server.ts`, `events.ts`, `auth-db.ts`, `jsonl-reader.ts`, `dispatch-proxy.ts`, `playwright-proxy.ts`, etc.) — unit + integration tests mandatory
-- Everything else under `src/**` (agent, poller, slack, worker, dispatch, mcp, deploy)
-- Type checking: `cd dashboard && npx vue-tsc --noEmit` still required (type-check ≠ test)
-
-Existing dashboard tests under `dashboard/src/**/*.test.ts` are kept as-is — exemption means "not required going forward," not "delete what's there."
+**UI frontend test exemption.** Vue layer under `dashboard/src/` (SFCs, composables, `api.ts`) does NOT require tests; `test-reviewer` + pipeline step 2 MUST NOT flag missing coverage there. Still required: backend API + SSE + auth + analytics under `src/dashboard/**`, everything else under `src/**`, and `cd dashboard && npx vue-tsc --noEmit` type-check.
 
 ## Agent Spawn Architecture (Summary)
 
@@ -218,58 +196,16 @@ Outbound (every tick): every YAML field — title, description, status, AC, phas
 
 ### Trello Is Background Infrastructure — Never In The Agent's Critical Path
 
-**The agent flow (read YAML → edit YAML → done) MUST NOT depend on Trello in any way.** This is a load-bearing architectural rule, not a preference.
+**The agent flow (read YAML → edit YAML → done) MUST NOT depend on Trello.** Load-bearing architectural rule. The MCP server (`@thehammer/danx-issue-mcp`) is YAML-only (DX-203); agent edits go through `Edit` / `Write` and the chokidar watcher (`src/db/issues-mirror.ts`) mirrors to Postgres on file events; the worker's poll loop + post-completion auto-sync (`src/worker/auto-sync.ts`) push YAML→Trello asynchronously. Trello errors surface ONLY in the dashboard.
 
-| What | Where it lives | When Trello is involved |
-|---|---|---|
-| `danx_issue_create` | MCP server (YAML-only — DX-203) | NEVER. Allocates `<PREFIX>-N` + writes YAML with `external_id: ""`. Returns immediately. |
-| Agent YAML edits | `Edit` / `Write` tools on `<repo>/.danxbot/issues/{open,closed}/<id>.yml` (DX-157) | NEVER. The chokidar watcher (`src/db/issues-mirror.ts`) mirrors every file change to Postgres on the file event. |
-| `danx_issue_get` / `danx_issue_list` / `danx_issue_close` | MCP server | NEVER. Pure local YAML ops. |
-| YAML → Trello mirror | Worker poller (`src/poller/index.ts`, `src/poller/orphan-push.ts`) + post-completion auto-sync (`src/worker/auto-sync.ts`) | Per tick (~60s) for the steady-state mirror; immediately on `danxbot_complete` for the auto-sync fast path. Both async, retried. |
-| Failed Trello pushes | `<repo>/.danxbot/.trello-retry/` queue + dashboard error surface | Operator inspects on the dashboard. |
+Forbidden: calling `mcp__trello__*` from agent flow; re-introducing tracker plumbing into `@thehammer/danx-issue-mcp`; treating "Trello unreachable" as agent-blocking; surfacing Trello creds to dispatched agents.
 
-**Implications every agent MUST internalize:**
-
-- Trello creds missing, Trello down, Trello rate-limited, Trello API changed — **none** of these affect agent operations. The agent never sees Trello errors.
-- A new card created via `danx_issue_create` does NOT immediately appear in Trello. The next worker poll picks up the orphan (empty `external_id`) and pushes it. Latency = polling interval. This is by design.
-- Edits to a YAML do NOT immediately appear in Trello. Same pipeline.
-- If Trello sync is broken, the dashboard is the SOLE error surface. Do not surface Trello errors in agent output, MCP tool responses, or skill output. The retry queue + dashboard banner own that signal.
-- Host-session `claude` at the repo root runs `@thehammer/danx-issue-mcp` with **only** `DANX_REPO_ROOT` in env (DX-203 retired the tracker triple). The server has no tracker concept — it's purely a YAML manipulator. Agents never need Trello credentials in their environment.
-- Workspace dispatches (poller / `/api/launch` / Slack) run the same MCP server. The `IssueTracker` interface in `src/issue-tracker/` is consumed exclusively by the WORKER's poll loop, never by the dispatched agent's MCP. The dispatched agent's MCP is local-YAML only; the worker mirrors after the agent returns.
-
-**Forbidden patterns (regressions to prevent):**
-
-- Calling `mcp__trello__*` from any agent skill, prompt, or workspace. Use `mcp__danx-issue__*` only.
-- Re-introducing tracker / `IssueTracker` plumbing into `@thehammer/danx-issue-mcp`. The server's handlers are purely local-YAML; `danx_issue_create` writes `external_id: ""` and the worker's orphan-push mirrors it. Synchronous tracker calls inside the MCP handlers are forbidden by DX-203.
-- Treating "Trello not reachable" as a hard failure in agent flow. It's a dashboard signal, never an agent-blocking error.
-- Surfacing TRELLO_API_TOKEN / TRELLO_API_KEY to a dispatched agent's environment. Workers need them; agents do not. The `.mcp.json` injected at the repo root + the issue-worker workspace's `.mcp.json` both declare exactly `DANX_REPO_ROOT` — adding tracker creds back is a workflow violation.
+Full table + implications: `.claude/rules/agent-dispatch.md` Forbidden Patterns row + `danxbot:danxbot` skill.
 
 ### Trello Board
 
-Board / list / label IDs live in each connected repo's `<repo>/.danxbot/config/trello.yml`. Workspace skills resolve them through the `IssueTracker` interface (`src/issue-tracker/`); Trello-specific bookkeeping stays inside `src/issue-tracker/trello.ts`.
-
-| List | Purpose |
-|---|---|
-| Review | New cards awaiting human review |
-| ToDo | Approved cards ready for work |
-| In Progress | Currently being worked on |
-| Blocked | Card itself can't proceed; `Issue.blocked = {reason, timestamp}` populated. Renamed from "Needs Help" in v4. The Trello list is still named "Needs Help" until operator renames; status `"Blocked"` maps to it via `needsHelpListId`. |
-| Done | Completed |
-| Cancelled | Dropped |
-| Action Items | Retro action items for future improvement |
+IDs in `<repo>/.danxbot/config/trello.yml`. Resolved via `IssueTracker` interface (`src/issue-tracker/`). Lists: Review → ToDo → In Progress → Blocked / Done / Cancelled + Action Items. `status: "Blocked"` populates `Issue.blocked = {reason, timestamp}`; cards waiting on OTHER cards use `Issue.waiting_on` + STAY in ToDo (different concept).
 
 ### Card Workflow (Orchestrator)
 
-**Before touching any issue YAML** (read, write, create, save, especially creating an Epic): load `issues:issue-card-workflow` via the Skill tool. The skill's frontmatter is the spec, but the trap that keeps biting host sessions is creating a `type: Epic` card without spawning every phase card in the SAME turn — `children: []` on an epic is never an acceptable end-state. If a user request says "make an epic for X," read it as "epic + every phase card" — that is the unit of work, not two requests.
-
-1. Move approved card from Review → ToDo (human action)
-2. `/danx-start` or `/danx-next` triggers the orchestrator
-3. Pick up card → move to In Progress (`position: "top"`) → add Progress checklist
-4. If the card itself is blocked from proceeding → set `status: "Blocked"` AND populate `Issue.blocked = {reason, timestamp}` (worker enforces the invariant). Cards waiting on OTHER cards' completion go to `Issue.waiting_on = {reason, timestamp, by[]}` and STAY in `ToDo` — different concept.
-5. Evaluate scope; split into epic + phase cards if 3+ phases
-6. TDD implementation (failing test → implement → verify)
-7. Quality gates: launch Test Reviewer + Code Reviewer subagents in parallel; post results as Trello comments; fix critical findings
-8. Validator subagent only for agent / SDK changes
-9. Commit, move card to Done (`position: "top"`), add retro comment (What went well / What went wrong / Action items / Commits)
-10. Action items → linked cards in the Action Items list. **Action items are a LAST RESORT** — see `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` Step 1.5. Anything required for the current card's ACs is the current card's work, not an action item. Anything small + unrelated should also be done in this session, not deferred. Action items only for large, unrelated, separately-scopeable work that genuinely needs its own card. Same rule applies to setting `status: "Blocked"` — last resort, only for true human / external blockers, never as a deferral mechanism for in-scope or small fixes.
-11. Signal completion via the `danxbot_complete` MCP tool — never exit silently. The worker uses the signal to finalize the dispatch row in MySQL.
+**Before touching any issue YAML — load `issues:issue-card-workflow` skill via the Skill tool.** Skill is authoritative: epic creation MUST ship phase cards same turn (`children: []` on epic = never acceptable); pickup → In Progress → TDD → quality gates (Test Reviewer + Code Reviewer subagents in parallel) → commit → Done with retro → `danxbot_complete`. Action items + `status: Blocked` are LAST RESORT (see `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` Step 1.5). Validator subagent only for agent/SDK changes.

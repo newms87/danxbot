@@ -2,82 +2,68 @@
 
 ## Runtime Modes: Docker (headless) vs Host (interactive)
 
-Danxbot has two runtime modes, and the distinction is load-bearing:
+Two runtime modes, distinction is load-bearing:
 
-- **Docker runtime** — the **headless** path. Agents run non-interactively (`claude -p`). No terminal, no user input during the session. Used for production workers.
-- **Host runtime** — the **interactive** path. Every agent dispatch opens a Windows Terminal tab running an interactive Claude Code TUI the user can watch and type into. `claude -p` is FORBIDDEN in this path — it defeats the entire purpose of host mode.
+- **Docker** — headless. Agents run non-interactively (`claude -p`). No terminal, no user input. Production workers.
+- **Host** — interactive. Every dispatch opens a Windows Terminal tab running an interactive Claude Code TUI. `claude -p` is FORBIDDEN here — see `.claude/rules/agent-dispatch.md` "Host mode MUST be interactive".
 
-Runtime mode ONLY decides how claude is spawned. Everything else — SessionLogWatcher, StallDetector, LaravelForwarder, heartbeat, MCP tools, usage tracking, completion signaling, cancellation — is identical across both modes. ONE claude process per dispatch, ONE JSONL, ONE watcher.
+Mode auto-detected from `/.dockerenv`. Mode ONLY decides spawn shape — SessionLogWatcher, StallDetector, LaravelForwarder, heartbeat, MCP tools, usage, completion, cancellation are identical. ONE claude process per dispatch, ONE JSONL, ONE watcher.
 
-Read `.claude/rules/agent-dispatch.md` before modifying anything in the dispatch/monitoring path. It is the spec for how this all fits together. For the host-mode interactivity invariant specifically, see `.claude/rules/host-mode-interactive.md`.
+Read `.claude/rules/agent-dispatch.md` before modifying anything in the dispatch/monitoring path.
 
 ## Architecture: Host-First + Minimal Containers
 
-Danxbot uses a host-first model: the host environment is fully configured before containers start. Containers only run danxbot code (poller, Slack listener, dispatch API, dashboard). They read repo files via bind mounts and connect to pre-existing Docker networks — but never manage other containers.
+Host environment fully configured before containers start. Containers run only danxbot code (poller, Slack listener, dispatch API, dashboard). Read repo files via bind mounts; join pre-existing Docker networks; never manage other containers.
 
-- **Shared infrastructure** (`danxbot/docker-compose.yml`): MySQL + dashboard
-- **Per-repo workers** (`<repo>/.danxbot/config/compose.yml`): One container per connected repo, handling poller + Slack + dispatch API
+- **Shared infra** (`danxbot/docker-compose.yml`): MySQL + dashboard
+- **Per-repo workers** (`<repo>/.danxbot/config/compose.yml`): One container per connected repo (poller + Slack + dispatch API)
 
-All containers join the `danxbot-net` bridge network. Workers also join their repo's Docker network if needed (e.g., `ssap_sail` for platform).
+All containers join `danxbot-net`. Workers also join their repo's Docker network if needed (e.g., `ssap_sail` for platform).
 
-**Prerequisites:** Before launching workers, ensure connected repos have their dev stacks running on the host (Sail, Docker Compose, etc.) and dependencies installed (vendor/, node_modules/). Run `make validate-repos` to check.
+**Prereq:** connected repos need their dev stacks running on host (Sail, Compose, vendor/, node_modules/). `make validate-repos` checks.
 
 ## Key Commands
 
 | Command | Use |
 |---------|-----|
-| `make validate-repos` | Check host prerequisites for all repos |
+| `make validate-repos` | Check host prerequisites |
 | `make launch-infra` | Start MySQL + dashboard |
-| `make launch-worker REPO=platform` | Start Docker worker for a repo |
-| `make launch-worker-host REPO=platform` | Start host worker (interactive terminals) |
-| `make launch-dashboard-host` | Start dashboard on host (no Docker) |
-| `make launch-all-workers` | Start Docker workers for all repos |
-| `make stop-worker REPO=platform` | Stop a Docker worker |
+| `make launch-worker REPO=<name>` | Docker worker |
+| `make launch-worker-host REPO=<name>` | Host worker (interactive terminals) |
+| `make launch-dashboard-host` | Dashboard on host (no Docker) |
+| `make launch-all-workers` | Docker workers for all repos |
+| `make stop-worker REPO=<name>` | Stop docker worker |
 | `make build` | Build the danxbot Docker image |
-| `make logs REPO=platform` | Tail worker logs |
+| `make logs REPO=<name>` | Tail worker logs |
 
 ## Code Changes & Restarts
 
-Edit files in `src/` on the host. Code changes are visible in the dashboard container via volume mount. Workers mount the repo directory, not danxbot source — rebuild the image (`make build`) then restart workers.
+Edit `src/` on host. Dashboard container sees changes via volume mount. Workers mount the repo dir, NOT danxbot source — rebuild + restart for worker code changes.
 
-**Dashboard TypeScript changes:** `docker compose up -d --force-recreate`
-**Worker code changes:** `make build && make launch-worker REPO=platform`
-**Dashboard Vue/CSS changes:** HMR on port **5566** (served by the `dashboard-dev` compose service, started automatically by `docker compose up -d`)
-**New dependencies:** `make build`
+| Change | Action |
+|---|---|
+| Dashboard TS | `docker compose up -d --force-recreate` |
+| Worker code | `make build && make launch-worker REPO=<name>` |
+| Dashboard Vue/CSS | HMR on port **5566** (`dashboard-dev` compose service auto-starts) |
+| New deps | `make build` |
 
 ## Dev repo mounts — never bypass `make launch-infra`
 
-The dashboard needs RW access to each connected repo's `.danxbot/` dir so operator toggles on the Agents tab can write `settings.json`. Those per-repo RW binds live in a gitignored `docker-compose.override.yml` auto-generated from `REPOS` by `make launch-infra` (prereq: `generate-dev-override`). Compose auto-merges the override ONLY when invoked without `-f`.
+The dashboard needs RW access to each connected repo's `.danxbot/` dir so operator toggles on the Agents tab can write `settings.json`. Per-repo RW binds live in a gitignored `docker-compose.override.yml` auto-generated from `REPOS` by `make launch-infra` (prereq: `generate-dev-override`). Compose auto-merges the override ONLY when invoked without `-f`.
 
-**Invariant:** use `make launch-infra` (or plain `docker compose up -d`) for dev infra. NEVER run `docker compose -f docker-compose.yml up` — `-f` suppresses override auto-merge and immediately regresses EROFS on the next settings write. If you're writing a new dev helper that needs an explicit `-f`, also pass `-f docker-compose.override.yml`.
+**Invariant:** use `make launch-infra` (or plain `docker compose up -d`) for dev infra. NEVER `docker compose -f docker-compose.yml up` — `-f` suppresses override auto-merge → EROFS on next settings write. New dev helpers needing explicit `-f` MUST also pass `-f docker-compose.override.yml`.
 
-Prod is unaffected: its `docker compose -f docker-compose.prod.yml` invocation intentionally bypasses the override (dev-only file).
-
-## Container Paths
-
-**Dashboard container:**
-
-| Host | Container |
-|------|-----------|
-| `./src` | `/danxbot/app/src` |
-| `./dashboard` | `/danxbot/app/dashboard` |
-
-**Worker container:**
-
-| Host | Container |
-|------|-----------|
-| `<repo>/` | `/danxbot/repos/<name>/` |
-| `./claude-auth/` | `/danxbot/app/claude-auth/` |
+Prod unaffected: `docker compose -f docker-compose.prod.yml` intentionally bypasses the override (dev-only file).
 
 ## Connected Repo Architecture
 
-Each connected repo has its own worker container. The repo is bind-mounted into the worker at `/danxbot/repos/<name>/`. The worker knows its repo via the `DANXBOT_REPO_NAME` env var.
+Each connected repo has its own worker container. Repo bind-mounted into worker at `/danxbot/repos/<name>/`. Worker knows its repo via `DANXBOT_REPO_NAME` env var.
 
-- **File browsing** (Read, Glob, Grep) works directly via the bind mount
+- **File browsing** (Read, Glob, Grep) works directly via bind mount
 - **Runtime commands** depend on the repo's compose.yml (workers join the repo's Docker network)
 - **Git/gh commands** run inside the worker container
 
-All repo config lives in `<repo>/.danxbot/config/` (version controlled). Secrets stay in `<repo>/.danxbot/.env` (gitignored).
+All repo config in `<repo>/.danxbot/config/` (version controlled). Secrets in `<repo>/.danxbot/.env` (gitignored).
 
 ## Per-Repo Config Structure
 
@@ -86,117 +72,40 @@ All repo config lives in `<repo>/.danxbot/config/` (version controlled). Secrets
   config/
     config.yml       # name, url, commands, docker, paths
     trello.yml       # board ID, list IDs, label IDs
-    compose.yml      # Worker Docker compose (defines container, networks, ports)
-    overview.md      # tech stack, architecture, patterns
+    compose.yml      # Worker Docker compose
+    overview.md      # tech stack, architecture
     workflow.md      # how to edit, test, commit, PR
-    tools.md         # agent tool commands (synced to repo's .claude/rules/)
+    tools.md         # agent tool commands
     docs/
-      domains/*.md   # domain knowledge
-      schema/*.md    # DB relationships
+      domains/*.md
+      schema/*.md
   .env               # Per-repo secrets (gitignored, DANX_* prefix)
-  .env.<target>      # Per-deploy-target overlay (gitignored, optional)
+  .env.<target>      # Per-deploy-target overlay (gitignored)
   features.md        # ideator's persistent memory (gitignored)
 ```
 
-Per-repo secrets live in `<repo>/.danxbot/.env` (gitignored) using standardized DANX_* prefix: DANX_SLACK_BOT_TOKEN, DANX_SLACK_APP_TOKEN, DANX_SLACK_CHANNEL_ID, DANX_DB_HOST/USER/PASSWORD/NAME, DANX_GITHUB_TOKEN, DANX_TRELLO_API_KEY, DANX_TRELLO_API_TOKEN. Danxbot's own `.env` keeps only shared infrastructure (ANTHROPIC_API_KEY, REPOS, DANXBOT_DB_*, DASHBOARD_PORT, DANXBOT_GIT_EMAIL).
-
-### Per-target env overlays — `.env.<target>`
-
-When values must differ between local dev and a specific deploy target (prod Slack channel ID, prod-only DB host, prod URLs), put the override in a sibling `.env.<target>` file at the SAME directory as the `.env` it overrides. `<target>` matches the deploy target name (`make deploy TARGET=<target>`), e.g. `.env.platform` or `.env.gpt`.
-
-Three overlay locations (the deploy collector reads all three):
-
-| Base file | Overlay | Resulting SSM path |
-|---|---|---|
-| `<root>/.env` | `<root>/.env.<target>` | `/<ssm_prefix>/shared/*` |
-| `<repo>/.danxbot/.env` | `<repo>/.danxbot/.env.<target>` | `/<ssm_prefix>/repos/<name>/*` |
-| `<repo>/<app_env_subpath>/.env` | `<repo>/<app_env_subpath>/.env.<target>` | `/<ssm_prefix>/repos/<name>/REPO_ENV_*` |
-
-Merge contract (`deploy/secrets.ts#collectDeploymentSecrets`):
-- Override keys win; base-only keys preserved; override-only keys added.
-- Missing overlay file is a no-op (returns the base map unchanged).
-- The merge is in-memory at deploy time only — local files are never modified.
-- Local dev (any consumer that reads `.env` without going through deploy) NEVER sees overlay values; the worker container only ever reads what `materialize-secrets.sh` writes from SSM after the deploy push.
-- Per-target scope: an overlay named `.env.platform` is read ONLY when `make deploy TARGET=platform` runs. `.env.gpt` does not bleed into a platform deploy.
-
-Files are gitignored by default — `.env.*` with `!.env.example` exception so any `.env.example` you commit for documentation stays trackable.
-
-## Root `.mcp.json` injection contract (DX-201)
-
-The poller injects exactly ONE MCP server — `danx-issue` — into every connected repo's root `.mcp.json` on every tick. A developer running bare `claude` at the repo root sees the `danx-issue` tool surface (atomic `<PREFIX>-N` allocation via `danx_issue_create`, list/get/save/close) and nothing else from danxbot. Worker-only MCPs (Trello, Playwright, context7, ...) still live exclusively inside per-workspace dirs (`<repo>/.danxbot/workspaces/<name>/.mcp.json`); they are NEVER added at the repo root.
-
-The injection is implemented by `src/poller/inject/inject-root-mcp.ts#injectDanxIssueMcp` and wired into `syncRepoFiles`. Contract:
-
-- ADDS the `danx-issue` entry to `mcpServers` when the key is missing. The entry's `env.DANX_REPO_ROOT` and `env.DANX_TRACKER` are baked as **literals** (the connected repo's absolute path; tracker name from poll-time options, default `"memory"`). They are NOT `${...}` placeholders, because the host-session `claude` that consumes this file does not have the worker's env-injection layer — `${DANX_REPO_ROOT}` would resolve to the empty string and the MCP server would refuse to start.
-- **Default tracker is `"memory"` — local YAML only, no Trello calls inside the MCP server.** This is non-negotiable: the agent flow MUST NOT depend on Trello (see CLAUDE.md "Trello Is Background Infrastructure — Never In The Agent's Critical Path"). The worker's poll loop mirrors YAML → Trello asynchronously via `orphan-push.ts` and the `.trello-retry/` queue. A broken Trello has zero effect on agent operations and surfaces ONLY in the dashboard.
-- `env.TRELLO_API_KEY` and `env.TRELLO_API_TOKEN` are present as `${...}` placeholders ONLY for the rare operator who explicitly opts into `tracker: "trello"` (sync upstream-create on `danx_issue_create`). The default config never reads them. If you find yourself needing them at the agent layer, you are violating the architectural rule above — the worker should be doing that work.
-- NEVER deletes, rewrites, or reorders any other `mcpServers` entry — pre-existing servers (operator's own MCPs, playwright in repos that ship one at root, etc.) survive byte-identical.
-- NEVER touches top-level keys outside `mcpServers`.
-- Operator override wins: if `mcpServers["danx-issue"]` already exists with different content, it is left alone.
-- Malformed JSON → log error, no write. The user's file is never overwritten when we can't parse it.
-- Atomic write via `.tmp` + `renameSync`; a poller crash mid-write leaves the original file intact.
-- Idempotent — re-running is a no-op when the key already exists. Safe to run every tick.
-
-Operators can opt out by adding `danx-issue` themselves with different content — the poller leaves whatever exists alone. Operators can also gitignore the file or commit it; danxbot doesn't dictate either way. The poller re-asserts the key on the next tick only when it's missing — files that already contain `danx-issue` are not rewritten.
-
-Workers' per-dispatch MCPs are unchanged — they still come from `<repo>/.danxbot/workspaces/<name>/.mcp.json` merged with the danxbot infrastructure server inside `dispatch()`. The root `.mcp.json` is the dev's interactive surface only; it does not feed worker dispatches.
-
-### CRITICAL: never put an `.env.local` (or any `.env.{APP_ENV}`) file at the connected repo's root
-
-Laravel's `LoadEnvironmentVariables::checkForSpecificEnvironmentFile()` substitutes `.env.{APP_ENV}` in place of `.env` whenever `APP_ENV` is already in the env repository at bootstrap time. Under plain `artisan tinker` this is harmless (APP_ENV is not yet set at the check). Under Octane's swoole worker bootstrap, APP_ENV is inherited from the parent process, so every worker loads `.env.{APP_ENV}` INSTEAD of `.env` — stripping `APP_KEY`, `REDIS_HOST`, and every other Laravel var not duplicated in the overlay file. Result: `MissingAppKeyException`, Clockwork/Redis connection refused, supervisor FATAL, HTTP RST. This has bitten us in production once; do not reintroduce it.
-
-When wiring up a new connected repo (especially Laravel / any framework with an env overlay convention), verify zero files at the repo root match `.env*` beyond what the framework itself expects.
-
-### `.claude/settings.local.json` — Developer-Only
-
-`<repo>/.claude/settings.local.json` is STRICTLY the developer's file (permissions, personal allowlists, local MCP toggles for their interactive `claude`). Danxbot does NOT read or write it. The worker port lives in `<repo>/.danxbot/.env` (`DANXBOT_WORKER_PORT=<port>`) alongside the rest of the bot-owned per-repo env; production gets it via `process.env.DANXBOT_WORKER_PORT` injected by compose from `deploy/targets/<target>.yml`.
-
-### Strict isolation from danxbot
-
-Danxbot-dispatched agents (poller, `/api/launch`, Slack) use their own per-dispatch MCP config and env from `<repo>/.danxbot/.env` delivered to the worker container via `env_file: ../.env` in `<repo>/.danxbot/config/compose.yml`. The dev's interactive `claude` at the repo root only sees the single `danx-issue` MCP server the poller injects (DX-201) — zero overlap with the worker's broader MCP surface (Trello, Playwright, etc.). The worker's own dispatches still source MCP from the workspace dir, never from the repo root.
-
-### The workspace: dispatched-agent cwd
-
-Every dispatched agent (poller, HTTP `/api/launch`, Slack) runs with `cwd = <repo>/.danxbot/workspaces/<name>/` — one resolved workspace per dispatch. Each plural workspace is fully self-contained: `workspace.yml`, `.mcp.json`, `CLAUDE.md`, `.claude/skills/`, `.claude/rules/` (static + per-repo rendered), `.claude/tools/`. The poller inject pipeline (`src/poller/index.ts#syncRepoFiles`) mirrors static workspace fixtures from `src/poller/inject/workspaces/<name>/` and writes per-repo rendered files into each plural workspace's `.claude/` on every tick. The repo-root `.claude/` is strictly developer-owned; the inject pipeline actively scrubs any leftover `danx-*` artifacts there. See agent-dispatch.md "Workspace isolation" + the workspace-dispatch epic.
+Per-repo secrets use standardized `DANX_*` prefix: `DANX_SLACK_BOT_TOKEN`, `DANX_SLACK_APP_TOKEN`, `DANX_SLACK_CHANNEL_ID`, `DANX_DB_HOST/USER/PASSWORD/NAME`, `DANX_GITHUB_TOKEN`, `DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`. Danxbot's own `.env` keeps shared infra only: `ANTHROPIC_API_KEY`, `REPOS`, `DANXBOT_DB_*`, `DASHBOARD_PORT`, `DANXBOT_GIT_EMAIL`.
 
 ## Per-Repo Trello Toggle
 
-`DANX_TRELLO_ENABLED` in `<repo>/.danxbot/.env` controls whether the poller runs for that repo. Defaults to `false` (explicit opt-in). Both host and docker runtimes read this var the same way — docker via `env_file`, host via `make launch-worker-host` sourcing the per-repo `.env`.
+`DANX_TRELLO_ENABLED` in `<repo>/.danxbot/.env` controls whether the poller runs for that repo. Defaults to `false` (explicit opt-in). Both runtimes read identically — docker via `env_file`, host via `make launch-worker-host` sourcing the per-repo `.env`.
 
 ## Claude Code Session Logs (JSONL)
 
-Claude Code writes native JSONL session logs to `~/.claude/projects/<cwd-path>/<session-uuid>.jsonl` for ALL invocation modes — verified empirically:
-- CLI headless via `spawnAgent()` (plain `-p`, no stream-json — stdout is ignored; JSONL is the monitoring source)
-- CLI interactive (terminal mode via `spawnInTerminal()` bash script)
-- SDK `query()` (Slack agent)
+Claude Code writes native JSONL session logs to `~/.claude/projects/<cwd-path>/<session-uuid>.jsonl` for every invocation mode (CLI headless via `spawnAgent()`, CLI interactive via `spawnInTerminal()`, SDK `query()`). Files contain full session: assistant messages, tool calls, results, system events, usage. Canonical source of truth for what the agent did.
 
-These files contain the full session history: assistant messages, tool calls, tool results, system events, usage stats. They are the canonical source of truth for what an agent did during a session.
+`SessionLogWatcher` polls these files for runtime-agnostic monitoring. Started by `spawnAgent()`; uses dispatch tag prepended to prompt to disambiguate among concurrent sessions.
 
-`SessionLogWatcher` polls these files to provide runtime-agnostic monitoring. It is always started by `spawnAgent()` and uses a dispatch tag prepended to the prompt to find the correct JSONL file when multiple sessions are active.
-
-Note: `logPromptToDisk()` in `process-utils.ts` writes debug artifacts (`prompt.md`, `agents.json`) to `logs/<jobId>/` for debugging — this is separate from JSONL session logs and intentional.
+`logPromptToDisk()` in `process-utils.ts` writes debug artifacts (`prompt.md`, `agents.json`) to `logs/<jobId>/` — separate from JSONL session logs, intentional.
 
 ## Tools Available Inside Containers
 
-The Docker image includes dev tools beyond Node.js:
+The Docker image includes dev tools beyond Node.js: **gh** (GitHub CLI), **git** (HTTPS token auth via gh), **mysql** (DB client).
 
-- **gh** — GitHub CLI for creating PRs, managing issues
-- **git** — Full git client (HTTPS token auth via gh)
-- **mysql** — MySQL client for direct DB access
+## Deep contracts → invoke `danxbot:docker-deep` skill
+
+When editing root `.mcp.json` inject (`src/poller/inject/inject-root-mcp.ts`), `.env.<target>` overlay merge (`deploy/secrets.ts`), workspace cwd isolation, container path tables, settings.local.json clarification, or the Laravel `.env.{APP_ENV}` production trap → load `danxbot:docker-deep` skill via Skill tool. Those contracts moved out of this file to keep the always-on rule slim; the skill is the authoritative reference.
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `src/index.ts` | Entrypoint: branches into worker or dashboard mode |
-| `src/worker/server.ts` | Worker HTTP server: /api/launch, /health, /api/status |
-| `src/dashboard/server.ts` | Dashboard HTTP server: API routes + static file serving |
-| `src/dispatch/core.ts` | Unified `dispatch()` — every deep-agent path funnels through here |
-| `src/agent/launcher.ts` | `spawnAgent()` — the one Claude Code CLI fork per dispatch |
-| `src/agent/router.ts` | Router (Haiku) — instant message triage |
-| `src/slack/listener.ts` | Slack message handler, orchestrates router → dispatch flow |
-| `src/dashboard/events.ts` | Event tracking, SSE broadcasting, analytics |
-| `src/config.ts` | Shared config + worker/dashboard mode detection |
-| `src/types.ts` | RepoContext, TrelloConfig, SlackConfig interfaces |
-| `src/env-file.ts` | Parser for per-repo .danxbot/.env files |
-| `Makefile` | Launch targets: launch-infra, launch-worker, launch-all-workers |
+Component file table → see CLAUDE.md "Architecture" section. Mode-detection lives in `src/config.ts`; entry routing in `src/index.ts`.
