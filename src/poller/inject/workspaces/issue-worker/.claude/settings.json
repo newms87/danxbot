@@ -16,8 +16,6 @@
     "investigate@newms-plugins": true,
     "dev@newms-plugins": true,
     "pipeline@newms-plugins": true,
-    "issues@newms-plugins": true,
-    "danxbot@newms-plugins": true,
-    "issue-worker@newms-plugins": true
+    "danxbot@newms-plugins": true
   }
 }
