@@ -14,33 +14,13 @@
  * - maxRuntimeMs: hard runtime cap
  */
 
-import { join } from "node:path";
-import { config } from "../config.js";
 import { createLogger } from "../logger.js";
-import { createInactivityTimer } from "./process-utils.js";
-import { SessionLogWatcher } from "./session-log-watcher.js";
-import {
-  createLaravelForwarder,
-  deriveQueuePath,
-} from "./laravel-forwarder.js";
-import { EventQueue } from "./event-queue.js";
-import { getDanxbotCommit } from "./danxbot-commit.js";
-import {
-  startDispatchTracking,
-  type DispatchTracker,
-} from "../dashboard/dispatch-tracker.js";
-import {
-  putStatus,
-  startHeartbeat,
-  notifyTerminalStatus,
-} from "./agent-status.js";
+import { putStatus } from "./agent-status.js";
 import { runHostModeFork } from "./spawn-host-mode.js";
 import { spawnDockerMode } from "./spawn-docker-mode.js";
-import { attachUsageAccumulator } from "./usage-accumulator.js";
-import { buildCleanup } from "./agent-cleanup.js";
-import { buildJobStopHandler } from "./agent-stop.js";
 import { runSpawnPreflight } from "./spawn-preflight.js";
 import { pairedWriteHostPid } from "./paired-host-pid-write.js";
+import { attachMonitoringStack } from "./attach-monitoring-stack.js";
 import {
   type AgentJob,
   type SpawnAgentOptions,
@@ -83,161 +63,19 @@ export async function spawnAgent(
   const { jobId, job, env, flags, firstMessage, promptDir, agentCwd } =
     await runSpawnPreflight(options);
 
-  // --- SessionLogWatcher: the single monitoring mechanism, runs identically in
-  //     both docker and host modes (see `.claude/rules/agent-dispatch.md`). ---
-  const watcher = new SessionLogWatcher({
-    cwd: agentCwd,
-    pollIntervalMs: 5_000,
-    dispatchId: jobId,
-  });
-  job.watcher = watcher;
-
-  // Watcher subscriber: tracks last assistant text for job summary,
-  // accumulates per-turn usage (with multi-block dedup), and resets the
-  // inactivity timer on every entry. See `usage-accumulator.ts` for the
-  // dedup contract.
-  const usageAccumulator = attachUsageAccumulator({
-    job,
-    watcher,
-    onActivity: () => inactivityTimer.reset(),
-  });
-
-  // --- Optional event forwarding ---
-  let forwarderFlush: (() => Promise<void>) | undefined;
-  if (options.eventForwarding) {
-    const queue = new EventQueue(
-      deriveQueuePath(join(config.logsDir, "event-queue"), jobId),
-    );
-    const forwarder = createLaravelForwarder(
-      options.eventForwarding.statusUrl,
-      options.eventForwarding.apiToken,
-      { queue },
-    );
-    watcher.onEntry(forwarder.consume);
-    forwarderFlush = forwarder.flush;
-  }
-
-  // --- Optional dispatch tracking: create a dispatches row and finalize it
-  //     when a terminal state is reached. Callers that should not appear in
-  //     dispatch history (e.g., Slack router-only) omit options.dispatch. ---
-  let dispatchTracker: DispatchTracker | undefined;
-  if (options.dispatch) {
-    dispatchTracker = await startDispatchTracking({
+  // Wire the watcher / usage / forwarder / inactivity-timer / heartbeat /
+  // max-runtime / cleanup / stop chain onto `job`. Phase 2b extracted this
+  // into its own module so Phase 2c (DB-driven full-stack reattach) can
+  // attach the same chain to a reattach shim. See
+  // `attach-monitoring-stack.ts` for the full ordering contract.
+  const { cleanup, getLastAssistantText, registerTermDir } =
+    await attachMonitoringStack({
+      job,
       jobId,
-      repoName: options.repoName,
-      trigger: options.dispatch,
-      runtimeMode: config.isHost ? "host" : "docker",
-      danxbotCommit: getDanxbotCommit(),
-      watcher,
-      startedAtMs: job.startedAt.getTime(),
-      parentJobId: options.parentJobId ?? null,
-      issueId: options.issueId ?? null,
-      agentName: options.agentName ?? null,
-      mcpSettingsPath: options.mcpSettingsPath ?? null,
+      agentCwd,
+      promptDir,
+      options,
     });
-    job.dispatchTracker = dispatchTracker;
-  }
-
-  watcher.start();
-
-  let termSettingsDirToClean: string | undefined;
-
-  // --- Inactivity timer: resets on watcher entries, kills via the runtime-
-  //     aware handle (docker: child.kill; host: process.kill(pid, sig)). ---
-  const inactivityTimer = createInactivityTimer(
-    (signal) => job.handle?.kill(signal),
-    options.timeoutMs,
-    (j) => {
-      // Fire-and-forget: cleanup awaits drain + finalize internally so the
-      // dispatch row converges on its own. The external Laravel PUT is a
-      // separate store; a brief order skew vs. the local DB is acceptable.
-      void cleanup();
-      // The docker close-handler wrapper only PUTs when job.status === "running"
-      // at close time; by the time the child exits here it will not issue a
-      // terminal PUT. notifyTerminalStatus is the only signal the dispatcher
-      // receives for an inactivity timeout.
-      notifyTerminalStatus(j, options, "timeout", j.summary);
-    },
-    job,
-  );
-
-  // --- Optional heartbeat ---
-  if (options.statusUrl && options.apiToken) {
-    startHeartbeat(job, options.apiToken);
-  }
-
-  // --- Optional max runtime ---
-  let maxRuntimeHandle: ReturnType<typeof setTimeout> | undefined;
-  if (options.maxRuntimeMs) {
-    maxRuntimeHandle = setTimeout(() => {
-      if (job.status === "running") {
-        log.info(
-          `[Job ${jobId}] Max runtime exceeded — ${options.maxRuntimeMs! / 1000}s — killing process`,
-        );
-        job.handle?.kill("SIGTERM");
-        job.status = "timeout";
-        job.summary = `Agent exceeded max runtime of ${Math.round(options.maxRuntimeMs! / 1000 / 60)} minutes`;
-        job.completedAt = new Date();
-        // See inactivity-timer comment — fire-and-forget; cleanup awaits
-        // drain + finalize internally.
-        void cleanup();
-        // See the inactivity-timer comment above — docker close-handler will
-        // not issue a terminal PUT once job.status !== "running".
-        notifyTerminalStatus(job, options, "timeout", job.summary);
-      }
-    }, options.maxRuntimeMs);
-  }
-
-  // Cache the in-flight cleanup promise so concurrent callers (e.g. the
-  // close handler's `void cleanup()` racing cancelJob's `await
-  // job._cleanup()`) all observe the SAME drain + finalize chain, instead of
-  // the second caller short-circuiting on a flag and resolving its await
-  // before the first chain has actually finished. A bare boolean flag would
-  // satisfy idempotency but defeat the only reason cancelJob and job.stop
-  // await the cleanup at all (sequencing the external `putStatus` PUT after
-  // the dispatch row's finalize commit). The un-cached payload lives in
-  // `agent-cleanup.ts`; this closure adds the cache + the catch.
-  const runCleanup = buildCleanup({
-    job,
-    jobId,
-    watcher,
-    inactivityTimer,
-    getMaxRuntimeHandle: () => maxRuntimeHandle,
-    forwarderFlush,
-    dispatchTracker,
-    promptDir,
-    getTermSettingsDir: () => termSettingsDirToClean,
-  });
-  let cleanupPromise: Promise<void> | undefined;
-  function cleanup(): Promise<void> {
-    if (cleanupPromise) return cleanupPromise;
-    // Catch so fire-and-forget callers (close handler, inactivity timer,
-    // host onExit) never raise an unhandled rejection if drain/finalize
-    // throw. Errors are logged via the inner try/catch around
-    // `dispatchTracker.finalize`; this outer .catch is a defense-in-depth
-    // net for everything else (drain itself, watcher.stop, forwarderFlush).
-    cleanupPromise = runCleanup().catch((err) => {
-      log.error(`[Job ${jobId}] Cleanup failed`, err);
-    });
-    return cleanupPromise;
-  }
-
-  job._cleanup = cleanup;
-  job._onComplete = () => options.onComplete?.(job);
-
-  // --- Agent-initiated stop mechanism ---
-  // The agent calls stop() via the HTTP /api/stop/:jobId endpoint when lifecycle
-  // tools signal completion. This is distinct from cancelJob() (user-initiated).
-  // See `agent-stop.ts` for the SIGTERM/SIGKILL grace pattern + cleanup
-  // ordering rationale.
-  job.stop = buildJobStopHandler({
-    job,
-    jobId,
-    cleanup,
-    statusUrl: options.statusUrl,
-    apiToken: options.apiToken,
-    onComplete: options.onComplete,
-  });
 
   // ============================================================================
   // Runtime fork — ONLY the spawn shape differs. Monitoring, heartbeat, stall
@@ -254,10 +92,8 @@ export async function spawnAgent(
       agentCwd,
       env,
       cleanup,
-      getLastAssistantText: usageAccumulator.getLastAssistantText,
-      registerTermDir: (dir) => {
-        termSettingsDirToClean = dir;
-      },
+      getLastAssistantText,
+      registerTermDir,
     });
   } else {
     spawnDockerMode({
@@ -266,7 +102,7 @@ export async function spawnAgent(
       firstMessage,
       agentCwd,
       env,
-      getLastAssistantText: usageAccumulator.getLastAssistantText,
+      getLastAssistantText,
       cleanup,
       statusUrl: options.statusUrl,
       apiToken: options.apiToken,
@@ -376,4 +212,3 @@ export function getJobStatus(job: AgentJob): Record<string, unknown> {
     cache_creation_input_tokens: job.usage.cache_creation_input_tokens,
   };
 }
-
