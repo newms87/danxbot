@@ -4,7 +4,13 @@ id: DX-164
 external_id: 69fe27f36bd61bdbf2a5a7d2
 parent_id: DX-158
 children: []
-dispatch: null
+dispatch:
+  id: 8d735b93-82bc-4011-b5aa-ba05b4322c11
+  pid: 0
+  host: dan
+  kind: work
+  started_at: 2026-05-10T08:19:28.794Z
+  ttl_seconds: 7200
 status: ToDo
 type: Feature
 title: "Multi-Worker > Phase 6: Card UI badges + agent busy state + end-to-end system test"

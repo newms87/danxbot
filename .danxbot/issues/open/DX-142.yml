@@ -4,8 +4,14 @@ id: DX-142
 external_id: 69fd7265ea5bc32a355ab734
 parent_id: DX-139
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: 054617b5-7d7e-493d-b508-6532e632b18a
+  pid: 29473
+  host: dan
+  kind: work
+  started_at: 2026-05-10T17:45:19.665Z
+  ttl_seconds: 7200
+status: In Progress
 type: Feature
 title: "[DB registry > Phase 3] Process-table orphan scan — pgrep dispatch tags + reap untracked"
 description: |-
@@ -119,15 +125,16 @@ ac:
     title: Manual smoke recreates the May-7 orphan scenario and verifies the scan reaps the orphans cleanly
     checked: false
 comments: []
-history: []
+history:
+  - timestamp: 2026-05-10T16:20:28.009Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-141"
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Phase 2 (DB-driven reattach) must ship so the scan can distinguish 'reattach me' from 'reap me' for alive-but-unregistered processes
-  timestamp: 2026-05-08T00:00:00.000Z
-  by:
-    - DX-141
+assigned_agent: murphy
+waiting_on: null
 blocked: null
