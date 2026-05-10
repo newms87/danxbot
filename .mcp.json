@@ -8,10 +8,7 @@
         "@thehammer/danx-issue-mcp"
       ],
       "env": {
-        "DANX_REPO_ROOT": "/home/newms/web/danxbot",
-        "DANX_TRACKER": "memory",
-        "TRELLO_API_KEY": "${TRELLO_API_KEY}",
-        "TRELLO_API_TOKEN": "${TRELLO_API_TOKEN}"
+        "DANX_REPO_ROOT": "/home/newms/web/danxbot"
       }
     }
   }

@@ -1,7 +1,7 @@
 /**
- * DX-201: inject `danx-issue` MCP server into a connected repo's root
- * `.mcp.json` so a host-session `claude` invocation at the repo root sees
- * the danx-issue tool surface (atomic id allocation via
+ * DX-201 / DX-203: inject `danx-issue` MCP server into a connected repo's
+ * root `.mcp.json` so a host-session `claude` invocation at the repo root
+ * sees the danx-issue tool surface (atomic id allocation via
  * `danx_issue_create`, etc).
  *
  * Contract (re-read before editing):
@@ -17,9 +17,19 @@
  *   poller crash mid-write leaves the original file intact.
  * - Idempotent — re-running is a no-op when the key already exists.
  *
- * Env-var values inside the canonical entry use Claude Code's
- * `${VAR}` substitution form. They resolve at agent runtime against
- * the host environment, same pattern as the workspace `.mcp.json`.
+ * The injected env block contains exactly `DANX_REPO_ROOT` (DX-203). The
+ * danx-issue MCP server is purely a YAML manipulator — it does NOT call
+ * any tracker, so the `DANX_TRACKER` / `TRELLO_API_KEY` /
+ * `TRELLO_API_TOKEN` triple that older versions injected is gone. The
+ * worker's poll loop owns the YAML → Trello mirror asynchronously
+ * (`src/poller/orphan-push.ts` + `.trello-retry/` queue); a broken or
+ * absent Trello has zero effect on dev MCP operations.
+ *
+ * `DANX_REPO_ROOT` is baked as a literal because the `.mcp.json` is
+ * consumed by a host-session `claude` whose shell may not export it.
+ * (Workspace `.mcp.json` files use `${...}` placeholders because the
+ * danxbot worker injects those vars at spawn time — host `claude` has
+ * no such injection.)
  */
 
 import {
@@ -36,8 +46,6 @@ const log = createLogger("inject-root-mcp");
 
 export interface InjectRootMcpOptions {
   repoRoot: string;
-  /** Tracker name baked into the entry's env. Default "trello". */
-  tracker?: string;
   /** @internal — see InjectRootMcpFsHooks. */
   _fsHooks?: InjectRootMcpFsHooks;
 }
@@ -50,30 +58,18 @@ export interface InjectRootMcpResult {
 /**
  * Build the canonical `danx-issue` server entry for a given repo.
  *
- * `DANX_REPO_ROOT` and `DANX_TRACKER` are baked as literals because the
- * `.mcp.json` is consumed by a host-session `claude` whose shell may not
- * export them. (Workspace `.mcp.json` files use `${...}` placeholders
- * because the danxbot worker injects those vars at spawn time — host
- * `claude` has no such injection.)
- *
- * `TRELLO_API_KEY` and `TRELLO_API_TOKEN` stay as `${...}` placeholders
- * for the rare operator who explicitly opts into `tracker: "trello"`.
- * The default tracker is `"memory"` — local YAML only, no upstream
- * tracker calls inside the MCP server. The worker polls the YAML and
- * mirrors to Trello asynchronously (orphan-push + retry queue), so a
- * broken or absent Trello has zero effect on dev MCP operations.
- * Trello errors surface in the dashboard, not in the agent's flow.
+ * `DANX_REPO_ROOT` is baked as a literal because the host `claude` shell
+ * may not export it. The server has no other env-var contract (DX-203):
+ * `DANX_TRACKER` / `TRELLO_API_KEY` / `TRELLO_API_TOKEN` are no longer
+ * read by the MCP server, so they're absent from the entry.
  */
-export function buildDanxIssueEntry(repoRoot: string, tracker: string) {
+export function buildDanxIssueEntry(repoRoot: string) {
   return {
     type: "stdio" as const,
     command: "npx",
     args: ["-y", "@thehammer/danx-issue-mcp"],
     env: {
       DANX_REPO_ROOT: repoRoot,
-      DANX_TRACKER: tracker,
-      TRELLO_API_KEY: "${TRELLO_API_KEY}",
-      TRELLO_API_TOKEN: "${TRELLO_API_TOKEN}",
     },
   };
 }
@@ -143,7 +139,7 @@ export function injectDanxIssueMcp(
     ...existing,
     mcpServers: {
       ...mcpServers,
-      "danx-issue": buildDanxIssueEntry(opts.repoRoot, opts.tracker ?? "memory"),
+      "danx-issue": buildDanxIssueEntry(opts.repoRoot),
     },
   };
 

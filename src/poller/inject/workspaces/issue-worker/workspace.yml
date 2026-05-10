@@ -4,10 +4,14 @@ required-placeholders:
   - DANXBOT_STOP_URL
   - DANXBOT_WORKER_PORT
   - DANX_REPO_ROOT
-optional-placeholders:
-  - DANX_TRACKER
-  - TRELLO_API_KEY
-  - TRELLO_API_TOKEN
+optional-placeholders: []
 required-gates:
   - "settings.issuePoller.enabled ≠ false"
   - "no CRITICAL_FAILURE flag"
+# Triage-precursor conflict-check (DX-200 / multi-worker dispatch epic
+# DX-158) stages a candidate YAML + every in-progress sibling under a
+# per-dispatch tmpdir keyed by the dispatch id. The skill's
+# `--conflict-check` mode reads the staged files directly via the Read
+# tool and returns a JSON verdict via `danxbot_complete.summary`.
+staging-paths:
+  - "/tmp/conflict-check/${DANXBOT_DISPATCH_ID}/"

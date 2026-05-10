@@ -1,7 +1,7 @@
 /**
- * DX-201: inject `danx-issue` MCP server into a connected repo's root
- * `.mcp.json` so a host-session `claude` invocation at the repo root sees
- * the danx-issue tool surface (atomic id allocation via
+ * DX-201 / DX-203: inject `danx-issue` MCP server into a connected repo's
+ * root `.mcp.json` so a host-session `claude` invocation at the repo root
+ * sees the danx-issue tool surface (atomic id allocation via
  * `danx_issue_create`, etc).
  *
  * The contract is strict: ADD `danx-issue` if missing, NEVER touch any
@@ -9,6 +9,11 @@
  * overrides of the `danx-issue` entry are preserved byte-identical.
  * Malformed JSON aborts the write loudly. Atomic write via `.tmp` +
  * rename so a poller crash mid-write leaves the original intact.
+ *
+ * DX-203: env block for the canonical entry contains exactly
+ * `DANX_REPO_ROOT`. The `DANX_TRACKER` / `TRELLO_API_KEY` /
+ * `TRELLO_API_TOKEN` triple older versions injected is gone — the MCP
+ * server is purely a YAML manipulator and reads no tracker creds.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -45,7 +50,7 @@ describe("injectDanxIssueMcp", () => {
     expect(result.changed).toBe(true);
     expect(result.path).toBe(mcpPath);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
-    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "memory"));
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot));
   });
 
   it("adds danx-issue when file exists with empty mcpServers", () => {
@@ -53,7 +58,7 @@ describe("injectDanxIssueMcp", () => {
     const result = injectDanxIssueMcp({ repoRoot });
     expect(result.changed).toBe(true);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
-    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "memory"));
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot));
   });
 
   it("preserves pre-existing mcpServers entries byte-identical", () => {
@@ -70,14 +75,14 @@ describe("injectDanxIssueMcp", () => {
     expect(result.changed).toBe(true);
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
     expect(parsed.mcpServers.playwright).toEqual(playwright);
-    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "memory"));
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot));
   });
 
   it("is a no-op when canonical danx-issue already present", () => {
     writeFileSync(
       mcpPath,
       JSON.stringify(
-        { mcpServers: { "danx-issue": buildDanxIssueEntry(repoRoot, "memory") } },
+        { mcpServers: { "danx-issue": buildDanxIssueEntry(repoRoot) } },
         null,
         2,
       ) + "\n",
@@ -132,7 +137,7 @@ describe("injectDanxIssueMcp", () => {
     const parsed = JSON.parse(readFileSync(mcpPath, "utf-8"));
     expect(parsed.extensions).toEqual(["foo", "bar"]);
     expect(parsed.otherKey).toEqual({ nested: true });
-    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot, "memory"));
+    expect(parsed.mcpServers["danx-issue"]).toEqual(buildDanxIssueEntry(repoRoot));
   });
 
   it("writes atomically via .tmp + rename (no .tmp left behind on success)", () => {
@@ -189,5 +194,19 @@ describe("injectDanxIssueMcp", () => {
     const second = injectDanxIssueMcp({ repoRoot });
     expect(second.changed).toBe(false);
     expect(readFileSync(mcpPath, "utf-8")).toBe(afterFirst);
+  });
+
+  it("DX-203: canonical entry exposes ONLY DANX_REPO_ROOT in env (no DANX_TRACKER / TRELLO_*)", () => {
+    // Pin the shape of the produced env block so a regression that
+    // re-adds `DANX_TRACKER` / `TRELLO_API_KEY` / `TRELLO_API_TOKEN`
+    // back into the inject path trips loud here. The MCP server is
+    // purely a YAML manipulator (DX-203); putting Trello creds in this
+    // env block re-introduces the "Trello in the agent's critical path"
+    // anti-pattern.
+    const entry = buildDanxIssueEntry(repoRoot);
+    expect(entry.env).toEqual({ DANX_REPO_ROOT: repoRoot });
+    expect(entry.env).not.toHaveProperty("DANX_TRACKER");
+    expect(entry.env).not.toHaveProperty("TRELLO_API_KEY");
+    expect(entry.env).not.toHaveProperty("TRELLO_API_TOKEN");
   });
 });
