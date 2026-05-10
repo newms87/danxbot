@@ -25,8 +25,8 @@ Auto-loaded rules + skills. Trigger the right one BEFORE editing.
 | Editing root `.mcp.json` inject, `deploy/secrets.ts`, `.env.<target>` overlays, workspace cwd, container paths, Laravel `.env.{APP_ENV}` trap | `danxbot:docker-deep` |
 | Editing `/api/resume`, `staged_files` validation, Playwright proxy binary path, any `usage` accumulator, debugging silent-dispatch / claude-auth failures | `danxbot:dispatch-deep` |
 | Editing `src/settings-file.ts`, dashboard Agents tab handlers, adding feature toggle / display field, `syncSettingsFileOnBoot`, legacy `trelloPoller` migration | `danxbot:settings-deep` |
-| Reading / writing / creating any issue YAML, ESPECIALLY epic creation (epics MUST ship with phase cards same turn) | `issues:issue-card-workflow` |
-| Card status `Needs Help` / `blocked != null`, `/unblock` invoked | `issues:unblock` |
+| Reading / writing / creating any issue YAML, ESPECIALLY epic creation (epics MUST ship with phase cards same turn) | `danxbot:issue-card-workflow` |
+| Card status `Needs Help` / `blocked != null`, `/unblock` invoked | `danxbot:unblock` |
 | Anything about danxbot runtime / dispatch / Trello-as-background-infra / poller boundary | `danxbot:danxbot` |
 | Investigating without fixing (diagnose / "why" / "how does X work" / read-only audit) | `investigate:investigate` |
 | Bug, error, failing test, factual claim about codebase behavior | `dev:debugging` |
@@ -208,4 +208,4 @@ IDs in `<repo>/.danxbot/config/trello.yml`. Resolved via `IssueTracker` interfac
 
 ### Card Workflow (Orchestrator)
 
-**Before touching any issue YAML — load `issues:issue-card-workflow` skill via the Skill tool.** Skill is authoritative: epic creation MUST ship phase cards same turn (`children: []` on epic = never acceptable); pickup → In Progress → TDD → quality gates (Test Reviewer + Code Reviewer subagents in parallel) → commit → Done with retro → `danxbot_complete`. Action items + `status: Blocked` are LAST RESORT (see `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` Step 1.5). Validator subagent only for agent/SDK changes.
+**Before touching any issue YAML — load `danxbot:issue-card-workflow` skill via the Skill tool.** Skill is authoritative: epic creation MUST ship phase cards same turn (`children: []` on epic = never acceptable); pickup → In Progress → TDD → quality gates (Test Reviewer + Code Reviewer subagents in parallel) → commit → Done with retro → `danxbot_complete`. Action items + `status: Blocked` are LAST RESORT (see `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` Step 1.5). Validator subagent only for agent/SDK changes.
