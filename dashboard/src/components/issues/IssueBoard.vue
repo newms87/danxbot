@@ -8,6 +8,13 @@ import { isInScope, type ScopeMode } from "../../composables/useIssueFilters";
 
 const props = defineProps<{
   issues: IssueListItem[];
+  /**
+   * Active repo name. Threaded through to `<IssueCard>` so the agent
+   * badge (`<AgentBadge>`) can fetch the right per-repo avatar without
+   * a board-level singleton lookup. Required even when there is no
+   * `assigned_agent` on the cards — the prop shape stays stable.
+   */
+  repo: string;
   showClosed?: boolean;
   scopedEpicId: string | null;
   scopeMode: ScopeMode;
@@ -141,6 +148,7 @@ function toggle(key: string): void {
             v-for="issue in grouped[col.key] ?? []"
             :key="issue.id"
             :issue="issue"
+            :repo="props.repo"
             :dimmed="dimmedFor(issue)"
             :scoped="scopedFor(issue)"
             @select="(i) => emit('select', i)"

@@ -58,6 +58,7 @@ const emit = defineEmits<{
   close: [];
   "jump-issue": [id: string];
   "toggle-scope": [];
+  "open-agent": [];
 }>();
 
 const tab = ref<TabId>("overview");
@@ -151,11 +152,13 @@ function selectTab(id: TabId, disabled: boolean): void {
     <template v-else-if="issue">
       <DrawerHeader
         :issue="issue"
+        :repo="props.selectedRepo"
         :scoped-epic-id="props.scopedEpicId"
         :show-close="showCloseButton"
         @close="emit('close')"
         @jump-issue="(id) => emit('jump-issue', id)"
         @toggle-scope="emit('toggle-scope')"
+        @open-agent="emit('open-agent')"
       />
       <div class="tabs">
         <button
@@ -183,6 +186,7 @@ function selectTab(id: TabId, disabled: boolean): void {
           v-else-if="tab === 'children'"
           :issue="issue"
           :all-issues="allIssues"
+          :repo="props.selectedRepo"
           @jump-issue="(id) => emit('jump-issue', id)"
         />
         <CommentsTab v-else-if="tab === 'comments'" :issue="issue" />

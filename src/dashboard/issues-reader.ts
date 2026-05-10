@@ -78,6 +78,14 @@ export interface IssueListItem {
    * this field. ISS-210.
    */
   priority: number;
+  /**
+   * Resolved persona name (`AGENT_NAME_SHAPE`) when the multi-worker pick
+   * algorithm has claimed this card for a specific agent (DX-200 / DX-164).
+   * `null` when no agent owns the card. Surfaced on the list item so the
+   * SPA renders the `<AgentBadge>` chip on issue rows + drawer header
+   * without a per-row detail fetch.
+   */
+  assigned_agent: string | null;
 }
 
 /** Full Issue plus the mirror-write timestamp (ms) and a serialized YAML rendering of the current state. */
@@ -201,6 +209,7 @@ function toListItem(
       issue.retro.commits.length > 0,
     updated_at: mtimeMs,
     priority: issue.priority,
+    assigned_agent: issue.assigned_agent,
   };
 }
 

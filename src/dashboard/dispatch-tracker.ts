@@ -226,10 +226,15 @@ export async function startDispatchTracking(
         });
         // Notify SSE clients immediately so they see the terminal state
         // without waiting for the next DB change-detector poll cycle.
+        // `repoName` is included so per-repo subscribers (e.g. the
+        // Agents tab roster — DX-164 Phase 6) can filter without a
+        // DB lookup; the value is already in `args.repoName` from the
+        // initial insert.
         eventBus.publish({
           topic: "dispatch:updated",
           data: {
             id: args.jobId,
+            repoName: args.repoName,
             status,
             summary: fields.summary ?? null,
             error: fields.error ?? null,

@@ -10,7 +10,7 @@
 #
 # Options:
 #   --worker-port PORT   Worker port (default: 5561)
-#   --test NAME          Run a single test (health, dispatch, heartbeat, cancel, error, poller, yaml-memory, cleanup)
+#   --test NAME          Run a single test (health, dispatch, heartbeat, cancel, error, poller, yaml-memory, multi-worker, cleanup)
 #   --host-mode          Include host-mode-only tests (stall detection)
 #   --api-token TOKEN    API token for dispatch requests (default: "system-test-token")
 
@@ -203,10 +203,31 @@ captured_has_status() {
   " "$CAPTURE_OUTPUT" "$status" 2>/dev/null || echo "false"
 }
 
+# DX-164 Phase 6 — multi-worker test seeds alice/bob/charlie into the
+# operator's `<repo>/.danxbot/settings.json` and may write fixture YAMLs.
+# These globals let the EXIT trap restore them even when `set -e` aborts
+# mid-test. Empty strings = nothing to roll back.
+MW_SETTINGS_FILE=""
+MW_SETTINGS_BACKUP=""
+MW_FIXTURE_PATHS=""
+
 cleanup() {
   stop_capture_server
   if [[ -n "${CAPTURE_OUTPUT:-}" && -f "$CAPTURE_OUTPUT" ]]; then
     rm -f "$CAPTURE_OUTPUT"
+  fi
+  # Restore the multi-worker test's mutated state on every exit path,
+  # including `set -e` aborts mid-helper. Idempotent — guarded on the
+  # globals being set at all.
+  if [[ -n "$MW_SETTINGS_FILE" && -n "$MW_SETTINGS_BACKUP" ]]; then
+    _multi_worker_restore_settings "$MW_SETTINGS_FILE" "$MW_SETTINGS_BACKUP" || true
+    MW_SETTINGS_FILE=""
+    MW_SETTINGS_BACKUP=""
+  fi
+  if [[ -n "$MW_FIXTURE_PATHS" ]]; then
+    # shellcheck disable=SC2086
+    rm -f $MW_FIXTURE_PATHS 2>/dev/null || true
+    MW_FIXTURE_PATHS=""
   fi
 }
 trap cleanup EXIT
@@ -978,6 +999,331 @@ test_yaml_memory() {
   log_info "Completed in $((SECONDS - start_time))s"
 }
 
+test_multi_worker() {
+  log_header "test-system-multi-worker"
+  local start_time=$SECONDS
+
+  # DX-164 Phase 6 — multi-worker concurrent dispatch verification.
+  #
+  # Two-tier shape:
+  #
+  # 1. Roster API surface (free, always runs): seed alice/bob/charlie
+  #    into <repo>/.danxbot/settings.json#agents{}, hit
+  #    `GET /api/agents?repo=<name>` via the dashboard, assert the new
+  #    `busyOn` field shape per agent (absent when idle, joined-from-
+  #    dispatches when busy). Restores the original settings on exit so
+  #    the operator's roster survives a CI run.
+  #
+  # 2. Concurrent dispatch (REAL_CLAUDE=1, ~$1, opt-in): inject 3
+  #    fixture cards on disjoint files into ToDo, observe the poller
+  #    pick + dispatch all 3 within 30s, agent-finalize.sh squash-merge
+  #    each onto main, every card move to Done. Skipped by default —
+  #    requires ANTHROPIC_API_KEY, the per-agent worktrees bootstrapped
+  #    via `make launch-worker`, and opens an agent-finalize.sh push
+  #    race we don't want to hit on every CI run.
+  #
+  # The Layer 2 deterministic half (multi-agent picker honours locks,
+  # conflict-check stamps blocked, agent-finalize.sh exit codes route
+  # correctly) lives in Phase 5's `multi-agent-pick.test.ts` and the
+  # Phase 4 `agent-finalize.test.ts`. This test is the LIVE one that
+  # proves the assembled pipeline survives real concurrent dispatch.
+
+  local repo_dir="${PROJECT_ROOT}/repos/danxbot"
+  local settings_file="${repo_dir}/.danxbot/settings.json"
+
+  if [[ ! -d "$repo_dir" ]]; then
+    skip "Multi-worker test requires repos/danxbot bind-mount"
+    return
+  fi
+
+  # ── Tier 1: roster surface ────────────────────────────────────────
+
+  # Snapshot existing settings so we can restore on exit. Register the
+  # backup with the global EXIT trap BEFORE mutating so a `set -e`
+  # abort mid-helper still rolls back.
+  local backup
+  backup=$(mktemp /tmp/danxbot-mw-settings-XXXXXX.json)
+  if [[ -f "$settings_file" ]]; then
+    cp "$settings_file" "$backup"
+  else
+    echo "MISSING" > "$backup"
+  fi
+  MW_SETTINGS_FILE="$settings_file"
+  MW_SETTINGS_BACKUP="$backup"
+
+  # Seed three test agents into settings.json. Names, schedules, and
+  # capabilities match the design spec (alice/bob/charlie, all
+  # issue-worker, default schedule). Merges into existing settings via
+  # node so the operator's overrides + display sections survive — the
+  # Tier 1 surface check intentionally only mutates `agents`.
+  if ! _multi_worker_seed_agents "$settings_file"; then
+    fail "Failed to seed test agents into $settings_file"
+    return
+  fi
+  log_info "Seeded alice/bob/charlie into $settings_file"
+
+  # Hit the dashboard's agents-roster endpoint (NOT the worker — the
+  # roster lives on the dashboard's HTTP plane). Dashboard listens on
+  # DANXBOT_DASHBOARD_PORT (default 5555).
+  local dash_port="${DANXBOT_DASHBOARD_PORT:-5555}"
+  local roster_response
+  roster_response=$(curl -s --max-time 10 \
+    "http://${WORKER_HOST}:${dash_port}/api/agents?repo=danxbot" 2>/dev/null || echo '{}')
+
+  local agent_count
+  agent_count=$(node -e '
+    try {
+      const r = JSON.parse(process.argv[1] || "{}");
+      console.log(Array.isArray(r.agents) ? r.agents.length : 0);
+    } catch { console.log(0); }
+  ' "$roster_response" 2>/dev/null)
+
+  if [[ "$agent_count" == "3" ]]; then
+    pass "Roster lists 3 seeded agents"
+  else
+    fail "Roster returned $agent_count agents (expected 3): $roster_response"
+    return
+  fi
+
+  # busyOn is absent on every idle agent. The contract is "no key when
+  # idle" (the optional field is omitted from the response object), so
+  # we assert STRICTLY against `=== undefined` — emitting `null` would
+  # be a contract regression. Empty key set → 3 idle agents.
+  local idle_count
+  idle_count=$(node -e '
+    try {
+      const r = JSON.parse(process.argv[1] || "{}");
+      console.log((r.agents || []).filter(a => a.busyOn === undefined).length);
+    } catch { console.log(0); }
+  ' "$roster_response" 2>/dev/null)
+
+  if [[ "$idle_count" == "3" ]]; then
+    pass "All 3 agents reported idle (no busyOn field)"
+  else
+    fail "Expected 3 idle agents; got $idle_count idle"
+  fi
+
+  # ── Tier 2: concurrent dispatch (opt-in) ──────────────────────────
+
+  if [[ -z "${REAL_CLAUDE:-}" || "${REAL_CLAUDE}" != "1" ]]; then
+    skip "Concurrent dispatch (REAL_CLAUDE=1 to enable; ~\$1)"
+    return
+  fi
+
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    skip "Concurrent dispatch requires ANTHROPIC_API_KEY"
+    return
+  fi
+
+  # Inject 3 fixture cards on disjoint files. Each agent picks one card
+  # via the multi-agent picker on the next tick. Cards are minimal —
+  # one tiny no-op edit + commit so the agent-finalize.sh squash-merge
+  # path runs end-to-end.
+  local timestamp
+  timestamp=$(date +%s)
+  local issues_dir="${repo_dir}/.danxbot/issues/open"
+  local fixture_ids=("DX-mw-${timestamp}-1" "DX-mw-${timestamp}-2" "DX-mw-${timestamp}-3")
+  local fixture_paths=("docs/multi-worker-alice.md" "docs/multi-worker-bob.md" "docs/multi-worker-charlie.md")
+
+  # Register fixture paths with the EXIT trap BEFORE writing so an
+  # abort during write still cleans up. Both open/ and closed/ paths
+  # listed (the worker moves the YAML on Done — either location may
+  # hold the file at trap time).
+  for i in 0 1 2; do
+    MW_FIXTURE_PATHS+=" ${issues_dir}/${fixture_ids[$i]}.yml"
+    MW_FIXTURE_PATHS+=" ${repo_dir}/.danxbot/issues/closed/${fixture_ids[$i]}.yml"
+  done
+  for i in 0 1 2; do
+    _multi_worker_write_fixture \
+      "${issues_dir}/${fixture_ids[$i]}.yml" \
+      "${fixture_ids[$i]}" \
+      "${fixture_paths[$i]}"
+  done
+  log_info "Injected 3 fixture cards into ${issues_dir}"
+
+  # Wait for the poller to dispatch each card (next tick is up to 60s
+  # away, then ~10s spawn latency per agent).
+  log_info "Waiting up to 90s for 3 concurrent dispatches..."
+  local elapsed=0
+  local dispatched=0
+  while [[ $elapsed -lt 90 ]]; do
+    local jobs_response
+    jobs_response=$(http_get "${WORKER_URL}/api/jobs")
+    dispatched=$(node -e '
+      try {
+        const r = JSON.parse(process.argv[1] || "{}");
+        const ids = process.argv[2].split(",");
+        const running = (r.jobs || []).filter(j =>
+          j.status === "running" && ids.some(id => (j.tracking || "").includes(id))
+        );
+        console.log(running.length);
+      } catch { console.log(0); }
+    ' "$jobs_response" "${fixture_ids[*]// /,}" 2>/dev/null || echo 0)
+    if [[ "$dispatched" == "3" ]]; then break; fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+
+  if [[ "$dispatched" == "3" ]]; then
+    pass "All 3 fixture cards dispatched concurrently within ${elapsed}s"
+  else
+    fail "Only $dispatched of 3 fixtures dispatched after 90s — multi-agent pick may not be enabled"
+  fi
+
+  # Wait for completion (5 min budget).
+  log_info "Waiting up to 5min for all 3 cards to reach terminal state..."
+  elapsed=0
+  local done_count=0
+  while [[ $elapsed -lt 300 ]]; do
+    done_count=0
+    for fid in "${fixture_ids[@]}"; do
+      if [[ -f "${repo_dir}/.danxbot/issues/closed/${fid}.yml" ]]; then
+        done_count=$((done_count + 1))
+      fi
+    done
+    if [[ "$done_count" == "3" ]]; then break; fi
+    sleep 10
+    elapsed=$((elapsed + 10))
+  done
+
+  if [[ "$done_count" == "3" ]]; then
+    pass "All 3 fixture cards reached terminal state"
+  else
+    fail "Only $done_count of 3 fixtures completed after 300s"
+  fi
+
+  # Verify 3 commits landed on main with conventional-commit format
+  # for our fixture ids.
+  local commits_landed=0
+  for fid in "${fixture_ids[@]}"; do
+    if (cd "$repo_dir" && git log origin/main --oneline | grep -qE "^[a-f0-9]+ feat\(${fid}\):"); then
+      commits_landed=$((commits_landed + 1))
+    fi
+  done
+
+  if [[ "$commits_landed" == "3" ]]; then
+    pass "All 3 fixture commits landed on origin/main"
+  else
+    fail "Only $commits_landed of 3 fixture commits found on origin/main"
+  fi
+
+  # Fixtures + settings are restored by the EXIT trap; nothing else
+  # to do here.
+  log_info "Completed in $((SECONDS - start_time))s"
+}
+
+# Helper: seed alice/bob/charlie into settings.json#agents preserving
+# overrides + display + agentDefaults. Idempotent — re-seeding overwrites
+# the three test agent records but leaves any other agents intact (the
+# operator's real roster survives the test if names don't clash).
+_multi_worker_seed_agents() {
+  local settings_file="$1"
+  mkdir -p "$(dirname "$settings_file")"
+  node -e '
+    const fs = require("fs");
+    const path = process.argv[1];
+    let cur = {
+      overrides: {
+        slack: { enabled: null },
+        issuePoller: { enabled: null, pickupNamePrefix: null },
+        dispatchApi: { enabled: null },
+        ideator: { enabled: null },
+      },
+      display: {},
+      agents: {},
+      agentDefaults: { conflictCheckEnabled: false },
+      meta: {},
+    };
+    if (fs.existsSync(path)) {
+      try { cur = JSON.parse(fs.readFileSync(path, "utf-8")); } catch {}
+    }
+    const now = new Date().toISOString();
+    const baseSchedule = {
+      tz: "America/Chicago",
+      mon: ["00:00-23:59"], tue: ["00:00-23:59"], wed: ["00:00-23:59"],
+      thu: ["00:00-23:59"], fri: ["00:00-23:59"], sat: ["00:00-23:59"], sun: ["00:00-23:59"],
+    };
+    cur.agents = cur.agents || {};
+    for (const name of ["alice", "bob", "charlie"]) {
+      cur.agents[name] = {
+        type: "agent",
+        bio: `Multi-worker test agent ${name}.`,
+        capabilities: ["issue-worker"],
+        schedule: baseSchedule,
+        enabled: true,
+        created_at: cur.agents[name]?.created_at || now,
+        updated_at: now,
+      };
+    }
+    cur.meta = { updatedAt: now, updatedBy: "setup" };
+    fs.writeFileSync(path, JSON.stringify(cur, null, 2) + "\n");
+  ' "$settings_file" 2>/dev/null
+}
+
+# Helper: restore the settings.json snapshot taken at the top of the test.
+# `$backup` containing the literal "MISSING" means the file did not exist
+# before the test ran — in that case we delete it.
+_multi_worker_restore_settings() {
+  local settings_file="$1"
+  local backup="$2"
+  if [[ ! -f "$backup" ]]; then return 0; fi
+  if [[ "$(cat "$backup")" == "MISSING" ]]; then
+    rm -f "$settings_file"
+  else
+    cp "$backup" "$settings_file"
+  fi
+  rm -f "$backup"
+}
+
+# Helper: write a minimal multi-worker fixture YAML. The card touches one
+# file (`<path>`) with a tiny no-op edit so all 3 cards land disjoint
+# changes that squash-merge cleanly to main.
+_multi_worker_write_fixture() {
+  local target="$1"
+  local id="$2"
+  local file="$3"
+  cat > "$target" <<EOF
+schema_version: 5
+tracker: trello
+id: $id
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Multi-worker test fixture: append marker to $file"
+description: |-
+  Append the marker line "<!-- marker $id -->" to \`$file\` (create the
+  file if it does not exist). Commit + finalize via agent-finalize.sh.
+priority: 3
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: ""
+    title: "Marker line appended to $file"
+    checked: false
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null
+assigned_agent: null
+EOF
+}
+
 test_cleanup() {
   log_header "test-system-cleanup"
 
@@ -1043,6 +1389,7 @@ main() {
       stall)       test_stall ;;
       poller)      test_poller ;;
       yaml-memory) test_yaml_memory ;;
+      multi-worker) test_multi_worker ;;
       cleanup)     test_cleanup ;;
       *) log "${RED}Unknown test: $SINGLE_TEST${NC}"; exit 1 ;;
     esac
@@ -1055,6 +1402,7 @@ main() {
     test_stall
     test_poller
     test_yaml_memory
+    test_multi_worker
     test_cleanup
   fi
 

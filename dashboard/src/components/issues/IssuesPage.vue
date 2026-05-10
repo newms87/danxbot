@@ -14,6 +14,13 @@ const selectedRepo = defineModel<string>("selectedRepo", { required: true });
 
 const emit = defineEmits<{
   select: [issue: IssueListItem];
+  /**
+   * Fired when the user clicks the agent badge in the drawer header.
+   * App.vue handles by switching `activeTab` to `agents` (the
+   * AgentsPage already scopes to `selectedRepo`, so the agent's roster
+   * card is in view).
+   */
+  "open-agent": [];
 }>();
 
 const { issues, loading, error, refresh, fetchDetail } = useIssues(
@@ -260,6 +267,7 @@ watch(
           <div class="board-wrap">
             <IssueBoard
               :issues="filteredIssues"
+              :repo="selectedRepo"
               :show-closed="showClosed"
               :scoped-epic-id="scopedEpicId"
               :scope-mode="scopeMode"
@@ -279,12 +287,14 @@ watch(
             @close="closeDrawer"
             @jump-issue="onJumpIssue"
             @toggle-scope="onToggleScope"
+            @open-agent="emit('open-agent')"
           />
         </template>
       </DanxSplitPanel>
       <div v-else class="board-wrap">
         <IssueBoard
           :issues="filteredIssues"
+          :repo="selectedRepo"
           :show-closed="showClosed"
           :scoped-epic-id="scopedEpicId"
           :scope-mode="scopeMode"
@@ -313,6 +323,7 @@ watch(
         @close="closeDrawer"
         @jump-issue="onJumpIssue"
         @toggle-scope="onToggleScope"
+        @open-agent="emit('open-agent')"
       />
     </DanxDialog>
     <BoardChatOverlay

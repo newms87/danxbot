@@ -57,7 +57,11 @@ export type {
   SettingsDisplayWorker,
   SettingsMeta,
 } from "@backend/settings-file.js";
-export type { AgentRosterResponse } from "@backend/dashboard/agents-toggles.js";
+export type {
+  AgentRosterEntry,
+  AgentRosterResponse,
+} from "@backend/dashboard/agents-toggles.js";
+export type { AgentBusyOn } from "@backend/dashboard/dispatches-db.js";
 export type { RepoInfo } from "./api";
 export type { RepoDispatchCounts, DispatchCountsByTrigger } from "@backend/dashboard/dispatches-db.js";
 export type {

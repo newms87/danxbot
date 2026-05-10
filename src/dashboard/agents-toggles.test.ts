@@ -35,10 +35,12 @@ vi.mock("./dispatch-proxy.js", () => ({
 }));
 
 const mockCountDispatchesByRepo = vi.fn();
+const mockAgentBusyOn = vi.fn();
 vi.mock("./dispatches-db.js", () => ({
   countDispatchesByRepo: (...args: unknown[]) =>
     mockCountDispatchesByRepo(...args),
   findNonTerminalDispatches: vi.fn().mockResolvedValue([]),
+  agentBusyOn: (...args: unknown[]) => mockAgentBusyOn(...args),
 }));
 
 const mockEventBusPublish = vi.fn();
@@ -92,6 +94,8 @@ beforeEach(() => {
   mockProxyToWorker.mockResolvedValue(undefined);
   mockProxyToWorkerWithFallback.mockReset();
   mockProxyToWorkerWithFallback.mockResolvedValue(undefined);
+  mockAgentBusyOn.mockReset();
+  mockAgentBusyOn.mockResolvedValue(new Map());
 });
 
 // ============================================================
@@ -428,6 +432,108 @@ describe("handleGetRoster", () => {
     await handleGetRoster(res, "danxbot", deps());
 
     expect(res._getStatusCode()).toBe(500);
+  });
+
+  // DX-164 Phase 6 — busyOn surfaced from the dispatches table.
+  it("attaches busyOn to agents with an in-flight dispatch", async () => {
+    mockReadSettings.mockReturnValue({
+      ...settings(),
+      agents: {
+        alice: {
+          type: "agent",
+          bio: "A",
+          capabilities: ["issue-worker"],
+          schedule: {
+            tz: "America/Chicago",
+            mon: [],
+            tue: [],
+            wed: [],
+            thu: [],
+            fri: [],
+            sat: [],
+            sun: [],
+          },
+          enabled: true,
+          created_at: "2026-05-08T12:00:00Z",
+          updated_at: "2026-05-08T12:00:00Z",
+        },
+        bob: {
+          type: "agent",
+          bio: "B",
+          capabilities: ["issue-worker"],
+          schedule: {
+            tz: "America/Chicago",
+            mon: [],
+            tue: [],
+            wed: [],
+            thu: [],
+            fri: [],
+            sat: [],
+            sun: [],
+          },
+          enabled: true,
+          created_at: "2026-05-08T12:00:00Z",
+          updated_at: "2026-05-08T12:00:00Z",
+        },
+      },
+      agentDefaults: { conflictCheckEnabled: true },
+    });
+    mockAgentBusyOn.mockResolvedValue(
+      new Map([
+        ["alice", { card_id: "DX-1", started_at: 1_700_000_000_000, dispatch_id: "uuid-1" }],
+      ]),
+    );
+
+    const res = createMockRes();
+    await handleGetRoster(res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    const alice = body.agents.find((a: { name: string }) => a.name === "alice");
+    const bob = body.agents.find((a: { name: string }) => a.name === "bob");
+    expect(alice.busyOn).toEqual({
+      card_id: "DX-1",
+      started_at: 1_700_000_000_000,
+      dispatch_id: "uuid-1",
+    });
+    expect(bob.busyOn).toBeUndefined();
+    expect(mockAgentBusyOn).toHaveBeenCalledWith("danxbot");
+  });
+
+  it("renders the roster with idle state when agentBusyOn throws", async () => {
+    mockReadSettings.mockReturnValue({
+      ...settings(),
+      agents: {
+        alice: {
+          type: "agent",
+          bio: "A",
+          capabilities: ["issue-worker"],
+          schedule: {
+            tz: "America/Chicago",
+            mon: [],
+            tue: [],
+            wed: [],
+            thu: [],
+            fri: [],
+            sat: [],
+            sun: [],
+          },
+          enabled: true,
+          created_at: "2026-05-08T12:00:00Z",
+          updated_at: "2026-05-08T12:00:00Z",
+        },
+      },
+      agentDefaults: { conflictCheckEnabled: true },
+    });
+    mockAgentBusyOn.mockRejectedValue(new Error("db down"));
+
+    const res = createMockRes();
+    await handleGetRoster(res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.agents).toHaveLength(1);
+    expect(body.agents[0].busyOn).toBeUndefined();
   });
 });
 

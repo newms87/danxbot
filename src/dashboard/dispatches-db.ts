@@ -433,6 +433,63 @@ export async function findNonTerminalDispatches(
   return rows.map(rowToDispatch);
 }
 
+/**
+ * Per-agent live busy state used by the Agents-tab roster (DX-164 Phase 6).
+ *
+ * `card_id` is the dispatch's `issue_id` when present, else `null` for
+ * non-issue dispatch types (slack / api). `started_at` is the dispatch's
+ * `started_at` epoch ms — the SPA renders elapsed time off this value
+ * client-side so the card animates without a per-second poll.
+ */
+export interface AgentBusyOn {
+  card_id: string | null;
+  started_at: number;
+  dispatch_id: string;
+}
+
+/**
+ * Return per-agent busy state for `repoName`. Maps `agent_name` →
+ * `{card_id, started_at, dispatch_id}` for every non-terminal dispatch
+ * with an `agent_name` set. When an agent has multiple in-flight
+ * dispatches (rare — the lock invariant is one-per-agent, but a stale
+ * legacy row could violate it), the OLDEST wins so the card shows the
+ * dispatch the operator most needs to attend to. Pre-Phase-5 dispatches
+ * with `agent_name = NULL` are excluded.
+ */
+export async function agentBusyOn(
+  repoName: string,
+): Promise<Map<string, AgentBusyOn>> {
+  const rows = await query<{
+    agent_name: string;
+    issue_id: string | null;
+    started_at: number | string;
+    id: string;
+  }>(
+    // `TERMINAL_LIST` is built from `TERMINAL_STATUSES` (the canonical
+    // terminal-status const) so adding a new terminal status anywhere
+    // — e.g. `"timeout"` — flows through this query automatically.
+    // Inlining the literal list once would have silently shown ghost-
+    // busy agents for every dispatch that landed in the new terminal.
+    `SELECT agent_name, issue_id, started_at, id FROM dispatches
+       WHERE repo_name = $1
+         AND agent_name IS NOT NULL
+         AND "status" NOT IN (${TERMINAL_LIST})
+       ORDER BY started_at ASC`,
+    [repoName],
+  );
+  const out = new Map<string, AgentBusyOn>();
+  for (const r of rows) {
+    if (typeof r.agent_name !== "string" || r.agent_name.length === 0) continue;
+    if (out.has(r.agent_name)) continue; // oldest wins
+    out.set(r.agent_name, {
+      card_id: r.issue_id ?? null,
+      started_at: Number(r.started_at),
+      dispatch_id: r.id,
+    });
+  }
+  return out;
+}
+
 export async function deleteOldDispatches(
   maxAgeMs: number,
 ): Promise<DeletedDispatch[]> {

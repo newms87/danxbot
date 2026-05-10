@@ -325,7 +325,28 @@ describe("listIssues", () => {
       has_retro: true,
       updated_at: 1_700_000_000_000,
       priority: 3,
+      assigned_agent: null,
     });
+  });
+
+  // DX-164 Phase 6: assigned_agent threads through the projection so the
+  // SPA can render the AgentBadge chip on issue rows + drawer header.
+  it("surfaces assigned_agent on the list item when the YAML stamps it", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-9",
+        type: "Feature",
+        title: "Claimed by alice",
+        status: "In Progress",
+        assigned_agent: "alice",
+      }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo);
+    expect(items[0].assigned_agent).toBe("alice");
   });
 
   it("has empty children_detail for non-epic cards with no children", async () => {

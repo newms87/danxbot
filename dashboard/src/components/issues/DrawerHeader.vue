@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { IssueDetail } from "../../types";
 import TypeBadge from "./TypeBadge.vue";
+import AgentBadge from "../AgentBadge.vue";
 import { relativeTime } from "../../utils/relativeTime";
 
 import { computed } from "vue";
@@ -8,6 +9,7 @@ import { computed } from "vue";
 const props = withDefaults(
   defineProps<{
     issue: IssueDetail;
+    repo: string;
     scopedEpicId: string | null;
     showClose?: boolean;
   }>(),
@@ -18,6 +20,7 @@ const emit = defineEmits<{
   close: [];
   "jump-issue": [id: string];
   "toggle-scope": [];
+  "open-agent": [];
 }>();
 
 const scopeTarget = computed<string | null>(() => {
@@ -55,6 +58,20 @@ const blockedByCard = computed(
       >×</button>
     </div>
     <h2 class="title">{{ issue.title }}</h2>
+    <div v-if="issue.assigned_agent" class="agent-row">
+      <button
+        type="button"
+        class="agent-link"
+        :data-test="`drawer-agent-${issue.assigned_agent}`"
+        @click="emit('open-agent')"
+      >
+        <AgentBadge
+          :repo="props.repo"
+          :agent-name="issue.assigned_agent"
+          size="md"
+        />
+      </button>
+    </div>
     <div
       v-if="issue.parent_id || (issue.children && issue.children.length > 0) || scopeTarget"
       class="rel-row"
@@ -144,6 +161,23 @@ const blockedByCard = computed(
   color: #f1f5f9;
   line-height: 1.3;
   letter-spacing: -0.01em;
+}
+.agent-row {
+  display: flex;
+  align-items: center;
+}
+.agent-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.agent-link:hover :deep(.agent-badge) {
+  background: rgb(99 102 241 / 0.18);
+  border-color: rgb(99 102 241 / 0.45);
 }
 .rel-row {
   display: flex;

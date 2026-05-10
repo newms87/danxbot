@@ -6,6 +6,11 @@ import IssueCard from "./IssueCard.vue";
 const props = defineProps<{
   issue: IssueDetail;
   allIssues: IssueListItem[];
+  /**
+   * Active repo name. Threaded into `<IssueCard>` so the agent badge
+   * (`<AgentBadge>`) on each child can fetch the right per-repo avatar.
+   */
+  repo: string;
 }>();
 
 const emit = defineEmits<{
@@ -40,6 +45,7 @@ const missingCount = computed(
         v-for="child in childCards"
         :key="child.id"
         :issue="child"
+        :repo="props.repo"
         show-status
         @select="(i) => emit('jump-issue', i.id)"
         @parent-click="(pid) => emit('jump-issue', pid)"

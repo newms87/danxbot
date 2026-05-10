@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   createAgent,
   deleteAgent,
@@ -11,11 +11,12 @@ import {
   type ToggleError,
 } from "../../api";
 import type {
-  AgentRecordWithName,
+  AgentRosterEntry,
   AgentRosterResponse,
   AgentSchedule,
   RepoInfo,
 } from "../../types";
+import { useStream } from "../../composables/useStream";
 import AgentCard from "./AgentCard.vue";
 import AgentEditDrawer from "./AgentEditDrawer.vue";
 import AgentDeleteModal from "./AgentDeleteModal.vue";
@@ -45,7 +46,7 @@ const activeRepoName = computed<string>(() => {
 
 const AGENT_LIMIT = 5;
 
-const roster = ref<AgentRecordWithName[]>([]);
+const roster = ref<AgentRosterEntry[]>([]);
 const loading = ref<boolean>(false);
 const error = ref<string | null>(null);
 
@@ -54,14 +55,14 @@ const error = ref<string | null>(null);
 // object distinguishes "drawer closed" from "drawer open in create
 // mode" without tri-state booleans.
 interface DrawerState {
-  agent: AgentRecordWithName | null;
+  agent: AgentRosterEntry | null;
 }
 const drawer = ref<DrawerState | null>(null);
 const drawerBusy = ref(false);
 const drawerError = ref<string | null>(null);
 
 // Delete modal state.
-const deleteTarget = ref<AgentRecordWithName | null>(null);
+const deleteTarget = ref<AgentRosterEntry | null>(null);
 const deleteBusy = ref(false);
 const deleteError = ref<string | null>(null);
 
@@ -88,7 +89,61 @@ async function loadRoster(): Promise<void> {
   }
 }
 
-onMounted(() => void loadRoster());
+/**
+ * DX-164 Phase 6 — busy state poll + SSE.
+ *
+ * `BUSY_REFRESH_MS` reloads the roster on a slow tick so per-card
+ * `busyOn.started_at` stays accurate over long horizons. The SSE
+ * subscription on `dispatch:created` / `dispatch:updated` triggers an
+ * immediate refresh on every dispatch lifecycle event for THIS repo —
+ * the worker stamps `agent_name` at dispatch start, so the very first
+ * `dispatch:created` event after a poller pick lands the green dot
+ * within milliseconds. Tearing both down on unmount + on `activeRepo`
+ * change keeps idle tabs off the SSE fleet (matching `useAgents` Phase
+ * 5/7's visibility-pause posture).
+ */
+const BUSY_REFRESH_MS = 5_000;
+let busyTimer: ReturnType<typeof setInterval> | null = null;
+let stream: ReturnType<typeof useStream> | null = null;
+let unsubscribers: Array<() => void> = [];
+
+function attachLiveBusy(): void {
+  detachLiveBusy();
+  busyTimer = setInterval(() => {
+    if (activeRepoName.value) void loadRoster();
+  }, BUSY_REFRESH_MS);
+  stream = useStream();
+  // Both topics fire on dispatch-state transitions for any repo. Both
+  // payloads carry `repoName` so per-repo subscribers can filter
+  // symmetrically (`dispatch:updated` was extended in DX-164 Phase 6
+  // to include the field — the worker already had it on the dispatch
+  // row at finalize time). Unrelated repos' dispatches are ignored.
+  const matchesActiveRepo = (event: { data: unknown }): boolean => {
+    const data = event.data as { repoName?: string } | null | undefined;
+    return !!data?.repoName && data.repoName === activeRepoName.value;
+  };
+  const onEvent = (event: { data: unknown }): void => {
+    if (matchesActiveRepo(event)) void loadRoster();
+  };
+  unsubscribers.push(stream.subscribe("dispatch:created", onEvent));
+  unsubscribers.push(stream.subscribe("dispatch:updated", onEvent));
+}
+function detachLiveBusy(): void {
+  if (busyTimer) {
+    clearInterval(busyTimer);
+    busyTimer = null;
+  }
+  for (const off of unsubscribers) off();
+  unsubscribers = [];
+  stream?.disconnect();
+  stream = null;
+}
+
+onMounted(() => {
+  void loadRoster();
+  attachLiveBusy();
+});
+onBeforeUnmount(detachLiveBusy);
 watch(activeRepoName, () => {
   drawer.value = null;
   deleteTarget.value = null;
@@ -101,7 +156,7 @@ function openCreate(): void {
   drawer.value = { agent: null };
 }
 
-function openEdit(agent: AgentRecordWithName): void {
+function openEdit(agent: AgentRosterEntry): void {
   drawerError.value = null;
   drawer.value = { agent };
 }
@@ -125,7 +180,7 @@ async function onSubmit(input: {
   drawerBusy.value = true;
   drawerError.value = null;
   try {
-    let saved: AgentRecordWithName;
+    let saved: AgentRosterEntry;
     if (isCreate) {
       const create: AgentCreateInput = {
         name: input.name,
@@ -176,7 +231,7 @@ async function onSubmit(input: {
   }
 }
 
-function askDelete(agent: AgentRecordWithName): void {
+function askDelete(agent: AgentRosterEntry): void {
   deleteError.value = null;
   deleteTarget.value = agent;
 }

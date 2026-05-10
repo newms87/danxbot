@@ -7304,8 +7304,18 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     ]);
     let capturedOnComplete: ((job: unknown) => void) | undefined;
     mockDispatch.mockImplementation(
-      (opts: { onComplete?: (job: unknown) => void }) => {
+      (opts: {
+        onComplete?: (job: unknown) => void;
+        pairedWriteYaml?: { write: (pid: number) => void };
+      }) => {
         capturedOnComplete = opts.onComplete;
+        // DX-140 — the launcher invokes `pairedWriteYaml.write(pid)` after
+        // the runtime fork resolves the agent's PID. Mirroring the
+        // sibling "agent timeout" test's pattern: invoking the callback
+        // populates `activeDispatches` mid-test so the
+        // `expect(map.has("ISS-FAKE")).toBe(false)` after onComplete
+        // measures a real transition, not a no-op.
+        opts.pairedWriteYaml?.write(4243);
         return Promise.resolve({
           dispatchId: "did-fail",
           job: {
@@ -7342,8 +7352,18 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
     });
 
     await poll(MOCK_REPO_CONTEXT);
+
+    // Mirror the timeout-test pre-condition assertion — the dispatch
+    // callback must have populated activeDispatches via the
+    // pairedWriteYaml.write hook above. Without this assertion the
+    // capturedOnComplete-undefined failure mode shows up confusingly
+    // far downstream.
+    const mapDuring = _getActiveDispatchesForTesting(MOCK_REPO_CONTEXT.name);
+    expect(mapDuring.has("ISS-FAKE")).toBe(true);
+
     mockClearDispatchAndWrite.mockClear();
 
+    expect(capturedOnComplete).toBeDefined();
     capturedOnComplete!({
       id: "job-fail",
       status: "failed",

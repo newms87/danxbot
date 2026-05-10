@@ -4,12 +4,14 @@ import type { IssueListItem } from "../../types";
 import TypeBadge from "./TypeBadge.vue";
 import ChildrenChecklist from "./ChildrenChecklist.vue";
 import ACBar from "./ACBar.vue";
+import AgentBadge from "../AgentBadge.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
 import { relativeTime } from "../../utils/relativeTime";
 
 const props = withDefaults(
   defineProps<{
     issue: IssueListItem;
+    repo: string;
     dimmed?: boolean;
     scoped?: boolean;
     showStatus?: boolean;
@@ -74,6 +76,14 @@ function onParentClick(e: MouseEvent): void {
         <span class="blocked-glyph">{{ blockedByCard ? '⏸' : '⛔' }}</span>
         {{ blockedLabel }}
       </span>
+      <AgentBadge
+        v-if="issue.assigned_agent"
+        :class="{ 'ml-auto': !blocked }"
+        class="row-agent"
+        :repo="props.repo"
+        :agent-name="issue.assigned_agent"
+        size="sm"
+      />
     </div>
 
     <div class="title">{{ issue.title }}</div>
@@ -184,6 +194,12 @@ function onParentClick(e: MouseEvent): void {
   border: 1px solid;
   border-radius: 4px;
   background: rgb(15 23 42 / 0.4);
+}
+.row-agent {
+  margin-left: 4px;
+}
+.row-agent.ml-auto {
+  margin-left: auto;
 }
 .blocked-badge {
   margin-left: auto;

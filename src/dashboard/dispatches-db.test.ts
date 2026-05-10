@@ -43,6 +43,7 @@ import {
   listDispatchesByIssueId,
   listBoardChatDispatches,
   getResumeChain,
+  agentBusyOn,
 } from "./dispatches-db.js";
 import type {
   Dispatch,
@@ -548,6 +549,87 @@ describe("findNonTerminalDispatches", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe("alive-1");
     expect(rows[0].hostPid).toBe(4321);
+  });
+});
+
+describe("agentBusyOn", () => {
+  it("queries non-terminal rows for repo with agent_name set, oldest-first", async () => {
+    mockQuery.mockResolvedValueOnce([]);
+    await agentBusyOn("danxbot");
+    const sql = mockQuery.mock.calls[0][0] as string;
+    const params = mockQuery.mock.calls[0][1] as unknown[];
+    expect(sql).toContain("FROM dispatches");
+    expect(sql).toContain("repo_name = $1");
+    expect(sql).toContain("agent_name IS NOT NULL");
+    // Excludes the canonical TERMINAL_STATUSES list (built from the
+    // single source of truth in `dispatches.ts`) so a stale terminal
+    // dispatch never reports busy.
+    for (const t of ["completed", "failed", "cancelled"]) {
+      expect(sql).toContain(`'${t}'`);
+    }
+    expect(sql).toMatch(/ORDER BY started_at ASC/i);
+    expect(params).toEqual(["danxbot"]);
+  });
+
+  it("returns Map<agentName, busyOn> with card_id from issue_id", async () => {
+    mockQuery.mockResolvedValueOnce([
+      {
+        agent_name: "alice",
+        issue_id: "DX-1",
+        started_at: 1_700_000_001_000,
+        id: "uuid-1",
+      },
+      {
+        agent_name: "bob",
+        issue_id: null,
+        started_at: 1_700_000_002_000,
+        id: "uuid-2",
+      },
+    ]);
+    const map = await agentBusyOn("danxbot");
+    expect(map.get("alice")).toEqual({
+      card_id: "DX-1",
+      started_at: 1_700_000_001_000,
+      dispatch_id: "uuid-1",
+    });
+    expect(map.get("bob")).toEqual({
+      card_id: null,
+      started_at: 1_700_000_002_000,
+      dispatch_id: "uuid-2",
+    });
+    expect(map.size).toBe(2);
+  });
+
+  it("oldest dispatch wins when an agent has multiple in-flight rows", async () => {
+    // Lock invariant says one-per-agent; defensive — rows arrive
+    // oldest-first per ORDER BY, so the FIRST one we see for an agent
+    // is the one we keep.
+    mockQuery.mockResolvedValueOnce([
+      {
+        agent_name: "alice",
+        issue_id: "DX-1",
+        started_at: 1_000,
+        id: "older",
+      },
+      {
+        agent_name: "alice",
+        issue_id: "DX-2",
+        started_at: 2_000,
+        id: "newer",
+      },
+    ]);
+    const map = await agentBusyOn("danxbot");
+    expect(map.get("alice")?.dispatch_id).toBe("older");
+    expect(map.get("alice")?.card_id).toBe("DX-1");
+    expect(map.size).toBe(1);
+  });
+
+  it("skips rows with empty agent_name", async () => {
+    mockQuery.mockResolvedValueOnce([
+      { agent_name: "", issue_id: "DX-1", started_at: 1, id: "x" },
+    ]);
+    const map = await agentBusyOn("danxbot");
+    expect(map.size).toBe(0);
   });
 });
 

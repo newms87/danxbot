@@ -19,7 +19,12 @@ import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import type { DispatchProxyDeps } from "./dispatch-proxy.js";
 import { requireUser } from "./auth-middleware.js";
-import { countDispatchesByRepo, type RepoDispatchCounts } from "./dispatches-db.js";
+import {
+  agentBusyOn,
+  countDispatchesByRepo,
+  type AgentBusyOn,
+  type RepoDispatchCounts,
+} from "./dispatches-db.js";
 import {
   DASHBOARD_PREFIX,
   FEATURES,
@@ -36,9 +41,21 @@ const log = createLogger("agents-toggles");
 
 /**
  * Roster shape returned by `GET /api/agents?repo=<name>` (DX-159 Phase 1).
+ *
+ * Each `agents[i]` is the per-repo `AgentRecord` enriched with `name`
+ * (DX-159) plus an optional `busyOn` field (DX-164 Phase 6) describing
+ * the agent's currently in-flight dispatch — `card_id` is the issue id
+ * the agent is working on (`null` for slack/api dispatches), `started_at`
+ * is the dispatch's epoch ms, `dispatch_id` is the dispatch UUID. The
+ * SPA renders the green-dot busy badge off this field; absence means
+ * idle.
  */
+export interface AgentRosterEntry extends AgentRecordWithName {
+  busyOn?: AgentBusyOn;
+}
+
 export interface AgentRosterResponse {
-  agents: AgentRecordWithName[];
+  agents: AgentRosterEntry[];
   settings: { conflictCheckEnabled: boolean };
 }
 
@@ -62,8 +79,23 @@ export async function handleGetRoster(
   try {
     const settings = readSettings(repo.localPath);
     const agentsMap = settings.agents ?? {};
-    const agents: AgentRecordWithName[] = Object.entries(agentsMap).map(
-      ([name, record]) => ({ name, ...record }),
+    // DX-164 Phase 6: join the live `dispatches` table so each agent
+    // surfaces its in-flight `busyOn`. Best-effort — a DB hiccup logs
+    // and returns the roster with no busy info rather than 500-ing
+    // the whole page; the SPA renders idle-grey-dot for everyone in
+    // that case, which is the correct degraded UX.
+    const busyMap = await agentBusyOn(repo.name).catch((err) => {
+      log.warn(
+        `handleGetRoster(${repoName}): agentBusyOn lookup failed — rendering with idle state`,
+        err,
+      );
+      return new Map<string, AgentBusyOn>();
+    });
+    const agents: AgentRosterEntry[] = Object.entries(agentsMap).map(
+      ([name, record]) => {
+        const busy = busyMap.get(name);
+        return busy ? { name, ...record, busyOn: busy } : { name, ...record };
+      },
     );
     const conflictCheckEnabled =
       settings.agentDefaults?.conflictCheckEnabled ?? true;

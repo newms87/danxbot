@@ -1,22 +1,25 @@
 <script setup lang="ts">
 /**
- * AgentCard — single roster row for the Agents tab. DX-160 Phase 2.
+ * AgentCard — single roster row for the Agents tab. DX-160 Phase 2 +
+ * DX-164 Phase 6 live busy state.
  *
- * Live busy badge is a placeholder grey dot in this phase; real
- * busy state lands in DX-164 (Phase 6). The card is read-only —
- * Edit + Delete affordances emit events the parent handles.
+ * Busy state derives from the optional `busyOn` field on the roster
+ * entry: when present the card flips green, names the in-flight card,
+ * and renders elapsed time as `Nm` / `Nh` / `Nd`. Idle state shows the
+ * grey dot. Elapsed time is a `setInterval` tick (60s) so the badge
+ * animates without a roster re-fetch.
  */
-import { computed } from "vue";
-import type { AgentRecordWithName } from "../../types";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import type { AgentBusyOn, AgentRosterEntry } from "../../types";
 import AgentAvatar from "./AgentAvatar.vue";
 
 const props = defineProps<{
-  agent: AgentRecordWithName;
+  agent: AgentRosterEntry;
   repo: string;
 }>();
 const emit = defineEmits<{
-  edit: [AgentRecordWithName];
-  delete: [AgentRecordWithName];
+  edit: [AgentRosterEntry];
+  delete: [AgentRosterEntry];
 }>();
 
 function summarizeSchedule(): string {
@@ -29,6 +32,45 @@ function summarizeSchedule(): string {
   return `${active.join("·")} · ${props.agent.schedule.tz}`;
 }
 const scheduleSummary = computed(summarizeSchedule);
+
+// `now.value` ticks every 60s while the card is mounted so the busy
+// badge's elapsed-time label rerenders without the roster re-fetching.
+// 60s is generous — agents typically live for minutes — and avoids
+// burning a per-second timer per card. Cleared on unmount.
+const now = ref<number>(Date.now());
+let tick: ReturnType<typeof setInterval> | null = null;
+onMounted(() => {
+  tick = setInterval(() => {
+    now.value = Date.now();
+  }, 60_000);
+});
+onBeforeUnmount(() => {
+  if (tick) clearInterval(tick);
+});
+
+const busy = computed<AgentBusyOn | null>(() => props.agent.busyOn ?? null);
+const busyLabel = computed<string>(() => {
+  const b = busy.value;
+  if (!b) return "idle";
+  const elapsed = formatElapsed(now.value - b.started_at);
+  return b.card_id
+    ? `running ${b.card_id} (${elapsed})`
+    : `running (${elapsed})`;
+});
+
+/**
+ * Pretty-print an elapsed window. Anything <60s reads as `<1m` so the
+ * badge never says `0m` immediately after a dispatch starts.
+ */
+function formatElapsed(ms: number): string {
+  if (ms < 60_000) return "<1m";
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
 </script>
 
 <template>
@@ -56,10 +98,15 @@ const scheduleSummary = computed(summarizeSchedule);
       <div class="head-right">
         <span
           class="busy-dot"
-          title="Live busy badge — wired in Phase 6"
-          aria-label="busy state placeholder"
-          data-test="agent-busy-placeholder"
+          :class="{ on: busy }"
+          :title="busyLabel"
+          :aria-label="busyLabel"
+          data-test="agent-busy-dot"
         ></span>
+        <span
+          class="busy-label"
+          :data-test="`agent-busy-label-${agent.name}`"
+        >{{ busyLabel }}</span>
       </div>
     </header>
     <div class="caps">
@@ -132,12 +179,33 @@ const scheduleSummary = computed(summarizeSchedule);
   background: rgba(100, 116, 139, 0.2);
   color: #94a3b8;
 }
+.head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .busy-dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
   background: #475569;
   display: inline-block;
+  flex-shrink: 0;
+}
+.busy-dot.on {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgb(34 197 94 / 0.18);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.busy-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 .caps {
   display: flex;

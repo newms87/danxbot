@@ -206,9 +206,14 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     );
     expect(danxNext).toMatch(/Resume self-check/);
     // Load-bearing instructions agents must read before doing work.
-    expect(danxNext).toMatch(/status is terminal/i);
-    expect(danxNext).toMatch(/every AC item is checked/i);
-    expect(danxNext).toMatch(/retro is filled/i);
+    // Phrasing has drifted (e.g. "terminal state + checked ACs + filled
+    // retro" vs the original "status is terminal" / "every AC item is
+    // checked" / "retro is filled") but the LOAD-BEARING components must
+    // each surface — pin on the canonical noun phrases the SKILL's
+    // resume-gate body uses.
+    expect(danxNext).toMatch(/terminal state|status:\s*"?Done"?/i);
+    expect(danxNext).toMatch(/every AC verif|checked: true/i);
+    expect(danxNext).toMatch(/retro\.(good|bad).*non-empty|retro is filled/i);
     expect(danxNext).toMatch(/danxbot_complete/);
     expect(danxNext).toMatch(/Do not redo work/i);
     // Verification mechanism the agent uses when status is non-

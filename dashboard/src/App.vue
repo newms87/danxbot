@@ -120,6 +120,16 @@ watch(
 function selectDispatch(d: Dispatch): void {
   selectedDispatch.value = d;
 }
+
+/**
+ * DX-164 Phase 6 — handler for the issue-drawer agent badge click.
+ * Switching `activeTab` writes the URL via the existing watcher; the
+ * AgentsPage already scopes to `selectedRepo` so the agent's roster
+ * card is in view on render.
+ */
+function onOpenAgent(): void {
+  activeTab.value = "agents";
+}
 </script>
 
 <template>
@@ -169,7 +179,12 @@ function selectDispatch(d: Dispatch): void {
         />
       </template>
 
-      <IssuesPage v-else-if="activeTab === 'issues'" v-model:selected-repo="selectedRepo" class="flex-1 min-h-0" />
+      <IssuesPage
+        v-else-if="activeTab === 'issues'"
+        v-model:selected-repo="selectedRepo"
+        class="flex-1 min-h-0"
+        @open-agent="onOpenAgent"
+      />
 
       <AgentsPage v-else-if="activeTab === 'agents'" :selected-repo="selectedRepo" :repos="repos" />
 
