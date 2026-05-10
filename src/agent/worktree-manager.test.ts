@@ -82,7 +82,6 @@ describe("WorktreeManager", () => {
 
       expect(runner.calls).toEqual([
         { cwd: ctx.localPath, args: ["worktree", "list", "--porcelain"] },
-        { cwd: ctx.localPath, args: ["fetch", "origin"] },
         {
           cwd: ctx.localPath,
           args: ["worktree", "add", "-B", "alice", expectedPath, "origin/main"],
@@ -118,10 +117,11 @@ describe("WorktreeManager", () => {
 
       await wm.bootstrap(ctx, "alice");
 
-      // Three calls: list, fetch, add — proving bootstrap proceeded past
-      // the idempotency check despite the lookalike sibling.
-      expect(runner.calls).toHaveLength(3);
-      expect(runner.calls[2].args).toEqual([
+      // Two calls: list + add — proving bootstrap proceeded past the
+      // idempotency check despite the lookalike sibling. (No fetch —
+      // worktree mgmt is purely local.)
+      expect(runner.calls).toHaveLength(2);
+      expect(runner.calls[1].args).toEqual([
         "worktree",
         "add",
         "-B",
@@ -160,21 +160,20 @@ describe("WorktreeManager", () => {
       ]);
     });
 
-    it("throws WorktreeError when `git fetch origin` fails", async () => {
+    it("does not call `git fetch` (worktree mgmt is purely local — no GitHub round-trip)", async () => {
       const runner = fakeRunner({
         responses: [
           { match: "worktree list", response: { stdout: "" } },
-          {
-            match: "fetch origin",
-            response: { code: 128, stderr: "fatal: unable to access" },
-          },
+          { match: "worktree add", response: { stdout: "" } },
         ],
       });
       const wm = createWorktreeManager(runner);
 
-      await expect(wm.bootstrap(ctx, "alice")).rejects.toBeInstanceOf(
-        WorktreeError,
-      );
+      await wm.bootstrap(ctx, "alice");
+
+      expect(
+        runner.calls.some((c) => c.args[0] === "fetch"),
+      ).toBe(false);
     });
 
     it("throws WorktreeError when `git worktree add` fails", async () => {
@@ -206,7 +205,6 @@ describe("WorktreeManager", () => {
     it("returns clean on a clean tree on origin/main", async () => {
       const runner = fakeRunner({
         responses: [
-          { match: "fetch origin", response: { stdout: "" } },
           { match: "status --porcelain", response: { stdout: "" } },
           {
             match: "rev-list --count origin/main..HEAD",
@@ -228,7 +226,6 @@ describe("WorktreeManager", () => {
       const porcelain = " M src/file.ts\n?? newfile.txt";
       const runner = fakeRunner({
         responses: [
-          { match: "fetch origin", response: { stdout: "" } },
           { match: "status --porcelain", response: { stdout: porcelain } },
           {
             match: "rev-list --count origin/main..HEAD",
@@ -253,7 +250,6 @@ describe("WorktreeManager", () => {
     it("returns dirty with reason 'branch has unmerged commits' when ahead > 0", async () => {
       const runner = fakeRunner({
         responses: [
-          { match: "fetch origin", response: { stdout: "" } },
           { match: "status --porcelain", response: { stdout: "" } },
           {
             match: "rev-list --count origin/main..HEAD",
@@ -278,7 +274,6 @@ describe("WorktreeManager", () => {
     it("returns clean when only behind origin/main (reset will fast-forward)", async () => {
       const runner = fakeRunner({
         responses: [
-          { match: "fetch origin", response: { stdout: "" } },
           { match: "status --porcelain", response: { stdout: "" } },
           {
             match: "rev-list --count origin/main..HEAD",
@@ -296,23 +291,15 @@ describe("WorktreeManager", () => {
       expect(result).toEqual({ state: "clean" });
     });
 
-    it("returns dirty (with empty details) when fetch fails — defers to recovery rather than risk a wrong reset", async () => {
-      const runner = fakeRunner({
-        responses: [
-          {
-            match: "fetch origin",
-            response: { code: 128, stderr: "fatal: network unreachable" },
-          },
-        ],
-      });
+    it("does not call `git fetch` (validation is purely local against cached refs)", async () => {
+      const runner = fakeRunner();
       const wm = createWorktreeManager(runner);
 
-      const result = await wm.validate(ctx, "alice");
-      expect(result.state).toBe("dirty");
-      if (result.state === "dirty") {
-        expect(result.reason).toMatch(/git fetch origin failed/);
-        expect(result.details).toEqual({ porcelain: "", ahead: 0, behind: 0 });
-      }
+      await wm.validate(ctx, "alice");
+
+      expect(
+        runner.calls.some((c) => c.args[0] === "fetch"),
+      ).toBe(false);
     });
   });
 
@@ -321,33 +308,16 @@ describe("WorktreeManager", () => {
   // ============================================================
 
   describe("resetClean", () => {
-    it("fetches origin, checks out the agent branch, then `git reset --hard origin/main`", async () => {
+    it("checks out the agent branch then `git reset --hard origin/main` (no fetch — local op)", async () => {
       const runner = fakeRunner();
       const wm = createWorktreeManager(runner);
 
       await wm.resetClean(ctx, "alice");
 
       expect(runner.calls).toEqual([
-        { cwd: expectedPath, args: ["fetch", "origin"] },
         { cwd: expectedPath, args: ["checkout", "alice"] },
         { cwd: expectedPath, args: ["reset", "--hard", "origin/main"] },
       ]);
-    });
-
-    it("throws WorktreeError when fetch fails", async () => {
-      const runner = fakeRunner({
-        responses: [
-          {
-            match: "fetch origin",
-            response: { code: 128, stderr: "fatal: network unreachable" },
-          },
-        ],
-      });
-      const wm = createWorktreeManager(runner);
-
-      await expect(wm.resetClean(ctx, "alice")).rejects.toBeInstanceOf(
-        WorktreeError,
-      );
     });
 
     it("throws WorktreeError when checkout fails", async () => {

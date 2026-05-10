@@ -2,7 +2,7 @@
 import type { IssueDetail } from "../../types";
 import TypeBadge from "./TypeBadge.vue";
 import AgentBadge from "../AgentBadge.vue";
-import { relativeTime } from "../../utils/relativeTime";
+import IssueAgeBadge from "../IssueAgeBadge.vue";
 
 import { computed } from "vue";
 
@@ -48,7 +48,12 @@ const blockedByCard = computed(
         class="blocked-badge"
         :class="{ 'by-card': blockedByCard }"
       >{{ blockedByCard ? "⏸ Blocked by" : "⛔ Blocked" }}</span>
-      <span class="updated">{{ relativeTime(issue.updated_at) }}</span>
+      <span class="age-slot">
+        <IssueAgeBadge
+          :updated-at="issue.updated_at"
+          :created-at="issue.created_at"
+        />
+      </span>
       <button
         v-if="props.showClose"
         type="button"
@@ -139,10 +144,10 @@ const blockedByCard = computed(
   background: rgb(245 158 11 / 0.15);
   border-color: rgb(245 158 11 / 0.35);
 }
-.updated {
+.age-slot {
   margin-left: auto;
-  font-size: 11px;
-  color: #64748b;
+  display: inline-flex;
+  align-items: center;
 }
 .close {
   background: none;

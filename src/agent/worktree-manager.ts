@@ -183,16 +183,12 @@ export function createWorktreeManager(
         return;
       }
 
-      // Refresh origin/main so the new branch tracks current upstream.
-      // Failure here is fatal — without origin/main we can't create the
-      // worktree at the right ref.
-      const fetched = await runner.run(ctx.localPath, ["fetch", "origin"]);
-      if (fetched.code !== 0) {
-        throw new WorktreeError(
-          `bootstrap(${agentName}): git fetch origin failed: ${fetched.stderr.trim()}`,
-        );
-      }
-
+      // No `git fetch` here. Worktree creation is a purely-local op:
+      // `git worktree add -B name path origin/main` only needs the cached
+      // local `refs/remotes/origin/main` to exist, which it does (host
+      // clone keeps it current). GitHub connectivity is the agent's
+      // concern at push/pull time, not the worktree manager's.
+      //
       // `-B` creates the branch if missing or resets it to `origin/main` if
       // it already exists (e.g. orphaned from a prior teardown that lost
       // the worktree but left the local branch around).
@@ -283,21 +279,12 @@ export function createWorktreeManager(
       assertAgentName(agentName);
       const path = this.worktreePath(ctx, agentName);
 
-      // `git fetch origin` keeps `origin/main` current so ahead/behind
-      // are measured against the latest upstream.
-      const fetched = await runner.run(path, ["fetch", "origin"]);
-      if (fetched.code !== 0) {
-        // Network failure is treated as dirty — the recovery-mode prompt
-        // will surface it and the agent can decide how to proceed (likely
-        // re-try fetch and continue). Better to defer than risk a stale
-        // origin/main causing a wrong-direction reset.
-        return {
-          state: "dirty",
-          reason: `git fetch origin failed: ${fetched.stderr.trim()}`,
-          details: { porcelain: "", ahead: 0, behind: 0 },
-        };
-      }
-
+      // No `git fetch` here. Validation is purely local — porcelain +
+      // rev-list against the cached `origin/main` ref is enough to
+      // decide clean/dirty for the next dispatch. GitHub connectivity is
+      // the agent's concern at push/pull time, not ours. Behind-only
+      // (cached `origin/main` newer than HEAD) is still clean and
+      // `resetClean` fast-forwards without touching local work.
       const porcelainResult = await runner.run(path, [
         "status",
         "--porcelain",
@@ -342,17 +329,9 @@ export function createWorktreeManager(
       assertAgentName(agentName);
       const path = this.worktreePath(ctx, agentName);
 
-      // Fetch first so `origin/main` reflects the absolute latest. The
-      // dispatch path's `validate` already fetched, but in production the
-      // gap between validate and reset is non-zero; refreshing here keeps
-      // `resetClean` self-sufficient for ad-hoc calls (e.g. recovery
-      // dispatch's post-cleanup step).
-      const fetched = await runner.run(path, ["fetch", "origin"]);
-      if (fetched.code !== 0) {
-        throw new WorktreeError(
-          `resetClean(${agentName}): git fetch origin failed: ${fetched.stderr.trim()}`,
-        );
-      }
+      // No `git fetch` here. Reset is purely local — `git reset --hard
+      // origin/main` operates on the cached ref. GitHub connectivity is
+      // the agent's concern at push/pull time, not ours.
       const checkout = await runner.run(path, ["checkout", agentName]);
       if (checkout.code !== 0) {
         throw new WorktreeError(

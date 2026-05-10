@@ -196,6 +196,15 @@ D("WorktreeManager (integration, real git)", () => {
     execFileSync("git", ["commit", "-m", "extra"], { cwd: sib, stdio: "ignore" });
     execFileSync("git", ["push", "origin", "main"], { cwd: sib, stdio: "ignore" });
 
+    // Refresh alice's cached `origin/main` — the manager doesn't fetch
+    // (worktree mgmt is purely local; GitHub connectivity is the agent's
+    // concern), so the caller does it explicitly when it needs to see
+    // newly-pushed remote commits.
+    execFileSync("git", ["fetch", "origin"], {
+      cwd: wtPath,
+      stdio: "ignore",
+    });
+
     // Verify alice's worktree is now strictly behind origin/main.
     const result = await wm.validate(ctx(), "alice");
     expect(result.state).toBe("clean");
@@ -226,6 +235,14 @@ D("WorktreeManager (integration, real git)", () => {
     execFileSync("git", ["add", "."], { cwd: sib, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "next"], { cwd: sib, stdio: "ignore" });
     execFileSync("git", ["push", "origin", "main"], { cwd: sib, stdio: "ignore" });
+
+    // Refresh cached `origin/main` so resetClean's `git reset --hard
+    // origin/main` sees the new commit. The manager itself never
+    // fetches.
+    execFileSync("git", ["fetch", "origin"], {
+      cwd: wtPath,
+      stdio: "ignore",
+    });
 
     await wm.resetClean(ctx(), "alice");
 

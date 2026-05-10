@@ -6,7 +6,7 @@ import ChildrenChecklist from "./ChildrenChecklist.vue";
 import ACBar from "./ACBar.vue";
 import AgentBadge from "../AgentBadge.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
-import { relativeTime } from "../../utils/relativeTime";
+import IssueAgeBadge from "../IssueAgeBadge.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -35,7 +35,6 @@ const blockedLabel = computed(() => {
   if (blockedByCard.value) return `Blocked by ${blockedByIds.value.join(", ")}`;
   return "Blocked";
 });
-const updatedLabel = computed(() => relativeTime(props.issue.updated_at));
 const statusMeta = computed(() => COLUMN_ACCENTS[props.issue.status]);
 
 // Unified `children[]` (ISS-81). Epic = phase cards (label "Phases"),
@@ -109,7 +108,12 @@ function onParentClick(e: MouseEvent): void {
         <span class="emoji">💬</span>{{ issue.comments_count }}
       </span>
       <span v-if="issue.has_retro" class="retro">retro</span>
-      <span class="updated">{{ updatedLabel }}</span>
+      <span class="age-slot" @click.stop>
+        <IssueAgeBadge
+          :updated-at="issue.updated_at"
+          :created-at="issue.created_at"
+        />
+      </span>
     </div>
   </button>
 </template>
@@ -260,8 +264,9 @@ function onParentClick(e: MouseEvent): void {
   color: #86efac;
   font-size: 10px;
 }
-.updated {
+.age-slot {
   margin-left: auto;
-  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
 }
 </style>

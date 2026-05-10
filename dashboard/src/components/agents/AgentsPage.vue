@@ -90,28 +90,22 @@ async function loadRoster(): Promise<void> {
 }
 
 /**
- * DX-164 Phase 6 — busy state poll + SSE.
+ * DX-164 Phase 6 — busy state via SSE only.
  *
- * `BUSY_REFRESH_MS` reloads the roster on a slow tick so per-card
- * `busyOn.started_at` stays accurate over long horizons. The SSE
- * subscription on `dispatch:created` / `dispatch:updated` triggers an
- * immediate refresh on every dispatch lifecycle event for THIS repo —
- * the worker stamps `agent_name` at dispatch start, so the very first
- * `dispatch:created` event after a poller pick lands the green dot
- * within milliseconds. Tearing both down on unmount + on `activeRepo`
- * change keeps idle tabs off the SSE fleet (matching `useAgents` Phase
- * 5/7's visibility-pause posture).
+ * The SSE subscription on `dispatch:created` / `dispatch:updated`
+ * triggers a roster refresh on every dispatch lifecycle event for THIS
+ * repo — the worker stamps `agent_name` at dispatch start, so the very
+ * first `dispatch:created` event after a poller pick lands the green
+ * dot within milliseconds. Per-card elapsed-time animation is driven by
+ * `AgentCard.vue`'s 60s local tick — no roster re-fetch needed for
+ * cosmetic time updates. See `.claude/rules/dashboard.md` "Real-time
+ * Updates Are Mandatory".
  */
-const BUSY_REFRESH_MS = 5_000;
-let busyTimer: ReturnType<typeof setInterval> | null = null;
 let stream: ReturnType<typeof useStream> | null = null;
 let unsubscribers: Array<() => void> = [];
 
 function attachLiveBusy(): void {
   detachLiveBusy();
-  busyTimer = setInterval(() => {
-    if (activeRepoName.value) void loadRoster();
-  }, BUSY_REFRESH_MS);
   stream = useStream();
   // Both topics fire on dispatch-state transitions for any repo. Both
   // payloads carry `repoName` so per-repo subscribers can filter
@@ -129,10 +123,6 @@ function attachLiveBusy(): void {
   unsubscribers.push(stream.subscribe("dispatch:updated", onEvent));
 }
 function detachLiveBusy(): void {
-  if (busyTimer) {
-    clearInterval(busyTimer);
-    busyTimer = null;
-  }
   for (const off of unsubscribers) off();
   unsubscribers = [];
   stream?.disconnect();

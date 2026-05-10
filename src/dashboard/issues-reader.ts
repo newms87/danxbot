@@ -13,6 +13,9 @@ import {
   type DbIssueRow,
 } from "../poller/issues-db.js";
 import { repoNameFromPath } from "../poller/repo-name.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("issues-reader");
 
 /**
  * Slim child entry on the list shape — child id + title + type + raw
@@ -70,6 +73,15 @@ export interface IssueListItem {
   has_retro: boolean;
   updated_at: number;
   /**
+   * Card creation time in epoch ms. Derived from `external_id` when the
+   * tracker uses MongoDB ObjectId-shaped ids (Trello: first 8 hex chars
+   * = unix seconds — deterministic). Falls back to `mirror_updated_at`
+   * (first-seen by chokidar) for cards that have not yet been mirrored
+   * outbound (`external_id: ""`). For those, `created_at === updated_at`
+   * on first render and stabilizes once the row is touched again.
+   */
+  created_at: number;
+  /**
    * Operator priority knob. `[1.0, 5.0]`; default `3.0`. Surfaced on the
    * list item so the SPA mirror (`dashboard/src/types.ts`) can render it
    * and so a future Agents-tab edit affordance has the value pre-loaded.
@@ -88,8 +100,15 @@ export interface IssueListItem {
   assigned_agent: string | null;
 }
 
-/** Full Issue plus the mirror-write timestamp (ms) and a serialized YAML rendering of the current state. */
-export type IssueDetail = Issue & { updated_at: number; raw_yaml: string };
+/** Full Issue plus the mirror-write timestamp (ms), creation time (ms), and a serialized YAML rendering of the current state. */
+export type IssueDetail = Issue & {
+  updated_at: number;
+  created_at: number;
+  raw_yaml: string;
+};
+
+export { deriveCreatedAt } from "./issue-created-at.js";
+import { deriveCreatedAt } from "./issue-created-at.js";
 
 /**
  * Per-issue history entry projected from `issue_history`. The mirror
@@ -208,6 +227,7 @@ function toListItem(
       issue.retro.action_item_ids.length > 0 ||
       issue.retro.commits.length > 0,
     updated_at: mtimeMs,
+    created_at: deriveCreatedAt(issue.external_id, mtimeMs),
     priority: issue.priority,
     assigned_agent: issue.assigned_agent,
   };
@@ -238,7 +258,21 @@ export async function listIssues(
 ): Promise<IssueListItem[]> {
   const repoName = repoNameFromPath(repoCwd);
   const dbRows = await dbListAllIssues(repoName);
-  const all = dbRows.map(toRawIssue);
+  // Skip-and-log on per-row corruption rather than throw — a single
+  // transient bad row (mid-write chokidar event, partially-mirrored
+  // create) used to crash the entire `/api/issues` endpoint. The
+  // mirror's invariant guarantees data.id matches the YAML stem, so
+  // `toRawIssue` shouldn't throw; the catch is defense-in-depth.
+  const all: RawIssue[] = [];
+  for (const row of dbRows) {
+    try {
+      all.push(toRawIssue(row));
+    } catch (err) {
+      log.warn(
+        `Skipping rogue issue row in ${repoName}: ${(err as Error).message}`,
+      );
+    }
+  }
 
   const openRaw: RawIssue[] = [];
   const closedRaw: RawIssue[] = [];
@@ -348,6 +382,7 @@ export async function readIssueDetail(
   return {
     ...raw.issue,
     updated_at: raw.mtimeMs,
+    created_at: deriveCreatedAt(raw.issue.external_id, raw.mtimeMs),
     raw_yaml: serializeIssue(raw.issue),
   };
 }

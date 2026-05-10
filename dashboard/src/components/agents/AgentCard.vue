@@ -9,9 +9,10 @@
  * grey dot. Elapsed time is a `setInterval` tick (60s) so the badge
  * animates without a roster re-fetch.
  */
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed } from "vue";
 import type { AgentBusyOn, AgentRosterEntry } from "../../types";
 import AgentAvatar from "./AgentAvatar.vue";
+import { useNowTick } from "../../composables/useNowTick";
 
 const props = defineProps<{
   agent: AgentRosterEntry;
@@ -33,20 +34,10 @@ function summarizeSchedule(): string {
 }
 const scheduleSummary = computed(summarizeSchedule);
 
-// `now.value` ticks every 60s while the card is mounted so the busy
-// badge's elapsed-time label rerenders without the roster re-fetching.
-// 60s is generous — agents typically live for minutes — and avoids
-// burning a per-second timer per card. Cleared on unmount.
-const now = ref<number>(Date.now());
-let tick: ReturnType<typeof setInterval> | null = null;
-onMounted(() => {
-  tick = setInterval(() => {
-    now.value = Date.now();
-  }, 60_000);
-});
-onBeforeUnmount(() => {
-  if (tick) clearInterval(tick);
-});
+// 60s elapsed-label tick — see `useNowTick` for the rationale on
+// matching tick interval to bucket resolution. Pure cosmetic refresh,
+// never a server call (cf. `.claude/rules/dashboard.md` real-time rule).
+const now = useNowTick();
 
 const busy = computed<AgentBusyOn | null>(() => props.agent.busyOn ?? null);
 const busyLabel = computed<string>(() => {
