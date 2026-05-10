@@ -120,7 +120,7 @@ describe("buildDispatchScript", () => {
     expect(content).toMatch(/^exec script -q -f /m);
   });
 
-  it("MUST NOT invoke claude with -p — host mode is interactive (see .claude/rules/host-mode-interactive.md)", () => {
+  it("MUST NOT invoke claude with -p — host mode is interactive (see .claude/rules/agent-dispatch.md 'Host mode MUST be interactive')", () => {
     const scriptPath = buildScript();
     const content = readFileSync(scriptPath, "utf-8");
     const executable = content

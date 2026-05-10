@@ -2,7 +2,7 @@
 # Per-repo workers live in <repo>/.danxbot/config/compose.yml.
 #
 # Usage:
-#   docker compose up -d              # start API + dashboard-dev (HMR) + mysql
+#   docker compose up -d              # start API + dashboard-dev (HMR) + postgres
 #   make launch-worker REPO=platform  # start a worker
 #
 # Dev surfaces:

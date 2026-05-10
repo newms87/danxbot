@@ -6,8 +6,8 @@
  * PID-liveness watcher so the outer launcher lifecycle sees the exit.
  *
  * Does NOT spawn a second headless claude — that would defeat the
- * single-fork invariant (see `.claude/rules/agent-dispatch.md` and
- * `.claude/rules/host-mode-interactive.md`).
+ * single-fork invariant (see `.claude/rules/agent-dispatch.md` —
+ * Single Fork Principle + "Host mode MUST be interactive").
  *
  * The function only owns the spawn shape. Monitoring (SessionLogWatcher),
  * stall detection, heartbeat, and event forwarding are wired by

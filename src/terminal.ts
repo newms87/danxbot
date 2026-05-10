@@ -91,7 +91,7 @@ export function getTerminalLogPath(jobId: string): string {
  * case. If this script ever uses `claude -p "<prompt>"`, host mode has no reason
  * to exist — it becomes a slower, flakier duplicate of docker mode.
  *
- * See .claude/rules/host-mode-interactive.md for the full rule.
+ * See .claude/rules/agent-dispatch.md "Host mode MUST be interactive" for the full rule.
  *
  * Before editing this function, confirm:
  *   1. The inner `claude` invocation is NOT `-p` and does NOT exit after one turn
@@ -191,7 +191,7 @@ report_status "running" ""
 ${pidEmit}
 # CRITICAL: Host mode MUST be interactive. firstMessage is delivered as a
 # positional argument (NOT piped via -p, which exits after one turn).
-# See .claude/rules/host-mode-interactive.md.
+# See .claude/rules/agent-dispatch.md "Host mode MUST be interactive".
 #
 # \`exec\` replaces this bash process with \`script\` in place, keeping the PID
 # stable so the PID in PID_FILE wraps claude's pty directly — cancellation

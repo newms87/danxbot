@@ -12,8 +12,8 @@
  * matches byte-for-byte in both modes (modulo the temp dir path) — the only
  * divergence is the spawn envelope (direct child_process vs wt.exe + script).
  *
- * See `.claude/rules/agent-dispatch.md` (Single Fork Principle) and
- * `.claude/rules/host-mode-interactive.md` for the invariants this enforces.
+ * See `.claude/rules/agent-dispatch.md` — Single Fork Principle + the
+ * "Host mode MUST be interactive" section enforce these invariants.
  */
 
 import { mkdtempSync, writeFileSync } from "node:fs";
