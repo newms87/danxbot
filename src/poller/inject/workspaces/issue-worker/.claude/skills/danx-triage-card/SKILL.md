@@ -77,12 +77,15 @@ The triage agent has THREE paths. The right path is decided by the YAML's
 | `waiting_on == null` AND `status === "Review"` | **Review** — ICE-score |
 | `waiting_on == null` AND `status === "Blocked"` | **Blocked** — Hard Gate audit |
 
-`Blocked` is a top-level `status` value (replaced "Needs Help"). The schema's allowed statuses
-are `Review`, `ToDo`, `In Progress`, `Blocked`, `Done`, `Cancelled`. The
-legacy `Needs Approval` parking status was retired in DX-231; the
-orthogonal `requires_human` field replaces it. A "blocked" card has
-`status: "Blocked"` AND `blocked: {reason, timestamp}` populated; the
-worker enforces the invariant `status === "Blocked" ⟺ blocked !== null`.
+The schema's allowed statuses are `Review`, `ToDo`, `In Progress`,
+`Blocked`, `Done`, `Cancelled`. A "blocked" card has `status: "Blocked"`
+AND `blocked: {reason, timestamp}` populated; the worker enforces the
+invariant `status === "Blocked" ⟺ blocked !== null`. The orthogonal
+`requires_human` field is a separate dispatch gate — it can co-exist
+with any open status and is set / cleared via the field directly, not
+via `status`. See `.claude/rules/danx-requires-human.md` for the
+whitelist + blacklist on when an agent may set it.
+
 A card with `status: ToDo` AND `waiting_on != null` is a Waiting On card
 and routes to the Waiting On path; a card with `status: ToDo` AND
 `waiting_on == null` is dispatchable work and OUT OF SCOPE for triage (the
@@ -149,7 +152,7 @@ Decide one of three outcomes:
 | **Cancel** | Obsolete / superseded / no-longer-desired. | `status: Cancelled`, `triage.last_status: Cancel`, `triage.ice` zeros. |
 | **Approve** | Implementable but the **direction needs human sign-off** before work starts (architectural risk, cross-cutting scope, ambiguous tradeoff). | `status: ToDo`, `requires_human: {reason, steps[], set_by: "agent", set_at: <ISO>}`, `triage.last_status: Approve`, `triage.ice` populated (so when the human flips `requires_human: null` and the card unblocks for dispatch, the queue already has a score). |
 
-**Before emitting `Approve`:** populate `requires_human` with a clear `reason` (one sentence — what direction needs human sign-off) and `steps[]` (concrete actions the operator must take to clear the field — e.g. "Confirm direction in design doc", "Decide between options A and B"). Set `set_by: "agent"` and `set_at` to the current ISO timestamp. The poller's dispatch filter (Phase 2 of DX-231) skips any card with `requires_human != null`, so the card stays parked until the human clears the field. The legacy `status: "Needs Approval"` parking status was retired in DX-231 and is rejected fail-loud by the loader.
+**Before emitting `Approve`:** read `.claude/rules/danx-requires-human.md` first — the whitelist + blacklist there is authoritative on whether `Approve` is the right call. Then populate `requires_human` with a clear `reason` (one sentence — what direction needs human sign-off) and `steps[]` (concrete actions the operator must take to clear the field — e.g. "Confirm direction in design doc", "Decide between options A and B"). Set `set_by: "agent"` and `set_at` to the current ISO timestamp. The poller's dispatch filter (`src/poller/local-issues.ts`) skips any card with `requires_human != null`, so the card stays parked until the human clears the field via the dashboard "Mark Resolved" affordance.
 
 Distinguishing `Approve` vs `Cancel` vs `Keep`:
 
@@ -220,14 +223,15 @@ A card is **out of scope** ONLY when ALL conditions hold:
 | `ToDo` / `In Progress` | Refuse — these are dispatchable / actively-dispatched cards; never re-triaged. `danxbot_complete({status: "failed", summary: "..."})`. |
 | `Done` / `Cancelled` | Refuse — terminal cards stay frozen. `danxbot_complete({status: "failed", summary: "..."})`. |
 
-DX-231 retired the legacy `Needs Approval` parking status. The
-orthogonal `requires_human` field replaces it — a card with
-`requires_human != null` is parked the same way (poller skips
-dispatching it) but lives at any open status.
+A card with `requires_human != null` is parked by the poller's
+dispatch filter regardless of its open status — it is also out of
+scope for the per-status triage agent. `requires_human` is cleared by
+the human (via the dashboard "Mark Resolved" affordance), not by
+triage.
 
 **A card with `waiting_on != null` is NEVER out of scope** — even if its `status` is `ToDo` (the worker forces `ToDo` on every waiting-on card). **A card with `blocked != null` is NEVER out of scope** — even if its `status` is `Blocked` (the worker enforces the invariant). Always route waiting-on cards to the Waiting On path and blocked cards to the Blocked path. Re-read the in-scope table at the top of "Per-status decision trees" if you find yourself looking at `status: ToDo` and considering refusal — the FIRST checks are `waiting_on != null` and `blocked != null`, not `status`.
 
-The poller is the gatekeeper; if you receive a genuinely out-of-scope card (`blocked == null` AND non-Review/non-Needs-Help status) the poller has a bug — fail loud so it surfaces.
+The poller is the gatekeeper; if you receive a genuinely out-of-scope card (`blocked == null` AND non-Review/non-Blocked status) the poller has a bug — fail loud so it surfaces.
 
 ## YAML changes — checklist (every triage save)
 

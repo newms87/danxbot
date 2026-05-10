@@ -195,6 +195,32 @@ describe("local-issues — DB-backed", () => {
     });
 
     it.skipIf(!handle)(
+      "excludes cards with requires_human != null (DX-231 dispatch gate)",
+      async () => {
+        await seed(
+          makeIssue({
+            id: "ISS-1",
+            external_id: "a",
+            requires_human: {
+              reason: "Need Stripe API key rotated",
+              steps: [
+                "Log into Stripe → API keys → Roll secret",
+                "Update DANX_STRIPE_KEY in <repo>/.danxbot/.env",
+                "Restart worker; toggle off this flag",
+              ],
+              set_by: "agent",
+              set_at: "2026-05-10T16:50:00.000Z",
+            },
+          }),
+          1000,
+        );
+        await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+      },
+    );
+
+    it.skipIf(!handle)(
       "excludes cards that already carry a non-null dispatch (occupied)",
       async () => {
         await seed(
