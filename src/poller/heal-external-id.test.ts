@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { healExternalIds, HEAL_COMMENT_HEADER } from "./heal-external-id.js";
-import { pushOrphans } from "./orphan-push.js";
+import { pushTrelloDiff } from "../issue/reconcile/trello.js";
 import { MemoryTracker } from "../issue-tracker/memory.js";
 import { TrelloTracker } from "../issue-tracker/trello.js";
 import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
@@ -280,14 +280,16 @@ describe("healExternalIds (DX-150 — per-tick external_id format heal)", () => 
     expect(readYaml("open", "DX-67").external_id).toBe("");
   });
 
-  it("(8) hands off to the orphan-push path: a healed YAML gets a fresh tracker-minted id on the next tick", async () => {
+  it("(8) hands off to the orphan-create branch: a healed YAML gets a fresh tracker-minted id via reconcile step 7", async () => {
     // Seed an open YAML with the bad mem-N id, heal it (blanks +
-    // audits), then run pushOrphans against a MemoryTracker — the
-    // blanked YAML gets minted a fresh `mem-1`. This is the
-    // integration AC for the heal → orphan-push → fresh card chain
-    // that motivates this whole pass: the bad data is unrecoverable
-    // by sync (would 400 on the foreign tracker), so the only path
-    // back to "card exists on the active tracker" is to re-mint.
+    // audits), then run pushTrelloDiff (the Phase 3 replacement for
+    // orphan-push) against a MemoryTracker — the blanked YAML gets
+    // minted a fresh `mem-1` via syncIssue's external_id === "" branch.
+    // This is the integration AC for the heal → reconcile-push → fresh
+    // card chain that motivates this whole pass: the bad data is
+    // unrecoverable by sync (would 400 on the foreign tracker), so the
+    // only path back to "card exists on the active tracker" is to
+    // re-mint via the orphan-create branch reconcile step 7 calls.
     const issue = buildIssue({ id: "DX-30", external_id: "mem-2" });
     writeFileSync(resolve(openDir, "DX-30.yml"), serializeIssue(issue));
 
@@ -303,14 +305,21 @@ describe("healExternalIds (DX-150 — per-tick external_id format heal)", () => 
     ]);
     expect(readYaml("open", "DX-30").external_id).toBe("");
 
-    // Next tick — orphan-push picks up the blanked YAML and mints a
-    // fresh id via the (still-MemoryTracker for test ergonomics)
-    // tracker. In production this would be the new TrelloTracker
-    // minting a 24-hex id; the contract is identical.
-    const pushResult = await pushOrphans(repoRoot, memory, "DX");
+    // Reconcile step 7 picks up the blanked YAML and mints a fresh id
+    // via the (still-MemoryTracker for test ergonomics) tracker. In
+    // production this would be TrelloTracker minting a 24-hex id; the
+    // contract is identical.
+    const blanked = readYaml("open", "DX-30");
+    const pushResult = await pushTrelloDiff({
+      issue: blanked,
+      repoName: "test-heal-orphan",
+      repoLocalPath: repoRoot,
+      issuePrefix: "DX",
+      tracker: memory,
+    });
 
-    expect(pushResult.pushed).toBe(1);
     expect(pushResult.errors).toEqual([]);
+    expect(pushResult.pushed).toBe(true);
     const reloaded = readYaml("open", "DX-30");
     expect(reloaded.external_id).not.toBe("");
     expect(reloaded.external_id).not.toBe("mem-2");

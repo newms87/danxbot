@@ -1,58 +1,66 @@
 /**
- * Best-effort tracker push on the dispatch's tracked issue. Phase 3 of
- * the tracker-agnostic-agents epic (Trello wsb4TVNT) wires this into
- * `handleStop` so an agent that calls `danxbot_complete` after editing
- * its YAML still gets that YAML pushed to the tracker before the
- * process exits — without waiting up to ~30-60s for the next poller
- * tick to mirror it. DX-157 made this the SOLE entry point for an
- * agent-driven terminal-save tracker push.
+ * Best-effort tracker push on the dispatch's tracked issue (DX-218 /
+ * Phase 3 of the Event-Driven Worker epic). Wired into `handleStop` so
+ * an agent that calls `danxbot_complete` after editing its YAML still
+ * gets that YAML pushed to the tracker before the process exits —
+ * without waiting up to ~30-60s for the next poller tick to mirror it.
+ *
+ * Phase 3 changed the implementation: instead of running its own
+ * tracker push (the legacy `syncTrackedIssueOnComplete` → `runSync`
+ * chain), this module now calls `reconcileIssue(..., "lifecycle")`.
+ * Reconcile owns step 7 (outbound tracker push via `pushTrelloDiff`),
+ * which goes through the per-card serial queue so concurrent reconciles
+ * for the same card don't race each other on Trello. The `lifecycle`
+ * trigger tells reconcile to AWAIT the trailing tracker push before
+ * returning; the dashboard sees terminal tracker state by the time
+ * `handleStop` SIGTERMs the agent.
  *
  * Lookup chain:
  *   1. `getDispatch(jobId)` → trigger metadata.
  *   2. `trigger === "trello"` && `metadata.cardId` → tracker-native
- *      external_id. Translate to internal `id` by scanning the local
- *      YAML directory (`findByExternalId`); skip if no local file
- *      mirrors that external_id (the dispatch ran but no save ever
- *      happened, so there's nothing local to sync).
+ *      external_id. Translate to internal `id` via the local YAML
+ *      directory (`findByExternalId`); skip if no local file mirrors
+ *      that external_id.
  *   3. Anything else (Slack, api, missing row) → no-op.
  *
- * Errors (DB lookup failure, sync exception) are logged and swallowed —
- * a tracker hiccup must NEVER block the agent's terminal state from
- * landing. The agent already passed `danxbot_complete`; the worker must
- * not turn that into a stall.
- *
- * Lives in its own module so unit tests can import + exercise it
- * without dragging the full `worker/dispatch.ts` chain (which imports
- * config + DB + Slack listener at module load time).
+ * Errors (DB lookup failure, reconcile exception) are logged and
+ * swallowed — a tracker hiccup must NEVER block the agent's terminal
+ * state from landing. The agent already passed `danxbot_complete`; the
+ * worker must not turn that into a stall.
  */
 
-import { syncTrackedIssueOnComplete } from "./issue-route.js";
+import { reconcileIssue } from "../issue/reconcile.js";
 import { findByExternalId } from "../poller/yaml-lifecycle.js";
 import { createLogger } from "../logger.js";
 import type {
   Dispatch,
   TrelloTriggerMetadata,
 } from "../dashboard/dispatches.js";
+import type { ReconcileTrigger } from "../issue/reconcile-types.js";
+import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import type { RepoContext } from "../types.js";
 
 const log = createLogger("auto-sync");
 
 export interface AutoSyncDeps {
   getDispatch: (jobId: string) => Promise<Dispatch | null>;
-  runSync: typeof syncTrackedIssueOnComplete;
+  /**
+   * Reconcile invocation seam. Production binds to `reconcileIssue`;
+   * tests inject a mock to assert the call without booting the chokepoint.
+   */
+  reconcile: (
+    repo: ReconcileRepoContext,
+    id: string,
+    trigger: ReconcileTrigger,
+  ) => Promise<unknown>;
 }
 
 /**
  * Lazy-load `getDispatchById` so this module's top-level import doesn't
  * pull `src/config.ts` (which validates DB env vars at module-init).
- * Tests pass their own `getDispatch` and never hit this path; the lazy
- * import only fires for production calls. Per
- * `.claude/rules/danx-repo-workflow.md` "Isolate Pure Helpers".
  */
 async function defaultGetDispatch(jobId: string): Promise<Dispatch | null> {
-  const { getDispatchById } = await import(
-    "../dashboard/dispatches-db.js"
-  );
+  const { getDispatchById } = await import("../dashboard/dispatches-db.js");
   return getDispatchById(jobId);
 }
 
@@ -61,33 +69,26 @@ export async function autoSyncTrackedIssue(
   repo: RepoContext,
   deps: AutoSyncDeps = {
     getDispatch: defaultGetDispatch,
-    runSync: syncTrackedIssueOnComplete,
+    reconcile: reconcileIssue,
   },
 ): Promise<void> {
   try {
     const row = await deps.getDispatch(jobId);
     if (!row || row.trigger !== "trello") return;
-    // The `Dispatch.trigger === "trello"` discriminator pins
-    // `triggerMetadata` to `TrelloTriggerMetadata` shape — see
-    // `src/dashboard/dispatches.ts`. The cast is type-safe given the
-    // discriminator check above, and a future rename of `cardId` would
-    // surface as a compile error here rather than as a silent runtime
-    // miss.
     const meta = row.triggerMetadata as TrelloTriggerMetadata;
     const externalId = meta.cardId;
     if (!externalId) return;
-    // Translate tracker-native external_id → internal id by scanning
-    // local YAMLs. The trigger metadata still carries the external_id
-    // (it's the only stable handle the poller has at dispatch time),
-    // but the worker's save-route is keyed by the internal id.
     const local = await findByExternalId(repo.localPath, externalId);
     if (!local) return;
-    const result = await deps.runSync(jobId, repo, local.id);
-    if (!result.ok && result.errors.length > 0) {
-      log.warn(
-        `[Dispatch ${jobId}] danxbot_complete auto-sync skipped: ${result.errors.join("; ")}`,
-      );
-    }
+    await deps.reconcile(
+      {
+        name: repo.name,
+        localPath: repo.localPath,
+        issuePrefix: repo.issuePrefix,
+      },
+      local.id,
+      "lifecycle",
+    );
   } catch (err) {
     log.error(
       `[Dispatch ${jobId}] danxbot_complete auto-sync failed (non-fatal)`,

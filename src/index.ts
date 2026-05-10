@@ -12,7 +12,14 @@ import { createLogger } from "./logger.js";
 import { runMigrations } from "./db/migrate.js";
 import { getPool, initPlatformPool } from "./db/connection.js";
 import { startIssuesMirror } from "./db/issues-mirror.js";
-import { reconcileIssue } from "./issue/reconcile.js";
+import {
+  reconcileIssue,
+  setReconcileSystemErrorHookForRepo,
+  setReconcileTrackerForRepo,
+} from "./issue/reconcile.js";
+import { bootRescheduleRetryQueue } from "./issue-tracker/retry-queue.js";
+import { createIssueTracker } from "./issue-tracker/index.js";
+import { recordSystemError } from "./dashboard/system-errors.js";
 import { setRepoName } from "./poller/repo-name.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
@@ -196,6 +203,37 @@ async function startWorkerMode(): Promise<void> {
     },
   );
   log.info(`[${repo.name}] Issues mirror started`);
+
+  // Phase 3 of Event-Driven Worker (DX-218): register the per-repo
+  // tracker with reconcile + the retry-queue scheduler so step 7 (the
+  // outbound push) can resolve the tracker without threading it through
+  // every callsite. Boot-rescan persisted retry entries and arm their
+  // setTimeout timers so a worker restart resumes failed pushes on
+  // schedule. Cheap: boot scan walks `<repo>/.danxbot/.trello-retry/`
+  // once, typically empty.
+  const repoTracker = createIssueTracker(repo);
+  const retrySystemErrorHook = (message: string): void => {
+    recordSystemError({
+      source: "retry-queue",
+      severity: "error",
+      repo: repo.name,
+      message,
+    });
+  };
+  setReconcileTrackerForRepo(repo.name, repoTracker);
+  setReconcileSystemErrorHookForRepo(repo.name, retrySystemErrorHook);
+  const reschedule = bootRescheduleRetryQueue({
+    repoLocalPath: repo.localPath,
+    repoName: repo.name,
+    issuePrefix: repo.issuePrefix,
+    tracker: repoTracker,
+    recordSystemError: retrySystemErrorHook,
+  });
+  if (reschedule.rearmed > 0 || reschedule.malformed > 0) {
+    log.info(
+      `[${repo.name}] Retry queue boot-rescheduled: ${reschedule.rearmed} armed, ${reschedule.malformed} malformed`,
+    );
+  }
 
   // Start the worker HTTP server (dispatch API + health)
   await startWorkerServer(repo);

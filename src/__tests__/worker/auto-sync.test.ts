@@ -205,32 +205,32 @@ describe("autoSyncTrackedIssue", () => {
     await seedDb(issue);
     void writeIssue;
 
-    const runSync = vi.fn().mockResolvedValue({ ok: true, errors: [] });
+    const reconcile = vi.fn().mockResolvedValue(undefined);
     const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-99"));
-    await autoSyncTrackedIssue("job-1", repo, { getDispatch, runSync });
+    await autoSyncTrackedIssue("job-1", repo, { getDispatch, reconcile });
 
-    expect(runSync).toHaveBeenCalledTimes(1);
-    expect(runSync).toHaveBeenCalledWith(
-      "job-1",
-      expect.any(Object),
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "test", localPath: scratchRoot }),
       "ISS-9",
+      "lifecycle",
     );
     },
   );
 
   it("skips runSync when no local YAML carries the trello cardId (no migration done)", async () => {
     // No YAML file on disk → findByExternalId returns null → no sync.
-    const runSync = vi.fn();
+    const reconcile = vi.fn();
     const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("ghost"));
     await autoSyncTrackedIssue("job-1", buildRepo(), {
       getDispatch,
-      runSync,
+      reconcile,
     });
-    expect(runSync).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("skips sync for slack-triggered dispatches", async () => {
-    const runSync = vi.fn();
+    const reconcile = vi.fn();
     const getDispatch = vi.fn().mockResolvedValue({
       ...buildTrelloRow("ignored"),
       trigger: "slack",
@@ -245,13 +245,13 @@ describe("autoSyncTrackedIssue", () => {
     });
     await autoSyncTrackedIssue("job-1", buildRepo(), {
       getDispatch,
-      runSync,
+      reconcile,
     });
-    expect(runSync).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("skips sync for api-triggered dispatches", async () => {
-    const runSync = vi.fn();
+    const reconcile = vi.fn();
     const getDispatch = vi.fn().mockResolvedValue({
       ...buildTrelloRow("ignored"),
       trigger: "api",
@@ -264,52 +264,52 @@ describe("autoSyncTrackedIssue", () => {
     });
     await autoSyncTrackedIssue("job-1", buildRepo(), {
       getDispatch,
-      runSync,
+      reconcile,
     });
-    expect(runSync).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("skips sync when the dispatch row is missing", async () => {
-    const runSync = vi.fn();
+    const reconcile = vi.fn();
     const getDispatch = vi.fn().mockResolvedValue(null);
     await autoSyncTrackedIssue("job-1", buildRepo(), {
       getDispatch,
-      runSync,
+      reconcile,
     });
-    expect(runSync).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("never throws when getDispatch rejects (non-fatal)", async () => {
-    const runSync = vi.fn();
+    const reconcile = vi.fn();
     const getDispatch = vi.fn().mockRejectedValue(new Error("db down"));
     await expect(
-      autoSyncTrackedIssue("job-1", buildRepo(), { getDispatch, runSync }),
+      autoSyncTrackedIssue("job-1", buildRepo(), { getDispatch, reconcile }),
     ).resolves.toBeUndefined();
-    expect(runSync).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("never throws when runSync rejects (non-fatal)", async () => {
-    const runSync = vi.fn().mockRejectedValue(new Error("sync exploded"));
+    const reconcile = vi.fn().mockRejectedValue(new Error("sync exploded"));
     const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-1"));
     await expect(
-      autoSyncTrackedIssue("job-1", buildRepo(), { getDispatch, runSync }),
+      autoSyncTrackedIssue("job-1", buildRepo(), { getDispatch, reconcile }),
     ).resolves.toBeUndefined();
   });
 
   it("skips sync when trello dispatch row has empty cardId", async () => {
-    const runSync = vi.fn();
+    const reconcile = vi.fn();
     const getDispatch = vi.fn().mockResolvedValue({
       ...buildTrelloRow(""),
     });
     await autoSyncTrackedIssue("job-1", buildRepo(), {
       getDispatch,
-      runSync,
+      reconcile,
     });
-    expect(runSync).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it("skips sync when trello dispatch row has missing cardId field entirely", async () => {
-    const runSync = vi.fn();
+    const reconcile = vi.fn();
     const trelloRow = buildTrelloRow("temp");
     // Strip cardId off the metadata object completely — simulates an
     // earlier-format dispatch row missing the field.
@@ -321,9 +321,9 @@ describe("autoSyncTrackedIssue", () => {
     });
     await autoSyncTrackedIssue("job-1", buildRepo(), {
       getDispatch,
-      runSync,
+      reconcile,
     });
-    expect(runSync).not.toHaveBeenCalled();
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it.skipIf(!handle)(
@@ -339,15 +339,15 @@ describe("autoSyncTrackedIssue", () => {
     };
     await seedDb(issue);
 
-    const runSync = vi.fn().mockResolvedValue({
+    const reconcile = vi.fn().mockResolvedValue({
       ok: false,
       errors: ["missing required field: title"],
     });
     const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-1"));
     await expect(
-      autoSyncTrackedIssue("job-1", repo, { getDispatch, runSync }),
+      autoSyncTrackedIssue("job-1", repo, { getDispatch, reconcile }),
     ).resolves.toBeUndefined();
-    expect(runSync).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
     },
   );
 });

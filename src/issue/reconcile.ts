@@ -1,14 +1,15 @@
 /**
- * Phase 1 + Phase 2 of the Event-Driven Worker epic
- * (DX-215 / DX-216 / DX-217).
+ * Phases 1, 2, and 3 of the Event-Driven Worker epic
+ * (DX-215 / DX-216 / DX-217 / DX-218).
  *
  * `reconcileIssue(repo, id, trigger)` is the chokepoint every entry point
  * (chokidar watcher, dispatch lifecycle, scheduler, cron audit, Trello
  * inbound hydration) calls when a single card's state may have changed.
  * Phase 1 wired the function with steps 1, 2, 4, 5, 6 implemented (load,
- * validate, hash diff, atomic write, await DB mirror). Phase 2 (this
- * commit) absorbs three poller helpers into step 3 and activates steps
- * 9-10:
+ * validate, hash diff, atomic write, await DB mirror). Phase 2 absorbed
+ * three poller helpers into step 3 and activated steps 9-10. Phase 3
+ * (this commit) lights up step 7 — the outbound tracker push — and
+ * retires the per-tick `_poll` mirror that previously did the same job.
  *
  *   - Step 3a: parent-status derive from children (was
  *     `recomputeParentStatuses`).
@@ -16,6 +17,14 @@
  *     `resolveWaitingOnCards`).
  *   - Step 3c: file location heal — `open/` ↔ `closed/` move based on
  *     terminal/non-terminal status (was `healLocalYamls`).
+ *   - Step 7 (Phase 3): outbound tracker push via `pushTrelloDiff` from
+ *     `./reconcile/trello.ts`. The push is FIFO-serialized per card by
+ *     the trello module's own slot map; reconcile schedules but does
+ *     not await on `watcher` / `audit` / `hydrate` triggers (return-
+ *     before-network-roundtrip). The `lifecycle` trigger (used by
+ *     `auto-sync.ts` after `danxbot_complete`) DOES await so the
+ *     dashboard sees terminal tracker state by the time the agent
+ *     process exits.
  *   - Step 9: recurse on `parent_id` after a mutating write so the
  *     parent's reconcile re-derives its own status from the new union.
  *   - Step 10: recurse on dependents (every card with
@@ -80,6 +89,8 @@ import {
   type ReconcileResult,
   type ReconcileTrigger,
 } from "./reconcile-types.js";
+import { pushTrelloDiff } from "./reconcile/trello.js";
+import type { IssueTracker } from "../issue-tracker/interface.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("reconcile");
@@ -122,6 +133,91 @@ const mutexes = new Map<string, Promise<unknown>>();
 
 function mutexKey(repoName: string, id: string): string {
   return `${repoName} ${id}`;
+}
+
+/**
+ * Per-repo IssueTracker registry — populated once at worker boot from
+ * `src/index.ts` so reconcile step 7 can resolve the tracker without
+ * threading it through every callsite. Production has one tracker per
+ * worker process (the worker is single-repo); the map shape supports
+ * future multi-repo dashboards.
+ *
+ * Tests register their own tracker via `setReconcileTrackerForRepo`
+ * (typically a `MemoryTracker`). When no tracker is registered for a
+ * given repo, step 7 silently skips — fail-safe for tests that exercise
+ * derived-state mutation but don't care about the outbound tracker push.
+ */
+const trackersByRepo = new Map<string, IssueTracker>();
+
+export function setReconcileTrackerForRepo(
+  repoName: string,
+  tracker: IssueTracker,
+): void {
+  trackersByRepo.set(repoName, tracker);
+}
+
+export function clearReconcileTrackerForRepo(repoName: string): void {
+  trackersByRepo.delete(repoName);
+}
+
+/**
+ * Per-repo `recordSystemError` hook — same registration pattern as the
+ * tracker registry. The hook fires from inside the trello push path
+ * when the retry queue exhausts max attempts (see
+ * `src/issue-tracker/retry-queue.ts#dropExhausted`).
+ */
+const systemErrorHooksByRepo = new Map<
+  string,
+  (message: string) => void | Promise<void>
+>();
+
+export function setReconcileSystemErrorHookForRepo(
+  repoName: string,
+  hook: (message: string) => void | Promise<void>,
+): void {
+  systemErrorHooksByRepo.set(repoName, hook);
+}
+
+export function clearReconcileSystemErrorHookForRepo(repoName: string): void {
+  systemErrorHooksByRepo.delete(repoName);
+}
+
+/**
+ * Per-card cache of "what hash did we last push to the tracker?". When
+ * the on-disk hash matches the cached value, step 7 skips the push
+ * entirely — saves one `tracker.getCard` round-trip per no-op chokidar
+ * fire.
+ *
+ * Cold cache (first reconcile after worker boot) → first push always
+ * fires; idempotent at the tracker layer (`syncIssue` returns 0 writes
+ * when nothing differs). Subsequent reconciles short-circuit until the
+ * agent edits the YAML again.
+ *
+ * Updated AFTER a successful push (no errors). On error the cache stays
+ * stale, so the next reconcile retries the push too — belt-and-
+ * suspenders against a dropped retry-queue entry.
+ */
+// DX-218 Phase 3: cache moved to its own module so retry-queue.ts can
+// also write to it after a successful timer-armed retry, without
+// closing a circular import chain (reconcile → trello → retry-queue →
+// would-be reconcile).
+import {
+  getLastPushedHash as cacheGet,
+  setLastPushedHash as cacheSet,
+  _resetPushHashCache,
+} from "./reconcile/push-hash-cache.js";
+
+/** Visible for tests — read the cache. */
+export function _getLastPushedHash(
+  repoName: string,
+  id: string,
+): string | undefined {
+  return cacheGet(repoName, id);
+}
+
+/** Visible for tests — clear the cache between cases. */
+export function _resetLastPushedHashes(): void {
+  _resetPushHashCache();
 }
 
 /**
@@ -363,150 +459,205 @@ async function reconcileBody(
   const bucketChanged = targetBucket !== loaded.bucket;
 
   // ---- Step 4: diff vs prior canonical ----
-  // No content mutation AND no bucket move means no work happened.
-  if (!mutatedFlag && !bucketChanged) {
-    log.debug(
-      `[${repo.name}] ${id}: no-op (trigger=${trigger}, hash=${prevHash.slice(0, 8)})`,
-    );
-    return {
-      changed: false,
-      prevHash,
-      nextHash: prevHash,
-      errors: [],
-      fanout: emptyFanout(),
-    };
-  }
+  // Even when step 3 detected no derived-state mutation, the on-disk
+  // YAML may have changed since this worker last pushed to the tracker
+  // (the agent's own `Edit` call fired chokidar → reconcile). Step 7
+  // below decides independently whether to push by comparing the
+  // current hash to the per-card lastPushedHash cache. Step 5 (write)
+  // and step 9-10 (recurse) still gate on `mutatedFlag || bucketChanged`
+  // because writing identical bytes is a no-op and recursing on
+  // identical state is wasted work.
 
   // ---- Step 5: atomic write YAML + bucket move ----
   // Pure-bucket-move (terminal status with no content delta) writes the
   // existing serialized body to the target dir; mutated cards re-
   // serialize. Either way, after the write we unlink the previous
   // location if it differs from the target.
+  const reconcileMutated = mutatedFlag || bucketChanged;
   const nextSerialized = mutatedFlag ? serializeIssue(mutated) : loaded.text;
-  ensureIssuesDirs(repo.localPath);
-  const targetPath = issuePath(repo.localPath, mutated.id, targetBucket);
-  writeFileSync(targetPath, nextSerialized);
-  if (resolve(targetPath) !== resolve(loaded.path)) {
-    // Order: write target first, unlink old after — matches
-    // `moveToClosedIfTerminal` so a write failure leaves the YAML
-    // recoverable from the old location.
-    try {
-      unlinkSync(loaded.path);
-    } catch (err) {
-      // Best-effort: if the old file is gone (race with another writer),
-      // the move already happened. Surface as non-fatal so the rest of
-      // the body proceeds.
-      errors.push({
-        step: "bucket-move",
-        message: `Failed to unlink ${loaded.path}: ${(err as Error).message}`,
-        fatal: false,
-      });
-    }
-  }
-
-  // The next-hash MUST match what the watcher computes when it observes
-  // this write — same recipe as `prevHash`: parse the on-disk text,
-  // canonicalize, sha256.
-  const nextHash = sha256(
-    canonicalize(parseYamlText(nextSerialized) as Record<string, unknown>),
-  );
-
-  // ---- Step 6: await DB mirror upsert ----
-  const mirror = getMirrorByLocalPath(repo.localPath);
-  if (mirror) {
-    try {
-      await mirror.awaitMirror(repo.name, id, nextHash, {
-        timeoutMs: RECONCILE_AWAIT_MIRROR_TIMEOUT_MS,
-      });
-    } catch (err) {
-      errors.push({
-        step: "await-mirror",
-        message: (err as Error).message,
-        fatal: false,
-      });
-    }
-  }
-
-  // ---- Steps 7, 8: TODO — tracker push + scheduler poke ----
-  // Phase 3 fills step 7 (tracker outbound diff push); Phase 4 fills
-  // step 8 (scheduler poke). Phase 2's fanout reports the parent + the
-  // dependents this body recursed on — `dispatchableChanged` stays
-  // `false` because Phase 4 owns that signal.
-
-  // ---- Step 9: recurse on parent_id ----
-  // After a write, the parent (if any) needs to re-derive its own status
-  // from the new union of children. The parent has its own mutex slot, so
-  // awaiting the recursive call here cannot deadlock against THIS mutex.
-  let parentRecursed: string | null = null;
-  if (mutated.parent_id) {
-    parentRecursed = mutated.parent_id;
-    if (
-      rec.depth < MAX_RECURSION_DEPTH &&
-      !rec.visited.has(parentRecursed)
-    ) {
-      const childVisited = new Set(rec.visited);
-      childVisited.add(id);
+  if (reconcileMutated) {
+    ensureIssuesDirs(repo.localPath);
+    const targetPath = issuePath(repo.localPath, mutated.id, targetBucket);
+    writeFileSync(targetPath, nextSerialized);
+    if (resolve(targetPath) !== resolve(loaded.path)) {
       try {
-        await reconcileWithContext(repo, parentRecursed, "watcher", {
-          visited: childVisited,
-          depth: rec.depth + 1,
-        });
+        unlinkSync(loaded.path);
       } catch (err) {
         errors.push({
-          step: "recurse-parent",
-          message: `Parent reconcile (${parentRecursed}) failed: ${(err as Error).message}`,
+          step: "bucket-move",
+          message: `Failed to unlink ${loaded.path}: ${(err as Error).message}`,
           fatal: false,
         });
       }
     }
   }
 
-  // ---- Step 10: recurse on dependents ----
-  // Every issue with `waiting_on.by[]` containing this id may have just
-  // been unblocked by this write. Reconcile each so they re-evaluate
-  // step 3b on the same trigger.
-  //
-  // Visited-set accumulation across iterations: when N dependents
-  // reference each other (depA waits on this id AND depB; depB waits
-  // on this id AND depA), a fresh `Set` per iteration would let the
-  // second dep's reconcile re-enter the first dep through ITS step 10
-  // — wasted work + cycle hazard. Accumulating the recursed-into ids
-  // into a single set across the loop keeps each dep's chain aware of
-  // every dep this iteration already handled.
-  let dependents: string[] = [];
-  try {
-    const depRows = await dbListDependentsByWaitingOnId(repoName, id);
-    dependents = depRows.map((d) => d.id);
-  } catch (err) {
-    errors.push({
-      step: "fetch-dependents",
-      message: `Failed to look up dependents of ${id}: ${(err as Error).message}`,
-      fatal: false,
-    });
+  // The next-hash MUST match what the watcher computes when it observes
+  // this write — same recipe as `prevHash`: parse the on-disk text,
+  // canonicalize, sha256. When step 5 didn't write, the hash is
+  // identical to prevHash.
+  const nextHash = reconcileMutated
+    ? sha256(
+        canonicalize(parseYamlText(nextSerialized) as Record<string, unknown>),
+      )
+    : prevHash;
+
+  // ---- Step 6: await DB mirror upsert ----
+  // Only when step 5 wrote. A no-op reconcile already saw the watcher
+  // upsert (it's the trigger that called us); awaiting again would
+  // wait on an upsert that already happened.
+  if (reconcileMutated) {
+    const mirror = getMirrorByLocalPath(repo.localPath);
+    if (mirror) {
+      try {
+        await mirror.awaitMirror(repo.name, id, nextHash, {
+          timeoutMs: RECONCILE_AWAIT_MIRROR_TIMEOUT_MS,
+        });
+      } catch (err) {
+        errors.push({
+          step: "await-mirror",
+          message: (err as Error).message,
+          fatal: false,
+        });
+      }
+    }
   }
-  const stepTenVisited = new Set(rec.visited);
-  stepTenVisited.add(id);
-  if (parentRecursed !== null) stepTenVisited.add(parentRecursed);
-  for (const depId of dependents) {
-    if (rec.depth >= MAX_RECURSION_DEPTH) break;
-    if (stepTenVisited.has(depId)) continue;
-    try {
-      await reconcileWithContext(repo, depId, "watcher", {
-        visited: new Set(stepTenVisited),
-        depth: rec.depth + 1,
+
+  // ---- Step 7: outbound tracker push ----
+  // Push to the tracker when the on-disk hash differs from what we last
+  // pushed for this card. Cold cache (worker just booted) → first push
+  // always fires; idempotent at the tracker layer (`syncIssue` issues
+  // 0 mutating calls when nothing differs).
+  //
+  // Trigger semantics:
+  //   - `lifecycle` (auto-sync from `danxbot_complete`) AWAITS the push
+  //     so the dashboard sees terminal tracker state by the time the
+  //     agent process exits.
+  //   - Every other trigger schedules the push on the per-card slot
+  //     and returns. The slot enforces FIFO order across concurrent
+  //     reconciles for the same card without holding reconcile's
+  //     mutex during the network round-trip.
+  const tracker = trackersByRepo.get(repo.name);
+  const lastPushed = cacheGet(repo.name, id);
+  if (tracker && lastPushed !== nextHash) {
+    const recordSystemError = systemErrorHooksByRepo.get(repo.name);
+    const pushPromise = pushTrelloDiff({
+      issue: mutated,
+      repoName: repo.name,
+      repoLocalPath: repo.localPath,
+      issuePrefix: repo.issuePrefix,
+      tracker,
+      ...(recordSystemError && { deps: { recordSystemError } }),
+    }).then((pushResult) => {
+      // Only update the lastPushedHash cache when the push fully
+      // succeeded (no errors). On error the retry queue takes over;
+      // leaving the cache stale ensures the next reconcile retries the
+      // push too — belt-and-suspenders against a dropped queue entry.
+      if (pushResult.errors.length === 0) {
+        cacheSet(repo.name, id, nextHash);
+      }
+      return pushResult;
+    });
+    if (trigger === "lifecycle") {
+      try {
+        const pushResult = await pushPromise;
+        for (const e of pushResult.errors) {
+          errors.push({
+            step: `tracker-push:${e.step}`,
+            message: e.message,
+            fatal: false,
+          });
+        }
+      } catch (err) {
+        errors.push({
+          step: "tracker-push",
+          message: (err as Error).message,
+          fatal: false,
+        });
+      }
+    } else {
+      // Non-lifecycle: don't await. Attach a tail-catch so an
+      // unawaited rejection doesn't surface as `UnhandledPromiseRejection`.
+      void pushPromise.catch((err) => {
+        log.warn(
+          `[${repo.name}] ${id} async tracker push rejected: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
       });
+    }
+  }
+
+  // ---- Step 8: scheduler poke (Phase 4) ----
+  // `dispatchableChanged` stays `false` until Phase 4 wires the picker.
+
+  // ---- Steps 9 + 10: parent + dependents fanout ----
+  // Only fanout when reconcile actually mutated state. A no-op
+  // reconcile (chokidar fired but step 3 found nothing to derive)
+  // means the upstream agent edit has already triggered its own
+  // chokidar event chain — recursing again would double-process.
+  // The early-return semantics from Phase 1 are preserved here for
+  // the fanout decision; only step 7 (tracker push) is hash-driven.
+  let parentRecursed: string | null = null;
+  let dependents: string[] = [];
+  if (reconcileMutated) {
+    if (mutated.parent_id) {
+      parentRecursed = mutated.parent_id;
+      if (
+        rec.depth < MAX_RECURSION_DEPTH &&
+        !rec.visited.has(parentRecursed)
+      ) {
+        const childVisited = new Set(rec.visited);
+        childVisited.add(id);
+        try {
+          await reconcileWithContext(repo, parentRecursed, "watcher", {
+            visited: childVisited,
+            depth: rec.depth + 1,
+          });
+        } catch (err) {
+          errors.push({
+            step: "recurse-parent",
+            message: `Parent reconcile (${parentRecursed}) failed: ${(err as Error).message}`,
+            fatal: false,
+          });
+        }
+      }
+    }
+
+    try {
+      const depRows = await dbListDependentsByWaitingOnId(repoName, id);
+      dependents = depRows.map((d) => d.id);
     } catch (err) {
       errors.push({
-        step: "recurse-dependents",
-        message: `Dependent reconcile (${depId}) failed: ${(err as Error).message}`,
+        step: "fetch-dependents",
+        message: `Failed to look up dependents of ${id}: ${(err as Error).message}`,
         fatal: false,
       });
     }
-    stepTenVisited.add(depId);
+    const stepTenVisited = new Set(rec.visited);
+    stepTenVisited.add(id);
+    if (parentRecursed !== null) stepTenVisited.add(parentRecursed);
+    for (const depId of dependents) {
+      if (rec.depth >= MAX_RECURSION_DEPTH) break;
+      if (stepTenVisited.has(depId)) continue;
+      try {
+        await reconcileWithContext(repo, depId, "watcher", {
+          visited: new Set(stepTenVisited),
+          depth: rec.depth + 1,
+        });
+      } catch (err) {
+        errors.push({
+          step: "recurse-dependents",
+          message: `Dependent reconcile (${depId}) failed: ${(err as Error).message}`,
+          fatal: false,
+        });
+      }
+      stepTenVisited.add(depId);
+    }
   }
 
   return {
-    changed: true,
+    changed: reconcileMutated,
     prevHash,
     nextHash,
     errors,

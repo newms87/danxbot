@@ -51,10 +51,14 @@ vi.mock("./sync.js", async (importOriginal) => {
 
 import { syncIssue } from "./sync.js";
 import {
+  _resetForTesting,
   backoffMsForAttempt,
+  bootRescheduleRetryQueue,
   drainRetries,
   enqueueRetry,
   MAX_ATTEMPTS,
+  setRetryQueueSystemErrorHookForRepo,
+  setRetryQueueTrackerForRepo,
   type RetryQueueEntry,
 } from "./retry-queue.js";
 import { ensureIssuesDirs, issuePath } from "../poller/yaml-lifecycle.js";
@@ -153,10 +157,15 @@ describe("retry-queue", () => {
 
   beforeEach(() => {
     vi.mocked(syncIssue).mockReset();
+    _resetForTesting();
     tmpDir = mkdtempSync(join(tmpdir(), "danxbot-retry-queue-"));
   });
 
   afterEach(() => {
+    // Cancel every armed timer + clear repo registries so a 30s-deferred
+    // retry from one case doesn't leak into another (or fire after
+    // `tmpDir` is rmSync'd and panic on a missing file).
+    _resetForTesting();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -987,5 +996,457 @@ describe("retry-queue", () => {
       // Queue empty: both entries cleaned up despite the hook throw.
       expect(listQueueFiles(tmpDir)).toEqual([]);
     });
+  });
+
+  /**
+   * DX-218 (Event-Driven Worker Phase 3) — `enqueueRetry` arms a
+   * `setTimeout(nextEligibleAt - now)` that fires the retry callback
+   * inside the same module. These tests exercise the timer-driven path
+   * with vitest fake timers; the legacy `drainRetries`-based assertions
+   * above remain valid because the manual flush helper is preserved.
+   */
+  describe("event-driven retry — setTimeout-armed timer (DX-218)", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("enqueueRetry arms a setTimeout for nextEligibleAt - now and the timer fires the push at the backoff window", async () => {
+      const issue = makeIssue({ id: "ISS-700", external_id: "ext-700" });
+      writeOpenIssue(tmpDir, issue);
+      vi.mocked(syncIssue).mockResolvedValue({
+        updatedLocal: issue,
+        remoteWriteCount: 1,
+      });
+      vi.setSystemTime(1700000000000);
+
+      enqueueRetry({
+        issueId: "ISS-700",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        errMessage: "tracker 503",
+      });
+
+      // BEFORE the backoff window expires — nothing fired yet.
+      expect(syncIssue).not.toHaveBeenCalled();
+      expect(listQueueFiles(tmpDir)).toHaveLength(1);
+
+      // Just inside the backoff window — still nothing.
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(syncIssue).not.toHaveBeenCalled();
+
+      // Cross the 30s threshold — timer fires + callback drains the entry.
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(syncIssue).toHaveBeenCalledTimes(1);
+      expect(listQueueFiles(tmpDir)).toEqual([]);
+    });
+
+    it("transient tracker error reschedules a fresh setTimeout for the next backoff (30s → 2min) and unlinks on eventual success", async () => {
+      const issue = makeIssue({ id: "ISS-701", external_id: "ext-701" });
+      writeOpenIssue(tmpDir, issue);
+      // Attempt 1: throw. Attempt 2: succeed.
+      let calls = 0;
+      vi.mocked(syncIssue).mockImplementation(async (_t, local) => {
+        calls++;
+        if (calls === 1) throw new Error("tracker 503");
+        return { updatedLocal: local, remoteWriteCount: 0 };
+      });
+      vi.setSystemTime(1700000000000);
+
+      enqueueRetry({
+        issueId: "ISS-701",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        errMessage: "tracker 503",
+      });
+
+      // Fire attempt 1 — fails — rewrites entry with attempt=2 + nextEligibleAt at +2min.
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(calls).toBe(1);
+      const filesAfterFail = listQueueFiles(tmpDir);
+      expect(filesAfterFail).toHaveLength(1);
+      const entryAfterFail = readQueueEntry(tmpDir, filesAfterFail[0]!);
+      expect(entryAfterFail.attempt).toBe(2);
+      // Sanity: rescheduled at attempt-2 backoff (2min) from the fire moment (~30s past queuedAt).
+      expect(entryAfterFail.nextEligibleAt).toBeGreaterThan(1700000000000 + 2 * 60 * 1000);
+
+      // Advance just shy of the 2-min mark — nothing more fired.
+      await vi.advanceTimersByTimeAsync(2 * 60 * 1000 - 10_000);
+      expect(calls).toBe(1);
+
+      // Cross the 2-min mark — attempt 2 fires + succeeds + unlinks.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(calls).toBe(2);
+      expect(listQueueFiles(tmpDir)).toEqual([]);
+    });
+
+    it("max-attempts exhaustion via the timer path fires recordSystemError + unlinks entry (matches legacy drain semantics)", async () => {
+      const issue = makeIssue({ id: "ISS-702", external_id: "ext-702" });
+      writeOpenIssue(tmpDir, issue);
+      vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 401"));
+      vi.setSystemTime(1700000000000);
+
+      const recordSystemError = vi.fn();
+
+      // Hand-place a queue entry already at the cap so a single timer
+      // fire trips the exhaustion branch.
+      ensureIssuesDirs(tmpDir);
+      const queueDirPath = resolve(tmpDir, ".danxbot", ".trello-retry");
+      mkdirSync(queueDirPath, { recursive: true });
+      const filename = "001700000000000-cap.json";
+      const path = resolve(queueDirPath, filename);
+      const entry: RetryQueueEntry = {
+        issueId: "ISS-702",
+        attempt: MAX_ATTEMPTS, // 24 → next attempt would be 25 → drop
+        queuedAt: 1700000000000,
+        nextEligibleAt: 1700000000000,
+        lastErr: "prior",
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+      };
+      writeFileSync(path, JSON.stringify(entry));
+
+      // Register tracker + hook the way the boot scan does, then arm
+      // the timer for this entry directly via boot reschedule.
+      const result = bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        recordSystemError,
+      });
+      expect(result.rearmed).toBe(1);
+
+      // Past-due entry → timer fires immediately (delay=0) on next tick.
+      await vi.advanceTimersByTimeAsync(0);
+      // The fire body re-reads + re-syncs once before bumping attempt to 25 → drop.
+      expect(recordSystemError).toHaveBeenCalledTimes(1);
+      expect(String(recordSystemError.mock.calls[0]![0])).toContain(
+        "max attempts (24) exceeded for ISS-702",
+      );
+      expect(listQueueFiles(tmpDir)).toEqual([]);
+    });
+
+    it("timer fires with no tracker registered → re-arms in 30s without a tracker call", async () => {
+      vi.setSystemTime(1700000000000);
+
+      // Queue entry whose `repoName` references a repo we never
+      // register a tracker for.
+      ensureIssuesDirs(tmpDir);
+      const queueDirPath = resolve(tmpDir, ".danxbot", ".trello-retry");
+      mkdirSync(queueDirPath, { recursive: true });
+      const path = resolve(queueDirPath, "001700000000000-orph.json");
+      const entry: RetryQueueEntry = {
+        issueId: "ISS-703",
+        attempt: 1,
+        queuedAt: 1700000000000,
+        nextEligibleAt: 1700000000000,
+        lastErr: "",
+        repoName: "unregistered-repo",
+        issuePrefix: "ISS",
+      };
+      writeFileSync(path, JSON.stringify(entry));
+
+      // Boot rescan registers a tracker only for "test-repo" — the
+      // entry's "unregistered-repo" doesn't match, so the fire body
+      // hits the no-tracker branch.
+      bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+      });
+      // Drop the test-repo registration so the lookup misses (the
+      // boot scan injected `repoName: test-repo` into the entry).
+      _resetForTesting();
+      // Re-arm WITHOUT registering any tracker — fire body must
+      // gracefully re-arm 30s instead of throwing.
+      bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "different-repo",
+        issuePrefix: "DIFF",
+        tracker,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      // syncIssue was NOT called (no tracker resolved for entry).
+      expect(syncIssue).not.toHaveBeenCalled();
+      // Entry still on disk, rewritten with bumped nextEligibleAt.
+      const files = listQueueFiles(tmpDir);
+      expect(files).toHaveLength(1);
+      const rewritten = readQueueEntry(tmpDir, files[0]!);
+      expect(rewritten.nextEligibleAt).toBe(1700000000000 + 30_000);
+    });
+
+    it("bootRescheduleRetryQueue rearms timers for every persisted entry on worker restart", async () => {
+      const a = makeIssue({ id: "ISS-704", external_id: "ext-704" });
+      const b = makeIssue({ id: "ISS-705", external_id: "ext-705" });
+      writeOpenIssue(tmpDir, a);
+      writeOpenIssue(tmpDir, b);
+
+      // Pre-populate two queue entries WITHOUT arming timers (skipArm).
+      vi.setSystemTime(1700000000000);
+      enqueueRetry({
+        issueId: "ISS-704",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        skipArm: true,
+      });
+      enqueueRetry({
+        issueId: "ISS-705",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        skipArm: true,
+      });
+      expect(listQueueFiles(tmpDir)).toHaveLength(2);
+
+      vi.mocked(syncIssue).mockResolvedValue({
+        updatedLocal: a,
+        remoteWriteCount: 0,
+      });
+
+      // Simulate worker restart — boot scan rearms.
+      const result = bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+      });
+      expect(result).toEqual({ rearmed: 2, malformed: 0 });
+
+      // Cross both entries' backoff windows.
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      expect(syncIssue).toHaveBeenCalledTimes(2);
+      expect(listQueueFiles(tmpDir)).toEqual([]);
+    });
+
+    it("setRetryQueueTrackerForRepo + setRetryQueueSystemErrorHookForRepo register the tracker and hook the timer callback resolves at fire time", async () => {
+      const issue = makeIssue({ id: "ISS-706", external_id: "ext-706" });
+      writeOpenIssue(tmpDir, issue);
+      vi.setSystemTime(1700000000000);
+
+      // Enqueue WITHOUT passing tracker / hook in opts — relies on the
+      // setter helpers having been called separately.
+      const recordSystemError = vi.fn();
+      setRetryQueueTrackerForRepo("test-repo", tracker);
+      setRetryQueueSystemErrorHookForRepo("test-repo", recordSystemError);
+      vi.mocked(syncIssue).mockResolvedValue({
+        updatedLocal: issue,
+        remoteWriteCount: 1,
+      });
+
+      enqueueRetry({
+        issueId: "ISS-706",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        errMessage: "tracker 502",
+      });
+
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      expect(syncIssue).toHaveBeenCalledTimes(1);
+      expect(listQueueFiles(tmpDir)).toEqual([]);
+      // No exhaustion → hook never fires.
+      expect(recordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("bootRescheduleRetryQueue drops malformed JSON entries and reports them in the result", () => {
+      ensureIssuesDirs(tmpDir);
+      const queueDirPath = resolve(tmpDir, ".danxbot", ".trello-retry");
+      mkdirSync(queueDirPath, { recursive: true });
+      // Plant one valid + two malformed entries.
+      const valid: RetryQueueEntry = {
+        issueId: "ISS-800",
+        attempt: 1,
+        queuedAt: 1,
+        nextEligibleAt: 1_000_000,
+        lastErr: "",
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+      };
+      writeFileSync(resolve(queueDirPath, "001.json"), JSON.stringify(valid));
+      writeFileSync(resolve(queueDirPath, "002.json"), "{not valid json{{{");
+      writeFileSync(
+        resolve(queueDirPath, "003.json"),
+        JSON.stringify({ issueId: "ISS-801" }),
+      ); // Missing required fields.
+
+      const result = bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+      });
+
+      expect(result).toEqual({ rearmed: 1, malformed: 2 });
+      // Malformed files unlinked, valid one survives.
+      expect(listQueueFiles(tmpDir)).toEqual(["001.json"]);
+    });
+
+    it("bootRescheduleRetryQueue backfills repoName + issuePrefix on legacy entries written before the schema bump", () => {
+      ensureIssuesDirs(tmpDir);
+      const queueDirPath = resolve(tmpDir, ".danxbot", ".trello-retry");
+      mkdirSync(queueDirPath, { recursive: true });
+      // Legacy entry — `repoName` + `issuePrefix` absent on disk.
+      const legacy = {
+        issueId: "ISS-810",
+        attempt: 1,
+        queuedAt: 1,
+        nextEligibleAt: 1_000_000,
+        lastErr: "",
+      };
+      writeFileSync(
+        resolve(queueDirPath, "001.json"),
+        JSON.stringify(legacy),
+      );
+
+      const result = bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+      });
+
+      expect(result).toEqual({ rearmed: 1, malformed: 0 });
+      // The on-disk file is untouched at boot rearm — backfill is in
+      // memory only — but the in-memory entry that armed the timer
+      // carries the boot-supplied identity. (Disk-backfill happens
+      // when the timer fires + rewrites on failure.)
+    });
+
+    it("fireRetry malformed-on-fire (entry rewritten to junk after arming) drops the queue entry without a tracker call", async () => {
+      const issue = makeIssue({ id: "ISS-820", external_id: "ext-820" });
+      writeOpenIssue(tmpDir, issue);
+      vi.setSystemTime(1700000000000);
+
+      enqueueRetry({
+        issueId: "ISS-820",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        skipArm: true,
+      });
+      // Boot rearm sets up the timer + tracker registry.
+      bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+      });
+
+      // Corrupt the queue entry on disk AFTER the timer is armed but
+      // BEFORE it fires — the timer callback re-reads the file and must
+      // gracefully drop it.
+      const files = listQueueFiles(tmpDir);
+      const path = resolve(
+        tmpDir,
+        ".danxbot",
+        ".trello-retry",
+        files[0]!,
+      );
+      writeFileSync(path, "{{not json}}");
+
+      await vi.advanceTimersByTimeAsync(31_000);
+
+      expect(syncIssue).not.toHaveBeenCalled();
+      expect(listQueueFiles(tmpDir)).toEqual([]);
+    });
+
+    it("fireRetry hits the defensive `entry.attempt > MAX_ATTEMPTS` branch when boot-rearmed entry is already past the cap", async () => {
+      ensureIssuesDirs(tmpDir);
+      const queueDirPath = resolve(tmpDir, ".danxbot", ".trello-retry");
+      mkdirSync(queueDirPath, { recursive: true });
+      const overflowing: RetryQueueEntry = {
+        issueId: "ISS-821",
+        attempt: MAX_ATTEMPTS + 1, // Defensive branch — past the cap on disk.
+        queuedAt: 1700000000000,
+        nextEligibleAt: 1700000000000,
+        lastErr: "prior",
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+      };
+      writeFileSync(
+        resolve(queueDirPath, "001.json"),
+        JSON.stringify(overflowing),
+      );
+      const recordSystemError = vi.fn();
+
+      bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        recordSystemError,
+      });
+      vi.setSystemTime(1700000000000);
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Defensive drop — no syncIssue, no rewrite, file unlinked, hook fires.
+      expect(syncIssue).not.toHaveBeenCalled();
+      expect(listQueueFiles(tmpDir)).toEqual([]);
+      expect(recordSystemError).toHaveBeenCalledTimes(1);
+    });
+
+    it("recordSystemError hook throwing on timer-driven exhaustion does not crash the timer or leave the entry on disk", async () => {
+      ensureIssuesDirs(tmpDir);
+      // Plant the YAML so attemptPush reaches syncIssue (which throws),
+      // bumping attempt past the cap → dropExhausted → hook fires.
+      writeOpenIssue(tmpDir, makeIssue({ id: "ISS-822", external_id: "ext-822" }));
+      const queueDirPath = resolve(tmpDir, ".danxbot", ".trello-retry");
+      mkdirSync(queueDirPath, { recursive: true });
+      const cap: RetryQueueEntry = {
+        issueId: "ISS-822",
+        attempt: MAX_ATTEMPTS,
+        queuedAt: 1700000000000,
+        nextEligibleAt: 1700000000000,
+        lastErr: "prior",
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+      };
+      writeFileSync(
+        resolve(queueDirPath, "001.json"),
+        JSON.stringify(cap),
+      );
+      vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 401"));
+      const recordSystemError = vi
+        .fn()
+        .mockRejectedValue(new Error("dashboard down"));
+      // Set system time BEFORE arming so the timer's delay calculation
+      // (`nextEligibleAt - Date.now()`) sees the past-due window
+      // immediately.
+      vi.setSystemTime(1700000000000);
+
+      bootRescheduleRetryQueue({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        recordSystemError,
+      });
+
+      // Advance past the 0-delay timer; one fire bumps attempt MAX → MAX+1 → drop.
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Entry is unlinked despite the hook throw.
+      expect(listQueueFiles(tmpDir)).toEqual([]);
+      expect(recordSystemError).toHaveBeenCalledTimes(1);
+    }, 10_000);
   });
 });
