@@ -119,13 +119,53 @@ If the YAML doesn't exist or fails to parse, signal `danxbot_complete({status: "
 
 ---
 
-## Step 1.1 — Resume self-check (read first, every dispatch)
+## Step 1.1 — Validate, never trust prior state (CRITICAL)
 
-Before doing ANY work, read the assigned YAML. If status is terminal (`Done` / `Cancelled`) AND every AC item is checked (`ac[i].checked === true` for every i) AND retro is filled (`retro.good` and `retro.bad` non-empty) — the prior session already finished. Call `danxbot_complete({status: "completed", summary: "Prior session already completed; verified terminal state on resume."})` and stop. **Do not redo work.** Do not flip status. Do not re-save the YAML. Do not append a new comment. The work has already shipped.
+A card's YAML may carry stale claims from prior dispatches that died
+mid-pipeline. **NEVER skip work because a prior agent claimed it was
+done.** Always verify the actual state of the code before treating any
+prior claim as truth.
 
-If you're not sure whether prior work landed (e.g. status is `ToDo` or `In Progress` but you see commits in `retro.commits[]` referencing your assigned scope, OR the resume prompt says `RESUMED dispatch on …`), inspect `git log` for those commit hashes before writing any new code. Real commits + checked ACs = done — fall through to the terminal-state branch above. No commits = fresh work — proceed to Step 1.5.
+Mechanical procedure (every dispatch, no exceptions):
 
-This is the May-7 incident gate (ISS-135). An orphan-resumed agent that re-runs `/danx-next` from scratch against a card whose prior session already shipped the work creates noisy duplicate retro comments, duplicate `danxbot_complete` calls, and looks to humans like a regression. The self-check is a 30-second read that costs zero tokens of redo.
+1. **Read the YAML.**
+2. **For each `ac[i]` where `checked: true`:** verify the claim against
+   real code/test/commit evidence:
+   - Read the files the AC names. Confirm the asserted code or
+     behavior is actually present.
+   - Run the test the AC requires. Confirm it passes.
+   - If `retro.commits[]` references the change, find the matching sha
+     in `git log origin/main` (or the agent branch). Confirm the
+     commit exists AND its diff actually lands the AC's claim.
+   - **Any mismatch** (file missing, test fails, commit not in log,
+     diff doesn't deliver the AC) → flip `ac[i].checked: false`, save,
+     treat as work to do.
+3. **For each sha in `retro.commits[]`:** run `git cat-file -t <sha>`.
+   Output not `commit` (or `git log` doesn't show it on `origin/main`)
+   → drop the stale sha from the list, save.
+4. **If `status: "Done"` or `"Cancelled"`** AND every AC verifies in
+   step 2 AND every commit verifies in step 3 AND `retro.good` +
+   `retro.bad` non-empty: the prior session truly finished. Call
+   `danxbot_complete({status: "completed", summary: "Verified prior
+   dispatch's terminal state on resume — no work to redo."})` and
+   stop. **Do not redo work.** Do not flip status. Do not re-save the
+   YAML.
+5. **Otherwise:** the card is yours — resume from the first failing
+   AC. Prior YAML state is advisory; YOUR evidence is authoritative.
+
+This rule exists because pre-DX-162 dispatched agents could (and did)
+call `danxbot_complete` after stamping ACs checked + flipping status
+to Done WITHOUT ever running `agent-finalize.sh` / `git commit` /
+`git push`. DX-203 and DX-210 both shipped Done with no commit on
+`origin/main`; the code sat uncommitted in the working tree for days
+until a follow-up dispatch caught the gap. Step 11's pre-call gate
+prevents the trap going forward — Step 1.1's revalidation is the
+defense for cards already in the broken state.
+
+The May-7 incident gate (ISS-135) is a special case of this same rule:
+an orphan-resumed agent that re-runs `/danx-next` against a truly-done
+card creates noisy duplicate retro comments. Step 4 of the procedure
+covers it: real commits + verified ACs → exit cleanly without redo.
 
 ---
 
@@ -541,22 +581,63 @@ Skip to Step 11.
 
 ---
 
-## Step 11 — Signal Completion (MANDATORY)
+## Step 11 — Signal Completion (MANDATORY + GATED)
 
-Call `danxbot_complete` once at the very end:
+`danxbot_complete` is the agent's terminal signal. The worker treats
+it as proof that the full pipeline ran. **Do not call it until every
+prerequisite below holds.** Calling it with prereqs unmet is a
+**workflow violation** — the worker writes the dispatch row as
+completed, the file moves `open/` → `closed/`, and the work appears
+shipped without ever landing on main. DX-203 + DX-210 burned the
+budget that way.
 
-- `status: "completed"` — card finished or moved to Blocked.
-- `status: "failed"` — fatal error stopped the work.
-- `status: "critical_failure"` — environment-level blocker (see `.claude/rules/danx-halt-flag.md`).
-- `summary` — one-line outcome (card title + commit sha, Blocked reason, or failure cause).
+### Pre-call gate (mechanical, every status: completed)
 
-The worker:
-1. Auto-syncs the tracked YAML one final time as a safety net.
+| # | Prereq | How to verify |
+|---|---|---|
+| 1 | All ACs evidence-verified (`ac[i].checked: true` w/ real evidence) | Step 6 + Step 8 |
+| 2 | Test-reviewer + code-reviewer findings addressed | Step 5 — `## Code Review` / `## Test Review` / `## Review Fixes` comments appended |
+| 3 | Commit landed on `origin/main` | Step 7a: `agent-finalize.sh` exit 0 + `PUSHED <sha>` on stdout. Step 7b: `git log origin/main --grep=<CARD-ID>` returns the commit. |
+| 4 | `retro.commits[]` populated with the verified sha(s) | Step 9 |
+| 5 | `retro.good` + `retro.bad` non-empty | Step 9 |
+| 6 | `status` set to terminal (`Done` / `Cancelled` / `Blocked`) | Step 9 / Step 10 |
+
+Any prereq missing → loop back to that step. Do not call
+`danxbot_complete` until all six hold.
+
+### Sha-less completion rejected
+
+`danxbot_complete({status: "completed", summary: "<no commit sha>"})`
+is rejected as a workflow violation: there is no path to "completed
+without a commit" except for documentation-only changes (note this
+explicitly in `summary`) or terminal-status `Blocked` / `failed` /
+`critical_failure`. Sha format: `feat(<CARD-ID>): <title> @ <sha>`.
+
+### Allowed final states
+
+- `status: "completed"` — card finished or moved to Blocked /
+  Cancelled. `summary` MUST contain the commit sha (or
+  `"docs-only — no commit"` if explicitly documentation-only).
+- `status: "failed"` — fatal error stopped the work. `summary`
+  describes the failure mode + what the next dispatch needs to know.
+- `status: "critical_failure"` — environment-level blocker (see
+  `.claude/rules/danx-halt-flag.md`). `summary` describes the env
+  issue for the operator.
+
+### What the worker does on signal
+
+1. Auto-syncs the YAML one final time (safety net).
 2. Finalizes the dispatch row.
-3. SIGTERMs the Claude process.
-4. Resumes polling.
+3. Renders the `## Retro` comment from `retro.{good, bad,
+   action_item_ids, commits}`.
+4. Spawns Action Items cards from `retro.action_item_ids[]`.
+5. Moves the file `open/` → `closed/` (Done / Cancelled).
+6. Pushes the tracker move.
+7. SIGTERMs claude.
+8. Resumes polling.
 
-Never exit without `danxbot_complete`.
+Never exit without `danxbot_complete`. Never call it with prereqs
+unmet.
 
 ---
 
