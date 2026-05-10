@@ -82,10 +82,11 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-    blocked: overrides.blocked ?? null,
-    waiting_on: overrides.waiting_on ?? null,
     history: [],
     ...overrides,
+    blocked: overrides.blocked ?? null,
+    assigned_agent: overrides.assigned_agent ?? null,
+    waiting_on: overrides.waiting_on ?? null,
   };
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {

@@ -102,6 +102,7 @@ function makeDispatch(overrides: Record<string, unknown> = {}): unknown {
     subagentCount: 0,
     nudgeCount: 0,
     danxbotCommit: null,
+    agentName: null,
     ...overrides,
   };
 }

@@ -67,6 +67,7 @@ function makeDispatch(overrides = {}) {
     subagentCount: 0,
     nudgeCount: 0,
     danxbotCommit: null,
+    agentName: null,
     ...overrides,
   };
 }

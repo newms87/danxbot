@@ -120,6 +120,7 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     subagentCount: 0,
     nudgeCount: 0,
     danxbotCommit: "abc1234",
+    agentName: null,
     ...overrides,
   };
 }
@@ -272,6 +273,7 @@ describe("rowToDispatch", () => {
       subagent_count: 2,
       nudge_count: 0,
       danxbot_commit: "sha123",
+      agent_name: null,
     };
     const d = rowToDispatch(row);
     expect(d.id).toBe("job-abc");
@@ -316,6 +318,7 @@ describe("rowToDispatch", () => {
       subagent_count: 0,
       nudge_count: 0,
       danxbot_commit: null,
+      agent_name: null,
     };
     const d = rowToDispatch(row);
     expect(d.triggerMetadata).toEqual(meta);
@@ -423,6 +426,7 @@ describe("getDispatchById", () => {
           subagent_count: 0,
           nudge_count: 0,
           danxbot_commit: null,
+          agent_name: null,
         },
       ]);
     const result = await getDispatchById("job-xyz");
@@ -459,6 +463,7 @@ describe("findLatestDispatchBySlackThread", () => {
       subagent_count: 0,
       nudge_count: 0,
       danxbot_commit: "abc1234",
+      agent_name: null,
       ...overrides,
     };
   }
@@ -536,6 +541,7 @@ describe("findNonTerminalDispatches", () => {
           subagent_count: 0,
           nudge_count: 0,
           danxbot_commit: null,
+          agent_name: null,
         },
       ]);
     const rows = await findNonTerminalDispatches("danxbot");
@@ -625,6 +631,7 @@ describe("listDispatches", () => {
           subagent_count: 0,
           nudge_count: 0,
           danxbot_commit: null,
+          agent_name: null,
         },
       ]);
     const result = await listDispatches({});
@@ -728,6 +735,7 @@ function makeRow(overrides: Record<string, unknown> = {}): Record<string, unknow
     subagent_count: 0,
     nudge_count: 0,
     danxbot_commit: null,
+    agent_name: null,
     ...overrides,
   };
 }

@@ -153,6 +153,16 @@ export interface Dispatch {
   subagentCount: number;
   nudgeCount: number;
   danxbotCommit: string | null;
+  /**
+   * Resolved agent name (`AGENT_NAME_SHAPE`) when this dispatch was launched
+   * against a per-repo persona under the multi-worker pick algorithm
+   * (DX-200 / DX-158). NULL for every other trigger — Slack, ideator,
+   * external `/api/launch`, and pre-Phase-5 issue-worker dispatches.
+   *
+   * The poller's `busyAgents(repo)` lookup queries this column with a
+   * partial index that skips terminal rows; see migration 018.
+   */
+  agentName: string | null;
 }
 
 export interface DispatchFilters {

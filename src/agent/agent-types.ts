@@ -234,6 +234,14 @@ export interface SpawnAgentOptions {
    * paired-write contract.
    */
   pairedWriteYaml?: YamlPairedWrite;
+  /**
+   * Resolved persona name (`AGENT_NAME_SHAPE`) when the multi-worker pick
+   * algorithm chose this agent for the dispatch (DX-200). Forwarded to
+   * `startDispatchTracking` so the row's `agent_name` column carries the
+   * value the poller's `busyAgents()` lookup queries on the next tick.
+   * Omitted by every non-agent caller (Slack, ideator, external launch).
+   */
+  agentName?: string | null;
 }
 
 /**

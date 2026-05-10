@@ -104,6 +104,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: "abc123",
+      agentName: null,
       watcher: watcher as never,
       startedAtMs: 1000,
     });
@@ -139,6 +140,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "host",
       danxbotCommit: "abc",
+      agentName: null,
       watcher: watcher as never,
     });
     const inserted = mockInsertDispatch.mock.calls[0][0];
@@ -161,6 +163,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: "abc",
+      agentName: null,
       watcher: watcher as never,
     });
     const inserted = mockInsertDispatch.mock.calls[0][0];
@@ -185,6 +188,7 @@ describe("startDispatchTracking", () => {
       trigger: apiTrigger,
       runtimeMode: "docker",
       danxbotCommit: "abc",
+      agentName: null,
       watcher: watcher as never,
     });
     const inserted = mockInsertDispatch.mock.calls[0][0];
@@ -204,6 +208,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: "abc123",
+      agentName: null,
       watcher: watcher as never,
       startedAtMs: 2000,
       parentJobId: "parent-aea75840",
@@ -229,6 +234,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: "abc123",
+      agentName: null,
       watcher: watcher as never,
       startedAtMs: 2000,
       issueId: "DX-84",
@@ -246,6 +252,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -260,6 +267,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "host",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -309,6 +317,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -339,6 +348,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -390,6 +400,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -427,6 +438,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -460,6 +472,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
     await trackerCompleted.finalize("completed", {
@@ -478,6 +491,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
     await trackerFailed.finalize("failed", {
@@ -497,6 +511,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -519,6 +534,7 @@ describe("startDispatchTracking", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -538,6 +554,7 @@ describe("startDispatchTracking", () => {
         trigger: slackTrigger,
         runtimeMode: "docker",
         danxbotCommit: null,
+        agentName: null,
         watcher: watcher as never,
       }),
     ).resolves.toBeDefined();
@@ -555,6 +572,7 @@ describe("startDispatchTracking — EventBus publishing", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: "abc",
+      agentName: null,
       watcher: watcher as never,
       startedAtMs: 1000,
     });
@@ -573,6 +591,7 @@ describe("startDispatchTracking — EventBus publishing", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
 
@@ -589,6 +608,7 @@ describe("startDispatchTracking — EventBus publishing", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
     mockPublish.mockClear();
@@ -617,6 +637,7 @@ describe("startDispatchTracking — EventBus publishing", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
     mockPublish.mockClear();
@@ -637,6 +658,7 @@ describe("startDispatchTracking — EventBus publishing", () => {
       trigger: slackTrigger,
       runtimeMode: "docker",
       danxbotCommit: null,
+      agentName: null,
       watcher: watcher as never,
     });
     mockPublish.mockClear();

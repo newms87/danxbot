@@ -26,6 +26,16 @@ import {
 const TRIAGE_HISTORY_CAP = 10;
 
 /**
+ * Local copy of `AGENT_NAME_SHAPE` from `src/settings-file.ts` — duplicated
+ * here so the YAML parser can validate `assigned_agent` (DX-200) without
+ * importing the settings file (which would pull `node:fs/promises` + the
+ * logger + the full per-repo settings surface into every parseIssue
+ * caller). The two definitions MUST stay byte-identical; a new test in
+ * `yaml.test.ts` asserts the regex source.
+ */
+const AGENT_NAME_SHAPE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/**
  * Priority field bounds + default. Operators set `priority` in
  * `[1.0, 5.0]` (float; 3.0 is "medium"); the parser clamps out-of-range
  * values and defaults missing fields to `PRIORITY_DEFAULT` so legacy
@@ -153,6 +163,7 @@ export function createEmptyIssue(
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    assigned_agent: null,
     waiting_on: null,
     blocked: null,
     history: [],
@@ -336,6 +347,11 @@ export function serializeIssue(issue: Issue): string {
       action_item_ids: [...issue.retro.action_item_ids],
       commits: [...issue.retro.commits],
     },
+    // `assigned_agent` carries the persona name claiming the card or `null`
+    // when no agent owns it. Serialized AFTER `retro` so existing YAMLs that
+    // omit the field round-trip without churning the byte order; the v3 →
+    // v5 migrations don't need a hard rewrite.
+    assigned_agent: issue.assigned_agent,
     // `waiting_on` carries `null` (default) or a record with reason/timestamp/by[].
     // Position after `retro` keeps the canonical key order stable for older
     // YAMLs that omit the field — they parse with `waiting_on: null` defaulted in
@@ -846,6 +862,33 @@ export function validateIssue(
     else historyResult = r;
   }
 
+  // assigned_agent — optional field. Missing → null. Present must be either
+  // null or a non-empty string matching `AGENT_NAME_SHAPE`. Cards predating
+  // DX-200 omit the field entirely; the multi-worker pick algorithm stamps
+  // it on dispatch start. Strict shape check so a hand-typo (`true`,
+  // garbage object) fails loud rather than silently leaking into the
+  // dispatches table's `agent_name` column.
+  let assignedAgentResult: string | null = null;
+  if ("assigned_agent" in v) {
+    const raw = v.assigned_agent;
+    if (raw === null || raw === undefined) {
+      assignedAgentResult = null;
+    } else if (typeof raw !== "string") {
+      errors.push("assigned_agent must be a string or null");
+    } else if (raw.length === 0) {
+      // Treat empty string as null — same forgiving shape as
+      // `external_id`, so a YAML that wrote `assigned_agent: ""` (e.g.
+      // hand-edit, mid-migration) round-trips as null without erroring.
+      assignedAgentResult = null;
+    } else if (!AGENT_NAME_SHAPE.test(raw)) {
+      errors.push(
+        `assigned_agent must match ${AGENT_NAME_SHAPE} (URL/branch/path-safe agent name)`,
+      );
+    } else {
+      assignedAgentResult = raw;
+    }
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -874,6 +917,7 @@ export function validateIssue(
     ac: acResult as IssueAcItem[],
     comments: commentsResult as IssueComment[],
     retro: retroResult as IssueRetro,
+    assigned_agent: assignedAgentResult,
     waiting_on: waitingOnResult,
     blocked: blockedResult,
     history: historyResult,

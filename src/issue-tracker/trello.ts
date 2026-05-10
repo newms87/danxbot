@@ -135,7 +135,7 @@ export class TrelloTracker implements IssueTracker {
     // calls `getComments` itself for the merge step).
     const parsed = parseCardTitle(card.name);
     return {
-      schema_version: 4,
+      schema_version: 5,
       tracker: "trello",
       // Internal id is parsed from the `#<PREFIX>-N: ` title prefix where
       // PREFIX is any 2-4 uppercase letters (Phase 2 of ISS-99 — supports
@@ -156,6 +156,10 @@ export class TrelloTracker implements IssueTracker {
       type,
       title: parsed.title,
       description: card.desc ?? "",
+      // Trello has no native priority field. Outbound mirror never edits
+      // it; inbound hydrate emits the schema default. Local YAML is
+      // authoritative for `priority` (operator edits it directly).
+      priority: 3.0,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -167,6 +171,10 @@ export class TrelloTracker implements IssueTracker {
       ac,
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      // `assigned_agent` is local-only metadata (DX-200) — Trello has no
+      // native field for the persona claim. Always emit null on read so
+      // the local YAML stays authoritative.
+      assigned_agent: null,
       // `waiting_on` (dep-chain queue) and `blocked` (self-block reason)
       // are local-only metadata managed by the agent + worker. Trello has
       // no native field for either — the Blocked label is derived from

@@ -166,6 +166,11 @@ vi.mock("../../critical-failure.js", () => ({
 vi.mock("../../settings-file.js", () => ({
   isFeatureEnabled: (_ctx: unknown, feature: string) => feature !== "ideator",
   getIssuePollerPickupPrefix: () => null,
+  // DX-200 multi-agent picker reads these. Default-empty so the legacy
+  // single-card path runs; multi-agent integration coverage lives in
+  // `src/poller/multi-agent-pick.test.ts`.
+  readAgents: () => [],
+  isConflictCheckEnabled: () => true,
 }));
 
 vi.mock("../../workspace/write-if-changed.js", () => ({
@@ -197,6 +202,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    assigned_agent: null,
     waiting_on: null,
     history: [],
   };

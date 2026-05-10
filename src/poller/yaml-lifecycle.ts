@@ -347,6 +347,35 @@ export function stampDispatchAndWrite(
 }
 
 /**
+ * Overwrite `assigned_agent` on an existing local Issue and persist
+ * the change. Returns the updated Issue. Used by the multi-worker pick
+ * algorithm (DX-200 / multi-worker dispatch epic DX-158 Phase 5)
+ * BEFORE dispatch so the YAML mirror surfaces the persona claim to the
+ * dashboard's per-card chat tab and to the next tick's
+ * `assignedCards()` lookup.
+ *
+ * `agentName` MUST match `AGENT_NAME_SHAPE` (defended at write time by
+ * `validateIssue` — passing a malformed name throws on the first read
+ * back through `parseIssue` + the chokidar mirror flips the row to
+ * `_malformed: true`). Pass `null` to clear a previous claim (the
+ * poller does this when an agent's worktree has been torn down or the
+ * operator deleted the agent record).
+ *
+ * No-op when the value is already what was requested — preserves the
+ * existing pattern used by `clearDispatchAndWrite` and avoids spurious
+ * mirror writes that would re-assert the same content hash.
+ */
+export function stampAssignedAgentAndWrite(
+  repoLocalPath: string,
+  issue: Issue,
+  agentName: string | null,
+): Promise<Issue> {
+  if (issue.assigned_agent === agentName) return Promise.resolve(issue);
+  const updated: Issue = { ...issue, assigned_agent: agentName };
+  return writeIssue(repoLocalPath, updated).then(() => updated);
+}
+
+/**
  * Clear `dispatch` on an existing local Issue and persist the change.
  * Returns the updated Issue. Used on the dispatch-end path:
  *

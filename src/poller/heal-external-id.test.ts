@@ -49,6 +49,7 @@ function buildIssue(
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    assigned_agent: null,
     waiting_on: null,
     history: [],
     ...overrides,

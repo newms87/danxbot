@@ -411,6 +411,21 @@ export interface Issue {
   comments: IssueComment[];
   retro: IssueRetro;
   /**
+   * Resolved persona name (`AGENT_NAME_SHAPE`) when the multi-worker pick
+   * algorithm has claimed this card for a specific agent (DX-200 / DX-158).
+   * Stamped at dispatch start by the poller's `pickAgent` step BEFORE the
+   * agent spawns; cleared on the next dispatch's pick if the previous
+   * agent finished cleanly (or persists when the agent should re-claim
+   * the same card on the next eligible tick).
+   *
+   * `null` when no agent owns the card (every pre-Phase-5 card and every
+   * card the multi-agent picker has not yet seen). The mirror's
+   * generated column `issues.assigned_agent` (migration 016) reads
+   * `data->>'assigned_agent'` directly; production rows that pre-date
+   * this field stamp the column NULL automatically.
+   */
+  assigned_agent: string | null;
+  /**
    * Non-null = the card is waiting on the issues listed in `waiting_on.by[]`.
    * Worker forces `status: "ToDo"` whenever this is non-null; poller skips
    * dispatching the card until every dependency in `by[]` reaches a terminal

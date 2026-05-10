@@ -6,7 +6,7 @@ function defaultInput(
   overrides: Partial<CreateCardInput> = {},
 ): CreateCardInput {
   return {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -15,6 +15,7 @@ function defaultInput(
     type: "Feature",
     title: "Make widget",
     description: "",
+    priority: 3.0,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [{ title: "Returns 200", checked: false }],
     comments: [],
@@ -318,7 +319,7 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 4,
+          schema_version: 5,
           tracker: "memory",
           id: "ISS-1",
           external_id: "seed-1",
@@ -329,11 +330,13 @@ describe("MemoryTracker", () => {
           type: "Feature",
           title: "Seeded",
           description: "",
+          priority: 3.0,
           triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
           ac: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,
+          assigned_agent: null,
           waiting_on: null,
           history: [],
         },
@@ -351,7 +354,7 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 4,
+          schema_version: 5,
           tracker: "trello",
           id: "ISS-2",
           external_id: "seed-trello",
@@ -362,11 +365,13 @@ describe("MemoryTracker", () => {
           type: "Feature",
           title: "Trello-shaped",
           description: "",
+          priority: 3.0,
           triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
           ac: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
           blocked: null,
+          assigned_agent: null,
           waiting_on: null,
           history: [],
         },

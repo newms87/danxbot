@@ -115,6 +115,7 @@ function makeSlackDispatch(over: Record<string, unknown> = {}) {
     subagentCount: 0,
     nudgeCount: 0,
     danxbotCommit: null,
+    agentName: null,
     ...over,
   };
 }

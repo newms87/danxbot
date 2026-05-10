@@ -15,7 +15,7 @@ import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 4,
+    schema_version: 5,
     tracker: "memory",
     id: "ISS-1",
     external_id: "",
@@ -26,11 +26,13 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     type: "Feature",
     title: "Test",
     description: "",
+    priority: 3.0,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    assigned_agent: null,
     waiting_on: null,
     history: [],
     ...overrides,

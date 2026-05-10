@@ -277,3 +277,68 @@ Any mismatch on the above is a skill-body bug; file as a follow-up issue and sur
 - You do NOT investigate the underlying bug / feature — that's the worker dispatch (Phase 4 / ISS-94). Triage decides "is this card ready to be worked on" not "what is the work."
 - For Review cards, the `ice` score is your judgement based on the card's CURRENT description, ACs, and recent commits. You may `git log --oneline -200` for context but DO NOT edit the description, append diagnostic notes, or restate ACs.
 - For Blocked cards, the audit is read-only — if the misclassification is "every step locally executable," you Demote and let the next worker dispatch DO the steps. You never run the steps yourself.
+
+## Conflict-check mode (`--conflict-check`)
+
+A SECOND mode invoked by the multi-worker pick algorithm (DX-200 / multi-worker dispatch epic DX-158). When the dispatch task body contains `--conflict-check`, route here INSTEAD of the per-status decision tree above.
+
+**Invocation:** the poller spawns this dispatch when it has picked a candidate card AND at least one OTHER agent already has an in-progress dispatch on this repo. The task prompt looks like:
+
+```
+Triage with --conflict-check using the danx-triage-card skill.
+
+Candidate: <PREFIX>-100 (<title>)
+In-progress: [<PREFIX>-141, <PREFIX>-142]
+
+Read every staged YAML at /tmp/conflict-check/<dispatch-id>/.
+Decide whether the candidate's likely file scope overlaps with any in-progress card.
+Reply with a single JSON object via danxbot_complete.summary:
+  {ok: true, reason: "..."} — no overlap detected
+  {ok: false, reason: "...", blocked_by: ["DX-N", ...]} — overlap; candidate should wait
+```
+
+**Inputs:** the worker stages a candidate YAML + every in-progress sibling YAML at the keyed tmpdir. Your dispatch's tmpdir is the staging path the worker substituted from `${DANXBOT_DISPATCH_ID}` — find it via `ls /tmp/conflict-check/`. Files:
+
+- `candidate.yml` — the card the picker is about to dispatch
+- `in-progress-0.yml`, `in-progress-1.yml`, ... — every currently-running sibling
+
+Read each via the `Read` tool (no MCP call needed; they're plain files in your dispatch's tmpdir).
+
+**Decision criteria:** infer file scope from each card's:
+
+- `description` — look for explicit Files / Modify / Create blocks
+- `ac[]` titles — they often name files / modules / functions
+- `title` — a card titled "Refactor launcher.ts" obviously touches `launcher.ts`
+
+Flag a conflict when:
+
+- Two cards explicitly name the same file (`launcher.ts`, `dispatch/core.ts`)
+- Two cards target the same module / domain (`src/poller/`, `src/dashboard/agents-*`)
+- Two cards are phases of the same epic that haven't declared independent file scopes
+
+Do NOT flag a conflict when:
+
+- Cards target disjoint domains (`src/agent/launcher.ts` vs `dashboard/src/components/AgentTable.vue`)
+- One card is documentation-only (README / `.md` edits) and the other is code
+- The overlap is a trivial shared file (e.g. `package.json`) that both cards merely bump dependencies in — not a blocker
+
+**Output (REQUIRED):** call `danxbot_complete({status: "completed", summary: <JSON>})` exactly once. The summary MUST be a single valid JSON object on its own line:
+
+```
+{"ok": true, "reason": "Candidate touches dashboard/; in-progress sibling touches src/poller/. Disjoint domains."}
+```
+
+OR
+
+```
+{"ok": false, "reason": "Both candidate and DX-141 modify src/agent/launcher.ts (declared in their Files sections).", "blocked_by": ["DX-141"]}
+```
+
+**Conservative bias:** when uncertain, return `ok: false`. The cost of a false positive is one tick's delay; the cost of a false negative is two agents racing on the same file. The poller treats every malformed / timeout / partial response as `ok: false` automatically — there is no "I don't know" exit; you decide.
+
+**Boundaries (conflict-check mode only):**
+
+- DO NOT edit any YAML. The conflict-check is read-only — your only output is the JSON in `danxbot_complete.summary`.
+- DO NOT call `mcp__danx-issue__danx_issue_get` or any other MCP tool. Every input you need is in `/tmp/conflict-check/<dispatch-id>/`.
+- DO NOT investigate the underlying bugs / features. The decision is "do these cards likely touch the same files?" not "are these cards good cards?"
+- DO NOT include preamble / explanation prose in `summary`. The poller's parser tolerates fenced ```json blocks but a bare JSON object is preferred.

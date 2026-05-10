@@ -491,6 +491,7 @@ async function runResolved(
         resumeSessionId: input.resumeSessionId,
         parentJobId: input.parentJobId,
         issueId: input.issueId,
+        agentName: input.agent?.name ?? null,
         // Paired host_pid write — only the initial spawn does this, and
         // only when the caller supplies a YAML pair. Stall-recovery
         // respawns reuse the existing dispatch row, so re-stamping
@@ -696,6 +697,11 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     // asynchronously. Workspaces that don't reference `DANX_REPO_ROOT`
     // simply ignore the extra overlay key.
     DANX_REPO_ROOT: input.repo.localPath,
+    // Auto-inject the dispatch id so workspaces that need a per-dispatch
+    // staging path (`staging-paths: - "/tmp/conflict-check/${DANXBOT_DISPATCH_ID}/"`)
+    // can reference it directly without forcing every caller to plumb
+    // it manually. DX-200 / multi-worker conflict-check uses this.
+    DANXBOT_DISPATCH_ID: dispatchId,
     ...input.overlay,
   };
 

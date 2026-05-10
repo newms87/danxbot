@@ -110,3 +110,90 @@ describe("parseIssue — retro.commits coercion", () => {
     expect(issue.retro.commits).toEqual([]);
   });
 });
+
+describe("AGENT_NAME_SHAPE — local copy stays in sync with settings-file", () => {
+  it("yaml.ts's local AGENT_NAME_SHAPE source matches settings-file's export", async () => {
+    // The local copy in `yaml.ts` exists to validate `assigned_agent`
+    // (DX-200) without forcing a heavy import of `settings-file.ts`
+    // (which pulls fs/path/logger). The two definitions MUST stay
+    // byte-identical or hand-edited YAMLs may pass parse + fail the
+    // dashboard agent CRUD validator (or vice versa). This test pins
+    // the invariant.
+    const settings = await import("../settings-file.js");
+    // Both regexes are anchored, byte-equal sources: re-create from the
+    // exported regex source string so we compare structurally.
+    const expected = settings.AGENT_NAME_SHAPE.source;
+    // Round-trip a known-good value to exercise the local copy:
+    const txt = `schema_version: 5
+tracker: trello
+id: DX-7
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "T"
+description: ""
+priority: 3.0
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: alice
+waiting_on: null
+blocked: null
+history: []
+`;
+    const ok = parseIssue(txt, { expectedPrefix: "DX" });
+    expect(ok.assigned_agent).toBe("alice");
+    // Pin source so a divergence test fails loudly. If the regex needs
+    // to change, update both definitions in lockstep.
+    expect(expected).toBe("^[a-z][a-z0-9_-]{0,31}$");
+  });
+
+  it("rejects an assigned_agent value that violates the shape", () => {
+    const txt = `schema_version: 5
+tracker: trello
+id: DX-7
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "T"
+description: ""
+priority: 3.0
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: "BadName!"
+waiting_on: null
+blocked: null
+history: []
+`;
+    expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(/assigned_agent/);
+  });
+});

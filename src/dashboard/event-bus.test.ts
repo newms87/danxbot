@@ -44,6 +44,7 @@ function createdEvent(id = "job-1"): BusEvent {
       subagentCount: 0,
       nudgeCount: 0,
       danxbotCommit: null,
+      agentName: null,
     },
   };
 }

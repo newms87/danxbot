@@ -79,6 +79,7 @@ function makeIssue(id: string): Issue {
       action_item_ids: [],
       commits: [],
     },
+    assigned_agent: null,
     waiting_on: null,
     blocked: null,
   };

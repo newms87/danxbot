@@ -73,6 +73,15 @@ export interface StartDispatchTrackingArgs {
    * leave it unset and the column is stamped NULL.
    */
   issueId?: string | null;
+  /**
+   * Resolved persona name (`AGENT_NAME_SHAPE`) when the multi-worker pick
+   * algorithm chose this agent for the dispatch (DX-200). Stamped onto the
+   * `dispatches.agent_name` column so the next tick's `busyAgents()` query
+   * can see the slot is taken without walking issue YAMLs. NULL for every
+   * non-agent dispatch (Slack, ideator, external launch, pre-Phase-5
+   * issue-worker rows).
+   */
+  agentName?: string | null;
 }
 
 /**
@@ -131,6 +140,7 @@ export async function startDispatchTracking(
     subagentCount: 0,
     nudgeCount: 0,
     danxbotCommit: args.danxbotCommit,
+    agentName: args.agentName ?? null,
   };
 
   try {

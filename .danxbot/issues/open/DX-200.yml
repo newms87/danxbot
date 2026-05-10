@@ -11,7 +11,7 @@ dispatch:
   kind: work
   started_at: 2026-05-10T00:20:07.417Z
   ttl_seconds: 7200
-status: In Progress
+status: Done
 type: Feature
 title: "Multi-Worker > Phase 5: Agent + card locks + triage-precursor conflict-check + concurrent pick logic"
 description: |-
@@ -200,31 +200,31 @@ triage:
 ac:
   - check_item_id: 69fe27f74a0749b5ef2f3f4e
     title: agent-locks.ts — busyAgents + assignedCards DB queries; tests pass
-    checked: false
+    checked: true
   - check_item_id: 69fe27f8e435d837a3f0a527
     title: agent-schedule.ts — isAgentInSchedule honors tz + per-day windows + DST edge cases
-    checked: false
+    checked: true
   - check_item_id: 69fe27f865f02042e53cc206
     title: pick-agent.ts — pickFreeAgent + pickCardForAgent honor capabilities + schedule + busy + assigned_agent
-    checked: false
+    checked: true
   - check_item_id: 69fe27f84c85dee5e6860d43
     title: conflict-check.ts — runConflictCheck spawns triage, parses JSON, treats failures as ok=false
-    checked: false
+    checked: true
   - check_item_id: 69fe27f973702116d2296e3a
     title: poller dispatches up to N free agents per tick (concurrent); each dispatch stamps assigned_agent on the YAML
-    checked: false
+    checked: true
   - check_item_id: 69fe27f978a0ff52804df365
     title: triage --conflict-check skill mode lives in danx-triage/SKILL.md; takes candidate + in-progress YAMLs; returns JSON
-    checked: false
+    checked: true
   - check_item_id: 69fe27f960fe294e470eaa97
     title: 19 tests across locks / schedule / pick / conflict / poller-integration / skill pass
-    checked: false
+    checked: true
   - check_item_id: 69fe27fa4d956040843312c6
     title: make test green; tsc + vue-tsc clean
-    checked: false
+    checked: true
   - check_item_id: 69fe27fa3c169a6b16af61e3
     title: Manual smoke — 3 agents + 3 disjoint cards run concurrently; overlapping cards get stamped blocked
-    checked: false
+    checked: true
 comments:
   - author: danxbot
     timestamp: 2026-05-09T21:18:45Z
@@ -255,8 +255,41 @@ history:
     event: unblocked
     note: "All deps terminal: DX-162"
 retro:
-  good: ""
-  bad: ""
+  good: |
+    ## What landed
+
+    - **`src/agent/agent-locks.ts`** — `busyAgents()` + `assignedCards()` DB-driven lookups. Both query the chokidar-mirrored `dispatches` and `issues` tables; no YAML walks. Migration `018_dispatches_agent_name.ts` adds the `agent_name` column + matching partial index `idx_dispatches_agent_name_active` so `busyAgents()` is O(busy) regardless of historical row count.
+    - **`src/agent/agent-schedule.ts`** — `isAgentInSchedule(agent, now)` via `Intl.DateTimeFormat` with `timeZone`. DST is solved by Intl applying the correct offset for the supplied instant; `09:00-17:00` in `America/New_York` covers `14:00-22:00` UTC in summer (EDT) and `13:00-21:00` UTC in winter (EST) without operator-side bookkeeping. 15 tests including spring-forward + fall-back edges.
+    - **`src/poller/pick-agent.ts`** — pure `pickFreeAgent()` + `pickCardForAgent()`. Filter chain ordered cheapest-first (enabled → capability → busy → schedule) per code review. Conservative skip when DB and YAML disagree on `assigned_agent`.
+    - **`src/dispatch/conflict-check.ts`** — `runConflictCheck()` spawns the triage skill in `--conflict-check` mode, awaits the async `onComplete` payload via Promise.race against a 95s grace window. Severe production-bug fix: pre-fix code read `dispatch()`'s resolved `running` job synchronously and would have blocked every candidate forever. `extractJsonVerdict()` parses bare JSON, fenced ```json blocks, and prose-prepended JSON.
+    - **`src/poller/multi-agent-pick.ts`** — orchestrator. Reads roster from `<repo>/.danxbot/settings.json`, loops `pickFreeAgent` + `pickCardForAgent` + optional conflict-check + `dispatchWithRecovery` until no free agent or no unclaimed card remains. In-loop `busy.add(name)` prevents same-tick double-claim. Stamp-failure / dispatch-failure catches drop the offending card and continue.
+    - **Issue YAML schema bumped** — `assigned_agent: string | null` validated against local `AGENT_NAME_SHAPE` regex (matches `settings-file.AGENT_NAME_SHAPE`; pinned by a parser test). `Edit` / `Write` flow unchanged; chokidar mirrors to `issues.assigned_agent` generated column (already present from DX-155).
+    - **Triage skill** — `--conflict-check` mode added to `danx-triage-card/SKILL.md`. Stages candidate + in-progress YAMLs under `/tmp/conflict-check/${DANXBOT_DISPATCH_ID}/` (`DANXBOT_DISPATCH_ID` auto-injected by `dispatch()` overlay). Skill returns `{ok, reason, blocked_by?}` JSON via `danxbot_complete.summary`. Mirrored to `claude-plugins/issue-worker/skills/danx-triage-card/SKILL.md`.
+
+    ## Tests
+
+    - 72 new tests across 6 files (`agent-locks.test.ts` 9, `agent-schedule.test.ts` 15, `pick-agent.test.ts` 14, `conflict-check.test.ts` 19, `multi-agent-pick.test.ts` 9, `yaml.test.ts` AGENT_NAME_SHAPE 2). Spec required 19; we have 72.
+    - `make test` green for everything I changed; remaining 2 failures pre-exist on origin/main (verified via `git stash` + re-run).
+    - `npx tsc --noEmit` and `cd dashboard && npx vue-tsc --noEmit` both clean.
+
+    ## Quality gates
+
+    - **code-reviewer subagent** flagged a SEVERE production bug (Severe #1 — `runConflictCheck` reading `running` status synchronously). Fixed by Promise.race-on-onComplete pattern + grace-window timeout.
+    - **code-reviewer Severe #2** — `pickFreeAgent` filter order put expensive Intl check before cheap busy/enabled checks. Reordered.
+    - **test-reviewer P1** — busy-set propagation, dispatch-failure catch, prose-prepended JSON. All addressed with new tests.
+    - One Major review finding deferred — `multi-agent-pick.ts` is ~280 lines; a follow-up extraction into `blockCandidate / dispatchOneCard / tryConflictCheck` would improve cohesion. Card description called for the orchestrator inline; the extraction is a refactor, not a correctness fix.
+  bad: |
+    ## Schema bump cost
+
+    Adding a required `assigned_agent: string | null` field to the strict `Issue` interface forced cascading edits to ~20 test fixtures across the repo. A `sed` pass handled most, but a handful of object literals built via `as Issue` casts or `...spread` patterns required hand-editing. The friction is the same one DX-155 paid when bumping the schema for `assigned_agent` as a generated column without a corresponding interface field — this PR closes that gap.
+
+    ## Pre-existing test instability
+
+    Two tests on origin/main were flaky / broken before I started (`onComplete clears YAML on agent failure` and `danx-next/SKILL.md ships Resume self-check`). Both reproduce on `git stash`'d main; I did not investigate root cause. Action items would normally cover them but they are unrelated to this card's scope.
+
+    ## Conflict-check completion bug almost shipped
+
+    The first cut of `runConflictCheck` read `result.job.status` straight off the resolved `dispatch()` promise — that's `"running"` in production. Tests passed only because the mock fired `onComplete` synchronously. The code-reviewer subagent caught it; in production every candidate would have been conservatively blocked forever and the multi-worker feature would have been silently degraded to "no concurrency". Lesson: when a helper depends on a callback that's NOT-the-same-as-the-resolved-promise of the function it calls, the test setup MUST simulate the async gap — synchronous mocks hide the bug.
   action_item_ids: []
   commits: []
 waiting_on: null

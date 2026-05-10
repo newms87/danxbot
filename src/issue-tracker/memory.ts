@@ -80,6 +80,7 @@ interface StoredCard {
   type: IssueType;
   title: string;
   description: string;
+  priority: number;
   triage: IssueTriage;
   ac: IssueAcItem[];
   comments: Required<IssueComment>[];
@@ -200,6 +201,7 @@ export class MemoryTracker implements IssueTracker {
       type: input.type,
       title: input.title,
       description: input.description,
+      priority: input.priority,
       triage: cloneTriage(input.triage),
       ac,
       comments: input.comments.map((c) => ({
@@ -385,7 +387,7 @@ export class MemoryTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 4,
+      schema_version: 5,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
@@ -396,6 +398,7 @@ export class MemoryTracker implements IssueTracker {
       type: card.type,
       title: card.title,
       description: card.description,
+      priority: card.priority,
       triage: cloneTriage(card.triage),
       ac: card.ac.map((a) => ({ ...a })),
       comments: card.comments.map((c) => ({
@@ -410,6 +413,11 @@ export class MemoryTracker implements IssueTracker {
         action_item_ids: [...card.retro.action_item_ids],
         commits: [...card.retro.commits],
       },
+      // `assigned_agent` is local-only metadata (DX-200) — tracker.getCard
+      // contract always emits null so the local YAML stays authoritative
+      // for the persona claim. Mirrors the same pattern as `parent_id` /
+      // `children` / `dispatch` / `history`.
+      assigned_agent: null,
       waiting_on:
         card.waiting_on === null
           ? null
@@ -438,6 +446,7 @@ export class MemoryTracker implements IssueTracker {
       type: issue.type,
       title: issue.title,
       description: issue.description,
+      priority: issue.priority,
       triage: cloneTriage(issue.triage),
       ac: issue.ac.map((a) => ({ ...a })),
       comments: issue.comments.map((c) => ({

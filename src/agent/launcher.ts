@@ -132,6 +132,7 @@ export async function spawnAgent(
       startedAtMs: job.startedAt.getTime(),
       parentJobId: options.parentJobId ?? null,
       issueId: options.issueId ?? null,
+      agentName: options.agentName ?? null,
     });
     job.dispatchTracker = dispatchTracker;
   }

@@ -83,6 +83,7 @@ import { hostname as osHostname } from "node:os";
 import type { IssueDispatch } from "../issue-tracker/interface.js";
 import { buildStartStamp } from "./dispatch-liveness-yaml.js";
 import { buildReattachPlan } from "./dispatch-reattach.js";
+import { tryMultiAgentDispatch } from "./multi-agent-pick.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -326,6 +327,7 @@ export async function evictDeadDispatches(repo: RepoContext): Promise<void> {
           ac: [],
           comments: [],
           retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+          assigned_agent: null,
           waiting_on: null,
           blocked: null,
           history: [],
@@ -790,12 +792,20 @@ async function _poll(repo: RepoContext): Promise<void> {
   // Items list cards now hydrate as `status: "Review"` (see
   // `trello.ts#listIdToStatus`), so the existing `status === "ToDo"`
   // filter inside `listDispatchableYamls` naturally excludes them.
-  let cards: IssueRef[] = (
-    await listDispatchableYamls(repo.localPath, repo.issuePrefix)
-  ).map(localIssueToRef);
-  const inProgressCards: IssueRef[] = (
-    await listInProgressYamls(repo.localPath, repo.issuePrefix)
-  ).map(localIssueToRef);
+  // Capture the full Issue payloads BEFORE projecting to IssueRef so
+  // the multi-agent picker (DX-200) can read `assigned_agent` /
+  // description / ac without re-loading from the DB. The legacy
+  // single-card path below uses the IssueRef projection.
+  const dispatchableIssues = await listDispatchableYamls(
+    repo.localPath,
+    repo.issuePrefix,
+  );
+  const inProgressIssues = await listInProgressYamls(
+    repo.localPath,
+    repo.issuePrefix,
+  );
+  let cards: IssueRef[] = dispatchableIssues.map(localIssueToRef);
+  const inProgressCards: IssueRef[] = inProgressIssues.map(localIssueToRef);
 
   // Orphan-resume check. Runs BEFORE the ToDo dispatch path so a
   // worker that died mid-dispatch can resume its prior session
@@ -873,6 +883,42 @@ async function _poll(repo: RepoContext): Promise<void> {
   // Save tracker-native ids for stuck-card recovery on failure
   const state = getState(repo.name);
   state.priorTodoCardIds = cards.map((c) => c.external_id);
+
+  // Multi-worker pick (DX-200 / DX-158 epic Phase 5). When the repo
+  // has at least one configured agent in `<repo>/.danxbot/settings.json`,
+  // route through the multi-agent picker instead of the legacy
+  // single-card dispatch. The picker:
+  //   - Claims up to N free agents per tick (concurrent dispatches)
+  //   - Stamps `assigned_agent` on each claimed YAML
+  //   - Runs a triage-precursor conflict-check when other agents are
+  //     in-flight, and stamps `blocked` on candidates that overlap
+  //   - Dispatches via `dispatchWithRecovery` (worktree validation +
+  //     persona injection from Phases 3-4)
+  // When the agents map is empty (every repo pre-Phase-5), the helper
+  // returns `{dispatched: 0}` and we fall through to the legacy
+  // single-card path below — zero behavior change for those repos.
+  // Filter the dispatchable Issue list to the same set the legacy path
+  // would dispatch — `cards` (IssueRef[]) reflects the post-filter
+  // state after the pickup-prefix filter and the waiting-on resolver
+  // ran. Build an Issue subset that intersects with `cards` by id.
+  const dispatchableIds = new Set(cards.map((c) => c.id));
+  const dispatchablePayloads = dispatchableIssues.filter((i) =>
+    dispatchableIds.has(i.id),
+  );
+  const multiAgentResult = await tryMultiAgentDispatch({
+    repo,
+    cards: dispatchablePayloads,
+    inProgress: inProgressIssues,
+    now: new Date(),
+  });
+  if (multiAgentResult.dispatched > 0 || multiAgentResult.conflictBlocked > 0) {
+    log.info(
+      `[${repo.name}] Multi-agent tick: dispatched=${multiAgentResult.dispatched}, conflict-blocked=${multiAgentResult.conflictBlocked}`,
+    );
+    // The multi-agent path owns the dispatch; do NOT fall through to
+    // the legacy single-card path on the same tick.
+    return;
+  }
 
   // Record the first card as the dispatch trigger. One agent session processes
   // the whole ToDo queue; tagging it with the primary card lets the dashboard

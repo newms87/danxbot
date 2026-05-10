@@ -62,6 +62,7 @@ function makeRow(overrides: Partial<Dispatch> = {}): Dispatch {
     subagentCount: 0,
     nudgeCount: 0,
     danxbotCommit: null,
+    agentName: null,
     ...overrides,
   };
 }

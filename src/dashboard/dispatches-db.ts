@@ -53,6 +53,7 @@ const COLUMN_MAP: Readonly<Record<keyof Dispatch, string>> = {
   subagentCount: "subagent_count",
   nudgeCount: "nudge_count",
   danxbotCommit: "danxbot_commit",
+  agentName: "agent_name",
 };
 
 const JSON_COLUMNS = new Set<keyof Dispatch>(["triggerMetadata"]);
@@ -97,6 +98,7 @@ export interface DispatchRow {
   subagent_count: number;
   nudge_count: number;
   danxbot_commit: string | null;
+  agent_name: string | null;
 }
 
 function parseMetadata(
@@ -146,6 +148,10 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     subagentCount: Number(row.subagent_count),
     nudgeCount: Number(row.nudge_count),
     danxbotCommit: row.danxbot_commit,
+    // Loose `==` matches the surrounding pattern: tolerates pre-migration
+    // test fixtures whose row shape predates DX-200 (column undefined) AND
+    // production rows whose column is NULL.
+    agentName: row.agent_name == null ? null : String(row.agent_name),
   };
 }
 

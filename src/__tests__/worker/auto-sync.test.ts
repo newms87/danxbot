@@ -169,6 +169,7 @@ function buildTrelloRow(cardId: string): Dispatch {
     subagentCount: 0,
     nudgeCount: 0,
     danxbotCommit: null,
+    agentName: null,
   };
 }
 

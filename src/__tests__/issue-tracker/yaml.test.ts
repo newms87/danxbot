@@ -50,6 +50,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     ],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    assigned_agent: null,
     waiting_on: null,
     history: [],
     ...overrides,
@@ -1003,6 +1004,7 @@ describe("serializeIssue byte-stable snapshot", () => {
         commits: ["abc1234"],
       },
       blocked: null,
+      assigned_agent: null,
       waiting_on: null,
       history: [],
     };
@@ -1056,6 +1058,7 @@ describe("serializeIssue byte-stable snapshot", () => {
           - ISS-101
         commits:
           - abc1234
+      assigned_agent: null
       waiting_on: null
       blocked: null
       "

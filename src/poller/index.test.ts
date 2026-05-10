@@ -324,6 +324,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked: null,
+    assigned_agent: null,
     waiting_on: null,
     history: [],
   };
@@ -464,6 +465,12 @@ vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
   getIssuePollerPickupPrefix: (...args: unknown[]) =>
     mockGetIssuePollerPickupPrefix(...args),
+  // DX-200 multi-agent picker reads these. Default-empty so the legacy
+  // single-card path runs in tests that don't seed an agent roster;
+  // multi-agent integration tests live in `multi-agent-pick.test.ts`
+  // and seed a real settings.json into a tmpdir.
+  readAgents: () => [],
+  isConflictCheckEnabled: () => true,
 }));
 
 vi.mock("../workspace/write-if-changed.js", () => ({
@@ -4839,6 +4846,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      assigned_agent: null,
       waiting_on: {
         reason: "waiting on ISS-99",
         timestamp: "2026-05-04T18:00:00.000Z",
@@ -4886,6 +4894,7 @@ describe("poll — YAML lifecycle integration (Phase 2 of tracker-agnostic-agent
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      assigned_agent: null,
       waiting_on: {
         reason: "waiting on ISS-99",
         timestamp: "2026-05-04T18:00:00.000Z",
@@ -6398,6 +6407,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -6613,6 +6623,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -6725,6 +6736,7 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -6802,6 +6814,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -7178,6 +7191,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    assigned_agent: null,
     waiting_on: null,
       history: [],
     };
@@ -7259,6 +7273,7 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
+    assigned_agent: null,
     waiting_on: null,
       history: [],
     };
