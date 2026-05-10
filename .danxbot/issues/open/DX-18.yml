@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-18
 external_id: 69f231be91af5198c196bb7e
@@ -38,6 +38,7 @@ description: |-
   - `<repo>/.danxbot/config/compose.yml` (interpolation source)
   - `scripts/worker-env.sh` (pivot or delete)
   - `src/repo-context.test.ts`, `src/__tests__/integration/launch-all-workers.test.ts`
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

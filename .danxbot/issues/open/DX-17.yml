@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-17
 external_id: 69f6c5f0810c85a140804b53
@@ -41,6 +41,7 @@ description: |-
   Code-reviewer finding from Phase 2 review (https://trello.com/c/ZDb7FOGO comment thread). Filed as Action Item per `~/.claude/rules/self-improvement.md`.
 
   <!-- danxbot -->
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

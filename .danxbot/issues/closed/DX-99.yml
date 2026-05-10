@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-99
 external_id: 69fd17c93c5a89deb03f9f74
@@ -185,6 +185,7 @@ description: |
     prefix; no escape hatch).
   - Multi-prefix history within a single repo — once migrated, the
     repo has exactly one prefix forever.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: Epic for issue prefix per-repo customization. Triage to ICE-score; phases not split yet.

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-81
 external_id: 69fa81688a5a805bfbbfc434
@@ -131,6 +131,7 @@ description: |-
   - `~/.claude/rules/issues.md`
   - `~/.claude/rules/planning.md`
   - All `.danxbot/issues/{open,closed}/*.yml` (strip `phases:` field)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-204
 external_id: 69fe4ed34ebc41d8115eb0bf
@@ -104,6 +104,7 @@ description: |
   migrated repos`) was attempted, hit this bug, was closed via
   empirical migration verification instead. This card carries the
   uncovered structural fix.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

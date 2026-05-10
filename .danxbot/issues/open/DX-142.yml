@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-142
 external_id: 69fd7265ea5bc32a355ab734
@@ -81,6 +81,7 @@ description: |-
   - Killing dispatches across hosts (SSH-based fleet management is a separate epic).
   - Process trees beyond the tagged `script -q -f` parent (claude children die when the parent does).
   - Per-tick rate limiting on the scan (it's read-only + fast — premature optimization).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

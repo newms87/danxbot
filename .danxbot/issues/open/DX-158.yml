@@ -11,7 +11,7 @@ children:
   - DX-200
   - DX-164
 dispatch: null
-status: In Progress
+status: ToDo
 type: Epic
 title: "[Multi-Worker] Per-agent worktrees, identity, locks, triage-precursor conflict check"
 description: |-
@@ -145,7 +145,7 @@ ac:
     checked: false
 comments:
   - author: danxbot
-    timestamp: "2026-05-09T21:18:30Z"
+    timestamp: 2026-05-09T21:18:30Z
     text: |-
       ## Phase 4 Handoff
 
@@ -178,6 +178,12 @@ history:
     from: ToDo
     to: In Progress
     note: Any child In Progress — parent In Progress
+  - timestamp: 2026-05-10T00:20:00.251Z
+    actor: worker:auto-derive
+    event: status_change
+    from: In Progress
+    to: ToDo
+    note: Any child ToDo — parent ToDo
 retro:
   good: ""
   bad: ""

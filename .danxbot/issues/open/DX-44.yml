@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-44
 external_id: 69ec3c07f4738e531c138599
@@ -46,6 +46,7 @@ description: |-
   ## Discovered
 
   During P6 verification (Trello [WWYKnQhc](https://trello.com/c/WWYKnQhc)). Independent of P6 — the leak's mtimes show accumulation over weeks.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-4
 external_id: 69f771e9c88c36ded4f15d0e
@@ -64,6 +64,7 @@ description: |-
 
   - Test additions (existing tests already pin behavior).
   - Cosmetic refactor of `renderRetroComment` formatting.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

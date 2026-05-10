@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-79
 external_id: 69fa279c237ee48413246a95
@@ -118,6 +118,7 @@ description: |-
   - DX-78 (TRIAGE_AUTO_PROMPT constant exists; skill knows auto mode).
   - DX-75 (Needs Approval status exists; otherwise triage decisions
     will fail validation when emitting that outcome).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

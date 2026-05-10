@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-102
 external_id: 69fd17d5bf3725185f6133ed
@@ -110,6 +110,7 @@ description: |
   - No dangling `parent_id` / `children` / `blocked.by` references
     in any migrated repo.
   - `make test-system-poller` green.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-72
 external_id: 69f9ee4e1e917c0a124eb928
@@ -77,6 +77,7 @@ description: |-
   - Cross-worker proxying via dashboard (future card).
   - Adding `danxbot_restart_worker` to docs/agents — fold into the
     same commit if trivial; otherwise a follow-up.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-94
 external_id: 69fc229e13cada95498abd29
@@ -97,6 +97,7 @@ description: |
   - `list_kind: "action_items"` filter removed (Phase 5 finalizes Trello mapping).
   - Test suite green; new triage-loop test covers all 7 behavioral cases above.
   - Idle-loop guard: triage failures don't busy-loop (verified by injecting a thrown agent in test).
+priority: 3
 triage:
   expires_at: 2026-05-07T06:25:32.727Z
   reassess_hint: ""

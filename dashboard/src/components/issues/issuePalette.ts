@@ -2,26 +2,35 @@ import type { IssueStatus, IssueType } from "../../types";
 
 /**
  * Child-status palette key used by `CHILD_STATUS_META`. Owned by the SPA
- * because the palette is a 4-color design-system decision: Cancelled is
+ * because the palette is a 5-color design-system decision: Cancelled is
  * conflated with Done; `waiting` is the dep-chain queue rendered as a
  * yellow ⏸ glyph; `blocked` is self-block (status === "Blocked" or the
- * sibling `Needs Approval` parking status) rendered as a red ⛔ glyph.
+ * sibling `Needs Approval` parking status) rendered as a red ⛔ glyph;
+ * `in_progress` distinguishes a child currently being worked on (amber
+ * ◐ glyph) from idle ToDo / Review siblings.
  */
-export type ChildStatusId = "done" | "todo" | "blocked" | "waiting";
+export type ChildStatusId =
+  | "done"
+  | "todo"
+  | "in_progress"
+  | "blocked"
+  | "waiting";
 
 /**
  * Project a child issue's raw `(status, waiting_on)` into the
- * `done | todo | blocked | waiting` palette key.
+ * `done | todo | in_progress | blocked | waiting` palette key.
  *
  *  - Done / Cancelled                                     → "done"
  *  - status === "Blocked" / "Needs Approval"              → "blocked"
  *  - waiting_on === true                                  → "waiting"
- *  - Anything else (Review, ToDo, In Progress)            → "todo"
+ *  - status === "In Progress"                             → "in_progress"
+ *  - Anything else (Review, ToDo)                         → "todo"
  *
  * Done / Cancelled win over a self-block because both are terminal — a
  * card cannot be "blocked" once shipped or dropped. Self-block beats
  * waiting-on because a card stuck on its own work is a stronger signal
- * than queued-behind-deps.
+ * than queued-behind-deps. Waiting beats In Progress so a child queued
+ * behind a dep doesn't masquerade as actively running.
  */
 export function projectChildStatus(
   status: IssueStatus,
@@ -31,6 +40,7 @@ export function projectChildStatus(
   if (status === "Done" || status === "Cancelled") return "done";
   if (status === "Blocked" || status === "Needs Approval") return "blocked";
   if (waitingOnByCard || waitingOn) return "waiting";
+  if (status === "In Progress") return "in_progress";
   return "todo";
 }
 
@@ -80,10 +90,11 @@ export const ISSUE_TYPE_META: Record<IssueTypeId, TypeMeta> = {
  * `projectChildStatus` (above) before indexing this map.
  */
 export const CHILD_STATUS_META: Record<ChildStatusId, ChildStatusMeta> = {
-  done:    { fg: "#6ee7b7", bg: "rgb(16 185 129 / 0.18)", glyph: "✓" },
-  todo:    { fg: "#cbd5e1", bg: "rgb(51 65 85 / 0.40)",   glyph: "○" },
-  blocked: { fg: "#fca5a5", bg: "rgb(239 68 68 / 0.18)",  glyph: "⛔" },
-  waiting: { fg: "#fcd34d", bg: "rgb(245 158 11 / 0.20)", glyph: "⏸" },
+  done:        { fg: "#6ee7b7", bg: "rgb(16 185 129 / 0.18)", glyph: "✓" },
+  todo:        { fg: "#cbd5e1", bg: "rgb(51 65 85 / 0.40)",   glyph: "○" },
+  in_progress: { fg: "#fcd34d", bg: "rgb(245 158 11 / 0.18)", glyph: "◐" },
+  blocked:     { fg: "#fca5a5", bg: "rgb(239 68 68 / 0.18)",  glyph: "⛔" },
+  waiting:     { fg: "#fcd34d", bg: "rgb(245 158 11 / 0.20)", glyph: "⏸" },
 };
 
 export const COLUMN_ACCENTS: Record<IssueStatus, ColumnAccent> = {

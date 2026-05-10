@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-48
 external_id: 69ec3120e95d0e8486f817c8
@@ -28,6 +28,7 @@ description: |-
   - `deploy/remote.ts` — `uploadClaudeAuth()` (the system under test)
   - `deploy/workers.test.ts` — reference for the string-shape assertion pattern
   - `deploy/test-helpers.ts` — already has fixtures; extend if needed
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

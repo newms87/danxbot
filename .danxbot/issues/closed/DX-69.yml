@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-69
 external_id: 69f9e2661f52a81b79788060
@@ -120,6 +120,7 @@ description: |-
   Land DX-68 first (handleStop DB fallback) — it's prerequisite for
   any agent that survives a restart to reach a clean terminal state.
   Then DX-69 closes the duplicate-dispatch race at both ends.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-86
 external_id: 69fa9ea456bcc7b7d5caeb5c
@@ -105,6 +105,7 @@ description: |-
     with `status: ToDo`, `external_id: ""`. Within one poll tick the
     poller dispatches it (orphan-push from Slice C still creates the
     Trello card on the same tick or next).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

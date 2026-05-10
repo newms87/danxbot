@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-33
 external_id: 69efecad56cd0c321f700448
@@ -65,6 +65,7 @@ description: |-
   - Trello foOZwh09 — full incident retro
   - Commit 7042162 — playwright text-block fix where the gap was discovered
   - Commit eae2d4d — workspace wiring that prod failed to pick up
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

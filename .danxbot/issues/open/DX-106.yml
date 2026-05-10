@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-106
 external_id: 69e864c342840838ea2de1d7
@@ -36,6 +36,7 @@ description: |-
   ## How to Verify
 
   Start worker for a connected repo that previously had `danx-*` files in `<repo>/.claude/` — confirm cleanup removed them, and `.danxbot/workspace/.claude/` now has the injected set. Dispatched agents still complete end-to-end. Interactive `claude` at repo root (use case #1) shows zero `danx-*` rules / subagents / skills in `/doctor` and `/skills`. `make test` passes; `npx tsc --noEmit` clean.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

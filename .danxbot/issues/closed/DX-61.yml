@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-61
 external_id: 69f9dfaca0e2e9adbb942532
@@ -111,6 +111,7 @@ description: |-
   - Mutation endpoints
   - Cross-repo aggregation
   - Caching layer
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

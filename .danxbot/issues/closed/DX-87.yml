@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-87
 external_id: 69fa9eab449bf07e04edb2df
@@ -126,6 +126,7 @@ description: |-
     appends to YAML `comments[]`.
   - Manual: post a bot-marked comment on the tracker (simulate via
     direct API call) → next tick does NOT re-import.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

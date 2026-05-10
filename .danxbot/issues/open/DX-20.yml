@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-20
 external_id: 69f2245603cbdd28c263c33e
@@ -32,6 +32,7 @@ description: |-
   ## Found while
 
   Code review nitpick N1 on card uHECTOjj (commit `7dd4abb`). Reviewer noted "Not blocking today; cli.ts main() is the only setter."
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

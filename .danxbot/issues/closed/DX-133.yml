@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-133
 external_id: 69fd5b2aef0ea7e17d46d98f
@@ -62,6 +62,7 @@ description: |-
 
   - Healing OTHER drift classes (orphan dispatch blocks, AC item id reconciliation) — those have their own existing passes.
   - Changing the order of existing passes beyond inserting healLocalYamls at the top.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

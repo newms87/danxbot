@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-67
 external_id: 69f9dfcd894e9331a1aae802
@@ -170,6 +170,7 @@ description: |-
   - Add a comment via the bot path — verify the inbound pull does
     NOT re-import the bot's own comment (no echo loop).
   - `npx vitest run` clean. `npx tsc --noEmit` clean.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

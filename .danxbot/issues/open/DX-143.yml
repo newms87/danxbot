@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-143
 external_id: 69fd75e5619a7efadfcb543c
@@ -77,6 +77,7 @@ description: |-
   All seven steps green → ACs check off. If any step fails, that's a real blocker on the card — do not mark Done.
 
   Note: this validation is mechanical; do NOT perform it in production / deployed targets. Local platform worker is the validation harness.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

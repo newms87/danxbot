@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-12
 external_id: 69f9df8df92ead2855476395
@@ -131,6 +131,7 @@ description: |-
 
   - Auto-creating the Blocked label via danxbot itself at runtime — operator runs setup or manually adds the id. (Setup skill IS updated; runtime auto-create is rejected as too magical.)
   - Migration of existing Needs Help cards that are actually blocked-style — humans can re-categorize as they see fit.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

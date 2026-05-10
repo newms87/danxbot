@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-113
 external_id: 69e27d354cff69d3df37e14f
@@ -77,6 +77,7 @@ description: |-
   - UI that calls these routes (Phases 5-6).
   - Cross-repo aggregations or analytics endpoints.
   - Export/CSV.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

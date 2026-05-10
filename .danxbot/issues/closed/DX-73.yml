@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-73
 external_id: 69fa128c88a2f2e4745a182c
@@ -58,6 +58,7 @@ description: |-
   - `npx vitest run src/poller/index.test.ts` clean (103 tests).
   - `npx vitest run` clean (153 files).
   - `npx tsc --noEmit` clean.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

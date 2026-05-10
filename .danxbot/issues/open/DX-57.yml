@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-57
 external_id: 69e5bd811c799dfa7f658808
@@ -50,6 +50,7 @@ description: |-
   ## How to verify
 
   Existing tests in `src/worker/dispatch.test.ts > handleLaunch — stall detection (host mode)` must pass unchanged. Add new unit tests in `stall-recovery.test.ts` that exercise: (1) stall under max nudges → respawn, (2) stall at max nudges → job.stop("failed"), (3) stall during a respawn → no-op, (4) teardown when job completes before stall fires.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

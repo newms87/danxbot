@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-103
 external_id: 69fd17d889104692f611e6ca
@@ -103,6 +103,7 @@ description: |
   - Missing `issue_prefix` in `config.yml` throws at worker startup;
     no legacy ISS fallback remains in code.
   - vitest backend + dashboard suites green; tsc + vue-tsc green.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

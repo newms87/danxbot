@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-139
 external_id: 69fd725baed19f5501531902
@@ -44,6 +44,7 @@ description: |-
   - Cross-worker / cross-host coordination beyond the existing `dispatch.host` column.
   - DB schema migrations beyond a small `pid_terminated_at` column added in Phase 1.
   - Replacing in-memory `activeJobs` with a DB-backed structure — `activeJobs` is the runtime cache, DB is durable; keep both, ensure sync.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -118,14 +119,18 @@ history:
     from: ToDo
     to: In Progress
     note: Any child In Progress — parent In Progress
+  - timestamp: 2026-05-09T05:25:29.111Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-151"
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
 waiting_on:
-  reason: Hard dependency on Issues DB Mirror (DX-151) — dispatch registry phases query the issues + dispatches tables landing in DX-151.
-  timestamp: 2026-05-08T12:00:00.000Z
+  reason: Depends on DX-158 (multi-worker worktrees + identity + locks) shipping first — DX-139's idempotent worker-restart-across-dispatches contract relies on the per-agent worktree + lock infrastructure DX-158 introduces.
+  timestamp: 2026-05-09T05:35:00.000Z
   by:
-    - DX-151
+    - DX-158
 blocked: null

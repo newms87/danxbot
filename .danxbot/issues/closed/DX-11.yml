@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-11
 external_id: 69e817eef72769c227ca25fc
@@ -52,6 +52,7 @@ description: |-
   - `aws --profile <profile> ssm get-parameter --name /<prefix>/shared/ANTHROPIC_API_KEY --with-decryption` returns three different values
   - Docker exec into each container and confirm `env | grep ANTHROPIC_API_KEY` differs per environment
   - Old key is revoked on the Anthropic dashboard (any further usage would 401)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

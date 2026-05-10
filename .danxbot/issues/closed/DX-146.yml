@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-146
 external_id: 69fd77a561254ef68fa8694c
@@ -94,6 +94,7 @@ description: |-
   - Auto-derive / heal / Trello hydrate appends — Phase 3.
   - Dashboard rendering — Phase 4.
   - Dashboard write-paths emitting `dashboard:<username>` — no card-mutating dashboard endpoint exists today; the description acknowledges this is forward-looking. Add the actor format to a TODO comment near the future endpoint surface; do not invent the endpoint here.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

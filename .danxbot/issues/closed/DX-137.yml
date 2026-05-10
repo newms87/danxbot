@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-137
 external_id: 69fd5b3781af949af082bec8
@@ -65,6 +65,7 @@ description: |-
   - Replacing the dispatches DB schema (host_pid stays a column for analytics).
   - Cross-host PID semantics (`dispatch.host` already covers that; this phase doesn't change it).
   - Migrating existing rows whose host_pid is wrong — they are repaired naturally on the next save.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

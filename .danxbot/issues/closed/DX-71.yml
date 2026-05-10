@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-71
 external_id: 69f9ee4957b2318b4331a700
@@ -168,6 +168,7 @@ description: |-
   - Dashboard cross-worker proxy — future card.
   - Restarting a worker for a DIFFERENT repo from this worker — future
     card; this phase rejects all cross-repo callers.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

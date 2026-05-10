@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-40
 external_id: 69eeea6b28fb565609be3942
@@ -36,6 +36,7 @@ description: |-
   ## Reference
 
   Trello CudG7AJy — original Slack agent E2E harness card. Free-mode case #11 was deferred to this card to keep the original card's scope tight + avoid blocking ship on a real-API run.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

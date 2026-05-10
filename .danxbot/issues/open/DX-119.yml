@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-119
 external_id: 69df2751f06ebee25bed3316
@@ -14,6 +14,7 @@ description: |-
   **Solution:** Change the default target list in `notifyError` to `reviewListId` so auto-generated error cards land in Review for human triage rather than ToDo for agent processing. Operational errors (billing/credit issues) are already sent to the Needs Help list via an explicit override — that path is unaffected.
 
   **ICE Score:** 567 = 7 × 9 × 9 (I: 7 — prevents agents from picking up unfixable error cards and wasting budget; keeps the workflow clean. C: 9 — single-line default change with very clear path. E: 9 — isolated to one file, under 5 lines changed.)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

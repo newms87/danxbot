@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-28
 external_id: 69f1786e681c00a08fc48cff
@@ -41,6 +41,7 @@ description: |-
   ## Found While
 
   Code-reviewer + test-reviewer subagent reports during H4JrjJrn fix.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-105
 external_id: 69eff89199f01688d77dcab6
@@ -53,6 +53,7 @@ description: |-
   - `writeIfChanged` already enforces idempotence — re-use, don't reimplement.
   - `src/poller/index.test.ts` asserts repo-root cleanliness (zero writes outside `<repo>/.danxbot/workspace/.claude/`). Preserve that invariant.
   - Phase 2 sync runs on Slack dispatches too — `writeIfChanged` keeps it fast on no-op ticks.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

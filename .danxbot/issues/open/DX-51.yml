@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-51
 external_id: 69eaf00ca7c23ad20bde6a62
@@ -45,6 +45,7 @@ description: |-
   - `dashboard/src/App.vue`, `components/DispatchList.vue`, `DispatchDetail.vue`, `SessionTimeline.vue`, `TriggerBadge.vue`, `StatusBadge.vue`, `agents/AgentsPage.vue`
   - `src/dashboard/dispatch-stream.ts`, `stream-routes.ts`, `events.ts` (SSE)
   - `src/poller/index.ts`, `src/dispatch/core.ts` (Trello trigger flow)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

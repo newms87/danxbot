@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-132
 external_id: 69fd5b2659f5cd381d6b8fce
@@ -58,6 +58,7 @@ description: |-
   - Dashboard surface for the queue depth (Phase 4 ties this in).
   - Retry on non-Trello tracker errors (memory tracker doesn't fail like this).
   - Compacting queue across restarts (single drain pass per tick is plenty).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

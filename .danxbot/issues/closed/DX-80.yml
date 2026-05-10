@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-80
 external_id: 69fa49f77ca61c3d4f849a3b
@@ -77,6 +77,7 @@ description: |-
   - `cd dashboard && npx vitest run` exits 0 with all suites passing.
   - `cd dashboard && npx vue-tsc --noEmit` still clean.
   - No regressions to backend suite or `npx tsc --noEmit`.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

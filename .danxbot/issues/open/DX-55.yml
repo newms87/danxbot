@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-55
 external_id: 69e6c387038b9bcfe36d5ff3
@@ -42,6 +42,7 @@ description: |-
   - `src/settings-file.ts` (the module whose export set grew)
   - `src/dashboard/agents-routes.test.ts` (the test file whose mock factory needed updating)
   - `~/.claude/rules/testing.md` (where the rule would land)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-31
 external_id: 69f1304dba6b0d8a9972c198
@@ -39,6 +39,7 @@ description: |-
   ## Found while
 
   Test-review of card SWTli9Jz (AgentHandle refactor). Flagged Critical by test-reviewer; deferred to keep that card scoped.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

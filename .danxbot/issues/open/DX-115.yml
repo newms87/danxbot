@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-115
 external_id: 69e27ce506fbcea19b94f4e5
@@ -81,6 +81,7 @@ description: |-
   - JSONL parsing (Phase 3). Stub it.
   - API routes or dashboard UI (Phases 4-6).
   - Retention cron (Phase 4).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

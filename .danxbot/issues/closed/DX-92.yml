@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-92
 external_id: 69fc22978641948b52679516
@@ -95,6 +95,7 @@ description: |
   - Poller restart reattaches to live dispatches without redispatching (verified via integration test).
   - In-memory `activeDispatches` always == YAML state after every tick (invariant test).
   - No regressions on existing dispatch lifecycle tests (`live-dispatch-guard.test.ts`, `index.test.ts` orphan-push, etc).
+priority: 3
 triage:
   expires_at: 2026-05-07T06:15:32.727Z
   reassess_hint: ""

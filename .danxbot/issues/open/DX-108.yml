@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-108
 external_id: 69e86493ef2cbd32cfafd337
@@ -37,6 +37,7 @@ description: |-
   ## How to Verify
 
   Dispatch an agent that prints `pwd` via the Bash tool — confirm `.danxbot/workspace/`. Have the agent read `src/config.ts` — confirm `--add-dir` granted access. Place a rule file at `<repo>/.claude/rules/dev-only.md` that does NOT exist in workspace; dispatch agent reads `.claude/rules/` — confirm `dev-only.md` is NOT visible. Confirm `.danxbot/workspace/.claude/settings.json` values (permissions, hooks) are honored.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-56
 external_id: 69e6aa579601e778e6db1d46
@@ -69,6 +69,7 @@ description: |-
   ## Verify
 
   `npx vitest run src/dashboard/server.test.ts` stays 65/65 green. `npx tsc --noEmit` clean. Live curl flow from .claude/rules/production-access.md still works.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

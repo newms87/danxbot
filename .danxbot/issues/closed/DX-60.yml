@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-60
 external_id: 69f9dfa491e30a21c55237bd
@@ -81,6 +81,7 @@ description: |-
   unit tests. Type checking (`npx vue-tsc --noEmit`) IS still required. The
   backend half (Phase 1) is NOT exempt — full unit + integration tests
   required for the new endpoints.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

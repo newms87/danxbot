@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-208
 external_id: 69fe515d1cb14e77493a2ed7
@@ -103,6 +103,7 @@ description: |-
   - Paired-write (`pairedWriteHostPid`) extraction — already its own
     module.
   - Reattach consumer — that's Phase 2c.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

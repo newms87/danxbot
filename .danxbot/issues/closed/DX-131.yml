@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-131
 external_id: 69fd5b22287019bf52173bc8
@@ -64,6 +64,7 @@ description: |-
   - Persistent retry queue (Phase 2).
   - Dashboard surface (Phase 4).
   - Changes to `syncIssue` itself or to `persistAfterSync`'s signature.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

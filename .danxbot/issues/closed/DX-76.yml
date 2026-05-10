@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-76
 external_id: 69fa272cecc946ff73d5dc54
@@ -104,6 +104,7 @@ description: |-
     still load and toggle correctly; next write emits `issuePoller`.
   - `npx vitest run` + `cd dashboard && npx vitest run` + `npx tsc
     --noEmit` + `cd dashboard && npx vue-tsc --noEmit` clean.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

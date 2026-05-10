@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-37
 external_id: 69ef7fa678a0cdcba10bf8c4
@@ -40,6 +40,7 @@ description: |-
   ## Reference
 
   Discovered during gpt-manager production verification (gpt-manager job `830cbd99`). The fix in `d11b63d` corrects new dispatches; without backfill, all pre-d11b63d rows remain wrong. Cost analytics, throughput dashboards, and any rate-limit decisions made off historical numbers are 2-5× too high.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

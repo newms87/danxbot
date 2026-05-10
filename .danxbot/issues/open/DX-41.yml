@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-41
 external_id: 69ecf832ec92edc6c7d9079f
@@ -19,6 +19,7 @@ description: |-
   Prefer option 1 — naming a port after its repo is what makes the collision impossible. The current fix in worker-env.sh defends against the leak but does not eliminate the namespace issue.
 
   Source comment in scripts/worker-env.sh references the leak. Tests cover the override behavior end-to-end. This card is the "deeper fix" that the bug card explicitly deferred.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

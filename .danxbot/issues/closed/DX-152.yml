@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-152
 external_id: 69fe1ea161c998efdf51a9e8
@@ -91,6 +91,7 @@ description: |-
   - Any reader migration (DX-155, DX-156).
   - `danx_issue_save` retirement (DX-157).
   - Migrating historical data — explicitly excluded per the brainstorm decision.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

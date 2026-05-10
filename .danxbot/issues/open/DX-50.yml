@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-50
 external_id: 69eb90bc8a6bc2668d81ebd5
@@ -35,6 +35,7 @@ description: |-
   ## Why this is an Action Item, not a phase of Card 183
 
   Card 183's scope was the MCP server itself + registry wiring. Adding a new inject pipeline is net-new architecture (new directory convention, new ownership contract with connected repos, new sync semantics to test). Keeping Card 183 tight avoids mixing two concerns in one commit.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

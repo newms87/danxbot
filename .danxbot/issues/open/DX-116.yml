@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-116
 external_id: 69e27cc33204da2502085f08
@@ -71,6 +71,7 @@ description: |-
   ## Out of scope for this phase
 
   - Any new code that belongs in Phases 2-6 (dispatch CRUD, JSONL reader, API routes, UI components).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

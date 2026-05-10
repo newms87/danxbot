@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-16
 external_id: 69f6d11f32498da53c521576
@@ -48,6 +48,7 @@ description: |-
   - Run `npx vitest run src/__tests__/worker/` — tests still pass without DB env vars set.
   - Run `npx vitest run` — full suite still passes (no regression in mocked test paths).
   - Boot a real worker — config errors surface on first DB call as before, OR via the explicit `validateAllConfig()` boot check.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

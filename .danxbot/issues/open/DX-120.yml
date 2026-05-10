@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-120
 external_id: 69df2763a1f0c258f30f841c
@@ -14,6 +14,7 @@ description: |-
   **Solution:** Add a periodic log cleanup that (1) deletes log files older than a configurable age (default: 7 days, matching `EVENTS_MAX_AGE_DAYS`), and (2) enforces a max file count (default: 500). The cleanup should run at startup and then on the same 6-hour interval as the existing event cleanup. Add a `AGENT_LOGS_MAX_AGE_DAYS` env var for the age threshold and `AGENT_LOGS_MAX_FILES` for the count cap. Expose a `startLogCleanup` / `stopLogCleanup` pair similar to `startEventCleanup`.
 
   **ICE Score:** 336 = 6 × 8 × 7 (I: 6 — prevents disk-full crashes in production; all deployments accumulate logs indefinitely today. C: 8 — proven pattern already used by `events-db.ts` and `threads-db.ts` cleanup. E: 7 — new `log-cleaner.ts` utility + hook into shutdown.ts, a few hours of work.)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-147
 external_id: 69fd77dd13bcb76fb70f4dc6
@@ -115,6 +115,7 @@ description: |-
 
   - Dashboard rendering — Phase 4.
   - `worker:retry-queue` / `worker:reconcile` actors — those code paths are pre-existing helpers used by other features; a future card can extend the actor list when those paths actually mutate status. The actor table in the parent epic's description is a canonical reference, not a Phase 3 deliverable.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

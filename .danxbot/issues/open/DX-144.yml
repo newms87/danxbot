@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-144
 external_id: 69fd75e9b14e858a16d23675
@@ -47,6 +47,7 @@ description: |-
   - Persistent error storage / DB-backed history.
   - Email / Slack notifications on new errors (future enhancement).
   - Per-error dismissal / acknowledgement (future enhancement).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

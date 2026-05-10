@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-7
 external_id: 69f76d57359b5fe89f80ab22
@@ -61,6 +61,7 @@ description: |-
   - `/api/launch` external dispatch — untouched.
   - Phase 5 retro/action-items rendering (already shipped).
   - TrelloTracker / MemoryTracker internals (already covered).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

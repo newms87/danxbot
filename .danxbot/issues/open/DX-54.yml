@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-54
 external_id: 69e6f9513fe45ef189f9e34a
@@ -57,6 +57,7 @@ description: |-
   ## Priority
 
   Low-Medium. No production bug today — the missing-putStatus sites were fixed in o0RFYGCc with explicit inline calls + regression tests (retry, partial-config, heartbeat-stop, host-mode variants). This card eliminates the class of bug permanently.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

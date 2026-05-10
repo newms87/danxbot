@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-52
 external_id: 69e82f9d71a2c89bc8fc6b30
@@ -32,6 +32,7 @@ description: |-
 
   - `git status` after the fix shows no reference to this file
   - Future sessions that write a handoff file at that path also get gitignored automatically
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

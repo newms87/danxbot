@@ -265,7 +265,7 @@ describe("TrelloTracker", () => {
 
     const tracker = new TrelloTracker(TRELLO);
     const result = await tracker.createCard({
-      schema_version: 4,
+      schema_version: 5,
       tracker: "trello",
       id: "ISS-1",
       parent_id: null,
@@ -274,6 +274,7 @@ describe("TrelloTracker", () => {
       type: "Feature",
       title: "T",
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [{ title: "AC1", checked: false }],
       comments: [],
@@ -793,7 +794,7 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(TRELLO);
     await tracker.createCard({
-      schema_version: 4,
+      schema_version: 5,
       tracker: "trello",
       id: "ISS-9",
       parent_id: null,
@@ -802,6 +803,7 @@ describe("TrelloTracker", () => {
       type: "Feature",
       title: "T",
       description: "D",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],

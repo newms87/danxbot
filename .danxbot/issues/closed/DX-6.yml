@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-6
 external_id: 69f76e8d069eb71dd315d363
@@ -40,6 +40,7 @@ description: |-
   ## When to ship
 
   After at least one full release cycle has passed since Phase 5's commit (`<sha placeholder>`). Confirm by checking `git log --since` for the Phase 5 commit and verifying any external `/api/launch` callers (gpt-manager, etc.) have updated their hardcoded `workspace: "trello-worker"` references to `"issue-worker"`.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

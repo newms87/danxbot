@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-5
 external_id: 69f771d6cbd1ada690743c73
@@ -85,6 +85,7 @@ description: "## Context
   - The `→` lookalike normalization helper — pure validation/formatting, not a retroactive fix.
 
   - Slack agent path."
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

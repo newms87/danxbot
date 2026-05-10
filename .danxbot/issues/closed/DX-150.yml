@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-150
 external_id: 69fd91d1b251594c5817e63e
@@ -79,6 +79,7 @@ description: |-
   - Pruning closed/ YAMLs that no longer correspond to any real card (separate concern).
   - Cross-tracker migration of card history (comments, retro on the old tracker are gone — accepted loss).
   - Detecting tracker swaps proactively (config-watch) — purely reactive heal on YAML scan is enough.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

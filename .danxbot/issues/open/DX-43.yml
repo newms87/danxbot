@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-43
 external_id: 69ec454060241b86081e5d3b
@@ -49,6 +49,7 @@ description: |-
   ## Why This Is Not Part of 3l2d7i46
 
   3l2d7i46 is the claude-auth preflight feature. This card is the meta-tooling improvement to prevent the next preflight-style feature from ending up split across two unrelated commits.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

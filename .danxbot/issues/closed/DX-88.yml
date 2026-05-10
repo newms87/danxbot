@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-88
 external_id: 69fa9eb2b60c13271a9528a8
@@ -131,6 +131,7 @@ description: |-
     issues zero `createCard` calls.
   - End-to-end: hand-write a YAML, watch it flow YAML → tracker
     on tick 1, no further writes on tick 2.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

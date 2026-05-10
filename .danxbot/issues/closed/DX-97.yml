@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-97
 external_id: 69f77e9cbe3dbb53b4f10349
@@ -15,6 +15,7 @@ status: Done
 type: Feature
 title: Fix dispatch-pipeline.test.ts 'extracts summary from last assistant text in JSONL' race. Test reads the assistant summary before fake-claude has finished writing the final text block, so it captures the intermediate 'I will help you with that task.' instead of 'Task completed successfully'. Likely needs a wait-for-final-block helper or to drive the assertion off the watcher's terminal entry rather than the in-flight one.
 description: ""
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

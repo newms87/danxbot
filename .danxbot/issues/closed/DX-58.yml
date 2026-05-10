@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-58
 external_id: 69f9df964b7f58666dc95671
@@ -96,6 +96,7 @@ description: |-
   ## Sibling Card
 
   gpt-manager `DX-47` is blocked on this card.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-45
 external_id: 69ec313a1dd6e6239cf54c78
@@ -31,6 +31,7 @@ description: |-
   - `src/__tests__/system/run-system-tests.sh`
   - `src/__tests__/system/` (new test file)
   - `repos/danxbot/.danxbot/config/compose.yml` (the contract under test)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

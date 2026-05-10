@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-63
 external_id: 69f9dfb7fca208a9dc348d3d
@@ -118,6 +118,7 @@ description: |-
     `ISSUE_TYPE_META`, `PHASE_STATUS_META`, `COLUMN_ACCENTS`,
     `statusToColumnId`, `phaseStatusToId` so every issue component
     consumes one source of truth
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

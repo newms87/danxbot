@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-62
 external_id: 69f9dfb11ca2a4ddd3077332
@@ -112,6 +112,7 @@ description: |-
   - `dashboard/src/composables/useIssues.ts` (new)
   - `dashboard/src/api.ts` — add `fetchIssues`, `fetchIssueDetail`
   - `dashboard/src/types.ts` — add `IssueListItem`, `Issue`
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

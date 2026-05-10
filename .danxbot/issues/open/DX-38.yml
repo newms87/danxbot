@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-38
 external_id: 69ef7f963a83967fcf64e39d
@@ -39,6 +39,7 @@ description: |-
   ## Reference
 
   Discovered during gpt-manager production verification (this session). The gate failure was the second blocker after the EROFS auth fix; cost ~10 minutes to diagnose and required an SSM update + worker recreate as workaround. A future operator who flips the toggle expecting the documented "no restart needed" behavior (`.claude/rules/settings-file.md`) will hit this same wall.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

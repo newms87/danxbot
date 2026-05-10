@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-77
 external_id: 69fa2762262f7bbe9da16e43
@@ -84,6 +84,7 @@ description: |-
   - `isFeatureEnabled(repo, "autoTriage")` returns `false` by default,
     `true` when the operator flips the toggle.
   - All type-checks + tests clean (backend + dashboard).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

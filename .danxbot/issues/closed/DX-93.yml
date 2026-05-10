@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-93
 external_id: 69fc229ac48aff2d0b575cfb
@@ -87,6 +87,7 @@ description: |
   - Manual smoke: invoke skill on each card status (Review, Needs Help, Blocked), verify YAML written w/ correct `triage.expires_at`, `triage.ice` (Review only), `triage.reassess_hint` (Needs Help / Blocked), `triage.history` appended.
   - On Needs Help cards, audit re-fires the `unblock` skill's misclassification check + correctly demotes locally-executable cards.
   - Old `danx-triage` skill body becomes a single-line redirect to `danx-triage-card` (or deleted, if Phase 5 ordering makes that cleaner).
+priority: 3
 triage:
   expires_at: 2026-05-07T06:20:32.727Z
   reassess_hint: ""

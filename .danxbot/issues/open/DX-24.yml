@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-24
 external_id: 69f19330f4f6f2fc9f398d28
@@ -28,6 +28,7 @@ description: |-
   ## Acceptance criteria
 
   - The reusability of a `useStream` instance after `disconnect()` is either documented in JSDoc OR the API is tightened to forbid it. No middle ground.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

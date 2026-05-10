@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-207
 external_id: 69fe51583c4def2c82a28911
@@ -77,6 +77,7 @@ description: |-
   - Reading the column or rewriting the file — Phase 2c.
   - Backfilling NULL for pre-migration rows — they will simply not be
     reattachable and Phase 2c falls through to mark-failed.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -101,12 +102,44 @@ ac:
   - check_item_id: 69fe515acd9f3a9df6fc442c
     title: 4 new unit tests pass; no existing tests regressed; tsc clean
     checked: false
-comments: []
+comments:
+  - author: danxbot
+    timestamp: 2026-05-08T23:30:00.000Z
+    text: |-
+      ## Reverted to ToDo — premature dispatch
+
+      Operator interrupted this dispatch: "We are not supposed to be
+      working on this yet."
+
+      **Root cause.** Grandparent epic `DX-139` carries
+      `waiting_on: { by: [DX-151] }` (Issues DB Mirror). The
+      dependency was never propagated when `DX-141` (parent) was split
+      into `DX-207` / `DX-208` / `DX-209` — the split comment on
+      DX-141 declared `DX-207` "unblocked, dispatches first," but
+      DX-141 itself should have been `waiting_on: [DX-151]`. As a
+      result the poller saw DX-207 with `waiting_on: null` and
+      dispatched it.
+
+      **Action taken on this card.** Set `waiting_on: by: [DX-151]`
+      with a reason explaining the chain (DX-207 → DX-141 → DX-139 →
+      DX-151). Worker will normalize `status` to `ToDo` on save.
+
+      **Out of scope (left for the operator or the next pickup of the
+      relevant card).** `DX-141` itself still has
+      `waiting_on: null` — when DX-151 ships, the operator should
+      verify DX-141's `waiting_on` and the chain on its other
+      children (DX-208 / DX-209) before letting any of them dispatch.
+      Re-checking the parent before resuming this work prevents the
+      same premature-dispatch trap from firing on DX-208.
 history:
   - timestamp: 2026-05-08T21:10:50.473Z
     actor: dispatch:3ecfde68-c199-415f-b265-5480e68e5b74
     event: created
     to: ToDo
+  - timestamp: 2026-05-09T05:25:29.480Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-151"
 retro:
   good: ""
   bad: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-2
 external_id: 69f772083ebbc515fcf1534e
@@ -47,6 +47,7 @@ description: |-
   ## Notes
 
   This is a one-shot verification task; the next agent should pick it up FIRST before touching any code. If it fails, that's a Phase 5 hotfix; if it passes, all the other follow-up cards (`VeChPbUQ`, `AoIo3L6K`, the test-coverage and DRY cards) can ship in any order.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

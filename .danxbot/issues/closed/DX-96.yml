@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-96
 external_id: 69f77e9b77472aefac1317b2
@@ -65,6 +65,7 @@ description: |
   by the inner try/catch in `drainAndSend`, but timer activity from
   `scheduleFlush`'s setTimeout + retry backoff in `postEventsWithRetry`
   is observable as event-loop weight after the dispatch terminates.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

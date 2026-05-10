@@ -4,13 +4,7 @@ id: DX-153
 external_id: 69fe1eac3961b2f48802f4ff
 parent_id: DX-151
 children: []
-dispatch:
-  id: 2e6e5a72-3db5-4965-9329-32c9b7f6ef1c
-  pid: 11914
-  host: dan
-  kind: work
-  started_at: 2026-05-09T00:52:12.664Z
-  ttl_seconds: 7200
+dispatch: null
 status: Done
 type: Feature
 title: "Issues DB Mirror > Phase 2: Add issues + issue_history tables (PG schema, generated columns, indexes)"
@@ -184,9 +178,12 @@ ac:
     title: full vitest suite green; tsc + vue-tsc clean
     checked: true
 comments:
-  - author: test-reviewer
-    timestamp: 2026-05-09T01:30:00Z
+  - id: 69fe8a598b8793b40b8b9835
+    author: test-reviewer
+    timestamp: 2026-05-09T01:14:01.819Z
     text: |
+      <!-- danxbot -->
+
       ## Test Review
 
       **Verdict:** ADEQUATE (with minor optional follow-ups).
@@ -221,9 +218,12 @@ comments:
       No flake risks identified — cleanups, schema restoration, unique
       DB names via `randomBytes(6).toString("hex")`, and
       `pg_terminate_backend` before `DROP DATABASE` are all in place.
-  - author: code-reviewer
-    timestamp: 2026-05-09T01:30:00Z
+  - id: 69fe8a5a05acaecaae3d7271
+    author: code-reviewer
+    timestamp: 2026-05-09T01:14:02.157Z
     text: |
+      <!-- danxbot -->
+
       ## Code Review
 
       **Verdict:** PASS with non-blocking notes.
@@ -252,9 +252,12 @@ comments:
       4. **`blocked` COALESCE** at `016_issues_mirror.ts:81-84` is
          correct and IMMUTABLE; verified `jsonb_typeof('null'::jsonb)
          = 'null'`, not `'object'`. No change needed.
-  - author: danxbot
-    timestamp: 2026-05-09T01:30:00Z
+  - id: 69fe8a5ad14eede7af557499
+    author: danxbot
+    timestamp: 2026-05-09T01:14:02.512Z
     text: |
+      <!-- danxbot -->
+
       ## Review Fixes
 
       Applied all three actionable findings from `code-reviewer` before
@@ -271,6 +274,46 @@ comments:
       Re-verified: 9/9 tests pass, full backend suite (3516 tests)
       green, `npx tsc --noEmit` clean, `cd dashboard && npx vue-tsc
       --noEmit` clean.
+  - id: 69fe8a5aaa214931094dd104
+    author: danxbot
+    timestamp: 2026-05-09T01:14:02.852Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - All 9 ACs satisfied on the first commit. 9/9 integration tests
+        pass against the local `danxbot-postgres`; full backend suite
+        (3516 tests) green; `npx tsc --noEmit` and `npx vue-tsc --noEmit`
+        clean.
+      - Generated-column DDL landed correctly on the first run despite
+        PG's IMMUTABLE/STABLE distinction for `text::timestamptz` — the
+        card description's documented escape hatch (regular columns for
+        timestamptz, populated by Phase 3 writer) avoided the trap.
+      - Code review caught three minor issues (one-off env var, silent
+        catch, DRY in `runUp`/`runDown`) — all fixed in the same
+        dispatch before committing.
+      - Real-PG integration tests fill the gap left by the existing
+        mock-only `migrate.test.ts` — `src/db/test-db.ts` is the
+        reusable building block Phase 3+ will need anyway.
+
+      **What went wrong:** - Card description claimed Phase 1 already ships a `withTestDb()`
+        helper. It did not — DX-152's tests are mock-only. Built the
+        helper from scratch in this dispatch.
+      - First test run skipped all 9 tests because `it.skipIf(!handle)`
+        evaluates eagerly at describe-collection time, not lazily at
+        test-runtime — `beforeAll`-built handle was always null when
+        `skipIf` ran. Refactored to top-level `await createTestDb()`
+        before the describe block. Cost ~5 minutes.
+      - Initial `blocked` column expression
+        `(jsonb_typeof(data->'blocked') = 'object')` returned NULL
+        (not `false`) when `data` had no `blocked` key, because
+        `NULL = 'object'` is NULL in SQL. Wrapped in `COALESCE(..., false)`.
+        Caught immediately by the rich/sparse generated-columns test.
+
+      **Action items:** Nothing
+      **Commits:** 98a38e0
 history:
   - timestamp: 2026-05-08T23:13:30.605Z
     actor: worker:auto-derive

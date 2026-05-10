@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-91
 external_id: 69fc22939fc6626978a755d9
@@ -85,6 +85,7 @@ description: |
   - All consumers updated; `grep -r "triaged\." danxbot/src/` returns zero hits in source code (test fixtures may keep one for migration-test purposes).
   - Stagger logic: re-running migration on already-migrated cards is a no-op; first migration assigns expires_at across `now → now + 5min*N` window.
   - issue-card-workflow skill doc reflects new schema.
+priority: 3
 triage:
   expires_at: 2026-05-07T06:10:32.727Z
   reassess_hint: ""

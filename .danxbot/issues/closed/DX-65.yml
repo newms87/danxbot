@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-65
 external_id: 69f9dfc245a088ecfe67ccfe
@@ -161,6 +161,7 @@ description: |-
     read-only)
   - `dashboard/src/composables/useIssues.ts` — extend with
     `fetchDetail(id)` + cache
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-15
 external_id: 69f7630de87072dda420b89d
@@ -59,6 +59,7 @@ description: |-
   - Ease: 6 — vi.mock hoisting requires careful thread-through, but the boilerplate boundary is clear
 
   ICE = 216
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

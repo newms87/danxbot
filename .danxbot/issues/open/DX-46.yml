@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-46
 external_id: 69ec3130f63b00f9a509e70c
@@ -36,6 +36,7 @@ description: |-
   - `deploy/remote.ts`
   - `deploy/workers.ts`
   - `.env.example`
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

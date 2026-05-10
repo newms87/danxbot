@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-209
 external_id: 69fe5163e15cf841ee5b9abc
@@ -165,6 +165,7 @@ description: |-
 
   Action item if smoke fails — file under DX-139's retro, not as a
   blocker for this card's Done state.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

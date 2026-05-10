@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-90
 external_id: 69fc2291e71586a67cc4af23
@@ -92,6 +92,7 @@ description: |
   - Plugin (claude-plugins) changes for the new triage agent prompt — lives in `issue-worker` workspace, not a new plugin.
   - Schema-builder dispatches — orthogonal to issue triage.
   - Trello UI/board renames — keep "Action Items" list name on the board; sync layer remaps to status: Review on hydration so no operator-facing change.
+priority: 3
 triage:
   expires_at: 2026-05-07T06:05:32.727Z
   reassess_hint: ""

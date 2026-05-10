@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-10
 external_id: 69f7844004a63103a75b2bd5
@@ -22,6 +22,7 @@ description: |-
   **Root Cause:** The forwarder cleanup path in `src/agent/launcher.ts` fired `void forwarderFlush?.();` (fire-and-forget) inside `runCleanup`. `forwarder.flush()` invokes `drainAndSend()` which `await queue.enqueue(toSend)` → `appendFile(filePath, ...)`. The yaml-lifecycle test creates `testState.logsDir` once via `vi.hoisted(mkdtempSync(...))` and removes it in `afterAll(rmSync(...))`. When `appendFile` is queued in libuv but the dir vanishes before it opens, ENOENT propagates through the orphaned `forwarderFlush` promise. The OUTER `cleanupPromise.catch` in `runCleanup` cannot reach it (different promise chain), so vitest reports it as an unhandled rejection. Reproduces under parallel-suite load because timer skew is wider; isolated runs finish the flush before teardown.
 
   **Solution:** Wrapped `drainAndSend()`'s body in try/catch with `log.warn` (`src/agent/laravel-forwarder.ts`). Catches ENOENT (and any other) errors at the source so all three fire-and-forget callers (`consume()`'s `void drainAndSend()`, `scheduleFlush`'s setTimeout, the launcher's `void forwarderFlush?.()`) are crash-safe. Forwarder contract is best-effort delivery: lost batches are acceptable, an unhandled rejection that crashes vitest (or the worker) is not. Three regression tests added in `laravel-forwarder.test.ts`: explicit `flush()` path, BATCH_SIZE drain path, and a log-warn assertion to prevent the catch silently rotting to `catch {}`.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-49
 external_id: 69eb90cc8e3bf59cfa51d347
@@ -37,6 +37,7 @@ description: |-
   ## Verification
 
   `PLAYWRIGHT_INTEGRATION=1 docker compose up -d playwright && make test-playwright-integration` — both tests pass byte-level against `example.com`.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

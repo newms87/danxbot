@@ -4,8 +4,14 @@ id: DX-200
 external_id: 69fe27f75db44a6aaad21a6b
 parent_id: DX-158
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: 1f826fdd-00f6-4bce-b8af-0aff7d0d80d3
+  pid: 76564
+  host: dan
+  kind: work
+  started_at: 2026-05-10T00:20:07.417Z
+  ttl_seconds: 7200
+status: In Progress
 type: Feature
 title: "Multi-Worker > Phase 5: Agent + card locks + triage-precursor conflict-check + concurrent pick logic"
 description: |-
@@ -221,7 +227,7 @@ ac:
     checked: false
 comments:
   - author: danxbot
-    timestamp: "2026-05-09T21:18:45Z"
+    timestamp: 2026-05-09T21:18:45Z
     text: |-
       ## Notes from Phase 4 (DX-162)
 
@@ -243,15 +249,15 @@ comments:
       **Verifying Phase 5 wires correctly:**
 
       Once you pass `agent: PersonaContext` from the poller, the dispatched agent's `prompt.md` should start with `You are <name>.\n\n<bio>\n\nYour worktree: <abspath>\nYour branch: <name>\n\n` followed by the task body. `prependPersona` is a pure function — easy to assert at the dispatch boundary in unit tests.
-history: []
+history:
+  - timestamp: 2026-05-10T00:20:06.663Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-162"
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Sequential phase ordering — locks query the DB schema added by DX-151 epic; agents call the finalize script from Phase 4 (DX-162); pre-dispatch validation comes from Phase 3 (DX-161).
-  timestamp: 2026-05-08T12:00:00.000Z
-  by:
-    - DX-162
+waiting_on: null
 blocked: null

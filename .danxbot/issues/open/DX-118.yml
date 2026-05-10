@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-118
 external_id: 69df24dc32dfa2044ef76c04
@@ -14,6 +14,7 @@ description: |
   **Solution:** Accept an optional `?repo=` query parameter on `/api/stream`. When present, only broadcast events whose `repoName` matches. This requires per-client filter state: replace the current `Set<SSEClient>` with a `Map<SSEClient, string | undefined>` where the value is the repo filter.
 
   **ICE Score:** 480 = 8 x 8 x 7 (I: 8 — every multi-repo dashboard user is affected; spurious updates confuse the UI and waste bandwidth. C: 8 — the broadcast function is a single place and the pattern is identical to what /api/events already does. E: 7 — touches events.ts broadcast/addSSEClient/removeSSEClient and server.ts SSE handler, isolated to 2 files.)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

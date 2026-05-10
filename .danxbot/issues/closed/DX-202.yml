@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-202
 external_id: 69fe467d278446bdd0c6dc4a
@@ -77,6 +77,7 @@ description: |-
   - DX-99 and DX-102 carry the synthesized placeholder `blocked.reason` — when an agent dispatches against either, it should overwrite the reason with the actual blocker context.
   - The skipped marketplace-mirror tests in `src/poller/inject/workspaces/issue-worker/workspace-shape.test.ts` will pass once the operator pushes the matching commit to `github:newms87/claude-plugins`.
   - DX-201 retro had a pre-existing YAML bug (`retro.commits[0]: 9828791` parsed as int instead of string). Not migrated; left for separate fix.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

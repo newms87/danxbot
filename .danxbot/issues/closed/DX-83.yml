@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-83
 external_id: 69fa8b0a2930db2646d92a1a
@@ -110,6 +110,7 @@ description: |-
   - `dashboard/src/components/issues/OverviewTab.vue` (trim if needed)
 
   Design ref: `/tmp/design_pkg/danxbot-design-system/project/ui_kits/dashboard/AgentChat.jsx`, `IssueDrawer.jsx`, `IssueBoard.jsx`.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

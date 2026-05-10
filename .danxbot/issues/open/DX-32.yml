@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-32
 external_id: 69efecbbea04f24d586cec83
@@ -50,6 +50,7 @@ description: |-
 
   - Trello foOZwh09 — incident + retro
   - Sibling Action Items card — the real fix (auto-sync on worker boot)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

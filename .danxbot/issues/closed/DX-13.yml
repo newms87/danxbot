@@ -4,13 +4,7 @@ id: DX-13
 external_id: 69f80d0f252e6b4c0734a4ad
 parent_id: null
 children: []
-dispatch:
-  id: 90694252-369c-47b4-9953-9c7980667ca3
-  pid: 89654
-  host: dan
-  kind: work
-  started_at: 2026-05-09T01:14:17.700Z
-  ttl_seconds: 7200
+dispatch: null
 status: Done
 type: Feature
 title: Audit replayQueueOnBoot for retain ENOENT — `src/agent/laravel-forwarder.ts#replayQueueOnBoot` calls drainQueue → queue.retain → writeFile, which can ENOENT if the queue dir is reaped between peekAll and retain. Boot timing makes this near-impossible in practice, but the same swallow-with-warn pattern (or moving the catch into EventQueue.retain) would close the gap.
@@ -52,19 +46,19 @@ triage:
         c: 4
         e: 5
 ac:
-  - check_item_id: ""
+  - check_item_id: 69fe8e79ff901cb16211e880
     title: "`EventQueue.retain` swallows ENOENT (file path or parent dir gone) and logs a warn naming the file path + batch count, instead of throwing."
     checked: true
-  - check_item_id: ""
+  - check_item_id: 69fe8e7ae1ed8f455d05f218
     title: "`EventQueue.retain` re-throws every non-ENOENT error from the underlying `writeFile` call (no over-broad swallow)."
     checked: true
-  - check_item_id: ""
+  - check_item_id: 69fe8e7b3e0447aed52367f0
     title: "`replayQueueOnBoot` resolves cleanly when the queue dir is removed between `peekAll()` and `retain()` — verified by a regression test that simulates the race."
     checked: true
-  - check_item_id: ""
+  - check_item_id: 69fe8e7b6fdd6aa6a7ff4215
     title: Existing `event-queue.test.ts` and `laravel-forwarder.test.ts` suites still pass; new tests cover both the unit case (retain ENOENT) and the integration case (replayQueueOnBoot survives a dir reap).
     checked: true
-  - check_item_id: ""
+  - check_item_id: 69fe8e7c37b7b1bebb757d94
     title: "`npx tsc --noEmit` passes."
     checked: true
 comments:
@@ -80,9 +74,12 @@ comments:
       **Decision:** Keep
       **ICE:** 40 (2×4×5)
       **Explain:** Defensive hardening for an ENOENT race in `replayQueueOnBoot` boot replay. Card body acknowledges the race is "near-impossible in practice" → impact is low (**I=2**). Anchors are precise — names `src/agent/laravel-forwarder.ts#replayQueueOnBoot`, the call chain `drainQueue → queue.retain → writeFile`, and the exact syscall (`ENOENT`) — high confidence (**C=4**). Fix is a one-line swallow-with-warn (`if (e.code === "ENOENT") log.warn(...); else throw`) inside `EventQueue.retain` or the boot replay path (**E=5**).
-  - author: code-reviewer
-    timestamp: 2026-05-09T01:25:00Z
+  - id: 69fe8e7d26ab763cc7e02137
+    author: code-reviewer
+    timestamp: 2026-05-09T01:31:41.015Z
     text: |
+      <!-- danxbot -->
+
       ## Code Review
 
       No CRITICAL findings. Fix is well-scoped, narrow, symmetric with the rest of `EventQueue`, JSDoc explicitly states the contract + non-allowlisted error codes.
@@ -97,9 +94,12 @@ comments:
 
       - **EISDIR test cross-platform stability**: `mkdirSync(path)` to force `EISDIR` is documented POSIX behaviour; Windows returns `EPERM`. danxbot test suite is Linux/macOS only — fine, but a one-line comment locks the assumption.
       - **JSDoc "transient filesystem race"** is accurate; the parenthetical already names test teardown — disregard.
-  - author: test-reviewer
-    timestamp: 2026-05-09T01:25:30Z
+  - id: 69fe8e7d37bda32355e8b9ec
+    author: test-reviewer
+    timestamp: 2026-05-09T01:31:41.419Z
     text: |
+      <!-- danxbot -->
+
       ## Test Review
 
       | Test | Status | Notes |
@@ -118,9 +118,12 @@ comments:
       ### Determinism
 
       All three new tests deterministic — `rmSync` synchronous, `mockImplementation` runs inside the awaited fetch promise, no real timers needed.
-  - author: danxbot
-    timestamp: 2026-05-09T01:27:00Z
+  - id: 69fe8e7d0c9f21691df0ffcd
+    author: danxbot
+    timestamp: 2026-05-09T01:31:41.829Z
     text: |
+      <!-- danxbot -->
+
       ## Review Fixes
 
       Addressed every finding from the parallel code-review + test-review subagents:
@@ -132,6 +135,25 @@ comments:
       5. **Added Linux/macOS comment** on the EISDIR test documenting that POSIX returns EISDIR, Windows would return EPERM (suite is Linux-only in CI).
 
       Re-ran filtered: 4/4 new pass. Re-ran `src/agent/event-queue.test.ts` + `src/agent/laravel-forwarder.test.ts`: 81/81. Re-ran `src/agent/`: 604/604. `npx tsc --noEmit`: clean.
+  - id: 69fe8e7e1c6138c3d6e50b7d
+    author: danxbot
+    timestamp: 2026-05-09T01:31:42.639Z
+    text: |-
+      <!-- danxbot -->
+      <!-- danxbot-retro -->
+
+      ## Retro
+
+      **What went well:** - Card description was precise (file, function, call chain, exact syscall) → triage to ToDo to fix took zero ambiguity.
+      - Picked the correct of the two locations the card offered: putting the catch in `EventQueue.retain` makes it symmetric with `peekAll` / `clear` / `hasPending` (all already swallow ENOENT) AND closes the gap for both the boot-replay path AND the running forwarder's `drainQueue` path in one edit. Putting it only in `replayQueueOnBoot` would have left the running path uncovered.
+      - TDD cycle was clean: RED for the right reason on first run (ENOENT writeFile error from the test setup), single edit to GREEN, then re-running both files surfaced the running-forwarder gap that the parallel reviewers also flagged.
+      - Both reviewers (code-reviewer + test-reviewer) independently flagged the same CRITICAL gap (running-forwarder test missing) — convergent signal that the issue was real, not subjective taste.
+
+      **What went wrong:** - First test pass missed the running-forwarder reach. The card description literally names "the same call path is reachable from the running forwarder's drainQueue (via drainAndSend())", but I initially only wrote tests for `replayQueueOnBoot`. Both reviewers caught it; the gap was added before commit. Lesson: when a card describes two reach paths, write a test for each before declaring the test-pass scope complete.
+      - Initial warn message said only `path + ENOENT + batch count`. Reviewer suggested adding a `dispatch=<id>` token so operators can grep without parsing basename — small change, real ergonomic improvement, should have been there from the first pass.
+
+      **Action items:** Nothing
+      **Commits:** d3f162da458d34ea810c7e345720f75eca10fe63
 history: []
 retro:
   good: |

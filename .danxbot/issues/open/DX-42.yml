@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-42
 external_id: 69ec47e229d27cfa1c45de3e
@@ -19,6 +19,7 @@ description: |-
   Out of scope for the original card — purely defensive tooling. Low priority but cheap to write.
 
   Reference: Trello auX4nTRk's "Review Fixes (round 2)" comment + `worker-compose-mounts.test.ts`'s "does not override the baked DANXBOT_COMMIT" test as the prior-art shape.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-111
 external_id: 69e27d857fe435bba78e65e3
@@ -102,6 +102,7 @@ description: |-
   - Replaying a dispatch.
   - Side-by-side comparison.
   - Downloading `prompt.md` as artifact — OK to ship only the JSONL download for now.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-136
 external_id: 69fd5b34a73c22885e8dfebd
@@ -70,6 +70,7 @@ description: |-
 
   - Worker-side enforcement (e.g. detect `ScheduleWakeup` calls and reject them) — agents are trusted; the contract is the lever.
   - Modifying Claude Code's `/loop` skill itself.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

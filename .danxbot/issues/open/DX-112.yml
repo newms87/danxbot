@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-112
 external_id: 69e27d58687ca0a6ecec0016
@@ -90,6 +90,7 @@ description: |-
   - Detail view (Phase 6).
   - SSE live-tail for list view (not needed — list is static until user refreshes or adds a live-updating composable later).
   - Server-side pagination UI.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

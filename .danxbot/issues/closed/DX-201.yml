@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-201
 external_id: ""
@@ -136,6 +136,7 @@ description: |-
   - Adding any OTHER MCP server at root — only `danx-issue`. Worker-only MCPs (Trello, Playwright) still live inside per-workspace dirs.
   - Changing the worker's per-dispatch MCP injection (still through `dispatch()` overlay).
   - Building UI for this in the dashboard.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

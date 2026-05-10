@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-68
 external_id: 69f9e2626583172b8d7f905d
@@ -86,6 +86,7 @@ description: |-
   - `src/worker/dispatch.ts` — `handleStop` (the change)
   - `src/dashboard/dispatches-db.ts` — `getDispatchById`, `updateDispatch`
   - `src/worker/dispatch.test.ts` — tests
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

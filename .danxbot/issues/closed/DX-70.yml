@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-70
 external_id: 69f9e26a74048f1bbe11f6cd
@@ -152,6 +152,7 @@ description: |-
   - `src/worker/server.ts` — graceful SIGTERM handler if not present
   - `Makefile` — verify `launch-worker-host` is idempotent (no-op if
     already running) so agent-initiated restarts compose cleanly
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

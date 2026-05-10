@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-145
 external_id: 69fd7767a5406144c5f0dddb
@@ -105,6 +105,7 @@ description: |-
   - Auto-derive / heal / Trello hydrate appends — Phase 3.
   - Dashboard rendering — Phase 4.
   - Migration of existing YAMLs — none required; default `[]` lands automatically on next save.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

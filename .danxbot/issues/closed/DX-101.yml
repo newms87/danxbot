@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-101
 external_id: 69fd17d2dcc79535f2e579de
@@ -87,6 +87,7 @@ description: |
   - Dashboard renders any prefix correctly for live data; Issues tab
     shows `<PREFIX>-N` chips.
   - Backend + dashboard vitest green; tsc + vue-tsc green.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

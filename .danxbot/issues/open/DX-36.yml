@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-36
 external_id: 69ef8867993590e1329a5caa
@@ -50,6 +50,7 @@ description: |
   ## Note
 
   Surfaced during the cjAyJpgr final cleanup. None of the changes in that commit touch the dispatch pipeline or watcher; this is a pre-existing flake exposed by full-suite timing variation. Filing as Action Item so it gets attention without blocking the unrelated commit.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

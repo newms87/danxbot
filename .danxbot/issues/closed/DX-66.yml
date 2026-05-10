@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-66
 external_id: 69f9dfc8ac25989e94e4d497
@@ -137,6 +137,7 @@ description: |-
     chips
   - `dashboard/src/composables/useIssueFilters.ts` — extend with
     `epic` + `mode`
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

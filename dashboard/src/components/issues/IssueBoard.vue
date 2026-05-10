@@ -89,9 +89,10 @@ const grouped = computed<Record<string, IssueListItem[]>>(() => {
     if (!col) continue;
     result[col.key].push(issue);
   }
-  for (const col of cols) {
-    result[col.key].sort((a, b) => b.updated_at - a.updated_at);
-  }
+  // No per-column re-sort. The backend's `sortIssuesForStatus` (in
+  // `src/issue-tracker/sort.ts`) emits the canonical order per status
+  // and the API list ships in that order; the SPA preserves it
+  // verbatim. ISS-210 retired the column-level updated_at re-sort.
   return result;
 });
 

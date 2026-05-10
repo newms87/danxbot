@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-75
 external_id: 69fa2728bd83bb1f0322cfa8
@@ -110,6 +110,7 @@ description: |-
   list does not exist yet when this card is picked up, the agent
   should set the YAML to `Needs Help` and explain in a comment so an
   operator creates the list, then resume.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-122
 external_id: 69df277dbcd2f37f93f09e6b
@@ -14,6 +14,7 @@ description: |-
   **Solution:** Add a MAX_ACTIVE_JOBS constant (e.g., 1000) and trim the oldest completed jobs when the map exceeds this limit. Since completed jobs are only needed for status queries (which are typically checked immediately after launch), evicting old completed entries is safe. Alternatively, reduce the cleanup interval from 60 minutes to 5 minutes to limit the window of accumulation without needing an explicit cap.
 
   **ICE Score:** 243 = 3 × 9 × 9 (I: 3 — unlikely to cause issues in practice since job objects are small, but a correctness improvement for long-running workers. C: 9 — trivial map maintenance, completely contained. E: 9 — 10 lines of change in worker/server.ts.)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

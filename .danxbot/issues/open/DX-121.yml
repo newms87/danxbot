@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-121
 external_id: 69df27729976c65c8fd31310
@@ -14,6 +14,7 @@ description: |-
   **Solution:** Add a per-user rate limiter in `message-queue.ts`: (1) track message counts per userId within a sliding window (e.g., 5 messages per 60 seconds), (2) if a user exceeds the limit, drop the message and post a friendly rate-limit notice to Slack instead of queuing it. Add `SLACK_RATE_LIMIT_MESSAGES` and `SLACK_RATE_LIMIT_WINDOW_MS` env vars with sensible defaults. The rate limiter should clean up expired windows automatically.
 
   **ICE Score:** 245 = 5 × 7 × 7 (I: 5 — prevents cost runaway and queue congestion from fast users; real risk in shared channels. C: 7 — message-queue.ts already has isolated state, adding a userId counter map is straightforward. E: 7 — isolated to message-queue.ts + one call site in listener.ts, ~2 hours.)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

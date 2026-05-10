@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-95
 external_id: 69fc22a2c03e667e043c6e3e
@@ -61,6 +61,7 @@ description: |
   - All open + closed YAMLs verified clean of legacy `triaged` field via grep.
   - Documentation updates landed in `claude-plugins/issues/skills/issue-card-workflow/` + `claude-plugins/danxbot/skills/danxbot/`.
   - End-to-end smoke (Action Items → Review → triage → ToDo) passes.
+priority: 3
 triage:
   expires_at: 2026-05-07T06:30:32.727Z
   reassess_hint: ""

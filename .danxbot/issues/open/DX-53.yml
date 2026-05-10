@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-53
 external_id: 69e7ea0796754cd2cb4ce46f
@@ -9,6 +9,7 @@ status: Review
 type: Feature
 title: "[Danxbot] Fix: startJsonlWatcher hydration race condition"
 description: In dispatch-stream.ts startJsonlWatcher, two concurrent calls for the same jobId can both pass the early-return guard before either writes to jsonlWatchers. Fix by adding an in-flight sentinel Set before the async hydration begins.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

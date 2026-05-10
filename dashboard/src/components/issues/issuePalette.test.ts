@@ -32,10 +32,13 @@ describe("projectChildStatus", () => {
     expect(projectChildStatus("Review", true)).toBe("waiting");
   });
 
-  it("Review / ToDo / In Progress (no waiting_on) → 'todo'", () => {
+  it("Review / ToDo (no waiting_on) → 'todo'", () => {
     expect(projectChildStatus("Review", false)).toBe("todo");
     expect(projectChildStatus("ToDo", false)).toBe("todo");
-    expect(projectChildStatus("In Progress", false)).toBe("todo");
+  });
+
+  it("In Progress (no waiting_on) → 'in_progress'", () => {
+    expect(projectChildStatus("In Progress", false)).toBe("in_progress");
   });
 });
 

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-98
 external_id: 69fcd5e0b2cd150af7b975e2
@@ -73,6 +73,7 @@ description: |
   - Integration test: scaffold a fake repo with an epic YAML referencing 3 child YAMLs, vary child statuses, run `recomputeParentStatuses`, assert the epic's on-disk status matches the expected derivation.
   - End-to-end: run the poller against a real repo, edit a child's status by hand, watch the epic update on the next tick.
   - Spot-check existing in-flight epics in `gpt-manager` + `danxbot` repos after first run — derived status should match what a human reader would expect from reading the children.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

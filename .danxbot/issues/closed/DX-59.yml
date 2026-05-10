@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-59
 external_id: 69f9df9d23d33f4abe670b62
@@ -92,6 +92,7 @@ description: |-
   ## Phase dependency
 
   None. Independent of all in-flight work. Closes the path for DX-49 (gpt-manager) AC #7 — once landed, `--timeout=30` is enforced by danxbot end-to-end and DX-49 can re-evaluate whether the agent path is achievable inside that budget (separate question, separate card).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

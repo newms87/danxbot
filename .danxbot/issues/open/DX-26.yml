@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-26
 external_id: 69f18828be5e39ad7ce889de
@@ -16,6 +16,7 @@ description: |-
   Concrete: in `/danx-next` Step 4 (TDD), check the card's "How to Verify" section and ensure the named test scope appears in the failing-test draft. If the card calls out an integration-level test, the unit tests are *additional*, not a substitute.
 
   Discovered during the C7W1cEhh retro — test reviewer caught the gap, but the orchestrator should have drafted the integration test up front.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

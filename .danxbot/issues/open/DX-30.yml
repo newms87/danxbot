@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-30
 external_id: 69f134e0315c505ce97ab463
@@ -37,6 +37,7 @@ description: |-
   ## Origin
 
   Filed as an action item from card #90 retro (`5qoyfsF0`).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

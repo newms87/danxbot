@@ -1,17 +1,11 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-206
 external_id: 69fe4ed7db1ef6161fee6c70
 parent_id: null
 children: []
-dispatch:
-  id: 060c2cab-413f-4ca2-996c-1a95a38c95f9
-  pid: 98300
-  host: dan
-  kind: work
-  started_at: 2026-05-08T23:16:57.916Z
-  ttl_seconds: 7200
-status: In Progress
+dispatch: null
+status: Blocked
 type: Feature
 title: "[Action Item from DX-202] Rename Trello list/label `Needs Help` → `Blocked` on connected repos' boards"
 description: |-
@@ -47,6 +41,7 @@ description: |-
 
   - Renaming `TrelloConfig.needsHelpListId` field name in TypeScript (separate code refactor; can be a follow-up action item if operator wants a clean rename)
   - Adding a new dedicated "Waiting On" Trello label for cards with non-null `waiting_on` — by design, waiting_on does NOT auto-paint a Trello label; the dashboard renders it
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -67,16 +62,80 @@ ac:
     checked: false
   - check_item_id: 69fe4ed9ba725dbbc9cf0394
     title: .claude/rules/trello-config.md table reflects renamed list + label (in danxbot repo root)
-    checked: false
+    checked: true
   - check_item_id: 69fe4ed96722814c94f1ef84
     title: Verify on next poll tick that danxbot pushes correctly to renamed list (no ID drift)
     checked: false
-comments: []
-history: []
+comments:
+  - id: 69fe70b8347c7a5d72bd7ed4
+    author: danxbot
+    timestamp: 2026-05-08T23:24:40.457Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Blocked — Trello UI rename requires operator action across 3 boards
+
+      **What's done (in-session):**
+
+      - Updated `.claude/rules/trello-config.md` (danxbot repo root) to reflect the target rename: list `Needs Help` → `Blocked`; removed the legacy `Needs Help` label row, leaving only the canonical `Blocked` label entry. The file is gitignored (local operator reference, not committed). My edit stands in this working tree; future host-mode `claude` sessions in this clone will see the renamed table.
+      - Identified the 3 connected-repo Trello boards that need operator action (quasar-ui-danx-legacy has no `trello.yml` and is excluded).
+
+      **What's still needed (operator action — Trello UI):**
+
+      For each board below, rename the LIST `Needs Help` → `Blocked` (the list ID does not change on rename, so danxbot keeps pushing correctly via `needsHelpListId`) AND delete the legacy `Needs Help` label (the canonical `Blocked` label already exists with its own id; the codebase uses `blockedLabelId` to apply the label, so the legacy one is unused).
+
+      1. **danxbot board** — `boardId: 69ddc215fd43f1b7f1a710f2`
+         - List to rename: `69ddc39eee773f39baef379f` (currently "Needs Help")
+         - Legacy label to delete: `69ddc215fd43f1b7f1a71181` ("Needs Help" label)
+         - Canonical label (keep): `69f8de90edc64b2b94a18bf2` ("Blocked")
+         - Config: `repos/danxbot/.danxbot/config/trello.yml`
+
+      2. **gpt-manager board** — `boardId: 66417202b576ab0bc2e40e31`
+         - List to rename: `69c9e3544c75a82497e0da2a`
+         - Legacy label to delete: `69c9e35acbe643fe948dabda`
+         - Canonical label (keep): `69f8de90439e8ee14eaa4616`
+         - Config: `repos/gpt-manager/.danxbot/config/trello.yml`
+
+      3. **platform board** — `boardId: 6660bb18772702f88512e59d`
+         - List to rename: `69f50a5a863fc78f59876c17`
+         - Legacy label to delete: `69f50a6a9c0107435c1d7985`
+         - Canonical label (keep): `68dd6b49accd3fad97596139`
+         - Config: `repos/platform/.danxbot/config/trello.yml`
+
+      After renaming on all 3 boards: wait one poll tick (~60s) and check the dashboard / dispatch logs for any `Trello API` errors. The IDs do not change when a list / label is renamed, so the runtime should continue pushing without drift.
+
+      **Why this needs operator help:** Trello UI rename is operator-only by architecture — `CLAUDE.md` (Trello Is Background Infrastructure) forbids agents calling Trello directly, and renaming list / label names is destructive operator-visible state across 3 shared boards.
+
+      **Incomplete ACs:**
+
+      - AC #1 — Trello list "Needs Help" renamed to "Blocked" on every connected repo's board
+      - AC #2 — Trello label "Needs Help" renamed (or merged with existing "Blocked") on every connected repo's board
+      - AC #4 — Verify on next poll tick that danxbot pushes correctly to renamed list (no ID drift)
+
+      **Final AC check:** Before Done, every AC must be `checked: true`.
+
+      ---
+
+      ## Side note — stale `@thehammer/danx-issue-mcp@1.0.3` (unrelated env defect)
+
+      Discovered while saving this card: the published npm package `@thehammer/danx-issue-mcp@1.0.3` (used by host-mode `claude` at the repo root via `.mcp.json` injection from DX-201) only accepts `schema_version: 3`, but every issue YAML in this repo is at `schema_version: 4`. The in-tree source `src/issue-tracker/yaml.ts` was updated to accept v3 OR v4, but the npm package was not republished. Effect: `mcp__danx-issue__danx_issue_save` returns `{saved: false, errors: ["schema_version must be 3 (got 4)"]}` for any host-mode session. Worker dispatches are unaffected — they use the in-process `mcp__danxbot__danx_issue_save` which is current. Operator action: republish `@thehammer/danx-issue-mcp` from the danx-issue-mcp repo with the v4-aware validator. Out of scope for DX-206; noting here so the operator sees it during the same Trello cleanup pass.
+history:
+  - timestamp: 2026-05-08T23:24:38.970Z
+    actor: dispatch:060c2cab-413f-4ca2-996c-1a95a38c95f9
+    event: status_change
+    from: In Progress
+    to: Blocked
 retro:
-  good: ""
-  bad: ""
+  good: |-
+    - Identified all 3 affected boards and produced concrete operator commands (board IDs + list IDs + label IDs) so the rename is mechanical.
+    - Updated `.claude/rules/trello-config.md` to the target state in this working tree, so the local doc reference matches once Trello UI catches up.
+  bad: |-
+    - Trello UI rename is fundamentally operator-only — agents cannot call Trello per `CLAUDE.md` rules, so 3 of 4 ACs cannot be verified in-session.
+    - `.claude/rules/trello-config.md` is gitignored, so the doc edit is a local working-tree change and will not propagate to other clones until an operator re-edits there too.
+    - Discovered the published `@thehammer/danx-issue-mcp@1.0.3` npm package is stuck at schema v3 while the codebase is at v4; documented in the Blocked comment but not filed as an action item — separate-repo work, operator decides whether to file.
   action_item_ids: []
   commits: []
 waiting_on: null
-blocked: null
+blocked:
+  reason: 'Trello UI list/label rename across 3 connected-repo boards (danxbot, gpt-manager, platform) requires operator action — agents are forbidden from calling Trello directly per `CLAUDE.md` "Trello Is Background Infrastructure". The Blocked comment lists exact board IDs, list IDs, and legacy label IDs to act on. Three ACs (#1, #2, #4) remain unchecked pending the rename + post-rename poll-tick verification. AC #3 (`.claude/rules/trello-config.md` doc update) is satisfied in-session.'
+  timestamp: 2026-05-08T23:25:00Z

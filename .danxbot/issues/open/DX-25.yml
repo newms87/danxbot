@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-25
 external_id: 69f19322baad560df3d8bcf6
@@ -27,6 +27,7 @@ description: |-
 
   - One canonical lifecycle pattern across all dashboard composables.
   - Existing tests still pass; new tests where coverage of the migrated pattern needs them.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

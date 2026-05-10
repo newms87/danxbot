@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-149
 external_id: ""
@@ -79,6 +79,7 @@ description: |-
   - Per-call try/catches inside helpers called from `_poll` — top-level catch is the contract.
   - Backoff / consecutive-failure tracking changes — leave existing `state.consecutiveFailures` bookkeeping alone.
   - Dashboard surface for the new error path — DX-134 (Phase 4) covers the SSE channel + UI banner.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

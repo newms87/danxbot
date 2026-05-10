@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-164
 external_id: 69fe27f36bd61bdbf2a5a7d2
@@ -117,6 +117,7 @@ description: |-
   - Slack / API dispatch UI badges — issue-worker only.
   - Per-agent dispatch history view (could be added in a follow-up; the Agents tab card already shows current state).
   - Auto-scaling agent count.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

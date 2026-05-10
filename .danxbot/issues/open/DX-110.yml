@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-110
 external_id: 69e86463cfa3e5a6c3cfa74b
@@ -39,6 +39,7 @@ description: |-
   ## How to Verify
 
   Start a worker for any connected repo. Observe `.danxbot/workspace/` exists with the expected files. Delete it, restart worker, verify regenerated identically. Confirm `<repo>/.claude/` is untouched by this phase. `make test` and `npx tsc --noEmit` green.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

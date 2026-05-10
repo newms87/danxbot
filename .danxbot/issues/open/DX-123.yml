@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-123
 external_id: 69df2789129ccb053fba6a4d
@@ -14,6 +14,7 @@ description: |-
   **Solution:** Add `offset` and `limit` query parameters to `/api/events` in `src/dashboard/server.ts` (e.g., `?offset=0&limit=50`). Default to returning all events when no params are provided (backwards compatible). Update the Vue frontend's `useEvents.ts` composable to fetch the first page on load and support load-more. The SSE stream continues to push full event objects for real-time updates (unchanged).
 
   **ICE Score:** 224 = 4 × 8 × 7 (I: 4 — meaningful for high-traffic deployments; for current usage the 500-event cap keeps payloads manageable but this is a growth concern. C: 8 — REST pagination is a well-understood pattern with clear implementation path. E: 7 — API change is trivial; Vue composable update takes ~2 hours.)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

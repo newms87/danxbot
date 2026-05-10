@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-3
 external_id: 69f771fa9a7261516bdaa417
@@ -55,6 +55,7 @@ description: |-
 
   - Layer 3 system-test coverage (covered by Trello `VeChPbUQ` follow-up if/when the poller refactors to MemoryTracker).
   - Coverage of `injectMcpServers` (different helper, separate code path).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-109
 external_id: 69e86479da89ea17345c820c
@@ -45,6 +45,7 @@ description: |-
   ## How to Verify
 
   Run a poller dispatch — confirm the claude process flag array contains `--strict-mcp-config` and `--allowed-tools <POLLER_ALLOW_TOOLS joined>`. Run an HTTP dispatch — same flags with http-launch allowlist. Rename the trello server key in `<repo>/.mcp.json` and confirm poller dispatch still has it (proves project-scope no longer leaks).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

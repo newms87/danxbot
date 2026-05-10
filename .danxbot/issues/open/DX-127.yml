@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-127
 external_id: 69df29f886f7be49aaf74c63
@@ -14,6 +14,7 @@ description: |
   **Solution:** Extract a `finalizeResponse()` helper function that takes the Slack client, channel/thread context, placeholder TS, response text, dashEvent, and optional attachments — and handles everything from SQL processing through reaction adding. Both the `very_low` path and the full path call this helper. This eliminates the duplication and makes future changes (e.g. adding new attachment types) a single-location edit.
 
   **ICE Score:** 160 = 5 × 8 × 4 (I: 5 — Reduces maintenance burden and future bug surface in a frequently-changed file. C: 8 — Clear refactor path with well-understood behavior. E: 4 — Requires careful extraction across ~300 lines in a high-complexity function; risk of subtle behavioral differences.)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-117
 external_id: 69df24845335a140e70b701d
@@ -14,6 +14,7 @@ description: |
   **Solution:** Create `src/worker/server.test.ts` covering the four HTTP endpoints - happy paths and key error paths - using the existing test patterns (vitest, mocked imports for launchAgent/cancelJob/getJobStatus).
 
   **ICE Score:** 420 = 7 x 6 x 10 (I: 7 - the worker server handles all agent dispatch; a regression here would silently break connected repo integrations. C: 6 - test patterns are well-established but requires mocking the child-process-based launcher. E: 10 - isolated to one new file, under 300 lines.)
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

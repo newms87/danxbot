@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-47
 external_id: 69ec3127e0fd8dc6597a8da7
@@ -21,6 +21,7 @@ description: |-
 
   - `docs/superpowers/specs/2026-04-17-production-deploy-port-design.md`
   - `scripts/claude-auth-setup.sh` — current authoritative description of the layout
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

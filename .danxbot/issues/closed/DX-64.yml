@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-64
 external_id: 69f9dfbc67ef3ff9d1664273
@@ -116,6 +116,7 @@ description: |-
   - `dashboard/src/composables/useIssueFilters.ts` (new)
   - `dashboard/src/components/issues/IssuesPage.vue` — render toolbar
   - `dashboard/src/components/issues/IssueBoard.vue` — accept filters
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-104
 external_id: 69fd2261d9d5ce18cf03e727
@@ -73,6 +73,7 @@ description: |-
   - Changing the `triage{}` schema.
   - Re-introducing the bulk-triage path.
   - Worker-side dispatch lifecycle changes beyond the validator hook.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""

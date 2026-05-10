@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-100
 external_id: 69fd17ce6770a81be9074dbd
@@ -93,6 +93,7 @@ description: |
   - `npx vitest run` green; `npx tsc --noEmit` green.
   - Running danxbot against the existing `ISS-*` YAMLs continues to
     parse + dispatch identically (no Trello-side changes).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
