@@ -187,7 +187,7 @@ Apply this filter, in order, every time you're tempted to defer work:
    debt, and incur re-dispatch cost. Prefer fixing every time.
 3. **Unrelated AND large** (multi-phase refactor, cross-cutting redesign,
    needs its own scoping, would derail this card)? → Action item is OK.
-4. **Needs human decision or external access** (credentials, ambiguous spec, repo you can't write to, secret rotation)? → Step 10 / action item. **NOT a valid blocker:** "needs deploy", "needs prod smoke", "needs production verification". A card is **Done when code is committed and tests pass locally** — deploys are an operational concern that ship code already accepted as Done. Never block a card on `make deploy` / `make deploy-smoke` / "verify in prod"; that's how Done turns into Forever-Blocked.
+4. **Needs human decision or external access** (credentials, ambiguous spec, repo you can't write to, secret rotation)? → Step 10 / action item. **NOT a valid blocker:** "needs deploy", "needs prod smoke", "needs production verification", "manual UI smoke", "pre-existing flaky test in an unrelated file", "post-terminal-save state I cannot observe from inside this dispatch". A card is **Done when code is committed and tests pass locally** — deploys are an operational concern that ship code already accepted as Done. Never block a card on `make deploy` / `make deploy-smoke` / "verify in prod" / "operator must click the dashboard" / "the watcher will mirror after I exit"; that's how Done turns into Forever-Blocked. Full pattern catalog + programmatic substitutes: `.claude/rules/danx-no-false-blockers.md`.
 
 Mechanical check before writing any action item or going to Blocked:
 **"Could I just do this in the next 10–30 minutes?"** Yes → do it. Drop the
@@ -430,6 +430,15 @@ Skip to Step 11.
 
 ## Step 10 — Move to Blocked (HUMAN INTERVENTION ONLY)
 
+**MANDATORY:** Before writing `status: "Blocked"`, populating
+`blocked: {reason, timestamp}`, appending a `## Blocked` comment, OR
+calling `danxbot_complete({status: "failed", ...})` with operator-must-X
+framing — INVOKE the `issue-blocker` skill via the Skill tool. The
+8-item gating checklist there has authority over this section. If any
+item fails you are NOT authorized to mark Blocked; return to in-session
+work. Failing to invoke the skill before a Blocked move is a rule
+violation.
+
 Blocked is a **LAST RESORT** AND is reserved EXCLUSIVELY for cards that
 cannot proceed without a human acting. If the card is just waiting on
 other in-flight work — that's **Waiting On** (Step 10b), not Blocked.
@@ -438,6 +447,9 @@ Use Step 10 ONLY when the blocker is genuinely one of:
 
 - **Credentials / secrets** a human must rotate / push to SSM.
   - **NOT a Blocker:** "needs deploy" / "needs prod smoke" / "needs Layer 3 system test". Layer 3 (`make test-system`) runs locally on this host — you can run it yourself. Production deploy ships code already accepted as Done; it is NEVER a completion gate. A card whose only remaining ACs are "deploy + smoke prod" is **already Done** — rewrite the ACs to local-verify form, run them, mark Done.
+  - **NOT a Blocker:** pre-existing flaky / failing test in an unrelated file. File an Action Item card via `danx_issue_create`, push the id into `retro.action_item_ids[]`, check the AC off (your card's tests pass), proceed. See `.claude/rules/danx-no-false-blockers.md` Pattern 1.
+  - **NOT a Blocker:** AC says "manual UI smoke" / "operator clicks X." The agent has the dashboard token at `~/.config/danxbot/dashboard-token` (host mode) + the playwright MCP + the dashboard component-test runner. Verify programmatically (component test → playwright → rewrite AC), check off, proceed. See `.claude/rules/danx-no-false-blockers.md` Pattern 2.
+  - **NOT a Blocker:** AC verifies behavior that fires AFTER `danxbot_complete` (epic auto-flip, post-completion auto-sync, watcher mirror, any self-derived state). Rewrite the AC to point at the unit test for the derivation function, run it, check off. See `.claude/rules/danx-no-false-blockers.md` Pattern 3.
 - **External repo / file your worker has no write access to** AND no other
   agent is going to fix it for you.
 - **Genuine human design decision** (ambiguous spec, missing requirement,
