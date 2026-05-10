@@ -291,6 +291,8 @@ retro:
 
     The first cut of `runConflictCheck` read `result.job.status` straight off the resolved `dispatch()` promise — that's `"running"` in production. Tests passed only because the mock fired `onComplete` synchronously. The code-reviewer subagent caught it; in production every candidate would have been conservatively blocked forever and the multi-worker feature would have been silently degraded to "no concurrency". Lesson: when a helper depends on a callback that's NOT-the-same-as-the-resolved-promise of the function it calls, the test setup MUST simulate the async gap — synchronous mocks hide the bug.
   action_item_ids: []
-  commits: []
+  commits:
+    - 0502690 [Danxbot] DX-200 Multi-Worker Phase 5
+    - "7061b36 (claude-plugins) issue-worker: danx-triage-card --conflict-check mode"
 waiting_on: null
 blocked: null
