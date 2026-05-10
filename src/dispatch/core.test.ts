@@ -2183,3 +2183,58 @@ describe("dispatch() — DX-242 fallback assembly", () => {
     expect(env.DANX_REPO_ROOT).toBeDefined();
   });
 });
+
+describe("registerActiveJob — defensive runtime checks (DX-209 reattach seam)", () => {
+  // Imported lazily so the top-of-file mocks don't bleed into other
+  // describe blocks. The function is the only public entrypoint into
+  // `activeJobs` outside the spawn loop, so its invariants need
+  // register-time enforcement (operator's `/api/cancel` request silently
+  // no-oping is the failure mode this prevents).
+  it("throws when jobId !== job.id (mismatch corrupts /api/cancel + /api/status routing)", async () => {
+    const { registerActiveJob } = await import("./core.js");
+    const stubJob = {
+      id: "wrong-id",
+      handle: { pid: 1, kill: () => {}, isAlive: () => true, onExit: () => {}, dispose: () => {} },
+      stop: async () => {},
+    } as unknown as Parameters<typeof registerActiveJob>[1];
+    expect(() => registerActiveJob("right-id", stubJob)).toThrow(
+      /jobId mismatch/,
+    );
+  });
+
+  it("throws when job.handle is missing (cancel/stop cannot reach the agent)", async () => {
+    const { registerActiveJob } = await import("./core.js");
+    const stubJob = {
+      id: "no-handle",
+      stop: async () => {},
+    } as unknown as Parameters<typeof registerActiveJob>[1];
+    expect(() => registerActiveJob("no-handle", stubJob)).toThrow(
+      /handle missing/,
+    );
+  });
+
+  it("throws when job.stop is missing (/api/stop has no handler — attachMonitoringStack must run first)", async () => {
+    const { registerActiveJob } = await import("./core.js");
+    const stubJob = {
+      id: "no-stop",
+      handle: { pid: 1, kill: () => {}, isAlive: () => true, onExit: () => {}, dispose: () => {} },
+    } as unknown as Parameters<typeof registerActiveJob>[1];
+    expect(() => registerActiveJob("no-stop", stubJob)).toThrow(
+      /stop missing/,
+    );
+  });
+
+  it("succeeds and surfaces the registered job through getActiveJob (happy path)", async () => {
+    const { registerActiveJob, getActiveJob, _resetForTesting } = await import(
+      "./core.js"
+    );
+    _resetForTesting();
+    const stubJob = {
+      id: "happy",
+      handle: { pid: 1, kill: () => {}, isAlive: () => true, onExit: () => {}, dispose: () => {} },
+      stop: async () => {},
+    } as unknown as Parameters<typeof registerActiveJob>[1];
+    expect(() => registerActiveJob("happy", stubJob)).not.toThrow();
+    expect(getActiveJob("happy")).toBe(stubJob);
+  });
+});

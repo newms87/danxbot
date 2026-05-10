@@ -95,6 +95,51 @@ export function getActiveJob(jobId: string): AgentJob | undefined {
 }
 
 /**
+ * Phase 2c (DX-209) seam — register a job into the activeJobs map outside
+ * of `dispatch()`'s spawn loop. Used exclusively by the worker boot reattach
+ * pass (`src/worker/reattach.ts`): a non-terminal dispatch row whose host
+ * PID is still alive needs the same `getActiveJob` / `cancelJob` /
+ * `/api/status` parity as a freshly-spawned job, but the spawn loop is
+ * NOT what produced it.
+ *
+ * Invariants enforced at registration time — fail-loud at register beats
+ * discovering a half-built job at `/api/cancel` time when the operator's
+ * cancel request silently no-ops:
+ *   - `job.id === jobId` and matches the dispatch row's id.
+ *   - `job.handle` is wired (via `createReattachHandle`) so cancel + stop
+ *     reach the existing PID.
+ *   - `job.stop` is wired by `attachMonitoringStack` BEFORE this call so
+ *     `/api/stop` can finalize via the agent's own `danxbot_complete`.
+ *
+ * Caller invariant NOT enforced (would need a DB lookup): the row's
+ * `status` is still `running`. Reattach upholds this by gating on
+ * `findNonTerminalDispatches`; misuse from another callsite would race a
+ * duplicate finalize against the original tracker.
+ *
+ * Idempotent: re-registering the same id silently overwrites the prior
+ * entry (the reattach pass is single-pass per repo per boot, so the
+ * collision is theoretical).
+ */
+export function registerActiveJob(jobId: string, job: AgentJob): void {
+  if (job.id !== jobId) {
+    throw new Error(
+      `registerActiveJob: jobId mismatch — got jobId="${jobId}" but job.id="${job.id}"`,
+    );
+  }
+  if (!job.handle) {
+    throw new Error(
+      `registerActiveJob[${jobId}]: job.handle missing — cancel/stop cannot reach the agent process`,
+    );
+  }
+  if (typeof job.stop !== "function") {
+    throw new Error(
+      `registerActiveJob[${jobId}]: job.stop missing — /api/stop has no handler. attachMonitoringStack must run before registration.`,
+    );
+  }
+  activeJobs.set(jobId, job);
+}
+
+/**
  * Snapshot of every job currently tracked — running and recently-finished
  * (still within the TTL grace window). Returns a fresh array so callers can
  * iterate safely without worrying about concurrent eviction.

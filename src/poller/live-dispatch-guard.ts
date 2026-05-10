@@ -15,7 +15,9 @@
  * `running` while the agent is genuinely still working. Without this
  * guard the tracker-side lock TTL eventually reclaims the card and the
  * poller spawns a duplicate. Rows with a dead PID fall through here:
- * worker startup `reconcileOrphanedDispatches` is responsible for those.
+ * worker startup `reattachOrResolveDispatches` (DX-209) is responsible
+ * for those — it marks dead-PID rows `failed` and reattaches alive PIDs
+ * into the new worker's `activeJobs` registry.
  *
  * Errors are swallowed and logged via the injected `log` — fail open so
  * a transient DB hiccup doesn't permanently halt the poller. Worst case

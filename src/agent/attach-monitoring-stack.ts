@@ -101,6 +101,40 @@ export interface AttachMonitoringStackOptions {
    * before passing the tracker here.
    */
   existingDispatchTracker?: DispatchTracker;
+  /**
+   * Phase 2c reattach seam. When set, the SessionLogWatcher uses this
+   * directory directly instead of deriving it from `agentCwd`. Reattach
+   * has the JSONL's parent directory stamped on the dispatch row but
+   * does not retain the original `cwd` (which is destructive-encoded
+   * under `~/.claude/projects/` and not perfectly invertible). Passing
+   * the resolved sessionDir avoids reverse-engineering the cwd.
+   *
+   * Fresh-spawn callers leave this unset; the watcher derives sessionDir
+   * from `agentCwd` via `deriveSessionDir` exactly as before.
+   */
+  sessionDir?: string;
+  /**
+   * Phase 2c reattach seam. When `true`, the watcher seeds its initial
+   * byte offset to the file's current size — historical JSONL entries
+   * are NOT re-emitted. Required for reattach: the prior worker
+   * incarnation already accumulated the file into the dispatch row's
+   * usage / tool-call counters, so replaying would double-count every
+   * token and tool call.
+   */
+  fromEof?: boolean;
+  /**
+   * Phase 2c reattach seam. Subscribers wired to the watcher BEFORE
+   * `watcher.start()` runs so they observe entries from the very first
+   * poll cycle. Necessary for reattach because `SessionLogWatcher.start`
+   * awaits the first poll before returning — any `onEntry` subscriber
+   * registered after `attachMonitoringStack` returns would miss
+   * `tool_use` blocks emitted in that first cycle, producing
+   * undercounts on `toolCallCount` / `subagentCount` for reattached
+   * rows. Fresh-spawn callers leave this unset.
+   */
+  extraOnEntry?: ReadonlyArray<
+    (entry: import("../types.js").AgentLogEntry) => void
+  >;
 }
 
 export interface AttachedMonitoringStack {
@@ -148,15 +182,28 @@ export interface AttachedMonitoringStack {
 export async function attachMonitoringStack(
   opts: AttachMonitoringStackOptions,
 ): Promise<AttachedMonitoringStack> {
-  const { job, jobId, agentCwd, promptDir, options, existingDispatchTracker } =
-    opts;
+  const {
+    job,
+    jobId,
+    agentCwd,
+    promptDir,
+    options,
+    existingDispatchTracker,
+    sessionDir,
+    fromEof,
+    extraOnEntry,
+  } = opts;
 
   // --- SessionLogWatcher: the single monitoring mechanism, runs identically in
   //     both docker and host modes (see `.claude/rules/agent-dispatch.md`). ---
+  //     Phase 2c reattach passes `sessionDir` directly + `fromEof: true` so
+  //     historical bytes are not replayed into the usage accumulator.
   const watcher = new SessionLogWatcher({
     cwd: agentCwd,
+    ...(sessionDir !== undefined ? { sessionDir } : {}),
     pollIntervalMs: 5_000,
     dispatchId: jobId,
+    ...(fromEof ? { fromEof: true } : {}),
   });
   job.watcher = watcher;
 
@@ -208,6 +255,20 @@ export async function attachMonitoringStack(
   }
   if (dispatchTracker) {
     job.dispatchTracker = dispatchTracker;
+  }
+
+  // Phase 2c (DX-209) — register caller-supplied subscribers BEFORE
+  // `watcher.start()`. The watcher's first `poll()` runs inside `start`
+  // and emits any pre-existing entries (or — for fresh spawns — any
+  // entries that have already landed by the time discovery completes).
+  // Subscribers registered AFTER `start()` returns miss that first
+  // batch. The reattach pass uses this slot to wire its tool-counter
+  // subscriber so post-restart `tool_use` blocks are counted from
+  // entry 0 onward.
+  if (extraOnEntry) {
+    for (const subscriber of extraOnEntry) {
+      watcher.onEntry(subscriber);
+    }
   }
 
   watcher.start();

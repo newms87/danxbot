@@ -25,7 +25,7 @@ import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
-import { reconcileOrphanedDispatches } from "./worker/reconcile.js";
+import { reattachOrResolveDispatches } from "./worker/reattach.js";
 import { ensurePortableRepoPath } from "./agent/portable-path.js";
 import { createWorktreeManager } from "./agent/worktree-manager.js";
 import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned.js";
@@ -164,7 +164,7 @@ async function startWorkerMode(): Promise<void> {
   // URL is unreachable; we read each entry, run the same auto-sync +
   // dispatch-row finalization the live `handleStop` runs, then delete
   // the file. Per-entry failures surface as `stop-replay`-source
-  // system errors. Run BEFORE `reconcileOrphanedDispatches` — that
+  // system errors. Run BEFORE `reattachOrResolveDispatches` — that
   // pass marks any still-non-terminal row `failed` based on host_pid
   // liveness, and we want the agent's actual terminal reason to win
   // over the synthetic "orphaned" reason.
@@ -182,19 +182,27 @@ async function startWorkerMode(): Promise<void> {
     log.error(`[${repo.name}] Stop-queue replay failed`, err);
   }
 
-  // Reconcile non-terminal dispatch rows from prior worker incarnations.
-  // Host-mode dispatches outlive the worker (claude is reparented to PID 1
-  // by `script -q -f`) — at startup we mark every row whose `host_pid` is
-  // dead or null as `failed`, and leave rows with a still-alive PID
-  // running. The poller's pre-claim DB guard prevents re-dispatching the
-  // latter while they're alive. See ISS-69.
+  // DB-driven full-stack reattach (Phase 2c, DX-209). Supersedes the
+  // legacy `reconcileOrphanedDispatches` boot pass:
+  //   - Dead-PID rows (and null/non-positive PID) are marked `failed`
+  //     with `pid_terminated_at` stamped — same observable behavior as
+  //     the prior reconcile, locked by `src/worker/reattach.test.ts`.
+  //   - Alive-PID rows are reattached: an `AgentHandle` shim wraps the
+  //     existing PID; `attachMonitoringStack` re-wires the watcher /
+  //     inactivity timer / cleanup / stop chain; the job is registered
+  //     into `activeJobs` so `/api/status`, `/api/cancel`, `/api/stop`
+  //     observe parity with newly-spawned dispatches.
+  //   - The per-dispatch MCP settings file is rewritten in place when
+  //     the worker comes back on a different port (same-port restart
+  //     is the production-pinned case → no-op).
+  // Failures are logged + swallowed — DB consistency is a side-channel
+  // and must not block the worker from serving live dispatches.
   try {
-    await reconcileOrphanedDispatches(repo.name);
+    await reattachOrResolveDispatches(repo.name, {
+      currentWorkerPort: repo.workerPort,
+    });
   } catch (err) {
-    // Reconciliation is a best-effort consistency pass — the DB is a
-    // side-channel and a transient failure should not block the worker
-    // from serving live dispatches. Log and continue.
-    log.error(`[${repo.name}] Dispatch reconciliation failed`, err);
+    log.error(`[${repo.name}] Dispatch reattach failed`, err);
   }
 
   // Boot the issues DB mirror (DX-154) BEFORE the poller — the poller's

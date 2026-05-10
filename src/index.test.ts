@@ -150,10 +150,14 @@ vi.mock("./worker/replay-stop-queue.js", () => ({
     .mockResolvedValue({ scanned: 0, replayed: [], skipped: [], failed: [] }),
   STOP_QUEUE_DIR: ".danxbot/dispatch-stops",
 }));
-vi.mock("./worker/reconcile.js", () => ({
-  reconcileOrphanedDispatches: vi
-    .fn()
-    .mockResolvedValue({ scanned: 0, orphaned: [], alive: [] }),
+vi.mock("./worker/reattach.js", () => ({
+  reattachOrResolveDispatches: vi.fn().mockResolvedValue({
+    scanned: 0,
+    orphaned: [],
+    alive: [],
+    reattached: [],
+    failedReattach: [],
+  }),
 }));
 
 // --- Test setup ---

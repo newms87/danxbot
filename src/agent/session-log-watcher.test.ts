@@ -768,6 +768,45 @@ describe("SessionLogWatcher", () => {
     );
   });
 
+  it("fromEof: true skips existing entries on attach and only emits newly appended ones (DX-209 reattach)", async () => {
+    // Reattach context: a prior worker incarnation already ingested the file
+    // contents into the dispatch row's totals. Re-replaying history would
+    // double-count tokens and tool calls. The reattach pass passes
+    // fromEof: true so the watcher tails strictly forward from EOF.
+    const entries: AgentLogEntry[] = [];
+    const filePath = writeJsonlFile(tempDir, "session.jsonl", [
+      rawAssistantEntry(),
+      rawToolResultEntry(),
+    ]);
+
+    const watcher = new SessionLogWatcher({
+      cwd: "/test",
+      sessionDir: tempDir,
+      pollIntervalMs: 50,
+      fromEof: true,
+    });
+    watcher.onEntry((e) => entries.push(e));
+
+    await watcher.start();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // No historical entries should have surfaced — neither the synthesized
+    // init nor the two pre-existing entries.
+    expect(entries.length).toBe(0);
+
+    // Append a fresh entry — that one MUST surface.
+    appendJsonlEntry(filePath, rawAssistantEntry());
+    await new Promise((r) => setTimeout(r, 150));
+    watcher.stop();
+
+    expect(entries.length).toBeGreaterThan(0);
+    // The synthesized init still fires because we observed an assistant
+    // entry post-attach (this is the watcher's existing init-synthesis
+    // contract); the only thing fromEof: true skips is REPLAY of bytes
+    // already on disk at attach time.
+    expect(entries.some((e) => e.type === "assistant")).toBe(true);
+  });
+
   it("stop() prevents further polling", async () => {
     const entries: AgentLogEntry[] = [];
     const filePath = writeJsonlFile(tempDir, "session.jsonl", [

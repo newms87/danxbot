@@ -75,8 +75,8 @@ describe("hasLiveDispatchForCard", () => {
   it("returns false when the row's host_pid is dead — preserves existing TTL semantics", async () => {
     // ISS-69 AC: poller still reclaims cards whose dispatch row has dead
     // PID. The guard must NOT block; the tracker-side lock TTL takes
-    // over, and reconcileOrphanedDispatches has separately marked the
-    // row failed at startup.
+    // over, and reattachOrResolveDispatches (DX-209) has separately
+    // marked the row failed at startup.
     deps.findNonTerminalDispatches = vi
       .fn()
       .mockResolvedValue([makeRow({ hostPid: 999_991 })]);

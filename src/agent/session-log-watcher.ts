@@ -56,6 +56,15 @@ export interface SessionLogWatcherOptions {
    * session file (e.g., an active human session) when the agent's file doesn't exist yet.
    */
   dispatchId?: string;
+  /**
+   * Skip every byte on disk at attach time and tail strictly forward from
+   * EOF. Used by the Phase 2c (DX-209) reattach pass: a prior worker
+   * incarnation already accumulated the JSONL into the dispatch row's
+   * usage / tool-call counters, so replaying the history would double-
+   * count every token and tool call. Default `false` — fresh spawns and
+   * resumes ingest the full file.
+   */
+  fromEof?: boolean;
 }
 
 /**
@@ -348,6 +357,7 @@ export class SessionLogWatcher {
   private sessionId: string | undefined;
   private dispatchId: string | undefined;
   private pollIntervalMs: number;
+  private fromEof: boolean;
   private running = false;
   private polling = false;
   private entries: AgentLogEntry[] = [];
@@ -358,6 +368,7 @@ export class SessionLogWatcher {
     this.sessionId = options.sessionId;
     this.dispatchId = options.dispatchId;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.fromEof = options.fromEof ?? false;
   }
 
   /** Register a consumer callback that receives each new AgentLogEntry. */
@@ -442,7 +453,7 @@ export class SessionLogWatcher {
         : await findNewestJsonlFile(this.sessionDir, this.sessionId);
 
       if (filePath) {
-        this.setParentFile(filePath);
+        await this.setParentFile(filePath);
         const tag = this.dispatchId ? `[Dispatch ${this.dispatchId}] ` : "";
         log.info(`${tag}Watching session file: ${filePath}`);
         return;
@@ -458,11 +469,33 @@ export class SessionLogWatcher {
     );
   }
 
-  /** Adopt a parent session file and derive the sub-agent directory. */
-  private setParentFile(filePath: string): void {
+  /**
+   * Adopt a parent session file and derive the sub-agent directory.
+   *
+   * When `this.fromEof` is set (Phase 2c reattach), seed `byteOffset` to
+   * the file's current size so the next poll reads strictly forward —
+   * historical entries are NOT re-emitted. A fresh `stat` failure (race
+   * with a delete that happens between discover and adopt) falls back to
+   * 0 so the watcher tails from the start; that is preferable to throwing
+   * during boot. `fromEof` does NOT skip sub-agent files: any sub-agent
+   * file claude writes AFTER reattach is genuinely new and should be
+   * tailed normally.
+   */
+  private async setParentFile(filePath: string): Promise<void> {
+    let byteOffset = 0;
+    if (this.fromEof) {
+      try {
+        const fileStats = await stat(filePath);
+        byteOffset = fileStats.size;
+      } catch (err) {
+        log.warn(
+          `fromEof: stat failed for ${filePath}; tailing from 0: ${String(err)}`,
+        );
+      }
+    }
     this.parentTail = {
       filePath,
-      byteOffset: 0,
+      byteOffset,
       lineBuffer: "",
       lastTimestamp: 0,
     };

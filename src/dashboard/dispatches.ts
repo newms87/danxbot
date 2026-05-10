@@ -137,7 +137,8 @@ export interface Dispatch {
    * Millisecond epoch when termination of `hostPid` was confirmed.
    * Stamped by:
    *   - `danxbot_complete` stop handler (agent self-terminated).
-   *   - `reconcileOrphanedDispatches` when sweeping a dead PID.
+   *   - `reattachOrResolveDispatches` when sweeping a dead PID OR when
+   *     finalizing a reattached job that ran to terminal post-restart.
    *   - `cancelJob` (user-initiated cancel).
    * `null` while the row is non-terminal. Together with `hostPidAt` this
    * gives operators the PID's full lifecycle without losing the
