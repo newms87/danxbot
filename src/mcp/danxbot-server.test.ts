@@ -183,7 +183,11 @@ describe("callTool — danxbot_complete", () => {
     expect(result).toMatch(/Agent signaled critical_failure/);
   });
 
-  it("surfaces non-2xx responses from the stop URL", async () => {
+  it("falls into the DX-242 fallback chain on a non-2xx; throws when no fallback context configured", async () => {
+    // Pre-DX-242 this branch threw immediately. With the fallback
+    // chain wired, a non-2xx triggers the (HTTP → DB → fs) chain;
+    // when no fallback context is available the chain bottoms out
+    // with a fail-loud throw whose message embeds the original 502.
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 502 }));
     await expect(
       callTool(
@@ -191,7 +195,7 @@ describe("callTool — danxbot_complete", () => {
         { status: "failed", summary: "x" },
         urls(),
       ),
-    ).rejects.toThrow(/HTTP 502/);
+    ).rejects.toThrow(/Stop API unreachable.*HTTP 502/);
   });
 
   it("defaults summary to empty string when caller omits it (status already validated)", async () => {

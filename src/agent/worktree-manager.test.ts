@@ -5,8 +5,20 @@
  * the integration suite at `src/__tests__/integration/worktree-manager.test.ts`.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import {
   createWorktreeManager,
   WorktreeError,
@@ -467,6 +479,173 @@ describe("WorktreeManager", () => {
   // DX-230 — every git invocation MUST run with cwd=hostPath (canonical
   // absolute path), never localPath. A regression that re-reads
   // localPath would corrupt worktree metadata across host↔docker swaps.
+  // ============================================================
+  // DX-242 — node_modules provisioning (real fs)
+  // ============================================================
+
+  describe("provisionNodeModules / ensureProvisioned (DX-242)", () => {
+    let workArea: string;
+    let repoRoot: string;
+    let worktreeRoot: string;
+
+    function makeRepoNm(): void {
+      // Lay out a minimal repo-root node_modules with .bin/tsx so the
+      // fail-loud precondition passes. The file just needs to exist —
+      // the helper only checks existence, not exec rights.
+      mkdirSync(join(repoRoot, "node_modules", ".bin"), { recursive: true });
+      writeFileSync(join(repoRoot, "node_modules", ".bin", "tsx"), "#!fake\n");
+    }
+
+    beforeEach(() => {
+      workArea = mkdtempSync(join(tmpdir(), "danxbot-prov-"));
+      repoRoot = join(workArea, "repo");
+      worktreeRoot = join(repoRoot, ".danxbot", "worktrees", "alice");
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(worktreeRoot, { recursive: true });
+    });
+
+    afterEach(() => {
+      rmSync(workArea, { recursive: true, force: true });
+    });
+
+    it("creates the symlink when the worktree has no node_modules", async () => {
+      makeRepoNm();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, "node_modules");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(realpathSync(join(repoRoot, "node_modules")));
+    });
+
+    it("is idempotent — running twice leaves the same valid symlink", async () => {
+      makeRepoNm();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, "node_modules");
+      const inodeBefore = lstatSync(link).ino;
+      await wm.ensureProvisioned(ctx, "alice");
+      // Same inode = exact same symlink, not recreated.
+      expect(lstatSync(link).ino).toBe(inodeBefore);
+    });
+
+    it("replaces a broken symlink (target missing) with a fresh one", async () => {
+      makeRepoNm();
+      const link = join(worktreeRoot, "node_modules");
+      symlinkSync(join(workArea, "does-not-exist"), link, "dir");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(realpathSync(join(repoRoot, "node_modules")));
+    });
+
+    it("replaces a real node_modules directory with the symlink", async () => {
+      makeRepoNm();
+      const real = join(worktreeRoot, "node_modules");
+      mkdirSync(real, { recursive: true });
+      writeFileSync(join(real, "stale.txt"), "stale\n");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(real).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(real, "stale.txt"))).toBe(false);
+    });
+
+    it("fails loud when repo-root node_modules exists but lacks .bin/tsx (broken install)", async () => {
+      // Create the dir without seeding tsx — simulates a half-installed
+      // repo (npm install ran partially, or someone manually deleted
+      // .bin/tsx). The fail-loud check must trip so the operator
+      // re-runs npm install at the right path.
+      mkdirSync(join(repoRoot, "node_modules", ".bin"), { recursive: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).rejects.toThrow(
+        WorktreeError,
+      );
+      // The error message names the missing path so an operator can
+      // run `npm install` at the right repo root.
+      await expect(wm.ensureProvisioned(ctx, "alice")).rejects.toThrow(
+        /node_modules.*\.bin.*tsx/,
+      );
+    });
+
+    it("is a no-op when repo-root has no node_modules (fresh clone, no npm install yet)", async () => {
+      // No `node_modules` directory at all in the repo root —
+      // permissive path. The worker can't actually run agents in this
+      // state (its own tsx resolution would fail) so the real failure
+      // surfaces upstream; the worktree-provisioning step doesn't add
+      // a redundant fail-loud here.
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).resolves.toBeUndefined();
+      expect(existsSync(join(worktreeRoot, "node_modules"))).toBe(false);
+    });
+
+    it("is a no-op when the worktree directory does not exist (bootstrap path covers that)", async () => {
+      makeRepoNm();
+      // Remove the worktree dir created in beforeEach.
+      rmSync(worktreeRoot, { recursive: true, force: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).resolves.toBeUndefined();
+      expect(existsSync(join(worktreeRoot, "node_modules"))).toBe(false);
+    });
+
+    it("ensureProvisioned re-validates agent name against AGENT_NAME_SHAPE", async () => {
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "Bad Name")).rejects.toThrow(
+        WorktreeError,
+      );
+    });
+
+    it("symlink target is the canonical (realpath) repo-root node_modules", async () => {
+      // When the operator's repo root is itself a symlink (host vs
+      // container path), the canonical comparison still works and the
+      // helper does not loop creating + replacing on every call.
+      makeRepoNm();
+      const symlinkedRoot = join(workArea, "repo-via-symlink");
+      symlinkSync(repoRoot, symlinkedRoot, "dir");
+      const wm = createWorktreeManager(fakeRunner());
+      // Use the symlinked path as hostPath; worktree is still at the
+      // canonical repoRoot path, but the manager is asked to provision
+      // via the symlinked one.
+      const ctx = makeRepoContext({
+        localPath: symlinkedRoot,
+        hostPath: symlinkedRoot,
+      });
+      const linkPath = join(
+        symlinkedRoot,
+        ".danxbot",
+        "worktrees",
+        "alice",
+        "node_modules",
+      );
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      // Idempotent on the second run despite the realpath canonicalization.
+      const inodeBefore = lstatSync(linkPath).ino;
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(linkPath).ino).toBe(inodeBefore);
+    });
+
+    it("readlink target points at <repoRoot>/node_modules (the literal path stored in the link)", async () => {
+      makeRepoNm();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, "node_modules");
+      // The symlink target stored on disk is the literal path we passed
+      // in (not the realpath). This matches how `git worktree add`
+      // bakes the canonical path into worktree metadata — both stay
+      // runtime-agnostic on host↔docker swaps as long as the operator
+      // configures a mirror-bind (DX-230).
+      expect(readlinkSync(link)).toBe(join(repoRoot, "node_modules"));
+    });
+  });
+
   describe("hostPath != localPath (DX-230 portability)", () => {
     const splitCtx = makeRepoContext({
       localPath: "/container/path",

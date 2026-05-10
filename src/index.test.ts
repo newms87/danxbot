@@ -124,6 +124,38 @@ vi.mock("./logger.js", () => ({
   }),
 }));
 
+// DX-242: stub the boot-time worktree provisioner + replay so the test
+// doesn't hit real filesystem / DB code paths. The boot wiring assertion
+// belongs in the dedicated unit suites for each module.
+vi.mock("./agent/worktree-manager.js", () => ({
+  createWorktreeManager: () => ({
+    worktreePath: () => "/unused",
+    bootstrap: vi.fn().mockResolvedValue(undefined),
+    teardown: vi.fn().mockResolvedValue(undefined),
+    validate: vi.fn().mockResolvedValue({ state: "clean" }),
+    resetClean: vi.fn().mockResolvedValue(undefined),
+    ensureProvisioned: vi.fn().mockResolvedValue(undefined),
+  }),
+}));
+vi.mock("./agent/ensure-worktrees-provisioned.js", () => ({
+  ensureWorktreesProvisioned: vi.fn().mockResolvedValue({
+    scanned: 0,
+    provisioned: [],
+    failed: [],
+  }),
+}));
+vi.mock("./worker/replay-stop-queue.js", () => ({
+  replayStopQueue: vi
+    .fn()
+    .mockResolvedValue({ scanned: 0, replayed: [], skipped: [], failed: [] }),
+  STOP_QUEUE_DIR: ".danxbot/dispatch-stops",
+}));
+vi.mock("./worker/reconcile.js", () => ({
+  reconcileOrphanedDispatches: vi
+    .fn()
+    .mockResolvedValue({ scanned: 0, orphaned: [], alive: [] }),
+}));
+
 // --- Test setup ---
 
 beforeEach(() => {

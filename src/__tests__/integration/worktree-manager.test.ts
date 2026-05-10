@@ -20,8 +20,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -330,6 +333,197 @@ D("WorktreeManager (integration, real git)", () => {
     const gitdirContents = readFileSync(gitdirFile, "utf-8").trim();
     expect(gitdirContents).toContain(repoDir);
     expect(gitdirContents).toContain(".danxbot/worktrees/alice");
+  });
+
+  // ============================================================
+  // DX-242 — node_modules provisioning, end-to-end against real fs
+  // ============================================================
+
+  /**
+   * The integration tmpdir layout (`originDir`, `repoDir`) does not
+   * include a `node_modules` directory, so the provisioning helper
+   * silently no-ops in the standard scenarios above (preserving
+   * compatibility with existing test fixtures). These two tests
+   * exercise the live provisioning path by seeding a fake repo-root
+   * `node_modules/.bin/tsx` before running bootstrap, then asserting
+   * the symlink lands at `<worktree>/node_modules` and resolves to
+   * the seeded target.
+   */
+
+  it("DX-242: bootstrap symlinks <worktree>/node_modules → <repoRoot>/node_modules when seeded", async () => {
+    // Seed a fake repo-root node_modules with the tsx bin the helper's
+    // fail-loud check expects. The contents don't have to be a real
+    // tsx — the helper only checks existence.
+    mkdirSync(join(repoDir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(
+      join(repoDir, "node_modules", ".bin", "tsx"),
+      "#!/bin/sh\necho fake-tsx\n",
+      { mode: 0o755 },
+    );
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(
+      repoDir,
+      ".danxbot",
+      "worktrees",
+      "alice",
+      "node_modules",
+    );
+    expect(existsSync(link)).toBe(true);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    // realpath canonicalizes through any host symlinks; both sides
+    // resolve to the same on-disk inode.
+    expect(realpathSync(link)).toBe(
+      realpathSync(join(repoDir, "node_modules")),
+    );
+    // And the load-bearing assertion: tsx resolves through the symlink
+    // from the worktree's cwd. This is the exact resolution path
+    // failing for `npx vitest run` + `spawn(tsxBin)` test scaffolding
+    // that DX-242 was filed for.
+    expect(
+      existsSync(join(link, ".bin", "tsx")),
+    ).toBe(true);
+  });
+
+  it("DX-242: a tsx-spawning command resolves through the bootstrap-provisioned link", async () => {
+    // The exact failure DX-242 was filed for: integration test
+    // scaffolding spawns `<worktree>/node_modules/.bin/tsx` (and the
+    // fake-claude / dispatch-pipeline tests do the same) and ENOENTs
+    // because git worktree add did not provision node_modules. After
+    // the fix, the bin resolves through the symlink and the spawn
+    // exits cleanly.
+    mkdirSync(join(repoDir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(
+      join(repoDir, "node_modules", ".bin", "tsx"),
+      "#!/bin/sh\necho fake-tsx-ok\nexit 0\n",
+      { mode: 0o755 },
+    );
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const tsxBin = join(
+      repoDir,
+      ".danxbot",
+      "worktrees",
+      "alice",
+      "node_modules",
+      ".bin",
+      "tsx",
+    );
+
+    // Spawn the bin directly from the worktree-resolved path. No
+    // ENOENT — the symlink resolves the lookup.
+    const stdout = execFileSync(tsxBin, [], { encoding: "utf-8" });
+    expect(stdout.trim()).toBe("fake-tsx-ok");
+  });
+
+  it("DX-242: validate() silently re-provisions a missing node_modules symlink before reading git state", async () => {
+    // Production repos gitignore `node_modules` so the worktree's
+    // symlink is never untracked. Mirror that in the test fixture so
+    // validate() can return clean after re-provisioning.
+    writeFileSync(join(repoDir, ".gitignore"), "node_modules\n");
+    git(repoDir, "add", ".gitignore");
+    git(repoDir, "commit", "-m", "ignore node_modules");
+    git(repoDir, "push", "origin", "main");
+
+    mkdirSync(join(repoDir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(
+      join(repoDir, "node_modules", ".bin", "tsx"),
+      "#!/bin/sh\necho fake-tsx\n",
+      { mode: 0o755 },
+    );
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(
+      repoDir,
+      ".danxbot",
+      "worktrees",
+      "alice",
+      "node_modules",
+    );
+    rmSync(link, { force: true });
+    expect(existsSync(link)).toBe(false);
+
+    // validate is supposed to be read-only at the contract level, but
+    // it ALSO calls `provisionNodeModules` internally to self-heal
+    // before reading git state. The return value remains the
+    // git-state shape; the side effect is repair.
+    const result = await wm.validate(ctx(), "alice");
+    expect(result.state).toBe("clean");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+  });
+
+  it("DX-242: resetClean() re-provisions node_modules after the reset (operator-driven `git clean -fdx` heal)", async () => {
+    writeFileSync(join(repoDir, ".gitignore"), "node_modules\n");
+    git(repoDir, "add", ".gitignore");
+    git(repoDir, "commit", "-m", "ignore node_modules");
+    git(repoDir, "push", "origin", "main");
+
+    mkdirSync(join(repoDir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(
+      join(repoDir, "node_modules", ".bin", "tsx"),
+      "#!/bin/sh\necho fake-tsx\n",
+      { mode: 0o755 },
+    );
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(
+      repoDir,
+      ".danxbot",
+      "worktrees",
+      "alice",
+      "node_modules",
+    );
+    rmSync(link, { force: true });
+
+    // resetClean's primary contract is the git reset; the post-reset
+    // re-provisioning is the secondary side effect we're asserting.
+    await wm.resetClean(ctx(), "alice");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(
+      realpathSync(join(repoDir, "node_modules")),
+    );
+  });
+
+  it("DX-242: ensureProvisioned heals an existing worktree that pre-dates the fix", async () => {
+    // Bootstrap creates the worktree; remove the symlink to simulate
+    // an existing worktree from before the fix landed (or to simulate
+    // an operator who ran `git clean -fdx` inside the worktree).
+    mkdirSync(join(repoDir, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(
+      join(repoDir, "node_modules", ".bin", "tsx"),
+      "#!/bin/sh\necho fake-tsx\n",
+      { mode: 0o755 },
+    );
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(
+      repoDir,
+      ".danxbot",
+      "worktrees",
+      "alice",
+      "node_modules",
+    );
+    expect(existsSync(link)).toBe(true);
+    rmSync(link, { force: true });
+    expect(existsSync(link)).toBe(false);
+
+    // Now exercise the boot-side repair path. ensureProvisioned must
+    // restore the symlink without redoing bootstrap.
+    await wm.ensureProvisioned(ctx(), "alice");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(
+      realpathSync(join(repoDir, "node_modules")),
+    );
   });
 
   it("bootstrap fails when ctx.hostPath does not resolve to a git repo", async () => {

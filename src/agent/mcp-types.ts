@@ -90,6 +90,39 @@ export interface McpFactoryOptions {
    * `{createUrl}`, unlike slack's `{replyUrl, updateUrl}` pair.
    */
   restartWorkerUrl?: string;
+  /**
+   * DX-242: fallback context the danxbot MCP server uses when its POST
+   * to `danxbotStopUrl` fails (worker crashed, OOM-killed, host
+   * reboot). The MCP server uses these — in order — to finalize the
+   * dispatch:
+   *
+   *   1. Direct UPDATE on the `dispatches` row via `db` credentials.
+   *   2. Atomic write to `<repoRoot>/.danxbot/dispatch-stops/<id>.json`
+   *      that the worker's boot replay processes on next start.
+   *
+   * `dispatchId` is the same UUID baked into the stop URL — passed
+   * separately so the MCP doesn't have to URL-parse to recover it.
+   * `repoRoot` enables the filesystem queue path. `db` enables the
+   * direct-write path.
+   *
+   * Auto-injected by `dispatch()` from `repo.localPath`, the
+   * dispatchId, and `config.db` so existing callers don't have to
+   * thread it through. Absent for non-worker dispatches (test
+   * fixtures) — the MCP server still works; it just throws on a
+   * primary-path failure instead of silently degrading, which is the
+   * right contract for those.
+   */
+  fallback?: {
+    repoRoot: string;
+    dispatchId: string;
+    db?: {
+      host: string;
+      port?: number;
+      user: string;
+      password: string;
+      database?: string;
+    };
+  };
 }
 
 export interface McpServerEntry {

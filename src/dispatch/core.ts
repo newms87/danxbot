@@ -906,11 +906,49 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // in `tools/list`.
   const restartWorker = input.repo.workerPort ? restartWorkerUrl : undefined;
 
+  // DX-242: build the danxbot MCP fallback context. The MCP server
+  // uses this to finalize a dispatch when the worker is unreachable —
+  // direct DB UPDATE on the dispatches row, then a filesystem queue
+  // entry the worker replays on its next boot. `repo.localPath` is
+  // the queue's root directory; `dispatchId` keys the queue entry;
+  // `config.db` is the same `DANXBOT_DB_*` block the worker itself
+  // reads. Worker-port-less dispatches still get the fallback because
+  // the worker boot replay can find the queue file regardless.
+  //
+  // The DB block is built defensively — test fixtures mock `../config`
+  // with a partial shape that omits `db`; we don't want to force every
+  // test mock to grow a db block. Production callers always have it.
+  // When the db is incomplete, the MCP server still gets the fs-queue
+  // path via `repoRoot` and skips the DB attempt at runtime via its
+  // own `readFallbackDbConfig` undefined check.
+  const dbConfig = config.db as typeof config.db | undefined;
+  const fallbackDb =
+    dbConfig &&
+    typeof dbConfig.host === "string" &&
+    typeof dbConfig.user === "string" &&
+    typeof dbConfig.password === "string"
+      ? {
+          host: dbConfig.host,
+          ...(typeof dbConfig.port === "number" ? { port: dbConfig.port } : {}),
+          user: dbConfig.user,
+          password: dbConfig.password,
+          ...(typeof dbConfig.database === "string"
+            ? { database: dbConfig.database }
+            : {}),
+        }
+      : undefined;
+  const fallback = {
+    repoRoot: input.repo.localPath,
+    dispatchId,
+    ...(fallbackDb ? { db: fallbackDb } : {}),
+  };
+
   const danxbotServer = defaultMcpRegistry[DANXBOT_SERVER_NAME].build({
     danxbotStopUrl: workerStopUrl,
     slack,
     issue,
     restartWorkerUrl: restartWorker,
+    fallback,
   });
   const mcpServers: Record<string, unknown> = {
     ...workspaceMcp.mcpServers,

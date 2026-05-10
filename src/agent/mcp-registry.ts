@@ -69,6 +69,26 @@ const DANXBOT_ENTRY: McpServerEntry = {
     if (opts.restartWorkerUrl) {
       env.DANXBOT_RESTART_WORKER_URL = opts.restartWorkerUrl;
     }
+    // DX-242: pass the fallback context so the MCP server can finalize
+    // a dispatch when the stop URL is unreachable. The MCP server reads
+    // each var independently (`readFallbackDbConfig` + raw env reads in
+    // `main()`) so a half-configured environment (e.g. only repoRoot
+    // set, no DB creds) still gets the filesystem-queue path.
+    if (opts.fallback) {
+      env.DANXBOT_DISPATCH_ID = opts.fallback.dispatchId;
+      env.DANX_REPO_ROOT = opts.fallback.repoRoot;
+      if (opts.fallback.db) {
+        env.DANXBOT_DB_HOST = opts.fallback.db.host;
+        if (opts.fallback.db.port !== undefined) {
+          env.DANXBOT_DB_PORT = String(opts.fallback.db.port);
+        }
+        env.DANXBOT_DB_USER = opts.fallback.db.user;
+        env.DANXBOT_DB_PASSWORD = opts.fallback.db.password;
+        if (opts.fallback.db.database !== undefined) {
+          env.DANXBOT_DB_NAME = opts.fallback.db.database;
+        }
+      }
+    }
     return {
       command: "npx",
       args: ["tsx", DANXBOT_MCP_SERVER_PATH],

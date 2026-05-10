@@ -2088,3 +2088,98 @@ describe("dispatch() — persona prepend (DX-162 / multi-worker)", () => {
     expect(opts.prompt).toContain("Your branch: alice");
   });
 });
+
+describe("dispatch() — DX-242 fallback assembly", () => {
+  // The fallback context the danxbot MCP server uses to finalize a
+  // dispatch when the worker is unreachable lives entirely in the
+  // server's env block. Reading it from the per-dispatch MCP settings
+  // file (the same observation seam other tests use for STOP_URL /
+  // SLACK_*_URL injection) is the only source-of-truth for what
+  // reaches the spawned subprocess.
+  const slackWorkerSrc = resolve(
+    __dirname,
+    "..",
+    "poller",
+    "inject",
+    "workspaces",
+    "slack-worker",
+  );
+
+  let tmpRepoDir: string;
+  let slackRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-fb-dispatch-"));
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "slack-worker");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(slackWorkerSrc, dest, { recursive: true });
+    slackRepo = makeRepoContext({ localPath: tmpRepoDir });
+    mockSpawnAgent.mockResolvedValue(makeRunningJob());
+    capturedStallOpts.length = 0;
+  });
+
+  afterEach(() => {
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  const META: DispatchTriggerMetadata = {
+    trigger: "slack",
+    metadata: {
+      channelId: "C1",
+      threadTs: "1.0",
+      messageTs: "1.1",
+      user: "U1",
+      userName: null,
+      messageText: "x",
+    },
+  };
+
+  it("auto-injects DANXBOT_DISPATCH_ID + DANX_REPO_ROOT into the danxbot MCP env", async () => {
+    const result = await dispatch({
+      repo: slackRepo,
+      task: "x",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0] as {
+      mcpConfigPath: string;
+    };
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8"));
+    const env = settings.mcpServers.danxbot.env;
+    expect(env.DANXBOT_DISPATCH_ID).toBe(result.dispatchId);
+    expect(env.DANX_REPO_ROOT).toBe(slackRepo.localPath);
+  });
+
+  it("omits DANXBOT_DB_* when the mocked config has no `db` block (defensive against test fixtures)", async () => {
+    // The dispatch core's fallback assembly defensively skips db when
+    // any of host/user/password are absent. The mocked `../config.js`
+    // in this suite (line 33-42) intentionally has no `db` field, so
+    // the dispatch should still succeed — just without the DB
+    // fallback. This pins the test-fixture compatibility contract
+    // documented in core.ts:803-810.
+    await dispatch({
+      repo: slackRepo,
+      task: "x",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0] as {
+      mcpConfigPath: string;
+    };
+    const settings = JSON.parse(readFileSync(opts.mcpConfigPath, "utf-8"));
+    const env = settings.mcpServers.danxbot.env;
+    expect(env.DANXBOT_DB_HOST).toBeUndefined();
+    expect(env.DANXBOT_DB_USER).toBeUndefined();
+    expect(env.DANXBOT_DB_PASSWORD).toBeUndefined();
+    // The fs-queue + dispatchId paths still work — the MCP server
+    // skips the DB step at runtime via `readFallbackDbConfig`.
+    expect(env.DANXBOT_DISPATCH_ID).toBeDefined();
+    expect(env.DANX_REPO_ROOT).toBeDefined();
+  });
+});

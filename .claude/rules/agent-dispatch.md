@@ -91,6 +91,26 @@ The only legitimate second observer is `TerminalOutputWatcher` (`src/agent/termi
 
 Agents signal completion with the `danxbot_complete` MCP tool. The tool is defined in `src/mcp/danxbot-server.ts` and is injected into every dispatched agent via `--mcp-config` pointing at a per-dispatch `settings.json` that sets `DANXBOT_STOP_URL`.
 
+### Fallback chain (DX-242)
+
+`danxbot_complete` is resilient to a worker outage between spawn and signal. When the POST to `DANXBOT_STOP_URL` fails (worker crashed, OOM-killed, host reboot), the MCP server falls through:
+
+1. **HTTP** — POST to `DANXBOT_STOP_URL`. Always tried first; fast path when the worker is alive.
+2. **Direct DB UPDATE** — when `DANXBOT_DB_*` + `DANXBOT_DISPATCH_ID` env vars are set, the MCP server opens a one-shot `pg.Pool` and `UPDATE`s the `dispatches` row to terminal status, summary, `completed_at`, `pid_terminated_at`. Idempotent (`WHERE "status" NOT IN (TERMINAL_STATUSES)`).
+3. **Filesystem queue** — when `DANX_REPO_ROOT` env is set, the MCP server atomically writes `<repoRoot>/.danxbot/dispatch-stops/<dispatchId>.json` (tempfile + rename) carrying the agent-facing `CompleteStatus` (NOT collapsed) so the boot replay can route `critical_failure` correctly.
+
+The chain succeeds if ANY path lands; the agent sees a single success message naming which path fired ("recorded via DB fallback" / "queued for boot replay"). When EVERY path fails (no fallback context configured AND HTTP unreachable), the MCP server fails loud with the original primary error embedded.
+
+The fallback context is auto-injected by `dispatch()` from `repo.localPath` (queue dir), `dispatchId` (queue key), and `config.db` (the same `DANXBOT_DB_*` block the worker reads). `mcp/danxbot-server.ts#mapCompleteToTerminalStatus` is the SINGLE source of truth for the `CompleteStatus → DispatchStatus` collapse — `worker/dispatch.ts#handleStopFromDb`, `worker/replay-stop-queue.ts`, and the MCP server's DB-fallback branch all import it.
+
+Boot replay (`src/worker/replay-stop-queue.ts`, wired into `startWorkerMode` BEFORE `reconcileOrphanedDispatches`):
+- Scans `<repo>/.danxbot/dispatch-stops/`.
+- For each entry: `getDispatchById` → skip-if-terminal → `autoSyncTrackedIssue` → `updateDispatch` → `unlinkSync`.
+- `critical_failure` branch: `writeFlag(<repo>/.danxbot/CRITICAL_FAILURE)` + row failed (auto-sync skipped).
+- Per-entry failures recorded as `stop-replay`-source system errors; the file STAYS on disk for the next boot to retry. Malformed JSON / shape errors discard the file (a permanently-broken file would otherwise loop every boot).
+
+### Worker-side flow
+
 Flow:
 
 1. Agent calls `danxbot_complete({status: "completed"|"failed", summary: "..."})`
@@ -114,6 +134,7 @@ Flow:
 - `DANXBOT_SLACK_UPDATE_URL` → `/api/slack/update/<id>` (Slack-only, `danxbot_slack_post_update`)
 - `DANXBOT_ISSUE_CREATE_URL` → `/api/issue-create/<id>` (`danx_issue_create`)
 - `DANXBOT_RESTART_WORKER_URL` → `/api/restart/<id>` (`danxbot_restart_worker`)
+- `DANXBOT_DISPATCH_ID` + `DANX_REPO_ROOT` + `DANXBOT_DB_*` (DX-242 fallback context, no URL — see "Fallback chain" above)
 
 DX-157 retired the parallel agent-facing save URL — agents `Edit` / `Write` the YAML at `<repo>/.danxbot/issues/{open,closed}/<id>.yml` directly, the chokidar watcher in the worker (`src/db/issues-mirror.ts`) mirrors every change to Postgres on the file event, and the post-completion auto-sync (`src/worker/auto-sync.ts`) handles the immediate tracker push when `danxbot_complete` fires. The poller's per-tick mirror is the eventual consistency safety net for tracker pushes that miss the auto-sync window.
 

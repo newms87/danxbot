@@ -26,7 +26,9 @@ export type SystemErrorSource =
   | "healer"
   | "reconcile"
   | "retry-queue"
-  | "poller";
+  | "poller"
+  | "worktree"
+  | "stop-replay";
 
 export type SystemErrorSeverity = "warn" | "error";
 

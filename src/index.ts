@@ -27,6 +27,9 @@ import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
 import { reconcileOrphanedDispatches } from "./worker/reconcile.js";
 import { ensurePortableRepoPath } from "./agent/portable-path.js";
+import { createWorktreeManager } from "./agent/worktree-manager.js";
+import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned.js";
+import { replayStopQueue } from "./worker/replay-stop-queue.js";
 
 const log = createLogger("startup");
 
@@ -120,6 +123,23 @@ async function startWorkerMode(): Promise<void> {
   // clear warning at startup rather than discovering it via a failed dispatch.
   await assertJsonlDirectoryAccess(repo.name);
 
+  // DX-242: self-heal `<worktree>/node_modules` for every existing agent
+  // worktree. Existing worktrees from before the bootstrap-time fix lack
+  // the symlink; this catches them on the next worker boot without
+  // operator action. Per-agent failures surface as `worktree`-source
+  // system errors so the dashboard agent card flags broken state instead
+  // of letting a dispatched agent silently ENOENT on `tsx` resolution
+  // (AC #2 + AC #8).
+  try {
+    await ensureWorktreesProvisioned(repo, createWorktreeManager());
+  } catch (err) {
+    // The function itself swallows per-agent failures; an exception
+    // here means the settings.json read or the manager constructor
+    // itself blew up — log + continue so the rest of boot proceeds.
+    // The poller's pre-claim DB guard still keeps things consistent.
+    log.error(`[${repo.name}] ensureWorktreesProvisioned failed`, err);
+  }
+
   // Platform pool must be ready before any sql:execute block runs.
   // Disabled repos skip pool creation.
   initPlatformPool(repo.db);
@@ -135,6 +155,31 @@ async function startWorkerMode(): Promise<void> {
     process.env.DANX_DB_USER = repo.db.user;
     process.env.DANX_DB_PASSWORD = repo.db.password;
     process.env.DANX_DB_NAME = repo.db.database;
+  }
+
+  // DX-242: replay queued `danxbot_complete` signals from agents that
+  // signaled completion while this worker (or a prior incarnation) was
+  // down. The MCP server's fallback chain writes
+  // `<repo>/.danxbot/dispatch-stops/<dispatchId>.json` when the stop
+  // URL is unreachable; we read each entry, run the same auto-sync +
+  // dispatch-row finalization the live `handleStop` runs, then delete
+  // the file. Per-entry failures surface as `stop-replay`-source
+  // system errors. Run BEFORE `reconcileOrphanedDispatches` — that
+  // pass marks any still-non-terminal row `failed` based on host_pid
+  // liveness, and we want the agent's actual terminal reason to win
+  // over the synthetic "orphaned" reason.
+  try {
+    const replayResult = await replayStopQueue(repo);
+    if (
+      replayResult.replayed.length > 0 ||
+      replayResult.failed.length > 0
+    ) {
+      log.info(
+        `[${repo.name}] Replayed ${replayResult.replayed.length} queued stops, ${replayResult.failed.length} failed`,
+      );
+    }
+  } catch (err) {
+    log.error(`[${repo.name}] Stop-queue replay failed`, err);
   }
 
   // Reconcile non-terminal dispatch rows from prior worker incarnations.

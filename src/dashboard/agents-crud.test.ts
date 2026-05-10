@@ -579,6 +579,7 @@ function mkWorktreeManager(opts: {
     },
     validate: async () => ({ state: "clean" }),
     resetClean: async () => {},
+    ensureProvisioned: async () => {},
   };
 }
 

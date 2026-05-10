@@ -33,6 +33,7 @@ import { isFeatureEnabled } from "../settings-file.js";
 import { writeFlag } from "../critical-failure.js";
 import {
   isCompleteStatus,
+  mapCompleteToTerminalStatus,
   type CompleteStatus,
 } from "../mcp/danxbot-server.js";
 import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
@@ -859,15 +860,15 @@ export async function handleSlackUpdate(
 }
 
 /**
- * Map the agent-facing `CompleteStatus` to the DB-facing `DispatchStatus`.
- * The DB schema only knows `completed`/`failed`; the `critical_failure`
- * agent signal is recorded as a `failed` row (the halt signal lives in
- * the flag file, not the row's status). Mirrors the asymmetry the
- * in-memory `handleStop` branch encodes via `job.stop("failed", ...)`
- * during a critical_failure.
+ * Wrapper around `mapCompleteToTerminalStatus` (DX-242) that ascribes
+ * the worker's `DispatchStatus` type to the result. The mapping itself
+ * lives in `mcp/danxbot-server.ts` so both worker stop handlers
+ * (this file + `worker/replay-stop-queue.ts`) and the MCP fallback
+ * chain (`mcp/danxbot-server.ts#callDanxbotComplete`) collapse the
+ * agent's `critical_failure` signal to the same `failed` row state.
  */
 function mapCompleteToDispatchStatus(status: CompleteStatus): DispatchStatus {
-  return status === "completed" ? "completed" : "failed";
+  return mapCompleteToTerminalStatus(status);
 }
 
 /**

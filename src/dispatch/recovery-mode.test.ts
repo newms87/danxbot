@@ -58,6 +58,7 @@ function mkManager(opts: {
       calls.resetClean++;
       if (opts.resetClean) await opts.resetClean();
     },
+    ensureProvisioned: async () => {},
   };
 }
 

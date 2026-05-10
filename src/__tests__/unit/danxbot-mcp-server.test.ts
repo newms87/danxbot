@@ -534,6 +534,291 @@ describe("danxbot MCP server — issue tools", () => {
   }, 10_000);
 });
 
+describe("danxbot MCP server — DX-242 DB fallback (real pg)", () => {
+  /**
+   * The DB-success branch lights up when the worker is unreachable
+   * AND the postgres pool credentials reach the spawned MCP via
+   * `DANXBOT_DB_*` env. We seed a `dispatches` row, spawn the server
+   * with an unreachable stop URL + real DB creds, call
+   * `danxbot_complete`, and assert the row transitions terminal in
+   * the database — proving the env injection path AND the SQL UPDATE.
+   *
+   * Skips when `DANXBOT_DB_*` env is absent on the local test
+   * runner. Pairs with the `tryDirectDbWrite` unit suite in
+   * `danxbot-stop-fallback.test.ts`, which exercises the SQL
+   * directly. This test exercises the env-plumbing + chain ordering.
+   */
+  function readPgEnv(): {
+    host: string;
+    port: number;
+    user: string;
+    password: string;
+    database: string;
+  } | undefined {
+    const host = process.env.DANXBOT_DB_HOST;
+    const portRaw = process.env.DANXBOT_DB_PORT;
+    const user = process.env.DANXBOT_DB_USER;
+    const password = process.env.DANXBOT_DB_PASSWORD;
+    const database = process.env.DANXBOT_DB_NAME;
+    if (!host || !user || !password || !database) return undefined;
+    const port = portRaw ? parseInt(portRaw, 10) : 5432;
+    if (!Number.isFinite(port)) return undefined;
+    return { host, port, user, password, database };
+  }
+  const pgEnv = readPgEnv();
+  const itIfDb = pgEnv ? it : it.skip;
+
+  itIfDb(
+    "critical_failure status writes the row as 'failed' (CompleteStatus → DispatchStatus collapse)",
+    async () => {
+      if (!pgEnv) return;
+      const { Pool } = await import("pg");
+      const { randomUUID } = await import("node:crypto");
+      const pool = new Pool({
+        host: pgEnv.host,
+        port: pgEnv.port,
+        user: pgEnv.user,
+        password: pgEnv.password,
+        database: pgEnv.database,
+        max: 2,
+      });
+      const dispatchId = `test-mcp-fb-${randomUUID()}`;
+      try {
+        await pool.query(
+          `INSERT INTO dispatches
+            (id, repo_name, "trigger", trigger_metadata,
+             "status", started_at, runtime_mode)
+           VALUES ($1, 'test-repo', 'api', '{}'::jsonb,
+                   'running', $2, 'host')`,
+          [dispatchId, Date.now()],
+        );
+
+        const proc = spawn(tsxBin, [serverScript], {
+          env: {
+            ...process.env,
+            DANXBOT_STOP_URL: `http://127.0.0.1:1/api/stop/${dispatchId}`,
+            DANXBOT_DISPATCH_ID: dispatchId,
+            DANXBOT_DB_HOST: pgEnv.host,
+            DANXBOT_DB_PORT: String(pgEnv.port),
+            DANXBOT_DB_USER: pgEnv.user,
+            DANXBOT_DB_PASSWORD: pgEnv.password,
+            DANXBOT_DB_NAME: pgEnv.database,
+          } as NodeJS.ProcessEnv,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+
+        try {
+          await new Promise((r) => setTimeout(r, 500));
+          await sendMessage(proc, {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: {
+              protocolVersion: "2024-11-05",
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+            },
+          });
+          const response = await sendMessage(proc, {
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/call",
+            params: {
+              name: "danxbot_complete",
+              arguments: {
+                status: "critical_failure",
+                summary: "MCP not loaded — env-level blocker",
+              },
+            },
+          });
+          expect(response.error).toBeUndefined();
+          const result = response.result as {
+            content: Array<{ type: string; text: string }>;
+          };
+          // Success message indicates DB fallback fired.
+          expect(result.content[0].text).toContain("DB fallback");
+        } finally {
+          proc.kill("SIGTERM");
+          // Give pg a beat to flush its connection close.
+          await new Promise((r) => setTimeout(r, 200));
+        }
+
+        // Row finalized in DB. critical_failure collapses to `failed`
+        // per the agent-facing → DB-status map.
+        const { rows } = await pool.query<{
+          status: string;
+          summary: string;
+        }>(
+          `SELECT "status", summary FROM dispatches WHERE id = $1`,
+          [dispatchId],
+        );
+        expect(rows[0].status).toBe("failed");
+        expect(rows[0].summary).toBe("MCP not loaded — env-level blocker");
+      } finally {
+        await pool.query("DELETE FROM dispatches WHERE id = $1", [dispatchId]);
+        await pool.end();
+      }
+    },
+    20_000,
+  );
+});
+
+describe("danxbot MCP server — DX-242 fallback chain", () => {
+  /**
+   * Spawn the MCP server with an unreachable stop URL, point its
+   * filesystem-queue path at a tmpdir, and assert that
+   * `danxbot_complete` still succeeds — the queue file is the
+   * fallback path that absorbs the worker outage. Mirrors the
+   * production scenario where the worker process dies before the
+   * agent gets a chance to call `danxbot_complete`.
+   *
+   * No DB creds are configured, so the chain is HTTP → fs queue (the
+   * DB step is gated on `readFallbackDbConfig` returning a config).
+   * That keeps the unit test free of postgres without losing
+   * coverage of the queue write itself — DB-fallback coverage lives
+   * in the dedicated stop-fallback unit suite.
+   */
+  let workArea: string;
+
+  beforeEach(() => {
+    workArea = require("node:fs").mkdtempSync(
+      require("node:path").join(require("node:os").tmpdir(), "danxbot-fallback-"),
+    );
+  });
+
+  afterEach(() => {
+    require("node:fs").rmSync(workArea, { recursive: true, force: true });
+  });
+
+  it("queues to filesystem when the stop URL is unreachable", async () => {
+    const dispatchId = "test-dispatch-fallback";
+    // Loopback port 1 is reserved + nothing listens — connection
+    // refused immediately, exactly the failure mode worker-down
+    // exhibits.
+    const proc = spawn(tsxBin, [serverScript], {
+      env: {
+        ...process.env,
+        DANXBOT_STOP_URL: `http://127.0.0.1:1/api/stop/${dispatchId}`,
+        DANXBOT_DISPATCH_ID: dispatchId,
+        DANX_REPO_ROOT: workArea,
+        // Deliberately no DANXBOT_DB_* vars — DB fallback skipped.
+        DANXBOT_DB_HOST: undefined,
+        DANXBOT_DB_USER: undefined,
+        DANXBOT_DB_PASSWORD: undefined,
+      } as NodeJS.ProcessEnv,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    try {
+      await new Promise((r) => setTimeout(r, 500));
+
+      await sendMessage(proc, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "test", version: "1.0" },
+        },
+      });
+
+      const response = await sendMessage(proc, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "danxbot_complete",
+          arguments: {
+            status: "completed",
+            summary: "Dispatched while worker was down.",
+          },
+        },
+      });
+
+      // No JSON-RPC error — fallback chain absorbed the worker
+      // outage.
+      expect(response.error).toBeUndefined();
+      const result = response.result as {
+        content: Array<{ type: string; text: string }>;
+      };
+      expect(result.content[0].text).toContain("queued for boot replay");
+
+      // Queue file landed on disk with the agent-facing status (NOT
+      // the collapsed DB status — the boot replay needs the original
+      // value to re-route critical_failure correctly).
+      const queueFile = require("node:path").join(
+        workArea,
+        ".danxbot",
+        "dispatch-stops",
+        `${dispatchId}.json`,
+      );
+      expect(require("node:fs").existsSync(queueFile)).toBe(true);
+      const body = JSON.parse(
+        require("node:fs").readFileSync(queueFile, "utf-8"),
+      );
+      expect(body).toMatchObject({
+        dispatchId,
+        status: "completed",
+        summary: "Dispatched while worker was down.",
+      });
+      expect(typeof body.timestamp).toBe("string");
+    } finally {
+      proc.kill("SIGTERM");
+    }
+  }, 15_000);
+
+  it("fails loud when no fallback paths are configured (worker down + no fallback context)", async () => {
+    const proc = spawn(tsxBin, [serverScript], {
+      env: {
+        ...process.env,
+        DANXBOT_STOP_URL: "http://127.0.0.1:1/api/stop/no-fallback",
+        // No DISPATCH_ID, no REPO_ROOT, no DB creds.
+        DANXBOT_DISPATCH_ID: undefined,
+        DANX_REPO_ROOT: undefined,
+        DANXBOT_DB_HOST: undefined,
+        DANXBOT_DB_USER: undefined,
+        DANXBOT_DB_PASSWORD: undefined,
+      } as NodeJS.ProcessEnv,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    try {
+      await new Promise((r) => setTimeout(r, 500));
+
+      await sendMessage(proc, {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "test", version: "1.0" },
+        },
+      });
+
+      const response = await sendMessage(proc, {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "danxbot_complete",
+          arguments: { status: "completed", summary: "ok" },
+        },
+      });
+
+      // No fallback context => fail loud rather than silently
+      // succeed against a worker that ate the signal.
+      expect(response.error).toBeDefined();
+      expect((response.error as { message: string }).message).toContain(
+        "Stop API unreachable",
+      );
+    } finally {
+      proc.kill("SIGTERM");
+    }
+  }, 15_000);
+});
+
 describe("danxbot MCP server — startup error", () => {
   it("exits with code 1 when DANXBOT_STOP_URL is not set", async () => {
     const proc = spawn(tsxBin, [serverScript], {

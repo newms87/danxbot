@@ -39,6 +39,12 @@
 
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
+import {
+  readFallbackDbConfig,
+  tryDirectDbWrite,
+  writeFsQueueEntry,
+  type FallbackDbConfig,
+} from "./danxbot-stop-fallback.js";
 
 /**
  * All values the `danxbot_complete` MCP tool accepts for `status`. Exposed
@@ -56,6 +62,27 @@ export function isCompleteStatus(value: unknown): value is CompleteStatus {
 }
 
 /**
+ * Map an agent-facing `CompleteStatus` to the `dispatches` row's
+ * terminal `status` column. `critical_failure` collapses to `failed`
+ * — the halt signal lives in the per-repo flag file (see
+ * `.claude/rules/agent-dispatch.md` "Critical failure flag"), not on
+ * the dispatch row. Callers that need to UPDATE the row use this; the
+ * agent-facing response advertises `critical_failure` distinctly so
+ * the operator and the agent see the right signal at each layer.
+ *
+ * Single source of truth — `worker/dispatch.ts` (handleStopFromDb),
+ * `worker/replay-stop-queue.ts`, and `mcp/danxbot-server.ts`
+ * (callDanxbotComplete fallback) all import this. A regression that
+ * inlines the ternary in any of those sites loses the documented
+ * "completed/failed only" contract.
+ */
+export function mapCompleteToTerminalStatus(
+  status: CompleteStatus,
+): "completed" | "failed" {
+  return status === "completed" ? "completed" : "failed";
+}
+
+/**
  * The set of per-dispatch callback URLs a danxbot MCP server process
  * can reach. `stop` is always present. The two Slack fields are present
  * only for Slack-triggered dispatches — the resolver injects their env
@@ -65,6 +92,31 @@ export interface DanxbotToolUrls {
   stop: string;
   slackReply?: string;
   slackUpdate?: string;
+  /**
+   * DX-242: fallback context so `danxbot_complete` can finalize a
+   * dispatch when the worker's stop URL is unreachable (worker
+   * crashed, OOM-killed, host reboot). When present, the MCP server
+   * tries — in order — direct DB UPDATE on the `dispatches` row, then
+   * a filesystem queue entry the worker's boot replay processes.
+   *
+   * `repoRoot` is the agent's repo root (`<repo>/.danxbot/dispatch-stops/`
+   * is the queue directory). `dispatchId` is the same UUID baked into
+   * the stop URL — passed explicitly so the MCP server doesn't have
+   * to URL-parse `urls.stop` to recover it. `db` carries the
+   * `DANXBOT_DB_*` credentials read at MCP boot.
+   *
+   * All three are optional — a non-worker dispatch (Slack-only ad-hoc
+   * tests, fixtures) may not configure any of them. In that mode the
+   * MCP server falls back exactly as far as the data lets it: HTTP
+   * stop only when none of the fallbacks are configured; HTTP → fs
+   * when only `repoRoot` is set; the full HTTP → DB → fs chain when
+   * everything is set. Boot reads each from env independently.
+   */
+  fallback?: {
+    repoRoot?: string;
+    dispatchId?: string;
+    db?: FallbackDbConfig;
+  };
   /**
    * Issue-create endpoint. Exposes the `danx_issue_create` tool (atomic
    * `<PREFIX>-N` allocation needs server-side coordination — two agents
@@ -275,11 +327,74 @@ async function callDanxbotComplete(
   }
   const summary = typeof rawSummary === "string" ? rawSummary : "";
 
-  const response = await postJson(urls.stop, { status, summary });
-  if (!response.ok) {
-    throw new Error(`Stop API returned HTTP ${response.status}`);
+  // Primary path: POST to the worker's stop endpoint. Almost always
+  // reaches the live worker on localhost; the fallback chain below
+  // handles the rare worker-down case (DX-242).
+  let primaryError: string | undefined;
+  try {
+    const response = await postJson(urls.stop, { status, summary });
+    if (response.ok) {
+      return `Agent signaled ${status}: ${summary}`;
+    }
+    primaryError = `Stop API returned HTTP ${response.status}`;
+  } catch (err) {
+    // fetch failed (ECONNREFUSED, DNS, network). Fall through.
+    primaryError = err instanceof Error ? err.message : String(err);
   }
-  return `Agent signaled ${status}: ${summary}`;
+
+  // DX-242 fallback chain: when the worker is unreachable, finalize
+  // the dispatch via direct DB write OR filesystem queue so an
+  // in-flight dispatch isn't left half-applied (dispatch row stuck
+  // running, no auto-sync, no Action Items spawn). The boot replay
+  // path handles tracker push + onboard cleanup the next time the
+  // worker boots.
+  const dispatchId = urls.fallback?.dispatchId;
+  const db = urls.fallback?.db;
+  const repoRoot = urls.fallback?.repoRoot;
+
+  if (!dispatchId) {
+    // Without a dispatch id we can't write a deterministic queue
+    // entry or DB row — surface the original error.
+    throw new Error(
+      `Stop API unreachable (${primaryError}) and no fallback dispatch id available — agent cannot signal completion`,
+    );
+  }
+
+  // Fallback 1: direct DB UPDATE on the dispatches row.
+  // Skip the agent-signaled critical_failure asymmetry — DB schema
+  // collapses to completed/failed via `mapCompleteToTerminalStatus`,
+  // shared with the worker's stop handlers and boot replay so the
+  // collapse rule lives in one place.
+  const dbStatus = mapCompleteToTerminalStatus(status);
+  if (db) {
+    const wrote = await tryDirectDbWrite(
+      { dispatchId, dbStatus, summary },
+      db,
+    );
+    if (wrote) {
+      return `Agent signaled ${status} (worker unreachable, recorded via DB fallback): ${summary}`;
+    }
+  }
+
+  // Fallback 2: filesystem queue. The worker scans
+  // `<repoRoot>/.danxbot/dispatch-stops/` on next boot and replays
+  // each entry through the same auto-sync / updateDispatch path the
+  // live `handleStop` runs.
+  if (repoRoot) {
+    const queued = writeFsQueueEntry(
+      { dispatchId, status, summary },
+      repoRoot,
+    );
+    if (queued) {
+      return `Agent signaled ${status} (worker + DB unreachable, queued for boot replay): ${summary}`;
+    }
+  }
+
+  // Every fallback failed. Fail loud so the agent surfaces the issue
+  // rather than silently exiting.
+  throw new Error(
+    `Stop API unreachable (${primaryError}); DB and filesystem fallbacks also failed for dispatch ${dispatchId}`,
+  );
 }
 
 async function callDanxbotSlackReply(
@@ -557,12 +672,29 @@ if (import.meta.url === entryUrl) {
     );
     process.exit(1);
   }
+  // DX-242: assemble fallback context. Each piece is optional —
+  // present in production worker dispatches, may be absent in older
+  // tests or non-worker spawn shapes. The fallback chain inside
+  // `callDanxbotComplete` skips any path whose context is missing
+  // and reports a precise failure when ALL paths are unreachable.
+  const fallbackDispatchId = process.env.DANXBOT_DISPATCH_ID;
+  const fallbackRepoRoot = process.env.DANX_REPO_ROOT;
+  const fallbackDb = readFallbackDbConfig(process.env);
+  const fallback: DanxbotToolUrls["fallback"] =
+    fallbackDispatchId || fallbackRepoRoot || fallbackDb
+      ? {
+          ...(fallbackDispatchId ? { dispatchId: fallbackDispatchId } : {}),
+          ...(fallbackRepoRoot ? { repoRoot: fallbackRepoRoot } : {}),
+          ...(fallbackDb ? { db: fallbackDb } : {}),
+        }
+      : undefined;
   const urls: DanxbotToolUrls = {
     stop: stopUrl,
     slackReply: process.env.DANXBOT_SLACK_REPLY_URL,
     slackUpdate: process.env.DANXBOT_SLACK_UPDATE_URL,
     issueCreate: process.env.DANXBOT_ISSUE_CREATE_URL,
     restartWorker: process.env.DANXBOT_RESTART_WORKER_URL,
+    ...(fallback ? { fallback } : {}),
   };
   main(urls);
 }
