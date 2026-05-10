@@ -146,6 +146,20 @@ export const AGENT_CAPABILITIES: readonly AgentCapability[] = [
 
 export interface AgentSchedule {
   tz: string;
+  /**
+   * 24/7 master switch (DX-247 temp impl). When `true`, the per-day
+   * window arrays are ignored by `isAgentInSchedule` — the agent is
+   * always in-schedule regardless of weekday or time-of-day. When
+   * `false`, the per-day arrays are consulted as before.
+   *
+   * Legacy schedules written before this field existed normalize to
+   * `false` so existing operator-authored windows keep their original
+   * semantics. New agents created via `AgentEditDrawer.vue` default to
+   * `true` (24/7 on) but the per-day arrays still carry working-hour
+   * defaults so toggling 24/7 off restores a usable window without the
+   * operator having to retype anything.
+   */
+  always_on: boolean;
   mon: string[];
   tue: string[];
   wed: string[];
@@ -354,6 +368,7 @@ function normalizeSchedule(raw: unknown): AgentSchedule | null {
   if (!isValidIanaTimeZone(r.tz)) return null;
   return {
     tz: r.tz,
+    always_on: r.always_on === true,
     mon: normalizeScheduleDay(r.mon),
     tue: normalizeScheduleDay(r.tue),
     wed: normalizeScheduleDay(r.wed),

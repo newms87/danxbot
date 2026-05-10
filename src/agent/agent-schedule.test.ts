@@ -5,6 +5,7 @@ import type { AgentSchedule } from "../settings-file.js";
 function emptySchedule(tz: string): AgentSchedule {
   return {
     tz,
+    always_on: false,
     mon: [],
     tue: [],
     wed: [],
@@ -81,6 +82,31 @@ describe("isAgentInSchedule", () => {
     sched.mon = ["00:00-23:59"];
     const now = new Date("2026-04-20T15:00:00Z");
     expect(isAgentInSchedule(agent(sched, false), now)).toBe(false);
+  });
+
+  it("DX-247: always_on=true short-circuits the per-day check (every day with empty windows still in-schedule)", () => {
+    const sched = emptySchedule("America/Chicago");
+    sched.always_on = true;
+    // Every per-day window array is empty — would return false under
+    // the legacy semantics. always_on=true overrides.
+    const monday = new Date("2026-04-20T15:00:00Z");
+    const sunday = new Date("2026-04-26T03:00:00Z");
+    expect(isAgentInSchedule(agent(sched), monday)).toBe(true);
+    expect(isAgentInSchedule(agent(sched), sunday)).toBe(true);
+  });
+
+  it("DX-247: always_on=true does not bypass agent.enabled=false", () => {
+    const sched = emptySchedule("America/Chicago");
+    sched.always_on = true;
+    const now = new Date("2026-04-20T15:00:00Z");
+    expect(isAgentInSchedule(agent(sched, false), now)).toBe(false);
+  });
+
+  it("DX-247: always_on=true does not bypass empty tz (defense in depth)", () => {
+    const sched = emptySchedule("");
+    sched.always_on = true;
+    const now = new Date("2026-04-20T15:00:00Z");
+    expect(isAgentInSchedule(agent(sched), now)).toBe(false);
   });
 
   it("respects per-day windows — checks the right weekday in the local tz", () => {

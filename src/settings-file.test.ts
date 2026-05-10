@@ -889,6 +889,7 @@ describe("settings-file", () => {
         capabilities: ["issue-worker"],
         schedule: {
           tz: "America/Chicago",
+          always_on: false,
           mon: ["09:00-17:00"],
           tue: ["09:00-17:00"],
           wed: ["09:00-17:00"],
@@ -1202,6 +1203,7 @@ describe("settings-file", () => {
         capabilities: ["issue-worker"],
         schedule: {
           tz: "America/Chicago",
+          always_on: false,
           mon: ["09:00-17:00"],
           tue: [],
           wed: [],

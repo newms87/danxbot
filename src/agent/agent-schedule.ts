@@ -160,6 +160,9 @@ export function isAgentInSchedule(
   if (!agent.enabled) return false;
   if (!agent.schedule.tz) return false;
 
+  // DX-247 temp impl: 24/7 master switch short-circuits the per-day check.
+  if (agent.schedule.always_on) return true;
+
   const { day, minuteOfDay } = getLocalTimeParts(agent.schedule.tz, now);
   const dayWindows = agent.schedule[day];
   if (!Array.isArray(dayWindows) || dayWindows.length === 0) return false;

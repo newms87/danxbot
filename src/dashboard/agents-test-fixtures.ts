@@ -70,6 +70,7 @@ export const EMPTY_REPO_COUNTS = {
 
 export const VALID_SCHEDULE = {
   tz: "America/Chicago",
+  always_on: false,
   mon: ["09:00-17:00"],
   tue: [],
   wed: [],

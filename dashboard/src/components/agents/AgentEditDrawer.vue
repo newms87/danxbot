@@ -50,8 +50,12 @@ const ALLOWED_AVATAR_MIMES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const MAX_AVATAR_BYTES = 1_000_000;
 
 function emptySchedule(): AgentSchedule {
+  // DX-247 temp impl: new agents default to 24/7 ON so they pick up work
+  // immediately. Per-day windows still seed working hours so toggling 24/7
+  // OFF reveals a usable starting state instead of an empty schedule.
   return {
     tz: "America/Chicago",
+    always_on: true,
     mon: ["09:00-17:00"],
     tue: ["09:00-17:00"],
     wed: ["09:00-17:00"],

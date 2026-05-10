@@ -117,9 +117,21 @@ export function validateScheduleShape(
       error: `schedule.tz must be a recognized IANA time zone — got ${typeof r.tz === "string" ? `"${r.tz}"` : typeof r.tz}`,
     };
   }
+  // DX-247 temp impl: `always_on` is optional in the body; missing/undefined
+  // normalizes to `false` for backwards compatibility with pre-DX-247 clients.
+  // A non-boolean value is rejected so a typo (e.g. `"true"` string) surfaces
+  // loudly instead of silently degrading to `false`.
+  let alwaysOn = false;
+  if (Object.prototype.hasOwnProperty.call(r, "always_on")) {
+    if (typeof r.always_on !== "boolean") {
+      return { error: "schedule.always_on must be a boolean" };
+    }
+    alwaysOn = r.always_on;
+  }
   const days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
   const out: AgentSchedule = {
     tz: r.tz,
+    always_on: alwaysOn,
     mon: [],
     tue: [],
     wed: [],

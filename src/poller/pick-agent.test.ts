@@ -6,6 +6,7 @@ import type { Issue } from "../issue-tracker/interface.js";
 function alwaysOpenSchedule(): AgentRecordWithName["schedule"] {
   return {
     tz: "America/Chicago",
+    always_on: false,
     mon: ["00:00-23:59"],
     tue: ["00:00-23:59"],
     wed: ["00:00-23:59"],
