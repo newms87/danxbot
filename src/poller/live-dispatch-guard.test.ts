@@ -42,6 +42,7 @@ function makeRow(overrides: Partial<Dispatch> = {}): Dispatch {
     nudgeCount: 0,
     danxbotCommit: null,
     agentName: null,
+    mcpSettingsPath: null,
     ...overrides,
   };
 }

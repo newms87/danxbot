@@ -4,8 +4,14 @@ id: DX-207
 external_id: 69fe51583c4def2c82a28911
 parent_id: DX-141
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: c5ba114b-8745-41e2-b2ea-b1a42662b186
+  pid: 73872
+  host: dan
+  kind: work
+  started_at: 2026-05-10T04:02:51.065Z
+  ttl_seconds: 7200
+status: Done
 type: Feature
 title: "[DB registry > Phase 2a] mcp_settings_path column — find per-dispatch MCP file at reattach"
 description: |-
@@ -91,17 +97,17 @@ triage:
   history: []
 ac:
   - check_item_id: 69fe51599d2191f37b5cbed3
-    title: Migration 016 adds mcp_settings_path VARCHAR(512) NULL to dispatches; idempotent up + down
-    checked: false
+    title: Migration 019 adds mcp_settings_path VARCHAR(512) NULL to dispatches; idempotent up + down
+    checked: true
   - check_item_id: 69fe5159fbc33c7eae3fd9b3
     title: Dispatch interface + COLUMN_MAP + DispatchRow + rowToDispatch all carry mcpSettingsPath
-    checked: false
+    checked: true
   - check_item_id: 69fe51595e151ec5be1398af
     title: startDispatchTracking accepts and persists mcpSettingsPath; dispatch() supplies it
-    checked: false
+    checked: true
   - check_item_id: 69fe515acd9f3a9df6fc442c
     title: 4 new unit tests pass; no existing tests regressed; tsc clean
-    checked: false
+    checked: true
 comments:
   - author: danxbot
     timestamp: 2026-05-08T23:30:00.000Z
@@ -131,6 +137,154 @@ comments:
       children (DX-208 / DX-209) before letting any of them dispatch.
       Re-checking the parent before resuming this work prevents the
       same premature-dispatch trap from firing on DX-208.
+  - author: test-reviewer
+    timestamp: 2026-05-10T04:21:00.000Z
+    text: |-
+      ## Test Review
+
+      | Test File | Test Method | Status |
+      |---|---|---|
+      | `019_dispatches_mcp_settings_path.test.ts` | adds VARCHAR(512) NULL column | Good |
+      | `019_dispatches_mcp_settings_path.test.ts` | `up()` is idempotent | Good |
+      | `019_dispatches_mcp_settings_path.test.ts` | down/up cycle | Good |
+      | `019_dispatches_mcp_settings_path.test.ts` | `down()` is idempotent | Good |
+      | `dispatches-db.test.ts` | mcpSettingsPath at declared position (string) | Good |
+      | `dispatches-db.test.ts` | sends null when mcpSettingsPath null | Good |
+      | `dispatches-db.test.ts` | `rowToDispatch` 3-branch (string / null / missing) | Good — pins loose-`==` legacy fixture branch |
+      | `dispatch-tracker.test.ts` | persists mcpSettingsPath on insert | Good |
+      | `dispatch-tracker.test.ts` | defaults mcpSettingsPath to null | Good |
+      | `dispatch/core.test.ts` | populates mcpSettingsPath on spawnAgent (= mcpConfigPath) | Good |
+      | `dispatch/core.test.ts` | **respawn must NOT pass mcpSettingsPath** | **Missing** — added |
+
+      **Risk surfaces.** `vi.mock("…/dispatches-db.js", …)` factories
+      across 21 files audited — none re-export the new column shape;
+      DX-207 only adds a column (no new exported function), so no
+      factory needs updating.
+
+      **Resume path.** `parentJobId` is preserved across resume but
+      `mcpSettingsPath` is per-dispatch (each resume writes a new
+      settings file). Resume children flow through the non-respawn
+      branch and inherit a fresh path via `insertDispatch` — covered.
+
+      All 11 new tests assert observable boundary behavior. None vacuous.
+      The `rowToDispatch` 3-branch test is particularly strong — it pins
+      the loose-`==` contract the inline comment warns against "fixing"
+      to `===`.
+
+      Single gap (respawn path coverage) addressed in `## Review Fixes`
+      below.
+  - author: code-reviewer
+    timestamp: 2026-05-10T04:21:30.000Z
+    text: |-
+      ## Code Review
+
+      ### P0 — `src/dispatch/core.ts:501` stale `mcp_settings_path` after stall respawn
+
+      The gate `mcpSettingsPath: isRespawn ? undefined : settingsPath`
+      was incorrect. Each `spawnForDispatch` call invokes
+      `writeMcpSettingsFile`, which `mkdtempSync`s a fresh
+      `/tmp/danxbot-mcp-XXXX/` directory. On respawn:
+
+      1. The previous job's `onComplete` runs
+         `cleanupMcpSettings(settingsDir)` — old dir **deleted**.
+      2. `spawnForDispatch(..., true)` writes a NEW dir at a NEW path.
+      3. The old gate skipped the DB update → row pointed at deleted dir.
+
+      Phase 2c (DX-209) reattach would have read a non-existent file or,
+      after `mkdtemp` randomness, an unrelated dispatch's settings.
+      **Comment was factually wrong** ("re-stamping would overwrite it
+      with the (still-correct) same string") — the path changes every
+      spawn.
+
+      **Fix shipped.** On respawn, fire-and-forget
+      `updateDispatch(dispatchId, { mcpSettingsPath: settingsPath })`
+      before the new spawn. Initial spawn still goes through
+      `startDispatchTracking` → `insertDispatch` for the atomic
+      stamp. Comment rewritten to match. Two new tests in
+      `core.test.ts`:
+      - respawn syncs path to fresh dir (asserts new path != initial,
+        and `updateDispatch` patch matches the spawnAgent argument)
+      - initial spawn does NOT issue an `mcpSettingsPath`
+        `updateDispatch` (locks the gate)
+
+      ### P1 — comment quality
+
+      - `core.ts` respawn comment rewritten to explain the cleanup
+        race correctly.
+      - `dispatches.ts` / `agent-types.ts` docstrings explain WHY (Phase
+        2c reattach, DX-209) — kept as-is.
+      - Migration 019 header explains rationale, NULL semantics,
+        idempotency contract — kept as-is.
+
+      ### P2 — DRY (pre-existing, deferred)
+
+      `dispatches-db.test.ts` duplicates a 30-element `orderedKeys`
+      literal across multiple tests. Pre-existing pattern (also present
+      in the `parentJobId` tests). Deferring: each new column propagates
+      the duplication, but consolidating would touch tests outside
+      DX-207's scope. Out of scope here.
+
+      ### What's correct
+
+      - Loose `==` null check matches `agentName`/`hostPid` precedent.
+      - `String(row.mcp_settings_path)` cast handles non-string driver
+        values defensively without the `Number(undefined) → NaN` foot-gun.
+      - snake_case ↔ camelCase mapping consistent.
+      - Migration test follows the `016_issues_mirror.test.ts` skipIf
+        pattern faithfully.
+      - `SpawnAgentOptions.mcpSettingsPath?: string | null` correctly
+        optional — non-`dispatch()` callers (none today) need no churn.
+      - No backwards-compat shims; no defensive code hiding bugs after
+        the P0 fix.
+  - author: danxbot
+    timestamp: 2026-05-10T04:23:00.000Z
+    text: |-
+      ## Review Fixes
+
+      Code-reviewer P0 (`isRespawn ? undefined : settingsPath` gate)
+      addressed in `src/dispatch/core.ts`:
+
+      - On respawn, `spawnForDispatch` now fires an
+        `updateDispatch(dispatchId, { mcpSettingsPath: settingsPath })`
+        before the new `spawnAgent` call. The initial spawn still
+        stamps the column atomically via `startDispatchTracking` →
+        `insertDispatch`.
+      - `mcpSettingsPath` is now passed to `spawnAgent` unconditionally
+        (initial uses it via the launcher's `startDispatchTracking`
+        call; on respawn the launcher's `dispatch === undefined` branch
+        skips tracking, so the value is ignored — but the explicit
+        pre-spawn `updateDispatch` keeps the row in sync).
+      - Inline comment rewritten to describe the cleanup race correctly.
+
+      Test-reviewer P1 (missing respawn coverage) addressed in
+      `src/dispatch/core.test.ts`:
+
+      - New test: `respawn syncs mcp_settings_path to the freshly
+        written settings dir (DX-207 + DX-209 reattach contract)` —
+        asserts that after a stall fires, `updateDispatch` was called
+        with the new path AND that the new path differs from the
+        initial path (proving a fresh file was actually written, not a
+        stale capture).
+      - New test: `initial spawn does NOT issue an mcp_settings_path
+        updateDispatch` — pins the gate so a future regression that
+        double-stamps via insert + update on initial would fail loudly.
+
+      Existing nudgeCount stall test updated from
+      `toHaveBeenNthCalledWith(N, ...)` to `toHaveBeenCalledWith(...)`
+      since the new respawn-resync `updateDispatch` interleaves
+      between nudge updates — call positions are no longer load-bearing
+      for that assertion's intent.
+
+      All 38 tests in `core.test.ts` green. 222 tests across every file
+      DX-207 touched green. `tsc --noEmit` clean.
+
+      Ten pre-existing failures across `issues-reader.test.ts` (3) and
+      `integration/issues-mirror.test.ts` (7) are unrelated to DX-207:
+      issues-reader fails because of a peer agent's uncommitted DX-164
+      modifications to `src/dashboard/issues-reader.ts`; issues-mirror
+      fails on chokidar real-fs timeout flakes. Per
+      `danx-no-false-blockers.md` Pattern 1, peer agents' uncommitted
+      diffs stay untouched.
 history:
   - timestamp: 2026-05-08T21:10:50.473Z
     actor: dispatch:3ecfde68-c199-415f-b265-5480e68e5b74
@@ -141,8 +295,53 @@ history:
     event: unblocked
     note: "All deps terminal: DX-151"
 retro:
-  good: ""
-  bad: ""
+  good: |
+    - Migration 019 shipped clean: `ADD COLUMN IF NOT EXISTS` on the up
+      direction + `DROP COLUMN IF EXISTS` on the down direction made
+      both halves idempotent without per-step probes.
+    - The `dispatch()` → `spawnAgent` → `startDispatchTracking` chain
+      already had room for the new field — only one explicit forward in
+      `core.ts` and a `?? null` fallback in the launcher and tracker
+      were needed; no signature churn.
+    - Reviewer caught a real P0: the original
+      `isRespawn ? undefined : settingsPath` gate would have left
+      Phase 2c (DX-209) reading a deleted-file path on every
+      stall-recovery respawn. The cleanup chain in
+      `spawnForDispatch.onComplete` runs `cleanupMcpSettings` BEFORE
+      the new spawn writes a fresh dir, so the old path is gone by
+      the time the new one is written.
+    - Loose `==`-null checks in `rowToDispatch` matching the
+      `agentName` / `hostPid` precedent caught the legacy-fixture
+      branch in tests — the 3-branch `rowToDispatch` test (string /
+      null / missing column) pins the contract a future
+      "fix to ===" refactor would silently break.
+    - 12 new tests landed (4 migration + 3 dispatches-db + 2
+      dispatch-tracker + 3 dispatch core) against the AC's bar of 4.
+      Every assertion targets observable boundaries (DB column shape,
+      COLUMN_MAP positional binding, end-to-end argument plumbing).
+  bad: |
+    - The original `isRespawn ? undefined : settingsPath` gate copied
+      the `pairedWriteYaml` / `apiDispatchMeta` precedent without
+      checking the underlying invariant: those represent immutable
+      origination metadata stamped once at row creation, but
+      `mcpSettingsPath` represents a transient filesystem location
+      that changes every spawn. The reviewer-flagged P0 was a real
+      bug that would have surfaced only on Phase 2c reattach in
+      production. Pre-pass thinking should have asked "does this
+      value change across respawns?" before borrowing the gate shape.
+    - Migration number drift: the AC text said "Migration 016" but
+      016 was already taken by `issues_mirror`; shipped as 019.
+      Updated the AC title to match. Worth noting that Phase-card
+      bodies referencing migration numbers can drift between draft
+      time and pickup time when intervening migrations land — future
+      epic splits should leave the migration number to the pickup
+      agent rather than baking it into the description.
+    - Pre-existing test failures from a peer agent's uncommitted
+      DX-164 modifications in `src/dashboard/issues-reader.ts` (3
+      tests) and from `chokidar` real-fs timeout flakes in
+      `issues-mirror.test.ts` (7 tests) had to be triaged as
+      unrelated per `danx-no-false-blockers.md` Pattern 1. Cost ~5
+      minutes to verify they predated this work.
   action_item_ids: []
   commits: []
 waiting_on: null

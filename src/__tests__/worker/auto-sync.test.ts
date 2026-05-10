@@ -170,6 +170,7 @@ function buildTrelloRow(cardId: string): Dispatch {
     nudgeCount: 0,
     danxbotCommit: null,
     agentName: null,
+    mcpSettingsPath: null,
   };
 }
 

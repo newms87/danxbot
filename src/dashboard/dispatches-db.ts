@@ -54,6 +54,7 @@ const COLUMN_MAP: Readonly<Record<keyof Dispatch, string>> = {
   nudgeCount: "nudge_count",
   danxbotCommit: "danxbot_commit",
   agentName: "agent_name",
+  mcpSettingsPath: "mcp_settings_path",
 };
 
 const JSON_COLUMNS = new Set<keyof Dispatch>(["triggerMetadata"]);
@@ -99,6 +100,7 @@ export interface DispatchRow {
   nudge_count: number;
   danxbot_commit: string | null;
   agent_name: string | null;
+  mcp_settings_path: string | null;
 }
 
 function parseMetadata(
@@ -152,6 +154,11 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     // test fixtures whose row shape predates DX-200 (column undefined) AND
     // production rows whose column is NULL.
     agentName: row.agent_name == null ? null : String(row.agent_name),
+    // Loose `==` for the same reason as `agentName` / `hostPid`: pre-DX-207
+    // rows + test fixtures whose row shape predates the column should
+    // surface as `null`, not the string `"undefined"` from a strict cast.
+    mcpSettingsPath:
+      row.mcp_settings_path == null ? null : String(row.mcp_settings_path),
   };
 }
 

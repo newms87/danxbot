@@ -163,6 +163,22 @@ export interface Dispatch {
    * partial index that skips terminal rows; see migration 018.
    */
   agentName: string | null;
+  /**
+   * Absolute path to the per-dispatch MCP settings JSON written by
+   * `dispatch()` (`src/dispatch/core.ts#writeMcpSettingsFile`) at spawn
+   * time — typically `/tmp/danxbot-mcp-XXXX/settings.json`. The file
+   * embeds `DANXBOT_STOP_URL` for the live worker port; Phase 2c
+   * (DX-209 — DB-driven full-stack reattach) reads this path to
+   * rewrite the URL when the worker restarts on a different port.
+   *
+   * NULL on legacy / pre-DX-207 rows and on dispatches whose workspace
+   * had no per-dispatch MCP file written (rare — every dispatch produced
+   * by `dispatch()` writes one). Phase 2c falls through to mark-failed
+   * for any non-terminal alive PID whose column is NULL — without the
+   * path, the agent's `danxbot_complete` callback cannot be reliably
+   * routed to the new worker.
+   */
+  mcpSettingsPath: string | null;
 }
 
 export interface DispatchFilters {

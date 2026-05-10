@@ -242,6 +242,17 @@ export interface SpawnAgentOptions {
    * Omitted by every non-agent caller (Slack, ideator, external launch).
    */
   agentName?: string | null;
+  /**
+   * Absolute path to the per-dispatch MCP settings JSON written by
+   * `dispatch()` (`src/dispatch/core.ts#writeMcpSettingsFile`). Forwarded
+   * to `startDispatchTracking` so the row's `mcp_settings_path` column
+   * captures the location for Phase 2c's reattach pass (DX-209) — the
+   * reader rewrites `DANXBOT_STOP_URL` in this file when the worker
+   * restarts on a different port. Omitted by callers that do not write a
+   * per-dispatch settings file (none today, but the field is optional
+   * for symmetry with other dispatch-row stamps).
+   */
+  mcpSettingsPath?: string | null;
 }
 
 /**

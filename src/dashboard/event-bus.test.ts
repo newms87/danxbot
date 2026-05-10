@@ -45,6 +45,7 @@ function createdEvent(id = "job-1"): BusEvent {
       nudgeCount: 0,
       danxbotCommit: null,
       agentName: null,
+      mcpSettingsPath: null,
     },
   };
 }

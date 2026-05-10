@@ -133,6 +133,7 @@ export async function spawnAgent(
       parentJobId: options.parentJobId ?? null,
       issueId: options.issueId ?? null,
       agentName: options.agentName ?? null,
+      mcpSettingsPath: options.mcpSettingsPath ?? null,
     });
     job.dispatchTracker = dispatchTracker;
   }

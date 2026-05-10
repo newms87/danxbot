@@ -284,6 +284,43 @@ describe("dispatch() — slack-worker integration", () => {
     );
   });
 
+  it("populates mcpSettingsPath on spawnAgent options matching the per-dispatch settings.json path (DX-207)", async () => {
+    // Phase 2a (DX-207) of the DB-driven full-stack reattach epic: the
+    // path of the per-dispatch MCP settings file is captured on the
+    // dispatch row via the `mcp_settings_path` column. This is the seam
+    // Phase 2c (DX-209) reads at reattach time to rewrite
+    // `DANXBOT_STOP_URL` when the worker restarts on a different port.
+    //
+    // Observable boundary: the same absolute path that `dispatch()`
+    // wrote settings.json at MUST also reach `spawnAgent` as
+    // `mcpSettingsPath` so the launcher's `startDispatchTracking` call
+    // stamps the column with the live filesystem path. A regression
+    // that decouples the two would pass every other test (the file is
+    // still written, the agent still spawns, the row still inserts)
+    // but would silently leave the column NULL — every reattach in
+    // Phase 2c would then fall through to mark-failed.
+    await dispatch({
+      repo: slackRepo,
+      task: "investigate",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: SLACK_META,
+    });
+
+    const opts = mockSpawnAgent.mock.calls[0][0];
+    expect(typeof opts.mcpSettingsPath).toBe("string");
+    expect(opts.mcpSettingsPath.length).toBeGreaterThan(0);
+    // The path is the canonical per-dispatch settings file the launcher
+    // also receives as `mcpConfigPath` — they MUST be the same string,
+    // because Phase 2c needs to read+rewrite the file the live agent's
+    // MCP server is consuming.
+    expect(opts.mcpSettingsPath).toBe(opts.mcpConfigPath);
+    // Belt-and-suspenders sanity: it really points at a danxbot-mcp-*
+    // temp dir produced by `writeMcpSettingsFile`, not some unrelated
+    // path that happened to match `mcpConfigPath`.
+    expect(opts.mcpSettingsPath).toMatch(/danxbot-mcp-/);
+  });
+
   it("never passes an allowedTools field to spawnAgent — the allowlist concept is gone", async () => {
     await dispatch({
       repo: slackRepo,
@@ -1094,9 +1131,12 @@ describe("dispatch() — apiDispatchMeta wiring", () => {
     const result = await dispatchWithStallEnabled(DEFAULT_DISPATCH_META);
 
     // First stall → resumeCount becomes 1, fresh StallDetector wired up
-    // for the respawned job.
+    // for the respawned job. `toHaveBeenCalledWith` (not `Nth`) because
+    // DX-207 added a second updateDispatch on respawn that resyncs
+    // `mcpSettingsPath` — call positions are no longer load-bearing for
+    // this assertion's intent (just that the nudge patch fires).
     await capturedStallOpts[0].onStall();
-    expect(mockUpdateDispatch).toHaveBeenNthCalledWith(1, result.dispatchId, {
+    expect(mockUpdateDispatch).toHaveBeenCalledWith(result.dispatchId, {
       nudgeCount: 1,
     });
 
@@ -1106,9 +1146,74 @@ describe("dispatch() — apiDispatchMeta wiring", () => {
     // changes on every respawn). And the count must increment, not reset.
     expect(capturedStallOpts).toHaveLength(2);
     await capturedStallOpts[1].onStall();
-    expect(mockUpdateDispatch).toHaveBeenNthCalledWith(2, result.dispatchId, {
+    expect(mockUpdateDispatch).toHaveBeenCalledWith(result.dispatchId, {
       nudgeCount: 2,
     });
+  });
+
+  it("respawn syncs mcp_settings_path to the freshly written settings dir (DX-207 + DX-209 reattach contract)", async () => {
+    // DX-207 P0 fix: `writeMcpSettingsFile` runs INSIDE `spawnForDispatch`,
+    // so each respawn produces a fresh `/tmp/danxbot-mcp-XXXX/` path.
+    // The previous spawn's `cleanupMcpSettings` removes the old dir as
+    // part of its onComplete chain (triggered by `terminateWithGrace`).
+    // Without an `updateDispatch` resync the dispatches row would still
+    // point at the deleted dir, and Phase 2c (DX-209) reattach would
+    // either read a missing file or, after `mkdtempSync` collision
+    // randomness, an unrelated dispatch's settings.
+    //
+    // Observable boundary: after a stall-recovery respawn,
+    // `updateDispatch(dispatchId, { mcpSettingsPath: <new path> })` MUST
+    // have been called with a string that:
+    //   (a) is not the same path the initial spawn used (proving a fresh
+    //       file was written, not a stale capture), and
+    //   (b) matches the value just handed to spawnAgent on the respawn.
+    mockedConfig.isHost = true;
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("initial"));
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("respawn"));
+
+    const result = await dispatchWithStallEnabled(DEFAULT_DISPATCH_META);
+    const initialOpts = mockSpawnAgent.mock.calls[0][0] as {
+      mcpSettingsPath: string;
+    };
+
+    expect(capturedStallOpts).toHaveLength(1);
+    await capturedStallOpts[0].onStall();
+
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
+    const respawnOpts = mockSpawnAgent.mock.calls[1][0] as {
+      mcpSettingsPath: string;
+    };
+    expect(respawnOpts.mcpSettingsPath).not.toBe(initialOpts.mcpSettingsPath);
+    expect(respawnOpts.mcpSettingsPath).toMatch(/danxbot-mcp-/);
+
+    // The DB resync uses the SAME path as the respawn's spawnAgent argument.
+    // Lock both halves of the contract: same dispatchId, same fresh path.
+    expect(mockUpdateDispatch).toHaveBeenCalledWith(result.dispatchId, {
+      mcpSettingsPath: respawnOpts.mcpSettingsPath,
+    });
+  });
+
+  it("initial spawn does NOT issue an mcp_settings_path updateDispatch — the value lands on the row via insertDispatch atomic with row creation", async () => {
+    // The respawn-only `updateDispatch` adds a write to the DB; if the
+    // initial spawn ALSO wrote it, that would be a redundant round-trip
+    // and a contract violation (the column is meant to be set once at
+    // INSERT and only re-set across spawns when the path actually
+    // changes). This test pins the gate.
+    mockedConfig.isHost = true;
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("initial"));
+    await dispatchWithStallEnabled(DEFAULT_DISPATCH_META);
+
+    // No respawn fired — exactly zero updateDispatch calls touching
+    // mcpSettingsPath should have happened. Nudge-count updates are
+    // also zero because no stall fired.
+    const mcpUpdates = mockUpdateDispatch.mock.calls.filter(
+      ([, patch]) =>
+        Object.prototype.hasOwnProperty.call(
+          patch as Record<string, unknown>,
+          "mcpSettingsPath",
+        ),
+    );
+    expect(mcpUpdates).toHaveLength(0);
   });
 });
 

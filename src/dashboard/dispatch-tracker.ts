@@ -82,6 +82,15 @@ export interface StartDispatchTrackingArgs {
    * issue-worker rows).
    */
   agentName?: string | null;
+  /**
+   * Absolute path to the per-dispatch MCP settings JSON written by
+   * `dispatch()` (`src/dispatch/core.ts#writeMcpSettingsFile`) at spawn
+   * time. Persisted on the row so Phase 2c (DX-209) can rewrite the
+   * embedded `DANXBOT_STOP_URL` if the worker restarts on a different
+   * port. NULL for callsites that bypass the standard `dispatch()` path
+   * — none today, but the column tolerates legacy / no-MCP rows.
+   */
+  mcpSettingsPath?: string | null;
 }
 
 /**
@@ -141,6 +150,7 @@ export async function startDispatchTracking(
     nudgeCount: 0,
     danxbotCommit: args.danxbotCommit,
     agentName: args.agentName ?? null,
+    mcpSettingsPath: args.mcpSettingsPath ?? null,
   };
 
   try {

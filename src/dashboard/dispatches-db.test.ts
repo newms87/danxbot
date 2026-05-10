@@ -122,6 +122,7 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     nudgeCount: 0,
     danxbotCommit: "abc1234",
     agentName: null,
+    mcpSettingsPath: null,
     ...overrides,
   };
 }
@@ -241,6 +242,50 @@ describe("dispatchToInsertParams", () => {
     const idx = orderedKeys.indexOf("parentJobId");
     expect(params[idx]).toBeNull();
   });
+
+  it("writes mcpSettingsPath at its declared position (round-trip on insert path)", () => {
+    // DX-207 — the per-dispatch MCP settings file path is the load-bearing
+    // hand-off between `dispatch()` and Phase 2c's reattach pass. A
+    // re-order of COLUMN_MAP that misaligned this column would silently
+    // route the path into some unrelated cell at write time, then surface
+    // as a NULL on the read side and force every reattached dispatch
+    // through the mark-failed branch.
+    const d = makeDispatch({
+      mcpSettingsPath: "/tmp/danxbot-mcp-AbCdEf/settings.json",
+    });
+    const params = dispatchToInsertParams(d);
+    // Reconstruct COLUMN_MAP order — `mcpSettingsPath` appended after
+    // `agentName` per dispatches-db.ts's COLUMN_MAP declaration.
+    const orderedKeys: Array<keyof typeof d> = [
+      "id", "repoName", "trigger", "triggerMetadata",
+      "slackThreadTs", "slackChannelId",
+      "sessionUuid", "jsonlPath", "parentJobId", "issueId", "status",
+      "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "hostPid", "hostPidAt", "pidTerminatedAt",
+      "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
+      "toolCallCount", "subagentCount", "nudgeCount",
+      "danxbotCommit", "agentName", "mcpSettingsPath",
+    ];
+    const idx = orderedKeys.indexOf("mcpSettingsPath");
+    expect(params[idx]).toBe("/tmp/danxbot-mcp-AbCdEf/settings.json");
+  });
+
+  it("sends null when mcpSettingsPath is null (legacy / no-MCP test paths)", () => {
+    const d = makeDispatch({ mcpSettingsPath: null });
+    const params = dispatchToInsertParams(d);
+    const orderedKeys: Array<keyof typeof d> = [
+      "id", "repoName", "trigger", "triggerMetadata",
+      "slackThreadTs", "slackChannelId",
+      "sessionUuid", "jsonlPath", "parentJobId", "issueId", "status",
+      "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "hostPid", "hostPidAt", "pidTerminatedAt",
+      "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
+      "toolCallCount", "subagentCount", "nudgeCount",
+      "danxbotCommit", "agentName", "mcpSettingsPath",
+    ];
+    const idx = orderedKeys.indexOf("mcpSettingsPath");
+    expect(params[idx]).toBeNull();
+  });
 });
 
 describe("rowToDispatch", () => {
@@ -275,6 +320,7 @@ describe("rowToDispatch", () => {
       nudge_count: 0,
       danxbot_commit: "sha123",
       agent_name: null,
+      mcp_settings_path: null,
     };
     const d = rowToDispatch(row);
     expect(d.id).toBe("job-abc");
@@ -286,6 +332,67 @@ describe("rowToDispatch", () => {
     expect(d.hostPid).toBe(4242);
     // Resume lineage round-trips through rowToDispatch.
     expect(d.parentJobId).toBe("parent-aea75840");
+  });
+
+  it("hydrates mcp_settings_path → mcpSettingsPath (string round-trips; null + missing column both surface as null)", () => {
+    // DX-207 — the read-side counterpart to the COLUMN_MAP positional
+    // round-trip test. Three branches exercised:
+    //   1. column carries a string → mcpSettingsPath = that string
+    //   2. column is NULL → mcpSettingsPath = null
+    //   3. column missing entirely (pre-DX-207 fixture) → mcpSettingsPath = null
+    // Branch 3 protects the loose `==` null check from being "fixed" to
+    // strict `===` — `Number(undefined)` style coercion would surface as
+    // the string "undefined", silently corrupting every legacy fixture
+    // and breaking the reattach decision.
+    const baseRow = {
+      id: "j",
+      repo_name: "r",
+      trigger: "api",
+      trigger_metadata: JSON.stringify(makeApiMeta()),
+      slack_thread_ts: null,
+      slack_channel_id: null,
+      session_uuid: null,
+      jsonl_path: null,
+      parent_job_id: null,
+      issue_id: null,
+      status: "running",
+      started_at: 1,
+      completed_at: null,
+      summary: null,
+      error: null,
+      runtime_mode: "docker",
+      host_pid: null,
+      host_pid_at: null,
+      pid_terminated_at: null,
+      tokens_total: 0,
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_read: 0,
+      cache_write: 0,
+      tool_call_count: 0,
+      subagent_count: 0,
+      nudge_count: 0,
+      danxbot_commit: null,
+      agent_name: null,
+    };
+
+    const withPath = rowToDispatch({
+      ...baseRow,
+      mcp_settings_path: "/tmp/danxbot-mcp-XyZ123/settings.json",
+    } as never);
+    expect(withPath.mcpSettingsPath).toBe(
+      "/tmp/danxbot-mcp-XyZ123/settings.json",
+    );
+
+    const withNull = rowToDispatch({
+      ...baseRow,
+      mcp_settings_path: null,
+    } as never);
+    expect(withNull.mcpSettingsPath).toBeNull();
+
+    // Pre-DX-207 fixture — column entirely absent on the row object.
+    const legacy = rowToDispatch(baseRow as never);
+    expect(legacy.mcpSettingsPath).toBeNull();
   });
 
   it("handles pre-parsed JSON object in trigger_metadata (mysql2 auto-parse)", () => {
@@ -320,6 +427,7 @@ describe("rowToDispatch", () => {
       nudge_count: 0,
       danxbot_commit: null,
       agent_name: null,
+      mcp_settings_path: null,
     };
     const d = rowToDispatch(row);
     expect(d.triggerMetadata).toEqual(meta);

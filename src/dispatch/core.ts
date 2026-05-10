@@ -447,6 +447,26 @@ async function runResolved(
       resolved.mcpServers,
     );
 
+    // On stall-recovery respawn, the initial spawn's `dispatches` row was
+    // stamped with the PRIOR `settings_dir/settings.json` path — that
+    // dir was just removed by the previous job's `cleanupMcpSettings`
+    // (the onComplete chain runs at terminateWithGrace). Without this
+    // resync, Phase 2c (DX-209) reattach would read a path pointing at a
+    // deleted file (or worse, after `mkdtempSync` randomness, a path
+    // belonging to an unrelated dispatch's settings dir). The initial
+    // spawn does not need this — `spawnAgent` → `startDispatchTracking`
+    // → `insertDispatch` stamps the column atomically with the row
+    // creation in that path.
+    if (isRespawn) {
+      updateDispatch(dispatchId, { mcpSettingsPath: settingsPath }).catch(
+        (err) =>
+          log.error(
+            `[Dispatch ${dispatchId}] Failed to update mcp_settings_path on respawn`,
+            err,
+          ),
+      );
+    }
+
     let job: AgentJob;
     try {
       // eventForwarding needs BOTH statusUrl and apiToken — skip the callback
@@ -492,6 +512,16 @@ async function runResolved(
         parentJobId: input.parentJobId,
         issueId: input.issueId,
         agentName: input.agent?.name ?? null,
+        // Per-dispatch MCP settings path (DX-207). On the initial spawn
+        // this lands on the row via `startDispatchTracking` →
+        // `insertDispatch`. On respawn `dispatch` is undefined →
+        // `startDispatchTracking` is skipped → this argument is ignored,
+        // and the respawn-only `updateDispatch` above is the path that
+        // actually keeps the row in sync with the freshly written
+        // settings dir. Forward it unconditionally so a future change
+        // that decouples row creation from `dispatch !== undefined`
+        // does not silently drop the column.
+        mcpSettingsPath: settingsPath,
         // Paired host_pid write — only the initial spawn does this, and
         // only when the caller supplies a YAML pair. Stall-recovery
         // respawns reuse the existing dispatch row, so re-stamping

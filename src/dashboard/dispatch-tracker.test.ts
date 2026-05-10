@@ -244,6 +244,47 @@ describe("startDispatchTracking", () => {
     expect(mockInsertDispatch.mock.calls[0][0].issueId).toBe("DX-84");
   });
 
+  it("persists mcpSettingsPath on the inserted row when the dispatch was launched with a per-dispatch MCP file (DX-207)", async () => {
+    // Locks the dispatch() → spawnAgent → startDispatchTracking →
+    // insertDispatch chain for the new column. Without this assertion a
+    // refactor that drops the field silently un-stamps every dispatch
+    // row, leaving Phase 2c (DX-209) reattach unable to locate the per-
+    // dispatch MCP settings file when the worker restarts on a different
+    // port — every reattach would fall through to mark-failed.
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "mcp-path-job",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: "abc123",
+      agentName: null,
+      mcpSettingsPath: "/tmp/danxbot-mcp-Z9z9z9/settings.json",
+      watcher: watcher as never,
+      startedAtMs: 2000,
+    });
+
+    expect(mockInsertDispatch).toHaveBeenCalledOnce();
+    expect(mockInsertDispatch.mock.calls[0][0].mcpSettingsPath).toBe(
+      "/tmp/danxbot-mcp-Z9z9z9/settings.json",
+    );
+  });
+
+  it("defaults mcpSettingsPath to null when caller did not pass one (no per-dispatch MCP file written)", async () => {
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "mcp-path-null-job",
+      repoName: "r",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      agentName: null,
+      watcher: watcher as never,
+    });
+
+    expect(mockInsertDispatch.mock.calls[0][0].mcpSettingsPath).toBeNull();
+  });
+
   it("defaults issueId to null on launches that did not pass it (Slack, ideator, board-chat, external API)", async () => {
     const watcher = makeMockWatcher();
     await startDispatchTracking({
