@@ -341,21 +341,37 @@ function _currentOpenCards(): IssueRef[] {
 // issue id helpers); listTriageDueYamls also takes `now` between path
 // and prefix. Production calls supply both args; tests assert on
 // `mock.calls[0][1]` to verify the prefix is forwarded.
-const mockListDispatchableYamls = vi.fn(
-  async (_repoPath: string, _prefix?: string): Promise<Issue[]> =>
-    _currentOpenCards()
-      .filter((r) => r.status === "ToDo")
-      .map(refToFakeIssue),
-);
-const mockListInProgressYamls = vi.fn(
-  async (_repoPath: string, _prefix?: string): Promise<Issue[]> =>
-    _currentOpenCards()
-      .filter((r) => r.status === "In Progress")
-      .map(refToFakeIssue),
-);
-const mockListBlockedTodoYamls = vi.fn(
-  async (_repoPath: string, _prefix?: string): Promise<Issue[]> => [],
-);
+//
+// DX-222: factory defaults extracted as named functions so a beforeEach
+// can `mockReset()` + re-apply them. Without this, leftover
+// `mockResolvedValueOnce` queues from prior tests in the same describe
+// block leak (vi.clearAllMocks preserves both impls AND once queues),
+// silently flipping later tests' poll() into the wrong dispatch branch.
+async function defaultListDispatchableYamls(
+  _repoPath: string,
+  _prefix?: string,
+): Promise<Issue[]> {
+  return _currentOpenCards()
+    .filter((r) => r.status === "ToDo")
+    .map(refToFakeIssue);
+}
+async function defaultListInProgressYamls(
+  _repoPath: string,
+  _prefix?: string,
+): Promise<Issue[]> {
+  return _currentOpenCards()
+    .filter((r) => r.status === "In Progress")
+    .map(refToFakeIssue);
+}
+async function defaultListBlockedTodoYamls(
+  _repoPath: string,
+  _prefix?: string,
+): Promise<Issue[]> {
+  return [];
+}
+const mockListDispatchableYamls = vi.fn(defaultListDispatchableYamls);
+const mockListInProgressYamls = vi.fn(defaultListInProgressYamls);
+const mockListBlockedTodoYamls = vi.fn(defaultListBlockedTodoYamls);
 const mockListTriageDueYamls = vi.fn(
   async (
     _repoPath: string,
@@ -6848,6 +6864,21 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    // DX-222: re-establish the per-tick infra mocks every `poll()` tick
+    // depends on. Without these, the in-isolation flow throws silently:
+    //   - `setupRepoConfigMocks()` wires `existsSync` + `readFileSync`
+    //     so `syncRepoFiles` doesn't crash when `_poll` calls it.
+    //   - `resetTrackerMocks()` re-applies the default
+    //     `mockTracker.{getComments, addComment, ...}` implementations so
+    //     `tryAcquireLock` (called inside `_poll` before dispatch) gets
+    //     `[]` from `getComments` instead of `undefined`. Without this,
+    //     `findCommentByMarker(undefined, ...)` throws and the outer
+    //     DX-149 catch swallows — no dispatch ever spawns.
+    // The full-file run masked both gaps because earlier `describe`
+    // blocks' beforeEach installed those impls and `vi.clearAllMocks`
+    // preserves implementations across tests in the same file.
+    setupRepoConfigMocks();
+    resetTrackerMocks();
     const mod = await import("./index.js");
     _getActiveDispatchesForTesting = mod._getActiveDispatchesForTesting;
     _resetForTesting = mod._resetForTesting;
@@ -6894,8 +6925,26 @@ describe("spawnClaude — dispatchStamp lifecycle (ISS-92, Phase 2)", () => {
       },
     );
     mockGetIssuePollerPickupPrefix.mockReturnValue(null);
-    mockListBlockedTodoYamls.mockResolvedValue([]);
-    mockListInProgressYamls.mockResolvedValue([]);
+    // DX-222: reset Once-queue-bearing list helpers so leaked
+    // `mockResolvedValueOnce` from prior tests in this block (notably
+    // AC #5 — `mockListDispatchableYamls.mockResolvedValueOnce([])` +
+    // `mockListInProgressYamls.mockResolvedValueOnce([aliveYaml])`)
+    // does not bleed into the next test's `poll()`. `vi.clearAllMocks`
+    // preserves both impls and Once queues; only `mockReset` flushes
+    // them. We re-apply the factory closure so the default `_currentOpenCards`-
+    // derived behavior remains.
+    mockListDispatchableYamls.mockReset();
+    mockListDispatchableYamls.mockImplementation(defaultListDispatchableYamls);
+    mockListInProgressYamls.mockReset();
+    mockListInProgressYamls.mockImplementation(defaultListInProgressYamls);
+    mockListBlockedTodoYamls.mockReset();
+    mockListBlockedTodoYamls.mockImplementation(defaultListBlockedTodoYamls);
+    // Defensive reset: the per-card triage describe block at line ~5719
+    // uses many `mockResolvedValueOnce` calls against this mock. A
+    // trailing unconsumed Once would leak into spawnClaude tests that
+    // take the empty-ToDo branch.
+    mockListTriageDueYamls.mockReset();
+    mockListTriageDueYamls.mockResolvedValue([]);
     mockFindByExternalId.mockReturnValue(null);
     mockLoadLocal.mockResolvedValue(null);
     mockFindNonTerminalDispatches.mockResolvedValue([]);
