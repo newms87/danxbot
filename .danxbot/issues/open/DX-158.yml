@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-158
 external_id: 69fe27e0c7e26e6436775174
@@ -11,7 +11,7 @@ children:
   - DX-200
   - DX-164
 dispatch: null
-status: ToDo
+status: In Progress
 type: Epic
 title: "[Multi-Worker] Per-agent worktrees, identity, locks, triage-precursor conflict check"
 description: |-
@@ -106,6 +106,7 @@ description: |-
   - Per-agent tool allowlist beyond the workspace's surface — future.
   - Auto-scaling agent count based on queue depth.
   - Slack / API dispatch-type stamping of `assigned_agent` — issue-worker only (slack/api don't have an issue YAML).
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -142,16 +143,45 @@ ac:
   - check_item_id: 69fe27e409caa0da7be60867
     title: make test + make test-system + make deploy-smoke TARGET=gpt pass after the final phase
     checked: false
-comments: []
-history: []
+comments:
+  - author: danxbot
+    timestamp: "2026-05-09T21:18:30Z"
+    text: |-
+      ## Phase 4 Handoff
+
+      **Built:** Persona block injection wired into `dispatch()` (DX-162); agent-finalize.sh squash-merge helper shipped to every connected repo via `injectDanxbotScripts`; issue-worker SKILL Step 7a routes the agent to the script with exit-code-driven recovery semantics. Commit `2d2c925`.
+
+      **Discoveries:**
+
+      - The agent-finalize.sh script CANNOT do `git checkout main` inside the worktree (git refuses — main is checked out at the parent repo's worktree). Workaround: `git reset --soft <merge-base>` + `git push origin HEAD:main` produces the same outcome (single squash commit fast-forwarded onto origin/main).
+      - The push-race integration test had a load-bearing bug in test infra, not the script: pre-push hooks inherit `GIT_DIR` / `GIT_INDEX_FILE` / `GIT_WORK_TREE` / `GIT_PREFIX` from the parent push, so `git push` from inside a sibling clone in the hook actually pushed the agent's repo. Fix: `unset GIT_DIR ...` at the top of any pre-push hook that wants to do real work in another repo. Worth recording for any future test that exercises push hooks.
+      - Operator-authored bios are NOT trusted input — a bio containing `Your worktree:` / `Your branch:` / `You are ` would corrupt the SKILL's persona-block routing invariants. `buildPersonaPrefix` throws at build time so the dashboard CRUD layer surfaces the error to the operator on save. Phase 5/dashboard CRUD should also validate at save time (defense in depth).
+
+      **Corrections:**
+
+      - none on the epic body. Phase 5 (DX-200) wiring is unchanged: poller picks `(agent, card)` and passes `agent: PersonaContext` into `dispatch()`. The persona shape `{name, bio}` is intentionally slim — the worktree path is derived from `repo.localPath + agent.name` so a future change to the worktree layout needs editing only `persona.ts`.
+
+      **Next-agent context (Phase 5 / DX-200):**
+
+      - `dispatchWithRecovery` in `src/dispatch/recovery-mode.ts` already inherits `agent` via `...input` spread (verified by 2 new tests in `recovery-mode.test.ts`). No additional plumbing needed there.
+      - The `agent: PersonaContext` shape on `DispatchInput` is `{name: string, bio: string}`. The poller pick path will need to assemble this from `<repo>/.danxbot/settings.json`'s `agents{}` map (Phase 1 schema).
+      - `agent-finalize.sh` exits `0` (success), `1` (rebase conflict), `2` (push race exhausted, cap=5), `64` (usage error: bad card id / multi-line title), `65` (wrong branch). The SKILL's Step 7a routes each to a distinct recovery action.
+      - The danx-issue card YAML schema gained a `priority` field + bumped `schema_version` to 5 mid-flight (other agent's WIP). Be aware when wiring picker logic — the DB mirror is at v5.
+history:
+  - timestamp: 2026-05-09T05:25:29.234Z
+    actor: worker:auto-derive
+    event: unblocked
+    note: "All deps terminal: DX-151"
+  - timestamp: 2026-05-09T23:34:02.412Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: In Progress
+    note: Any child In Progress — parent In Progress
 retro:
   good: ""
   bad: ""
   action_item_ids: []
   commits: []
-waiting_on:
-  reason: Hard dependency on Issues DB Mirror epic (DX-151) — multi-worker locks are DB-derived from dispatches table + issues.assigned_agent generated column.
-  timestamp: 2026-05-08T12:00:00.000Z
-  by:
-    - DX-151
+waiting_on: null
 blocked: null

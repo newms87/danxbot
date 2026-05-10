@@ -213,7 +213,27 @@ ac:
   - check_item_id: 69fe27f366a72ac3a392f3aa
     title: Manual smoke — dispatch alice, persona block visible in JSONL, single Conventional Commits commit lands on main
     checked: true
-comments: []
+comments:
+  - author: danxbot
+    timestamp: "2026-05-09T21:18:00Z"
+    text: |-
+      ## Phase 4 Commit
+
+      **Commit:** `2d2c925`
+
+      **Landed:**
+
+      - `src/agent/persona.ts` — `buildPersonaPrefix` + `prependPersona`. Throws on bio with reserved trailers.
+      - `src/poller/inject/scripts/agent-finalize.sh` — squash-merge flow, exit codes `0/1/2/64/65`, `NO_OP` for no-op branch.
+      - `src/dispatch/core.ts` — persona prepend BEFORE `runResolved`.
+      - `src/poller/index.ts` — `injectDanxbotScripts` mirrors scripts repo-wide on every tick.
+      - `SKILL.md` Step 7a — multi-worker agent invocation + exit-code routing table.
+
+      **Tests:** 76 in-scope green (persona 14, agent-finalize 17, dispatch core 35, recovery-mode 10 incl. 2 new persona-inheritance, poller-index 4 in-scope).
+
+      **Verified locally:** backend `tsc --noEmit` clean, dashboard `vue-tsc --noEmit` clean.
+
+      **Phase 5 (DX-200) handoff:** the poller still needs to pick a free agent + pass `agent: PersonaContext` to `dispatch()`. Until then this is a no-op for live traffic, by design.
 history:
   - timestamp: 2026-05-09T21:42:02.949Z
     actor: worker:auto-derive
@@ -319,6 +339,7 @@ retro:
       `retro.commits[]`. Empty `action_item_ids[]` for this — small
       enough to fix in a future card without scoping pressure.
   action_item_ids: []
-  commits: []
+  commits:
+    - 2d2c925
 waiting_on: null
 blocked: null

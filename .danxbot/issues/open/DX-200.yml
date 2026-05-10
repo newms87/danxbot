@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 tracker: trello
 id: DX-200
 external_id: 69fe27f75db44a6aaad21a6b
@@ -179,6 +179,7 @@ description: |-
   - Card UI badges (DX-164).
   - System test fixtures (DX-164).
   - Slack / API dispatch integration with the agent lock — slack/api dispatches still flow through the existing path; the agent-busy check applies (alice can't reply to slack while running an issue), but the YAML stamp is issue-worker-specific.
+priority: 3
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -218,7 +219,30 @@ ac:
   - check_item_id: 69fe27fa3c169a6b16af61e3
     title: Manual smoke — 3 agents + 3 disjoint cards run concurrently; overlapping cards get stamped blocked
     checked: false
-comments: []
+comments:
+  - author: danxbot
+    timestamp: "2026-05-09T21:18:45Z"
+    text: |-
+      ## Notes from Phase 4 (DX-162)
+
+      Phase 4 shipped the persona injection + `agent-finalize.sh`. Phase 5 is now the load-bearing missing piece — until you wire the poller to pick a free agent + pass `agent: PersonaContext` to `dispatch()`, none of the Phase 4 plumbing fires for live traffic.
+
+      **Reusable helpers Phase 5 will want:**
+
+      - `src/agent/persona.ts` exports `PersonaContext = {name, bio}`. That's the shape `DispatchInput.agent` expects — assemble it from `<repo>/.danxbot/settings.json`'s `agents{}` map (Phase 1 schema).
+      - `src/agent/worktree-manager.ts` exposes `bootstrap` / `validate` / `resetClean` / `teardown` — Phase 3 helpers you'll call before dispatch.
+      - `src/dispatch/recovery-mode.ts#dispatchWithRecovery` already inherits the persona via `...input` spread (pinned by 2 new tests in `recovery-mode.test.ts`). Use it as the entry point instead of bare `dispatch()` so dirty-branch recovery works for free.
+
+      **Things that will bite you:**
+
+      - The card YAML schema gained `priority` + bumped to `schema_version: 5` mid-flight (separate agent's WIP). The DB mirror at v5 reflects this. Be aware when adding picker logic that sorts by priority.
+      - `Issue.assigned_agent` is referenced in the recovery prompt today (Phase 3) but doesn't exist on the YAML schema yet. Phase 5 needs to land both the schema field AND the picker that stamps it.
+      - The `mcp__danx-issue__danx_issue_create` tool does NOT carry tracker creds — it writes YAML with `external_id: ""` and the worker's orphan-push mirrors it asynchronously (architectural rule from CLAUDE.md "Trello Is Background Infrastructure").
+      - `agent-finalize.sh` is invoked by the dispatched agent — Phase 5 doesn't need to call it directly. Just make sure the agent's worktree dir is bootstrapped + the persona block carries the `Your worktree:` line that points the agent into the right cwd.
+
+      **Verifying Phase 5 wires correctly:**
+
+      Once you pass `agent: PersonaContext` from the poller, the dispatched agent's `prompt.md` should start with `You are <name>.\n\n<bio>\n\nYour worktree: <abspath>\nYour branch: <name>\n\n` followed by the task body. `prependPersona` is a pure function — easy to assert at the dispatch boundary in unit tests.
 history: []
 retro:
   good: ""
