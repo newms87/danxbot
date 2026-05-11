@@ -97,8 +97,8 @@ export async function busyAgents(repoName: string): Promise<Set<string>> {
  * dispatch row right now. This is the LIVENESS truth — distinct from
  * the YAML's `status: "In Progress"` field which goes stale whenever a
  * dispatch dies outside the orderly completion path (worker OOM,
- * operator DB cancel, claude-auth failure, broken-worktree resetClean,
- * etc.).
+ * operator DB cancel, claude-auth failure, broken-worktree sync
+ * abort, etc.).
  *
  * The picker uses this to compute the conflict-check `inProgress`
  * input — without it, orphan YAMLs whose status never got cleared back

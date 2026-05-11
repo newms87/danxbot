@@ -222,10 +222,10 @@ D("WorktreeManager (integration, real git)", () => {
   });
 
   // ============================================================
-  // resetClean — fast-forward and recover
+  // syncWorktree (DX-293) — non-destructive replacement for resetClean
   // ============================================================
 
-  it("resetClean fast-forwards a behind-only branch back to origin/main", async () => {
+  it("syncWorktree fast-forwards a behind-only branch back to origin/main (ff path)", async () => {
     const wm = createWorktreeManager(defaultGitRunner);
     await wm.bootstrap(ctx(), "alice");
     const wtPath = wm.worktreePath(ctx(), "alice");
@@ -246,22 +246,132 @@ D("WorktreeManager (integration, real git)", () => {
     execFileSync("git", ["commit", "-m", "next"], { cwd: sib, stdio: "ignore" });
     execFileSync("git", ["push", "origin", "main"], { cwd: sib, stdio: "ignore" });
 
-    // Refresh cached `origin/main` so resetClean's `git reset --hard
-    // origin/main` sees the new commit. The manager itself never
-    // fetches.
-    execFileSync("git", ["fetch", "origin"], {
-      cwd: wtPath,
-      stdio: "ignore",
-    });
+    // syncWorktree fetches internally, so we don't need to pre-fetch
+    // here. ff path: pure-behind → `git pull --ff-only` advances HEAD.
+    const result = await wm.syncWorktree(ctx(), "alice");
 
-    await wm.resetClean(ctx(), "alice");
-
-    // After reset, alice's tree should contain the new file.
+    expect(result.kind).toBe("ff");
+    // After ff, alice's tree should contain the new file.
     expect(existsSync(join(wtPath, "next.txt"))).toBe(true);
 
     // And validate should report clean.
-    const result = await wm.validate(ctx(), "alice");
-    expect(result.state).toBe("clean");
+    const v = await wm.validate(ctx(), "alice");
+    expect(v.state).toBe("clean");
+  });
+
+  it("syncWorktree returns noop when worktree is already at origin/main", async () => {
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const result = await wm.syncWorktree(ctx(), "alice");
+
+    expect(result).toEqual({ kind: "noop" });
+  });
+
+  it("syncWorktree rebases ahead-only commits cleanly onto origin/main (rebased path)", async () => {
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+    const wtPath = wm.worktreePath(ctx(), "alice");
+
+    // Make TWO independent commits on alice's branch — these are the
+    // "ahead" commits that must be replayed onto the (advancing) main.
+    writeFileSync(join(wtPath, "alice-1.txt"), "a1\n");
+    execFileSync("git", ["add", "."], { cwd: wtPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "alice 1"], { cwd: wtPath, stdio: "ignore" });
+    writeFileSync(join(wtPath, "alice-2.txt"), "a2\n");
+    execFileSync("git", ["add", "."], { cwd: wtPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "alice 2"], { cwd: wtPath, stdio: "ignore" });
+
+    // Advance origin/main through a sibling clone with a NON-conflicting
+    // file (alice's commits touch alice-*.txt; main touches main-extra).
+    const sib = join(workArea, "sib");
+    execFileSync("git", ["clone", originDir, sib], { stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: sib,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "test"], {
+      cwd: sib,
+      stdio: "ignore",
+    });
+    writeFileSync(join(sib, "main-extra.txt"), "from main\n");
+    execFileSync("git", ["add", "."], { cwd: sib, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "main extra"], { cwd: sib, stdio: "ignore" });
+    execFileSync("git", ["push", "origin", "main"], { cwd: sib, stdio: "ignore" });
+
+    const result = await wm.syncWorktree(ctx(), "alice");
+
+    expect(result).toEqual({ kind: "rebased", commits: 2 });
+    // Both alice commits + main's commit are present after rebase.
+    expect(existsSync(join(wtPath, "alice-1.txt"))).toBe(true);
+    expect(existsSync(join(wtPath, "alice-2.txt"))).toBe(true);
+    expect(existsSync(join(wtPath, "main-extra.txt"))).toBe(true);
+  });
+
+  it("syncWorktree returns {kind: 'abort'} on rebase conflict AND leaves the working tree at HEAD (no destructive cleanup)", async () => {
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+    const wtPath = wm.worktreePath(ctx(), "alice");
+
+    // Both alice's commit and main's commit touch the SAME file with
+    // incompatible content — rebase MUST conflict.
+    writeFileSync(join(wtPath, "shared.txt"), "alice version\n");
+    execFileSync("git", ["add", "."], { cwd: wtPath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "alice writes shared"], {
+      cwd: wtPath,
+      stdio: "ignore",
+    });
+    const aliceHeadBefore = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: wtPath,
+      encoding: "utf-8",
+    }).trim();
+
+    const sib = join(workArea, "sib");
+    execFileSync("git", ["clone", originDir, sib], { stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: sib,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["config", "user.name", "test"], {
+      cwd: sib,
+      stdio: "ignore",
+    });
+    writeFileSync(join(sib, "shared.txt"), "main version\n");
+    execFileSync("git", ["add", "."], { cwd: sib, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "main writes shared"], {
+      cwd: sib,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["push", "origin", "main"], { cwd: sib, stdio: "ignore" });
+
+    const result = await wm.syncWorktree(ctx(), "alice");
+
+    expect(result.kind).toBe("abort");
+    if (result.kind === "abort") {
+      expect(result.reason).toBe("rebase conflict against origin/main");
+    }
+
+    // Critical post-condition: HEAD is back where we started — `rebase
+    // --abort` restored the worktree, and there are NO uncommitted
+    // residue files left over (no `git restore`, no `git reset`).
+    const aliceHeadAfter = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: wtPath,
+      encoding: "utf-8",
+    }).trim();
+    expect(aliceHeadAfter).toBe(aliceHeadBefore);
+
+    // Alice's file content survived (her version, not main's).
+    expect(readFileSync(join(wtPath, "shared.txt"), "utf-8")).toBe(
+      "alice version\n",
+    );
+
+    // `git status --porcelain` is clean (rebase --abort cleaned up any
+    // .git/rebase-merge state).
+    const porcelain = execFileSync("git", ["status", "--porcelain"], {
+      cwd: wtPath,
+      encoding: "utf-8",
+    });
+    expect(porcelain.trim()).toBe("");
   });
 
   // ============================================================
@@ -459,7 +569,7 @@ D("WorktreeManager (integration, real git)", () => {
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
 
-  it("DX-242: resetClean() re-provisions node_modules after the reset (operator-driven `git clean -fdx` heal)", async () => {
+  it("DX-242 / DX-293: syncWorktree() re-provisions node_modules after a non-abort sync (operator-driven `git clean -fdx` heal)", async () => {
     writeFileSync(join(repoDir, ".gitignore"), "node_modules\n");
     git(repoDir, "add", ".gitignore");
     git(repoDir, "commit", "-m", "ignore node_modules");
@@ -484,9 +594,12 @@ D("WorktreeManager (integration, real git)", () => {
     );
     rmSync(link, { force: true });
 
-    // resetClean's primary contract is the git reset; the post-reset
-    // re-provisioning is the secondary side effect we're asserting.
-    await wm.resetClean(ctx(), "alice");
+    // syncWorktree's primary contract is the non-destructive branch
+    // sync; the post-sync re-provisioning is the secondary side effect
+    // we're asserting (operator ran `git clean -fdx`; symlink heals on
+    // the next dispatch).
+    const result = await wm.syncWorktree(ctx(), "alice");
+    expect(result.kind).toBe("noop");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(realpathSync(link)).toBe(
       realpathSync(join(repoDir, "node_modules")),
@@ -610,7 +723,7 @@ D("WorktreeManager (integration, real git)", () => {
     expect(realpathSync(link)).toBe(realpathSync(join(repoDir, ".env")));
   });
 
-  it("DX-244: resetClean() re-provisions .env after the reset (operator-driven `git clean -fdx` heal)", async () => {
+  it("DX-244 / DX-293: syncWorktree() re-provisions .env after a non-abort sync (operator-driven `git clean -fdx` heal)", async () => {
     writeFileSync(join(repoDir, ".gitignore"), "node_modules\n.env\n");
     git(repoDir, "add", ".gitignore");
     git(repoDir, "commit", "-m", "ignore node_modules + .env");
@@ -624,7 +737,8 @@ D("WorktreeManager (integration, real git)", () => {
     const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
     rmSync(link, { force: true });
 
-    await wm.resetClean(ctx(), "alice");
+    const result = await wm.syncWorktree(ctx(), "alice");
+    expect(result.kind).toBe("noop");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(realpathSync(link)).toBe(realpathSync(join(repoDir, ".env")));
   });
@@ -653,9 +767,9 @@ D("WorktreeManager (integration, real git)", () => {
 
     // Operator (or a buggy script) replaced the symlink with a real
     // file containing stale content. The next ensureProvisioned (or
-    // validate / resetClean) must replace it with the symlink — leaving
-    // the stale file would mean the worktree's env values diverge from
-    // the canonical .env every time a secret rotates.
+    // validate / syncWorktree) must replace it with the symlink —
+    // leaving the stale file would mean the worktree's env values
+    // diverge from the canonical .env every time a secret rotates.
     const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
     rmSync(link, { force: true });
     writeFileSync(link, "DXTEST_REPLACE=stale\n");

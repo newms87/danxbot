@@ -180,19 +180,37 @@ export async function dispatchInRecoveryMode(
  * Worktree-aware dispatch entry point. Use this from callers that own a
  * named agent + a `WorktreeManager`.
  *
- * On `clean` validation we run `resetClean` to fast-forward (or no-op
+ * On `clean` validation we run `syncWorktree` to fast-forward (or no-op
  * when already at HEAD) BEFORE handing off to dispatch — this is the
  * one chance to refresh the worktree's `main` ref. On `dirty` we route
  * to `dispatchInRecoveryMode` instead and the normal dispatch is
  * skipped — the next poll tick re-evaluates after recovery completes.
  *
+ * `syncWorktree` is the DX-293 non-destructive replacement for the
+ * retired `resetClean` — fetch + ff-only OR rebase OR abort, never
+ * `git reset --hard`. Since `validate() === clean` already implies
+ * `ahead === 0`, the rebase branch is unreachable through this
+ * caller; it exists for the prep skill (DX-291 P3+) which bypasses
+ * the legacy validate gate.
+ *
+ * On a `kind: "abort"` result we throw a plain `Error` (NOT
+ * `WorktreeError`) to preserve the previous "dispatch fails loud"
+ * semantics. Importing `WorktreeError` as a runtime value would
+ * eager-load `worktree-manager.ts`, whose top-level `promisify(
+ * execFileCb)` call trips partial `node:child_process` mocks in
+ * otherwise-unrelated tests (`src/poller/index.test.ts` etc.). The
+ * type-only `WorktreeManager` import keeps this module load-time
+ * clean. DX-291 P3+ replaces this throw with the prep-verdict path
+ * that flips `agents.<name>.broken` so the operator can route via
+ * the dashboard instead of a dead-lettered dispatch.
+ *
  * **Caller serialization invariant:** callers MUST hold a per-agent
  * dispatch lock around this function so a concurrent operator-driven
- * dirtying op cannot race between `validate()` and `resetClean()` (the
- * reset would silently destroy uncommitted work). Phase 5 (DX-200)
- * lands the formal lock via the `dispatches` table; until then, the
- * single-poller invariant + the absence of an issue-worker dispatch API
- * for arbitrary callers gives us this property by construction.
+ * dirtying op cannot race with `validate()` + `syncWorktree()`.
+ * Phase 5 (DX-200) lands the formal lock via the `dispatches` table;
+ * until then, the single-poller invariant + the absence of an
+ * issue-worker dispatch API for arbitrary callers gives us this
+ * property by construction.
  */
 export async function dispatchWithRecovery(
   input: DispatchInput,
@@ -204,7 +222,7 @@ export async function dispatchWithRecovery(
   // Refresh the host clone's `refs/remotes/origin/main` BEFORE validate
   // so external pushes (PR-merge via GitHub web UI, peer-dev pushes,
   // this host's own non-finalize pushes) are visible to the next
-  // resetClean. Without this, the agent starts on whatever sha was
+  // syncWorktree. Without this, the agent starts on whatever sha was
   // cached at the last finalize / manual fetch — silent staleness.
   // Transient failures fall through (warning logged inside the
   // manager) so a flaky network does not dead-letter the dispatch.
@@ -214,7 +232,16 @@ export async function dispatchWithRecovery(
   if (validation.state === "dirty") {
     return dispatchInRecoveryMode(input, agentName, validation, manager, deps);
   }
-  // Clean — fast-forward (or no-op) before normal spawn.
-  await manager.resetClean(input.repo, agentName);
+  // Clean — fast-forward (or no-op) before normal spawn. Abort is a
+  // genuine failure mode (ff-only refused, fetch failed mid-way) and
+  // throws so the worker dispatch loop surfaces it loudly. Plain
+  // `Error` (not `WorktreeError`) — see the JSDoc above for the
+  // load-time rationale.
+  const sync = await manager.syncWorktree(input.repo, agentName);
+  if (sync.kind === "abort") {
+    throw new Error(
+      `dispatchWithRecovery(${input.repo.name}/${agentName}): syncWorktree aborted: ${sync.reason} — ${sync.details}`,
+    );
+  }
   return deps.dispatch(input);
 }

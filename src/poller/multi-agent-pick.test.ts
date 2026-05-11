@@ -44,7 +44,7 @@ vi.mock("../agent/worktree-manager.js", () => ({
     bootstrap: vi.fn(),
     teardown: vi.fn(),
     validate: vi.fn().mockResolvedValue({ state: "clean" }),
-    resetClean: vi.fn(),
+    syncWorktree: vi.fn().mockResolvedValue({ kind: "noop" }),
     ensureProvisioned: vi.fn(),
     fetchOrigin: vi.fn().mockResolvedValue(true),
   }),
@@ -368,7 +368,7 @@ describe("tryMultiAgentDispatch", () => {
   it("DX-262 — stale in-progress YAML with no live dispatch is filtered out → conflict-check skipped, candidate dispatched", async () => {
     // Orphan YAML left "In Progress" by a dispatch that died outside
     // the orderly completion path (worker OOM, operator DB cancel,
-    // broken-worktree resetClean, claude-auth fail). The dispatches
+    // broken-worktree sync abort, claude-auth fail). The dispatches
     // table has NO live row for DX-99 — without this filter the
     // picker would burn a conflict-check triage every tick.
     writeSettings({

@@ -34,7 +34,7 @@ function stubManager(opts: StubManagerOptions): {
     bootstrap: async () => {},
     teardown: async () => {},
     validate: async () => ({ state: "clean" }),
-    resetClean: async () => {},
+    syncWorktree: async () => ({ kind: "noop" }),
     fetchOrigin: async () => true,
     async ensureProvisioned(_ctx, agentName) {
       calls.push(agentName);

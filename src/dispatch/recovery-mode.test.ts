@@ -18,6 +18,7 @@ import {
   type DirtyValidation,
 } from "./recovery-mode.js";
 import type {
+  SyncResult,
   ValidationResult,
   WorktreeManager,
 } from "../agent/worktree-manager.js";
@@ -36,12 +37,12 @@ vi.mock("../logger.js", () => ({
 
 function mkManager(opts: {
   validate?: () => Promise<ValidationResult>;
-  resetClean?: () => Promise<void>;
+  syncWorktree?: () => Promise<SyncResult>;
   fetchOrigin?: () => Promise<boolean>;
 }): WorktreeManager & {
   calls: {
     validate: number;
-    resetClean: number;
+    syncWorktree: number;
     bootstrap: number;
     teardown: number;
     fetchOrigin: number;
@@ -49,7 +50,7 @@ function mkManager(opts: {
 } {
   const calls = {
     validate: 0,
-    resetClean: 0,
+    syncWorktree: 0,
     bootstrap: 0,
     teardown: 0,
     fetchOrigin: 0,
@@ -67,9 +68,9 @@ function mkManager(opts: {
       calls.validate++;
       return opts.validate ? opts.validate() : { state: "clean" };
     },
-    resetClean: async () => {
-      calls.resetClean++;
-      if (opts.resetClean) await opts.resetClean();
+    syncWorktree: async () => {
+      calls.syncWorktree++;
+      return opts.syncWorktree ? opts.syncWorktree() : { kind: "noop" };
     },
     ensureProvisioned: async () => {},
     fetchOrigin: async () => {
@@ -113,7 +114,7 @@ const dirty: DirtyValidation = {
 // ============================================================
 
 describe("dispatchWithRecovery", () => {
-  it("clean validation → resetClean called, then deps.dispatch invoked verbatim", async () => {
+  it("clean validation → syncWorktree called, then deps.dispatch invoked verbatim", async () => {
     const dispatchMock = vi.fn(
       async (_input: DispatchInput): Promise<DispatchResult> => ({
         dispatchId: "id-1",
@@ -131,7 +132,7 @@ describe("dispatchWithRecovery", () => {
 
     expect(manager.calls.fetchOrigin).toBe(1);
     expect(manager.calls.validate).toBe(1);
-    expect(manager.calls.resetClean).toBe(1);
+    expect(manager.calls.syncWorktree).toBe(1);
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(dispatchMock.mock.calls[0][0].task).toBe("do the thing");
     expect(result.dispatchId).toBe("id-1");
@@ -154,8 +155,9 @@ describe("dispatchWithRecovery", () => {
         order.push("validate");
         return { state: "clean" };
       },
-      resetClean: async () => {
-        order.push("resetClean");
+      syncWorktree: async () => {
+        order.push("syncWorktree");
+        return { kind: "noop" };
       },
     });
 
@@ -165,7 +167,7 @@ describe("dispatchWithRecovery", () => {
       { dispatch: dispatchMock },
     );
 
-    expect(order).toEqual(["fetchOrigin", "validate", "resetClean"]);
+    expect(order).toEqual(["fetchOrigin", "validate", "syncWorktree"]);
   });
 
   it("dispatch proceeds when fetchOrigin returns false (transient network failure does not dead-letter)", async () => {
@@ -188,8 +190,36 @@ describe("dispatchWithRecovery", () => {
 
     expect(manager.calls.fetchOrigin).toBe(1);
     expect(manager.calls.validate).toBe(1);
-    expect(manager.calls.resetClean).toBe(1);
+    expect(manager.calls.syncWorktree).toBe(1);
     expect(result.dispatchId).toBe("id-flaky");
+  });
+
+  it("syncWorktree abort → throws plain Error (preserves loud-fail semantics; type-only WorktreeManager import avoids eager worktree-manager.ts load)", async () => {
+    // The dirty branch handles in-flight WIP via the recovery dispatch.
+    // A `kind: "abort"` here means the clean branch could not sync
+    // (ff-only pull rejected mid-fetch, network failure, etc.) — there
+    // is no in-flight work to commit and no broken-agent plumbing yet
+    // (DX-291 P3+ replaces this throw with the prep verdict). Throwing
+    // makes the worker surface the failure loudly instead of silently
+    // dispatching against a stale worktree.
+    const dispatchMock = vi.fn();
+    const manager = mkManager({
+      validate: async () => ({ state: "clean" }),
+      syncWorktree: async () => ({
+        kind: "abort",
+        reason: "ff-only pull rejected",
+        details: "fatal: Not possible to fast-forward",
+      }),
+    });
+
+    await expect(
+      dispatchWithRecovery(
+        mkInput(),
+        { agentName: "alice", manager },
+        { dispatch: dispatchMock },
+      ),
+    ).rejects.toThrow(/syncWorktree aborted/);
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 
   it("dirty validation → routes to recovery-mode dispatch with recovery prompt + 'internal:recovery' endpoint", async () => {
@@ -208,7 +238,7 @@ describe("dispatchWithRecovery", () => {
     );
 
     expect(manager.calls.validate).toBe(1);
-    expect(manager.calls.resetClean).toBe(0); // never reset on dirty
+    expect(manager.calls.syncWorktree).toBe(0); // never sync on dirty
     expect(dispatchMock).toHaveBeenCalledTimes(1);
 
     const handed = dispatchMock.mock.calls[0][0];

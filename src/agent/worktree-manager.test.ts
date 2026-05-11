@@ -316,52 +316,257 @@ describe("WorktreeManager", () => {
   });
 
   // ============================================================
-  // resetClean
+  // syncWorktree (DX-293) — non-destructive replacement for resetClean
   // ============================================================
 
-  describe("resetClean", () => {
-    it("checks out the agent branch then `git reset --hard origin/main` (no fetch — local op)", async () => {
-      const runner = fakeRunner();
+  describe("syncWorktree", () => {
+    function syncRunner(
+      counts: string,
+      extra: FakeRunnerOptions["responses"] = [],
+    ): GitRunner & { calls: RecordedCall[] } {
+      // `git rev-list --left-right --count origin/main...HEAD` →
+      // "<behind>\t<ahead>\n" by default. Tests pass the literal
+      // string they want returned.
+      return fakeRunner({
+        responses: [
+          { match: "fetch origin", response: { stdout: "" } },
+          {
+            match: "rev-list --left-right --count",
+            response: { stdout: counts },
+          },
+          ...(extra ?? []),
+        ],
+      });
+    }
+
+    it("returns {kind: 'noop'} when ahead=0 and behind=0", async () => {
+      const runner = syncRunner("0\t0\n");
       const wm = createWorktreeManager(runner);
 
-      await wm.resetClean(ctx, "alice");
+      const result = await wm.syncWorktree(ctx, "alice");
 
-      expect(runner.calls).toEqual([
-        { cwd: expectedPath, args: ["checkout", "alice"] },
-        { cwd: expectedPath, args: ["reset", "--hard", "origin/main"] },
+      expect(result).toEqual({ kind: "noop" });
+      // fetch + rev-list only — no pull, no rebase.
+      expect(runner.calls.map((c) => c.args[0])).toEqual([
+        "fetch",
+        "rev-list",
       ]);
     });
 
-    it("throws WorktreeError when checkout fails", async () => {
+    it("ff path: pure-behind branch fast-forwards via `git pull --ff-only`, returns {kind: 'ff', from, to}", async () => {
+      // We need rev-parse HEAD to return DIFFERENT shas before vs after
+      // the pull (otherwise from === to and the test can't distinguish a
+      // real ff from a no-op). Drive an ordered queue keyed on argv.
+      const headValues = ["aaaaaaa\n", "bbbbbbb\n"];
       const runner = fakeRunner({
         responses: [
+          { match: "fetch origin", response: { stdout: "" } },
           {
-            match: "checkout alice",
-            response: { code: 1, stderr: "error: pathspec did not match" },
+            match: "rev-list --left-right --count",
+            response: { stdout: "2\t0\n" },
           },
+          { match: "pull --ff-only origin main", response: { stdout: "" } },
         ],
       });
+      const origRun = runner.run;
+      runner.run = async (cwd, args) => {
+        if (args[0] === "rev-parse" && args[1] === "HEAD") {
+          runner.calls.push({ cwd, args });
+          return {
+            stdout: headValues.shift() ?? "",
+            stderr: "",
+            code: 0,
+          };
+        }
+        return origRun.call(runner, cwd, args);
+      };
       const wm = createWorktreeManager(runner);
 
-      await expect(wm.resetClean(ctx, "alice")).rejects.toBeInstanceOf(
-        WorktreeError,
-      );
+      const result = await wm.syncWorktree(ctx, "alice");
+
+      expect(result).toEqual({
+        kind: "ff",
+        from: "aaaaaaa",
+        to: "bbbbbbb",
+      });
+      // No `reset`, no `checkout <ref>`, no `restore`, no `clean -f`.
+      expect(
+        runner.calls.some(
+          (c) =>
+            c.args[0] === "reset" ||
+            c.args[0] === "checkout" ||
+            c.args[0] === "restore" ||
+            (c.args[0] === "clean" && c.args.includes("-f")),
+        ),
+      ).toBe(false);
     });
 
-    it("throws WorktreeError when reset fails", async () => {
+    it("rebased path: ahead>0 with clean rebase, returns {kind: 'rebased', commits: N}", async () => {
+      const runner = syncRunner("0\t3\n", [
+        { match: "rebase origin/main", response: { stdout: "" } },
+      ]);
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.syncWorktree(ctx, "alice");
+
+      expect(result).toEqual({ kind: "rebased", commits: 3 });
+      // Rebase ran without `--abort` follow-up (no conflict).
+      expect(
+        runner.calls.some(
+          (c) => c.args[0] === "rebase" && c.args[1] === "--abort",
+        ),
+      ).toBe(false);
+    });
+
+    it("abort path: rebase conflict → `git rebase --abort` is invoked AND worktree stays at HEAD (no destructive cleanup)", async () => {
+      const runner = syncRunner("1\t2\n", [
+        {
+          match: "rebase origin/main",
+          response: {
+            code: 1,
+            stderr: "CONFLICT (content): Merge conflict in src/foo.ts",
+          },
+        },
+        { match: "rebase --abort", response: { stdout: "" } },
+      ]);
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.syncWorktree(ctx, "alice");
+
+      expect(result).toMatchObject({
+        kind: "abort",
+        reason: "rebase conflict against origin/main",
+      });
+      if (result.kind === "abort") {
+        expect(result.details).toContain("CONFLICT");
+      }
+      // Critical: `rebase --abort` ran AFTER the failed rebase to
+      // restore HEAD. No `git reset`, no `git checkout <ref>`, no
+      // `git restore`, no `git clean -f` — those would be destructive.
+      const argv0s = runner.calls.map((c) => c.args.join(" "));
+      expect(argv0s.some((a) => a.startsWith("rebase --abort"))).toBe(true);
+      expect(argv0s.some((a) => a.startsWith("reset"))).toBe(false);
+      expect(argv0s.some((a) => a.startsWith("restore"))).toBe(false);
+      expect(argv0s.some((a) => /^clean( |\b)/.test(a) && a.includes("-f"))).toBe(
+        false,
+      );
+      // No `checkout <ref>` either — the only checkout we'd allow is the
+      // retired `checkout <branch-name>`, which is also not in this flow.
+      expect(argv0s.some((a) => a.startsWith("checkout"))).toBe(false);
+    });
+
+    it("abort path: ff-only pull rejected → {kind: 'abort', reason: 'ff-only pull rejected'}", async () => {
+      const runner = syncRunner("1\t0\n", [
+        { match: "rev-parse HEAD", response: { stdout: "aaaaaaa\n" } },
+        {
+          match: "pull --ff-only origin main",
+          response: {
+            code: 1,
+            stderr: "fatal: Not possible to fast-forward, aborting.",
+          },
+        },
+      ]);
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.syncWorktree(ctx, "alice");
+
+      expect(result).toMatchObject({
+        kind: "abort",
+        reason: "ff-only pull rejected",
+      });
+      if (result.kind === "abort") {
+        expect(result.details).toContain("fast-forward");
+      }
+    });
+
+    it("abort path: fetch failure → {kind: 'abort', reason: 'git fetch failed'}", async () => {
       const runner = fakeRunner({
         responses: [
           {
-            match: "reset --hard",
-            response: { code: 1, stderr: "fatal: ambiguous argument" },
+            match: "fetch origin",
+            response: { code: 128, stderr: "fatal: unable to access remote" },
           },
         ],
       });
       const wm = createWorktreeManager(runner);
 
-      await expect(wm.resetClean(ctx, "alice")).rejects.toBeInstanceOf(
-        WorktreeError,
+      const result = await wm.syncWorktree(ctx, "alice");
+
+      expect(result).toMatchObject({
+        kind: "abort",
+        reason: "git fetch failed",
+      });
+    });
+
+    it("ABSOLUTE RULE (DX-291): no `git reset`, `git checkout <ref> -- <path>`, `git restore`, or `git clean -f` invocations anywhere in syncWorktree", async () => {
+      // Exhaustive ban-assertion across the four interesting branches —
+      // noop, ff, rebased, abort. Run each branch and accumulate
+      // every git argv shape the runner saw. None of the banned shapes
+      // may appear.
+      const observed: string[] = [];
+      const recordingRunner = (counts: string, extra: FakeRunnerOptions["responses"]) => {
+        const r = fakeRunner({
+          responses: [
+            { match: "fetch origin", response: { stdout: "" } },
+            {
+              match: "rev-list --left-right --count",
+              response: { stdout: counts },
+            },
+            ...(extra ?? []),
+          ],
+        });
+        const origRun = r.run;
+        r.run = async (cwd, args) => {
+          observed.push(args.join(" "));
+          return origRun.call(r, cwd, args);
+        };
+        return r;
+      };
+
+      // noop
+      let wm = createWorktreeManager(recordingRunner("0\t0\n", []));
+      await wm.syncWorktree(ctx, "alice");
+
+      // ff
+      wm = createWorktreeManager(
+        recordingRunner("1\t0\n", [
+          { match: "rev-parse HEAD", response: { stdout: "h\n" } },
+          { match: "pull --ff-only", response: { stdout: "" } },
+        ]),
       );
+      await wm.syncWorktree(ctx, "alice");
+
+      // rebased
+      wm = createWorktreeManager(
+        recordingRunner("0\t1\n", [
+          { match: "rebase origin/main", response: { stdout: "" } },
+        ]),
+      );
+      await wm.syncWorktree(ctx, "alice");
+
+      // abort (rebase conflict)
+      wm = createWorktreeManager(
+        recordingRunner("1\t1\n", [
+          {
+            match: "rebase origin/main",
+            response: { code: 1, stderr: "CONFLICT" },
+          },
+          { match: "rebase --abort", response: { stdout: "" } },
+        ]),
+      );
+      await wm.syncWorktree(ctx, "alice");
+
+      // Banned: any `reset`, any `checkout <ref>` other than agent-branch
+      // checkout (which syncWorktree never calls; retired with resetClean),
+      // any `restore`, any `clean -f`.
+      const banned = observed.filter(
+        (cmd) =>
+          cmd.startsWith("reset") ||
+          cmd.startsWith("checkout") ||
+          cmd.startsWith("restore") ||
+          /^clean\b.*\s-f/.test(cmd),
+      );
+      expect(banned).toEqual([]);
     });
   });
 
@@ -458,7 +663,7 @@ describe("WorktreeManager", () => {
         await expect(wm.bootstrap(ctx, name)).rejects.toThrow(WorktreeError);
         await expect(wm.teardown(ctx, name)).rejects.toThrow(WorktreeError);
         await expect(wm.validate(ctx, name)).rejects.toThrow(WorktreeError);
-        await expect(wm.resetClean(ctx, name)).rejects.toThrow(WorktreeError);
+        await expect(wm.syncWorktree(ctx, name)).rejects.toThrow(WorktreeError);
         expect(() => wm.worktreePath(ctx, name)).toThrow(WorktreeError);
       }
     });

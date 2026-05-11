@@ -6,7 +6,7 @@
 # worktree whose .git pointer resolves from the host worker's perspective —
 # the exact thing that broke in docker-mode dashboard (DX-262 root cause:
 # `git worktree add` ran with the container path baked into worktree
-# metadata, breaking the host worker's `resetClean(<agent>)`).
+# metadata, breaking the host worker's `syncWorktree(<agent>)`).
 #
 # This test creates a throwaway agent, asserts the worktree exists AND is
 # a real git repository (i.e. `git -C <worktree> status` exits 0 from the

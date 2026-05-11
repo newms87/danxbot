@@ -300,7 +300,7 @@ export async function tryMultiAgentDispatch(
     // input list came from `listInProgressYamls` (status === "In
     // Progress" — YAML truth) at the top of the tick; orphan YAMLs
     // whose dispatch died outside the orderly completion path
-    // (worker OOM, operator DB cancel, broken-worktree resetClean,
+    // (worker OOM, operator DB cancel, broken-worktree sync abort,
     // claude-auth fail) carry `In Progress` until reconcile resets
     // them, which can be MANY ticks later. Without this filter the
     // picker burns a conflict-check dispatch every tick against a

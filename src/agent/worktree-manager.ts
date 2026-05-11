@@ -4,31 +4,35 @@
  *
  * Each named agent owns a persistent git worktree at
  * `<repo>/.danxbot/worktrees/<agentName>/` and a same-named branch. The
- * manager exposes four operations the dispatch layer + agent CRUD endpoints
+ * manager exposes operations the dispatch layer + agent CRUD endpoints
  * use to keep that worktree healthy across dispatches:
  *
  *   - `bootstrap(ctx, name)` — idempotent `git worktree add -B` plus
  *     `node_modules` (DX-242) + `.env` (DX-244) symlink provisioning.
  *     Called on `POST /api/agents` and lazily on first dispatch (in
  *     case an agent was hand-edited into `settings.json`).
- *
- *   `validate` and `resetClean` ALSO re-provision both symlinks
- *   (silently in `validate`, post-reset in `resetClean`) via the
- *   `provisionWorktreeArtifacts` umbrella so every dispatch path that
- *   funnels through them is self-healing on its own —
- *   `ensureProvisioned` is the EXTRA seam for callers (today: the
- *   worker boot path) that want the repair WITHOUT triggering git
- *   work.
+ *   - `validate` and `syncWorktree` ALSO re-provision both symlinks
+ *     (silently in `validate`, post-sync in `syncWorktree`) via the
+ *     `provisionWorktreeArtifacts` umbrella so every dispatch path
+ *     that funnels through them is self-healing on its own —
+ *     `ensureProvisioned` is the EXTRA seam for callers (today: the
+ *     worker boot path) that want the repair WITHOUT triggering git
+ *     work.
  *   - `validate(ctx, name)` — pre-dispatch sanity check. Returns `clean`
  *     when the worktree has no uncommitted changes and zero local commits
  *     ahead of `origin/main`; otherwise `dirty` with `{porcelain, ahead,
  *     behind}` so the caller can build a recovery prompt.
- *   - `resetClean(ctx, name)` — `git checkout <name>; git reset --hard
- *     origin/main`. Only safe on `validate() === clean` (caller's
- *     responsibility — we don't re-check inside). Re-provisions
- *     `node_modules` + `.env` post-reset so an operator-driven `git
- *     clean -fdx` (which strips the symlinks as untracked) heals on
- *     the next dispatch.
+ *   - `syncWorktree(ctx, name)` — non-destructive branch sync (DX-293).
+ *     Fetches origin, then either no-ops, fast-forwards via `git pull
+ *     --ff-only`, or rebases the agent branch onto `origin/main`. On
+ *     rebase conflict the rebase is aborted and the worktree is left
+ *     at HEAD (no destructive cleanup). Replaces the retired
+ *     `resetClean` (which used `git reset --hard origin/main` and
+ *     could destroy uncommitted work if the caller's `validate()`
+ *     raced with a concurrent writer). Re-provisions `node_modules` +
+ *     `.env` after a successful sync so an operator-driven `git clean
+ *     -fdx` heals on the next dispatch. See `SyncResult` for the
+ *     returned shape.
  *
  *   - `ensureProvisioned(ctx, name)` — repair-only entry point for
  *     `node_modules` + `.env` provisioning on existing worktrees that
@@ -88,8 +92,8 @@ const log = createLogger("worktree-manager");
  * Validation outcome surfaced to the dispatch layer.
  *
  * - `clean` — worktree has no uncommitted changes AND zero commits ahead of
- *   `origin/main`. Behind-only is still clean (caller's `resetClean` will
- *   fast-forward without losing work).
+ *   `origin/main`. Behind-only is still clean (caller's `syncWorktree`
+ *   will fast-forward without losing work).
  * - `dirty` — caller MUST NOT touch the working tree. The recovery-mode
  *   dispatch reads `details` to render the porcelain + ahead/behind context
  *   into the prompt so the agent knows exactly what to finish.
@@ -108,6 +112,38 @@ export type ValidationResult =
         behind: number;
       };
     };
+
+/**
+ * Result of `syncWorktree` (DX-293).
+ *
+ * Replaces the retired `resetClean` which used `git reset --hard
+ * origin/main` and could destroy uncommitted work if a caller's
+ * `validate()` raced with a concurrent writer. `syncWorktree` uses ONLY
+ * non-destructive git ops: `fetch`, `pull --ff-only`, and `rebase`. On
+ * rebase conflict the rebase is aborted (returning the working tree to
+ * its pre-rebase state at HEAD) and the kind=`abort` shape is returned
+ * for the caller to route.
+ *
+ * - `noop` — already at `origin/main`. Nothing to do.
+ * - `ff` — branch was behind-only; fast-forwarded via `git pull
+ *   --ff-only`. `from` and `to` are the HEAD shas before and after.
+ * - `rebased` — branch had local commits; rebased cleanly onto
+ *   `origin/main`. `commits` is the count of agent-branch commits that
+ *   were replayed.
+ * - `abort` — sync could not complete (rebase conflict, ff-only pull
+ *   rejected, or fetch network failure). `reason` is a short human
+ *   label; `details` is the verbatim git stderr (or a code-only
+ *   string when stderr was empty). The worktree is left at HEAD —
+ *   no destructive cleanup. Caller routes abort to the verdict path
+ *   that flips `agents.<name>.broken` (Phase 3+); until P3 ships, the
+ *   `dispatchWithRecovery` clean-validate branch throws
+ *   `WorktreeError` so the dispatch fails loud.
+ */
+export type SyncResult =
+  | { kind: "noop" }
+  | { kind: "ff"; from: string; to: string }
+  | { kind: "rebased"; commits: number }
+  | { kind: "abort"; reason: string; details: string };
 
 export interface WorktreeManager {
   /** Absolute path of an agent's worktree, derived from `ctx.hostPath`. */
@@ -129,20 +165,32 @@ export interface WorktreeManager {
    */
   validate(ctx: WorktreeRepo, agentName: string): Promise<ValidationResult>;
   /**
-   * Caller's responsibility to call only when `validate() === clean`. We do
-   * not re-validate; the caller usually does it as one combined gate.
+   * Non-destructive branch sync (DX-293). Replaces the retired
+   * `resetClean` (which used `git reset --hard origin/main`). Fetches
+   * origin, then either no-ops, fast-forwards via `git pull --ff-only`,
+   * rebases the agent branch onto `origin/main`, or aborts a rebase
+   * conflict. Never invokes `git reset`, `git checkout <ref>`, `git
+   * restore`, or `git clean -f`. See `SyncResult` for the shape +
+   * abort semantics. Re-provisions `node_modules` + `.env` after a
+   * non-abort sync so an operator-driven `git clean -fdx` heals on
+   * the next dispatch.
+   *
+   * Caller decides whether to proceed on `abort` — for the current
+   * `dispatchWithRecovery` path (P2), abort throws `WorktreeError`
+   * because the caller has no agent-broken plumbing yet. P3+ routes
+   * abort through the prep-verdict flow that flips `agents.<name>.broken`.
    */
-  resetClean(ctx: WorktreeRepo, agentName: string): Promise<void>;
+  syncWorktree(ctx: WorktreeRepo, agentName: string): Promise<SyncResult>;
   /**
    * Idempotent: ensure both `<worktree>/node_modules` (DX-242) and
    * `<worktree>/.env` (DX-244) symlinks exist. Bootstrap-time
    * provisioning runs unconditionally inside `bootstrap()`, but
    * existing worktrees that pre-date a fix lack the corresponding
    * symlink. Callers that operate on a possibly-stale worktree (the
-   * worker boot path, `validate`, `resetClean`) call this directly to
-   * repair without forcing a full bootstrap. No-op when the worktree
-   * directory does not yet exist — bootstrap is the right entry point
-   * in that case. Silent skip when a corresponding source
+   * worker boot path, `validate`, `syncWorktree`) call this directly
+   * to repair without forcing a full bootstrap. No-op when the
+   * worktree directory does not yet exist — bootstrap is the right
+   * entry point in that case. Silent skip when a corresponding source
    * (`<repoRoot>/node_modules`, `<repoRoot>/.env`) is missing (CI /
    * fresh-clone path). Throws `WorktreeError` only when
    * `<repoRoot>/node_modules` exists but lacks `.bin/tsx` —
@@ -153,11 +201,11 @@ export interface WorktreeManager {
   ensureProvisioned(ctx: WorktreeRepo, agentName: string): Promise<void>;
   /**
    * Refresh the host clone's cached `refs/remotes/origin/main` so the
-   * subsequent `validate()` + `resetClean()` pair operates on the truly
-   * latest upstream sha. Called once by `dispatchWithRecovery` per
-   * dispatch so external pushes (PR-merge via the GitHub web UI, peer
-   * dev pushes, this host's own non-finalize pushes) take effect on the
-   * NEXT dispatch without manual operator intervention.
+   * subsequent `validate()` + `syncWorktree()` pair operates on the
+   * truly latest upstream sha. Called once by `dispatchWithRecovery`
+   * per dispatch so external pushes (PR-merge via the GitHub web UI,
+   * peer dev pushes, this host's own non-finalize pushes) take effect
+   * on the NEXT dispatch without manual operator intervention.
    *
    * Returns false on transient network failure — `dispatchWithRecovery`
    * logs and proceeds with the stale cached ref (better to dispatch on
@@ -410,7 +458,7 @@ export function createWorktreeManager(
       // decide clean/dirty for the next dispatch. GitHub connectivity is
       // the agent's concern at push/pull time, not ours. Behind-only
       // (cached `origin/main` newer than HEAD) is still clean and
-      // `resetClean` fast-forwards without touching local work.
+      // `syncWorktree` fast-forwards without touching local work.
       const porcelainResult = await runner.run(path, [
         "status",
         "--porcelain",
@@ -446,44 +494,135 @@ export function createWorktreeManager(
           details,
         };
       }
-      // Behind-only is clean — `resetClean` will fast-forward without
+      // Behind-only is clean — `syncWorktree` will fast-forward without
       // touching local work.
       return { state: "clean" };
     },
 
-    async resetClean(ctx, agentName) {
+    async syncWorktree(ctx, agentName) {
       assertAgentName(agentName);
       const path = this.worktreePath(ctx, agentName);
 
-      // No `git fetch` here. Reset is purely local — `git reset --hard
-      // origin/main` operates on the cached ref. GitHub connectivity is
-      // the agent's concern at push/pull time, not ours.
-      const checkout = await runner.run(path, ["checkout", agentName]);
-      if (checkout.code !== 0) {
-        throw new WorktreeError(
-          `resetClean(${agentName}): git checkout failed: ${checkout.stderr.trim()}`,
-        );
+      // Step 1 — refresh refs/remotes/origin/main from the worktree's
+      // own .git (shared across all worktrees of this clone). The host-
+      // clone fetch in `fetchOrigin` runs once per dispatch from
+      // `dispatchWithRecovery`; this second fetch is a fast no-op when
+      // the cache is already current AND a recovery path when the
+      // caller skipped fetchOrigin (e.g. the prep skill in DX-291 P3+
+      // that bypasses the legacy dispatchWithRecovery).
+      const fetchResult = await runner.run(path, ["fetch", "origin"]);
+      if (fetchResult.code !== 0) {
+        return buildAbort("git fetch failed", "git fetch", fetchResult);
       }
-      const reset = await runner.run(path, [
-        "reset",
-        "--hard",
-        "origin/main",
+
+      // Step 2 — inspect ahead/behind in one shot. `--left-right
+      // --count origin/main...HEAD` emits "<behind>\t<ahead>".
+      const counts = await runner.run(path, [
+        "rev-list",
+        "--left-right",
+        "--count",
+        "origin/main...HEAD",
       ]);
-      if (reset.code !== 0) {
-        throw new WorktreeError(
-          `resetClean(${agentName}): git reset --hard origin/main failed: ${reset.stderr.trim()}`,
-        );
+      if (counts.code !== 0) {
+        return buildAbort("rev-list failed", "git rev-list", counts);
       }
-      // DX-242 + DX-244: re-provision after reset. `git reset --hard`
-      // does not touch untracked dirs (and both symlinks are
-      // gitignored, so they look untracked) — but `git clean -fdx`
-      // (called elsewhere in the recovery path, and any operator
-      // running it manually) DOES remove them. Re-stamp the links
-      // unconditionally so resetClean's post-condition is "worktree
-      // is ready for the next dispatch."
-      provisionWorktreeArtifacts(ctx.hostPath, path);
+      const [behindStr, aheadStr] = counts.stdout.trim().split(/\s+/);
+      const behind = parseCount(behindStr ?? "");
+      const ahead = parseCount(aheadStr ?? "");
+
+      // Step 3 — pure-noop: already at origin/main, nothing to do.
+      if (ahead === 0 && behind === 0) {
+        provisionWorktreeArtifacts(ctx.hostPath, path);
+        return { kind: "noop" };
+      }
+
+      // Step 4 — pure-behind: fast-forward via `git pull --ff-only`.
+      // No `git reset` anywhere — `pull --ff-only` refuses to move HEAD
+      // if a non-ff would be required, so the worktree state cannot be
+      // destroyed by this path.
+      if (ahead === 0) {
+        return fastForward(runner, ctx, path);
+      }
+
+      // Step 5 — ahead > 0: rebase agent branch onto origin/main. On
+      // conflict, abort the rebase to return the worktree to its
+      // pre-rebase state at HEAD.
+      return rebaseOnto(runner, ctx, path, ahead);
     },
   };
+}
+
+/**
+ * Build a structured `abort` SyncResult from a failed `GitRunner`
+ * result. Preserves stderr verbatim (trimmed) when present; falls back
+ * to a `git <cmd> exited with code N` string when stderr was empty
+ * (some git ops emit nothing on stdout/stderr and just exit non-zero).
+ */
+function buildAbort(
+  reason: string,
+  cmdLabel: string,
+  result: { stderr: string; code: number },
+): SyncResult {
+  return {
+    kind: "abort",
+    reason,
+    details:
+      result.stderr.trim() || `${cmdLabel} exited with code ${result.code}`,
+  };
+}
+
+/**
+ * Step 4 of `syncWorktree` — pure-behind branch: capture HEAD shas
+ * before + after `git pull --ff-only`. `--ff-only` refuses any
+ * non-ff move, so the worktree is never destroyed by this path.
+ */
+async function fastForward(
+  runner: GitRunner,
+  ctx: WorktreeRepo,
+  path: string,
+): Promise<SyncResult> {
+  const fromHead = await runner.run(path, ["rev-parse", "HEAD"]);
+  const pull = await runner.run(path, ["pull", "--ff-only", "origin", "main"]);
+  if (pull.code !== 0) {
+    return buildAbort("ff-only pull rejected", "git pull", pull);
+  }
+  const toHead = await runner.run(path, ["rev-parse", "HEAD"]);
+  provisionWorktreeArtifacts(ctx.hostPath, path);
+  return {
+    kind: "ff",
+    from: fromHead.stdout.trim(),
+    to: toHead.stdout.trim(),
+  };
+}
+
+/**
+ * Step 5 of `syncWorktree` — ahead-branch: rebase onto `origin/main`.
+ * On conflict we capture the original rebase stderr BEFORE invoking
+ * `git rebase --abort` (so `details` carries the conflict context,
+ * not the abort confirmation) and surface a structured `abort`. The
+ * `--abort` itself is best-effort — even on its non-zero exit the
+ * working tree returns to HEAD because `--abort` only fails when
+ * there is no rebase in progress, which means we never moved off HEAD
+ * in the first place.
+ */
+async function rebaseOnto(
+  runner: GitRunner,
+  ctx: WorktreeRepo,
+  path: string,
+  ahead: number,
+): Promise<SyncResult> {
+  const rebase = await runner.run(path, ["rebase", "origin/main"]);
+  if (rebase.code !== 0) {
+    const aborted = buildAbort(
+      "rebase conflict against origin/main",
+      "git rebase",
+      rebase,
+    );
+    await runner.run(path, ["rebase", "--abort"]);
+    return aborted;
+  }
+  provisionWorktreeArtifacts(ctx.hostPath, path);
+  return { kind: "rebased", commits: ahead };
 }
 
 /** Parse `git rev-list --count` stdout to an integer; 0 on parse failure. */
