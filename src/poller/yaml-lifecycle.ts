@@ -59,7 +59,22 @@ import { getMirrorByLocalPath } from "../db/issues-mirror.js";
 import { createLogger } from "../logger.js";
 
 const writeIssueLog = createLogger("write-issue");
-const WRITE_ISSUE_AWAIT_TIMEOUT_MS = 5_000;
+/**
+ * `awaitMirror`'s read-your-writes budget. MUST exceed
+ * `DEFAULT_AWAIT_WRITE_FINISH.stabilityThreshold` in
+ * `src/db/issues-mirror.ts` (currently 5s) by enough margin to cover the
+ * post-debounce chain — chokidar `change` emit → `processFileEvent` →
+ * `parseYamlText` + canonicalize + hash → `upsert` → `resolvePending`.
+ *
+ * Equal values produced a tight race that the reject path consistently
+ * won under write-bursts (boot reattach clearing 3-6 stale dispatches in
+ * one shot), surfacing as `awaitMirror timed out for danxbot/<ID> — DB
+ * will catch up via reconcile` warns even though the upsert landed a few
+ * ms later. 3s margin is generous enough that a slow disk or load spike
+ * doesn't tip the race back; not so generous that a genuinely-dropped
+ * chokidar event leaves callers blocked for a noticeable interval.
+ */
+const WRITE_ISSUE_AWAIT_TIMEOUT_MS = 8_000;
 
 /**
  * Read the issue identified by `id`. Returns null when no row exists.

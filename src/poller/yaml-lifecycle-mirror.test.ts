@@ -225,10 +225,14 @@ describe("writeIssue ↔ mirror — read-your-writes", () => {
     try {
       const issue = makeIssue("DX-3");
       const writePromise = writeIssue(repo.localPath, issue);
-      // Advance past the 5s writeIssue → awaitMirror timeout. The
+      // Advance past the 8s writeIssue → awaitMirror timeout. The
       // writer's catch-and-warn branch fires and the function resolves
-      // successfully (best-effort by design — file IS on disk).
-      await vi.advanceTimersByTimeAsync(5_001);
+      // successfully (best-effort by design — file IS on disk). Budget
+      // was bumped 5s → 8s to give chokidar's 5s `stabilityThreshold`
+      // a 3s margin for the post-debounce emit→upsert→resolvePending
+      // chain (false-timeout race observed 2026-05-11 during boot
+      // reattach burst).
+      await vi.advanceTimersByTimeAsync(8_001);
       await writePromise;
 
       // File IS on disk regardless of the DB outage.
