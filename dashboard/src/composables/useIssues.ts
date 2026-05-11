@@ -1,7 +1,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
 import { fetchIssueDetail, fetchIssues, patchIssue } from "../api";
-import type { IssueDetail, IssueListItem, IssueStatus } from "../types";
+import type { Issue, IssueDetail, IssueListItem, IssueStatus } from "../types";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -21,6 +21,14 @@ export interface UseIssues {
    * any server-side derived fields the optimistic update did not carry.
    */
   moveIssueStatus: (id: string, toStatus: IssueStatus) => Promise<void>;
+  /**
+   * Apply a server-confirmed Issue snapshot to local state — drops the
+   * detail cache entry and merges the patchable fields into the matching
+   * IssueListItem so the board view reflects the change without waiting
+   * for the next 30s poll. Callers (the drawer's inline edit affordances)
+   * forward the post-PATCH issue here after every successful mutation.
+   */
+  applyIssueUpdate: (updated: Issue) => void;
 }
 
 /**
@@ -152,5 +160,54 @@ export function useIssues(repo: Ref<string>): UseIssues {
     }
   }
 
-  return { issues, loading, error, refresh: load, fetchDetail, moveIssueStatus };
+  function applyIssueUpdate(updated: Issue): void {
+    const requestRepo = repo.value;
+    if (!requestRepo) return;
+    // Invalidate the detail cache so the next drawer-open re-fetches.
+    detailCache.delete(`${requestRepo}:${updated.id}`);
+    const idx = issues.value.findIndex((i) => i.id === updated.id);
+    if (idx === -1) return;
+    issues.value = issues.value.map((i, j) =>
+      j === idx ? mergeIntoListItem(i, updated) : i,
+    );
+  }
+
+  return {
+    issues,
+    loading,
+    error,
+    refresh: load,
+    fetchDetail,
+    moveIssueStatus,
+    applyIssueUpdate,
+  };
+}
+
+/**
+ * Merge the patchable fields of a server-confirmed Issue into an existing
+ * IssueListItem projection. Keeps board state consistent with the drawer's
+ * just-completed edit without a full re-fetch. Fields the patch surface
+ * cannot touch (`created_at`, `children_detail`, `has_retro`) are kept
+ * verbatim from the prior projection — the 30s poll reconciles those.
+ */
+function mergeIntoListItem(item: IssueListItem, updated: Issue): IssueListItem {
+  const acDone = updated.ac.filter((a) => a.checked).length;
+  return {
+    ...item,
+    title: updated.title,
+    description: updated.description,
+    status: updated.status,
+    type: updated.type,
+    priority: updated.priority,
+    parent_id: updated.parent_id,
+    children: [...updated.children],
+    ac_done: acDone,
+    ac_total: updated.ac.length,
+    comments_count: updated.comments.length,
+    waiting_on: updated.waiting_on !== null,
+    waiting_on_reason: updated.waiting_on?.reason ?? null,
+    waiting_on_by: updated.waiting_on?.by ?? [],
+    assigned_agent: updated.assigned_agent,
+    updated_at: Date.now(),
+  };
 }

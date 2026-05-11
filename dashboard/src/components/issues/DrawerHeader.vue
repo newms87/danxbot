@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import type { IssueDetail } from "../../types";
+import { computed, nextTick, ref, watch } from "vue";
+import type { Issue, IssueDetail } from "../../types";
+import { patchIssue } from "../../api";
 import TypeBadge from "./TypeBadge.vue";
 import AgentBadge from "../AgentBadge.vue";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
-
-import { computed } from "vue";
 
 const props = withDefaults(
   defineProps<{
@@ -21,6 +21,7 @@ const emit = defineEmits<{
   "jump-issue": [id: string];
   "toggle-scope": [];
   "open-agent": [];
+  "update:issue": [issue: Issue];
 }>();
 
 const scopeTarget = computed<string | null>(() => {
@@ -45,6 +46,82 @@ const requiresHuman = computed(() => props.issue.requires_human);
 function scrollToPanel(): void {
   const el = document.getElementById("requires-human-panel");
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+const editing = ref(false);
+const draft = ref("");
+const saving = ref(false);
+const errorMsg = ref<string | null>(null);
+const inputEl = ref<HTMLInputElement | null>(null);
+
+// Closing the drawer or jumping to another issue must exit edit mode so
+// the next card opens in the read state.
+watch(
+  () => props.issue.id,
+  () => {
+    editing.value = false;
+    saving.value = false;
+    errorMsg.value = null;
+  },
+);
+
+async function startEdit(): Promise<void> {
+  if (editing.value) return;
+  draft.value = props.issue.title;
+  editing.value = true;
+  errorMsg.value = null;
+  await nextTick();
+  inputEl.value?.focus();
+  inputEl.value?.select();
+}
+
+async function commit(): Promise<void> {
+  const trimmed = draft.value.trim();
+  if (trimmed.length === 0) {
+    errorMsg.value = "Title cannot be empty";
+    return;
+  }
+  if (trimmed === props.issue.title) {
+    editing.value = false;
+    errorMsg.value = null;
+    return;
+  }
+  saving.value = true;
+  errorMsg.value = null;
+  try {
+    const updated = await patchIssue(props.repo, props.issue.id, {
+      title: trimmed,
+    });
+    emit("update:issue", updated);
+    editing.value = false;
+  } catch (err) {
+    errorMsg.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    saving.value = false;
+  }
+}
+
+function cancel(): void {
+  editing.value = false;
+  errorMsg.value = null;
+  draft.value = "";
+}
+
+function onKeydown(e: KeyboardEvent): void {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    void commit();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    cancel();
+  }
+}
+
+function onTitleKeydown(e: KeyboardEvent): void {
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    void startEdit();
+  }
 }
 </script>
 
@@ -73,7 +150,29 @@ function scrollToPanel(): void {
         @click="emit('close')"
       >×</button>
     </div>
-    <h2 class="title">{{ issue.title }}</h2>
+    <template v-if="editing">
+      <input
+        ref="inputEl"
+        v-model="draft"
+        type="text"
+        class="title-input"
+        :disabled="saving"
+        data-test="drawer-title-input"
+        aria-label="Edit title"
+        @keydown="onKeydown"
+      />
+      <div v-if="errorMsg" class="title-error" data-test="drawer-title-error">{{ errorMsg }}</div>
+    </template>
+    <h2
+      v-else
+      class="title"
+      role="button"
+      tabindex="0"
+      data-test="drawer-title"
+      :title="`${issue.title} — click to edit`"
+      @click="startEdit"
+      @keydown="onTitleKeydown"
+    >{{ issue.title }}</h2>
     <button
       v-if="requiresHuman"
       type="button"
@@ -187,6 +286,42 @@ function scrollToPanel(): void {
   color: #f1f5f9;
   line-height: 1.3;
   letter-spacing: -0.01em;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: 0 -4px;
+}
+.title:hover {
+  background: rgb(51 65 85 / 0.35);
+}
+.title:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: -2px;
+}
+.title-input {
+  font-family: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  color: #f1f5f9;
+  background: rgb(15 23 42 / 0.8);
+  border: 1px solid #6366f1;
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 0 -4px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  width: calc(100% + 8px);
+}
+.title-input:focus {
+  outline: none;
+}
+.title-input:disabled {
+  opacity: 0.6;
+}
+.title-error {
+  font-size: 11px;
+  color: #fca5a5;
+  margin: 4px 0 -2px;
 }
 .agent-row {
   display: flex;

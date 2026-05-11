@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { defineComponent, h, ref, type Ref } from "vue";
 import { mount, flushPromises } from "@vue/test-utils";
-import type { IssueListItem, IssueStatus } from "../types";
+import type { Issue, IssueListItem, IssueStatus } from "../types";
 
 // ─── Mocks (declared before importing the SUT) ───────────────────────────────
 
@@ -177,6 +177,252 @@ describe("useIssues — moveIssueStatus", () => {
     await expect(
       ret.moveIssueStatus("DX-1", "Done"),
     ).rejects.toThrow(/No repo selected/);
+    wrapper.unmount();
+  });
+});
+
+// ─── applyIssueUpdate ────────────────────────────────────────────────────────
+
+function makeIssueSnapshot(
+  id: string,
+  overrides: Partial<Issue> = {},
+): Issue {
+  return {
+    schema_version: 6,
+    tracker: "memory",
+    id,
+    external_id: "",
+    parent_id: null,
+    children: [],
+    dispatch: null,
+    status: "ToDo",
+    type: "Feature",
+    title: `Card ${id}`,
+    description: "",
+    priority: 3,
+    triage: {
+      expires_at: "",
+      reassess_hint: "",
+      last_status: "",
+      last_explain: "",
+      ice: { total: 0, i: 0, c: 0, e: 0 },
+      history: [],
+    },
+    ac: [],
+    comments: [],
+    history: [],
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    waiting_on: null,
+    blocked: null,
+    requires_human: null,
+    assigned_agent: null,
+    ...overrides,
+  } as unknown as Issue;
+}
+
+describe("useIssues — applyIssueUpdate", () => {
+  it("merges the patchable fields from Issue into the matching IssueListItem", async () => {
+    mockFetchIssues.mockResolvedValue([
+      makeIssue("DX-1", "ToDo"),
+      makeIssue("DX-2", "ToDo"),
+    ]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    const updated = makeIssueSnapshot("DX-1", {
+      title: "Renamed",
+      description: "New body",
+      status: "In Progress",
+      priority: 5,
+      parent_id: "DX-99",
+      children: ["DX-3"],
+    });
+    ret.applyIssueUpdate(updated);
+
+    const row = ret.issues.value.find((i) => i.id === "DX-1")!;
+    expect(row.title).toBe("Renamed");
+    expect(row.description).toBe("New body");
+    expect(row.status).toBe("In Progress");
+    expect(row.priority).toBe(5);
+    expect(row.parent_id).toBe("DX-99");
+    expect(row.children).toEqual(["DX-3"]);
+    // The sibling card is untouched.
+    expect(ret.issues.value.find((i) => i.id === "DX-2")!.status).toBe("ToDo");
+    wrapper.unmount();
+  });
+
+  it("recomputes ac_done from `ac[].checked` and ac_total from length", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    const updated = makeIssueSnapshot("DX-1", {
+      ac: [
+        { check_item_id: "a", title: "1", checked: true },
+        { check_item_id: "b", title: "2", checked: false },
+        { check_item_id: "c", title: "3", checked: true },
+      ],
+    });
+    ret.applyIssueUpdate(updated);
+
+    const row = ret.issues.value[0];
+    expect(row.ac_total).toBe(3);
+    expect(row.ac_done).toBe(2);
+    wrapper.unmount();
+  });
+
+  it("updates comments_count to comments.length", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    const updated = makeIssueSnapshot("DX-1", {
+      comments: [
+        { id: "c1", author: "a", timestamp: "", text: "hi" },
+        { id: "c2", author: "b", timestamp: "", text: "ok" },
+      ],
+    });
+    ret.applyIssueUpdate(updated);
+
+    expect(ret.issues.value[0].comments_count).toBe(2);
+    wrapper.unmount();
+  });
+
+  it("collapses waiting_on object to (boolean, reason, by[]) — non-null variant", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    const updated = makeIssueSnapshot("DX-1", {
+      waiting_on: {
+        reason: "Waits for DX-2",
+        timestamp: "2026-05-10T00:00:00Z",
+        by: ["DX-2"],
+      },
+    });
+    ret.applyIssueUpdate(updated);
+
+    const row = ret.issues.value[0];
+    expect(row.waiting_on).toBe(true);
+    expect(row.waiting_on_reason).toBe("Waits for DX-2");
+    expect(row.waiting_on_by).toEqual(["DX-2"]);
+    wrapper.unmount();
+  });
+
+  it("collapses waiting_on null to (false, null, [])", async () => {
+    mockFetchIssues.mockResolvedValue([
+      // Start with a row that has waiting_on=true so the merge is observable.
+      {
+        ...makeIssue("DX-1"),
+        waiting_on: true,
+        waiting_on_reason: "old",
+        waiting_on_by: ["DX-99"],
+      } as IssueListItem,
+    ]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    ret.applyIssueUpdate(
+      makeIssueSnapshot("DX-1", { waiting_on: null }),
+    );
+
+    const row = ret.issues.value[0];
+    expect(row.waiting_on).toBe(false);
+    expect(row.waiting_on_reason).toBeNull();
+    expect(row.waiting_on_by).toEqual([]);
+    wrapper.unmount();
+  });
+
+  it("invalidates the detail cache so the next fetchDetail re-fetches", async () => {
+    const detail1 = { ...makeIssueSnapshot("DX-1"), updated_at: 1, created_at: 0, raw_yaml: "" };
+    const detail2 = { ...makeIssueSnapshot("DX-1", { title: "Server" }), updated_at: 2, created_at: 0, raw_yaml: "" };
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    mockFetchIssueDetail.mockResolvedValueOnce(detail1);
+    mockFetchIssueDetail.mockResolvedValueOnce(detail2);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    const first = await ret.fetchDetail("DX-1");
+    expect(first).toBe(detail1);
+    // Cache HIT (no second fetch).
+    const cached = await ret.fetchDetail("DX-1");
+    expect(cached).toBe(detail1);
+    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(1);
+
+    ret.applyIssueUpdate(makeIssueSnapshot("DX-1", { title: "Optimistic" }));
+
+    // Cache MISS (invalidated by applyIssueUpdate) → second fetch fires.
+    const refetched = await ret.fetchDetail("DX-1");
+    expect(refetched).toBe(detail2);
+    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("is a no-op when the id is not in the list", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    const before = ret.issues.value;
+    ret.applyIssueUpdate(makeIssueSnapshot("DX-999", { title: "Phantom" }));
+    expect(ret.issues.value).toBe(before);
+    wrapper.unmount();
+  });
+
+  it("is a no-op when no repo is selected", async () => {
+    mockFetchIssues.mockResolvedValue([]);
+    const { wrapper, ret } = mountWithIssues(ref(""));
+    await flushPromises();
+
+    expect(() =>
+      ret.applyIssueUpdate(makeIssueSnapshot("DX-1")),
+    ).not.toThrow();
+    wrapper.unmount();
+  });
+
+  it("bumps updated_at to a recent timestamp so the row sorts as freshly touched", async () => {
+    mockFetchIssues.mockResolvedValue([
+      { ...makeIssue("DX-1"), updated_at: 1_000 } as IssueListItem,
+    ]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    const before = Date.now();
+    ret.applyIssueUpdate(makeIssueSnapshot("DX-1"));
+    const after = Date.now();
+
+    const row = ret.issues.value[0];
+    expect(row.updated_at).toBeGreaterThanOrEqual(before);
+    expect(row.updated_at).toBeLessThanOrEqual(after);
+    wrapper.unmount();
+  });
+
+  it("preserves untouched IssueListItem-only fields (children_detail, has_retro)", async () => {
+    const listed = {
+      ...makeIssue("DX-1"),
+      children_detail: [
+        {
+          id: "DX-2",
+          name: "child",
+          type: "Feature" as const,
+          status: "ToDo" as const,
+          waiting_on: false,
+          waiting_on_by_card: false,
+          missing: false,
+        },
+      ],
+      has_retro: true,
+    } as IssueListItem;
+    mockFetchIssues.mockResolvedValue([listed]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    ret.applyIssueUpdate(makeIssueSnapshot("DX-1", { title: "Renamed" }));
+
+    const row = ret.issues.value[0];
+    expect(row.title).toBe("Renamed");
+    expect(row.children_detail).toEqual(listed.children_detail);
+    expect(row.has_retro).toBe(true);
     wrapper.unmount();
   });
 });

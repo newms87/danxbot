@@ -1,18 +1,31 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { IssueDetail } from "../../types";
+import { computed, ref } from "vue";
+import type { Issue, IssueDetail } from "../../types";
+import { patchIssue } from "../../api";
 import { relativeTime } from "../../utils/relativeTime";
 import { MarkdownEditor } from "@thehammer/danx-ui";
 
 const props = defineProps<{
   issue: IssueDetail;
+  repo: string;
 }>();
 
+const emit = defineEmits<{
+  "update:issue": [issue: Issue];
+}>();
+
+interface PendingComment {
+  key: string;
+  text: string;
+}
+
 interface RenderedComment {
+  key: string;
   author: string;
   tsLabel: string;
   text: string;
   isDanxbot: boolean;
+  pending: boolean;
 }
 
 function tsLabel(s: string): string {
@@ -21,50 +34,133 @@ function tsLabel(s: string): string {
   return relativeTime(n);
 }
 
-const comments = computed<RenderedComment[]>(() =>
-  props.issue.comments.map((c) => ({
+const draft = ref("");
+const submitting = ref(false);
+const errorMsg = ref<string | null>(null);
+// Optimistic insertions waiting for the PATCH to resolve. Each carries
+// a unique `key` so removal is per-entry — text-equality dedupe
+// (earlier draft) would drop a still-in-flight pending whenever the
+// user re-posted the same string.
+const pending = ref<PendingComment[]>([]);
+const pendingSeq = ref(0);
+
+const comments = computed<RenderedComment[]>(() => {
+  const real = props.issue.comments.map<RenderedComment>((c, i) => ({
+    key: c.id ?? `c-${i}`,
     author: c.author,
     tsLabel: tsLabel(c.timestamp),
     text: c.text,
     isDanxbot: c.author === "danxbot",
-  })),
+    pending: false,
+  }));
+  const pendingRendered = pending.value.map<RenderedComment>((p) => ({
+    key: p.key,
+    author: "you",
+    tsLabel: "just now",
+    text: p.text,
+    isDanxbot: false,
+    pending: true,
+  }));
+  return [...real, ...pendingRendered];
+});
+
+const canSubmit = computed(
+  () => !submitting.value && draft.value.trim().length > 0,
 );
+
+async function onSubmit(): Promise<void> {
+  const text = draft.value;
+  if (!text.trim() || submitting.value) return;
+  pendingSeq.value += 1;
+  const optimistic: PendingComment = {
+    key: `pending-${pendingSeq.value}`,
+    text,
+  };
+  pending.value = [...pending.value, optimistic];
+  submitting.value = true;
+  errorMsg.value = null;
+  try {
+    const updated = await patchIssue(props.repo, props.issue.id, {
+      comments_append: { text },
+    });
+    // Remove THIS pending entry by key — not by text — so a duplicate
+    // post in flight is not collateral damage. The parent's
+    // `update:issue` round-trip lands the server-stamped comment via
+    // `props.issue.comments`.
+    pending.value = pending.value.filter((p) => p.key !== optimistic.key);
+    draft.value = "";
+    emit("update:issue", updated);
+  } catch (err) {
+    pending.value = pending.value.filter((p) => p.key !== optimistic.key);
+    errorMsg.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    submitting.value = false;
+  }
+}
 </script>
 
 <template>
-  <div v-if="comments.length === 0" class="empty">
-    No comments yet.
-  </div>
-  <div v-else class="comments">
-    <div
-      v-for="(c, i) in comments"
-      :key="i"
-      class="bubble"
-      :class="{ danxbot: c.isDanxbot }"
-    >
-      <div class="head">
-        <span class="author" :class="{ danxbot: c.isDanxbot }">{{ c.author }}</span>
-        <span class="ts">{{ c.tsLabel }}</span>
+  <div class="comments-tab">
+    <div v-if="comments.length === 0" class="empty">
+      No comments yet.
+    </div>
+    <div v-else class="comments">
+      <div
+        v-for="c in comments"
+        :key="c.key"
+        class="bubble"
+        :class="{ danxbot: c.isDanxbot, pending: c.pending }"
+        :data-test="c.pending ? 'comment-pending' : 'comment-real'"
+      >
+        <div class="head">
+          <span class="author" :class="{ danxbot: c.isDanxbot }">{{ c.author }}</span>
+          <span class="ts">{{ c.tsLabel }}</span>
+        </div>
+        <MarkdownEditor
+          :model-value="c.text"
+          readonly
+          hide-footer
+          class="text"
+        />
       </div>
-      <MarkdownEditor
-        :model-value="c.text"
-        readonly
-        hide-footer
-        class="text"
+    </div>
+    <div class="composer">
+      <textarea
+        v-model="draft"
+        rows="3"
+        class="composer-input"
+        placeholder="Write a comment… (markdown supported)"
+        :disabled="submitting"
+        data-test="comment-composer"
       />
+      <div v-if="errorMsg" class="error" data-test="comment-error">{{ errorMsg }}</div>
+      <div class="composer-actions">
+        <button
+          type="button"
+          class="post-btn"
+          :disabled="!canSubmit"
+          data-test="comment-post"
+          @click="onSubmit"
+        >{{ submitting ? "Posting…" : "Post" }}</button>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.comments-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+}
 .empty {
-  padding: 40px;
+  padding: 40px 0;
   text-align: center;
   color: #475569;
   font-size: 13px;
 }
 .comments {
-  padding: 16px 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -78,6 +174,10 @@ const comments = computed<RenderedComment[]>(() =>
 .bubble.danxbot {
   background: rgb(30 27 75 / 0.4);
   border-color: rgb(99 102 241 / 0.25);
+}
+.bubble.pending {
+  opacity: 0.6;
+  border-style: dashed;
 }
 .head {
   display: flex;
@@ -101,5 +201,58 @@ const comments = computed<RenderedComment[]>(() =>
   font-size: 13px;
   color: #cbd5e1;
   line-height: 1.5;
+}
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #1e293b;
+}
+.composer-input {
+  font-family: inherit;
+  font-size: 13px;
+  color: #e2e8f0;
+  background: rgb(15 23 42 / 0.6);
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 8px 10px;
+  resize: vertical;
+  min-height: 64px;
+}
+.composer-input:focus {
+  outline: none;
+  border-color: #6366f1;
+}
+.composer-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.error {
+  font-size: 12px;
+  color: #fca5a5;
+  background: rgb(239 68 68 / 0.1);
+  border: 1px solid rgb(239 68 68 / 0.3);
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+.composer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.post-btn {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: #f1f5f9;
+  background: #6366f1;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.post-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 </style>

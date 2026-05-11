@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { IssueDetail, IssueListItem } from "../../types";
+import type { Issue, IssueDetail, IssueListItem } from "../../types";
 import DrawerHeader from "./DrawerHeader.vue";
 import OverviewTab from "./OverviewTab.vue";
 import ACTab from "./ACTab.vue";
@@ -11,7 +11,6 @@ import RawTab from "./RawTab.vue";
 import HistoryTab from "./HistoryTab.vue";
 import RequiresHumanPanel from "./RequiresHumanPanel.vue";
 import AgentChat from "../chat/AgentChat.vue";
-import type { Issue } from "../../types";
 import { acCounts } from "./acCounts";
 
 type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "history" | "retro" | "raw";
@@ -61,7 +60,13 @@ const emit = defineEmits<{
   "jump-issue": [id: string];
   "toggle-scope": [];
   "open-agent": [];
+  // DX-239 — `RequiresHumanPanel` emits this after its own PATCH so
+  // IssuesPage can apply the post-patch Issue snapshot.
   "issue-patched": [issue: Issue];
+  // DX-238 — every drawer-side inline edit (AC checkbox, comments
+  // composer, title, description) flows through this. IssuesPage hands
+  // it to `applyIssueUpdate` + merges into `selectedDetail`.
+  "update:issue": [issue: Issue];
 }>();
 
 const tab = ref<TabId>("overview");
@@ -87,6 +92,8 @@ const childrenLabel = computed(() => {
   const base = isEpic.value ? "Phases" : "Children";
   return childCount.value > 0 ? `${base} · ${childCount.value}` : base;
 });
+
+const hasActiveDispatch = computed(() => props.issue?.dispatch != null);
 
 const tabs = computed(() => {
   // Epics use children (phase cards) as their acceptance criteria —
@@ -145,6 +152,10 @@ function selectTab(id: TabId, disabled: boolean): void {
   tab.value = id;
   if (props.issue) writeTabPref(props.issue.type === "Epic", id);
 }
+
+function onUpdateIssue(issue: Issue): void {
+  emit("update:issue", issue);
+}
 </script>
 
 <template>
@@ -162,12 +173,18 @@ function selectTab(id: TabId, disabled: boolean): void {
         @jump-issue="(id) => emit('jump-issue', id)"
         @toggle-scope="emit('toggle-scope')"
         @open-agent="emit('open-agent')"
+        @update:issue="onUpdateIssue"
       />
       <RequiresHumanPanel
         :issue="issue"
         :repo="props.selectedRepo"
         @patched="(updated) => emit('issue-patched', updated)"
       />
+      <div
+        v-if="hasActiveDispatch"
+        class="active-dispatch-banner"
+        data-test="active-dispatch-banner"
+      >Agent is working on this card — your edits may collide.</div>
       <div class="tabs">
         <button
           v-for="t in tabs"
@@ -186,10 +203,16 @@ function selectTab(id: TabId, disabled: boolean): void {
         <OverviewTab
           v-if="tab === 'overview'"
           :issue="issue"
-          :all-issues="allIssues"
+          :repo="props.selectedRepo"
           @jump-issue="(id) => emit('jump-issue', id)"
+          @update:issue="onUpdateIssue"
         />
-        <ACTab v-else-if="tab === 'ac'" :issue="issue" />
+        <ACTab
+          v-else-if="tab === 'ac'"
+          :issue="issue"
+          :repo="props.selectedRepo"
+          @update:issue="onUpdateIssue"
+        />
         <ChildrenTab
           v-else-if="tab === 'children'"
           :issue="issue"
@@ -197,7 +220,12 @@ function selectTab(id: TabId, disabled: boolean): void {
           :repo="props.selectedRepo"
           @jump-issue="(id) => emit('jump-issue', id)"
         />
-        <CommentsTab v-else-if="tab === 'comments'" :issue="issue" />
+        <CommentsTab
+          v-else-if="tab === 'comments'"
+          :issue="issue"
+          :repo="props.selectedRepo"
+          @update:issue="onUpdateIssue"
+        />
         <HistoryTab v-else-if="tab === 'history'" :issue="issue" />
         <RetroTab v-else-if="tab === 'retro'" :issue="issue" />
         <RawTab v-else-if="tab === 'raw'" :issue="issue" />
@@ -219,6 +247,16 @@ function selectTab(id: TabId, disabled: boolean): void {
   text-align: center;
   color: #64748b;
   font-size: 13px;
+}
+.active-dispatch-banner {
+  background: rgb(99 102 241 / 0.12);
+  border-bottom: 1px solid rgb(99 102 241 / 0.3);
+  color: #a5b4fc;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 6px 20px;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
 }
 .tabs {
   display: flex;

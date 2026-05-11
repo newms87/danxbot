@@ -8,7 +8,7 @@ import IssueBoard from "./IssueBoard.vue";
 import IssueDetailView from "./IssueDetailView.vue";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import { typeToId } from "./issuePalette";
-import type { IssueDetail, IssueListItem, IssueStatus } from "../../types";
+import type { Issue, IssueDetail, IssueListItem, IssueStatus } from "../../types";
 
 const selectedRepo = defineModel<string>("selectedRepo", { required: true });
 
@@ -23,8 +23,30 @@ const emit = defineEmits<{
   "open-agent": [];
 }>();
 
-const { issues, loading, error, refresh, fetchDetail, moveIssueStatus } =
-  useIssues(toRef(selectedRepo));
+const {
+  issues,
+  loading,
+  error,
+  refresh,
+  fetchDetail,
+  moveIssueStatus,
+  applyIssueUpdate,
+} = useIssues(toRef(selectedRepo));
+
+function onUpdateIssue(updated: Issue): void {
+  // Update the board projection + invalidate the detail cache.
+  applyIssueUpdate(updated);
+  // Reflect the change immediately in the drawer's current detail view
+  // by merging the new Issue fields onto the IssueDetail (detail-only
+  // fields — created_at, raw_yaml — stay; the 30s poll refreshes them).
+  if (selectedDetail.value && selectedDetail.value.id === updated.id) {
+    selectedDetail.value = {
+      ...selectedDetail.value,
+      ...updated,
+      updated_at: Date.now(),
+    };
+  }
+}
 
 function onMove(issue: IssueListItem, toStatus: IssueStatus): void {
   // useIssues handles the optimistic mutation + revert + populates the
@@ -308,6 +330,7 @@ watch(
             @toggle-scope="onToggleScope"
             @open-agent="emit('open-agent')"
             @issue-patched="onIssuePatched"
+            @update:issue="onUpdateIssue"
           />
         </template>
       </DanxSplitPanel>
@@ -345,6 +368,7 @@ watch(
         @toggle-scope="onToggleScope"
         @open-agent="emit('open-agent')"
         @issue-patched="onIssuePatched"
+        @update:issue="onUpdateIssue"
       />
     </DanxDialog>
     <BoardChatOverlay
