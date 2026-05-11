@@ -12,7 +12,14 @@ export default defineConfig({
   test: {
     environment: "happy-dom",
     include: ["src/**/*.test.ts"],
+    setupFiles: ["./vitest.setup.ts"],
     restoreMocks: true,
+    // Full-suite runs do a cold transform+import of every test file's
+    // graph. The first `mount()` after the cold import can blow past 5s
+    // (App.vue + every dashboard SFC in its tree). Bumping the floor
+    // gives the slowest first-test of the suite headroom; isolated runs
+    // are unaffected. See DX-253.
+    testTimeout: 15000,
     // Vitest 4's default `useFakeTimers()` toFake list hangs `vi.useRealTimers()`
     // in afterEach (repro: useStream.test.ts). Pin to the standard set.
     fakeTimers: {
