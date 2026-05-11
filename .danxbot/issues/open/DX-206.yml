@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-206
 external_id: 69fe4ed7db1ef6161fee6c70
@@ -135,7 +135,9 @@ retro:
     - Discovered the published `@thehammer/danx-issue-mcp@1.0.3` npm package is stuck at schema v3 while the codebase is at v4; documented in the Blocked comment but not filed as an action item — separate-repo work, operator decides whether to file.
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked:
   reason: 'Trello UI list/label rename across 3 connected-repo boards (danxbot, gpt-manager, platform) requires operator action — agents are forbidden from calling Trello directly per `CLAUDE.md` "Trello Is Background Infrastructure". The Blocked comment lists exact board IDs, list IDs, and legacy label IDs to act on. Three ACs (#1, #2, #4) remain unchecked pending the rename + post-rename poll-tick verification. AC #3 (`.claude/rules/trello-config.md` doc update) is satisfied in-session.'
   timestamp: 2026-05-08T23:25:00Z
+requires_human: null

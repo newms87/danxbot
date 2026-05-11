@@ -980,3 +980,131 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
     }
   });
 });
+
+describe("clearAssignedAgentOnDeletion (DX-283 — agent delete cascade)", () => {
+  let repoRoot: string;
+  let openDir: string;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), "danxbot-heal-delete-"));
+    openDir = resolve(repoRoot, ".danxbot/issues/open");
+    mkdirSync(openDir, { recursive: true });
+    mkdirSync(resolve(repoRoot, ".danxbot/issues/closed"), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it("clears assigned_agent on every open YAML matching the deleted agent name", async () => {
+    const claimed1 = buildIssue({
+      id: "ISS-400",
+      status: "ToDo",
+      assigned_agent: "phil",
+    });
+    const claimed2 = buildIssue({
+      id: "ISS-401",
+      status: "ToDo",
+      assigned_agent: "phil",
+    });
+    const other = buildIssue({
+      id: "ISS-402",
+      status: "ToDo",
+      assigned_agent: "murphy",
+    });
+    writeFileSync(resolve(openDir, "ISS-400.yml"), serializeIssue(claimed1));
+    writeFileSync(resolve(openDir, "ISS-401.yml"), serializeIssue(claimed2));
+    writeFileSync(resolve(openDir, "ISS-402.yml"), serializeIssue(other));
+
+    const result = await clearAssignedAgentOnDeletion(repoRoot, "ISS", "phil");
+
+    expect(result.healed.map((h) => h.id).sort()).toEqual(["ISS-400", "ISS-401"]);
+    expect(result.healed.every((h) => h.staleAgent === "phil")).toBe(true);
+
+    const r400 = parseIssue(
+      readFileSync(resolve(openDir, "ISS-400.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    const r402 = parseIssue(
+      readFileSync(resolve(openDir, "ISS-402.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(r400.assigned_agent).toBeNull();
+    expect(r402.assigned_agent).toBe("murphy");
+  });
+
+  it("clears in-flight dispatch block alongside the assigned_agent (preserves the co-owned-fields invariant)", async () => {
+    const inFlight = buildIssue({
+      id: "ISS-403",
+      status: "In Progress",
+      assigned_agent: "phil",
+      dispatch: {
+        id: "did-1",
+        pid: 0,
+        host: "h",
+        kind: "work" as const,
+        started_at: "2026-05-01T00:00:00.000Z",
+        ttl_seconds: 7200,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-403.yml"), serializeIssue(inFlight));
+
+    const result = await clearAssignedAgentOnDeletion(repoRoot, "ISS", "phil");
+
+    expect(result.healed.map((h) => h.id)).toEqual(["ISS-403"]);
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-403.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(reloaded.assigned_agent).toBeNull();
+    expect(reloaded.dispatch).toBeNull();
+  });
+
+  it("is idempotent — second invocation after a clean returns healed: []", async () => {
+    const claimed = buildIssue({
+      id: "ISS-404",
+      status: "ToDo",
+      assigned_agent: "phil",
+    });
+    writeFileSync(resolve(openDir, "ISS-404.yml"), serializeIssue(claimed));
+
+    const first = await clearAssignedAgentOnDeletion(repoRoot, "ISS", "phil");
+    expect(first.healed).toHaveLength(1);
+
+    const second = await clearAssignedAgentOnDeletion(repoRoot, "ISS", "phil");
+    expect(second.healed).toEqual([]);
+  });
+
+  it("ignores YAMLs naming a different agent", async () => {
+    const claimedDani = buildIssue({
+      id: "ISS-405",
+      status: "ToDo",
+      assigned_agent: "dani",
+    });
+    writeFileSync(resolve(openDir, "ISS-405.yml"), serializeIssue(claimedDani));
+
+    const result = await clearAssignedAgentOnDeletion(repoRoot, "ISS", "phil");
+    expect(result.healed).toEqual([]);
+
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-405.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(reloaded.assigned_agent).toBe("dani");
+  });
+
+  it("records parse errors and continues past them", async () => {
+    writeFileSync(resolve(openDir, "ISS-406.yml"), "broken: :::");
+    const claimed = buildIssue({
+      id: "ISS-407",
+      status: "ToDo",
+      assigned_agent: "phil",
+    });
+    writeFileSync(resolve(openDir, "ISS-407.yml"), serializeIssue(claimed));
+
+    const result = await clearAssignedAgentOnDeletion(repoRoot, "ISS", "phil");
+    expect(result.healed.map((h) => h.id)).toEqual(["ISS-407"]);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].path.endsWith("ISS-406.yml")).toBe(true);
+  });
+});
