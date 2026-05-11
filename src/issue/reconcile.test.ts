@@ -32,9 +32,12 @@ import {
   reconcileIssue,
   _hasReconcileMutex,
   _resetReconcileMutexes,
+  _resetDispatchableCache,
+  setReconcileSchedulerHookForRepo,
+  clearReconcileSchedulerHookForRepo,
   type ReconcileRepoContext,
 } from "./reconcile.js";
-import { ReconcileValidationError } from "./reconcile-types.js";
+import { ReconcileValidationError, type ReconcileResult } from "./reconcile-types.js";
 
 function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
   return {
@@ -97,6 +100,7 @@ function writeYaml(dir: string, id: string, issue: Issue): string {
 
 beforeEach(() => {
   _resetReconcileMutexes();
+  _resetDispatchableCache();
 });
 
 describe("reconcileIssue — Phase 1 chokepoint", () => {
@@ -127,10 +131,13 @@ describe("reconcileIssue — Phase 1 chokepoint", () => {
 
     expect(result.changed).toBe(false);
     expect(result.errors).toEqual([]);
+    // dispatchableChanged is `true` on first-observation of a
+    // dispatchable card (Phase 4b.1 / DX-288). The fixture is a fresh
+    // ToDo with no blockers, so the cache is cold → poke fires.
     expect(result.fanout).toEqual({
       parentId: null,
       dependents: [],
-      dispatchableChanged: false,
+      dispatchableChanged: true,
     });
     // The hash MUST match what the mirror would compute on the same
     // file — parity is load-bearing for `awaitMirror` round-trips in
@@ -1093,4 +1100,304 @@ describe("reconcileIssue — Phase 2 step 9 + 10 recursion (DX-217)", () => {
       expect(result.fanout.parentId).toBe("DX-900");
     },
   );
+});
+
+describe("reconcileIssue — fanout.dispatchableChanged (Phase 4b.1 / DX-288)", () => {
+  let ctx: ReturnType<typeof makeRepoCtx>;
+
+  beforeEach(() => {
+    ctx = makeRepoCtx();
+  });
+
+  afterEach(() => {
+    ctx.cleanup();
+  });
+
+  it("first observation of a dispatchable card → dispatchableChanged === true", async () => {
+    const issue = makeIssue("DX-1001", "ToDo");
+    writeYaml(ctx.openDir, "DX-1001", issue);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1001", "watcher");
+
+    expect(result.fanout.dispatchableChanged).toBe(true);
+  });
+
+  it("first observation of a non-dispatchable card (In Progress) → dispatchableChanged === false", async () => {
+    const issue = makeIssue("DX-1002", "In Progress");
+    writeYaml(ctx.openDir, "DX-1002", issue);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1002", "watcher");
+
+    expect(result.fanout.dispatchableChanged).toBe(false);
+  });
+
+  it("first observation of a card with blocked != null → dispatchableChanged === false", async () => {
+    const issue: Issue = {
+      ...makeIssue("DX-1003", "Blocked"),
+      blocked: {
+        reason: "Awaiting design decision",
+        timestamp: "2026-05-11T10:00:00Z",
+      },
+    };
+    writeYaml(ctx.openDir, "DX-1003", issue);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1003", "watcher");
+
+    expect(result.fanout.dispatchableChanged).toBe(false);
+  });
+
+  it("first observation of a card with waiting_on != null → dispatchableChanged === false", async () => {
+    const issue: Issue = {
+      ...makeIssue("DX-1004", "ToDo"),
+      waiting_on: {
+        reason: "Waiting on DX-D3",
+        timestamp: "2026-05-11T10:00:00Z",
+        by: ["DX-1003"],
+      },
+    };
+    writeYaml(ctx.openDir, "DX-1004", issue);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1004", "watcher");
+
+    expect(result.fanout.dispatchableChanged).toBe(false);
+  });
+
+  it("first observation of a card with requires_human != null → dispatchableChanged === false", async () => {
+    const issue: Issue = {
+      ...makeIssue("DX-1005", "ToDo"),
+      requires_human: {
+        reason: "API key rotation needed",
+        steps: ["Rotate the Stripe key"],
+        set_by: "agent",
+        set_at: "2026-05-11T10:00:00Z",
+      },
+    };
+    writeYaml(ctx.openDir, "DX-1005", issue);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1005", "watcher");
+
+    expect(result.fanout.dispatchableChanged).toBe(false);
+  });
+
+  it("first observation of a card with dispatch != null → dispatchableChanged === false", async () => {
+    const issue: Issue = {
+      ...makeIssue("DX-1006", "ToDo"),
+      dispatch: {
+        id: "dispatch-abc",
+        pid: 1234,
+        host: "test-host",
+        kind: "work",
+        started_at: "2026-05-11T10:00:00Z",
+        ttl_seconds: 7200,
+      },
+    };
+    writeYaml(ctx.openDir, "DX-1006", issue);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1006", "watcher");
+
+    expect(result.fanout.dispatchableChanged).toBe(false);
+  });
+
+  it("no-op reconcile (same state, second call) → dispatchableChanged === false", async () => {
+    const issue = makeIssue("DX-1007", "ToDo");
+    writeYaml(ctx.openDir, "DX-1007", issue);
+
+    const first = await reconcileIssue(ctx.repo, "DX-1007", "watcher");
+    expect(first.fanout.dispatchableChanged).toBe(true); // first observation
+
+    const second = await reconcileIssue(ctx.repo, "DX-1007", "watcher");
+    expect(second.fanout.dispatchableChanged).toBe(false); // no change
+  });
+
+  it("flips true when dispatch field is stamped (ToDo → ToDo+dispatch)", async () => {
+    const issue = makeIssue("DX-1008", "ToDo");
+    writeYaml(ctx.openDir, "DX-1008", issue);
+    await reconcileIssue(ctx.repo, "DX-1008", "watcher"); // first observation primes cache (dispatchable)
+
+    // Stamp dispatch — card is no longer dispatchable.
+    const stamped: Issue = {
+      ...issue,
+      dispatch: {
+        id: "d-1",
+        pid: 9999,
+        host: "test",
+        kind: "work",
+        started_at: "2026-05-11T10:00:00Z",
+        ttl_seconds: 7200,
+      },
+    };
+    writeYaml(ctx.openDir, "DX-1008", stamped);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1008", "watcher");
+    expect(result.fanout.dispatchableChanged).toBe(true); // flipped true→false
+  });
+
+  it("flips true when blocked clears (Blocked → ToDo)", async () => {
+    const blockedIssue: Issue = {
+      ...makeIssue("DX-1009", "Blocked"),
+      blocked: { reason: "Initial block", timestamp: "2026-05-11T10:00:00Z" },
+    };
+    writeYaml(ctx.openDir, "DX-1009", blockedIssue);
+    await reconcileIssue(ctx.repo, "DX-1009", "watcher"); // prime: non-dispatchable
+
+    const cleared: Issue = {
+      ...blockedIssue,
+      status: "ToDo",
+      blocked: null,
+    };
+    writeYaml(ctx.openDir, "DX-1009", cleared);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1009", "watcher");
+    expect(result.fanout.dispatchableChanged).toBe(true); // flipped false→true
+  });
+
+  it("stays false when an unrelated field changes but dispatchability is unchanged (title only)", async () => {
+    const issue = makeIssue("DX-1010", "ToDo");
+    writeYaml(ctx.openDir, "DX-1010", issue);
+    await reconcileIssue(ctx.repo, "DX-1010", "watcher"); // prime
+
+    const renamed: Issue = { ...issue, title: "New title" };
+    writeYaml(ctx.openDir, "DX-1010", renamed);
+
+    const result = await reconcileIssue(ctx.repo, "DX-1010", "watcher");
+    expect(result.fanout.dispatchableChanged).toBe(false); // dispatchability unchanged
+  });
+
+  it("cache survives a body throw — next reconcile observes the prior cache entry, not a half-written stamp", async () => {
+    // Prime the cache by reconciling a valid, dispatchable card.
+    const issue = makeIssue("DX-1012", "ToDo");
+    const path = writeYaml(ctx.openDir, "DX-1012", issue);
+    const primed = await reconcileIssue(ctx.repo, "DX-1012", "watcher");
+    expect(primed.fanout.dispatchableChanged).toBe(true); // primes cache to "true"
+
+    // Corrupt the YAML so the next reconcile throws ReconcileValidationError
+    // INSIDE the body (post-load, during validate). The cache write at
+    // step 8 lives AFTER the throw site; the prior entry must survive
+    // intact.
+    writeFileSync(path, "id: not-valid-yaml-at-all {{{ broken\n");
+    await expect(
+      reconcileIssue(ctx.repo, "DX-1012", "watcher"),
+    ).rejects.toBeInstanceOf(ReconcileValidationError);
+
+    // Restore valid YAML in the same dispatchable state. If the throw
+    // had clobbered the cache, this third reconcile would see
+    // `prior === undefined` and report `dispatchableChanged: true`.
+    // Surviving cache means `prior === true`, current === true, flip
+    // === false.
+    writeFileSync(path, serializeIssue(issue));
+    const after = await reconcileIssue(ctx.repo, "DX-1012", "watcher");
+    expect(after.fanout.dispatchableChanged).toBe(false);
+  });
+
+  it("tombstone clears the cache — re-creating the card triggers a fresh first-observation", async () => {
+    const issue = makeIssue("DX-1011", "ToDo");
+    const path = writeYaml(ctx.openDir, "DX-1011", issue);
+    await reconcileIssue(ctx.repo, "DX-1011", "watcher"); // prime cache to "dispatchable"
+
+    // Tombstone: delete the file.
+    unlinkSync(path);
+    const tombstone = await reconcileIssue(ctx.repo, "DX-1011", "watcher");
+    expect(tombstone.fanout.dispatchableChanged).toBe(false); // tombstone result is no-op
+
+    // Re-create the card — should be observed as fresh (true again).
+    writeYaml(ctx.openDir, "DX-1011", issue);
+    const recreated = await reconcileIssue(ctx.repo, "DX-1011", "watcher");
+    expect(recreated.fanout.dispatchableChanged).toBe(true);
+  });
+});
+
+describe("reconcileIssue — scheduler hook invocation (Phase 4b.1 / DX-288)", () => {
+  let ctx: ReturnType<typeof makeRepoCtx>;
+
+  beforeEach(() => {
+    ctx = makeRepoCtx();
+  });
+
+  afterEach(() => {
+    ctx.cleanup();
+    clearReconcileSchedulerHookForRepo(ctx.repo.name);
+  });
+
+  it("invokes the registered scheduler hook after reconcile resolves (non-lifecycle trigger)", async () => {
+    const issue = makeIssue("DX-2001", "ToDo");
+    writeYaml(ctx.openDir, "DX-2001", issue);
+
+    const calls: Array<{ repoName: string; dispatchableChanged: boolean }> = [];
+    setReconcileSchedulerHookForRepo(ctx.repo.name, ({ repo, result }) => {
+      calls.push({
+        repoName: repo.name,
+        dispatchableChanged: result.fanout.dispatchableChanged,
+      });
+    });
+
+    await reconcileIssue(ctx.repo, "DX-2001", "watcher");
+    // Hook is fire-and-forget on a microtask; wait one microtask cycle.
+    await new Promise((r) => setImmediate(r));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.repoName).toBe(ctx.repo.name);
+    expect(calls[0]?.dispatchableChanged).toBe(true);
+  });
+
+  it("does NOT invoke the scheduler hook for lifecycle triggers (avoid lag re-introduction)", async () => {
+    const issue = makeIssue("DX-2002", "ToDo");
+    writeYaml(ctx.openDir, "DX-2002", issue);
+
+    const calls: ReconcileResult[] = [];
+    setReconcileSchedulerHookForRepo(ctx.repo.name, ({ result }) => {
+      calls.push(result);
+    });
+
+    await reconcileIssue(ctx.repo, "DX-2002", "lifecycle");
+    await new Promise((r) => setImmediate(r));
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it("invokes the hook even when dispatchableChanged is false (hook decides what to do with the flag)", async () => {
+    const issue = makeIssue("DX-2003", "In Progress");
+    writeYaml(ctx.openDir, "DX-2003", issue);
+
+    const calls: ReconcileResult[] = [];
+    setReconcileSchedulerHookForRepo(ctx.repo.name, ({ result }) => {
+      calls.push(result);
+    });
+
+    await reconcileIssue(ctx.repo, "DX-2003", "watcher");
+    await new Promise((r) => setImmediate(r));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.fanout.dispatchableChanged).toBe(false);
+  });
+
+  it("clearReconcileSchedulerHookForRepo unregisters the hook so subsequent reconciles do not fire it", async () => {
+    const issue = makeIssue("DX-2004", "ToDo");
+    writeYaml(ctx.openDir, "DX-2004", issue);
+
+    const calls: ReconcileResult[] = [];
+    setReconcileSchedulerHookForRepo(ctx.repo.name, ({ result }) => {
+      calls.push(result);
+    });
+    clearReconcileSchedulerHookForRepo(ctx.repo.name);
+
+    await reconcileIssue(ctx.repo, "DX-2004", "watcher");
+    await new Promise((r) => setImmediate(r));
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a throwing scheduler hook does NOT propagate to reconcile's caller", async () => {
+    const issue = makeIssue("DX-2005", "ToDo");
+    writeYaml(ctx.openDir, "DX-2005", issue);
+
+    setReconcileSchedulerHookForRepo(ctx.repo.name, () => {
+      throw new Error("hook explosion");
+    });
+
+    // Must not throw — reconcileIssue's promise resolves normally.
+    await expect(
+      reconcileIssue(ctx.repo, "DX-2005", "watcher"),
+    ).resolves.toBeDefined();
+    await new Promise((r) => setImmediate(r));
+  });
 });

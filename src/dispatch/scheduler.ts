@@ -59,11 +59,30 @@ import { TrelloTracker } from "../issue-tracker/trello.js";
 import { findByExternalId } from "../poller/yaml-lifecycle.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
+import type { ReconcileResult } from "../issue/reconcile-types.js";
+import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("scheduler");
 
 const trackersByRepo = new Map<string, IssueTracker>();
+
+/**
+ * Picker registration — Phase 4b.1 (DX-288) of the Event-Driven Worker
+ * epic. Each repo registers a `runPicker` callback at `bootScheduler`
+ * time so `onReconcileResult` can fire the picker when reconcile
+ * reports a dispatch-eligibility change. The callback is repo-bound:
+ * production wires `tryMultiAgentDispatch` with a fresh card snapshot
+ * on each invocation; tests register a spy.
+ *
+ * `pendingPokes` debounces multiple back-to-back reconciles for the
+ * same repo to a single picker run per microtask burst — without
+ * debouncing, two reconciles in a tick would queue two redundant
+ * picker invocations that compete for the same agent slots.
+ */
+export type RunPickerFn = (input: { now: Date }) => Promise<unknown>;
+const pickersByRepo = new Map<string, RunPickerFn>();
+const pendingPokes = new Set<string>();
 
 /**
  * Lookup the tracker registered by `bootScheduler`. Returns undefined
@@ -79,9 +98,14 @@ export function getSchedulerTracker(
 /**
  * Test seam. Reset all registered trackers between tests so a stale
  * registration from a prior test does not leak into a later one.
+ * Extends the legacy DX-219 reset to also drain the Phase 4b.1
+ * picker registry + pending-poke debounce set so onReconcileResult
+ * tests start from a clean state.
  */
 export function _resetSchedulerTrackers(): void {
   trackersByRepo.clear();
+  pickersByRepo.clear();
+  pendingPokes.clear();
 }
 
 /**
@@ -103,8 +127,19 @@ export function _resetSchedulerTrackers(): void {
 export function bootScheduler(args: {
   repo: RepoContext;
   tracker: IssueTracker;
+  /**
+   * Phase 4b.1 (DX-288). Optional picker callback registered for the
+   * repo so `onReconcileResult` can fire the multi-agent dispatch loop
+   * when reconcile reports a dispatch-eligibility change. Production
+   * wires a closure that re-fetches dispatchable + in-progress card
+   * lists and invokes `tryMultiAgentDispatch`. Tests register a spy.
+   * Omitting the callback keeps `onReconcileResult` a no-op for that
+   * repo — the legacy `_poll` per-tick path still runs picks until
+   * Phase 4b.3 deletes it.
+   */
+  runPicker?: RunPickerFn;
 }): void {
-  const { repo, tracker } = args;
+  const { repo, tracker, runPicker } = args;
   if (tracker instanceof TrelloTracker) {
     const trello = repo.trello;
     if (!trello?.apiKey || !trello?.apiToken || !trello?.boardId) {
@@ -116,9 +151,87 @@ export function bootScheduler(args: {
     }
   }
   trackersByRepo.set(repo.name, tracker);
+  if (runPicker) {
+    pickersByRepo.set(repo.name, runPicker);
+  } else {
+    // Explicit clear on re-boot without a picker — defends against a
+    // hot-reload scenario where a prior boot registered a picker that
+    // a later boot does not want to keep. Idempotent when no entry
+    // was set.
+    pickersByRepo.delete(repo.name);
+  }
   log.info(
-    `[${repo.name}] scheduler boot: ${tracker instanceof TrelloTracker ? "TrelloTracker validated" : "MemoryTracker"} and registered`,
+    `[${repo.name}] scheduler boot: ${tracker instanceof TrelloTracker ? "TrelloTracker validated" : "MemoryTracker"} and registered${runPicker ? " (picker wired)" : ""}`,
   );
+}
+
+/**
+ * Reconcile-result poke from the chokepoint in `src/issue/reconcile.ts`
+ * (Phase 4b.1 / DX-288). Fires the registered picker for the repo
+ * when reconcile flipped a field the dispatch scheduler keys on
+ * (`status`, `waiting_on`, `blocked`, `requires_human`, `dispatch`).
+ *
+ * Skip conditions:
+ *   - `result.fanout.dispatchableChanged === false` — nothing changed
+ *     in the scheduler's view; no picker run needed.
+ *   - No picker registered for the repo — `bootScheduler` was called
+ *     without `runPicker`. Until Phase 4b.3 wires every production
+ *     caller, some repos legitimately have no picker (the legacy
+ *     `_poll` path is still doing picks).
+ *   - A picker run is already queued for this repo on the current
+ *     macrotask burst — debounce coalesces 2+ reconciles in the same
+ *     tick into one picker invocation.
+ *
+ * Scheduling: `setImmediate` puts the picker on the macrotask queue
+ * AFTER reconcile's mutex unwinds. This is the same "slot/mutex
+ * separation" pattern Phase 3 (DX-218) established for `pushTrelloDiff`
+ * — reconcile body returns fast, the picker runs without holding the
+ * reconcile lock.
+ *
+ * Error propagation: picker failures land on the picker's `.catch`
+ * branch and are logged. Reconcile's caller never observes them; the
+ * scheduler poke is fire-and-forget.
+ */
+export function onReconcileResult(args: {
+  repo: ReconcileRepoContext;
+  result: ReconcileResult;
+}): void {
+  if (!args.result.fanout.dispatchableChanged) return;
+  const repoName = args.repo.name;
+  if (pendingPokes.has(repoName)) return;
+  const runPicker = pickersByRepo.get(repoName);
+  if (!runPicker) return;
+  pendingPokes.add(repoName);
+  setImmediate(() => {
+    pendingPokes.delete(repoName);
+    // Re-read the picker map at fire time. A hot reload between
+    // schedule and fire (rare but possible during worker boot) could
+    // have rewired the callback; honor the latest registration.
+    const latestRunPicker = pickersByRepo.get(repoName);
+    if (!latestRunPicker) return;
+    // Wrap the invocation so both sync throws AND async rejections
+    // land on the same catch — `Promise.resolve(throwingFn())` does
+    // NOT capture a sync throw because the throw escapes BEFORE
+    // `Promise.resolve` runs.
+    let pickerResult: Promise<unknown>;
+    try {
+      pickerResult = Promise.resolve(latestRunPicker({ now: new Date() }));
+    } catch (err) {
+      log.error(
+        `[${repoName}] scheduler picker run threw synchronously: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    pickerResult.catch((err) => {
+      log.error(
+        `[${repoName}] scheduler picker run failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  });
 }
 
 /**

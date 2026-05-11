@@ -58,10 +58,14 @@ import {
   buildLockHolderInfo,
   getSchedulerTracker,
   guardLiveDispatchForCard,
+  onReconcileResult,
   releaseLock,
   runPostDispatchProgressCheck,
+  type RunPickerFn,
   tryAcquireLock,
 } from "./scheduler.js";
+import type { ReconcileResult } from "../issue/reconcile-types.js";
+import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import { TrelloTracker } from "../issue-tracker/trello.js";
 import { MemoryTracker } from "../issue-tracker/memory.js";
 
@@ -509,6 +513,191 @@ describe("AC #1 — lock helpers re-exported from scheduler", () => {
     expect(tryAcquireLock).toBe(lock.tryAcquireLock);
     expect(releaseLock).toBe(lock.releaseLock);
     expect(buildLockHolderInfo).toBe(lock.buildLockHolderInfo);
+  });
+});
+
+describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
+  function makeReconcileRepo(name = "danxbot"): ReconcileRepoContext {
+    return { name, localPath: `/tmp/${name}`, issuePrefix: "DX" };
+  }
+
+  function makeResult(dispatchableChanged: boolean): ReconcileResult {
+    return {
+      changed: false,
+      prevHash: null,
+      nextHash: "",
+      errors: [],
+      fanout: {
+        parentId: null,
+        dependents: [],
+        dispatchableChanged,
+      },
+    };
+  }
+
+  function waitMacrotask(): Promise<void> {
+    return new Promise((r) => setImmediate(r));
+  }
+
+  it("invokes the registered picker exactly once when dispatchableChanged is true", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+
+    expect(picker).toHaveBeenCalledTimes(1);
+    expect(picker.mock.calls[0]?.[0].now).toBeInstanceOf(Date);
+  });
+
+  it("no-op when dispatchableChanged is false", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(false) });
+    await waitMacrotask();
+
+    expect(picker).not.toHaveBeenCalled();
+  });
+
+  it("no-op when no picker is registered for the repo (does not throw, does not queue work)", async () => {
+    const repo = makeReconcileRepo();
+    // bootScheduler without runPicker
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+    });
+
+    // Must not throw. Subsequent bootScheduler with a picker AND a
+    // result must run the new picker — proving the earlier no-poke
+    // poke did NOT leave a stale `pendingPokes` entry that would
+    // suppress the next legitimate fire.
+    expect(() =>
+      onReconcileResult({ repo, result: makeResult(true) }),
+    ).not.toThrow();
+    await waitMacrotask();
+
+    const followupPicker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: followupPicker,
+    });
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(followupPicker).toHaveBeenCalledTimes(1);
+  });
+
+  it("debounces 2+ back-to-back pokes for the same repo into a single picker invocation", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    onReconcileResult({ repo, result: makeResult(true) });
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+
+    expect(picker).toHaveBeenCalledTimes(1);
+  });
+
+  it("after a debounced burst fires, a subsequent poke schedules another run", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+
+  it("debouncing is per-repo — concurrent pokes for different repos each fire their own picker", async () => {
+    const repoA = makeReconcileRepo("repo-a");
+    const repoB = makeReconcileRepo("repo-b");
+    const pickerA = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    const pickerB = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repoA.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: pickerA,
+    });
+    bootScheduler({
+      repo: makeRepo({ name: repoB.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: pickerB,
+    });
+
+    onReconcileResult({ repo: repoA, result: makeResult(true) });
+    onReconcileResult({ repo: repoB, result: makeResult(true) });
+    await waitMacrotask();
+
+    expect(pickerA).toHaveBeenCalledTimes(1);
+    expect(pickerB).toHaveBeenCalledTimes(1);
+  });
+
+  it("a rejecting picker does not propagate or cause subsequent pokes to fail", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi
+      .fn<RunPickerFn>()
+      .mockRejectedValueOnce(new Error("picker boom"))
+      .mockResolvedValueOnce(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    // Subsequent poke still schedules a fresh run despite the prior rejection.
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+
+  it("bootScheduler re-boot without a picker clears any prior registration for the repo", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+    // Re-boot without runPicker — picker should be cleared.
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+
+    expect(picker).not.toHaveBeenCalled();
   });
 });
 

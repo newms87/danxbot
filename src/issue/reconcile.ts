@@ -1,15 +1,19 @@
 /**
- * Phases 1, 2, and 3 of the Event-Driven Worker epic
- * (DX-215 / DX-216 / DX-217 / DX-218).
+ * Phases 1, 2, 3, and 4b.1 of the Event-Driven Worker epic
+ * (DX-215 / DX-216 / DX-217 / DX-218 / DX-288).
  *
  * `reconcileIssue(repo, id, trigger)` is the chokepoint every entry point
  * (chokidar watcher, dispatch lifecycle, scheduler, cron audit, Trello
  * inbound hydration) calls when a single card's state may have changed.
  * Phase 1 wired the function with steps 1, 2, 4, 5, 6 implemented (load,
  * validate, hash diff, atomic write, await DB mirror). Phase 2 absorbed
- * two poller helpers into step 3 and activated steps 9-10. Phase 3
- * (this commit) lights up step 7 — the outbound tracker push — and
- * retires the per-tick `_poll` mirror that previously did the same job.
+ * two poller helpers into step 3 and activated steps 9-10. Phase 3 lit
+ * up step 7 — the outbound tracker push — and retired the per-tick
+ * `_poll` mirror. Phase 4b.1 (this commit / DX-288) lights up step 8 —
+ * `fanout.dispatchableChanged` computed via a per-card cache diff, and
+ * a per-repo scheduler hook fired AFTER the per-card mutex resolves so
+ * the dispatch picker can react to reconcile-observed state flips
+ * without waiting for the next `_poll` tick.
  *
  *   - Step 3a: parent-status derive from children (was
  *     `recomputeParentStatuses`).
@@ -205,6 +209,81 @@ import {
   _resetPushHashCache,
 } from "./reconcile/push-hash-cache.js";
 
+/**
+ * Per-card cache of dispatch-eligibility — `<repoName>-<id>` → boolean
+ * (DX-288 / Phase 4b.1 of the Event-Driven Worker epic).
+ *
+ * The cache lets each reconcile compute `fanout.dispatchableChanged` by
+ * diffing the post-reconcile dispatch-eligibility against the prior
+ * observation. Dispatch-eligibility is the same predicate the poller's
+ * `listDispatchableYamls` enforces: `status === "ToDo" && blocked ===
+ * null && waiting_on === null && requires_human === null && dispatch
+ * === null`.
+ *
+ * Semantics:
+ *   - First observation of an `(repoName, id)` pair: `dispatchableChanged`
+ *     equals the current dispatch-eligibility. Newly-visible dispatchable
+ *     cards poke the scheduler; newly-visible non-dispatchable cards do
+ *     not (nothing for the picker to do).
+ *   - Subsequent observations: `dispatchableChanged = current !== prior`.
+ *   - Tombstone (file deleted): cache entry cleared. A subsequent
+ *     re-creation triggers a fresh first-observation.
+ *
+ * Cold cache (worker boot) sees every card on its first reconcile and
+ * pokes the scheduler for each currently-dispatchable card — equivalent
+ * to a one-time boot rehydrate of the picker's dispatchable set.
+ */
+const dispatchableByCardId = new Map<string, boolean>();
+
+function dispatchableKey(repoName: string, id: string): string {
+  return `${repoName}-${id}`;
+}
+
+function isCardDispatchable(issue: Issue): boolean {
+  return (
+    issue.status === "ToDo" &&
+    issue.blocked === null &&
+    issue.waiting_on === null &&
+    issue.requires_human === null &&
+    issue.dispatch === null
+  );
+}
+
+/** Visible for tests — drain the dispatchability cache between cases. */
+export function _resetDispatchableCache(): void {
+  dispatchableByCardId.clear();
+}
+
+/**
+ * Per-repo scheduler hook registry — populated by `src/index.ts` at
+ * worker boot so reconcile can poke the dispatch scheduler when a
+ * card's dispatch-eligibility changes. Identical registration shape
+ * to `trackersByRepo` and `systemErrorHooksByRepo` above so the three
+ * extension points are read the same way.
+ *
+ * Production wires `scheduler.onReconcileResult` here. Tests register
+ * their own spy hook. When no hook is registered for a repo, reconcile
+ * silently skips the poke — fail-safe for tests that exercise the
+ * derivation path but don't care about the scheduler edge.
+ */
+type ReconcileSchedulerHook = (args: {
+  repo: ReconcileRepoContext;
+  result: ReconcileResult;
+}) => void;
+
+const schedulerHooksByRepo = new Map<string, ReconcileSchedulerHook>();
+
+export function setReconcileSchedulerHookForRepo(
+  repoName: string,
+  hook: ReconcileSchedulerHook,
+): void {
+  schedulerHooksByRepo.set(repoName, hook);
+}
+
+export function clearReconcileSchedulerHookForRepo(repoName: string): void {
+  schedulerHooksByRepo.delete(repoName);
+}
+
 /** Visible for tests — read the cache. */
 export function _getLastPushedHash(
   repoName: string,
@@ -351,6 +430,12 @@ async function reconcileBody(
   const loaded = loadYaml(repo.localPath, id);
   if (loaded === null) {
     log.debug(`[${repo.name}] ${id}: tombstone (trigger=${trigger})`);
+    // Clear the dispatchability cache so a future re-creation of this
+    // id triggers a fresh first-observation poke. Keeping the stale
+    // entry would make a subsequent re-create observe `priorDispatchable
+    // === currentDispatchable` and skip the scheduler poke even though
+    // the card is brand new from the scheduler's POV.
+    dispatchableByCardId.delete(dispatchableKey(repo.name, id));
     return tombstoneResult();
   }
 
@@ -535,9 +620,6 @@ async function reconcileBody(
     }
   }
 
-  // ---- Step 8: scheduler poke (Phase 4) ----
-  // `dispatchableChanged` stays `false` until Phase 4 wires the picker.
-
   // ---- Steps 9 + 10: parent + dependents fanout ----
   // Only fanout when reconcile actually mutated state. A no-op
   // reconcile (chokidar fired but step 3 found nothing to derive)
@@ -603,6 +685,26 @@ async function reconcileBody(
     }
   }
 
+  // ---- Step 8: dispatchableChanged (DX-288 / Phase 4b.1) ----
+  // Diff the post-reconcile dispatch-eligibility against the prior
+  // observation cached at module scope. First observation reports
+  // `dispatchableChanged === currentDispatchable` — a fresh card that's
+  // currently dispatchable pokes the scheduler so the picker sees it
+  // without waiting for the next chokidar event.
+  //
+  // The cache update happens BEFORE the scheduler hook fires (in
+  // `reconcileIssue` below). Two reconciles for the same id queued via
+  // the per-card mutex therefore see a consistent prior value: the
+  // first run stamps current, the second run diffs against that stamp.
+  const currentDispatchable = isCardDispatchable(mutated);
+  const cacheKey = dispatchableKey(repo.name, id);
+  const priorDispatchable = dispatchableByCardId.get(cacheKey);
+  const dispatchableChanged =
+    priorDispatchable === undefined
+      ? currentDispatchable
+      : currentDispatchable !== priorDispatchable;
+  dispatchableByCardId.set(cacheKey, currentDispatchable);
+
   return {
     changed: reconcileMutated,
     prevHash,
@@ -611,7 +713,7 @@ async function reconcileBody(
     fanout: {
       parentId: parentRecursed,
       dependents,
-      dispatchableChanged: false,
+      dispatchableChanged,
     },
   };
 }
@@ -647,10 +749,41 @@ export function reconcileIssue(
   id: string,
   trigger: ReconcileTrigger,
 ): Promise<ReconcileResult> {
-  return reconcileWithContext(repo, id, trigger, {
+  const resultPromise = reconcileWithContext(repo, id, trigger, {
     visited: new Set<string>(),
     depth: 0,
   });
+  // Step 8 (scheduler poke) runs OUTSIDE the per-card mutex so a slow
+  // picker run does not pile up other reconciles for the same id.
+  // `lifecycle` triggers (auto-sync from `danxbot_complete`) intentionally
+  // skip the poke — lifecycle awaits the trailing tracker push and a
+  // re-poke from lifecycle would re-introduce the lag the event-driven
+  // path is meant to eliminate. See DX-218 carryover note.
+  if (trigger !== "lifecycle") {
+    void resultPromise.then(
+      (result) => {
+        const hook = schedulerHooksByRepo.get(repo.name);
+        if (hook) {
+          try {
+            hook({ repo, result });
+          } catch (err) {
+            log.warn(
+              `[${repo.name}] ${id} scheduler hook threw: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+      },
+      () => {
+        // Rejected promise (ReconcileValidationError or unhandled
+        // throw inside the body): no result to poke with. Errors
+        // surface to the caller through `resultPromise` itself; we
+        // simply don't run the scheduler hook on failure.
+      },
+    );
+  }
+  return resultPromise;
 }
 
 /** Visible for tests — drain the mutex map between cases. */

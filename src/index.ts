@@ -14,12 +14,18 @@ import { getPool, initPlatformPool } from "./db/connection.js";
 import { startIssuesMirror } from "./db/issues-mirror.js";
 import {
   reconcileIssue,
+  setReconcileSchedulerHookForRepo,
   setReconcileSystemErrorHookForRepo,
   setReconcileTrackerForRepo,
 } from "./issue/reconcile.js";
 import { bootRescheduleRetryQueue } from "./issue-tracker/retry-queue.js";
 import { createIssueTracker } from "./issue-tracker/index.js";
-import { bootScheduler } from "./dispatch/scheduler.js";
+import { bootScheduler, onReconcileResult } from "./dispatch/scheduler.js";
+import {
+  listDispatchableYamls,
+  listInProgressYamls,
+} from "./poller/local-issues.js";
+import { tryMultiAgentDispatch } from "./poller/multi-agent-pick.js";
 import { recordSystemError } from "./dashboard/system-errors.js";
 import { setRepoName } from "./poller/repo-name.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
@@ -352,7 +358,36 @@ async function startWorkerMode(): Promise<void> {
   // threading the tracker through every dispatch's onComplete callback.
   // MemoryTracker skips the credential check (constructs without
   // creds) but is still registered for the post-dispatch path.
-  bootScheduler({ repo, tracker: repoTracker });
+  //
+  // Phase 4b.1 (DX-288) wires the `runPicker` callback so reconcile's
+  // dispatchableChanged poke fires the multi-agent picker without
+  // waiting for the next `_poll` tick. The closure re-reads card
+  // state on each fire so we observe the latest YAML truth (DB-backed
+  // via `listDispatchableYamls`). Until Phase 4b.3 deletes the legacy
+  // `_poll` picker invocation, both paths run — both are idempotent
+  // (`busyAgents` DB lock + tracker-comment lock prevent double-claim).
+  bootScheduler({
+    repo,
+    tracker: repoTracker,
+    runPicker: async ({ now }) => {
+      const cards = await listDispatchableYamls(
+        repo.localPath,
+        repo.issuePrefix,
+      );
+      const inProgress = await listInProgressYamls(
+        repo.localPath,
+        repo.issuePrefix,
+      );
+      await tryMultiAgentDispatch({
+        repo,
+        cards,
+        inProgress,
+        tracker: repoTracker,
+        now,
+      });
+    },
+  });
+  setReconcileSchedulerHookForRepo(repo.name, onReconcileResult);
 
   // DX-265: one-shot cleanup of legacy `Needs Approval` Trello list +
   // label (retired in DX-231; DX-234 left the fossils in place "for
@@ -374,6 +409,7 @@ async function startWorkerMode(): Promise<void> {
       details: { error: err instanceof Error ? err.message : String(err) },
     });
   }
+
 
   const reschedule = bootRescheduleRetryQueue({
     repoLocalPath: repo.localPath,
