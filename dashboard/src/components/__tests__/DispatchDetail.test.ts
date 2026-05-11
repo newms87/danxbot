@@ -54,6 +54,8 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     hostPidAt: null,
     pidTerminatedAt: null,
     mcpSettingsPath: null,
+    recoverCount: 0,
+    parentRecoverId: null,
     ...overrides,
   };
 }

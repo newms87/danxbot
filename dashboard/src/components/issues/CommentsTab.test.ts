@@ -242,6 +242,127 @@ describe("CommentsTab", () => {
     expect(w.findAll('[data-test="comment-real"]')).toHaveLength(2);
   });
 
+  describe("author rendering", () => {
+    it("renders a named human author verbatim, no bot icon, no muted style", () => {
+      const w = mountTab(
+        makeDetail({
+          comments: [
+            { id: "c-1", author: "monitor", timestamp: "2026-05-10T12:00:00Z", text: "ok" },
+          ],
+        }),
+      );
+      const bubble = w.get('[data-test="comment-real"]');
+      const author = bubble.get('[data-test="comment-author"]');
+      expect(author.text()).toBe("monitor");
+      expect(bubble.find('[data-test="comment-bot-icon"]').exists()).toBe(false);
+      expect(author.classes()).not.toContain("unknown");
+      expect(author.classes()).not.toContain("bot");
+    });
+
+    it('renders author "danxbot" as italic with the bot icon', () => {
+      const w = mountTab(
+        makeDetail({
+          comments: [
+            { id: "c-1", author: "danxbot", timestamp: "2026-05-10T12:00:00Z", text: "auto" },
+          ],
+        }),
+      );
+      const bubble = w.get('[data-test="comment-real"]');
+      const author = bubble.get('[data-test="comment-author"]');
+      expect(author.text()).toContain("danxbot");
+      expect(author.classes()).toContain("bot");
+      expect(bubble.find('[data-test="comment-bot-icon"]').exists()).toBe(true);
+    });
+
+    it('renders missing author as muted "unknown"', () => {
+      const w = mountTab(
+        makeDetail({
+          comments: [
+            { id: "c-1", author: "", timestamp: "2026-05-10T12:00:00Z", text: "legacy" },
+          ],
+        }),
+      );
+      const bubble = w.get('[data-test="comment-real"]');
+      const author = bubble.get('[data-test="comment-author"]');
+      expect(author.text()).toBe("unknown");
+      expect(author.classes()).toContain("unknown");
+      expect(bubble.find('[data-test="comment-bot-icon"]').exists()).toBe(false);
+    });
+
+    it("renders the full ISO timestamp as a hover tooltip on the timestamp label", () => {
+      const w = mountTab(
+        makeDetail({
+          comments: [
+            { id: "c-1", author: "dan", timestamp: "2026-05-10T12:00:00Z", text: "tt" },
+          ],
+        }),
+      );
+      const ts = w.get('[data-test="comment-real"] [data-test="comment-ts"]');
+      expect(ts.attributes("title")).toBe("2026-05-10T12:00:00Z");
+      expect(ts.classes()).toContain("has-tooltip");
+    });
+
+    it("omits the title attribute when the timestamp is empty (legacy row)", () => {
+      const w = mountTab(
+        makeDetail({
+          comments: [
+            { id: "c-1", author: "", timestamp: "", text: "legacy" },
+          ],
+        }),
+      );
+      const ts = w.get('[data-test="comment-real"] [data-test="comment-ts"]');
+      expect(ts.attributes("title")).toBeUndefined();
+      expect(ts.classes()).not.toContain("has-tooltip");
+      // Visible label falls back to a non-empty placeholder when ts parsing fails.
+      expect(ts.text()).toBe("(no timestamp)");
+    });
+
+    it("bot icon is decorative (aria-hidden=true)", () => {
+      const w = mountTab(
+        makeDetail({
+          comments: [
+            { id: "c-1", author: "danxbot", timestamp: "2026-05-10T12:00:00Z", text: "x" },
+          ],
+        }),
+      );
+      const icon = w.get('[data-test="comment-bot-icon"]');
+      expect(icon.attributes("aria-hidden")).toBe("true");
+    });
+
+    it("classifyAuthor is literal-match (case sensitive); 'Danxbot' renders verbatim as a named author", () => {
+      const w = mountTab(
+        makeDetail({
+          comments: [
+            { id: "c-1", author: "Danxbot", timestamp: "2026-05-10T12:00:00Z", text: "x" },
+          ],
+        }),
+      );
+      const bubble = w.get('[data-test="comment-real"]');
+      const author = bubble.get('[data-test="comment-author"]');
+      expect(author.text()).toBe("Danxbot");
+      expect(author.classes()).toContain("named");
+      expect(author.classes()).not.toContain("bot");
+      expect(bubble.find('[data-test="comment-bot-icon"]').exists()).toBe(false);
+    });
+
+    it("whitespace-only author renders verbatim as a named author (does not collapse to unknown)", () => {
+      // Pins current `!raw` behavior. The bot-mirror path stamps either
+      // "danxbot" (literal) or a real Trello display name; an all-whitespace
+      // string would itself be a tracker-side defect — pin the UI shape
+      // here so a future helper tweak does not silently change branch.
+      const w = mountTab(
+        makeDetail({
+          comments: [
+            { id: "c-1", author: "   ", timestamp: "2026-05-10T12:00:00Z", text: "x" },
+          ],
+        }),
+      );
+      const author = w.get('[data-test="comment-author"]');
+      expect(author.classes()).toContain("named");
+      expect(author.classes()).not.toContain("unknown");
+    });
+  });
+
   it("removes the optimistic bubble and surfaces the error when PATCH rejects", async () => {
     patchMock.mockRejectedValue(new Error("server says no"));
 

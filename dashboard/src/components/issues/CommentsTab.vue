@@ -19,12 +19,19 @@ interface PendingComment {
   text: string;
 }
 
+// `bot` = danxbot-authored (every agent / worker append-path stamps
+// `author: "danxbot"`); `unknown` = legacy / pre-DX-236 rows synced
+// from Trello before the server-stamp landed; `named` = everything
+// else (human dashboard user, Trello-mirrored member display name).
+type AuthorKind = "named" | "bot" | "unknown";
+
 interface RenderedComment {
   key: string;
-  author: string;
+  authorLabel: string;
+  authorKind: AuthorKind;
   tsLabel: string;
+  tsTooltip: string | null;
   text: string;
-  isDanxbot: boolean;
   pending: boolean;
 }
 
@@ -32,6 +39,12 @@ function tsLabel(s: string): string {
   const n = Date.parse(s);
   if (Number.isNaN(n)) return s || "(no timestamp)";
   return relativeTime(n);
+}
+
+function classifyAuthor(raw: string): { kind: AuthorKind; label: string } {
+  if (!raw) return { kind: "unknown", label: "unknown" };
+  if (raw === "danxbot") return { kind: "bot", label: "danxbot" };
+  return { kind: "named", label: raw };
 }
 
 const draft = ref("");
@@ -45,20 +58,25 @@ const pending = ref<PendingComment[]>([]);
 const pendingSeq = ref(0);
 
 const comments = computed<RenderedComment[]>(() => {
-  const real = props.issue.comments.map<RenderedComment>((c, i) => ({
-    key: c.id ?? `c-${i}`,
-    author: c.author,
-    tsLabel: tsLabel(c.timestamp),
-    text: c.text,
-    isDanxbot: c.author === "danxbot",
-    pending: false,
-  }));
+  const real = props.issue.comments.map<RenderedComment>((c, i) => {
+    const a = classifyAuthor(c.author);
+    return {
+      key: c.id ?? `c-${i}`,
+      authorLabel: a.label,
+      authorKind: a.kind,
+      tsLabel: tsLabel(c.timestamp),
+      tsTooltip: c.timestamp || null,
+      text: c.text,
+      pending: false,
+    };
+  });
   const pendingRendered = pending.value.map<RenderedComment>((p) => ({
     key: p.key,
-    author: "you",
+    authorLabel: "you",
+    authorKind: "named",
     tsLabel: "just now",
+    tsTooltip: null,
     text: p.text,
-    isDanxbot: false,
     pending: true,
   }));
   return [...real, ...pendingRendered];
@@ -109,12 +127,27 @@ async function onSubmit(): Promise<void> {
         v-for="c in comments"
         :key="c.key"
         class="bubble"
-        :class="{ danxbot: c.isDanxbot, pending: c.pending }"
+        :class="{ bot: c.authorKind === 'bot', pending: c.pending }"
         :data-test="c.pending ? 'comment-pending' : 'comment-real'"
       >
         <div class="head">
-          <span class="author" :class="{ danxbot: c.isDanxbot }">{{ c.author }}</span>
-          <span class="ts">{{ c.tsLabel }}</span>
+          <span
+            class="author"
+            :class="c.authorKind"
+            data-test="comment-author"
+          >
+            <span
+              v-if="c.authorKind === 'bot'"
+              class="bot-glyph"
+              aria-hidden="true"
+              data-test="comment-bot-icon"
+            >🤖</span>{{ c.authorLabel }}</span>
+          <span
+            class="ts"
+            :class="{ 'has-tooltip': c.tsTooltip !== null }"
+            :title="c.tsTooltip ?? undefined"
+            data-test="comment-ts"
+          >{{ c.tsLabel }}</span>
         </div>
         <MarkdownEditor
           :model-value="c.text"
@@ -171,7 +204,7 @@ async function onSubmit(): Promise<void> {
   background: rgb(15 23 42 / 0.6);
   border: 1px solid #1e293b;
 }
-.bubble.danxbot {
+.bubble.bot {
   background: rgb(30 27 75 / 0.4);
   border-color: rgb(99 102 241 / 0.25);
 }
@@ -190,12 +223,24 @@ async function onSubmit(): Promise<void> {
   font-weight: 600;
   color: #e2e8f0;
 }
-.author.danxbot {
+.author.bot {
   color: #a5b4fc;
+  font-style: italic;
+}
+.author.unknown {
+  color: #64748b;
+  font-weight: 500;
+  font-style: italic;
+}
+.bot-glyph {
+  margin-right: 4px;
 }
 .ts {
   font-size: 11px;
   color: #64748b;
+}
+.ts.has-tooltip {
+  cursor: help;
 }
 .text {
   font-size: 13px;
