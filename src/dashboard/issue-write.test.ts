@@ -364,13 +364,79 @@ describe("applyIssuePatch — round-trip mutation", () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  it("status: Blocked without a blocked field surfaces the schema invariant as 400", async () => {
-    // The dashboard's allowlist intentionally does NOT expose `blocked`,
-    // so a Blocked DnD must fail loud rather than silently coercing.
+  it("status: Blocked auto-stamps `blocked` so the YAML invariant survives a drag (DX-237)", async () => {
+    // The dashboard write API is the human-driven surface — a drag-to-Blocked
+    // operator gesture has no place to declare a reason, so the server stamps
+    // a generic record. The agent path still uses the full `blocked: {reason,
+    // timestamp}` shape via Edit/Write — this normalization only fires for
+    // the dashboard's status-only patches.
     writeFixture(makeIssue(), "open");
-    await expect(
-      applyIssuePatch("danxbot", repoLocalPath, "DX-1", { status: "Blocked" }, "alice"),
-    ).rejects.toMatchObject({ status: 400 });
+    const before = Date.now();
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { status: "Blocked" },
+      "alice",
+    );
+    expect(issue.status).toBe("Blocked");
+    expect(issue.blocked).not.toBeNull();
+    expect(issue.blocked!.reason).toBe("Manually moved to Blocked via dashboard");
+    expect(Date.parse(issue.blocked!.timestamp)).toBeGreaterThanOrEqual(before);
+  });
+
+  it("status away from Blocked auto-clears `blocked` (drag out of Blocked)", async () => {
+    writeFixture(
+      makeIssue({
+        status: "Blocked",
+        blocked: { reason: "old reason", timestamp: "2026-04-20T00:00:00Z" },
+      }),
+      "open",
+    );
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { status: "In Progress" },
+      "alice",
+    );
+    expect(issue.status).toBe("In Progress");
+    expect(issue.blocked).toBeNull();
+  });
+
+  it("status away from ToDo auto-clears `waiting_on` (operator wins over dispatch gates)", async () => {
+    writeFixture(
+      makeIssue({
+        status: "ToDo",
+        waiting_on: {
+          reason: "queued behind DX-99",
+          timestamp: "2026-04-20T00:00:00Z",
+          by: ["DX-99"],
+        },
+      }),
+      "open",
+    );
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { status: "In Progress" },
+      "alice",
+    );
+    expect(issue.status).toBe("In Progress");
+    expect(issue.waiting_on).toBeNull();
+  });
+
+  it("status patch that does not touch Blocked leaves `blocked` alone", async () => {
+    writeFixture(makeIssue({ status: "ToDo", blocked: null }), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { status: "In Progress" },
+      "alice",
+    );
+    expect(issue.blocked).toBeNull();
   });
 });
 
@@ -381,12 +447,15 @@ describe("applyIssuePatch — atomic write + rollback", () => {
       issuePath(repoLocalPath, "DX-1", "open"),
       "utf-8",
     );
+    // Empty title is rejected by parseIssue's strict schema, so the
+    // serialized YAML round-trip throws and the temp file is rolled back
+    // before the destination is touched.
     await expect(
       applyIssuePatch(
         "danxbot",
         repoLocalPath,
         "DX-1",
-        { status: "Blocked" },
+        { title: "" },
         "alice",
       ),
     ).rejects.toMatchObject({ status: 400 });

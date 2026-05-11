@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { IssueListItem } from "../../types";
+import type { CardDragHandlers } from "../../composables/useCardDrag";
 import TypeBadge from "./TypeBadge.vue";
 import ChildrenChecklist from "./ChildrenChecklist.vue";
 import ACBar from "./ACBar.vue";
@@ -15,8 +16,15 @@ const props = withDefaults(
     dimmed?: boolean;
     scoped?: boolean;
     showStatus?: boolean;
+    /** `true` when this card is the active drag source (board-side ghost). */
+    dragging?: boolean;
+    /**
+     * HTML5 DnD handlers from `useCardDrag().bindCard(issue)`. Optional
+     * so non-board consumers (drawer, dialog) skip the drag wiring.
+     */
+    dragHandlers?: CardDragHandlers;
   }>(),
-  { dimmed: false, scoped: false, showStatus: false },
+  { dimmed: false, scoped: false, showStatus: false, dragging: false },
 );
 
 const emit = defineEmits<{
@@ -51,9 +59,12 @@ function onParentClick(e: MouseEvent): void {
 <template>
   <button
     class="issue-card"
-    :class="{ epic: isEpic, blocked, 'blocked-by-card': blockedByCard, dimmed: props.dimmed, scoped: props.scoped }"
+    :class="{ epic: isEpic, blocked, 'blocked-by-card': blockedByCard, dimmed: props.dimmed, scoped: props.scoped, 'is-dragging': props.dragging }"
     type="button"
+    :draggable="props.dragHandlers ? true : undefined"
     @click="emit('select', issue)"
+    @dragstart="props.dragHandlers?.onDragstart($event)"
+    @dragend="props.dragHandlers?.onDragend($event)"
   >
     <div class="card-header">
       <span class="id-chip">{{ issue.id }}</span>
@@ -166,6 +177,13 @@ function onParentClick(e: MouseEvent): void {
   opacity: 0.32;
 }
 .issue-card.dimmed:hover {
+  transform: none;
+}
+.issue-card.is-dragging {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.issue-card.is-dragging:hover {
   transform: none;
 }
 .card-header {

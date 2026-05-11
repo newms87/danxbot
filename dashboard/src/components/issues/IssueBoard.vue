@@ -5,6 +5,7 @@ import type { IssueListItem, IssueStatus } from "../../types";
 import IssueCard from "./IssueCard.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
 import { isInScope, type ScopeMode } from "../../composables/useIssueFilters";
+import { useCardDrag } from "../../composables/useCardDrag";
 
 const props = defineProps<{
   issues: IssueListItem[];
@@ -23,7 +24,19 @@ const props = defineProps<{
 const emit = defineEmits<{
   select: [issue: IssueListItem];
   "parent-click": [parentId: string];
+  /**
+   * Fired when the user releases a card over a column whose status
+   * differs from `issue.status`. Parent owns the optimistic state
+   * mutation + REST patch via `useIssues.moveIssueStatus`.
+   */
+  move: [issue: IssueListItem, toStatus: IssueStatus];
 }>();
+
+const cardDrag = useCardDrag({
+  onDrop: (issue, _from, to) => {
+    emit("move", issue, to);
+  },
+});
 
 interface BoardColumn {
   key: string;
@@ -32,6 +45,12 @@ interface BoardColumn {
   testId: string;
   collapsedByDefault: boolean;
   match: (i: IssueListItem) => boolean;
+  /**
+   * Drop target status. `undefined` for synthetic columns (e.g.
+   * `done_recent`) that aggregate by predicate rather than a single
+   * status — drops on those columns are inert (no patch fires).
+   */
+  status?: IssueStatus;
 }
 
 const RECENT_DONE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -45,6 +64,7 @@ function statusColumn(status: IssueStatus): BoardColumn {
     testId: meta.id,
     collapsedByDefault: meta.collapsedByDefault,
     match: (i) => i.status === status,
+    status,
   };
 }
 
@@ -131,7 +151,10 @@ function toggle(key: string): void {
       v-for="col in columns"
       :key="col.key"
       class="column"
-      :class="{ collapsed: collapsed[col.key] }"
+      :class="{ collapsed: collapsed[col.key], 'drop-hover': col.status && cardDrag.isHoveringColumn(col.status) }"
+      :style="{ '--col-accent': col.accent }"
+      v-bind="col.status ? cardDrag.bindColumn(col.status) : {}"
+      :data-test="`column-${col.testId}`"
     >
       <button
         class="header"
@@ -156,6 +179,8 @@ function toggle(key: string): void {
             :repo="props.repo"
             :dimmed="dimmedFor(issue)"
             :scoped="scopedFor(issue)"
+            :dragging="cardDrag.isDragging(issue)"
+            :drag-handlers="cardDrag.bindCard(issue)"
             @select="(i) => emit('select', i)"
             @parent-click="(pid) => emit('parent-click', pid)"
           />
@@ -257,5 +282,11 @@ function toggle(key: string): void {
   background: rgb(15 23 42 / 0.4);
   border-radius: 6px;
   border: 1px solid #1e293b;
+}
+.column.drop-hover {
+  outline: 2px dashed var(--col-accent, #a5b4fc);
+  outline-offset: -4px;
+  background: rgb(99 102 241 / 0.05);
+  border-radius: 8px;
 }
 </style>

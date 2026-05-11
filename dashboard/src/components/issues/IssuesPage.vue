@@ -8,7 +8,7 @@ import IssueBoard from "./IssueBoard.vue";
 import IssueDetailView from "./IssueDetailView.vue";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import { typeToId } from "./issuePalette";
-import type { IssueDetail, IssueListItem } from "../../types";
+import type { IssueDetail, IssueListItem, IssueStatus } from "../../types";
 
 const selectedRepo = defineModel<string>("selectedRepo", { required: true });
 
@@ -23,9 +23,16 @@ const emit = defineEmits<{
   "open-agent": [];
 }>();
 
-const { issues, loading, error, refresh, fetchDetail } = useIssues(
-  toRef(selectedRepo),
-);
+const { issues, loading, error, refresh, fetchDetail, moveIssueStatus } =
+  useIssues(toRef(selectedRepo));
+
+function onMove(issue: IssueListItem, toStatus: IssueStatus): void {
+  // useIssues handles the optimistic mutation + revert + populates the
+  // `error` ref that drives the global banner. Swallow the rejection so
+  // an unhandled-promise warning does not leak — the banner is the
+  // operator-facing surface.
+  void moveIssueStatus(issue.id, toStatus).catch(() => {});
+}
 
 const {
   q,
@@ -273,6 +280,7 @@ watch(
               :scope-mode="scopeMode"
               @select="onSelect"
               @parent-click="onParentClick"
+              @move="onMove"
             />
           </div>
         </template>

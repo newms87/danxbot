@@ -441,6 +441,29 @@ function applyValidatedPatch(
     next.status = patch.status;
   }
 
+  // Operator action (dashboard drag, manual status patch) overrides the
+  // dispatch gates `blocked` / `waiting_on`. Without this normalization
+  // the YAML-level invariant `status === "Blocked" ⟺ blocked != null`
+  // (and `waiting_on != null ⟹ status === "ToDo"`) would 400 every
+  // drag-into-Blocked or drag-out-of-Blocked, since the inbound patch
+  // only carries `status`. Auto-stamp / auto-clear so the drag UX
+  // round-trips cleanly. The operator wins; if they explicitly set
+  // `blocked` or `waiting_on` in the patch (future field expansion),
+  // those take precedence over this normalization.
+  if (patch.status !== undefined) {
+    if (next.status === "Blocked" && next.blocked === null) {
+      next.blocked = {
+        reason: "Manually moved to Blocked via dashboard",
+        timestamp: nowIso,
+      };
+    } else if (next.status !== "Blocked" && next.blocked !== null) {
+      next.blocked = null;
+    }
+    if (next.status !== "ToDo" && next.waiting_on !== null) {
+      next.waiting_on = null;
+    }
+  }
+
   // Compute target state from the post-patch status. Done / Cancelled
   // close the card; everything else opens it. Reopen is a special case
   // of "force open" — the status is set above, and the target derives

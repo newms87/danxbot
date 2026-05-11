@@ -1,7 +1,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
-import { fetchIssueDetail, fetchIssues } from "../api";
-import type { IssueDetail, IssueListItem } from "../types";
+import { fetchIssueDetail, fetchIssues, patchIssue } from "../api";
+import type { IssueDetail, IssueListItem, IssueStatus } from "../types";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -11,6 +11,16 @@ export interface UseIssues {
   error: Ref<string | null>;
   refresh: () => Promise<void>;
   fetchDetail: (id: string) => Promise<IssueDetail>;
+  /**
+   * Optimistically move a card between columns. Mutates `issues` immediately
+   * so the UI re-renders, then PATCHes `/api/issues/:id`. On failure the
+   * local state reverts to the prior status and the caller receives the
+   * server error (also surfaced via the `error` ref).
+   *
+   * The next REST poll (or eventual `issue:updated` SSE event) reconciles
+   * any server-side derived fields the optimistic update did not carry.
+   */
+  moveIssueStatus: (id: string, toStatus: IssueStatus) => Promise<void>;
 }
 
 /**
@@ -32,6 +42,11 @@ export function useIssues(repo: Ref<string>): UseIssues {
   let cancelled = false;
   let currentReq = 0;
   const detailCache = new Map<string, IssueDetail>();
+  // Optimistic `moveIssueStatus` mutations awaiting their PATCH to
+  // resolve. The 30s poll's `load()` would otherwise overwrite the
+  // optimistic state with the still-stale server snapshot — replay
+  // these onto every fresh REST commit so the column doesn't snap back.
+  const pendingMoves = new Map<string, IssueStatus>();
 
   async function fetchDetail(id: string): Promise<IssueDetail> {
     const requestRepo = repo.value;
@@ -65,7 +80,14 @@ export function useIssues(repo: Ref<string>): UseIssues {
           detailCache.delete(cacheKey);
         }
       }
-      issues.value = result;
+      issues.value = pendingMoves.size === 0
+        ? result
+        : result.map((i) => {
+            const pending = pendingMoves.get(i.id);
+            return pending && pending !== i.status
+              ? { ...i, status: pending }
+              : i;
+          });
       error.value = null;
     } catch (err) {
       if (cancelled || reqId !== currentReq) return;
@@ -103,5 +125,32 @@ export function useIssues(repo: Ref<string>): UseIssues {
     stopTimer();
   });
 
-  return { issues, loading, error, refresh: load, fetchDetail };
+  async function moveIssueStatus(
+    id: string,
+    toStatus: IssueStatus,
+  ): Promise<void> {
+    const requestRepo = repo.value;
+    if (!requestRepo) throw new Error("No repo selected");
+    const idx = issues.value.findIndex((i) => i.id === id);
+    if (idx === -1) throw new Error(`Unknown issue ${id}`);
+    const original = issues.value[idx];
+    if (original.status === toStatus) return;
+    detailCache.delete(`${requestRepo}:${id}`);
+    pendingMoves.set(id, toStatus);
+    issues.value = issues.value.map((i, j) =>
+      j === idx ? { ...i, status: toStatus } : i,
+    );
+    try {
+      await patchIssue(requestRepo, id, { status: toStatus });
+    } catch (err) {
+      issues.value = issues.value.map((i) => (i.id === id ? original : i));
+      const message = err instanceof Error ? err.message : String(err);
+      error.value = message;
+      throw err;
+    } finally {
+      pendingMoves.delete(id);
+    }
+  }
+
+  return { issues, loading, error, refresh: load, fetchDetail, moveIssueStatus };
 }
