@@ -54,6 +54,7 @@ import {
   handleGetIssueHistory,
   handleListIssues,
 } from "./issues-routes.js";
+import { handlePatchIssue } from "./issue-write.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
 import {
   handleLogin,
@@ -348,6 +349,23 @@ async function route(
       res,
       url.searchParams.get("repo"),
       decodeURIComponent(agentByNameMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // PATCH /api/issues/:id?repo=<name> — DX-236. Dashboard human write
+  // surface for issue YAMLs. Matched ahead of the blanket /api/* gate
+  // so the handler's own `requireUser` call produces the 401 (mirrors
+  // the PATCH/DELETE handlers above) — the handler also needs
+  // `auth.user.username` to stamp `comments_append.author` server-side.
+  const issuePatchMatch = url.pathname.match(/^\/api\/issues\/([^/]+)$/);
+  if (method === "PATCH" && issuePatchMatch) {
+    await handlePatchIssue(
+      req,
+      res,
+      decodeURIComponent(issuePatchMatch[1]),
+      url.searchParams.get("repo"),
       dispatchDeps,
     );
     return true;

@@ -80,7 +80,9 @@ export type {
   IssueHistoryEvent,
   WaitingOn,
   Blocked,
+  RequiresHuman,
 } from "@backend/issue-tracker/interface.js";
+export type { IssuePatch } from "@backend/dashboard/issue-write.js";
 export type {
   SystemError,
   SystemErrorSource,

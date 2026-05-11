@@ -148,6 +148,15 @@ vi.mock("./issues-routes.js", () => ({
     mockHandleGetIssueHistory(...args),
 }));
 
+// DX-236 — `issue-write.ts` pulls in `loadIssuePrefix` (fs read) and
+// the chokidar-mirrored YAML serialiser. Stub at the route boundary
+// so the server test only verifies the PATCH /api/issues/:id wiring;
+// `issue-write.test.ts` owns handler-level coverage.
+const mockHandlePatchIssue = vi.fn();
+vi.mock("./issue-write.js", () => ({
+  handlePatchIssue: (...args: unknown[]) => mockHandlePatchIssue(...args),
+}));
+
 // Stub dispatch-stream so startDashboard() doesn't start a real DB poller.
 const mockStartDbChangeDetector = vi.fn();
 vi.mock("./dispatch-stream.js", () => ({
@@ -923,6 +932,41 @@ describe("dashboard server", () => {
       await requestHandler(req, res);
       expect(res._getStatusCode()).toBe(401);
       expect(mockHandleGetIssueHistory).not.toHaveBeenCalled();
+    });
+
+    // DX-236 — PATCH /api/issues/:id MUST be matched ahead of the
+    // blanket `/api/*` user-auth gate so the handler's own
+    // `requireUser` call produces the 401 (and so it can stamp
+    // `comments_append.author` from the authed user). A refactor that
+    // moves the gate above the PATCH match would silently route every
+    // dashboard write through the generic 401 path, swallowing the
+    // handler's own auth + author-stamping logic.
+    it("PATCH /api/issues/:id is matched before the /api/* user-auth gate", async () => {
+      mockHandlePatchIssue.mockImplementation(ok());
+      const { req, res } = createMockReqRes(
+        "PATCH",
+        "/api/issues/DX-1?repo=danxbot",
+      );
+      // Intentionally NO auth header — the PATCH route is supposed to
+      // run the handler regardless (the handler does its own
+      // requireUser). With the wrong order, the blanket gate would
+      // 401 before the handler ran.
+      await requestHandler(req, res);
+      expect(mockHandlePatchIssue).toHaveBeenCalledTimes(1);
+      const [, , id, repoQuery] = mockHandlePatchIssue.mock.calls[0];
+      expect(id).toBe("DX-1");
+      expect(repoQuery).toBe("danxbot");
+    });
+
+    it("PATCH /api/issues/:id forwards URL-encoded ids", async () => {
+      mockHandlePatchIssue.mockImplementation(ok());
+      const { req, res } = createMockReqRes(
+        "PATCH",
+        "/api/issues/DX%2D1?repo=danxbot",
+      );
+      await requestHandler(req, res);
+      const [, , id] = mockHandlePatchIssue.mock.calls[0];
+      expect(id).toBe("DX-1");
     });
   });
 });

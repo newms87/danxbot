@@ -130,6 +130,19 @@ describe("handleStream — input validation", () => {
     expect(res.statusCode).toBe(200);
     expect(mockSubscribe).toHaveBeenCalledOnce();
   });
+
+  // DX-236 — `issue:updated` is the optimistic SSE topic the dashboard
+  // write API publishes after every successful PATCH /api/issues/:id.
+  // Without this entry in `VALID_STATIC_TOPICS`, every dashboard issue
+  // drawer subscriber would 400 silently as soon as the SPA wires up
+  // the topic.
+  it("accepts issue:updated as a valid topic", async () => {
+    const req = makeReq("topics=issue:updated");
+    const res = makeRes();
+    await handleStream(req, res, new URLSearchParams("topics=issue:updated"));
+    expect(res.statusCode).toBe(200);
+    expect(mockSubscribe).toHaveBeenCalledOnce();
+  });
 });
 
 describe("handleStream — dispatch:jsonl:<id> topic", () => {

@@ -51,6 +51,35 @@ Re-running the make target rotates the token (old one invalidated). The `monitor
 
 For `gpt`/etc., swap `LOCALHOST=1` → `TARGET=<t>` and store the token at `~/.config/danxbot/dashboard-token-<target>`. The dashboard host is the Caddy-fronted public URL (e.g. `https://danxbot.sageus.ai`).
 
+## Issue Write API — `PATCH /api/issues/:id?repo=<name>` (DX-236)
+
+Human-driven write surface for issue YAMLs. Auth-gated by per-user bearer (NOT the dispatch token). Allowlisted patch fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | `IssueStatus` | Terminal (`Done`/`Cancelled`) moves the file `open/` → `closed/`. `Blocked` is rejected because `blocked` isn't patchable; pair with a future affordance. |
+| `title` | non-empty `string` | |
+| `description` | `string` | |
+| `ac` | `IssueAcItem[]` | Full array replace. The SPA round-trips existing `check_item_id`s so the worker's tracker push edits in place. |
+| `comments_append` | `{text}` | Server stamps `author` (auth user) + `timestamp` (now ISO). Client-supplied `author`/`timestamp`/`id` are ignored. |
+| `requires_human` | `RequiresHuman \| null` | Server stamps `set_by: "human"` + `set_at: now`; client cannot fake `set_by`. |
+| `reopen` | `true` | Move `closed/<id>.yml` → `open/<id>.yml`. Defaults `status: "ToDo"` unless paired with one of `Review`/`ToDo`/`In Progress`/`Blocked`. |
+
+Any other field returns `400 {error: "Field not patchable: <name>"}`. Empty patch returns `400`. Atomic temp+rename — no partial-state residue on validation failure. Per-id mutex inside the dashboard process serializes concurrent writers on the SAME card; cross-process (agent + dashboard) is last-writer-wins, same as agent-vs-poller.
+
+Successful writes publish the `issue:updated` SSE topic with the post-patch `Issue` so subscribers update without a refetch — the worker's chokidar mirror still fires later (5s `awaitWriteFinish` debounce) and re-affirms via DB; subscribers MUST be idempotent.
+
+Quick smoke:
+
+```bash
+TOKEN=$(cat ~/.config/danxbot/dashboard-token)
+curl -sS -X PATCH \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Renamed"}' \
+  "http://localhost:5566/api/issues/DX-1?repo=danxbot"
+```
+
 ## Two Dev URLs
 
 | URL | Serves | When to use |

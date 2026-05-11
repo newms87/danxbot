@@ -19,6 +19,7 @@ import type { Dispatch } from "./dispatches.js";
 import type { JsonlBlock } from "./jsonl-reader.js";
 import type { AgentSnapshot } from "./agents-list.js";
 import type { SystemError } from "./system-errors.js";
+import type { Issue } from "../issue-tracker/interface.js";
 
 /** All first-class topic literals. Wildcard prefix patterns are also valid but
  * callers must supply the exact topic string (e.g. `dispatch:jsonl:${id}`). */
@@ -27,6 +28,7 @@ export type EventTopic =
   | "dispatch:updated"
   | "agent:updated"
   | "issue-prefix:changed"
+  | "issue:updated"
   | "system-errors"
   | (string & {}); // open-ended for `dispatch:jsonl:<id>`
 
@@ -70,13 +72,37 @@ export interface IssuePrefixChangedPayload {
   };
 }
 
+/**
+ * DX-236: emitted by `PATCH /api/issues/:id` after a successful write.
+ * The dashboard's chokidar mirror runs in the worker container with a
+ * 5s `awaitWriteFinish` debounce — without an optimistic in-process
+ * publish the SPA wouldn't see the new state for several seconds. The
+ * worker-side mirror still fires later and re-affirms the same shape
+ * via the DB; subscribers MUST be idempotent against the second event.
+ *
+ * `issue` is the post-patch Issue exactly as written to disk (sourced
+ * from the deserialized YAML, NOT a re-fetched DB row), so the SPA can
+ * commit local state without a refetch round trip. `repo` and `id` are
+ * lifted to the top level so subscribers can cheaply filter by repo
+ * before deserializing the full issue payload.
+ */
+export interface IssueUpdatedPayload {
+  topic: "issue:updated";
+  data: {
+    repo: string;
+    id: string;
+    issue: Issue;
+  };
+}
+
 export type BusEvent =
   | DispatchCreatedPayload
   | DispatchUpdatedPayload
   | DispatchJsonlPayload
   | AgentUpdatedPayload
   | SystemErrorPayload
-  | IssuePrefixChangedPayload;
+  | IssuePrefixChangedPayload
+  | IssueUpdatedPayload;
 
 export type BusEventCallback = (event: BusEvent) => void;
 

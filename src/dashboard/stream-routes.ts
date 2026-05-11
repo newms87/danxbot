@@ -44,6 +44,7 @@ const VALID_STATIC_TOPICS = new Set([
   "dispatch:created",
   "dispatch:updated",
   "agent:updated",
+  "issue:updated",
   "system-errors",
 ]);
 

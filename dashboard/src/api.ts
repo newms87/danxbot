@@ -8,8 +8,10 @@ import type {
   DispatchDetail,
   DispatchFilters,
   Feature,
+  Issue,
   IssueDetail,
   IssueListItem,
+  IssuePatch,
   JsonlBlock,
   SystemError,
 } from "./types";
@@ -129,6 +131,35 @@ export async function fetchIssueDetail(
   );
   if (!res.ok) throw new Error(`fetchIssueDetail failed: ${res.status}`);
   return res.json();
+}
+
+/**
+ * PATCH /api/issues/:id?repo=<name> — DX-236. Applies an allowlisted
+ * patch (`status` / `title` / `description` / `ac` / `comments_append`
+ * / `requires_human` / `reopen`) and returns the post-patch Issue.
+ *
+ * Errors surface as a `ToggleError` so callers can render the server's
+ * `error` string inline (the dashboard write API uses the same
+ * `{error: string}` shape as every other mutation route). 400 on
+ * non-allowlisted fields, schema-invariant violations, or empty patch;
+ * 404 when the YAML is missing in both `open/` and `closed/`.
+ */
+export async function patchIssue(
+  repo: string,
+  id: string,
+  patch: IssuePatch,
+): Promise<Issue> {
+  const res = await fetchWithAuth(
+    `/api/issues/${encodeURIComponent(id)}?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  const body = (await res.json()) as { issue: Issue };
+  return body.issue;
 }
 
 export async function fetchAgent(repo: string): Promise<AgentSnapshot> {
