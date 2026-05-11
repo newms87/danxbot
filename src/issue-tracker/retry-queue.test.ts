@@ -52,6 +52,9 @@ vi.mock("./sync.js", async (importOriginal) => {
 import { syncIssue } from "./sync.js";
 import {
   _resetForTesting,
+  _setRngForTesting,
+  BACKOFF_BASE_MS,
+  BACKOFF_CAP_MS,
   backoffMsForAttempt,
   bootRescheduleRetryQueue,
   drainRetries,
@@ -61,6 +64,11 @@ import {
   setRetryQueueTrackerForRepo,
   type RetryQueueEntry,
 } from "./retry-queue.js";
+import {
+  _resetForTesting as resetCircuit,
+  _setNowForTesting as setCircuitNow,
+  recordFailure as circuitRecordFailure,
+} from "./circuit-breaker.js";
 import { ensureIssuesDirs, issuePath } from "../poller/yaml-lifecycle.js";
 import { parseIssue, serializeIssue } from "./yaml.js";
 import type { Issue, IssueTracker } from "./interface.js";
@@ -135,21 +143,48 @@ const noopLog = {
   error: () => undefined,
 };
 
-describe("backoffMsForAttempt", () => {
-  it("attempt 1 → 30s", () => {
-    expect(backoffMsForAttempt(1)).toBe(30 * 1000);
+describe("backoffMsForAttempt (DX-300 exponential + jitter)", () => {
+  // The base values: 120 * 2^(n-1) capped at 1800s. With jitter at the
+  // un-jittered floor (rng → 0), each attempt produces the pure base.
+  // Jitter ceiling (rng → 0.999) yields up to 10% over base.
+  it("attempt 1 → 120s base (no jitter)", () => {
+    expect(backoffMsForAttempt(1, () => 0)).toBe(120 * 1000);
   });
-  it("attempt 2 → 2min", () => {
-    expect(backoffMsForAttempt(2)).toBe(2 * 60 * 1000);
+  it("attempt 2 → 240s base", () => {
+    expect(backoffMsForAttempt(2, () => 0)).toBe(240 * 1000);
   });
-  it("attempt 3 → 10min", () => {
-    expect(backoffMsForAttempt(3)).toBe(10 * 60 * 1000);
+  it("attempt 3 → 480s base", () => {
+    expect(backoffMsForAttempt(3, () => 0)).toBe(480 * 1000);
   });
-  it("attempt 4 → 1h", () => {
-    expect(backoffMsForAttempt(4)).toBe(60 * 60 * 1000);
+  it("attempt 4 → 960s base", () => {
+    expect(backoffMsForAttempt(4, () => 0)).toBe(960 * 1000);
   });
-  it("attempt 24 → 1h (cap)", () => {
-    expect(backoffMsForAttempt(24)).toBe(60 * 60 * 1000);
+  it("attempt 5 → 1800s (cap, would be 1920s)", () => {
+    expect(backoffMsForAttempt(5, () => 0)).toBe(BACKOFF_CAP_MS);
+  });
+  it("attempt 24 → 1800s (still cap)", () => {
+    expect(backoffMsForAttempt(24, () => 0)).toBe(BACKOFF_CAP_MS);
+  });
+
+  it("jitter ceiling: attempt 1 with rng → 0.999 stays under 132s", () => {
+    // 120s base + 10% jitter ceiling = 132s. Strict floor → strict cap.
+    const val = backoffMsForAttempt(1, () => 0.999);
+    expect(val).toBeGreaterThanOrEqual(BACKOFF_BASE_MS);
+    expect(val).toBeLessThan(BACKOFF_BASE_MS * 1.1);
+  });
+
+  it("attempt 0 / negative → 0 (sanity, never called with these values in production)", () => {
+    expect(backoffMsForAttempt(0, () => 0)).toBe(0);
+    expect(backoffMsForAttempt(-1, () => 0)).toBe(0);
+  });
+
+  it("uses the module-level rng seam when no override is passed", () => {
+    _setRngForTesting(() => 0);
+    expect(backoffMsForAttempt(1)).toBe(BACKOFF_BASE_MS);
+    _setRngForTesting(() => 0.5);
+    const half = backoffMsForAttempt(1);
+    expect(half).toBeGreaterThan(BACKOFF_BASE_MS);
+    expect(half).toBeLessThanOrEqual(BACKOFF_BASE_MS * 1.05);
   });
 });
 
@@ -160,14 +195,20 @@ describe("retry-queue", () => {
   beforeEach(() => {
     vi.mocked(syncIssue).mockReset();
     _resetForTesting();
+    // Disable jitter for deterministic delay assertions across the file.
+    _setRngForTesting(() => 0);
+    // Reset the circuit breaker so a prior test's tripped breaker
+    // doesn't leak into this one (the breaker is module-singleton).
+    resetCircuit();
     tmpDir = mkdtempSync(join(tmpdir(), "danxbot-retry-queue-"));
   });
 
   afterEach(() => {
-    // Cancel every armed timer + clear repo registries so a 30s-deferred
+    // Cancel every armed timer + clear repo registries so a deferred
     // retry from one case doesn't leak into another (or fire after
     // `tmpDir` is rmSync'd and panic on a missing file).
     _resetForTesting();
+    resetCircuit();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -188,11 +229,13 @@ describe("retry-queue", () => {
       expect(files[0]).toBe("001700000000000-deadbeef.json");
 
       const entry = readQueueEntry(tmpDir, files[0]!);
+      // DX-300: attempt-1 backoff is 120s (was 30s pre-DX-300). Jitter
+      // is pinned to 0 via the beforeEach `_setRngForTesting` seam.
       expect(entry).toMatchObject({
         issueId: "ISS-100",
         attempt: 1,
         queuedAt: 1700000000000,
-        nextEligibleAt: 1700000000000 + 30 * 1000,
+        nextEligibleAt: 1700000000000 + 120 * 1000,
         lastErr: "tracker 500",
       });
     });
@@ -417,13 +460,16 @@ describe("retry-queue", () => {
         random: () => "z",
       });
 
-      // First drain: tracker fails.
+      // First drain: tracker fails. Pre-DX-300 attempt-1 backoff was
+      // 30s; DX-300 is 120s, so the eligibility math shifts forward.
+      // Queued at t=1000, attempt-1 backoff 120000 → eligible at
+      // t=121000. Drain at t=200000 → eligible.
       vi.mocked(syncIssue).mockRejectedValueOnce(new Error("Trello 500"));
       const result1 = await drainRetries({
         tracker,
         repoLocalPath: tmpDir,
         prefix: "ISS",
-        now: () => 100_000, // entry's nextEligibleAt was 1000 + 30000 = 31000 — eligible
+        now: () => 200_000,
         log: noopLog,
       });
       expect(result1.failed).toBe(1);
@@ -435,8 +481,8 @@ describe("retry-queue", () => {
       const entry1 = readQueueEntry(tmpDir, files1[0]!);
       expect(entry1.attempt).toBe(2);
       expect(entry1.lastErr).toBe("Trello 500");
-      // attempt 2 backoff is 2min from now (100_000)
-      expect(entry1.nextEligibleAt).toBe(100_000 + 2 * 60 * 1000);
+      // attempt 2 backoff is 240s (4min) from drain `now` (200_000).
+      expect(entry1.nextEligibleAt).toBe(200_000 + 240 * 1000);
 
       // Second drain BEFORE the new eligibility — must skip the entry,
       // not call syncIssue.
@@ -449,7 +495,7 @@ describe("retry-queue", () => {
         tracker,
         repoLocalPath: tmpDir,
         prefix: "ISS",
-        now: () => 100_000 + 30_000, // still inside the 2min window
+        now: () => 200_000 + 60_000, // still inside the 240s window
         log: noopLog,
       });
       expect(result2.skipped).toBe(1);
@@ -468,7 +514,7 @@ describe("retry-queue", () => {
         tracker,
         repoLocalPath: tmpDir,
         prefix: "ISS",
-        now: () => 100_000 + 2 * 60 * 1000 + 1, // just past eligibility
+        now: () => 200_000 + 240 * 1000 + 1, // just past eligibility
         log: noopLog,
       });
       expect(result3.succeeded).toBe(1);
@@ -743,7 +789,7 @@ describe("retry-queue", () => {
         tracker,
         repoLocalPath: tmpDir,
         prefix: "ISS",
-        now: () => 1000, // exactly at queuedAt — nextEligibleAt = 1000+30000 > 1000
+        now: () => 1000, // exactly at queuedAt — nextEligibleAt = 1000+120000 > 1000
         log: noopLog,
       });
 
@@ -1038,18 +1084,18 @@ describe("retry-queue", () => {
       expect(syncIssue).not.toHaveBeenCalled();
       expect(listQueueFiles(tmpDir)).toHaveLength(1);
 
-      // Just inside the backoff window — still nothing.
-      await vi.advanceTimersByTimeAsync(29_000);
+      // Just inside the 120s backoff window — still nothing.
+      await vi.advanceTimersByTimeAsync(119_000);
       expect(syncIssue).not.toHaveBeenCalled();
 
-      // Cross the 30s threshold — timer fires + callback drains the entry.
+      // Cross the 120s threshold — timer fires + callback drains the entry.
       await vi.advanceTimersByTimeAsync(2_000);
 
       expect(syncIssue).toHaveBeenCalledTimes(1);
       expect(listQueueFiles(tmpDir)).toEqual([]);
     });
 
-    it("transient tracker error reschedules a fresh setTimeout for the next backoff (30s → 2min) and unlinks on eventual success", async () => {
+    it("transient tracker error reschedules a fresh setTimeout for the next backoff (120s → 240s) and unlinks on eventual success", async () => {
       const issue = makeIssue({ id: "ISS-701", external_id: "ext-701" });
       writeOpenIssue(tmpDir, issue);
       // Attempt 1: throw. Attempt 2: succeed.
@@ -1070,21 +1116,21 @@ describe("retry-queue", () => {
         errMessage: "tracker 503",
       });
 
-      // Fire attempt 1 — fails — rewrites entry with attempt=2 + nextEligibleAt at +2min.
-      await vi.advanceTimersByTimeAsync(31_000);
+      // Fire attempt 1 — fails — rewrites entry with attempt=2 + nextEligibleAt at +240s.
+      await vi.advanceTimersByTimeAsync(121_000);
       expect(calls).toBe(1);
       const filesAfterFail = listQueueFiles(tmpDir);
       expect(filesAfterFail).toHaveLength(1);
       const entryAfterFail = readQueueEntry(tmpDir, filesAfterFail[0]!);
       expect(entryAfterFail.attempt).toBe(2);
-      // Sanity: rescheduled at attempt-2 backoff (2min) from the fire moment (~30s past queuedAt).
-      expect(entryAfterFail.nextEligibleAt).toBeGreaterThan(1700000000000 + 2 * 60 * 1000);
+      // Sanity: rescheduled at attempt-2 backoff (240s) from the fire moment (~120s past queuedAt).
+      expect(entryAfterFail.nextEligibleAt).toBeGreaterThan(1700000000000 + 240 * 1000);
 
-      // Advance just shy of the 2-min mark — nothing more fired.
-      await vi.advanceTimersByTimeAsync(2 * 60 * 1000 - 10_000);
+      // Advance just shy of the 240s mark — nothing more fired.
+      await vi.advanceTimersByTimeAsync(240 * 1000 - 10_000);
       expect(calls).toBe(1);
 
-      // Cross the 2-min mark — attempt 2 fires + succeeds + unlinks.
+      // Cross the 240s mark — attempt 2 fires + succeeds + unlinks.
       await vi.advanceTimersByTimeAsync(20_000);
       expect(calls).toBe(2);
       expect(listQueueFiles(tmpDir)).toEqual([]);
@@ -1229,8 +1275,8 @@ describe("retry-queue", () => {
       });
       expect(result).toEqual({ rearmed: 2, malformed: 0 });
 
-      // Cross both entries' backoff windows.
-      await vi.advanceTimersByTimeAsync(31_000);
+      // Cross both entries' backoff windows (attempt-1 = 120s).
+      await vi.advanceTimersByTimeAsync(121_000);
 
       expect(syncIssue).toHaveBeenCalledTimes(2);
       expect(listQueueFiles(tmpDir)).toEqual([]);
@@ -1259,7 +1305,7 @@ describe("retry-queue", () => {
         errMessage: "tracker 502",
       });
 
-      await vi.advanceTimersByTimeAsync(31_000);
+      await vi.advanceTimersByTimeAsync(121_000);
 
       expect(syncIssue).toHaveBeenCalledTimes(1);
       expect(listQueueFiles(tmpDir)).toEqual([]);
@@ -1364,7 +1410,7 @@ describe("retry-queue", () => {
       );
       writeFileSync(path, "{{not json}}");
 
-      await vi.advanceTimersByTimeAsync(31_000);
+      await vi.advanceTimersByTimeAsync(121_000);
 
       expect(syncIssue).not.toHaveBeenCalled();
       expect(listQueueFiles(tmpDir)).toEqual([]);
@@ -1404,6 +1450,108 @@ describe("retry-queue", () => {
       expect(syncIssue).not.toHaveBeenCalled();
       expect(listQueueFiles(tmpDir)).toEqual([]);
       expect(recordSystemError).toHaveBeenCalledTimes(1);
+    });
+
+    it("fireRetry (timer path) defers without bumping attempt when the circuit is open AT FIRE TIME", async () => {
+      // DX-300: the production hot path is `fireRetry`, not
+      // `drainRetries`. The drain tests pin the same semantics but
+      // pin them at the wrong code path — this test exercises the
+      // setTimeout-driven branch.
+      const issue = makeIssue({ id: "ISS-2310", external_id: "ext-2310" });
+      writeOpenIssue(tmpDir, issue);
+      vi.mocked(syncIssue).mockResolvedValue({
+        updatedLocal: issue,
+        remoteWriteCount: 0,
+      });
+      vi.setSystemTime(1_700_000_000_000);
+      // Wire the breaker's now-provider to the same fake clock as the
+      // queue so they stay in lockstep across the fake-timer advances.
+      setCircuitNow(() => Date.now());
+
+      enqueueRetry({
+        issueId: "ISS-2310",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        errMessage: "tracker 503",
+      });
+
+      // Advance to just before the 120s backoff window so the
+      // breaker trip happens RIGHT before the timer fires (otherwise
+      // the breaker's 60s cooldown expires before the queue's 120s
+      // backoff and the fire-time check observes half-open).
+      await vi.advanceTimersByTimeAsync(115_000);
+      circuitRecordFailure(
+        new Error("Trello API error: 429 Too Many Requests (GET /pre-fire)"),
+        { endpoint: "GET /pre-fire" },
+      );
+
+      // Now cross the original 120s threshold → timer fires →
+      // observes open breaker → defers w/o tracker call.
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(syncIssue).not.toHaveBeenCalled();
+      // Entry still queued, attempt STILL 1 (no bump), rescheduled
+      // for past the cooldown window.
+      const files = listQueueFiles(tmpDir);
+      expect(files).toHaveLength(1);
+      const e = readQueueEntry(tmpDir, files[0]!);
+      expect(e.attempt).toBe(1);
+      // Breaker tripped at t = 1_700_000_000_000 + 115_000; cooldown
+      // ends at +60_000 = 1_700_000_000_175_000. Defer reschedules
+      // past that. The exact value depends on jitter; just assert
+      // it sits strictly past the cooldown floor.
+      expect(e.nextEligibleAt).toBeGreaterThanOrEqual(
+        1_700_000_000_000 + 115_000 + 60_000,
+      );
+    });
+
+    it("fireRetry: race-case — syncIssue throws TrelloCircuitOpen-shaped error after the up-front check → defers w/o attempt bump", async () => {
+      // Pin the post-call branch in `fireRetry` (the `isCircuitOpenMessage`
+      // matcher inside the error path). Without this, the production
+      // path would bump the attempt counter on a race-failure that
+      // semantically was a deferral, not a real failure.
+      const issue = makeIssue({ id: "ISS-2311", external_id: "ext-2311" });
+      writeOpenIssue(tmpDir, issue);
+      // Simulate the wrapper short-circuiting AFTER fireRetry's
+      // up-front check passed. syncIssue throws a circuit-open shape
+      // on EVERY call (the breaker stays open across re-fires until
+      // the cooldown elapses; subsequent timers re-arm via defer).
+      vi.mocked(syncIssue).mockRejectedValue(
+        new Error("Trello circuit open until 2026-05-12T00:00:00.000Z"),
+      );
+      vi.setSystemTime(1_700_000_000_000);
+      setCircuitNow(() => Date.now());
+
+      enqueueRetry({
+        issueId: "ISS-2311",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        issuePrefix: "ISS",
+        tracker,
+        errMessage: "tracker 503",
+      });
+
+      // Cross the 120s window — fireRetry fires, the up-front
+      // isOpen() check returns false (we didn't trip the breaker
+      // via `circuitRecordFailure`), syncIssue runs (rejected mock),
+      // the catch returns a circuit-open-shaped error, the post-call
+      // branch matches it and defers without bumping attempt.
+      // `mockRejectedValue` (persistent) keeps producing the same
+      // error on every re-armed fire so the test exercises the
+      // race-branch repeatedly without flipping into normal-failure
+      // accounting on a second call.
+      await vi.advanceTimersByTimeAsync(121_000);
+
+      // At least one call landed (the race-branch matched it).
+      expect(vi.mocked(syncIssue).mock.calls.length).toBeGreaterThanOrEqual(1);
+      const files = listQueueFiles(tmpDir);
+      expect(files).toHaveLength(1);
+      const e = readQueueEntry(tmpDir, files[0]!);
+      // Attempt NOT bumped — every race-branch invocation in this
+      // sequence treated the wrapper short-circuit as a deferral.
+      expect(e.attempt).toBe(1);
     });
 
     it("recordSystemError hook throwing on timer-driven exhaustion does not crash the timer or leave the entry on disk", async () => {
@@ -1450,5 +1598,217 @@ describe("retry-queue", () => {
       expect(listQueueFiles(tmpDir)).toEqual([]);
       expect(recordSystemError).toHaveBeenCalledTimes(1);
     }, 10_000);
+  });
+
+  /**
+   * DX-300 — retry queue defers without consuming an attempt while
+   * the process-wide Trello circuit breaker is open. The wiring is
+   * the load-bearing bit: a 429 from any caller pauses every queue
+   * entry's next fire for the cooldown window, then drains as
+   * normal once the breaker probes closed.
+   */
+  describe("circuit-breaker integration (DX-300)", () => {
+    it("drainRetries defers an eligible entry WITHOUT bumping attempt when the circuit is open", async () => {
+      const issue = makeIssue({ id: "ISS-2301", external_id: "ext-2301" });
+      writeOpenIssue(tmpDir, issue);
+      enqueueRetry({
+        issueId: "ISS-2301",
+        repoLocalPath: tmpDir,
+        now: () => 1_000,
+        random: () => "a",
+      });
+
+      // Trip the circuit at t=200_000 so it's open through the drain.
+      let nowMs = 200_000;
+      setCircuitNow(() => nowMs);
+      circuitRecordFailure(
+        new Error("Trello API error: 429 Too Many Requests (GET /cards/x)"),
+        { endpoint: "GET /cards/x" },
+      );
+
+      const result = await drainRetries({
+        tracker,
+        repoLocalPath: tmpDir,
+        prefix: "ISS",
+        now: () => nowMs,
+        log: noopLog,
+      });
+
+      // No tracker call, no attempt bump.
+      expect(syncIssue).not.toHaveBeenCalled();
+      expect(result.attempted).toBe(0);
+      expect(result.skipped).toBe(1);
+      // Entry still queued, attempt still 1, nextEligibleAt past circuit cooldown.
+      const files = listQueueFiles(tmpDir);
+      expect(files).toHaveLength(1);
+      const rewritten = readQueueEntry(tmpDir, files[0]!);
+      expect(rewritten.attempt).toBe(1);
+      // Cooldown ended at 200_000 + 60s = 260_000; jitter pinned to 0
+      // by the beforeEach rng seam, so wake is exactly 260_000.
+      expect(rewritten.nextEligibleAt).toBe(260_000);
+    });
+
+    it("N concurrent entries all defer through ONE circuit-open event (no flood of tracker calls)", async () => {
+      // Plant 5 eligible entries; trip the circuit once; verify NONE
+      // of them issued a tracker call, and they all rescheduled to
+      // the same circuit-cooldown wake-up.
+      const ids = ["ISS-2302", "ISS-2303", "ISS-2304", "ISS-2305", "ISS-2306"];
+      for (let i = 0; i < ids.length; i++) {
+        writeOpenIssue(
+          tmpDir,
+          makeIssue({ id: ids[i]!, external_id: `ext-${i}` }),
+        );
+        enqueueRetry({
+          issueId: ids[i]!,
+          repoLocalPath: tmpDir,
+          now: () => 1_000 + i,
+          random: () => String.fromCharCode(97 + i).repeat(8),
+        });
+      }
+      expect(listQueueFiles(tmpDir)).toHaveLength(5);
+
+      let nowMs = 300_000;
+      setCircuitNow(() => nowMs);
+      circuitRecordFailure(
+        new Error("Trello API error: 429 Too Many Requests (GET /cards/y)"),
+        { endpoint: "GET /cards/y" },
+      );
+
+      const result = await drainRetries({
+        tracker,
+        repoLocalPath: tmpDir,
+        prefix: "ISS",
+        now: () => nowMs,
+        log: noopLog,
+      });
+
+      expect(syncIssue).not.toHaveBeenCalled();
+      expect(result.attempted).toBe(0);
+      expect(result.skipped).toBe(5);
+      // Every entry deferred to circuit wake-up = 300_000 + 60s = 360_000
+      // (jitter pinned to 0 in beforeEach).
+      const all = listQueueFiles(tmpDir);
+      expect(all).toHaveLength(5);
+      for (const fn of all) {
+        const e = readQueueEntry(tmpDir, fn);
+        expect(e.attempt).toBe(1);
+        expect(e.nextEligibleAt).toBe(360_000);
+      }
+    });
+
+    it("race: circuit went open mid-syncIssue → outcome's TrelloCircuitOpen message defers w/o attempt bump", async () => {
+      // Simulate the wrapper short-circuiting mid-call (e.g. another
+      // caller tripped the breaker between the drain's top-of-loop
+      // isOpen() check and syncIssue's first sub-call). syncIssue
+      // throws a synthetic TrelloCircuitOpen-shaped Error here.
+      const issue = makeIssue({ id: "ISS-2307", external_id: "ext-2307" });
+      writeOpenIssue(tmpDir, issue);
+      enqueueRetry({
+        issueId: "ISS-2307",
+        repoLocalPath: tmpDir,
+        now: () => 1_000,
+        random: () => "r",
+      });
+
+      let nowMs = 400_000;
+      setCircuitNow(() => nowMs);
+      // Note: do NOT trip the breaker here — drain's top-of-loop check
+      // sees closed and proceeds into attemptPush. The mock then throws
+      // a circuit-open-shaped error from inside.
+      vi.mocked(syncIssue).mockRejectedValueOnce(
+        new Error("Trello circuit open until 2026-05-11T20:00:00.000Z"),
+      );
+
+      const result = await drainRetries({
+        tracker,
+        repoLocalPath: tmpDir,
+        prefix: "ISS",
+        now: () => nowMs,
+        log: noopLog,
+      });
+
+      // The wrapper short-circuited; queue treats it as a defer.
+      expect(result.attempted).toBe(0);
+      expect(result.failed).toBe(0);
+      expect(result.skipped).toBe(1);
+      const files = listQueueFiles(tmpDir);
+      expect(files).toHaveLength(1);
+      const rewritten = readQueueEntry(tmpDir, files[0]!);
+      expect(rewritten.attempt).toBe(1); // NOT bumped
+    });
+
+    it("deferEntryForCircuit jitter uses the breaker's INITIAL cooldown as the base, NOT the remaining cooldown window", async () => {
+      // Pin the fix for the "late-deferral jitter collapse" failure mode:
+      // when an entry defers RIGHT before the cooldown ends, the jitter
+      // window must STILL be ~6s wide (10% of 60s INITIAL cooldown),
+      // not ~0.1s (10% of remaining cooldown).
+      const issue = makeIssue({ id: "ISS-2309", external_id: "ext-2309" });
+      writeOpenIssue(tmpDir, issue);
+      enqueueRetry({
+        issueId: "ISS-2309",
+        repoLocalPath: tmpDir,
+        now: () => 1_000,
+        random: () => "z",
+      });
+
+      // Trip the breaker at t=500_000; cooldown ends at t=560_000.
+      let nowMs = 500_000;
+      setCircuitNow(() => nowMs);
+      circuitRecordFailure(
+        new Error("Trello API error: 429 Too Many Requests (GET /late)"),
+        { endpoint: "GET /late" },
+      );
+
+      // Drain LATE in the cooldown (5s before it ends). With the
+      // remaining-cooldown jitter, max-jitter would be ~500ms. With
+      // INITIAL-cooldown jitter, max-jitter is ~6s.
+      nowMs = 555_000;
+      // Max-jitter rng → 0.999 → jitter ~ 0.999 * 0.1 * 60_000 = 5994ms.
+      _setRngForTesting(() => 0.999);
+      const result = await drainRetries({
+        tracker,
+        repoLocalPath: tmpDir,
+        prefix: "ISS",
+        now: () => nowMs,
+        log: noopLog,
+      });
+      expect(result.skipped).toBe(1);
+      const files = listQueueFiles(tmpDir);
+      const e = readQueueEntry(tmpDir, files[0]!);
+      // Cooldown ends at 560_000. With INITIAL-base jitter we expect
+      // 560_000 + ~5990 (well above 560_500 the remaining-base math
+      // would have produced).
+      expect(e.nextEligibleAt).toBeGreaterThan(560_500);
+      expect(e.nextEligibleAt).toBeLessThan(560_000 + 6_000);
+    });
+
+    it("normal (non-circuit) tracker error STILL bumps attempt — sanity check the new branch didn't accidentally swallow real failures", async () => {
+      const issue = makeIssue({ id: "ISS-2308", external_id: "ext-2308" });
+      writeOpenIssue(tmpDir, issue);
+      enqueueRetry({
+        issueId: "ISS-2308",
+        repoLocalPath: tmpDir,
+        now: () => 1_000,
+        random: () => "r",
+      });
+
+      vi.mocked(syncIssue).mockRejectedValueOnce(new Error("Trello API error: 500 Server Error (GET /cards/z)"));
+
+      const result = await drainRetries({
+        tracker,
+        repoLocalPath: tmpDir,
+        prefix: "ISS",
+        now: () => 200_000,
+        log: noopLog,
+      });
+
+      expect(result.attempted).toBe(1);
+      expect(result.failed).toBe(1);
+      expect(result.skipped).toBe(0);
+      const files = listQueueFiles(tmpDir);
+      const rewritten = readQueueEntry(tmpDir, files[0]!);
+      // Normal failure → attempt bumped to 2.
+      expect(rewritten.attempt).toBe(2);
+    });
   });
 });

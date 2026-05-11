@@ -79,6 +79,13 @@ import type { Issue, IssueTracker } from "./interface.js";
 import { IssueParseError, parseIssue } from "./yaml.js";
 import { issuePath } from "./paths.js";
 import { loadActionItemTitles, syncIssue } from "./sync.js";
+import {
+  CIRCUIT_OPEN_MESSAGE_PREFIX,
+  INITIAL_COOLDOWN_MS as CIRCUIT_INITIAL_COOLDOWN_MS,
+  isOpen as circuitIsOpen,
+  openUntilMs as circuitOpenUntilMs,
+  TrelloCircuitOpen,
+} from "./circuit-breaker.js";
 import { persistIfDifferent } from "../issue/reconcile/trello-persist.js";
 import { setLastPushedHash } from "../issue/reconcile/push-hash-cache.js";
 import { canonicalize, sha256 } from "../db/canonicalize.js";
@@ -89,22 +96,72 @@ const log = createLogger("retry-queue");
 /** Hard cap on retry attempts. After this, the queue entry is dropped. */
 export const MAX_ATTEMPTS = 24;
 
-/** Backoff schedule (ms) — wait time BEFORE the attempt at this number. */
-const BACKOFF_MS_BY_ATTEMPT: ReadonlyArray<number> = [
-  // index 0 is unused; attempts are 1-indexed
-  0,
-  30 * 1000, // attempt 1: 30s
-  2 * 60 * 1000, // attempt 2: 2min
-  10 * 60 * 1000, // attempt 3: 10min
-];
-const BACKOFF_MS_DEFAULT = 60 * 60 * 1000; // attempt 4+: 1h
+/**
+ * Exponential backoff base (DX-300). Wait before attempt 1 is
+ * `BACKOFF_BASE_MS`; each subsequent attempt doubles the prior delay,
+ * capped at `BACKOFF_CAP_MS`. Schedule:
+ *
+ *   attempt 1 → 120s
+ *   attempt 2 → 240s
+ *   attempt 3 → 480s
+ *   attempt 4 → 960s
+ *   attempt 5+ → 1800s (cap)
+ *
+ * Replaces the pre-DX-300 fixed-step schedule (30s, 2min, 10min, 1h).
+ * The shift is deliberate: 30s was too aggressive against Trello's
+ * rate-limit cooldown (a 429 with a per-card 30s retry storms back
+ * inside the rate-limit window). 120s+ gives Trello time to relax,
+ * and combined with the process-wide circuit breaker
+ * (`circuit-breaker.ts`) every concurrent caller is paused on the
+ * first 429 so the queue alone doesn't extend the rate-limit window.
+ */
+export const BACKOFF_BASE_MS = 120 * 1000;
+export const BACKOFF_CAP_MS = 30 * 60 * 1000;
 
-/** ms to wait BEFORE the given attempt number. */
-export function backoffMsForAttempt(attempt: number): number {
-  if (attempt < BACKOFF_MS_BY_ATTEMPT.length && attempt >= 1) {
-    return BACKOFF_MS_BY_ATTEMPT[attempt]!;
-  }
-  return BACKOFF_MS_DEFAULT;
+/**
+ * Jitter fraction — `delay += rng() * BACKOFF_JITTER_FRACTION * delay`,
+ * so the realized delay is uniformly distributed in `[delay, delay * 1.1)`.
+ * Spreads N cards that all hit 429 simultaneously across the backoff
+ * window instead of having them all retry at the same instant.
+ */
+export const BACKOFF_JITTER_FRACTION = 0.1;
+
+/**
+ * Module-level jitter source. Production reads `Math.random`; tests
+ * swap via `_setRngForTesting` (typically `() => 0` for deterministic
+ * backoff equal to the un-jittered base, or `() => 0.999` to pin the
+ * worst-case jitter ceiling). Swapping per-call would require threading
+ * `rng` through every caller (enqueue, fire-retry rescheduler, drain
+ * rescheduler, boot rescheduler), which is much noisier.
+ */
+let rng: () => number = Math.random;
+
+/** Test seam — swap the jitter source. */
+export function _setRngForTesting(f: () => number): void {
+  rng = f;
+}
+
+/**
+ * Compute the delay (ms) to wait BEFORE attempt `attempt` (1-indexed).
+ *
+ * Formula: `min(BACKOFF_BASE_MS * 2^(attempt-1), BACKOFF_CAP_MS)`
+ *          + uniform jitter in `[0, BACKOFF_JITTER_FRACTION * baseDelay)`.
+ *
+ * The jitter source is module-level — see `_setRngForTesting`. Tests
+ * may also pass an explicit `rng` argument for one-off overrides.
+ */
+export function backoffMsForAttempt(
+  attempt: number,
+  rngOverride?: () => number,
+): number {
+  if (attempt < 1) return 0;
+  const exp = Math.min(
+    BACKOFF_BASE_MS * Math.pow(2, attempt - 1),
+    BACKOFF_CAP_MS,
+  );
+  const r = rngOverride ?? rng;
+  const jitter = r() * BACKOFF_JITTER_FRACTION * exp;
+  return Math.floor(exp + jitter);
 }
 
 /** On-disk shape — one JSON file per queued entry. */
@@ -340,6 +397,16 @@ async function fireRetry(
     return;
   }
 
+  // DX-300: defer (without consuming an attempt) when the process-wide
+  // Trello circuit breaker is open. The breaker was tripped by another
+  // caller hitting 429, so we already know any Trello-bound call would
+  // either short-circuit with TrelloCircuitOpen or — worse — actually
+  // hit the API mid-cooldown and extend the rate-limit window.
+  if (circuitIsOpen()) {
+    deferEntryForCircuit(path, entry, now);
+    return;
+  }
+
   const tracker = entryRepoName
     ? trackersByRepo.get(entryRepoName)
     : undefined;
@@ -394,6 +461,16 @@ async function fireRetry(
     return;
   }
 
+  // DX-300: race-case — the circuit-open check at fireRetry top saw
+  // closed, then syncIssue's first sub-call tripped the breaker (or
+  // raced another caller's trip). The wrapper rethrows
+  // `TrelloCircuitOpen` whose message comes through here verbatim;
+  // treat it as a deferral (no attempt bump), same as the pre-check.
+  if (isCircuitOpenMessage(result.errMessage)) {
+    deferEntryForCircuit(path, entry, now);
+    return;
+  }
+
   // Tracker errored — bump attempt and reschedule, OR exhaust.
   const newAttempt = entry.attempt + 1;
   if (newAttempt > MAX_ATTEMPTS) {
@@ -406,19 +483,70 @@ async function fireRetry(
     return;
   }
   const nowMs = now?.() ?? Date.now();
+  const delayMs = backoffMsForAttempt(newAttempt);
   const rewritten: RetryQueueEntry = {
     ...entry,
     attempt: newAttempt,
-    nextEligibleAt: nowMs + backoffMsForAttempt(newAttempt),
+    nextEligibleAt: nowMs + delayMs,
     lastErr: result.errMessage,
   };
   writeFileSync(path, JSON.stringify(rewritten));
   log.warn(
     `Retry queue: ${entry.issueId} attempt ${entry.attempt} failed (${result.errMessage}); next attempt in ${Math.round(
-      backoffMsForAttempt(newAttempt) / 1000,
+      delayMs / 1000,
     )}s`,
   );
   armTimer(path, rewritten, now);
+}
+
+/**
+ * Match the error shape `TrelloCircuitOpen.message` produces from
+ * `circuit-breaker.ts`. Used by the queue's race-handler — when the
+ * tracker wrapper short-circuits mid-syncIssue, the error makes its
+ * way back here as a string in `outcome.errMessage`, not the typed
+ * `TrelloCircuitOpen` class, so we check the prefix.
+ */
+function isCircuitOpenMessage(msg: string): boolean {
+  return msg.startsWith(CIRCUIT_OPEN_MESSAGE_PREFIX);
+}
+
+/**
+ * Defer an entry until just past the breaker's `openUntilMs`, without
+ * bumping the per-card attempt counter (the breaker is a separate
+ * back-pressure axis from the per-card retry budget). Adds the same
+ * 0-10% jitter as a normal reschedule so 20 entries blocked on the
+ * breaker don't all wake up at the same instant.
+ */
+function deferEntryForCircuit(
+  path: string,
+  entry: RetryQueueEntry,
+  now: (() => number) | undefined,
+): void {
+  const nowMs = now?.() ?? Date.now();
+  const cooldownEnds = circuitOpenUntilMs();
+  // Sanity: if the breaker has already elapsed by the time we get
+  // here (raced state), set the wake-up slightly into the future to
+  // avoid a busy-loop where the timer fires immediately into another
+  // open-state observation.
+  const baseTarget = Math.max(cooldownEnds, nowMs + 1_000);
+  // Jitter window is anchored on the breaker's INITIAL cooldown (not
+  // the per-call remaining-cooldown). Anchoring on remaining-cooldown
+  // would collapse jitter for entries that defer LATE in the cooldown
+  // (e.g. an entry hitting `circuitIsOpen()` ~1s before the cooldown
+  // ends would have `[0, 100ms)` jitter and pile onto the wake-up
+  // edge along with every other late entry).
+  const jitterMs = Math.floor(
+    rng() * BACKOFF_JITTER_FRACTION * CIRCUIT_INITIAL_COOLDOWN_MS,
+  );
+  const rearmedEntry: RetryQueueEntry = {
+    ...entry,
+    nextEligibleAt: baseTarget + jitterMs,
+  };
+  writeFileSync(path, JSON.stringify(rearmedEntry));
+  log.info(
+    `Retry queue: ${entry.issueId} deferred — Trello circuit open (cooldown ends ${new Date(cooldownEnds).toISOString()})`,
+  );
+  armTimer(path, rearmedEntry, now);
 }
 
 /**
@@ -602,6 +730,7 @@ export function _resetForTesting(): void {
   armedTimers.clear();
   trackersByRepo.clear();
   systemErrorHookByRepo.clear();
+  rng = Math.random;
 }
 
 /**
@@ -715,6 +844,16 @@ export async function drainRetries(deps: DrainDeps): Promise<DrainResult> {
       result.exhausted++;
       continue;
     }
+    // DX-300: defer past the circuit-breaker cooldown without burning
+    // the per-card attempt budget. Mirrors `fireRetry`'s up-front gate
+    // so the test-flush path observes identical semantics. The entry
+    // is rewritten with a new `nextEligibleAt` so the next drain skips
+    // it cleanly until the breaker has recovered.
+    if (circuitIsOpen()) {
+      deferEntryForCircuit(path, entry, deps.now);
+      result.skipped++;
+      continue;
+    }
     const outcome = await attemptPush({
       issueId: entry.issueId,
       repoName: entry.repoName ?? repoName,
@@ -738,8 +877,18 @@ export async function drainRetries(deps: DrainDeps): Promise<DrainResult> {
       result.yamlInvalid++;
       continue;
     }
+    // DX-300: race-case (circuit went open mid-syncIssue) → defer
+    // without burning the per-card attempt budget AND without bumping
+    // `attempted` — the tracker wrapper short-circuited before the
+    // outbound HTTP call, so no tracker call was actually issued.
+    if (!outcome.succeeded && isCircuitOpenMessage(outcome.errMessage)) {
+      deferEntryForCircuit(path, entry, deps.now);
+      result.skipped++;
+      continue;
+    }
     // `attempted` counts only entries that issued a tracker call. yamlMissing
-    // / yamlInvalid short-circuited above without one, matching the DX-132
+    // / yamlInvalid short-circuited above without one; circuit-open is
+    // handled in the branch immediately above. Matches the DX-132
     // semantics the legacy drain promised.
     result.attempted++;
     if (outcome.succeeded) {
@@ -761,17 +910,18 @@ export async function drainRetries(deps: DrainDeps): Promise<DrainResult> {
       result.exhausted++;
       continue;
     }
+    const delayMs = backoffMsForAttempt(newAttempt);
     const rewritten: RetryQueueEntry = {
       ...entry,
       attempt: newAttempt,
-      nextEligibleAt: now() + backoffMsForAttempt(newAttempt),
+      nextEligibleAt: now() + delayMs,
       lastErr: outcome.errMessage,
     };
     writeFileSync(path, JSON.stringify(rewritten));
     result.failed++;
     logger.warn(
       `Retry queue: ${entry.issueId} attempt ${entry.attempt} failed (${outcome.errMessage}); next attempt in ${Math.round(
-        backoffMsForAttempt(newAttempt) / 1000,
+        delayMs / 1000,
       )}s`,
     );
   }

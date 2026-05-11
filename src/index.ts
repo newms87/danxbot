@@ -19,6 +19,7 @@ import {
   setReconcileTrackerForRepo,
 } from "./issue/reconcile.js";
 import { bootRescheduleRetryQueue } from "./issue-tracker/retry-queue.js";
+import { setCircuitLogger } from "./issue-tracker/circuit-breaker.js";
 import { createIssueTracker } from "./issue-tracker/index.js";
 import { bootScheduler, onReconcileResult } from "./dispatch/scheduler.js";
 import {
@@ -47,6 +48,13 @@ import { replayStopQueue } from "./worker/replay-stop-queue.js";
 import { cleanupLegacyNeedsApproval } from "./worker/legacy-cleanup.js";
 
 const log = createLogger("startup");
+
+// DX-300: wire the Trello circuit-breaker's log surface to the
+// project logger ONCE at module load (before any tracker call can
+// trip the breaker). Without this the breaker's open/close lines
+// would land on the default no-op logger and the operator would
+// have no signal a rate-limit cooldown is in effect.
+setCircuitLogger(createLogger("trello-circuit"));
 
 /**
  * Assert that the Claude Code session-log directory is accessible and writable.

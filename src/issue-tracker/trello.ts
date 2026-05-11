@@ -1,5 +1,12 @@
 import type { TrelloConfig } from "../types.js";
 import {
+  isOpen as circuitIsOpen,
+  openUntilMs as circuitOpenUntilMs,
+  recordFailure as circuitRecordFailure,
+  recordSuccess as circuitRecordSuccess,
+  TrelloCircuitOpen,
+} from "./circuit-breaker.js";
+import {
   isTriaged,
   type CreateCardInput,
   type Issue,
@@ -818,17 +825,48 @@ export class TrelloTracker implements IssueTracker {
 
   // ---------- HTTP helpers ----------
 
+  // ----- HTTP helpers with circuit-breaker gating (DX-300) -----
+  //
+  // Every Trello-bound call funnels through `requestRaw`, which carries
+  // the pre-call circuit check + post-call recordSuccess/recordFailure.
+  // The pre-call check short-circuits with `TrelloCircuitOpen` when the
+  // breaker is open, so 20 concurrent callers don't all hit Trello after
+  // the first 429 trips the breaker. The post-call branch records
+  // success/failure; only 429s actually trip the breaker (other failures
+  // are pass-through). Side-effects are contained here so callers
+  // (`syncIssue`, retry-queue, reconcile) don't need to know the breaker
+  // exists. Network-level failures (DNS, TCP reset, fetch abort) bubble
+  // up as-is — they are NOT 429s and do not trip the breaker.
+  //
+  // `requestJson` and `requestVoid` are thin shape-adapters over
+  // `requestRaw`: they decide how to read the response body, nothing else.
+
+  private async requestRaw(
+    url: string,
+    init: RequestInit,
+    endpoint: string,
+  ): Promise<Response> {
+    if (circuitIsOpen()) {
+      throw new TrelloCircuitOpen(circuitOpenUntilMs());
+    }
+    const response = await fetch(url, init);
+    if (!response.ok) {
+      const err = new Error(
+        `Trello API error: ${response.status} ${response.statusText} (${endpoint})`,
+      );
+      circuitRecordFailure(err, { endpoint });
+      throw err;
+    }
+    circuitRecordSuccess();
+    return response;
+  }
+
   private async requestJson<T>(
     url: string,
     init: RequestInit,
     endpoint: string,
   ): Promise<T> {
-    const response = await fetch(url, init);
-    if (!response.ok) {
-      throw new Error(
-        `Trello API error: ${response.status} ${response.statusText} (${endpoint})`,
-      );
-    }
+    const response = await this.requestRaw(url, init, endpoint);
     return (await response.json()) as T;
   }
 
@@ -837,12 +875,7 @@ export class TrelloTracker implements IssueTracker {
     init: RequestInit,
     endpoint: string,
   ): Promise<void> {
-    const response = await fetch(url, init);
-    if (!response.ok) {
-      throw new Error(
-        `Trello API error: ${response.status} ${response.statusText} (${endpoint})`,
-      );
-    }
+    await this.requestRaw(url, init, endpoint);
   }
 }
 

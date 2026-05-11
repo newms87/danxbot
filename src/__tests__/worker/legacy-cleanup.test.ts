@@ -26,6 +26,7 @@ import {
 import { cleanupLegacyNeedsApproval } from "../../worker/legacy-cleanup.js";
 import { TrelloTracker } from "../../issue-tracker/trello.js";
 import { MemoryTracker } from "../../issue-tracker/memory.js";
+import { _resetForTesting as resetCircuit } from "../../issue-tracker/circuit-breaker.js";
 import {
   _clearSystemErrors,
   listSystemErrors,
@@ -110,12 +111,20 @@ describe("cleanupLegacyNeedsApproval", () => {
       recursive: true,
     });
     _clearSystemErrors();
+    // DX-300: reset the process-wide Trello circuit breaker between
+    // cases. Several tests below inject 429 responses to test failure
+    // paths, which trips the breaker; without this reset, the next
+    // test's `deleteLabel` / `archiveList` would short-circuit before
+    // hitting fetch and the "label cleanup still runs" invariant
+    // would silently break.
+    resetCircuit();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
     rmSync(scratch, { recursive: true, force: true });
     _clearSystemErrors();
+    resetCircuit();
   });
 
   // Default lookup mock: list + label both absent. Per-test scenarios
@@ -429,8 +438,15 @@ describe("cleanupLegacyNeedsApproval", () => {
       if (url.includes(`/lists/${LEGACY_LIST_ID}/cards`))
         return jsonResponse([{ id: CARD_ID, name: "#DX-100: Card that fails" }]);
       // moveToStatus PUT fails — migration aborts before getCard fires.
+      // DX-300: use 5xx not 429 — a 429 trips the process-wide circuit
+      // breaker, which (correctly) pauses every subsequent Trello call
+      // including the deleteLabel cleanup we want this test to observe.
+      // The intent of the test ("orchestrator continues past one
+      // failure") is preserved with any non-2xx code; rate-limit
+      // back-pressure is a separate concern pinned in
+      // `src/__tests__/integration/trello-circuit.test.ts`.
       if (url.includes(`/cards/${CARD_ID}?`) && init?.method === "PUT") {
-        return new Response("rate limited", { status: 429 });
+        return new Response("server error", { status: 500 });
       }
       // Archive must NOT be called when migration failed — assert this
       // via the throw in the default branch below.
@@ -521,8 +537,11 @@ describe("cleanupLegacyNeedsApproval", () => {
       // Enumerating cards on the legacy list blows up — orchestrator
       // can't safely decide whether the list is empty, so it skips
       // archival entirely. Label cleanup is independent and proceeds.
+      // DX-300: use 5xx not 429 — see the matching comment in the
+      // "card migration failure" test for the rate-limit-vs-circuit
+      // rationale.
       if (url.includes(`/lists/${LEGACY_LIST_ID}/cards`)) {
-        return new Response("rate limited", { status: 429 });
+        return new Response("server error", { status: 500 });
       }
       // Archive call MUST NOT fire — guarded by the catch.
       if (

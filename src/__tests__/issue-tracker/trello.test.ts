@@ -4,6 +4,13 @@ import {
   formatCardTitle,
   parseCardTitle,
 } from "../../issue-tracker/trello.js";
+import {
+  TrelloCircuitOpen,
+  _resetForTesting as resetCircuit,
+  _setNowForTesting as setCircuitNow,
+  getState as getCircuitState,
+  setCircuitLogger,
+} from "../../issue-tracker/circuit-breaker.js";
 import type { TrelloConfig } from "../../types.js";
 
 const TRELLO: TrelloConfig = {
@@ -33,9 +40,12 @@ describe("TrelloTracker", () => {
   beforeEach(() => {
     fetchMock = vi.fn();
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    // Isolate from any other test that left the circuit-breaker open.
+    resetCircuit();
   });
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    resetCircuit();
   });
 
   function jsonResponse(body: unknown, status = 200): Response {
@@ -1000,6 +1010,126 @@ describe("parseCardTitle / formatCardTitle prefix roundtrip", () => {
       // (the tracker is the mirror, not the source of truth).
       expect(formatCardTitle("DX-1", "")).toBe("#DX-1: ");
       expect(parseCardTitle("#DX-1: ")).toEqual({ id: "DX-1", title: "" });
+    });
+  });
+
+  describe("circuit breaker integration (DX-300)", () => {
+    // The wrapper short-circuits with `TrelloCircuitOpen` while the
+    // breaker is open AND records 429s back to the breaker. The state-
+    // machine semantics are exhaustively pinned in
+    // `circuit-breaker.test.ts`; here we pin only the WIRING.
+    //
+    // This block is a top-level sibling of the main `describe("TrelloTracker")`
+    // block (above), so its `fetchMock` doesn't reach here — re-set up
+    // the global fetch stub locally.
+
+    const originalFetch = globalThis.fetch;
+    let fetchMock: ReturnType<typeof vi.fn>;
+    beforeEach(() => {
+      fetchMock = vi.fn();
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+      resetCircuit();
+      setCircuitLogger({ info: () => undefined, warn: () => undefined });
+    });
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      resetCircuit();
+    });
+
+    function jsonOk(body: unknown): Response {
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    function rateLimited(): Response {
+      return new Response("Too Many Requests", {
+        status: 429,
+        statusText: "Too Many Requests",
+      });
+    }
+
+    it("trips the breaker on a 429 and short-circuits subsequent calls", async () => {
+      const t = 1_700_000_000_000;
+      setCircuitNow(() => t);
+      const tracker = new TrelloTracker(TRELLO);
+
+      fetchMock.mockResolvedValueOnce(rateLimited());
+      await expect(tracker.findLabelByName("Triaged")).rejects.toThrow(
+        /Trello API error: 429/,
+      );
+      expect(getCircuitState()).toBe("open");
+
+      // Second call must NOT hit fetch — short-circuit.
+      fetchMock.mockClear();
+      await expect(tracker.findLabelByName("Triaged")).rejects.toBeInstanceOf(
+        TrelloCircuitOpen,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("does NOT trip the breaker on non-429 errors", async () => {
+      const t = 1_700_000_000_000;
+      setCircuitNow(() => t);
+      const tracker = new TrelloTracker(TRELLO);
+
+      fetchMock.mockResolvedValueOnce(
+        new Response("Server Error", {
+          status: 500,
+          statusText: "Server Error",
+        }),
+      );
+      await expect(tracker.findLabelByName("Triaged")).rejects.toThrow(
+        /Trello API error: 500/,
+      );
+      expect(getCircuitState()).toBe("closed");
+
+      // Next call still issues fetch.
+      fetchMock.mockResolvedValueOnce(jsonOk([{ id: "lbl-x", name: "Other" }]));
+      await tracker.findLabelByName("Other");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("requestVoid path (e.g. moveToStatus) also respects the breaker (independent wiring from requestJson)", async () => {
+      // `requestJson` and `requestVoid` are thin shape-adapters over a
+      // shared `requestRaw`, but pin BOTH so a future refactor that
+      // splits them again can't accidentally drop the gate on one side.
+      let t = 1_700_000_000_000;
+      setCircuitNow(() => t);
+      const tracker = new TrelloTracker(TRELLO);
+
+      // Trip via a requestVoid call (moveToStatus uses PUT → requestVoid).
+      fetchMock.mockResolvedValueOnce(rateLimited());
+      await expect(tracker.moveToStatus("card-x", "Done")).rejects.toThrow(/429/);
+      expect(getCircuitState()).toBe("open");
+
+      // Next requestVoid call must short-circuit (not hit fetch).
+      fetchMock.mockClear();
+      await expect(tracker.moveToStatus("card-y", "Done")).rejects.toBeInstanceOf(
+        TrelloCircuitOpen,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("records success and resets to closed after half-open recovery", async () => {
+      let nowMs = 1_700_000_000_000;
+      setCircuitNow(() => nowMs);
+      const tracker = new TrelloTracker(TRELLO);
+
+      // Trip → 60s cooldown.
+      fetchMock.mockResolvedValueOnce(rateLimited());
+      await expect(tracker.findLabelByName("Triaged")).rejects.toThrow(/429/);
+      expect(getCircuitState()).toBe("open");
+
+      // Advance past cooldown → state becomes half-open on observation.
+      nowMs += 60_000;
+      expect(getCircuitState()).toBe("half-open");
+
+      // Probe success → closed.
+      fetchMock.mockResolvedValueOnce(jsonOk([{ id: "lbl-x", name: "Triaged" }]));
+      await tracker.findLabelByName("Triaged");
+      expect(getCircuitState()).toBe("closed");
     });
   });
 
