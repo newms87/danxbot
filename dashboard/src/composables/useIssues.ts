@@ -22,6 +22,14 @@ export interface UseIssues {
    */
   moveIssueStatus: (id: string, toStatus: IssueStatus) => Promise<void>;
   /**
+   * DX-264 — optimistically write a new `position` for a card (intra-
+   * column reorder). The backend sort tier honors position ASC; the
+   * SPA does NOT re-sort locally (the next REST poll re-fetches the
+   * canonically sorted list). On PATCH failure the local position is
+   * reverted and `error` carries the server message.
+   */
+  moveIssuePosition: (id: string, position: number | null) => Promise<void>;
+  /**
    * Apply a server-confirmed Issue snapshot to local state — drops the
    * detail cache entry and merges the patchable fields into the matching
    * IssueListItem so the board view reflects the change without waiting
@@ -160,6 +168,30 @@ export function useIssues(repo: Ref<string>): UseIssues {
     }
   }
 
+  async function moveIssuePosition(
+    id: string,
+    position: number | null,
+  ): Promise<void> {
+    const requestRepo = repo.value;
+    if (!requestRepo) throw new Error("No repo selected");
+    const idx = issues.value.findIndex((i) => i.id === id);
+    if (idx === -1) throw new Error(`Unknown issue ${id}`);
+    const original = issues.value[idx];
+    if (original.position === position) return;
+    detailCache.delete(`${requestRepo}:${id}`);
+    issues.value = issues.value.map((i, j) =>
+      j === idx ? { ...i, position } : i,
+    );
+    try {
+      await patchIssue(requestRepo, id, { position });
+    } catch (err) {
+      issues.value = issues.value.map((i) => (i.id === id ? original : i));
+      const message = err instanceof Error ? err.message : String(err);
+      error.value = message;
+      throw err;
+    }
+  }
+
   function applyIssueUpdate(updated: Issue): void {
     const requestRepo = repo.value;
     if (!requestRepo) return;
@@ -179,6 +211,7 @@ export function useIssues(repo: Ref<string>): UseIssues {
     refresh: load,
     fetchDetail,
     moveIssueStatus,
+    moveIssuePosition,
     applyIssueUpdate,
   };
 }
@@ -199,6 +232,7 @@ function mergeIntoListItem(item: IssueListItem, updated: Issue): IssueListItem {
     status: updated.status,
     type: updated.type,
     priority: updated.priority,
+    position: updated.position,
     parent_id: updated.parent_id,
     children: [...updated.children],
     ac_done: acDone,

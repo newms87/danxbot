@@ -27,6 +27,7 @@ function buildIssue(
     title: `Title for ${overrides.id}`,
     description: "Body",
     priority: 3.0,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

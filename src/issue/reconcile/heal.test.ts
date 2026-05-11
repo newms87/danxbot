@@ -19,6 +19,7 @@ function makeIssue(
     title: "Title",
     description: "Body",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

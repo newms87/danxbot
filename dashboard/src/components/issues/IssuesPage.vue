@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import { useIssues } from "../../composables/useIssues";
 import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
+import { nextPosition } from "../../composables/cardPosition";
 import { DanxDialog, DanxSplitPanel } from "@thehammer/danx-ui";
 import FilterToolbar from "./FilterToolbar.vue";
 import IssueBoard from "./IssueBoard.vue";
@@ -30,6 +31,7 @@ const {
   refresh,
   fetchDetail,
   moveIssueStatus,
+  moveIssuePosition,
   applyIssueUpdate,
 } = useIssues(toRef(selectedRepo));
 
@@ -54,6 +56,19 @@ function onMove(issue: IssueListItem, toStatus: IssueStatus): void {
   // an unhandled-promise warning does not leak — the banner is the
   // operator-facing surface.
   void moveIssueStatus(issue.id, toStatus).catch(() => {});
+}
+
+function onReorder(
+  issue: IssueListItem,
+  before: IssueListItem | null,
+  after: IssueListItem | null,
+): void {
+  // Compute the fractional-indexing midpoint from the neighbors'
+  // current positions (null neighbor → ±1 from the single neighbor).
+  // The backend's `position` ASC sort tier ranks the new value into
+  // the dropped slot; the SPA does NOT locally re-sort.
+  const position = nextPosition(before?.position ?? null, after?.position ?? null);
+  void moveIssuePosition(issue.id, position).catch(() => {});
 }
 
 const {
@@ -314,6 +329,7 @@ watch(
               @select="onSelect"
               @parent-click="onParentClick"
               @move="onMove"
+              @reorder="onReorder"
             />
           </div>
         </template>

@@ -16,6 +16,7 @@ function child(id: string, status: IssueStatus): Issue {
     title: `Title for ${id}`,
     description: "Body",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -185,6 +186,7 @@ function makeParent(
     title: "Parent",
     description: "",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

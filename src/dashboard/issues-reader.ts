@@ -102,6 +102,18 @@ export interface IssueListItem {
    */
   priority: number;
   /**
+   * Operator manual ordering knob inside a status column (DX-264).
+   * `null` (default) means "fall back to the canonical ICE → priority →
+   * mtime tier"; a finite number sorts ASC ahead of every `null`-
+   * positioned sibling in the same priority bucket. The board does NOT
+   * re-sort using this field — the backend's `sortIssuesForStatus`
+   * applies the position tier and ships rows in canonical order. The
+   * SPA only reads `position` for the drag affordance (compute the
+   * neighbor midpoint on intra-column drop and PATCH `/api/issues/:id`
+   * with the new value).
+   */
+  position: number | null;
+  /**
    * Resolved persona name (`AGENT_NAME_SHAPE`) when the multi-worker pick
    * algorithm has claimed this card for a specific agent (DX-200 / DX-164).
    * `null` when no agent owns the card. Surfaced on the list item so the
@@ -254,6 +266,7 @@ function toListItem(
     updated_at: mtimeMs,
     created_at: deriveCreatedAt(issue.external_id, mtimeMs),
     priority: issue.priority,
+    position: issue.position,
     assigned_agent: issue.assigned_agent,
     requires_human: issue.requires_human,
   };

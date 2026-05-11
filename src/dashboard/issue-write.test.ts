@@ -216,6 +216,48 @@ describe("applyIssuePatch — allowlist + body shape", () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
+  it("rejects position with a non-number, non-null value (string)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { position: "5" as unknown as number },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "position must be a finite number or null" },
+    });
+  });
+
+  it("rejects position with NaN", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { position: Number.NaN },
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects position with Infinity", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { position: Number.POSITIVE_INFINITY },
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
   it("rejects reopen ≠ true literally", async () => {
     writeFixture(makeIssue({ status: "Done" }), "closed");
     await expect(
@@ -246,6 +288,38 @@ describe("applyIssuePatch — round-trip mutation", () => {
       readFileSync(issuePath(repoLocalPath, "DX-1", "open"), "utf-8"),
     );
     expect(onDisk).toMatchObject({ title: "Renamed", description: "New body" });
+  });
+
+  it("position: finite number lands on disk + post-patch issue carries it", async () => {
+    writeFixture(makeIssue(), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { position: 1.5 },
+      "alice",
+    );
+    expect(issue.position).toBe(1.5);
+    const onDisk = parseYamlText(
+      readFileSync(issuePath(repoLocalPath, "DX-1", "open"), "utf-8"),
+    );
+    expect(onDisk).toMatchObject({ position: 1.5 });
+  });
+
+  it("position: null clears the override", async () => {
+    writeFixture(makeIssue({ position: 7.25 }), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { position: null },
+      "alice",
+    );
+    expect(issue.position).toBeNull();
+    const onDisk = parseYamlText(
+      readFileSync(issuePath(repoLocalPath, "DX-1", "open"), "utf-8"),
+    );
+    expect(onDisk).toMatchObject({ position: null });
   });
 
   it("ac is full-array replace (not merge)", async () => {

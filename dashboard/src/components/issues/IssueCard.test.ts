@@ -48,6 +48,7 @@ function makeListItem(overrides: Partial<IssueListItem> = {}): IssueListItem {
     updated_at: 0,
     created_at: 0,
     priority: 3,
+    position: null,
     assigned_agent: null,
     requires_human: null,
     ...overrides,

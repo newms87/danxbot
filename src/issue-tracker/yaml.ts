@@ -213,6 +213,7 @@ export function createEmptyIssue(
     title: seed.title ?? "",
     description: seed.description ?? "",
     priority: PRIORITY_DEFAULT,
+    position: null,
     triage: emptyTriage(),
     ac: [],
     comments: [],
@@ -347,6 +348,7 @@ export function serializeIssue(issue: Issue): string {
     title: issue.title,
     description: issue.description,
     priority: issue.priority,
+    position: issue.position,
     triage: {
       expires_at: issue.triage.expires_at,
       reassess_hint: issue.triage.reassess_hint,
@@ -1010,6 +1012,27 @@ export function validateIssue(
     }
   }
 
+  // Position: optional `number | null` (DX-264). Missing → `null`.
+  // Strict shape check at parse-time so a hand-typed garbage value
+  // (string, NaN, Infinity) fails loud instead of silently re-sorting
+  // the column. Finite number or null only — fractional-indexing
+  // midpoints stay representable, and `null` is the canonical "no
+  // operator override" sentinel that the sort tier checks against.
+  // Runs BEFORE the `errors.length > 0` early return so its push counts.
+  let positionValue: number | null = null;
+  if ("position" in v) {
+    const raw = v.position;
+    if (raw === null || raw === undefined) {
+      positionValue = null;
+    } else if (typeof raw !== "number" || !Number.isFinite(raw)) {
+      errors.push(
+        `position must be a finite number or null (got ${JSON.stringify(raw)})`,
+      );
+    } else {
+      positionValue = raw;
+    }
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -1041,6 +1064,7 @@ export function validateIssue(
     title: v.title as string,
     description: description as string,
     priority: priorityValue,
+    position: positionValue,
     triage: triageResult as IssueTriage,
     ac: acResult as IssueAcItem[],
     comments: commentsResult as IssueComment[],

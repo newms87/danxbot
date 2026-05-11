@@ -405,6 +405,7 @@ export class MemoryTracker implements IssueTracker {
       title: card.title,
       description: card.description,
       priority: card.priority,
+      position: null,
       triage: cloneTriage(card.triage),
       ac: card.ac.map((a) => ({ ...a })),
       comments: card.comments.map((c) => ({

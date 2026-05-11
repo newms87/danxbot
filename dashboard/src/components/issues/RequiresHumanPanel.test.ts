@@ -27,6 +27,7 @@ function makeIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
     title: "Title",
     description: "",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

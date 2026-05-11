@@ -17,6 +17,7 @@ interface Knobs {
   parentId?: string | null;
   waitingOnBy?: string[];
   blockedReason?: string;
+  position?: number | null;
 }
 
 function mkIssue(k: Knobs): Issue {
@@ -49,6 +50,7 @@ function mkIssue(k: Knobs): Issue {
       timestamp: "2030-01-01T00:00:00.000Z",
     };
   }
+  if (k.position !== undefined) i.position = k.position;
   return i;
 }
 
@@ -238,6 +240,154 @@ describe("sortIssuesForStatus — priority bucket", () => {
     );
     // b wins on priority; c beats a on FIFO at equal priority.
     expect(ids(out)).toEqual(["ISS-2", "ISS-3", "ISS-1"]);
+  });
+});
+
+describe("sortIssuesForStatus — position tier (DX-264 — operator manual ordering)", () => {
+  it("a single positioned card sorts above every null-position sibling regardless of ICE", () => {
+    const positioned = mkIssue({ id: "ISS-1", iceTotal: 1, position: 100 });
+    const highIce = mkIssue({ id: "ISS-2", iceTotal: 125 });
+    const midIce = mkIssue({ id: "ISS-3", iceTotal: 60, untriaged: true });
+    const byId = new Map<string, Issue>([
+      [positioned.id, positioned],
+      [highIce.id, highIce],
+      [midIce.id, midIce],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: positioned, mtime: 100 },
+        { issue: highIce, mtime: 200 },
+        { issue: midIce, mtime: 50 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)[0]).toBe("ISS-1");
+  });
+
+  it("positioned cards sort among themselves ASC by position", () => {
+    const a = mkIssue({ id: "ISS-1", position: 30 });
+    const b = mkIssue({ id: "ISS-2", position: 10 });
+    const c = mkIssue({ id: "ISS-3", position: 20 });
+    const byId = new Map<string, Issue>([
+      [a.id, a],
+      [b.id, b],
+      [c.id, c],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: a, mtime: 100 },
+        { issue: b, mtime: 200 },
+        { issue: c, mtime: 300 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-2", "ISS-3", "ISS-1"]);
+  });
+
+  it("null-position cards fall back to the existing ICE → priority → FIFO chain", () => {
+    const positioned = mkIssue({ id: "ISS-1", position: 5 });
+    const highIce = mkIssue({ id: "ISS-2", iceTotal: 100 });
+    const lowIce = mkIssue({ id: "ISS-3", iceTotal: 10 });
+    const byId = new Map<string, Issue>([
+      [positioned.id, positioned],
+      [highIce.id, highIce],
+      [lowIce.id, lowIce],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: positioned, mtime: 50 },
+        { issue: highIce, mtime: 200 },
+        { issue: lowIce, mtime: 300 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-1", "ISS-2", "ISS-3"]);
+  });
+
+  it("position 0 (falsy but non-null) still beats null", () => {
+    const zero = mkIssue({ id: "ISS-1", position: 0, iceTotal: 1 });
+    const nullPos = mkIssue({ id: "ISS-2", iceTotal: 125 });
+    const byId = new Map<string, Issue>([
+      [zero.id, zero],
+      [nullPos.id, nullPos],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: zero, mtime: 100 },
+        { issue: nullPos, mtime: 200 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-1", "ISS-2"]);
+  });
+
+  it("negative position works (e.g. inserting at the very top)", () => {
+    const negativePos = mkIssue({ id: "ISS-1", position: -100, iceTotal: 1 });
+    const positiveLow = mkIssue({ id: "ISS-2", position: 5, iceTotal: 1 });
+    const positiveHi = mkIssue({ id: "ISS-3", position: 50, iceTotal: 1 });
+    const byId = new Map<string, Issue>([
+      [negativePos.id, negativePos],
+      [positiveLow.id, positiveLow],
+      [positiveHi.id, positiveHi],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: positiveLow, mtime: 100 },
+        { issue: negativePos, mtime: 200 },
+        { issue: positiveHi, mtime: 300 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-1", "ISS-2", "ISS-3"]);
+  });
+
+  it("waiting/blocked tier still wins over position — a waiting positioned card sits below an OK null-position card", () => {
+    const positionedWaiting = mkIssue({
+      id: "ISS-1",
+      position: 1,
+      waitingOnBy: ["ISS-99"],
+    });
+    const okNullPos = mkIssue({ id: "ISS-2", iceTotal: 10 });
+    const byId = new Map<string, Issue>([
+      [positionedWaiting.id, positionedWaiting],
+      [okNullPos.id, okNullPos],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: positionedWaiting, mtime: 100 },
+        { issue: okNullPos, mtime: 200 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-2", "ISS-1"]);
+  });
+
+  it("position has NO effect in the recency bucket (In Progress) — updated_at DESC wins", () => {
+    const positionedOld = mkIssue({
+      id: "ISS-1",
+      status: "In Progress",
+      position: 1,
+    });
+    const nullPosNew = mkIssue({ id: "ISS-2", status: "In Progress" });
+    const byId = new Map<string, Issue>([
+      [positionedOld.id, positionedOld],
+      [nullPosNew.id, nullPosNew],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: positionedOld, mtime: 50 },
+        { issue: nullPosNew, mtime: 500 },
+      ]),
+      "In Progress",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-2", "ISS-1"]);
   });
 });
 

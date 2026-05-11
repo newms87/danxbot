@@ -237,6 +237,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
       title: "t",
       description: "d",
       priority: 3,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",

@@ -38,6 +38,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Do the thing",
     description: "body",
     priority: 3.0,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

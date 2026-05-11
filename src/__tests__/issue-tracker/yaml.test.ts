@@ -38,6 +38,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Do the thing",
     description: "A longer body",
     priority: 3.0,
+    position: null,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [{ check_item_id: "ac-1", title: "Returns 200", checked: false }],
     comments: [
@@ -67,6 +68,55 @@ describe("serializeIssue / parseIssue", () => {
     expect(parsed).toEqual(issue);
     const yaml2 = serializeIssue(parsed);
     expect(yaml2).toBe(yaml1);
+  });
+
+  describe("position field (DX-264 — operator manual ordering inside a status column)", () => {
+    it("round-trips position: null (default — no operator override)", () => {
+      const issue = fullIssue({ position: null });
+      const yaml = serializeIssue(issue);
+      expect(yaml).toContain("position: null");
+      const parsed = parseIssue(yaml);
+      expect(parsed.position).toBeNull();
+    });
+
+    it("round-trips a finite numeric position byte-for-byte", () => {
+      const issue = fullIssue({ position: 1.5 });
+      const yaml = serializeIssue(issue);
+      const parsed = parseIssue(yaml);
+      expect(parsed.position).toBe(1.5);
+      // Byte-stable: re-serializing the parsed issue produces the same YAML.
+      expect(serializeIssue(parsed)).toBe(yaml);
+    });
+
+    it("treats a missing position field as null on parse (back-compat for legacy YAMLs)", () => {
+      const issue = fullIssue();
+      const yaml = serializeIssue(issue);
+      const yamlNoPosition = yaml.replace(/\nposition:[^\n]*/, "");
+      expect(yamlNoPosition).not.toContain("position:");
+      const parsed = parseIssue(yamlNoPosition);
+      expect(parsed.position).toBeNull();
+    });
+
+    it("rejects position with a non-number, non-null value (string)", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "position: null",
+        'position: "1.5"',
+      );
+      expect(() => parseIssue(yaml)).toThrow(/position must be a finite number/);
+    });
+
+    it("rejects position with a non-finite numeric value (.inf)", () => {
+      const yaml = serializeIssue(fullIssue()).replace(
+        "position: null",
+        "position: .inf",
+      );
+      expect(() => parseIssue(yaml)).toThrow(/position must be a finite number/);
+    });
+
+    it("createEmptyIssue defaults position to null", () => {
+      const issue = createEmptyIssue();
+      expect(issue.position).toBeNull();
+    });
   });
 
   describe("requires_human field (DX-231 — orthogonal 'needs human action' indicator)", () => {
@@ -1188,6 +1238,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       title: "Canonical fixture",
       description: "First line of description.\nSecond line, with detail.",
       priority: 3.0,
+      position: null,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [
         { check_item_id: "ac-1", title: "Returns 200", checked: false },
@@ -1231,6 +1282,7 @@ describe("serializeIssue byte-stable snapshot", () => {
         First line of description.
         Second line, with detail.
       priority: 3
+      position: null
       triage:
         expires_at: ""
         reassess_hint: ""
@@ -1291,6 +1343,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       title: "Needs human",
       description: "Body",
       priority: 3.0,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -1331,6 +1384,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       title: Needs human
       description: Body
       priority: 3
+      position: null
       triage:
         expires_at: ""
         reassess_hint: ""

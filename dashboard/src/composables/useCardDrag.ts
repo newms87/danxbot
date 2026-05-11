@@ -17,6 +17,18 @@ export interface ColumnDragHandlers {
   onDrop: (e: DragEvent) => void;
 }
 
+/**
+ * Drop-slot handlers for the gaps between cards in the same column.
+ * `key` is the slot's logical identity (caller supplies
+ * `${status}:${beforeId ?? "head"}:${afterId ?? "tail"}`) so
+ * `isHoveringSlot` can target a specific gap without coordinate math.
+ */
+export interface SlotDragHandlers {
+  onDragover: (e: DragEvent) => void;
+  onDragleave: (e: DragEvent) => void;
+  onDrop: (e: DragEvent) => void;
+}
+
 export interface UseCardDragOptions {
   /**
    * Invoked when a card is released over a *different* column.
@@ -29,15 +41,37 @@ export interface UseCardDragOptions {
     fromStatus: IssueStatus,
     toStatus: IssueStatus,
   ) => Promise<void> | void;
+  /**
+   * DX-264 — invoked when a card is released over a drop slot (the
+   * transparent gap between two cards in the same column). The
+   * composable computes nothing; it surfaces the slot's neighbors so
+   * the caller can compute the new `position` via `nextPosition` from
+   * `./cardPosition.ts` and PATCH the card. Either neighbor may be
+   * `null` (top / bottom of column). Same-column drops on the column
+   * background (NOT a slot) are inert (`onDrop` short-circuits on equal
+   * status); intra-column reordering goes exclusively through slots.
+   */
+  onReorder?: (
+    issue: IssueListItem,
+    before: IssueListItem | null,
+    after: IssueListItem | null,
+  ) => Promise<void> | void;
 }
 
 export interface UseCardDragReturn {
   bindCard: (issue: IssueListItem) => CardDragHandlers;
   bindColumn: (status: IssueStatus) => ColumnDragHandlers;
+  bindSlot: (
+    key: string,
+    before: IssueListItem | null,
+    after: IssueListItem | null,
+  ) => SlotDragHandlers;
   dragging: Ref<DragState | null>;
   hoverColumn: Ref<IssueStatus | null>;
+  hoverSlot: Ref<string | null>;
   isDragging: (issue: IssueListItem) => boolean;
   isHoveringColumn: (status: IssueStatus) => boolean;
+  isHoveringSlot: (key: string) => boolean;
 }
 
 const DRAG_IMAGE_OFFSET_X = 20;
@@ -78,12 +112,18 @@ function buildDragImage(source: HTMLElement): HTMLElement {
 export function useCardDrag(opts: UseCardDragOptions): UseCardDragReturn {
   const dragging = ref<DragState | null>(null);
   const hoverColumn = ref<IssueStatus | null>(null);
+  const hoverSlot = ref<string | null>(null);
   // `bindColumn` is invoked once per column per render. Memoize the
   // handler trio per status so Vue's runtime can short-circuit the
   // listener-patch on re-renders (object identity matches → no
   // detach/reattach). The map is composable-scoped so per-board state
   // does not leak across instances.
   const columnHandlers = new Map<IssueStatus, ColumnDragHandlers>();
+  // `bindSlot` returns handlers keyed by the slot's logical id. The
+  // neighbors (`before` / `after`) MAY change identity across renders
+  // (the board re-derives them from the post-mutation list each tick),
+  // so we DON'T memoize — each render rebuilds slots from scratch with
+  // the closure capturing the current neighbor refs.
 
   function bindCard(issue: IssueListItem): CardDragHandlers {
     return {
@@ -158,6 +198,60 @@ export function useCardDrag(opts: UseCardDragOptions): UseCardDragReturn {
     return handlers;
   }
 
+  function bindSlot(
+    key: string,
+    before: IssueListItem | null,
+    after: IssueListItem | null,
+  ): SlotDragHandlers {
+    return {
+      onDragover(e: DragEvent): void {
+        if (!dragging.value) return;
+        // Slot must intercept the column's own dragover so the slot
+        // highlight wins over the column-wide outline.
+        e.preventDefault();
+        e.stopPropagation();
+        const dt = e.dataTransfer;
+        if (dt) dt.dropEffect = "move";
+        hoverSlot.value = key;
+        // Suppress the column-level outline while a specific slot is the
+        // active target — column.drop-hover and slot.drop-hover are
+        // mutually exclusive in the UX.
+        hoverColumn.value = null;
+      },
+      onDragleave(e: DragEvent): void {
+        if (hoverSlot.value !== key) return;
+        const root = e.currentTarget as Node | null;
+        const next = e.relatedTarget as Node | null;
+        if (root && next && root.contains(next)) return;
+        hoverSlot.value = null;
+      },
+      onDrop(e: DragEvent): void {
+        e.preventDefault();
+        e.stopPropagation();
+        const drag = dragging.value;
+        hoverSlot.value = null;
+        hoverColumn.value = null;
+        if (!drag) return;
+        const { issue } = drag;
+        dragging.value = null;
+        if (!opts.onReorder) return;
+        // No-op when dropping into a slot adjacent to ourselves — the
+        // card is already there, so a PATCH would just churn the
+        // position field with no visible effect.
+        if (before?.id === issue.id || after?.id === issue.id) return;
+        const result = opts.onReorder(issue, before, after);
+        if (result && typeof (result as Promise<void>).catch === "function") {
+          (result as Promise<void>).catch((err) => {
+            console.error(
+              `[useCardDrag] onReorder rejected for ${issue.id} between ${before?.id ?? "head"}/${after?.id ?? "tail"}:`,
+              err,
+            );
+          });
+        }
+      },
+    };
+  }
+
   function isDragging(issue: IssueListItem): boolean {
     return dragging.value?.issue.id === issue.id;
   }
@@ -166,12 +260,19 @@ export function useCardDrag(opts: UseCardDragOptions): UseCardDragReturn {
     return hoverColumn.value === status;
   }
 
+  function isHoveringSlot(key: string): boolean {
+    return hoverSlot.value === key;
+  }
+
   return {
     bindCard,
     bindColumn,
+    bindSlot,
     dragging,
     hoverColumn,
+    hoverSlot,
     isDragging,
     isHoveringColumn,
+    isHoveringSlot,
   };
 }

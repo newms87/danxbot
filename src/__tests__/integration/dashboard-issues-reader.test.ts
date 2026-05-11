@@ -93,6 +93,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Sample",
     description: "Body",
     priority: 3.0,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

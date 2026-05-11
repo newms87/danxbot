@@ -71,6 +71,7 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Title",
     description: "",
     priority: 3.0,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -330,6 +331,7 @@ describe("listIssues", () => {
       created_at: 1_700_000_000_000,
       updated_at: 1_700_000_000_000,
       priority: 3,
+      position: null,
       assigned_agent: null,
       requires_human: null,
     });
@@ -1074,6 +1076,65 @@ describe("listIssues", () => {
       expect(items[0].has_retro).toBe(true);
     },
   );
+});
+
+describe("listIssues — position projection + sort tier (DX-264)", () => {
+  it("surfaces issue.position verbatim on each list item", async () => {
+    const repo = setupRepo();
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-1", position: 4.25 }), 1);
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-2", position: null }), 2);
+
+    const items = await listIssues(repo);
+    const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+    expect(byId["ISS-1"].position).toBe(4.25);
+    expect(byId["ISS-2"].position).toBeNull();
+  });
+
+  it("position ASC wins over ICE within a ToDo column", async () => {
+    const repo = setupRepo();
+    // High-ICE card with null position should sit BELOW the low-ICE
+    // positioned card — position tier dominates the ICE tier.
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        position: null,
+        triage: {
+          expires_at: "2030-01-01T00:00:00.000Z",
+          reassess_hint: "",
+          last_status: "Keep",
+          last_explain: "",
+          ice: { total: 125, i: 5, c: 5, e: 5 },
+          history: [],
+        },
+      }),
+      100,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-2",
+        position: 1,
+        triage: {
+          expires_at: "2030-01-01T00:00:00.000Z",
+          reassess_hint: "",
+          last_status: "Keep",
+          last_explain: "",
+          ice: { total: 1, i: 1, c: 1, e: 1 },
+          history: [],
+        },
+      }),
+      200,
+    );
+
+    const items = await listIssues(repo);
+    const todoOrder = items
+      .filter((i) => i.status === "ToDo")
+      .map((i) => i.id);
+    expect(todoOrder).toEqual(["ISS-2", "ISS-1"]);
+  });
 });
 
 describe("readIssueDetail", () => {
