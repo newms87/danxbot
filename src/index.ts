@@ -33,6 +33,7 @@ import { ensurePortableRepoPath } from "./agent/portable-path.js";
 import { createWorktreeManager } from "./agent/worktree-manager.js";
 import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned.js";
 import { replayStopQueue } from "./worker/replay-stop-queue.js";
+import { cleanupLegacyNeedsApproval } from "./worker/legacy-cleanup.js";
 
 const log = createLogger("startup");
 
@@ -352,6 +353,28 @@ async function startWorkerMode(): Promise<void> {
   // MemoryTracker skips the credential check (constructs without
   // creds) but is still registered for the post-dispatch path.
   bootScheduler({ repo, tracker: repoTracker });
+
+  // DX-265: one-shot cleanup of legacy `Needs Approval` Trello list +
+  // label (retired in DX-231; DX-234 left the fossils in place "for
+  // the operator to remove by hand" — this is the automated
+  // follow-through). Idempotent + per-step graceful-degradation; a
+  // failure logs warn-level system events but never blocks boot. Runs
+  // AFTER `bootScheduler` (so the tracker is fully registered) and
+  // BEFORE `startPoller` (so the poller's first tick sees the
+  // post-cleanup board state).
+  try {
+    await cleanupLegacyNeedsApproval({ repo, tracker: repoTracker });
+  } catch (err) {
+    log.error(`[${repo.name}] Legacy cleanup pass failed`, err);
+    recordSystemError({
+      source: "legacy-cleanup",
+      severity: "warn",
+      repo: repo.name,
+      message: `Legacy cleanup pass threw — next boot will retry`,
+      details: { error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+
   const reschedule = bootRescheduleRetryQueue({
     repoLocalPath: repo.localPath,
     repoName: repo.name,

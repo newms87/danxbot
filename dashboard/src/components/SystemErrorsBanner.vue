@@ -11,11 +11,22 @@ defineEmits<{
 }>();
 
 /**
+ * Banner renders warn + error only. `info` is audit-grade — visible via
+ * `/api/system-errors` and the SSE stream, but never promotes the banner
+ * (DX-265 introduced the severity for the worker-boot legacy-cleanup
+ * audit trail). Filtering here rather than in the composable keeps the
+ * underlying event log complete for any future audit-log UI.
+ */
+const displayErrors = computed(() =>
+  props.errors.filter((e) => e.severity !== "info"),
+);
+
+/**
  * Highest-severity color band for the banner. `error` from any source
  * promotes the whole banner to red; otherwise warn-yellow.
  */
 const palette = computed(() =>
-  props.errors.some((e) => e.severity === "error")
+  displayErrors.value.some((e) => e.severity === "error")
     ? {
         wrap: "border-red-500 bg-red-50 dark:bg-red-900/30 dark:border-red-500 text-red-900 dark:text-red-100",
         sub: "text-red-700 dark:text-red-300",
@@ -55,7 +66,7 @@ function whenText(ts: string): string {
 
 <template>
   <div
-    v-if="errors.length > 0"
+    v-if="displayErrors.length > 0"
     role="alert"
     :class="['mb-3 rounded-lg border px-4 py-3 text-sm', palette.wrap]"
   >
@@ -63,12 +74,12 @@ function whenText(ts: string): string {
       <span aria-hidden="true" class="text-lg leading-none">{{ palette.icon }}</span>
       <span>{{ palette.label }}</span>
       <span :class="['ml-1 rounded-full px-2 py-0.5 text-xs font-normal', palette.chip]">
-        {{ errors.length }}
+        {{ displayErrors.length }}
       </span>
     </div>
     <ul class="mt-2 space-y-1.5">
       <li
-        v-for="err in errors"
+        v-for="err in displayErrors"
         :key="err.id"
         class="flex items-start justify-between gap-3"
       >

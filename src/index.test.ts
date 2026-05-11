@@ -151,6 +151,20 @@ vi.mock("./worker/replay-stop-queue.js", () => ({
     .mockResolvedValue({ scanned: 0, replayed: [], skipped: [], failed: [] }),
   STOP_QUEUE_DIR: ".danxbot/dispatch-stops",
 }));
+// DX-265: stub the worker-boot legacy-cleanup pass. Real impl would
+// hit Trello over the network during the boot pipeline; the stub
+// keeps the boot test pure (no network) and lets the rest of the
+// boot ordering assertions run unaffected.
+const mockCleanupLegacyNeedsApproval = vi.fn().mockResolvedValue({
+  migrated: [],
+  failedMigrations: [],
+  listArchived: false,
+  labelDeleted: false,
+  skipped: true,
+});
+vi.mock("./worker/legacy-cleanup.js", () => ({
+  cleanupLegacyNeedsApproval: mockCleanupLegacyNeedsApproval,
+}));
 const mockReattachOrResolveDispatches = vi.fn().mockResolvedValue({
   scanned: 0,
   orphaned: [],
@@ -273,6 +287,41 @@ describe("worker mode startup flow", () => {
 
     // startPoller still runs — proves the catch around reapOrphans
     // did not propagate the failure up through main().
+    expect(mockStartPoller).toHaveBeenCalledOnce();
+  });
+
+  it("calls cleanupLegacyNeedsApproval (DX-265) once before startPoller", async () => {
+    await importIndex();
+
+    expect(mockCleanupLegacyNeedsApproval).toHaveBeenCalledOnce();
+    // Locks the boot ordering: the cleanup pass runs BEFORE the
+    // poller's first tick, so the poller never observes the pre-
+    // cleanup board state. Per the rationale comment in
+    // `src/index.ts#startWorkerMode`.
+    expect(mockCleanupLegacyNeedsApproval).toHaveBeenCalledBefore(
+      mockStartPoller,
+    );
+    // The cleanup pass receives the repo context + a tracker
+    // instance — assert via call shape (the tracker shape is
+    // tracker-implementation-specific so we only pin the repo
+    // argument). The default mock resolves with skipped:true
+    // because no DANXBOT_TRACKER=memory env is set here AND no
+    // TrelloTracker is constructed; the helper itself decides
+    // skip behavior, the wiring just hands off the args.
+    expect(mockCleanupLegacyNeedsApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ repo: MOCK_REPO }),
+    );
+  });
+
+  it("does not crash the worker boot pipeline when cleanupLegacyNeedsApproval rejects (failure is swallowed)", async () => {
+    mockCleanupLegacyNeedsApproval.mockRejectedValueOnce(
+      new Error("trello unreachable"),
+    );
+
+    await importIndex();
+
+    // startPoller still runs — proves the catch around the
+    // cleanup pass did not propagate the failure up through main().
     expect(mockStartPoller).toHaveBeenCalledOnce();
   });
 

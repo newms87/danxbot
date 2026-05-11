@@ -29,9 +29,21 @@ export type SystemErrorSource =
   | "poller"
   | "worktree"
   | "stop-replay"
-  | "orphan-reaper";
+  | "orphan-reaper"
+  | "legacy-cleanup";
 
-export type SystemErrorSeverity = "warn" | "error";
+/**
+ * `"info"` is the audit-trail channel: routine, non-actionable events
+ * a callsite wants visible on `/api/system-errors` + the SSE stream
+ * without promoting the banner from green to yellow/red. The banner
+ * filters info entries out by default (it only renders warn/error);
+ * info entries are observable via the REST list endpoint and SSE.
+ *
+ * DX-265 introduced this for the worker-boot legacy-cleanup pass so
+ * operators have a "what got archived?" audit trail without an
+ * always-on banner shout.
+ */
+export type SystemErrorSeverity = "info" | "warn" | "error";
 
 export interface SystemError {
   id: string;
@@ -115,4 +127,18 @@ export function listSystemErrors(
 /** Test-only: drain the buffer between cases. */
 export function _clearSystemErrors(): void {
   buffer.length = 0;
+}
+
+/**
+ * Sugar around {@link recordSystemError} for the `severity: "info"`
+ * audit-trail channel (DX-265). Callsites that surface non-error
+ * lifecycle events (legacy cleanup actions, boot-pass milestones) use
+ * this shape so a grep for "recordSystemError" highlights
+ * actual-error callsites only. Routes through the same ring buffer +
+ * SSE topic so consumers don't need a second wire.
+ */
+export function recordSystemEvent(
+  opts: Omit<RecordSystemErrorOptions, "severity">,
+): SystemError {
+  return recordSystemError({ ...opts, severity: "info" });
 }

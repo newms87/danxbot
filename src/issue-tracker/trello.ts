@@ -488,6 +488,104 @@ export class TrelloTracker implements IssueTracker {
     await this.deleteCheckItem(checklistId, checkItemId);
   }
 
+  // ---------- Board-cleanup helpers (DX-265) ----------
+  //
+  // These helpers exist for one-shot administrative cleanup of legacy
+  // board artifacts (specifically the retired `Needs Approval` list +
+  // label from DX-231). They are NOT part of the abstract
+  // {@link IssueTracker} interface — every method here is a Trello-
+  // specific REST call with no MemoryTracker analog. Consumers
+  // (`src/worker/legacy-cleanup.ts`) type-narrow the tracker via
+  // `instanceof TrelloTracker` before invoking, and skip cleanup
+  // entirely on non-Trello backends.
+
+  /**
+   * Find an open (non-archived) list on the configured board whose name
+   * matches `name` exactly. Returns `null` when no list matches — the
+   * orchestrator treats that as "already cleaned up" and short-circuits.
+   * Archived lists are ignored: the cleanup pass marks the legacy list
+   * `closed: true` once, and a re-run after archival should be a no-op.
+   */
+  async findListByName(
+    name: string,
+  ): Promise<{ id: string; name: string } | null> {
+    const url = this.buildUrl(`/boards/${this.trello.boardId}/lists`, {
+      fields: "id,name,closed",
+      filter: "open",
+    });
+    const lists = await this.requestJson<
+      Array<{ id: string; name: string; closed: boolean }>
+    >(url, { method: "GET" }, `GET /boards/${this.trello.boardId}/lists`);
+    const found = lists.find((l) => l.name === name && !l.closed);
+    return found ? { id: found.id, name: found.name } : null;
+  }
+
+  /**
+   * Find a label on the configured board whose name matches `name`
+   * exactly. Returns `null` when absent. Trello labels are not archived
+   * (there is no `closed` flag) — a missing label means the operator
+   * (or a prior cleanup pass) already deleted it.
+   */
+  async findLabelByName(
+    name: string,
+  ): Promise<{ id: string; name: string } | null> {
+    const url = this.buildUrl(`/boards/${this.trello.boardId}/labels`, {
+      fields: "id,name",
+    });
+    const labels = await this.requestJson<
+      Array<{ id: string; name: string }>
+    >(url, { method: "GET" }, `GET /boards/${this.trello.boardId}/labels`);
+    const found = labels.find((l) => l.name === name);
+    return found ? { id: found.id, name: found.name } : null;
+  }
+
+  /**
+   * Public counterpart to the private `fetchListCards` used internally
+   * by `fetchOpenCards`. Exposed so the legacy-cleanup orchestrator can
+   * enumerate cards on a list NOT in the active status map (the legacy
+   * `Needs Approval` list isn't routed through `statusToListId`).
+   */
+  async listCards(
+    listId: string,
+  ): Promise<Array<{ id: string; name: string }>> {
+    return this.fetchListCards(listId);
+  }
+
+  /**
+   * Archive (Trello's term for "close") a list. Reversible — the
+   * operator can re-open via the Trello UI ("More → Archive list" →
+   * "Send to Archive"). Used by the legacy-cleanup pass to retire the
+   * `Needs Approval` list after migrating any stray cards off it.
+   *
+   * Trello API: `PUT /lists/:id/closed?value=true`.
+   */
+  async archiveList(listId: string): Promise<void> {
+    const url = this.buildUrl(`/lists/${listId}/closed`, { value: "true" });
+    await this.requestVoid(
+      url,
+      { method: "PUT" },
+      `PUT /lists/${listId}/closed`,
+    );
+  }
+
+  /**
+   * Permanently delete a label from the board. Unlike list archival,
+   * label deletion is NOT reversible via the Trello UI. The legacy-
+   * cleanup pass uses this to retire the `Needs Approval` label; the
+   * orchestrator only calls this AFTER confirming the label is no
+   * longer referenced (post-migration of any cards that carried it).
+   *
+   * Trello API: `DELETE /labels/:id`.
+   */
+  async deleteLabel(labelId: string): Promise<void> {
+    const url = this.buildUrl(`/labels/${labelId}`);
+    await this.requestVoid(
+      url,
+      { method: "DELETE" },
+      `DELETE /labels/${labelId}`,
+    );
+  }
+
   // ---------- internals ----------
 
   private async fetchListCards(
