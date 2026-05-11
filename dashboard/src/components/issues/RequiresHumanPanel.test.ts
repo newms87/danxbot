@@ -134,12 +134,17 @@ describe("RequiresHumanPanel", () => {
       const w = mountPanel(makeIssue({ requires_human: reqHuman }));
       await w.get("[data-test='rh-mark-resolved']").trigger("click");
       await w.get("[data-test='rh-confirm-yes']").trigger("click");
-      await flushPromises();
-      expect(patchIssue).toHaveBeenCalledTimes(1);
+      // DX-262: see the modal save test for the rationale on vi.waitFor
+      // over flushPromises under full-suite CPU contention.
+      await vi.waitFor(() => {
+        expect(patchIssue).toHaveBeenCalledTimes(1);
+      });
       expect(patchIssue).toHaveBeenCalledWith("danxbot", "DX-1", {
         requires_human: null,
       });
-      expect(w.emitted("patched")?.[0]?.[0]).toEqual(patched);
+      await vi.waitFor(() => {
+        expect(w.emitted("patched")?.[0]?.[0]).toEqual(patched);
+      });
     });
 
     it("cancel on the confirm prompt returns to action buttons without PATCH", async () => {
@@ -156,8 +161,11 @@ describe("RequiresHumanPanel", () => {
       const w = mountPanel(makeIssue({ requires_human: reqHuman }));
       await w.get("[data-test='rh-mark-resolved']").trigger("click");
       await w.get("[data-test='rh-confirm-yes']").trigger("click");
-      await flushPromises();
-      expect(w.get("[data-test='rh-resolve-error']").text()).toBe("boom");
+      // DX-262: error rendering is two cascaded reactive updates after the
+      // rejected mock; see modal save test for full rationale on vi.waitFor.
+      await vi.waitFor(() => {
+        expect(w.get("[data-test='rh-resolve-error']").text()).toBe("boom");
+      });
       // confirm UI is still open so the operator can retry
       expect(w.find("[data-test='rh-confirm']").exists()).toBe(true);
     });
@@ -203,6 +211,10 @@ describe("RequiresHumanPanel", () => {
       const w = mountPanel(makeIssue({ requires_human: null }));
       await w.get("[data-test='rh-flag']").trigger("click");
       await w.get("[data-test='rh-modal-save']").trigger("click");
+      // DX-262: negative assertion — `vi.waitFor` can't gate on
+      // `not.toHaveBeenCalled` (it would pass trivially on first poll);
+      // flushPromises is correct here. saveModal returns early before any
+      // await on the empty-reason guard so one macrotask drain is enough.
       await flushPromises();
       expect(patchIssue).not.toHaveBeenCalled();
       expect(w.get("[data-test='rh-modal-error']").text()).toBe(
@@ -226,8 +238,16 @@ describe("RequiresHumanPanel", () => {
       // Modal seeded one row — fill it in.
       await w.get(".rh-step-input").setValue("Invite the bot user");
       await w.get("[data-test='rh-modal-save']").trigger("click");
-      await flushPromises();
-      expect(patchIssue).toHaveBeenCalledTimes(1);
+      // DX-262: `await flushPromises()` is a single setTimeout(0) tick — under
+      // full-suite CPU contention, the chained reactive updates that follow
+      // the click (saveModal sync portion → modalSaving=true render flush →
+      // mocked patchIssue resolves → emit("patched") → modalOpen=false →
+      // unmount flush) don't always land inside that one tick. vi.waitFor
+      // polls until the call count is observable, decoupling the assertion
+      // from the exact macrotask scheduling order.
+      await vi.waitFor(() => {
+        expect(patchIssue).toHaveBeenCalledTimes(1);
+      });
       // Wire shape is the slim RequiresHumanPatchInput — set_by + set_at
       // are server-stamped and intentionally NOT sent (DX-239).
       expect(patchIssue).toHaveBeenCalledWith("danxbot", "DX-1", {
@@ -236,8 +256,10 @@ describe("RequiresHumanPanel", () => {
           steps: ["Invite the bot user"],
         },
       });
-      expect(w.emitted("patched")?.[0]?.[0]).toEqual(patched);
-      expect(w.find("[data-test='rh-modal']").exists()).toBe(false);
+      await vi.waitFor(() => {
+        expect(w.emitted("patched")?.[0]?.[0]).toEqual(patched);
+        expect(w.find("[data-test='rh-modal']").exists()).toBe(false);
+      });
     });
 
     it("drops a trailing empty step row so the operator's 'about to add another' row isn't persisted", async () => {
@@ -253,7 +275,10 @@ describe("RequiresHumanPanel", () => {
       await inputs[0].setValue("Step one");
       // second row left empty
       await w.get("[data-test='rh-modal-save']").trigger("click");
-      await flushPromises();
+      // DX-262: see the modal save test for the rationale on vi.waitFor.
+      await vi.waitFor(() => {
+        expect(patchIssue).toHaveBeenCalledTimes(1);
+      });
       expect(patchIssue).toHaveBeenCalledWith("danxbot", "DX-1", {
         requires_human: {
           reason: "Rotate Stripe key",
@@ -269,10 +294,13 @@ describe("RequiresHumanPanel", () => {
       await w.get("[data-test='rh-modal-reason']").setValue("Reason");
       await w.get(".rh-step-input").setValue("Step");
       await w.get("[data-test='rh-modal-save']").trigger("click");
-      await flushPromises();
-      expect(w.get("[data-test='rh-modal-error']").text()).toBe(
-        "400 bad shape",
-      );
+      // DX-262: error rendering is two cascaded reactive updates after the
+      // rejected mock; see modal save test for full rationale on vi.waitFor.
+      await vi.waitFor(() => {
+        expect(w.get("[data-test='rh-modal-error']").text()).toBe(
+          "400 bad shape",
+        );
+      });
       // Modal stays open so the operator can fix + retry
       expect(w.find("[data-test='rh-modal']").exists()).toBe(true);
     });
