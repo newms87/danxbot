@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "danx-issue": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@thehammer/danx-issue-mcp"],
+      "env": {
+        "DANX_REPO_ROOT": "${DANX_REPO_ROOT}"
+      }
+    }
+  }
+}

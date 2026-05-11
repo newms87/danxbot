@@ -1,0 +1,9 @@
+name: skill-eval
+description: Skill-trigger regression harness — isolated dispatch surface for /skill-eval probes
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANXBOT_WORKER_PORT
+  - DANX_REPO_ROOT
+optional-placeholders: []
+required-gates: []
+staging-paths: []
