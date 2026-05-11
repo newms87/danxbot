@@ -151,14 +151,24 @@ vi.mock("./worker/replay-stop-queue.js", () => ({
     .mockResolvedValue({ scanned: 0, replayed: [], skipped: [], failed: [] }),
   STOP_QUEUE_DIR: ".danxbot/dispatch-stops",
 }));
+const mockReattachOrResolveDispatches = vi.fn().mockResolvedValue({
+  scanned: 0,
+  orphaned: [],
+  alive: [],
+  reattached: [],
+  failedReattach: [],
+});
 vi.mock("./worker/reattach.js", () => ({
-  reattachOrResolveDispatches: vi.fn().mockResolvedValue({
-    scanned: 0,
-    orphaned: [],
-    alive: [],
-    reattached: [],
-    failedReattach: [],
-  }),
+  reattachOrResolveDispatches: mockReattachOrResolveDispatches,
+}));
+const mockReapOrphans = vi.fn().mockResolvedValue({
+  scanned: 0,
+  reaped: [],
+  mismatched: [],
+  healthy: 0,
+});
+vi.mock("./worker/process-scan.js", () => ({
+  reapOrphans: mockReapOrphans,
 }));
 
 // --- Test setup ---
@@ -235,6 +245,32 @@ describe("worker mode startup flow", () => {
   it("starts poller", async () => {
     await importIndex();
 
+    expect(mockStartPoller).toHaveBeenCalledOnce();
+  });
+
+  it("calls reapOrphans (DX-142 process-table orphan scan) after reattachOrResolveDispatches with the repo's name + localPath", async () => {
+    await importIndex();
+
+    expect(mockReapOrphans).toHaveBeenCalledWith({
+      repoName: MOCK_REPO.name,
+      repoLocalPath: MOCK_REPO.localPath,
+    });
+    // Reap runs AFTER reattach (rationale in src/index.ts: alive rows
+    // get rewired first; reaper sees only genuine orphans). Locking
+    // the order with a CalledBefore assertion catches a future
+    // refactor that subtly swaps them.
+    expect(mockReattachOrResolveDispatches).toHaveBeenCalledBefore(
+      mockReapOrphans,
+    );
+  });
+
+  it("does not crash the worker boot pipeline when reapOrphans rejects (failure is swallowed + surfaced via system_errors)", async () => {
+    mockReapOrphans.mockRejectedValueOnce(new Error("pgrep exploded"));
+
+    await importIndex();
+
+    // startPoller still runs — proves the catch around reapOrphans
+    // did not propagate the failure up through main().
     expect(mockStartPoller).toHaveBeenCalledOnce();
   });
 

@@ -26,6 +26,7 @@ import { repoContexts } from "./repo-context.js";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
 import { reattachOrResolveDispatches } from "./worker/reattach.js";
+import { reapOrphans } from "./worker/process-scan.js";
 import { ensurePortableRepoPath } from "./agent/portable-path.js";
 import { createWorktreeManager } from "./agent/worktree-manager.js";
 import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned.js";
@@ -204,6 +205,46 @@ async function startWorkerMode(): Promise<void> {
     });
   } catch (err) {
     log.error(`[${repo.name}] Dispatch reattach failed`, err);
+  }
+
+  // Phase 3 (DX-142): process-table orphan scan. Catches dispatched
+  // claude processes the durable state (DB row + YAML) lost track of —
+  // the May-7 incident shape, where a `script -q -f` parent reparented
+  // to PID 1 and survived the worker death after its row went terminal.
+  // Runs AFTER `reattachOrResolveDispatches` so any alive non-terminal
+  // row already has its monitoring stack rewired; the reaper sees only
+  // genuine orphans (terminal-row-but-alive-process / no-row-at-all).
+  // Failures swallowed — the worker's primary mission is serving live
+  // dispatches, not running a perfect scan tick.
+  try {
+    const reaped = await reapOrphans({
+      repoName: repo.name,
+      repoLocalPath: repo.localPath,
+    });
+    if (
+      reaped.scanned > 0 ||
+      reaped.reaped.length > 0 ||
+      reaped.mismatched.length > 0
+    ) {
+      log.info(
+        `[${repo.name}] Orphan reaper (boot): scanned=${reaped.scanned} reaped=${reaped.reaped.length} mismatched=${reaped.mismatched.length} healthy=${reaped.healthy}`,
+      );
+    }
+  } catch (err) {
+    log.error(`[${repo.name}] Orphan reaper (boot) failed`, err);
+    // Boot reap failure is observably different from a per-tick
+    // failure: per-tick recovers next tick (~60s); a boot failure
+    // means the worker came up without ever scanning, so orphans
+    // from a prior crash can keep running for the entire poller
+    // cadence (hours if the poller is idle). Escalate to the
+    // dashboard banner so the operator sees the gap.
+    recordSystemError({
+      source: "orphan-reaper",
+      severity: "error",
+      repo: repo.name,
+      message: `Orphan reaper boot pass failed — orphans from a prior crash are NOT being reaped this boot; next poller tick will retry`,
+      details: { error: err instanceof Error ? err.message : String(err) },
+    });
   }
 
   // Boot the issues DB mirror (DX-154) BEFORE the poller — the poller's

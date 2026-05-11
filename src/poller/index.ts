@@ -89,6 +89,7 @@ import type {
 } from "../dashboard/dispatches.js";
 import { findNonTerminalDispatches } from "../dashboard/dispatches-db.js";
 import { isPidAlive } from "../agent/host-pid.js";
+import { reapOrphans } from "../worker/process-scan.js";
 import { hasLiveDispatchForCard as hasLiveDispatchForCardImpl } from "./live-dispatch-guard.js";
 import { hostname as osHostname } from "node:os";
 import type { IssueDispatch } from "../issue-tracker/interface.js";
@@ -622,6 +623,34 @@ async function _poll(repo: RepoContext): Promise<void> {
   // ToDo dispatch path can immediately re-claim a card whose previous
   // dispatch just died.
   await evictDeadDispatches(repo);
+
+  // Phase 3 (DX-142) — process-table orphan scan. The DB-driven
+  // reattach pass at boot + the YAML-driven `evictDeadDispatches`
+  // above both look at KNOWN records and ask "is the recorded PID
+  // alive?" Neither asks "is there a live dispatch process I have
+  // no record of?" — which is exactly the failure shape the May-7
+  // incident hit. `reapOrphans` enumerates every dispatched claude
+  // process via `pgrep -af '<!-- danxbot-dispatch:'` and SIGTERMs
+  // the ones whose DB row went terminal (or never existed) while
+  // the OS process kept running. See `src/worker/process-scan.ts`
+  // for the per-process decision matrix; failures swallowed so a
+  // bad scan tick can't take down the poller.
+  try {
+    const reaped = await reapOrphans({
+      repoName: repo.name,
+      repoLocalPath: repo.localPath,
+    });
+    if (
+      reaped.reaped.length > 0 ||
+      reaped.mismatched.length > 0
+    ) {
+      log.info(
+        `[${repo.name}] Orphan reaper (tick): scanned=${reaped.scanned} reaped=${reaped.reaped.length} mismatched=${reaped.mismatched.length} healthy=${reaped.healthy}`,
+      );
+    }
+  } catch (err) {
+    log.error(`[${repo.name}] Orphan reaper (tick) failed`, err);
+  }
 
   // ISS-98 / DX-210 follow-up: derive parent (Epic + non-epic) statuses
   // DX-217 (Event-Driven Worker Phase 2): the per-tick parent-status

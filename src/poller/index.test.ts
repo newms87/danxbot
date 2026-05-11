@@ -240,6 +240,17 @@ vi.mock("../agent/host-pid.js", () => ({
   isPidAlive: (...args: unknown[]) => mockIsPidAlive(...args),
 }));
 
+// DX-142 Phase 3: process-table orphan scan called once per tick in
+// `_poll` (alongside `evictDeadDispatches`). Mock it to a no-op so the
+// poller tick stays Layer 1 and any test that wants to assert the
+// per-tick call shape can reach the captured fn directly.
+const mockReapOrphans = vi
+  .fn()
+  .mockResolvedValue({ scanned: 0, reaped: [], mismatched: [], healthy: 0 });
+vi.mock("../worker/process-scan.js", () => ({
+  reapOrphans: (...args: unknown[]) => mockReapOrphans(...args),
+}));
+
 vi.mock("../agent/resolve-parent-session.js", () => ({
   resolveParentSessionId: (...args: unknown[]) =>
     mockResolveParentSessionId(...args),
@@ -2778,6 +2789,40 @@ describe("poll — critical-failure halt gate", () => {
 
     expect(mockReadFlag).not.toHaveBeenCalled();
     expect(mockTracker.fetchOpenCards).not.toHaveBeenCalled();
+  });
+});
+
+describe("poll — DX-142 process-table orphan scan (per-tick)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockReadFlag.mockReturnValue(null);
+    mockIsFeatureEnabled.mockReturnValue(true);
+  });
+
+  it("invokes reapOrphans once per tick with the repo's name + localPath (sibling pass to evictDeadDispatches)", async () => {
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockReapOrphans).toHaveBeenCalledTimes(1);
+    expect(mockReapOrphans).toHaveBeenCalledWith({
+      repoName: MOCK_REPO_CONTEXT.name,
+      repoLocalPath: MOCK_REPO_CONTEXT.localPath,
+    });
+  });
+
+  it("a reapOrphans rejection does not crash the tick — the rest of _poll still runs", async () => {
+    // The wiring is wrapped in try/catch — a failed reap pass should
+    // not prevent the rest of the tick (tracker fetch, dispatch, etc).
+    mockReapOrphans.mockRejectedValueOnce(new Error("pgrep exploded"));
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Tracker fetch still happens — proves the catch landed and
+    // _poll continued past the reap pass.
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
   });
 });
 

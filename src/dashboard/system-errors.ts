@@ -28,7 +28,8 @@ export type SystemErrorSource =
   | "retry-queue"
   | "poller"
   | "worktree"
-  | "stop-replay";
+  | "stop-replay"
+  | "orphan-reaper";
 
 export type SystemErrorSeverity = "warn" | "error";
 
