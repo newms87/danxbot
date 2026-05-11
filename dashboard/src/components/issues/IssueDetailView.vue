@@ -9,7 +9,9 @@ import CommentsTab from "./CommentsTab.vue";
 import RetroTab from "./RetroTab.vue";
 import RawTab from "./RawTab.vue";
 import HistoryTab from "./HistoryTab.vue";
+import RequiresHumanPanel from "./RequiresHumanPanel.vue";
 import AgentChat from "../chat/AgentChat.vue";
+import type { Issue } from "../../types";
 import { acCounts } from "./acCounts";
 
 type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "history" | "retro" | "raw";
@@ -59,6 +61,7 @@ const emit = defineEmits<{
   "jump-issue": [id: string];
   "toggle-scope": [];
   "open-agent": [];
+  "issue-patched": [issue: Issue];
 }>();
 
 const tab = ref<TabId>("overview");
@@ -159,6 +162,11 @@ function selectTab(id: TabId, disabled: boolean): void {
         @jump-issue="(id) => emit('jump-issue', id)"
         @toggle-scope="emit('toggle-scope')"
         @open-agent="emit('open-agent')"
+      />
+      <RequiresHumanPanel
+        :issue="issue"
+        :repo="props.selectedRepo"
+        @patched="(updated) => emit('issue-patched', updated)"
       />
       <div class="tabs">
         <button

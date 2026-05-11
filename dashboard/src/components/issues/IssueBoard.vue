@@ -128,6 +128,17 @@ const grouped = computed<Record<string, IssueListItem[]>>(() => {
   return result;
 });
 
+// DX-239 — per-column `👤 N` subscript when any card in the column has
+// `requires_human != null`. Visual cue without filtering; clicking the
+// card surfaces the panel.
+const requiresHumanCounts = computed<Record<string, number>>(() => {
+  const out: Record<string, number> = {};
+  for (const [key, list] of Object.entries(grouped.value)) {
+    out[key] = list.filter((i) => i.requires_human !== null).length;
+  }
+  return out;
+});
+
 function dimmedFor(i: IssueListItem): boolean {
   return (
     !!props.scopedEpicId &&
@@ -166,6 +177,12 @@ function toggle(key: string): void {
         <span class="dot" :style="{ background: col.accent }" />
         <span class="label">{{ col.label }}</span>
         <span class="count">{{ grouped[col.key]?.length ?? 0 }}</span>
+        <span
+          v-if="requiresHumanCounts[col.key] > 0"
+          class="rh-count"
+          :title="`${requiresHumanCounts[col.key]} card(s) require human action`"
+          :data-test="`column-rh-${col.testId}`"
+        >👤 {{ requiresHumanCounts[col.key] }}</span>
         <span class="glyph">{{ collapsed[col.key] ? "▸" : "▾" }}</span>
       </button>
 
@@ -251,6 +268,17 @@ function toggle(key: string): void {
   border-radius: 9999px;
   background: rgb(51 65 85 / 0.4);
   font-variant-numeric: tabular-nums;
+}
+.rh-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: #fdba74;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: rgb(249 115 22 / 0.15);
+  border: 1px solid rgb(249 115 22 / 0.35);
+  font-variant-numeric: tabular-nums;
+  cursor: help;
 }
 .glyph {
   margin-left: auto;

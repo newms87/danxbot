@@ -65,6 +65,18 @@ import type { DispatchProxyDeps } from "./dispatch-proxy.js";
 const log = createLogger("issue-write");
 
 /**
+ * Slim input shape for `requires_human` writes. The dashboard's panel ships
+ * exactly `{reason, steps}`; the server stamps `set_by: "human"` and
+ * `set_at: now` regardless of what the client sends. Exporting the slim
+ * shape lets the SPA's typed `patchIssue` wrapper express the wire format
+ * honestly — no `set_at: ""` placeholders required.
+ */
+export interface RequiresHumanPatchInput {
+  reason: string;
+  steps: string[];
+}
+
+/**
  * Allowlisted body shape for `PATCH /api/issues/:id`. Any other field
  * triggers `400 Field not patchable: <name>` BEFORE the file is read,
  * so a typo can't accidentally land an empty patch on disk.
@@ -82,11 +94,14 @@ export interface IssuePatch {
    */
   comments_append?: { text: string };
   /**
-   * Either a full RequiresHuman record (server stamps `set_by: "human"`
-   * + `set_at: now`; client-supplied `set_by` / `set_at` are ignored) or
-   * `null` to clear the field.
+   * Server stamps `set_by: "human"` + `set_at: now` on every set; client
+   * input is only the `reason` + `steps[]` (other fields are ignored).
+   * Accepts either the slim `RequiresHumanPatchInput` shape (the dashboard
+   * panel's wire format — DX-239) or a full `RequiresHuman` record (legacy
+   * callers that already had the timestamps lying around — the extras
+   * are dropped by `validatePatchShape`). `null` clears the field.
    */
-  requires_human?: RequiresHuman | null;
+  requires_human?: RequiresHumanPatchInput | RequiresHuman | null;
   /**
    * Move a Done / Cancelled card from `closed/` back to `open/`. When
    * passed without an explicit `status`, defaults to `ToDo`. Setting

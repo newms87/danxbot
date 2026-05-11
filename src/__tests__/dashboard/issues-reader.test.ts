@@ -308,6 +308,7 @@ describe("listIssues", () => {
           status: "ToDo",
           waiting_on: true,
           waiting_on_by_card: false,
+          requires_human: false,
           missing: true,
         },
         {
@@ -317,6 +318,7 @@ describe("listIssues", () => {
           status: "ToDo",
           waiting_on: true,
           waiting_on_by_card: false,
+          requires_human: false,
           missing: true,
         },
       ],
@@ -329,7 +331,97 @@ describe("listIssues", () => {
       updated_at: 1_700_000_000_000,
       priority: 3,
       assigned_agent: null,
+      requires_human: null,
     });
+  });
+
+  // DX-239 / P8 of DX-231 — requires_human is projected on the list item
+  // and the parent's children_detail row so the SPA can render the 👤
+  // indicator + the per-epic aggregate count without a detail fetch.
+  it("projects requires_human on the list item and as a boolean on the parent's children row", async () => {
+    const repo = setupRepo();
+    const reqHuman = {
+      reason: "Need Stripe key rotated",
+      steps: ["Log into Stripe", "Roll the secret", "Update .env"],
+      set_by: "agent" as const,
+      set_at: "2026-05-10T16:50:00Z",
+    };
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-10",
+        type: "Epic",
+        title: "Parent epic",
+        children: ["ISS-11", "ISS-12"],
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-11",
+        type: "Feature",
+        title: "Child with requires_human",
+        parent_id: "ISS-10",
+        requires_human: reqHuman,
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-12",
+        type: "Feature",
+        title: "Child without",
+        parent_id: "ISS-10",
+        requires_human: null,
+      }),
+      1_700_000_000_000,
+    );
+
+    const items = await listIssues(repo);
+    const parent = items.find((i) => i.id === "ISS-10")!;
+    const child = items.find((i) => i.id === "ISS-11")!;
+    const sibling = items.find((i) => i.id === "ISS-12")!;
+
+    expect(child.requires_human).toEqual(reqHuman);
+    expect(sibling.requires_human).toBeNull();
+    expect(parent.requires_human).toBeNull();
+
+    expect(parent.children_detail).toEqual([
+      expect.objectContaining({ id: "ISS-11", requires_human: true }),
+      expect.objectContaining({ id: "ISS-12", requires_human: false }),
+    ]);
+  });
+
+  // Defense-in-depth: parents themselves can have requires_human set
+  // (e.g. an epic flagged for a 3rd-party action). The list-item passthrough
+  // must survive intact — the panel reads it directly off the row.
+  it("projects requires_human on the PARENT's own list item (not just the children)", async () => {
+    const repo = setupRepo();
+    const parentReq = {
+      reason: "Epic-level: vendor portal access needed",
+      steps: ["Grant access", "Notify ops"],
+      set_by: "human" as const,
+      set_at: "2026-05-10T16:50:00Z",
+    };
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-20",
+        type: "Epic",
+        title: "Parent flagged",
+        children: [],
+        requires_human: parentReq,
+      }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo);
+    expect(items[0].requires_human).toEqual(parentReq);
   });
 
   // DX-164 Phase 6: assigned_agent threads through the projection so the
@@ -408,6 +500,7 @@ describe("listIssues", () => {
         status: "Done",
         waiting_on: false,
         waiting_on_by_card: false,
+        requires_human: false,
         missing: false,
       },
     ]);
@@ -703,6 +796,7 @@ describe("listIssues", () => {
       status: "ToDo",
       waiting_on: true,
       waiting_on_by_card: false,
+      requires_human: false,
       missing: true,
     });
   });

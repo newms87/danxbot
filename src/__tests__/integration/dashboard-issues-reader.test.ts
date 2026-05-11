@@ -232,6 +232,7 @@ describe("listIssues — DB-backed", () => {
           status: "Done",
           waiting_on: false,
           waiting_on_by_card: false,
+          requires_human: false,
           missing: false,
         },
       ]);

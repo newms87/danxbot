@@ -160,6 +160,62 @@ describe("applyIssuePatch — allowlist + body shape", () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
+  it("rejects requires_human.steps when it is not an array", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        {
+          requires_human: {
+            reason: "x",
+            // Wrong shape — `steps` is a string instead of an array.
+            steps: "not an array" as unknown as string[],
+            set_by: "human",
+            set_at: "x",
+          },
+        },
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects requires_human.steps[i] when an entry is non-string", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        {
+          requires_human: {
+            reason: "x",
+            // Second entry is a number — the panel's reorder UI guarantees
+            // strings, but a malformed external client must 400.
+            steps: ["valid", 42 as unknown as string],
+            set_by: "human",
+            set_at: "x",
+          },
+        },
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects requires_human when the body is an array (must be mapping or null)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { requires_human: [] as unknown as null },
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
   it("rejects reopen ≠ true literally", async () => {
     writeFixture(makeIssue({ status: "Done" }), "closed");
     await expect(
@@ -258,6 +314,31 @@ describe("applyIssuePatch — round-trip mutation", () => {
     expect(setAtMs).toBeGreaterThanOrEqual(before);
     expect(issue.requires_human?.reason).toBe("Need API key");
     expect(issue.requires_human?.steps).toEqual(["rotate it"]);
+  });
+
+  it("preserves requires_human.steps[] order verbatim (panel reorder UX contract)", async () => {
+    writeFixture(makeIssue(), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      {
+        requires_human: {
+          reason: "ordered actions",
+          // Deliberately unsorted — the dashboard's RequiresHumanPanel
+          // ships ↑↓ reorder; the server must not alphabetize or dedupe.
+          steps: ["c-first", "a-second", "b-third"],
+          set_by: "human",
+          set_at: "x",
+        },
+      },
+      "alice",
+    );
+    expect(issue.requires_human?.steps).toEqual([
+      "c-first",
+      "a-second",
+      "b-third",
+    ]);
   });
 
   it("requires_human: null clears the field", async () => {
@@ -649,6 +730,33 @@ describe("applyIssuePatch — SSE event emission", () => {
       applyIssuePatch("danxbot", repoLocalPath, "DX-1", {}, "alice"),
     ).rejects.toMatchObject({ status: 400 });
     expect(mockEventBusPublish).not.toHaveBeenCalled();
+  });
+
+  it("publishes the post-patch requires_human block in the issue:updated payload (DX-239 cross-client sync)", async () => {
+    writeFixture(makeIssue(), "open");
+    await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      {
+        requires_human: {
+          reason: "Need vendor access",
+          steps: ["Grant role A", "Notify ops"],
+        },
+      },
+      "alice",
+    );
+    expect(mockEventBusPublish).toHaveBeenCalledTimes(1);
+    const call = mockEventBusPublish.mock.calls[0][0];
+    expect(call.topic).toBe("issue:updated");
+    // The broadcast carries the post-patch Issue verbatim — the SPA
+    // relies on this so a second operator's view updates without a refetch.
+    expect(call.data.issue.requires_human).toMatchObject({
+      reason: "Need vendor access",
+      steps: ["Grant role A", "Notify ops"],
+      set_by: "human",
+    });
+    expect(call.data.issue.requires_human.set_at.length).toBeGreaterThan(0);
   });
 });
 

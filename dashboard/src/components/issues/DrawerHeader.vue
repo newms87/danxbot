@@ -35,6 +35,17 @@ const isScoped = computed(
 const blockedByCard = computed(
   () => !!props.issue.waiting_on && props.issue.waiting_on.by.length > 0,
 );
+
+// DX-239 — orange banner under the title when `requires_human != null`,
+// click scrolls to the pinned `RequiresHumanPanel` mounted above the
+// tabs in `IssueDetailView`. The anchor (`#requires-human-panel`) is
+// owned by that panel; this banner is the cue + scroll trigger only.
+const requiresHuman = computed(() => props.issue.requires_human);
+
+function scrollToPanel(): void {
+  const el = document.getElementById("requires-human-panel");
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 </script>
 
 <template>
@@ -63,6 +74,16 @@ const blockedByCard = computed(
       >×</button>
     </div>
     <h2 class="title">{{ issue.title }}</h2>
+    <button
+      v-if="requiresHuman"
+      type="button"
+      class="requires-human-banner"
+      data-test="drawer-rh-banner"
+      @click="scrollToPanel"
+    >
+      <span aria-hidden="true">👤</span>
+      Requires human action — see panel below
+    </button>
     <div v-if="issue.assigned_agent" class="agent-row">
       <button
         type="button"
@@ -221,5 +242,23 @@ const blockedByCard = computed(
   color: #fcd34d;
   background: rgb(245 158 11 / 0.12);
   border-color: rgb(245 158 11 / 0.3);
+}
+.requires-human-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fdba74;
+  background: rgb(249 115 22 / 0.12);
+  border: 1px solid rgb(249 115 22 / 0.35);
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+.requires-human-banner:hover {
+  background: rgb(249 115 22 / 0.2);
 }
 </style>

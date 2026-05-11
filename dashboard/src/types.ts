@@ -82,7 +82,10 @@ export type {
   Blocked,
   RequiresHuman,
 } from "@backend/issue-tracker/interface.js";
-export type { IssuePatch } from "@backend/dashboard/issue-write.js";
+export type {
+  IssuePatch,
+  RequiresHumanPatchInput,
+} from "@backend/dashboard/issue-write.js";
 export type {
   SystemError,
   SystemErrorSource,

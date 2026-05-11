@@ -2,6 +2,7 @@ import type {
   Issue,
   IssueStatus,
   IssueType,
+  RequiresHuman,
 } from "../issue-tracker/interface.js";
 import { ISSUE_STATUSES } from "../issue-tracker/interface.js";
 import { sortInputsForStatus } from "../issue-tracker/sort.js";
@@ -40,6 +41,14 @@ export interface IssueListChild {
    * (no card refs) keeps a different variant.
    */
   waiting_on_by_card: boolean;
+  /**
+   * True when the child's `requires_human != null`. Drives the 👤 glyph
+   * shown next to the child row in the parent's checklist (DX-239 / P8 of
+   * DX-231). Boolean instead of the full record because the checklist row
+   * does not surface the reason / steps — those live on the child's own
+   * drawer; the indicator is structural-only.
+   */
+  requires_human: boolean;
   missing: boolean;
 }
 
@@ -98,6 +107,16 @@ export interface IssueListItem {
    * without a per-row detail fetch.
    */
   assigned_agent: string | null;
+  /**
+   * Orthogonal "this card needs a human" indicator (DX-231 / P8). `null`
+   * when no human action is needed; full record (reason + steps + set_by
+   * + set_at) when set. Surfaced on the list item so every card view
+   * (board, drawer header, child rows) can render the 👤 indicator and
+   * the dashboard's `RequiresHumanPanel` can show the reason without a
+   * per-row detail fetch. Passthrough of the YAML field — the SPA never
+   * mutates this; mutations go through `PATCH /api/issues/:id`.
+   */
+  requires_human: RequiresHuman | null;
 }
 
 /** Full Issue plus the mirror-write timestamp (ms), creation time (ms), and a serialized YAML rendering of the current state. */
@@ -183,6 +202,7 @@ function toListItem(
           status: "ToDo" as IssueStatus,
           waiting_on: true,
           waiting_on_by_card: false,
+          requires_human: false,
           missing: true,
         };
       }
@@ -194,6 +214,7 @@ function toListItem(
         waiting_on: child.waiting_on !== null,
         waiting_on_by_card:
           child.waiting_on !== null && child.waiting_on.by.length > 0,
+        requires_human: child.requires_human !== null,
         missing: false,
       };
     });
@@ -230,6 +251,7 @@ function toListItem(
     created_at: deriveCreatedAt(issue.external_id, mtimeMs),
     priority: issue.priority,
     assigned_agent: issue.assigned_agent,
+    requires_human: issue.requires_human,
   };
 }
 

@@ -50,6 +50,22 @@ const statusMeta = computed(() => COLUMN_ACCENTS[props.issue.status]);
 const childrenDetail = computed(() => props.issue.children_detail);
 const childrenLabel = computed(() => (isEpic.value ? "phases" : "children"));
 
+// DX-239 / P8 of DX-231 — `requires_human` indicators on the card.
+// Two surfaces: the 👤 chip on the card itself (when this card has the
+// field set), and an aggregated "👤 N" chip when ANY of the card's
+// children is flagged (epic-level rollup). Tooltip on the self-chip
+// truncates the reason at 80 chars to fit Trello-card width without
+// reflow.
+const requiresHuman = computed(() => props.issue.requires_human);
+const requiresHumanTooltip = computed(() => {
+  const r = requiresHuman.value;
+  if (!r) return undefined;
+  return r.reason.length > 80 ? `${r.reason.slice(0, 77)}…` : r.reason;
+});
+const requiresHumanChildCount = computed(
+  () => childrenDetail.value.filter((c) => c.requires_human).length,
+);
+
 function onParentClick(e: MouseEvent): void {
   e.stopPropagation();
   if (props.issue.parent_id) emit("parent-click", props.issue.parent_id);
@@ -77,6 +93,18 @@ function onParentClick(e: MouseEvent): void {
       <span v-if="childrenDetail.length > 0" class="children-count-chip">
         {{ childrenDetail.length }} {{ childrenLabel }}
       </span>
+      <span
+        v-if="requiresHumanChildCount > 0"
+        class="requires-human-children-chip"
+        :title="`${requiresHumanChildCount} ${childrenLabel.slice(0, -1)}${requiresHumanChildCount === 1 ? '' : 's'} require human action`"
+        data-test="requires-human-children-chip"
+      >👤 {{ requiresHumanChildCount }}</span>
+      <span
+        v-if="requiresHuman"
+        class="requires-human-badge"
+        :title="requiresHumanTooltip"
+        data-test="requires-human-badge"
+      >👤</span>
       <span
         v-if="blocked"
         class="blocked-badge"
@@ -153,6 +181,24 @@ function onParentClick(e: MouseEvent): void {
 }
 .issue-card.blocked-by-card {
   border-left: 3px solid #f59e0b;
+}
+.requires-human-badge {
+  font-size: 12px;
+  line-height: 1;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgb(249 115 22 / 0.15);
+  border: 1px solid rgb(249 115 22 / 0.4);
+  cursor: help;
+}
+.requires-human-children-chip {
+  font-size: 10px;
+  font-weight: 600;
+  color: #fdba74;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgb(249 115 22 / 0.12);
+  border: 1px solid rgb(249 115 22 / 0.25);
 }
 .issue-card:hover {
   transform: translateY(-1px);

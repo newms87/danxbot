@@ -198,6 +198,17 @@ function onParentClick(parentId: string): void {
   scopedEpicId.value = parentId;
 }
 
+// DX-239 — `RequiresHumanPanel`'s PATCH returns the post-patch Issue.
+// Merge it into the open detail so the panel + indicators reflect the
+// new state immediately, without waiting for the chokidar mirror
+// debounce (~5s) and a separate re-fetch. The watcher's SSE event will
+// re-affirm later; the local merge is the optimistic path.
+function onIssuePatched(updated: import("../../types").Issue): void {
+  const current = selectedDetail.value;
+  if (!current || current.id !== updated.id) return;
+  selectedDetail.value = { ...current, ...updated };
+}
+
 function onToggleScope(): void {
   const detail = selectedDetail.value;
   if (!detail) return;
@@ -296,6 +307,7 @@ watch(
             @jump-issue="onJumpIssue"
             @toggle-scope="onToggleScope"
             @open-agent="emit('open-agent')"
+            @issue-patched="onIssuePatched"
           />
         </template>
       </DanxSplitPanel>
@@ -332,6 +344,7 @@ watch(
         @jump-issue="onJumpIssue"
         @toggle-scope="onToggleScope"
         @open-agent="emit('open-agent')"
+        @issue-patched="onIssuePatched"
       />
     </DanxDialog>
     <BoardChatOverlay

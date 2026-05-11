@@ -12,6 +12,7 @@ const rows = computed(() =>
     id: c.id,
     name: c.name,
     status: projectChildStatus(c.status, c.waiting_on, c.waiting_on_by_card),
+    requiresHuman: c.requires_human,
   })),
 );
 </script>
@@ -33,6 +34,12 @@ const rows = computed(() =>
       >{{ CHILD_STATUS_META[c.status].glyph }}</span>
       <span class="id-chip">{{ c.id }}</span>
       <span class="label">{{ i + 1 }}: {{ c.name }}</span>
+      <span
+        v-if="c.requiresHuman"
+        class="rh-glyph"
+        title="Requires human action"
+        data-test="children-checklist-rh"
+      >👤</span>
     </div>
   </div>
 </template>
@@ -81,5 +88,10 @@ const rows = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.rh-glyph {
+  font-size: 11px;
+  flex-shrink: 0;
+  cursor: help;
 }
 </style>
