@@ -5,12 +5,23 @@
  * Spawns the real server script as a child process to test the full protocol.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from "vitest";
 import { spawn, ChildProcess } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
+import {
+  probePgReachable,
+  resolveTestPgHost,
+} from "../helpers/test-pg.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "../../..");
@@ -547,6 +558,8 @@ describe("danxbot MCP server — DX-242 DB fallback (real pg)", () => {
    * runner. Pairs with the `tryDirectDbWrite` unit suite in
    * `danxbot-stop-fallback.test.ts`, which exercises the SQL
    * directly. This test exercises the env-plumbing + chain ordering.
+   *
+   * Host portability — see `resolveTestPgHost` (DX-256).
    */
   function readPgEnv(): {
     host: string;
@@ -563,15 +576,26 @@ describe("danxbot MCP server — DX-242 DB fallback (real pg)", () => {
     if (!host || !user || !password || !database) return undefined;
     const port = portRaw ? parseInt(portRaw, 10) : 5432;
     if (!Number.isFinite(port)) return undefined;
-    return { host, port, user, password, database };
+    return { host: resolveTestPgHost(host), port, user, password, database };
   }
   const pgEnv = readPgEnv();
+  // Probe once: skip cleanly when pg is unreachable instead of
+  // letting `new Pool` hang for 10s. The `beforeAll` runs before the
+  // single `itIfDb` body so the skip decision is available there.
+  let pgReachable = false;
+  beforeAll(async () => {
+    if (pgEnv) pgReachable = await probePgReachable(pgEnv);
+  });
   const itIfDb = pgEnv ? it : it.skip;
 
   itIfDb(
     "critical_failure status writes the row as 'failed' (CompleteStatus → DispatchStatus collapse)",
-    async () => {
+    async (ctx) => {
       if (!pgEnv) return;
+      if (!pgReachable) {
+        ctx.skip();
+        return;
+      }
       const { Pool } = await import("pg");
       const { randomUUID } = await import("node:crypto");
       const pool = new Pool({

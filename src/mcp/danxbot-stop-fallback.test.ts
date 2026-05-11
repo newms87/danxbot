@@ -17,7 +17,7 @@
  * upstream, the file wouldn't exist).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -36,6 +36,10 @@ import {
   writeFsQueueEntry,
   type FallbackDbConfig,
 } from "./danxbot-stop-fallback.js";
+import {
+  probePgReachable,
+  resolveTestPgHost,
+} from "../__tests__/helpers/test-pg.js";
 
 describe("writeFsQueueEntry (DX-242)", () => {
   let workArea: string;
@@ -136,17 +140,32 @@ describe("writeFsQueueEntry (DX-242)", () => {
  * idempotent-skip clause (load-bearing per the file header).
  */
 function maybeSkip(): FallbackDbConfig | undefined {
-  return readFallbackDbConfig(process.env);
+  const raw = readFallbackDbConfig(process.env);
+  if (!raw) return undefined;
+  // Host portability — see `resolveTestPgHost` (DX-256).
+  return { ...raw, host: resolveTestPgHost(raw.host) };
 }
 
 describe("tryDirectDbWrite (DX-242, real pg)", () => {
   const db = maybeSkip();
+  // `beforeAll` probes the pool once with a 2s timeout so the suite
+  // skips cleanly when pg is down — without the probe, every test's
+  // `beforeEach` would hang for 10s before vitest's hookTimeout
+  // fired, plus an `afterEach` cascade of `Called end on pool more
+  // than once` errors from the partially-initialized pool.
+  let pgReachable = false;
+  beforeAll(async () => {
+    if (db) pgReachable = await probePgReachable(db);
+  });
   const itIfDb = db ? it : it.skip;
-  let pool: Pool;
+  let pool: Pool | undefined;
   let dispatchId: string;
 
-  beforeEach(async () => {
-    if (!db) return;
+  beforeEach(async (ctx) => {
+    if (!db || !pgReachable) {
+      ctx.skip();
+      return;
+    }
     pool = new Pool({
       host: db.host,
       ...(db.port ? { port: db.port } : {}),
@@ -171,16 +190,22 @@ describe("tryDirectDbWrite (DX-242, real pg)", () => {
   });
 
   afterEach(async () => {
-    if (!db) return;
+    // `if (pool)` guard: when `beforeEach` skipped or threw before
+    // assigning, `pool` is `undefined` and the old `await pool.end()`
+    // would cascade as `Called end on pool more than once` against
+    // the previous test's already-closed pool.
+    if (!pool) return;
     try {
       await pool.query("DELETE FROM dispatches WHERE id = $1", [dispatchId]);
     } finally {
       await pool.end();
+      pool = undefined;
     }
   });
 
   itIfDb("UPDATEs the dispatches row to terminal status on a non-terminal row", async () => {
-    if (!db) return;
+    // beforeEach ctx.skip()s when !pool; this narrows for tsc.
+    if (!db || !pool) return;
     const ok = await tryDirectDbWrite(
       {
         dispatchId,
@@ -210,7 +235,7 @@ describe("tryDirectDbWrite (DX-242, real pg)", () => {
   });
 
   itIfDb("returns false on already-terminal row and preserves the original summary (idempotent)", async () => {
-    if (!db) return;
+    if (!db || !pool) return;
     // Pre-finalize the row with a recognizable summary.
     await pool.query(
       `UPDATE dispatches SET "status" = 'failed', summary = 'original-reason' WHERE id = $1`,
@@ -236,7 +261,7 @@ describe("tryDirectDbWrite (DX-242, real pg)", () => {
   });
 
   itIfDb("returns false when the dispatch row does not exist (no rows updated)", async () => {
-    if (!db) return;
+    if (!db || !pool) return;
     const ok = await tryDirectDbWrite(
       {
         dispatchId: `does-not-exist-${randomUUID()}`,
