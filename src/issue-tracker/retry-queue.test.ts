@@ -201,6 +201,11 @@ describe("retry-queue", () => {
     // doesn't leak into this one (the breaker is module-singleton).
     resetCircuit();
     tmpDir = mkdtempSync(join(tmpdir(), "danxbot-retry-queue-"));
+    // Settings dir must exist before writeSettings (or any
+    // `.danxbot/settings.json` write) — the queue dir helpers create
+    // `.danxbot/.trello-retry/` lazily, but `writeSettings` expects
+    // `.danxbot/` already.
+    mkdirSync(join(tmpDir, ".danxbot"), { recursive: true });
   });
 
   afterEach(() => {
@@ -238,6 +243,99 @@ describe("retry-queue", () => {
         nextEligibleAt: 1700000000000 + 120 * 1000,
         lastErr: "tracker 500",
       });
+    });
+
+    // DX-302 — trelloSync override=false halts the retry queue.
+    // Fresh enqueues are dropped on the floor (no JSON file is written);
+    // the drainRetries flush also short-circuits without calling the
+    // tracker. Both gates read `<repo>/.danxbot/settings.json`'s
+    // `overrides.trelloSync.enabled` directly via
+    // `isTrelloSyncOverrideDisabled`.
+    it("DX-302 — enqueueRetry drops the enqueue when overrides.trelloSync.enabled is false", () => {
+      writeFileSync(
+        join(tmpDir, ".danxbot", "settings.json"),
+        JSON.stringify({
+          overrides: { trelloSync: { enabled: false } },
+          meta: { updatedAt: new Date().toISOString(), updatedBy: "dashboard:test" },
+        }),
+      );
+
+      enqueueRetry({
+        issueId: "ISS-301",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        errMessage: "tracker 500 — would normally enqueue",
+      });
+
+      const files = listQueueFiles(tmpDir);
+      expect(files).toEqual([]);
+    });
+
+    it("DX-302 — enqueueRetry writes normally when overrides.trelloSync.enabled is null (defer to env)", () => {
+      writeFileSync(
+        join(tmpDir, ".danxbot", "settings.json"),
+        JSON.stringify({
+          overrides: { trelloSync: { enabled: null } },
+          meta: { updatedAt: new Date().toISOString(), updatedBy: "dashboard:test" },
+        }),
+      );
+
+      enqueueRetry({
+        issueId: "ISS-302",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        errMessage: "tracker 500",
+      });
+
+      const files = listQueueFiles(tmpDir);
+      expect(files).toHaveLength(1);
+    });
+
+    it("DX-302 — drainRetries returns empty (no tracker call) when overrides.trelloSync.enabled is false; entries stay on disk", async () => {
+      // First enqueue WITH trelloSync enabled (so the entry lands on disk).
+      writeFileSync(
+        join(tmpDir, ".danxbot", "settings.json"),
+        JSON.stringify({
+          overrides: { trelloSync: { enabled: true } },
+          meta: { updatedAt: new Date().toISOString(), updatedBy: "dashboard:test" },
+        }),
+      );
+      enqueueRetry({
+        issueId: "ISS-303",
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        errMessage: "tracker 500",
+        skipArm: true,
+      });
+      expect(listQueueFiles(tmpDir)).toHaveLength(1);
+
+      // Operator flips trelloSync off — drain should now no-op.
+      writeFileSync(
+        join(tmpDir, ".danxbot", "settings.json"),
+        JSON.stringify({
+          overrides: { trelloSync: { enabled: false } },
+          meta: { updatedAt: new Date().toISOString(), updatedBy: "dashboard:test" },
+        }),
+      );
+
+      const result = await drainRetries({
+        repoLocalPath: tmpDir,
+        repoName: "test-repo",
+        prefix: "ISS",
+        tracker,
+        // Past the eligibility window so without the gate the entry
+        // would be attempted immediately.
+        now: () => Number.MAX_SAFE_INTEGER,
+      });
+
+      expect(result.succeeded).toBe(0);
+      expect(result.failed).toBe(0);
+      expect(result.skipped).toBe(0);
+      // The entry remains on disk for the next drain after the operator
+      // re-enables trelloSync — no attempt was consumed.
+      expect(listQueueFiles(tmpDir)).toHaveLength(1);
+      // syncIssue was not called.
+      expect(vi.mocked(syncIssue)).not.toHaveBeenCalled();
     });
 
     it("multiple enqueues for the same issue produce distinct files (FIFO ordering preserved)", () => {

@@ -663,22 +663,40 @@ async function _poll(repo: RepoContext): Promise<void> {
   // children. Phase 5 reintroduces a 1-min audit pass for drift
   // recovery.
 
-  log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
-
-  // Check Needs Help first — user-responded cards get moved to ToDo top
-  const movedFromNeedsHelp = await checkNeedsHelp(repo, tracker);
-  if (movedFromNeedsHelp > 0) {
+  // DX-302 — `trelloSync` is a per-repo override that halts every Trello
+  // inbound + outbound call without halting the WHOLE poll tick (the
+  // existing `issuePoller` toggle does that — it gates `poll()` itself
+  // up front and never reaches `_poll`). When `trelloSync` is `false`
+  // the operator wants local-YAML dispatch to keep running but every
+  // Trello call must short-circuit: inbound hydration, comment pull,
+  // outbound mirror, retry queue, auto-sync. This block guards the
+  // inbound half (checkNeedsHelp + fetchOpenCards + bulkSyncMissingYamls);
+  // the outbound auto-sync + retry-queue gates live in their own modules.
+  const trelloSyncEnabled = isFeatureEnabled(repo, "trelloSync");
+  if (!trelloSyncEnabled) {
     log.info(
-      `[${repo.name}] Moved ${movedFromNeedsHelp} card${movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`,
+      `[${repo.name}] trello sync disabled via settings — skipping inbound hydration + comment pull`,
     );
+  } else {
+    log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
+
+    // Check Needs Help first — user-responded cards get moved to ToDo top
+    const movedFromNeedsHelp = await checkNeedsHelp(repo, tracker);
+    if (movedFromNeedsHelp > 0) {
+      log.info(
+        `[${repo.name}] Moved ${movedFromNeedsHelp} card${movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`,
+      );
+    }
   }
 
-  let openCards: IssueRef[];
-  try {
-    openCards = await tracker.fetchOpenCards();
-  } catch (error) {
-    log.error(`[${repo.name}] Error fetching cards`, error);
-    return;
+  let openCards: IssueRef[] = [];
+  if (trelloSyncEnabled) {
+    try {
+      openCards = await tracker.fetchOpenCards();
+    } catch (error) {
+      log.error(`[${repo.name}] Error fetching cards`, error);
+      return;
+    }
   }
   // ISS-86: tracker.fetchOpenCards() is the inbound channel ONLY (new
   // cards + bulk-sync). It does NOT decide what gets dispatched —

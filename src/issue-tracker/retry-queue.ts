@@ -89,6 +89,7 @@ import {
 import { persistIfDifferent } from "../issue/reconcile/trello-persist.js";
 import { setLastPushedHash } from "../issue/reconcile/push-hash-cache.js";
 import { canonicalize, sha256 } from "../db/canonicalize.js";
+import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
 import { createLogger, type Logger } from "../logger.js";
 
 const log = createLogger("retry-queue");
@@ -288,6 +289,18 @@ export interface EnqueueRetryOptions {
  * succeeds.
  */
 export function enqueueRetry(opts: EnqueueRetryOptions): void {
+  // DX-302 — `trelloSync=false` halts every outbound Trello call for the
+  // repo, including freshly-failed pushes that would otherwise enter
+  // the retry queue. Drop the enqueue on the floor; the upstream caller
+  // (reconcile step 7 / runSync) sees no error since this is a
+  // best-effort retry write. Reads `overrides.trelloSync.enabled` only;
+  // null + true + read errors all fall through to normal enqueue.
+  if (isTrelloSyncOverrideDisabled(opts.repoLocalPath)) {
+    log.info(
+      `Retry queue: trello sync disabled for repo (${opts.repoName ?? "unknown"}) — dropping enqueue for ${opts.issueId}`,
+    );
+    return;
+  }
   const queuedAt = opts.now?.() ?? Date.now();
   const random = opts.random?.() ?? randomUUID().slice(0, 8);
   ensureQueueDir(opts.repoLocalPath);
@@ -430,6 +443,27 @@ async function fireRetry(
 
   // Find the YAML and run the push attempt.
   const repoLocalPath = repoLocalPathFromQueueFile(path);
+
+  // DX-302 — re-check the override at fire time so an operator who
+  // flipped `trelloSync=false` between enqueue and fire halts the
+  // attempt without losing the queue entry. The entry STAYS on disk;
+  // when the operator re-enables, a future enqueue or boot replay re-
+  // arms the timer and the attempt fires. Re-arm a 30s timer so a
+  // setTimeout-armed entry doesn't sit orphaned until the next worker
+  // boot if the operator never flips it back.
+  if (isTrelloSyncOverrideDisabled(repoLocalPath)) {
+    log.info(
+      `Retry queue: trello sync disabled for repo (${entryRepoName}) — deferring ${entry.issueId} (entry stays on disk)`,
+    );
+    const nowMs = now?.() ?? Date.now();
+    const deferredEntry: RetryQueueEntry = {
+      ...entry,
+      nextEligibleAt: nowMs + 30_000,
+    };
+    writeFileSync(path, JSON.stringify(deferredEntry));
+    armTimer(path, deferredEntry, now);
+    return;
+  }
 
   const result = await attemptPush({
     issueId: entry.issueId,
@@ -783,6 +817,18 @@ const EMPTY_DRAIN_RESULT: DrainResult = {
 export async function drainRetries(deps: DrainDeps): Promise<DrainResult> {
   const dir = queueDir(deps.repoLocalPath);
   if (!existsSync(dir)) return { ...EMPTY_DRAIN_RESULT };
+
+  // DX-302 — toggle gate. drainRetries is the synchronous-flush
+  // counterpart to fireRetry's setTimeout path; both must halt when the
+  // operator has disabled trelloSync for this repo so no tracker call
+  // fires from EITHER drain path. Entries stay on disk so the next
+  // enqueue or boot reschedules them when the toggle is re-enabled.
+  if (isTrelloSyncOverrideDisabled(deps.repoLocalPath)) {
+    log.info(
+      `Retry queue: trello sync disabled for repo (${deps.repoName ?? "test-repo"}) — drainRetries returning empty (entries stay on disk)`,
+    );
+    return { ...EMPTY_DRAIN_RESULT };
+  }
 
   const now = deps.now ?? (() => Date.now());
   const logger = deps.log ?? log;

@@ -53,6 +53,11 @@ const envDefaults = computed<Record<Feature, boolean>>(() => ({
   dispatchApi: true,
   ideator: false,
   autoTriage: false,
+  // DX-302 — `trelloSync`'s env default mirrors `issuePoller`'s proxy:
+  // when Trello creds are present the worker registers a Trello tracker
+  // and inbound + outbound sync run by default. Operators flip the
+  // explicit override to disable both directions without rotating env.
+  trelloSync: !!props.agent.settings.display.trello?.configured,
 }));
 
 const slackSub = computed(
@@ -189,6 +194,15 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         :env-default="envDefaults.autoTriage"
         subline="triages Action Items + Review when ToDo is empty"
         :busy="busyFeature === 'autoTriage'"
+        @change="(f, e) => $emit('toggle', agent.name, f, e)"
+      />
+      <FeatureToggle
+        feature="trelloSync"
+        label="Trello sync"
+        :enabled="agent.settings.overrides.trelloSync.enabled"
+        :env-default="envDefaults.trelloSync"
+        subline="inbound + outbound Trello calls"
+        :busy="busyFeature === 'trelloSync'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
       />
     </div>

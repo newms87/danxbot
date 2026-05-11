@@ -70,7 +70,12 @@ function snap(
   name: string,
   overrides: Partial<
     Record<
-      "slack" | "issuePoller" | "dispatchApi" | "ideator" | "autoTriage",
+      | "slack"
+      | "issuePoller"
+      | "dispatchApi"
+      | "ideator"
+      | "autoTriage"
+      | "trelloSync",
       boolean | null
     >
   > = {},
@@ -85,6 +90,7 @@ function snap(
         dispatchApi: { enabled: overrides.dispatchApi ?? null },
         ideator: { enabled: overrides.ideator ?? null },
         autoTriage: { enabled: overrides.autoTriage ?? null },
+        trelloSync: { enabled: overrides.trelloSync ?? null },
       },
       display: {},
       meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:test" },

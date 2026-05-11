@@ -18,6 +18,7 @@ import {
   getIssuePollerPickupPrefix,
   isConflictCheckEnabled,
   isFeatureEnabled,
+  isTrelloSyncOverrideDisabled,
   isValidIanaTimeZone,
   mask,
   mutateAgents,
@@ -106,6 +107,7 @@ describe("settings-file", () => {
           dispatchApi: { enabled: null },
           ideator: { enabled: null },
           autoTriage: { enabled: null },
+          trelloSync: { enabled: null },
         },
         display: { worker: { port: 1234, runtime: "host" } },
         meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:alice" },
@@ -269,6 +271,35 @@ describe("settings-file", () => {
       expect(s.overrides.issuePoller.enabled).toBe(true);
       expect(s.overrides.dispatchApi.enabled).toBe(false);
       expect(s.meta.updatedBy).toBe("dashboard:test");
+    });
+
+    // DX-302 — patching `trelloSync` alone must not clobber the existing
+    // four-feature override surface, and patching another feature later
+    // must preserve a prior `trelloSync` patch. Same writer-merge
+    // invariant as every other override, pinned per-feature.
+    it("preserves other overrides when patching trelloSync alone", async () => {
+      await writeSettings(localPath, {
+        overrides: {
+          slack: { enabled: false },
+          ideator: { enabled: true },
+        },
+        writtenBy: "setup",
+      });
+
+      await writeSettings(localPath, {
+        overrides: { trelloSync: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+
+      const s = readSettings(localPath);
+      expect(s.overrides.slack.enabled).toBe(false);
+      expect(s.overrides.ideator.enabled).toBe(true);
+      expect(s.overrides.trelloSync.enabled).toBe(false);
+    });
+
+    it("trelloSync default is `{enabled: null}` on a freshly-seeded file", () => {
+      const d = defaultSettings();
+      expect(d.overrides.trelloSync).toEqual({ enabled: null });
     });
 
     it("preserves display when patch only touches overrides", async () => {
@@ -480,16 +511,87 @@ describe("settings-file", () => {
       expect(isFeatureEnabled(ctx, "issuePoller")).toBe(true);
     });
 
-    it("covers all five features via the FEATURES constant", () => {
+    it("covers all six features via the FEATURES constant", () => {
       expect(FEATURES).toEqual([
         "slack",
         "issuePoller",
         "dispatchApi",
         "ideator",
         "autoTriage",
+        "trelloSync",
       ]);
     });
 
+    // DX-302 — trelloSync defers to env (RepoContext.trelloEnabled) when
+    // override is null; explicit override wins. Distinct from
+    // issuePoller, which gates the whole poll tick — trelloSync gates
+    // only the Trello legs.
+    it("trelloSync env default is `RepoContext.trelloEnabled` when override is null", () => {
+      const ctxOn = makeRepoContext({ localPath, trelloEnabled: true });
+      expect(isFeatureEnabled(ctxOn, "trelloSync")).toBe(true);
+      const ctxOff = makeRepoContext({ localPath, trelloEnabled: false });
+      expect(isFeatureEnabled(ctxOff, "trelloSync")).toBe(false);
+    });
+
+    it("trelloSync override=true forces on even when env is false", async () => {
+      await writeSettings(localPath, {
+        overrides: { trelloSync: { enabled: true } },
+        writtenBy: "dashboard:test",
+      });
+      const ctx = makeRepoContext({ localPath, trelloEnabled: false });
+      expect(isFeatureEnabled(ctx, "trelloSync")).toBe(true);
+    });
+
+    it("trelloSync override=false forces off even when env is true", async () => {
+      await writeSettings(localPath, {
+        overrides: { trelloSync: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+      const ctx = makeRepoContext({ localPath, trelloEnabled: true });
+      expect(isFeatureEnabled(ctx, "trelloSync")).toBe(false);
+    });
+  });
+
+  // ============================================================
+  // isTrelloSyncOverrideDisabled — DX-302 override-only helper
+  // ============================================================
+
+  describe("isTrelloSyncOverrideDisabled", () => {
+    it("returns false when settings file is missing", () => {
+      expect(isTrelloSyncOverrideDisabled(localPath)).toBe(false);
+    });
+
+    it("returns false when override is null (defer to env)", async () => {
+      await writeSettings(localPath, {
+        overrides: { trelloSync: { enabled: null } },
+        writtenBy: "dashboard:test",
+      });
+      expect(isTrelloSyncOverrideDisabled(localPath)).toBe(false);
+    });
+
+    it("returns false when override is true (explicit on)", async () => {
+      await writeSettings(localPath, {
+        overrides: { trelloSync: { enabled: true } },
+        writtenBy: "dashboard:test",
+      });
+      expect(isTrelloSyncOverrideDisabled(localPath)).toBe(false);
+    });
+
+    it("returns true ONLY when override is explicitly false", async () => {
+      await writeSettings(localPath, {
+        overrides: { trelloSync: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+      expect(isTrelloSyncOverrideDisabled(localPath)).toBe(true);
+    });
+
+    it("returns false when settings file is corrupt (fail-safe)", () => {
+      writeFileSync(settingsFilePath(localPath), "broken json");
+      expect(isTrelloSyncOverrideDisabled(localPath)).toBe(false);
+    });
+  });
+
+  describe("isFeatureEnabled — feature-specific defaults", () => {
     it("ideator env default is false (explicit opt-in)", () => {
       const ctx = makeRepoContext({ localPath });
       expect(isFeatureEnabled(ctx, "ideator")).toBe(false);

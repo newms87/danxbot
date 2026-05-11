@@ -48,7 +48,8 @@ export type Feature =
   | "issuePoller"
   | "dispatchApi"
   | "ideator"
-  | "autoTriage";
+  | "autoTriage"
+  | "trelloSync";
 
 export const FEATURES: readonly Feature[] = [
   "slack",
@@ -56,6 +57,7 @@ export const FEATURES: readonly Feature[] = [
   "dispatchApi",
   "ideator",
   "autoTriage",
+  "trelloSync",
 ] as const;
 
 /**
@@ -98,6 +100,16 @@ export interface SettingsOverrides {
   dispatchApi: FeatureOverride;
   ideator: FeatureOverride;
   autoTriage: FeatureOverride;
+  /**
+   * DX-302 — when set to `false`, every Trello inbound + outbound call
+   * path no-ops for this repo (poller inbound hydration + comment pull,
+   * worker auto-sync, retry queue). Cards continue to flow through the
+   * local YAML + DB normally; the Trello board freezes at its last-
+   * synced state until the toggle is re-enabled. Distinct from
+   * `issuePoller`, which halts the WHOLE per-tick poll (including
+   * local-YAML dispatch) — `trelloSync` halts only the Trello legs.
+   */
+  trelloSync: FeatureOverride;
 }
 
 export interface SettingsDisplayWorker {
@@ -225,6 +237,7 @@ export interface WriteSettingsPatchOverrides {
   dispatchApi?: FeatureOverride;
   ideator?: FeatureOverride;
   autoTriage?: FeatureOverride;
+  trelloSync?: FeatureOverride;
 }
 
 export interface WriteSettingsPatch {
@@ -259,6 +272,7 @@ export function defaultSettings(): Settings {
       dispatchApi: { enabled: null },
       ideator: { enabled: null },
       autoTriage: { enabled: null },
+      trelloSync: { enabled: null },
     },
     display: {},
     agents: {},
@@ -488,6 +502,7 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
       dispatchApi: normalizeOverride(partial.overrides?.dispatchApi),
       ideator: normalizeOverride(partial.overrides?.ideator),
       autoTriage: normalizeOverride(partial.overrides?.autoTriage),
+      trelloSync: normalizeOverride(partial.overrides?.trelloSync),
     },
     display:
       partial.display && typeof partial.display === "object"
@@ -581,6 +596,8 @@ async function runWrite(
         ideator: patch.overrides?.ideator ?? existing.overrides.ideator,
         autoTriage:
           patch.overrides?.autoTriage ?? existing.overrides.autoTriage,
+        trelloSync:
+          patch.overrides?.trelloSync ?? existing.overrides.trelloSync,
       },
       display: patch.display
         ? { ...existing.display, ...patch.display }
@@ -704,6 +721,13 @@ function envDefault(ctx: RepoContext, feature: Feature): boolean {
       // past, a recurring agent dispatch that costs tokens. Operators
       // turn it on per-repo from the Agents tab.
       return false;
+    case "trelloSync":
+      // DX-302 — the env default for "should Trello sync run" is the
+      // same boolean the env-level `DANX_TRELLO_ENABLED` carries on
+      // `RepoContext`. Operators flip the override to false when they
+      // want to halt sync without touching `.env` + restarting; null
+      // (the default) defers to env.
+      return ctx.trelloEnabled;
   }
 }
 
@@ -836,6 +860,37 @@ export function readAgents(localPath: string): AgentRecordWithName[] {
   } catch (err) {
     log.error(`readAgents threw — returning [] for ${localPath}`, err);
     return [];
+  }
+}
+
+/**
+ * DX-302 — `trelloSync` override-only reader for call sites that don't
+ * carry a full `RepoContext`. Returns `true` ONLY when the operator has
+ * explicitly set `overrides.trelloSync.enabled: false` in
+ * `<repo>/.danxbot/settings.json`; `null` (defer to env), `true`
+ * (explicit on), or any read error returns `false` (i.e. NOT disabled).
+ *
+ * Used by the retry queue + reconcile step 7 (outbound mirror push) —
+ * call sites that have a `repoLocalPath` but not the surrounding
+ * `RepoContext` carrying `trelloEnabled`. Per-tick callers with a full
+ * `RepoContext` (the poller, the worker's auto-sync) should call
+ * `isFeatureEnabled(ctx, "trelloSync")` instead so the env-default path
+ * also fires when override is null.
+ *
+ * Never throws — read failures degrade to "not disabled" so a broken
+ * settings file can't paint every retry as permanently disabled and
+ * silently drop tracker pushes for the duration of the corruption.
+ */
+export function isTrelloSyncOverrideDisabled(localPath: string): boolean {
+  try {
+    const settings = readSettings(localPath);
+    return settings.overrides.trelloSync.enabled === false;
+  } catch (err) {
+    log.error(
+      `isTrelloSyncOverrideDisabled threw — returning false for ${localPath}`,
+      err,
+    );
+    return false;
   }
 }
 

@@ -16,7 +16,7 @@ vi.mock("../settings-file.js", async () => {
     ...actual,
     readSettings: (...args: unknown[]) => mockReadSettings(...args),
     writeSettings: (...args: unknown[]) => mockWriteSettings(...args),
-    FEATURES: ["slack", "issuePoller", "dispatchApi", "ideator"],
+    FEATURES: ["slack", "issuePoller", "dispatchApi", "ideator", "autoTriage", "trelloSync"],
     DASHBOARD_PREFIX: "dashboard:",
   };
 });
@@ -295,6 +295,28 @@ describe("handlePatchToggle", () => {
       "/repos/danxbot",
       expect.objectContaining({
         overrides: { issuePoller: { enabled: null } },
+      }),
+    );
+  });
+
+  // DX-302 — round-trip PATCH for the new `trelloSync` feature. The
+  // route's allowlist accepts every member of FEATURES, including this
+  // one; the handler writes `overrides.trelloSync.enabled` and stamps
+  // `dashboard:<username>` as the writer.
+  it("DX-302 — accepts `feature: trelloSync` and writes overrides.trelloSync.enabled", async () => {
+    mockWriteSettings.mockResolvedValue(settings({ trelloSync: false }));
+    mockReadSettings.mockReturnValue(settings({ trelloSync: false }));
+
+    const req = authReq({ feature: "trelloSync", enabled: false });
+    const res = createMockRes();
+    await handlePatchToggle(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockWriteSettings).toHaveBeenCalledWith(
+      "/repos/danxbot",
+      expect.objectContaining({
+        overrides: { trelloSync: { enabled: false } },
+        writtenBy: "dashboard:newms87",
       }),
     );
   });

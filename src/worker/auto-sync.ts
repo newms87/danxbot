@@ -32,6 +32,7 @@
 import { reconcileIssue } from "../issue/reconcile.js";
 import { findByExternalId } from "../poller/yaml-lifecycle.js";
 import { createLogger } from "../logger.js";
+import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
 import type {
   Dispatch,
   TrelloTriggerMetadata,
@@ -73,6 +74,25 @@ export async function autoSyncTrackedIssue(
   },
 ): Promise<void> {
   try {
+    // DX-302 — per-repo `trelloSync` operator override. When the
+    // operator has explicitly flipped it off in
+    // `<repo>/.danxbot/settings.json`, every Trello outbound call must
+    // no-op; auto-sync is one of the four outbound paths the epic gates.
+    // Checked BEFORE the dispatch lookup so a disabled-Trello repo
+    // doesn't even probe the DB for the per-dispatch trigger row.
+    //
+    // We consult ONLY the explicit override (not the env default) so
+    // existing tests + production code that fire a Trello-trigger
+    // auto-sync against a repo without `DANX_TRELLO_ENABLED` env (e.g.
+    // the system-test fixture) keep working — the trigger filter on
+    // the dispatch row is the canonical "is this a Trello sync"
+    // signal, and this gate is the additive operator-pause on top.
+    if (isTrelloSyncOverrideDisabled(repo.localPath)) {
+      log.info(
+        `[${repo.name}] trello sync disabled via settings override — skipping auto-sync for dispatch ${jobId}`,
+      );
+      return;
+    }
     const row = await deps.getDispatch(jobId);
     if (!row || row.trigger !== "trello") return;
     const meta = row.triggerMetadata as TrelloTriggerMetadata;

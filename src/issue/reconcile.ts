@@ -99,6 +99,7 @@ import {
 } from "../dispatch/triage-timer.js";
 import type { IssueTracker } from "../issue-tracker/interface.js";
 import { createLogger } from "../logger.js";
+import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
 
 const log = createLogger("reconcile");
 
@@ -602,7 +603,26 @@ async function reconcileBody(
   //     mutex during the network round-trip.
   const tracker = trackersByRepo.get(repo.name);
   const lastPushed = cacheGet(repo.name, id);
-  if (tracker && lastPushed !== nextHash) {
+  // DX-302 — operator override halts step 7. The chokidar-event reconcile
+  // path is the main outbound mirror channel (every agent YAML save fires
+  // here); without this gate, flipping `overrides.trelloSync.enabled =
+  // false` would NOT actually stop Trello pushes — auto-sync would skip,
+  // retry-queue would skip, but every agent save would still hit Trello
+  // through this path. Override-only (consistent with auto-sync) so the
+  // env default + trigger-filter combo on the dispatch row remain the
+  // canonical "is this a Trello sync" signals; this is the additive
+  // operator-pause. The lastPushedHash cache is left UNCHANGED on skip so
+  // the next reconcile after re-enable still fires the push.
+  const trelloSyncDisabled =
+    tracker !== undefined &&
+    lastPushed !== nextHash &&
+    isTrelloSyncOverrideDisabled(repo.localPath);
+  if (trelloSyncDisabled) {
+    log.info(
+      `[${repo.name}] ${id} trelloSync override=false — skipping outbound tracker push (will re-fire on next reconcile after re-enable)`,
+    );
+  }
+  if (tracker && lastPushed !== nextHash && !trelloSyncDisabled) {
     const recordSystemError = systemErrorHooksByRepo.get(repo.name);
     const pushPromise = pushTrelloDiff({
       issue: mutated,
