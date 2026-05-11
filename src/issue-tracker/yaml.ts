@@ -383,7 +383,7 @@ export function serializeIssue(issue: Issue): string {
     // sees every dispatch gate adjacent. Field is `null` when no human
     // action is needed. Independent from `blocked` and `waiting_on`.
     requires_human:
-      issue.requires_human === null
+      issue.requires_human == null
         ? null
         : {
             reason: issue.requires_human.reason,

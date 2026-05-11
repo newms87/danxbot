@@ -11,7 +11,8 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { parseIssue, IssueParseError } from "./yaml.js";
+import { parseIssue, serializeIssue, IssueParseError } from "./yaml.js";
+import type { Issue } from "./interface.js";
 
 const BASE = `schema_version: 4
 tracker: trello
@@ -195,5 +196,69 @@ blocked: null
 history: []
 `;
     expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(/assigned_agent/);
+  });
+});
+
+describe("serializeIssue — requires_human tolerates undefined", () => {
+  /**
+   * Regression: pre-DX-231 YAMLs lack the `requires_human` field
+   * entirely. If anything upstream of `serializeIssue` produced an
+   * `Issue` object with `requires_human: undefined` (rather than
+   * `null`), the strict `=== null` check fell through to read
+   * `.reason` of undefined → `TypeError: Cannot read properties of
+   * undefined (reading 'reason')`. Boot reattach hit this every time
+   * a legacy YAML had a dead `dispatch:` block to clear, so the
+   * stamps accumulated and the multi-agent picker filtered every ToDo
+   * card with `dispatch !== null`. Worker idled with a populated ToDo
+   * queue until an operator manually cleared the YAMLs.
+   *
+   * Loose `== null` covers both null and undefined; treat absent the
+   * same as null and round-trip cleanly.
+   */
+  function legacyIssueWithoutRequiresHuman(): Issue {
+    return {
+      schema_version: 6,
+      tracker: "memory",
+      id: "DX-1",
+      external_id: "",
+      parent_id: null,
+      children: [],
+      dispatch: null,
+      status: "ToDo",
+      type: "Feature",
+      title: "t",
+      description: "d",
+      priority: 3,
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+      ac: [],
+      comments: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      blocked: null,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      requires_human: undefined as any,
+      assigned_agent: null,
+      waiting_on: null,
+      history: [],
+    };
+  }
+
+  it("serializes an Issue with `requires_human: undefined` as `null` (round-trips)", () => {
+    const issue = legacyIssueWithoutRequiresHuman();
+    const yaml = serializeIssue(issue);
+    expect(yaml).toMatch(/requires_human:\s*null/);
+    const reparsed = parseIssue(yaml, { expectedPrefix: "DX" });
+    expect(reparsed.requires_human).toBeNull();
+  });
+
+  it("does not throw `Cannot read properties of undefined (reading 'reason')`", () => {
+    const issue = legacyIssueWithoutRequiresHuman();
+    expect(() => serializeIssue(issue)).not.toThrow();
   });
 });

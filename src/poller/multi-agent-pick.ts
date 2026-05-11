@@ -466,6 +466,27 @@ export async function tryMultiAgentDispatch(
         `[${repo.name}] multi-agent dispatch failed for ${card.id} → ${agent.name}`,
         err,
       );
+      // Dispatch threw post-stamp → YAML carries a `dispatch:` block
+      // pointing at a dispatchId that never made it into the DB. Without
+      // clearing, every subsequent tick's `listDispatchableYamls` filter
+      // (`if (i.dispatch !== null) return false`) rejects the card
+      // permanently. The accumulated stale blocks were the root cause of
+      // a poller-idle-with-ToDo-queue stall seen 2026-05-11.
+      try {
+        const fresh = await loadLocal(
+          repo.localPath,
+          stamped.id,
+          repo.issuePrefix,
+        );
+        if (fresh && fresh.dispatch !== null) {
+          await clearDispatchAndWrite(repo.localPath, fresh);
+        }
+      } catch (clearErr) {
+        log.error(
+          `[${repo.name}] multi-agent post-fail clearDispatch failed for ${card.id}`,
+          clearErr,
+        );
+      }
       remainingCards.splice(remainingCards.indexOf(card), 1);
       continue;
     }

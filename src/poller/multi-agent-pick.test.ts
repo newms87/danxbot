@@ -411,6 +411,56 @@ describe("tryMultiAgentDispatch", () => {
     expect(mockedDispatchWithRecovery.mock.calls[0][1].agentName).toBe("alice");
   });
 
+  it("dispatchWithRecovery throws AFTER YAML stamp → clearDispatchAndWrite fires so the stamp doesn't persist", async () => {
+    /**
+     * Regression for the poller-idle-with-ToDo-queue bug seen on
+     * 2026-05-11. Before the fix, the catch block in
+     * `tryMultiAgentDispatch` logged and continued, leaving the
+     * just-stamped `dispatch:` block on the YAML. The next tick's
+     * `listDispatchableYamls` filter rejected the card
+     * (`if (i.dispatch !== null) return false`), so failed dispatches
+     * accumulated until the entire ToDo queue was filtered out and the
+     * worker stalled with "No cards in ToDo" while cards were waiting.
+     *
+     * Contract: dispatch throws → loadLocal the just-stamped YAML →
+     * `clearDispatchAndWrite` invoked so subsequent ticks see a clean
+     * slate. `loadLocal` returns null in the default mock; this test
+     * overrides it to return an Issue with a non-null `dispatch{}` so
+     * the clear branch fires and we can assert against the call.
+     */
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockRejectedValueOnce(
+      new Error("dispatch failed post-stamp"),
+    );
+    const lifecycle = await import("./yaml-lifecycle.js");
+    vi.mocked(lifecycle.loadLocal).mockResolvedValueOnce({
+      ...issue("DX-1"),
+      dispatch: {
+        id: "stamp-uuid",
+        pid: 0,
+        host: "test",
+        kind: "work" as const,
+        started_at: "",
+        ttl_seconds: 7200,
+      },
+    });
+    const clearMock = vi.mocked(lifecycle.clearDispatchAndWrite);
+    clearMock.mockClear();
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(0);
+    expect(clearMock).toHaveBeenCalledTimes(1);
+    const [, clearedIssue] = clearMock.mock.calls[0];
+    expect(clearedIssue.id).toBe("DX-1");
+  });
+
   it("dispatchWithRecovery throws → loop continues with remaining cards (no halt)", async () => {
     writeSettings({
       alice: agentRecord("alice"),
