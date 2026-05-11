@@ -67,7 +67,70 @@ function toRow(raw: RawRow): DbIssueRow {
     raw.mirror_updated_at instanceof Date
       ? raw.mirror_updated_at.getTime()
       : new Date(raw.mirror_updated_at).getTime();
-  return { issue: raw.data, mirrorUpdatedAtMs: ts };
+  return { issue: normalizeLoadedIssue(raw.data), mirrorUpdatedAtMs: ts };
+}
+
+/**
+ * Fill schema-default values on rows whose on-disk YAML predates fields
+ * that were added in later schema bumps (v4 history, v5 priority, v6
+ * position / requires_human / assigned_agent / waiting_on optional).
+ *
+ * The mirror (`src/db/issues-mirror.ts#readAndParse`) intentionally
+ * stores the YAML payload verbatim — no `parseIssue` / `validateIssue`
+ * pass — so a hash round-trip stays content-addressed and older clients
+ * round-trip cleanly without rewriting v3 bytes into v6 bytes. That
+ * leaves the schema-default fill-in as the DB-reader's job: every
+ * consumer behind these helpers can assume the strict `Issue` shape,
+ * regardless of which schema version the row was written under.
+ *
+ * Mutates the input in place — `data` is a fresh JSONB deserialization
+ * owned by this scope. `_malformed: true` rows (also stamped by the
+ * mirror when YAML parsing throws) are passed through untouched; the
+ * consumer is responsible for skipping them.
+ */
+function normalizeLoadedIssue(raw: unknown): Issue {
+  if (!raw || typeof raw !== "object") return raw as Issue;
+  const obj = raw as Record<string, unknown>;
+  if (obj._malformed === true) return obj as unknown as Issue;
+  if (!Array.isArray(obj.children)) obj.children = [];
+  if (!Array.isArray(obj.comments)) obj.comments = [];
+  if (!Array.isArray(obj.history)) obj.history = [];
+  if (!Array.isArray(obj.ac)) obj.ac = [];
+  if (obj.waiting_on === undefined) obj.waiting_on = null;
+  if (obj.blocked === undefined) obj.blocked = null;
+  if (obj.requires_human === undefined) obj.requires_human = null;
+  if (obj.assigned_agent === undefined) obj.assigned_agent = null;
+  if (obj.priority === undefined) obj.priority = 3.0;
+  if (obj.position === undefined) obj.position = null;
+  if (obj.dispatch === undefined) obj.dispatch = null;
+  if (obj.parent_id === undefined) obj.parent_id = null;
+  if (obj.retro === undefined || obj.retro === null) {
+    obj.retro = { good: "", bad: "", action_item_ids: [], commits: [] };
+  } else if (typeof obj.retro === "object") {
+    const r = obj.retro as Record<string, unknown>;
+    if (!Array.isArray(r.action_item_ids)) r.action_item_ids = [];
+    if (!Array.isArray(r.commits)) r.commits = [];
+    if (typeof r.good !== "string") r.good = "";
+    if (typeof r.bad !== "string") r.bad = "";
+  }
+  if (obj.waiting_on && typeof obj.waiting_on === "object") {
+    const w = obj.waiting_on as Record<string, unknown>;
+    if (!Array.isArray(w.by)) w.by = [];
+  }
+  if (obj.triage && typeof obj.triage === "object") {
+    const t = obj.triage as Record<string, unknown>;
+    if (!Array.isArray(t.history)) t.history = [];
+    if (typeof t.expires_at !== "string") t.expires_at = "";
+    if (typeof t.reassess_hint !== "string") t.reassess_hint = "";
+    if (typeof t.last_status !== "string") t.last_status = "";
+    if (typeof t.last_explain !== "string") t.last_explain = "";
+  }
+  return obj as unknown as Issue;
+}
+
+function nullableIssue(data: Issue | undefined | null): Issue | null {
+  if (data === undefined || data === null) return null;
+  return normalizeLoadedIssue(data);
 }
 
 /**
@@ -82,7 +145,7 @@ export async function dbSelectIssueById(
     `SELECT data FROM issues WHERE repo_name = $1 AND id = $2 LIMIT 1`,
     [repoName, id],
   );
-  return rows[0]?.data ?? null;
+  return nullableIssue(rows[0]?.data);
 }
 
 /**
@@ -102,7 +165,7 @@ export async function dbSelectIssueByExternalId(
     `SELECT data FROM issues WHERE repo_name = $1 AND external_id = $2 LIMIT 1`,
     [repoName, externalId],
   );
-  return rows[0]?.data ?? null;
+  return nullableIssue(rows[0]?.data);
 }
 
 /**
@@ -158,7 +221,7 @@ export async function dbListDependentsByWaitingOnId(
          AND data @> $2::jsonb`,
     [repoName, containment],
   );
-  return rows.map((r) => r.data);
+  return rows.map((r) => normalizeLoadedIssue(r.data));
 }
 
 /**
@@ -175,7 +238,7 @@ export async function dbListChildrenByParent(
     `SELECT data FROM issues WHERE repo_name = $1 AND parent_id = $2`,
     [repoName, parentId],
   );
-  return rows.map((r) => r.data);
+  return rows.map((r) => normalizeLoadedIssue(r.data));
 }
 
 /**
@@ -193,7 +256,7 @@ export async function dbListParentsToRecompute(
          AND jsonb_array_length(data->'children') > 0`,
     [repoName],
   );
-  return rows.map((r) => r.data);
+  return rows.map((r) => normalizeLoadedIssue(r.data));
 }
 
 /**
@@ -248,7 +311,7 @@ export async function dbSelectIssuesByIds(
     `SELECT data FROM issues WHERE repo_name = $1 AND id = ANY($2::text[])`,
     [repoName, ids],
   );
-  return rows.map((r) => r.data);
+  return rows.map((r) => normalizeLoadedIssue(r.data));
 }
 
 export async function dbListAllIssues(

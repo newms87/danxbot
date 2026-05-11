@@ -22,6 +22,7 @@ import { up as upIssuesMirror } from "../db/migrations/016_issues_mirror.js";
 import { canonicalize, sha256 } from "../db/canonicalize.js";
 import {
   dbListDependentsByWaitingOnId,
+  dbSelectIssueById,
   resetIssueDbQueryFn,
   setIssueDbQueryFn,
 } from "./issues-db.js";
@@ -234,6 +235,134 @@ describe("dbListDependentsByWaitingOnId (DX-217)", () => {
       expect(rows).toHaveLength(1);
       // Sanity: only the REPO row, not the other-repo one.
       expect(rows[0].id).toBe("DX-2");
+    },
+  );
+});
+
+describe("normalizeLoadedIssue — v3 row defaults", () => {
+  beforeEach(async () => {
+    if (handle) await handle.pool.query("DELETE FROM issues");
+  });
+
+  it.skipIf(!handle)(
+    "fills history/waiting_on/priority/etc. on a v3-shaped row loaded from DB",
+    async () => {
+      // Minimal v3 shape — no history, no waiting_on, no priority, no
+      // position, no requires_human, no assigned_agent. Same shape
+      // gpt-manager's SG-105 ships on disk.
+      const v3 = {
+        schema_version: 3,
+        tracker: "trello",
+        id: "DX-V3",
+        external_id: "ext-v3",
+        parent_id: null,
+        children: [],
+        dispatch: null,
+        status: "Review",
+        type: "Bug",
+        title: "v3",
+        description: "",
+        triage: {
+          expires_at: "",
+          reassess_hint: "",
+          last_status: "",
+          last_explain: "",
+          ice: { total: 0, i: 0, c: 0, e: 0 },
+        },
+        ac: [],
+        comments: [],
+        retro: { good: "", bad: "" },
+        blocked: null,
+      };
+      const contentHash = sha256(canonicalize(v3));
+      await handle!.pool.query(
+        `INSERT INTO issues (repo_name, data, content_hash, mirror_updated_at)
+         VALUES ($1, $2::jsonb, $3, now())`,
+        [REPO, JSON.stringify(v3), contentHash],
+      );
+
+      const loaded = await dbSelectIssueById(REPO, "DX-V3");
+      expect(loaded).not.toBeNull();
+      // Schema-default fields normalize:
+      expect(loaded!.history).toEqual([]);
+      expect(loaded!.waiting_on).toBeNull();
+      expect(loaded!.requires_human).toBeNull();
+      expect(loaded!.assigned_agent).toBeNull();
+      expect(loaded!.priority).toBe(3);
+      expect(loaded!.position).toBeNull();
+      expect(loaded!.retro.action_item_ids).toEqual([]);
+      expect(loaded!.retro.commits).toEqual([]);
+      expect(loaded!.triage.history).toEqual([]);
+    },
+  );
+
+  it.skipIf(!handle)(
+    "fills waiting_on.by[] when waiting_on is present but missing by[]",
+    async () => {
+      // Hypothetical hand-edited / legacy waiting_on with no by[] — would
+      // crash listDispatchableYamls (`w.by` undefined → `.map` throws).
+      const broken = {
+        ...({
+          schema_version: 6,
+          tracker: "memory",
+          id: "DX-W",
+          external_id: "",
+          parent_id: null,
+          children: [],
+          dispatch: null,
+          status: "ToDo",
+          type: "Feature",
+          title: "w",
+          description: "",
+          priority: 3,
+          position: null,
+          triage: {
+            expires_at: "",
+            reassess_hint: "",
+            last_status: "",
+            last_explain: "",
+            ice: { total: 0, i: 0, c: 0, e: 0 },
+            history: [],
+          },
+          ac: [],
+          comments: [],
+          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+          blocked: null,
+          requires_human: null,
+          assigned_agent: null,
+          history: [],
+        }),
+        // Non-null waiting_on, missing by[]
+        waiting_on: { reason: "x", timestamp: "" },
+      };
+      const contentHash = sha256(canonicalize(broken));
+      await handle!.pool.query(
+        `INSERT INTO issues (repo_name, data, content_hash, mirror_updated_at)
+         VALUES ($1, $2::jsonb, $3, now())`,
+        [REPO, JSON.stringify(broken), contentHash],
+      );
+
+      const loaded = await dbSelectIssueById(REPO, "DX-W");
+      expect(loaded!.waiting_on).not.toBeNull();
+      expect(loaded!.waiting_on!.by).toEqual([]);
+    },
+  );
+
+  it.skipIf(!handle)(
+    "passes through _malformed rows untouched",
+    async () => {
+      const malformed = { id: "DX-M", _malformed: true, raw: "garbage" };
+      const contentHash = sha256(canonicalize(malformed));
+      await handle!.pool.query(
+        `INSERT INTO issues (repo_name, data, content_hash, mirror_updated_at)
+         VALUES ($1, $2::jsonb, $3, now())`,
+        [REPO, JSON.stringify(malformed), contentHash],
+      );
+      const loaded = await dbSelectIssueById(REPO, "DX-M");
+      expect(loaded).not.toBeNull();
+      expect((loaded as unknown as Record<string, unknown>)._malformed).toBe(true);
+      // Crucially: did NOT acquire children/history arrays — caller skips it.
+      expect((loaded as unknown as Record<string, unknown>).history).toBeUndefined();
     },
   );
 });
