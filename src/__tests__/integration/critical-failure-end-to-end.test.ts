@@ -263,7 +263,6 @@ vi.mock("../../poller/local-issues.js", async () => {
       walk(repoLocalPath, prefix).filter(
         (i) => (i as Record<string, unknown>).status === "In Progress",
       ),
-    listBlockedTodoYamls: async () => [],
     listTriageDueYamls: async () => [],
   };
 });

@@ -1009,6 +1009,20 @@ async function _poll(repo: RepoContext): Promise<void> {
   log.warn(
     `[${repo.name}] Legacy unscoped dispatch suppressed for ${resolvedIssue.id} — configure an agent or wait for the multi-agent picker to free up`,
   );
+  // DX-219 follow-up: the pre-stamp block above wrote `dispatch:
+  // {pid:0, …}` onto `resolvedIssue` BEFORE we knew the spawn would be
+  // suppressed. Without this rollback the YAML carries an orphan
+  // dispatch record forever, and the subsequent tick's
+  // `i.dispatch != null` gate excludes the card from
+  // `listDispatchableYamls` permanently. Clearing here is the inverse
+  // of the stamp call inside the `if (existing) …` branch above.
+  try {
+    await clearDispatchAndWrite(repo.localPath, resolvedIssue);
+  } catch (clearErr) {
+    log.warn(
+      `[${repo.name}] post-suppress clearDispatch failed for ${resolvedIssue.id}: ${clearErr instanceof Error ? clearErr.message : String(clearErr)}`,
+    );
+  }
   // await spawnClaude(
   //   repo,
   //   task,
@@ -1698,11 +1712,50 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
     const workspaceDir = resolve(workspacesTargetDir, entry);
     if (!statSync(workspaceDir).isDirectory()) continue;
     injectMcpServers(workspaceDir);
+    stripHostUnreachableMcpServers(workspaceDir);
     pruneStaleDanxArtifactsInWorkspace(
       resolve(injectWorkspacesDir, entry),
       workspaceDir,
     );
   }
+}
+
+/**
+ * Host-mode dispatches run claude on the operator's machine; the inject
+ * `.mcp.json` is authored for docker dispatches and references MCP
+ * servers via danxbot-net DNS (e.g. `http://playwright:3000`). Those
+ * hostnames don't resolve from the host, so the server appears as
+ * "1 MCP server failed" in the agent's TUI and any tool call against it
+ * times out. Strip such entries from the workspace `.mcp.json` post-
+ * mirror when `config.isHost` so the host-mode agent sees only servers
+ * it can actually reach.
+ *
+ * The list of host-unreachable entries is intentionally hard-coded:
+ * every server we ship under `mcp-servers/` targets the danxbot-net
+ * playwright container. A future dashboard toggle (filed separately)
+ * will let operators opt in via host port mapping or remote URL.
+ */
+function stripHostUnreachableMcpServers(workspaceDir: string): void {
+  if (!config.isHost) return;
+  const mcpJsonPath = resolve(workspaceDir, ".mcp.json");
+  if (!existsSync(mcpJsonPath)) return;
+  let parsed: { mcpServers?: Record<string, unknown> };
+  try {
+    parsed = JSON.parse(readFileSync(mcpJsonPath, "utf-8"));
+  } catch {
+    return;
+  }
+  if (!parsed.mcpServers || typeof parsed.mcpServers !== "object") return;
+  const HOST_UNREACHABLE = new Set(["playwright"]);
+  let removed = false;
+  for (const name of Object.keys(parsed.mcpServers)) {
+    if (HOST_UNREACHABLE.has(name)) {
+      delete parsed.mcpServers[name];
+      removed = true;
+    }
+  }
+  if (!removed) return;
+  writeIfChanged(mcpJsonPath, JSON.stringify(parsed, null, 2) + "\n");
 }
 
 /**

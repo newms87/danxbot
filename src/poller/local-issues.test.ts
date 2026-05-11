@@ -10,7 +10,6 @@ import { createTestDb, type TestDbHandle } from "../db/test-db.js";
 import { up as upIssuesMirror } from "../db/migrations/016_issues_mirror.js";
 import { canonicalize, sha256 } from "../db/canonicalize.js";
 import {
-  listBlockedTodoYamls,
   listDispatchableYamls,
   listInProgressYamls,
   listTriageDueYamls,
@@ -179,20 +178,132 @@ describe("local-issues — DB-backed", () => {
       expect(result.map((i) => i.id)).toEqual(["ISS-3"]);
     });
 
-    it.skipIf(!handle)("excludes waiting_on cards", async () => {
-      const waiting_on: WaitingOn = {
-        reason: "Waits for ISS-2",
-        timestamp: "2026-01-01T00:00:00Z",
-        by: ["ISS-2"],
-      };
-      await seed(
-        makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
-        1000,
-      );
-      await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
-      const result = await listDispatchableYamls(REPO_PATH, "ISS");
-      expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
-    });
+    it.skipIf(!handle)(
+      "excludes waiting_on cards when dep is non-terminal",
+      async () => {
+        const waiting_on: WaitingOn = {
+          reason: "Waits for ISS-2",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-2"],
+        };
+        await seed(
+          makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
+          1000,
+        );
+        await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "includes waiting_on cards when every dep is Done (deps closed → effective null)",
+      async () => {
+        const waiting_on: WaitingOn = {
+          reason: "Waits for ISS-2",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-2"],
+        };
+        await seed(
+          makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
+          1000,
+        );
+        await seed(
+          makeIssue({ id: "ISS-2", external_id: "b", status: "Done" }),
+          1000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "includes waiting_on cards when every dep is Cancelled",
+      async () => {
+        const waiting_on: WaitingOn = {
+          reason: "Waits for ISS-2",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-2"],
+        };
+        await seed(
+          makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
+          1000,
+        );
+        await seed(
+          makeIssue({ id: "ISS-2", external_id: "b", status: "Cancelled" }),
+          1000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "excludes waiting_on cards when at least one dep is still open",
+      async () => {
+        const waiting_on: WaitingOn = {
+          reason: "Waits for ISS-2 + ISS-3",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-2", "ISS-3"],
+        };
+        await seed(
+          makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
+          1000,
+        );
+        await seed(
+          makeIssue({ id: "ISS-2", external_id: "b", status: "Done" }),
+          1000,
+        );
+        await seed(
+          makeIssue({ id: "ISS-3", external_id: "c", status: "ToDo" }),
+          1000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id).sort()).toEqual(["ISS-3"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "excludes waiting_on cards when a dep is missing from the DB (fail-safe)",
+      async () => {
+        const waiting_on: WaitingOn = {
+          reason: "Waits for ISS-999 (renamed/deleted)",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-999"],
+        };
+        await seed(
+          makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
+          1000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual([]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "does NOT mutate the issue's raw waiting_on when deps are terminal (durable record preserved)",
+      async () => {
+        const waiting_on: WaitingOn = {
+          reason: "Waits for ISS-2",
+          timestamp: "2026-01-01T00:00:00Z",
+          by: ["ISS-2"],
+        };
+        await seed(
+          makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
+          1000,
+        );
+        await seed(
+          makeIssue({ id: "ISS-2", external_id: "b", status: "Done" }),
+          1000,
+        );
+        await listDispatchableYamls(REPO_PATH, "ISS");
+        const row = await handle!.pool.query(
+          "SELECT data FROM issues WHERE repo_name = $1 AND id = $2",
+          [REPO_NAME, "ISS-1"],
+        );
+        expect(row.rows[0].data.waiting_on).toEqual(waiting_on);
+      },
+    );
 
     // DX-231 (Phase 2 — DX-233) — `requires_human` is an orthogonal
     // dispatch gate parallel to `blocked` and `waiting_on`. Three tests
@@ -645,54 +756,6 @@ describe("local-issues — DB-backed", () => {
       const result = await listDispatchableYamls(REPO_PATH, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
     });
-  });
-
-  describe("listBlockedTodoYamls", () => {
-    const waiting_on: WaitingOn = {
-      reason: "Waits for ISS-2",
-      timestamp: "2026-01-01T00:00:00Z",
-      by: ["ISS-2"],
-    };
-
-    it.skipIf(!handle)(
-      "returns ToDo issues with non-null waiting_on, sorted FIFO",
-      async () => {
-        await seed(
-          makeIssue({ id: "ISS-1", external_id: "a", waiting_on }),
-          2000,
-        );
-        await seed(
-          makeIssue({ id: "ISS-2", external_id: "b", waiting_on }),
-          1000,
-        );
-        const result = await listBlockedTodoYamls(REPO_PATH, "ISS");
-        expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1"]);
-      },
-    );
-
-    it.skipIf(!handle)(
-      "excludes ToDo issues whose waiting_on is null",
-      async () => {
-        await seed(makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
-        expect(await listBlockedTodoYamls(REPO_PATH, "ISS")).toEqual([]);
-      },
-    );
-
-    it.skipIf(!handle)(
-      "excludes In Progress issues even with non-null waiting_on",
-      async () => {
-        await seed(
-          makeIssue({
-            id: "ISS-1",
-            external_id: "a",
-            status: "In Progress",
-            waiting_on,
-          }),
-          1000,
-        );
-        expect(await listBlockedTodoYamls(REPO_PATH, "ISS")).toEqual([]);
-      },
-    );
   });
 
   describe("listInProgressYamls", () => {

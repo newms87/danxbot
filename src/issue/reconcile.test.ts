@@ -484,7 +484,7 @@ describe("reconcileIssue — Phase 2 healer (open ↔ closed file move)", () => 
 });
 
 // ---- Integration tests (DB-backed) ---------------------------------
-// Phase 2 reconcile bodies for parent-derive, waiting_on auto-clear,
+// Phase 2 reconcile bodies for parent-derive, waiting_on durability,
 // and recursion all hit `src/poller/issues-db.ts` SQL helpers. These
 // suites use a real Postgres test DB; they're skipped when local PG is
 // unreachable (matches `epic-status.test.ts` pattern).
@@ -754,7 +754,7 @@ describe("reconcileIssue — Phase 2 parent-derive (DX-217)", () => {
   );
 });
 
-describe("reconcileIssue — Phase 2 waiting_on auto-clear (DX-217)", () => {
+describe("reconcileIssue — waiting_on is durable (DX-219 follow-up)", () => {
   let dbCtx: DbCtx;
   const REPO = "reconcile-waiting-test";
 
@@ -768,33 +768,32 @@ describe("reconcileIssue — Phase 2 waiting_on auto-clear (DX-217)", () => {
   });
 
   it.skipIf(!dbHandle)(
-    "clears waiting_on + appends unblocked history when every dep is terminal",
+    "does NOT clear waiting_on when every dep is terminal — the link is a durable record",
     async () => {
+      const waiterWaitingOn = {
+        reason: "waits on DX-601",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        by: ["DX-601"],
+      };
       const waiter: Issue = {
         ...makeIssue("DX-600", "ToDo"),
-        waiting_on: {
-          reason: "waits on DX-601",
-          timestamp: "2026-01-01T00:00:00.000Z",
-          by: ["DX-601"],
-        },
+        waiting_on: waiterWaitingOn,
       };
       writeYaml(dbCtx.openDir, "DX-600", waiter);
       await seedDb(REPO, waiter);
       await seedDb(REPO, makeIssue("DX-601", "Done"));
 
-      const result = await reconcileIssue(dbCtx.repo, "DX-600", "watcher");
+      await reconcileIssue(dbCtx.repo, "DX-600", "watcher");
 
-      expect(result.changed).toBe(true);
       const updated = parseIssue(
         readFileSync(resolve(dbCtx.openDir, "DX-600.yml"), "utf-8"),
         { expectedPrefix: "DX" },
       );
-      expect(updated.waiting_on).toBeNull();
+      expect(updated.waiting_on).toEqual(waiterWaitingOn);
       const unblock = updated.history.find(
         (h) => h.event === "unblocked" && h.actor === "worker:auto-derive",
       );
-      expect(unblock).toBeDefined();
-      expect(unblock!.note).toContain("DX-601");
+      expect(unblock).toBeUndefined();
     },
   );
 
@@ -813,35 +812,13 @@ describe("reconcileIssue — Phase 2 waiting_on auto-clear (DX-217)", () => {
       await seedDb(REPO, waiter);
       await seedDb(REPO, makeIssue("DX-611", "In Progress"));
 
-      const result = await reconcileIssue(dbCtx.repo, "DX-610", "watcher");
+      await reconcileIssue(dbCtx.repo, "DX-610", "watcher");
 
-      expect(result.changed).toBe(false);
       const updated = parseIssue(
         readFileSync(resolve(dbCtx.openDir, "DX-610.yml"), "utf-8"),
         { expectedPrefix: "DX" },
       );
       expect(updated.waiting_on).not.toBeNull();
-    },
-  );
-
-  it.skipIf(!dbHandle)(
-    "leaves waiting_on intact when a dep is missing from the DB",
-    async () => {
-      const waiter: Issue = {
-        ...makeIssue("DX-620", "ToDo"),
-        waiting_on: {
-          reason: "waits on DX-621",
-          timestamp: "2026-01-01T00:00:00.000Z",
-          by: ["DX-621"],
-        },
-      };
-      writeYaml(dbCtx.openDir, "DX-620", waiter);
-      await seedDb(REPO, waiter);
-      // DX-621 deliberately absent.
-
-      const result = await reconcileIssue(dbCtx.repo, "DX-620", "watcher");
-
-      expect(result.changed).toBe(false);
     },
   );
 });
@@ -899,19 +876,22 @@ describe("reconcileIssue — Phase 2 step 9 + 10 recursion (DX-217)", () => {
   );
 
   it.skipIf(!dbHandle)(
-    "step 10: writing a card recurses on dependents (waiting_on.by[] containing this id)",
+    "step 10: writing a card surfaces dependents in fanout (waiting_on link preserved)",
     async () => {
       // DX-801 waits on DX-800. We seed DX-800 as Done both in YAML and
       // DB, and DX-801 as still-waiting. Reconciling DX-800 should
-      // recurse on DX-801 via step 10 and clear its waiting_on.
+      // surface DX-801 in fanout.dependents (so downstream consumers can
+      // re-evaluate effective state) WITHOUT mutating DX-801's durable
+      // waiting_on record.
       const blocker: Issue = makeIssue("DX-800", "Done");
+      const waiterWaitingOn = {
+        reason: "waits on DX-800",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        by: ["DX-800"],
+      };
       const waiter: Issue = {
         ...makeIssue("DX-801", "ToDo"),
-        waiting_on: {
-          reason: "waits on DX-800",
-          timestamp: "2026-01-01T00:00:00.000Z",
-          by: ["DX-800"],
-        },
+        waiting_on: waiterWaitingOn,
       };
       writeYaml(dbCtx.openDir, "DX-800", blocker);
       writeYaml(dbCtx.openDir, "DX-801", waiter);
@@ -920,33 +900,29 @@ describe("reconcileIssue — Phase 2 step 9 + 10 recursion (DX-217)", () => {
 
       const result = await reconcileIssue(dbCtx.repo, "DX-800", "watcher");
 
-      // Blocker reconciled: heal moves it to closed/.
       expect(result.fanout.dependents).toContain("DX-801");
       expect(existsSync(resolve(dbCtx.closedDir, "DX-800.yml"))).toBe(true);
 
-      // Dependent recursion: DX-801's waiting_on cleared.
       const updated = parseIssue(
         readFileSync(resolve(dbCtx.openDir, "DX-801.yml"), "utf-8"),
         { expectedPrefix: "DX" },
       );
-      expect(updated.waiting_on).toBeNull();
+      expect(updated.waiting_on).toEqual(waiterWaitingOn);
     },
   );
 
   it.skipIf(!dbHandle)(
-    "step 10: multiple dependents all unblocked from a single trigger",
+    "step 10: multiple dependents all surface in fanout without mutation",
     async () => {
-      // Three cards (DX-811, DX-812, DX-813) all wait on DX-810.
-      // Reconciling DX-810 should fan out to all three via step 10
-      // and clear waiting_on on each.
       const blocker: Issue = makeIssue("DX-810", "Done");
+      const baseWaitingOn = {
+        reason: "waits on DX-810",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        by: ["DX-810"],
+      };
       const waiter = (id: string): Issue => ({
         ...makeIssue(id, "ToDo"),
-        waiting_on: {
-          reason: `waits on DX-810`,
-          timestamp: "2026-01-01T00:00:00.000Z",
-          by: ["DX-810"],
-        },
+        waiting_on: baseWaitingOn,
       });
       writeYaml(dbCtx.openDir, "DX-810", blocker);
       writeYaml(dbCtx.openDir, "DX-811", waiter("DX-811"));
@@ -969,7 +945,7 @@ describe("reconcileIssue — Phase 2 step 9 + 10 recursion (DX-217)", () => {
           readFileSync(resolve(dbCtx.openDir, `${id}.yml`), "utf-8"),
           { expectedPrefix: "DX" },
         );
-        expect(updated.waiting_on).toBeNull();
+        expect(updated.waiting_on).toEqual(baseWaitingOn);
       }
     },
   );

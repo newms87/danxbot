@@ -139,10 +139,12 @@ export async function dbListOpenIssues(
  * use the GIN index on `data` if one exists; absent that, the cost is
  * a scan over the repo's rows, which is acceptable at current scale.
  *
- * Closed (Done / Cancelled) cards have `waiting_on: null` by
- * construction (terminal save clears it), so the filter on
- * `data->'waiting_on' IS NOT NULL` is for clarity, not correctness —
- * either form returns the same set.
+ * `data->'waiting_on' IS NOT NULL` guards against cards whose link was
+ * already null. With the DX-219 follow-up that removed the auto-clear
+ * pass, closed (Done / Cancelled) cards MAY still carry a non-null
+ * `waiting_on` (durable audit trail) — reconcile step 10 will recurse
+ * onto those closed dependents and exit early at the heal step, which
+ * is a no-op. The filter just keeps the candidate set small.
  */
 export async function dbListDependentsByWaitingOnId(
   repoName: string,
@@ -225,6 +227,28 @@ export class IssuesPayloadTooLargeError extends Error {
     );
     this.name = "IssuesPayloadTooLargeError";
   }
+}
+
+/**
+ * Batch-fetch a subset of issues by id. Returns rows in any order;
+ * caller indexes into a `Map<id, Issue>` for lookup. Used by the
+ * dispatch reader to enrich its open-only `byId` with closed
+ * dependencies referenced from any open card's `waiting_on.by[]`, so
+ * `effectiveWaitingOn` can verify each dep's terminal status without a
+ * per-dep round-trip.
+ *
+ * Empty `ids` returns `[]` without touching the DB.
+ */
+export async function dbSelectIssuesByIds(
+  repoName: string,
+  ids: string[],
+): Promise<Issue[]> {
+  if (ids.length === 0) return [];
+  const rows = await queryFn<{ data: Issue }>(
+    `SELECT data FROM issues WHERE repo_name = $1 AND id = ANY($2::text[])`,
+    [repoName, ids],
+  );
+  return rows.map((r) => r.data);
 }
 
 export async function dbListAllIssues(

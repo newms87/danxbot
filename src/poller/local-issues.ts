@@ -39,6 +39,7 @@
 
 import {
   dbListOpenIssues,
+  dbSelectIssuesByIds,
   type DbIssueRow,
 } from "./issues-db.js";
 import type { Issue } from "../issue-tracker/interface.js";
@@ -46,6 +47,7 @@ import {
   ancestorWaitingOrBlocked,
   sortInputsForStatus,
 } from "../issue-tracker/sort.js";
+import { isEffectivelyWaitingOn } from "../issue/effective-waiting-on.js";
 import { repoNameFromPath } from "./repo-name.js";
 
 function fifoCompare(a: DbIssueRow, b: DbIssueRow): number {
@@ -67,16 +69,27 @@ function sortFifo(rows: DbIssueRow[]): Issue[] {
  * Return every issue eligible for dispatch this tick. Predicates:
  *
  *   - `status === "ToDo"`
- *   - `waiting_on === null`
+ *   - **Effective** `waiting_on` is null — `effectiveWaitingOn(i, byId)`
+ *     returns null iff every id in `i.waiting_on.by[]` resolves to a
+ *     terminal status (`Done` / `Cancelled`). The raw YAML may still
+ *     carry a non-null `waiting_on` record (durable audit trail); the
+ *     dispatch gate looks at effective state only. Any unresolvable
+ *     dep keeps the card waiting.
  *   - `blocked === null`
  *   - `dispatch === null` (an active dispatch occupies the card)
  *   - `type !== "Epic"` (epics are containers; phase children carry the work)
- *   - No ancestor (parent, grandparent, …) has `waiting_on !== null`
- *     OR `blocked !== null`. A blocked / waiting parent transitively
- *     blocks every descendant — the entire subtree is held until the
- *     ancestor's impediment clears. Ancestor walk runs on the fetched
- *     `byId` map; closed (Done / Cancelled) ancestors are excluded
- *     from the map so they cannot block descendants.
+ *   - No ancestor (parent, grandparent, …) is effectively waiting OR
+ *     `blocked !== null`. A blocked / effectively-waiting parent
+ *     transitively blocks every descendant — the entire subtree is
+ *     held until the ancestor's impediment clears. Ancestor walk runs
+ *     on the same `byId` map.
+ *
+ * `byId` is built from `dbListOpenIssues` (open rows only) and then
+ * enriched with any closed deps referenced by an open card's
+ * `waiting_on.by[]`. Without the enrichment, a card waiting on a closed
+ * (Done) dep would see the dep as "missing from map" and stay
+ * effectively waiting forever — wrong: closed deps SHOULD eligibilise
+ * the card.
  *
  * Sort: `sortInputsForStatus("ToDo", byId)` — see module header.
  */
@@ -88,11 +101,23 @@ export async function listDispatchableYamls(
   const rows = await dbListOpenIssues(repoName);
   const byId = new Map<string, Issue>();
   for (const r of rows) byId.set(r.issue.id, r.issue);
+  const missingDepIds = new Set<string>();
+  for (const r of rows) {
+    const w = r.issue.waiting_on;
+    if (w === null) continue;
+    for (const depId of w.by) {
+      if (!byId.has(depId)) missingDepIds.add(depId);
+    }
+  }
+  if (missingDepIds.size > 0) {
+    const closedDeps = await dbSelectIssuesByIds(repoName, [...missingDepIds]);
+    for (const d of closedDeps) byId.set(d.id, d);
+  }
   const filtered = rows.filter((r) => {
     const i = r.issue;
     if (i.status !== "ToDo") return false;
-    if (i.waiting_on !== null) return false;
-    if (i.blocked !== null) return false;
+    if (isEffectivelyWaitingOn(i, byId)) return false;
+    if (i.blocked != null) return false;
     // DX-231 (Phase 2 — DX-233): the orthogonal "needs human action"
     // field is a dispatch gate parallel to `blocked` and `waiting_on`.
     // Paired with `isDispatchSessionTerminal` in `src/worker/issue-route.ts`
@@ -101,8 +126,14 @@ export async function listDispatchableYamls(
     // flips the field and exits would see the poller re-dispatch the
     // card on the next tick — infinite loop. `/api/launch` deliberately
     // bypasses this filter (operator override); see `handleLaunch`.
-    if (i.requires_human !== null) return false;
-    if (i.dispatch !== null) return false;
+    //
+    // Loose `!= null` (vs strict `!== null`) tolerates pre-DX-231
+    // JSONB rows whose `requires_human` key was never written — those
+    // surface as `undefined` after JSONB→JS conversion and would
+    // otherwise be incorrectly excluded. Same coercion applied to
+    // `blocked` + `dispatch` for symmetry.
+    if (i.requires_human != null) return false;
+    if (i.dispatch != null) return false;
     // Epics are containers — phase children carry the actual work. The
     // poller dispatches phase cards directly; the dispatched agent reads
     // the parent epic for context. Epic status is derived from children
@@ -161,27 +192,6 @@ export async function findInProgressIssueByDispatchId(
       r.issue.status === "In Progress" && r.issue.dispatch?.id === dispatchId,
   );
   return match?.issue ?? null;
-}
-
-/**
- * Return every ToDo issue with a non-null `waiting_on` record. Companion
- * to `listDispatchableYamls` (which filters waiting_on=null out): the call
- * site feeds these to `resolveWaitingOnCards` so a card whose dependencies
- * just became terminal can be cleared and appended to the dispatchable
- * pool on the same tick. "Blocked" in the function name is historical
- * (the field was renamed to `waiting_on`).
- */
-export async function listBlockedTodoYamls(
-  repoLocalPath: string,
-  _prefix: string,
-): Promise<Issue[]> {
-  const repoName = repoNameFromPath(repoLocalPath);
-  const rows = await dbListOpenIssues(repoName);
-  return sortFifo(
-    rows.filter(
-      (r) => r.issue.status === "ToDo" && r.issue.waiting_on !== null,
-    ),
-  );
 }
 
 /**

@@ -7,16 +7,17 @@
  * inbound hydration) calls when a single card's state may have changed.
  * Phase 1 wired the function with steps 1, 2, 4, 5, 6 implemented (load,
  * validate, hash diff, atomic write, await DB mirror). Phase 2 absorbed
- * three poller helpers into step 3 and activated steps 9-10. Phase 3
+ * two poller helpers into step 3 and activated steps 9-10. Phase 3
  * (this commit) lights up step 7 — the outbound tracker push — and
  * retires the per-tick `_poll` mirror that previously did the same job.
  *
  *   - Step 3a: parent-status derive from children (was
  *     `recomputeParentStatuses`).
- *   - Step 3b: `waiting_on` auto-clear when every dep is terminal (was
- *     `resolveWaitingOnCards`).
- *   - Step 3c: file location heal — `open/` ↔ `closed/` move based on
- *     terminal/non-terminal status (was `healLocalYamls`).
+ *   - Step 3b: file location heal — `open/` ↔ `closed/` move based on
+ *     terminal/non-terminal status (was `healLocalYamls`). (The earlier
+ *     step 3b `waiting_on` auto-clear was REMOVED — see
+ *     `src/issue/effective-waiting-on.ts` for why `waiting_on` is now
+ *     a durable record, derived effectively at read time.)
  *   - Step 7 (Phase 3): outbound tracker push via `pushTrelloDiff` from
  *     `./reconcile/trello.ts`. The push is FIFO-serialized per card by
  *     the trello module's own slot map; reconcile schedules but does
@@ -32,7 +33,7 @@
  *     propagate immediately.
  *
  * The pure decision helpers live next door under
- * `src/issue/reconcile/{parent,heal,waiting-on}.ts` so they're testable
+ * `src/issue/reconcile/{parent,heal}.ts` so they're testable
  * with hand-built fixtures (no fs, no DB). The orchestrator below does
  * the IO, calls the pure helpers, and writes the result.
  *
@@ -68,20 +69,17 @@ import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
 import {
   dbListChildrenByParent,
   dbListDependentsByWaitingOnId,
-  dbSelectIssueById,
 } from "../poller/issues-db.js";
 import { repoNameFromPath } from "../poller/repo-name.js";
 import type {
   Issue,
   IssueHistoryEntry,
-  IssueStatus,
 } from "../issue-tracker/interface.js";
 import {
   applyParentDeriveMutation,
   deriveParentStatus,
 } from "./reconcile/parent.js";
 import { decideFileMove, type IssueBucket } from "./reconcile/heal.js";
-import { decideWaitingOnClear } from "./reconcile/waiting-on.js";
 import {
   ReconcileValidationError,
   type ReconcileError,
@@ -328,28 +326,6 @@ function tombstoneResult(): ReconcileResult {
 }
 
 /**
- * Apply waiting_on auto-clear mutation. Mirrors the legacy
- * `resolveWaitingOnCards` mutation (DX-147): clears `waiting_on` and
- * appends the `worker:auto-derive` `unblocked` history entry naming
- * every dep that resolved.
- */
-function applyWaitingOnClear(issue: Issue, now: string): Issue {
-  if (issue.waiting_on === null) return issue;
-  const deps = issue.waiting_on.by;
-  const updatedHistory = appendHistory(issue.history, {
-    timestamp: now,
-    actor: "worker:auto-derive",
-    event: "unblocked",
-    note: `All deps terminal: ${deps.join(", ")}`,
-  });
-  return {
-    ...issue,
-    waiting_on: null,
-    history: updatedHistory,
-  };
-}
-
-/**
  * Apply the heal-direction history entry produced by `decideFileMove`.
  * The pure helper leaves `timestamp: ""` so the orchestrator can stamp
  * the write-time clock; we fill it in here.
@@ -363,24 +339,6 @@ function applyHealHistory(
     ...issue,
     history: appendHistory(issue.history, { ...entry, timestamp: now }),
   };
-}
-
-/**
- * Build the per-id status map needed by `decideWaitingOnClear`. One
- * SQL round-trip per dep is acceptable at current scale (`waiting_on.by[]`
- * is typically 1-2 entries); future load may justify a single batch
- * query. Missing rows resolve to `null`.
- */
-async function fetchByStatuses(
-  repoName: string,
-  ids: string[],
-): Promise<Map<string, IssueStatus | null>> {
-  const out = new Map<string, IssueStatus | null>();
-  for (const id of ids) {
-    const dep = await dbSelectIssueById(repoName, id);
-    out.set(id, dep ? dep.status : null);
-  }
-  return out;
 }
 
 async function reconcileBody(
@@ -436,18 +394,7 @@ async function reconcileBody(
     }
   }
 
-  // 3b. waiting_on auto-clear — when every dep is terminal, clear and
-  // stamp the unblock history entry so the next dispatch picks up the
-  // card on this same trigger.
-  if (mutated.waiting_on !== null) {
-    const byStatuses = await fetchByStatuses(repoName, mutated.waiting_on.by);
-    if (decideWaitingOnClear(mutated, byStatuses)) {
-      mutated = applyWaitingOnClear(mutated, now);
-      mutatedFlag = true;
-    }
-  }
-
-  // 3c. File location heal — terminal status in `open/` moves to
+  // 3b. File location heal — terminal status in `open/` moves to
   // `closed/`; non-terminal status in `closed/` moves to `open/` AND
   // appends a `worker:heal` history entry (real state delta).
   const fileMove = decideFileMove(mutated, loaded.bucket);

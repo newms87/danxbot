@@ -33,6 +33,7 @@
  */
 
 import type { Issue, IssueStatus } from "./interface.js";
+import { isEffectivelyWaitingOn } from "../issue/effective-waiting-on.js";
 
 /**
  * Subset of `Issue` fields the sort consults. The dashboard reader
@@ -49,12 +50,18 @@ export interface SortInput<T> {
 }
 
 /**
- * Walk the parent chain. Return `true` when ANY ancestor has a non-null
- * `waiting_on` or `blocked` record. Cycle-safe via a `seen` set; missing
- * ancestors (parent_id points outside the supplied map) are treated as
- * non-blocking — closed cards live outside `byId` for the poller path,
- * and the dashboard reader includes referenced closeds in its map so
- * the answer agrees across consumers.
+ * Walk the parent chain. Return `true` when ANY ancestor is
+ * **effectively** waiting (raw `waiting_on` set AND at least one dep is
+ * non-terminal / missing) OR has a non-null `blocked` record. Cycle-safe
+ * via a `seen` set; missing ancestors (parent_id points outside the
+ * supplied map) are treated as non-blocking — closed cards live outside
+ * the poller's open-only `byId`, and consumers that need to verify
+ * closed-ancestor deps pre-populate the map with the relevant closed
+ * rows.
+ *
+ * Effective-waiting (not raw) is the right gate: an ancestor whose
+ * own deps are all terminal no longer blocks descendants even though
+ * its YAML still carries the audit-trail `waiting_on` record.
  *
  * Public so `local-issues.ts` re-uses this single walker for its
  * dispatch filter; before ISS-210 the poller carried its own copy
@@ -71,19 +78,19 @@ export function ancestorWaitingOrBlocked(
     seen.add(parentId);
     const parent = byId.get(parentId);
     if (!parent) return false;
-    if (parent.waiting_on !== null) return true;
+    if (isEffectivelyWaitingOn(parent, byId)) return true;
     if (parent.blocked !== null) return true;
     parentId = parent.parent_id;
   }
   return false;
 }
 
-/** Combined check: card's own waiting/blocked OR any ancestor's. */
+/** Combined check: card's own effective-waiting/blocked OR any ancestor's. */
 export function isWaitingOrBlocked(
   issue: Issue,
   byId: Map<string, Issue>,
 ): boolean {
-  if (issue.waiting_on !== null) return true;
+  if (isEffectivelyWaitingOn(issue, byId)) return true;
   if (issue.blocked !== null) return true;
   return ancestorWaitingOrBlocked(issue, byId);
 }

@@ -374,15 +374,8 @@ async function defaultListInProgressYamls(
     .filter((r) => r.status === "In Progress")
     .map(refToFakeIssue);
 }
-async function defaultListBlockedTodoYamls(
-  _repoPath: string,
-  _prefix?: string,
-): Promise<Issue[]> {
-  return [];
-}
 const mockListDispatchableYamls = vi.fn(defaultListDispatchableYamls);
 const mockListInProgressYamls = vi.fn(defaultListInProgressYamls);
-const mockListBlockedTodoYamls = vi.fn(defaultListBlockedTodoYamls);
 const mockListTriageDueYamls = vi.fn(
   async (
     _repoPath: string,
@@ -396,8 +389,6 @@ vi.mock("./local-issues.js", () => ({
     mockListDispatchableYamls(...(args as [string, string?])),
   listInProgressYamls: (...args: unknown[]) =>
     mockListInProgressYamls(...(args as [string, string?])),
-  listBlockedTodoYamls: (...args: unknown[]) =>
-    mockListBlockedTodoYamls(...(args as [string, string?])),
   listTriageDueYamls: (...args: unknown[]) =>
     mockListTriageDueYamls(...(args as [string, number, string?])),
 }));
@@ -3207,8 +3198,6 @@ describe.skip("[DX-242 SKIP â€” DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll â
       (...args: unknown[]) => (args[1] as string) !== "ideator",
     );
     mockListTriageDueYamls.mockReset();
-    mockListBlockedTodoYamls.mockReset();
-    mockListBlockedTodoYamls.mockResolvedValue([]);
     mockLoadLocal.mockReset();
     mockLoadLocal.mockResolvedValue(null);
     mockStampDispatchAndWrite.mockClear();
@@ -4786,10 +4775,10 @@ describe.skip("[DX-242 SKIP â€” DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll â
       if (id === "ISS-99") return { ...blockedIssue, id: "ISS-99", status: "ToDo", blocked: null };
       return null;
     });
-    // ISS-86: blocked YAMLs are surfaced via listBlockedTodoYamls (NOT
-    // the dispatchable list). resolveBlockedCards then keeps or drops.
+    // ISS-86 / DX-219 follow-up: waiting_on cards never appear in
+    // `listDispatchableYamls`'s output when their deps are still open,
+    // so no dispatch should fire.
     mockListDispatchableYamls.mockResolvedValueOnce([]);
-    mockListBlockedTodoYamls.mockResolvedValueOnce([blockedIssue as Issue]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -5609,8 +5598,6 @@ describe.skip("[DX-242 SKIP â€” DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll â
     setupRepoConfigMocks();
     mockListTriageDueYamls.mockReset();
     mockListTriageDueYamls.mockResolvedValue([]);
-    mockListBlockedTodoYamls.mockReset();
-    mockListBlockedTodoYamls.mockResolvedValue([]);
     mockStampDispatchAndWrite.mockClear();
     mockFindByExternalId.mockReset();
     mockFindByExternalId.mockResolvedValue(null);
@@ -5897,7 +5884,6 @@ describe.skip("[DX-242 SKIP â€” DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll â
       ref("blocked-card", "Blocked", "ToDo"),
     ]);
     mockListDispatchableYamls.mockResolvedValueOnce([]);
-    mockListBlockedTodoYamls.mockResolvedValueOnce([]);
 
     await poll(MOCK_REPO_CONTEXT);
 
@@ -6065,16 +6051,6 @@ describe("poll â€” DX-217 Phase 2 absorbed-helpers invariant", () => {
     await poll(MOCK_REPO_CONTEXT);
     expect(mockRecomputeParentStatuses).not.toHaveBeenCalled();
     expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
-  });
-
-  it("does NOT call listBlockedTodoYamls from _poll (Phase 2 â€” waiting_on auto-clear absorbed into reconcile step 3b)", async () => {
-    // The legacy in-tick `resolveWaitingOnCards` block called
-    // `listBlockedTodoYamls` to find waiting cards. With the block gone,
-    // the listing helper is no longer reached from `_poll`. Reconcile's
-    // step 3b clears `waiting_on` per-card on chokidar events.
-    mockListBlockedTodoYamls.mockClear();
-    await poll(MOCK_REPO_CONTEXT);
-    expect(mockListBlockedTodoYamls).not.toHaveBeenCalled();
   });
 
   // DX-218 (Event-Driven Worker Phase 3): the per-tick drainRetries
@@ -6721,8 +6697,6 @@ describe.skip("[DX-242 SKIP â€” DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] spawnC
     mockListDispatchableYamls.mockImplementation(defaultListDispatchableYamls);
     mockListInProgressYamls.mockReset();
     mockListInProgressYamls.mockImplementation(defaultListInProgressYamls);
-    mockListBlockedTodoYamls.mockReset();
-    mockListBlockedTodoYamls.mockImplementation(defaultListBlockedTodoYamls);
     // Defensive reset: the per-card triage describe block at line ~5719
     // uses many `mockResolvedValueOnce` calls against this mock. A
     // trailing unconsumed Once would leak into spawnClaude tests that

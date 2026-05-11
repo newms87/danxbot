@@ -225,7 +225,6 @@ vi.mock("../../poller/local-issues.js", () => ({
     lastOpenCards.value
       .filter((r) => r.status === "In Progress")
       .map(refToFakeIssue),
-  listBlockedTodoYamls: async (_repoPath: string): Promise<Issue[]> => [],
   listTriageDueYamls: async (
     _repoPath: string,
     _now: number,

@@ -256,9 +256,15 @@ export interface IssueRetro {
  * Waiting-on record. Populated when an in-progress card cannot proceed
  * because it is waiting on other in-flight work (a phase sibling, an Action
  * Items card, a separately-scoped task), but the card itself is fine and
- * does NOT need human intervention. The poller auto-clears `waiting_on` and
- * dispatches the card once every issue id in `by[]` reaches a terminal
- * status (Done or Cancelled).
+ * does NOT need human intervention.
+ *
+ * The record is a **durable audit trail**: once the agent (or operator)
+ * sets it, the worker NEVER auto-clears it — only the agent itself may
+ * null it if the original link was a mistake. Effective state is derived
+ * at read time by `effectiveWaitingOn` (src/issue/effective-waiting-on.ts):
+ * dispatch eligibility and the dashboard "waiting on" pill both treat the
+ * card as effectively unblocked once every id in `by[]` resolves to a
+ * terminal status (Done / Cancelled), but the raw record stays on disk.
  *
  * Distinct from `status: "Blocked"` + the `Issue.blocked` field, which mean
  * the card itself cannot make progress on its own work — a human (or a
@@ -290,7 +296,8 @@ export interface WaitingOn {
  * block before the card can proceed.
  *
  * Distinct from `Issue.waiting_on` (dep-chain queue) — `waiting_on` keeps
- * `status: "ToDo"` and auto-clears when deps terminal. `blocked` parks the
+ * `status: "ToDo"` and is a durable record (derived effective-null when
+ * every dep is terminal — see `effectiveWaitingOn`). `blocked` parks the
  * card at `status: "Blocked"` until a human or next dispatch clears it.
  *
  * Both fields can technically coexist, but practically rare: a card that is

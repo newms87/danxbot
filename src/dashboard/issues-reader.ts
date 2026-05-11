@@ -11,10 +11,12 @@ import {
   dbListAllIssues,
   dbListIssueHistory,
   dbSelectIssueDetail,
+  dbSelectIssuesByIds,
   type DbIssueRow,
 } from "../poller/issues-db.js";
 import { repoNameFromPath } from "../poller/repo-name.js";
 import { createLogger } from "../logger.js";
+import { effectiveWaitingOn } from "../issue/effective-waiting-on.js";
 
 const log = createLogger("issues-reader");
 
@@ -206,18 +208,20 @@ function toListItem(
           missing: true,
         };
       }
+      const childEffective = effectiveWaitingOn(child, byId);
       return {
         id: cid,
         name: child.title,
         type: child.type,
         status: child.status,
-        waiting_on: child.waiting_on !== null,
+        waiting_on: childEffective !== null,
         waiting_on_by_card:
-          child.waiting_on !== null && child.waiting_on.by.length > 0,
+          childEffective !== null && childEffective.by.length > 0,
         requires_human: child.requires_human !== null,
         missing: false,
       };
     });
+  const effective = effectiveWaitingOn(issue, byId);
   // No projection. The literal YAML `status` + `waiting_on` are the
   // single source of truth for both the board's column placement and
   // the card's "Blocked by" pill. If an epic should surface as Blocked,
@@ -238,9 +242,9 @@ function toListItem(
     ac_total: issue.ac.length,
     ac_done: issue.ac.filter((a) => a.checked).length,
     children_detail: childrenDetail,
-    waiting_on: issue.waiting_on !== null,
-    waiting_on_reason: issue.waiting_on?.reason ?? null,
-    waiting_on_by: issue.waiting_on?.by ?? [],
+    waiting_on: effective !== null,
+    waiting_on_reason: effective?.reason ?? null,
+    waiting_on_by: effective?.by ?? [],
     comments_count: issue.comments.length,
     has_retro:
       issue.retro.good.length > 0 ||
@@ -401,8 +405,22 @@ export async function readIssueDetail(
   const row = await dbSelectIssueDetail(repoName, id);
   if (!row) return null;
   const raw = toRawIssue(row);
+  // Project the response `waiting_on` to its EFFECTIVE value: null when
+  // every dep is terminal so the SPA's "Waiting on …" pill hides without
+  // a SPA-side change. The on-disk YAML retains the raw record as the
+  // durable audit trail — `raw_yaml` below still serializes from the
+  // unprojected issue, so a developer inspecting the raw YAML through
+  // the dashboard sees the original link.
+  let waiting_on = raw.issue.waiting_on;
+  if (waiting_on !== null) {
+    const deps = await dbSelectIssuesByIds(repoName, waiting_on.by);
+    const byId = new Map<string, Issue>();
+    for (const d of deps) byId.set(d.id, d);
+    waiting_on = effectiveWaitingOn(raw.issue, byId);
+  }
   return {
     ...raw.issue,
+    waiting_on,
     updated_at: raw.mtimeMs,
     created_at: deriveCreatedAt(raw.issue.external_id, raw.mtimeMs),
     raw_yaml: serializeIssue(raw.issue),

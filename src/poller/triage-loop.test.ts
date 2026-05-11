@@ -30,7 +30,6 @@ import { createTestDb, type TestDbHandle } from "../db/test-db.js";
 import { up as upIssuesMirror } from "../db/migrations/016_issues_mirror.js";
 import { canonicalize, sha256 } from "../db/canonicalize.js";
 import {
-  listBlockedTodoYamls,
   listDispatchableYamls,
   listInProgressYamls,
   listTriageDueYamls,
@@ -405,7 +404,7 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
   );
 
   it.skipIf(!handle)(
-    "Waiting card (waiting_on != null, status ToDo) lands in the blocked-todo + triage-due sets, NOT the work-ready set",
+    "Waiting card (waiting_on != null, status ToDo, dep missing/non-terminal) is in triage-due but NOT work-ready",
     async () => {
       await seed(
         makeIssue({
@@ -421,9 +420,6 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
         1000,
       );
       expect(await listDispatchableYamls(REPO_PATH, "ISS")).toEqual([]);
-      expect(
-        (await listBlockedTodoYamls(REPO_PATH, "ISS")).map((i) => i.id),
-      ).toEqual(["ISS-1"]);
       expect(
         (await listTriageDueYamls(REPO_PATH, NOW, "ISS")).map((i) => i.id),
       ).toEqual(["ISS-1"]);
