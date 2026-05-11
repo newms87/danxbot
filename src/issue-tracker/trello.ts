@@ -160,6 +160,7 @@ export class TrelloTracker implements IssueTracker {
       // it; inbound hydrate emits the schema default. Local YAML is
       // authoritative for `priority` (operator edits it directly).
       priority: 3.0,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",

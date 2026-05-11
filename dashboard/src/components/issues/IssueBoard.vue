@@ -30,13 +30,54 @@ const emit = defineEmits<{
    * mutation + REST patch via `useIssues.moveIssueStatus`.
    */
   move: [issue: IssueListItem, toStatus: IssueStatus];
+  /**
+   * DX-264 — fired when a card is dropped into a drop slot (the gap
+   * between two cards in the same column, or the head/tail of an
+   * otherwise-empty column). Parent computes the new `position` via
+   * `nextPosition` from `cardPosition.ts` and PATCHes the card. Either
+   * neighbor is `null` at the column's head / tail.
+   */
+  reorder: [
+    issue: IssueListItem,
+    before: IssueListItem | null,
+    after: IssueListItem | null,
+  ];
 }>();
 
 const cardDrag = useCardDrag({
   onDrop: (issue, _from, to) => {
     emit("move", issue, to);
   },
+  onReorder: (issue, before, after) => {
+    emit("reorder", issue, before, after);
+  },
 });
+
+/** Stable key for a drop slot in the position-aware columns. */
+function slotKey(
+  colKey: string,
+  before: IssueListItem | null,
+  after: IssueListItem | null,
+): string {
+  return `${colKey}:${before?.id ?? "head"}:${after?.id ?? "tail"}`;
+}
+
+/**
+ * Drop slots only render inside priority-bucket columns (Review / ToDo
+ * / Blocked) where the backend's `position` tier is honored. Recency
+ * columns (In Progress / Done / Done Recent / Cancelled) sort by
+ * `updated_at` and ignore position, so a drop there would be a silent
+ * no-op visually — disable the affordance entirely to avoid a
+ * "looked like a drop, did nothing" UX trap.
+ */
+const POSITIONABLE_STATUSES = new Set<IssueStatus>([
+  "Review",
+  "ToDo",
+  "Blocked",
+]);
+function columnSupportsPosition(col: BoardColumn): boolean {
+  return col.status !== undefined && POSITIONABLE_STATUSES.has(col.status);
+}
 
 interface BoardColumn {
   key: string;
@@ -188,19 +229,50 @@ function toggle(key: string): void {
 
       <DanxScroll v-if="!collapsed[col.key]" class="cards-scroll">
         <div class="cards">
-          <div v-if="(grouped[col.key]?.length ?? 0) === 0" class="empty">No items</div>
-          <IssueCard
-            v-for="issue in grouped[col.key] ?? []"
-            :key="issue.id"
-            :issue="issue"
-            :repo="props.repo"
-            :dimmed="dimmedFor(issue)"
-            :scoped="scopedFor(issue)"
-            :dragging="cardDrag.isDragging(issue)"
-            :drag-handlers="cardDrag.bindCard(issue)"
-            @select="(i) => emit('select', i)"
-            @parent-click="(pid) => emit('parent-click', pid)"
-          />
+          <div v-if="(grouped[col.key]?.length ?? 0) === 0" class="empty">
+            <!-- DX-264: empty column gets a single drop slot so the
+                 first reorder seeds a position value. Non-positionable
+                 columns skip the slot entirely (drag remains
+                 column-level only). -->
+            <span v-if="columnSupportsPosition(col)"
+              class="drop-slot drop-slot-empty"
+              :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.key, null, null)) }"
+              v-bind="cardDrag.bindSlot(slotKey(col.key, null, null), null, null)"
+              :data-test="`drop-slot-${col.testId}-empty`"
+            />
+            No items
+          </div>
+          <template v-else>
+            <span
+              v-if="columnSupportsPosition(col)"
+              class="drop-slot"
+              :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.key, null, (grouped[col.key] ?? [])[0] ?? null)) }"
+              v-bind="cardDrag.bindSlot(slotKey(col.key, null, (grouped[col.key] ?? [])[0] ?? null), null, (grouped[col.key] ?? [])[0] ?? null)"
+              :data-test="`drop-slot-${col.testId}-head`"
+            />
+            <template
+              v-for="(issue, idx) in grouped[col.key] ?? []"
+              :key="issue.id"
+            >
+              <IssueCard
+                :issue="issue"
+                :repo="props.repo"
+                :dimmed="dimmedFor(issue)"
+                :scoped="scopedFor(issue)"
+                :dragging="cardDrag.isDragging(issue)"
+                :drag-handlers="cardDrag.bindCard(issue)"
+                @select="(i) => emit('select', i)"
+                @parent-click="(pid) => emit('parent-click', pid)"
+              />
+              <span
+                v-if="columnSupportsPosition(col)"
+                class="drop-slot"
+                :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.key, issue, (grouped[col.key] ?? [])[idx + 1] ?? null)) }"
+                v-bind="cardDrag.bindSlot(slotKey(col.key, issue, (grouped[col.key] ?? [])[idx + 1] ?? null), issue, (grouped[col.key] ?? [])[idx + 1] ?? null)"
+                :data-test="`drop-slot-${col.testId}-${issue.id}`"
+              />
+            </template>
+          </template>
         </div>
       </DanxScroll>
 
@@ -316,5 +388,24 @@ function toggle(key: string): void {
   outline-offset: -4px;
   background: rgb(99 102 241 / 0.05);
   border-radius: 8px;
+}
+/* DX-264 — drop slots are 6px-tall transparent gaps between cards.
+   On dragover they swell to 14px with the column accent so the
+   operator gets a clear "drop here" target without coordinate math. */
+.drop-slot {
+  display: block;
+  height: 6px;
+  margin: -2px 0;
+  border-radius: 4px;
+  transition: background-color 120ms, height 120ms;
+}
+.drop-slot.drop-slot-empty {
+  height: 24px;
+  margin: 6px 0;
+}
+.drop-slot.drop-slot-hover {
+  height: 14px;
+  background: var(--col-accent, #a5b4fc);
+  opacity: 0.6;
 }
 </style>

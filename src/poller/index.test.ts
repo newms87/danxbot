@@ -329,6 +329,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     title: ref.title,
     description: "",
     priority: 3.0,
+    position: null,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [],
     comments: [],
@@ -6167,6 +6168,7 @@ describe("runStartupReattach (ISS-92, Phase 2)", () => {
       title: id,
       description: "",
       priority: 3.0,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6384,6 +6386,7 @@ describe("evictDeadDispatches (ISS-92, Phase 2 — per-tick liveness scan)", () 
       title: id,
       description: "",
       priority: 3.0,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6498,6 +6501,7 @@ describe("runStartupReattach — corrupt-YAML tolerance (ISS-92)", () => {
       title: "Healthy",
       description: "",
       priority: 3.0,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6577,6 +6581,7 @@ describe("evictDeadDispatches — YAML missing on disk (ISS-92)", () => {
       title: "X",
       description: "",
       priority: 3.0,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -6986,6 +6991,7 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] spawnC
       title: "Pre-existing live dispatch",
       description: "",
       priority: 3.0,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -7069,6 +7075,7 @@ describe.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] spawnC
       title: "Expired",
       description: "",
       priority: 3.0,
+      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",

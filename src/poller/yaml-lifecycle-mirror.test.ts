@@ -62,6 +62,7 @@ function makeIssue(id: string): Issue {
     title: `Test ${id}`,
     description: `desc ${id}`,
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

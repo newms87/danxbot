@@ -147,6 +147,21 @@ export function sortInputsForStatus<T>(
     const bBlocked = isWaitingOrBlocked(b.issue, byId);
     if (aBlocked !== bBlocked) return aBlocked ? 1 : -1;
 
+    // Position tier (DX-264) — operator manual ordering wins over the
+    // triage agent's ICE tier inside the priority bucket. `position`
+    // ASC, NULLs last: a card with a finite numeric position sorts
+    // ahead of every `null`-positioned sibling; among non-null
+    // positions, lower number first. Among `null`-position cards the
+    // existing ICE / priority / FIFO chain decides. Recency-bucket
+    // statuses (In Progress / Done / Cancelled) take the early DESC
+    // return above and never see this branch — manual position never
+    // overrides updated_at on the activity columns.
+    const aPos = a.issue.position;
+    const bPos = b.issue.position;
+    if (aPos !== null && bPos === null) return -1;
+    if (aPos === null && bPos !== null) return 1;
+    if (aPos !== null && bPos !== null && aPos !== bPos) return aPos - bPos;
+
     // Both untriaged → both score +Infinity → iceDelta is NaN. Fall
     // through to priority + FIFO tiebreaks. A finite delta or
     // ±Infinity (one untriaged, one triaged) is a real ordering signal

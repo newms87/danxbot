@@ -197,6 +197,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     title: ref.title,
     description: "",
     priority: 3.0,
+    position: null,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [],
     comments: [],

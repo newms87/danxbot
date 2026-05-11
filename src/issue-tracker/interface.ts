@@ -421,6 +421,30 @@ export interface Issue {
    */
   priority: number;
   /**
+   * Operator manual ordering knob INSIDE a status column (DX-264). `null`
+   * (default) means "fall back to the canonical ICE → priority → mtime
+   * tier"; a finite number sorts ASC ahead of every `null`-positioned
+   * sibling in the same priority bucket. Used by the dashboard's
+   * drag-to-reorder gesture inside a column and by the poller's dispatch
+   * sort so the operator's manual ordering wins over the triage agent's
+   * automated ICE ranking when context only the human has matters.
+   *
+   * Positions are computed with the fractional-indexing midpoint algorithm
+   * (`nextPosition` in `src/issue-tracker/position.ts`) so a reorder
+   * between two neighbors is a single-card PATCH — the rest of the column
+   * keeps its existing values. Compared with float midpoints; `null`
+   * sorts last. Bucket-local — the sort never compares positions across
+   * status columns.
+   *
+   * Recency-bucket statuses (In Progress / Done / Cancelled) IGNORE the
+   * field; they continue to sort by `updated_at` DESC. A card that
+   * accumulates a position while in ToDo retains the value when it moves
+   * through In Progress (where it has no effect) and back to a priority
+   * bucket (where it does), so the operator's order survives the round
+   * trip.
+   */
+  position: number | null;
+  /**
    * Per-card triage record. Replaces the older flat
    * `triaged: {timestamp, status, explain}` block. Newly hydrated cards
    * (poller hydration + agent-create) get a fully empty `triage` (every

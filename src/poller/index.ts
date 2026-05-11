@@ -329,6 +329,7 @@ export async function evictDeadDispatches(repo: RepoContext): Promise<void> {
           title: issueId,
           description: "",
           priority: 3.0,
+          position: null,
           triage: {
             expires_at: "",
             reassess_hint: "",

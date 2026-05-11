@@ -75,6 +75,7 @@ function makeIssue(
     title: `Title ${id}`,
     description: "",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

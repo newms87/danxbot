@@ -177,6 +177,7 @@ describe("rewriteIdFields", () => {
         title: "fix ISS-7",
         description: "see ISS-1 and ISS-9.",
         priority: 3.0,
+        position: null,
         triage: {
           expires_at: "",
           reassess_hint: "",
@@ -240,6 +241,7 @@ describe("rewriteIdFields", () => {
         title: "t",
         description: "see SG-3 in other repo",
         priority: 3.0,
+        position: null,
         triage: {
           expires_at: "",
           reassess_hint: "",

@@ -108,6 +108,15 @@ export interface IssuePatch {
    * `reopen: true` against a card already in `open/` is a 400.
    */
   reopen?: true;
+  /**
+   * Operator manual ordering knob inside the card's status column
+   * (DX-264). Finite number wins over the canonical ICE → priority →
+   * mtime tier; `null` clears the override. Computed by the dashboard's
+   * fractional-indexing helper on intra-column drop. Schema invariants
+   * are checked by `validatePatchShape` (must be a finite number or
+   * null — anything else is a 400).
+   */
+  position?: number | null;
 }
 
 const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
@@ -118,6 +127,7 @@ const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
   "comments_append",
   "requires_human",
   "reopen",
+  "position",
 ]);
 
 const REOPEN_ALLOWED_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
@@ -343,6 +353,18 @@ function validatePatchShape(body: unknown): IssuePatch {
     }
     patch.reopen = true;
   }
+  if ("position" in raw) {
+    const v = raw.position;
+    if (v === null) {
+      patch.position = null;
+    } else if (typeof v !== "number" || !Number.isFinite(v)) {
+      throw new IssuePatchError(400, {
+        error: "position must be a finite number or null",
+      });
+    } else {
+      patch.position = v;
+    }
+  }
   return patch;
 }
 
@@ -454,6 +476,9 @@ function applyValidatedPatch(
     next.status = patch.status ?? "ToDo";
   } else if (patch.status !== undefined) {
     next.status = patch.status;
+  }
+  if (patch.position !== undefined) {
+    next.position = patch.position;
   }
 
   // Operator action (dashboard drag, manual status patch) overrides the
