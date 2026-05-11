@@ -92,6 +92,11 @@ import {
   type ReconcileTrigger,
 } from "./reconcile-types.js";
 import { pushTrelloDiff } from "./reconcile/trello.js";
+import {
+  armTriageTimer,
+  clearTriageTimer,
+  parseTriageExpiresAtMs,
+} from "../dispatch/triage-timer.js";
 import type { IssueTracker } from "../issue-tracker/interface.js";
 import { createLogger } from "../logger.js";
 
@@ -252,6 +257,25 @@ function isCardDispatchable(issue: Issue): boolean {
 /** Visible for tests — drain the dispatchability cache between cases. */
 export function _resetDispatchableCache(): void {
   dispatchableByCardId.clear();
+}
+
+/**
+ * Per-card cache of last-observed `triage.expires_at` — `<repoName>-<id>`
+ * → string (DX-289 / Phase 4b.2). Same per-card-key shape as
+ * `dispatchableByCardId`, but the stored value is the prior raw string
+ * (not a boolean) so reconcile can detect "new value written by the
+ * triage agent" via plain string-equality. Cache miss = first
+ * observation; always arms with the current value.
+ */
+const triageExpiresAtByCardId = new Map<string, string>();
+
+function triageExpiresAtKey(repoName: string, id: string): string {
+  return `${repoName}-${id}`;
+}
+
+/** Visible for tests — drain the triage-expires cache between cases. */
+export function _resetTriageExpiresCache(): void {
+  triageExpiresAtByCardId.clear();
 }
 
 /**
@@ -436,6 +460,13 @@ async function reconcileBody(
     // === currentDispatchable` and skip the scheduler poke even though
     // the card is brand new from the scheduler's POV.
     dispatchableByCardId.delete(dispatchableKey(repo.name, id));
+    // Phase 4b.2 (DX-289). Tombstone clears any armed triage timer —
+    // a fire would call reconcileIssue against a missing file and
+    // tombstone again with no work to do. The cache entry is dropped
+    // so a future re-creation of this id triggers a fresh first-
+    // observation arm via the cache-miss branch in step 7b below.
+    clearTriageTimer(repo.name, id);
+    triageExpiresAtByCardId.delete(triageExpiresAtKey(repo.name, id));
     return tombstoneResult();
   }
 
@@ -682,6 +713,46 @@ async function reconcileBody(
         });
       }
       stepTenVisited.add(depId);
+    }
+  }
+
+  // ---- Step 7b: triage timer re-arm (DX-289 / Phase 4b.2) ----
+  // Re-arm the per-card triage `setTimeout` whenever `triage.expires_at`
+  // differs from the value we last saw for this `(repo, id)` pair AND
+  // the card is currently in the triage agent's scope (Review /
+  // Blocked / waiting_on != null). Cards outside scope cannot be triaged
+  // — arming the timer would just fire a moot audit reconcile that
+  // re-arms again, looping on `expires_at === ""`. Terminal status (or
+  // bucket move to closed) clears the timer too.
+  //
+  // The triage-timer import is module-cyclic-safe because the timer
+  // imports `ReconcileRepoContext` as a type-only symbol.
+  const isTerminalStatus =
+    mutated.status === "Done" || mutated.status === "Cancelled";
+  const inTriageScope =
+    mutated.waiting_on !== null ||
+    mutated.status === "Review" ||
+    mutated.status === "Blocked";
+  const triageCacheKey = triageExpiresAtKey(repo.name, id);
+  if (isTerminalStatus || targetBucket === "closed" || !inTriageScope) {
+    clearTriageTimer(repo.name, id);
+    triageExpiresAtByCardId.delete(triageCacheKey);
+  } else {
+    const nextTriageExpiresAt = mutated.triage.expires_at;
+    const priorTriageExpiresAt =
+      triageExpiresAtByCardId.get(triageCacheKey);
+    if (priorTriageExpiresAt !== nextTriageExpiresAt) {
+      // First observation OR triage agent stamped a fresh expiry —
+      // re-arm the timer to fire at the new value. The string-to-ms
+      // translation lives in `triage-timer.ts` so the empty / past /
+      // unparseable handling stays in one place.
+      armTriageTimer({
+        repo,
+        cardId: id,
+        expiresAtMs: parseTriageExpiresAtMs(nextTriageExpiresAt),
+        reconcile: reconcileIssue,
+      });
+      triageExpiresAtByCardId.set(triageCacheKey, nextTriageExpiresAt);
     }
   }
 

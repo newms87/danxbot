@@ -58,11 +58,13 @@ import {
   buildLockHolderInfo,
   getSchedulerTracker,
   guardLiveDispatchForCard,
+  onAgentRosterChange,
   onReconcileResult,
   releaseLock,
   runPostDispatchProgressCheck,
   type RunPickerFn,
   tryAcquireLock,
+  unwatchSettingsFileForRepo,
 } from "./scheduler.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
@@ -737,5 +739,285 @@ describe("runPostDispatchProgressCheck — flag-detail formatting", () => {
     const detail = (writeFlag as Mock).mock.calls[0][1].detail;
     expect(detail).toContain("status=completed");
     expect(detail).toContain("summary=Refactored the foo into bar");
+  });
+});
+
+describe("onAgentRosterChange — Phase 4b.2 (DX-289)", () => {
+  function waitMacrotask(): Promise<void> {
+    return new Promise((r) => setImmediate(r));
+  }
+
+  afterEach(async () => {
+    await unwatchSettingsFileForRepo("danxbot");
+    await unwatchSettingsFileForRepo("repo-a");
+    await unwatchSettingsFileForRepo("repo-b");
+  });
+
+  it("invokes the registered picker exactly once when called", async () => {
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo(),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onAgentRosterChange("danxbot");
+    await waitMacrotask();
+
+    expect(picker).toHaveBeenCalledTimes(1);
+    expect(picker.mock.calls[0]?.[0].now).toBeInstanceOf(Date);
+  });
+
+  it("no-op when no picker is registered (empty roster scenario)", async () => {
+    bootScheduler({
+      repo: makeRepo(),
+      tracker: makeMemoryTracker(),
+    });
+
+    expect(() => onAgentRosterChange("danxbot")).not.toThrow();
+    await waitMacrotask();
+    // No throws, no work scheduled — verified by reaching this point
+    // without a picker mock having been invoked.
+  });
+
+  it("debounces 2+ back-to-back pokes for the same repo into a single picker invocation", async () => {
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo(),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onAgentRosterChange("danxbot");
+    onAgentRosterChange("danxbot");
+    onAgentRosterChange("danxbot");
+    await waitMacrotask();
+
+    expect(picker).toHaveBeenCalledTimes(1);
+  });
+
+  it("debounce is per-repo — concurrent pokes for different repos each fire their own picker", async () => {
+    const pickerA = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    const pickerB = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: "repo-a" }),
+      tracker: makeMemoryTracker(),
+      runPicker: pickerA,
+    });
+    bootScheduler({
+      repo: makeRepo({ name: "repo-b" }),
+      tracker: makeMemoryTracker(),
+      runPicker: pickerB,
+    });
+
+    onAgentRosterChange("repo-a");
+    onAgentRosterChange("repo-b");
+    await waitMacrotask();
+
+    expect(pickerA).toHaveBeenCalledTimes(1);
+    expect(pickerB).toHaveBeenCalledTimes(1);
+  });
+
+  it("after a debounced burst fires, a subsequent poke schedules another run", async () => {
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo(),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onAgentRosterChange("danxbot");
+    onAgentRosterChange("danxbot");
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    onAgentRosterChange("danxbot");
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+
+  it("a rejecting picker does not propagate or block subsequent pokes", async () => {
+    const picker = vi
+      .fn<RunPickerFn>()
+      .mockRejectedValueOnce(new Error("picker boom"))
+      .mockResolvedValueOnce(undefined);
+    bootScheduler({
+      repo: makeRepo(),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onAgentRosterChange("danxbot");
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    onAgentRosterChange("danxbot");
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-289)", () => {
+  function waitMacrotask(): Promise<void> {
+    return new Promise((r) => setImmediate(r));
+  }
+
+  let tmpRepoDir: string;
+  let repoCtx: ReturnType<typeof makeRepo>;
+
+  beforeEach(async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { resolve } = await import("node:path");
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-sched-watch-"));
+    mkdirSync(resolve(tmpRepoDir, ".danxbot"), { recursive: true });
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "issues", "open"), {
+      recursive: true,
+    });
+    writeFileSync(
+      resolve(tmpRepoDir, ".danxbot", "settings.json"),
+      JSON.stringify({
+        version: 2,
+        overrides: {},
+        display: {},
+        agents: {},
+        agentDefaults: { conflictCheckEnabled: true },
+        meta: {
+          updatedAt: new Date(0).toISOString(),
+          updatedBy: "worker",
+        },
+      }),
+    );
+    repoCtx = makeRepo({ name: "danxbot-watch", localPath: tmpRepoDir });
+  });
+
+  afterEach(async () => {
+    const { rmSync } = await import("node:fs");
+    await import("./scheduler.js").then((m) =>
+      m.unwatchSettingsFileForRepo("danxbot-watch"),
+    );
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  it("settings.json writes flow through watchSettingsFile → onAgentRosterChange → registered picker", async () => {
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    const reconcileSpy = vi.fn().mockResolvedValue({
+      changed: false,
+      prevHash: null,
+      nextHash: "",
+      errors: [],
+      fanout: {
+        parentId: null,
+        dependents: [],
+        dispatchableChanged: false,
+      },
+    });
+    bootScheduler({
+      repo: repoCtx,
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+      reconcile: reconcileSpy,
+    });
+
+    // Chokidar attaches asynchronously; give it a moment.
+    await new Promise((r) => setTimeout(r, 250));
+
+    const { writeFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    writeFileSync(
+      resolve(tmpRepoDir, ".danxbot", "settings.json"),
+      JSON.stringify({ v: 2, marker: "first" }),
+    );
+
+    // Wait for chokidar's awaitWriteFinish (200ms stability) + the
+    // setImmediate that schedules the picker.
+    await new Promise((r) => setTimeout(r, 500));
+    await waitMacrotask();
+
+    expect(picker).toHaveBeenCalledTimes(1);
+  });
+
+  it("rapid-fire double settings.json writes coalesce into a single picker invocation (AC #3)", async () => {
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    const reconcileSpy = vi.fn().mockResolvedValue({
+      changed: false,
+      prevHash: null,
+      nextHash: "",
+      errors: [],
+      fanout: {
+        parentId: null,
+        dependents: [],
+        dispatchableChanged: false,
+      },
+    });
+    bootScheduler({
+      repo: repoCtx,
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+      reconcile: reconcileSpy,
+    });
+    await new Promise((r) => setTimeout(r, 250));
+
+    const { writeFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const settingsPath = resolve(tmpRepoDir, ".danxbot", "settings.json");
+
+    writeFileSync(settingsPath, JSON.stringify({ v: 1 }));
+    writeFileSync(settingsPath, JSON.stringify({ v: 2 }));
+    writeFileSync(settingsPath, JSON.stringify({ v: 3 }));
+
+    // awaitWriteFinish (200ms stability) collapses the burst into a
+    // single chokidar emit, and the scheduler's pendingRosterPokes
+    // debounce coalesces any remaining edges to a single picker call.
+    await new Promise((r) => setTimeout(r, 500));
+    await waitMacrotask();
+
+    expect(picker).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-boot with reconcile replaces the prior watcher (idempotent over hot-reload)", async () => {
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    const reconcileSpy = vi.fn().mockResolvedValue({
+      changed: false,
+      prevHash: null,
+      nextHash: "",
+      errors: [],
+      fanout: {
+        parentId: null,
+        dependents: [],
+        dispatchableChanged: false,
+      },
+    });
+
+    bootScheduler({
+      repo: repoCtx,
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+      reconcile: reconcileSpy,
+    });
+    await new Promise((r) => setTimeout(r, 250));
+
+    // Re-boot — the prior watcher MUST be drained before the new one
+    // is armed; otherwise a single write fires two picker pokes.
+    bootScheduler({
+      repo: repoCtx,
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+      reconcile: reconcileSpy,
+    });
+    await new Promise((r) => setTimeout(r, 250));
+
+    const { writeFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    writeFileSync(
+      resolve(tmpRepoDir, ".danxbot", "settings.json"),
+      JSON.stringify({ v: 99 }),
+    );
+
+    await new Promise((r) => setTimeout(r, 500));
+    await waitMacrotask();
+
+    // Single watcher, single poke — not two pokes from a leaked watcher.
+    expect(picker).toHaveBeenCalledTimes(1);
   });
 });

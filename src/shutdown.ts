@@ -3,6 +3,7 @@ import { stopThreadCleanup } from "./threads.js";
 import { stopRetentionCron } from "./dashboard/retention.js";
 import { clearJobCleanupIntervals } from "./worker/dispatch.js";
 import { listActiveJobs } from "./dispatch/core.js";
+import { unwatchAllSettingsFiles } from "./dispatch/scheduler.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
 
@@ -50,6 +51,10 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
 
   // Clear per-job cleanup intervals from worker dispatch
   clearJobCleanupIntervals();
+
+  // Phase 4b.2 (DX-289). Drain every per-repo settings.json chokidar
+  // watcher so handles don't outlive the worker on SIGTERM.
+  await unwatchAllSettingsFiles();
 
   // Close database connection pools
   await closePool();

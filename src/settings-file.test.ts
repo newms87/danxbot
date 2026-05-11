@@ -26,6 +26,7 @@ import {
   settingsFilePath,
   settingsLockPath,
   syncSettingsFileOnBoot,
+  watchSettingsFile,
   writeSettings,
   type AgentRecord,
   type Settings,
@@ -1327,6 +1328,123 @@ describe("settings-file", () => {
       expect(isValidIanaTimeZone("")).toBe(false);
       expect(isValidIanaTimeZone(null)).toBe(false);
       expect(isValidIanaTimeZone(123)).toBe(false);
+    });
+  });
+
+  // ============================================================
+  // watchSettingsFile — Phase 4b.2 (DX-289)
+  // ============================================================
+
+  describe("watchSettingsFile", () => {
+    function waitForOnChange(
+      calls: string[],
+      target: number,
+      timeoutMs = 2000,
+    ): Promise<void> {
+      const start = Date.now();
+      return new Promise((resolve, reject) => {
+        const poll = setInterval(() => {
+          if (calls.length >= target) {
+            clearInterval(poll);
+            resolve();
+          } else if (Date.now() - start > timeoutMs) {
+            clearInterval(poll);
+            reject(
+              new Error(
+                `Timed out waiting for ${target} onChange call(s); observed ${calls.length}`,
+              ),
+            );
+          }
+        }, 30);
+      });
+    }
+
+    it("invokes onChange when settings.json is written", async () => {
+      const calls: string[] = [];
+      // Seed with an initial write so chokidar has a file to watch.
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify(defaultSettings()),
+      );
+
+      const { unwatch } = watchSettingsFile({
+        localPath,
+        onChange: (p) => calls.push(p),
+      });
+
+      // chokidar needs a brief moment to attach the watcher.
+      await new Promise((r) => setTimeout(r, 200));
+
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({ ...defaultSettings(), changedAt: Date.now() }),
+      );
+
+      await waitForOnChange(calls, 1);
+      expect(calls).toContain(localPath);
+
+      await unwatch();
+    });
+
+    it("does NOT invoke onChange when .settings.lock is created/touched", async () => {
+      const calls: string[] = [];
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify(defaultSettings()),
+      );
+
+      const { unwatch } = watchSettingsFile({
+        localPath,
+        onChange: (p) => calls.push(p),
+      });
+
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Touch the sibling lock file — chokidar's `ignored` glob must
+      // filter it out.
+      writeFileSync(settingsLockPath(localPath), "");
+      writeFileSync(settingsLockPath(localPath), "x");
+      writeFileSync(settingsLockPath(localPath), "xy");
+
+      // Settle interval for the awaitWriteFinish stabilityThreshold +
+      // chokidar's normal event delay.
+      await new Promise((r) => setTimeout(r, 700));
+
+      expect(calls).toHaveLength(0);
+
+      await unwatch();
+    });
+
+    it("unwatch handle stops further onChange invocations", async () => {
+      const calls: string[] = [];
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify(defaultSettings()),
+      );
+
+      const { unwatch } = watchSettingsFile({
+        localPath,
+        onChange: (p) => calls.push(p),
+      });
+
+      await new Promise((r) => setTimeout(r, 200));
+
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({ ...defaultSettings(), v: 1 }),
+      );
+      await waitForOnChange(calls, 1);
+      const baseline = calls.length;
+
+      await unwatch();
+
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({ ...defaultSettings(), v: 2 }),
+      );
+      await new Promise((r) => setTimeout(r, 600));
+
+      expect(calls.length).toBe(baseline);
     });
   });
 });

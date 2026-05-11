@@ -37,6 +37,7 @@ import {
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import chokidar from "chokidar";
 import { createLogger } from "./logger.js";
 import type { RepoContext } from "./types.js";
 
@@ -940,4 +941,84 @@ export async function syncSettingsFileOnBoot(
 export function _resetForTesting(): void {
   lastParseErrorLogTs.clear();
   inProcessQueues.clear();
+}
+
+/**
+ * Phase 4b.2 (DX-289) of the Event-Driven Worker epic. Chokidar-watches
+ * `<repo>/.danxbot/settings.json` and fires `onChange(localPath)` on
+ * every emit. The sibling `.settings.lock` file MUST NOT trigger
+ * onChange — it ticks every dashboard write and would double-fire the
+ * scheduler's roster-rebuild path. Chokidar's `ignored` option filters
+ * it out (path-substring match — covers both `.settings.lock` and any
+ * future lock-file companion that starts the same way).
+ *
+ * The caller is responsible for the debounce: chokidar fires `change`
+ * for every fs event, and an in-flight settings write that produces
+ * two file writes (atomic tmp+rename → two `add` + one `unlink`) will
+ * surface multiple events. The downstream consumer
+ * (`scheduler.onAgentRosterChange`) coalesces back-to-back fires the
+ * same way `onReconcileResult` does for reconcile.
+ *
+ * Returns an `unwatch` handle that drains the chokidar watcher when
+ * called. Caller (`bootScheduler`) stashes the handle per-repo so
+ * worker shutdown can `await unwatch()` cleanly.
+ *
+ * Errors from the chokidar handler are caught and logged — a single
+ * `onChange` throw must not poison the watcher.
+ */
+export function watchSettingsFile(args: {
+  localPath: string;
+  onChange: (localPath: string) => void;
+}): { unwatch: () => Promise<void> } {
+  const { localPath, onChange } = args;
+  const settingsPath = settingsFilePath(localPath);
+  const watcher = chokidar.watch(settingsPath, {
+    // Ignore the lock-file companion. `ignored` accepts an array of
+    // path matchers; the function form runs per-path so we can match
+    // any path whose basename starts with `.settings.lock`.
+    ignored: (path: string) => path.endsWith(".settings.lock"),
+    // Only emit after a settings write fully settles. The dashboard's
+    // atomic tmp + rename produces a rename event that lands as a
+    // `change` once the tmp file is in place; 200ms is the same
+    // debounce the issues-mirror chokidar config uses for fan-in.
+    awaitWriteFinish: {
+      stabilityThreshold: 200,
+      pollInterval: 50,
+    },
+    // We poll for new file creation but `awaitWriteFinish` handles
+    // settled-state. Initial `add` events suppressed via
+    // `ignoreInitial: true` so a boot-time scan does not fire onChange
+    // for the existing file.
+    ignoreInitial: true,
+  });
+
+  watcher.on("add", (path) => {
+    try {
+      onChange(localPath);
+    } catch (err) {
+      log.error(
+        `[settings-watch] ${localPath}: onChange threw for add ${path}`,
+        err,
+      );
+    }
+  });
+  watcher.on("change", (path) => {
+    try {
+      onChange(localPath);
+    } catch (err) {
+      log.error(
+        `[settings-watch] ${localPath}: onChange threw for change ${path}`,
+        err,
+      );
+    }
+  });
+  watcher.on("error", (err) => {
+    log.error(`[settings-watch] ${localPath}: chokidar emitted error`, err);
+  });
+
+  return {
+    async unwatch() {
+      await watcher.close();
+    },
+  };
 }

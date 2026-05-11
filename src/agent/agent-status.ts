@@ -18,6 +18,7 @@
  */
 
 import { createLogger } from "../logger.js";
+import { rearmTtlTimer } from "../dispatch/ttl-timer.js";
 import type { AgentJob } from "./agent-types.js";
 
 const log = createLogger("agent-status");
@@ -98,6 +99,15 @@ export function startHeartbeat(job: AgentJob, apiToken: string): void {
       return;
     }
     putStatus(job, apiToken, "running");
+    // Phase 4b.2 (DX-289) — re-arm the per-dispatch TTL timer. Healthy
+    // dispatches refresh every heartbeat tick (10s); dead PIDs stop
+    // calling this and the timer eventually fires. Silent no-op when
+    // `ttlMs` is unset (non-poller dispatches) or no timer is armed
+    // for this dispatchId. `dispatchId` is the stable id preserved
+    // across stall-recovery respawns; `job.id` cycles on respawn.
+    if (job.ttlMs !== undefined && job.dispatchId !== undefined) {
+      rearmTtlTimer(job.dispatchId, job.ttlMs);
+    }
   }, HEARTBEAT_INTERVAL_MS);
 }
 

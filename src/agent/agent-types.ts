@@ -65,6 +65,25 @@ export interface AgentJob {
    */
   handle?: AgentHandle;
   heartbeatInterval?: ReturnType<typeof setInterval>;
+  /**
+   * Phase 4b.2 (DX-289) — per-dispatch TTL window in milliseconds. Set
+   * by `dispatch()` when the dispatch is bound to an issue card; the
+   * heartbeat loop reads this on every tick and calls `rearmTtlTimer`
+   * so a healthy long-running dispatch never trips the dead-PID check.
+   * Undefined for non-poller dispatches (Slack, external /api/launch
+   * without an issue id) where there is no YAML `dispatch{}` block to
+   * clear on expiry.
+   */
+  ttlMs?: number;
+  /**
+   * Phase 4b.2 (DX-289) — stable dispatch id used to key the per-
+   * dispatch TTL timer. Same as `id` on the initial spawn, but
+   * preserved across stall-recovery respawns (where `id` cycles to a
+   * fresh UUID while the dispatch row + TTL timer stay keyed on the
+   * original). The launcher / dispatch core stamps this after the
+   * job is constructed.
+   */
+  dispatchId?: string;
   /** The SessionLogWatcher monitoring this job's JSONL session file. */
   watcher?: SessionLogWatcher;
   /**

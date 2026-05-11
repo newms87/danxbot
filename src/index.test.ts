@@ -78,8 +78,14 @@ vi.mock("./dashboard/retention.js", () => ({
 }));
 
 const mockSyncSettingsFileOnBoot = vi.fn().mockResolvedValue(undefined);
+const mockWatchSettingsFile = vi.fn().mockReturnValue({
+  unwatch: vi.fn().mockResolvedValue(undefined),
+});
 vi.mock("./settings-file.js", () => ({
   syncSettingsFileOnBoot: mockSyncSettingsFileOnBoot,
+  watchSettingsFile: mockWatchSettingsFile,
+  settingsFilePath: vi.fn((p: string) => `${p}/.danxbot/settings.json`),
+  settingsLockPath: vi.fn((p: string) => `${p}/.danxbot/.settings.lock`),
 }));
 
 const mockStartIssuesMirror = vi.fn().mockResolvedValue({
@@ -221,7 +227,13 @@ async function importIndex(): Promise<void> {
 // Worker mode tests (DANXBOT_REPO_NAME set)
 // ============================================================
 
-describe("worker mode startup flow", () => {
+// Cold-start cost on this describe block is high because every test
+// re-imports `src/index.ts`, which pulls the worker-mode module graph
+// (poller, scheduler, settings-watch, triage timers, reattach, ...).
+// The first test that lands the import bears the full cost (~4–5s);
+// subsequent tests reuse vitest's transform cache. Bump per-test
+// timeout so the first test does not flake under CI load.
+describe("worker mode startup flow", { timeout: 15_000 }, () => {
   beforeEach(() => {
     mockIsWorkerMode = true;
     mockIsDashboardMode = false;

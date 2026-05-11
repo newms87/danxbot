@@ -33,6 +33,7 @@ import {
   _hasReconcileMutex,
   _resetReconcileMutexes,
   _resetDispatchableCache,
+  _resetTriageExpiresCache,
   setReconcileSchedulerHookForRepo,
   clearReconcileSchedulerHookForRepo,
   type ReconcileRepoContext,
@@ -98,9 +99,17 @@ function writeYaml(dir: string, id: string, issue: Issue): string {
   return path;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   _resetReconcileMutexes();
   _resetDispatchableCache();
+  _resetTriageExpiresCache();
+  // Drain any triage timers armed by prior tests in this file. Without
+  // this, a Review/Blocked card from one describe block can leave a
+  // setTimeout in the global module map that fires `reconcileIssue(...,
+  // "audit")` during the next test's run and trips assertions on
+  // scheduler-hook fire counts.
+  const triageTimer = await import("../dispatch/triage-timer.js");
+  triageTimer._clearAllTriageTimers();
 });
 
 describe("reconcileIssue — Phase 1 chokepoint", () => {
@@ -1399,5 +1408,199 @@ describe("reconcileIssue — scheduler hook invocation (Phase 4b.1 / DX-288)", (
       reconcileIssue(ctx.repo, "DX-2005", "watcher"),
     ).resolves.toBeDefined();
     await new Promise((r) => setImmediate(r));
+  });
+});
+
+describe("reconcileIssue — triage-timer re-arm (Phase 4b.2 / DX-289)", () => {
+  let ctx: ReturnType<typeof makeRepoCtx>;
+
+  beforeEach(async () => {
+    ctx = makeRepoCtx();
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    triageTimer._clearAllTriageTimers();
+  });
+
+  afterEach(async () => {
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    triageTimer._clearAllTriageTimers();
+    ctx.cleanup();
+  });
+
+  function makeIssueWithExpiry(
+    id: string,
+    status: IssueStatus,
+    expiresAt: string,
+  ): Issue {
+    return {
+      ...makeIssue(id, status),
+      triage: {
+        expires_at: expiresAt,
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+    };
+  }
+
+  it("arms a triage timer with the new expires_at when reconcile observes a change", async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    writeYaml(
+      ctx.openDir,
+      "DX-3001",
+      makeIssueWithExpiry("DX-3001", "Review", future),
+    );
+
+    await reconcileIssue(ctx.repo, "DX-3001", "watcher");
+
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    expect(triageTimer._isTriageTimerArmed(ctx.repo.name, "DX-3001")).toBe(
+      true,
+    );
+    expect(
+      triageTimer._getTriageTimerExpiresAt(ctx.repo.name, "DX-3001"),
+    ).toBe(Date.parse(future));
+  });
+
+  it("re-arms with the updated expires_at when the YAML's triage.expires_at changes", async () => {
+    const initial = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const updated = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString();
+    const path = writeYaml(
+      ctx.openDir,
+      "DX-3002",
+      makeIssueWithExpiry("DX-3002", "Review", initial),
+    );
+
+    await reconcileIssue(ctx.repo, "DX-3002", "watcher");
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    expect(
+      triageTimer._getTriageTimerExpiresAt(ctx.repo.name, "DX-3002"),
+    ).toBe(Date.parse(initial));
+
+    // Triage agent rewrites the YAML with a fresh expires_at — same
+    // file path; the next reconcile fires from chokidar.
+    writeFileSync(
+      path,
+      serializeIssue(makeIssueWithExpiry("DX-3002", "Review", updated)),
+    );
+
+    await reconcileIssue(ctx.repo, "DX-3002", "watcher");
+    expect(
+      triageTimer._getTriageTimerExpiresAt(ctx.repo.name, "DX-3002"),
+    ).toBe(Date.parse(updated));
+  });
+
+  it("clears the triage timer when the card moves to a terminal status", async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const path = writeYaml(
+      ctx.openDir,
+      "DX-3003",
+      makeIssueWithExpiry("DX-3003", "Review", future),
+    );
+
+    await reconcileIssue(ctx.repo, "DX-3003", "watcher");
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    expect(triageTimer._isTriageTimerArmed(ctx.repo.name, "DX-3003")).toBe(
+      true,
+    );
+
+    // Terminal status — agent stamped Done.
+    writeFileSync(
+      path,
+      serializeIssue(makeIssueWithExpiry("DX-3003", "Done", future)),
+    );
+
+    await reconcileIssue(ctx.repo, "DX-3003", "watcher");
+    expect(triageTimer._isTriageTimerArmed(ctx.repo.name, "DX-3003")).toBe(
+      false,
+    );
+  });
+
+  it("does NOT arm a timer for a ToDo card outside triage scope (prevents immediate-fire infinite loop)", async () => {
+    // ToDo + waiting_on=null + status not Review/Blocked = outside the
+    // triage agent's scope. If we armed an immediate-fire timer here
+    // (empty expires_at → 0ms), the timer would fire, reconcile audit
+    // would re-observe the same empty value, and the loop would re-arm
+    // forever. Guard exists in step 7b of reconcile.ts.
+    writeYaml(
+      ctx.openDir,
+      "DX-3006",
+      makeIssueWithExpiry("DX-3006", "ToDo", ""),
+    );
+
+    await reconcileIssue(ctx.repo, "DX-3006", "watcher");
+
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    expect(triageTimer._isTriageTimerArmed(ctx.repo.name, "DX-3006")).toBe(
+      false,
+    );
+  });
+
+  it("arms a timer for a ToDo card that has waiting_on != null (in-scope via waiting_on)", async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const issue: Issue = {
+      ...makeIssueWithExpiry("DX-3007", "ToDo", future),
+      waiting_on: {
+        reason: "Pending another card",
+        timestamp: "2026-05-01T00:00:00Z",
+        by: ["DX-1"],
+      },
+    };
+    writeYaml(ctx.openDir, "DX-3007", issue);
+
+    await reconcileIssue(ctx.repo, "DX-3007", "watcher");
+
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    expect(triageTimer._isTriageTimerArmed(ctx.repo.name, "DX-3007")).toBe(
+      true,
+    );
+  });
+
+  it("does NOT re-arm when expires_at is unchanged across reconciles (cache hit)", async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    writeYaml(
+      ctx.openDir,
+      "DX-3008",
+      makeIssueWithExpiry("DX-3008", "Review", future),
+    );
+
+    await reconcileIssue(ctx.repo, "DX-3008", "watcher");
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    const firstExpiry = triageTimer._getTriageTimerExpiresAt(
+      ctx.repo.name,
+      "DX-3008",
+    );
+    expect(firstExpiry).toBe(Date.parse(future));
+
+    // Identical content — chokidar fires a second event but reconcile
+    // observes no triage.expires_at change and short-circuits the arm.
+    // Same value remains; armed entry unchanged.
+    await reconcileIssue(ctx.repo, "DX-3008", "watcher");
+    expect(
+      triageTimer._getTriageTimerExpiresAt(ctx.repo.name, "DX-3008"),
+    ).toBe(firstExpiry);
+  });
+
+  it("tombstone reconcile clears the triage timer", async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const path = writeYaml(
+      ctx.openDir,
+      "DX-3004",
+      makeIssueWithExpiry("DX-3004", "Review", future),
+    );
+
+    await reconcileIssue(ctx.repo, "DX-3004", "watcher");
+    const triageTimer = await import("../dispatch/triage-timer.js");
+    expect(triageTimer._isTriageTimerArmed(ctx.repo.name, "DX-3004")).toBe(
+      true,
+    );
+
+    // YAML deleted (operator unlinked) — reconcile sees a tombstone.
+    unlinkSync(path);
+    await reconcileIssue(ctx.repo, "DX-3004", "watcher");
+    expect(triageTimer._isTriageTimerArmed(ctx.repo.name, "DX-3004")).toBe(
+      false,
+    );
   });
 });

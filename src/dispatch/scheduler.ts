@@ -61,6 +61,11 @@ import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
+import {
+  scanAndArmTriageTimers,
+  type ReconcileFn as TriageReconcileFn,
+} from "./triage-timer.js";
+import { watchSettingsFile } from "../settings-file.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("scheduler");
@@ -85,6 +90,25 @@ const pickersByRepo = new Map<string, RunPickerFn>();
 const pendingPokes = new Set<string>();
 
 /**
+ * Phase 4b.2 (DX-289). settings.json file-watch handles registered per-
+ * repo at `bootScheduler` time. Worker shutdown drains via `unwatch()`.
+ * Map shape mirrors `pickersByRepo` + `trackersByRepo`.
+ */
+const settingsWatchersByRepo = new Map<
+  string,
+  { unwatch: () => Promise<void> }
+>();
+
+/**
+ * Phase 4b.2 — pending `onAgentRosterChange` pokes per repo. Same shape
+ * + debounce semantics as `pendingPokes` for `onReconcileResult`.
+ * Decoupled set because a roster-change burst and a reconcile burst can
+ * be in flight concurrently, and either source coalescing the other's
+ * fire would be incorrect.
+ */
+const pendingRosterPokes = new Set<string>();
+
+/**
  * Lookup the tracker registered by `bootScheduler`. Returns undefined
  * when no boot has happened for this repo — callers that need to
  * fail-loud should branch on that.
@@ -106,6 +130,18 @@ export function _resetSchedulerTrackers(): void {
   trackersByRepo.clear();
   pickersByRepo.clear();
   pendingPokes.clear();
+  pendingRosterPokes.clear();
+  // Close any settings watchers registered by prior tests so a vitest
+  // worker doesn't leak fs handles between describes. Awaiting per
+  // entry inside the synchronous reset hook would change the public
+  // contract (every caller would have to `await _reset...`); instead
+  // we fire-and-forget the unwatch — chokidar's `close()` swallows
+  // its own errors and tests already use `_resetForTesting` in
+  // settings-file.ts to drain in-process state.
+  for (const watcher of settingsWatchersByRepo.values()) {
+    void watcher.unwatch().catch(() => undefined);
+  }
+  settingsWatchersByRepo.clear();
 }
 
 /**
@@ -138,8 +174,17 @@ export function bootScheduler(args: {
    * Phase 4b.3 deletes it.
    */
   runPicker?: RunPickerFn;
+  /**
+   * Phase 4b.2 (DX-289). Reconcile function reference forwarded to the
+   * triage-timer boot-scan + the settings.json file-watch. Production
+   * wires `reconcileIssue` from `src/issue/reconcile.ts`; tests pass a
+   * spy. When omitted, the boot-scan + file-watch are SKIPPED — most
+   * tests don't need them, and omitting avoids forcing every caller to
+   * thread a stub through.
+   */
+  reconcile?: TriageReconcileFn;
 }): void {
-  const { repo, tracker, runPicker } = args;
+  const { repo, tracker, runPicker, reconcile } = args;
   if (tracker instanceof TrelloTracker) {
     const trello = repo.trello;
     if (!trello?.apiKey || !trello?.apiToken || !trello?.boardId) {
@@ -160,9 +205,134 @@ export function bootScheduler(args: {
     // was set.
     pickersByRepo.delete(repo.name);
   }
+
+  // Phase 4b.2 (DX-289). Start the settings.json watcher + triage
+  // boot-scan re-arm, both keyed on the reconcile dep. Idempotent over
+  // re-boot — replace the prior watcher handle if one exists.
+  if (reconcile) {
+    const prior = settingsWatchersByRepo.get(repo.name);
+    if (prior) {
+      void prior.unwatch().catch((err) =>
+        log.warn(
+          `[${repo.name}] scheduler boot: prior settings-watch unwatch failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        ),
+      );
+    }
+    const reconcileRepo: ReconcileRepoContext = {
+      name: repo.name,
+      localPath: repo.localPath,
+      issuePrefix: repo.issuePrefix,
+    };
+    const handle = watchSettingsFile({
+      localPath: repo.localPath,
+      onChange: () => {
+        onAgentRosterChange(repo.name);
+      },
+    });
+    settingsWatchersByRepo.set(repo.name, handle);
+    scanAndArmTriageTimers({ repo: reconcileRepo, reconcile });
+  } else {
+    // No reconcile dep — drop any prior watcher cleanly. Matches the
+    // hot-reload-without-picker branch above.
+    const prior = settingsWatchersByRepo.get(repo.name);
+    if (prior) {
+      void prior.unwatch().catch(() => undefined);
+      settingsWatchersByRepo.delete(repo.name);
+    }
+  }
+
   log.info(
-    `[${repo.name}] scheduler boot: ${tracker instanceof TrelloTracker ? "TrelloTracker validated" : "MemoryTracker"} and registered${runPicker ? " (picker wired)" : ""}`,
+    `[${repo.name}] scheduler boot: ${tracker instanceof TrelloTracker ? "TrelloTracker validated" : "MemoryTracker"} and registered${runPicker ? " (picker wired)" : ""}${reconcile ? " (settings watch + triage boot-scan wired)" : ""}`,
   );
+}
+
+/**
+ * Phase 4b.2 (DX-289). Drain the settings.json file-watch for one repo.
+ * Tests use this between cases to release chokidar handles deterministically.
+ * Idempotent — silent no-op when no watcher is armed for the repo.
+ */
+export async function unwatchSettingsFileForRepo(
+  repoName: string,
+): Promise<void> {
+  const handle = settingsWatchersByRepo.get(repoName);
+  if (!handle) return;
+  settingsWatchersByRepo.delete(repoName);
+  await handle.unwatch();
+}
+
+/**
+ * Phase 4b.2 (DX-289). Drain every registered settings-file watcher
+ * across all repos. Called from `src/shutdown.ts` so chokidar handles
+ * don't outlive the worker process on SIGTERM. Idempotent — empty
+ * registry is a no-op. Failures per watcher are logged and swallowed
+ * so shutdown stays bounded.
+ */
+export async function unwatchAllSettingsFiles(): Promise<void> {
+  const handles = Array.from(settingsWatchersByRepo.entries());
+  settingsWatchersByRepo.clear();
+  await Promise.allSettled(
+    handles.map(([repoName, handle]) =>
+      handle.unwatch().catch((err) =>
+        log.warn(
+          `[${repoName}] settings watcher drain failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        ),
+      ),
+    ),
+  );
+}
+
+/**
+ * Phase 4b.2 (DX-289). Poke the scheduler that the agent roster for a
+ * repo changed (typically: operator toggled an agent on/off via the
+ * dashboard, or `<repo>/.danxbot/settings.json` was rewritten by
+ * `make deploy`). Wires identically to `onReconcileResult` — fires the
+ * registered picker once per macrotask burst so a roster change
+ * surfaces newly-idle agents to the dispatch loop without waiting for
+ * the next `_poll` tick.
+ *
+ * Skip conditions:
+ *   - No picker registered for the repo (legacy `_poll` path still
+ *     runs picks; the change will be picked up there).
+ *   - A roster-change poke is already pending for this repo on the
+ *     current macrotask burst — debounce coalesces 2+ writes within
+ *     the same tick into one picker invocation.
+ *
+ * Scheduling: `setImmediate` puts the picker on the macrotask queue
+ * AFTER the chokidar handler returns. Same fire-and-forget model as
+ * `onReconcileResult`.
+ */
+export function onAgentRosterChange(repoName: string): void {
+  if (pendingRosterPokes.has(repoName)) return;
+  const runPicker = pickersByRepo.get(repoName);
+  if (!runPicker) return;
+  pendingRosterPokes.add(repoName);
+  setImmediate(() => {
+    pendingRosterPokes.delete(repoName);
+    const latestRunPicker = pickersByRepo.get(repoName);
+    if (!latestRunPicker) return;
+    let pickerResult: Promise<unknown>;
+    try {
+      pickerResult = Promise.resolve(latestRunPicker({ now: new Date() }));
+    } catch (err) {
+      log.error(
+        `[${repoName}] scheduler roster-change picker threw synchronously: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    pickerResult.catch((err) => {
+      log.error(
+        `[${repoName}] scheduler roster-change picker failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  });
 }
 
 /**

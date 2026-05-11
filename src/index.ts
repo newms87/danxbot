@@ -427,6 +427,9 @@ async function startWorkerMode(): Promise<void> {
         now,
       });
     },
+    // Phase 4b.2 (DX-289) — wire reconcile so bootScheduler can start
+    // the settings.json file-watch + boot-scan triage timer re-arm.
+    reconcile: reconcileIssue,
   });
   setReconcileSchedulerHookForRepo(repo.name, onReconcileResult);
 

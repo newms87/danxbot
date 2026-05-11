@@ -64,6 +64,34 @@ import {
 import { prependPersona, type PersonaContext } from "../agent/persona.js";
 import { releaseLock } from "../issue-tracker/lock.js";
 import type { IssueTracker } from "../issue-tracker/interface.js";
+import {
+  armTtlTimer,
+  clearTtlTimer,
+  type TtlTimerDeps,
+} from "./ttl-timer.js";
+import { isPidAlive } from "../agent/host-pid.js";
+import { reconcileIssue } from "../issue/reconcile.js";
+import {
+  clearDispatchAndWrite,
+  loadLocal,
+} from "../poller/yaml-lifecycle.js";
+
+const ttlTimerDeps: TtlTimerDeps = {
+  isPidAlive,
+  reconcile: reconcileIssue,
+  clearDispatch: clearDispatchAndWrite,
+  loadIssue: loadLocal,
+};
+
+/**
+ * Phase 4b.2 (DX-289). Default per-dispatch TTL when the caller path
+ * does not stamp a `dispatch.ttl_seconds` on a YAML (e.g. Slack
+ * deep-agent, external `/api/launch` calls without an issue id). The
+ * worker should still tear the dispatch down if its host PID dies; the
+ * default mirrors the work-kind 2h budget from
+ * `src/poller/dispatch-liveness-yaml.ts`.
+ */
+const DEFAULT_TTL_MS = 2 * 60 * 60 * 1000;
 
 const log = createLogger("dispatch-core");
 
@@ -718,6 +746,11 @@ async function runResolved(
           if (resolved.settingsPath) {
             cleanupWorkspaceSettings(resolved.settingsPath);
           }
+          // Phase 4b.2 (DX-289) — drain the TTL timer on terminal state.
+          // Safe to call even when the timer was never armed
+          // (non-poller dispatches): clearTtlTimer is a silent no-op
+          // when no entry exists.
+          clearTtlTimer(dispatchId);
           // DX-241: fire-and-forget tracker lock release. Runs BEFORE
           // the caller's onComplete so the lock is gone by the time
           // the poller's card-progress check observes the terminal
@@ -739,6 +772,11 @@ async function runResolved(
       if (resolved.settingsPath) {
         cleanupWorkspaceSettings(resolved.settingsPath);
       }
+      // Phase 4b.2 (DX-289) — if `armTtlTimer` ran before this catch
+      // observed the spawn error (rare: spawn error inside the persona
+      // / completion-instruction prepend can race the arming), clear
+      // the orphan timer. Idempotent no-op when never armed.
+      clearTtlTimer(dispatchId);
       // DX-241: spawn-failure path also releases the tracker lock so a
       // dispatch that died before reaching a terminal status doesn't
       // leak its lock until TTL. `fireLockReleaseOnce` short-circuits
@@ -749,6 +787,11 @@ async function runResolved(
       fireLockReleaseOnce();
       throw spawnErr;
     }
+
+    // Phase 4b.2 (DX-289) — stamp the stable dispatch id on the job so
+    // the heartbeat tick can re-arm the TTL timer using the right key
+    // even across stall-recovery respawns (where `job.id` cycles).
+    job.dispatchId = dispatchId;
 
     // Index under the stable dispatchId so callers can still poll.
     activeJobs.set(dispatchId, job);
@@ -849,6 +892,32 @@ async function runResolved(
 
   const job = await spawnForDispatch(taskWithInstruction, false);
   setupStallDetection(job);
+
+  // Phase 4b.2 (DX-289) — arm the per-dispatch TTL timer. Only the
+  // poller path stamps a per-issue YAML; non-poller dispatches (Slack,
+  // external /api/launch without an issue id) have nothing to clear on
+  // expiry, so the timer is a no-op for them and we skip arming. The
+  // heartbeat hook in `agent-status.ts` re-arms on every tick; a dead
+  // PID lets the timer fire and clear the YAML's `dispatch{}` field.
+  if (input.issueId) {
+    const pid = job.handle?.pid ?? 0;
+    armTtlTimer({
+      dispatchId,
+      repo: {
+        name: input.repo.name,
+        localPath: input.repo.localPath,
+        issuePrefix: input.repo.issuePrefix,
+      },
+      cardId: input.issueId,
+      pid,
+      ttlMs: DEFAULT_TTL_MS,
+      deps: ttlTimerDeps,
+    });
+    // Stash the ttl on the job so the heartbeat tick has access to it
+    // when calling `rearmTtlTimer` — keeps the heartbeat module pure
+    // (no module-global default).
+    job.ttlMs = DEFAULT_TTL_MS;
+  }
 
   // Phase 5c (ISS-102): preserve the workspace's stagingPaths + the
   // overlay so a later POST /api/restage/:dispatchId can re-run the

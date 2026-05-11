@@ -2238,3 +2238,137 @@ describe("registerActiveJob — defensive runtime checks (DX-209 reattach seam)"
     expect(getActiveJob("happy")).toBe(stubJob);
   });
 });
+
+describe("dispatch() — TTL timer wiring (DX-289 / Phase 4b.2)", () => {
+  const issueWorkerSrc = resolve(
+    __dirname,
+    "..",
+    "poller",
+    "inject",
+    "workspaces",
+    "issue-worker",
+  );
+  let tmpRepoDir: string;
+  let issueRepo: ReturnType<typeof makeRepoContext>;
+
+  beforeEach(() => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-ttl-wiring-"));
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "issue-worker");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(issueWorkerSrc, dest, { recursive: true });
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "issues", "open"), {
+      recursive: true,
+    });
+    issueRepo = {
+      ...makeRepoContext({ localPath: tmpRepoDir }),
+      trelloEnabled: true,
+    };
+  });
+
+  afterEach(async () => {
+    const ttlTimer = await import("./ttl-timer.js");
+    ttlTimer._clearAllTtlTimers();
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  function makeJobWithHandle(): ReturnType<typeof makeRunningJob> & {
+    handle: { pid: number; kill: () => void };
+  } {
+    return {
+      ...makeRunningJob(),
+      handle: { pid: 4242, kill: () => {} },
+    };
+  }
+
+  it("arms the TTL timer when input.issueId is set (poller path)", async () => {
+    const job = makeJobWithHandle();
+    mockSpawnAgent.mockResolvedValueOnce(job);
+
+    const { dispatch } = await import("./core.js");
+    const result = await dispatch({
+      repo: issueRepo,
+      task: "Pick up DX-1.",
+      workspace: "issue-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      issueId: "DX-1",
+    });
+
+    const ttlTimer = await import("./ttl-timer.js");
+    expect(ttlTimer._isTtlTimerArmed(result.dispatchId)).toBe(true);
+    const args = ttlTimer._getTtlTimerArgs(result.dispatchId);
+    expect(args?.cardId).toBe("DX-1");
+    expect(args?.pid).toBe(4242);
+    // job.dispatchId + job.ttlMs stamps are load-bearing for the
+    // heartbeat re-arm — they MUST land on the returned job.
+    expect(result.job.dispatchId).toBe(result.dispatchId);
+    expect(result.job.ttlMs).toBeGreaterThan(0);
+  });
+
+  it("does NOT arm the TTL timer when input.issueId is absent (Slack / external launch)", async () => {
+    mockSpawnAgent.mockResolvedValueOnce(makeJobWithHandle());
+
+    const { dispatch } = await import("./core.js");
+    const result = await dispatch({
+      repo: issueRepo,
+      task: "Reply to slack message.",
+      workspace: "issue-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+    });
+
+    const ttlTimer = await import("./ttl-timer.js");
+    expect(ttlTimer._isTtlTimerArmed(result.dispatchId)).toBe(false);
+    expect(result.job.dispatchId).toBe(result.dispatchId);
+    expect(result.job.ttlMs).toBeUndefined();
+  });
+
+  it("clears the TTL timer when the dispatch reaches a terminal onComplete", async () => {
+    const job = makeJobWithHandle();
+    let capturedOnComplete: ((j: typeof job) => void) | undefined;
+    mockSpawnAgent.mockImplementationOnce(async (opts) => {
+      capturedOnComplete = opts.onComplete as typeof capturedOnComplete;
+      return job;
+    });
+
+    const { dispatch } = await import("./core.js");
+    const result = await dispatch({
+      repo: issueRepo,
+      task: "Pick up DX-1.",
+      workspace: "issue-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      issueId: "DX-1",
+    });
+
+    const ttlTimer = await import("./ttl-timer.js");
+    expect(ttlTimer._isTtlTimerArmed(result.dispatchId)).toBe(true);
+
+    // Simulate the launcher firing onComplete on terminal state.
+    capturedOnComplete?.(job);
+    expect(ttlTimer._isTtlTimerArmed(result.dispatchId)).toBe(false);
+  });
+
+  it("clears the TTL timer on spawn failure (defense-in-depth)", async () => {
+    mockSpawnAgent.mockRejectedValueOnce(new Error("spawn boom"));
+
+    const { dispatch } = await import("./core.js");
+    await expect(
+      dispatch({
+        repo: issueRepo,
+        task: "Pick up DX-1.",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "DX-1",
+      }),
+    ).rejects.toThrow("spawn boom");
+
+    // No entry should leak — the spawn-failure catch block clears the
+    // timer idempotently.
+    const ttlTimer = await import("./ttl-timer.js");
+    expect(ttlTimer._isTtlTimerArmed("any-id")).toBe(false);
+  });
+});
