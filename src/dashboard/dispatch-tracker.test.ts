@@ -285,6 +285,29 @@ describe("startDispatchTracking", () => {
     expect(mockInsertDispatch.mock.calls[0][0].mcpSettingsPath).toBeNull();
   });
 
+  it("defaults recoverCount to 0 + parentRecoverId to null on every fresh insert (DX-259)", async () => {
+    // Phase 1 starts every dispatch chain at zero recovers / no parent
+    // recover. Phase 2 stamps positive values on the *new* row written by
+    // /api/resume when the launcher's recover handler fires; this test
+    // pins the steady-state default so a regression in the row builder
+    // doesn't silently un-stamp the cap-decision input.
+    const watcher = makeMockWatcher();
+    await startDispatchTracking({
+      jobId: "recover-defaults-job",
+      repoName: "danxbot",
+      trigger: slackTrigger,
+      runtimeMode: "docker",
+      danxbotCommit: null,
+      agentName: null,
+      watcher: watcher as never,
+    });
+
+    expect(mockInsertDispatch).toHaveBeenCalledOnce();
+    const inserted = mockInsertDispatch.mock.calls[0][0];
+    expect(inserted.recoverCount).toBe(0);
+    expect(inserted.parentRecoverId).toBeNull();
+  });
+
   it("defaults issueId to null on launches that did not pass it (Slack, ideator, board-chat, external API)", async () => {
     const watcher = makeMockWatcher();
     await startDispatchTracking({

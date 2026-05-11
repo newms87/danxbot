@@ -132,6 +132,8 @@ function makeRow(overrides: Partial<Dispatch> = {}): Dispatch {
     danxbotCommit: null,
     agentName: null,
     mcpSettingsPath: null,
+    recoverCount: 0,
+    parentRecoverId: null,
     ...overrides,
   };
 }

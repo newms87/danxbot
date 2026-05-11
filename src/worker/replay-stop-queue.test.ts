@@ -65,6 +65,14 @@ function fakeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     hostPidAt: null,
     pidTerminatedAt: null,
     mcpSettingsPath: null,
+    // DX-259 — added so this fixture stays consistent with the live
+    // Dispatch interface even though the `as Dispatch` cast still
+    // suppresses strict-shape errors. The cast + the rest of this
+    // fixture's drifted field names (`sessionId`, `workspace`, `title`,
+    // `cwd`, `settingsDir`, `usage`, `runtime`) are pre-existing tech
+    // debt from DX-242; reconciling them is out of scope for Phase 1.
+    recoverCount: 0,
+    parentRecoverId: null,
     ...overrides,
   } as Dispatch;
 }

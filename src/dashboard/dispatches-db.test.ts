@@ -123,6 +123,8 @@ function makeDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
     danxbotCommit: "abc1234",
     agentName: null,
     mcpSettingsPath: null,
+    recoverCount: 0,
+    parentRecoverId: null,
     ...overrides,
   };
 }
@@ -265,6 +267,7 @@ describe("dispatchToInsertParams", () => {
       "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
       "toolCallCount", "subagentCount", "nudgeCount",
       "danxbotCommit", "agentName", "mcpSettingsPath",
+      "recoverCount", "parentRecoverId",
     ];
     const idx = orderedKeys.indexOf("mcpSettingsPath");
     expect(params[idx]).toBe("/tmp/danxbot-mcp-AbCdEf/settings.json");
@@ -282,9 +285,39 @@ describe("dispatchToInsertParams", () => {
       "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
       "toolCallCount", "subagentCount", "nudgeCount",
       "danxbotCommit", "agentName", "mcpSettingsPath",
+      "recoverCount", "parentRecoverId",
     ];
     const idx = orderedKeys.indexOf("mcpSettingsPath");
     expect(params[idx]).toBeNull();
+  });
+
+  it("writes recoverCount + parentRecoverId at their declared positions (DX-259 round-trip)", () => {
+    // DX-259 Phase 1 — the recover-chain columns are the load-bearing
+    // hand-off between the launcher's API-error recover handler (Phase 2)
+    // and the chain walker the dashboard "show recover chain" view will
+    // call (Phase 3). A re-order of COLUMN_MAP that misaligned either
+    // column would silently route the values into unrelated cells at
+    // write time and corrupt every recovered dispatch's lineage.
+    const d = makeDispatch({
+      recoverCount: 2,
+      parentRecoverId: "parent-recover-12345",
+    });
+    const params = dispatchToInsertParams(d);
+    const orderedKeys: Array<keyof typeof d> = [
+      "id", "repoName", "trigger", "triggerMetadata",
+      "slackThreadTs", "slackChannelId",
+      "sessionUuid", "jsonlPath", "parentJobId", "issueId", "status",
+      "startedAt", "completedAt", "summary", "error", "runtimeMode",
+      "hostPid", "hostPidAt", "pidTerminatedAt",
+      "tokensTotal", "tokensIn", "tokensOut", "cacheRead", "cacheWrite",
+      "toolCallCount", "subagentCount", "nudgeCount",
+      "danxbotCommit", "agentName", "mcpSettingsPath",
+      "recoverCount", "parentRecoverId",
+    ];
+    const recoverCountIdx = orderedKeys.indexOf("recoverCount");
+    const parentRecoverIdIdx = orderedKeys.indexOf("parentRecoverId");
+    expect(params[recoverCountIdx]).toBe(2);
+    expect(params[parentRecoverIdIdx]).toBe("parent-recover-12345");
   });
 });
 
@@ -321,6 +354,8 @@ describe("rowToDispatch", () => {
       danxbot_commit: "sha123",
       agent_name: null,
       mcp_settings_path: null,
+      recover_count: 0,
+      parent_recover_id: null,
     };
     const d = rowToDispatch(row);
     expect(d.id).toBe("job-abc");
@@ -332,6 +367,76 @@ describe("rowToDispatch", () => {
     expect(d.hostPid).toBe(4242);
     // Resume lineage round-trips through rowToDispatch.
     expect(d.parentJobId).toBe("parent-aea75840");
+    // DX-259 — fresh / non-recovered rows surface defaults.
+    expect(d.recoverCount).toBe(0);
+    expect(d.parentRecoverId).toBeNull();
+  });
+
+  it("hydrates recover_count / parent_recover_id (DX-259; legacy fixture defaults to 0 / null)", () => {
+    // DX-259 Phase 1 — read-side counterpart to the COLUMN_MAP positional
+    // round-trip test. Three branches exercised, mirroring the existing
+    // `mcp_settings_path` pattern:
+    //   1. columns carry real values → recoverCount / parentRecoverId reflect them
+    //   2. columns are 0 / NULL → defaults
+    //   3. columns missing entirely (pre-DX-259 fixture) → recoverCount = 0,
+    //      parentRecoverId = null
+    // Branch 3 protects the loose `==` null check from being "fixed" to
+    // strict `===`. `Number(undefined)` would surface as `NaN`, silently
+    // corrupting every legacy fixture's recoverCount and breaking the
+    // Phase 2 cap decision.
+    const baseRow = {
+      id: "j",
+      repo_name: "r",
+      trigger: "api",
+      trigger_metadata: JSON.stringify(makeApiMeta()),
+      slack_thread_ts: null,
+      slack_channel_id: null,
+      session_uuid: null,
+      jsonl_path: null,
+      parent_job_id: null,
+      issue_id: null,
+      status: "running",
+      started_at: 1,
+      completed_at: null,
+      summary: null,
+      error: null,
+      runtime_mode: "docker",
+      host_pid: null,
+      host_pid_at: null,
+      pid_terminated_at: null,
+      tokens_total: 0,
+      tokens_in: 0,
+      tokens_out: 0,
+      cache_read: 0,
+      cache_write: 0,
+      tool_call_count: 0,
+      subagent_count: 0,
+      nudge_count: 0,
+      danxbot_commit: null,
+      agent_name: null,
+      mcp_settings_path: null,
+    };
+
+    const recovered = rowToDispatch({
+      ...baseRow,
+      recover_count: 2,
+      parent_recover_id: "parent-recover-XyZ",
+    } as never);
+    expect(recovered.recoverCount).toBe(2);
+    expect(recovered.parentRecoverId).toBe("parent-recover-XyZ");
+
+    const fresh = rowToDispatch({
+      ...baseRow,
+      recover_count: 0,
+      parent_recover_id: null,
+    } as never);
+    expect(fresh.recoverCount).toBe(0);
+    expect(fresh.parentRecoverId).toBeNull();
+
+    // Pre-DX-259 fixture — both columns entirely absent on the row object.
+    const legacy = rowToDispatch(baseRow as never);
+    expect(legacy.recoverCount).toBe(0);
+    expect(legacy.parentRecoverId).toBeNull();
   });
 
   it("hydrates mcp_settings_path → mcpSettingsPath (string round-trips; null + missing column both surface as null)", () => {
@@ -428,6 +533,8 @@ describe("rowToDispatch", () => {
       danxbot_commit: null,
       agent_name: null,
       mcp_settings_path: null,
+      recover_count: 0,
+      parent_recover_id: null,
     };
     const d = rowToDispatch(row);
     expect(d.triggerMetadata).toEqual(meta);

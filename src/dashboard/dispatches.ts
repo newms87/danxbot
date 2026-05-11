@@ -180,6 +180,27 @@ export interface Dispatch {
    * routed to the new worker.
    */
   mcpSettingsPath: string | null;
+  /**
+   * Number of times this dispatch chain has auto-recovered from a
+   * Claude API stream-idle synthetic error. Migration 020 adds the
+   * column with `NOT NULL DEFAULT 0` so legacy rows + every fresh
+   * insert that omits the field read as "never recovered". Phase 2 of
+   * DX-246 (recover wiring) increments the counter; Phase 1 leaves it
+   * at 0 since no caller writes it yet. The cap (`MAX_RECOVERS = 3`)
+   * reads this field to decide failed-vs-recovered branching, so the
+   * counter MUST persist across worker restarts mid-chain.
+   */
+  recoverCount: number;
+  /**
+   * Self-referential FK to `dispatches(id)` — the parent row in this
+   * dispatch's recover chain. NULL when the dispatch was launched
+   * directly (not as the recovery of an earlier dispatch). Migration
+   * 020 declares the column NULLable; Phase 2 stamps it on the new
+   * dispatch row that `/api/resume` writes when the launcher's
+   * recover handler fires. The dashboard's "show recover chain" view
+   * (Phase 3) walks this column to render the full recovery lineage.
+   */
+  parentRecoverId: string | null;
 }
 
 export interface DispatchFilters {

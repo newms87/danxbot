@@ -302,6 +302,8 @@ describe("guardLiveDispatchForCard (AC #2)", () => {
       danxbotCommit: null,
       agentName: null,
       mcpSettingsPath: null,
+      recoverCount: 0,
+      parentRecoverId: null,
       ...overrides,
     };
   }

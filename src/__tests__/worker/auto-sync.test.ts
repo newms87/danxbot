@@ -171,6 +171,8 @@ function buildTrelloRow(cardId: string): Dispatch {
     danxbotCommit: null,
     agentName: null,
     mcpSettingsPath: null,
+    recoverCount: 0,
+    parentRecoverId: null,
   };
 }
 

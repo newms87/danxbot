@@ -151,6 +151,13 @@ export async function startDispatchTracking(
     danxbotCommit: args.danxbotCommit,
     agentName: args.agentName ?? null,
     mcpSettingsPath: args.mcpSettingsPath ?? null,
+    // DX-259 Phase 1: foundation columns. Inserts always start the
+    // chain at zero recovers / no parent recover; Phase 2 wires the
+    // launcher to stamp these on the *new* row written by /api/resume
+    // when the API-error recover handler fires. Existing call sites
+    // see no behavior change because every fresh dispatch starts here.
+    recoverCount: 0,
+    parentRecoverId: null,
   };
 
   try {

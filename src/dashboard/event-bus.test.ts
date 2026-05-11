@@ -46,6 +46,8 @@ function createdEvent(id = "job-1"): BusEvent {
       danxbotCommit: null,
       agentName: null,
       mcpSettingsPath: null,
+      recoverCount: 0,
+      parentRecoverId: null,
     },
   };
 }

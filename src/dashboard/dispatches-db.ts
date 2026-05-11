@@ -55,6 +55,8 @@ const COLUMN_MAP: Readonly<Record<keyof Dispatch, string>> = {
   danxbotCommit: "danxbot_commit",
   agentName: "agent_name",
   mcpSettingsPath: "mcp_settings_path",
+  recoverCount: "recover_count",
+  parentRecoverId: "parent_recover_id",
 };
 
 const JSON_COLUMNS = new Set<keyof Dispatch>(["triggerMetadata"]);
@@ -101,6 +103,8 @@ export interface DispatchRow {
   danxbot_commit: string | null;
   agent_name: string | null;
   mcp_settings_path: string | null;
+  recover_count: number;
+  parent_recover_id: string | null;
 }
 
 function parseMetadata(
@@ -159,6 +163,13 @@ export function rowToDispatch(row: DispatchRow): Dispatch {
     // surface as `null`, not the string `"undefined"` from a strict cast.
     mcpSettingsPath:
       row.mcp_settings_path == null ? null : String(row.mcp_settings_path),
+    // Loose `==` matches the surrounding pattern: tolerates pre-DX-259
+    // rows + test fixtures whose row shape predates migration 020
+    // (column undefined) AND production rows whose recover_count
+    // legitimately defaulted to 0.
+    recoverCount: row.recover_count == null ? 0 : Number(row.recover_count),
+    parentRecoverId:
+      row.parent_recover_id == null ? null : String(row.parent_recover_id),
   };
 }
 
