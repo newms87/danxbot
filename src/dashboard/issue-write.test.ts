@@ -270,50 +270,67 @@ describe("applyIssuePatch — round-trip mutation", () => {
   });
 
   it("comments_append server-stamps author + timestamp; client-supplied values are ignored", async () => {
-    writeFixture(makeIssue(), "open");
-    const before = Date.now();
-    const issue = await applyIssuePatch(
-      "danxbot",
-      repoLocalPath,
-      "DX-1",
-      // Even if a malicious client passes author+timestamp, the route
-      // only reads `text` from the validated patch shape.
-      { comments_append: { text: "looks good" } } as IssuePatch,
-      "alice",
-    );
-    expect(issue.comments).toHaveLength(1);
-    expect(issue.comments[0].author).toBe("alice");
-    expect(issue.comments[0].text).toBe("looks good");
-    expect(issue.comments[0].timestamp.length).toBeGreaterThan(0);
-    const ts = Date.parse(issue.comments[0].timestamp);
-    expect(ts).toBeGreaterThanOrEqual(before);
-    expect(issue.comments[0]).not.toHaveProperty("id");
+    // Frozen clock — under load Date.now() can drift back across an
+    // await boundary (WSL2 NTP correction observed ~800ms). Locking
+    // the clock makes the stamp deterministic and lets the assertion
+    // be exact equality, not a flaky `>=`. The patch path uses
+    // `new Date().toISOString()` which respects vi.setSystemTime.
+    vi.useFakeTimers();
+    const frozen = new Date("2026-05-11T12:00:00.000Z");
+    vi.setSystemTime(frozen);
+    try {
+      writeFixture(makeIssue(), "open");
+      const issue = await applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        // Even if a malicious client passes author+timestamp, the route
+        // only reads `text` from the validated patch shape.
+        { comments_append: { text: "looks good" } } as IssuePatch,
+        "alice",
+      );
+      expect(issue.comments).toHaveLength(1);
+      expect(issue.comments[0].author).toBe("alice");
+      expect(issue.comments[0].text).toBe("looks good");
+      expect(issue.comments[0].timestamp).toBe(frozen.toISOString());
+      expect(issue.comments[0]).not.toHaveProperty("id");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("requires_human server-stamps set_by: human + set_at; client cannot fake set_by", async () => {
-    writeFixture(makeIssue(), "open");
-    const before = Date.now();
-    const issue = await applyIssuePatch(
-      "danxbot",
-      repoLocalPath,
-      "DX-1",
-      {
-        requires_human: {
-          reason: "Need API key",
-          steps: ["rotate it"],
-          // Client tries to spoof "agent" — server overrides to "human".
-          set_by: "agent",
-          set_at: "1970-01-01T00:00:00Z",
+    // Same frozen-clock discipline as the comments_append test above —
+    // exact-equality assertion replaces the flaky `>=` and removes the
+    // load-induced clock-drift failure mode.
+    vi.useFakeTimers();
+    const frozen = new Date("2026-05-11T12:00:00.000Z");
+    vi.setSystemTime(frozen);
+    try {
+      writeFixture(makeIssue(), "open");
+      const issue = await applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        {
+          requires_human: {
+            reason: "Need API key",
+            steps: ["rotate it"],
+            // Client tries to spoof "agent" — server overrides to "human".
+            set_by: "agent",
+            set_at: "1970-01-01T00:00:00Z",
+          },
         },
-      },
-      "alice",
-    );
-    expect(issue.requires_human).not.toBeNull();
-    expect(issue.requires_human?.set_by).toBe("human");
-    const setAtMs = Date.parse(issue.requires_human?.set_at ?? "");
-    expect(setAtMs).toBeGreaterThanOrEqual(before);
-    expect(issue.requires_human?.reason).toBe("Need API key");
-    expect(issue.requires_human?.steps).toEqual(["rotate it"]);
+        "alice",
+      );
+      expect(issue.requires_human).not.toBeNull();
+      expect(issue.requires_human?.set_by).toBe("human");
+      expect(issue.requires_human?.set_at).toBe(frozen.toISOString());
+      expect(issue.requires_human?.reason).toBe("Need API key");
+      expect(issue.requires_human?.steps).toEqual(["rotate it"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("preserves requires_human.steps[] order verbatim (panel reorder UX contract)", async () => {
@@ -451,19 +468,28 @@ describe("applyIssuePatch — round-trip mutation", () => {
     // a generic record. The agent path still uses the full `blocked: {reason,
     // timestamp}` shape via Edit/Write — this normalization only fires for
     // the dashboard's status-only patches.
-    writeFixture(makeIssue(), "open");
-    const before = Date.now();
-    const issue = await applyIssuePatch(
-      "danxbot",
-      repoLocalPath,
-      "DX-1",
-      { status: "Blocked" },
-      "alice",
-    );
-    expect(issue.status).toBe("Blocked");
-    expect(issue.blocked).not.toBeNull();
-    expect(issue.blocked!.reason).toBe("Manually moved to Blocked via dashboard");
-    expect(Date.parse(issue.blocked!.timestamp)).toBeGreaterThanOrEqual(before);
+    //
+    // Frozen clock — same flake class as the server-stamp tests above
+    // (DX-254). Exact-equality removes the WSL2 NTP-drift failure mode.
+    vi.useFakeTimers();
+    const frozen = new Date("2026-05-11T12:00:00.000Z");
+    vi.setSystemTime(frozen);
+    try {
+      writeFixture(makeIssue(), "open");
+      const issue = await applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { status: "Blocked" },
+        "alice",
+      );
+      expect(issue.status).toBe("Blocked");
+      expect(issue.blocked).not.toBeNull();
+      expect(issue.blocked!.reason).toBe("Manually moved to Blocked via dashboard");
+      expect(issue.blocked!.timestamp).toBe(frozen.toISOString());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("status away from Blocked auto-clears `blocked` (drag out of Blocked)", async () => {

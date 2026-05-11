@@ -130,39 +130,46 @@ describe("writeFsQueueEntry (DX-242)", () => {
 
 /**
  * Real-pg integration coverage for the DB-write happy path. Skips when
- * `DANXBOT_DB_*` env is absent — local Layer 1 runs without postgres
- * stay green. CI / dev runs against the dev pg pool exercise the full
- * UPDATE / idempotency contract.
+ * `DANXBOT_DB_*` env is absent OR the configured pg pool is
+ * unreachable — local Layer 1 runs without postgres stay green. CI /
+ * dev runs against the dev pg pool exercise the full UPDATE /
+ * idempotency contract.
  *
  * The danxbot pg pool's `dispatches` table is the same table the live
  * MCP fallback writes to; using it directly catches column-name
  * regressions, status-enum drift, and the `WHERE NOT IN (terminal)`
  * idempotent-skip clause (load-bearing per the file header).
+ *
+ * Skip gate (DX-254): the single beforeAll below probes BOTH env AND
+ * a TCP connect+auth handshake (`probePgReachable`, 2s timeout) and
+ * only sets `db` when both succeed. The prior split-gate pattern
+ * (sync `maybeSkip()` for env at module load + separate
+ * `pgReachable` boolean in beforeAll) was misleadingly named — the
+ * function did NOT actually decide skip, only env-presence. The
+ * consolidated gate ensures every `beforeEach` skip below ties
+ * back to one decision point.
  */
-function maybeSkip(): FallbackDbConfig | undefined {
-  const raw = readFallbackDbConfig(process.env);
-  if (!raw) return undefined;
-  // Host portability — see `resolveTestPgHost` (DX-256).
-  return { ...raw, host: resolveTestPgHost(raw.host) };
-}
-
 describe("tryDirectDbWrite (DX-242, real pg)", () => {
-  const db = maybeSkip();
-  // `beforeAll` probes the pool once with a 2s timeout so the suite
-  // skips cleanly when pg is down — without the probe, every test's
-  // `beforeEach` would hang for 10s before vitest's hookTimeout
-  // fired, plus an `afterEach` cascade of `Called end on pool more
-  // than once` errors from the partially-initialized pool.
-  let pgReachable = false;
-  beforeAll(async () => {
-    if (db) pgReachable = await probePgReachable(db);
-  });
-  const itIfDb = db ? it : it.skip;
+  let db: FallbackDbConfig | undefined;
   let pool: Pool | undefined;
   let dispatchId: string;
 
+  beforeAll(async () => {
+    const raw = readFallbackDbConfig(process.env);
+    if (!raw) return; // env absent — gate stays closed
+    // Host portability — see `resolveTestPgHost` (DX-256).
+    const candidate = { ...raw, host: resolveTestPgHost(raw.host) };
+    if (await probePgReachable(candidate)) {
+      db = candidate; // env present AND pg reachable
+    }
+    // env present BUT unreachable: db stays undefined → beforeEach
+    // skips every test cleanly. Without the probe, `new Pool` in
+    // beforeEach would hang for 10s on the configured host before
+    // vitest's hookTimeout fired.
+  });
+
   beforeEach(async (ctx) => {
-    if (!db || !pgReachable) {
+    if (!db) {
       ctx.skip();
       return;
     }
@@ -203,7 +210,7 @@ describe("tryDirectDbWrite (DX-242, real pg)", () => {
     }
   });
 
-  itIfDb("UPDATEs the dispatches row to terminal status on a non-terminal row", async () => {
+  it("UPDATEs the dispatches row to terminal status on a non-terminal row", async () => {
     // beforeEach ctx.skip()s when !pool; this narrows for tsc.
     if (!db || !pool) return;
     const ok = await tryDirectDbWrite(
@@ -234,7 +241,7 @@ describe("tryDirectDbWrite (DX-242, real pg)", () => {
     expect(rows[0].pid_terminated_at).toEqual(rows[0].completed_at);
   });
 
-  itIfDb("returns false on already-terminal row and preserves the original summary (idempotent)", async () => {
+  it("returns false on already-terminal row and preserves the original summary (idempotent)", async () => {
     if (!db || !pool) return;
     // Pre-finalize the row with a recognizable summary.
     await pool.query(
@@ -260,7 +267,7 @@ describe("tryDirectDbWrite (DX-242, real pg)", () => {
     expect(rows[0].summary).toBe("original-reason");
   });
 
-  itIfDb("returns false when the dispatch row does not exist (no rows updated)", async () => {
+  it("returns false when the dispatch row does not exist (no rows updated)", async () => {
     if (!db || !pool) return;
     const ok = await tryDirectDbWrite(
       {

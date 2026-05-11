@@ -554,45 +554,53 @@ describe("danxbot MCP server — DX-242 DB fallback (real pg)", () => {
    * `danxbot_complete`, and assert the row transitions terminal in
    * the database — proving the env injection path AND the SQL UPDATE.
    *
-   * Skips when `DANXBOT_DB_*` env is absent on the local test
-   * runner. Pairs with the `tryDirectDbWrite` unit suite in
+   * Skip gate (DX-254): the single beforeAll below probes BOTH env
+   * AND TCP reachability. `pgEnv` is set only when both succeed,
+   * matching the consolidated gate in
+   * `danxbot-stop-fallback.test.ts`. The prior split-gate (sync
+   * env-read at module load + async probe in beforeAll) decided
+   * skip in two places — the consolidated gate ties every
+   * `ctx.skip()` below back to one decision point.
+   *
+   * Pairs with the `tryDirectDbWrite` unit suite in
    * `danxbot-stop-fallback.test.ts`, which exercises the SQL
    * directly. This test exercises the env-plumbing + chain ordering.
    *
    * Host portability — see `resolveTestPgHost` (DX-256).
    */
-  function readPgEnv(): {
+  let pgEnv: {
     host: string;
     port: number;
     user: string;
     password: string;
     database: string;
-  } | undefined {
+  } | undefined;
+
+  beforeAll(async () => {
     const host = process.env.DANXBOT_DB_HOST;
     const portRaw = process.env.DANXBOT_DB_PORT;
     const user = process.env.DANXBOT_DB_USER;
     const password = process.env.DANXBOT_DB_PASSWORD;
     const database = process.env.DANXBOT_DB_NAME;
-    if (!host || !user || !password || !database) return undefined;
+    if (!host || !user || !password || !database) return; // env absent
     const port = portRaw ? parseInt(portRaw, 10) : 5432;
-    if (!Number.isFinite(port)) return undefined;
-    return { host: resolveTestPgHost(host), port, user, password, database };
-  }
-  const pgEnv = readPgEnv();
-  // Probe once: skip cleanly when pg is unreachable instead of
-  // letting `new Pool` hang for 10s. The `beforeAll` runs before the
-  // single `itIfDb` body so the skip decision is available there.
-  let pgReachable = false;
-  beforeAll(async () => {
-    if (pgEnv) pgReachable = await probePgReachable(pgEnv);
+    if (!Number.isFinite(port)) return; // malformed port
+    const candidate = {
+      host: resolveTestPgHost(host),
+      port,
+      user,
+      password,
+      database,
+    };
+    if (await probePgReachable(candidate)) {
+      pgEnv = candidate; // env present AND pg reachable
+    }
   });
-  const itIfDb = pgEnv ? it : it.skip;
 
-  itIfDb(
+  it(
     "critical_failure status writes the row as 'failed' (CompleteStatus → DispatchStatus collapse)",
     async (ctx) => {
-      if (!pgEnv) return;
-      if (!pgReachable) {
+      if (!pgEnv) {
         ctx.skip();
         return;
       }
