@@ -719,10 +719,19 @@ describe("WorktreeManager", () => {
     let repoRoot: string;
     let worktreeRoot: string;
 
+    function writeRepoPkg(deps: Record<string, string>): void {
+      writeFileSync(
+        join(repoRoot, "package.json"),
+        JSON.stringify({ name: "test-repo", devDependencies: deps }),
+      );
+    }
+
     function makeRepoNm(): void {
-      // Lay out a minimal repo-root node_modules with .bin/tsx so the
-      // fail-loud precondition passes. The file just needs to exist —
-      // the helper only checks existence, not exec rights.
+      // Lay out a minimal repo-root node_modules with .bin/tsx + a
+      // package.json declaring tsx so the sentinel-based fail-loud
+      // precondition passes. The file just needs to exist — the helper
+      // only checks existence, not exec rights.
+      writeRepoPkg({ tsx: "^4.0.0" });
       mkdirSync(join(repoRoot, "node_modules", ".bin"), { recursive: true });
       writeFileSync(join(repoRoot, "node_modules", ".bin", "tsx"), "#!fake\n");
     }
@@ -784,21 +793,64 @@ describe("WorktreeManager", () => {
       expect(existsSync(join(real, "stale.txt"))).toBe(false);
     });
 
-    it("fails loud when repo-root node_modules exists but lacks .bin/tsx (broken install)", async () => {
-      // Create the dir without seeding tsx — simulates a half-installed
-      // repo (npm install ran partially, or someone manually deleted
-      // .bin/tsx). The fail-loud check must trip so the operator
-      // re-runs npm install at the right path.
+    it("fails loud when repo declares tsx in package.json but node_modules lacks .bin/tsx (broken install)", async () => {
+      // package.json declares tsx → sentinel resolves to .bin/tsx →
+      // missing file trips the fail-loud check. Simulates a
+      // half-installed repo (npm install ran partially, or someone
+      // manually deleted .bin/tsx).
+      writeRepoPkg({ tsx: "^4.0.0" });
       mkdirSync(join(repoRoot, "node_modules", ".bin"), { recursive: true });
       const wm = createWorktreeManager(fakeRunner());
       const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
       await expect(wm.ensureProvisioned(ctx, "alice")).rejects.toThrow(
         WorktreeError,
       );
-      // The error message names the missing path so an operator can
-      // run `npm install` at the right repo root.
       await expect(wm.ensureProvisioned(ctx, "alice")).rejects.toThrow(
         /node_modules.*\.bin.*tsx/,
+      );
+    });
+
+    it("skips the sentinel gate when repo has no package.json (non-Node repo with vendor node_modules)", async () => {
+      // Connected repos like gpt-manager (Laravel + Vue) have a
+      // node_modules at the repo root but no tsx dep. Earlier DX-242
+      // form hardcoded `.bin/tsx` and false-positive-failed every such
+      // repo. The package.json-aware sentinel skips the gate entirely
+      // when there's no package.json to read deps from, so the symlink
+      // is still provisioned.
+      mkdirSync(join(repoRoot, "node_modules"), { recursive: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(join(worktreeRoot, "node_modules")).isSymbolicLink()).toBe(true);
+    });
+
+    it("skips the sentinel gate when package.json declares no deps", async () => {
+      writeFileSync(join(repoRoot, "package.json"), JSON.stringify({ name: "x" }));
+      mkdirSync(join(repoRoot, "node_modules"), { recursive: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(join(worktreeRoot, "node_modules")).isSymbolicLink()).toBe(true);
+    });
+
+    it("uses first declared dep as sentinel when neither tsx nor vitest are declared", async () => {
+      // Repo declares lodash but not tsx/vitest → sentinel = lodash
+      // package dir. Present → passes. Missing → throws.
+      writeRepoPkg({ lodash: "^4.0.0" });
+      mkdirSync(join(repoRoot, "node_modules", "lodash"), { recursive: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(join(worktreeRoot, "node_modules")).isSymbolicLink()).toBe(true);
+    });
+
+    it("fails loud when first declared dep is missing from node_modules", async () => {
+      writeRepoPkg({ lodash: "^4.0.0" });
+      mkdirSync(join(repoRoot, "node_modules"), { recursive: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).rejects.toThrow(
+        /node_modules.*lodash/,
       );
     });
 

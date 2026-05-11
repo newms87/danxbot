@@ -61,6 +61,7 @@ import { join, sep } from "node:path";
 import {
   existsSync,
   lstatSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -664,22 +665,21 @@ function provisionWorktreeArtifacts(
  * DX-242: provision a `<worktree>/node_modules` symlink pointing at the
  * repo-root `node_modules`.
  *
- * Adds a fail-loud precondition on `.bin/tsx` (a symlink to a
- * `node_modules` that doesn't have tsx is worse than no symlink — the
- * test scaffolding would resolve `<worktree>/node_modules/.bin/tsx`
- * past existsSync but spawn a non-existent file). Otherwise delegates
- * to `provisionSymlink`.
+ * Adds a fail-loud precondition tied to the repo's OWN `package.json`
+ * dependencies, not a hardcoded `tsx`. The original DX-242 form pinned
+ * `.bin/tsx` because danxbot self-hosts agent worktrees that run
+ * `npx vitest` (→ tsx). That precondition is wrong for connected repos
+ * with no tsx dependency (gpt-manager = Laravel + Vue; platform = same
+ * shape). The repo-aware check picks tsx OR vitest OR a sentinel that
+ * the repo's own `package.json` actually declares, so a populated
+ * `node_modules` always passes and a half-installed one still throws
+ * loud.
  *
  * Test-path silent skip: `<repoRoot>/node_modules` may not exist in
  * unit tests that drive the manager with fake `GitRunner`s and in
  * integration tests that build a real git repo in a tmpdir without
  * populating `node_modules`. Skip rather than throw so existing test
- * scaffolding keeps working without a per-test `npm install` seed
- * step. A worker booted into a fresh clone with no `npm install` would
- * also hit this path, but it can't actually run agents anyway in that
- * state — the worker's own tsx resolution comes from
- * `<repoRoot>/node_modules` — so the skip-and-let-the-real-failure-
- * surface contract holds.
+ * scaffolding keeps working without a per-test `npm install` seed step.
  */
 function provisionNodeModules(repoRoot: string, worktreePath: string): void {
   const repoNm = join(repoRoot, "node_modules");
@@ -689,14 +689,50 @@ function provisionNodeModules(repoRoot: string, worktreePath: string): void {
     );
     return;
   }
-  const tsxBin = join(repoNm, ".bin", "tsx");
-  if (!existsSync(tsxBin)) {
-    throw new WorktreeError(
-      `provisionNodeModules: ${tsxBin} does not exist — run \`npm install\` at ${repoRoot} ` +
-        `before bootstrapping or dispatching worktree agents`,
-    );
+  const sentinel = pickInstallSentinel(repoRoot);
+  if (sentinel) {
+    const sentinelPath = join(repoNm, sentinel.relPath);
+    if (!existsSync(sentinelPath)) {
+      throw new WorktreeError(
+        `provisionNodeModules: ${sentinelPath} does not exist — run \`npm install\` at ${repoRoot} ` +
+          `before bootstrapping or dispatching worktree agents (sentinel: ${sentinel.reason})`,
+      );
+    }
   }
   provisionSymlink(repoRoot, worktreePath, "node_modules", "dir", "provisionNodeModules");
+}
+
+/**
+ * Pick a `node_modules`-relative sentinel path that proves `npm install`
+ * ran for THIS repo. Reads `<repoRoot>/package.json` and prefers a
+ * declared dep that ships a CLI binary (tsx, vitest), falling back to
+ * the first declared dep's package dir. Returns null when the repo has
+ * no package.json or no declared deps — caller skips the gate (a
+ * present-but-empty `node_modules` is the same shape as a populated one
+ * for a deps-less repo).
+ */
+function pickInstallSentinel(
+  repoRoot: string,
+): { relPath: string; reason: string } | null {
+  let pkgRaw: string;
+  try {
+    pkgRaw = readFileSync(join(repoRoot, "package.json"), "utf8");
+  } catch {
+    return null;
+  }
+  let pkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+  try {
+    pkg = JSON.parse(pkgRaw);
+  } catch {
+    return null;
+  }
+  const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+  for (const binCli of ["tsx", "vitest"]) {
+    if (deps[binCli]) return { relPath: join(".bin", binCli), reason: `${binCli} in deps` };
+  }
+  const first = Object.keys(deps)[0];
+  if (first) return { relPath: first, reason: `${first} in deps` };
+  return null;
 }
 
 /**
