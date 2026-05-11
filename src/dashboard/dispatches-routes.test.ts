@@ -117,6 +117,22 @@ describe("handleListDispatches", () => {
     expect(mockListDispatches).toHaveBeenCalledWith({});
   });
 
+  it("forwards status=recovered through the allowlist (DX-261)", async () => {
+    // Pin the Phase 3 fix where `"recovered"` was missing from
+    // `VALID_STATUSES` and silently dropped — operators trying to
+    // narrow the dispatches table to chain-recovered rows would have
+    // seen every status instead. The new compile-time-exhaustive guard
+    // in `dispatches-routes.ts` prevents this class of regression; this
+    // test is the runtime witness.
+    mockListDispatches.mockResolvedValueOnce([]);
+    const { res } = createMockReqRes("GET", "/api/dispatches?status=recovered");
+    await handleListDispatches(
+      res,
+      new URLSearchParams({ status: "recovered" }),
+    );
+    expect(mockListDispatches).toHaveBeenCalledWith({ status: "recovered" });
+  });
+
   it("returns 500 on listDispatches failure", async () => {
     mockListDispatches.mockRejectedValueOnce(new Error("db"));
     const { res } = createMockReqRes("GET", "/");

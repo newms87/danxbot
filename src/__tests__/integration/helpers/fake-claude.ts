@@ -600,6 +600,50 @@ async function runScenario(): Promise<void> {
     return;
   }
 
+  if (scenario === "api-error") {
+    // DX-261 (Phase 3 of DX-246). Reproduces the synthetic JSONL pair
+    // Claude Code emits when the Anthropic API stream times out mid-turn:
+    // one assistant entry with isApiErrorMessage:true + model:"<synthetic>"
+    // (BOTH surface forms, defense-in-depth — see api-error-detector.ts)
+    // followed by a `turn_duration` system entry. The launcher's
+    // ApiErrorDetector reads the first entry, arms a 5s confirmation
+    // window, and fires the recover handler if no real assistant entry
+    // arrives. fake-claude lingers (long lingerMs) to keep the JSONL
+    // session "alive" while the recover handler runs — the recover
+    // handler kills this process via SIGTERM as part of `job.stop`.
+    writeEntry({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        stop_reason: "stop_sequence",
+        content: [
+          {
+            type: "text",
+            text: "API Error: Stream idle timeout - partial response received",
+          },
+        ],
+        usage: { input_tokens: 50, output_tokens: 0 },
+      },
+      isApiErrorMessage: true,
+      error: "unknown",
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    writeEntry({
+      type: "system",
+      subtype: "turn_duration",
+      durationMs: 1_457_211,
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    // Stay alive while the detector's 5s window runs + the recover
+    // handler POSTs /api/resume. The recover handler calls `job.stop`
+    // which SIGTERMs this process; we just need to outlive the window.
+    setInterval(() => {}, 60_000);
+    await new Promise(() => {});
+    return;
+  }
+
   if (scenario === "dup-msg-id") {
     // Reproduces Claude Code's multi-block-per-turn JSONL split: ONE API
     // response carrying both a text block and a tool_use block is written

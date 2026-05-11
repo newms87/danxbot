@@ -173,6 +173,83 @@ When `StallDetector` determines an agent is stuck (no watcher activity + no ✻ 
 
 **Silent dispatch failures (timeout with no JSONL ever appearing) are usually broken claude-auth, NOT a stalled agent.** Three known auth misconfigurations all surface as `Agent timed out after N seconds of inactivity` with no watcher attach: read-only `.claude.json` / `.claude/` bind, expired OAuth token, mismatched UID on bind source. Diagnostic recipe + full root-cause table → invoke `danxbot:dispatch-deep` skill BEFORE chasing StallDetector logic on a "silent failure" report.
 
+## Claude API stream-idle auto-recover (DX-246)
+
+Distinct from Stall Recovery. Stall recovery handles "agent stopped writing JSONL" (could be claude thinking too long, sub-agent stuck, etc.). API stream-idle recover handles a specific failure mode: the Anthropic stream times out mid-turn and Claude Code writes a **synthetic JSONL pair** signaling the model lost its connection. The agent itself is still alive but produced no real turn — the only way forward is to kill the session and POST `/api/resume` so claude reconnects via `claude --resume <sessionUuid>`.
+
+### Synthetic JSONL signature
+
+Claude Code writes BOTH a synthetic assistant entry AND a `turn_duration` system entry when the API stream times out (observed 2026-05-10 — DX-235). The detector matches on the assistant entry via either of two surface forms (defense-in-depth — Claude Code has emitted both in the wild):
+
+```jsonc
+// Surface form 1 — explicit flag
+{
+  "type": "assistant",
+  "message": {
+    "model": "<synthetic>",
+    "stop_reason": "stop_sequence",
+    "content": [{"type": "text",
+                 "text": "API Error: Stream idle timeout - partial response received"}]
+  },
+  "isApiErrorMessage": true,
+  "error": "unknown"
+}
+
+// Surface form 2 — content-pattern match
+{
+  "type": "assistant",
+  "message": {
+    "model": "<synthetic>",
+    "content": [{"type": "text", "text": "API error: <anything>"}]
+  }
+}
+
+// Both surfaces are usually followed by:
+{"type": "system", "subtype": "turn_duration", "durationMs": 1457211}
+```
+
+Detection logic — `src/agent/api-error-detector.ts#matchesSynthetic`:
+
+1. `raw.isApiErrorMessage === true`, OR
+2. `raw.message.model === "<synthetic>"` AND content text matches `/API Error/i`.
+
+### Detector behavior
+
+`ApiErrorDetector` subscribes to the same `SessionLogWatcher` every other observer reads (one fork, one watcher — see "Single Fork Principle"). On match it:
+
+- **Arms a 5s confirmation timer** instead of firing immediately. If a real assistant entry (`model !== "<synthetic>"`) arrives during the window, the API recovered on its own — pending recover is cancelled. This catches transient API stutter that resolves without operator intervention.
+- **Idempotency by recover epoch.** The detector remembers the `recoverCount` value at which it fired. Further synthetic entries in the same epoch are no-ops. When the recover handler bumps `recoverCount`, the next synthetic re-arms for the new epoch.
+- **Sub-agent (sidechain) entries are skipped.** A sub-agent's API error stays scoped to the sub-agent; never triggers a recover on the parent dispatch.
+
+### Recover contract
+
+`attach-monitoring-stack.ts#handleApiErrorRecover` runs after the 5s window confirms. Sequence:
+
+1. **Skip if non-running.** Detector might fire after stall / cancel / inactivity already terminated the job.
+2. **Increment counter** — `job.recoverCount + 1`, persisted to the dispatch row via `tracker.recordRecoverCount`.
+3. **Branch on cap:**
+   - **count > `MAX_RECOVERS` (= 3):** write `<repo>/.danxbot/CRITICAL_FAILURE` via `writeFlag`, call `job.stop("api_error_failed", ...)`. Poller halts on next tick. Operator clears the flag to resume polling.
+   - **count ≤ `MAX_RECOVERS`:** call `job.stop("api_error_recover", ...)` which collapses the dispatch row to `status: "recovered"`, then `POST /api/resume` so a fresh dispatch picks up `--resume <sessionUuid>` with `parent_recover_id` pointing back at this row.
+
+`/api/resume` failures (network, HTTP non-2xx) are logged but do NOT escalate to `CRITICAL_FAILURE` — a transient resume error is recoverable on the next poller tick; persisting a halt for it would defeat the feature.
+
+The dispatch row's status enum carries `"recovered"` as a terminal state (separate from `"failed"`). The chain is queryable via `parent_recover_id` — the dashboard's Recovers column surfaces `recover_count` on each row + a chain indicator next to the dispatch ID when `parent_recover_id` is non-null.
+
+### Integration points (re-read before editing)
+
+- `src/agent/api-error-detector.ts` — pure detector, no recover logic.
+- `src/agent/attach-monitoring-stack.ts` — wires `ApiErrorDetector` onto the shared watcher; carries `handleApiErrorRecover` + `MAX_RECOVERS` constant.
+- `src/agent/agent-types.ts#SpawnAgentOptions.recoverContext` — `{originalTask, workspace, workerPort, repoLocalPath}` — required for the recover-ok branch to fire `/api/resume`; missing context fails-loud to `api_error_failed` so the dispatch row doesn't leak in `recovered` state with no resume-child.
+- `src/dispatch/core.ts` — auto-injects `recoverContext` from `RepoContext.localPath` + `workerPort` so callers don't have to remember.
+- `src/worker/dispatch.ts#handleResume` — threads `recover_count` + `parent_recover_id` from the POST body onto the new dispatch row.
+- `src/dashboard/dispatches.ts` — surfaces `recoverCount` + `parentRecoverId` on the `Dispatch` row type; `dispatches-routes.ts` validates `?status=recovered` in the list filter.
+- `dashboard/src/components/DispatchList.vue` — Recovers column badge + parent linkage indicator (↳ glyph) next to the dispatch ID.
+- `src/__tests__/integration/api-error-recover.test.ts` — end-to-end pin: synthetic JSONL → detector → recover handler → `/api/resume` POST + chain stamping + cap-exhausted CRITICAL_FAILURE.
+
+### Tuning
+
+`MAX_RECOVERS = 3` is hardcoded in `attach-monitoring-stack.ts`. Changing it requires updating the unit + integration tests that pin `MAX_RECOVERS` to 3. Don't change without a strong operational reason — 3 attempts × ~5s window each is enough to ride out the API stutter the feature was built for; more attempts would let a sustained outage burn tokens before falling through to operator intervention.
+
 ## Host mode MUST be interactive — `claude -p` is FORBIDDEN there
 
 Host runtime exists SOLELY to launch an interactive Claude Code TUI the user can read + type into. `claude -p` is the non-interactive print/headless mode → exits after one turn → defeats the entire purpose of host mode. If both modes use `-p`, host mode has no reason to exist.

@@ -17,13 +17,30 @@ import { resolveJsonlPath } from "./jsonl-path-resolver.js";
 const log = createLogger("dispatches-routes");
 
 const VALID_TRIGGERS: readonly TriggerType[] = ["slack", "trello", "api"];
-const VALID_STATUSES: readonly DispatchStatus[] = [
+
+// `satisfies` + the `_AssertExhaustive` line below make the allowlist
+// compile-time-exhaustive against the `DispatchStatus` union: adding a
+// new union member without listing it here is a TS error, not a silent
+// "filter silently drops the new status" runtime bug. The pre-DX-261
+// state shipped without `"recovered"` exactly that way — Phase 3 fixes
+// the bug AND the bug class.
+const VALID_STATUSES = [
   "queued",
   "running",
   "completed",
   "failed",
   "cancelled",
-];
+  "recovered",
+] as const satisfies readonly DispatchStatus[];
+
+// Compile-time check: every `DispatchStatus` variant appears in
+// `VALID_STATUSES`. If a future status is added to the union but
+// omitted here, `Missing` is non-`never` and the `extends never`
+// guard fails. Pure type-level — no runtime cost.
+type _AssertExhaustive<Missing extends never> = Missing;
+type _Missing = Exclude<DispatchStatus, (typeof VALID_STATUSES)[number]>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _Check = _AssertExhaustive<_Missing>;
 
 function parseFilters(params: URLSearchParams): DispatchFilters {
   const filters: DispatchFilters = {};

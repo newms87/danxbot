@@ -65,6 +65,7 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
           <th class="p-3 text-right whitespace-nowrap">Duration</th>
           <th class="p-3 text-right whitespace-nowrap">Tools</th>
           <th class="p-3 text-right whitespace-nowrap">Sub-ag</th>
+          <th class="p-3 text-right whitespace-nowrap" title="Auto-recovers from Claude API stream-idle errors (DX-246)">Recovers</th>
           <th class="p-3 text-right whitespace-nowrap">Tok total</th>
           <th class="p-3 text-right whitespace-nowrap">Tok in</th>
           <th class="p-3 text-right whitespace-nowrap">Tok out</th>
@@ -72,10 +73,10 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
       </thead>
       <tbody>
         <tr v-if="loading && !hasDispatches" class="text-slate-500">
-          <td class="p-6 text-center" colspan="12">Loading…</td>
+          <td class="p-6 text-center" colspan="13">Loading…</td>
         </tr>
         <tr v-else-if="!hasDispatches" class="text-slate-500">
-          <td class="p-6 text-center" colspan="12">No dispatches yet.</td>
+          <td class="p-6 text-center" colspan="13">No dispatches yet.</td>
         </tr>
         <tr
           v-for="d in dispatches"
@@ -87,7 +88,19 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
             <div class="text-[11px] text-slate-400">{{ formatDate(d.startedAt) }}</div>
             <div class="text-slate-200">{{ formatTime(d.startedAt) }}</div>
           </td>
-          <td class="p-3 font-mono text-slate-300 whitespace-nowrap" :title="d.id">{{ d.id.slice(0, 8) }}</td>
+          <!-- Tooltip carries the parent id only when this dispatch is a
+               recover-child — without it, the ↳ glyph below tells the
+               operator "this is a recovery" but not WHICH dispatch it
+               recovered from. Plain `d.id` for the common (non-chain)
+               case keeps the hover quiet. -->
+          <td class="p-3 font-mono text-slate-300 whitespace-nowrap" :title="d.parentRecoverId ? `${d.id} — auto-recovered from ${d.parentRecoverId}` : d.id">
+            <span
+              v-if="d.parentRecoverId"
+              class="inline-block mr-1 text-amber-300 cursor-help"
+              :title="`Recovery of ${d.parentRecoverId} (DX-246 auto-recover chain)`"
+              data-testid="recover-chain-indicator"
+            >↳</span>{{ d.id.slice(0, 8) }}
+          </td>
           <td class="p-3"><TriggerBadge :trigger="d.trigger" /></td>
           <td class="p-3 text-slate-400">{{ d.repoName }}</td>
           <td class="p-3">
@@ -106,6 +119,14 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
                 ? 'bg-pink-500/20 text-pink-300'
                 : 'bg-slate-700/30 text-slate-500 font-normal'"
             >{{ d.subagentCount }}</span>
+          </td>
+          <td class="p-3 text-right" data-testid="recover-cell">
+            <span
+              v-if="d.recoverCount > 0"
+              class="inline-block min-w-[24px] text-center px-1.5 rounded-full text-[11.5px] font-semibold font-mono bg-amber-500/20 text-amber-300"
+              :title="`Auto-recovered ${d.recoverCount} time(s) from Claude API stream-idle errors`"
+              data-testid="recover-badge"
+            >{{ d.recoverCount }}</span>
           </td>
           <td class="p-3 text-right font-mono text-slate-300">{{ d.tokensTotal.toLocaleString() }}</td>
           <td class="p-3 text-right font-mono text-slate-400">{{ d.tokensIn.toLocaleString() }}</td>
