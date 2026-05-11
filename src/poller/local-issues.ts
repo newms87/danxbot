@@ -140,6 +140,30 @@ export async function listInProgressYamls(
 }
 
 /**
+ * Look up the In Progress YAML whose `dispatch.id` matches `dispatchId`.
+ * Used by the worker boot reattach pass (DX-209 extension) to decide
+ * whether a dead-PID dispatch row is salvageable via `claude --resume`.
+ *
+ * Returns `null` when no matching In Progress YAML exists — caller falls
+ * through to the legacy orphan-mark behavior. The dispatch may have
+ * already moved its YAML to `closed/` (status: Done) before the worker
+ * died, in which case auto-resume must NOT fire (the work is done; the
+ * dispatch row just never got finalized).
+ */
+export async function findInProgressIssueByDispatchId(
+  repoLocalPath: string,
+  dispatchId: string,
+): Promise<Issue | null> {
+  const repoName = repoNameFromPath(repoLocalPath);
+  const rows = await dbListOpenIssues(repoName);
+  const match = rows.find(
+    (r) =>
+      r.issue.status === "In Progress" && r.issue.dispatch?.id === dispatchId,
+  );
+  return match?.issue ?? null;
+}
+
+/**
  * Return every ToDo issue with a non-null `waiting_on` record. Companion
  * to `listDispatchableYamls` (which filters waiting_on=null out): the call
  * site feeds these to `resolveWaitingOnCards` so a card whose dependencies

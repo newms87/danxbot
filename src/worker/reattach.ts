@@ -81,6 +81,7 @@ import type { SessionLogWatcher } from "../agent/session-log-watcher.js";
 import { registerActiveJob } from "../dispatch/core.js";
 import { createReattachHandle } from "./reattach-handle.js";
 import { rewriteMcpSettingsIfPortChanged } from "./mcp-settings-rewrite.js";
+import { attemptAutoResume } from "./reattach-resume.js";
 import { eventBus } from "../dashboard/event-bus.js";
 import { dirname } from "node:path";
 
@@ -110,6 +111,14 @@ export interface ReattachResult {
   reattached: string[];
   /** Row IDs alive but unable to reattach (e.g. session log gone). */
   failedReattach: string[];
+  /**
+   * Parent row IDs whose dead-PID dispatch was auto-resumed via
+   * `claude --resume`. A separate child dispatch row was spawned with
+   * `parent_job_id` pointing back at the entry's id. The parent ends up
+   * `cancelled` (see `reattach-resume.ts` for the status choice
+   * rationale) rather than `failed` — distinct from `orphaned`.
+   */
+  autoResumed: string[];
 }
 
 export interface ReattachOptions {
@@ -117,6 +126,14 @@ export interface ReattachOptions {
   currentWorkerPort: number;
   /** Inactivity timeout for the watcher in milliseconds. Defaults to the dispatch core's value. */
   timeoutMs?: number;
+  /**
+   * Full RepoContext. Required for the dead-PID auto-resume branch
+   * (`attemptAutoResume`) — dispatch() needs the repo's localPath,
+   * trello config, settings, etc. When omitted, the dead-PID branch
+   * falls back to the legacy orphan-mark path (no auto-resume). Tests
+   * that only care about alive-PID reattach can keep omitting this.
+   */
+  repo?: import("../types.js").RepoContext;
 }
 
 async function markOrphaned(rowId: string): Promise<void> {
@@ -456,6 +473,7 @@ export async function reattachOrResolveDispatches(
     alive: [],
     reattached: [],
     failedReattach: [],
+    autoResumed: [],
   };
   if (rows.length === 0) {
     log.info(`[${repoName}] No non-terminal dispatches to reattach`);
@@ -465,6 +483,39 @@ export async function reattachOrResolveDispatches(
   for (const row of rows) {
     const pid = row.hostPid;
     if (isDispatchOrphaned(row, isPidAlive)) {
+      // Try auto-resume first — when the row has a recoverable session
+      // (`sessionUuid` + `jsonlPath`) and an In Progress YAML still
+      // points at this dispatch, we spawn a fresh dispatch with
+      // `claude --resume <sessionId>` so the new agent inherits the
+      // dead session's full conversation history. The parent row is
+      // marked `cancelled` with a summary linking the child's id.
+      //
+      // On any refusal (no session, no YAML, dispatch throw) fall
+      // through to the legacy orphan-mark behavior. The DB side-channel
+      // contract (errors per row are logged + swallowed) extends to
+      // the auto-resume path too — boot scan never blocks on a single
+      // bad row.
+      if (opts.repo) {
+        try {
+          const resumeOutcome = await attemptAutoResume(row, opts.repo);
+          if (resumeOutcome.resumed) {
+            result.autoResumed.push(row.id);
+            log.info(
+              `[${repoName}] reattach: ${row.id} dead (host_pid=${pid ?? "null"}) → auto-resumed as ${resumeOutcome.childDispatchId}`,
+            );
+            continue;
+          }
+          log.info(
+            `[${repoName}] reattach: ${row.id} dead (host_pid=${pid ?? "null"}); auto-resume refused (${resumeOutcome.refusalReason}) → marking failed`,
+          );
+        } catch (err) {
+          log.error(
+            `[${repoName}] reattach: ${row.id} auto-resume threw; falling back to orphan-mark`,
+            err,
+          );
+        }
+      }
+
       try {
         await markOrphaned(row.id);
         result.orphaned.push(row.id);

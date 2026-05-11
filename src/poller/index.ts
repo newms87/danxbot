@@ -1027,12 +1027,18 @@ async function _poll(repo: RepoContext): Promise<void> {
 async function hasLiveDispatchForCard(
   repoName: string,
   cardId: string,
+  internalIssueId?: string,
 ): Promise<boolean> {
-  return hasLiveDispatchForCardImpl(repoName, cardId, {
-    findNonTerminalDispatches,
-    isPidAlive,
-    log,
-  });
+  return hasLiveDispatchForCardImpl(
+    repoName,
+    cardId,
+    {
+      findNonTerminalDispatches,
+      isPidAlive,
+      log,
+    },
+    internalIssueId,
+  );
 }
 
 async function bulkSyncMissingYamls(
@@ -1119,7 +1125,7 @@ async function tryResumeOrphan(
     // for this card (host-mode `script -q -f` reparented claude to
     // PID 1 and is still running — see ISS-69).
     if (!issue.dispatch) {
-      if (await hasLiveDispatchForCard(repo.name, ref.external_id)) {
+      if (await hasLiveDispatchForCard(repo.name, ref.external_id, issue.id)) {
         log.info(
           `[${repo.name}] Skipping orphan-reset for "${issue.title}" (${issue.id}) — no YAML dispatch stamp, but dispatches DB has live host_pid`,
         );
@@ -1178,9 +1184,9 @@ async function tryResumeOrphan(
     // guard catches dispatches whose YAML block was lost (file deleted
     // by an operator, schema corruption) but whose dispatches table
     // row still records the live host_pid.
-    if (await hasLiveDispatchForCard(repo.name, ref.external_id)) {
+    if (await hasLiveDispatchForCard(repo.name, ref.external_id, issue.id)) {
       log.info(
-        `[${repo.name}] Skipping orphan-resume for "${issue.title}" (${issue.id}) — dispatches DB has live host_pid for card ${ref.external_id}`,
+        `[${repo.name}] Skipping orphan-resume for "${issue.title}" (${issue.id}) — dispatches DB has live host_pid for card ${ref.external_id} (or issueId ${issue.id})`,
       );
       continue;
     }

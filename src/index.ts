@@ -200,6 +200,7 @@ async function startWorkerMode(): Promise<void> {
   try {
     await reattachOrResolveDispatches(repo.name, {
       currentWorkerPort: repo.workerPort,
+      repo,
     });
   } catch (err) {
     log.error(`[${repo.name}] Dispatch reattach failed`, err);

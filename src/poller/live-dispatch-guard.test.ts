@@ -145,6 +145,81 @@ describe("hasLiveDispatchForCard", () => {
     expect(live).toBe(false);
   });
 
+  // Internal-issue-id matcher (covers the auto-resume case: child
+  // dispatch is `trigger: "api"`, so it can't match via trello's
+  // `triggerMetadata.cardId` — but its `issueId` column carries the
+  // internal `DX-N` id).
+  it("returns true when an api-trigger row matches via internalIssueId (auto-resume child)", async () => {
+    deps.findNonTerminalDispatches = vi.fn().mockResolvedValue([
+      makeRow({
+        trigger: "api",
+        triggerMetadata: {
+          endpoint: "/internal/auto-resume",
+          callerIp: null,
+          statusUrl: null,
+          initialPrompt: "",
+          workspace: "issue-worker",
+        },
+        issueId: "DX-142",
+        hostPid: process.pid,
+      }),
+    ]);
+    deps.isPidAlive = vi.fn().mockReturnValue(true);
+
+    const live = await hasLiveDispatchForCard(
+      "danxbot",
+      "card-target",
+      deps,
+      "DX-142",
+    );
+
+    expect(live).toBe(true);
+  });
+
+  it("ignores internalIssueId mismatch — api row for a different internal id does not match", async () => {
+    deps.findNonTerminalDispatches = vi.fn().mockResolvedValue([
+      makeRow({
+        trigger: "api",
+        triggerMetadata: {
+          endpoint: "/internal/auto-resume",
+          callerIp: null,
+          statusUrl: null,
+          initialPrompt: "",
+          workspace: "issue-worker",
+        },
+        issueId: "DX-999",
+        hostPid: process.pid,
+      }),
+    ]);
+    deps.isPidAlive = vi.fn().mockReturnValue(true);
+
+    const live = await hasLiveDispatchForCard(
+      "danxbot",
+      "card-target",
+      deps,
+      "DX-142",
+    );
+
+    expect(live).toBe(false);
+  });
+
+  it("trello + internalIssueId both supplied — matches via EITHER (defense in depth)", async () => {
+    deps.findNonTerminalDispatches = vi.fn().mockResolvedValue([
+      // Row matches via trello cardId but NOT internalIssueId.
+      makeRow({ hostPid: process.pid }),
+    ]);
+    deps.isPidAlive = vi.fn().mockReturnValue(true);
+
+    const live = await hasLiveDispatchForCard(
+      "danxbot",
+      "card-target",
+      deps,
+      "DX-142",
+    );
+
+    expect(live).toBe(true);
+  });
+
   it("fails open with a warn log when the DB lookup throws", async () => {
     deps.findNonTerminalDispatches = vi
       .fn()

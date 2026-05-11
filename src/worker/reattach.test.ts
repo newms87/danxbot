@@ -91,6 +91,15 @@ vi.mock("../config.js", () => ({
   },
 }));
 
+// Mock auto-resume policy module so tests cover the reattach-side
+// wiring (autoResumed array, fall-through to orphan-mark) without
+// dragging dispatch core under the suite. Default = refuses (returns
+// resumed:false); individual tests override per-call.
+const mockAttemptAutoResume = vi.fn();
+vi.mock("./reattach-resume.js", () => ({
+  attemptAutoResume: (...args: unknown[]) => mockAttemptAutoResume(...args),
+}));
+
 import {
   buildReattachTracker,
   buildToolCounterSubscriber,
@@ -453,6 +462,7 @@ describe("reattachOrResolveDispatches — empty input", () => {
       alive: [],
       reattached: [],
       failedReattach: [],
+      autoResumed: [],
     });
   });
 });
@@ -717,5 +727,153 @@ describe("buildReattachTracker — finalize / SSE / nudges", () => {
     const [, fields] = mockUpdateDispatch.mock.calls[0];
     expect(fields.toolCallCount).toBe(2);
     expect(fields.subagentCount).toBe(1);
+  });
+});
+
+// --- Auto-resume on boot (extension): dead-PID + recoverable session
+//     → spawn child via dispatch() with --resume.
+//
+// The branch lives in `reattachOrResolveDispatches`; the policy lives in
+// `attemptAutoResume`. These tests stub the policy module to keep the
+// reattach-side wiring covered (autoResumed array, parent row NOT
+// marked failed, log path) without dragging dispatch core under the
+// suite.
+
+describe("reattachOrResolveDispatches — dead-PID auto-resume branch", () => {
+  const fakeRepo = {
+    name: "danxbot",
+    localPath: "/tmp/x",
+  } as unknown as import("../types.js").RepoContext;
+
+  beforeEach(() => {
+    mockAttemptAutoResume.mockReset();
+  });
+
+  it("does not call attemptAutoResume when opts.repo is omitted (legacy callers)", async () => {
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      makeRow({
+        id: "dead-no-repo",
+        hostPid: 999_999,
+        sessionUuid: "session-u",
+        jsonlPath: "/tmp/x.jsonl",
+      }),
+    ]);
+    mockIsPidAlive.mockReturnValue(false);
+
+    const result = await reattachOrResolveDispatches("danxbot", {
+      currentWorkerPort: 9300,
+    });
+
+    expect(mockAttemptAutoResume).not.toHaveBeenCalled();
+    expect(result.orphaned).toEqual(["dead-no-repo"]);
+    expect(result.autoResumed).toEqual([]);
+  });
+
+  it("passes the row's repoContext through to attemptAutoResume so the policy can paired-write the YAML", async () => {
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      makeRow({
+        id: "dead-needs-yaml-stamp",
+        hostPid: 999_999,
+        sessionUuid: "session-u",
+        jsonlPath: "/tmp/x.jsonl",
+      }),
+    ]);
+    mockIsPidAlive.mockReturnValue(false);
+    mockAttemptAutoResume.mockResolvedValue({
+      resumed: true,
+      childDispatchId: "child-yaml",
+    });
+
+    await reattachOrResolveDispatches("danxbot", {
+      currentWorkerPort: 9300,
+      repo: fakeRepo,
+    });
+
+    // The reattach helper MUST hand the full repo to the policy — the
+    // paired-write callback needs `repo.localPath` + `repo.issuePrefix`
+    // to locate the In Progress YAML and stamp the new child's
+    // dispatch{} block. Without this, the YAML keeps advertising the
+    // dead parent's PID and the poller's `tryResumeOrphan` re-spawns
+    // a duplicate on the next tick (the exact regression observed
+    // 2026-05-10 21:13 BRT).
+    const [, repoArg] = mockAttemptAutoResume.mock.calls[0];
+    expect(repoArg).toBe(fakeRepo);
+  });
+
+  it("auto-resumes when attemptAutoResume returns resumed:true — orphaned stays empty, autoResumed gets the id", async () => {
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      makeRow({
+        id: "dead-resumable",
+        hostPid: 999_999,
+        sessionUuid: "session-u",
+        jsonlPath: "/tmp/x.jsonl",
+      }),
+    ]);
+    mockIsPidAlive.mockReturnValue(false);
+    mockAttemptAutoResume.mockResolvedValue({
+      resumed: true,
+      childDispatchId: "child-1",
+    });
+
+    const result = await reattachOrResolveDispatches("danxbot", {
+      currentWorkerPort: 9300,
+      repo: fakeRepo,
+    });
+
+    expect(mockAttemptAutoResume).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "dead-resumable" }),
+      fakeRepo,
+    );
+    expect(result.autoResumed).toEqual(["dead-resumable"]);
+    expect(result.orphaned).toEqual([]);
+    // Caller (attemptAutoResume) owns the parent row's status write;
+    // reattach must NOT also call markOrphaned on the same row.
+    const markedFailedIds = mockUpdateDispatch.mock.calls
+      .filter((call: unknown[]) => (call[1] as { status?: string }).status === "failed")
+      .map((call: unknown[]) => call[0] as string);
+    expect(markedFailedIds).not.toContain("dead-resumable");
+  });
+
+  it("falls back to orphan-mark when attemptAutoResume refuses (resumed:false)", async () => {
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      makeRow({ id: "dead-refused", hostPid: 999_999 }),
+    ]);
+    mockIsPidAlive.mockReturnValue(false);
+    mockAttemptAutoResume.mockResolvedValue({
+      resumed: false,
+      refusalReason: "no-matching-yaml",
+    });
+
+    const result = await reattachOrResolveDispatches("danxbot", {
+      currentWorkerPort: 9300,
+      repo: fakeRepo,
+    });
+
+    expect(result.autoResumed).toEqual([]);
+    expect(result.orphaned).toEqual(["dead-refused"]);
+    expect(mockUpdateDispatch).toHaveBeenCalledWith(
+      "dead-refused",
+      expect.objectContaining({ status: "failed" }),
+    );
+  });
+
+  it("falls back to orphan-mark when attemptAutoResume throws", async () => {
+    mockFindNonTerminalDispatches.mockResolvedValue([
+      makeRow({ id: "dead-throw", hostPid: 999_999 }),
+    ]);
+    mockIsPidAlive.mockReturnValue(false);
+    mockAttemptAutoResume.mockRejectedValue(new Error("dispatch unavailable"));
+
+    const result = await reattachOrResolveDispatches("danxbot", {
+      currentWorkerPort: 9300,
+      repo: fakeRepo,
+    });
+
+    expect(result.autoResumed).toEqual([]);
+    expect(result.orphaned).toEqual(["dead-throw"]);
+    expect(mockUpdateDispatch).toHaveBeenCalledWith(
+      "dead-throw",
+      expect.objectContaining({ status: "failed" }),
+    );
   });
 });

@@ -41,6 +41,16 @@ export async function hasLiveDispatchForCard(
   repoName: string,
   cardId: string,
   deps: LiveDispatchGuardDeps,
+  /**
+   * Optional internal issue id (`DX-N`). When supplied, the guard ALSO
+   * matches dispatch rows whose `issueId` column equals this — covers
+   * non-trello-triggered dispatches that still target the same card
+   * (e.g. the worker boot auto-resume path, which uses `trigger: "api"`
+   * + `issue_id: <internal>` to mirror a dead poller dispatch). Without
+   * this branch the poller's `tryResumeOrphan` was blind to live
+   * auto-resume children and spawned duplicates on the next tick.
+   */
+  internalIssueId?: string,
 ): Promise<boolean> {
   let rows: Dispatch[];
   try {
@@ -52,9 +62,12 @@ export async function hasLiveDispatchForCard(
     return false;
   }
   for (const row of rows) {
-    if (row.trigger !== "trello") continue;
-    const meta = row.triggerMetadata as TrelloTriggerMetadata;
-    if (meta.cardId !== cardId) continue;
+    const matchesExternal =
+      row.trigger === "trello" &&
+      (row.triggerMetadata as TrelloTriggerMetadata).cardId === cardId;
+    const matchesInternal =
+      internalIssueId !== undefined && row.issueId === internalIssueId;
+    if (!matchesExternal && !matchesInternal) continue;
     // Inverse of reconcile's branch: a row is "live" exactly when it is
     // NOT orphaned. Both consumers route through `isDispatchOrphaned` so
     // the rule lives in one place. See `dispatch-liveness.ts`.
