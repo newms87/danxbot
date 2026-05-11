@@ -102,6 +102,7 @@ vi.mock("./reattach-resume.js", () => ({
 
 import {
   buildReattachTracker,
+  buildStallSnapshotFromJsonl,
   buildToolCounterSubscriber,
   reattachOrResolveDispatches,
 } from "./reattach.js";
@@ -877,5 +878,152 @@ describe("reattachOrResolveDispatches — dead-PID auto-resume branch", () => {
       "dead-throw",
       expect.objectContaining({ status: "failed" }),
     );
+  });
+});
+
+// --- buildStallSnapshotFromJsonl — DX-282 ---
+
+describe("buildStallSnapshotFromJsonl — on-disk JSONL → seed for reattach", () => {
+  function writeJsonl(name: string, lines: object[]): string {
+    const dir = join(tempBase, "snapshot-jsonl");
+    const { mkdirSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${name}.jsonl`);
+    writeFileSync(path, lines.map((o) => JSON.stringify(o)).join("\n") + "\n");
+    return path;
+  }
+
+  it("returns undefined when the JSONL is missing", () => {
+    const snap = buildStallSnapshotFromJsonl(
+      join(tempBase, "does-not-exist.jsonl"),
+    );
+    expect(snap).toBeUndefined();
+  });
+
+  it("reports hasReceivedToolResult=false on a fresh log with no tool_results yet", () => {
+    const path = writeJsonl("fresh", [
+      {
+        type: "assistant",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: { content: [{ type: "text", text: "thinking" }] },
+      },
+    ]);
+    expect(buildStallSnapshotFromJsonl(path)).toEqual({
+      hasReceivedToolResult: false,
+      isToolCallPending: false,
+      lastToolResultTimestamp: null,
+    });
+  });
+
+  it("reports isToolCallPending=true when the last assistant tool_use lacks a matching tool_result", () => {
+    const path = writeJsonl("pending", [
+      {
+        type: "assistant",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: {
+          content: [
+            { type: "tool_use", id: "t1", name: "Bash", input: {} },
+          ],
+        },
+      },
+    ]);
+    const snap = buildStallSnapshotFromJsonl(path);
+    expect(snap?.isToolCallPending).toBe(true);
+    expect(snap?.hasReceivedToolResult).toBe(false);
+  });
+
+  it("reports last tool_result timestamp and clears pending when matched", () => {
+    const path = writeJsonl("matched", [
+      {
+        type: "assistant",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: {
+          content: [
+            { type: "tool_use", id: "t1", name: "Bash", input: {} },
+          ],
+        },
+      },
+      {
+        type: "user",
+        timestamp: "2026-01-01T00:01:00.000Z",
+        message: {
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "ok" },
+          ],
+        },
+      },
+    ]);
+    const snap = buildStallSnapshotFromJsonl(path);
+    expect(snap).toEqual({
+      hasReceivedToolResult: true,
+      isToolCallPending: false,
+      lastToolResultTimestamp: Date.parse("2026-01-01T00:01:00.000Z"),
+    });
+  });
+
+  it("captures the dani-shape stall: last entry is a tool_result, no follow-up", () => {
+    // Reproduces the operator-Ctrl-D-during-vitest scenario that prompted
+    // DX-282. Agent emits assistant tool_use → claude permission gate
+    // returns a tool_result with the rejection text → agent halts. The
+    // snapshot must report a non-null lastToolResultTimestamp older than
+    // wall-clock-minus-threshold so the reattach detector can flip to
+    // "stalled" on the first check tick.
+    const path = writeJsonl("dani-stall", [
+      {
+        type: "assistant",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: {
+          content: [
+            { type: "tool_use", id: "t1", name: "Bash", input: {} },
+          ],
+        },
+      },
+      {
+        type: "user",
+        timestamp: "2026-01-01T00:00:30.000Z",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content:
+                "The user doesn't want to proceed with this tool use. STOP what you are doing and wait for the user to tell you how to proceed.",
+              is_error: true,
+            },
+          ],
+        },
+      },
+    ]);
+    const snap = buildStallSnapshotFromJsonl(path);
+    expect(snap?.hasReceivedToolResult).toBe(true);
+    expect(snap?.isToolCallPending).toBe(false);
+    expect(snap?.lastToolResultTimestamp).toBe(
+      Date.parse("2026-01-01T00:00:30.000Z"),
+    );
+  });
+
+  it("skips malformed JSON lines and continues past them", () => {
+    const dir = join(tempBase, "malformed");
+    const { mkdirSync } = require("node:fs") as typeof import("node:fs");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "malformed.jsonl");
+    writeFileSync(
+      path,
+      [
+        "not-json-at-all",
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-01-01T00:00:00.000Z",
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: "t1", content: "ok" },
+            ],
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+    const snap = buildStallSnapshotFromJsonl(path);
+    expect(snap?.hasReceivedToolResult).toBe(true);
   });
 });

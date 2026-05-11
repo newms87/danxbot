@@ -53,13 +53,25 @@ import { resolve } from "node:path";
 import {
   appendHistory,
   buildIssueIdRegex,
-
   IssueParseError,
   parseIssue,
   serializeIssue,
 } from "../issue-tracker/yaml.js";
 import type { Issue, IssueStatus } from "../issue-tracker/interface.js";
-import { ensureIssuesDirs, issuePath, moveToClosedIfTerminal } from "./yaml-lifecycle.js";
+import {
+  clearDispatchAndWrite,
+  ensureIssuesDirs,
+  issuePath,
+  moveToClosedIfTerminal,
+} from "./yaml-lifecycle.js";
+import {
+  checkYamlDispatchLiveness,
+  type LivenessDeps,
+} from "./dispatch-liveness-yaml.js";
+import { isPidAlive } from "../agent/host-pid.js";
+import { hostname as osHostname } from "node:os";
+import type { RepoContext } from "../types.js";
+import { createLogger } from "../logger.js";
 
 /**
  * One heal action recorded by `healLocalYamls`. The `direction` tag
@@ -225,6 +237,299 @@ function parseErrorMessage(err: unknown): string {
   if (err instanceof IssueParseError) return err.message;
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/**
+ * One orphan claim cleared by `clearAssignedAgentOnDeletion` (the
+ * dashboard's delete-agent cascade — DX-283). The shape predates the
+ * DX-286 invariant heal; keeping the original name avoids churning the
+ * `clearAssignedAgentOnDeletion` consumers.
+ */
+export interface OrphanAssignedAgentHeal {
+  id: string;
+  staleAgent: string;
+}
+
+export interface HealOrphanAssignedAgentsResult {
+  /** Open YAMLs the scan looked at (parse-rejected files count too). */
+  scanned: number;
+  /** Cards whose orphan `assigned_agent` claim was cleared. */
+  healed: OrphanAssignedAgentHeal[];
+  /** Parse / write failures. The pass continues past each. */
+  errors: HealError[];
+}
+
+/**
+ * One outcome row from `healOrphanInvariantViolations`. The two `kind`
+ * variants are the two XOR sides of the
+ * `(dispatch !== null) === (assigned_agent !== null)` invariant.
+ */
+export interface InvariantHeal {
+  id: string;
+  /**
+   * - `agent-without-dispatch` — `assigned_agent != null + dispatch == null`
+   *   (DX-286 absorbed the standalone `healOrphanAssignedAgents` boot
+   *   pass into this both-direction scan — same predicate + same
+   *   `clearDispatchAndWrite` call, now reachable per-tick too).
+   * - `dispatch-without-agent` — `dispatch != null + assigned_agent == null`
+   *   (the DX-286 orphan pre-stamp direction). The dispatch's verdict is
+   *   recorded so the operator-facing log line can name the failure mode.
+   */
+  kind: "agent-without-dispatch" | "dispatch-without-agent";
+  /** Stale assigned_agent value when present, else null. */
+  staleAgent: string | null;
+  /** Stale dispatch.id when present, else null. */
+  staleDispatchId: string | null;
+  /**
+   * Verdict from `checkYamlDispatchLiveness` when `dispatch != null`. When
+   * the dispatch is null (kind === "agent-without-dispatch"), this is
+   * undefined — there is no dispatch record to audit.
+   */
+  verdict?: "dead-pid" | "dead-ttl" | "cross-host";
+}
+
+export interface HealOrphanInvariantResult {
+  /** Open YAMLs the scan looked at (parse-rejected files count too). */
+  scanned: number;
+  /** Cards whose invariant violation was cleared. */
+  healed: InvariantHeal[];
+  /** Parse / write failures. The pass continues past each. */
+  errors: HealError[];
+}
+
+/**
+ * Per-tick (and one-shot at boot) heal: walk
+ * `<repo>/.danxbot/issues/open/` and clear any card violating the
+ * `(dispatch !== null) === (assigned_agent !== null)` co-ownership
+ * invariant when the underlying dispatch (if any) is verifiably dead.
+ *
+ * The invariant has two failure directions, both handled here:
+ *
+ *  1. `assigned_agent != null + dispatch == null` — orphan claim,
+ *     DX-286 absorbed the standalone boot-only pass that previously
+ *     handled this direction so per-tick + boot share one entry point.
+ *  2. `dispatch != null + assigned_agent == null` — orphan pre-stamp
+ *     (DX-286). The picker stamped the dispatch{} block with `pid: 0`,
+ *     `assigned_agent` got cleared by some other path before the spawn
+ *     enriched the PID, and the DB never carried a matching dispatch row.
+ *     Cards in this state drop out of `listDispatchableYamls` (filter
+ *     rejects `dispatch != null`) and are unrecoverable without
+ *     intervention. Pre-DX-286, the only path to recovery was a worker
+ *     restart triggering boot reattach's dead-pid clearing pass —
+ *     production was accumulating 6+ such orphans per boot.
+ *
+ * Liveness gate: when `dispatch != null` AND the dispatch's PID is alive
+ * on this host AND TTL has not expired, the card is left alone. The
+ * in-flight dispatch will reconcile via its own onComplete chain. This
+ * protects against killing a real dispatch caught mid-spawn (between
+ * `stampDispatchAndWrite` and `pairedWriteHostPid`). Direction 1 has no
+ * dispatch record so it always clears.
+ *
+ * Runs:
+ *  - Once at worker startup, after `startIssuesMirror` (so the mirror's
+ *    read-your-writes ack inside `writeIssue` resolves) and BEFORE the
+ *    poller's first tick, to clean pre-fix-bug residue.
+ *  - At the top of every `_poll` tick (DX-286), to catch new orphans
+ *    before the picker sees them so the picker's `listDispatchableYamls`
+ *    filter doesn't permanently lock them out.
+ *
+ * Idempotent: a follow-up run on already-healed YAMLs returns
+ * `healed: []` (clearDispatchAndWrite short-circuits when both fields
+ * are already null).
+ *
+ * Tracker-independent. Tolerates malformed YAMLs (returned in `errors[]`;
+ * the pass continues).
+ */
+export async function healOrphanInvariantViolations(
+  repoLocalPath: string,
+  prefix: string,
+  livenessDeps: LivenessDeps,
+): Promise<HealOrphanInvariantResult> {
+  const result: HealOrphanInvariantResult = {
+    scanned: 0,
+    healed: [],
+    errors: [],
+  };
+  const idRegex = buildIssueIdRegex(prefix);
+  const openDir = resolve(repoLocalPath, ".danxbot", "issues", "open");
+  if (!existsSync(openDir)) return result;
+
+  for (const entry of readdirSync(openDir)) {
+    if (!entry.endsWith(".yml")) continue;
+    const stem = entry.slice(0, -".yml".length);
+    if (!idRegex.test(stem)) continue;
+    const path = resolve(openDir, entry);
+    result.scanned++;
+
+    let issue: Issue;
+    try {
+      issue = parseIssue(readFileSync(path, "utf-8"), {
+        expectedPrefix: prefix,
+      });
+    } catch (err) {
+      result.errors.push({ path, message: parseErrorMessage(err) });
+      continue;
+    }
+
+    const dispatchSet = issue.dispatch !== null;
+    const agentSet = issue.assigned_agent !== null;
+    // Invariant holds when both are null OR both are non-null. XOR =
+    // violation worth investigating; equality = nothing to do.
+    if (dispatchSet === agentSet) continue;
+
+    if (dispatchSet) {
+      // Direction 2: dispatch != null + assigned_agent == null. Skip
+      // when the dispatch is genuinely live — the in-flight spawn is
+      // mid-paired-write and will enrich/reconcile on its own.
+      const verdict = checkYamlDispatchLiveness(issue.dispatch!, livenessDeps);
+      if (verdict.kind === "alive") continue;
+      try {
+        const staleDispatchId = issue.dispatch!.id;
+        await clearDispatchAndWrite(repoLocalPath, issue);
+        result.healed.push({
+          id: issue.id,
+          kind: "dispatch-without-agent",
+          staleAgent: null,
+          staleDispatchId,
+          verdict: verdict.kind,
+        });
+      } catch (err) {
+        result.errors.push({ path, message: parseErrorMessage(err) });
+      }
+      continue;
+    }
+
+    // Direction 1: assigned_agent != null + dispatch == null. No
+    // dispatch record to audit — clear immediately.
+    const staleAgent = issue.assigned_agent!;
+    try {
+      await clearDispatchAndWrite(repoLocalPath, issue);
+      result.healed.push({
+        id: issue.id,
+        kind: "agent-without-dispatch",
+        staleAgent,
+        staleDispatchId: null,
+      });
+    } catch (err) {
+      result.errors.push({ path, message: parseErrorMessage(err) });
+    }
+  }
+  return result;
+}
+
+const invariantHealLog = createLogger("invariant-heal");
+
+/**
+ * Convenience wrapper that runs `healOrphanInvariantViolations` against
+ * the named repo with default liveness deps and emits the log lines both
+ * the boot and per-tick callers need. Extracted so the producer + the
+ * format live in one file (DX-286 review feedback) — boot in
+ * `src/index.ts` and per-tick in `src/poller/index.ts` both call this
+ * with a `label` describing the trigger so log readers can tell them
+ * apart.
+ *
+ * Errors from the scan are caught + logged at error level; they never
+ * propagate. The boot caller treats heal failure as non-fatal (the
+ * worker still starts); the per-tick caller treats heal failure as
+ * non-fatal (the tick still proceeds).
+ */
+export async function runInvariantHeal(
+  repo: RepoContext,
+  label: "boot" | "per-tick",
+): Promise<void> {
+  try {
+    const result = await healOrphanInvariantViolations(
+      repo.localPath,
+      repo.issuePrefix,
+      { currentHost: osHostname(), now: Date.now(), isPidAlive },
+    );
+    if (result.healed.length === 0 && result.errors.length === 0) return;
+    if (result.healed.length > 0) {
+      invariantHealLog.info(
+        `[${repo.name}] Invariant heal (${label}): scanned=${result.scanned} cleared=${result.healed.length}`,
+      );
+      for (const h of result.healed) {
+        const verdict = h.verdict ? ` verdict=${h.verdict}` : "";
+        invariantHealLog.warn(
+          `[${repo.name}] heal: cleared invariant violation on ${h.id} (kind=${h.kind}${verdict}, dispatch=${h.staleDispatchId ?? "null"}, agent=${h.staleAgent ?? "null"})`,
+        );
+      }
+    }
+    for (const e of result.errors) {
+      invariantHealLog.warn(
+        `[${repo.name}] heal: invariant scan error at ${e.path}: ${e.message}`,
+      );
+    }
+  } catch (err) {
+    invariantHealLog.error(
+      `[${repo.name}] Invariant heal (${label}) failed`,
+      err,
+    );
+  }
+}
+
+/**
+ * Immediate-cascade counterpart to the `healOrphanInvariantViolations`
+ * scan, called by the dashboard's delete-agent handler (DX-283). Walks
+ * `<repo>/.danxbot/issues/open/` once and clears the `assigned_agent`
+ * stamp on every YAML that names the just-deleted agent. Without this
+ * cascade, the operator's delete leaves stale claims that block the
+ * multi-agent picker until the next per-tick invariant scan picks up.
+ *
+ * Differs from the invariant heal in its predicate: this clears
+ * strict-equality matches against `agentName`, regardless of `dispatch`
+ * state. `dispatch != null` paired with
+ * `assigned_agent === <deleted>` is the in-flight case — the worktree
+ * teardown step (run before this in the delete handler) already
+ * blocks deletion when a non-terminal dispatch exists for the agent,
+ * so by the time we reach this point any `dispatch != null` we see
+ * is itself orphan state. Clear both fields together (via
+ * `clearDispatchAndWrite`) to preserve the
+ * `assigned_agent ⇔ live dispatch` invariant.
+ *
+ * Idempotent: re-running on a clean dir returns `healed: []`.
+ */
+export async function clearAssignedAgentOnDeletion(
+  repoLocalPath: string,
+  prefix: string,
+  agentName: string,
+): Promise<HealOrphanAssignedAgentsResult> {
+  const result: HealOrphanAssignedAgentsResult = {
+    scanned: 0,
+    healed: [],
+    errors: [],
+  };
+  const idRegex = buildIssueIdRegex(prefix);
+  const openDir = resolve(repoLocalPath, ".danxbot", "issues", "open");
+  if (!existsSync(openDir)) return result;
+
+  for (const entry of readdirSync(openDir)) {
+    if (!entry.endsWith(".yml")) continue;
+    const stem = entry.slice(0, -".yml".length);
+    if (!idRegex.test(stem)) continue;
+    const path = resolve(openDir, entry);
+    result.scanned++;
+
+    let issue: Issue;
+    try {
+      issue = parseIssue(readFileSync(path, "utf-8"), {
+        expectedPrefix: prefix,
+      });
+    } catch (err) {
+      result.errors.push({ path, message: parseErrorMessage(err) });
+      continue;
+    }
+
+    if (issue.assigned_agent !== agentName) continue;
+
+    try {
+      await clearDispatchAndWrite(repoLocalPath, issue);
+      result.healed.push({ id: issue.id, staleAgent: agentName });
+    } catch (err) {
+      result.errors.push({ path, message: parseErrorMessage(err) });
+    }
+  }
+  return result;
 }
 
 /**

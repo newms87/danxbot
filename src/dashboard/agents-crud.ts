@@ -30,6 +30,8 @@ import {
 import { publishAgentSnapshot } from "./agents-list.js";
 import { validateAgentFields } from "./agent-validators.js";
 import { agentDir, assertWithinAgentsRoot } from "./agent-fs.js";
+import { clearAssignedAgentOnDeletion } from "../poller/heal.js";
+import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
 
 const log = createLogger("agents-crud");
 
@@ -288,7 +290,7 @@ export async function handleDeleteAgent(
   // "remove the record + per-agent dir", which a stale probe doesn't
   // compromise.
   try {
-    const active = await findNonTerminalDispatches(repo.name);
+    const active = await findNonTerminalDispatches(repo.name, agentName);
     if (active.length > 0) {
       json(res, 409, {
         error: `agent "${agentName}" is busy — ${active.length} non-terminal dispatch(es) in repo "${repo.name}"`,
@@ -358,6 +360,37 @@ export async function handleDeleteAgent(
     } catch (err) {
       log.warn(`handleDeleteAgent(${repo.name}, ${agentName}): rm ${dir} failed`, err);
     }
+  }
+
+  // DX-283 cascade: clear `assigned_agent: <deleted>` from any open
+  // YAMLs. Without this the multi-agent picker treats those cards as
+  // owned by an offline agent forever — `pickCardForAgent` skips them
+  // for every other agent until the next worker boot heal scrubs the
+  // claim. The boot heal already exists (DX-281, `healOrphanAssigned-
+  // Agents`); this cascade gives the operator the same outcome
+  // immediately, no restart required. Idempotent + best-effort: a
+  // failure here is logged but does NOT roll back the settings write.
+  try {
+    // `RepoConfig` (the handler's repo shape) doesn't carry the
+    // issue prefix — resolve it from disk via the same loader the
+    // worker boot uses. Throws on missing config.yml or invalid
+    // prefix shape; both are caught + logged (best-effort cascade).
+    const prefix = loadIssuePrefix(repo.localPath);
+    const cleared = await clearAssignedAgentOnDeletion(
+      repo.localPath,
+      prefix,
+      agentName,
+    );
+    if (cleared.healed.length > 0) {
+      log.info(
+        `handleDeleteAgent(${repo.name}, ${agentName}): cleared assigned_agent on ${cleared.healed.length} card(s): ${cleared.healed.map((h) => h.id).join(", ")}`,
+      );
+    }
+  } catch (err) {
+    log.warn(
+      `handleDeleteAgent(${repo.name}, ${agentName}): assigned_agent cascade failed — boot heal will catch up on next restart`,
+      err,
+    );
   }
 
   await publishAgentSnapshot(repo, deps.resolveHost);

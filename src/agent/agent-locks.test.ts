@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   assignedCards,
   busyAgents,
+  liveDispatchIssueIds,
   resetAgentLocksQueryFn,
   setAgentLocksQueryFn,
 } from "./agent-locks.js";
@@ -10,6 +11,8 @@ interface MockDispatchRow {
   repoName: string;
   agentName: string | null;
   status: string;
+  issueId?: string | null;
+  pidTerminatedAt?: number | null;
 }
 
 interface MockIssueRow {
@@ -38,6 +41,13 @@ const SQL_ASSIGNED_CARDS = normalizeSql(
        AND assigned_agent IS NOT NULL
        AND "status" NOT IN ('Done', 'Cancelled')`,
 );
+const SQL_LIVE_DISPATCH_ISSUE_IDS = normalizeSql(
+  `SELECT DISTINCT issue_id FROM dispatches
+     WHERE repo_name = $1
+       AND issue_id IS NOT NULL
+       AND "status" NOT IN ('completed', 'failed', 'cancelled')
+       AND pid_terminated_at IS NULL`,
+);
 
 beforeEach(() => {
   dispatches.length = 0;
@@ -59,6 +69,26 @@ beforeEach(() => {
           if (!seen.has(r.agentName)) {
             seen.add(r.agentName);
             out.push({ agent_name: r.agentName });
+          }
+        }
+      }
+      return out as never;
+    }
+    if (norm === SQL_LIVE_DISPATCH_ISSUE_IDS) {
+      const [repoName] = p as [string];
+      const seen = new Set<string>();
+      const out: { issue_id: string }[] = [];
+      for (const r of dispatches) {
+        if (
+          r.repoName === repoName &&
+          typeof r.issueId === "string" &&
+          r.issueId.length > 0 &&
+          !["completed", "failed", "cancelled"].includes(r.status) &&
+          (r.pidTerminatedAt === undefined || r.pidTerminatedAt === null)
+        ) {
+          if (!seen.has(r.issueId)) {
+            seen.add(r.issueId);
+            out.push({ issue_id: r.issueId });
           }
         }
       }
@@ -169,6 +199,65 @@ describe("assignedCards", () => {
 
   it("returns an empty map when no card has a claim", async () => {
     const out = await assignedCards("danxbot");
+    expect(out.size).toBe(0);
+  });
+});
+
+describe("liveDispatchIssueIds", () => {
+  // DX-262 follow-up — the multi-agent picker uses this set as the
+  // TRUE in-progress signal, replacing the YAML status field which
+  // goes stale whenever a dispatch dies outside the orderly
+  // completion path.
+
+  it("returns the issue_id of every non-terminal dispatch with a card", async () => {
+    dispatches.push(
+      { repoName: "danxbot", agentName: "alice", status: "running", issueId: "DX-1" },
+      { repoName: "danxbot", agentName: "bob", status: "queued", issueId: "DX-2" },
+      { repoName: "danxbot", agentName: "charlie", status: "completed", issueId: "DX-3" },
+      { repoName: "danxbot", agentName: "dave", status: "cancelled", issueId: "DX-4" },
+    );
+    const out = await liveDispatchIssueIds("danxbot");
+    expect(out).toEqual(new Set(["DX-1", "DX-2"]));
+  });
+
+  it("excludes dispatches with NULL issue_id (slack / api / non-issue dispatches)", async () => {
+    dispatches.push(
+      { repoName: "danxbot", agentName: "alice", status: "running", issueId: null },
+      { repoName: "danxbot", agentName: "bob", status: "running", issueId: "DX-2" },
+    );
+    const out = await liveDispatchIssueIds("danxbot");
+    expect(out).toEqual(new Set(["DX-2"]));
+  });
+
+  it("excludes dispatches whose PID has been terminated (worker recovery edge)", async () => {
+    dispatches.push(
+      { repoName: "danxbot", agentName: "alice", status: "running", issueId: "DX-1", pidTerminatedAt: Date.now() },
+      { repoName: "danxbot", agentName: "bob", status: "running", issueId: "DX-2", pidTerminatedAt: null },
+    );
+    const out = await liveDispatchIssueIds("danxbot");
+    expect(out).toEqual(new Set(["DX-2"]));
+  });
+
+  it("scopes to the repo", async () => {
+    dispatches.push(
+      { repoName: "danxbot", agentName: "alice", status: "running", issueId: "DX-1" },
+      { repoName: "gpt-manager", agentName: "bob", status: "running", issueId: "GP-1" },
+    );
+    const out = await liveDispatchIssueIds("danxbot");
+    expect(out).toEqual(new Set(["DX-1"]));
+  });
+
+  it("dedupes — one issue with multiple non-terminal dispatch rows surfaces once", async () => {
+    dispatches.push(
+      { repoName: "danxbot", agentName: "alice", status: "running", issueId: "DX-1" },
+      { repoName: "danxbot", agentName: "bob", status: "queued", issueId: "DX-1" },
+    );
+    const out = await liveDispatchIssueIds("danxbot");
+    expect(out).toEqual(new Set(["DX-1"]));
+  });
+
+  it("empty when no live dispatch carries an issue_id", async () => {
+    const out = await liveDispatchIssueIds("danxbot");
     expect(out.size).toBe(0);
   });
 });

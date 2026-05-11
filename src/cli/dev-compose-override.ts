@@ -140,6 +140,37 @@ export function buildOverride(repoNames: string[]): string {
     return `      - \${${v}:-./repos/${name}}/claude-projects:${CONTAINER_CLAUDE_PROJECTS_BASE}/${name}:ro`;
   });
 
+  // DX-262 mirror-bind: dashboard invokes WorktreeManager for agent
+  // CRUD. `git worktree add` bakes `realpath(cwd)` into worktree
+  // metadata. Container-side cwd = `/danxbot/app/repos/<name>` → gitdir
+  // pointer dies on host. Mirror-binding the same source at the host
+  // abs path makes that path real INSIDE the container too, so git's
+  // realpath canonicalizes to the host abs path. Worker compose does
+  // the same via `${DANXBOT_REPO_ROOT}:${DANXBOT_REPO_HOST_PATH}` per
+  // DX-230 — dashboard parity here was missing until DX-262.
+  //
+  // Same env var as the RW bind, used as BOTH source AND destination
+  // so the inside-container path equals the host abs path. Skips the
+  // `:-./repos/<name>` fallback intentionally: a fallback like
+  // `./repos/<name>:./repos/<name>` would mount a relative path at a
+  // relative dest, which compose rejects with a clearer error than the
+  // silent realpath corruption otherwise. `make launch-infra` always
+  // exports the var.
+  const repoMirrorBinds = repoNames.map((name) => {
+    const v = repoRootVarName(name);
+    return `      - \${${v}}:\${${v}}`;
+  });
+
+  // DX-262 host-path env per repo — read by `src/target.ts#loadTarget`
+  // to populate `RepoConfig.hostPath` so WorktreeManager runs at the
+  // mirror-bound host abs path. Naming mirrors `hostPathVarName` in
+  // src/target.ts.
+  const hostPathEnvs = repoNames.map((name) => {
+    const v = repoRootVarName(name);
+    const envKey = `DANXBOT_REPO_HOST_PATH_${name.toUpperCase().replace(/-/g, "_")}`;
+    return `      ${envKey}: \${${v}}`;
+  });
+
   // Single RO bind for host-mode dispatches' JSONL logs. Host-mode
   // workers write to the developer's `~/.claude/projects/` (the
   // host's HOME), under encoded-cwd subdirs that don't appear under
@@ -162,8 +193,11 @@ export function buildOverride(repoNames: string[]): string {
     "  dashboard:",
     "    volumes:",
     ...repoBinds,
+    ...repoMirrorBinds,
     ...projectsBinds,
     hostProjectsBind,
+    "    environment:",
+    ...hostPathEnvs,
     "",
   ].join("\n");
 }

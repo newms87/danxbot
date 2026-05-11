@@ -24,6 +24,7 @@ import { recordSystemError } from "./dashboard/system-errors.js";
 import { setRepoName } from "./poller/repo-name.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
+import { runInvariantHeal } from "./poller/heal.js";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
 import { reattachOrResolveDispatches } from "./worker/reattach.js";
@@ -301,6 +302,28 @@ async function startWorkerMode(): Promise<void> {
     },
   );
   log.info(`[${repo.name}] Issues mirror started`);
+
+  // One-shot boot heal: walk every open YAML and clear any card violating
+  // the `(dispatch !== null) === (assigned_agent !== null)` co-ownership
+  // invariant when the underlying dispatch is verifiably dead. Covers BOTH
+  // orphan directions in one pass:
+  //   - `assigned_agent != null + dispatch == null` — orphan claim from
+  //     pre-DX-286 producers (the `dispatch` slot was cleared but the
+  //     `assigned_agent` stamp survived). These cards block the multi-
+  //     agent picker forever — `pickCardForAgent` treats them as owned by
+  //     a different agent and silently skips every tick.
+  //   - `dispatch != null + assigned_agent == null` — orphan pre-stamp
+  //     (DX-286). The picker stamped the dispatch{} block but the spawn
+  //     never landed in the DB (paired-write rollback, chokidar race,
+  //     mid-spawn crash). Cards in this state drop out of
+  //     `listDispatchableYamls` (filter rejects `dispatch != null`) and
+  //     were unrecoverable until boot reattach's dead-pid clearing pass.
+  // Liveness gate via `checkYamlDispatchLiveness` skips dispatches caught
+  // genuinely mid-spawn (alive PID, within TTL, on this host). Runs AFTER
+  // the mirror is up (so `writeIssue` awaitMirror resolves) and BEFORE
+  // the poller dispatches its first tick. The same scan runs at the top
+  // of every poll tick (`src/poller/index.ts`) for ongoing self-heal.
+  await runInvariantHeal(repo, "boot");
 
   // Phase 3 of Event-Driven Worker (DX-218): register the per-repo
   // tracker with reconcile + the retry-queue scheduler so step 7 (the

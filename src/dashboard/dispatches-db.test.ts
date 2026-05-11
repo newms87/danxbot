@@ -765,6 +765,18 @@ describe("findNonTerminalDispatches", () => {
     expect(rows[0].id).toBe("alive-1");
     expect(rows[0].hostPid).toBe(4321);
   });
+
+  it("DX-262 — narrows query with agent_name filter when given", async () => {
+    // Without the filter, the busy probe in `handleDeleteAgent` was
+    // returning every non-terminal row in the repo (including orphan
+    // crash-leftovers) and 409'ing forever. Filter scopes to the agent.
+    mockQuery.mockResolvedValueOnce([]);
+    await findNonTerminalDispatches("danxbot", "phil");
+    const sql = mockQuery.mock.calls[0][0] as string;
+    const params = mockQuery.mock.calls[0][1] as unknown[];
+    expect(sql).toContain("agent_name = $2");
+    expect(params).toEqual(["danxbot", "phil"]);
+  });
 });
 
 describe("agentBusyOn", () => {

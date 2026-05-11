@@ -71,6 +71,35 @@ describe("renderProdCompose", () => {
     expect(out).toContain("image: img");
   });
 
+  it("DX-262 — emits /danxbot/repos:/danxbot/repos mirror-bind on the dashboard service", () => {
+    // Dashboard's WorktreeManager `git worktree add` bakes
+    // `realpath(cwd)` into the worktree's `.git` pointer. Without the
+    // mirror-bind, gitdir resolves to `/danxbot/app/repos/<name>` which
+    // is invisible to the host worker → `fatal: not a git repository`
+    // on first dispatch. Mirror-binding `/danxbot/repos:/danxbot/repos`
+    // makes the host abs path real inside the container; combined with
+    // the per-repo DANXBOT_REPO_HOST_PATH_<NAME> env, the WorktreeManager
+    // runs git ops at that path and the metadata works on both sides.
+    const out = renderProdCompose("img", 5555, ["danxbot"]);
+    expect(out).toContain("- /danxbot/repos:/danxbot/repos");
+  });
+
+  it("DX-262 — emits DANXBOT_REPO_HOST_PATH_<NAME> env per repo on the dashboard service", () => {
+    // `src/target.ts#loadTarget` reads these to set `RepoConfig.hostPath`
+    // — the path WorktreeManager passes to `git worktree add`. Var name
+    // MUST match `hostPathVarName` in src/target.ts.
+    const out = renderProdCompose("img", 5555, ["danxbot", "gpt-manager"]);
+    expect(out).toContain("DANXBOT_REPO_HOST_PATH_DANXBOT: /danxbot/repos/danxbot");
+    expect(out).toContain(
+      "DANXBOT_REPO_HOST_PATH_GPT_MANAGER: /danxbot/repos/gpt-manager",
+    );
+  });
+
+  it("leaves no unsubstituted ${DASHBOARD_REPO_HOST_PATH_ENVS} token (template/code rename drift)", () => {
+    const out = renderProdCompose("img", 5555, ["danxbot"]);
+    expect(out).not.toMatch(/\$\{DASHBOARD_REPO_HOST_PATH_ENVS\}/);
+  });
+
   it("leaves no unsubstituted ${CLAUDE_PROJECTS_MOUNTS} token in the rendered output — guards against template/code rename drift", () => {
     // The placeholder name in the template (`${CLAUDE_PROJECTS_MOUNTS}`) and
     // the key passed to `applyTemplateVars` must match exactly. A rename in

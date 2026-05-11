@@ -14,6 +14,12 @@ services:
       - "${DASHBOARD_PORT}:${DASHBOARD_PORT}"
     volumes:
       - /danxbot/repos:/danxbot/app/repos
+      # DX-262 mirror-bind: dashboard's WorktreeManager `git worktree add`
+      # bakes `realpath(cwd)` into worktree metadata. Mounting the same
+      # source at its own host abs path makes the host path real INSIDE
+      # the container so git canonicalizes to a path that survives
+      # worker handoff. Workers do the same via DX-230.
+      - /danxbot/repos:/danxbot/repos
       - /danxbot/threads:/danxbot/threads
       - /danxbot/logs:/danxbot/logs
       - /danxbot/claude-auth:/danxbot/claude-auth:ro
@@ -25,6 +31,11 @@ services:
       # layout as `docker-compose.override.yml` in dev.
 ${CLAUDE_PROJECTS_MOUNTS}
       - /var/run/docker.sock:/var/run/docker.sock
+    # DX-262 — per-repo host-path env consumed by `src/target.ts#loadTarget`
+    # to populate `RepoConfig.hostPath`. Rendered per-repo by
+    # `renderProdCompose` in `deploy/compose-infra.ts`.
+    environment:
+${DASHBOARD_REPO_HOST_PATH_ENVS}
     networks:
       - danxbot-net
     depends_on:

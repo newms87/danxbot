@@ -953,30 +953,46 @@ test_yaml_memory() {
   local container_name
   container_name=$(docker ps --filter "publish=${WORKER_PORT}" --format "{{.Names}}" 2>/dev/null | head -1)
 
-  local jsonl_content
-  if [[ -n "$container_name" ]]; then
-    # `/home/danxbot/.claude/projects` matches the danxbot user inside
-    # the worker image (Dockerfile creates the danxbot user with that
-    # home dir). If a future image change moves the home dir, this find
-    # returns empty and the assertion below fails loud — a deliberate
-    # canary so the test catches the path drift instead of silently
-    # asserting against an empty string.
-    jsonl_content=$(docker exec "$container_name" sh -c "
-      for f in \$(find /home/danxbot/.claude/projects -name '*.jsonl' 2>/dev/null); do
-        if grep -q 'danxbot-dispatch:${job_id}' \"\$f\" 2>/dev/null; then
-          cat \"\$f\"
-          break
-        fi
-      done
-    " 2>/dev/null)
-  else
-    # Host-mode worker — JSONL on the same filesystem as the test runner.
-    local matched_file
-    matched_file=$(find "$HOME/.claude/projects" -name '*.jsonl' -exec grep -l "danxbot-dispatch:${job_id}" {} \; 2>/dev/null | head -1)
-    if [[ -n "$matched_file" ]]; then
-      jsonl_content=$(cat "$matched_file" 2>/dev/null)
+  # Initialize empty so the `[[ -z ]]` check below is safe under `set -u`
+  # even when neither runtime branch finds a JSONL.
+  local jsonl_content=""
+
+  # JSONL flush can lag dispatch completion by a few seconds (chokidar
+  # debounce + claude's own write cadence). Retry the find a handful of
+  # times before giving up.
+  local attempt
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if [[ -n "$container_name" ]]; then
+      # `/home/danxbot/.claude/projects` matches the danxbot user inside
+      # the worker image (Dockerfile creates the danxbot user with that
+      # home dir). If a future image change moves the home dir, this find
+      # returns empty and the assertion below fails loud — a deliberate
+      # canary so the test catches the path drift instead of silently
+      # asserting against an empty string.
+      jsonl_content=$(docker exec "$container_name" sh -c "
+        for f in \$(find /home/danxbot/.claude/projects -name '*.jsonl' 2>/dev/null); do
+          if grep -q 'danxbot-dispatch:${job_id}' \"\$f\" 2>/dev/null; then
+            cat \"\$f\"
+            break
+          fi
+        done
+      " 2>/dev/null)
+    else
+      # Host-mode worker — JSONL on the same filesystem as the test runner.
+      local matched_file
+      # `-L` follows symlinks — required because DX-240 stores host-mode
+      # JSONLs at `<repo>/claude-projects/<encoded>/` and symlinks
+      # `~/.claude/projects/<encoded>` to that target. Without `-L`, find
+      # treats the symlink as a leaf and never traverses into the JSONLs,
+      # so every host-mode dispatch silently looks like "JSONL not found".
+      matched_file=$(find -L "$HOME/.claude/projects" -name '*.jsonl' -exec grep -l "danxbot-dispatch:${job_id}" {} \; 2>/dev/null | head -1)
+      if [[ -n "$matched_file" ]]; then
+        jsonl_content=$(cat "$matched_file" 2>/dev/null)
+      fi
     fi
-  fi
+    [[ -n "$jsonl_content" ]] && break
+    sleep 2
+  done
 
   if [[ -z "$jsonl_content" ]]; then
     fail "Could not locate dispatched session JSONL for job ${job_id}"
@@ -1066,41 +1082,64 @@ test_multi_worker() {
   # roster lives on the dashboard's HTTP plane). Dashboard listens on
   # DANXBOT_DASHBOARD_PORT (default 5555).
   local dash_port="${DANXBOT_DASHBOARD_PORT:-5555}"
+  # Dashboard auth — every /api endpoint requires Bearer token. Token
+  # persists at ~/.config/danxbot/dashboard-token (mode 0600). Test
+  # without it lands on 401 + the `|| echo '{}'` fallback fires, masking
+  # the cause as "0 agents returned".
+  local dash_token=""
+  if [[ -f "$HOME/.config/danxbot/dashboard-token" ]]; then
+    dash_token=$(cat "$HOME/.config/danxbot/dashboard-token")
+  fi
+  if [[ -z "$dash_token" ]]; then
+    skip "Multi-worker roster needs ~/.config/danxbot/dashboard-token (run: make create-user LOCALHOST=1 USERNAME=monitor)"
+    return
+  fi
+
   local roster_response
   roster_response=$(curl -s --max-time 10 \
+    -H "Authorization: Bearer ${dash_token}" \
     "http://${WORKER_HOST}:${dash_port}/api/agents?repo=danxbot" 2>/dev/null || echo '{}')
 
-  local agent_count
-  agent_count=$(node -e '
+  # Tolerant of pre-existing operator agents — assert the THREE seeded
+  # names (alice/bob/charlie) are present, not that the roster has
+  # exactly 3 entries. A pristine roster is the rare case in real
+  # operator environments; the prior strict-equal check fired a false
+  # positive any time the operator had real agents configured.
+  local seeded_present
+  seeded_present=$(node -e '
     try {
       const r = JSON.parse(process.argv[1] || "{}");
-      console.log(Array.isArray(r.agents) ? r.agents.length : 0);
+      const names = new Set((r.agents || []).map(a => a.name));
+      const want = ["alice", "bob", "charlie"];
+      console.log(want.filter(n => names.has(n)).length);
     } catch { console.log(0); }
   ' "$roster_response" 2>/dev/null)
 
-  if [[ "$agent_count" == "3" ]]; then
-    pass "Roster lists 3 seeded agents"
+  if [[ "$seeded_present" == "3" ]]; then
+    pass "Roster includes seeded alice/bob/charlie"
   else
-    fail "Roster returned $agent_count agents (expected 3): $roster_response"
+    fail "Roster missing seeded agents ($seeded_present/3 present): $roster_response"
     return
   fi
 
   # busyOn is absent on every idle agent. The contract is "no key when
   # idle" (the optional field is omitted from the response object), so
   # we assert STRICTLY against `=== undefined` — emitting `null` would
-  # be a contract regression. Empty key set → 3 idle agents.
-  local idle_count
-  idle_count=$(node -e '
+  # be a contract regression. Scope to the seeded names only so
+  # pre-existing operator agents that ARE busy don't fail this check.
+  local idle_seeded
+  idle_seeded=$(node -e '
     try {
       const r = JSON.parse(process.argv[1] || "{}");
-      console.log((r.agents || []).filter(a => a.busyOn === undefined).length);
+      const seeded = new Set(["alice", "bob", "charlie"]);
+      console.log((r.agents || []).filter(a => seeded.has(a.name) && a.busyOn === undefined).length);
     } catch { console.log(0); }
   ' "$roster_response" 2>/dev/null)
 
-  if [[ "$idle_count" == "3" ]]; then
-    pass "All 3 agents reported idle (no busyOn field)"
+  if [[ "$idle_seeded" == "3" ]]; then
+    pass "All 3 seeded agents reported idle (no busyOn field)"
   else
-    fail "Expected 3 idle agents; got $idle_count idle"
+    fail "Expected 3 idle seeded agents; got $idle_seeded idle"
   fi
 
   # ── Tier 2: concurrent dispatch (opt-in) ──────────────────────────
@@ -1243,7 +1282,13 @@ _multi_worker_seed_agents() {
       mon: ["00:00-23:59"], tue: ["00:00-23:59"], wed: ["00:00-23:59"],
       thu: ["00:00-23:59"], fri: ["00:00-23:59"], sat: ["00:00-23:59"], sun: ["00:00-23:59"],
     };
-    cur.agents = cur.agents || {};
+    // Replace the agents map wholesale so the test owns the full
+    // roster surface during execution. Pre-existing operator agents
+    // (real names like dani/murphy/phil) collide with the AGENTS_MAX=5
+    // cap when combined with the 3 seeded names — the 6th entry gets
+    // silently dropped by `normalizeAgents`. Backup is restored on
+    // EXIT (see _multi_worker_restore_settings + cleanup trap).
+    cur.agents = {};
     for (const name of ["alice", "bob", "charlie"]) {
       cur.agents[name] = {
         type: "agent",
@@ -1336,8 +1381,14 @@ test_cleanup() {
     pass "No orphaned MCP temp dirs (older than 1 hour)"
   else
     fail "Found $stale_mcp orphaned MCP temp dirs"
-    find /tmp -maxdepth 1 -name "danxbot-mcp-*" -mmin +60 2>/dev/null | head -5 | while read -r d; do
-      log_info "  $d"
+    # `find | head` under `set -o pipefail` exits 141 (SIGPIPE) when find
+    # has more than 5 hits — kills the whole script before later tests
+    # run. Buffer find into an array and slice instead.
+    local stale_dirs
+    mapfile -t stale_dirs < <(find /tmp -maxdepth 1 -name "danxbot-mcp-*" -mmin +60 2>/dev/null)
+    local i
+    for i in 0 1 2 3 4; do
+      [[ -n "${stale_dirs[$i]:-}" ]] && log_info "  ${stale_dirs[$i]}"
     done
   fi
 
@@ -1345,8 +1396,11 @@ test_cleanup() {
     pass "No orphaned terminal temp dirs (older than 1 hour)"
   else
     fail "Found $stale_term orphaned terminal temp dirs"
-    find /tmp -maxdepth 1 -name "danxbot-term-*" -mmin +60 2>/dev/null | head -5 | while read -r d; do
-      log_info "  $d"
+    local stale_term_dirs
+    mapfile -t stale_term_dirs < <(find /tmp -maxdepth 1 -name "danxbot-term-*" -mmin +60 2>/dev/null)
+    local j
+    for j in 0 1 2 3 4; do
+      [[ -n "${stale_term_dirs[$j]:-}" ]] && log_info "  ${stale_term_dirs[$j]}"
     done
   fi
 

@@ -120,6 +120,13 @@ export async function dispatchInRecoveryMode(
     title: `Branch recovery — ${agentName}`,
     apiDispatchMeta: recoveryMeta,
     onComplete: async (job) => {
+      // Stamp BEFORE caller.onComplete so the caller's "did the tracked
+      // card progress?" guard can short-circuit. Recovery dispatches do
+      // branch cleanup, not card work — running the progress check
+      // would write a spurious CRITICAL_FAILURE flag every time recovery
+      // succeeds against a clean ToDo card. See AgentJob.recoveryMode
+      // for the cross-file contract.
+      job.recoveryMode = true;
       // Caller's onComplete first — preserve existing semantics + don't
       // let our follow-up errors mask the caller's bookkeeping. Errors
       // from the caller are caught + logged so the dispatch lifecycle

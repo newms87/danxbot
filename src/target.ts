@@ -29,6 +29,10 @@ import { parse as parseYaml } from "yaml";
 import type { RepoConfig } from "./types.js";
 import { getReposBase } from "./poller/constants.js";
 
+// `hostPathVarName` is declared near the bottom of this file (after
+// `findTargetPath`) but used inside `loadTarget`'s `repos[]` builder.
+// Function declarations hoist — referencing the name here is fine.
+
 export type TargetMode = "local" | "deploy";
 
 export interface ResolvedTarget {
@@ -116,16 +120,24 @@ export function loadTarget(
           `Invalid repos[].worker_port in ${path} (repo "${repoName}"): required integer in [1, 65535]`,
         );
       }
-      const localPath = `${getReposBase()}/${repoName.trim()}`;
+      const trimmedName = repoName.trim();
+      const localPath = `${getReposBase()}/${trimmedName}`;
+      // Dashboard mode invokes WorktreeManager via `agents-crud.ts` for
+      // POST/DELETE `/api/agents`. `git worktree add` bakes the cwd's
+      // `realpath()` into `<worktree>/.git`, so docker-mode dashboards
+      // MUST run the op from the host abs path (mirror-bound into the
+      // container) or every new worktree's .git pointer dies the moment
+      // the host worker tries to use it. Per-repo env var carries the
+      // host abs path; dev `docker-compose.override.yml` and prod
+      // `docker-compose.prod.yml` emit it. Host-mode dashboard runs
+      // outside any container — env is absent, fall back to localPath
+      // (already the host abs path there).
+      const hostPath = process.env[hostPathVarName(trimmedName)] || localPath;
       const repo: RepoConfig = {
-        name: repoName.trim(),
+        name: trimmedName,
         url: repoUrl.trim(),
         localPath,
-        // Dashboard reads `RepoConfig` from the deploy target; it never
-        // dispatches and never invokes WorktreeManager — `hostPath`
-        // mirrors `localPath` here. The worker overrides it from
-        // `process.env.DANXBOT_REPO_HOST_PATH` in `loadRepoContext`.
-        hostPath: localPath,
+        hostPath,
         workerPort,
       };
       if (workerHost !== undefined && workerHost !== null) {
@@ -148,6 +160,23 @@ export function loadTarget(
  * Throws with a clear, actionable message on miss — the operator either
  * needs to `cd` into the danxbot product root or create the target file.
  */
+/**
+ * Per-repo env var carrying the host abs path of `<repo>` into a
+ * docker-mode dashboard container. Naming mirrors `repoRootVarName` in
+ * `src/cli/dev-compose-override.ts` — uppercase + hyphens→underscores —
+ * so the dev compose override and prod compose can both emit values
+ * keyed off the same scheme. Absent → `target.ts` falls back to
+ * `localPath` (correct for host-mode dashboards, which run outside any
+ * container).
+ *
+ * Distinct from worker's bare `DANXBOT_REPO_HOST_PATH`: worker is
+ * single-repo so a bare name suffices; dashboard serves N repos so
+ * each needs its own var.
+ */
+export function hostPathVarName(name: string): string {
+  return `DANXBOT_REPO_HOST_PATH_${name.toUpperCase().replace(/-/g, "_")}`;
+}
+
 export function findTargetPath(targetName: string, startDir: string = process.cwd()): string {
   let dir = resolve(startDir);
   const root = resolve("/");

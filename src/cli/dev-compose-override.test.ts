@@ -143,6 +143,43 @@ describe("buildOverride", () => {
     }
   });
 
+  it("emits a DX-262 mirror-bind per repo so docker dashboard's `git worktree add` bakes host abs paths", () => {
+    // Worktree manager runs `git worktree add` with cwd = repo.hostPath.
+    // Git bakes `realpath(cwd)` into worktree metadata. Container's
+    // `/danxbot/app/repos/<name>` is invisible to the host worker, so
+    // metadata baked at that path breaks at handoff. Mirror-binding
+    // `${DANXBOT_REPO_ROOT_<NAME>}:${DANXBOT_REPO_ROOT_<NAME>}` makes the
+    // host abs path real inside the container too — git canonicalizes
+    // to that path and the metadata works from either side. Worker
+    // compose already does the same via DX-230.
+    //
+    // No `:-` fallback intentional — a relative-on-both-sides mount
+    // (./repos/<name>:./repos/<name>) would be ill-defined; force
+    // launch-infra to export a real path.
+    const out = buildOverride(["danxbot", "gpt-manager"]);
+    expect(out).toContain(
+      "      - ${DANXBOT_REPO_ROOT_DANXBOT}:${DANXBOT_REPO_ROOT_DANXBOT}",
+    );
+    expect(out).toContain(
+      "      - ${DANXBOT_REPO_ROOT_GPT_MANAGER}:${DANXBOT_REPO_ROOT_GPT_MANAGER}",
+    );
+  });
+
+  it("emits DANXBOT_REPO_HOST_PATH_<NAME> env per repo on the dashboard service", () => {
+    // `src/target.ts#loadTarget` reads this env var to set
+    // `RepoConfig.hostPath` so WorktreeManager runs at the mirror-bound
+    // host abs path. Variable name MUST match `hostPathVarName` in
+    // src/target.ts — these tests are the lockstep guarantee.
+    const out = buildOverride(["danxbot", "gpt-manager"]);
+    expect(out).toContain("    environment:");
+    expect(out).toContain(
+      "      DANXBOT_REPO_HOST_PATH_DANXBOT: ${DANXBOT_REPO_ROOT_DANXBOT}",
+    );
+    expect(out).toContain(
+      "      DANXBOT_REPO_HOST_PATH_GPT_MANAGER: ${DANXBOT_REPO_ROOT_GPT_MANAGER}",
+    );
+  });
+
   it("produces the expected structural shape (guards against indent regressions)", () => {
     const out = buildOverride(["danxbot"]);
     // Compose is whitespace-sensitive: `services:` top-level, 2-space service

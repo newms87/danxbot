@@ -474,3 +474,238 @@ describe("runSync (local-first persist)", () => {
     expect(existsSync(issuePath(tmpDir, "ISS-111", "open"))).toBe(true);
   });
 });
+
+// DX-286 — `persistAfterSync` MUST clear `assigned_agent` alongside
+// `dispatch` on terminal-session saves so the
+// `(dispatch !== null) === (assigned_agent !== null)` co-ownership
+// invariant survives every terminal write. Pre-DX-286, the path cleared
+// dispatch only, leaving Done/Cancelled cards in `closed/` with
+// `assigned_agent: <name>` (visible in the production fixtures
+// DX-253-256, DX-259) and Blocked cards in `open/` with the same
+// orphan-agent stamp. The new heal scan in `_poll` can clean open/
+// orphans on the next tick, but closed/ residue accumulates as audit
+// noise — easier to fix at the source.
+describe("persistAfterSync — DX-286 co-ownership invariant on terminal save", () => {
+  let tmpDir: string;
+  let repo: RepoContext;
+  const tracker = {} as IssueTracker;
+
+  beforeEach(() => {
+    vi.mocked(syncIssue).mockReset();
+    vi.mocked(enqueueRetry).mockReset();
+    tmpDir = mkdtempSync(join(tmpdir(), "danxbot-persistsync-"));
+    ensureIssuesDirs(tmpDir);
+    repo = { localPath: tmpDir, issuePrefix: "ISS" } as RepoContext;
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // Direct evidence for the producer-side fix. Issue carries BOTH
+  // dispatch + assigned_agent at terminal save (the active in-flight
+  // shape); both fields must be null in the persisted closed/ YAML.
+  it("Done save clears BOTH dispatch and assigned_agent atomically (the DX-286 fix)", async () => {
+    vi.mocked(syncIssue).mockRejectedValue(new Error("tracker offline"));
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-200",
+      external_id: "ext-200",
+      status: "Done",
+      assigned_agent: "phil",
+      dispatch: {
+        id: "did-200",
+        pid: 4242,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T07:00:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+
+    await runSync({ tracker, recordError }, "dispatch-200", repo, issue);
+
+    const closedPath = issuePath(tmpDir, "ISS-200", "closed");
+    expect(existsSync(closedPath)).toBe(true);
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"), {
+      expectedPrefix: "ISS",
+    });
+    expect(persisted.status).toBe("Done");
+    expect(persisted.dispatch).toBeNull();
+    // The DX-286 assertion: assigned_agent MUST also be cleared.
+    expect(persisted.assigned_agent).toBeNull();
+  });
+
+  // Cancelled is the other open→closed terminal status; same invariant.
+  it("Cancelled save clears BOTH dispatch and assigned_agent atomically", async () => {
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: makeIssue({
+        id: "ISS-201",
+        external_id: "ext-201",
+        status: "Cancelled",
+        assigned_agent: "murphy",
+        dispatch: {
+          id: "did-201",
+          pid: 5555,
+          host: "host-a",
+          kind: "work",
+          started_at: "2026-05-11T07:00:00Z",
+          ttl_seconds: 7200,
+        },
+      }),
+      remoteWriteCount: 0,
+    });
+    const recordError = vi.fn();
+
+    await runSync(
+      { tracker, recordError },
+      "dispatch-201",
+      repo,
+      makeIssue({
+        id: "ISS-201",
+        external_id: "ext-201",
+        status: "Cancelled",
+        assigned_agent: "murphy",
+        dispatch: {
+          id: "did-201",
+          pid: 5555,
+          host: "host-a",
+          kind: "work",
+          started_at: "2026-05-11T07:00:00Z",
+          ttl_seconds: 7200,
+        },
+      }),
+    );
+
+    const closedPath = issuePath(tmpDir, "ISS-201", "closed");
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"), {
+      expectedPrefix: "ISS",
+    });
+    expect(persisted.dispatch).toBeNull();
+    expect(persisted.assigned_agent).toBeNull();
+  });
+
+  // Blocked is a session-terminal status that STAYS in open/.
+  // moveToClosedIfTerminal returns false (Blocked is not Done/Cancelled),
+  // so the file lands in open/ but persistAfterSync still clears the
+  // dispatch slot (and now, post-DX-286, assigned_agent too).
+  it("Blocked save (stays in open/) clears BOTH dispatch and assigned_agent", async () => {
+    vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 502"));
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-202",
+      external_id: "ext-202",
+      status: "Blocked",
+      assigned_agent: "dani",
+      dispatch: {
+        id: "did-202",
+        pid: 6666,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T07:00:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+
+    await runSync({ tracker, recordError }, "dispatch-202", repo, issue);
+
+    const openPath = issuePath(tmpDir, "ISS-202", "open");
+    expect(existsSync(openPath)).toBe(true);
+    const persisted = parseIssue(readFileSync(openPath, "utf-8"), {
+      expectedPrefix: "ISS",
+    });
+    expect(persisted.status).toBe("Blocked");
+    expect(persisted.dispatch).toBeNull();
+    expect(persisted.assigned_agent).toBeNull();
+  });
+
+  // Edge case for the OR-guard at line 611. Card has assigned_agent
+  // but no dispatch (the closed/ residue shape from pre-DX-286
+  // persistAfterSync). The terminal save should still detect the
+  // invariant violation and clear assigned_agent.
+  it("Done save with assigned_agent only (no dispatch) still clears the orphan agent", async () => {
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: makeIssue({
+        id: "ISS-203",
+        external_id: "ext-203",
+        status: "Done",
+        assigned_agent: "phil",
+      }),
+      remoteWriteCount: 0,
+    });
+    const recordError = vi.fn();
+
+    await runSync(
+      { tracker, recordError },
+      "dispatch-203",
+      repo,
+      makeIssue({
+        id: "ISS-203",
+        external_id: "ext-203",
+        status: "Done",
+        assigned_agent: "phil",
+      }),
+    );
+
+    const closedPath = issuePath(tmpDir, "ISS-203", "closed");
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"), {
+      expectedPrefix: "ISS",
+    });
+    expect(persisted.assigned_agent).toBeNull();
+    expect(persisted.dispatch).toBeNull();
+  });
+
+  // Negative — mid-session save (status: In Progress, no terminal
+  // signals) MUST preserve assigned_agent + dispatch. The DX-286
+  // clear must not bleed into mid-dispatch persists, otherwise the
+  // running agent loses its claim mid-turn.
+  it("non-terminal mid-session save preserves dispatch AND assigned_agent (no orphan clear bleed)", async () => {
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: makeIssue({
+        id: "ISS-204",
+        external_id: "ext-204",
+        status: "In Progress",
+        assigned_agent: "phil",
+        dispatch: {
+          id: "did-204",
+          pid: 7777,
+          host: "host-a",
+          kind: "work",
+          started_at: "2026-05-11T07:00:00Z",
+          ttl_seconds: 7200,
+        },
+      }),
+      remoteWriteCount: 0,
+    });
+    const recordError = vi.fn();
+
+    await runSync(
+      { tracker, recordError },
+      "dispatch-204",
+      repo,
+      makeIssue({
+        id: "ISS-204",
+        external_id: "ext-204",
+        status: "In Progress",
+        assigned_agent: "phil",
+        dispatch: {
+          id: "did-204",
+          pid: 7777,
+          host: "host-a",
+          kind: "work",
+          started_at: "2026-05-11T07:00:00Z",
+          ttl_seconds: 7200,
+        },
+      }),
+    );
+
+    const openPath = issuePath(tmpDir, "ISS-204", "open");
+    expect(existsSync(openPath)).toBe(true);
+    const persisted = parseIssue(readFileSync(openPath, "utf-8"), {
+      expectedPrefix: "ISS",
+    });
+    expect(persisted.assigned_agent).toBe("phil");
+    expect(persisted.dispatch).not.toBeNull();
+    expect(persisted.dispatch?.pid).toBe(7777);
+  });
+});

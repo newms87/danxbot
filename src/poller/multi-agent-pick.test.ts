@@ -76,8 +76,10 @@ vi.mock("./yaml-lifecycle.js", async () => {
     clearDispatchAndWrite: vi.fn(async (_p, issue) => ({
       ...issue,
       dispatch: null,
+      assigned_agent: null,
     })),
     loadLocal: vi.fn(async () => null),
+    loadLocalFromDisk: vi.fn(() => null),
     writeIssue: vi.fn(async () => undefined),
   };
 });
@@ -89,7 +91,12 @@ import {
   guardLiveDispatchForCard,
   runPostDispatchProgressCheck,
 } from "../dispatch/scheduler.js";
-import { clearDispatchAndWrite, loadLocal } from "./yaml-lifecycle.js";
+import {
+  clearDispatchAndWrite,
+  loadLocal,
+  loadLocalFromDisk,
+  stampAssignedAgentAndWrite,
+} from "./yaml-lifecycle.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 
@@ -279,6 +286,16 @@ describe("tryMultiAgentDispatch", () => {
       alice: agentRecord("alice"),
       bob: agentRecord("bob"),
     });
+    // DX-262 follow-up — picker now intersects `inProgress` with the
+    // live-dispatch set before calling conflict-check. Tell the SQL
+    // handler that DX-99 has a live dispatch so the conflict-check
+    // path actually fires.
+    setAgentLocksQueryFn(async (sql) => {
+      if (sql.includes("FROM dispatches") && sql.includes("issue_id")) {
+        return [{ issue_id: "DX-99" }] as never;
+      }
+      return [] as never;
+    });
     mockedDispatchWithRecovery.mockResolvedValue({
       dispatchId: "did",
       job: {} as never,
@@ -314,6 +331,15 @@ describe("tryMultiAgentDispatch", () => {
     const yl = await import("./yaml-lifecycle.js");
     vi.mocked(yl.loadLocal).mockResolvedValue(issue("DX-1"));
 
+    // DX-262 follow-up — picker only consults conflict-check when the
+    // YAML's in-progress status is backed by a LIVE dispatch row.
+    setAgentLocksQueryFn(async (sql) => {
+      if (sql.includes("FROM dispatches") && sql.includes("issue_id")) {
+        return [{ issue_id: "DX-141" }] as never;
+      }
+      return [] as never;
+    });
+
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
@@ -324,13 +350,82 @@ describe("tryMultiAgentDispatch", () => {
     expect(result.dispatched).toBe(0);
     expect(result.conflictBlocked).toBe(1);
     expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
-    // The blocked card was written via writeIssue with status="Blocked".
+    // Conflict-check rejection stamps `waiting_on` (dep-chain queue),
+    // NOT `blocked` (self-block / human-required). The candidate is
+    // fine — it just must wait for the overlapping sibling to finish.
+    // Status stays unchanged so the poller re-evaluates via
+    // `effectiveWaitingOn` next tick.
     expect(yl.writeIssue).toHaveBeenCalled();
     const writeCall = vi.mocked(yl.writeIssue).mock.calls[0];
-    expect(writeCall[1].status).toBe("Blocked");
-    expect(writeCall[1].blocked).toMatchObject({
+    expect(writeCall[1].status).not.toBe("Blocked");
+    expect(writeCall[1].blocked).toBeNull();
+    expect(writeCall[1].waiting_on).toMatchObject({
       reason: expect.stringContaining("Conflict-check rejection"),
+      by: ["DX-141"],
     });
+  });
+
+  it("DX-262 — stale in-progress YAML with no live dispatch is filtered out → conflict-check skipped, candidate dispatched", async () => {
+    // Orphan YAML left "In Progress" by a dispatch that died outside
+    // the orderly completion path (worker OOM, operator DB cancel,
+    // broken-worktree resetClean, claude-auth fail). The dispatches
+    // table has NO live row for DX-99 — without this filter the
+    // picker would burn a conflict-check triage every tick.
+    writeSettings({
+      alice: agentRecord("alice"),
+    });
+    // SQL handler returns empty for the live-issue-ids query →
+    // liveInProgress becomes empty → conflict-check skipped.
+    setAgentLocksQueryFn(async () => [] as never);
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [issue("DX-99", { status: "In Progress" })],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+    expect(result.dispatched).toBe(1);
+    expect(result.conflictBlocked).toBe(0);
+    expect(mockedRunConflictCheck).not.toHaveBeenCalled();
+  });
+
+  it("DX-262 — partial overlap: only the live-dispatch in-progress card reaches conflict-check; stale one is dropped", async () => {
+    // Two YAMLs claim "In Progress" but only one has a live dispatch.
+    // Conflict-check sees ONLY the live one, not both.
+    writeSettings({
+      alice: agentRecord("alice"),
+    });
+    setAgentLocksQueryFn(async (sql) => {
+      if (sql.includes("FROM dispatches") && sql.includes("issue_id")) {
+        return [{ issue_id: "DX-50" }] as never;
+      }
+      return [] as never;
+    });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+    mockedRunConflictCheck.mockResolvedValue({ ok: true, reason: "no overlap" });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [
+        issue("DX-50", { status: "In Progress" }),
+        issue("DX-99", { status: "In Progress" }),
+      ],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+    expect(result.dispatched).toBe(1);
+    expect(mockedRunConflictCheck).toHaveBeenCalledTimes(1);
+    const passedInProgress = mockedRunConflictCheck.mock.calls[0][0].inProgress;
+    expect(passedInProgress.map((c) => c.id)).toEqual(["DX-50"]);
   });
 
   it("conflictCheckEnabled=false → no triage spawn, all candidates dispatched", async () => {
@@ -412,6 +507,55 @@ describe("tryMultiAgentDispatch", () => {
     expect(mockedDispatchWithRecovery.mock.calls[0][1].agentName).toBe("alice");
   });
 
+  it("DX-284: catch-cleanup uses loadLocalFromDisk so awaitMirror lag doesn't strand the orphan pre-stamp", async () => {
+    // Specific to the DX-284 regression: when `awaitMirror` times out
+    // inside the just-fired `stampDispatchAndWrite`, the DB lags the
+    // YAML. The old code re-read via `loadLocal` (DB), saw `dispatch:
+    // null`, and skipped the clear → orphan pre-stamp persisted. The
+    // fix swaps the cleanup re-read to `loadLocalFromDisk`.
+    //
+    // Setup: simulate the race by making `loadLocal` return the stale
+    // (pre-stamp) shape — the old code would have followed this path
+    // and skipped the clear. `loadLocalFromDisk` returns the post-
+    // stamp shape — the fixed code follows THIS path and clears.
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockRejectedValueOnce(
+      new Error("dispatch failed post-stamp"),
+    );
+    const lifecycle = await import("./yaml-lifecycle.js");
+    vi.mocked(lifecycle.loadLocal).mockResolvedValueOnce(
+      issue("DX-1", { dispatch: null }), // stale DB shape
+    );
+    vi.mocked(lifecycle.loadLocalFromDisk).mockReturnValueOnce(
+      issue("DX-1", {
+        dispatch: {
+          id: "stamp-uuid",
+          pid: 0,
+          host: "test",
+          kind: "work" as const,
+          started_at: "",
+          ttl_seconds: 7200,
+        },
+      }),
+    );
+    const clearMock = vi.mocked(lifecycle.clearDispatchAndWrite);
+    clearMock.mockClear();
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(0);
+    // Cleared via the disk-read path even though the DB still showed
+    // dispatch: null.
+    expect(clearMock).toHaveBeenCalledTimes(1);
+    expect(clearMock.mock.calls[0][1].id).toBe("DX-1");
+  });
+
   it("dispatchWithRecovery throws AFTER YAML stamp → clearDispatchAndWrite fires so the stamp doesn't persist", async () => {
     /**
      * Regression for the poller-idle-with-ToDo-queue bug seen on
@@ -434,7 +578,10 @@ describe("tryMultiAgentDispatch", () => {
       new Error("dispatch failed post-stamp"),
     );
     const lifecycle = await import("./yaml-lifecycle.js");
-    vi.mocked(lifecycle.loadLocal).mockResolvedValueOnce({
+    // DX-284: cleanup paths now read from DISK, not the DB-mirror,
+    // to dodge the awaitMirror lag that was orphaning pre-stamps.
+    // Mock the disk reader (sync, NOT async).
+    vi.mocked(lifecycle.loadLocalFromDisk).mockReturnValueOnce({
       ...issue("DX-1"),
       dispatch: {
         id: "stamp-uuid",
@@ -727,10 +874,11 @@ describe("tryMultiAgentDispatch", () => {
       job: {} as never,
     });
     vi.mocked(runPostDispatchProgressCheck).mockResolvedValue(undefined);
-    // Make loadLocal return a fresh issue carrying a stale dispatch
-    // block so the cleanup branch actually runs (the default mock
-    // returns null → cleanup short-circuits).
-    vi.mocked(loadLocal).mockResolvedValueOnce(
+    // DX-284: cleanup now reads from disk via `loadLocalFromDisk`.
+    // Return a fresh issue carrying a stale dispatch block so the
+    // cleanup branch actually runs (default mock returns null →
+    // short-circuit).
+    vi.mocked(loadLocalFromDisk).mockReturnValueOnce(
       issue("DX-1", {
         dispatch: {
           id: "old-did",
@@ -768,6 +916,33 @@ describe("tryMultiAgentDispatch", () => {
     );
   });
 
+  it("recovery-mode dispatches skip runPostDispatchProgressCheck (branch cleanup, not card work — would write spurious CRITICAL_FAILURE)", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    await dispatchInput.onComplete!({
+      id: "did-1",
+      status: "completed",
+      summary: "recovered branch",
+      recoveryMode: true,
+    } as never);
+
+    expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
+  });
+
   it("AC #4: locally-only cards skip runPostDispatchProgressCheck (no tracker round-trip possible)", async () => {
     writeSettings({ alice: agentRecord("alice") });
     mockedDispatchWithRecovery.mockResolvedValue({
@@ -792,5 +967,183 @@ describe("tryMultiAgentDispatch", () => {
     } as never);
 
     expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
+  });
+
+  // Heal: orphan assigned_agent (agent name no longer in roster — agent
+  // deleted via the settings-clobber race in DX-281, or removed without
+  // running the DX-283 cascade). pickCardForAgent treats those cards as
+  // owned-by-other-agent forever and the picker silently skips them. The
+  // heal pass at the top of tryMultiAgentDispatch clears the orphan claim
+  // so the card becomes pickable on the same tick.
+  // DX-286: heal uses clearDispatchAndWrite (not stampAssignedAgentAndWrite)
+  // to enforce the (dispatch !== null) === (assigned_agent !== null)
+  // invariant atomically — see the heal-pass header comment in
+  // multi-agent-pick.ts for the full rationale.
+  it("heals orphan assigned_agent (agent not in roster) → clears claim, dispatches card", async () => {
+    writeSettings({ murphy: agentRecord("murphy") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const orphanCard = issue("DX-220", { assigned_agent: "phil" });
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [orphanCard],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(clearDispatchAndWrite).toHaveBeenCalledWith(
+      tmpRepo,
+      expect.objectContaining({ id: "DX-220", assigned_agent: "phil" }),
+    );
+    expect(result.dispatched).toBe(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    expect(dispatchInput.issueId).toBe("DX-220");
+    expect(dispatchInput.agent!.name).toBe("murphy");
+  });
+
+  // Invariant: 1 open card per agent at a time. When two open ToDo cards
+  // both stamp assigned_agent=dani (clearDispatchAndWrite miss, manual
+  // edit, etc.), the heal pass keeps the first in pick order and clears
+  // the rest. The kept card dispatches this tick; cleared cards become
+  // unclaimed and re-enter the pool next tick.
+  it("heals duplicate assigned_agent across open cards → keeps first, clears rest", async () => {
+    writeSettings({ dani: agentRecord("dani") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const a = issue("DX-1", { assigned_agent: "dani" });
+    const b = issue("DX-2", { assigned_agent: "dani" });
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [a, b],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(clearDispatchAndWrite).toHaveBeenCalledWith(
+      tmpRepo,
+      expect.objectContaining({ id: "DX-2", assigned_agent: "dani" }),
+    );
+    expect(clearDispatchAndWrite).not.toHaveBeenCalledWith(
+      tmpRepo,
+      expect.objectContaining({ id: "DX-1", assigned_agent: "dani" }),
+    );
+    expect(result.dispatched).toBe(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    expect(dispatchInput.issueId).toBe("DX-1");
+  });
+
+  // DX-286 AC #2 — the heal must clear BOTH dispatch{} and
+  // assigned_agent atomically when the duplicate carries a stale
+  // dispatch{} block (e.g. a chokidar mirror lag let a stamped card
+  // sneak past the listDispatchableYamls filter). Pre-fix the heal
+  // used stampAssignedAgentAndWrite(c, null) which preserved
+  // dispatch{}, leaving the orphan state described in the bug
+  // (assigned_agent: null + dispatch: {pid:0}).
+  it("AC #2: heal-clears-duplicate when dispatch{} is also stamped → both fields cleared atomically", async () => {
+    writeSettings({ dani: agentRecord("dani") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const a = issue("DX-1", { assigned_agent: "dani" });
+    const b = issue("DX-2", {
+      assigned_agent: "dani",
+      dispatch: {
+        id: "did-stale",
+        pid: 0,
+        host: "dan",
+        kind: "work",
+        started_at: "2026-05-11T07:00:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [a, b],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    // Heal should clear DX-2 (the duplicate) via clearDispatchAndWrite
+    // — clears both dispatch{} AND assigned_agent in one write.
+    expect(clearDispatchAndWrite).toHaveBeenCalledWith(
+      tmpRepo,
+      expect.objectContaining({
+        id: "DX-2",
+        assigned_agent: "dani",
+        dispatch: expect.objectContaining({ id: "did-stale", pid: 0 }),
+      }),
+    );
+    // And the heal must NOT use stampAssignedAgentAndWrite(_, _, null)
+    // which would preserve the dispatch{} block (the bug).
+    expect(stampAssignedAgentAndWrite).not.toHaveBeenCalledWith(
+      tmpRepo,
+      expect.anything(),
+      null,
+    );
+    // First card still dispatched.
+    expect(result.dispatched).toBe(1);
+    expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe("DX-1");
+  });
+
+  // DX-286 AC #1 — explicit end-state assertion: a dispatch() throw
+  // post-stamp leaves both fields null on disk, NOT the orphan
+  // pre-stamp state. The pre-existing test on line 557 asserts the
+  // call-shape; this complements by asserting the produced YAML state
+  // (via the clearDispatchAndWrite mock contract — the mock returns
+  // {dispatch: null, assigned_agent: null} so the post-state matches
+  // production behavior).
+  it("AC #1: dispatch() throw post-stamp → end-state YAML has dispatch=null AND assigned_agent=null", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockRejectedValueOnce(
+      new Error("dispatch failed post-stamp"),
+    );
+    const lifecycle = await import("./yaml-lifecycle.js");
+    // The post-stamp disk view: assigned_agent + dispatch BOTH set
+    // (the picker just stamped them on lines 438 and 443).
+    vi.mocked(lifecycle.loadLocalFromDisk).mockReturnValueOnce({
+      ...issue("DX-1"),
+      assigned_agent: "alice",
+      dispatch: {
+        id: "stamp-uuid",
+        pid: 0,
+        host: "host-a",
+        kind: "work" as const,
+        started_at: "",
+        ttl_seconds: 7200,
+      },
+    });
+    const clearMock = vi.mocked(lifecycle.clearDispatchAndWrite);
+    clearMock.mockClear();
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(0);
+    // Catch fired clearDispatchAndWrite — the function clears BOTH
+    // fields by contract (see yaml-lifecycle.ts:461-471). The mock
+    // factory at top of file mirrors that contract.
+    expect(clearMock).toHaveBeenCalledTimes(1);
+    const [, clearedIssue] = clearMock.mock.calls[0];
+    expect(clearedIssue.id).toBe("DX-1");
+    // Post-state derived from the mock contract:
+    const postState = await clearMock.mock.results[0].value;
+    expect(postState.dispatch).toBeNull();
+    expect(postState.assigned_agent).toBeNull();
   });
 });

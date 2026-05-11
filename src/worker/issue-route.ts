@@ -596,8 +596,21 @@ function persistAfterSync(repoLocalPath: string, issue: Issue): void {
   // Phase 2). Mid-session saves with non-null dispatch survive
   // unchanged so the reattach pass + per-tick liveness scan still see
   // the running agent.
-  const persisted = isDispatchSessionTerminal(issue) && issue.dispatch !== null
-    ? { ...issue, dispatch: null }
+  //
+  // DX-286: clear `assigned_agent` ALONGSIDE `dispatch` so the
+  // `(dispatch !== null) === (assigned_agent !== null)` co-ownership
+  // invariant holds across the terminal save. Pre-DX-286, this branch
+  // cleared dispatch only, leaving Done/Cancelled cards with
+  // `assigned_agent: <name> + dispatch: null` in `closed/` — a direction-1
+  // invariant violation visible in the production fixtures (DX-253-256,
+  // DX-259, etc.) that the per-tick heal scan in `_poll` can't reach
+  // (the scan walks `open/` only). Aligning here closes the producer at
+  // the source so terminal cards persist clean from the start.
+  const sessionTerminal = isDispatchSessionTerminal(issue);
+  const needsClear =
+    sessionTerminal && (issue.dispatch !== null || issue.assigned_agent !== null);
+  const persisted = needsClear
+    ? { ...issue, dispatch: null, assigned_agent: null }
     : issue;
 
   if (moveToClosedIfTerminal(repoLocalPath, persisted)) return;

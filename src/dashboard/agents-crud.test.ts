@@ -6,6 +6,7 @@ import {
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
   existsSync,
@@ -510,6 +511,22 @@ describe("handleDeleteAgent", () => {
     expect(mockWriteSettings).not.toHaveBeenCalled();
   });
 
+  it("DX-262 — busy probe filters by agent_name so unrelated stuck dispatches don't block DELETE", async () => {
+    // Pre-fix: the busy probe was repo-wide, so any orphan
+    // running-status row in `dispatches` (e.g. from a crashed worker)
+    // permanently 409'd every agent's DELETE. Post-fix: agent_name
+    // filter scopes the check to THIS agent.
+    mockFindNonTerminalDispatches.mockReset();
+    mockFindNonTerminalDispatches.mockResolvedValue([]);
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(mockFindNonTerminalDispatches).toHaveBeenCalledWith(
+      "danxbot",
+      "alice",
+    );
+  });
+
   it("204s on idle agent; settings record is dropped + per-agent dir is removed", async () => {
     const dir = resolvePath(tmpRepoDir, ".danxbot/agents/alice");
     mkdirSync(dir, { recursive: true });
@@ -545,6 +562,80 @@ describe("handleDeleteAgent", () => {
     await handleDeleteAgent(req, res, "danxbot", "alice", tmpDeps());
     expect(res._getStatusCode()).toBe(500);
     expect(JSON.parse(res._getBody()).error).toMatch(/Failed to persist/);
+  });
+
+  it("DX-283: cascades assigned_agent clear on every open YAML claiming the deleted agent", async () => {
+    // End-to-end: drop two open YAMLs claiming "alice", invoke DELETE,
+    // assert the cascade ran. The cascade's per-card unit coverage
+    // lives in heal.test.ts — this test just locks in the handler
+    // wiring so a future refactor that drops the call surfaces here.
+    const configDir = resolvePath(tmpRepoDir, ".danxbot/config");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      resolvePath(configDir, "config.yml"),
+      "issue_prefix: ISS\n",
+    );
+    const issuesOpen = resolvePath(tmpRepoDir, ".danxbot/issues/open");
+    mkdirSync(issuesOpen, { recursive: true });
+    const claimedA = [
+      "schema_version: 6",
+      "tracker: memory",
+      "id: ISS-500",
+      "external_id: ''",
+      "parent_id: null",
+      "children: []",
+      "dispatch: null",
+      "status: ToDo",
+      "type: Feature",
+      "title: ISS-500",
+      "description: body",
+      "priority: 3.0",
+      "triage:",
+      "  expires_at: ''",
+      "  reassess_hint: ''",
+      "  last_status: ''",
+      "  last_explain: ''",
+      "  ice:",
+      "    total: 0",
+      "    i: 0",
+      "    c: 0",
+      "    e: 0",
+      "  history: []",
+      "ac: []",
+      "comments: []",
+      "history: []",
+      "retro:",
+      "  good: ''",
+      "  bad: ''",
+      "  action_item_ids: []",
+      "  commits: []",
+      "assigned_agent: alice",
+      "waiting_on: null",
+      "blocked: null",
+      "requires_human: null",
+      "",
+    ].join("\n");
+    writeFileSync(resolvePath(issuesOpen, "ISS-500.yml"), claimedA);
+    writeFileSync(
+      resolvePath(issuesOpen, "ISS-501.yml"),
+      claimedA.replace("ISS-500", "ISS-501"),
+    );
+
+    const req = authReqJSON("DELETE", null);
+    const res = createMockRes();
+    await handleDeleteAgent(req, res, "danxbot", "alice", tmpDeps());
+    expect(res._getStatusCode()).toBe(204);
+
+    const r500 = readFileSync(
+      resolvePath(issuesOpen, "ISS-500.yml"),
+      "utf-8",
+    );
+    const r501 = readFileSync(
+      resolvePath(issuesOpen, "ISS-501.yml"),
+      "utf-8",
+    );
+    expect(r500).toMatch(/assigned_agent: null/);
+    expect(r501).toMatch(/assigned_agent: null/);
   });
 });
 

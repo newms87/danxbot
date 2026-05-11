@@ -44,6 +44,27 @@ export const DEFAULT_CHECK_INTERVAL_MS = 2_000; // 2 seconds
 export const DEFAULT_MAX_NUDGES = 3;
 export const DEFAULT_CONFIRMATION_WINDOW_MS = 10_000; // 10 seconds
 
+/**
+ * Static snapshot of "what does the JSONL say right now" used to seed
+ * the detector when the live watcher has no entries yet (reattach
+ * with `fromEof:true`). When the watcher receives a live entry the
+ * snapshot is no longer consulted — live data wins.
+ *
+ * Without this seed, a reattach-on-boot for an agent that froze
+ * before the worker died sees `entries.length === 0` → `getState`
+ * returns `"waiting"` → no stall, no kill, dispatch row + claude
+ * process stay alive indefinitely. The seed lets the detector make
+ * a verdict on the first check tick using on-disk history.
+ */
+export interface StallSnapshot {
+  /** Mirrors `hasReceivedToolResult(jsonlEntries)` computed once at attach. */
+  hasReceivedToolResult: boolean;
+  /** Mirrors `isToolCallPending(jsonlEntries)` computed once at attach. */
+  isToolCallPending: boolean;
+  /** Mirrors `getLastToolResultTimestamp(jsonlEntries)` computed once at attach. */
+  lastToolResultTimestamp: number | null;
+}
+
 export interface StallDetectorOptions {
   /** The SessionLogWatcher whose entries will be inspected for tool call state. */
   watcher: SessionLogWatcher;
@@ -70,6 +91,12 @@ export interface StallDetectorOptions {
    * Default: 10 seconds.
    */
   confirmationWindowMs?: number;
+  /**
+   * Reattach-only: pre-computed JSONL snapshot used while
+   * `watcher.getEntries()` is empty. See `StallSnapshot` for the
+   * rationale + load-bearing semantics.
+   */
+  seedSnapshot?: StallSnapshot;
 }
 
 /** Extract content blocks from an AgentLogEntry, safely handling missing data. */
@@ -135,6 +162,7 @@ export class StallDetector {
   private readonly checkIntervalMs: number;
   private readonly maxNudges: number;
   private readonly confirmationWindowMs: number;
+  private readonly seedSnapshot: StallSnapshot | undefined;
 
   private checkTimer: ReturnType<typeof setInterval> | undefined;
   private nudgeCount = 0;
@@ -153,6 +181,7 @@ export class StallDetector {
     this.checkIntervalMs = options.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
     this.maxNudges = options.maxNudges ?? DEFAULT_MAX_NUDGES;
     this.confirmationWindowMs = options.confirmationWindowMs ?? DEFAULT_CONFIRMATION_WINDOW_MS;
+    this.seedSnapshot = options.seedSnapshot;
   }
 
   /** Start periodic stall checks. */
@@ -186,8 +215,13 @@ export class StallDetector {
   getState(): StallState {
     const entries = this.watcher.getEntries();
 
-    // No entries yet — agent just started, waiting for first output
-    if (entries.length === 0) return "waiting";
+    // No live entries yet. On a fresh spawn this means "agent hasn't
+    // written its first JSONL line" → waiting. On a reattach with
+    // `fromEof:true`, this is the steady state until new entries
+    // arrive — and the JSONL may already carry a stalled tail. The
+    // seed snapshot (computed once at attach time from the on-disk
+    // JSONL) lets us make a verdict without waiting for a new write.
+    if (entries.length === 0) return this.getSeedSnapshotState();
 
     // No tool_result has happened yet — first turn, agent is still in initial response
     if (!hasReceivedToolResult(entries)) return "waiting";
@@ -199,6 +233,25 @@ export class StallDetector {
     return this.terminalWatcher
       ? this.getTerminalStallState(this.terminalWatcher)
       : this.getFallbackStallState(entries);
+  }
+
+  /**
+   * Compute state from the static seed snapshot when no live entries
+   * exist. Mirrors the three short-circuits in `getState` but reads
+   * from the on-disk-derived snapshot. Returns `"waiting"` (the
+   * pre-fix default) when no seed was provided — preserves fresh-
+   * spawn behavior.
+   */
+  private getSeedSnapshotState(): StallState {
+    const snap = this.seedSnapshot;
+    if (snap === undefined) return "waiting";
+    if (!snap.hasReceivedToolResult) return "waiting";
+    if (snap.isToolCallPending) return "waiting";
+    if (snap.lastToolResultTimestamp === null) return "waiting";
+    if (Date.now() - snap.lastToolResultTimestamp >= this.stallThresholdMs) {
+      return "stalled";
+    }
+    return "thinking";
   }
 
   /** Check stall state using terminal output timestamps (host mode). */

@@ -1163,3 +1163,126 @@ describe("StallDetector confirmation window", () => {
     expect(onStall).not.toHaveBeenCalled();
   });
 });
+
+// --- Seed snapshot (reattach with empty live watcher) — DX-282 ---
+
+describe("StallDetector seedSnapshot fallback (reattach path)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns 'stalled' when watcher empty + seed snapshot says last tool_result is older than threshold", () => {
+    const detector = new StallDetector({
+      watcher: makeWatcher([]),
+      onStall: vi.fn(),
+      stallThresholdMs: 60_000,
+      seedSnapshot: {
+        hasReceivedToolResult: true,
+        isToolCallPending: false,
+        lastToolResultTimestamp: Date.now() - 120_000,
+      },
+    });
+    expect(detector.getState()).toBe("stalled");
+  });
+
+  it("returns 'thinking' when watcher empty + seed snapshot says last tool_result is within threshold", () => {
+    const detector = new StallDetector({
+      watcher: makeWatcher([]),
+      onStall: vi.fn(),
+      stallThresholdMs: 60_000,
+      seedSnapshot: {
+        hasReceivedToolResult: true,
+        isToolCallPending: false,
+        lastToolResultTimestamp: Date.now() - 10_000,
+      },
+    });
+    expect(detector.getState()).toBe("thinking");
+  });
+
+  it("returns 'waiting' when seed snapshot says no tool_result has happened yet", () => {
+    const detector = new StallDetector({
+      watcher: makeWatcher([]),
+      onStall: vi.fn(),
+      seedSnapshot: {
+        hasReceivedToolResult: false,
+        isToolCallPending: false,
+        lastToolResultTimestamp: null,
+      },
+    });
+    expect(detector.getState()).toBe("waiting");
+  });
+
+  it("returns 'waiting' when seed snapshot says a tool_use is pending (agent awaiting tool)", () => {
+    const detector = new StallDetector({
+      watcher: makeWatcher([]),
+      onStall: vi.fn(),
+      stallThresholdMs: 60_000,
+      seedSnapshot: {
+        hasReceivedToolResult: true,
+        isToolCallPending: true,
+        lastToolResultTimestamp: Date.now() - 120_000,
+      },
+    });
+    expect(detector.getState()).toBe("waiting");
+  });
+
+  it("returns 'waiting' (pre-fix default) when watcher empty + no seed provided", () => {
+    const detector = new StallDetector({
+      watcher: makeWatcher([]),
+      onStall: vi.fn(),
+    });
+    expect(detector.getState()).toBe("waiting");
+  });
+
+  it("live entries take precedence over seed snapshot the moment any arrive", () => {
+    // Watcher reports ONE live entry — even though that single entry alone
+    // isn't enough for the stalled verdict, getState must read live data
+    // not seed. Seed claimed stalled; live says we're in the middle of
+    // a fresh first turn → "waiting" (no tool_result yet in live data).
+    const liveEntry = assistantEntry([], "hello world", Date.now());
+    const detector = new StallDetector({
+      watcher: makeWatcher([liveEntry]),
+      onStall: vi.fn(),
+      stallThresholdMs: 60_000,
+      seedSnapshot: {
+        hasReceivedToolResult: true,
+        isToolCallPending: false,
+        lastToolResultTimestamp: Date.now() - 120_000,
+      },
+    });
+    expect(detector.getState()).toBe("waiting");
+  });
+
+  it("fires onStall through confirmation window on reattach with stale seed snapshot", async () => {
+    const onStall = vi.fn();
+    const detector = new StallDetector({
+      watcher: makeWatcher([]),
+      onStall,
+      stallThresholdMs: 30_000,
+      checkIntervalMs: 500,
+      confirmationWindowMs: 2_000,
+      maxNudges: 1,
+      seedSnapshot: {
+        hasReceivedToolResult: true,
+        isToolCallPending: false,
+        lastToolResultTimestamp: Date.now() - 60_000,
+      },
+    });
+
+    detector.start();
+    // Inside confirmation window — should not fire
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(onStall).not.toHaveBeenCalled();
+
+    // Past confirmation window — should fire
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(onStall).toHaveBeenCalledTimes(1);
+
+    detector.stop();
+  });
+});

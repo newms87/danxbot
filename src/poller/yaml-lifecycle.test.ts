@@ -18,6 +18,8 @@ import {
   hydrateFromRemote,
   issuePath,
   moveToClosedIfTerminal,
+  loadLocalFromDisk,
+  stampAssignedAgentAndWrite,
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
@@ -492,7 +494,7 @@ describe("yaml-lifecycle", () => {
   });
 
   describe("clearDispatchAndWrite", () => {
-    it("sets dispatch to null and persists", async () => {
+    it("sets dispatch AND assigned_agent to null and persists", async () => {
       const tracker = new MemoryTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-16" }),
@@ -511,16 +513,54 @@ describe("yaml-lifecycle", () => {
         started_at: "2026-05-07T12:00:00.000Z",
         ttl_seconds: 7200,
       });
-      expect(stamped.dispatch).not.toBeNull();
+      // Simulate the dispatch start path also stamping assigned_agent
+      // — that's the field clearDispatchAndWrite must release on the
+      // dispatch-end path.
+      const owned = await stampAssignedAgentAndWrite(repoRoot, stamped, "phil");
+      expect(owned.dispatch).not.toBeNull();
+      expect(owned.assigned_agent).toBe("phil");
 
-      const cleared = await clearDispatchAndWrite(repoRoot, stamped);
+      const cleared = await clearDispatchAndWrite(repoRoot, owned);
       expect(cleared.dispatch).toBeNull();
+      expect(cleared.assigned_agent).toBeNull();
 
       const reloaded = readYamlFile(repoRoot, "ISS-16");
       expect(reloaded.dispatch).toBeNull();
+      expect(reloaded.assigned_agent).toBeNull();
     });
 
-    it("is a no-op when dispatch is already null (returns input, no write)", async () => {
+    it("clears stale assigned_agent even when dispatch is already null (heal path)", async () => {
+      // Pre-fix bug shape: the boot reattach dead-pid handler cleared
+      // dispatch on a prior pass but left assigned_agent stamped. The
+      // function must still clear the orphan claim on a follow-up call
+      // so the multi-agent picker can re-assign the card.
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-18" }),
+      );
+      const original = await hydrateFromRemote(
+        tracker,
+        external_id,
+        null,
+        repoRoot, "ISS",
+      );
+      const orphaned = await stampAssignedAgentAndWrite(
+        repoRoot,
+        original,
+        "phil",
+      );
+      expect(orphaned.dispatch).toBeNull();
+      expect(orphaned.assigned_agent).toBe("phil");
+
+      const cleared = await clearDispatchAndWrite(repoRoot, orphaned);
+      expect(cleared.dispatch).toBeNull();
+      expect(cleared.assigned_agent).toBeNull();
+
+      const reloaded = readYamlFile(repoRoot, "ISS-18");
+      expect(reloaded.assigned_agent).toBeNull();
+    });
+
+    it("is a no-op when BOTH dispatch and assigned_agent are already null (returns input, no write)", async () => {
       const tracker = new MemoryTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-17" }),
@@ -533,6 +573,7 @@ describe("yaml-lifecycle", () => {
       );
       await writeIssue(repoRoot, original);
       expect(original.dispatch).toBeNull();
+      expect(original.assigned_agent).toBeNull();
 
       const result = await clearDispatchAndWrite(repoRoot, original);
       // Same reference — no allocation, no spread.
@@ -685,6 +726,67 @@ describe("yaml-lifecycle", () => {
       const lines = content.split("\n");
       expect(lines).toContain("old-issues/");
       expect(lines).toContain("issues/");
+    });
+  });
+
+  describe("loadLocalFromDisk (DX-284 — DB-mirror-bypass cleanup reader)", () => {
+    it("returns the parsed Issue when the open YAML exists", async () => {
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-400" }),
+      );
+      const created = await hydrateFromRemote(
+        tracker,
+        external_id,
+        null,
+        repoRoot, "ISS",
+      );
+      await writeIssue(repoRoot, created);
+      const loaded = loadLocalFromDisk(repoRoot, "ISS-400", "ISS");
+      expect(loaded).not.toBeNull();
+      expect(loaded?.id).toBe("ISS-400");
+    });
+
+    it("returns null when the YAML is missing", () => {
+      const loaded = loadLocalFromDisk(repoRoot, "ISS-999", "ISS");
+      expect(loaded).toBeNull();
+    });
+
+    it("returns null when the YAML is malformed (doesn't throw past the caller)", () => {
+      const path = issuePath(repoRoot, "ISS-401", "open");
+      ensureIssuesDirs(repoRoot);
+      writeFileSync(path, "not: valid: yaml: :::");
+      const loaded = loadLocalFromDisk(repoRoot, "ISS-401", "ISS");
+      expect(loaded).toBeNull();
+    });
+
+    it("returns the post-write shape WITHOUT needing the mirror — load happens via file read", async () => {
+      // Core DX-284 invariant: loadLocalFromDisk must see the byte
+      // pattern written by `writeIssue` even with NO mirror active.
+      // The yaml-lifecycle test suite runs without `startIssuesMirror`,
+      // so `loadLocal` (DB-backed) would return null here. This test
+      // documents the contract that the cleanup path now depends on.
+      const tracker = new MemoryTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-402" }),
+      );
+      const created = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-mirror-bypass",
+        repoRoot, "ISS",
+      );
+      const stamped = await stampDispatchAndWrite(repoRoot, created, {
+        id: "did-mirror-bypass",
+        pid: 0,
+        host: "h",
+        kind: "work",
+        started_at: "2026-05-11T00:00:00.000Z",
+        ttl_seconds: 7200,
+      });
+      expect(stamped.dispatch).not.toBeNull();
+      const loaded = loadLocalFromDisk(repoRoot, "ISS-402", "ISS");
+      expect(loaded?.dispatch?.id).toBe("did-mirror-bypass");
     });
   });
 });

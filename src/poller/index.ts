@@ -70,6 +70,7 @@ import { injectDanxIssueMcp } from "./inject/inject-root-mcp.js";
 // Phase 5 reintroduces them as a 1-min cron audit pass calling
 // `reconcileIssue` on every open YAML.
 import { healExternalIds } from "./heal-external-id.js";
+import { runInvariantHeal } from "./heal.js";
 import {
   listDispatchableYamls,
   listInProgressYamls,
@@ -743,6 +744,17 @@ async function _poll(repo: RepoContext): Promise<void> {
   // wrote, so step 9's parent recursion picks up new children inside
   // the same tick. Phase 5 reintroduces a 1-min audit pass for drift
   // recovery.
+
+  // DX-286 — per-tick orphan invariant scan. Walks every open YAML and
+  // clears any card violating
+  // `(dispatch !== null) === (assigned_agent !== null)` when the
+  // underlying dispatch (if any) is verifiably dead. Catches both XOR
+  // directions in one pass; the liveness gate inside the scan protects
+  // in-flight paired-writes. Runs BEFORE `listDispatchableYamls` so
+  // orphans cleared this tick re-enter the dispatchable pool on the
+  // SAME tick rather than waiting another poll interval. Same scan
+  // runs once at boot (`src/index.ts`) for pre-fix-bug residue.
+  await runInvariantHeal(repo, "per-tick");
 
   // ISS-86: dispatch source is local YAML, not the tracker fetch above.
   // Phase 4 of ISS-90 dropped the `excludeExternalIds` filter — Action

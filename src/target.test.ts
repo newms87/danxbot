@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { loadTarget, findTargetPath } from "./target.js";
+import { loadTarget, findTargetPath, hostPathVarName } from "./target.js";
 
 vi.mock("./poller/constants.js", () => ({
   getReposBase: () => "/danxbot/repos",
@@ -20,6 +20,14 @@ function writeTarget(name: string, body: string): string {
 
 beforeEach(() => {
   tmp = mkdtempSync(resolve(tmpdir(), "danxbot-target-test-"));
+  // DX-262 — strip any DANXBOT_REPO_HOST_PATH_* leaked from a parent
+  // shell so the default-hostPath assertions are deterministic. The
+  // dedicated env-override test re-sets its key explicitly.
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("DANXBOT_REPO_HOST_PATH_")) {
+      delete process.env[key];
+    }
+  }
 });
 
 afterEach(() => {
@@ -157,5 +165,57 @@ repos:
   it("throws when repos is not an array", () => {
     writeTarget("bad-repos", `name: x\nrepos: "not-an-array"\n`);
     expect(() => loadTarget("bad-repos", tmp)).toThrow(/repos/);
+  });
+
+  it("DX-262 — RepoConfig.hostPath reads DANXBOT_REPO_HOST_PATH_<NAME> env when set (docker-mode dashboard)", () => {
+    // Docker-mode dashboard's WorktreeManager invocations need to run
+    // git from the HOST abs path (mirror-bound into the container) so
+    // `realpath()` writes a path the host worker can also resolve.
+    // The dev compose override and prod template both emit a per-repo
+    // env var with that host path; this test pins target.ts → env read.
+    writeTarget(
+      "x",
+      `name: x\nmode: deploy\nrepos:\n  - name: danxbot\n    url: https://example.git\n    worker_port: 5561\n`,
+    );
+    const prev = process.env["DANXBOT_REPO_HOST_PATH_DANXBOT"];
+    process.env["DANXBOT_REPO_HOST_PATH_DANXBOT"] = "/home/dev/web/danxbot";
+    try {
+      const t = loadTarget("x", tmp);
+      expect(t.repos[0].localPath).toBe("/danxbot/repos/danxbot");
+      expect(t.repos[0].hostPath).toBe("/home/dev/web/danxbot");
+    } finally {
+      if (prev === undefined) delete process.env["DANXBOT_REPO_HOST_PATH_DANXBOT"];
+      else process.env["DANXBOT_REPO_HOST_PATH_DANXBOT"] = prev;
+    }
+  });
+
+  it("DX-262 — hostPath falls back to localPath when the env var is unset (host-mode dashboard)", () => {
+    // Host-mode dashboard runs outside any container — localPath IS
+    // the host abs path. No env var needed.
+    writeTarget(
+      "x",
+      `name: x\nmode: local\nrepos:\n  - name: danxbot\n    url: https://example.git\n    worker_port: 5561\n`,
+    );
+    const prev = process.env["DANXBOT_REPO_HOST_PATH_DANXBOT"];
+    delete process.env["DANXBOT_REPO_HOST_PATH_DANXBOT"];
+    try {
+      const t = loadTarget("x", tmp);
+      expect(t.repos[0].hostPath).toBe(t.repos[0].localPath);
+    } finally {
+      if (prev !== undefined) process.env["DANXBOT_REPO_HOST_PATH_DANXBOT"] = prev;
+    }
+  });
+});
+
+describe("hostPathVarName", () => {
+  // Must mirror `repoRootVarName` in src/cli/dev-compose-override.ts:
+  // uppercase + hyphens→underscores. The dev override emitter and the
+  // prod renderer both produce env keys via the same scheme — these
+  // unit tests pin that.
+  it("uppercases + hyphens→underscores", () => {
+    expect(hostPathVarName("danxbot")).toBe("DANXBOT_REPO_HOST_PATH_DANXBOT");
+    expect(hostPathVarName("gpt-manager")).toBe(
+      "DANXBOT_REPO_HOST_PATH_GPT_MANAGER",
+    );
   });
 });

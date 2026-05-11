@@ -441,7 +441,23 @@ export async function getResumeChain(
  */
 export async function findNonTerminalDispatches(
   repoName: string,
+  agentName?: string,
 ): Promise<Dispatch[]> {
+  // DX-262 — optional `agentName` filter scopes the busy probe to the
+  // agent the operator is trying to DELETE. Without it, unrelated
+  // stuck-running rows in the same repo (e.g. orphan dispatches from a
+  // crashed worker) block every agent's deletion. Caller passes the
+  // agent name when probing for "is THIS agent busy"; omits it when
+  // checking repo-wide pressure.
+  if (agentName) {
+    const rows = await query<DispatchRow>(
+      `SELECT * FROM dispatches
+       WHERE repo_name = $1 AND agent_name = $2 AND "status" IN ('queued', 'running')
+       ORDER BY started_at ASC`,
+      [repoName, agentName],
+    );
+    return rows.map(rowToDispatch);
+  }
   const rows = await query<DispatchRow>(
     `SELECT * FROM dispatches
      WHERE repo_name = $1 AND "status" IN ('queued', 'running')

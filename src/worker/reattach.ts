@@ -69,7 +69,7 @@ import {
 } from "../agent/host-pid.js";
 import { isDispatchOrphaned } from "../dashboard/dispatch-liveness.js";
 import { attachMonitoringStack } from "../agent/attach-monitoring-stack.js";
-import { StallDetector } from "../agent/stall-detector.js";
+import { StallDetector, type StallSnapshot } from "../agent/stall-detector.js";
 import type { AgentJob, SpawnAgentOptions } from "../agent/agent-types.js";
 import type { AgentLogEntry } from "../types.js";
 import type {
@@ -80,6 +80,7 @@ import type { Dispatch, DispatchStatus } from "../dashboard/dispatches.js";
 import type { SessionLogWatcher } from "../agent/session-log-watcher.js";
 import { registerActiveJob } from "../dispatch/core.js";
 import { createReattachHandle } from "./reattach-handle.js";
+import { readFileSync } from "node:fs";
 import { rewriteMcpSettingsIfPortChanged } from "./mcp-settings-rewrite.js";
 import { attemptAutoResume } from "./reattach-resume.js";
 import { eventBus } from "../dashboard/event-bus.js";
@@ -265,12 +266,28 @@ async function maybeRewriteMcpSettings(
  * path is not stamped on the row). Falls back to the 7-minute watcher-
  * only threshold. On detected stall, calls `job.stop("failed", ...)` —
  * the same recovery path the dispatch core uses.
+ *
+ * Seed snapshot: `attachMonitoringStack` starts the watcher with
+ * `fromEof:true` so the post-restart counters don't double-count
+ * historical entries. That leaves `watcher.getEntries()` empty until
+ * the next live JSONL write — and if the agent froze BEFORE the
+ * worker died (operator Ctrl-D in the host TUI, permission deny,
+ * OOM, etc.), no live writes will ever come and the detector would
+ * sit on `"waiting"` forever. The seed is a one-shot read of the
+ * on-disk JSONL at attach time; the detector uses it while the live
+ * buffer is empty, then transparently switches to live data the
+ * moment any new entry arrives.
  */
-function attachStallDetectorForReattach(job: AgentJob): void {
+function attachStallDetectorForReattach(
+  job: AgentJob,
+  jsonlPath: string,
+): void {
   if (!config.isHost) return;
   if (!job.watcher) return;
+  const seedSnapshot = buildStallSnapshotFromJsonl(jsonlPath);
   const detector = new StallDetector({
     watcher: job.watcher,
+    seedSnapshot,
     onStall: async () => {
       if (job.status !== "running") return;
       detector.stop();
@@ -287,6 +304,90 @@ function attachStallDetectorForReattach(job: AgentJob): void {
   job._cleanup = async () => {
     detector.stop();
     await originalCleanup?.();
+  };
+}
+
+/**
+ * Read the JSONL once and derive the structural facts the stall
+ * detector needs while the live watcher buffer is empty:
+ *
+ *  - `hasReceivedToolResult` — has the agent ever finished a tool call?
+ *    Pre-tool-result, "waiting" is the correct state regardless of
+ *    elapsed time.
+ *  - `isToolCallPending` — is there an outstanding `tool_use` with no
+ *    matching `tool_result`? Agent is waiting on a tool — "waiting".
+ *  - `lastToolResultTimestamp` — when did the last tool_result land?
+ *    `Date.now() - this` compared against the stall threshold gives
+ *    the "frozen N minutes ago" verdict.
+ *
+ * Returns `undefined` (NOT an empty snapshot) when the JSONL is gone
+ * or unreadable — caller treats undefined as "no seed available"
+ * → pre-fix behavior (waiting until live entries arrive). The
+ * watcher's own missing-file handling stays authoritative for the
+ * absence-of-session-log error path.
+ *
+ * Exported for direct unit testing — the path through
+ * `attachStallDetectorForReattach` is hard to exercise without
+ * spinning up a full reattach flow.
+ */
+export function buildStallSnapshotFromJsonl(
+  jsonlPath: string,
+): StallSnapshot | undefined {
+  let text: string;
+  try {
+    text = readFileSync(jsonlPath, "utf-8");
+  } catch {
+    return undefined;
+  }
+  const lines = text.split("\n");
+  const pendingToolUseIds = new Set<string>();
+  let hasReceivedToolResult = false;
+  let lastToolResultTimestamp: number | null = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const obj = parsed as {
+      type?: unknown;
+      message?: { content?: unknown };
+      timestamp?: unknown;
+    };
+    const content = obj.message?.content;
+    if (!Array.isArray(content)) continue;
+    if (obj.type === "assistant") {
+      for (const block of content as Array<Record<string, unknown>>) {
+        if (block.type === "tool_use" && typeof block.id === "string") {
+          pendingToolUseIds.add(block.id);
+        }
+      }
+      continue;
+    }
+    if (obj.type === "user") {
+      for (const block of content as Array<Record<string, unknown>>) {
+        if (
+          block.type === "tool_result" &&
+          typeof block.tool_use_id === "string"
+        ) {
+          pendingToolUseIds.delete(block.tool_use_id);
+          hasReceivedToolResult = true;
+          if (typeof obj.timestamp === "string") {
+            const ms = Date.parse(obj.timestamp);
+            if (!Number.isNaN(ms)) lastToolResultTimestamp = ms;
+          }
+        }
+      }
+    }
+  }
+  return {
+    hasReceivedToolResult,
+    isToolCallPending: pendingToolUseIds.size > 0,
+    lastToolResultTimestamp,
   };
 }
 
@@ -474,7 +575,7 @@ async function reattachAlive(
     extraOnEntry: [counters.subscriber],
   });
 
-  attachStallDetectorForReattach(job);
+  attachStallDetectorForReattach(job, row.jsonlPath);
 
   return { kind: "reattached", job };
 }

@@ -38,10 +38,20 @@ export function renderProdCompose(
         `      - /danxbot/repos/${name}/claude-projects:/danxbot/app/claude-projects/${name}:ro`,
     )
     .join("\n");
+  // DX-262 — per-repo host abs path env so docker-mode dashboard's
+  // WorktreeManager runs at the mirror-bound `/danxbot/repos/<name>`
+  // path. Variable name must match `hostPathVarName` in `src/target.ts`.
+  const hostPathEnvs = repoNames
+    .map((name) => {
+      const key = `DANXBOT_REPO_HOST_PATH_${name.toUpperCase().replace(/-/g, "_")}`;
+      return `      ${key}: /danxbot/repos/${name}`;
+    })
+    .join("\n");
   return applyTemplateVars(readFileSync(TEMPLATE, "utf-8"), {
     "${ECR_IMAGE}": ecrImage,
     "${DASHBOARD_PORT}": String(dashboardPort),
     "${CLAUDE_PROJECTS_MOUNTS}": claudeProjectsMounts,
+    "${DASHBOARD_REPO_HOST_PATH_ENVS}": hostPathEnvs,
   });
 }
 

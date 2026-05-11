@@ -32,6 +32,7 @@ import { dirname, resolve } from "node:path";
 import {
   appendHistory,
   createEmptyIssue,
+  parseIssue,
   serializeIssue,
   validateIssue,
 } from "../issue-tracker/yaml.js";
@@ -97,6 +98,44 @@ export async function loadLocal(
 ): Promise<Issue | null> {
   const repoName = repoNameFromPath(repoLocalPath);
   return dbSelectIssueById(repoName, id);
+}
+
+/**
+ * Disk-backed counterpart to `loadLocal`. Reads `open/<id>.yml`
+ * directly via the file system and `parseIssue`s the bytes — no DB
+ * round-trip, no mirror dependency.
+ *
+ * Cleanup paths that fire IMMEDIATELY after a `writeIssue` (especially
+ * `stampDispatchAndWrite` followed by a synchronous `dispatch()`
+ * throw) MUST use this helper rather than `loadLocal`. `writeIssue`'s
+ * mirror ack uses an 8-second `awaitMirror` timeout that frequently
+ * lapses under chokidar pressure; when it does, `loadLocal` returns
+ * the PRE-write DB shape, the cleanup's `if (fresh.dispatch !== null)`
+ * guard evaluates false, the clear is skipped, and the orphan
+ * `dispatch{pid:0}` block lives on disk forever — the symptom that
+ * stuck the poller in DX-284.
+ *
+ * Returns `null` when the file is missing (card moved to `closed/`,
+ * was renamed, was never written). The caller treats null as "card
+ * not in the open bucket, nothing to clear here."
+ */
+export function loadLocalFromDisk(
+  repoLocalPath: string,
+  id: string,
+  prefix: string,
+): Issue | null {
+  const path = issuePath(repoLocalPath, id, "open");
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch {
+    return null;
+  }
+  try {
+    return parseIssue(text, { expectedPrefix: prefix });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -407,15 +446,26 @@ export function stampAssignedAgentAndWrite(
  *     and clearing forces the regular ToDo dispatch path on the next
  *     tick.
  *
- * No-op when `issue.dispatch` is already null (returns the input
+ * Also clears `assigned_agent` in the same write. The invariant is
+ * `assigned_agent != null ⇔ live dispatch on this card` — they are
+ * co-owned fields, not independent. Leaving `assigned_agent` set after
+ * the dispatch row dies is what stuck the multi-agent picker before:
+ * the boot reattach + per-tick eviction paths cleared `dispatch` but
+ * left `assigned_agent: <name>` behind, so `pickCardForAgent` treated
+ * the card as owned by an offline / different agent forever and
+ * `tryMultiAgentDispatch` bailed every tick.
+ *
+ * No-op only when BOTH fields are already null (returns the input
  * unchanged AND skips the write).
  */
 export function clearDispatchAndWrite(
   repoLocalPath: string,
   issue: Issue,
 ): Promise<Issue> {
-  if (issue.dispatch === null) return Promise.resolve(issue);
-  const updated: Issue = { ...issue, dispatch: null };
+  if (issue.dispatch === null && issue.assigned_agent === null) {
+    return Promise.resolve(issue);
+  }
+  const updated: Issue = { ...issue, dispatch: null, assigned_agent: null };
   // Sync phase first — see `stampDispatchAndWrite` for the rationale.
   return writeIssue(repoLocalPath, updated).then(() => updated);
 }

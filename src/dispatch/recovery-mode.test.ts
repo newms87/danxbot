@@ -294,6 +294,31 @@ describe("dispatchWithRecovery — persona inheritance (DX-162)", () => {
 // ============================================================
 
 describe("dispatchInRecoveryMode post-completion behaviour", () => {
+  it("stamps job.recoveryMode = true BEFORE caller's onComplete fires (so progress-check guards short-circuit and don't write CRITICAL_FAILURE for a recovery dispatch)", async () => {
+    const manager = mkManager({ validate: async () => ({ state: "clean" }) });
+    const observed: Array<boolean | undefined> = [];
+    const callerOnComplete = vi.fn(async (job: AgentJob) => {
+      observed.push(job.recoveryMode);
+    });
+    const dispatchMock = vi.fn(
+      async (input: DispatchInput): Promise<DispatchResult> => {
+        await input.onComplete?.(fakeJob());
+        return { dispatchId: "id-rm", job: fakeJob() };
+      },
+    );
+
+    await dispatchInRecoveryMode(
+      mkInput({ onComplete: callerOnComplete }),
+      "alice",
+      dirty,
+      manager,
+      { dispatch: dispatchMock },
+    );
+
+    expect(callerOnComplete).toHaveBeenCalledTimes(1);
+    expect(observed).toEqual([true]);
+  });
+
   it("re-validates after completion; clean → no Needs Help comment filed", async () => {
     const manager = mkManager({ validate: async () => ({ state: "clean" }) });
     const dispatchMock = vi.fn(

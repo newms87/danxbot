@@ -60,7 +60,11 @@ import {
   runPostDispatchProgressCheck,
   tryAcquireLock,
 } from "../dispatch/scheduler.js";
-import { assignedCards, busyAgents } from "../agent/agent-locks.js";
+import {
+  assignedCards,
+  busyAgents,
+  liveDispatchIssueIds,
+} from "../agent/agent-locks.js";
 import { targetName } from "../config.js";
 import type { IssueTracker } from "../issue-tracker/interface.js";
 // `createWorktreeManager` is intentionally imported lazily inside
@@ -75,7 +79,7 @@ import {
   readAgents,
   type AgentRecordWithName,
 } from "../settings-file.js";
-import type { Issue } from "../issue-tracker/interface.js";
+import type { Issue, WaitingOn } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 import { pickCardForAgent, pickFreeAgent } from "./pick-agent.js";
 import {
@@ -84,6 +88,7 @@ import {
 import {
   clearDispatchAndWrite,
   loadLocal,
+  loadLocalFromDisk,
   stampAssignedAgentAndWrite,
   stampDispatchAndWrite,
   writeIssue,
@@ -171,6 +176,62 @@ export async function tryMultiAgentDispatch(
   const busy = await busyAgents(repo.name);
   const assigned = await assignedCards(repo.name);
   const conflictEnabled = isConflictCheckEnabled(repo.localPath);
+
+  // Heal orphan/duplicate `assigned_agent` stamps BEFORE the picker loop.
+  // Two failure modes the picker can't otherwise progress past:
+  //   (a) `assigned_agent` names an agent that no longer exists in the
+  //       roster (settings.json clobber per DX-281, or operator deletion
+  //       without the DX-283 cascade). `pickCardForAgent` treats those
+  //       cards as owned-by-another-agent forever → silent skip every
+  //       tick. Clear the stamp so the card returns to the unclaimed
+  //       pool.
+  //   (b) Same agent stamped on multiple open ToDo cards
+  //       (clearDispatchAndWrite miss on a prior dispatch, manual YAML
+  //       edit). Invariant: 1 open card per agent at a time. Keep the
+  //       first card in pick order (already canonical from
+  //       `listDispatchableYamls` — ICE+priority+FIFO) and clear the
+  //       rest. The kept card dispatches this tick; cleared cards
+  //       re-enter the pool unclaimed on the next tick.
+  // Heal mutations are persisted via `clearDispatchAndWrite` (NOT
+  // `stampAssignedAgentAndWrite(..., null)`) so the co-ownership
+  // invariant `(dispatch !== null) === (assigned_agent !== null)` is
+  // enforced atomically — DX-286 traced orphan `dispatch{pid:0}` blocks
+  // to a heal that cleared assigned_agent only, leaving the dispatch{}
+  // block on cards that came in carrying a stale dispatch. The DX-286
+  // per-tick `runInvariantHeal` in `_poll` runs BEFORE this picker, so
+  // cards reaching here should already satisfy the invariant; this heal
+  // is the second line of defense against the chokidar-lag race window
+  // where a fresh stamp lands between the per-tick scan and the
+  // picker's DB read. The in-memory `cards` view is replaced with
+  // post-heal Issue objects so the remainder of this fn sees the
+  // cleared state.
+  const rosterNames = new Set(roster.map((r) => r.name));
+  const seenAgents = new Set<string>();
+  const healedCards: Issue[] = [];
+  for (const c of cards) {
+    if (c.assigned_agent === null) {
+      healedCards.push(c);
+      continue;
+    }
+    if (!rosterNames.has(c.assigned_agent)) {
+      log.warn(
+        `[${repo.name}] heal: ${c.id} carries orphan assigned_agent=${c.assigned_agent} (not in roster) — clearing claim`,
+      );
+      const cleared = await clearDispatchAndWrite(repo.localPath, c);
+      healedCards.push(cleared);
+      continue;
+    }
+    if (seenAgents.has(c.assigned_agent)) {
+      log.warn(
+        `[${repo.name}] heal: ${c.id} duplicates assigned_agent=${c.assigned_agent} (already claimed by an earlier card this tick) — clearing claim (invariant: 1 open card per agent)`,
+      );
+      const cleared = await clearDispatchAndWrite(repo.localPath, c);
+      healedCards.push(cleared);
+      continue;
+    }
+    seenAgents.add(c.assigned_agent);
+    healedCards.push(c);
+  }
   const { createWorktreeManager } = await import(
     "../agent/worktree-manager.js"
   );
@@ -179,7 +240,9 @@ export async function tryMultiAgentDispatch(
   // Mutable working set — each successful dispatch removes the card
   // from this list (so the next iteration picks a different one) and
   // adds the agent to `busy` (so `pickFreeAgent` skips them next).
-  const remainingCards = [...cards];
+  // Seeded from `healedCards` (post heal pass) so orphan/dup claims are
+  // already cleared.
+  const remainingCards = [...healedCards];
   let dispatched = 0;
   let conflictBlocked = 0;
 
@@ -231,31 +294,67 @@ export async function tryMultiAgentDispatch(
 
     // Run the conflict-check precursor when other agents are
     // working AND the operator hasn't disabled it.
+    //
+    // DX-262 follow-up — re-filter `inProgress` against the LIVE
+    // dispatches table right before the conflict-check spawn. The
+    // input list came from `listInProgressYamls` (status === "In
+    // Progress" — YAML truth) at the top of the tick; orphan YAMLs
+    // whose dispatch died outside the orderly completion path
+    // (worker OOM, operator DB cancel, broken-worktree resetClean,
+    // claude-auth fail) carry `In Progress` until reconcile resets
+    // them, which can be MANY ticks later. Without this filter the
+    // picker burns a conflict-check dispatch every tick against a
+    // ghost card. The filter also closes the slow-tick window where
+    // a sibling card moved Done between the top-of-tick read and the
+    // dispatch call. `liveDispatchIssueIds` is the cheap O(busy)
+    // query — no full table scan.
+    let liveInProgress: readonly Issue[] = inProgress;
     if (inProgress.length > 0 && conflictEnabled) {
+      const liveIds = await liveDispatchIssueIds(repo.name);
+      liveInProgress = inProgress.filter((c) => liveIds.has(c.id));
+      if (liveInProgress.length < inProgress.length) {
+        const dropped = inProgress
+          .filter((c) => !liveIds.has(c.id))
+          .map((c) => c.id);
+        log.info(
+          `[${repo.name}] conflict-check: dropped ${dropped.length} stale in-progress YAML(s) with no live dispatch — ${dropped.join(", ")}`,
+        );
+      }
+    }
+    if (liveInProgress.length > 0 && conflictEnabled) {
       const checkDispatchId = randomUUID();
       const verdict = await runConflictCheck(
-        { repo, candidate: card, inProgress },
+        { repo, candidate: card, inProgress: liveInProgress },
         { dispatch, dispatchId: checkDispatchId },
       );
       if (!verdict.ok) {
         log.warn(
           `[${repo.name}] conflict-check blocked ${card.id} for ${agent.name}: ${verdict.reason}`,
         );
-        // Stamp the candidate's `blocked` field so the dashboard can
-        // surface why the picker passed on it. The poller's
-        // existing blocker-clear pass picks it up on a future tick
-        // when the in-progress sibling reaches a terminal status.
+        // Stamp `waiting_on` (NOT `blocked`) on the candidate. Per the
+        // schema contract (src/issue-tracker/interface.ts: `Blocked` vs
+        // `WaitingOn`): `blocked` = THIS card cannot make progress on
+        // its own work (human must act); `waiting_on` = dep-chain queue
+        // (waiting for OTHER cards to finish first, status stays ToDo).
+        // A conflict-check rejection is the second case — the candidate
+        // is fine, it just must wait for the overlapping sibling(s) to
+        // finish. `effectiveWaitingOn` derives the card eligible again
+        // automatically once every dep reaches a terminal status.
         const fresh = await loadLocal(repo.localPath, card.id, repo.issuePrefix);
         if (fresh) {
-          const reason = `Conflict-check rejection: ${verdict.reason}`;
-          const updated: Issue = {
-            ...fresh,
-            status: "Blocked" as const,
-            blocked: {
-              reason: reason.length > 280 ? reason.slice(0, 279) + "…" : reason,
-              timestamp: now.toISOString(),
-            },
+          const reasonRaw = `Conflict-check rejection: ${verdict.reason}`;
+          const reason =
+            reasonRaw.length > 280 ? reasonRaw.slice(0, 279) + "…" : reasonRaw;
+          const by =
+            verdict.blocked_by && verdict.blocked_by.length > 0
+              ? verdict.blocked_by
+              : liveInProgress.map((c) => c.id);
+          const waiting: WaitingOn = {
+            reason,
+            timestamp: now.toISOString(),
+            by,
           };
+          const updated: Issue = { ...fresh, waiting_on: waiting };
           // Direct write skipping `stampDispatchAndWrite` — the card
           // isn't being dispatched, only flagged. `writeIssue`
           // mirror handles DB sync.
@@ -399,9 +498,18 @@ export async function tryMultiAgentDispatch(
             ? { tracker, externalId: stamped.external_id }
             : undefined,
           pairedWriteYaml: {
+            // DX-284: cleanup paths re-read the YAML from DISK, not
+            // the DB-backed `loadLocal`. `writeIssue`'s mirror ack
+            // uses an 8s `awaitMirror` timeout that frequently lapses
+            // under chokidar pressure (observed: "awaitMirror timed
+            // out for danxbot/DX-260"). When it does, `loadLocal`
+            // returns the PRE-stamp DB shape, the `fresh.dispatch !==
+            // null` guard evaluates false, the clear is skipped, and
+            // the orphan `dispatch{pid:0}` block accumulates on disk.
+            // Disk reads bypass the mirror entirely.
             write: async (pid: number) => {
               const enriched: IssueDispatch = { ...startStamp, pid };
-              const fresh = await loadLocal(
+              const fresh = loadLocalFromDisk(
                 repo.localPath,
                 stamped.id,
                 repo.issuePrefix,
@@ -414,7 +522,7 @@ export async function tryMultiAgentDispatch(
               await stampDispatchAndWrite(repo.localPath, fresh, enriched);
             },
             clear: async () => {
-              const fresh = await loadLocal(
+              const fresh = loadLocalFromDisk(
                 repo.localPath,
                 stamped.id,
                 repo.issuePrefix,
@@ -429,7 +537,9 @@ export async function tryMultiAgentDispatch(
             // sees a clean slate. The `assigned_agent` stamp survives
             // (the next dispatch by the same agent re-claims it via
             // pickCardForAgent's "self-claim allowed" branch).
-            const fresh = await loadLocal(
+            //
+            // DX-284: disk read (see pairedWriteYaml.write comment).
+            const fresh = loadLocalFromDisk(
               repo.localPath,
               stamped.id,
               repo.issuePrefix,
@@ -447,7 +557,12 @@ export async function tryMultiAgentDispatch(
             // safeguard against an env-level blocker (MCP/Bash/auth
             // failing) that lets the agent "finish" without moving the
             // card. The next poll tick reads the flag and halts.
-            if (hasTrackerCoordinate(stamped)) {
+            //
+            // Skip when the dispatch was recovery-mode (branch cleanup,
+            // not card work) — the tracked card stays in ToDo by design
+            // and writing CRITICAL_FAILURE would halt the poller for a
+            // non-issue. See AgentJob.recoveryMode.
+            if (hasTrackerCoordinate(stamped) && !job.recoveryMode) {
               await runPostDispatchProgressCheck({
                 repo,
                 cardId: stamped.external_id,
@@ -473,7 +588,12 @@ export async function tryMultiAgentDispatch(
       // permanently. The accumulated stale blocks were the root cause of
       // a poller-idle-with-ToDo-queue stall seen 2026-05-11.
       try {
-        const fresh = await loadLocal(
+        // DX-284: disk read instead of `loadLocal`. The
+        // `stampDispatchAndWrite` we just ran above may have lost its
+        // `awaitMirror` race (the very symptom that gets us here
+        // — `dispatch()` throwing post-stamp). Reading from disk
+        // bypasses the DB-mirror lag so the clear actually runs.
+        const fresh = loadLocalFromDisk(
           repo.localPath,
           stamped.id,
           repo.issuePrefix,

@@ -93,6 +93,42 @@ export async function busyAgents(repoName: string): Promise<Set<string>> {
 }
 
 /**
+ * Set of `<PREFIX>-N` issue IDs that have at least one non-terminal
+ * dispatch row right now. This is the LIVENESS truth — distinct from
+ * the YAML's `status: "In Progress"` field which goes stale whenever a
+ * dispatch dies outside the orderly completion path (worker OOM,
+ * operator DB cancel, claude-auth failure, broken-worktree resetClean,
+ * etc.).
+ *
+ * The picker uses this to compute the conflict-check `inProgress`
+ * input — without it, orphan YAMLs whose status never got cleared back
+ * to ToDo trigger a $0.01-per-tick conflict-check triage forever
+ * (DX-262 root cause once the worktree side was fixed).
+ *
+ * `pid_terminated_at IS NULL` excludes rows the worker recovery path
+ * marked terminated-but-not-yet-finalized; those are effectively dead.
+ */
+export async function liveDispatchIssueIds(
+  repoName: string,
+): Promise<Set<string>> {
+  const rows = await queryFn<{ issue_id: string }>(
+    `SELECT DISTINCT issue_id FROM dispatches
+       WHERE repo_name = $1
+         AND issue_id IS NOT NULL
+         AND "status" NOT IN ('completed', 'failed', 'cancelled')
+         AND pid_terminated_at IS NULL`,
+    [repoName],
+  );
+  const out = new Set<string>();
+  for (const r of rows) {
+    if (typeof r.issue_id === "string" && r.issue_id.length > 0) {
+      out.add(r.issue_id);
+    }
+  }
+  return out;
+}
+
+/**
  * Map of `<PREFIX>-N` → agent name for every open issue that has
  * stamped an `assigned_agent` claim. The pick step consults this map
  * when filtering candidate cards — a card claimed by another agent is
