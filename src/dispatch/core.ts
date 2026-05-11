@@ -400,6 +400,24 @@ export interface DispatchInput {
     tracker: IssueTracker;
     externalId: string;
   };
+  /**
+   * DX-260 (Phase 2 of DX-246) — inherited recover count for the spawn
+   * about to be created. Threaded to `spawnAgent` so
+   * `AgentJob.recoverCount` is seeded from the chain's prior count
+   * AND the new dispatches row's `recover_count` column reflects the
+   * same starting value. Fresh launches omit the field (or pass `0`);
+   * the API-error recover handler's `POST /api/resume` carries the
+   * parent's post-increment count here.
+   */
+  recoverCount?: number;
+  /**
+   * DX-260 — parent dispatch ID when THIS dispatch is the
+   * recover-child of an earlier dispatch. Threaded to `spawnAgent` →
+   * `startDispatchTracking` so the new row's `parent_recover_id`
+   * column points at the prior dispatch. `null` / undefined for
+   * direct launches.
+   */
+  parentRecoverId?: string | null;
 }
 
 export interface DispatchResult {
@@ -541,6 +559,18 @@ async function runResolved(
   input: Omit<DispatchInput, "workspace" | "overlay">,
   dispatchId: string,
   resolved: ResolvedSurface,
+  recoverCtx: {
+    /**
+     * Raw task body BEFORE persona prepend + completion instruction
+     * — what the API-error recover handler POSTs as the new user
+     * turn on `/api/resume`. Captured in `dispatch()` from
+     * `input.task` BEFORE the persona prepend rebinds it.
+     */
+    originalTask: string;
+    workspace: string;
+    workerPort: number;
+    repoLocalPath: string;
+  },
 ): Promise<DispatchResult> {
   const taskWithInstruction = input.task + buildCompletionInstruction();
   let resumeCount = 0;
@@ -644,6 +674,21 @@ async function runResolved(
         parentJobId: input.parentJobId,
         issueId: input.issueId,
         agentName: input.agent?.name ?? null,
+        // DX-260 (Phase 2 of DX-246). Only the initial spawn carries
+        // these — stall-recovery respawns reuse the SAME dispatch row
+        // (which already has the right recover_count + parent_recover_id
+        // baked in) and would double-stamp if we re-passed them. The
+        // recoverContext stays threaded across respawns so the
+        // ApiErrorDetector wiring still works inside the recovered
+        // process tree.
+        initialRecoverCount: isRespawn ? undefined : input.recoverCount,
+        parentRecoverId: isRespawn ? undefined : input.parentRecoverId ?? null,
+        recoverContext: {
+          originalTask: recoverCtx.originalTask,
+          workspace: recoverCtx.workspace,
+          workerPort: recoverCtx.workerPort,
+          repoLocalPath: recoverCtx.repoLocalPath,
+        },
         // Per-dispatch MCP settings path (DX-207). On the initial spawn
         // this lands on the row via `startDispatchTracking` →
         // `insertDispatch`. On respawn `dispatch` is undefined →
@@ -1040,16 +1085,34 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // reachable because the danxbot server registers it, not because it's
   // listed anywhere.
   try {
-    return await runResolved(inputWithPersona, dispatchId, {
-      mcpServers,
-      cwd: workspace.cwd,
-      envOverrides: workspace.env,
-      stagedFilePaths,
-      topLevelAgent: workspace.topLevelAgent,
-      settingsPath: workspace.settingsPath,
-      stagingPaths: workspace.stagingPaths,
-      overlay,
-    });
+    return await runResolved(
+      inputWithPersona,
+      dispatchId,
+      {
+        mcpServers,
+        cwd: workspace.cwd,
+        envOverrides: workspace.env,
+        stagedFilePaths,
+        topLevelAgent: workspace.topLevelAgent,
+        settingsPath: workspace.settingsPath,
+        stagingPaths: workspace.stagingPaths,
+        overlay,
+      },
+      // DX-260 (Phase 2 of DX-246) — capture the recover context
+      // BEFORE the persona prepend rebinds `input.task`. `originalTask`
+      // is the raw caller-supplied body so the recover handler's
+      // `/api/resume` POST carries the same task that originally
+      // launched the dispatch (re-attached as a safety net; claude's
+      // `--resume` typically already has it in the prior session
+      // context). `repoLocalPath` is for `writeFlag` on the cap-
+      // exhausted path; `workerPort` is for the resume URL.
+      {
+        originalTask: input.task,
+        workspace: input.workspace,
+        workerPort: input.repo.workerPort,
+        repoLocalPath: input.repo.localPath,
+      },
+    );
   } catch (err) {
     // runResolved already cleans up MCP settings + staged files in the
     // spawn-failure branch via the catch block in spawnForDispatch. This

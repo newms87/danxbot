@@ -161,6 +161,7 @@ describe("createInactivityTimer", () => {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
       },
+      recoverCount: 0,
       stop: async () => {},
     };
   }
@@ -232,6 +233,7 @@ describe("setupProcessHandlers", () => {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
       },
+      recoverCount: 0,
       stop: async () => {},
     };
   }

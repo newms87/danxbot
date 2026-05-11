@@ -47,11 +47,43 @@ import {
 } from "./danxbot-stop-fallback.js";
 
 /**
- * All values the `danxbot_complete` MCP tool accepts for `status`. Exposed
- * (alongside `isCompleteStatus`) so the worker's stop handler and the
- * MCP server schema can reference a single source of truth.
+ * Status values the `danxbot_complete` MCP tool's JSON schema advertises
+ * to the agent. Subset of `COMPLETE_STATUSES` — the launcher-internal
+ * `api_error_*` statuses (DX-260) are accepted by the worker's stop
+ * pipeline but intentionally hidden from the agent's tool surface
+ * because the agent never originates them (the API-error recover handler
+ * in `attach-monitoring-stack.ts` does).
  */
-export const COMPLETE_STATUSES = ["completed", "failed", "critical_failure"] as const;
+export const AGENT_COMPLETE_STATUSES = [
+  "completed",
+  "failed",
+  "critical_failure",
+] as const;
+
+/**
+ * All values the `/api/stop/:jobId` endpoint AND `job.stop` accept.
+ * Includes the agent-visible set plus the two launcher-internal status
+ * values the API-error recover handler emits (DX-260 / Phase 2 of
+ * DX-246):
+ *
+ *   - `api_error_recover` — recover-ok path; maps to dispatch row
+ *     status `"recovered"`. Caller is expected to follow up with
+ *     `POST /api/resume` so the chain continues on a fresh row whose
+ *     `parent_recover_id` references this row.
+ *   - `api_error_failed` — cap-exhausted path (recoverCount has
+ *     exceeded `MAX_RECOVERS = 3`); maps to dispatch row status
+ *     `"failed"`. Caller is expected to write the per-repo
+ *     `CRITICAL_FAILURE` flag before signaling so the poller halts.
+ *
+ * Single source of truth for both the schema's enum (via
+ * `AGENT_COMPLETE_STATUSES`) and the worker's `isCompleteStatus`
+ * validator.
+ */
+export const COMPLETE_STATUSES = [
+  ...AGENT_COMPLETE_STATUSES,
+  "api_error_recover",
+  "api_error_failed",
+] as const;
 export type CompleteStatus = (typeof COMPLETE_STATUSES)[number];
 
 export function isCompleteStatus(value: unknown): value is CompleteStatus {
@@ -63,23 +95,35 @@ export function isCompleteStatus(value: unknown): value is CompleteStatus {
 
 /**
  * Map an agent-facing `CompleteStatus` to the `dispatches` row's
- * terminal `status` column. `critical_failure` collapses to `failed`
- * — the halt signal lives in the per-repo flag file (see
- * `.claude/rules/agent-dispatch.md` "Critical failure flag"), not on
- * the dispatch row. Callers that need to UPDATE the row use this; the
- * agent-facing response advertises `critical_failure` distinctly so
- * the operator and the agent see the right signal at each layer.
+ * terminal `status` column.
+ *
+ *   - `completed` → `completed`
+ *   - `failed` → `failed`
+ *   - `critical_failure` → `failed`. The halt signal lives in the
+ *     per-repo flag file (see `.claude/rules/agent-dispatch.md`
+ *     "Critical failure flag"), not on the dispatch row. The
+ *     agent-facing response advertises `critical_failure` distinctly
+ *     so the operator and the agent see the right signal at each
+ *     layer.
+ *   - `api_error_recover` → `recovered`. DX-260 / Phase 2 of DX-246:
+ *     the API-error recover handler ended this row terminal; a fresh
+ *     row continues the chain via `POST /api/resume`.
+ *   - `api_error_failed` → `failed`. DX-260: cap exhausted; the
+ *     recover handler also writes the per-repo `CRITICAL_FAILURE`
+ *     flag, mirroring the `critical_failure` two-layer pattern.
  *
  * Single source of truth — `worker/dispatch.ts` (handleStopFromDb),
  * `worker/replay-stop-queue.ts`, and `mcp/danxbot-server.ts`
  * (callDanxbotComplete fallback) all import this. A regression that
- * inlines the ternary in any of those sites loses the documented
- * "completed/failed only" contract.
+ * inlines the mapping in any of those sites loses the documented
+ * contract.
  */
 export function mapCompleteToTerminalStatus(
   status: CompleteStatus,
-): "completed" | "failed" {
-  return status === "completed" ? "completed" : "failed";
+): "completed" | "failed" | "recovered" {
+  if (status === "completed") return "completed";
+  if (status === "api_error_recover") return "recovered";
+  return "failed";
 }
 
 /**
@@ -159,7 +203,7 @@ export const TOOLS = [
       properties: {
         status: {
           type: "string",
-          enum: [...COMPLETE_STATUSES],
+          enum: [...AGENT_COMPLETE_STATUSES],
           description:
             "completed = success, failed = card-specific fatal error, " +
             "critical_failure = environment-level blocker affecting every dispatch",

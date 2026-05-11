@@ -24,6 +24,7 @@
 
 import { createLogger } from "../logger.js";
 import { putStatus } from "./agent-status.js";
+import type { CompleteStatus } from "../mcp/danxbot-server.js";
 import type { AgentJob } from "./agent-types.js";
 
 const log = createLogger("agent-stop");
@@ -37,13 +38,36 @@ export interface BuildJobStopHandlerDeps {
   onComplete?: (job: AgentJob) => void;
 }
 
+/**
+ * Map an agent-facing `CompleteStatus` to the in-memory
+ * `AgentJob.status` value. `buildCleanup` collapses the result to the
+ * DispatchStatus the dispatch row stores via the same shape contract:
+ *
+ *   - `completed`          → `completed` (in-memory) → `completed` (DB)
+ *   - `failed`             → `failed`                → `failed`
+ *   - `critical_failure`   → `failed`                → `failed`
+ *   - `api_error_failed`   → `failed`                → `failed`
+ *   - `api_error_recover`  → `recovered`             → `recovered`
+ *
+ * The cap-exhausted / critical-failure flags are written by the
+ * caller BEFORE invoking `job.stop`, mirroring the two-layer pattern
+ * the `critical_failure` handler in `worker/dispatch.ts` already uses.
+ */
+function mapCompleteToInMemory(
+  status: CompleteStatus,
+): "completed" | "failed" | "recovered" {
+  if (status === "completed") return "completed";
+  if (status === "api_error_recover") return "recovered";
+  return "failed";
+}
+
 export function buildJobStopHandler(
   deps: BuildJobStopHandlerDeps,
 ): AgentJob["stop"] {
   const { job, jobId, cleanup, statusUrl, apiToken, onComplete } = deps;
 
   return async function jobStop(
-    status: "completed" | "failed",
+    status: CompleteStatus,
     summary?: string,
   ): Promise<void> {
     if (job.status !== "running") return;
@@ -51,8 +75,11 @@ export function buildJobStopHandler(
 
     log.info(`[Job ${jobId}] Agent self-stop (${status}) — sending SIGTERM`);
 
-    // Set terminal status BEFORE killing to prevent the close handler from overriding it
-    job.status = status;
+    // Set terminal status BEFORE killing to prevent the close handler from overriding it.
+    // The `CompleteStatus` is collapsed to the narrower in-memory job
+    // status here — `buildCleanup` re-derives the DispatchStatus from
+    // `job.status` so the DB row mirrors the same shape.
+    job.status = mapCompleteToInMemory(status);
     if (summary) job.summary = summary;
     job.completedAt = new Date();
 

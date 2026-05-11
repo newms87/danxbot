@@ -36,8 +36,14 @@ import { TERMINAL_STATUSES } from "../dashboard/dispatches.js";
  */
 interface DbWriteShape {
   dispatchId: string;
-  /** Already-collapsed DB status: `completed` or `failed`. */
-  dbStatus: "completed" | "failed";
+  /**
+   * Already-collapsed DB status. Includes `recovered` from DX-260
+   * (Phase 2 of DX-246) — when the agent signaled `api_error_recover`
+   * through the MCP tool and the worker is unreachable, the fallback
+   * row still needs to land terminal=recovered so the recover-child
+   * dispatch's `parent_recover_id` references a terminal row.
+   */
+  dbStatus: "completed" | "failed" | "recovered";
   summary: string;
 }
 

@@ -103,6 +103,19 @@ describe("isCompleteStatus", () => {
     }
   });
 
+  // DX-260 (Phase 2 of DX-246) — pin the COMPLETE_STATUSES set explicitly
+  // so a future shrink (e.g. accidentally dropping `api_error_recover`)
+  // surfaces here, not as a silent worker-stop validation failure.
+  it("accepts the full DX-260 set: agent-visible + launcher-internal", () => {
+    expect([...COMPLETE_STATUSES]).toEqual([
+      "completed",
+      "failed",
+      "critical_failure",
+      "api_error_recover",
+      "api_error_failed",
+    ]);
+  });
+
   it("rejects other strings", () => {
     expect(isCompleteStatus("bogus")).toBe(false);
     expect(isCompleteStatus("")).toBe(false);
@@ -114,6 +127,53 @@ describe("isCompleteStatus", () => {
     expect(isCompleteStatus(null)).toBe(false);
     expect(isCompleteStatus(123)).toBe(false);
     expect(isCompleteStatus({})).toBe(false);
+  });
+});
+
+describe("mapCompleteToTerminalStatus (DX-260)", () => {
+  // Single source of truth for collapsing the agent-facing
+  // `CompleteStatus` → the `dispatches` row's terminal `status` column.
+  // Three consumers (`worker/dispatch.ts#handleStopFromDb`,
+  // `worker/replay-stop-queue.ts`, the MCP fallback chain in
+  // this same file) all import this — a regression that inlines the
+  // mapping in any of those sites would lose the contract these tests
+  // pin.
+
+  it("completed maps to completed", async () => {
+    const { mapCompleteToTerminalStatus } = await import(
+      "./danxbot-server.js"
+    );
+    expect(mapCompleteToTerminalStatus("completed")).toBe("completed");
+  });
+
+  it("failed maps to failed", async () => {
+    const { mapCompleteToTerminalStatus } = await import(
+      "./danxbot-server.js"
+    );
+    expect(mapCompleteToTerminalStatus("failed")).toBe("failed");
+  });
+
+  it("critical_failure collapses to failed (halt signal lives in flag file)", async () => {
+    const { mapCompleteToTerminalStatus } = await import(
+      "./danxbot-server.js"
+    );
+    expect(mapCompleteToTerminalStatus("critical_failure")).toBe("failed");
+  });
+
+  it("api_error_recover maps to recovered (distinct telemetry — DX-260)", async () => {
+    const { mapCompleteToTerminalStatus } = await import(
+      "./danxbot-server.js"
+    );
+    expect(mapCompleteToTerminalStatus("api_error_recover")).toBe(
+      "recovered",
+    );
+  });
+
+  it("api_error_failed collapses to failed (cap exhausted; flag lives elsewhere)", async () => {
+    const { mapCompleteToTerminalStatus } = await import(
+      "./danxbot-server.js"
+    );
+    expect(mapCompleteToTerminalStatus("api_error_failed")).toBe("failed");
   });
 });
 

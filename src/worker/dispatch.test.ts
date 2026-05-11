@@ -1548,6 +1548,8 @@ type CapturedDispatchInput = {
   };
   parentJobId?: string;
   resumeSessionId?: string;
+  recoverCount?: number;
+  parentRecoverId?: string | null;
 };
 
 function capturedInput(callIdx = 0): CapturedDispatchInput {
@@ -1671,6 +1673,71 @@ describe("handleResume — apiDispatchMeta build", () => {
     // dispatch is indistinguishable from a fresh launch downstream.
     expect(input.parentJobId).toBe("parent-job-abc");
     expect(input.resumeSessionId).toBe("parent");
+  });
+
+  // DX-260 (Phase 2 of DX-246) — the API-error recover handler POSTs
+  // /api/resume with `recover_count` and `parent_recover_id` on top of
+  // the regular resume body. The worker MUST thread those into
+  // DispatchInput so the new dispatch row inherits the chain's count
+  // and references its parent — silent loss of either field breaks the
+  // cap check across rows AND the dashboard's recover-chain view.
+  it("threads recover_count + parent_recover_id from the body into the DispatchInput (recover-spawned resume)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "issue-worker",
+      job_id: "parent-job-abc",
+      task: "Continue from prior turn",
+      recover_count: 2,
+      parent_recover_id: "prior-dispatch-id",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const input = capturedInput();
+    expect(input.recoverCount).toBe(2);
+    expect(input.parentRecoverId).toBe("prior-dispatch-id");
+  });
+
+  it("defaults recoverCount=undefined + parentRecoverId=null when the resume body omits them (operator-initiated, non-recover resume)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "issue-worker",
+      job_id: "parent-job-abc",
+      task: "Continue from prior turn",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const input = capturedInput();
+    // Missing → undefined so dispatch-tracker falls back to the row's
+    // default (0 / null) at insert. Forwarding `0` here would silently
+    // shadow that fallback for any future caller that relies on it.
+    expect(input.recoverCount).toBeUndefined();
+    expect(input.parentRecoverId).toBeNull();
+  });
+
+  it("ignores recover_count when body sends a non-number (e.g. the field arrives as a string '2')", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "issue-worker",
+      job_id: "parent-job-abc",
+      task: "Continue from prior turn",
+      recover_count: "2",
+    });
+    const res = createMockRes();
+
+    await handleResume(req, res, MOCK_REPO);
+
+    // Coercion is deliberately off — the recover handler MUST send a
+    // real integer; accepting strings here would mask a producer bug
+    // and let `NaN` reach the row's `recover_count` column. Defaults
+    // to undefined.
+    expect(res._getStatusCode()).toBe(200);
+    expect(capturedInput().recoverCount).toBeUndefined();
   });
 });
 

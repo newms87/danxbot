@@ -2427,7 +2427,18 @@ async function handleAgentCompletion(
   state: RepoPollerState,
   job: AgentJob,
 ): Promise<void> {
-  const isFailure = job.status !== "completed";
+  // DX-260 (Phase 2 of DX-246): `recovered` is a launcher-internal
+  // terminal state that means "this dispatch ended so a fresh resume
+  // could continue the chain." The recover-child dispatch (auto-spawned
+  // via /api/resume from the recover handler) will report its OWN
+  // terminal status when it finishes. Treating `recovered` as a
+  // failure here would inflate `consecutiveFailures` per recover and
+  // trip the poller-level halt after `pollerBackoffScheduleMs.length`
+  // API-error events — undoing the entire feature's "recovered !=
+  // failed" semantic. The per-chain cap (MAX_RECOVERS) is enforced
+  // in-launcher and writes CRITICAL_FAILURE on exhaust, so the
+  // poller-level escalator never needs to see these.
+  const isFailure = job.status !== "completed" && job.status !== "recovered";
 
   if (isFailure) {
     state.consecutiveFailures++;
@@ -2460,12 +2471,21 @@ async function handleAgentCompletion(
     state.backoffUntil = 0;
   }
 
+  // DX-260: skip card-progress + triage checks on `recovered`. The
+  // parent dispatch hit an API stream-idle error and handed off to a
+  // recover-child via POST /api/resume; the recover-child is still
+  // running against the same card. Treating "card still in ToDo when
+  // parent ended" as a halt signal here would CRITICAL_FAILURE the
+  // entire poller on every transient Anthropic stutter. The
+  // recover-child runs its own card-progress check when IT terminates.
+  const isRecovered = job.status === "recovered";
+
   // Post-dispatch card-progress check. Runs on both success and
   // failure — a "completed" agent that never moved the card is as much
   // of an env-level signal as a "failed" one. If the card still sits
   // in ToDo, this writes the critical-failure flag; the next tick's
   // halt gate will see it and refuse to dispatch.
-  if (state.trackedCardId) {
+  if (state.trackedCardId && !isRecovered) {
     await checkCardProgressedOrHalt(repo, state, job);
   }
 
@@ -2475,7 +2495,7 @@ async function handleAgentCompletion(
   // loop the existing trello-trigger guard does not catch (triage
   // dispatches use `trigger: "api"` and never move the card across
   // lists). Same fail-loud halt mechanism via the critical-failure flag.
-  if (state.triageTracked) {
+  if (state.triageTracked && !isRecovered) {
     await checkTriageProgressedOrHalt(repo, state, job);
   }
 

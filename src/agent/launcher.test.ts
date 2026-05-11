@@ -3125,6 +3125,7 @@ describe("terminateWithGrace", () => {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
       },
+      recoverCount: 0,
     } as AgentJob;
     return { job, handle };
   }

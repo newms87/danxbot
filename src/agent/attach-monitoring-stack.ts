@@ -68,9 +68,22 @@ import { startHeartbeat, notifyTerminalStatus } from "./agent-status.js";
 import { attachUsageAccumulator } from "./usage-accumulator.js";
 import { buildCleanup } from "./agent-cleanup.js";
 import { buildJobStopHandler } from "./agent-stop.js";
+import { ApiErrorDetector, type ApiErrorInfo } from "./api-error-detector.js";
+import { writeFlag } from "../critical-failure.js";
 import type { AgentJob, SpawnAgentOptions } from "./agent-types.js";
 
 const log = createLogger("attach-monitoring-stack");
+
+/**
+ * DX-260 (Phase 2 of DX-246) — recover cap. The first `MAX_RECOVERS`
+ * consecutive API-error synthetic events in a dispatch chain trigger
+ * an auto-recover via `POST /api/resume`; the next one writes the
+ * per-repo `CRITICAL_FAILURE` flag and ends the chain. Hardcoded
+ * because the cap is the same for every dispatch — operator
+ * intervention is the only path past it. Exported so tests can import
+ * the same constant the production handler reads.
+ */
+export const MAX_RECOVERS = 3;
 
 export interface AttachMonitoringStackOptions {
   /** Partially-constructed job from preflight (or reattach shim). */
@@ -251,11 +264,49 @@ export async function attachMonitoringStack(
       issueId: options.issueId ?? null,
       agentName: options.agentName ?? null,
       mcpSettingsPath: options.mcpSettingsPath ?? null,
+      // DX-260 (Phase 2 of DX-246): recover-chain stamps. Fresh launches
+      // pass undefined and the tracker defaults both to chain origin
+      // (0 / null); recover-spawned resumes thread the parent's
+      // post-increment count + the parent's id here so the chain is
+      // queryable from the dashboard.
+      recoverCount: options.initialRecoverCount,
+      parentRecoverId: options.parentRecoverId ?? null,
     });
   }
   if (dispatchTracker) {
     job.dispatchTracker = dispatchTracker;
   }
+
+  // DX-260 (Phase 2 of DX-246) — API-error auto-recover. Seed the
+  // in-memory counter from the inherited value (resume children carry
+  // the parent's post-increment count) and wire `ApiErrorDetector`
+  // onto the same watcher every other observer reads. The detector's
+  // 5s confirmation window debounces transient API stutter; the
+  // recover handler implements the cap check + recover POST.
+  job.recoverCount = options.initialRecoverCount ?? 0;
+  // Keep the detector reference so cleanup can `.stop()` it — the
+  // detector's 5s confirmation-window timer is the only setTimeout
+  // that survives `watcher.stop()` on its own. Without an explicit
+  // `.stop()`, a synthetic that armed within the last 5 seconds
+  // before terminal would fire the recover handler AFTER cleanup ran,
+  // creating a race where the handler observes a half-disposed job.
+  // The `job.status !== "running"` guard at the top of
+  // `handleApiErrorRecover` is the second line of defense, but
+  // clearing the timer at cleanup time is the first.
+  const apiErrorDetector = new ApiErrorDetector({
+    jobId,
+    watcher,
+    getRecoverCount: () => job.recoverCount,
+    onApiError: (info) => {
+      void handleApiErrorRecover({
+        info,
+        job,
+        jobId,
+        dispatchTracker,
+        options,
+      });
+    },
+  });
 
   // Phase 2c (DX-209) — register caller-supplied subscribers BEFORE
   // `watcher.start()`. The watcher's first `poll()` runs inside `start`
@@ -344,6 +395,14 @@ export async function attachMonitoringStack(
   let cleanupPromise: Promise<void> | undefined;
   function cleanup(): Promise<void> {
     if (cleanupPromise) return cleanupPromise;
+    // DX-260: stop the API-error detector FIRST so the confirmation-
+    // window timer (5s default) can't fire after cleanup begins. The
+    // detector subscribes to watcher.onEntry, but a timer armed
+    // BEFORE the cleanup is independent of watcher state; without
+    // this explicit stop, a synthetic-error fire mid-cleanup races
+    // with `dispatchTracker.finalize` and the recover handler ends
+    // up calling `job.stop` on a half-disposed job.
+    apiErrorDetector.stop();
     // Catch so fire-and-forget callers (close handler, inactivity timer,
     // host onExit) never raise an unhandled rejection if drain/finalize
     // throw. Errors are logged via the inner try/catch around
@@ -382,4 +441,154 @@ export async function attachMonitoringStack(
       termSettingsDirToClean = dir;
     },
   };
+}
+
+/**
+ * DX-260 (Phase 2 of DX-246) — recover handler invoked by the
+ * `ApiErrorDetector` after the 5s confirmation window confirms a
+ * Claude API stream-idle synthetic error.
+ *
+ * Increments the chain's recover counter (in-memory + DB), then
+ * branches on the cap:
+ *
+ *  - **Cap exhausted** (count > `MAX_RECOVERS`): writes the per-repo
+ *    `CRITICAL_FAILURE` flag so the poller halts, then calls
+ *    `job.stop("api_error_failed", summary)` which collapses the
+ *    in-memory status to `failed` AND the dispatch row to `failed`
+ *    via `buildCleanup`. The agent dies; no `/api/resume` POSTs;
+ *    operator clears the flag to resume polling.
+ *
+ *  - **Recover ok** (count ≤ `MAX_RECOVERS`): calls
+ *    `job.stop("api_error_recover", summary)` which collapses the
+ *    in-memory status to `recovered` and finalizes the dispatch row
+ *    as `recovered`; then POSTs `/api/resume` so the chain continues
+ *    on a fresh row stamped with `parent_recover_id` pointing back
+ *    here. Resume failures are logged but do NOT escalate to the
+ *    flag — a one-off /api/resume failure is recoverable (the
+ *    poller will re-dispatch the card on its next tick); persisting
+ *    the cap-exhausted halt for a transient HTTP error would defeat
+ *    the whole feature.
+ *
+ * Fire-and-forget from the detector's callback because the detector
+ * runs inside `setTimeout` and has no way to await our work. The
+ * function captures every error in its own try/catch so a thrown
+ * error here never escapes as an unhandled rejection.
+ */
+async function handleApiErrorRecover(args: {
+  info: ApiErrorInfo;
+  job: AgentJob;
+  jobId: string;
+  dispatchTracker: DispatchTracker | undefined;
+  options: SpawnAgentOptions;
+}): Promise<void> {
+  const { info, job, jobId, dispatchTracker, options } = args;
+  try {
+    if (job.status !== "running") {
+      // The job already reached terminal — either the agent self-
+      // signaled or a sibling observer (stall detector, inactivity
+      // timer, cancel) tore it down between the detector arming and
+      // firing. The recover would step on the existing terminal.
+      log.info(
+        `[Job ${jobId}] API-error detector fired after job reached terminal (${job.status}); skipping recover`,
+      );
+      return;
+    }
+
+    const newCount = job.recoverCount + 1;
+    job.recoverCount = newCount;
+    if (dispatchTracker) {
+      await dispatchTracker.recordRecoverCount(newCount);
+    }
+
+    const summary = `API error stream-idle recover ${newCount}/${MAX_RECOVERS}: ${info.errorText}`;
+
+    if (newCount > MAX_RECOVERS) {
+      log.warn(
+        `[Job ${jobId}] API-error recover cap (${MAX_RECOVERS}) exhausted — writing CRITICAL_FAILURE flag and failing dispatch`,
+      );
+      const recoverContext = options.recoverContext;
+      if (recoverContext) {
+        // The flag's `dispatchId` is the LAST row in the recover
+        // chain — the one whose agent saw the cap fire. Operators
+        // walking back via `parent_recover_id` can reach every
+        // earlier attempt.
+        writeFlag(recoverContext.repoLocalPath, {
+          source: "agent",
+          dispatchId: jobId,
+          reason: "API-error recover cap exhausted",
+          detail: info.errorText,
+        });
+      } else {
+        log.error(
+          `[Job ${jobId}] cap exhausted but recoverContext absent — cannot write CRITICAL_FAILURE flag`,
+        );
+      }
+      await job.stop("api_error_failed", summary);
+      return;
+    }
+
+    // Recover-ok branch. Check `recoverContext` BEFORE finalizing the
+    // row — otherwise an absent context (tests / ad-hoc spawns / a
+    // future caller that bypasses dispatch()) would leave the row
+    // marked `recovered` with no resume-child to back it up. The
+    // dashboard would show a terminated dispatch in `recovered` state
+    // forever, the Slack listener's short-circuit would wait for a
+    // recover-child that never comes, and the poller's "skip
+    // recovered" check (`handleAgentCompletion` in `poller/index.ts`)
+    // would let the next tick re-dispatch the same card with no
+    // record of the failure. Failing loudly to `api_error_failed`
+    // here surfaces the misconfiguration as a CRITICAL_FAILURE-style
+    // halt instead of a silent leak.
+    if (!options.recoverContext) {
+      log.error(
+        `[Job ${jobId}] recover ok-path: recoverContext absent — cannot continue chain; collapsing to api_error_failed`,
+      );
+      await job.stop("api_error_failed", summary);
+      return;
+    }
+
+    log.warn(
+      `[Job ${jobId}] API-error stream-idle synthetic detected (recover ${newCount}/${MAX_RECOVERS}) — killing dispatch and re-resuming`,
+    );
+
+    // job.stop drains the forwarder, finalizes the dispatch row
+    // (status=recovered), and SIGTERMs the agent. The resume POST
+    // below happens AFTER the row is finalized so the new row's
+    // parent_recover_id references a terminal row.
+    await job.stop("api_error_recover", summary);
+
+    const { originalTask, workspace, workerPort } = options.recoverContext;
+    const resumeUrl = `http://localhost:${workerPort}/api/resume`;
+    const body: Record<string, unknown> = {
+      repo: options.repoName,
+      job_id: jobId,
+      task: originalTask,
+      workspace,
+      recover_count: newCount,
+      parent_recover_id: jobId,
+    };
+    if (options.apiToken) body.api_token = options.apiToken;
+
+    try {
+      const response = await fetch(resumeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => "<no body>");
+        log.error(
+          `[Job ${jobId}] /api/resume returned HTTP ${response.status}: ${text}`,
+        );
+        return;
+      }
+      log.info(
+        `[Job ${jobId}] API-error recover succeeded — /api/resume accepted; chain continues`,
+      );
+    } catch (err) {
+      log.error(`[Job ${jobId}] /api/resume POST failed`, err);
+    }
+  } catch (err) {
+    log.error(`[Job ${jobId}] API-error recover handler threw`, err);
+  }
 }

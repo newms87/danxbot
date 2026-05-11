@@ -196,6 +196,16 @@ function failureLineForStatus(
       // branch. Keep a defensive message so a future refactor doesn't
       // fall into an unreachable-default anti-pattern.
       return ":white_check_mark: Done.";
+    case "recovered":
+      // DX-260 (Phase 2 of DX-246) — the launcher's API-error
+      // recover handler killed this dispatch so a fresh resume could
+      // take over. The recover-child dispatch will post the user's
+      // real answer via `danxbot_slack_reply`; the listener's
+      // caller should skip the failure-post branch entirely when
+      // status === "recovered". This case stays defensive: if the
+      // skip is missed, the user sees an informational note rather
+      // than a misleading red X.
+      return ":hourglass: Retrying after a transient API error — please hold.";
   }
 }
 
@@ -261,6 +271,17 @@ async function launchSlackDispatch(
       onComplete: (job) => resolve(job),
     }).catch(reject);
   });
+
+  // DX-260 (Phase 2 of DX-246) — `recovered` is a launcher-internal
+  // terminal state that means "this dispatch ended so a fresh resume
+  // could continue the chain." The recover-child dispatch carries
+  // the SAME slack thread metadata; when IT terminates, the listener
+  // posts the real success / failure outcome. Skip the reaction swap
+  // + failure post here so the user sees one outcome, not a
+  // "retrying" intermediate followed by the real one.
+  if (finalJob.status === "recovered") {
+    return;
+  }
 
   const success = finalJob.status === "completed";
   await swapReaction(

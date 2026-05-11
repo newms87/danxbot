@@ -5,7 +5,8 @@ export type DispatchStatus =
   | "running"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "recovered";
 
 export type RuntimeMode = "docker" | "host";
 
@@ -216,6 +217,11 @@ export const TERMINAL_STATUSES: readonly DispatchStatus[] = [
   "completed",
   "failed",
   "cancelled",
+  // DX-260 (Phase 2 of DX-246): a row that auto-recovered via the
+  // launcher's API-error handler ends terminal here; the chain
+  // continues on a fresh row stamped with `parent_recover_id` pointing
+  // back at this one.
+  "recovered",
 ];
 
 export function isTerminalStatus(status: DispatchStatus): boolean {

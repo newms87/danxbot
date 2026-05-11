@@ -116,6 +116,13 @@ export async function runSpawnPreflight(
       cache_read_input_tokens: 0,
       cache_creation_input_tokens: 0,
     },
+    // DX-260 (Phase 2 of DX-246) — seeded here so the `ApiErrorDetector`
+    // sees a stable counter from the very first `getRecoverCount`
+    // call. `attachMonitoringStack` overwrites this with
+    // `options.initialRecoverCount ?? 0` once it runs; the explicit
+    // zero default keeps the type-system invariant intact for any
+    // mocked-runtime-fork paths that bypass that overwrite.
+    recoverCount: 0,
   };
 
   const env = buildCleanEnv(options.env);

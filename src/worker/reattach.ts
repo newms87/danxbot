@@ -197,6 +197,13 @@ function buildPartialJob(
       cache_read_input_tokens: row.cacheRead,
       cache_creation_input_tokens: row.cacheWrite,
     },
+    // DX-260 (Phase 2 of DX-246) — seed from the row's existing count
+    // so the API-error recover handler's cap check picks up where the
+    // pre-restart run left off. New synthetic-error fires after
+    // reattach increment correctly on top of the persisted counter
+    // (re-running the chain from zero would silently double-allow
+    // the recover budget).
+    recoverCount: row.recoverCount,
     stop: unstamped,
   };
 }
@@ -405,6 +412,16 @@ export function buildReattachTracker(
       } catch (err) {
         log.error(
           `[Dispatch ${row.id}] reattach tracker recordNudge failed`,
+          err,
+        );
+      }
+    },
+    async recordRecoverCount(count: number): Promise<void> {
+      try {
+        await updateDispatch(row.id, { recoverCount: count });
+      } catch (err) {
+        log.error(
+          `[Dispatch ${row.id}] reattach tracker recordRecoverCount failed`,
           err,
         );
       }

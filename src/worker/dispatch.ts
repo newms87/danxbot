@@ -32,6 +32,7 @@ import { normalizeCallbackUrl } from "./url-normalizer.js";
 import { isFeatureEnabled } from "../settings-file.js";
 import { writeFlag } from "../critical-failure.js";
 import {
+  COMPLETE_STATUSES,
   isCompleteStatus,
   mapCompleteToTerminalStatus,
   type CompleteStatus,
@@ -348,7 +349,23 @@ function buildDispatchInput(
   repo: RepoContext,
   parsed: ParsedDispatchRequest,
   apiDispatchMeta: DispatchTriggerMetadata,
-  extras: { resumeSessionId?: string; parentJobId?: string } = {},
+  extras: {
+    resumeSessionId?: string;
+    parentJobId?: string;
+    /**
+     * DX-260 (Phase 2 of DX-246) — inherited recover count carried by
+     * the API-error recover handler's `POST /api/resume`. Fresh
+     * launches omit (defaults to 0). Threaded into the new dispatch
+     * row's `recover_count` and the seed for `AgentJob.recoverCount`.
+     */
+    recoverCount?: number;
+    /**
+     * DX-260 — parent dispatch ID for the recover chain. Set on
+     * recover-spawned resumes so the new row's `parent_recover_id`
+     * column points at the row that just hit terminal=recovered.
+     */
+    parentRecoverId?: string | null;
+  } = {},
 ): Parameters<typeof dispatch>[0] {
   return {
     repo,
@@ -363,6 +380,8 @@ function buildDispatchInput(
     resumeSessionId: extras.resumeSessionId,
     parentJobId: extras.parentJobId,
     stagedFiles: parsed.stagedFiles,
+    recoverCount: extras.recoverCount,
+    parentRecoverId: extras.parentRecoverId ?? null,
   };
 }
 
@@ -562,10 +581,27 @@ export async function handleResume(
       },
     };
 
+    // DX-260 (Phase 2 of DX-246) — the API-error recover handler POSTs
+    // here with `recover_count` (post-increment) + `parent_recover_id`
+    // (the prior row's id) so the new dispatch row carries the chain
+    // bookkeeping. Non-recover resumes (operator-initiated, chat
+    // continuations) omit both; the dispatch row starts at the chain
+    // origin (0 / null). The cap check itself is in-process — by the
+    // time we reach here the recover handler has already confirmed
+    // the cap was not exhausted.
+    const recoverCount =
+      typeof body.recover_count === "number" ? body.recover_count : undefined;
+    const parentRecoverId =
+      typeof body.parent_recover_id === "string"
+        ? body.parent_recover_id
+        : null;
+
     const { dispatchId } = await dispatch(
       buildDispatchInput(repo, parsed, apiDispatchMeta, {
         resumeSessionId: resolved.sessionId,
         parentJobId,
+        recoverCount,
+        parentRecoverId,
       }),
     );
 
@@ -684,10 +720,15 @@ function parseStopStatus(
     return null;
   }
   if (!isCompleteStatus(rawStatus)) {
+    // Error message uses the full COMPLETE_STATUSES list (includes the
+    // launcher-internal `api_error_*` values DX-260 added) so a caller
+    // hitting the worker directly with one of those still gets a
+    // recognizable error if it typos. Agents only see the
+    // `AGENT_COMPLETE_STATUSES` subset via the MCP tool schema.
     json(res, 400, {
       error:
         `Invalid status "${String(rawStatus)}" — must be one of ` +
-        `completed, failed, critical_failure`,
+        COMPLETE_STATUSES.join(", "),
     });
     return null;
   }

@@ -51,6 +51,16 @@ export interface DispatchTracker {
   ): Promise<void>;
   /** Update the nudge count mid-run (called by stall detector). */
   recordNudge(count: number): Promise<void>;
+  /**
+   * Persist the current recover count to the dispatches row. Called by
+   * the API-error recover handler in `attach-monitoring-stack.ts` BEFORE
+   * `job.stop` runs, so the row carries the post-increment count even
+   * when the worker dies between this update and the row's finalize
+   * (DX-260 / Phase 2 of DX-246). Independent from `finalize` so the
+   * cap-exhausted path AND the recover-ok path both write the same
+   * column the same way.
+   */
+  recordRecoverCount(count: number): Promise<void>;
 }
 
 export interface StartDispatchTrackingArgs {
@@ -91,6 +101,24 @@ export interface StartDispatchTrackingArgs {
    * — none today, but the column tolerates legacy / no-MCP rows.
    */
   mcpSettingsPath?: string | null;
+  /**
+   * DX-260 (Phase 2 of DX-246) — initial recover count for THIS
+   * dispatch row. Defaults to 0 on a fresh launch; the recover-spawn
+   * path through `/api/resume` threads the parent's post-increment
+   * count here so the chain's count is monotonic across rows. The
+   * `MAX_RECOVERS = 3` cap reads from the row + the in-memory
+   * `AgentJob.recoverCount` seeded from this value.
+   */
+  recoverCount?: number;
+  /**
+   * DX-260 — parent dispatch ID when this row is a recover-child.
+   * Defaults to null on a fresh launch. The dashboard's "show recover
+   * chain" view walks the column to render the lineage; the
+   * `parent_job_id` column (set on resume via the same row) is the
+   * complementary view of the same lineage from the resume-chain
+   * angle.
+   */
+  parentRecoverId?: string | null;
 }
 
 /**
@@ -151,13 +179,14 @@ export async function startDispatchTracking(
     danxbotCommit: args.danxbotCommit,
     agentName: args.agentName ?? null,
     mcpSettingsPath: args.mcpSettingsPath ?? null,
-    // DX-259 Phase 1: foundation columns. Inserts always start the
-    // chain at zero recovers / no parent recover; Phase 2 wires the
-    // launcher to stamp these on the *new* row written by /api/resume
-    // when the API-error recover handler fires. Existing call sites
-    // see no behavior change because every fresh dispatch starts here.
-    recoverCount: 0,
-    parentRecoverId: null,
+    // DX-259 Phase 1: foundation columns. Defaults to 0 / null so every
+    // fresh launch starts at the chain's origin. DX-260 Phase 2 threads
+    // these through `StartDispatchTrackingArgs` so the new row written
+    // by /api/resume when the API-error recover handler fires inherits
+    // the parent's count and references the parent's id via
+    // `parent_recover_id`.
+    recoverCount: args.recoverCount ?? 0,
+    parentRecoverId: args.parentRecoverId ?? null,
   };
 
   try {
@@ -268,6 +297,13 @@ export async function startDispatchTracking(
         await updateDispatch(args.jobId, { nudgeCount: count });
       } catch (err) {
         log.error(`[Job ${args.jobId}] Failed to record nudge`, err);
+      }
+    },
+    async recordRecoverCount(count) {
+      try {
+        await updateDispatch(args.jobId, { recoverCount: count });
+      } catch (err) {
+        log.error(`[Job ${args.jobId}] Failed to record recover count`, err);
       }
     },
   };

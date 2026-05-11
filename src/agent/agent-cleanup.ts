@@ -118,12 +118,19 @@ export function buildCleanup(
       // Reproduce / Trello 69f77e9b77472aefac1317b2.
       job._forwarderFlush = forwarderFlush?.();
       if (dispatchTracker && job.status !== "running") {
+        // DX-260 (Phase 2 of DX-246) adds `"recovered"` — a row that
+        // ended terminal because the API-error recover handler killed
+        // it so a fresh dispatch could continue the chain. `summary`
+        // surfaces but `error` stays null (the row didn't fail; it
+        // handed off).
         const dispatchStatus =
           job.status === "completed"
             ? "completed"
             : job.status === "canceled"
               ? "cancelled"
-              : "failed";
+              : job.status === "recovered"
+                ? "recovered"
+                : "failed";
         try {
           await dispatchTracker.finalize(dispatchStatus, {
             summary: job.summary || null,

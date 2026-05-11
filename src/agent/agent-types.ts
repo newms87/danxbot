@@ -24,7 +24,15 @@ export interface AgentUsage {
 
 export interface AgentJob {
   id: string;
-  status: "running" | "completed" | "failed" | "timeout" | "canceled";
+  /**
+   * In-memory job state. `recovered` (DX-260 / Phase 2 of DX-246) marks
+   * the dispatch as terminated by the API-error recover handler — the
+   * launcher will POST `/api/resume` to continue the chain on a fresh
+   * dispatch row whose `parent_recover_id` points at this one. Distinct
+   * from `failed` so `buildCleanup` can finalize the dispatches row with
+   * status `"recovered"` (DispatchStatus) instead of `"failed"`.
+   */
+  status: "running" | "completed" | "failed" | "timeout" | "canceled" | "recovered";
   summary: string;
   startedAt: Date;
   completedAt?: Date;
@@ -36,6 +44,17 @@ export interface AgentJob {
    * (see `.claude/rules/agent-dispatch.md`) means no double-counting.
    */
   usage: AgentUsage;
+  /**
+   * DX-260 (Phase 2 of DX-246) — number of times the dispatch chain
+   * containing THIS spawn has auto-recovered from a Claude API stream-
+   * idle synthetic error. Seeded from `SpawnAgentOptions.initialRecoverCount`
+   * (which the launcher / poller pulls off the dispatches row at spawn
+   * time, or `0` for a fresh dispatch). The `ApiErrorDetector` recover
+   * handler bumps this counter and the `MAX_RECOVERS = 3` cap reads it
+   * to decide failed-vs-recovered branching. Persisted to the
+   * `dispatches.recover_count` column via `DispatchTracker.recordRecoverCount`.
+   */
+  recoverCount: number;
   /**
    * Runtime handle for the spawned claude process. Set during the runtime
    * fork inside `spawnAgent`. Docker mode wraps a ChildProcess; host mode
@@ -102,8 +121,18 @@ export interface AgentJob {
    *
    * Always set by `spawnAgent()` before the job is returned to the caller — required,
    * not optional, so call sites don't have to silently no-op on a missing handler.
+   *
+   * Accepted `status` values mirror `CompleteStatus` from
+   * `src/mcp/danxbot-server.ts`. The launcher-internal `api_error_recover`
+   * / `api_error_failed` values (DX-260) are emitted by the API-error
+   * recover handler in `attach-monitoring-stack.ts` — agents never call
+   * these directly because the MCP tool schema only advertises
+   * `AGENT_COMPLETE_STATUSES`.
    */
-  stop: (status: "completed" | "failed", summary?: string) => Promise<void>;
+  stop: (
+    status: import("../mcp/danxbot-server.js").CompleteStatus,
+    summary?: string,
+  ) => Promise<void>;
   /**
    * Restage context preserved at /api/launch + /api/resume time so a
    * later POST /api/restage/:dispatchId can re-run the same
@@ -253,6 +282,60 @@ export interface SpawnAgentOptions {
    * for symmetry with other dispatch-row stamps).
    */
   mcpSettingsPath?: string | null;
+  /**
+   * DX-260 (Phase 2 of DX-246) — inherited recover count for this
+   * spawn's chain. Seeds `AgentJob.recoverCount` AND the new dispatch
+   * row's `recover_count` column. Fresh launches get `0`; recover-
+   * spawned resumes (via `POST /api/resume` with `recover_count` set)
+   * inherit the parent's count so the `MAX_RECOVERS = 3` cap sees the
+   * whole chain.
+   */
+  initialRecoverCount?: number;
+  /**
+   * DX-260 — parent dispatch ID when THIS dispatch is the
+   * recover-child of an earlier dispatch. Stamped on the new
+   * `dispatches.parent_recover_id` column so the dashboard can walk
+   * the chain. Set only by the API-error recover handler's POST to
+   * `/api/resume`; every other caller leaves it `null`.
+   */
+  parentRecoverId?: string | null;
+  /**
+   * DX-260 — context the API-error recover handler needs to drive the
+   * recover flow. Set by `dispatch()` for every spawn; absent for ad-
+   * hoc spawns that should NOT auto-recover (tests, future scenarios
+   * that opt out). When unset, `attachMonitoringStack` still wires the
+   * `ApiErrorDetector`, but the handler fails-loud (kills the job
+   * without POSTing `/api/resume`) so the misconfiguration surfaces
+   * instead of being silently swallowed.
+   */
+  recoverContext?: {
+    /**
+     * Original task body (BEFORE `buildCompletionInstruction` is
+     * appended in `runResolved`). Posted to `/api/resume` as the new
+     * user turn — claude `--resume` restores the prior session's
+     * conversation, so the task is effectively re-attached for the
+     * safety-net path the description references.
+     */
+    originalTask: string;
+    /**
+     * Workspace name the dispatch ran under. Resume needs to re-
+     * resolve the workspace to rebuild the MCP surface; reusing the
+     * same workspace name guarantees the recover child inherits the
+     * original tool set.
+     */
+    workspace: string;
+    /** Worker port for the `POST /api/resume` URL. */
+    workerPort: number;
+    /**
+     * Repo localPath — passed to `writeFlag` on the cap-exhausted
+     * path so the `CRITICAL_FAILURE` flag lands in the right
+     * `<repo>/.danxbot/` directory (the worker is per-repo, but
+     * `attachMonitoringStack` only has the repo name in
+     * `options.repoName`; the path lives on the dispatch's
+     * `RepoContext`).
+     */
+    repoLocalPath: string;
+  };
 }
 
 /**
