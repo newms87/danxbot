@@ -30,7 +30,12 @@ import { recordSystemError } from "./dashboard/system-errors.js";
 import { setRepoName } from "./poller/repo-name.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
-import { runInvariantHeal } from "./poller/heal.js";
+import {
+  healOrphanInvariantViolations,
+  runInvariantHeal,
+} from "./poller/heal.js";
+import { isPidAlive } from "./agent/host-pid.js";
+import { hostname as osHostname } from "node:os";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
 import { reattachOrResolveDispatches } from "./worker/reattach.js";
@@ -331,6 +336,42 @@ async function startWorkerMode(): Promise<void> {
   // the poller dispatches its first tick. The same scan runs at the top
   // of every poll tick (`src/poller/index.ts`) for ongoing self-heal.
   await runInvariantHeal(repo, "boot");
+
+  // DX-286 — boot pass for the OTHER direction of the invariant:
+  // `dispatch != null + assigned_agent == null` (orphan pre-stamp).
+  // The picker on a prior boot stamped the dispatch{} block but the
+  // dispatch never landed in the DB (paired-write rollback, chokidar
+  // race, mid-spawn crash). The card drops out of `listDispatchableYamls`
+  // (filter rejects `dispatch != null`) and is unrecoverable until a
+  // worker restart triggers boot reattach's dead-pid clearing pass.
+  // This boot scan + the per-tick wiring in `_poll` close that gap.
+  // Liveness check skips dispatches that are genuinely mid-flight
+  // (paired-write between stamp and PID-enrichment).
+  try {
+    const invariantHeal = await healOrphanInvariantViolations(
+      repo.localPath,
+      repo.issuePrefix,
+      { currentHost: osHostname(), now: Date.now(), isPidAlive },
+    );
+    if (invariantHeal.healed.length > 0 || invariantHeal.errors.length > 0) {
+      log.info(
+        `[${repo.name}] Orphan invariant heal: scanned=${invariantHeal.scanned} cleared=${invariantHeal.healed.length} errors=${invariantHeal.errors.length}`,
+      );
+      for (const h of invariantHeal.healed) {
+        const verdict = h.verdict ? ` verdict=${h.verdict}` : "";
+        log.warn(
+          `[${repo.name}] heal: cleared invariant violation on ${h.id} (kind=${h.kind}${verdict}, dispatch=${h.staleDispatchId ?? "null"}, agent=${h.staleAgent ?? "null"})`,
+        );
+      }
+      for (const e of invariantHeal.errors) {
+        log.warn(
+          `[${repo.name}] heal: invariant scan error at ${e.path}: ${e.message}`,
+        );
+      }
+    }
+  } catch (err) {
+    log.error(`[${repo.name}] Orphan invariant heal failed`, err);
+  }
 
   // Phase 3 of Event-Driven Worker (DX-218): register the per-repo
   // tracker with reconcile + the retry-queue scheduler so step 7 (the

@@ -1108,3 +1108,392 @@ describe("clearAssignedAgentOnDeletion (DX-283 — agent delete cascade)", () =>
     expect(result.errors[0].path.endsWith("ISS-406.yml")).toBe(true);
   });
 });
+
+describe("healOrphanInvariantViolations (DX-286 — both-direction invariant scan)", () => {
+  let repoRoot: string;
+  let openDir: string;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), "danxbot-heal-invariant-"));
+    openDir = resolve(repoRoot, ".danxbot/issues/open");
+    mkdirSync(openDir, { recursive: true });
+    mkdirSync(resolve(repoRoot, ".danxbot/issues/closed"), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  // Default deps — current host matches the dispatch host, no PID is alive,
+  // current time is far enough past every fixture's `started_at` that TTL
+  // checks fall through to the PID branch (which always returns dead).
+  const deps: LivenessDeps = {
+    currentHost: "host-a",
+    now: Date.parse("2026-05-11T08:00:00Z"),
+    isPidAlive: () => false,
+  };
+
+  // Direction 2 — DX-286 orphan pre-stamp. The card the bug was filed on
+  // had `pid: 0` (the start-stamp sentinel), `host: dan`, `assigned_agent:
+  // null`, no matching DB row. The scan must clear both fields atomically.
+  it("clears dispatch-without-agent when the dispatch verdict is dead-pid (DX-286 orphan pre-stamp)", async () => {
+    const orphan = buildIssue({
+      id: "ISS-286",
+      status: "ToDo",
+      assigned_agent: null,
+      dispatch: {
+        id: "did-orphan-1",
+        pid: 0,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T07:08:27.171Z",
+        ttl_seconds: 7200,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-286.yml"), serializeIssue(orphan));
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
+
+    expect(result.scanned).toBe(1);
+    expect(result.healed).toEqual([
+      {
+        id: "ISS-286",
+        kind: "dispatch-without-agent",
+        staleAgent: null,
+        staleDispatchId: "did-orphan-1",
+        verdict: "dead-pid",
+      },
+    ]);
+    expect(result.errors).toEqual([]);
+
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-286.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(reloaded.dispatch).toBeNull();
+    expect(reloaded.assigned_agent).toBeNull();
+  });
+
+  // Direction 1 — legacy orphan claim that the boot-only
+  // `healOrphanAssignedAgents` already covers. Both functions should
+  // produce the same result for this case so callers can pick either.
+  it("clears agent-without-dispatch (parity with healOrphanAssignedAgents)", async () => {
+    const orphan = buildIssue({
+      id: "ISS-300",
+      status: "ToDo",
+      assigned_agent: "phil",
+    });
+    writeFileSync(resolve(openDir, "ISS-300.yml"), serializeIssue(orphan));
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
+
+    expect(result.healed).toEqual([
+      {
+        id: "ISS-300",
+        kind: "agent-without-dispatch",
+        staleAgent: "phil",
+        staleDispatchId: null,
+      },
+    ]);
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-300.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(reloaded.assigned_agent).toBeNull();
+    expect(reloaded.dispatch).toBeNull();
+  });
+
+  // Liveness gate — protects in-flight dispatches caught between
+  // stampDispatchAndWrite and pairedWriteHostPid. The PID is alive on this
+  // host AND the started_at + TTL has not expired, so leave the card alone.
+  it("leaves dispatch-without-agent ALONE when the dispatch verdict is alive (in-flight paired-write)", async () => {
+    const inflight = buildIssue({
+      id: "ISS-287",
+      status: "ToDo",
+      assigned_agent: null,
+      dispatch: {
+        id: "did-live-1",
+        pid: 4242,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T07:55:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-287.yml"), serializeIssue(inflight));
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", {
+      currentHost: "host-a",
+      now: Date.parse("2026-05-11T08:00:00Z"),
+      isPidAlive: (pid) => pid === 4242,
+    });
+
+    expect(result.scanned).toBe(1);
+    expect(result.healed).toEqual([]);
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-287.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(reloaded.dispatch).not.toBeNull();
+    expect(reloaded.dispatch!.pid).toBe(4242);
+  });
+
+  // Cross-host verdict still clears — a stamp from another host that has
+  // no liveness coordinate from THIS worker must not lock the card forever.
+  it("clears dispatch-without-agent when the dispatch verdict is cross-host", async () => {
+    const orphan = buildIssue({
+      id: "ISS-288",
+      status: "ToDo",
+      assigned_agent: null,
+      dispatch: {
+        id: "did-cross-1",
+        pid: 5555,
+        host: "host-b",
+        kind: "work",
+        started_at: "2026-05-11T07:55:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-288.yml"), serializeIssue(orphan));
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", {
+      currentHost: "host-a",
+      now: Date.parse("2026-05-11T08:00:00Z"),
+      isPidAlive: () => true,
+    });
+
+    expect(result.healed[0]?.verdict).toBe("cross-host");
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-288.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(reloaded.dispatch).toBeNull();
+  });
+
+  // TTL expiry — running PID but past the start_at + ttl_seconds budget.
+  // The card is stuck and the YAML state is misleading; clear it.
+  it("clears dispatch-without-agent when the dispatch verdict is dead-ttl", async () => {
+    const orphan = buildIssue({
+      id: "ISS-289",
+      status: "ToDo",
+      assigned_agent: null,
+      dispatch: {
+        id: "did-ttl-1",
+        pid: 6666,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T00:00:00Z",
+        ttl_seconds: 60,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-289.yml"), serializeIssue(orphan));
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", {
+      currentHost: "host-a",
+      now: Date.parse("2026-05-11T08:00:00Z"),
+      isPidAlive: () => true,
+    });
+
+    expect(result.healed[0]?.verdict).toBe("dead-ttl");
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-289.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(reloaded.dispatch).toBeNull();
+  });
+
+  // Invariant-respecting cards (both null OR both non-null) are left
+  // alone. The scan does not touch healthy in-flight dispatches.
+  it("leaves invariant-respecting cards untouched (both-null and both-non-null)", async () => {
+    const cleanIdle = buildIssue({
+      id: "ISS-290",
+      status: "ToDo",
+      assigned_agent: null,
+      dispatch: null,
+    });
+    const cleanInFlight = buildIssue({
+      id: "ISS-291",
+      status: "In Progress",
+      assigned_agent: "murphy",
+      dispatch: {
+        id: "did-running-1",
+        pid: 7777,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T07:55:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-290.yml"), serializeIssue(cleanIdle));
+    writeFileSync(
+      resolve(openDir, "ISS-291.yml"),
+      serializeIssue(cleanInFlight),
+    );
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", {
+      currentHost: "host-a",
+      now: Date.parse("2026-05-11T08:00:00Z"),
+      isPidAlive: (pid) => pid === 7777,
+    });
+
+    expect(result.scanned).toBe(2);
+    expect(result.healed).toEqual([]);
+    const r290 = parseIssue(
+      readFileSync(resolve(openDir, "ISS-290.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    const r291 = parseIssue(
+      readFileSync(resolve(openDir, "ISS-291.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(r290.assigned_agent).toBeNull();
+    expect(r290.dispatch).toBeNull();
+    expect(r291.assigned_agent).toBe("murphy");
+    expect(r291.dispatch).not.toBeNull();
+  });
+
+  // Idempotent — second invocation against an already-healed dir is a
+  // no-op. Important because the per-tick wiring will run this scan on
+  // every poll interval.
+  it("is idempotent — re-running on a clean dir returns healed: []", async () => {
+    const orphan = buildIssue({
+      id: "ISS-292",
+      status: "ToDo",
+      assigned_agent: null,
+      dispatch: {
+        id: "did-idempotent-1",
+        pid: 0,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T07:00:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-292.yml"), serializeIssue(orphan));
+
+    const first = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
+    expect(first.healed).toHaveLength(1);
+
+    const second = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
+    expect(second.healed).toEqual([]);
+  });
+
+  // Mixed fixture covers both directions in one pass — production-style
+  // input the per-tick wiring will see.
+  it("clears both directions in a single pass", async () => {
+    const dir1 = buildIssue({
+      id: "ISS-293",
+      status: "ToDo",
+      assigned_agent: "phil",
+    });
+    const dir2 = buildIssue({
+      id: "ISS-294",
+      status: "ToDo",
+      assigned_agent: null,
+      dispatch: {
+        id: "did-mixed-1",
+        pid: 0,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T07:00:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-293.yml"), serializeIssue(dir1));
+    writeFileSync(resolve(openDir, "ISS-294.yml"), serializeIssue(dir2));
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
+    const byKind = result.healed.reduce(
+      (acc, h) => {
+        acc[h.kind] = (acc[h.kind] ?? []).concat(h.id);
+        return acc;
+      },
+      {} as Record<string, string[]>,
+    );
+    expect(byKind["agent-without-dispatch"]).toEqual(["ISS-293"]);
+    expect(byKind["dispatch-without-agent"]).toEqual(["ISS-294"]);
+
+    const r293 = parseIssue(
+      readFileSync(resolve(openDir, "ISS-293.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    const r294 = parseIssue(
+      readFileSync(resolve(openDir, "ISS-294.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(r293.assigned_agent).toBeNull();
+    expect(r293.dispatch).toBeNull();
+    expect(r294.assigned_agent).toBeNull();
+    expect(r294.dispatch).toBeNull();
+  });
+
+  it("records parse errors and continues past them", async () => {
+    writeFileSync(resolve(openDir, "ISS-295.yml"), "not: valid: yaml: :::");
+    const orphan = buildIssue({
+      id: "ISS-296",
+      status: "ToDo",
+      assigned_agent: null,
+      dispatch: {
+        id: "did-after-bad-1",
+        pid: 0,
+        host: "host-a",
+        kind: "work",
+        started_at: "2026-05-11T07:00:00Z",
+        ttl_seconds: 7200,
+      },
+    });
+    writeFileSync(resolve(openDir, "ISS-296.yml"), serializeIssue(orphan));
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
+
+    expect(result.healed.map((h) => h.id)).toEqual(["ISS-296"]);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].path.endsWith("ISS-295.yml")).toBe(true);
+  });
+
+  // AC #3 — boot reattach should find ZERO orphans on a healthy worker.
+  // Verified at the heal level: after the scan, no card carries a
+  // dispatch{} block whose verdict would later trip
+  // `buildReattachPlan(...).cleared` — equivalent to "no dead-pid log
+  // line on next boot."
+  it("AC #3: post-scan, no card carries a dispatch{} block that boot reattach would clear", async () => {
+    const orphans = [
+      { id: "ISS-260", agent: null, pid: 0 },
+      { id: "ISS-262", agent: null, pid: 0 },
+      { id: "ISS-264", agent: null, pid: 0 },
+      { id: "ISS-265", agent: null, pid: 0 },
+      { id: "ISS-276", agent: null, pid: 0 },
+      { id: "ISS-281", agent: null, pid: 0 },
+    ];
+    for (const o of orphans) {
+      const issue = buildIssue({
+        id: o.id,
+        status: "ToDo",
+        assigned_agent: o.agent,
+        dispatch: {
+          id: `did-${o.id}`,
+          pid: o.pid,
+          host: "host-a",
+          kind: "work",
+          started_at: "2026-05-11T07:00:00Z",
+          ttl_seconds: 7200,
+        },
+      });
+      writeFileSync(resolve(openDir, `${o.id}.yml`), serializeIssue(issue));
+    }
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
+    expect(result.healed).toHaveLength(orphans.length);
+
+    // Verify zero dispatch{} blocks remain that boot reattach would
+    // re-clear (i.e. zero "verdict=dead-pid" log lines on next boot).
+    for (const o of orphans) {
+      const reloaded = parseIssue(
+        readFileSync(resolve(openDir, `${o.id}.yml`), "utf-8"),
+        { expectedPrefix: "ISS" },
+      );
+      expect(reloaded.dispatch).toBeNull();
+      expect(reloaded.assigned_agent).toBeNull();
+    }
+  });
+});
