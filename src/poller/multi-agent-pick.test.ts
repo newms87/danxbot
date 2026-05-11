@@ -17,6 +17,27 @@ vi.mock("../dispatch/recovery-mode.js", () => ({
 vi.mock("../dispatch/conflict-check.js", () => ({
   runConflictCheck: vi.fn(),
 }));
+// Stub the scheduler module so the multi-agent test doesn't drag in
+// the DB connection chain (`dashboard/dispatches-db.js` →
+// `db/connection.js` hard-requires DANXBOT_DB_*). The scheduler is the
+// single API surface for dispatch-time protections — `multi-agent-pick`
+// imports the lock helpers from here too, so the mock must re-route
+// `buildLockHolderInfo`/`tryAcquireLock` to the real implementations
+// from `../issue-tracker/lock.js` (which has no DB-chain transitive
+// load). Defaults match the legacy path: no live PID, no-op post-
+// dispatch check.
+vi.mock("../dispatch/scheduler.js", async () => {
+  const lock = await vi.importActual<typeof import("../issue-tracker/lock.js")>(
+    "../issue-tracker/lock.js",
+  );
+  return {
+    guardLiveDispatchForCard: vi.fn().mockResolvedValue(false),
+    runPostDispatchProgressCheck: vi.fn().mockResolvedValue(undefined),
+    buildLockHolderInfo: lock.buildLockHolderInfo,
+    tryAcquireLock: lock.tryAcquireLock,
+    releaseLock: lock.releaseLock,
+  };
+});
 vi.mock("../agent/worktree-manager.js", () => ({
   createWorktreeManager: vi.fn().mockReturnValue({
     worktreePath: vi.fn(),
@@ -64,6 +85,11 @@ vi.mock("./yaml-lifecycle.js", async () => {
 import { tryMultiAgentDispatch } from "./multi-agent-pick.js";
 import { runConflictCheck } from "../dispatch/conflict-check.js";
 import { dispatchWithRecovery } from "../dispatch/recovery-mode.js";
+import {
+  guardLiveDispatchForCard,
+  runPostDispatchProgressCheck,
+} from "../dispatch/scheduler.js";
+import { clearDispatchAndWrite, loadLocal } from "./yaml-lifecycle.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 
@@ -516,5 +542,204 @@ describe("tryMultiAgentDispatch", () => {
     // alice picked DX-2 (DX-1 was claimed by bob).
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
     expect(dispatchInput.issueId).toBe("DX-2");
+  });
+
+  /**
+   * AC #2 of DX-219 — pre-claim DB liveness guard. Ports
+   * `hasLiveDispatchForCard` (ISS-69) onto the multi-agent path. When a
+   * live PID dispatch already owns the card (host-mode claude that
+   * reparented to PID 1 after a worker restart), the picker MUST skip
+   * it. Without this port, the picker would double-claim and melt the
+   * working tree.
+   */
+  it("AC #2: skips a card when guardLiveDispatchForCard reports a live PID — picker refuses to assign", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+    vi.mocked(guardLiveDispatchForCard).mockResolvedValueOnce(true);
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(0);
+    expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+    expect(guardLiveDispatchForCard).toHaveBeenCalledWith({
+      repoName: "danxbot",
+      cardId: "ext-DX-1",
+      internalIssueId: "DX-1",
+    });
+  });
+
+  it("AC #2: proceeds when guard returns false (no live PID) and forwards external_id + internalIssueId", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+    vi.mocked(guardLiveDispatchForCard).mockResolvedValue(false);
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(1);
+    expect(guardLiveDispatchForCard).toHaveBeenCalledWith({
+      repoName: "danxbot",
+      cardId: "ext-DX-1",
+      internalIssueId: "DX-1",
+    });
+  });
+
+  it("AC #2: locally-only cards (empty external_id) skip the DB guard — no inter-worker double-claim risk", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1", { external_id: "" })],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    expect(guardLiveDispatchForCard).not.toHaveBeenCalled();
+  });
+
+  /**
+   * AC #4 of DX-219 — post-dispatch card-progress check ported into
+   * the multi-agent onComplete chain. When the dispatch ends and the
+   * card is trello-tracked, the scheduler's check runs so an env-level
+   * stuck-card writes the CRITICAL_FAILURE flag.
+   */
+  it("AC #4: wires runPostDispatchProgressCheck into dispatch.onComplete for trello-tracked cards", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+    vi.mocked(runPostDispatchProgressCheck).mockResolvedValue(undefined);
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    // Extract the onComplete passed to dispatch() and invoke it like
+    // the launcher would on agent termination. The mocked scheduler
+    // call should fire with the card's external_id + job metadata.
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    expect(dispatchInput.onComplete).toBeDefined();
+    await dispatchInput.onComplete!({
+      id: "did-1",
+      status: "completed",
+      summary: "ok",
+    } as never);
+
+    expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
+    const passed = vi.mocked(runPostDispatchProgressCheck).mock.calls[0][0];
+    expect(passed.cardId).toBe("ext-DX-1");
+    expect(passed.jobId).toBe("did-1");
+    expect(passed.jobStatus).toBe("completed");
+    expect(passed.jobSummary).toBe("ok");
+  });
+
+  it("AC #4: dispatch.onComplete runs BOTH the YAML dispatch{} cleanup AND the post-dispatch progress check in one invocation", async () => {
+    // Composite-behaviour test for the multi-agent onComplete chain.
+    // The handler must (a) clear the YAML's `dispatch{}` block via
+    // `clearDispatchAndWrite` when a stale block exists, AND (b) fire
+    // `runPostDispatchProgressCheck` for the trello-tracked card. A
+    // future refactor that drops either step would slip past the
+    // narrowly-scoped per-effect tests; this asserts they coexist.
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+    vi.mocked(runPostDispatchProgressCheck).mockResolvedValue(undefined);
+    // Make loadLocal return a fresh issue carrying a stale dispatch
+    // block so the cleanup branch actually runs (the default mock
+    // returns null → cleanup short-circuits).
+    vi.mocked(loadLocal).mockResolvedValueOnce(
+      issue("DX-1", {
+        dispatch: {
+          id: "old-did",
+          pid: 999,
+          host: "h",
+          kind: "work",
+          started_at: "2026-05-10T00:00:00Z",
+          ttl_seconds: 7200,
+        },
+      }),
+    );
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    await dispatchInput.onComplete!({
+      id: "did-1",
+      status: "completed",
+      summary: "ok",
+    } as never);
+
+    // Both effects fire — the order they run in is not part of the
+    // contract (no shared state between them), but BOTH must run.
+    expect(clearDispatchAndWrite).toHaveBeenCalledTimes(1);
+    expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runPostDispatchProgressCheck).mock.calls[0][0].cardId).toBe(
+      "ext-DX-1",
+    );
+  });
+
+  it("AC #4: locally-only cards skip runPostDispatchProgressCheck (no tracker round-trip possible)", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1", { external_id: "" })],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    await dispatchInput.onComplete!({
+      id: "did-1",
+      status: "completed",
+      summary: "ok",
+    } as never);
+
+    expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
   });
 });

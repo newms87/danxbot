@@ -19,6 +19,7 @@ import {
 } from "./issue/reconcile.js";
 import { bootRescheduleRetryQueue } from "./issue-tracker/retry-queue.js";
 import { createIssueTracker } from "./issue-tracker/index.js";
+import { bootScheduler } from "./dispatch/scheduler.js";
 import { recordSystemError } from "./dashboard/system-errors.js";
 import { setRepoName } from "./poller/repo-name.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
@@ -317,6 +318,15 @@ async function startWorkerMode(): Promise<void> {
   };
   setReconcileTrackerForRepo(repo.name, repoTracker);
   setReconcileSystemErrorHookForRepo(repo.name, retrySystemErrorHook);
+
+  // Phase 4 of Event-Driven Worker (DX-219) — boot the per-repo
+  // dispatch scheduler. Validates TrelloTracker credentials fail-loud
+  // BEFORE any dispatch fires (AC #3) and registers the tracker so
+  // the post-dispatch progress check (AC #4) can resolve it without
+  // threading the tracker through every dispatch's onComplete callback.
+  // MemoryTracker skips the credential check (constructs without
+  // creds) but is still registered for the post-dispatch path.
+  bootScheduler({ repo, tracker: repoTracker });
   const reschedule = bootRescheduleRetryQueue({
     repoLocalPath: repo.localPath,
     repoName: repo.name,

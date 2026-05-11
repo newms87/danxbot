@@ -54,12 +54,14 @@ import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
 import { runConflictCheck } from "../dispatch/conflict-check.js";
 import { dispatchWithRecovery } from "../dispatch/recovery-mode.js";
-import { assignedCards, busyAgents } from "../agent/agent-locks.js";
-import { targetName } from "../config.js";
 import {
   buildLockHolderInfo,
+  guardLiveDispatchForCard,
+  runPostDispatchProgressCheck,
   tryAcquireLock,
-} from "../issue-tracker/lock.js";
+} from "../dispatch/scheduler.js";
+import { assignedCards, busyAgents } from "../agent/agent-locks.js";
+import { targetName } from "../config.js";
 import type { IssueTracker } from "../issue-tracker/interface.js";
 // `createWorktreeManager` is intentionally imported lazily inside
 // `tryMultiAgentDispatch` so the poller's heavy unit-test mock surface
@@ -201,6 +203,31 @@ export async function tryMultiAgentDispatch(
     log.info(
       `[${repo.name}] multi-agent pick: ${agent.name} → ${card.id} (${card.title})`,
     );
+
+    // AC #2 of DX-219 — pre-claim DB liveness guard (ISS-69 ported into
+    // the scheduler). The DB-side `busyAgents` lock is per-environment;
+    // a host-mode claude reparented to PID 1 after a worker restart
+    // still owns this card and the dispatch row still says "running",
+    // but the lock would be released on the worker shutdown. Without
+    // this guard the picker would assign the SAME card to a NEW agent
+    // and melt the working tree. The check skips locally-only cards
+    // (no external_id) — those have no inter-worker double-claim risk
+    // and the guard's `internalIssueId` branch still covers them via
+    // the dispatch row's `issue_id` column.
+    if (hasTrackerCoordinate(card)) {
+      const live = await guardLiveDispatchForCard({
+        repoName: repo.name,
+        cardId: card.external_id,
+        internalIssueId: card.id,
+      });
+      if (live) {
+        log.info(
+          `[${repo.name}] multi-agent pre-claim guard: card ${card.id} (${card.external_id}) has a live PID dispatch — skipping ${agent.name}`,
+        );
+        remainingCards.splice(remainingCards.indexOf(card), 1);
+        continue;
+      }
+    }
 
     // Run the conflict-check precursor when other agents are
     // working AND the operator hasn't disabled it.
@@ -397,7 +424,7 @@ export async function tryMultiAgentDispatch(
               }
             },
           },
-          onComplete: async () => {
+          onComplete: async (job) => {
             // Clear the YAML's `dispatch{}` block so the next tick
             // sees a clean slate. The `assigned_agent` stamp survives
             // (the next dispatch by the same agent re-claims it via
@@ -409,6 +436,25 @@ export async function tryMultiAgentDispatch(
             );
             if (fresh && fresh.dispatch !== null) {
               await clearDispatchAndWrite(repo.localPath, fresh);
+            }
+
+            // AC #4 of DX-219 — post-dispatch card-progress check +
+            // CRITICAL_FAILURE halt ported into the multi-agent path.
+            // Skip locally-only cards (no external_id, no tracker round-
+            // trip is possible). The legacy `_poll` single-card path's
+            // `checkCardProgressedOrHalt` ran for every trello-trigger
+            // dispatch; this is the multi-agent equivalent. Token-burn
+            // safeguard against an env-level blocker (MCP/Bash/auth
+            // failing) that lets the agent "finish" without moving the
+            // card. The next poll tick reads the flag and halts.
+            if (hasTrackerCoordinate(stamped)) {
+              await runPostDispatchProgressCheck({
+                repo,
+                cardId: stamped.external_id,
+                jobId: job.id,
+                jobStatus: job.status,
+                jobSummary: job.summary,
+              });
             }
           },
         },

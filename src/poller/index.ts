@@ -96,6 +96,7 @@ import type { IssueDispatch } from "../issue-tracker/interface.js";
 import { buildStartStamp } from "./dispatch-liveness-yaml.js";
 import { buildReattachPlan } from "./dispatch-reattach.js";
 import { tryMultiAgentDispatch } from "./multi-agent-pick.js";
+import { runPostDispatchProgressCheck } from "../dispatch/scheduler.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -2440,20 +2441,20 @@ function cleanupAfterAgent(state: RepoPollerState): void {
 }
 
 /**
- * After a trello-triggered dispatch exits, fetch the tracked card's
- * current list. If it's still in ToDo, the dispatch made zero
- * progress — an env-level blocker the poller cannot recover from on
- * its own. Write the critical-failure flag so the next tick halts.
+ * Legacy single-card dispatch post-completion adapter. The actual
+ * fetch + halt-flag logic lives in `runPostDispatchProgressCheck`
+ * (`src/dispatch/scheduler.ts`) — DX-219 deduped the body so the
+ * legacy `_poll` path and the multi-agent `onComplete` chain share
+ * one implementation of the "card stayed in ToDo → CRITICAL_FAILURE"
+ * decision. This wrapper exists to thread the legacy path's
+ * `state.trackedCardId` and `AgentJob` shape into the scheduler's
+ * parameterized inputs.
  *
- * Complementary to `recoverStuckCards`, which handles the case where
- * the agent moved a card to In Progress but failed mid-work (the
- * recovery there moves it to Needs Help). This function handles the
- * distinct case where the agent never moved the card at all — the
- * classic signal that MCP or Bash failed to load.
- *
- * A fetch failure here does NOT trip the flag: we only halt when we
- * have positive evidence the card stayed in ToDo. Swallowing the
- * error and logging is intentional — the next tick will try again.
+ * Resilience to a future bootScheduler regression: the scheduler
+ * silently warns + returns when no tracker is registered for the
+ * repo, so this wrapper still composes cleanly even if `startPoller`
+ * happens before `bootScheduler` (which the worker boot order
+ * forbids — but defense-in-depth lives here).
  */
 async function checkCardProgressedOrHalt(
   repo: RepoContext,
@@ -2463,76 +2464,12 @@ async function checkCardProgressedOrHalt(
   const cardId = state.trackedCardId;
   if (!cardId) return;
 
-  const tracker = getRepoTracker(repo);
-  let card: Issue;
-  try {
-    card = await tracker.getCard(cardId);
-  } catch (err) {
-    log.error(
-      `[${repo.name}] Failed to fetch tracked card ${cardId} after dispatch — skipping card-progress check`,
-      err,
-    );
-    return;
-  }
-
-  if (card.status !== "ToDo") {
-    // Card moved to In Progress / Needs Help / Done / Cancelled / Review.
-    // The dispatch made SOME progress even if it ultimately failed — not
-    // an env-level issue. Leave the flag untripped.
-    return;
-  }
-
-  // Legitimately Blocked: the agent decided the card is waiting on
-  // other in-flight work and stamped a `blocked` record on the local
-  // YAML (worker contract `blocked != null` → `status: "ToDo"`). The
-  // tracker reports ToDo, but this is intentional progress, not an
-  // env-level failure. The poller's blocked-card gate handles
-  // re-dispatching once the blocker terminates. Read the local YAML
-  // (the only source of structured `blocked` data — Trello has no
-  // native field) and skip the flag when it's set.
-  //
-  // Ordering invariant: the agent edits the YAML in place with `Edit` /
-  // `Write` (DX-157 retired the legacy save MCP tool — the chokidar
-  // watcher now mirrors every file change to the DB) BEFORE calling
-  // `danxbot_complete`. The on-disk write completes synchronously
-  // before `danxbot_complete` returns to the agent, so by the time the
-  // worker fires `onComplete` and we reach this check, the blocked
-  // record is already on disk. No race.
-  //
-  // `findByExternalId` is the only structured reader we have for the
-  // YAML's `blocked` field; tolerate read failures the same way we
-  // tolerate `tracker.getCard` failures above — log and skip the flag
-  // (false-negative, never false-positive).
-  let local;
-  try {
-    local = await findByExternalId(repo.localPath, cardId);
-  } catch (err) {
-    log.error(
-      `[${repo.name}] Failed to read local YAML for ${cardId} during post-dispatch check — skipping flag`,
-      err,
-    );
-    return;
-  }
-  if (local?.waiting_on) {
-    log.info(
-      `[${repo.name}] Tracked card "${card.title}" (${cardId}) intentionally waiting on ${local.waiting_on.by.join(", ")} — skipping critical-failure check`,
-    );
-    return;
-  }
-
-  log.error(
-    `[${repo.name}] Tracked card "${card.title}" (${cardId}) still in ToDo after dispatch ${job.id} — writing critical-failure flag`,
-  );
-  writeFlag(repo.localPath, {
-    source: "post-dispatch-check",
-    dispatchId: job.id,
+  await runPostDispatchProgressCheck({
+    repo,
     cardId,
-    cardUrl: `https://trello.com/c/${cardId}`,
-    reason: `Tracked card "${card.title}" did not move out of ToDo after dispatch`,
-    detail:
-      `Card ${cardId} (${card.title}) stayed in the ToDo list across dispatch ${job.id} ` +
-      `(status=${job.status}, summary=${job.summary || "none"}). ` +
-      `Poller halts until this flag is cleared and the underlying environment blocker is fixed.`,
+    jobId: job.id,
+    jobStatus: job.status,
+    jobSummary: job.summary,
   });
 }
 
