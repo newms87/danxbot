@@ -479,10 +479,6 @@ describe("WorktreeManager", () => {
   // DX-230 — every git invocation MUST run with cwd=hostPath (canonical
   // absolute path), never localPath. A regression that re-reads
   // localPath would corrupt worktree metadata across host↔docker swaps.
-  // ============================================================
-  // DX-242 — node_modules provisioning (real fs)
-  // ============================================================
-
   describe("fetchOrigin", () => {
     it("runs `git fetch --quiet --prune origin main` in the host clone", async () => {
       const runner = fakeRunner();
@@ -673,6 +669,192 @@ describe("WorktreeManager", () => {
       // runtime-agnostic on host↔docker swaps as long as the operator
       // configures a mirror-bind (DX-230).
       expect(readlinkSync(link)).toBe(join(repoRoot, "node_modules"));
+    });
+  });
+
+  describe("provisionEnvFile / ensureProvisioned (DX-244)", () => {
+    let workArea: string;
+    let repoRoot: string;
+    let worktreeRoot: string;
+
+    function seedRepoEnv(content = "DANXBOT_DB_USER=fake\n"): void {
+      writeFileSync(join(repoRoot, ".env"), content);
+    }
+
+    beforeEach(() => {
+      workArea = mkdtempSync(join(tmpdir(), "danxbot-prov-env-"));
+      repoRoot = join(workArea, "repo");
+      worktreeRoot = join(repoRoot, ".danxbot", "worktrees", "alice");
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(worktreeRoot, { recursive: true });
+    });
+
+    afterEach(() => {
+      rmSync(workArea, { recursive: true, force: true });
+    });
+
+    it("creates the .env symlink when the worktree has none", async () => {
+      seedRepoEnv();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, ".env");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(realpathSync(join(repoRoot, ".env")));
+    });
+
+    it("is idempotent — running twice leaves the same valid symlink", async () => {
+      seedRepoEnv();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, ".env");
+      const inodeBefore = lstatSync(link).ino;
+      await wm.ensureProvisioned(ctx, "alice");
+      // Same inode = exact same symlink, not recreated.
+      expect(lstatSync(link).ino).toBe(inodeBefore);
+    });
+
+    it("replaces a broken .env symlink (target missing) with a fresh one", async () => {
+      seedRepoEnv();
+      const link = join(worktreeRoot, ".env");
+      symlinkSync(join(workArea, "does-not-exist"), link, "file");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(realpathSync(join(repoRoot, ".env")));
+    });
+
+    it("replaces a real .env file with the symlink (operator left a stale copy)", async () => {
+      seedRepoEnv("DANXBOT_DB_USER=fresh\n");
+      const real = join(worktreeRoot, ".env");
+      writeFileSync(real, "DANXBOT_DB_USER=stale\n");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(real).isSymbolicLink()).toBe(true);
+      // realpath resolves through the symlink to the canonical file
+      expect(realpathSync(real)).toBe(realpathSync(join(repoRoot, ".env")));
+    });
+
+    it("is a no-op when repo-root has no .env (CI / fresh-clone path)", async () => {
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).resolves.toBeUndefined();
+      expect(existsSync(join(worktreeRoot, ".env"))).toBe(false);
+    });
+
+    it("is a no-op when the worktree directory does not exist", async () => {
+      seedRepoEnv();
+      rmSync(worktreeRoot, { recursive: true, force: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).resolves.toBeUndefined();
+      expect(existsSync(join(worktreeRoot, ".env"))).toBe(false);
+    });
+
+    it("symlink target is the canonical (realpath) repo-root .env", async () => {
+      // When the operator's repo root is itself a symlink (host vs
+      // container path), the canonical comparison still works and the
+      // helper does not loop creating + replacing on every call.
+      seedRepoEnv();
+      const symlinkedRoot = join(workArea, "repo-via-symlink");
+      symlinkSync(repoRoot, symlinkedRoot, "dir");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({
+        localPath: symlinkedRoot,
+        hostPath: symlinkedRoot,
+      });
+      const linkPath = join(
+        symlinkedRoot,
+        ".danxbot",
+        "worktrees",
+        "alice",
+        ".env",
+      );
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      const inodeBefore = lstatSync(linkPath).ino;
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(linkPath).ino).toBe(inodeBefore);
+    });
+
+    it("readlink target points at <repoRoot>/.env (the literal path stored in the link)", async () => {
+      seedRepoEnv();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, ".env");
+      // The symlink target stored on disk is the literal path we passed
+      // in (not the realpath). DX-230 portability — same contract as
+      // node_modules: runtime-agnostic on host↔docker swaps as long as
+      // the operator configures a mirror-bind.
+      expect(readlinkSync(link)).toBe(join(repoRoot, ".env"));
+    });
+
+    it("bootstrap + ensureProvisioned land BOTH symlinks atomically (umbrella guarantee)", async () => {
+      // Single-call coverage for `provisionWorktreeArtifacts` —
+      // protects against a future refactor that drops one of the two
+      // `provision*` calls from the umbrella.
+      mkdirSync(join(repoRoot, "node_modules", ".bin"), { recursive: true });
+      writeFileSync(join(repoRoot, "node_modules", ".bin", "tsx"), "#!fake\n");
+      seedRepoEnv();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(
+        lstatSync(join(worktreeRoot, "node_modules")).isSymbolicLink(),
+      ).toBe(true);
+      expect(lstatSync(join(worktreeRoot, ".env")).isSymbolicLink()).toBe(true);
+    });
+  });
+
+  describe("provisionSymlink defense-in-depth (DX-244)", () => {
+    // The `expectedRoot` check in `provisionSymlink` exists to stop a
+    // future refactor that lets a caller pass an arbitrary worktree
+    // path from silently destroying whatever lives at the target. The
+    // public surface (`bootstrap` / `ensureProvisioned` / etc.) always
+    // routes through `worktreePath()` which builds a path under
+    // `<repoRoot>/.danxbot/worktrees/<safe-name>`, so the throw is
+    // unreachable through normal paths. Test the helper directly so a
+    // regression that REMOVES the guard fails CI loudly.
+    let workArea: string;
+    let repoRoot: string;
+    let outsideDir: string;
+
+    beforeEach(() => {
+      workArea = mkdtempSync(join(tmpdir(), "danxbot-prov-guard-"));
+      repoRoot = join(workArea, "repo");
+      outsideDir = join(workArea, "outside-the-worktree-tree");
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(outsideDir, { recursive: true });
+    });
+
+    afterEach(() => {
+      rmSync(workArea, { recursive: true, force: true });
+    });
+
+    it("throws when the link path is outside <repoRoot>/.danxbot/worktrees/", async () => {
+      // Use require() inside the test scope so we keep the import
+      // surface at the top of the file uncluttered.
+      const { provisionSymlink } = await import("./worktree-manager.js");
+      expect(() =>
+        provisionSymlink(repoRoot, outsideDir, ".env", "file", "test"),
+      ).toThrow(WorktreeError);
+      expect(() =>
+        provisionSymlink(repoRoot, outsideDir, ".env", "file", "test"),
+      ).toThrow(/refusing to operate on .* must be rooted under/);
+    });
+
+    it("throws even when the link path is a sibling of the worktrees subtree (not just any outside path)", async () => {
+      // E.g. `<repoRoot>/.danxbot/something-else/alice` — close but
+      // not under `worktrees/`. The `startsWith` guard must catch it.
+      const { provisionSymlink } = await import("./worktree-manager.js");
+      const sibling = join(repoRoot, ".danxbot", "something-else", "alice");
+      expect(() =>
+        provisionSymlink(repoRoot, sibling, ".env", "file", "test"),
+      ).toThrow(WorktreeError);
     });
   });
 

@@ -450,9 +450,10 @@ D("WorktreeManager (integration, real git)", () => {
     expect(existsSync(link)).toBe(false);
 
     // validate is supposed to be read-only at the contract level, but
-    // it ALSO calls `provisionNodeModules` internally to self-heal
-    // before reading git state. The return value remains the
-    // git-state shape; the side effect is repair.
+    // it ALSO calls `provisionWorktreeArtifacts` internally to
+    // self-heal before reading git state (node_modules here, .env via
+    // the umbrella's second leg — see DX-244 tests below). The return
+    // value remains the git-state shape; the side effect is repair.
     const result = await wm.validate(ctx(), "alice");
     expect(result.state).toBe("clean");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
@@ -524,6 +525,146 @@ D("WorktreeManager (integration, real git)", () => {
     expect(realpathSync(link)).toBe(
       realpathSync(join(repoDir, "node_modules")),
     );
+  });
+
+  // ============================================================
+  // DX-244 — .env provisioning, end-to-end against real fs
+  // ============================================================
+
+  /**
+   * Same pattern as the DX-242 tests above: the standard scenarios
+   * have no `<repoDir>/.env`, so the provisioning helper silently
+   * no-ops (preserving compat with existing fixtures). These tests
+   * seed a fake repo-root `.env` first and assert the symlink lands
+   * at `<worktree>/.env` resolving to that target.
+   */
+
+  it("DX-244: bootstrap symlinks <worktree>/.env → <repoRoot>/.env when seeded", async () => {
+    writeFileSync(
+      join(repoDir, ".env"),
+      "DXTEST_BOOT=ok\nDANXBOT_DB_USER=fake\n",
+    );
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
+    expect(existsSync(link)).toBe(true);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(realpathSync(join(repoDir, ".env")));
+    // Load-bearing assertion: the symlink resolves the same content
+    // a `npx vitest run` from the worktree's cwd would read via the
+    // setup file. This is the exact resolution path that fails
+    // pre-DX-244 with "Missing required environment variable:
+    // DANXBOT_DB_USER".
+    expect(readFileSync(link, "utf-8")).toBe(
+      "DXTEST_BOOT=ok\nDANXBOT_DB_USER=fake\n",
+    );
+  });
+
+  it("DX-244: bootstrap is a silent no-op for .env when the repo root has none", async () => {
+    // Mirrors the node_modules fixture-compat behavior: a missing
+    // repo-root .env is fine (CI / fresh clones / legacy fixtures);
+    // bootstrap creates the worktree without throwing and without
+    // creating a broken symlink.
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
+    expect(existsSync(link)).toBe(false);
+  });
+
+  it("DX-244: bootstrap is idempotent for .env — second run keeps the same symlink", async () => {
+    writeFileSync(join(repoDir, ".env"), "DXTEST_IDEMPOTENT=1\n");
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+    const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
+    const targetBefore = realpathSync(link);
+
+    await wm.bootstrap(ctx(), "alice");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(targetBefore);
+  });
+
+  it("DX-244: validate() silently re-provisions a missing .env symlink before reading git state", async () => {
+    // Mirror the DX-242 .gitignore-based fixture so the worktree
+    // stays clean after the symlink is in place.
+    writeFileSync(join(repoDir, ".gitignore"), "node_modules\n.env\n");
+    git(repoDir, "add", ".gitignore");
+    git(repoDir, "commit", "-m", "ignore node_modules + .env");
+    git(repoDir, "push", "origin", "main");
+
+    writeFileSync(join(repoDir, ".env"), "DXTEST_VALIDATE=ok\n");
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
+    rmSync(link, { force: true });
+    expect(existsSync(link)).toBe(false);
+
+    const result = await wm.validate(ctx(), "alice");
+    expect(result.state).toBe("clean");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(realpathSync(join(repoDir, ".env")));
+  });
+
+  it("DX-244: resetClean() re-provisions .env after the reset (operator-driven `git clean -fdx` heal)", async () => {
+    writeFileSync(join(repoDir, ".gitignore"), "node_modules\n.env\n");
+    git(repoDir, "add", ".gitignore");
+    git(repoDir, "commit", "-m", "ignore node_modules + .env");
+    git(repoDir, "push", "origin", "main");
+
+    writeFileSync(join(repoDir, ".env"), "DXTEST_RESET=ok\n");
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
+    rmSync(link, { force: true });
+
+    await wm.resetClean(ctx(), "alice");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(realpathSync(join(repoDir, ".env")));
+  });
+
+  it("DX-244: ensureProvisioned heals an existing worktree's missing .env symlink", async () => {
+    writeFileSync(join(repoDir, ".env"), "DXTEST_ENSURE=ok\n");
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
+    expect(existsSync(link)).toBe(true);
+    rmSync(link, { force: true });
+    expect(existsSync(link)).toBe(false);
+
+    await wm.ensureProvisioned(ctx(), "alice");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(realpathSync(join(repoDir, ".env")));
+  });
+
+  it("DX-244: ensureProvisioned replaces a stale non-symlink .env (e.g. operator copied a real file in)", async () => {
+    writeFileSync(join(repoDir, ".env"), "DXTEST_REPLACE=fresh\n");
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    await wm.bootstrap(ctx(), "alice");
+
+    // Operator (or a buggy script) replaced the symlink with a real
+    // file containing stale content. The next ensureProvisioned (or
+    // validate / resetClean) must replace it with the symlink — leaving
+    // the stale file would mean the worktree's env values diverge from
+    // the canonical .env every time a secret rotates.
+    const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
+    rmSync(link, { force: true });
+    writeFileSync(link, "DXTEST_REPLACE=stale\n");
+    expect(lstatSync(link).isSymbolicLink()).toBe(false);
+
+    await wm.ensureProvisioned(ctx(), "alice");
+
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(link, "utf-8")).toBe("DXTEST_REPLACE=fresh\n");
   });
 
   it("bootstrap fails when ctx.hostPath does not resolve to a git repo", async () => {

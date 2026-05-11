@@ -8,15 +8,17 @@
  * use to keep that worktree healthy across dispatches:
  *
  *   - `bootstrap(ctx, name)` — idempotent `git worktree add -B` plus
- *     `node_modules` symlink provisioning (DX-242). Called on
- *     `POST /api/agents` and lazily on first dispatch (in case an agent was
- *     hand-edited into `settings.json`).
+ *     `node_modules` (DX-242) + `.env` (DX-244) symlink provisioning.
+ *     Called on `POST /api/agents` and lazily on first dispatch (in
+ *     case an agent was hand-edited into `settings.json`).
  *
- *   `validate` and `resetClean` ALSO re-provision `node_modules` inline
- *   (silently in `validate`, post-reset in `resetClean`) so every
- *   dispatch path that funnels through them is self-healing on its own —
- *   `ensureProvisioned` is the EXTRA seam for callers (today: the worker
- *   boot path) that want the repair WITHOUT triggering git work.
+ *   `validate` and `resetClean` ALSO re-provision both symlinks
+ *   (silently in `validate`, post-reset in `resetClean`) via the
+ *   `provisionWorktreeArtifacts` umbrella so every dispatch path that
+ *   funnels through them is self-healing on its own —
+ *   `ensureProvisioned` is the EXTRA seam for callers (today: the
+ *   worker boot path) that want the repair WITHOUT triggering git
+ *   work.
  *   - `validate(ctx, name)` — pre-dispatch sanity check. Returns `clean`
  *     when the worktree has no uncommitted changes and zero local commits
  *     ahead of `origin/main`; otherwise `dirty` with `{porcelain, ahead,
@@ -24,13 +26,14 @@
  *   - `resetClean(ctx, name)` — `git checkout <name>; git reset --hard
  *     origin/main`. Only safe on `validate() === clean` (caller's
  *     responsibility — we don't re-check inside). Re-provisions
- *     `node_modules` post-reset so an operator-driven `git clean -fdx`
- *     (which strips the symlink as untracked) heals on the next dispatch.
+ *     `node_modules` + `.env` post-reset so an operator-driven `git
+ *     clean -fdx` (which strips the symlinks as untracked) heals on
+ *     the next dispatch.
  *
  *   - `ensureProvisioned(ctx, name)` — repair-only entry point for
- *     `node_modules` provisioning on existing worktrees that pre-date the
- *     bootstrap fix. Called from the worker boot path so every existing
- *     agent inherits the fix without operator action.
+ *     `node_modules` + `.env` provisioning on existing worktrees that
+ *     pre-date a bootstrap fix. Called from the worker boot path so
+ *     every existing agent inherits the fixes without operator action.
  *   - `teardown(ctx, name)` — `git worktree remove --force <path>` plus
  *     best-effort branch deletion (local + remote). Called on
  *     `DELETE /api/agents/:name`.
@@ -117,7 +120,13 @@ export interface WorktreeManager {
    * push permission to a freshly-created remote branch.
    */
   teardown(ctx: WorktreeRepo, agentName: string): Promise<void>;
-  /** Never throws on a recoverable git state — returns `dirty` instead. */
+  /**
+   * Never throws on a recoverable git state — returns `dirty` instead.
+   * MAY throw `WorktreeError` when `<repoRoot>/node_modules` exists
+   * but lacks `.bin/tsx` (half-installed repo); the worker can't run
+   * agents in that state regardless, so surfacing here keeps silent
+   * dispatch-time failures off the table.
+   */
   validate(ctx: WorktreeRepo, agentName: string): Promise<ValidationResult>;
   /**
    * Caller's responsibility to call only when `validate() === clean`. We do
@@ -125,16 +134,21 @@ export interface WorktreeManager {
    */
   resetClean(ctx: WorktreeRepo, agentName: string): Promise<void>;
   /**
-   * Idempotent: ensure `<worktree>/node_modules` is provisioned (DX-242).
-   * Bootstrap-time provisioning runs unconditionally inside `bootstrap()`,
-   * but existing worktrees that pre-date the fix lack the symlink. Callers
-   * that operate on a possibly-stale worktree (the worker boot path,
-   * `validate`, `resetClean`) call this directly to repair without forcing
-   * a full bootstrap. No-op when the worktree directory does not yet exist
-   * — bootstrap is the right entry point in that case. Throws
-   * `WorktreeError` when the repo-root `node_modules` is missing or stale
-   * (the worker can't run agents either way; surface the breakage instead
-   * of silently producing a worktree that fails on first dispatch).
+   * Idempotent: ensure both `<worktree>/node_modules` (DX-242) and
+   * `<worktree>/.env` (DX-244) symlinks exist. Bootstrap-time
+   * provisioning runs unconditionally inside `bootstrap()`, but
+   * existing worktrees that pre-date a fix lack the corresponding
+   * symlink. Callers that operate on a possibly-stale worktree (the
+   * worker boot path, `validate`, `resetClean`) call this directly to
+   * repair without forcing a full bootstrap. No-op when the worktree
+   * directory does not yet exist — bootstrap is the right entry point
+   * in that case. Silent skip when a corresponding source
+   * (`<repoRoot>/node_modules`, `<repoRoot>/.env`) is missing (CI /
+   * fresh-clone path). Throws `WorktreeError` only when
+   * `<repoRoot>/node_modules` exists but lacks `.bin/tsx` —
+   * half-installed repo state where the worker can't run agents
+   * either way, so surfacing the breakage at provision time keeps
+   * silent dispatch-time failures off the table.
    */
   ensureProvisioned(ctx: WorktreeRepo, agentName: string): Promise<void>;
   /**
@@ -284,11 +298,16 @@ export function createWorktreeManager(
           `bootstrap(${agentName}): git worktree add failed: ${created.stderr.trim()}`,
         );
       }
-      // DX-242: provision node_modules unconditionally on every fresh
-      // worktree. Without this, `<worktree>/node_modules/.bin/tsx` is
-      // missing and any test (or dispatched script) that spawns a
-      // bin from the worktree's cwd fails with ENOENT.
-      provisionNodeModules(ctx.hostPath, path);
+      // DX-242 + DX-244: provision node_modules + .env unconditionally
+      // on every fresh worktree. Without node_modules,
+      // `<worktree>/node_modules/.bin/tsx` is missing and any test
+      // (or dispatched script) spawning a bin from the worktree's
+      // cwd fails with ENOENT. Without .env, `npx vitest run` from
+      // the worktree's cwd throws "Missing required environment
+      // variable: DANXBOT_DB_USER" at module-load time. Both
+      // symlinks are gitignored so they never appear in `git
+      // status`.
+      provisionWorktreeArtifacts(ctx.hostPath, path);
       log.info(`bootstrap(${agentName}): created worktree at ${path}`);
     },
 
@@ -304,7 +323,7 @@ export function createWorktreeManager(
         );
         return;
       }
-      provisionNodeModules(ctx.hostPath, path);
+      provisionWorktreeArtifacts(ctx.hostPath, path);
     },
 
     async teardown(ctx, agentName) {
@@ -378,12 +397,13 @@ export function createWorktreeManager(
       assertAgentName(agentName);
       const path = this.worktreePath(ctx, agentName);
 
-      // DX-242: silently repair node_modules before reading git state.
-      // Existing worktrees from before this fix lack the symlink, and a
-      // dispatch following validate would still fail ENOENT on
-      // `<worktree>/node_modules/.bin/<bin>` lookups. Repair here so
-      // every dispatch path that funnels through validate is covered.
-      provisionNodeModules(ctx.hostPath, path);
+      // DX-242 + DX-244: silently repair node_modules + .env before
+      // reading git state. Existing worktrees from before each fix
+      // lack the corresponding symlink, and a dispatch following
+      // validate would still fail (ENOENT on tsx lookups, or
+      // module-load env-var errors). Repair here so every dispatch
+      // path that funnels through validate is covered.
+      provisionWorktreeArtifacts(ctx.hostPath, path);
 
       // No `git fetch` here. Validation is purely local — porcelain +
       // rev-list against the cached `origin/main` ref is enough to
@@ -454,13 +474,14 @@ export function createWorktreeManager(
           `resetClean(${agentName}): git reset --hard origin/main failed: ${reset.stderr.trim()}`,
         );
       }
-      // DX-242: re-provision after reset. `git reset --hard` does not
-      // touch untracked dirs (and the symlink is gitignored, so it
-      // looks untracked) — but `git clean -fdx` (called elsewhere in
-      // the recovery path, and any operator running it manually) DOES
-      // remove it. Re-stamp the link unconditionally so resetClean's
-      // post-condition is "worktree is ready for the next dispatch."
-      provisionNodeModules(ctx.hostPath, path);
+      // DX-242 + DX-244: re-provision after reset. `git reset --hard`
+      // does not touch untracked dirs (and both symlinks are
+      // gitignored, so they look untracked) — but `git clean -fdx`
+      // (called elsewhere in the recovery path, and any operator
+      // running it manually) DOES remove them. Re-stamp the links
+      // unconditionally so resetClean's post-condition is "worktree
+      // is ready for the next dispatch."
+      provisionWorktreeArtifacts(ctx.hostPath, path);
     },
   };
 }
@@ -486,35 +507,116 @@ function worktreeListIncludes(stdout: string, path: string): boolean {
 }
 
 /**
+ * Provision both worktree symlinks (DX-242 + DX-244) — node_modules
+ * for binary resolution, .env for vitest module-load env vars. Single
+ * entry point so callers don't track which artifacts exist; adding a
+ * new artifact (a future `.npmrc`, etc.) is one entry here, not
+ * touch-ups across four callsites.
+ */
+function provisionWorktreeArtifacts(
+  repoRoot: string,
+  worktreePath: string,
+): void {
+  provisionNodeModules(repoRoot, worktreePath);
+  provisionEnvFile(repoRoot, worktreePath);
+}
+
+/**
  * DX-242: provision a `<worktree>/node_modules` symlink pointing at the
- * repo-root `node_modules`. Called unconditionally from `bootstrap`,
- * `validate`, and `resetClean`, plus directly from the worker boot path
- * via `ensureProvisioned`.
+ * repo-root `node_modules`.
  *
- * Mechanism (chosen over `npm ci`-per-worktree, documented in
- * `WorktreeManager`'s header):
- *   - Symlink — cheapest (~1ms vs ~30-60s + tens of MB per worktree).
- *   - Idempotent — an existing symlink resolving to the canonical target
- *     is a no-op.
- *   - Self-healing — a wrong target (broken symlink, real directory,
- *     plain file) is replaced. Nothing other than this symlink should
- *     ever live at `<worktree>/node_modules`, so replacement is safe.
- *   - Fail-loud — a missing or broken `<repoRoot>/node_modules/.bin/tsx`
- *     throws `WorktreeError`. Without `tsx` the worker itself can't run
- *     dispatched agents; surfacing the breakage at provision time keeps
- *     silent dispatch-time failures off the table.
+ * Adds a fail-loud precondition on `.bin/tsx` (a symlink to a
+ * `node_modules` that doesn't have tsx is worse than no symlink — the
+ * test scaffolding would resolve `<worktree>/node_modules/.bin/tsx`
+ * past existsSync but spawn a non-existent file). Otherwise delegates
+ * to `provisionSymlink`.
  *
- * The `realpathSync` comparison handles the case where the operator's
- * repo root is itself a symlink (host vs container path resolution): we
- * always compare against the canonical filesystem path so a symlink
- * that resolves to the right place is treated as identical to a direct
- * link. This matches how `git worktree add` canonicalizes its own
- * metadata via realpath (DX-230).
+ * Test-path silent skip: `<repoRoot>/node_modules` may not exist in
+ * unit tests that drive the manager with fake `GitRunner`s and in
+ * integration tests that build a real git repo in a tmpdir without
+ * populating `node_modules`. Skip rather than throw so existing test
+ * scaffolding keeps working without a per-test `npm install` seed
+ * step. A worker booted into a fresh clone with no `npm install` would
+ * also hit this path, but it can't actually run agents anyway in that
+ * state — the worker's own tsx resolution comes from
+ * `<repoRoot>/node_modules` — so the skip-and-let-the-real-failure-
+ * surface contract holds.
  */
 function provisionNodeModules(repoRoot: string, worktreePath: string): void {
   const repoNm = join(repoRoot, "node_modules");
-  const worktreeNm = join(worktreePath, "node_modules");
+  if (!existsSync(repoNm)) {
+    log.debug(
+      `provisionNodeModules: ${repoNm} does not exist — skipping (no repo-root node_modules to share)`,
+    );
+    return;
+  }
   const tsxBin = join(repoNm, ".bin", "tsx");
+  if (!existsSync(tsxBin)) {
+    throw new WorktreeError(
+      `provisionNodeModules: ${tsxBin} does not exist — run \`npm install\` at ${repoRoot} ` +
+        `before bootstrapping or dispatching worktree agents`,
+    );
+  }
+  provisionSymlink(repoRoot, worktreePath, "node_modules", "dir", "provisionNodeModules");
+}
+
+/**
+ * DX-244: provision a `<worktree>/.env` symlink pointing at the repo-
+ * root `.env`. Pairs with `vitest.setup.ts` — setup file calls
+ * `loadEnvFile(<cwd>/.env)`, the symlink is the resolution path that
+ * lets `npx vitest run` from the worktree's cwd see DANXBOT_DB_*
+ * without operator preamble.
+ *
+ * No precondition (the file is opaque content; vitest will surface a
+ * clear "Missing required environment variable: <NAME>" if a needed
+ * key is absent — that's actionable on its own). Test-path silent
+ * skip when the repo-root `.env` is missing (CI / fresh clones / the
+ * existing integration-test fixtures with synthetic repos).
+ */
+function provisionEnvFile(repoRoot: string, worktreePath: string): void {
+  provisionSymlink(repoRoot, worktreePath, ".env", "file", "provisionEnvFile");
+}
+
+/**
+ * Generic worktree-artifact symlink provisioner used by
+ * `provisionNodeModules` (DX-242) + `provisionEnvFile` (DX-244).
+ *
+ * - Idempotent — an existing symlink resolving to the canonical
+ *   target is a no-op.
+ * - Self-healing — a wrong target (broken symlink, real directory,
+ *   plain file) is replaced. Nothing other than the canonical
+ *   symlink is supposed to live at `<worktree>/<relName>`, so
+ *   replacement is safe.
+ * - Silent skip when source missing — caller decides whether that's
+ *   acceptable (both current callers say yes; node_modules adds a
+ *   prior fail-loud check on `.bin/tsx`).
+ * - NOT concurrency-safe — two callers racing on the same worktree
+ *   would have the second `symlinkSync` fail with EEXIST. Today
+ *   only one worker per repo and per-agent ops are sequential, so
+ *   unreachable; do not call concurrently from a future test
+ *   harness without serializing per-agent.
+ *
+ * The `realpathSync` comparison handles the case where the operator's
+ * repo root is itself a symlink (host vs container path resolution):
+ * always compare against the canonical filesystem path so a symlink
+ * that resolves to the right place is treated as identical to a
+ * direct link. This matches how `git worktree add` canonicalizes its
+ * own metadata via realpath (DX-230).
+ *
+ * Exported for unit-test access to the defense-in-depth
+ * `expectedRoot` check (which can't fire through the public surface
+ * because `worktreePath()` always builds a safe path). Production
+ * callers stay inside `provisionNodeModules` / `provisionEnvFile`.
+ */
+export function provisionSymlink(
+  repoRoot: string,
+  worktreePath: string,
+  relName: string,
+  type: "dir" | "file",
+  logTag: string,
+): void {
+  const sourceAbs = join(repoRoot, relName);
+  const linkAbs = join(worktreePath, relName);
 
   // Defense-in-depth: every public caller already passes a
   // worktreePath rooted under `<repoRoot>/.danxbot/worktrees/<safe-name>`
@@ -525,90 +627,56 @@ function provisionNodeModules(repoRoot: string, worktreePath: string): void {
   // pin the safety property locally instead of distributing it across
   // every callsite.
   const expectedRoot = join(repoRoot, ".danxbot", "worktrees") + sep;
-  if (!worktreeNm.startsWith(expectedRoot)) {
+  if (!linkAbs.startsWith(expectedRoot)) {
     throw new WorktreeError(
-      `provisionNodeModules: refusing to operate on ${worktreeNm} — must be rooted under ${expectedRoot}`,
+      `${logTag}: refusing to operate on ${linkAbs} — must be rooted under ${expectedRoot}`,
     );
   }
 
-  // Test-path shortcut: skip when `<repoRoot>/node_modules` itself
-  // doesn't exist. In production the worker boots from the repo root
-  // and `npm install` ran at deploy/build time — the directory always
-  // exists. In unit tests that drive the manager with fake `GitRunner`s
-  // (synthetic paths like `/repo/danxbot`) and integration tests that
-  // build a real git repo in a tmpdir without populating
-  // `node_modules`, the directory does NOT exist; we silently no-op so
-  // the existing test scaffolding keeps working without a per-test
-  // npm-install seed step.
-  //
-  // Note: we are intentionally permissive here, NOT fail-loud. A worker
-  // booted into a freshly-cloned repo with no `npm install` yet would
-  // also hit this path — but a worker can't actually run agents
-  // anyway in that state (the worker's own `tsx` resolution comes from
-  // `<repoRoot>/node_modules`, which is missing too), so the
-  // skip-and-let-the-real-failure-surface contract holds.
-  if (!existsSync(repoNm)) {
-    log.debug(
-      `provisionNodeModules: ${repoNm} does not exist — skipping (no repo-root node_modules to share)`,
-    );
+  if (!existsSync(sourceAbs)) {
+    log.debug(`${logTag}: ${sourceAbs} does not exist — skipping`);
     return;
   }
 
-  // Precondition: when `<repoRoot>/node_modules` exists, it MUST contain
-  // `.bin/tsx`. A symlink to a directory that has node_modules but no
-  // tsx is worse than no symlink — the test scaffolding would still
-  // resolve `<worktree>/node_modules/.bin/tsx` past the existsSync
-  // check but spawn a non-existent file. Fail loud here so the operator
-  // runs `npm install` at the repo root before retrying.
-  if (!existsSync(tsxBin)) {
-    throw new WorktreeError(
-      `provisionNodeModules: ${tsxBin} does not exist — run \`npm install\` at ${repoRoot} ` +
-        `before bootstrapping or dispatching worktree agents`,
-    );
-  }
-
-  // The canonical path of the repo-root node_modules. Used both as the
-  // symlink target and as the comparison key for the idempotency check.
-  const canonicalTarget = realpathSync(repoNm);
+  // Canonical target (used as both symlink target and idempotency key).
+  const canonicalTarget = realpathSync(sourceAbs);
 
   // Inspect the existing entry, if any. lstat (not stat) so we don't
   // follow the link before deciding what to do.
   let existing: ReturnType<typeof lstatSync> | undefined;
   try {
-    existing = lstatSync(worktreeNm);
+    existing = lstatSync(linkAbs);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
 
   if (existing) {
     if (existing.isSymbolicLink()) {
-      // Symlink already there. If it resolves to the same canonical
-      // target, no-op. Otherwise (broken link, wrong target) replace.
       let currentTarget: string | undefined;
       try {
-        currentTarget = realpathSync(worktreeNm);
+        currentTarget = realpathSync(linkAbs);
       } catch {
         // Broken symlink — currentTarget stays undefined; falls through
         // to the replace branch below.
       }
       if (currentTarget === canonicalTarget) {
         log.debug(
-          `provisionNodeModules: ${worktreeNm} already symlinked to ${canonicalTarget}`,
+          `${logTag}: ${linkAbs} already symlinked to ${canonicalTarget}`,
         );
         return;
       }
-      rmSync(worktreeNm, { force: true });
+      rmSync(linkAbs, { force: true });
     } else {
       // Real directory or plain file. Nothing other than our symlink is
-      // supposed to live here; replacing it is the contract. Use
-      // `recursive: true` to handle a stale `npm install` inside the
-      // worktree (the candidate alt-mechanism that this fix replaces).
-      rmSync(worktreeNm, { recursive: true, force: true });
+      // supposed to live here; replacing it is the contract. `recursive`
+      // covers an unexpected directory landing here (e.g. a stale
+      // `npm install` inside the worktree).
+      rmSync(linkAbs, { recursive: true, force: true });
     }
   }
 
-  symlinkSync(repoNm, worktreeNm, "dir");
-  log.info(`provisionNodeModules: symlinked ${worktreeNm} -> ${repoNm}`);
+  symlinkSync(sourceAbs, linkAbs, type);
+  log.info(`${logTag}: symlinked ${linkAbs} -> ${sourceAbs}`);
 }
 
 export class WorktreeError extends Error {

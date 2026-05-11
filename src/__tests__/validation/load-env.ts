@@ -7,18 +7,18 @@
  * `make test-validate` would silently skip every API-gated scenario unless the
  * user manually `export`-ed the key into their shell.
  *
- * Node 20.12+ ships `process.loadEnvFile` natively; resolved absolutely from
- * this file's location so it works regardless of the test runner's cwd.
+ * Resolved absolutely from this file's location: validation runs with
+ * `root: "src"` in `vitest.validation.config.ts`, so a cwd-relative
+ * resolve would land in the wrong directory. Uses the shared
+ * `loadEnvFile` helper which works on Node 18 — pre-DX-244 this called
+ * `process.loadEnvFile` (Node 20.12+) which threw on the host's
+ * Node 18.x and silently broke the whole validation harness.
  */
 
-import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadEnvFile } from "../helpers/load-env-file.js";
 
 // src/__tests__/validation/load-env.ts → repo root = up four levels
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const envPath = resolve(repoRoot, ".env");
-
-if (existsSync(envPath)) {
-  process.loadEnvFile(envPath);
-}
+loadEnvFile(resolve(repoRoot, ".env"));

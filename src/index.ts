@@ -125,13 +125,15 @@ async function startWorkerMode(): Promise<void> {
   // clear warning at startup rather than discovering it via a failed dispatch.
   await assertJsonlDirectoryAccess(repo.name);
 
-  // DX-242: self-heal `<worktree>/node_modules` for every existing agent
-  // worktree. Existing worktrees from before the bootstrap-time fix lack
-  // the symlink; this catches them on the next worker boot without
-  // operator action. Per-agent failures surface as `worktree`-source
-  // system errors so the dashboard agent card flags broken state instead
-  // of letting a dispatched agent silently ENOENT on `tsx` resolution
-  // (AC #2 + AC #8).
+  // DX-242 + DX-244: self-heal `<worktree>/node_modules` AND
+  // `<worktree>/.env` for every existing agent worktree. Existing
+  // worktrees from before either bootstrap-time fix lack the
+  // corresponding symlink; this catches them on the next worker boot
+  // without operator action. Per-agent failures surface as
+  // `worktree`-source system errors so the dashboard agent card flags
+  // broken state instead of letting a dispatched agent silently ENOENT
+  // on `tsx` resolution (DX-242) or "Missing required environment
+  // variable: DANXBOT_DB_USER" at vitest module-load (DX-244).
   try {
     await ensureWorktreesProvisioned(repo, createWorktreeManager());
   } catch (err) {

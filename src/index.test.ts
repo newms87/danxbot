@@ -191,12 +191,14 @@ beforeEach(() => {
 // initPlatformPool → startWorkerServer → optional startSlackListener →
 // startPoller → initShutdownHandlers. Each await is a fresh microtask + the
 // real fs op adds a macrotask boundary. One setTimeout(0) flush is not
-// enough — we need to drain until the pipeline quiesces. 10× setTimeout(0)
-// is sufficient empirically and deterministic across platforms (total wait
-// is still <20ms).
+// enough — we need to drain until the pipeline quiesces. 30× setTimeout(0)
+// gives enough margin under full-suite parallel load that no individual
+// boot-pipeline await escapes the drain (DX-244 saw 1-of-3 flake at
+// 10× when the test-file count crossed ~220 and per-tick CPU pressure
+// spiked); total wait is still <100ms, deterministic across platforms.
 async function importIndex(): Promise<void> {
   await import("./index.js");
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 30; i++) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }

@@ -1,12 +1,13 @@
 /**
- * DX-242: ensure every existing agent worktree has a
- * `<worktree>/node_modules` symlink at worker boot.
+ * DX-242 + DX-244: ensure every existing agent worktree has its
+ * provisioning symlinks (`<worktree>/node_modules`,
+ * `<worktree>/.env`) at worker boot.
  *
- * This is the self-healing half of the bootstrap fix: workspaces that
- * pre-date the provisioning step (today: every existing worktree) lack
- * the symlink. Running the bootstrap-time fix on a fresh boot pulls
- * existing worktrees into the new contract automatically — no operator
- * action required (AC #2).
+ * This is the self-healing half of the bootstrap fix: worktrees that
+ * pre-date a provisioning step lack the corresponding symlink.
+ * Running the bootstrap-time fix on a fresh boot pulls existing
+ * worktrees into the new contract automatically — no operator action
+ * required (AC #2).
  *
  * Per-agent failures are logged AND recorded as system errors so the
  * dashboard surfaces them on the agent card (AC #8 — "silent breakage
@@ -73,7 +74,7 @@ export async function ensureWorktreesProvisioned(
         severity: "error",
         repo: ctx.name,
         message:
-          `Agent worktree '${name}' is missing node_modules and could not ` +
+          `Agent worktree '${name}' is missing required artifacts (node_modules / .env) and could not ` +
           `be self-healed: ${message}`,
         details: { agent: name },
       });

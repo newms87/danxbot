@@ -1,7 +1,7 @@
 /**
  * Unit tests for the worker-boot self-heal pass that re-provisions
- * `<worktree>/node_modules` for every agent declared in
- * `settings.json` (DX-242).
+ * `<worktree>/node_modules` (DX-242) and `<worktree>/.env` (DX-244)
+ * for every agent declared in `settings.json`.
  *
  * Tests use real tmpdirs so the `readSettings` IO path runs unchanged,
  * but the worktree manager itself is a hand-rolled stub so we can
@@ -155,6 +155,13 @@ describe("ensureWorktreesProvisioned (DX-242)", () => {
     // Each message names the affected agent so the operator can act.
     expect(messages.some((m: string) => m.includes("alice"))).toBe(true);
     expect(messages.some((m: string) => m.includes("carol"))).toBe(true);
+    // DX-244: messages enumerate BOTH artifacts so the operator
+    // doesn't have to grep the helper to know which one's missing.
+    // A regression that drops `.env` (or reverts to the
+    // node_modules-only wording) trips this.
+    expect(
+      messages.every((m: string) => m.includes("node_modules / .env")),
+    ).toBe(true);
   });
 
   it("does not throw when a single agent's ensureProvisioned rejects", async () => {
