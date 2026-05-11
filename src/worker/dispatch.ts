@@ -384,6 +384,19 @@ function isWorkspaceCallerError(err: unknown): boolean {
   );
 }
 
+/**
+ * `POST /api/launch` — operator-directed dispatch. Body shape declared
+ * by `parseDispatchRequest`.
+ *
+ * Intentional bypass: `requires_human != null` on a card does NOT
+ * disqualify it from this route (DX-231 / DX-233). The poller's
+ * dispatch filter in `listDispatchableYamls` skips such cards, but the
+ * operator override path goes through — the dispatched agent reads
+ * `requires_human` on its first turn (the YAML lives in the workspace
+ * cwd) and decides whether to proceed or exit. Mirrors the established
+ * pattern for `blocked` / `waiting_on`: poller respects the gate, the
+ * operator can punch through.
+ */
 export async function handleLaunch(
   req: IncomingMessage,
   res: ServerResponse,

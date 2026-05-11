@@ -194,6 +194,29 @@ describe("local-issues — DB-backed", () => {
       expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
     });
 
+    // DX-231 (Phase 2 — DX-233) — `requires_human` is an orthogonal
+    // dispatch gate parallel to `blocked` and `waiting_on`. Three tests
+    // pin the contract:
+    //   1. `requires_human != null` alone — excluded.
+    //   2. `requires_human != null` AND `waiting_on != null` — excluded
+    //      (gates compose; either is sufficient to disqualify).
+    //   3. `requires_human != null` AND `blocked != null` — excluded
+    //      (same composition guarantee for the self-block gate).
+    // The regression baseline (`requires_human == null` → included) is
+    // covered by the very first test in this describe block
+    // ("returns ToDo + blocked=null issues") — `makeIssue`'s default
+    // sets `requires_human: null`.
+    const REQUIRES_HUMAN_FIXTURE = {
+      reason: "Need Stripe API key rotated",
+      steps: [
+        "Log into Stripe → API keys → Roll secret",
+        "Update DANX_STRIPE_KEY in <repo>/.danxbot/.env",
+        "Restart worker; toggle off this flag",
+      ],
+      set_by: "agent" as const,
+      set_at: "2026-05-10T16:50:00.000Z",
+    };
+
     it.skipIf(!handle)(
       "excludes cards with requires_human != null (DX-231 dispatch gate)",
       async () => {
@@ -201,15 +224,63 @@ describe("local-issues — DB-backed", () => {
           makeIssue({
             id: "ISS-1",
             external_id: "a",
-            requires_human: {
-              reason: "Need Stripe API key rotated",
-              steps: [
-                "Log into Stripe → API keys → Roll secret",
-                "Update DANX_STRIPE_KEY in <repo>/.danxbot/.env",
-                "Restart worker; toggle off this flag",
-              ],
-              set_by: "agent",
-              set_at: "2026-05-10T16:50:00.000Z",
+            requires_human: REQUIRES_HUMAN_FIXTURE,
+          }),
+          1000,
+        );
+        await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "excludes cards with BOTH requires_human != null AND waiting_on != null (independent gates)",
+      async () => {
+        await seed(
+          makeIssue({
+            id: "ISS-1",
+            external_id: "a",
+            requires_human: REQUIRES_HUMAN_FIXTURE,
+            waiting_on: {
+              reason: "Waits for ISS-99",
+              timestamp: "2026-01-01T00:00:00Z",
+              by: ["ISS-99"],
+            },
+          }),
+          1000,
+        );
+        await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "excludes cards with BOTH requires_human != null AND blocked != null (independent gates)",
+      async () => {
+        // The card under test is seeded with `status: "ToDo"` AND
+        // `blocked != null`. That combination deliberately bypasses
+        // the v4 loader invariant `status === "Blocked" ⟺
+        // blocked !== null` — the row is INSERTed directly into the
+        // `issues` table via `seed()`, skipping the YAML loader.
+        // The bypass is intentional: it isolates gate 3
+        // (`blocked !== null`) and gate 4 (`requires_human !== null`)
+        // in the dispatch filter so the test pins their composition
+        // without short-circuiting on gate 1 (`status !== "ToDo"`).
+        // A schema-faithful `status: "Blocked"` would trip gate 1
+        // first and never exercise the `requires_human` predicate
+        // here — defeating the test's purpose. The two gates are
+        // independent: either alone disqualifies the row; this test
+        // proves they ALSO disqualify when fired together.
+        await seed(
+          makeIssue({
+            id: "ISS-1",
+            external_id: "a",
+            requires_human: REQUIRES_HUMAN_FIXTURE,
+            blocked: {
+              reason: "Self-block placeholder",
+              timestamp: "2026-01-01T00:00:00Z",
             },
           }),
           1000,
@@ -483,6 +554,39 @@ describe("local-issues — DB-backed", () => {
             external_id: "a",
             type: "Epic",
             status: "Done",
+          }),
+          1000,
+        );
+        await seed(
+          makeIssue({ id: "ISS-2", external_id: "b", parent_id: "ISS-1" }),
+          2000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "does NOT propagate ancestor's requires_human to descendant (self-only gate, DX-231)",
+      async () => {
+        // DX-231 spec: "Reconcile: `requires_human` is NOT propagated
+        // to parent." The same non-propagation applies the other
+        // direction — a parent with `requires_human != null` does NOT
+        // block descendants. `ancestorWaitingOrBlocked` only inspects
+        // `waiting_on` / `blocked`. This test locks the contract so a
+        // future regressor that adds `requires_human` to the ancestor
+        // walk would fail loudly.
+        await seed(
+          makeIssue({
+            id: "ISS-1",
+            external_id: "a",
+            type: "Epic",
+            requires_human: {
+              reason: "Need Stripe API key rotated",
+              steps: ["Log into Stripe", "Roll secret"],
+              set_by: "agent",
+              set_at: "2026-05-10T16:50:00.000Z",
+            },
           }),
           1000,
         );
