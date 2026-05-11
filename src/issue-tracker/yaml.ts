@@ -27,6 +27,59 @@ import {
 const TRIAGE_HISTORY_CAP = 10;
 
 /**
+ * Forward-compatible schema_version bounds (DX-280).
+ *
+ * `KNOWN_SCHEMA_MIN` is the oldest schema_version this validator still
+ * accepts directly (older YAMLs are rejected with a migration pointer).
+ * `KNOWN_SCHEMA_MAX` is the newest schema_version this validator was
+ * built against — values ABOVE this are still accepted (forward-compat)
+ * but emit a `console.warn` so consumers notice their bundled validator
+ * is behind the writer.
+ *
+ * The drift class this prevents: the writer in `serializeIssue` /
+ * `createEmptyIssue` stamps `schema_version: N` on every save; the
+ * published `@thehammer/danx-issue-mcp` package bundles a validator
+ * snapshot at publish time. If the writer's N is bumped without a
+ * same-commit `make publish-danx-issue-mcp`, host sessions running the
+ * stale npm-resolved bundle hit a hard parse error on every save round
+ * trip. Before DX-280 the bound was an explicit allowlist (`v.schema_version
+ * !== 3 && !== 4 && !== 5 && !== 6`) — a writer bump to 7 with the bundle
+ * still at 6 made every save fail until the operator noticed and
+ * republished. Forward-compat soft-degrades that into a noisy warning;
+ * cards still load, agents still work, the operator still sees a clear
+ * signal to republish.
+ *
+ * Schema bumps are increment-only and ADDITIVE — new fields default to
+ * safe values on parse, removed fields are still tolerated by the
+ * shape-specific validators. Breaking field-shape changes are caught by
+ * the per-field validators (`validateBlocked`, `validateRequiresHuman`,
+ * etc.) regardless of `schema_version`, so forward-compat does not paper
+ * over real schema breaks.
+ *
+ * Maintenance contract: every time the writer's stamped version bumps
+ * (the literal `6` in `createEmptyIssue` + `serializeIssue` +
+ * `issueToCreateInput` + the `issue.schema_version` assignment in
+ * `validateIssue`), bump `KNOWN_SCHEMA_MAX` here. The
+ * `forward-compat-bounds.test` regression test asserts the writer and
+ * the validator's known-max stay in sync.
+ */
+export const KNOWN_SCHEMA_MIN = 3;
+export const KNOWN_SCHEMA_MAX = 6;
+
+/**
+ * Set of `schema_version` values this process has already warned about.
+ * `parseIssue` is on the chokidar mirror's hot path (also `/api/issues`,
+ * heal pass, retry queue, sync.ts) — without dedup, a single drifted
+ * worker would emit `N_cards × M_call_sites` warnings per tick, drowning
+ * the operator log. One warning per distinct unknown version per
+ * process lifetime is enough signal: the operator runs `make
+ * publish-danx-issue-mcp` once; subsequent reads stop warning after the
+ * republish makes the version known. Module-scoped (per-process), so a
+ * fresh dispatch starts with an empty set and re-warns once.
+ */
+const warnedSchemaVersions = new Set<number>();
+
+/**
  * Local copy of `AGENT_NAME_SHAPE` from `src/settings-file.ts` — duplicated
  * here so the YAML parser can validate `assigned_agent` (DX-200) without
  * importing the settings file (which would pull `node:fs/promises` + the
@@ -565,17 +618,22 @@ export function validateIssue(
   }
   const v = value as Record<string, unknown>;
 
-  // schema_version — v3 through v6. Reject older versions with a loud
-  // migration pointer. v1 was retired by `migrate-issues-to-v2`; v2 is
-  // retired by `migrate-issues-to-v3` (adds the required `children: []`
-  // field). v3 is migrated to v4 lazily by this validator when reading v3
-  // YAMLs with `blocked:` field (auto-renamed to `waiting_on:` in the
-  // output). v6 (DX-231) drops `"Needs Approval"` status and adds the
-  // orthogonal `requires_human` field — the migration is a no-op for
-  // YAMLs that did not carry the retired status (the field defaults
-  // `null` on parse when missing); YAMLs carrying `status: "Needs
-  // Approval"` are rejected fail-loud below so the operator migrates by
-  // hand before the loader can normalize them.
+  // schema_version — v3 through v6 (KNOWN_SCHEMA_MIN..KNOWN_SCHEMA_MAX),
+  // with forward-compat for any integer > KNOWN_SCHEMA_MAX (DX-280).
+  // Reject older versions with a loud migration pointer. v1 was retired
+  // by `migrate-issues-to-v2`; v2 is retired by `migrate-issues-to-v3`
+  // (adds the required `children: []` field). v3 is migrated to v4
+  // lazily by this validator when reading v3 YAMLs with `blocked:` field
+  // (auto-renamed to `waiting_on:` in the output). v6 (DX-231) drops
+  // `"Needs Approval"` status and adds the orthogonal `requires_human`
+  // field — the migration is a no-op for YAMLs that did not carry the
+  // retired status (the field defaults `null` on parse when missing);
+  // YAMLs carrying `status: "Needs Approval"` are rejected fail-loud
+  // below so the operator migrates by hand before the loader can
+  // normalize them. Versions ABOVE KNOWN_SCHEMA_MAX warn-and-accept so
+  // a writer bump committed without a matching `make
+  // publish-danx-issue-mcp` does not bring down host saves — see the
+  // `KNOWN_SCHEMA_MAX` header above for the drift-class rationale.
   if (!("schema_version" in v)) {
     errors.push("missing required field: schema_version");
   } else if (v.schema_version === 1 || v.schema_version === 2) {
@@ -583,14 +641,30 @@ export function validateIssue(
       `schema_version ${v.schema_version} is no longer supported — run scripts/migrate-issues-to-v3.ts to upgrade`,
     );
   } else if (
-    v.schema_version !== 3 &&
-    v.schema_version !== 4 &&
-    v.schema_version !== 5 &&
-    v.schema_version !== 6
+    typeof v.schema_version !== "number" ||
+    !Number.isInteger(v.schema_version) ||
+    v.schema_version < KNOWN_SCHEMA_MIN
   ) {
     errors.push(
-      `schema_version must be 3, 4, 5, or 6 (got ${JSON.stringify(v.schema_version)})`,
+      `schema_version must be an integer >= ${KNOWN_SCHEMA_MIN} (got ${JSON.stringify(v.schema_version)})`,
     );
+  } else if (v.schema_version > KNOWN_SCHEMA_MAX) {
+    // Forward-compat (DX-280). Writer bumped past this validator's known
+    // max — bundled package is behind. Accept the YAML (cards still load,
+    // saves still round-trip), but emit a loud warning so the operator
+    // sees the lag and runs `make publish-danx-issue-mcp` to refresh the
+    // bundle. Same parser otherwise — unknown future fields are silently
+    // dropped on serialize, which is the standard forward-compat read
+    // semantic. Per-field validators still fire so a breaking shape
+    // change is NOT papered over. Dedup keyed on the unknown version so
+    // a 100-card poll tick emits ONE warning per distinct future
+    // version, not 100 × N call sites.
+    if (!warnedSchemaVersions.has(v.schema_version)) {
+      warnedSchemaVersions.add(v.schema_version);
+      console.warn(
+        `[danx-issue-yaml] schema_version ${v.schema_version} is newer than this validator's known max ${KNOWN_SCHEMA_MAX} — accepting (forward-compat). Run \`make publish-danx-issue-mcp\` from danxbot to refresh the bundled validator.`,
+      );
+    }
   }
 
   // tracker
@@ -948,6 +1022,13 @@ export function validateIssue(
   const priorityValue =
     "priority" in v ? clampPriority(v.priority) : PRIORITY_DEFAULT;
   const issue: Issue = {
+    // Hardcoded to the canonical writer version (KNOWN_SCHEMA_MAX). A
+    // forward-compat-accepted parse (v.schema_version > KNOWN_SCHEMA_MAX)
+    // silent-downgrades here — the returned `Issue.schema_version` is
+    // type-literal `6`, never the future value seen on disk. Lockstep
+    // contract: when the writer bumps, bump this literal AND
+    // KNOWN_SCHEMA_MAX above in the same commit (the `lockstep
+    // invariant` test pins both directions).
     schema_version: 6,
     tracker: v.tracker as string,
     id: v.id as string,

@@ -10,8 +10,16 @@
  * take down the list.
  */
 
-import { describe, it, expect } from "vitest";
-import { parseIssue, serializeIssue, IssueParseError } from "./yaml.js";
+import { describe, it, expect, vi } from "vitest";
+import {
+  parseIssue,
+  serializeIssue,
+  createEmptyIssue,
+  issueToCreateInput,
+  IssueParseError,
+  KNOWN_SCHEMA_MAX,
+  KNOWN_SCHEMA_MIN,
+} from "./yaml.js";
 import type { Issue } from "./interface.js";
 
 const BASE = `schema_version: 4
@@ -260,5 +268,214 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
   it("does not throw `Cannot read properties of undefined (reading 'reason')`", () => {
     const issue = legacyIssueWithoutRequiresHuman();
     expect(() => serializeIssue(issue)).not.toThrow();
+  });
+});
+
+/**
+ * DX-280 — Forward-compatible schema_version bound.
+ *
+ * The bug this prevents: the writer in `serializeIssue` /
+ * `createEmptyIssue` stamps `schema_version: N` on every save; the
+ * published `@thehammer/danx-issue-mcp` package bundles a validator
+ * snapshot at publish time. Before DX-280 the validator's allowlist
+ * was an explicit `!== 3 && !== 4 && !== 5 && !== 6` set — a writer
+ * bump to 7 committed without a same-commit `make
+ * publish-danx-issue-mcp` made every host save fail with
+ * `schema_version must be 3, 4, 5, or 6 (got 7)`.
+ *
+ * Forward-compat soft-degrades that into a `console.warn`: cards still
+ * parse, saves still round-trip, the operator gets a loud signal to
+ * republish. These tests pin the behavior so a future hand-edit cannot
+ * regress to the hard-reject form.
+ *
+ * Concretely the test simulates the drift class by writing a YAML whose
+ * `schema_version` is `KNOWN_SCHEMA_MAX + 1` — a future writer's stamp
+ * the current validator does NOT know about — and asserts that
+ * `parseIssue` accepts it instead of throwing.
+ */
+function yamlWithSchemaVersion(version: number | string): string {
+  return `schema_version: ${version}
+tracker: trello
+id: DX-1
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: t
+description: d
+priority: 3.0
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null
+history: []
+`;
+}
+
+describe("DX-280 — schema_version forward-compat bound", () => {
+  // Vitest's `restoreMocks: true` (vitest.config.ts) handles vi.spyOn
+  // cleanup between tests automatically — NO afterEach needed.
+  //
+  // The forward-compat warn in yaml.ts is dedup-keyed on the unknown
+  // version (module-level Set, intentionally not exported as a test
+  // seam). Each `it` below uses a UNIQUE `KNOWN_SCHEMA_MAX + N` so the
+  // Set state from earlier tests in the file does not bleed in.
+  // Different test files run in separate vitest fork workers, so the
+  // Set is fresh across files.
+
+  it("accepts a future schema_version (writer-N / validator-N-1 drift) without throwing", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const futureVersion = KNOWN_SCHEMA_MAX + 1;
+    const txt = yamlWithSchemaVersion(futureVersion);
+    expect(() => parseIssue(txt, { expectedPrefix: "DX" })).not.toThrow();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toMatch(
+      /forward-compat|make publish-danx-issue-mcp/i,
+    );
+  });
+
+  it("warns loudly enough that the operator notices the lag", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    parseIssue(yamlWithSchemaVersion(KNOWN_SCHEMA_MAX + 2), {
+      expectedPrefix: "DX",
+    });
+    const msg = String(warnSpy.mock.calls[0]?.[0] ?? "");
+    expect(msg).toContain(`schema_version ${KNOWN_SCHEMA_MAX + 2}`);
+    expect(msg).toContain(String(KNOWN_SCHEMA_MAX));
+    expect(msg).toContain("publish-danx-issue-mcp");
+  });
+
+  it("does NOT warn on a known schema_version (KNOWN_SCHEMA_MAX itself)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    parseIssue(yamlWithSchemaVersion(KNOWN_SCHEMA_MAX), {
+      expectedPrefix: "DX",
+    });
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("dedup: repeated parses of the SAME future version emit exactly one warning (chokidar mirror amplification guard)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const v = KNOWN_SCHEMA_MAX + 3;
+    parseIssue(yamlWithSchemaVersion(v), { expectedPrefix: "DX" });
+    parseIssue(yamlWithSchemaVersion(v), { expectedPrefix: "DX" });
+    parseIssue(yamlWithSchemaVersion(v), { expectedPrefix: "DX" });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("dedup: DIFFERENT future versions each emit their own warning", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    parseIssue(yamlWithSchemaVersion(KNOWN_SCHEMA_MAX + 4), {
+      expectedPrefix: "DX",
+    });
+    parseIssue(yamlWithSchemaVersion(KNOWN_SCHEMA_MAX + 5), {
+      expectedPrefix: "DX",
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("silent-downgrade: forward-compat-accepted YAMLs return Issue.schema_version = KNOWN_SCHEMA_MAX (type-stable for downstream consumers)", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const issue = parseIssue(yamlWithSchemaVersion(KNOWN_SCHEMA_MAX + 6), {
+      expectedPrefix: "DX",
+    });
+    expect(issue.schema_version).toBe(KNOWN_SCHEMA_MAX);
+  });
+
+  it("downgrade-on-write: parse(future) → serialize() re-stamps KNOWN_SCHEMA_MAX and drops unknown future fields", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Inject an unknown future top-level field; the writer's fixed key
+    // set must NOT re-emit it — forward-compat is READ-ONLY, never
+    // round-trip-faithful for fields the validator did not parse.
+    const txt = yamlWithSchemaVersion(KNOWN_SCHEMA_MAX + 7).replace(
+      /^title: t$/m,
+      'title: t\nfuture_only_field: "should not survive round-trip"',
+    );
+    const issue = parseIssue(txt, { expectedPrefix: "DX" });
+    const reSerialized = serializeIssue(issue);
+    expect(reSerialized).toMatch(
+      new RegExp(`^schema_version:\\s*${KNOWN_SCHEMA_MAX}\\b`),
+    );
+    expect(reSerialized).not.toContain("future_only_field");
+  });
+
+  it("rejects schema_version below KNOWN_SCHEMA_MIN with a clear error (not silent forward-accept)", () => {
+    const txt = yamlWithSchemaVersion(KNOWN_SCHEMA_MIN - 1);
+    expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+      IssueParseError,
+    );
+  });
+
+  it("rejects non-integer schema_version (e.g. string, float, null)", () => {
+    expect(() =>
+      parseIssue(yamlWithSchemaVersion('"6"'), { expectedPrefix: "DX" }),
+    ).toThrow(/schema_version must be an integer/);
+    expect(() =>
+      parseIssue(yamlWithSchemaVersion(3.5), { expectedPrefix: "DX" }),
+    ).toThrow(/schema_version must be an integer/);
+  });
+
+  it("rejects YAML that omits schema_version entirely", () => {
+    const txt = yamlWithSchemaVersion(KNOWN_SCHEMA_MAX).replace(
+      /^schema_version: .+\n/,
+      "",
+    );
+    expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+      /missing required field: schema_version/,
+    );
+  });
+
+  it("lockstep invariant: every writer site stamps KNOWN_SCHEMA_MAX (bump them all together when adding a schema version)", () => {
+    // The drift class this card prevents is exactly: ONE of the three
+    // writer sites bumps; the validator's KNOWN_SCHEMA_MAX does not.
+    // Exercise all three writer sites so a one-sided bump fails this
+    // test loudly before it reaches a host session.
+    //
+    // Writer site 1 — createEmptyIssue (the schema_version literal on
+    // the returned Issue).
+    const fresh = createEmptyIssue();
+    expect(fresh.schema_version).toBe(KNOWN_SCHEMA_MAX);
+
+    // Writer site 2 — issueToCreateInput (the schema_version literal
+    // on the CreateCardInput shape pushed to the tracker).
+    const created = issueToCreateInput({
+      ...fresh,
+      id: "DX-1",
+      title: "t",
+      description: "d",
+    });
+    expect(created.schema_version).toBe(KNOWN_SCHEMA_MAX);
+
+    // Writer site 3 — validateIssue's built Issue (the schema_version
+    // literal that round-trips through parseIssue, including the
+    // forward-compat silent-downgrade path). Exercised by writing
+    // canonical YAML and re-parsing.
+    const issue: Issue = {
+      ...fresh,
+      id: "DX-1",
+      title: "t",
+      description: "d",
+      status: "ToDo",
+      type: "Feature",
+    };
+    const yaml = serializeIssue(issue);
+    expect(yaml).toMatch(
+      new RegExp(`^schema_version:\\s*${KNOWN_SCHEMA_MAX}\\b`),
+    );
+    const reparsed = parseIssue(yaml, { expectedPrefix: "DX" });
+    expect(reparsed.schema_version).toBe(KNOWN_SCHEMA_MAX);
   });
 });

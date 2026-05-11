@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   buildIssueIdRegex,
   createEmptyIssue,
   IssueParseError,
+  KNOWN_SCHEMA_MAX,
   parseIssue as parseIssueRaw,
   serializeIssue,
   validateIssue as validateIssueRaw,
@@ -677,11 +678,33 @@ describe("validateIssue", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 7 produces the exact error string (next unsupported version)", () => {
-    const result = validateIssue(valid({ schema_version: 7 }));
+  it("schema_version: 7 is forward-compat accepted with a console.warn (DX-280)", () => {
+    // Pre-DX-280 behavior: validator hard-rejected with "schema_version
+    // must be 3, 4, 5, or 6 (got 7)" — that broke every host save when
+    // the writer's stamped version bumped without a same-commit
+    // `make publish-danx-issue-mcp`. DX-280 reshapes the bound: any
+    // integer >= KNOWN_SCHEMA_MIN is accepted; values above
+    // KNOWN_SCHEMA_MAX emit a loud warning instead of throwing.
+    // Reintroducing the hard-reject form regresses this test by
+    // construction.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = validateIssue(valid({ schema_version: KNOWN_SCHEMA_MAX + 1 }));
+      expect(result.ok).toBe(true);
+      expect(warnSpy).toHaveBeenCalled();
+      expect(String(warnSpy.mock.calls[0]?.[0] ?? "")).toMatch(
+        /forward-compat|publish-danx-issue-mcp/i,
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("schema_version below KNOWN_SCHEMA_MIN (but not v1/v2) is still rejected — forward-compat is only above the max (DX-280)", () => {
+    const result = validateIssue(valid({ schema_version: 0 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors).toContain("schema_version must be 3, 4, 5, or 6 (got 7)");
+      expect(result.errors.some((e) => /schema_version must be an integer/.test(e))).toBe(true);
     }
   });
 

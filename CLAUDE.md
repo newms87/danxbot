@@ -45,6 +45,10 @@ Source: `~/web/danx-issue-mcp/`. Every dispatched agent and host session resolve
 
 **Sequencing rule.** When the change touches BOTH the MCP package AND danxbot's consumer side (workspace `.mcp.json`, inject contract, dispatch overlay), publish first → then commit danxbot side. Reverse order = ~60s window where every workspace dispatch breaks because the new env shape lands locally before npm propagates the matching server. The publish make target waits for `npm view` to surface the new version before exiting; once it returns, the danxbot commit is safe.
 
+**Schema-version lockstep + forward-compat safety net (DX-280).** Two of the bundled symbols MUST stay in lockstep across every commit, on pain of the drift class that broke every host save mid-DX-275: the writer's stamped `schema_version` literal (currently `6`, in `src/issue-tracker/yaml.ts` — used by `createEmptyIssue`, `serializeIssue`, `issueToCreateInput`, and the built `Issue` in `validateIssue`) and `KNOWN_SCHEMA_MAX` (the validator's accepted-version ceiling, same file). When the writer bumps, bump `KNOWN_SCHEMA_MAX` in the SAME commit, then run `make publish-danx-issue-mcp` so the bundled validator catches up. The `DX-280 — schema_version forward-compat bound` block in `src/issue-tracker/yaml.test.ts` pins the writer == `KNOWN_SCHEMA_MAX` invariant — a one-sided bump fails the unit suite before it reaches a host session.
+
+If the publish step gets missed anyway, the validator no longer hard-rejects: any integer `schema_version >= KNOWN_SCHEMA_MIN` is accepted, with a `console.warn` for values above the known max. Cards still parse, saves still round-trip, the operator gets a loud signal to republish. This is a safety net, not a license to skip the publish — forward-compat reads silently drop unknown future fields on round-trip (a v7-only field disappears the moment a stale v6 reader saves the YAML), so the same-commit publish is still the right discipline. The hard-reject form is a workflow violation to reintroduce.
+
 ## Architecture
 
 ```
