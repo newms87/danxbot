@@ -162,3 +162,29 @@ describe("AgentCard — DX-298 broken banner", () => {
     );
   });
 });
+
+describe("AgentCard — DX-227 cosmetic-only escape hatch lock", () => {
+  it("source does NOT import from api.ts (cosmetic-timer rule)", async () => {
+    // AgentCard renders an animated "running 5m" elapsed label via the
+    // useNowTick composable's 60s setInterval. That's the documented
+    // cosmetic-only exception to the "no client-side polling" rule
+    // (.claude/rules/dashboard.md § Real-time Updates Are Mandatory).
+    // The exception holds ONLY while AgentCard never calls fetch* from
+    // api.ts — the moment it does, the local timer becomes polling.
+    // This source-check locks the contract in code.
+    //
+    // Pattern matches static and dynamic imports, and tolerates the
+    // api-as-directory shape (`from "../api/foo"`) — same shape used by
+    // the repo-level sweep at __tests__/no-poll-imports.test.ts so a
+    // future contributor doesn't get inconsistent enforcement.
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const source = await fs.readFile(
+      path.resolve(__dirname, "AgentCard.vue"),
+      "utf-8",
+    );
+    expect(source).not.toMatch(
+      /(?:from\s+|import\s*\()\s*["'][^"']*\/api(?:["']|\/)/,
+    );
+  });
+});

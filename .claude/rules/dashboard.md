@@ -1,5 +1,28 @@
 # Dashboard
 
+## Real-time Updates Are Mandatory (DX-227)
+
+Every dashboard composable that owns server state subscribes to `/api/stream` via `useStream`. **No `setInterval` may call into `api.ts`** — server state updates flow through the SSE bus, not a client clock.
+
+The backend pattern: in-process `eventBus` → `/api/stream` SSE topic → composable reducer. New panels must follow this chain — see `useDispatches.ts` (canonical reference), `useAgents.ts`, `useIssues.ts` (post-DX-226).
+
+If the server can't push the event (e.g. external-system pull): add an event source on the worker / dashboard that observes the change (chokidar for files, dispatch-tracker for in-process state, etc.) and publishes through the bus. **Do not add a polling fallback.**
+
+**Allowed:** purely-cosmetic local timers that re-render existing data without a server call. Current allowed examples:
+
+- `dashboard/src/composables/useNowTick.ts` — 60s `setInterval` refreshing `Date.now()` for elapsed-time labels (`AgentCard`'s "running 5m" badge AND broken-banner "Set Nm ago" both share the same ref). Never imports `api.ts`.
+- `dashboard/src/components/agents/CriticalFailureBanner.vue` — 1s `setInterval` powering the amber throttle-countdown ("resumes in Nh Nm Ns"). Updates `now.value = Date.now()` only; no fetch.
+
+These never call `fetch*` from `api.ts`. Adding a new cosmetic timer is fine; if it ever needs to call the server, you've crossed the line — convert to SSE.
+
+**Test guards (mandatory, dual layer):**
+
+- **Per-file source check.** Every server-state composable test file carries `expect(source).not.toMatch(/setInterval\s*\(/)` against its own composable file (`useDispatches.test.ts`, `useAgents.test.ts`, `useIssues.test.ts`). Author-local failure message at the composable's eye level — fires the moment a regression lands in a known composable.
+- **Repo-level sweep.** `dashboard/src/__tests__/no-poll-imports.test.ts` walks `dashboard/src/composables/*.ts` AND `dashboard/src/components/**/*.vue`, failing the build for any non-allowlisted file that contains `setInterval(` OR a polling-shaped `setTimeout(...fetch|reload|refresh|poll...)`. The exempt allowlist is `useNowTick.ts` + `CriticalFailureBanner.vue` only; allowlisted files are additionally asserted to NOT import from `api.ts` (static or dynamic). The sweep catches new composables / components nobody remembered to lock down.
+- **Cosmetic-only escape-hatch lock.** `AgentCard.test.ts` carries a source-check that `AgentCard.vue` does NOT import from `api` — locks the cosmetic-only contract for the canonical client of `useNowTick`.
+
+Both layers stay. The per-file check fires fast on a known regression site; the sweep catches anything new. Removing either reduces signal.
+
 ## Architecture
 
 The dashboard is a Vite + Vue 3 + Tailwind CSS 4 SPA in the `dashboard/` directory, with the API server in `src/dashboard/server.ts` on port 5555.
