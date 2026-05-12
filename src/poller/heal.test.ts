@@ -592,7 +592,7 @@ describe("clearAssignedAgentOnDeletion (DX-283 — agent delete cascade)", () =>
   });
 });
 
-describe("healOrphanInvariantViolations (DX-286 — both-direction invariant scan)", () => {
+describe("healOrphanInvariantViolations — orphan dispatch scan (co-ownership retired)", () => {
   let repoRoot: string;
   let openDir: string;
 
@@ -616,14 +616,14 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
     isPidAlive: () => false,
   };
 
-  // Direction 2 — DX-286 orphan pre-stamp. The card the bug was filed on
-  // had `pid: 0` (the start-stamp sentinel), `host: dan`, `assigned_agent:
-  // null`, no matching DB row. The scan must clear both fields atomically.
-  it("clears dispatch-without-agent when the dispatch verdict is dead-pid (DX-286 orphan pre-stamp)", async () => {
+  // Orphan pre-stamp. dispatch slot occupied with a dead PID and no
+  // matching live process — scan clears the dispatch slot. assigned_agent
+  // is preserved (durable audit) even though heal cleared dispatch.
+  it("clears dispatch slot when PID is dead, preserving assigned_agent", async () => {
     const orphan = buildIssue({
       id: "ISS-286",
       status: "ToDo",
-      assigned_agent: null,
+      assigned_agent: "phil",
       dispatch: {
         id: "did-orphan-1",
         pid: 0,
@@ -654,36 +654,29 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
       { expectedPrefix: "ISS" },
     );
     expect(reloaded.dispatch).toBeNull();
-    expect(reloaded.assigned_agent).toBeNull();
+    // assigned_agent persists — durable ownership audit.
+    expect(reloaded.assigned_agent).toBe("phil");
   });
 
-  // Direction 1 — orphan agent claim. Pre-DX-286 this was handled by
-  // a standalone boot-only `healOrphanAssignedAgents` function; DX-286
-  // absorbed it so the per-tick scan and the boot pass share one entry
-  // point with identical semantics for this direction.
-  it("clears agent-without-dispatch (Direction 1 — absorbed boot-only orphan claim heal)", async () => {
-    const orphan = buildIssue({
+  // Co-ownership retired: a card with `assigned_agent: phil` and
+  // `dispatch: null` is the steady state after a dispatch ends. No
+  // heal action.
+  it("leaves cards with assigned_agent + null dispatch alone (steady state, not an orphan)", async () => {
+    const idle = buildIssue({
       id: "ISS-300",
       status: "ToDo",
       assigned_agent: "phil",
     });
-    writeFileSync(resolve(openDir, "ISS-300.yml"), serializeIssue(orphan));
+    writeFileSync(resolve(openDir, "ISS-300.yml"), serializeIssue(idle));
 
     const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
 
-    expect(result.healed).toEqual([
-      {
-        id: "ISS-300",
-        kind: "agent-without-dispatch",
-        staleAgent: "phil",
-        staleDispatchId: null,
-      },
-    ]);
+    expect(result.healed).toEqual([]);
     const reloaded = parseIssue(
       readFileSync(resolve(openDir, "ISS-300.yml"), "utf-8"),
       { expectedPrefix: "ISS" },
     );
-    expect(reloaded.assigned_agent).toBeNull();
+    expect(reloaded.assigned_agent).toBe("phil");
     expect(reloaded.dispatch).toBeNull();
   });
 
@@ -862,15 +855,16 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
     expect(second.healed).toEqual([]);
   });
 
-  // Mixed fixture covers both directions in one pass — production-style
-  // input the per-tick wiring will see.
-  it("clears both directions in a single pass", async () => {
-    const dir1 = buildIssue({
+  // Co-ownership retired: `assigned_agent: phil + dispatch: null` is
+  // the steady state after a dispatch ends and is left alone. Only the
+  // orphan-pre-stamp shape (dispatch set, dead) is healed.
+  it("heals only orphan-pre-stamp; leaves steady-state idle owners alone", async () => {
+    const idleOwner = buildIssue({
       id: "ISS-293",
       status: "ToDo",
       assigned_agent: "phil",
     });
-    const dir2 = buildIssue({
+    const orphanPreStamp = buildIssue({
       id: "ISS-294",
       status: "ToDo",
       assigned_agent: null,
@@ -883,8 +877,8 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
         ttl_seconds: 7200,
       },
     });
-    writeFileSync(resolve(openDir, "ISS-293.yml"), serializeIssue(dir1));
-    writeFileSync(resolve(openDir, "ISS-294.yml"), serializeIssue(dir2));
+    writeFileSync(resolve(openDir, "ISS-293.yml"), serializeIssue(idleOwner));
+    writeFileSync(resolve(openDir, "ISS-294.yml"), serializeIssue(orphanPreStamp));
 
     const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
     const byKind = result.healed.reduce(
@@ -894,7 +888,7 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
       },
       {} as Record<string, string[]>,
     );
-    expect(byKind["agent-without-dispatch"]).toEqual(["ISS-293"]);
+    expect(byKind["agent-without-dispatch"]).toBeUndefined();
     expect(byKind["dispatch-without-agent"]).toEqual(["ISS-294"]);
 
     const r293 = parseIssue(
@@ -905,7 +899,7 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
       readFileSync(resolve(openDir, "ISS-294.yml"), "utf-8"),
       { expectedPrefix: "ISS" },
     );
-    expect(r293.assigned_agent).toBeNull();
+    expect(r293.assigned_agent).toBe("phil");
     expect(r293.dispatch).toBeNull();
     expect(r294.assigned_agent).toBeNull();
     expect(r294.dispatch).toBeNull();
@@ -1110,7 +1104,7 @@ describe("clearAssignedAgentOnDeletion (DX-283 — agent delete cascade)", () =>
   });
 });
 
-describe("healOrphanInvariantViolations (DX-286 — both-direction invariant scan)", () => {
+describe("healOrphanInvariantViolations — orphan dispatch scan (co-ownership retired)", () => {
   let repoRoot: string;
   let openDir: string;
 
@@ -1134,14 +1128,13 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
     isPidAlive: () => false,
   };
 
-  // Direction 2 — DX-286 orphan pre-stamp. The card the bug was filed on
-  // had `pid: 0` (the start-stamp sentinel), `host: dan`, `assigned_agent:
-  // null`, no matching DB row. The scan must clear both fields atomically.
-  it("clears dispatch-without-agent when the dispatch verdict is dead-pid (DX-286 orphan pre-stamp)", async () => {
+  // Orphan pre-stamp duplicate-block coverage (this test file has a
+  // second `describe` mirror — preserve the same assertions).
+  it("clears dispatch slot when PID is dead, preserving assigned_agent (mirror)", async () => {
     const orphan = buildIssue({
       id: "ISS-286",
       status: "ToDo",
-      assigned_agent: null,
+      assigned_agent: "phil",
       dispatch: {
         id: "did-orphan-1",
         pid: 0,
@@ -1172,35 +1165,25 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
       { expectedPrefix: "ISS" },
     );
     expect(reloaded.dispatch).toBeNull();
-    expect(reloaded.assigned_agent).toBeNull();
+    expect(reloaded.assigned_agent).toBe("phil");
   });
 
-  // Direction 1 — legacy orphan claim that the boot-only
-  // `healOrphanAssignedAgents` already covers. Both functions should
-  // produce the same result for this case so callers can pick either.
-  it("clears agent-without-dispatch (parity with healOrphanAssignedAgents)", async () => {
-    const orphan = buildIssue({
+  it("leaves cards with assigned_agent + null dispatch alone (steady state, mirror)", async () => {
+    const idle = buildIssue({
       id: "ISS-300",
       status: "ToDo",
       assigned_agent: "phil",
     });
-    writeFileSync(resolve(openDir, "ISS-300.yml"), serializeIssue(orphan));
+    writeFileSync(resolve(openDir, "ISS-300.yml"), serializeIssue(idle));
 
     const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
 
-    expect(result.healed).toEqual([
-      {
-        id: "ISS-300",
-        kind: "agent-without-dispatch",
-        staleAgent: "phil",
-        staleDispatchId: null,
-      },
-    ]);
+    expect(result.healed).toEqual([]);
     const reloaded = parseIssue(
       readFileSync(resolve(openDir, "ISS-300.yml"), "utf-8"),
       { expectedPrefix: "ISS" },
     );
-    expect(reloaded.assigned_agent).toBeNull();
+    expect(reloaded.assigned_agent).toBe("phil");
     expect(reloaded.dispatch).toBeNull();
   });
 
@@ -1379,15 +1362,16 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
     expect(second.healed).toEqual([]);
   });
 
-  // Mixed fixture covers both directions in one pass — production-style
-  // input the per-tick wiring will see.
-  it("clears both directions in a single pass", async () => {
-    const dir1 = buildIssue({
+  // Co-ownership retired: `assigned_agent: phil + dispatch: null` is
+  // the steady state after a dispatch ends and is left alone. Only the
+  // orphan-pre-stamp shape (dispatch set, dead) is healed.
+  it("heals only orphan-pre-stamp; leaves steady-state idle owners alone", async () => {
+    const idleOwner = buildIssue({
       id: "ISS-293",
       status: "ToDo",
       assigned_agent: "phil",
     });
-    const dir2 = buildIssue({
+    const orphanPreStamp = buildIssue({
       id: "ISS-294",
       status: "ToDo",
       assigned_agent: null,
@@ -1400,8 +1384,8 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
         ttl_seconds: 7200,
       },
     });
-    writeFileSync(resolve(openDir, "ISS-293.yml"), serializeIssue(dir1));
-    writeFileSync(resolve(openDir, "ISS-294.yml"), serializeIssue(dir2));
+    writeFileSync(resolve(openDir, "ISS-293.yml"), serializeIssue(idleOwner));
+    writeFileSync(resolve(openDir, "ISS-294.yml"), serializeIssue(orphanPreStamp));
 
     const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
     const byKind = result.healed.reduce(
@@ -1411,7 +1395,7 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
       },
       {} as Record<string, string[]>,
     );
-    expect(byKind["agent-without-dispatch"]).toEqual(["ISS-293"]);
+    expect(byKind["agent-without-dispatch"]).toBeUndefined();
     expect(byKind["dispatch-without-agent"]).toEqual(["ISS-294"]);
 
     const r293 = parseIssue(
@@ -1422,7 +1406,7 @@ describe("healOrphanInvariantViolations (DX-286 — both-direction invariant sca
       readFileSync(resolve(openDir, "ISS-294.yml"), "utf-8"),
       { expectedPrefix: "ISS" },
     );
-    expect(r293.assigned_agent).toBeNull();
+    expect(r293.assigned_agent).toBe("phil");
     expect(r293.dispatch).toBeNull();
     expect(r294.assigned_agent).toBeNull();
     expect(r294.dispatch).toBeNull();

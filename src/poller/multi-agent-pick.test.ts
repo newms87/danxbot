@@ -1089,11 +1089,9 @@ describe("tryMultiAgentDispatch", () => {
   // running the DX-283 cascade). pickCardForAgent treats those cards as
   // owned-by-other-agent forever and the picker silently skips them. The
   // heal pass at the top of tryMultiAgentDispatch clears the orphan claim
-  // so the card becomes pickable on the same tick.
-  // DX-286: heal uses clearDispatchAndWrite (not stampAssignedAgentAndWrite)
-  // to enforce the (dispatch !== null) === (assigned_agent !== null)
-  // invariant atomically — see the heal-pass header comment in
-  // multi-agent-pick.ts for the full rationale.
+  // (direct write — bypasses clearDispatchAndWrite which now preserves
+  // assigned_agent as durable audit) so the card becomes pickable on
+  // the same tick.
   it("heals orphan assigned_agent (agent not in roster) → clears claim, dispatches card", async () => {
     writeSettings({ murphy: agentRecord("murphy") });
     mockedDispatchWithRecovery.mockResolvedValue({
@@ -1110,22 +1108,25 @@ describe("tryMultiAgentDispatch", () => {
       now: NOW,
     });
 
-    expect(clearDispatchAndWrite).toHaveBeenCalledWith(
-      tmpRepo,
-      expect.objectContaining({ id: "DX-220", assigned_agent: "phil" }),
-    );
+    // Heal does not route through clearDispatchAndWrite anymore (that
+    // function preserves assigned_agent now). Instead it writes the
+    // cleared shape directly via writeIssue. Assert on the dispatch
+    // outcome: card got picked up by murphy after the orphan stamp
+    // was released.
+    expect(clearDispatchAndWrite).not.toHaveBeenCalled();
     expect(result.dispatched).toBe(1);
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
     expect(dispatchInput.issueId).toBe("DX-220");
     expect(dispatchInput.agent!.name).toBe("murphy");
   });
 
-  // Invariant: 1 open card per agent at a time. When two open ToDo cards
-  // both stamp assigned_agent=dani (clearDispatchAndWrite miss, manual
-  // edit, etc.), the heal pass keeps the first in pick order and clears
-  // the rest. The kept card dispatches this tick; cleared cards become
-  // unclaimed and re-enter the pool next tick.
-  it("heals duplicate assigned_agent across open cards → keeps first, clears rest", async () => {
+  // Co-ownership retired: with `assigned_agent` as durable audit,
+  // multiple ToDo cards can legitimately name the same agent (re-bounced
+  // cards, multi-phase work). The picker dispatches one per tick
+  // (`pickFreeAgent` skips agents that already dispatched this tick),
+  // so no double-spawn risk; other claimed cards wait for the next
+  // eligible tick.
+  it("does NOT clear duplicate assigned_agent across open cards (durable audit allows multi-claim)", async () => {
     writeSettings({ dani: agentRecord("dani") });
     mockedDispatchWithRecovery.mockResolvedValue({
       dispatchId: "did",
@@ -1142,73 +1143,11 @@ describe("tryMultiAgentDispatch", () => {
       now: NOW,
     });
 
-    expect(clearDispatchAndWrite).toHaveBeenCalledWith(
-      tmpRepo,
-      expect.objectContaining({ id: "DX-2", assigned_agent: "dani" }),
-    );
-    expect(clearDispatchAndWrite).not.toHaveBeenCalledWith(
-      tmpRepo,
-      expect.objectContaining({ id: "DX-1", assigned_agent: "dani" }),
-    );
+    expect(clearDispatchAndWrite).not.toHaveBeenCalled();
+    // First card dispatches; second is left untouched.
     expect(result.dispatched).toBe(1);
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
     expect(dispatchInput.issueId).toBe("DX-1");
-  });
-
-  // DX-286 AC #2 — the heal must clear BOTH dispatch{} and
-  // assigned_agent atomically when the duplicate carries a stale
-  // dispatch{} block (e.g. a chokidar mirror lag let a stamped card
-  // sneak past the listDispatchableYamls filter). Pre-fix the heal
-  // used stampAssignedAgentAndWrite(c, null) which preserved
-  // dispatch{}, leaving the orphan state described in the bug
-  // (assigned_agent: null + dispatch: {pid:0}).
-  it("AC #2: heal-clears-duplicate when dispatch{} is also stamped → both fields cleared atomically", async () => {
-    writeSettings({ dani: agentRecord("dani") });
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
-
-    const a = issue("DX-1", { assigned_agent: "dani" });
-    const b = issue("DX-2", {
-      assigned_agent: "dani",
-      dispatch: {
-        id: "did-stale",
-        pid: 0,
-        host: "dan",
-        kind: "work",
-        started_at: "2026-05-11T07:00:00Z",
-        ttl_seconds: 7200,
-      },
-    });
-    const result = await tryMultiAgentDispatch({
-      repo: fakeRepo(),
-      cards: [a, b],
-      inProgress: [],
-      tracker: fakeTracker(),
-      now: NOW,
-    });
-
-    // Heal should clear DX-2 (the duplicate) via clearDispatchAndWrite
-    // — clears both dispatch{} AND assigned_agent in one write.
-    expect(clearDispatchAndWrite).toHaveBeenCalledWith(
-      tmpRepo,
-      expect.objectContaining({
-        id: "DX-2",
-        assigned_agent: "dani",
-        dispatch: expect.objectContaining({ id: "did-stale", pid: 0 }),
-      }),
-    );
-    // And the heal must NOT use stampAssignedAgentAndWrite(_, _, null)
-    // which would preserve the dispatch{} block (the bug).
-    expect(stampAssignedAgentAndWrite).not.toHaveBeenCalledWith(
-      tmpRepo,
-      expect.anything(),
-      null,
-    );
-    // First card still dispatched.
-    expect(result.dispatched).toBe(1);
-    expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe("DX-1");
   });
 
   // DX-286 AC #1 — explicit end-state assertion: a dispatch() throw

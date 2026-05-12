@@ -446,26 +446,28 @@ export function stampAssignedAgentAndWrite(
  *     and clearing forces the regular ToDo dispatch path on the next
  *     tick.
  *
- * Also clears `assigned_agent` in the same write. The invariant is
- * `assigned_agent != null ⇔ live dispatch on this card` — they are
- * co-owned fields, not independent. Leaving `assigned_agent` set after
- * the dispatch row dies is what stuck the multi-agent picker before:
- * the boot reattach + per-tick eviction paths cleared `dispatch` but
- * left `assigned_agent: <name>` behind, so `pickCardForAgent` treated
- * the card as owned by an offline / different agent forever and
- * `tryMultiAgentDispatch` bailed every tick.
+ * `assigned_agent` is PRESERVED — it records who last owned the card
+ * and is durable across dispatch end + terminal save. The old
+ * co-ownership invariant `(dispatch != null) ⇔ (assigned_agent != null)`
+ * is retired: `assigned_agent` is now persistent audit, only cleared
+ * when the agent is removed from the repo's roster (handled in
+ * `multi-agent-pick.ts` orphan-roster guard + agent-delete flow).
  *
- * No-op only when BOTH fields are already null (returns the input
- * unchanged AND skips the write).
+ * Same-agent re-claim still works: `pickCardForAgent` allows a card
+ * whose `assigned_agent` matches the picking agent. Other-agent
+ * exclusion is unchanged.
+ *
+ * No-op when `dispatch` is already null (returns the input unchanged
+ * AND skips the write).
  */
 export function clearDispatchAndWrite(
   repoLocalPath: string,
   issue: Issue,
 ): Promise<Issue> {
-  if (issue.dispatch === null && issue.assigned_agent === null) {
+  if (issue.dispatch === null) {
     return Promise.resolve(issue);
   }
-  const updated: Issue = { ...issue, dispatch: null, assigned_agent: null };
+  const updated: Issue = { ...issue, dispatch: null };
   // Sync phase first — see `stampDispatchAndWrite` for the rationale.
   return writeIssue(repoLocalPath, updated).then(() => updated);
 }

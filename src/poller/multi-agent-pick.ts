@@ -90,6 +90,7 @@ import {
   loadLocalFromDisk,
   stampAssignedAgentAndWrite,
   stampDispatchAndWrite,
+  writeIssue,
 } from "./yaml-lifecycle.js";
 import type { IssueDispatch } from "../issue-tracker/interface.js";
 
@@ -177,34 +178,24 @@ export async function tryMultiAgentDispatch(
 
   // Heal orphan/duplicate `assigned_agent` stamps BEFORE the picker loop.
   // Two failure modes the picker can't otherwise progress past:
-  //   (a) `assigned_agent` names an agent that no longer exists in the
-  //       roster (settings.json clobber per DX-281, or operator deletion
-  //       without the DX-283 cascade). `pickCardForAgent` treats those
-  //       cards as owned-by-another-agent forever → silent skip every
-  //       tick. Clear the stamp so the card returns to the unclaimed
-  //       pool.
-  //   (b) Same agent stamped on multiple open ToDo cards
-  //       (clearDispatchAndWrite miss on a prior dispatch, manual YAML
-  //       edit). Invariant: 1 open card per agent at a time. Keep the
-  //       first card in pick order (already canonical from
-  //       `listDispatchableYamls` — ICE+priority+FIFO) and clear the
-  //       rest. The kept card dispatches this tick; cleared cards
-  //       re-enter the pool unclaimed on the next tick.
-  // Heal mutations are persisted via `clearDispatchAndWrite` (NOT
-  // `stampAssignedAgentAndWrite(..., null)`) so the co-ownership
-  // invariant `(dispatch !== null) === (assigned_agent !== null)` is
-  // enforced atomically — DX-286 traced orphan `dispatch{pid:0}` blocks
-  // to a heal that cleared assigned_agent only, leaving the dispatch{}
-  // block on cards that came in carrying a stale dispatch. The DX-286
-  // per-tick `runInvariantHeal` in `_poll` runs BEFORE this picker, so
-  // cards reaching here should already satisfy the invariant; this heal
-  // is the second line of defense against the chokidar-lag race window
-  // where a fresh stamp lands between the per-tick scan and the
-  // picker's DB read. The in-memory `cards` view is replaced with
-  // post-heal Issue objects so the remainder of this fn sees the
-  // cleared state.
+  //   `assigned_agent` names an agent that no longer exists in the
+  //   roster (settings.json clobber per DX-281, or operator deletion
+  //   without the DX-283 cascade). `pickCardForAgent` treats those
+  //   cards as owned-by-another-agent forever → silent skip every
+  //   tick. Clear the stamp + dispatch so the card returns to the
+  //   unclaimed pool. The co-ownership invariant is retired, but the
+  //   not-in-roster case is the one place where a persistent
+  //   `assigned_agent` would actually block dispatch — the agent is
+  //   gone, so the audit value is meaningless.
+  //
+  // Duplicate-agent across multiple open cards is NOT cleared anymore:
+  // with `assigned_agent` as durable audit, multiple ToDo cards can
+  // legitimately name the same agent (re-bounced cards, multi-phase
+  // work). The picker dispatches one per tick (an agent that
+  // dispatches becomes busy → skipped for the rest of the tick) so
+  // there is no double-spawn risk; the other claimed cards simply
+  // wait for the next eligible tick.
   const rosterNames = new Set(roster.map((r) => r.name));
-  const seenAgents = new Set<string>();
   const healedCards: Issue[] = [];
   for (const c of cards) {
     if (c.assigned_agent === null) {
@@ -215,19 +206,11 @@ export async function tryMultiAgentDispatch(
       log.warn(
         `[${repo.name}] heal: ${c.id} carries orphan assigned_agent=${c.assigned_agent} (not in roster) — clearing claim`,
       );
-      const cleared = await clearDispatchAndWrite(repo.localPath, c);
+      const cleared: Issue = { ...c, assigned_agent: null, dispatch: null };
+      await writeIssue(repo.localPath, cleared);
       healedCards.push(cleared);
       continue;
     }
-    if (seenAgents.has(c.assigned_agent)) {
-      log.warn(
-        `[${repo.name}] heal: ${c.id} duplicates assigned_agent=${c.assigned_agent} (already claimed by an earlier card this tick) — clearing claim (invariant: 1 open card per agent)`,
-      );
-      const cleared = await clearDispatchAndWrite(repo.localPath, c);
-      healedCards.push(cleared);
-      continue;
-    }
-    seenAgents.add(c.assigned_agent);
     healedCards.push(c);
   }
   const { createWorktreeManager } = await import(

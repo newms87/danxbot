@@ -592,28 +592,22 @@ export function isDispatchSessionTerminal(issue: Issue): boolean {
  * worker's persist semantics.
  */
 function persistAfterSync(repoLocalPath: string, issue: Issue): void {
-  // Clear the dispatch slot on terminal-for-session saves (ISS-92,
-  // Phase 2). Mid-session saves with non-null dispatch survive
-  // unchanged so the reattach pass + per-tick liveness scan still see
-  // the running agent.
+  // Terminal-for-session saves PRESERVE both `dispatch` and
+  // `assigned_agent` as the durable audit record of which agent /
+  // dispatch session did the work. The pre-existing clear-on-terminal
+  // behavior (ISS-92 / DX-286) destroyed that record on Done/Cancelled
+  // saves, so closed cards lost all knowledge of the agent and the
+  // dispatch UUID forever — see the bug surfacing in the dashboard's
+  // empty AgentBadge on every closed card.
   //
-  // DX-286: clear `assigned_agent` ALONGSIDE `dispatch` so the
-  // `(dispatch !== null) === (assigned_agent !== null)` co-ownership
-  // invariant holds across the terminal save. Pre-DX-286, this branch
-  // cleared dispatch only, leaving Done/Cancelled cards with
-  // `assigned_agent: <name> + dispatch: null` in `closed/` — a direction-1
-  // invariant violation visible in the production fixtures (DX-253-256,
-  // DX-259, etc.) that the per-tick heal scan in `_poll` can't reach
-  // (the scan walks `open/` only). Aligning here closes the producer at
-  // the source so terminal cards persist clean from the start.
-  const sessionTerminal = isDispatchSessionTerminal(issue);
-  const needsClear =
-    sessionTerminal && (issue.dispatch !== null || issue.assigned_agent !== null);
-  const persisted = needsClear
-    ? { ...issue, dispatch: null, assigned_agent: null }
-    : issue;
-
-  if (moveToClosedIfTerminal(repoLocalPath, persisted)) return;
+  // The picker's claim map (`assignedCards()`) already filters out
+  // `status IN ('Done', 'Cancelled')`, so a persistent `assigned_agent`
+  // on a closed card cannot cause a stuck claim. The reattach + per-tick
+  // liveness scans walk `open/` only, so a persistent `dispatch` on a
+  // closed card is invisible to them. The old co-ownership invariant
+  // `(dispatch !== null) === (assigned_agent !== null)` is retired —
+  // both fields are now persistent audit, not coupled lifecycle slots.
+  if (moveToClosedIfTerminal(repoLocalPath, issue)) return;
 
   // Non-terminal save — write to `open/`. If a stale closed copy
   // lingers from a previous Done save that the operator manually
@@ -621,8 +615,8 @@ function persistAfterSync(repoLocalPath: string, issue: Issue): void {
   // The poller will treat the open copy as authoritative on the next
   // tick.
   ensureIssuesDirs(repoLocalPath);
-  const openPath = issuePath(repoLocalPath, persisted.id, "open");
-  writeFileSync(openPath, serializeIssue(persisted));
+  const openPath = issuePath(repoLocalPath, issue.id, "open");
+  writeFileSync(openPath, serializeIssue(issue));
 }
 
 /** POST /api/issue-create/:dispatchId — synchronous create-card flow. */

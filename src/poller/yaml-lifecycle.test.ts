@@ -495,7 +495,7 @@ describe("yaml-lifecycle", () => {
   });
 
   describe("clearDispatchAndWrite", () => {
-    it("sets dispatch AND assigned_agent to null and persists", async () => {
+    it("clears dispatch and PRESERVES assigned_agent (durable audit)", async () => {
       const tracker = new MemoryTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-16" }),
@@ -514,27 +514,24 @@ describe("yaml-lifecycle", () => {
         started_at: "2026-05-07T12:00:00.000Z",
         ttl_seconds: 7200,
       });
-      // Simulate the dispatch start path also stamping assigned_agent
-      // — that's the field clearDispatchAndWrite must release on the
-      // dispatch-end path.
       const owned = await stampAssignedAgentAndWrite(repoRoot, stamped, "phil");
       expect(owned.dispatch).not.toBeNull();
       expect(owned.assigned_agent).toBe("phil");
 
       const cleared = await clearDispatchAndWrite(repoRoot, owned);
       expect(cleared.dispatch).toBeNull();
-      expect(cleared.assigned_agent).toBeNull();
+      // assigned_agent persists across dispatch end — durable ownership.
+      expect(cleared.assigned_agent).toBe("phil");
 
       const reloaded = readYamlFile(repoRoot, "ISS-16");
       expect(reloaded.dispatch).toBeNull();
-      expect(reloaded.assigned_agent).toBeNull();
+      expect(reloaded.assigned_agent).toBe("phil");
     });
 
-    it("clears stale assigned_agent even when dispatch is already null (heal path)", async () => {
-      // Pre-fix bug shape: the boot reattach dead-pid handler cleared
-      // dispatch on a prior pass but left assigned_agent stamped. The
-      // function must still clear the orphan claim on a follow-up call
-      // so the multi-agent picker can re-assign the card.
+    it("is a no-op when dispatch is already null (returns input, no write)", async () => {
+      // assigned_agent state is irrelevant — the function gates on
+      // `dispatch === null` only, since assigned_agent is durable audit
+      // and never touched here.
       const tracker = new MemoryTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-18" }),
@@ -545,23 +542,24 @@ describe("yaml-lifecycle", () => {
         null,
         repoRoot, "ISS",
       );
-      const orphaned = await stampAssignedAgentAndWrite(
+      const withAgent = await stampAssignedAgentAndWrite(
         repoRoot,
         original,
         "phil",
       );
-      expect(orphaned.dispatch).toBeNull();
-      expect(orphaned.assigned_agent).toBe("phil");
+      expect(withAgent.dispatch).toBeNull();
+      expect(withAgent.assigned_agent).toBe("phil");
 
-      const cleared = await clearDispatchAndWrite(repoRoot, orphaned);
-      expect(cleared.dispatch).toBeNull();
-      expect(cleared.assigned_agent).toBeNull();
+      const result = await clearDispatchAndWrite(repoRoot, withAgent);
+      // Same reference — short-circuit, no write.
+      expect(result).toBe(withAgent);
 
       const reloaded = readYamlFile(repoRoot, "ISS-18");
-      expect(reloaded.assigned_agent).toBeNull();
+      // assigned_agent untouched.
+      expect(reloaded.assigned_agent).toBe("phil");
     });
 
-    it("is a no-op when BOTH dispatch and assigned_agent are already null (returns input, no write)", async () => {
+    it("is a no-op when dispatch is null (no assigned_agent either)", async () => {
       const tracker = new MemoryTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-17" }),
@@ -577,7 +575,6 @@ describe("yaml-lifecycle", () => {
       expect(original.assigned_agent).toBeNull();
 
       const result = await clearDispatchAndWrite(repoRoot, original);
-      // Same reference — no allocation, no spread.
       expect(result).toBe(original);
     });
   });

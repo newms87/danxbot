@@ -18,9 +18,10 @@
  *      tracker call below.
  *   3. `reapOrphans` — process-table orphan scan; SIGTERMs dispatched
  *      claude processes the DB lost track of.
- *   4. `runInvariantHeal` — `(dispatch !== null) === (assigned_agent
- *      !== null)` invariant; clears violators when the underlying
- *      dispatch is verifiably dead. Surfaces back to scheduler via the
+ *   4. `runInvariantHeal` — clears the `dispatch` slot on cards whose
+ *      dispatch is verifiably dead (orphan pre-stamp from legacy
+ *      unscoped path / mid-spawn crash). `assigned_agent` is durable
+ *      audit and is preserved. Surfaces back to scheduler via the
  *      reconcile-driven `onReconcileResult` event chain on the same
  *      tick.
  *   5. `runInboundFetch` — Trello inbound: Needs Help comment scan +

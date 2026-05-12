@@ -404,8 +404,10 @@ describe("runSync (local-first persist)", () => {
     expect(existsSync(closedPath)).toBe(false);
     const persisted = parseIssue(readFileSync(openPath, "utf-8"), { expectedPrefix: "ISS" });
     expect(persisted.status).toBe("ToDo");
-    // Blocked is treated as session-terminal → dispatch slot cleared.
-    expect(persisted.dispatch).toBeNull();
+    // dispatch + assigned_agent are preserved across every save; the
+    // clear-on-terminal behavior was retired so the audit record of
+    // who ran the last session survives.
+    expect(persisted.dispatch).not.toBeNull();
     expect(persisted.waiting_on).not.toBeNull();
     expect(recordError).toHaveBeenCalledTimes(1);
   });
@@ -476,17 +478,15 @@ describe("runSync (local-first persist)", () => {
   });
 });
 
-// DX-286 — `persistAfterSync` MUST clear `assigned_agent` alongside
-// `dispatch` on terminal-session saves so the
-// `(dispatch !== null) === (assigned_agent !== null)` co-ownership
-// invariant survives every terminal write. Pre-DX-286, the path cleared
-// dispatch only, leaving Done/Cancelled cards in `closed/` with
-// `assigned_agent: <name>` (visible in the production fixtures
-// DX-253-256, DX-259) and Blocked cards in `open/` with the same
-// orphan-agent stamp. The new heal scan in `_poll` can clean open/
-// orphans on the next tick, but closed/ residue accumulates as audit
-// noise — easier to fix at the source.
-describe("persistAfterSync — DX-286 co-ownership invariant on terminal save", () => {
+// `persistAfterSync` MUST preserve `dispatch` AND `assigned_agent` on
+// every save (terminal or mid-session) — both fields are durable audit
+// of which agent / dispatch session did the work. The previous DX-286
+// "clear on terminal" behavior destroyed that audit on every Done /
+// Cancelled / Blocked save, leaving closed cards with no record of the
+// owning agent. The picker's claim map already filters out
+// Done/Cancelled rows (`assignedCards()`), so a persistent
+// `assigned_agent` on a closed card cannot cause a stuck claim.
+describe("persistAfterSync — preserves dispatch + assigned_agent forever", () => {
   let tmpDir: string;
   let repo: RepoContext;
   const tracker = {} as IssueTracker;
@@ -503,10 +503,10 @@ describe("persistAfterSync — DX-286 co-ownership invariant on terminal save", 
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  // Direct evidence for the producer-side fix. Issue carries BOTH
-  // dispatch + assigned_agent at terminal save (the active in-flight
-  // shape); both fields must be null in the persisted closed/ YAML.
-  it("Done save clears BOTH dispatch and assigned_agent atomically (the DX-286 fix)", async () => {
+  // Issue carries BOTH dispatch + assigned_agent at terminal save;
+  // both fields must survive the persist so the closed/ YAML records
+  // who did the work.
+  it("Done save preserves BOTH dispatch and assigned_agent", async () => {
     vi.mocked(syncIssue).mockRejectedValue(new Error("tracker offline"));
     const recordError = vi.fn().mockResolvedValue(undefined);
     const issue = makeIssue({
@@ -532,13 +532,13 @@ describe("persistAfterSync — DX-286 co-ownership invariant on terminal save", 
       expectedPrefix: "ISS",
     });
     expect(persisted.status).toBe("Done");
-    expect(persisted.dispatch).toBeNull();
-    // The DX-286 assertion: assigned_agent MUST also be cleared.
-    expect(persisted.assigned_agent).toBeNull();
+    expect(persisted.dispatch).not.toBeNull();
+    expect(persisted.dispatch!.id).toBe("did-200");
+    expect(persisted.assigned_agent).toBe("phil");
   });
 
-  // Cancelled is the other open→closed terminal status; same invariant.
-  it("Cancelled save clears BOTH dispatch and assigned_agent atomically", async () => {
+  // Cancelled is the other open→closed terminal status; same preservation.
+  it("Cancelled save preserves BOTH dispatch and assigned_agent", async () => {
     vi.mocked(syncIssue).mockResolvedValue({
       updatedLocal: makeIssue({
         id: "ISS-201",
@@ -582,15 +582,14 @@ describe("persistAfterSync — DX-286 co-ownership invariant on terminal save", 
     const persisted = parseIssue(readFileSync(closedPath, "utf-8"), {
       expectedPrefix: "ISS",
     });
-    expect(persisted.dispatch).toBeNull();
-    expect(persisted.assigned_agent).toBeNull();
+    expect(persisted.dispatch!.id).toBe("did-201");
+    expect(persisted.assigned_agent).toBe("murphy");
   });
 
-  // Blocked is a session-terminal status that STAYS in open/.
-  // moveToClosedIfTerminal returns false (Blocked is not Done/Cancelled),
-  // so the file lands in open/ but persistAfterSync still clears the
-  // dispatch slot (and now, post-DX-286, assigned_agent too).
-  it("Blocked save (stays in open/) clears BOTH dispatch and assigned_agent", async () => {
+  // Blocked is a session-terminal status that STAYS in open/. The
+  // dispatch slot and assigned_agent are preserved — durable audit
+  // even when the session ended without reaching Done.
+  it("Blocked save (stays in open/) preserves BOTH dispatch and assigned_agent", async () => {
     vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 502"));
     const recordError = vi.fn().mockResolvedValue(undefined);
     const issue = makeIssue({
@@ -616,15 +615,14 @@ describe("persistAfterSync — DX-286 co-ownership invariant on terminal save", 
       expectedPrefix: "ISS",
     });
     expect(persisted.status).toBe("Blocked");
-    expect(persisted.dispatch).toBeNull();
-    expect(persisted.assigned_agent).toBeNull();
+    expect(persisted.dispatch!.id).toBe("did-202");
+    expect(persisted.assigned_agent).toBe("dani");
   });
 
-  // Edge case for the OR-guard at line 611. Card has assigned_agent
-  // but no dispatch (the closed/ residue shape from pre-DX-286
-  // persistAfterSync). The terminal save should still detect the
-  // invariant violation and clear assigned_agent.
-  it("Done save with assigned_agent only (no dispatch) still clears the orphan agent", async () => {
+  // Card with assigned_agent but no dispatch (the steady state when a
+  // prior dispatch ended cleanly). assigned_agent must round-trip on
+  // the terminal save — it is the persistent ownership record.
+  it("Done save with assigned_agent only (no dispatch) preserves the agent", async () => {
     vi.mocked(syncIssue).mockResolvedValue({
       updatedLocal: makeIssue({
         id: "ISS-203",
@@ -652,15 +650,15 @@ describe("persistAfterSync — DX-286 co-ownership invariant on terminal save", 
     const persisted = parseIssue(readFileSync(closedPath, "utf-8"), {
       expectedPrefix: "ISS",
     });
-    expect(persisted.assigned_agent).toBeNull();
+    expect(persisted.assigned_agent).toBe("phil");
     expect(persisted.dispatch).toBeNull();
   });
 
   // Negative — mid-session save (status: In Progress, no terminal
-  // signals) MUST preserve assigned_agent + dispatch. The DX-286
-  // clear must not bleed into mid-dispatch persists, otherwise the
-  // running agent loses its claim mid-turn.
-  it("non-terminal mid-session save preserves dispatch AND assigned_agent (no orphan clear bleed)", async () => {
+  // signals) preserves assigned_agent + dispatch. Same preservation
+  // semantics across every status; this test pins that the behavior
+  // doesn't depend on status.
+  it("non-terminal mid-session save preserves dispatch AND assigned_agent", async () => {
     vi.mocked(syncIssue).mockResolvedValue({
       updatedLocal: makeIssue({
         id: "ISS-204",

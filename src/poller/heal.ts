@@ -63,6 +63,7 @@ import {
   ensureIssuesDirs,
   issuePath,
   moveToClosedIfTerminal,
+  writeIssue,
 } from "./yaml-lifecycle.js";
 import {
   checkYamlDispatchLiveness,
@@ -260,32 +261,27 @@ export interface HealOrphanAssignedAgentsResult {
 }
 
 /**
- * One outcome row from `healOrphanInvariantViolations`. The two `kind`
- * variants are the two XOR sides of the
- * `(dispatch !== null) === (assigned_agent !== null)` invariant.
+ * One outcome row from `healOrphanInvariantViolations`. With the
+ * co-ownership invariant retired (`assigned_agent` is durable audit),
+ * only one healing direction remains: orphan pre-stamp where the
+ * dispatch slot was filled but never matched a real spawn.
  */
 export interface InvariantHeal {
   id: string;
   /**
-   * - `agent-without-dispatch` — `assigned_agent != null + dispatch == null`
-   *   (DX-286 absorbed the standalone `healOrphanAssignedAgents` boot
-   *   pass into this both-direction scan — same predicate + same
-   *   `clearDispatchAndWrite` call, now reachable per-tick too).
-   * - `dispatch-without-agent` — `dispatch != null + assigned_agent == null`
-   *   (the DX-286 orphan pre-stamp direction). The dispatch's verdict is
-   *   recorded so the operator-facing log line can name the failure mode.
+   * `dispatch-without-agent` — `dispatch != null + assigned_agent == null`
+   * AND the dispatch's PID is not alive. This is the legacy-pre-stamp
+   * orphan (poller's pre-spawn `stampDispatchAndWrite` ran but the
+   * actual spawn never happened, e.g. legacy unscoped dispatch path),
+   * the only orphan shape the heal pass still touches.
    */
-  kind: "agent-without-dispatch" | "dispatch-without-agent";
-  /** Stale assigned_agent value when present, else null. */
-  staleAgent: string | null;
-  /** Stale dispatch.id when present, else null. */
-  staleDispatchId: string | null;
-  /**
-   * Verdict from `checkYamlDispatchLiveness` when `dispatch != null`. When
-   * the dispatch is null (kind === "agent-without-dispatch"), this is
-   * undefined — there is no dispatch record to audit.
-   */
-  verdict?: "dead-pid" | "dead-ttl" | "cross-host";
+  kind: "dispatch-without-agent";
+  /** Always null with the retired direction-1 branch. Field kept for API stability. */
+  staleAgent: null;
+  /** Stale dispatch.id. */
+  staleDispatchId: string;
+  /** Verdict from `checkYamlDispatchLiveness`. */
+  verdict: "dead-pid" | "dead-ttl" | "cross-host";
 }
 
 export interface HealOrphanInvariantResult {
@@ -299,46 +295,28 @@ export interface HealOrphanInvariantResult {
 
 /**
  * Per-tick (and one-shot at boot) heal: walk
- * `<repo>/.danxbot/issues/open/` and clear any card violating the
- * `(dispatch !== null) === (assigned_agent !== null)` co-ownership
- * invariant when the underlying dispatch (if any) is verifiably dead.
+ * `<repo>/.danxbot/issues/open/` and clear the `dispatch` slot on any
+ * card whose dispatch is verifiably dead but still occupies the slot.
  *
- * The invariant has two failure directions, both handled here:
+ * The co-ownership invariant `(dispatch != null) ⇔ (assigned_agent != null)`
+ * is RETIRED. `assigned_agent` is durable audit ("who last owned this
+ * card") and is preserved across dispatch end + terminal save. The
+ * only orphan shape this pass still touches is the pre-stamp direction:
+ * `dispatch != null + dispatch is dead`, regardless of `assigned_agent`.
+ * This catches:
+ *   - The legacy unscoped pre-stamp path in `_processOneCard` that
+ *     stamped a dispatch shell without actually spawning.
+ *   - PID-died orphans from any path that didn't reach its own
+ *     onComplete clear (worker crash mid-dispatch).
  *
- *  1. `assigned_agent != null + dispatch == null` — orphan claim,
- *     DX-286 absorbed the standalone boot-only pass that previously
- *     handled this direction so per-tick + boot share one entry point.
- *  2. `dispatch != null + assigned_agent == null` — orphan pre-stamp
- *     (DX-286). The picker stamped the dispatch{} block with `pid: 0`,
- *     `assigned_agent` got cleared by some other path before the spawn
- *     enriched the PID, and the DB never carried a matching dispatch row.
- *     Cards in this state drop out of `listDispatchableYamls` (filter
- *     rejects `dispatch != null`) and are unrecoverable without
- *     intervention. Pre-DX-286, the only path to recovery was a worker
- *     restart triggering boot reattach's dead-pid clearing pass —
- *     production was accumulating 6+ such orphans per boot.
+ * Liveness gate: when the dispatch's PID is alive on this host AND TTL
+ * has not expired, the card is left alone. The in-flight dispatch will
+ * reconcile via its own onComplete chain.
  *
- * Liveness gate: when `dispatch != null` AND the dispatch's PID is alive
- * on this host AND TTL has not expired, the card is left alone. The
- * in-flight dispatch will reconcile via its own onComplete chain. This
- * protects against killing a real dispatch caught mid-spawn (between
- * `stampDispatchAndWrite` and `pairedWriteHostPid`). Direction 1 has no
- * dispatch record so it always clears.
+ * Runs once at boot and at the top of every `_poll` tick.
  *
- * Runs:
- *  - Once at worker startup, after `startIssuesMirror` (so the mirror's
- *    read-your-writes ack inside `writeIssue` resolves) and BEFORE the
- *    poller's first tick, to clean pre-fix-bug residue.
- *  - At the top of every `_poll` tick (DX-286), to catch new orphans
- *    before the picker sees them so the picker's `listDispatchableYamls`
- *    filter doesn't permanently lock them out.
- *
- * Idempotent: a follow-up run on already-healed YAMLs returns
- * `healed: []` (clearDispatchAndWrite short-circuits when both fields
- * are already null).
- *
- * Tracker-independent. Tolerates malformed YAMLs (returned in `errors[]`;
- * the pass continues).
+ * Idempotent: `clearDispatchAndWrite` short-circuits when dispatch is
+ * already null. Tracker-independent. Tolerates malformed YAMLs.
  */
 export async function healOrphanInvariantViolations(
   repoLocalPath: string,
@@ -371,44 +349,20 @@ export async function healOrphanInvariantViolations(
       continue;
     }
 
-    const dispatchSet = issue.dispatch !== null;
-    const agentSet = issue.assigned_agent !== null;
-    // Invariant holds when both are null OR both are non-null. XOR =
-    // violation worth investigating; equality = nothing to do.
-    if (dispatchSet === agentSet) continue;
+    if (issue.dispatch === null) continue;
 
-    if (dispatchSet) {
-      // Direction 2: dispatch != null + assigned_agent == null. Skip
-      // when the dispatch is genuinely live — the in-flight spawn is
-      // mid-paired-write and will enrich/reconcile on its own.
-      const verdict = checkYamlDispatchLiveness(issue.dispatch!, livenessDeps);
-      if (verdict.kind === "alive") continue;
-      try {
-        const staleDispatchId = issue.dispatch!.id;
-        await clearDispatchAndWrite(repoLocalPath, issue);
-        result.healed.push({
-          id: issue.id,
-          kind: "dispatch-without-agent",
-          staleAgent: null,
-          staleDispatchId,
-          verdict: verdict.kind,
-        });
-      } catch (err) {
-        result.errors.push({ path, message: parseErrorMessage(err) });
-      }
-      continue;
-    }
+    const verdict = checkYamlDispatchLiveness(issue.dispatch, livenessDeps);
+    if (verdict.kind === "alive") continue;
 
-    // Direction 1: assigned_agent != null + dispatch == null. No
-    // dispatch record to audit — clear immediately.
-    const staleAgent = issue.assigned_agent!;
     try {
+      const staleDispatchId = issue.dispatch.id;
       await clearDispatchAndWrite(repoLocalPath, issue);
       result.healed.push({
         id: issue.id,
-        kind: "agent-without-dispatch",
-        staleAgent,
-        staleDispatchId: null,
+        kind: "dispatch-without-agent",
+        staleAgent: null,
+        staleDispatchId,
+        verdict: verdict.kind,
       });
     } catch (err) {
       result.errors.push({ path, message: parseErrorMessage(err) });
@@ -476,16 +430,13 @@ export async function runInvariantHeal(
  * cascade, the operator's delete leaves stale claims that block the
  * multi-agent picker until the next per-tick invariant scan picks up.
  *
- * Differs from the invariant heal in its predicate: this clears
- * strict-equality matches against `agentName`, regardless of `dispatch`
- * state. `dispatch != null` paired with
- * `assigned_agent === <deleted>` is the in-flight case — the worktree
+ * Differs from `clearDispatchAndWrite` (which preserves
+ * `assigned_agent` as durable audit): this path is invoked when the
+ * agent has been deleted from the roster, so the stamp is no longer
+ * meaningful audit — it's an orphan reference to a vanished persona.
+ * Both `assigned_agent` and `dispatch` are nulled here. The worktree
  * teardown step (run before this in the delete handler) already
- * blocks deletion when a non-terminal dispatch exists for the agent,
- * so by the time we reach this point any `dispatch != null` we see
- * is itself orphan state. Clear both fields together (via
- * `clearDispatchAndWrite`) to preserve the
- * `assigned_agent ⇔ live dispatch` invariant.
+ * blocks deletion when a non-terminal dispatch exists for the agent.
  *
  * Idempotent: re-running on a clean dir returns `healed: []`.
  */
@@ -523,7 +474,8 @@ export async function clearAssignedAgentOnDeletion(
     if (issue.assigned_agent !== agentName) continue;
 
     try {
-      await clearDispatchAndWrite(repoLocalPath, issue);
+      const cleared: Issue = { ...issue, assigned_agent: null, dispatch: null };
+      await writeIssue(repoLocalPath, cleared);
       result.healed.push({ id: issue.id, staleAgent: agentName });
     } catch (err) {
       result.errors.push({ path, message: parseErrorMessage(err) });

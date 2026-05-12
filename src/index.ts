@@ -382,38 +382,23 @@ async function startWorkerMode(): Promise<void> {
   );
   log.info(`[${repo.name}] Issues mirror started`);
 
-  // One-shot boot heal: walk every open YAML and clear any card violating
-  // the `(dispatch !== null) === (assigned_agent !== null)` co-ownership
-  // invariant when the underlying dispatch is verifiably dead. Covers BOTH
-  // orphan directions in one pass:
-  //   - `assigned_agent != null + dispatch == null` — orphan claim from
-  //     pre-DX-286 producers (the `dispatch` slot was cleared but the
-  //     `assigned_agent` stamp survived). These cards block the multi-
-  //     agent picker forever — `pickCardForAgent` treats them as owned by
-  //     a different agent and silently skips every tick.
-  //   - `dispatch != null + assigned_agent == null` — orphan pre-stamp
-  //     (DX-286). The picker stamped the dispatch{} block but the spawn
-  //     never landed in the DB (paired-write rollback, chokidar race,
-  //     mid-spawn crash). Cards in this state drop out of
-  //     `listDispatchableYamls` (filter rejects `dispatch != null`) and
-  //     were unrecoverable until boot reattach's dead-pid clearing pass.
-  // Liveness gate via `checkYamlDispatchLiveness` skips dispatches caught
-  // genuinely mid-spawn (alive PID, within TTL, on this host). Runs AFTER
-  // the mirror is up (so `writeIssue` awaitMirror resolves) and BEFORE
-  // the poller dispatches its first tick. The same scan runs at the top
-  // of every poll tick (`src/cron/sync-and-audit.ts`) for ongoing self-heal.
+  // One-shot boot heal: walk every open YAML and clear the `dispatch`
+  // slot on any card whose dispatch is verifiably dead. The
+  // co-ownership invariant `(dispatch != null) ⇔ (assigned_agent != null)`
+  // is retired — `assigned_agent` is durable audit and persists across
+  // dispatch end + terminal save. The only orphan shape this pass
+  // touches is `dispatch != null + dispatch is dead` (the legacy
+  // unscoped pre-stamp path; worker crash mid-spawn). Liveness gate via
+  // `checkYamlDispatchLiveness` skips dispatches caught genuinely
+  // mid-spawn (alive PID, within TTL, on this host). Runs AFTER the
+  // mirror is up (so `writeIssue` awaitMirror resolves) and BEFORE
+  // the first poll tick. The same scan runs per-tick from
+  // `src/cron/sync-and-audit.ts` for ongoing self-heal.
   await runInvariantHeal(repo, "boot");
 
-  // DX-286 — boot pass for the OTHER direction of the invariant:
-  // `dispatch != null + assigned_agent == null` (orphan pre-stamp).
-  // The picker on a prior boot stamped the dispatch{} block but the
-  // dispatch never landed in the DB (paired-write rollback, chokidar
-  // race, mid-spawn crash). The card drops out of `listDispatchableYamls`
-  // (filter rejects `dispatch != null`) and is unrecoverable until a
-  // worker restart triggers boot reattach's dead-pid clearing pass.
-  // This boot scan + the per-tick wiring in `_poll` close that gap.
-  // Liveness check skips dispatches that are genuinely mid-flight
-  // (paired-write between stamp and PID-enrichment).
+  // Same scan kept under the original wrapper for the structured-log
+  // line consumers downstream rely on. The body is now identical to
+  // the runInvariantHeal call above.
   try {
     const invariantHeal = await healOrphanInvariantViolations(
       repo.localPath,
