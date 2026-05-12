@@ -1,0 +1,82 @@
+[
+  {
+    "query": "Kill the danxbot-worker-danxbot process — it's stuck on a dead dispatch.",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `pkill -f 'node.*tsx watch'` to clear stale tsx watchers.",
+    "should_trigger": true
+  },
+  {
+    "query": "Send SIGKILL to PID 12345.",
+    "should_trigger": true
+  },
+  {
+    "query": "Use `kill -9` on the runaway claude subprocess.",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `docker kill danxbot-worker-danxbot` to terminate the stuck container's main process.",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `taskkill /F /PID 5678` to kill the Windows Terminal process.",
+    "should_trigger": true
+  },
+  {
+    "query": "Send SIGTERM to every process matching 'vitest' — `pkill vitest`.",
+    "should_trigger": true
+  },
+  {
+    "query": "Clean up the stale tsx watchers via pkill — they're zombie processes.",
+    "should_trigger": true
+  },
+  {
+    "query": "Find the dispatch process with `ps aux | grep claude` and then kill it.",
+    "should_trigger": true
+  },
+  {
+    "query": "Use `docker top danxbot-worker-danxbot` to find the agent PID and then send it SIGKILL.",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `ps aux | grep claude` to count how many agents are currently active — no kill needed.",
+    "should_trigger": false
+  },
+  {
+    "query": "Use `pgrep -f vitest` to list the test runner PIDs without sending any signal.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run `docker top danxbot-worker-danxbot` to see what processes are running inside the container.",
+    "should_trigger": false
+  },
+  {
+    "query": "Stop the dev stack via `docker compose down` — graceful compose-managed shutdown.",
+    "should_trigger": false
+  },
+  {
+    "query": "Restart the dashboard container via `docker compose restart dashboard`.",
+    "should_trigger": false
+  },
+  {
+    "query": "Cancel the dispatch via the worker's /api/cancel HTTP endpoint.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run `systemctl stop danxbot` to stop the service via systemd.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run `kill --help` to print the man page for the kill command — no signals sent.",
+    "should_trigger": false
+  },
+  {
+    "query": "Read the output of `lsof -i :5566` to find which process is binding the port.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run `docker inspect danxbot-worker-danxbot --format '{{.State.Pid}}'` to print the container's main PID — just printing, no signal sent.",
+    "should_trigger": false
+  }
+]

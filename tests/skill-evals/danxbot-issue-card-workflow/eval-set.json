@@ -1,0 +1,82 @@
+[
+  {
+    "query": "Pick up DX-300 and process it through danx-next.",
+    "should_trigger": true
+  },
+  {
+    "query": "Create an epic for the new authentication overhaul and split it into 4 phase cards.",
+    "should_trigger": true
+  },
+  {
+    "query": "Make a card for the bug where dispatches occasionally produce duplicate retro comments.",
+    "should_trigger": true
+  },
+  {
+    "query": "Add a comment to issue card DX-279 summarizing today's progress.",
+    "should_trigger": true
+  },
+  {
+    "query": "Move DX-99 from ToDo to Blocked and populate the blocked record with a reason.",
+    "should_trigger": true
+  },
+  {
+    "query": "Read the YAML at .danxbot/issues/open/DX-244.yml and tell me what work is left on it.",
+    "should_trigger": true
+  },
+  {
+    "query": "Create a ticket for the missing test coverage on src/worker/auto-sync.ts.",
+    "should_trigger": true
+  },
+  {
+    "query": "Split this large feature into phases — each phase its own separate card under a new epic.",
+    "should_trigger": true
+  },
+  {
+    "query": "Write a draft YAML for a Bug card and call mcp__danx-issue__danx_issue_create on it.",
+    "should_trigger": true
+  },
+  {
+    "query": "Append a comment to DX-279 with the verdict from the test-reviewer subagent run.",
+    "should_trigger": true
+  },
+  {
+    "query": "Read the Trello config at .danxbot/config/trello.yml — different subdir from the YAML store.",
+    "should_trigger": false
+  },
+  {
+    "query": "Update README.md to document the parent-and-child rollup workflow for tracker-mirrored items.",
+    "should_trigger": false
+  },
+  {
+    "query": "Build a dashboard component IssueDetail.vue that renders the retro section of a tracker item.",
+    "should_trigger": false
+  },
+  {
+    "query": "Add an 'assigned_agent' column to the dashboard's issues table SQL view.",
+    "should_trigger": false
+  },
+  {
+    "query": "Write a unit test for parseIssueYaml in src/issue-tracker/yaml.test.ts using inline fixture strings — purely in-memory.",
+    "should_trigger": false
+  },
+  {
+    "query": "Refactor parseIssueYaml in src/issue-tracker/yaml.ts to split the validator from the loader.",
+    "should_trigger": false
+  },
+  {
+    "query": "Add the term 'tracker entry' to the glossary in docs/terminology.md.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run the SQL migration that adds an 'assigned_agent' column to the issues Postgres table.",
+    "should_trigger": false
+  },
+  {
+    "query": "Update the comment block in src/issue-tracker/yaml.ts that mentions 'schema_version 7' to reference DX-280.",
+    "should_trigger": false
+  },
+  {
+    "query": "Bump the schema_version literal in src/issue-tracker/yaml.ts from 6 to 7 — code change in the library, no YAML store interaction.",
+    "should_trigger": false
+  }
+]

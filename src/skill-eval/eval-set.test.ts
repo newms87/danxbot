@@ -186,13 +186,22 @@ describe("resolveEvalSetPath", () => {
   });
 });
 
-describe("loadEvalSet — committed fixture", () => {
-  it("the committed dev-debugging eval-set is a valid 10/10 set", () => {
-    // Loads the actual on-disk JSON committed under tests/skill-evals/
-    // through the same validator that production uses. A typo in the
-    // committed eval-set would fail this test instead of waiting until
-    // a real paid sweep tries to load it. Free safety net.
-    const path = resolveEvalSetPath(process.cwd(), "dev:debugging");
+describe("loadEvalSet — committed fixtures", () => {
+  // Loads each on-disk eval-set committed under tests/skill-evals/
+  // through the same validator production uses. A typo in any
+  // committed set fails this test instead of waiting until a real
+  // paid sweep tries to load it. Free safety net.
+  //
+  // Add a new row here when a new <plugin>:<skill> eval-set lands on disk.
+  it.each([
+    "dev:debugging",
+    "investigate:investigate",
+    "dev:testing",
+    "dev:git-discipline",
+    "base:process-kill",
+    "danxbot:issue-card-workflow",
+  ])("the committed %s eval-set is a valid 10/10 set", (pluginSkill) => {
+    const path = resolveEvalSetPath(process.cwd(), pluginSkill);
     const queries = loadEvalSet(path);
     expect(queries.length).toBe(20);
     expect(queries.filter((q) => q.shouldTrigger).length).toBe(10);

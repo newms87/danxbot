@@ -1,0 +1,82 @@
+[
+  {
+    "query": "Run `npx vitest run src/skill-eval/eval-set.test.ts` and tell me if it passes.",
+    "should_trigger": true
+  },
+  {
+    "query": "Write a vitest test for validateEvalSet's error path on an empty array input.",
+    "should_trigger": true
+  },
+  {
+    "query": "Fix the broken test in src/poller/index.test.ts — it's failing on the new dispatch return shape.",
+    "should_trigger": true
+  },
+  {
+    "query": "Add a pytest fixture for the new DatabaseWrapper class.",
+    "should_trigger": true
+  },
+  {
+    "query": "Inspect dashboard/src/composables/useAuth.test.ts — does it cover the 401 retry path?",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `make test-unit` and report the failure count to me.",
+    "should_trigger": true
+  },
+  {
+    "query": "Mock the `spawn` call in the spawnAgent test using vi.mock so it doesn't actually fork.",
+    "should_trigger": true
+  },
+  {
+    "query": "Delete the obsolete test src/legacy/__tests__/old-router.test.ts — the module it covered is gone.",
+    "should_trigger": true
+  },
+  {
+    "query": "Reason about whether the test coverage for danxbot_complete is sufficient — list the gaps.",
+    "should_trigger": true
+  },
+  {
+    "query": "Write a jest snapshot test for the AgentBadge.vue component covering name, avatar, and busy states.",
+    "should_trigger": true
+  },
+  {
+    "query": "Bump @types/vitest from 1.0 to 1.5 in package.json devDependencies — dep version bump only.",
+    "should_trigger": false
+  },
+  {
+    "query": "Update .github/workflows/ci.yml to cache node_modules between runs — no test logic changes.",
+    "should_trigger": false
+  },
+  {
+    "query": "Rename src/test-utils/factories.ts to src/test-utils/builders.ts and update imports across the codebase.",
+    "should_trigger": false
+  },
+  {
+    "query": "Add a test-coverage badge URL to README.md's shields.io section.",
+    "should_trigger": false
+  },
+  {
+    "query": "Move src/__tests__/fixtures/sample.json to src/fixtures/sample.json and update the relative path in the imports.",
+    "should_trigger": false
+  },
+  {
+    "query": "Delete the obsolete shell script scripts/test-runner.sh — we use npm test directly now.",
+    "should_trigger": false
+  },
+  {
+    "query": "Update package.json scripts.lint to add --max-warnings=0 to the eslint invocation — the test script line is untouched.",
+    "should_trigger": false
+  },
+  {
+    "query": "Add coverage/ to the .gitignore — currently the directory leaks into git status output.",
+    "should_trigger": false
+  },
+  {
+    "query": "Update CONTRIBUTING.md's 'Running Tests' section heading anchor from #running-tests to #tests for cleaner URLs.",
+    "should_trigger": false
+  },
+  {
+    "query": "Rename src/agent/launcher.test.ts to src/agent/spawn-agent.test.ts — file rename only, no logic changes.",
+    "should_trigger": false
+  }
+]

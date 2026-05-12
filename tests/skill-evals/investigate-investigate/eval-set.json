@@ -1,0 +1,82 @@
+[
+  {
+    "query": "Investigate dispatch latency on the gpt target — read-only audit, no changes to anything.",
+    "should_trigger": true
+  },
+  {
+    "query": "Look into how isFeatureEnabled falls back when settings.json is malformed — I want to understand it, not modify it.",
+    "should_trigger": true
+  },
+  {
+    "query": "Audit how the chokidar watcher in src/db/issues-mirror.ts decides when to mirror — read-only walk-through.",
+    "should_trigger": true
+  },
+  {
+    "query": "Trace the path a Slack message takes from the bolt listener to danxbot_slack_reply — call-chain only, no edits.",
+    "should_trigger": true
+  },
+  {
+    "query": "Why does the poller skip cards with non-null waiting_on? Walk me through the dispatch filter logic.",
+    "should_trigger": true
+  },
+  {
+    "query": "How does the worker resolve DANXBOT_WORKER_PORT differently in production versus local dev?",
+    "should_trigger": true
+  },
+  {
+    "query": "Find out which workers are currently running on the gpt target right now — read-only inventory, no restarts.",
+    "should_trigger": true
+  },
+  {
+    "query": "Dig into the difference between StallDetector and ApiErrorDetector — read-only comparison of when each fires.",
+    "should_trigger": true
+  },
+  {
+    "query": "Check on the production worker health — is the dispatch API actually reachable from the dashboard right now? Don't touch anything.",
+    "should_trigger": true
+  },
+  {
+    "query": "Figure out what triggers a critical_failure flag end-to-end — I'm trying to understand the contract.",
+    "should_trigger": true
+  },
+  {
+    "query": "Investigate why src/poller/index.test.ts is failing on the new dispatch return shape — and then fix it.",
+    "should_trigger": false
+  },
+  {
+    "query": "Look into the dispatch hang on DX-244 and patch the bug once you find it.",
+    "should_trigger": false
+  },
+  {
+    "query": "Audit the SQL queries in src/db/issues-mirror.ts and add the missing indexes you find.",
+    "should_trigger": false
+  },
+  {
+    "query": "Trace the leak in the worker process and apply the fix once you've located it.",
+    "should_trigger": false
+  },
+  {
+    "query": "Figure out why my build is broken and apply the patch in the same session.",
+    "should_trigger": false
+  },
+  {
+    "query": "Dig into the StallDetector code and refactor the nudge logic into a standalone helper module.",
+    "should_trigger": false
+  },
+  {
+    "query": "Check on the failing test in src/worker/dispatch.test.ts and rewrite the broken spec to match the new behavior.",
+    "should_trigger": false
+  },
+  {
+    "query": "Find out why dispatches are slow and add a cache layer to the hot path.",
+    "should_trigger": false
+  },
+  {
+    "query": "Why does spawnAgent leak event listeners? Fix the leak in this same dispatch.",
+    "should_trigger": false
+  },
+  {
+    "query": "How does the rebase script handle conflicts? Add better error messages while you're in there.",
+    "should_trigger": false
+  }
+]

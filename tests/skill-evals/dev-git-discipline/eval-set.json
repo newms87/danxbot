@@ -1,0 +1,82 @@
+[
+  {
+    "query": "Commit the changes to src/skill-eval/run.ts with message 'feat(DX-312): add --dry-run flag'.",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `git stash` to set aside the WIP changes while I check out main.",
+    "should_trigger": true
+  },
+  {
+    "query": "Revert the last commit on this branch.",
+    "should_trigger": true
+  },
+  {
+    "query": "Delete the file src/legacy/old-router.ts — it's unused.",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `git reset --hard HEAD~3` to drop the last three commits.",
+    "should_trigger": true
+  },
+  {
+    "query": "Clean up untracked files with `git clean -fd`.",
+    "should_trigger": true
+  },
+  {
+    "query": "Checkout the main branch and pull the latest from origin.",
+    "should_trigger": true
+  },
+  {
+    "query": "Cherry-pick commit abc123 from feature/foo onto main.",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `git restore src/agent/launcher.ts` to discard the local edits.",
+    "should_trigger": true
+  },
+  {
+    "query": "Dispatch a subagent with isolation: \"worktree\" to run the refactor in parallel.",
+    "should_trigger": true
+  },
+  {
+    "query": "Run `git log --oneline -20` on this branch and show me the recent history.",
+    "should_trigger": false
+  },
+  {
+    "query": "Show me the output of `git status` so I can see the working tree state.",
+    "should_trigger": false
+  },
+  {
+    "query": "Diff HEAD against origin/main to see what's ahead — `git diff origin/main..HEAD`.",
+    "should_trigger": false
+  },
+  {
+    "query": "Print the current branch name via `git branch --show-current`.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run `git blame src/poller/index.ts` to find who last touched line 42.",
+    "should_trigger": false
+  },
+  {
+    "query": "Search commit messages for DX-244 — `git log --grep='DX-244'`.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run `gh pr view 142` to see the PR description.",
+    "should_trigger": false
+  },
+  {
+    "query": "List remote branches via `git branch -r --sort=-committerdate`.",
+    "should_trigger": false
+  },
+  {
+    "query": "Fetch origin without merging — `git fetch origin`.",
+    "should_trigger": false
+  },
+  {
+    "query": "Run `git remote -v` to confirm the upstream URL.",
+    "should_trigger": false
+  }
+]
