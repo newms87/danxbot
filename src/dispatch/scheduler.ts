@@ -570,6 +570,27 @@ export function onAgentRosterChange(repoName: string): void {
 }
 
 /**
+ * Boot-time picker kick. Post-DX-290 the picker fires ONLY on
+ * `onReconcileResult({dispatchableChanged:true})` or
+ * `onAgentRosterChange`. If a worker boots while every ToDo card is
+ * already in steady dispatchable state (no field flips during the boot
+ * reconcile pass) and no operator rewrites settings.json, the picker
+ * never gets invoked → worker sits idle with cards available. This
+ * helper fires the picker exactly once via the same single-flight
+ * mutex, intended to be called by the worker boot sequence after
+ * `bootRehydrate` completes (so the picker observes a consistent
+ * disk + DB snapshot). No-op when no picker is registered for the
+ * repo (test harnesses + mock-tracker boots).
+ */
+export function kickPickerOnceAtBoot(repoName: string): void {
+  const runPicker = pickersByRepo.get(repoName);
+  if (!runPicker) return;
+  setImmediate(() => {
+    void firePickerWithMutex(repoName);
+  });
+}
+
+/**
  * Reconcile-result poke from the chokepoint in `src/issue/reconcile.ts`
  * (Phase 4b.1 / DX-288). Fires the registered picker for the repo
  * when reconcile flipped a field the dispatch scheduler keys on

@@ -24,6 +24,7 @@ import { createIssueTracker } from "./issue-tracker/index.js";
 import {
   bootRehydrate,
   bootScheduler,
+  kickPickerOnceAtBoot,
   onReconcileResult,
 } from "./dispatch/scheduler.js";
 import {
@@ -519,6 +520,13 @@ async function startWorkerMode(): Promise<void> {
       loadIssue: loadLocal,
     },
   });
+
+  // Boot-fire the picker once. Post-DX-290 the picker is event-driven
+  // only (reconcile diff / roster change); if every ToDo card is already
+  // in steady dispatchable state at boot, neither event fires and the
+  // worker sits idle with cards available. Kick once after rehydrate so
+  // the picker observes the consistent disk + DB snapshot.
+  kickPickerOnceAtBoot(repo.name);
 
   // DX-265: one-shot cleanup of legacy `Needs Approval` Trello list +
   // label (retired in DX-231; DX-234 left the fossils in place "for
